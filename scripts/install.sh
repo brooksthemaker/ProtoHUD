@@ -103,11 +103,10 @@ PKGS=(
     # Runtime: ldconfig, udevadm
     kmod udev
 
-    # Android mirror — V4L2 loopback device + scrcpy client
+    # Android mirror — V4L2 loopback device
     # v4l2loopback-dkms creates a virtual /dev/video* that scrcpy writes into;
     # OpenCV reads those frames so ProtoHUD can display them as an overlay.
     v4l2loopback-dkms
-    scrcpy
     adb
 )
 
@@ -128,6 +127,44 @@ if [[ ${#PKGS_MISSING[@]} -gt 0 ]]; then
     ok "Packages installed: ${PKGS_MISSING[*]}"
 else
     ok "All packages already installed — skipping apt"
+fi
+
+# ── scrcpy (Android mirror client) ───────────────────────────────────────────
+# scrcpy is not in the default Raspberry Pi OS Bullseye repos.
+# Try apt first; if unavailable, build from source using the official script.
+section_inline() { echo -e "\n${BOLD}── $* ──${RESET}"; }
+section_inline "scrcpy"
+
+if dpkg -s scrcpy &>/dev/null 2>&1; then
+    ok "scrcpy already installed"
+elif apt-cache show scrcpy &>/dev/null 2>&1; then
+    sudo apt-get install -y scrcpy
+    ok "scrcpy installed via apt"
+else
+    warn "scrcpy not in apt repos — building from source (this takes ~5 min)"
+
+    # Build deps for scrcpy client
+    sudo apt-get install -y \
+        meson \
+        libsdl2-dev \
+        libavcodec-dev libavdevice-dev libavformat-dev \
+        libavutil-dev libswresample-dev \
+        libusb-1.0-0-dev \
+        ffmpeg
+
+    SCRCPY_TMP=$(mktemp -d /tmp/scrcpy.XXXXXX)
+    git clone --depth 1 https://github.com/Genymobile/scrcpy.git "${SCRCPY_TMP}"
+
+    # install_release.sh fetches the pre-built server APK and builds the client
+    bash "${SCRCPY_TMP}/install_release.sh"
+    rm -rf "${SCRCPY_TMP}"
+
+    if command -v scrcpy &>/dev/null; then
+        ok "scrcpy built and installed: $(scrcpy --version 2>&1 | head -1)"
+    else
+        warn "scrcpy build failed — Android mirror will not be available"
+        warn "Try manually: https://github.com/Genymobile/scrcpy/blob/master/doc/linux.md"
+    fi
 fi
 
 # ── RP2350 helmet audio USB device check ─────────────────────────────────────
