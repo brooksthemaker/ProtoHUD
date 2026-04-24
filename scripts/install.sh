@@ -352,6 +352,10 @@ ninja -C "${BUILD_DIR}" -j"$(nproc)"
 
 ok "Build complete: ${BUILD_DIR}/protohud"
 
+# Convenience symlink so that ./protohud works from the project root
+ln -sf "${BUILD_DIR}/protohud" "${PROJECT_ROOT}/protohud"
+ok "Symlink created: ${PROJECT_ROOT}/protohud → build/protohud"
+
 # ── VITURE XR SDK libraries ───────────────────────────────────────────────────
 section "9 / 11  VITURE XR SDK libraries"
 
@@ -440,11 +444,20 @@ echo -e "${BOLD}Config file:${RESET}              ${PROJECT_ROOT}/config/config.
 echo -e "${BOLD}Boot config:${RESET}              ${BOOT_CFG}"
 echo ""
 
-echo -e "${BOLD}Quick-start:${RESET}"
-echo "  cd ${BUILD_DIR}"
-echo "  ./protohud"
+echo -e "${BOLD}Quick-start (3 ways to run):${RESET}"
 echo ""
-echo "  — or via systemd (after enabling) —"
+echo "  1. From the project root (symlink installed by this script):"
+echo "     cd ${PROJECT_ROOT}"
+echo "     ./protohud"
+echo ""
+echo "  2. From the build directory directly:"
+echo "     cd ${BUILD_DIR}"
+echo "     ./protohud"
+echo ""
+echo "  3. Via the run script (checks groups, handles config path):"
+echo "     ${PROJECT_ROOT}/scripts/run.sh"
+echo ""
+echo "  — or via systemd to auto-start on boot —"
 echo "  sudo systemctl enable --now protohud"
 echo "  journalctl -u protohud -f"
 echo ""
