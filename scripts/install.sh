@@ -213,8 +213,16 @@ else
     SCRCPY_TMP=$(mktemp -d /tmp/scrcpy.XXXXXX)
     git clone --depth 1 https://github.com/Genymobile/scrcpy.git "${SCRCPY_TMP}"
 
-    # install_release.sh fetches the pre-built server APK and builds the client
-    bash "${SCRCPY_TMP}/install_release.sh"
+    # Build in a subshell so meson runs from inside the repo directory.
+    # meson.build is at the repo root; running meson from outside fails with
+    # "Neither source directory 'build-auto' nor build directory None contain
+    #  a build file meson.build" because the cwd doesn't contain meson.build.
+    (
+        cd "${SCRCPY_TMP}"
+        meson setup build-auto --buildtype=release --strip
+        ninja -C build-auto
+        sudo ninja -C build-auto install
+    )
     rm -rf "${SCRCPY_TMP}"
 
     if command -v scrcpy &>/dev/null; then
