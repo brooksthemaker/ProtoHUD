@@ -1,0 +1,130 @@
+{
+  "display": {
+    "width": 1920,
+    "height": 1080,
+    "fullscreen": true,
+    "target_fps": 90,
+    "eye_separation": 0.064,
+    "hud_opacity": 0.85,
+    "hud_scale": 1.0
+  },
+  "cameras": {
+    "owlsight_left": {
+      "libcamera_id": 0,
+      "width": 1280,
+      "height": 800,
+      "fps": 60,
+      "flip_h": false,
+      "flip_v": false
+    },
+    "owlsight_right": {
+      "libcamera_id": 1,
+      "width": 1280,
+      "height": 800,
+      "fps": 60,
+      "flip_h": false,
+      "flip_v": false
+    },
+    "usb_cam_1": {
+      "device": "/dev/video2",
+      "width": 1280,
+      "height": 720,
+      "fps": 30
+    },
+    "usb_cam_2": {
+      "device": "/dev/video3",
+      "width": 1280,
+      "height": 720,
+      "fps": 30
+    }
+  },
+  "serial": {
+    "teensy": {
+      "port": "/dev/ttyACM0",
+      "baud": 115200
+    },
+    "lora": {
+      "port": "/dev/ttyACM2",
+      "baud": 115200,
+      "_note": "RAK4631 enumerates as ACM2 (after Teensy=ACM0, SmartKnob=ACM1). Adjust if udev assigns a different index.",
+      "ping_on_start": true,
+      "node_info_refresh_s": 60
+    },
+    "smartknob": {
+      "port": "/dev/ttyACM1",
+      "baud": 115200,
+      "sleep_timeout_s": 30,
+      "wake_degrees": 5.0
+    }
+  },
+  "vitrue": {
+    "product_id": 0,
+    "monitor_index": -1,
+    "use_beast_camera": true,
+    "enable_imu": true
+  },
+  "hud": {
+    "compass_height_px": 60,
+    "panel_width_px": 320,
+    "lora_message_history": 50,
+    "show_secondary_cams": true,
+    "secondary_cam_size": 0.22
+  },
+  "gpio": {
+    "enabled": true,
+    "button_1_gpio": 17,
+    "button_2_gpio": 27,
+    "button_3_gpio": 22,
+    "af_trigger_time_ms": 1500,
+    "pip_trigger_time_ms": 2000
+  },
+  "camera": {
+    "autofocus_on_startup": true,
+    "autofocus_sync": true,
+    "focus_mode": "auto",
+    "focus_position": 500
+  },
+  "night_vision": {
+    "exposure_ev": 0.0,
+    "shutter_us": 33333
+  },
+  "pip": {
+    "enabled": true,
+    "size": 0.25,
+    "anchor": "top_center",
+    "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
+  },
+  "audio": {
+    "_note": "Audio capture is handled by the RP2350 helmet audio processor (USB Audio UAC2). The CM5 receives pre-processed stereo and routes it to the chosen output. Run 'arecord -l' to verify the RP2350 card name after connecting via USB.",
+    "enabled": true,
+    "capture_device":    "hw:CARD=HelmetAudio6Mic,DEV=0",
+    "active_output":     "viture",
+    "_active_output_values": "viture | headphones | hdmi",
+    "output_viture":     "hw:CARD=VITUREXRGlasses,DEV=0",
+    "output_headphones": "hw:CARD=Headphones,DEV=0",
+    "output_hdmi":       "hw:CARD=vc4hdmi0,DEV=0",
+    "sample_rate": 48000,
+    "period_size": 256,
+    "n_periods": 4,
+    "master_gain": 1.0
+  },
+  "android": {
+    "_about":    "Android device mirror via scrcpy → V4L2 loopback → OpenCV.",
+    "_prereqs":  "sudo apt install scrcpy v4l2loopback-dkms && sudo modprobe v4l2loopback video_nr=4 card_label=AndroidMirror exclusive_caps=1",
+    "enabled":   false,
+    "v4l2_sink": "/dev/video4",
+    "adb_serial": "",
+    "max_size":  1080,
+    "fps":       30,
+    "overlay_size": 0.40,
+    "anchor":    "bottom_left",
+    "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
+  },
+  "colors": {
+    "hud_primary":    [0, 220, 180, 220],
+    "hud_accent":     [0, 180, 255, 255],
+    "hud_warn":       [255, 180, 0,  255],
+    "hud_danger":     [255, 60,  60, 255],
+    "hud_background": [10,  15,  20, 180]
+  }
+}

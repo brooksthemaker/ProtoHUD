@@ -1,0 +1,142 @@
+#pragma once
+// ── dma_camera.h ──────────────────────────────────────────────────────────────
+// Zero-copy DMA camera using libcamera + EGL dmabuf import.
+//
+// Frames are captured by the ISP in NV12 format and their dmabuf file
+// descriptors are imported directly into OpenGL ES as EGLImages — the pixel
+// data never touches the CPU.  A GLSL ES shader converts NV12 → RGB on the GPU.
+//
+// Thread model
+// ─────────────
+//  • capture thread  — runs libcamera event loop; writes to ready_slot_
+//  • render  thread  — calls draw(); reads ready_slot_
+//
+// Buffer state machine (3 slots)
+//   IDLE ──queue──► CAPTURING ──complete──► READY ──draw──► RENDERING
+//    ▲                                                            │
+//    └──────────────── return after draw ────────────────────────┘
+//
+// init() MUST be called from the render thread (after the GL context is current).
+
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <array>
+#include <unordered_map>
+
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+
+namespace libcamera {
+    class Camera;
+    class CameraConfiguration;
+    class CameraManager;
+    class FrameBuffer;
+    class FrameBufferAllocator;
+    class Request;
+    class Stream;
+}
+
+class DmaCamera {
+public:
+    struct Config {
+        int libcamera_id = 0;
+        int width        = 1280;
+        int height       = 800;
+        int fps          = 60;
+    };
+
+    DmaCamera();
+    ~DmaCamera();
+
+    // Call after GL context is current.
+    bool init(libcamera::CameraManager* lcam_mgr, const Config& cfg,
+              const char* nv12_vs_path, const char* nv12_fs_path);
+    void shutdown();
+
+    // Draw the latest frame filling the current GL viewport.
+    // Returns false if no frame is available yet.
+    bool draw();
+
+    // Hot-swap the capture resolution / frame-rate without destroying GL resources.
+    // Stops capture, reconfigures libcamera, reallocates DMA buffers, restarts.
+    // Must be called from the render thread. Returns false on failure (camera
+    // reverts to previous config and capture is restarted).
+    bool reconfigure(int width, int height, int fps);
+
+    // ── Focus / Exposure control (libcamera controls API) ─────────────────────
+    void start_autofocus();
+    void stop_autofocus();
+    void set_focus_position(int pos);   // 0-1000
+    int  get_focus_position() const;
+    bool is_af_locked() const;
+    void set_exposure_ev(float ev);     // -3.0 to +3.0
+    void set_shutter_speed_us(int us);  // microseconds
+
+    bool is_ok()  const { return ok_; }
+    int  width()  const { return cfg_.width; }
+    int  height() const { return cfg_.height; }
+
+private:
+    enum class SlotState { IDLE, CAPTURING, READY, RENDERING };
+
+    struct Slot {
+        libcamera::FrameBuffer* buffer  = nullptr;
+        libcamera::Request*     request = nullptr;
+        EGLImageKHR             img_y   = EGL_NO_IMAGE_KHR;
+        EGLImageKHR             img_uv  = EGL_NO_IMAGE_KHR;
+        SlotState               state   = SlotState::IDLE;
+    };
+
+    bool configure_camera();
+    bool allocate_buffers_and_egl();
+    bool create_egl_image(const libcamera::FrameBuffer* buf, Slot& slot);
+    bool load_egl_procs();
+    bool create_gl_resources(const char* vs_path, const char* fs_path);
+    void start_capture();
+    void event_loop();
+    void on_request_complete(libcamera::Request* req);
+
+    // libcamera
+    libcamera::CameraManager*                         lcam_mgr_  = nullptr;
+    std::shared_ptr<libcamera::Camera>                camera_;
+    std::unique_ptr<libcamera::CameraConfiguration>   cam_cfg_;
+    std::unique_ptr<libcamera::FrameBufferAllocator>  allocator_;
+    libcamera::Stream*                                stream_    = nullptr;
+    uint32_t                                          stride_    = 0;
+
+    // Slots
+    static constexpr int NUM_SLOTS = 3;
+    std::array<Slot, NUM_SLOTS>                       slots_;
+    std::unordered_map<libcamera::FrameBuffer*, int>  buf_to_slot_;
+    std::unordered_map<libcamera::Request*, int>      req_to_slot_;
+
+    // Frame handoff
+    std::mutex handoff_mtx_;
+    int        ready_slot_  = -1;
+    int        render_slot_ = -1;
+
+    // EGL
+    EGLDisplay egl_display_ = EGL_NO_DISPLAY;
+    PFNEGLCREATEIMAGEKHRPROC            pfn_create_image_   = nullptr;
+    PFNEGLDESTROYIMAGEKHRPROC           pfn_destroy_image_  = nullptr;
+    PFNGLEGLIMAGETARGETTEXTURE2DOESPROC pfn_img_target_tex_ = nullptr;
+
+    // GLES resources
+    GLuint tex_y_      = 0;
+    GLuint tex_uv_     = 0;
+    GLuint nv12_prog_  = 0;
+    GLuint quad_vbo_   = 0;
+    GLint  loc_tex_y_  = -1;
+    GLint  loc_tex_uv_ = -1;
+
+    // Capture thread
+    std::atomic<bool> running_ { false };
+    std::thread       event_thread_;
+
+    Config cfg_;
+    bool   ok_ = false;
+};

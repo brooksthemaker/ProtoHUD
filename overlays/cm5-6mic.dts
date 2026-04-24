@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: GPL-2.0
+// Device Tree overlay — ProtoHUD 6-channel ICS-43434 mic array
+// wired directly to CM5 (BCM2712) I2S GPIO.
+//
+// Topology:
+//   Three stereo pairs of ICS-43434 MEMS microphones share one I2S clock bus
+//   (BCK + LRCK) but each pair drives a separate DATA line into three CM5 GPIO
+//   pins configured as PCM_DIN0, PCM_DIN1, PCM_DIN2.
+//
+// CM5 GPIO pinout used:
+//   GPIO 18  →  PCM_CLK  (BCK,  I2S bit clock — output)
+//   GPIO 19  →  PCM_FS   (LRCK, I2S word select — output)
+//   GPIO 20  →  PCM_DIN0 (DATA from FRONT_L/R pair)
+//   GPIO 21  →  PCM_DIN1 (DATA from SIDE_L/R pair)
+//   GPIO 25  →  PCM_DIN2 (DATA from REAR_L/R pair)
+//
+// Each pair: ICS-43434 L/R pin tied to GND for left slot, VDD for right slot.
+//
+// Build:
+//   dtc -@ -I dts -O dtb -o cm5-6mic.dtbo cm5-6mic.dts
+//
+// Install:
+//   sudo cp cm5-6mic.dtbo /boot/firmware/overlays/
+//   # Add to /boot/firmware/config.txt:
+//   dtoverlay=cm5-6mic
+//
+// Verify:
+//   arecord -l           # look for card sndrpii2s0
+//   arecord -D hw:CARD=sndrpii2s0,DEV=0 -c 6 -r 48000 -f S16_LE -d 3 test.wav
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2712";
+
+    fragment@0 {
+        target = <&i2s_clk_producer>;
+        __overlay__ {
+            status = "okay";
+        };
+    };
+
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            // Simple audio card — no codec, pure mic input
+            mic_sound: mic_sound {
+                compatible = "simple-audio-card";
+                simple-audio-card,name = "sndrpii2s0";
+                simple-audio-card,format = "i2s";
+
+                simple-audio-card,bitclock-master = <&dailink_master>;
+                simple-audio-card,frame-master    = <&dailink_master>;
+
+                dailink_master: simple-audio-card,cpu {
+                    sound-dai = <&i2s_clk_producer>;
+                    // 48000 Hz × 32 bits/slot × 2 slots = 3.072 MHz BCK
+                    dai-tdm-slot-num   = <2>;
+                    dai-tdm-slot-width = <32>;
+                };
+
+                // Virtual codec — ICS-43434 is a bare I2S device, no I2C control
+                simple-audio-card,codec {
+                    sound-dai = <&dmic_codec>;
+                };
+            };
+
+            // Dummy codec node for the raw I2S mics
+            dmic_codec: dmic_codec {
+                compatible = "dmic-codec";
+                num-channels = <6>;
+                #sound-dai-cells = <0>;
+            };
+        };
+    };
+};
