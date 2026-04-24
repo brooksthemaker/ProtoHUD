@@ -17,8 +17,26 @@ set(CMAKE_CXX_FLAGS_DEBUG   "-g -DDEBUG")
 
 find_package(PkgConfig REQUIRED)
 
-# GLFW3 (window + input — DRM/KMS or X11 backend, no X11 required)
-pkg_check_modules(GLFW3 REQUIRED glfw3)
+# GLFW3 (window + input — X11 backend on Bullseye)
+# Try pkg-config first; fall back to CMake config (installed by the source build).
+pkg_check_modules(GLFW3 glfw3)   # not REQUIRED here — we handle failure below
+if(NOT GLFW3_FOUND)
+    find_package(glfw3 3.3 QUIET)
+    if(glfw3_FOUND)
+        # Translate find_package target to the variables the rest of this file uses
+        get_target_property(_glfw_loc glfw LOCATION)
+        set(GLFW3_LIBRARIES    glfw)
+        set(GLFW3_INCLUDE_DIRS "")
+        set(GLFW3_CFLAGS_OTHER "")
+        set(GLFW3_FOUND TRUE)
+        message(STATUS "GLFW3 found via find_package (${_glfw_loc})")
+    else()
+        message(FATAL_ERROR
+            "GLFW3 not found.\n"
+            "Install with:  sudo apt-get install libglfw3-dev\n"
+            "Or run:        scripts/install.sh  (builds from source as fallback)")
+    endif()
+endif()
 
 # OpenCV (USB cameras + MJPEG decode for Beast camera)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio imgcodecs)

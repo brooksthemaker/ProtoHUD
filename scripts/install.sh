@@ -79,8 +79,7 @@ PKGS=(
     cmake ninja-build pkg-config git curl
     device-tree-compiler       # dtc — compiles .dts → .dtbo
 
-    # GLFW3 + GLES2/EGL (window management and OpenGL ES context)
-    libglfw3-dev
+    # GLES2/EGL (handled separately — GLFW3 has its own fallback below)
     libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev
 
     # Dear ImGui is fetched via CMake FetchContent — no apt package needed
@@ -127,6 +126,65 @@ if [[ ${#PKGS_MISSING[@]} -gt 0 ]]; then
     ok "Packages installed: ${PKGS_MISSING[*]}"
 else
     ok "All packages already installed — skipping apt"
+fi
+
+# ── GLFW3 (window + input) ───────────────────────────────────────────────────
+# libglfw3-dev is in the Bullseye repo but its pkg-config file sometimes lands
+# in a path CMake doesn't search, or the package may be absent entirely.
+# Strategy: try apt → verify pkg-config finds it → build from source if needed.
+section_inline() { echo -e "\n${BOLD}── $* ──${RESET}"; }
+section_inline "GLFW3"
+
+glfw3_ok() { pkg-config --exists glfw3 2>/dev/null; }
+
+if glfw3_ok; then
+    ok "GLFW3 already found by pkg-config ($(pkg-config --modversion glfw3))"
+else
+    # Try the apt package first
+    if ! dpkg -s libglfw3-dev &>/dev/null 2>&1; then
+        sudo apt-get install -y libglfw3-dev 2>/dev/null || true
+    fi
+
+    # Some Bullseye installs put the .pc file under the multiarch path only.
+    # Export it so both this shell and the later cmake invocation can find it.
+    MULTIARCH_PC="/usr/lib/aarch64-linux-gnu/pkgconfig"
+    if [[ -f "${MULTIARCH_PC}/glfw3.pc" ]]; then
+        export PKG_CONFIG_PATH="${MULTIARCH_PC}:${PKG_CONFIG_PATH:-}"
+        info "Added ${MULTIARCH_PC} to PKG_CONFIG_PATH"
+    fi
+
+    if glfw3_ok; then
+        ok "GLFW3 found via pkg-config after path fix ($(pkg-config --modversion glfw3))"
+    else
+        warn "libglfw3-dev pkg-config not usable — building GLFW3 from source (~2 min)"
+
+        sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev \
+                                libxcursor-dev libxi-dev libxext-dev
+
+        GLFW_TMP=$(mktemp -d /tmp/glfw.XXXXXX)
+        git clone --depth 1 --branch 3.4 \
+            https://github.com/glfw/glfw.git "${GLFW_TMP}"
+
+        cmake -S "${GLFW_TMP}" -B "${GLFW_TMP}/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGLFW_BUILD_X11=ON \
+            -DGLFW_BUILD_WAYLAND=OFF \
+            -DGLFW_BUILD_EXAMPLES=OFF \
+            -DGLFW_BUILD_TESTS=OFF \
+            -DGLFW_BUILD_DOCS=OFF \
+            -GNinja -Wno-dev
+        ninja -C "${GLFW_TMP}/build"
+        sudo ninja -C "${GLFW_TMP}/build" install
+        sudo ldconfig
+        rm -rf "${GLFW_TMP}"
+
+        if glfw3_ok; then
+            ok "GLFW3 built and installed ($(pkg-config --modversion glfw3))"
+        else
+            fatal "GLFW3 installation failed — cannot continue"
+        fi
+    fi
 fi
 
 # ── scrcpy (Android mirror client) ───────────────────────────────────────────
@@ -342,6 +400,9 @@ section "8 / 11  Build ProtoHUD"
 mkdir -p "${BUILD_DIR}"
 
 info "Configuring with CMake..."
+# Ensure multiarch pkg-config paths are visible to CMake
+export PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
 cmake -S "${PROJECT_ROOT}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -GNinja \
