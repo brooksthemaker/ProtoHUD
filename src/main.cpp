@@ -692,9 +692,8 @@ int main(int argc, char* argv[]) {
 
     // ── Menu system ───────────────────────────────────────────────────────────
 
-    // Auto-show overlay for cameras that opened successfully at startup
-    bool pip_cam1_overlay_active = cameras.usb1_ok();
-    bool pip_cam2_overlay_active = cameras.usb2_ok();
+    bool pip_cam1_overlay_active = false;
+    bool pip_cam2_overlay_active = false;
 
     MenuSystem menu(build_menu(&teensy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
