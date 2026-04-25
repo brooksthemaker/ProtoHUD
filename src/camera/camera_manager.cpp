@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <thread>
+#include <unistd.h>
 
 // NOTE: do NOT add 'using namespace libcamera' here — libcamera::CameraManager
 // would collide with our own CameraManager class.
@@ -70,6 +71,14 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb1_cfg_ = usb1;
     usb2_cfg_ = usb2;
 
+    // Scan and report available V4L2 devices so wrong paths are obvious
+    std::cerr << "[cam] scanning V4L2 devices:";
+    for (int i = 0; i <= 9; i++) {
+        std::string d = "/dev/video" + std::to_string(i);
+        if (access(d.c_str(), F_OK) == 0) std::cerr << " " << d;
+    }
+    std::cerr << "\n";
+
     usb1_ok_ = !usb1.device.empty() && open_v4l2(usb_cap1_, usb1, "usb1");
     usb2_ok_ = !usb2.device.empty() && open_v4l2(usb_cap2_, usb2, "usb2");
 
@@ -123,9 +132,12 @@ bool CameraManager::set_resolution(int width, int height, int fps) {
 
 void CameraManager::usb_capture_thread() {
     cv::Mat frame, rgba;
+    int frames1 = 0, empty1 = 0;
+    int frames2 = 0, empty2 = 0;
 
     auto capture = [&](cv::VideoCapture& cap, std::mutex& cap_mtx,
-                       TexSlot& slot, std::atomic<bool>& ok_flag) -> bool {
+                       TexSlot& slot, std::atomic<bool>& ok_flag,
+                       int& good, int& bad, const char* name) -> bool {
         bool got_frame = false;
         {
             std::lock_guard<std::mutex> lk(cap_mtx);
@@ -134,8 +146,15 @@ void CameraManager::usb_capture_thread() {
             if (!frame.empty()) {
                 cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
                 got_frame = true;
+                ++good;
+                if (good == 1)
+                    std::cerr << "[cam] " << name << ": first frame received ("
+                              << frame.cols << "x" << frame.rows << ")\n";
+            } else {
+                if (++bad % 30 == 1)
+                    std::cerr << "[cam] " << name << ": " << bad
+                              << " empty reads (good=" << good << ")\n";
             }
-            // Don't clear ok_flag on a dropped frame — only when device closes
         }
         if (got_frame) {
             std::lock_guard<std::mutex> lk(slot.mtx);
@@ -149,8 +168,8 @@ void CameraManager::usb_capture_thread() {
     };
 
     while (running_) {
-        bool any = capture(usb_cap1_, usb1_cap_mtx_, usb1_slot_, usb1_ok_);
-        any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_);
+        bool any = capture(usb_cap1_, usb1_cap_mtx_, usb1_slot_, usb1_ok_, frames1, empty1, "usb1");
+        any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_, frames2, empty2, "usb2");
         if (!any)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
