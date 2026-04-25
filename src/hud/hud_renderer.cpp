@@ -304,52 +304,46 @@ void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
 
 void HudRenderer::draw_face_panel(ImDrawList* dl, const FaceState& f,
                                    ImVec2 origin, float pw, float ph) {
-    dl->AddRectFilled(origin, {origin.x + pw, origin.y + ph}, col_.panel_bg);
+    // Transparent background — no fill; left border line as visual anchor only
     dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.primary);
     dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y}, col_.separator);
 
     ImU32 hdr_col = f.connected ? col_.primary : col_.danger;
     if (font_ui_) ImGui::PushFont(font_ui_);
-    dl->AddText({origin.x + 8.f, origin.y + 6.f}, hdr_col, "FACE");
+    dl->AddText({origin.x + 4.f, origin.y + 6.f}, hdr_col, "FACE");
 
     float py = origin.y + 28.f;
     const float lh = 22.f;
 
-    dl->AddText({origin.x + 8.f, py}, f.connected ? col_.accent : col_.danger,
+    dl->AddText({origin.x + 4.f, py}, f.connected ? col_.accent : col_.danger,
                 f.connected ? "Connected" : "Offline");
     py += lh;
 
     char buf[64];
     snprintf(buf, sizeof(buf), "Effect: %s", effect_name(f.effect_id));
-    dl->AddText({origin.x + 8.f, py}, col_.text, buf);
+    dl->AddText({origin.x + 4.f, py}, col_.text, buf);
     py += lh;
 
     if (f.playing_gif) {
         snprintf(buf, sizeof(buf), "GIF: #%d", f.gif_id);
-        dl->AddText({origin.x + 8.f, py}, col_.accent, buf);
+        dl->AddText({origin.x + 4.f, py}, col_.accent, buf);
     } else {
         snprintf(buf, sizeof(buf), "Palette: #%d", f.palette_id);
-        dl->AddText({origin.x + 8.f, py}, col_.text, buf);
+        dl->AddText({origin.x + 4.f, py}, col_.text, buf);
     }
     py += lh;
 
     // Color swatch
     ImU32 swatch = IM_COL32(f.r, f.g, f.b, 255);
-    dl->AddRectFilled({origin.x + 8.f, py}, {origin.x + 32.f, py + 16.f}, swatch);
-    dl->AddRect      ({origin.x + 8.f, py}, {origin.x + 32.f, py + 16.f}, col_.text_dim);
+    dl->AddRectFilled({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f}, swatch);
+    dl->AddRect      ({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f}, col_.text_dim);
     snprintf(buf, sizeof(buf), " R%d G%d B%d", f.r, f.g, f.b);
-    dl->AddText({origin.x + 34.f, py + 1.f}, col_.text, buf);
+    dl->AddText({origin.x + 30.f, py + 1.f}, col_.text, buf);
     py += lh;
 
-    // Brightness bar
-    dl->AddText({origin.x + 8.f, py}, col_.text_dim, "Brightness:");
-    py += 18.f;
-    float bar_w = pw - 20.f;
-    dl->AddRectFilled({origin.x + 8.f, py}, {origin.x + 8.f + bar_w, py + 10.f},
-                      IM_COL32(30, 40, 45, 255));
-    dl->AddRectFilled({origin.x + 8.f, py},
-                      {origin.x + 8.f + bar_w * (f.brightness / 255.f), py + 10.f},
-                      col_.primary);
+    // Brightness as a percentage number — no bar graph
+    snprintf(buf, sizeof(buf), "Brt: %d%%", (f.brightness * 100) / 255);
+    dl->AddText({origin.x + 4.f, py}, col_.text_dim, buf);
     if (font_ui_) ImGui::PopFont();
 }
 
@@ -357,12 +351,12 @@ void HudRenderer::draw_face_panel(ImDrawList* dl, const FaceState& f,
 
 void HudRenderer::draw_lora_panel(ImDrawList* dl, const AppState& s,
                                    ImVec2 origin, float pw, float ph) {
-    dl->AddRectFilled(origin, {origin.x + pw, origin.y + ph}, col_.panel_bg);
+    // Transparent background — no fill; left border line as visual anchor only
     dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.primary);
     dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y}, col_.separator);
 
     if (font_ui_) ImGui::PushFont(font_ui_);
-    dl->AddText({origin.x + 8.f, origin.y + 6.f}, col_.primary, "LORA NODES");
+    dl->AddText({origin.x + 4.f, origin.y + 6.f}, col_.primary, "LORA NODES");
 
     float py = origin.y + 28.f;
     time_t now = std::time(nullptr);
@@ -382,18 +376,18 @@ void HudRenderer::draw_lora_panel(ImDrawList* dl, const AppState& s,
             snprintf(buf, sizeof(buf), "ID:%08X  %03.0f° %.1fkm",
                      node.node_id, node.heading_deg, node.distance_m / 1000.f);
         }
-        dl->AddText({origin.x + 8.f, py}, node_col, buf);
+        dl->AddText({origin.x + 4.f, py}, node_col, buf);
         py += 18.f;
 
         snprintf(buf, sizeof(buf), "  RSSI:%d SNR:%d %ds",
                  node.rssi, node.snr,
                  node.last_seen > 0 ? static_cast<int>(age) : -1);
-        dl->AddText({origin.x + 8.f, py}, col_.text_dim, buf);
+        dl->AddText({origin.x + 4.f, py}, col_.text_dim, buf);
         py += 22.f;
     }
 
     if (s.lora_nodes.empty()) {
-        dl->AddText({origin.x + 8.f, py}, col_.text_dim, "No nodes tracked");
+        dl->AddText({origin.x + 4.f, py}, col_.text_dim, "No nodes tracked");
     }
     if (font_ui_) ImGui::PopFont();
 }
