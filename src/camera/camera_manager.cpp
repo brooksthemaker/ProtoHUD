@@ -99,10 +99,10 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb1_cfg_ = usb1;
     usb2_cfg_ = usb2;
 
-    // Scan /dev/video0-19 and list only real USB cameras (uvcvideo driver)
+    // Scan /dev/video0-31 and list only real USB cameras (uvcvideo driver)
     std::cerr << "[cam] USB cameras found:\n";
     bool found_any = false;
-    for (int i = 0; i <= 19; i++) {
+    for (int i = 0; i <= 31; i++) {
         std::string d = "/dev/video" + std::to_string(i);
         std::string info;
         if (access(d.c_str(), F_OK) == 0 && is_usb_capture_device(d, &info)) {
