@@ -294,10 +294,11 @@ void DmaCamera::on_request_complete(Request* req) {
     try {
         const auto& meta     = req->metadata();
         const auto& camCtrls = camera_->controls();   // ControlInfoMap (supported)
+        // ControlList::get() returns std::optional<T> in libcamera >= 0.7
         if (camCtrls.count(&controls::AfState))
-            last_af_state_.store(meta.get(controls::AfState));
+            last_af_state_.store(meta.get(controls::AfState).value_or(0));
         if (camCtrls.count(&controls::LensPosition))
-            last_lens_pos_.store(meta.get(controls::LensPosition));
+            last_lens_pos_.store(meta.get(controls::LensPosition).value_or(0.0f));
     } catch (...) {}
 
     auto it = req_to_slot_.find(req);
