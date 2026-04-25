@@ -4,8 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${ROOT}/build/protohud"
 
+echo "Project root : ${ROOT}"
+echo "Binary       : ${BIN}"
+echo ""
+
 if [ ! -f "${BIN}" ]; then
-    echo "Binary not found — run scripts/build.sh first"
+    echo "ERROR: binary not found — run ./scripts/install.sh first"
     exit 1
 fi
 

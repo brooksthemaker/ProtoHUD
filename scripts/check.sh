@@ -20,6 +20,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/build"
 
+echo -e "${BOLD}Project root:${RESET} ${PROJECT_ROOT}"
+echo -e "${BOLD}Build dir:${RESET}    ${BUILD_DIR}"
+echo ""
+
 # ── 1. User groups ────────────────────────────────────────────────────────────
 section "User groups"
 REQUIRED_GROUPS=(gpio dialout video render audio input)
