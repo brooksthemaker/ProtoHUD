@@ -466,13 +466,22 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     constexpr ImU32 col_glow1  = IM_COL32(255, 160,  32,  70);
     constexpr ImU32 col_glow2  = IM_COL32(255, 160,  32,  28);
 
-    // Optional gradient background: transparent at top, opaque at bottom
+    // Optional gradient background: transparent at top and outer edges, opaque at bottom.
+    // Three strips so the left and right sides also fade in from transparent.
     if (s.compass_bg_enabled) {
-        const uint8_t a = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
+        const uint8_t a  = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
+        const float   fw = static_cast<float>(cfg_.compass_bg_side_fade);
+        const ImU32   T  = IM_COL32(8, 12, 18, 0);
+        const ImU32   A  = IM_COL32(8, 12, 18, a);
+        // Left strip: fully transparent outer edge, opaque only at inner-bottom corner
         dl->AddRectFilledMultiColor(
-            {origin.x, origin.y}, {origin.x + tw, origin.y + th},
-            IM_COL32(8, 12, 18,  0), IM_COL32(8, 12, 18,  0),  // top: clear
-            IM_COL32(8, 12, 18,  a), IM_COL32(8, 12, 18,  a)); // bottom: solid
+            {origin.x - fw, origin.y}, {origin.x,       origin.y + th}, T, T, A, T);
+        // Center: transparent top, opaque bottom
+        dl->AddRectFilledMultiColor(
+            {origin.x,      origin.y}, {origin.x + tw,  origin.y + th}, T, T, A, A);
+        // Right strip: opaque only at inner-bottom corner, fully transparent outer edge
+        dl->AddRectFilledMultiColor(
+            {origin.x + tw, origin.y}, {origin.x + tw + fw, origin.y + th}, T, T, T, A);
     }
 
     if (font_mono_) ImGui::PushFont(font_mono_);
