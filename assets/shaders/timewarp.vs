@@ -1,10 +1,12 @@
-#version 100
-attribute vec3 vertexPosition;
-attribute vec2 vertexTexCoord;
-varying vec2 fragTexCoord;
-uniform mat4 mvp;
+// timewarp.vs — vertex shader for async rotational timewarp
+// Attributes bound at locations 0 (a_pos) and 1 (a_uv) by gl_utils link_program().
+// The homography warp is applied per-pixel in the fragment shader (perspective-correct).
+attribute vec2 a_pos;
+attribute vec2 a_uv;
+
+varying vec2 v_uv;
 
 void main() {
-    fragTexCoord = vertexTexCoord;
-    gl_Position = mvp * vec4(vertexPosition, 1.0);
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+    v_uv = a_uv;
 }
