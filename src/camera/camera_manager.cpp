@@ -18,21 +18,24 @@
 CameraManager::CameraManager()  = default;
 CameraManager::~CameraManager() { shutdown(); }
 
-// Returns true if the device is a V4L2 video-capture node driven by uvcvideo
-// (i.e. a real USB camera, not a libcamera ISP pipeline node).
+// Returns true if the device is a usable video-capture node.
+// Rejects known libcamera ISP/pipeline drivers that have VIDEO_CAPTURE
+// but produce no frames when opened directly.
 static bool is_usb_capture_device(const std::string& path, std::string* info_out = nullptr) {
     int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd < 0) return false;
     struct v4l2_capability cap {};
     bool ok = false;
     if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) {
-        if (info_out) {
-            *info_out = std::string(reinterpret_cast<char*>(cap.driver))
-                      + ": " + reinterpret_cast<char*>(cap.card);
-        }
-        // uvcvideo = USB Video Class — the standard Linux USB camera driver
-        ok = (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) &&
-             (std::string(reinterpret_cast<char*>(cap.driver)) == "uvcvideo");
+        std::string driver(reinterpret_cast<char*>(cap.driver));
+        std::string card  (reinterpret_cast<char*>(cap.card));
+        if (info_out) *info_out = driver + ": " + card;
+        // Block known RPi ISP pipeline drivers — they open but yield no frames
+        bool is_isp = (driver == "rp1-cfe"      ||
+                       driver == "bcm2835-isp"   ||
+                       driver == "pispbe"         ||
+                       driver.find("pisp") != std::string::npos);
+        ok = (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) && !is_isp;
     }
     close(fd);
     return ok;
@@ -44,8 +47,8 @@ static bool open_v4l2(cv::VideoCapture& cap, const UsbCamConfig& cfg,
     std::string info;
     if (!is_usb_capture_device(cfg.device, &info)) {
         std::cerr << "[cam] " << name << ": " << cfg.device
-                  << " is not a USB camera (driver=" << info
-                  << ") — see '[cam] USB cameras:' list above for correct paths\n";
+                  << " is an ISP/pipeline node, not a camera (driver=" << info
+                  << ") — use a path from the '[cam] USB cameras found:' list\n";
         return false;
     }
     cap.open(cfg.device, cv::CAP_V4L2);
@@ -99,10 +102,10 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb1_cfg_ = usb1;
     usb2_cfg_ = usb2;
 
-    // Scan /dev/video0-31 and list only real USB cameras (uvcvideo driver)
+    // Scan /dev/video0-63 and list non-ISP capture nodes
     std::cerr << "[cam] USB cameras found:\n";
     bool found_any = false;
-    for (int i = 0; i <= 31; i++) {
+    for (int i = 0; i <= 63; i++) {
         std::string d = "/dev/video" + std::to_string(i);
         std::string info;
         if (access(d.c_str(), F_OK) == 0 && is_usb_capture_device(d, &info)) {
