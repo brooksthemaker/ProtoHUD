@@ -2,8 +2,13 @@
 build/
 *.o
 *.a
-*.so
 *.d
+
+# Shared libraries — excluded globally, but the vendored VITURE SDK
+# binaries below are intentionally tracked (they are pre-built aarch64
+# binaries that have no other install source).
+*.so
+!vendor/viture/lib/**/*.so
 
 # CMake
 CMakeCache.txt
