@@ -32,7 +32,7 @@
       "fps": 30
     },
     "usb_cam_2": {
-      "device": "/dev/video18",
+      "device": "/dev/video36",
       "width": 1280,
       "height": 720,
       "fps": 30
