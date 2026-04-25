@@ -33,6 +33,7 @@ struct HudColors {
 struct HudConfig {
     int   compass_height        = 72;
     int   compass_bottom_margin = 20;
+    float compass_bg_opacity    = 0.75f;
     int   panel_width           = 200;
     int   top_bar_height        = 52;
     float opacity               = 0.85f;
