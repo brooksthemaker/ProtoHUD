@@ -137,12 +137,18 @@ Node color by age: teal < 30 s · cyan 30–120 s · dim > 120 s
 
 ## Compass Tape (full width, 60 px, bottom)
 
+Shows a 120° window (60° either side of current heading). Each degree
+spans `screen_width / 120` pixels so the visible range scales with
+display width.
+
 ```
- N      NNE    NE     ENE     E      ESE    SE     SSE     S
- |       |      |      |      ▲      |      |      |       |
- ░░░░░░░░░░░░░░░░░░░░░░▲░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-                        95°
+      NE          ENE              E            ESE          SE
+       |    80     |    90    95°  |    100      |    110     |
+  ░░░░░|░░░░|░░░░░░|░░░░|░░░░░▲░░░|░░░░|░░░░░░░░|░░░░|░░░░░░|
+                               ▲
+                              95°
 ```
 
-Current heading shown with a center tick and degree readout below.
-Cardinal labels appear at 45° intervals across the full tape.
+Current heading shown with a center triangle cursor and degree readout below.
+Cardinal labels (N, NE, E, SE, S, SW, W, NW) appear when they fall within the
+120° window. Major ticks every 10°, minor ticks every 5°.
