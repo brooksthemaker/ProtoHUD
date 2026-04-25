@@ -74,6 +74,12 @@ public:
     DmaCamera* owl_left()  { return owl_left_.get();  }
     DmaCamera* owl_right() { return owl_right_.get(); }
 
+    // ── USB open / close (safe to call from any thread) ──────────────────────
+    void open_usb1();
+    void close_usb1();
+    void open_usb2();
+    void close_usb2();
+
     // ── Status ────────────────────────────────────────────────────────────────
     bool owl_left_ok()  const { return owl_left_  && owl_left_->is_ok();  }
     bool owl_right_ok() const { return owl_right_ && owl_right_->is_ok(); }
@@ -93,7 +99,9 @@ private:
     std::unique_ptr<DmaCamera> owl_right_;
 
     // USB cameras (OpenCV capture)
+    UsbCamConfig     usb1_cfg_, usb2_cfg_;
     cv::VideoCapture usb_cap1_, usb_cap2_;
+    std::mutex       usb1_cap_mtx_, usb2_cap_mtx_;
     std::atomic<bool> usb1_ok_ { false };
     std::atomic<bool> usb2_ok_ { false };
 

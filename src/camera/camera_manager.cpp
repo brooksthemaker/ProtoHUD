@@ -3,8 +3,10 @@
 #include <libcamera/libcamera.h>
 #include <opencv2/imgproc.hpp>
 
+#include <chrono>
 #include <cstring>
 #include <iostream>
+#include <thread>
 
 // NOTE: do NOT add 'using namespace libcamera' here — libcamera::CameraManager
 // would collide with our own CameraManager class.
@@ -41,7 +43,11 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     }
 
     // ── USB cameras (OpenCV) ──────────────────────────────────────────────────
+    usb1_cfg_ = usb1;
+    usb2_cfg_ = usb2;
+
     auto open_cap = [](cv::VideoCapture& cap, const UsbCamConfig& cfg) -> bool {
+        if (cfg.device.empty()) return false;
         cap.open(cfg.device, cv::CAP_V4L2);
         if (!cap.isOpened()) return false;
         cap.set(cv::CAP_PROP_FRAME_WIDTH,  cfg.width);
@@ -52,7 +58,9 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb1_ok_ = open_cap(usb_cap1_, usb1);
     usb2_ok_ = open_cap(usb_cap2_, usb2);
 
-    if (usb1_ok_ || usb2_ok_) {
+    // Start thread whenever USB devices are configured so open/close can work
+    // later even if the cameras were not available at startup.
+    if (!usb1.device.empty() || !usb2.device.empty()) {
         running_ = true;
         usb_thread_ = std::thread(&CameraManager::usb_capture_thread, this);
     }
@@ -100,25 +108,71 @@ bool CameraManager::set_resolution(int width, int height, int fps) {
 
 void CameraManager::usb_capture_thread() {
     cv::Mat frame, rgba;
-    while (running_) {
-        auto capture = [&](cv::VideoCapture& cap, TexSlot& slot,
-                           std::atomic<bool>& ok_flag) {
-            if (!cap.isOpened()) return;
-            if (!cap.read(frame) || frame.empty()) { ok_flag = false; return; }
+
+    auto capture = [&](cv::VideoCapture& cap, std::mutex& cap_mtx,
+                       TexSlot& slot, std::atomic<bool>& ok_flag) -> bool {
+        bool got_frame = false;
+        {
+            std::lock_guard<std::mutex> lk(cap_mtx);
+            if (!cap.isOpened()) return false;
+            if (!cap.read(frame) || frame.empty()) { ok_flag = false; return true; }
             cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
-            {
-                std::lock_guard<std::mutex> lk(slot.mtx);
-                slot.w = rgba.cols;
-                slot.h = rgba.rows;
-                slot.buf.resize(static_cast<size_t>(rgba.total()) * 4);
-                std::memcpy(slot.buf.data(), rgba.data, slot.buf.size());
-                slot.dirty = true;
-            }
-            ok_flag = true;
-        };
-        capture(usb_cap1_, usb1_slot_, usb1_ok_);
-        capture(usb_cap2_, usb2_slot_, usb2_ok_);
+            got_frame = true;
+            ok_flag   = true;
+        }
+        if (got_frame) {
+            std::lock_guard<std::mutex> lk(slot.mtx);
+            slot.w = rgba.cols;
+            slot.h = rgba.rows;
+            slot.buf.resize(static_cast<size_t>(rgba.total()) * 4);
+            std::memcpy(slot.buf.data(), rgba.data, slot.buf.size());
+            slot.dirty = true;
+        }
+        return true;
+    };
+
+    while (running_) {
+        bool any = capture(usb_cap1_, usb1_cap_mtx_, usb1_slot_, usb1_ok_);
+        any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_);
+        if (!any)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+}
+
+// ── USB open / close (callable from any thread) ───────────────────────────────
+
+void CameraManager::open_usb1() {
+    std::lock_guard<std::mutex> lk(usb1_cap_mtx_);
+    if (usb_cap1_.isOpened() || usb1_cfg_.device.empty()) return;
+    usb_cap1_.open(usb1_cfg_.device, cv::CAP_V4L2);
+    if (!usb_cap1_.isOpened()) { usb1_ok_ = false; return; }
+    usb_cap1_.set(cv::CAP_PROP_FRAME_WIDTH,  usb1_cfg_.width);
+    usb_cap1_.set(cv::CAP_PROP_FRAME_HEIGHT, usb1_cfg_.height);
+    usb_cap1_.set(cv::CAP_PROP_FPS,          usb1_cfg_.fps);
+    usb1_ok_ = true;
+}
+
+void CameraManager::close_usb1() {
+    std::lock_guard<std::mutex> lk(usb1_cap_mtx_);
+    usb_cap1_.release();
+    usb1_ok_ = false;
+}
+
+void CameraManager::open_usb2() {
+    std::lock_guard<std::mutex> lk(usb2_cap_mtx_);
+    if (usb_cap2_.isOpened() || usb2_cfg_.device.empty()) return;
+    usb_cap2_.open(usb2_cfg_.device, cv::CAP_V4L2);
+    if (!usb_cap2_.isOpened()) { usb2_ok_ = false; return; }
+    usb_cap2_.set(cv::CAP_PROP_FRAME_WIDTH,  usb2_cfg_.width);
+    usb_cap2_.set(cv::CAP_PROP_FRAME_HEIGHT, usb2_cfg_.height);
+    usb_cap2_.set(cv::CAP_PROP_FPS,          usb2_cfg_.fps);
+    usb2_ok_ = true;
+}
+
+void CameraManager::close_usb2() {
+    std::lock_guard<std::mutex> lk(usb2_cap_mtx_);
+    usb_cap2_.release();
+    usb2_ok_ = false;
 }
 
 // ── USB texture upload (render thread) ────────────────────────────────────────

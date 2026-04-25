@@ -313,9 +313,19 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── USB camera PiP layout ─────────────────────────────────────────────────
+    std::vector<MenuItem> cam1_menu = {
+        { "Open",  [cameras]{ cameras->open_usb1();  }, {} },
+        { "Close", [cameras]{ cameras->close_usb1(); }, {} },
+    };
+    std::vector<MenuItem> cam2_menu = {
+        { "Open",  [cameras]{ cameras->open_usb2();  }, {} },
+        { "Close", [cameras]{ cameras->close_usb2(); }, {} },
+    };
     std::vector<MenuItem> pip_menu = {
-        { "Position", nullptr, make_position_items(pip_cfg) },
-        { "Size",     nullptr, make_size_items(pip_cfg)     },
+        { "Cam 1",    nullptr, std::move(cam1_menu)          },
+        { "Cam 2",    nullptr, std::move(cam2_menu)          },
+        { "Position", nullptr, make_position_items(pip_cfg)  },
+        { "Size",     nullptr, make_size_items(pip_cfg)      },
     };
 
     // ── Android mirror ────────────────────────────────────────────────────────
@@ -749,9 +759,11 @@ int main(int argc, char* argv[]) {
             pip_right_active = buttons.pip_right_active();
         }
 
-        // ── Android mirror health update ──────────────────────────────────────
+        // ── USB camera / Android mirror health update ─────────────────────────
         {
             std::lock_guard<std::mutex> lk(state.mtx);
+            state.health.cam_usb1       = cameras.usb1_ok();
+            state.health.cam_usb2       = cameras.usb2_ok();
             state.health.android_mirror = android_mirror.is_connected();
         }
 
