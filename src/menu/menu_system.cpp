@@ -113,7 +113,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         }
 
         std::string label = items[i].label;
-        if (!items[i].children.empty()) label += "  \xe2\x80\xba";  // UTF-8 ›
+        if (!items[i].children.empty()) label += "  >";  // submenu indicator (ASCII-safe)
 
         // Use Selectable so we can detect clicks (keyboard nav handled outside)
         if (ImGui::Selectable(label.c_str(), selected,
