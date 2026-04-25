@@ -114,11 +114,13 @@ void CameraManager::usb_capture_thread() {
         bool got_frame = false;
         {
             std::lock_guard<std::mutex> lk(cap_mtx);
-            if (!cap.isOpened()) return false;
-            if (!cap.read(frame) || frame.empty()) { ok_flag = false; return true; }
-            cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
-            got_frame = true;
-            ok_flag   = true;
+            if (!cap.isOpened()) { ok_flag = false; return false; }
+            cap.read(frame);
+            if (!frame.empty()) {
+                cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
+                got_frame = true;
+            }
+            // Don't clear ok_flag on a dropped frame — only when device closes
         }
         if (got_frame) {
             std::lock_guard<std::mutex> lk(slot.mtx);

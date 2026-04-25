@@ -316,16 +316,28 @@ static std::vector<MenuItem> build_menu(
 
     // ── USB camera PiP layout ─────────────────────────────────────────────────
     std::vector<MenuItem> cam1_menu = {
-        { "Open",         [cameras]{ std::thread([cameras]{ cameras->open_usb1(); }).detach(); }, {} },
-        { "Close",        [cameras]{ cameras->close_usb1(); }, {} },
+        { "Open",         [cameras, pip_cam1_overlay]{
+                              std::thread([cameras, pip_cam1_overlay]{
+                                  cameras->open_usb1();
+                                  *pip_cam1_overlay = true;
+                              }).detach(); }, {} },
+        { "Close",        [cameras, pip_cam1_overlay]{
+                              cameras->close_usb1();
+                              *pip_cam1_overlay = false; }, {} },
         { "Show Overlay", [pip_cam1_overlay]{ *pip_cam1_overlay = true;  }, {} },
         { "Hide Overlay", [pip_cam1_overlay]{ *pip_cam1_overlay = false; }, {} },
         { "Position",     nullptr, make_position_items(pip_cfg1) },
         { "Size",         nullptr, make_size_items(pip_cfg1)     },
     };
     std::vector<MenuItem> cam2_menu = {
-        { "Open",         [cameras]{ std::thread([cameras]{ cameras->open_usb2(); }).detach(); }, {} },
-        { "Close",        [cameras]{ cameras->close_usb2(); }, {} },
+        { "Open",         [cameras, pip_cam2_overlay]{
+                              std::thread([cameras, pip_cam2_overlay]{
+                                  cameras->open_usb2();
+                                  *pip_cam2_overlay = true;
+                              }).detach(); }, {} },
+        { "Close",        [cameras, pip_cam2_overlay]{
+                              cameras->close_usb2();
+                              *pip_cam2_overlay = false; }, {} },
         { "Show Overlay", [pip_cam2_overlay]{ *pip_cam2_overlay = true;  }, {} },
         { "Hide Overlay", [pip_cam2_overlay]{ *pip_cam2_overlay = false; }, {} },
         { "Position",     nullptr, make_position_items(pip_cfg2) },
@@ -678,7 +690,9 @@ int main(int argc, char* argv[]) {
 
     // ── Menu system ───────────────────────────────────────────────────────────
 
-    bool pip_cam1_overlay_active = false, pip_cam2_overlay_active = false;
+    // Auto-show overlay for cameras that opened successfully at startup
+    bool pip_cam1_overlay_active = cameras.usb1_ok();
+    bool pip_cam2_overlay_active = cameras.usb2_ok();
 
     MenuSystem menu(build_menu(&teensy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
