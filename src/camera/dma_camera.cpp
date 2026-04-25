@@ -90,9 +90,20 @@ bool DmaCamera::configure_camera() {
     // Frame rate is set via FrameDurationLimits control on camera_->start(),
     // not via StreamConfiguration (frameRate field does not exist on Bullseye).
 
-    if (cam_cfg_->validate() == CameraConfiguration::Invalid) {
+    auto status = cam_cfg_->validate();
+    if (status == CameraConfiguration::Invalid) {
         std::cerr << "[dma] camera configuration invalid\n";
         return false;
+    }
+    if (status == CameraConfiguration::Adjusted) {
+        // libcamera snapped the requested size to the nearest supported mode.
+        // Update cfg_ so EGL image dimensions match the actual buffer layout.
+        std::cout << "[dma] camera " << cfg_.libcamera_id
+                  << " size adjusted by libcamera: "
+                  << cfg_.width << "×" << cfg_.height
+                  << " → " << sc.size.width << "×" << sc.size.height << "\n";
+        cfg_.width  = sc.size.width;
+        cfg_.height = sc.size.height;
     }
     if (camera_->configure(cam_cfg_.get())) {
         std::cerr << "[dma] camera_->configure() failed\n";
@@ -469,7 +480,15 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
     sc.bufferCount = NUM_SLOTS;
     // frameRate is set via FrameDurationLimits in start_capture(), not here.
 
-    if (cam_cfg_->validate() == CameraConfiguration::Invalid) {
+    auto rcfg_status = cam_cfg_->validate();
+    if (rcfg_status == CameraConfiguration::Adjusted) {
+        std::cout << "[dma] reconfigure: size adjusted "
+                  << cfg_.width << "×" << cfg_.height
+                  << " → " << sc.size.width << "×" << sc.size.height << "\n";
+        cfg_.width  = sc.size.width;
+        cfg_.height = sc.size.height;
+    }
+    if (rcfg_status == CameraConfiguration::Invalid) {
         std::cerr << "[dma] reconfigure: invalid configuration "
                   << width << "×" << height << " @" << fps << "fps — reverting\n";
         cfg_.width = old_w;  cfg_.height = old_h;  cfg_.fps = old_fps;

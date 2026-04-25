@@ -1,4 +1,5 @@
 #include <iostream>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -370,7 +371,20 @@ static void render_eye_fbo(gl::Fbo& fbo,
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
-    std::string cfg_path = (argc > 1) ? argv[1] : "config.json";
+    // Resolve resource paths relative to the binary's own directory so the app
+    // works from any working directory (e.g. run via symlink from project root).
+    namespace fs = std::filesystem;
+    std::string bin_dir;
+    try {
+        bin_dir = fs::canonical(argv[0]).parent_path().string();
+    } catch (...) {
+        bin_dir = ".";  // fallback: use CWD
+    }
+    auto res = [&bin_dir](const std::string& rel) {
+        return bin_dir + "/" + rel;
+    };
+
+    std::string cfg_path = (argc > 1) ? argv[1] : res("config.json");
     json cfg = load_config(cfg_path);
 
     // ── Config extraction ─────────────────────────────────────────────────────
@@ -516,7 +530,9 @@ int main(int argc, char* argv[]) {
     // ── Async Timewarp ────────────────────────────────────────────────────────
 
     CameraIntrinsics K { 1920.0f, 1920.0f, 960.0f, 540.0f };
-    AsyncTimewarp timewarp(K);
+    AsyncTimewarp timewarp(K,
+        res("assets/shaders/timewarp.vs").c_str(),
+        res("assets/shaders/timewarp.fs").c_str());
     bool use_timewarp = timewarp.init();
     if (!use_timewarp)
         std::cerr << "[main] timewarp shader unavailable — skipping\n";
@@ -537,7 +553,8 @@ int main(int argc, char* argv[]) {
 
     CameraManager cameras;
     cameras.init(owl_left, owl_right, usb1_cfg, usb2_cfg,
-                 "assets/shaders/nv12.vs", "assets/shaders/nv12.fs");
+                 res("assets/shaders/nv12.vs").c_str(),
+                 res("assets/shaders/nv12.fs").c_str());
     {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.health.cam_owl_left  = cameras.owl_left_ok();
