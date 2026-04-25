@@ -115,7 +115,7 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     const float th = static_cast<float>(cfg_.top_bar_height);
     const float ch = static_cast<float>(cfg_.compass_height);
     const float pw = static_cast<float>(cfg_.panel_width);
-    const float mid_h = fh - th - ch;
+    const float mid_h = fh - th; // compass is center-third only; panels use full height
 
     draw_top_bar     (dl, s, fw);
     draw_face_panel  (dl, s.face,       { fw - pw, th },  pw, mid_h * 0.5f);
