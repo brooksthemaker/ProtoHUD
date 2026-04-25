@@ -456,7 +456,7 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     dl->AddLine(origin, {origin.x + tw, origin.y}, col_.primary);
 
     const float heading   = s.compass_heading;
-    const float ppd       = 3.f;       // pixels per degree
+    const float ppd       = tw / 120.f; // 120° visible across full tape width
     const float center_x  = origin.x + tw / 2.f;
     const float tick_y    = origin.y + th - 8.f;
 
