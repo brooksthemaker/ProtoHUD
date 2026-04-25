@@ -1,13 +1,17 @@
 #include "gpio_buttons.h"
 
 #include <gpiod.h>
-#include <unistd.h>
 #include <iostream>
 
-// ── libgpiod v1 implementation ────────────────────────────────────────────────
-// Raspberry Pi OS Bookworm ships libgpiod 1.6.x (v1 API).
-// The v2 API (gpiod_line_settings_new, gpiod_request_config_new, etc.) is NOT
-// available in the Bookworm repositories.
+// ── libgpiod v2 implementation ────────────────────────────────────────────────
+// libgpiod v2 (installed on this system: 2.2.1) completely rewrote the API.
+// v1 concepts replaced:
+//   gpiod_chip_open_by_name()  → gpiod_chip_open("/dev/gpiochip0")
+//   gpiod_chip_get_line()      → gpiod_line_config + gpiod_chip_request_lines()
+//   gpiod_line_bulk            → gpiod_edge_event_buffer
+//   gpiod_line_request_bulk()  → gpiod_chip_request_lines()
+//   gpiod_line_event_read()    → gpiod_line_request_read_edge_events()
+//   GPIOD_LINE_EVENT_*         → GPIOD_EDGE_EVENT_*
 
 GpioButtons::GpioButtons(int pin_left, int pin_right, int pin_aux,
                          int af_trigger_ms, int pip_trigger_ms)
@@ -19,84 +23,101 @@ GpioButtons::~GpioButtons() {
 }
 
 bool GpioButtons::init() {
-    struct gpiod_chip* chip = gpiod_chip_open_by_name("gpiochip0");
+    // ── Open chip ─────────────────────────────────────────────────────────────
+    gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
     if (!chip) {
-        std::cerr << "[gpio] cannot open gpiochip0\n";
+        std::cerr << "[gpio] cannot open /dev/gpiochip0\n";
         return false;
     }
 
-    struct gpiod_line* line_left  = gpiod_chip_get_line(chip, static_cast<unsigned>(pin_left_));
-    struct gpiod_line* line_right = gpiod_chip_get_line(chip, static_cast<unsigned>(pin_right_));
-    struct gpiod_line* line_aux   = gpiod_chip_get_line(chip, static_cast<unsigned>(pin_aux_));
+    // ── Line settings: input, pull-up, both-edge detection ───────────────────
+    gpiod_line_settings* settings = gpiod_line_settings_new();
+    if (!settings) {
+        gpiod_chip_close(chip);
+        return false;
+    }
+    gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_INPUT);
+    gpiod_line_settings_set_bias(settings, GPIOD_LINE_BIAS_PULL_UP);
+    gpiod_line_settings_set_edge_detection(settings, GPIOD_LINE_EDGE_BOTH);
 
-    if (!line_left || !line_right || !line_aux) {
-        std::cerr << "[gpio] failed to get GPIO lines\n";
+    // ── Line config: apply settings to our three offsets ─────────────────────
+    gpiod_line_config* line_cfg = gpiod_line_config_new();
+    if (!line_cfg) {
+        gpiod_line_settings_free(settings);
+        gpiod_chip_close(chip);
+        return false;
+    }
+    unsigned int offsets[3] = {
+        static_cast<unsigned int>(pin_left_),
+        static_cast<unsigned int>(pin_right_),
+        static_cast<unsigned int>(pin_aux_)
+    };
+    if (gpiod_line_config_add_line_settings(line_cfg, offsets, 3, settings) < 0) {
+        std::cerr << "[gpio] failed to configure GPIO lines\n";
+        gpiod_line_config_free(line_cfg);
+        gpiod_line_settings_free(settings);
         gpiod_chip_close(chip);
         return false;
     }
 
-    // Build a bulk handle for all three lines
-    struct gpiod_line_bulk bulk;
-    gpiod_line_bulk_init(&bulk);
-    gpiod_line_bulk_add(&bulk, line_left);
-    gpiod_line_bulk_add(&bulk, line_right);
-    gpiod_line_bulk_add(&bulk, line_aux);
-
-    // Request both-edge events with pull-up (available since libgpiod 1.5).
-    // Use explicit field assignment for C++17 compatibility (no designated
-    // initializers until C++20).
-    struct gpiod_line_request_config config {};
-    config.consumer    = "protohud";
-    config.request_type = GPIOD_LINE_REQUEST_EVENT_BOTH_EDGES;
-    config.flags        = GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP;
-
-    if (gpiod_line_request_bulk(&bulk, &config, nullptr) < 0) {
-        std::cerr << "[gpio] failed to request GPIO line events\n";
+    // ── Request config: consumer name ─────────────────────────────────────────
+    gpiod_request_config* req_cfg = gpiod_request_config_new();
+    if (!req_cfg) {
+        gpiod_line_config_free(line_cfg);
+        gpiod_line_settings_free(settings);
         gpiod_chip_close(chip);
         return false;
     }
+    gpiod_request_config_set_consumer(req_cfg, "protohud");
 
+    // ── Request the lines ─────────────────────────────────────────────────────
+    gpiod_line_request* request = gpiod_chip_request_lines(chip, req_cfg, line_cfg);
+
+    gpiod_request_config_free(req_cfg);
+    gpiod_line_config_free(line_cfg);
+    gpiod_line_settings_free(settings);
+    gpiod_chip_close(chip);   // chip can be closed once lines are requested
+
+    if (!request) {
+        std::cerr << "[gpio] failed to request GPIO lines "
+                  << pin_left_ << ", " << pin_right_ << ", " << pin_aux_ << "\n"
+                  << "       Check that the user is in the 'gpio' group\n";
+        return false;
+    }
+
+    // ── Poll thread ───────────────────────────────────────────────────────────
     running_ = true;
-    poll_thread_ = std::thread([this, chip, line_left, line_right, line_aux]() {
-        struct gpiod_line_bulk bulk_all;
-        gpiod_line_bulk_init(&bulk_all);
-        gpiod_line_bulk_add(&bulk_all, line_left);
-        gpiod_line_bulk_add(&bulk_all, line_right);
-        gpiod_line_bulk_add(&bulk_all, line_aux);
+    poll_thread_ = std::thread([this, request]() {
+        constexpr int BUF_CAPACITY = 16;
+        gpiod_edge_event_buffer* buf = gpiod_edge_event_buffer_new(BUF_CAPACITY);
 
         while (running_) {
-            // Wait up to 1 s for any edge event
-            struct timespec timeout { 1, 0 };
-            struct gpiod_line_bulk event_bulk;
-            gpiod_line_bulk_init(&event_bulk);
+            // Wait up to 1 second for any edge event (timeout in nanoseconds)
+            int ret = gpiod_line_request_wait_edge_events(request, 1'000'000'000LL);
+            if (ret < 0) break;    // error — exit thread
+            if (ret == 0) continue; // timeout — check running_ and loop
 
-            int ret = gpiod_line_bulk_event_wait(&bulk_all, &timeout, &event_bulk);
-            if (ret < 0 || ret == 0) continue;  // error or timeout
+            // Read all pending events
+            int n = gpiod_line_request_read_edge_events(request, buf, BUF_CAPACITY);
+            for (int i = 0; i < n; i++) {
+                gpiod_edge_event* ev = gpiod_edge_event_buffer_get_event(buf, i);
+                unsigned int offset  = gpiod_edge_event_get_line_offset(ev);
+                auto type            = gpiod_edge_event_get_event_type(ev);
 
-            // Drain all pending events from the lines that fired
-            unsigned int n = gpiod_line_bulk_num_lines(&event_bulk);
-            for (unsigned int i = 0; i < n; i++) {
-                struct gpiod_line* line = gpiod_line_bulk_get_line(&event_bulk, i);
-
-                struct gpiod_line_event event;
-                if (gpiod_line_event_read(line, &event) < 0) continue;
-
-                unsigned int offset = gpiod_line_offset(line);
-                // RISING edge = button released (pull-up, active-low)
-                // FALLING edge = button pressed
-                int state = (event.event_type == GPIOD_LINE_EVENT_RISING_EDGE) ? 1 : 0;
+                // Active-low wiring (button → GND, pull-up):
+                //   FALLING edge = button pressed  (state 0)
+                //   RISING  edge = button released (state 1)
+                int state = (type == GPIOD_EDGE_EVENT_RISING_EDGE) ? 1 : 0;
                 handle_button_event(static_cast<int>(offset), state);
             }
         }
 
-        gpiod_line_release(line_left);
-        gpiod_line_release(line_right);
-        gpiod_line_release(line_aux);
-        gpiod_chip_close(chip);
+        gpiod_edge_event_buffer_free(buf);
+        gpiod_line_request_release(request);
     });
 
-    std::cout << "[gpio] buttons initialised on GPIO " << pin_left_
-              << ", " << pin_right_ << ", " << pin_aux_ << "\n";
+    std::cout << "[gpio] buttons initialised on GPIO "
+              << pin_left_ << ", " << pin_right_ << ", " << pin_aux_ << "\n";
     return true;
 }
 
@@ -127,21 +148,19 @@ void GpioButtons::update_pip_state() {
 void GpioButtons::handle_button_event(int pin, int state) {
     if (pin == pin_left_) {
         if (state == 0) {
-            // Button pressed (falling edge)
+            // Pressed
             left_press_time_ = std::chrono::steady_clock::now();
             button_left_held_ = true;
             pip_left_threshold_reached_ = false;
         } else {
-            // Button released (rising edge)
+            // Released
             auto hold_ms = get_left_hold_ms();
             button_left_held_ = false;
             pip_left_threshold_reached_ = false;
 
             if (hold_ms >= af_trigger_ms_) {
-                // Long press → trigger autofocus
                 if (af_left_cb_) af_left_cb_();
             } else {
-                // Short press → toggle PiP
                 pip_left_active_ = !pip_left_active_.load();
                 if (pip_left_cb_) pip_left_cb_();
             }
@@ -166,7 +185,7 @@ void GpioButtons::handle_button_event(int pin, int state) {
         }
 
     } else if (pin == pin_aux_) {
-        // Aux button: trigger select on release
+        // Aux/select: fire callback on release
         if (state == 1) {
             if (select_cb_) select_cb_();
         }
