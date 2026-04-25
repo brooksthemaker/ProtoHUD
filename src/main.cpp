@@ -718,6 +718,11 @@ int main(int argc, char* argv[]) {
 
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
         if (key_pressed(ImGuiKey_Escape)) { state.quit = true; break; }
+        // Ctrl+Q / Ctrl+K — force-kill (immediate exit, skips graceful cleanup)
+        if (ImGui::GetIO().KeyCtrl &&
+            (key_pressed(ImGuiKey_Q) || key_pressed(ImGuiKey_K))) {
+            std::exit(0);
+        }
         if (key_pressed(ImGuiKey_M)) {
             if (menu.is_open()) menu.close();
             else                menu.open();
