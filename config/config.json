@@ -26,13 +26,13 @@
       "flip_v": false
     },
     "usb_cam_1": {
-      "device": "/dev/video2",
+      "device": "/dev/video17",
       "width": 1280,
       "height": 720,
       "fps": 30
     },
     "usb_cam_2": {
-      "device": "/dev/video3",
+      "device": "/dev/video18",
       "width": 1280,
       "height": 720,
       "fps": 30
