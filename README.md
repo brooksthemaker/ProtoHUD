@@ -1,6 +1,8 @@
 # ProtoHUD
 
-A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a protogen costume helmet. It composites zero-copy libcamera frames from two OWLsight CSI cameras into a VITURE Beast XR glasses display (3840×1080 SBS), overlays a Dear ImGui HUD, and integrates spatial audio, LoRa mesh radio, a haptic SmartKnob, and GPIO hardware buttons.
+A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a protogen costume helmet. It composites zero-copy libcamera frames from two OWLsight CSI cameras into a VITURE Beast XR glasses display (3840×1080 SBS), overlays a Dear ImGui HUD, and integrates audio routing, LoRa mesh radio, a haptic SmartKnob, and GPIO hardware buttons.
+
+Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival) is handled by a companion **RP2350 helmet audio processor** over USB Audio. The CM5 receives pre-processed stereo and routes it to VITURE glasses, headphones, or HDMI.
 
 ---
 
@@ -10,18 +12,19 @@ A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a proto
 2. [Hardware](#hardware)
 3. [Pinouts & Inter-Controller Wiring](#pinouts--inter-controller-wiring)
 4. [Quick Start](#quick-start)
-5. [Building Manually](#building-manually)
-6. [Camera Resolution](#camera-resolution)
-7. [Camera Focus Control](#camera-focus-control)
-8. [Night Vision (Exposure & Shutter)](#night-vision-exposure--shutter)
-9. [GPIO Buttons](#gpio-buttons)
-10. [USB Camera Picture-in-Picture](#usb-camera-picture-in-picture)
-11. [Android Mirror](#android-mirror)
-12. [Overlay Position & Size](#overlay-position--size)
-13. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
-14. [Spatial Audio](#spatial-audio)
-15. [Configuration Reference](#configuration-reference)
-16. [Troubleshooting](#troubleshooting)
+5. [Post-Install Health Check](#post-install-health-check)
+6. [Building Manually](#building-manually)
+7. [Camera Resolution](#camera-resolution)
+8. [Camera Focus Control](#camera-focus-control)
+9. [Night Vision (Exposure & Shutter)](#night-vision-exposure--shutter)
+10. [GPIO Buttons](#gpio-buttons)
+11. [USB Camera Picture-in-Picture](#usb-camera-picture-in-picture)
+12. [Android Mirror](#android-mirror)
+13. [Overlay Position & Size](#overlay-position--size)
+14. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
+15. [Audio Routing](#audio-routing)
+16. [Configuration Reference](#configuration-reference)
+17. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -43,9 +46,16 @@ A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a proto
 │                                                                      │
 │  Serial threads:  Teensy (face LEDs) · SmartKnob · LoRa radio       │
 │  GPIO thread:     libgpiod v1 · 3 hardware buttons                  │
-│  Audio thread:    ALSA · 6-ch I2S · beamformer · wind gate          │
+│  Audio thread:    ALSA · USB capture (RP2350) → gain → playback     │
 │  Android thread:  scrcpy subprocess → V4L2 loopback → OpenCV → GL  │
 └──────────────────────────────────────────────────────────────────────┘
+         ▲ USB Audio (UAC2, stereo 48 kHz)
+┌────────┴───────────────────────────────┐
+│  RP2350 Helmet Audio Processor         │
+│  6× ICS-43434 MEMS mics               │
+│  Beamforming · Noise suppression · DOA │
+│  → stereo out via USB Audio Class 2   │
+└────────────────────────────────────────┘
 ```
 
 **Rendering pipeline per frame:**
@@ -71,7 +81,7 @@ Optional async timewarp warps each eye FBO using the latest IMU pose before comp
 | Face LEDs | Teensy 4.1 running Prototracer firmware |
 | Input | SmartKnob (ESP32-S3 haptic knob) + 3 GPIO buttons |
 | Radio | RAK4631 LoRa mesh radio (868/915 MHz) |
-| Audio | 6-channel I2S microphone array (cm5-6mic DT overlay) |
+| Audio processor | RP2350 helmet audio board — 6-mic beamforming/NR, USB Audio UAC2 output |
 | Android device | Any ADB-capable Android phone (optional, for screen mirror) |
 | OS | Raspberry Pi OS Bullseye (64-bit, aarch64) |
 
@@ -102,13 +112,9 @@ This section lists every physical connection for each controller in the system a
   OWLsight Left ─────┤ CSI0             USB-A ├──────────────────── Teensy 4.1
   OWLsight Right ────┤ CSI1             USB-A ├──────────────────── SmartKnob (ESP32-S3)
                      │                  USB-A ├──────────────────── RAK4631 LoRa radio
-  GPIO 18-21, 25 ────┤ I2S (PCM)        USB-C ├──────────────────── VITURE Beast XR glasses
-  GPIO 17, 27, 22 ───┤ GPIO                   │
+  GPIO 17, 27, 22 ───┤ GPIO             USB-A ├──────────────────── RP2350 Helmet Audio
+                     │                  USB-C ├──────────────────── VITURE Beast XR glasses
                      └─────────────────────────────────────────┘
-                              │ I2S (PCM)
-                   ┌──────────┴──────────┐
-                   │  ICS-43434 mic ×6   │
-                   └─────────────────────┘
 ```
 
 ---
@@ -116,21 +122,6 @@ This section lists every physical connection for each controller in the system a
 ### Raspberry Pi CM5
 
 The CM5 is the central hub. All other controllers connect to it.
-
-#### GPIO — I2S Microphone Array (preferred path)
-
-| CM5 GPIO | Pin # | Signal   | Connected to                        |
-|----------|-------|----------|-------------------------------------|
-| GPIO 18  | 12    | PCM_CLK  | BCK on all 6 ICS-43434 mics (shared)|
-| GPIO 19  | 35    | PCM_FS   | LRCK on all 6 ICS-43434 mics (shared)|
-| GPIO 20  | 38    | PCM_DIN0 | DATA on FRONT\_L + FRONT\_R mics     |
-| GPIO 21  | 40    | PCM_DIN1 | DATA on SIDE\_L + SIDE\_R mics       |
-| GPIO 25  | 22    | PCM_DIN2 | DATA on REAR\_L + REAR\_R mics       |
-| 3V3      | 1/17  | VDD      | VDD on all 6 mics                   |
-| GND      | any   | GND      | GND on all 6 mics                   |
-
-> The `cm5-6mic` device tree overlay must be enabled to expose these pins as
-> `hw:CARD=sndrpii2s0,DEV=0`. See [overlays/README.md](overlays/README.md).
 
 #### GPIO — Hardware Buttons
 
@@ -142,15 +133,16 @@ The CM5 is the central hub. All other controllers connect to it.
 
 All buttons are wired to GND; internal pull-ups are configured by `libgpiod`.
 
-#### USB Ports — Serial Controllers
+#### USB Ports — Serial & Audio Controllers
 
-| Port symlink   | Device     | Controller           | Baud    |
-|----------------|------------|----------------------|---------|
-| `/dev/teensy`  | /dev/ttyACM0 | Teensy 4.1 (face LEDs) | 115200 |
-| `/dev/smartknob` | /dev/ttyACM1 | SmartKnob (ESP32-S3) | 115200 |
-| `/dev/lora`    | /dev/ttyACM2 | RAK4631 LoRa radio   | 115200  |
+| Port symlink      | Device       | Controller                      | Protocol |
+|-------------------|--------------|---------------------------------|----------|
+| `/dev/teensy`     | /dev/ttyACM0 | Teensy 4.1 (face LEDs)          | CDC serial 115200 |
+| `/dev/smartknob`  | /dev/ttyACM1 | SmartKnob (ESP32-S3)            | CDC serial 115200 |
+| `/dev/lora`       | /dev/ttyACM2 | RAK4631 LoRa radio              | CDC serial 115200 |
+| `hw:CARD=HelmetAudio6Mic,DEV=0` | USB Audio | RP2350 Helmet Audio | UAC2 stereo 48 kHz |
 
-Symlinks are created by the udev rules in `scripts/install.sh`.
+The serial symlinks are created by the udev rules in `scripts/install.sh`.
 
 #### CSI Camera Connectors
 
@@ -161,68 +153,64 @@ Symlinks are created by the udev rules in `scripts/install.sh`.
 
 #### VITURE Beast XR Glasses
 
-Connected to the CM5 via a single USB-C cable (DisplayPort Alt Mode + USB data
-for the VITURE SDK).
+Connected to the CM5 via a single USB-C cable (DisplayPort Alt Mode + USB data for the VITURE SDK).
+
+---
+
+### RP2350 Helmet Audio Processor
+
+The RP2350 owns all microphone capture and DSP. It presents itself to the CM5 as a standard USB Audio Class 2 device and streams pre-processed stereo audio.
+
+**VID:PID:** `1209:B350`  
+**Product string:** `Helmet Audio 6-Mic`  
+**Connection:** USB-A (CM5) → USB-C (RP2350 board)  
+**ALSA card name:** `hw:CARD=HelmetAudio6Mic,DEV=0`
+
+The CM5 does **not** run any microphone DSP — it simply captures the stereo stream and routes it to the selected output device.
+
+#### RP2350 → ICS-43434 Microphone Wiring
+
+Six ICS-43434 MEMS microphones are arranged in a hexagonal pattern on the RP2350 board for 360° capture. The RP2350 handles all I2S capture internally.
+
+| Mic label | L/R pin | Azimuth |
+|-----------|---------|---------|
+| FRONT\_L  | GND     | 330°    |
+| FRONT\_R  | VDD     | 30°     |
+| SIDE\_L   | GND     | 270°    |
+| SIDE\_R   | VDD     | 90°     |
+| REAR\_L   | GND     | 210°    |
+| REAR\_R   | VDD     | 150°    |
 
 ---
 
 ### Teensy 4.1 — Face LEDs
 
-The Teensy runs the [ProtoTracer](https://github.com/coelacanthus/ProtoTracer)
-face-LED firmware and receives animation commands from the CM5 over USB CDC
-serial at 115200 baud.
+The Teensy runs the [ProtoTracer](https://github.com/coelacanthus/ProtoTracer) face-LED firmware and receives animation commands from the CM5 over USB CDC serial at 115200 baud.
 
 **CM5 → Teensy:** USB-A (CM5) to USB-C (Teensy 4.1)  
 **Serial port on CM5:** `/dev/teensy` → `/dev/ttyACM0`
-
-#### Teensy 4.1 Pinout — Mic Bridge (fallback only)
-
-Use this wiring only if the CM5 I2S driver cannot support three simultaneous
-DIN lines. When using the mic bridge, flash `firmware/teensy_audio/` instead
-and set `capture_device` to `hw:CARD=TeensyAudio,DEV=0`.
-
-| Teensy Pin | Signal         | Mic role             | I2S bus |
-|------------|----------------|----------------------|---------|
-| Pin 8      | I2S1 quad DIN  | FRONT\_L (GND) + FRONT\_R (VDD) | I2S1 |
-| Pin 6      | I2S1 quad DIN  | SIDE\_L (GND) + SIDE\_R (VDD)   | I2S1 |
-| Pin 21     | I2S1 SCK (BCK) | Shared clock for I2S1 bus        | I2S1 |
-| Pin 20     | I2S1 WS (LRCK) | Shared frame sync for I2S1 bus   | I2S1 |
-| Pin 5      | I2S2 DIN       | REAR\_L (GND) + REAR\_R (VDD)   | I2S2 |
-| Pin 33     | I2S2 SCK (BCK) | Shared clock for I2S2 bus        | I2S2 |
-| Pin 34     | I2S2 WS (LRCK) | Shared frame sync for I2S2 bus   | I2S2 |
-| 3V3        | VDD            | All 6 mics (shared)              | —    |
-| GND        | GND            | All 6 mics (shared)              | —    |
-
-The Teensy then bridges all 6 mic channels to the CM5 as a USB Audio device.
 
 ---
 
 ### SmartKnob — ESP32-S3
 
-The SmartKnob provides haptic detent navigation. It communicates with the CM5
-over a framed binary UART protocol at 115200 baud.
+The SmartKnob provides haptic detent navigation. It communicates with the CM5 over a framed binary UART protocol at 115200 baud.
 
 **CM5 → SmartKnob:** USB-A (CM5) to USB-C (SmartKnob)  
 **Serial port on CM5:** `/dev/smartknob` → `/dev/ttyACM1`
 
-The SmartKnob has no additional external wiring to the CM5 beyond the USB cable.
-All data exchange (position events, haptic commands, sleep control) flows over
-the USB serial link. See [SmartKnob Menu Navigation](#smartknob-menu-navigation)
-for the full protocol table.
+The SmartKnob has no additional external wiring to the CM5 beyond the USB cable. All data exchange (position events, haptic commands, sleep control) flows over the USB serial link. See [SmartKnob Menu Navigation](#smartknob-menu-navigation) for the full protocol table.
 
 ---
 
 ### RAK4631 LoRa Radio
 
-The RAK4631 is a WisBlock module combining an **nRF52840** MCU with an
-**SX1262** LoRa transceiver and an optional **RAK3401 1W PA booster**.
+The RAK4631 is a WisBlock module combining an **nRF52840** MCU with an **SX1262** LoRa transceiver and an optional **RAK3401 1W PA booster**.
 
 **CM5 → RAK4631:** USB-A (CM5) to USB-C (RAK5005-O base board)  
 **Serial port on CM5:** `/dev/lora` → `/dev/ttyACM2`
 
 #### RAK4631 Internal Wiring (WisBlock BSP — do not modify)
-
-The SX1262 is wired to the nRF52840 internally by the WisBlock PCB:
 
 | nRF52840 signal | WisBlock pin | SX1262 function    |
 |-----------------|--------------|---------------------|
@@ -234,39 +222,7 @@ The SX1262 is wired to the nRF52840 internally by the WisBlock PCB:
 
 #### RAK12501 GPS (WisBlock Slot A)
 
-The optional GPS module connects to the RAK4631 via WisBlock Slot A UART
-(`Serial1` in firmware, 9600 baud NMEA). No additional wiring is needed — it
-plugs directly into the base board.
-
-| Signal  | Connection              |
-|---------|-------------------------|
-| Serial1 | RAK12501 (Quectel L76K) |
-| 3V3     | Supplied by base board  |
-| GND     | Supplied by base board  |
-
----
-
-### ICS-43434 Microphone Array (6× mics)
-
-Six ICS-43434 MEMS microphones are arranged in a hexagonal pattern for
-360° spatial audio capture. They connect either directly to the CM5 (preferred)
-or to the Teensy 4.1 (fallback bridge).
-
-#### Direct CM5 Wiring (preferred)
-
-Three stereo pairs, each sharing one CM5 DIN line. The L/R pin on each mic
-determines which LRCK slot it occupies.
-
-| Mic label | L/R pin | Data line | CM5 GPIO | USB ch (bridge) | Azimuth |
-|-----------|---------|-----------|----------|-----------------|---------|
-| FRONT\_L  | GND     | PCM_DIN0  | GPIO 20  | 0               | 330°    |
-| FRONT\_R  | VDD     | PCM_DIN0  | GPIO 20  | 1               | 30°     |
-| SIDE\_L   | GND     | PCM_DIN1  | GPIO 21  | 2               | 270°    |
-| SIDE\_R   | VDD     | PCM_DIN1  | GPIO 21  | 3               | 90°     |
-| REAR\_L   | GND     | PCM_DIN2  | GPIO 25  | 4               | 210°    |
-| REAR\_R   | VDD     | PCM_DIN2  | GPIO 25  | 5               | 150°    |
-
-All mics share BCK (GPIO 18), LRCK (GPIO 19), VDD (3.3 V), and GND.
+The optional GPS module connects to the RAK4631 via WisBlock Slot A UART (`Serial1` in firmware, 9600 baud NMEA). No additional wiring is needed — it plugs directly into the base board.
 
 ---
 
@@ -274,105 +230,64 @@ All mics share BCK (GPIO 18), LRCK (GPIO 19), VDD (3.3 V), and GND.
 
 #### Raspberry Pi CM5
 
-The CM5 is the recommended SBC but alternatives exist depending on form factor
-and budget constraints.
-
 | Alternative | Pros | Cons |
 |-------------|------|------|
-| **Raspberry Pi CM5** *(default)* | Native CSI, official libcamera support, CM5 I2S multi-DIN, 8 GB RAM option, broad community support | Compute Module form factor requires a carrier board; higher cost than Pi 4 |
-| **Raspberry Pi 5** | Same CPU (BCM2712), identical software stack, standard 40-pin header, cheaper, no carrier board needed | Two CSI ports but uses narrower 22-pin FFC vs CM5; no DDR5 option; slightly more power draw in a helmet |
-| **Raspberry Pi 4** | Well-tested, widely available, cheaper | BCM2711 has weaker GPU; I2S multi-DIN support is less reliable; lower RAM ceiling |
-| **NVIDIA Jetson Orin NX** | Far superior GPU/NPU for AI inference (object detection, etc.) | Much higher cost, power, and heat; no native libcamera; I2S/GPIO ecosystem less mature; heavier |
-| **Orange Pi 5 Plus** | RK3588 chip with strong GPU and 32 GB RAM option; lower cost than Jetson | libcamera not supported — camera pipeline requires a complete rewrite; smaller community; GPIO library fragmentation |
-| **Khadas VIM4** | Amlogic A311D2, decent GPU, compact | Very limited CSI camera support; audio I2S driver quality inconsistent; niche ecosystem |
+| **Raspberry Pi CM5** *(default)* | Native CSI, official libcamera support, 8 GB RAM option, broad community support | Compute Module form factor requires a carrier board; higher cost than Pi 4 |
+| **Raspberry Pi 5** | Same CPU (BCM2712), identical software stack, standard 40-pin header, cheaper | Two CSI ports but uses narrower 22-pin FFC vs CM5; no DDR5 option |
+| **Raspberry Pi 4** | Well-tested, widely available, cheaper | Weaker GPU; lower RAM ceiling |
+| **NVIDIA Jetson Orin NX** | Far superior GPU/NPU for AI inference | Much higher cost, power, and heat; no native libcamera |
+| **Orange Pi 5 Plus** | RK3588 chip, lower cost | libcamera not supported — camera pipeline requires a complete rewrite |
 
-> **Recommendation:** Stick with CM5 (or Pi 5 if a carrier board is impractical).
-> Any alternative requires substantial camera and audio driver rework.
-
----
-
-#### ICS-43434 MEMS Microphones
-
-The ICS-43434 is a high-quality, low-noise digital I2S microphone well-suited
-for beamforming arrays.
-
-| Alternative | Pros | Cons |
-|-------------|------|------|
-| **ICS-43434** *(default)* | Low noise floor (−65 dBFS A-weighted), flat 20 Hz–20 kHz response, wide dynamic range (87 dB SNR), simple I2S interface | Requires PCB or breakout; QFN package difficult to hand-solder |
-| **INMP441** | Very common, cheap breakout boards readily available, good SNR (61 dB), I2S | Narrower frequency response (60 Hz–15 kHz); lower SNR than ICS-43434; more crosstalk on shared bus |
-| **SPH0645LM4H** | Adafruit breakout available, SparkFun ecosystem, good SNR (65 dB) | Philips I2S variant (data valid on opposite clock edge) — requires driver adjustment or adapter; slightly higher noise |
-| **SPH0655LM4H** | Same as SPH0645 but with higher AOP (103 dBSPL) | Same driver edge issue as SPH0645; pricier breakout boards |
-| **MSM261S4030H0** | Very cheap on AliExpress, I2S | Poor documentation, inconsistent QC, noisy at low signal levels |
-| **Analog MEMS (e.g., ADMP504)** | Extremely low noise, excellent sensitivity | Requires external ADC (e.g., PCM1808) — adds I2C/SPI complexity and another power rail |
-
-> **Recommendation:** ICS-43434 is the best choice if you can solder SMD or
-> use a custom breakout. For prototyping, INMP441 breakouts work and the only
-> software change is `capture_device` in `config.json`.
+> **Recommendation:** Stick with CM5 (or Pi 5 if a carrier board is impractical). Any alternative requires substantial camera driver rework.
 
 ---
 
 #### SmartKnob / ESP32-S3
 
-The SmartKnob uses an ESP32-S3 with a BLDC motor driver for haptic feedback.
-
 | Alternative | Pros | Cons |
 |-------------|------|------|
-| **SmartKnob (ESP32-S3)** *(default)* | Open hardware, haptic detents feel premium, USB-C, native BLE option | Requires motor + driver PCB; must source or build the custom PCB; calibration required on first boot |
-| **ESP32-S3 (bare, rotary encoder)** | Drop-in firmware replacement (same UART protocol), simpler build, cheaper | No haptic feedback — purely mechanical detents; less premium user experience |
-| **ESP32-C3 (rotary encoder)** | Cheapest option, smallest form factor | No I2S (not relevant here), fewer GPIOs; no haptics; same lack-of-feedback drawback |
-| **RP2040 (rotary encoder)** | Extremely cheap, great USB support, MicroPython or C SDK | Would require firmware rewrite (SmartKnob firmware is Arduino/ESP-IDF); no haptic option |
-| **Bluetooth rotary encoder (HID)** | Cable-free | Adds BLE latency (~10–50 ms); battery management in helmet; pairing complexity |
-| **GPIO rotary encoder (direct to CM5)** | Zero additional hardware | Requires software debounce; loses haptic feedback entirely; uses GPIO pins already constrained |
-
-> **Recommendation:** Use the original SmartKnob for the best experience. If
-> the haptic PCB is unavailable, a bare ESP32-S3 with a rotary encoder and the
-> same firmware (minus motor init) is the simplest fallback — no CM5 code
-> changes needed.
+| **SmartKnob (ESP32-S3)** *(default)* | Open hardware, haptic detents feel premium, USB-C | Requires motor + driver PCB; must source or build the custom PCB |
+| **ESP32-S3 (bare, rotary encoder)** | Drop-in firmware replacement (same UART protocol) | No haptic feedback |
+| **GPIO rotary encoder (direct to CM5)** | Zero additional hardware | No haptic feedback; uses GPIO pins |
 
 ---
 
 #### RAK4631 LoRa Radio
 
-The RAK4631 (nRF52840 + SX1262) is a WisBlock module with optional GPS and a
-1W RF booster.
-
 | Alternative | Pros | Cons |
 |-------------|------|------|
-| **RAK4631 + RAK3401 1W booster** *(default)* | ~1 W output, long range (1–5 km line-of-sight), integrated GPS slot, WisBlock modular ecosystem, well-supported by RadioLib | Overkill for short-range; 1W may require amateur radio licence in some regions; bulkier WisBlock stack |
-| **RAK4631 (no booster)** | Same footprint, 22 dBm (~160 mW), still long-range, no licence concern in most regions | Reduced range vs booster |
-| **Heltec WiFi LoRa 32 (ESP32 + SX1276/SX1278)** | Very cheap, self-contained, OLED display, USB-C | Older SX1276 (worse sensitivity than SX1262); firmware rewrite from RadioLib/nRF to ESP-IDF; no integrated GPS slot |
-| **TTGO T-Beam (ESP32 + SX1276 + GPS)** | Integrated GPS + LoRa + battery management, cheap, popular in Meshtastic | SX1276 vs SX1262 sensitivity gap; firmware rewrite required; uses different sync word / modem settings |
-| **Adafruit Feather M0 LoRa (ATSAMD21 + RFM95W)** | Popular, well-documented, Arduino-compatible | RFM95W is SX1276-based; lower MCU power; no GPS slot; 100 mW max; USB-serial adapter needed |
-| **Meshtastic node (stock firmware)** | Off-the-shelf, large community, mesh routing built-in | Stock Meshtastic protocol is incompatible with the ProtoHUD binary frame protocol — would require a full USB protocol shim or firmware fork |
+| **RAK4631 + RAK3401 1W booster** *(default)* | ~1 W output, long range, integrated GPS slot | May require amateur radio licence at 1W |
+| **RAK4631 (no booster)** | Same footprint, 22 dBm, no licence concern in most regions | Reduced range vs booster |
+| **Heltec WiFi LoRa 32 v3 (ESP32 + SX1262)** | Cheap, self-contained | Firmware rewrite required; no integrated GPS |
+| **Meshtastic node (stock firmware)** | Off-the-shelf, large community | Stock protocol incompatible with ProtoHUD binary frame protocol |
 
-> **Recommendation:** RAK4631 without the booster is the most practical choice
-> for short-to-medium range and avoids licensing headaches. If budget is tight,
-> the Heltec LoRa 32 v3 (SX1262 variant) is the closest drop-in and needs
-> only a firmware port.
+> **Recommendation:** RAK4631 without the booster is the most practical choice. If budget is tight, the Heltec LoRa 32 v3 (SX1262 variant) needs only a firmware port.
 
 ---
 
 ## Quick Start
 
-Run the one-shot installer on the CM5 (**requires sudo**, Bullseye, aarch64):
+Run the one-shot installer on the CM5 (Bullseye, aarch64). The script uses per-command `sudo` internally — **do not run it as root**:
 
 ```bash
-git clone <repo-url> ~/protohud
-cd ~/protohud
+git clone https://github.com/brooksthemaker/ProtoHUD ~/ProtoHUD
+cd ~/ProtoHUD
 chmod +x scripts/install.sh
-sudo scripts/install.sh
+./scripts/install.sh
 ```
 
-The installer (11 steps):
-1. Installs all apt dependencies (GLFW, GLES, libcamera, OpenCV, libgpiod, ALSA, scrcpy, v4l2loopback-dkms, adb, …)
-2. Compiles and installs the `cm5-6mic` I2S device-tree overlay
-3. Patches `/boot/config.txt` (gpu_mem=256, camera_auto_detect, overlay)
-4. Writes udev rules for stable `/dev/teensy`, `/dev/smartknob`, `/dev/lora` symlinks
-5. Configures v4l2loopback (`/dev/video4`) for Android mirror via `/etc/modprobe.d/`
-6. Adds your user to `gpio dialout video render audio input` groups
-7. Builds ProtoHUD with CMake + Ninja
-8. Installs the VITURE SDK `.so` files
-9. Creates a systemd service (`sudo systemctl enable --now protohud`)
+The installer runs 11 steps:
+1. **Preflight** — checks OS, arch, and sudo availability; caches credentials once
+2. **Packages** — apt dependencies (GLFW, GLES, libcamera, OpenCV, libgpiod, ALSA, v4l2loopback-dkms, adb, scrcpy)
+3. **Overlay** — compiles and installs the `cm5-6mic` I2S device-tree overlay (for boot config; not used for audio capture)
+4. **Boot config** — sets `gpu_mem=256`, `camera_auto_detect=1` in `/boot/config.txt`
+5. **udev** — stable `/dev/teensy`, `/dev/smartknob`, `/dev/lora` symlinks
+6. **Android** — v4l2loopback module config for Android mirror (`/dev/video4`)
+7. **Groups** — adds current user to `gpio dialout video render audio input`
+8. **Build** — CMake + Ninja (ImGui fetched automatically on first run)
+9. **Libraries** — installs VITURE SDK `.so` files to `/usr/local/lib`
+10. **Symlink** — creates `./protohud` at project root pointing to `build/protohud`
+11. **Summary** — lists what changed and what still needs a reboot
 
 After the installer finishes, **reboot once** to apply group membership and boot-config changes:
 
@@ -380,13 +295,45 @@ After the installer finishes, **reboot once** to apply group membership and boot
 sudo reboot
 ```
 
-Then run:
+Then run the health check to verify everything is ready:
 
 ```bash
-cd ~/protohud/build
-./protohud                          # windowed desktop
-./protohud ../config/config.json    # explicit config path
+./scripts/check.sh
 ```
+
+And launch ProtoHUD:
+
+```bash
+./protohud                        # uses config/config.json by default
+./scripts/run.sh                  # same, with startup diagnostics printed
+./scripts/run.sh /path/to/alt.json  # explicit config path
+```
+
+---
+
+## Post-Install Health Check
+
+`scripts/check.sh` verifies the full system after a reboot. Run it any time to diagnose problems:
+
+```bash
+chmod +x scripts/check.sh && ./scripts/check.sh
+```
+
+It checks (and prints PASS / WARN / FAIL for each):
+
+| Check | What it looks for |
+|-------|-------------------|
+| User groups | `gpio dialout video render audio input` |
+| Binary | `build/protohud` exists; root symlink `./protohud` present |
+| VITURE SDK | `libglasses.so` + `libcarina_vio.so` in `/usr/local/lib` |
+| RP2350 audio | `arecord -l` finds `HelmetAudio` / VID:PID `1209:b350` |
+| Audio outputs | VITURE XR glasses, headphones jack, HDMI via `aplay -l` |
+| CSI cameras | `libcamera-hello --list-cameras` finds ≥ 2 cameras |
+| v4l2loopback | Module loaded; `/dev/video4` ready |
+| Boot config | `gpu_mem=256` and `camera_auto_detect=1` set |
+| scrcpy | Binary present (optional — Android mirror) |
+
+All required checks must pass before launching. Fix any `[FAIL]` items, then re-run.
 
 ---
 
@@ -397,11 +344,10 @@ cd ~/protohud/build
 ```bash
 sudo apt install \
     cmake ninja-build pkg-config git \
-    libglfw3-dev libgles2-mesa-dev libegl1-mesa-dev libgl1-mesa-dev \
+    libglfw3-dev libgles2-mesa-dev libegl1-mesa-dev \
     libcamera-dev libopencv-dev \
-    nlohmann-json3-dev libfftw3-dev libgpiod-dev libasound2-dev \
-    device-tree-compiler \
-    scrcpy v4l2loopback-dkms adb
+    nlohmann-json3-dev libgpiod-dev libasound2-dev \
+    device-tree-compiler
 ```
 
 Dear ImGui is fetched automatically by CMake (`FetchContent`); no manual install needed.
@@ -421,7 +367,7 @@ sudo modprobe v4l2loopback video_nr=4 card_label="AndroidMirror" exclusive_caps=
 ### Build
 
 ```bash
-cd ~/protohud
+cd ~/ProtoHUD
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -GNinja
 ninja -C build -j$(nproc)
 ```
@@ -429,8 +375,9 @@ ninja -C build -j$(nproc)
 ### Run
 
 ```bash
-cd build
-./protohud
+./protohud          # from project root via symlink
+# or
+./build/protohud    # direct binary path
 ```
 
 Keyboard shortcuts while running:
@@ -447,7 +394,7 @@ Keyboard shortcuts while running:
 
 ## Camera Resolution
 
-Resolution can be changed at runtime without restarting the application — libcamera stops, reconfigures the sensor mode, reallocates DMA buffers, and resumes capture. The GLSL shader and GL textures are preserved.
+Resolution can be changed at runtime without restarting the application — libcamera stops, reconfigures the sensor mode, reallocates DMA buffers, and resumes capture.
 
 ### Menu Navigation
 
@@ -464,11 +411,7 @@ Menu → Camera → Resolution → <preset>
 | 1920×1080 @30fps | 1920×1080 | 30 | Full HD, lower frame rate |
 | 2560×1440 @15fps | 2560×1440 | 15 | Maximum detail, slideshow fps |
 
-> libcamera snaps to the nearest sensor mode the physical camera supports. If an OWLsight doesn't support the requested size, libcamera returns the closest match and logs a warning.
-
 ### Config Default
-
-The startup resolution comes from the camera config block:
 
 ```json
 "cameras": {
@@ -478,16 +421,6 @@ The startup resolution comes from the camera config block:
 ```
 
 Changes made via the menu are applied immediately but **not persisted** — edit `config.json` to make them permanent.
-
-### API (C++)
-
-```cpp
-// Reconfigure both cameras simultaneously
-cameras.set_resolution(1920, 1080, 30);
-
-// Reconfigure one camera independently
-cameras.owl_left()->reconfigure(640, 400, 120);
-```
 
 ---
 
@@ -513,15 +446,6 @@ Menu → Camera → Autofocus     → Left / Right / Both
 
 Hold GPIO 17 (left) or GPIO 27 (right) for 1.5 s to trigger AF on that camera. In Slave mode the partner camera follows automatically.
 
-### API (C++)
-
-```cpp
-cameras.owl_left()->start_autofocus();
-cameras.owl_left()->set_focus_position(500);  // 0–1000
-bool locked = cameras.owl_left()->is_af_locked();
-int  pos    = cameras.owl_left()->get_focus_position();
-```
-
 ---
 
 ## Night Vision (Exposure & Shutter)
@@ -530,8 +454,6 @@ int  pos    = cameras.owl_left()->get_focus_position();
 
 **Menu:** `Camera → Exposure (EV)` — range −3.0 to +3.0 stops.
 
-Each stop doubles or halves the sensor gain applied by the ISP. EV and shutter are applied every frame to both cameras.
-
 ### Shutter Speed
 
 **Menu:** `Camera → Shutter Speed`
@@ -539,13 +461,10 @@ Each stop doubles or halves the sensor gain applied by the ISP. EV and shutter a
 | Label | Exposure | Use Case |
 |-------|----------|----------|
 | 1/4000 | 250 µs | Bright daylight |
-| 1/2000 | 500 µs | Daylight |
 | 1/1000 | 1 ms | Bright indoor |
-| 1/500 | 2 ms | Standard indoor |
 | 1/250 | 4 ms | Dim indoor |
-| 1/125 | 8 ms | Low light |
-| 1/60 | 16.7 ms | Night vision |
-| 1/30 | 33.3 ms | **Default** |
+| 1/60 | 16.7 ms | Low light |
+| **1/30** | **33.3 ms** | **Default** |
 | 1/25 | 40 ms | Very low light |
 
 ### Config Defaults
@@ -585,21 +504,16 @@ Each stop doubles or halves the sensor gain applied by the ISP. EV and shutter a
 ### Diagnosis
 
 ```bash
-# Check GPIO lines are visible
 gpioinfo gpiochip0 | grep -E "17|27|22"
-
-# Read button state (1 = released, 0 = pressed)
-gpioget gpiochip0 17
-
-# Check group membership
-groups $USER  # must include: gpio
+gpioget gpiochip0 17   # 1 = released, 0 = pressed
+groups $USER           # must include: gpio
 ```
 
 ---
 
 ## USB Camera Picture-in-Picture
 
-USB cameras are captured by OpenCV in a background thread and uploaded to GL textures. When PiP is active, `HudRenderer::draw_pip()` renders a 16:9 overlay using ImGui's `DrawList::AddImage`. Position and size are controlled at runtime via the menu or set in config.
+USB cameras are captured by OpenCV in a background thread and uploaded to GL textures. When PiP is active, `HudRenderer::draw_pip()` renders a 16:9 overlay using ImGui's `DrawList::AddImage`.
 
 ### Activation
 
@@ -620,13 +534,6 @@ USB cameras are captured by OpenCV in a background thread and uploaded to GL tex
 
 `anchor` values: `top_left` · `top_center` · `top_right` · `bottom_left` · `bottom_center` · `bottom_right`
 
-### Diagnosis
-
-```bash
-v4l2-ctl --list-devices        # find USB camera /dev paths
-v4l2-ctl -d /dev/video2 --info # verify format support
-```
-
 ---
 
 ## Android Mirror
@@ -640,11 +547,8 @@ Streams an Android device screen into a portrait overlay in the HUD using **scrc
 3. First connection: accept the ADB authorisation dialog on the phone.
 
 ```bash
-# Verify ADB sees the device
 adb devices
-# Expected output:
-# List of devices attached
-# XXXXXXXX    device
+# Expected: XXXXXXXX    device
 ```
 
 ### Activation
@@ -670,68 +574,28 @@ Or set `"android"."enabled": true` in `config.json` to auto-start on launch.
 }
 ```
 
-| Key | Description |
-|-----|-------------|
-| `enabled` | Auto-start scrcpy on launch |
-| `v4l2_sink` | V4L2 loopback device created by v4l2loopback (`video_nr=4`) |
-| `adb_serial` | Target a specific device (`adb devices` to find serial). Empty = first connected. |
-| `max_size` | Longest dimension scrcpy will encode (px). Lower = less CPU. |
-| `fps` | Maximum frame rate passed to scrcpy (`--max-fps`). |
-| `overlay_size` | Starting height of the overlay as a fraction of screen height. |
-| `anchor` | Starting position (see [Overlay Position & Size](#overlay-position--size)). |
-
-### HUD indicator
-
-The `AN` dot in the top-bar health strip is green when scrcpy is connected and frames are flowing.
-
-### Menu
-
-```
-Android Mirror
-├── Start Mirror    — spawns scrcpy subprocess
-├── Stop Mirror     — kills scrcpy and stops capture thread
-├── Show Overlay    — makes the overlay visible
-├── Hide Overlay    — hides the overlay (capture continues in background)
-├── Position        — Top Left / Top Center / Top Right / Bottom Left / Bottom Center / Bottom Right
-└── Size            — 15% / 20% / 25% / 30% / 40% / 50% / 60%
-```
-
 ---
 
 ## Overlay Position & Size
 
-Both the USB camera PiP and the Android mirror overlay use the same anchor system. Changes take effect immediately on the next rendered frame; they are not persisted to `config.json` automatically (edit the file to make them permanent).
-
-### Anchor positions
+Both the USB camera PiP and the Android mirror overlay use the same anchor system.
 
 ```
 ┌──────────────────────────────────────────────┐  ← top bar
 │  top_left      top_center      top_right      │
 │                                               │
-│                                               │
 │  bottom_left  bottom_center  bottom_right     │
 └──────────────────────────────────────────────┘  ← compass tape
 ```
 
-Bottom positions automatically clear the compass tape (they use `compass_height_px` as a bottom margin).
-
-### Size
-
 Size is a fraction of the current eye height (1080 px at default resolution):
 
-| Setting | PiP height | PiP width (16:9) | Android height | Android width (9:16) |
-|---------|-----------|------------------|----------------|----------------------|
-| 15% | 162 px | 288 px | 162 px | 91 px |
-| 25% | 270 px | 480 px | 270 px | 152 px |
-| 40% | 432 px | 768 px | 432 px | 243 px |
-| 60% | 648 px | 1152 px | 648 px | 365 px |
-
-### Menu paths
-
-```
-Menu → USB Cameras → Position / Size
-Menu → Android Mirror → Position / Size
-```
+| Setting | PiP height | PiP width (16:9) |
+|---------|-----------|------------------|
+| 15% | 162 px | 288 px |
+| 25% | 270 px | 480 px |
+| 40% | 432 px | 768 px |
+| 60% | 648 px | 1152 px |
 
 ---
 
@@ -761,9 +625,7 @@ Root
 ├── Audio
 │   ├── Enable / Disable
 │   ├── Volume         (25% · 50% · 75% · 100% · 125% · 150%)
-│   ├── Mode           (Passthrough · Focus Auto · Focus Manual)
-│   ├── Focus Dir      (Front · Right · Back · Left · diagonals)
-│   └── Wind Gate      (Off · Light · Medium · Strong · Max)
+│   └── Output         (VITURE · Headphones · HDMI)
 ├── Headset
 │   ├── Dimming        (Level 0–9)
 │   ├── HUD Bright     (Level 1–9)
@@ -803,30 +665,63 @@ Root
 
 ---
 
-## Spatial Audio
+## Audio Routing
 
-Six-channel I2S microphone array connected directly to CM5 GPIO via the `cm5-6mic` DT overlay.
+All microphone capture and DSP (beamforming, noise suppression, direction-of-arrival) runs on the **RP2350 helmet audio processor**. The CM5 plays no role in DSP — it simply receives the pre-processed stereo stream over USB Audio and routes it to the selected output.
 
-### Pipeline Stages
+### Signal Path
 
-| Stage | Description |
-|-------|-------------|
-| Wind gate | Inter-mic coherence detector; suppresses turbulence bursts |
-| Noise suppressor | Minimum-statistics Wiener filter per bin per channel |
-| GCC-PHAT DOA | Direction-of-arrival estimator (azimuth in degrees) |
-| Beamformer | Delay-and-sum spatial filter towards estimated or manual DOA |
-| Spatial processor | Binaural ILD/ITD rendering tied to IMU head yaw |
+```
+6× ICS-43434 mics
+    │ I2S (internal to RP2350 board)
+    ▼
+RP2350 — beamforming · noise suppression · DOA
+    │ USB Audio UAC2 (stereo 48 kHz 16-bit)
+    ▼
+CM5 ALSA capture  →  gain  →  ALSA playback
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+             VITURE XR        3.5 mm jack        HDMI
+          hw:VITUREXRGlasses  hw:Headphones    hw:vc4hdmi0
+```
+
+### Output Selection
+
+Switch the output at runtime via the HUD menu — no restart required:
+
+```
+Menu → Audio → Output → VITURE / Headphones / HDMI
+```
+
+The switch takes effect at the start of the next ALSA period (~5 ms) with no dropout or gap in audio.
+
+The `AU` strip in the HUD top bar shows the current output and xrun count:
+
+```
+AU → VITURE  X:0
+```
 
 ### Config
 
 ```json
 "audio": {
-  "capture_device":  "hw:CARD=sndrpii2s0,DEV=0",
-  "playback_device": "hw:CARD=VITUREXRGlasses,DEV=0",
-  "sample_rate": 48000,
-  "period_size": 256
+  "enabled":           true,
+  "capture_device":    "hw:CARD=HelmetAudio6Mic,DEV=0",
+  "active_output":     "viture",
+  "output_viture":     "hw:CARD=VITUREXRGlasses,DEV=0",
+  "output_headphones": "hw:CARD=Headphones,DEV=0",
+  "output_hdmi":       "hw:CARD=vc4hdmi0,DEV=0",
+  "sample_rate":       48000,
+  "period_size":       256,
+  "n_periods":         4,
+  "master_gain":       1.0
 }
 ```
+
+`active_output` values: `viture` · `headphones` · `hdmi`
+
+> **Note:** Run `arecord -l` to verify the RP2350 card name after connecting via USB. If the card appears under a different name, update `capture_device` accordingly.
 
 ---
 
@@ -845,11 +740,13 @@ Full `config/config.json` layout:
   "cameras": {
     "owlsight_left": {
       "libcamera_id": 0,
-      "width":  1280, "height": 800, "fps": 60
+      "width":  1280, "height": 800, "fps": 60,
+      "flip_h": false, "flip_v": false
     },
     "owlsight_right": {
       "libcamera_id": 1,
-      "width":  1280, "height": 800, "fps": 60
+      "width":  1280, "height": 800, "fps": 60,
+      "flip_h": false, "flip_v": false
     },
     "usb_cam_1": { "device": "/dev/video2", "width": 1280, "height": 720, "fps": 30 },
     "usb_cam_2": { "device": "/dev/video3", "width": 1280, "height": 720, "fps": 30 }
@@ -864,8 +761,8 @@ Full `config/config.json` layout:
 
   "serial": {
     "teensy":    { "port": "/dev/ttyACM0", "baud": 115200 },
-    "lora":      { "port": "/dev/ttyACM2", "baud": 115200 },
-    "smartknob": { "port": "/dev/ttyACM1", "baud": 115200, "sleep_timeout_s": 30 }
+    "lora":      { "port": "/dev/ttyACM2", "baud": 115200, "ping_on_start": true, "node_info_refresh_s": 60 },
+    "smartknob": { "port": "/dev/ttyACM1", "baud": 115200, "sleep_timeout_s": 30, "wake_degrees": 5.0 }
   },
 
   "gpio": {
@@ -879,6 +776,7 @@ Full `config/config.json` layout:
 
   "camera": {
     "autofocus_on_startup": true,
+    "autofocus_sync":       true,
     "focus_mode":           "auto",   // "manual" | "auto" | "slave"
     "focus_position":       500
   },
@@ -890,43 +788,52 @@ Full `config/config.json` layout:
 
   "pip": {
     "enabled": true,
-    "size":    0.25,      // fraction of screen height (0.15–0.60)
+    "size":    0.25,
     "anchor":  "top_center"
-    // anchor: top_left | top_center | top_right | bottom_left | bottom_center | bottom_right
   },
 
   "android": {
-    "enabled":      false,        // true = auto-start scrcpy on launch
-    "v4l2_sink":    "/dev/video4",// V4L2 loopback device (video_nr=4)
-    "adb_serial":   "",           // empty = first connected USB device
-    "max_size":     1080,         // scrcpy --max-size
-    "fps":          30,           // scrcpy --max-fps
-    "overlay_size": 0.40,         // starting size (fraction of screen height)
-    "anchor":       "bottom_left" // starting position
+    "enabled":      false,
+    "v4l2_sink":    "/dev/video4",
+    "adb_serial":   "",
+    "max_size":     1080,
+    "fps":          30,
+    "overlay_size": 0.40,
+    "anchor":       "bottom_left"
   },
 
   "hud": {
-    "compass_height_px": 60,
-    "panel_width_px":    320,
-    "lora_message_history": 50
+    "compass_height_px":    60,
+    "panel_width_px":       320,
+    "lora_message_history": 50,
+    "show_secondary_cams":  true,
+    "secondary_cam_size":   0.22
   },
 
   "audio": {
-    "enabled":         true,
-    "capture_device":  "hw:CARD=sndrpii2s0,DEV=0",
-    "playback_device": "hw:CARD=VITUREXRGlasses,DEV=0",
-    "sample_rate":     48000,
-    "period_size":     256,
-    "master_gain":     1.0,
-    "pipeline": {
-      "wind":  { "depth": 0.85, "floor_gain": 0.08 },
-      "noise": { "enabled": true, "noise_bias": 1.5, "floor_gain": 0.05 }
-    }
+    "enabled":           true,
+    "capture_device":    "hw:CARD=HelmetAudio6Mic,DEV=0",
+    "active_output":     "viture",     // viture | headphones | hdmi
+    "output_viture":     "hw:CARD=VITUREXRGlasses,DEV=0",
+    "output_headphones": "hw:CARD=Headphones,DEV=0",
+    "output_hdmi":       "hw:CARD=vc4hdmi0,DEV=0",
+    "sample_rate":       48000,
+    "period_size":       256,
+    "n_periods":         4,
+    "master_gain":       1.0
+  },
+
+  "colors": {
+    "hud_primary":    [0, 220, 180, 220],
+    "hud_accent":     [0, 180, 255, 255],
+    "hud_warn":       [255, 180, 0,  255],
+    "hud_danger":     [255, 60,  60, 255],
+    "hud_background": [10,  15,  20, 180]
   }
 }
 ```
 
-Config changes take effect on restart. Night vision EV/shutter and focus mode are applied live each frame — no restart needed.
+Config changes take effect on restart. Night vision EV/shutter and focus mode are applied live each frame — no restart needed. Audio output can be switched live from the menu.
 
 ---
 
@@ -935,22 +842,11 @@ Config changes take effect on restart. Night vision EV/shutter and focus mode ar
 ### Camera shows black / no image
 
 ```bash
-# List libcamera cameras
 cam --list
-
-# Check EGL extensions
 eglinfo | grep -i "dma_buf\|image_base"
 ```
 
-Ensure `camera_auto_detect=1` is in `/boot/config.txt` and the overlay was applied (`dtoverlay=cm5-6mic` if using the mic array).
-
-### Resolution change has no effect
-
-libcamera logs the actual negotiated mode:
-```
-[dma] reconfigured camera 0 → 1920×1080 @30fps
-```
-If the sensor doesn't support the requested size, libcamera returns the nearest match. Check `cam --camera=0 --info` for supported modes.
+Ensure `camera_auto_detect=1` is in `/boot/config.txt`. Reboot after any boot config change.
 
 ### GPIO buttons not responding
 
@@ -970,41 +866,63 @@ Not all CSI camera modules include a VCM motor. OWLsight supports it; generic IM
 
 ### Audio not starting
 
+**Check RP2350 is connected and detected:**
+
 ```bash
-aplay -l   # check VITUREXRGlasses device
-arecord -l # check sndrpii2s0 device (needs reboot after overlay)
+arecord -l   # must list HelmetAudio or similar (VID:PID 1209:b350)
+```
+
+If the card is not listed, the RP2350 is not connected or not enumerated. Connect via USB and re-check.
+
+**Check output devices:**
+
+```bash
+aplay -l     # look for VITUREXRGlasses, Headphones, vc4hdmi0
+```
+
+**Check the AU strip** in the HUD top bar — `AU → VITURE  X:0` is normal. A rising xrun count (X:N) means the system is too busy; try reducing camera resolution.
+
+**Check group membership:**
+
+```bash
+groups $USER   # must include: audio
 ```
 
 ### Menu not responding to SmartKnob
 
 ```bash
 ls -l /dev/ttyACM1
-# should show crw-rw---- ... dialout
 groups $USER  # must include: dialout
 ```
 
-Reflash SmartKnob firmware if the `[knob] Motor calibration complete` message never appears.
+Reflash SmartKnob firmware if `[knob] Motor calibration complete` never appears in the log.
 
 ### Build fails: imgui not found
 
 ```bash
 # Dear ImGui is fetched via CMake FetchContent on first configure.
-# Ensure internet access during cmake, or pre-download:
+# Ensure internet access during cmake:
 cmake -S . -B build    # fetches imgui v1.91.0 automatically
+```
+
+### Build fails: glfw3 not found
+
+The installer handles GLFW3 automatically (pkg-config path fix + source build fallback). If building manually:
+
+```bash
+sudo apt-get install libglfw3-dev
+# If pkg-config still can't find it, add the multiarch path:
+export PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
 ```
 
 ### Android mirror: "V4L2 sink /dev/video4 not ready"
 
-The v4l2loopback module is not loaded or not configured with `exclusive_caps=1`.
-
 ```bash
-lsmod | grep v4l2loopback          # check if module is loaded
-ls /dev/video*                      # check device exists
+lsmod | grep v4l2loopback
 sudo modprobe v4l2loopback video_nr=4 card_label="AndroidMirror" exclusive_caps=1
-cat /sys/devices/virtual/video4linux/video4/name  # should print "AndroidMirror"
 ```
 
-If the module fails to load after a kernel update, rebuild the DKMS module:
+If the module fails to load after a kernel update:
 
 ```bash
 sudo dkms autoinstall
@@ -1014,37 +932,24 @@ sudo dkms autoinstall
 
 ```bash
 adb devices          # phone must show "device" not "unauthorized"
-adb kill-server      # reset ADB if the server is stale
-adb start-server
+adb kill-server && adb start-server
 ```
 
-Ensure USB debugging is enabled on the phone (`Settings → Developer options → USB debugging`) and the authorisation dialog was accepted.
+Ensure USB debugging is enabled and the authorisation dialog was accepted on the phone.
 
-### Android mirror: overlay shows "No signal"
+### Can't find the binary after install
 
-scrcpy is running but frames are not arriving. Common causes:
+The installer creates a symlink at the project root:
 
 ```bash
-# Check scrcpy is actually running
-pgrep -a scrcpy
-
-# Check the V4L2 sink is receiving data
-v4l2-ctl -d /dev/video4 --stream-mmap --stream-count=1 2>&1 | head -5
-
-# Try running scrcpy manually to see error output
-scrcpy --no-audio --no-control --video-codec=h264 --max-size=1080 \
-       --v4l2-sink=/dev/video4 --max-fps=30
+ls -la ~/ProtoHUD/protohud    # should point to build/protohud
+./protohud                    # run from project root
 ```
 
-Some Android versions require `--video-encoder` or `--video-source=display` depending on the scrcpy version. Check `scrcpy --version`; version ≥ 2.0 is recommended.
+If the symlink is missing, recreate it:
 
-### Android mirror: overlay position/size not saved after restart
-
-Menu changes are runtime-only. Edit `config/config.json` to persist them:
-
-```json
-"pip":     { "anchor": "bottom_right", "size": 0.30 },
-"android": { "anchor": "top_left",     "overlay_size": 0.35 }
+```bash
+ln -sf build/protohud ~/ProtoHUD/protohud
 ```
 
 ---
@@ -1057,11 +962,13 @@ Menu changes are runtime-only. Edit `config/config.json` to persist them:
 │   ├── main.cpp                    — init, render loop, menu definition
 │   ├── app_state.h                 — shared state structs (mutex-protected)
 │   ├── gl_utils.h                  — GLES2 shader/VBO/FBO helpers
+│   ├── protocols.h                 — serial frame protocol definitions
 │   ├── android/
 │   │   └── android_mirror.h/.cpp  — scrcpy subprocess + V4L2 capture + GL upload
 │   ├── camera/
 │   │   ├── dma_camera.h/.cpp       — zero-copy NV12 libcamera path
 │   │   ├── camera_manager.h/.cpp   — owns both OWLsight + USB cameras
+│   │   ├── v4l2_camera.h/.cpp      — V4L2 USB camera capture
 │   │   └── viture_camera.h/.cpp    — Beast built-in passthrough camera
 │   ├── hud/
 │   │   └── hud_renderer.h/.cpp     — Dear ImGui DrawList HUD
@@ -1073,20 +980,22 @@ Menu changes are runtime-only. Edit `config/config.json` to persist them:
 │   ├── input/
 │   │   └── gpio_buttons.h/.cpp     — libgpiod v1 button handler
 │   ├── serial/
+│   │   ├── serial_port.h/.cpp      — raw UART helpers
 │   │   ├── teensy_controller.h/.cpp
 │   │   ├── lora_radio.h/.cpp
 │   │   └── smartknob.h/.cpp
 │   └── audio/
-│       ├── audio_engine.h/.cpp
-│       ├── enhanced_pipeline.h/.cpp
-│       └── …
+│       └── audio_engine.h/.cpp     — ALSA USB capture → gain → playback routing
 ├── assets/shaders/
 │   ├── nv12.vs / nv12.fs           — NV12→RGB camera shader (GLSL ES)
 │   └── timewarp.vs / timewarp.fs   — homography warp shader
 ├── config/config.json
-├── overlays/cm5-6mic.dts           — 6-ch I2S microphone DT overlay
-├── vendor/viture/                  — VITURE XR SDK (pre-built .so)
-└── scripts/install.sh              — one-shot CM5 installer
+├── overlays/cm5-6mic.dts           — 6-ch I2S DT overlay (boot config; audio handled by RP2350)
+├── vendor/viture/                  — VITURE XR SDK (pre-built aarch64 .so)
+└── scripts/
+    ├── install.sh                  — one-shot CM5 installer (11 steps)
+    ├── check.sh                    — post-reboot health check
+    └── run.sh                      — launch wrapper with startup diagnostics
 ```
 
 ---
