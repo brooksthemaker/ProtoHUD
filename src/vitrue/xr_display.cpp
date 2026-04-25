@@ -70,10 +70,24 @@ bool XRDisplay::init() {
     bool found = find_and_connect();
     if (!found) std::cerr << "[xr] VITURE glasses not found — desktop fallback\n";
 
-    eye_w_  = 1920;
-    eye_h_  = 1080;
-    disp_w_ = found ? 3840 : 1920;
-    disp_h_ = 1080;
+    // Resolve display dimensions from the chosen monitor's current video mode
+    // so the window always matches the physical output without hardcoding.
+    GLFWmonitor* mon = choose_monitor();
+    if (mon) {
+        const GLFWvidmode* vm = glfwGetVideoMode(mon);
+        disp_w_ = vm->width;
+        disp_h_ = vm->height;
+    } else {
+        // Primary monitor / windowed fallback
+        const GLFWvidmode* vm = glfwGetVideoMode(glfwGetPrimaryMonitor());
+        disp_w_ = vm ? vm->width  : 1920;
+        disp_h_ = vm ? vm->height : 1080;
+    }
+    // Each eye is half the display width (SBS layout)
+    eye_w_ = found ? disp_w_ / 2 : disp_w_;
+    eye_h_ = disp_h_;
+    std::cerr << "[xr] display " << disp_w_ << "x" << disp_h_
+              << "  eye " << eye_w_ << "x" << eye_h_ << "\n";
 
     // GLES 2.0 context via EGL
     glfwWindowHint(GLFW_CLIENT_API,          GLFW_OPENGL_ES_API);
@@ -83,7 +97,7 @@ bool XRDisplay::init() {
     glfwWindowHint(GLFW_DOUBLEBUFFER,          GLFW_TRUE);
     glfwWindowHint(GLFW_RESIZABLE,             GLFW_FALSE);
 
-    GLFWmonitor* mon = choose_monitor();
+    mon = choose_monitor();
     window_ = glfwCreateWindow(disp_w_, disp_h_, "ProtoHUD", mon, nullptr);
     if (!window_) {
         std::cerr << "[xr] glfwCreateWindow failed\n";

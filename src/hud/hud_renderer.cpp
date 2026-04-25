@@ -115,7 +115,7 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     const float th = static_cast<float>(cfg_.top_bar_height);
     const float ch = static_cast<float>(cfg_.compass_height);
     const float pw = static_cast<float>(cfg_.panel_width);
-    const float mid_h = fh - th - ch;
+    const float mid_h = fh - th; // compass is center-third only; panels use full height
 
     draw_top_bar     (dl, s, fw);
     draw_face_panel  (dl, s.face,       { fw - pw, th },  pw, mid_h * 0.5f);
@@ -128,7 +128,9 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
 
     draw_health_dots(dl, s.health, {10.f, th + 8.f});
 
-    draw_compass_tape(dl, s,            { 0.f, fh - ch }, fw, ch);
+    const float cw      = fw / 3.f;
+    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    draw_compass_tape(dl, s, {fw / 2.f - cw / 2.f, fh - ch - c_margin}, cw, ch);
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -488,16 +490,21 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         }
     }
 
-    // Centre cursor triangle
+    // Centre cursor triangle — glow then sharp fill
     dl->AddTriangleFilled(
-        {center_x,       origin.y      },
+        {center_x,        origin.y       },
+        {center_x - 12.f, origin.y + 18.f},
+        {center_x + 12.f, origin.y + 18.f},
+        col_glow2);
+    dl->AddTriangleFilled(
+        {center_x,       origin.y       },
         {center_x - 8.f, origin.y + 14.f},
         {center_x + 8.f, origin.y + 14.f},
-        col_.accent);
+        col_major);
 
     // Heading readout
     char hdg[16]; snprintf(hdg, sizeof(hdg), "%03.0f°", heading);
-    dl->AddText({center_x - 16.f, origin.y + 16.f}, col_.accent, hdg);
+    dl->AddText({center_x - 16.f, origin.y + 16.f}, col_major, hdg);
 
     if (font_mono_) ImGui::PopFont();
 }

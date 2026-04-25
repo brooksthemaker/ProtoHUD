@@ -23,9 +23,11 @@ top of the live camera feed.
 ║ ● Audio      ║                                         ║ LORA NODES        ║
 ║ ● Android    ║                                         ║ Alpha      045° … ║
 ║              ║                                         ║   RSSI:-87 SNR:6  ║
-╠══════════════╩═════════════════════════════════════════╩═══════════════════╣  ← y=1020
-║░░░░░░░░░ N ░░░░░░░ NE ░░░░░░░ E ░░░░░░░ SE ░░░░░░░ S ░░░░░░░░░░░░░░░░░░ ║  ← compass (60 px)
-╚═════════════════════════════════════════════════════════════════════════════╝  ← y=1080
+║              ║                                         ║                   ║
+║              ╠══════════════════════════╣              ║                   ║  ← compass strip
+║              ║  NE    ENE    E   95°   ║              ║                   ║  ← floats above
+║              ╚══════════════════════════╝              ║                   ║     bottom edge
+╚══════════════════════════════════════════════════════════════════════════════╝  ← y=1080
 ```
 
 **●** = subsystem OK (teal dot)  **○** = subsystem fault (red dot, label dimmed)
@@ -135,11 +137,12 @@ Node color by age: teal < 30 s · cyan 30–120 s · dim > 120 s
 
 ---
 
-## Compass Tape (full width, 60 px, bottom)
+## Compass Tape (center third, 60 px, floats above bottom edge)
 
-Shows a 120° window (60° either side of current heading). Each degree
-spans `screen_width / 120` pixels so the visible range scales with
-display width.
+Spans the middle 1/3 of screen width, horizontally centered. Shows a
+120° window (60° either side of current heading). Each degree spans
+`tape_width / 120` pixels. Vertical position is `compass_bottom_margin_px`
+above the screen edge (default 20 px, set in `config.json → hud`).
 
 ```
       NE          ENE              E            ESE          SE
