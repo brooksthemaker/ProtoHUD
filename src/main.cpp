@@ -76,7 +76,9 @@ static std::vector<MenuItem> build_menu(
         TeensyController* teensy, XRDisplay* xr, CameraManager* cameras,
         LoRaRadio* lora, SmartKnob* knob, AudioEngine* audio, AppState& state,
         AndroidMirror* android_mirror, bool* android_overlay,
-        OverlayConfig* pip_cfg, OverlayConfig* android_cfg)
+        OverlayConfig* pip_cfg1, OverlayConfig* pip_cfg2,
+        bool* pip_cam1_overlay, bool* pip_cam2_overlay,
+        OverlayConfig* android_cfg)
 {
     (void)lora; (void)knob;
 
@@ -314,18 +316,24 @@ static std::vector<MenuItem> build_menu(
 
     // ── USB camera PiP layout ─────────────────────────────────────────────────
     std::vector<MenuItem> cam1_menu = {
-        { "Open",  [cameras]{ cameras->open_usb1();  }, {} },
-        { "Close", [cameras]{ cameras->close_usb1(); }, {} },
+        { "Open",         [cameras]{ std::thread([cameras]{ cameras->open_usb1(); }).detach(); }, {} },
+        { "Close",        [cameras]{ cameras->close_usb1(); }, {} },
+        { "Show Overlay", [pip_cam1_overlay]{ *pip_cam1_overlay = true;  }, {} },
+        { "Hide Overlay", [pip_cam1_overlay]{ *pip_cam1_overlay = false; }, {} },
+        { "Position",     nullptr, make_position_items(pip_cfg1) },
+        { "Size",         nullptr, make_size_items(pip_cfg1)     },
     };
     std::vector<MenuItem> cam2_menu = {
-        { "Open",  [cameras]{ cameras->open_usb2();  }, {} },
-        { "Close", [cameras]{ cameras->close_usb2(); }, {} },
+        { "Open",         [cameras]{ std::thread([cameras]{ cameras->open_usb2(); }).detach(); }, {} },
+        { "Close",        [cameras]{ cameras->close_usb2(); }, {} },
+        { "Show Overlay", [pip_cam2_overlay]{ *pip_cam2_overlay = true;  }, {} },
+        { "Hide Overlay", [pip_cam2_overlay]{ *pip_cam2_overlay = false; }, {} },
+        { "Position",     nullptr, make_position_items(pip_cfg2) },
+        { "Size",         nullptr, make_size_items(pip_cfg2)     },
     };
     std::vector<MenuItem> pip_menu = {
-        { "Cam 1",    nullptr, std::move(cam1_menu)          },
-        { "Cam 2",    nullptr, std::move(cam2_menu)          },
-        { "Position", nullptr, make_position_items(pip_cfg)  },
-        { "Size",     nullptr, make_size_items(pip_cfg)      },
+        { "Cam 1", nullptr, std::move(cam1_menu) },
+        { "Cam 2", nullptr, std::move(cam2_menu) },
     };
 
     // ── Android mirror ────────────────────────────────────────────────────────
@@ -502,13 +510,23 @@ int main(int argc, char* argv[]) {
     hud_cfg.scale                = jval(jdisp,"hud_scale",            1.0f);
 
     AndroidMirrorConfig and_cfg;
-    OverlayConfig       pip_overlay_cfg;
+    OverlayConfig       pip_overlay_cfg1, pip_overlay_cfg2;
     OverlayConfig       android_overlay_cfg;
 
     if (cfg.contains("pip")) {
         auto& jpip = cfg["pip"];
-        pip_overlay_cfg.size   = jval(jpip, "size",   0.25f);
-        pip_overlay_cfg.anchor = parse_anchor(jpip.value("anchor", std::string("top_center")));
+        // Per-camera configs; fall back to top-level pip values
+        float def_size = jval(jpip, "size", 0.25f);
+        std::string def_anch = jpip.value("anchor", std::string("top_left"));
+
+        auto& jc1 = jpip.contains("cam1") ? jpip["cam1"] : jpip;
+        pip_overlay_cfg1.size   = jval(jc1, "size",   def_size);
+        pip_overlay_cfg1.anchor = parse_anchor(jc1.value("anchor", def_anch));
+
+        std::string def_anch2 = jpip.contains("cam1") ? std::string("top_right") : def_anch;
+        auto& jc2 = jpip.contains("cam2") ? jpip["cam2"] : jpip;
+        pip_overlay_cfg2.size   = jval(jc2, "size",   def_size);
+        pip_overlay_cfg2.anchor = parse_anchor(jc2.value("anchor", def_anch2));
     }
 
     if (cfg.contains("android")) {
@@ -659,9 +677,13 @@ int main(int argc, char* argv[]) {
 
     // ── Menu system ───────────────────────────────────────────────────────────
 
+    bool pip_cam1_overlay_active = false, pip_cam2_overlay_active = false;
+
     MenuSystem menu(build_menu(&teensy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
-                               &pip_overlay_cfg, &android_overlay_cfg));
+                               &pip_overlay_cfg1, &pip_overlay_cfg2,
+                               &pip_cam1_overlay_active, &pip_cam2_overlay_active,
+                               &android_overlay_cfg));
 
     menu.set_detent_callback([&knob, &menu](int count) {
         knob.set_detents(count);
@@ -872,12 +894,14 @@ int main(int argc, char* argv[]) {
         hud.draw_frame(snap, xr.eye_width(), xr.eye_height());
         menu.draw(xr.eye_width(), xr.eye_height());
 
-        if (pip_left_active || pip_right_active) {
-            hud.draw_pip(tex_usb1, tex_usb2,
-                         xr.eye_width(), xr.eye_height(),
-                         pip_left_active || pip_right_active,
-                         pip_overlay_cfg);
-        }
+        hud.draw_pip(tex_usb1, "Cam 1",
+                     xr.eye_width(), xr.eye_height(),
+                     pip_cam1_overlay_active || pip_left_active,
+                     pip_overlay_cfg1);
+        hud.draw_pip(tex_usb2, "Cam 2",
+                     xr.eye_width(), xr.eye_height(),
+                     pip_cam2_overlay_active || pip_right_active,
+                     pip_overlay_cfg2);
 
         hud.draw_android_overlay(tex_android,
                                   xr.eye_width(), xr.eye_height(),

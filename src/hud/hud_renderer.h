@@ -59,10 +59,11 @@ public:
     // Build all HUD draw commands (pure ImGui DrawList — no GL calls).
     void draw_frame(const AppState& snap, int w, int h);
 
-    // Build PiP draw commands (USB camera overlay, 16:9 aspect).
-    // tex_usb1/tex_usb2: raw GLuint texture IDs. Pass 0 if unavailable.
+    // Build PiP draw commands for a single USB camera overlay (16:9 aspect).
+    // tex: raw GLuint texture ID (0 = no image, shows placeholder).
+    // label: short name shown in the overlay corner.
     // cfg controls anchor position and size as a fraction of screen height.
-    void draw_pip(unsigned int tex_usb1, unsigned int tex_usb2,
+    void draw_pip(unsigned int tex, const char* label,
                   int w, int h, bool active, const OverlayConfig& cfg);
 
     // Build Android mirror overlay (portrait 9:16 aspect).

@@ -94,8 +94,8 @@
   },
   "pip": {
     "enabled": true,
-    "size": 0.25,
-    "anchor": "top_center",
+    "cam1": { "size": 0.25, "anchor": "top_left"  },
+    "cam2": { "size": 0.25, "anchor": "top_right" },
     "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
   },
   "audio": {

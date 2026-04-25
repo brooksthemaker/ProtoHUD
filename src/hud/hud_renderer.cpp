@@ -157,9 +157,9 @@ static ImVec2 overlay_origin(const OverlayConfig& cfg,
 
 // ── PiP ──────────────────────────────────────────────────────────────────────
 
-void HudRenderer::draw_pip(unsigned int tex_usb1, unsigned int tex_usb2,
+void HudRenderer::draw_pip(unsigned int tex, const char* label,
                             int w, int h, bool active, const OverlayConfig& cfg) {
-    if (!active || (!tex_usb1 && !tex_usb2)) return;
+    if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
     ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -179,15 +179,16 @@ void HudRenderer::draw_pip(unsigned int tex_usb1, unsigned int tex_usb2,
                       { pos.x + ov_w, pos.y + ov_h },
                       col_.background);
 
-    // Label (top-left corner of the box)
-    if (font_mono_) ImGui::PushFont(font_mono_);
-    dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.primary, "USB CAM");
-    if (font_mono_) ImGui::PopFont();
+    // Camera image or dark placeholder
+    if (tex) {
+        dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
+                     { pos.x, pos.y }, { pos.x + ov_w, pos.y + ov_h });
+    }
 
-    // Camera image
-    GLuint tex = tex_usb1 ? tex_usb1 : tex_usb2;
-    dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-                 { pos.x, pos.y }, { pos.x + ov_w, pos.y + ov_h });
+    // Label (always on top so it's visible even with no signal)
+    if (font_mono_) ImGui::PushFont(font_mono_);
+    dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.primary, label);
+    if (font_mono_) ImGui::PopFont();
 }
 
 // ── Android mirror overlay ────────────────────────────────────────────────────
