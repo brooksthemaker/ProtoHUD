@@ -8,6 +8,7 @@
 #include <cmath>
 #include <ctime>
 #include <cstring>
+#include <iostream>
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -160,6 +161,10 @@ static ImVec2 overlay_origin(const OverlayConfig& cfg,
 void HudRenderer::draw_pip(unsigned int tex, const char* label,
                             int w, int h, bool active, const OverlayConfig& cfg) {
     if (!active) return;
+    // One-shot diagnostic: confirm overlay is actually being rendered
+    { static bool once = false; if (!once) { once = true;
+        std::cerr << "[pip] " << label << " overlay active, tex=" << tex
+                  << " sw=" << w << " sh=" << h << "\n"; } }
 
     ImGui::SetCurrentContext(ctx_);
     ImDrawList* dl = ImGui::GetForegroundDrawList();
