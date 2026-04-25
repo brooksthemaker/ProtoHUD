@@ -31,12 +31,13 @@ struct HudColors {
 };
 
 struct HudConfig {
-    int   compass_height       = 72;
-    int   panel_width          = 200;
-    int   top_bar_height       = 52;
-    float opacity              = 0.85f;
-    float scale                = 1.0f;
-    float health_panel_opacity = 0.71f;
+    int   compass_height        = 72;
+    int   compass_bottom_margin = 20;
+    int   panel_width           = 200;
+    int   top_bar_height        = 52;
+    float opacity               = 0.85f;
+    float scale                 = 1.0f;
+    float health_panel_opacity  = 0.71f;
 };
 
 class HudRenderer {
