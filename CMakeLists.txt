@@ -171,11 +171,14 @@ set_target_properties(protohud PROPERTIES
 
 configure_file(config/config.json ${CMAKE_BINARY_DIR}/config.json COPYONLY)
 
-# Copy NV12 shaders to build directory
-file(GLOB SHADER_FILES "${CMAKE_SOURCE_DIR}/assets/shaders/*")
-foreach(SHADER ${SHADER_FILES})
-    configure_file(${SHADER} "${CMAKE_BINARY_DIR}/assets/shaders/" COPYONLY)
-endforeach()
+# Copy shaders to build directory.
+# configure_file() silently skips files when the destination directory doesn't
+# exist yet, so we use file(MAKE_DIRECTORY) + file(COPY) for a reliable
+# configure-time copy, and add a POST_BUILD command so shader edits are picked
+# up on the next ninja run without requiring a full reconfigure.
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/assets/shaders")
+file(COPY "${CMAKE_SOURCE_DIR}/assets/shaders/"
+     DESTINATION "${CMAKE_BINARY_DIR}/assets/shaders")
 
 # Copy VITURE .so files next to the binary for in-tree runs
 add_custom_command(TARGET protohud POST_BUILD
@@ -184,6 +187,14 @@ add_custom_command(TARGET protohud POST_BUILD
         "${VITURE_LIB_DIR}/libcarina_vio.so"
         "$<TARGET_FILE_DIR:protohud>"
     COMMENT "Copying VITURE SDK libraries to build directory"
+)
+
+# Keep shaders in sync with source on every build (no reconfigure needed after edits)
+add_custom_command(TARGET protohud POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets/shaders"
+        "$<TARGET_FILE_DIR:protohud>/assets/shaders"
+    COMMENT "Syncing shaders to build directory"
 )
 
 install(TARGETS protohud RUNTIME DESTINATION bin)
