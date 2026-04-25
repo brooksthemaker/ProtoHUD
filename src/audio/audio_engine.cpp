@@ -1,6 +1,7 @@
 #include "audio_engine.h"
 
 #include <alsa/asoundlib.h>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <iostream>

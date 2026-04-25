@@ -6,6 +6,7 @@
 #include <viture_result.h>
 
 #include <GLES2/gl2.h>
+#include <algorithm>
 #include <dirent.h>
 #include <fstream>
 #include <iostream>
@@ -257,7 +258,9 @@ GLFWmonitor* XRDisplay::choose_monitor() const {
 // ── Device control ────────────────────────────────────────────────────────────
 void XRDisplay::set_brightness(int l)  { if (device_) xr_device_provider_set_brightness_level(device_, l); }
 void XRDisplay::set_3d_mode(bool b)    { if (device_) xr_device_provider_native_switch_dimension(device_, b ? 1 : 0); }
-void XRDisplay::set_dimming(int l)     { if (device_) xr_device_provider_set_electrochromic_level(device_, std::max(0, std::min(9, l))); }
-void XRDisplay::set_hud_brightness(int l) { if (device_) xr_device_provider_set_oled_brightness(device_, std::max(1, std::min(9, l))); }
-void XRDisplay::recenter_tracking()    { if (device_) xr_device_provider_recenter_imu_origin(device_); }
-void XRDisplay::toggle_gaze_lock()     { if (device_) xr_device_provider_toggle_gaze_lock(device_); }
+// Electrochromic film (lens tint): SDK takes float 0.0–1.0; map from level 0–9
+void XRDisplay::set_dimming(int l)     { if (device_) xr_device_provider_set_film_mode(device_, std::max(0.0f, std::min(1.0f, l / 9.0f))); }
+void XRDisplay::set_hud_brightness(int l) { if (device_) xr_device_provider_set_brightness_level(device_, std::max(1, std::min(9, l))); }
+// Native DOF recenter (Gen2/Beast); no-op on Gen1 devices
+void XRDisplay::recenter_tracking()    { if (device_) xr_device_provider_native_recenter_dof(device_); }
+void XRDisplay::toggle_gaze_lock()     { /* gaze lock not available in current VITURE SDK */ }
