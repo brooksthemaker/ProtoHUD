@@ -1,18 +1,12 @@
-// Passthrough vertex shader — GLSL 1.00 (GLES 2.0 compatible)
-// Raylib populates vertexPosition, vertexTexCoord, vertexColor, and mvp.
-#version 100
+// nv12.vs — vertex shader for camera NV12 → RGB blit
+// Attributes bound at locations 0 (a_pos) and 1 (a_uv) by gl_utils link_program().
+attribute vec2 a_pos;
+attribute vec2 a_uv;
 
-attribute vec3 vertexPosition;
-attribute vec2 vertexTexCoord;
-attribute vec4 vertexColor;
-
-varying vec2 fragTexCoord;
-varying vec4 fragColor;
-
-uniform mat4 mvp;
+varying vec2 v_uv;
 
 void main() {
-    fragTexCoord = vertexTexCoord;
-    fragColor    = vertexColor;
-    gl_Position  = mvp * vec4(vertexPosition, 1.0);
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+    // Camera DMA buffers have origin at top-left; flip V for GL bottom-left convention.
+    v_uv = vec2(a_uv.x, 1.0 - a_uv.y);
 }

@@ -14,8 +14,9 @@
 #include <thread>
 
 // DRM fourcc codes — avoids depending on drm/drm_fourcc.h
-#define DRM_FORMAT_R8   0x20203852u   // 'R','8',' ',' '
-#define DRM_FORMAT_RG88 0x38384752u   // 'R','G','8','8'
+// NV12: semi-planar 4:2:0 — Y plane, then interleaved Cb/Cr (UV) plane.
+// fourcc_code('N','V','1','2') = 0x3231564E (little-endian).
+#define DRM_FORMAT_NV12 0x3231564Eu
 
 using namespace libcamera;
 
@@ -167,83 +168,59 @@ bool DmaCamera::create_egl_image(const FrameBuffer* buf, Slot& slot) {
     auto off_uv = static_cast<EGLint>(planes[1].offset);
     auto pitch  = static_cast<EGLint>(stride_);
 
-    // Y plane — full resolution, single channel (R8)
-    {
-        EGLint attr[] = {
-            EGL_WIDTH,                        cfg_.width,
-            EGL_HEIGHT,                       cfg_.height,
-            EGL_LINUX_DRM_FOURCC_EXT,         (EGLint)DRM_FORMAT_R8,
-            EGL_DMA_BUF_PLANE0_FD_EXT,        fd_y,
-            EGL_DMA_BUF_PLANE0_OFFSET_EXT,    off_y,
-            EGL_DMA_BUF_PLANE0_PITCH_EXT,     pitch,
-            EGL_NONE
-        };
-        slot.img_y = pfn_create_image_(egl_display_, EGL_NO_CONTEXT,
-                                       EGL_LINUX_DMA_BUF_EXT, nullptr, attr);
-        if (slot.img_y == EGL_NO_IMAGE_KHR) {
-            std::cerr << "[dma] eglCreateImageKHR for Y plane failed (err 0x"
-                      << std::hex << eglGetError() << std::dec << ")\n";
-            return false;
-        }
+    // Import the full NV12 buffer as a single multi-plane EGLImage.
+    // PLANE0 = Y (luma, full resolution), PLANE1 = UV (chroma, interleaved Cb/Cr).
+    // Mesa V3D on Pi5 supports DRM_FORMAT_NV12 natively; sampling via
+    // GL_TEXTURE_EXTERNAL_OES + samplerExternalOES returns RGB (TMU does YCbCr→RGB).
+    // This avoids DRM_FORMAT_RG88 which is not supported on V3D (EGL_BAD_MATCH).
+    EGLint attr[] = {
+        EGL_WIDTH,                         cfg_.width,
+        EGL_HEIGHT,                        cfg_.height,
+        EGL_LINUX_DRM_FOURCC_EXT,          (EGLint)DRM_FORMAT_NV12,
+        EGL_DMA_BUF_PLANE0_FD_EXT,         fd_y,
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT,     off_y,
+        EGL_DMA_BUF_PLANE0_PITCH_EXT,      pitch,
+        EGL_DMA_BUF_PLANE1_FD_EXT,         fd_uv,
+        EGL_DMA_BUF_PLANE1_OFFSET_EXT,     off_uv,
+        EGL_DMA_BUF_PLANE1_PITCH_EXT,      pitch,
+        EGL_NONE
+    };
+    slot.img_y = pfn_create_image_(egl_display_, EGL_NO_CONTEXT,
+                                   EGL_LINUX_DMA_BUF_EXT, nullptr, attr);
+    if (slot.img_y == EGL_NO_IMAGE_KHR) {
+        std::cerr << "[dma] eglCreateImageKHR for NV12 failed (err 0x"
+                  << std::hex << eglGetError() << std::dec << ")\n";
+        return false;
     }
-
-    // UV plane — half resolution, dual channel (RG88 = Cb in R, Cr in G)
-    {
-        EGLint attr[] = {
-            EGL_WIDTH,                        cfg_.width  / 2,
-            EGL_HEIGHT,                       cfg_.height / 2,
-            EGL_LINUX_DRM_FOURCC_EXT,         (EGLint)DRM_FORMAT_RG88,
-            EGL_DMA_BUF_PLANE0_FD_EXT,        fd_uv,
-            EGL_DMA_BUF_PLANE0_OFFSET_EXT,    off_uv,
-            EGL_DMA_BUF_PLANE0_PITCH_EXT,     pitch,
-            EGL_NONE
-        };
-        slot.img_uv = pfn_create_image_(egl_display_, EGL_NO_CONTEXT,
-                                        EGL_LINUX_DMA_BUF_EXT, nullptr, attr);
-        if (slot.img_uv == EGL_NO_IMAGE_KHR) {
-            std::cerr << "[dma] eglCreateImageKHR for UV plane failed (err 0x"
-                      << std::hex << eglGetError() << std::dec << ")\n";
-            pfn_destroy_image_(egl_display_, slot.img_y);
-            slot.img_y = EGL_NO_IMAGE_KHR;
-            return false;
-        }
-    }
+    slot.img_uv = EGL_NO_IMAGE_KHR;   // unused — full NV12 encoded in img_y
     return true;
 }
 
 // ── GL resources (textures + shader + quad VBO) ───────────────────────────────
 
 bool DmaCamera::create_gl_resources(const char* vs_path, const char* fs_path) {
-    // Y and UV textures — backing store is set per-frame via EGLImageTargetTexture2DOES
+    // Single GL_TEXTURE_EXTERNAL_OES texture — the driver handles NV12 plane layout.
+    // Only GL_CLAMP_TO_EDGE and GL_LINEAR/GL_NEAREST are valid for external OES.
     glGenTextures(1, &tex_y_);
-    glGenTextures(1, &tex_uv_);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex_y_);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
 
-    auto setup_tex = [](GLuint id) {
-        glBindTexture(GL_TEXTURE_2D, id);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    };
-    setup_tex(tex_y_);
-    setup_tex(tex_uv_);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    // NV12 → RGB shader
+    // NV12 shader — uses samplerExternalOES (driver handles YCbCr→RGB)
     nv12_prog_ = gl::build_program(vs_path, fs_path);
     if (!nv12_prog_) {
         std::cerr << "[dma] NV12 shader failed to load\n";
         return false;
     }
 
-    // Cache uniform locations
-    loc_tex_y_  = glGetUniformLocation(nv12_prog_, "tex_y");
-    loc_tex_uv_ = glGetUniformLocation(nv12_prog_, "tex_uv");
+    // Cache the sampler uniform location (uniform name "tex" in nv12.fs)
+    loc_tex_y_ = glGetUniformLocation(nv12_prog_, "tex");
 
-    // Tell the shader which texture units to sample
     glUseProgram(nv12_prog_);
-    if (loc_tex_y_  >= 0) glUniform1i(loc_tex_y_,  0);  // GL_TEXTURE0
-    if (loc_tex_uv_ >= 0) glUniform1i(loc_tex_uv_, 1);  // GL_TEXTURE1
+    if (loc_tex_y_ >= 0) glUniform1i(loc_tex_y_, 0);   // GL_TEXTURE0
     glUseProgram(0);
 
     // Fullscreen quad VBO (NDC, shared across draws)
@@ -362,16 +339,12 @@ bool DmaCamera::draw() {
         }
     }
 
-    // ── Bind EGLImages to GL textures ────────────────────────────────────────
+    // ── Bind NV12 EGLImage to the external OES texture ───────────────────────
     // Re-binding each frame is lightweight (just updates the texture backing pointer).
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex_y_);
-    pfn_img_target_tex_(GL_TEXTURE_2D, slots_[slot].img_y);
-
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, tex_uv_);
-    pfn_img_target_tex_(GL_TEXTURE_2D, slots_[slot].img_uv);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex_y_);
+    pfn_img_target_tex_(GL_TEXTURE_EXTERNAL_OES, slots_[slot].img_y);
 
     // ── Draw fullscreen NV12 → RGB quad ──────────────────────────────────────
 
@@ -383,11 +356,9 @@ bool DmaCamera::draw() {
 
     glUseProgram(0);
 
-    // Restore texture unit 0 as active (convention for rest of pipeline)
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    // Unbind the external OES texture (leave texture unit 0 active, unbound)
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
 
     return true;
 }
@@ -395,14 +366,17 @@ bool DmaCamera::draw() {
 // ── shutdown ──────────────────────────────────────────────────────────────────
 
 void DmaCamera::shutdown() {
-    if (!ok_ && !running_) return;
-    ok_ = false;
+    // Guard against double-shutdown, but always release camera_ if it was acquired
+    // (camera_ is set in configure_camera() before EGL work, so it must be
+    // cleaned up even when ok_ is false due to a later EGL failure).
+    if (!ok_ && !running_ && !camera_) return;
 
+    ok_      = false;
     running_ = false;
     if (event_thread_.joinable()) event_thread_.join();
 
     if (camera_) {
-        camera_->stop();
+        camera_->stop();  // safe to call even if capture was never started
         camera_->requestCompleted.disconnect(this, &DmaCamera::on_request_complete);
     }
 
@@ -416,10 +390,9 @@ void DmaCamera::shutdown() {
         // Requests are owned by the camera; don't delete them
     }
 
-    if (tex_y_)     { glDeleteTextures(1, &tex_y_);     tex_y_     = 0; }
-    if (tex_uv_)    { glDeleteTextures(1, &tex_uv_);    tex_uv_    = 0; }
-    if (nv12_prog_) { glDeleteProgram(nv12_prog_);       nv12_prog_ = 0; }
-    if (quad_vbo_)  { glDeleteBuffers(1, &quad_vbo_);   quad_vbo_  = 0; }
+    if (tex_y_)     { glDeleteTextures(1, &tex_y_);    tex_y_    = 0; }
+    if (nv12_prog_) { glDeleteProgram(nv12_prog_);     nv12_prog_ = 0; }
+    if (quad_vbo_)  { glDeleteBuffers(1, &quad_vbo_);  quad_vbo_  = 0; }
 
     if (allocator_) allocator_->free(stream_);
     if (camera_)    { camera_->release(); camera_.reset(); }

@@ -129,12 +129,12 @@ private:
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC pfn_img_target_tex_ = nullptr;
 
     // GLES resources
+    // tex_y_ is a GL_TEXTURE_EXTERNAL_OES texture bound to the full NV12 EGLImage.
+    // No separate UV texture — the driver handles YCbCr→RGB via samplerExternalOES.
     GLuint tex_y_      = 0;
-    GLuint tex_uv_     = 0;
     GLuint nv12_prog_  = 0;
     GLuint quad_vbo_   = 0;
-    GLint  loc_tex_y_  = -1;
-    GLint  loc_tex_uv_ = -1;
+    GLint  loc_tex_y_  = -1;   // uniform location of "tex" (samplerExternalOES)
 
     // Capture thread
     std::atomic<bool> running_ { false };
