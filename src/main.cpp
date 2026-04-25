@@ -809,6 +809,22 @@ int main(int argc, char* argv[]) {
             pip_right_active = buttons.pip_right_active();
         }
 
+        // ── Keyboard button emulation (number keys) ───────────────────────────
+        // 1/2 = toggle PiP left/right   (short-press buttons 1/2)
+        // 3   = menu select             (button 3 / aux)
+        // 4/5 = autofocus left/right    (long-press buttons 1/2)
+        if (!menu.is_open()) {
+            if (key_pressed(ImGuiKey_1)) pip_left_active  = !pip_left_active;
+            if (key_pressed(ImGuiKey_2)) pip_right_active = !pip_right_active;
+        }
+        if (key_pressed(ImGuiKey_3) && menu.is_open()) menu.select();
+        if (key_pressed(ImGuiKey_4)) {
+            if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+        }
+        if (key_pressed(ImGuiKey_5)) {
+            if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+        }
+
         // ── USB camera / Android mirror health update ─────────────────────────
         {
             std::lock_guard<std::mutex> lk(state.mtx);
