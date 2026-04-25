@@ -738,6 +738,9 @@ int main(int argc, char* argv[]) {
     bool pip_left_active  = false, pip_right_active  = false;  // GPIO-driven
     bool kb_pip_left      = false, kb_pip_right      = false;  // keyboard-driven
 
+    // Edge-detection state for direct GLFW key polling (keys 1-5)
+    bool prev_key[6] = {};  // indexed by key number 1-5
+
     if (gpio_enabled) {
         if (buttons.init()) {
             buttons.on_af_left([&cameras]() {
@@ -810,21 +813,26 @@ int main(int argc, char* argv[]) {
             pip_right_active = buttons.pip_right_active();
         }
 
-        // ── Keyboard button emulation (number keys) ───────────────────────────
-        // 1/2 = toggle PiP left/right   (short-press buttons 1/2)
-        // 3   = menu select             (button 3 / aux)
-        // 4/5 = autofocus left/right    (long-press buttons 1/2)
-        // kb_pip_* are independent of gpio; GPIO does not overwrite them.
-        if (!menu.is_open()) {
-            if (key_pressed(ImGuiKey_1)) kb_pip_left  = !kb_pip_left;
-            if (key_pressed(ImGuiKey_2)) kb_pip_right = !kb_pip_right;
-        }
-        if (key_pressed(ImGuiKey_3) && menu.is_open()) menu.select();
-        if (key_pressed(ImGuiKey_4)) {
-            if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
-        }
-        if (key_pressed(ImGuiKey_5)) {
-            if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+        // ── Keyboard button emulation (number keys, direct GLFW polling) ─────
+        // Uses glfwGetKey() directly — independent of ImGui key mapping and
+        // the glfwPollEvents/begin_frame ordering.  Edge detection via prev_key[].
+        // 1/2 = toggle PiP left/right   4/5 = autofocus left/right
+        // 3   = menu select
+        {
+            GLFWwindow* win = static_cast<GLFWwindow*>(xr.glfw_window());
+            auto edge = [&](int n, int glfw_key) -> bool {
+                bool now = (glfwGetKey(win, glfw_key) == GLFW_PRESS);
+                bool fired = now && !prev_key[n];
+                prev_key[n] = now;
+                return fired;
+            };
+            if (!menu.is_open()) {
+                if (edge(1, GLFW_KEY_1)) kb_pip_left  = !kb_pip_left;
+                if (edge(2, GLFW_KEY_2)) kb_pip_right = !kb_pip_right;
+            }
+            if (edge(3, GLFW_KEY_3) && menu.is_open()) menu.select();
+            if (edge(4, GLFW_KEY_4) && cameras.owl_left())  cameras.owl_left()->start_autofocus();
+            if (edge(5, GLFW_KEY_5) && cameras.owl_right()) cameras.owl_right()->start_autofocus();
         }
 
         // ── USB camera / Android mirror health update ─────────────────────────
