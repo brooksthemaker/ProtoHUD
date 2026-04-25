@@ -201,27 +201,37 @@ elif apt-cache show scrcpy &>/dev/null 2>&1; then
 else
     warn "scrcpy not in apt repos — building from source (this takes ~5 min)"
 
-    # Build deps for scrcpy client
+    # ── Build deps ────────────────────────────────────────────────────
     sudo apt-get install -y \
-        meson \
+        python3-pip \
         libsdl2-dev \
         libavcodec-dev libavdevice-dev libavformat-dev \
         libavutil-dev libswresample-dev \
         libusb-1.0-0-dev \
         ffmpeg
 
+    # Bullseye's apt meson is 0.56 — scrcpy 2.x requires >= 0.63.
+    # The version mismatch shows as:
+    #   FAILED: meson install --no_rebuild   (underscore vs hyphen flag)
+    # Upgrade meson via pip to get a current version system-wide.
+    sudo pip3 install --upgrade meson
+    # Pip installs to /usr/local/bin; ensure it takes priority over apt meson.
+    export PATH="/usr/local/bin:${PATH}"
+    info "meson version: $(meson --version)"
+
+    # ninja is still taken from apt (version fine for our purposes)
+    sudo apt-get install -y ninja-build
+
     SCRCPY_TMP=$(mktemp -d /tmp/scrcpy.XXXXXX)
     git clone --depth 1 https://github.com/Genymobile/scrcpy.git "${SCRCPY_TMP}"
 
-    # Build in a subshell so meson runs from inside the repo directory.
-    # meson.build is at the repo root; running meson from outside fails with
-    # "Neither source directory 'build-auto' nor build directory None contain
-    #  a build file meson.build" because the cwd doesn't contain meson.build.
+    # Run entirely inside the repo directory.
+    # Use sudo -E so PATH (with the pip meson) is preserved into the install step.
     (
         cd "${SCRCPY_TMP}"
         meson setup build-auto --buildtype=release --strip
         ninja -C build-auto
-        sudo ninja -C build-auto install
+        sudo -E ninja -C build-auto install
     )
     rm -rf "${SCRCPY_TMP}"
 
