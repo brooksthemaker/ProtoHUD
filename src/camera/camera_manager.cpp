@@ -18,24 +18,34 @@
 CameraManager::CameraManager()  = default;
 CameraManager::~CameraManager() { shutdown(); }
 
-// Returns true if the device is a V4L2 video-capture node (not a sub-device).
-static bool is_capture_device(const std::string& path) {
+// Returns true if the device is a V4L2 video-capture node driven by uvcvideo
+// (i.e. a real USB camera, not a libcamera ISP pipeline node).
+static bool is_usb_capture_device(const std::string& path, std::string* info_out = nullptr) {
     int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd < 0) return false;
     struct v4l2_capability cap {};
-    bool ok = (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) &&
-              (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE);
+    bool ok = false;
+    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) {
+        if (info_out) {
+            *info_out = std::string(reinterpret_cast<char*>(cap.driver))
+                      + ": " + reinterpret_cast<char*>(cap.card);
+        }
+        // uvcvideo = USB Video Class — the standard Linux USB camera driver
+        ok = (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) &&
+             (std::string(reinterpret_cast<char*>(cap.driver)) == "uvcvideo");
+    }
     close(fd);
     return ok;
 }
 
-// Shared helper: verify capture capability, open via OpenCV, negotiate MJPEG.
+// Shared helper: verify it's a USB camera, open via OpenCV, negotiate MJPEG.
 static bool open_v4l2(cv::VideoCapture& cap, const UsbCamConfig& cfg,
                       const char* name) {
-    if (!is_capture_device(cfg.device)) {
+    std::string info;
+    if (!is_usb_capture_device(cfg.device, &info)) {
         std::cerr << "[cam] " << name << ": " << cfg.device
-                  << " is not a video-capture node (libcamera ISP sub-device?)"
-                  << " — check config.json and run: v4l2-ctl --list-devices\n";
+                  << " is not a USB camera (driver=" << info
+                  << ") — see '[cam] USB cameras:' list above for correct paths\n";
         return false;
     }
     cap.open(cfg.device, cv::CAP_V4L2);
@@ -89,18 +99,18 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb1_cfg_ = usb1;
     usb2_cfg_ = usb2;
 
-    // Scan /dev/video0-19 and flag which are real capture nodes
-    std::cerr << "[cam] V4L2 capture nodes:";
+    // Scan /dev/video0-19 and list only real USB cameras (uvcvideo driver)
+    std::cerr << "[cam] USB cameras found:\n";
     bool found_any = false;
     for (int i = 0; i <= 19; i++) {
         std::string d = "/dev/video" + std::to_string(i);
-        if (access(d.c_str(), F_OK) == 0 && is_capture_device(d)) {
-            std::cerr << " " << d;
+        std::string info;
+        if (access(d.c_str(), F_OK) == 0 && is_usb_capture_device(d, &info)) {
+            std::cerr << "  " << d << "  (" << info << ")\n";
             found_any = true;
         }
     }
-    if (!found_any) std::cerr << " (none found)";
-    std::cerr << "\n";
+    if (!found_any) std::cerr << "  (none — are USB cameras plugged in?)\n";
 
     usb1_ok_ = !usb1.device.empty() && open_v4l2(usb_cap1_, usb1, "usb1");
     usb2_ok_ = !usb2.device.empty() && open_v4l2(usb_cap2_, usb2, "usb2");
