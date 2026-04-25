@@ -23,8 +23,9 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 13. [Overlay Position & Size](#overlay-position--size)
 14. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
 15. [Audio Routing](#audio-routing)
-16. [Configuration Reference](#configuration-reference)
-17. [Troubleshooting](#troubleshooting)
+16. [HUD Layout](#hud-layout)
+17. [Configuration Reference](#configuration-reference)
+18. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -706,7 +707,7 @@ Menu → Audio → Output → VITURE / Headphones / HDMI
 
 The switch takes effect at the start of the next ALSA period (~5 ms) with no dropout or gap in audio.
 
-The `AU` strip in the HUD top bar shows the current output and xrun count:
+The audio strip in the HUD top bar shows the current output and xrun count:
 
 ```
 AU → VITURE  X:0
@@ -732,6 +733,46 @@ AU → VITURE  X:0
 `active_output` values: `viture` · `headphones` · `hdmi`
 
 > **Note:** Run `arecord -l` to verify the RP2350 card name after connecting via USB. If the card appears under a different name, update `capture_device` accordingly.
+
+---
+
+## HUD Layout
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ░░░░░░░░░  Top bar (background fill, no border)           Audio strip       │
+│             [clock · unread message badge]           AU → VITURE  X:0  ████ │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ● Proot      │                                        │ FACE                │
+│ ● LoRa       │                                        │ Connected           │
+│ ● Interface  │      Left eye / Right eye camera       │ Effect: Idle        │
+│ ● Left Cam   │      (stereo SBS 3840×1080)            │ Palette: #0         │
+│ ● Right Cam  │                                        ├─────────────────────┤
+│ ● Cam 1      │  [LoRa messages panel — left side,     │ LORA NODES          │
+│ ● Cam 2      │   shown only when messages present]    │ NodeName  045° 1.2km│
+│ ● Audio      │                                        │   RSSI:-87 SNR:6 8s │
+│ ● Android    │                                        │                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│░░░░░░░░░░░░░░░░░░░░░  Compass tape  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Health indicator column** (left edge, below top bar):
+Each row shows a filled dot — teal = OK, red = fault — followed by its label.
+
+| Label | Subsystem |
+|-------|-----------|
+| Proot | Prototracer face LED controller (Teensy) |
+| LoRa | LoRa mesh radio |
+| Interface | SmartKnob haptic controller |
+| Left Cam | OWLsight left CSI camera |
+| Right Cam | OWLsight right CSI camera |
+| Cam 1 | USB camera 1 (PiP source) |
+| Cam 2 | USB camera 2 (PiP source) |
+| Audio | Spatial audio engine |
+| Android | Android screen mirror (scrcpy) |
+
+Background opacity of the health panel is configurable via `hud.health_panel_opacity` (0.0–1.0).
 
 ---
 
@@ -817,7 +858,8 @@ Full `config/config.json` layout:
     "panel_width_px":       320,
     "lora_message_history": 50,
     "show_secondary_cams":  true,
-    "secondary_cam_size":   0.22
+    "secondary_cam_size":   0.22,
+    "health_panel_opacity": 0.71   // 0.0 = fully transparent · 1.0 = fully opaque
   },
 
   "audio": {
@@ -890,7 +932,7 @@ If the card is not listed, the RP2350 is not connected or not enumerated. Connec
 aplay -l     # look for VITUREXRGlasses, Headphones, vc4hdmi0
 ```
 
-**Check the AU strip** in the HUD top bar — `AU → VITURE  X:0` is normal. A rising xrun count (X:N) means the system is too busy; try reducing camera resolution.
+**Check the audio strip** in the HUD top bar — `AU → VITURE  X:0` is normal. A rising xrun count (X:N) means the system is too busy; try reducing camera resolution. Also check that the **Audio** indicator in the left-side health column is teal (not red).
 
 **Check group membership:**
 
