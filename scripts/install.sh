@@ -6,7 +6,7 @@
 #
 #  What this does (in order):
 #    1. Preflight  — check OS, arch, sudo availability
-#    2. Packages   — build tools, libraries, headers, scrcpy
+#    2. Packages   — build tools, libraries, headers
 #    3. Overlay    — compile & install the cm5-6mic I2S DT overlay
 #    4. Boot cfg   — dtoverlay, gpu_mem, camera in /boot/config.txt
 #    5. udev       — stable /dev/teensy, /dev/smartknob, /dev/lora symlinks
@@ -105,6 +105,7 @@ PKGS=(
     # Android mirror — V4L2 loopback device
     # v4l2loopback-dkms creates a virtual /dev/video* that scrcpy writes into;
     # OpenCV reads those frames so ProtoHUD can display them as an overlay.
+    # scrcpy itself is NOT installed here — install it separately afterward.
     v4l2loopback-dkms
     adb
 )
@@ -184,62 +185,6 @@ else
         else
             fatal "GLFW3 installation failed — cannot continue"
         fi
-    fi
-fi
-
-# ── scrcpy (Android mirror client) ───────────────────────────────────────────
-# scrcpy is not in the default Raspberry Pi OS Bullseye repos.
-# Try apt first; if unavailable, build from source using the official script.
-section_inline() { echo -e "\n${BOLD}── $* ──${RESET}"; }
-section_inline "scrcpy"
-
-if dpkg -s scrcpy &>/dev/null 2>&1; then
-    ok "scrcpy already installed"
-elif apt-cache show scrcpy &>/dev/null 2>&1; then
-    sudo apt-get install -y scrcpy
-    ok "scrcpy installed via apt"
-else
-    warn "scrcpy not in apt repos — building from source (this takes ~5 min)"
-
-    # ── Build deps ────────────────────────────────────────────────────
-    sudo apt-get install -y \
-        python3-pip \
-        libsdl2-dev \
-        libavcodec-dev libavdevice-dev libavformat-dev \
-        libavutil-dev libswresample-dev \
-        libusb-1.0-0-dev \
-        ffmpeg
-
-    # Bullseye's apt meson is 0.56 — scrcpy 2.x requires >= 0.63.
-    # The version mismatch shows as:
-    #   FAILED: meson install --no_rebuild   (underscore vs hyphen flag)
-    # Upgrade meson via pip to get a current version system-wide.
-    sudo pip3 install --upgrade meson
-    # Pip installs to /usr/local/bin; ensure it takes priority over apt meson.
-    export PATH="/usr/local/bin:${PATH}"
-    info "meson version: $(meson --version)"
-
-    # ninja is still taken from apt (version fine for our purposes)
-    sudo apt-get install -y ninja-build
-
-    SCRCPY_TMP=$(mktemp -d /tmp/scrcpy.XXXXXX)
-    git clone --depth 1 https://github.com/Genymobile/scrcpy.git "${SCRCPY_TMP}"
-
-    # Run entirely inside the repo directory.
-    # Use sudo -E so PATH (with the pip meson) is preserved into the install step.
-    (
-        cd "${SCRCPY_TMP}"
-        meson setup build-auto --buildtype=release --strip
-        ninja -C build-auto
-        sudo -E ninja -C build-auto install
-    )
-    rm -rf "${SCRCPY_TMP}"
-
-    if command -v scrcpy &>/dev/null; then
-        ok "scrcpy built and installed: $(scrcpy --version 2>&1 | head -1)"
-    else
-        warn "scrcpy build failed — Android mirror will not be available"
-        warn "Try manually: https://github.com/Genymobile/scrcpy/blob/master/doc/linux.md"
     fi
 fi
 
@@ -349,6 +294,7 @@ if ! dpkg -s v4l2loopback-dkms &>/dev/null 2>&1; then
 else
     # Write persistent modprobe options (video_nr=4 → /dev/video4, exclusive_caps
     # forces V4L2 output-only mode so scrcpy's --v4l2-sink works correctly).
+    # Install scrcpy separately: https://github.com/Genymobile/scrcpy
     if [[ ! -f "${V4L2_CONF}" ]] || ! grep -q "v4l2loopback" "${V4L2_CONF}" 2>/dev/null; then
         sudo tee "${V4L2_CONF}" >/dev/null << 'EOF'
 # v4l2loopback — virtual V4L2 device for Android mirror (ProtoHUD / scrcpy)
