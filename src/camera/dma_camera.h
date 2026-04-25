@@ -34,6 +34,7 @@ namespace libcamera {
     class Camera;
     class CameraConfiguration;
     class CameraManager;
+    class ControlList;
     class FrameBuffer;
     class FrameBufferAllocator;
     class Request;
@@ -99,6 +100,8 @@ private:
     void start_capture();
     void event_loop();
     void on_request_complete(libcamera::Request* req);
+    // Apply any pending control updates to a request's ControlList before requeuing.
+    void apply_pending_controls(libcamera::ControlList& ctrls);
 
     // libcamera
     libcamera::CameraManager*                         lcam_mgr_  = nullptr;
@@ -136,6 +139,18 @@ private:
     // Capture thread
     std::atomic<bool> running_ { false };
     std::thread       event_thread_;
+
+    // ── Pending controls ──────────────────────────────────────────────────────
+    // Written by any thread (main/menu), consumed atomically by capture thread
+    // before the next request is requeued.  Sentinel -1 / -9999 = no-op.
+    std::atomic<int>   pending_af_mode_    { -1 };       // AfModeEnum value, -1 = no-op
+    std::atomic<float> pending_ev_         { -9999.0f }; // ExposureValue, sentinel = no-op
+    std::atomic<int>   pending_shutter_us_ { -1 };       // ExposureTime µs, -1 = no-op
+    std::atomic<float> pending_lens_pos_   { -1.0f };    // LensPosition diopters, -1 = no-op
+
+    // ── Latest camera metadata (written by capture thread via atomics) ────────
+    std::atomic<int>   last_af_state_      { 0 };        // AfState enum value
+    std::atomic<float> last_lens_pos_      { 0.0f };     // LensPosition diopters
 
     Config cfg_;
     bool   ok_ = false;

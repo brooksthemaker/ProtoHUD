@@ -6,7 +6,8 @@
 #include <cstring>
 #include <iostream>
 
-using namespace libcamera;
+// NOTE: do NOT add 'using namespace libcamera' here — libcamera::CameraManager
+// would collide with our own CameraManager class.
 
 CameraManager::CameraManager()  = default;
 CameraManager::~CameraManager() { shutdown(); }

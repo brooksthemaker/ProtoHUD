@@ -11,6 +11,7 @@
 #include <iostream>
 #include <cstring>
 #include <chrono>
+#include <thread>
 
 // DRM fourcc codes — avoids depending on drm/drm_fourcc.h
 #define DRM_FORMAT_R8   0x20203852u   // 'R','8',' ',' '
@@ -86,7 +87,8 @@ bool DmaCamera::configure_camera() {
     sc.size        = { static_cast<unsigned>(cfg_.width),
                        static_cast<unsigned>(cfg_.height) };
     sc.bufferCount = NUM_SLOTS;
-    sc.frameRate   = cfg_.fps;
+    // Frame rate is set via FrameDurationLimits control on camera_->start(),
+    // not via StreamConfiguration (frameRate field does not exist on Bullseye).
 
     if (cam_cfg_->validate() == CameraConfiguration::Invalid) {
         std::cerr << "[dma] camera configuration invalid\n";
@@ -247,9 +249,23 @@ void DmaCamera::start_capture() {
     running_ = true;
     event_thread_ = std::thread([this] { event_loop(); });
 
-    if (camera_->start()) {
-        std::cerr << "[dma] camera_->start() failed\n";
-        return;
+    // Set frame rate via FrameDurationLimits.
+    // libcamera on Bullseye does not expose frameRate on StreamConfiguration.
+    ControlList startCtrls(controls::controls);
+    try {
+        if (camera_->controls().count(&controls::FrameDurationLimits)) {
+            int64_t fd = 1000000LL / std::max(1, cfg_.fps);
+            startCtrls.set(controls::FrameDurationLimits,
+                           Span<const int64_t, 2>({ fd, fd }));
+        }
+    } catch (...) {}
+
+    if (camera_->start(&startCtrls)) {
+        // Older libcamera build may not accept a ControlList on start(); retry bare.
+        if (camera_->start()) {
+            std::cerr << "[dma] camera_->start() failed\n";
+            return;
+        }
     }
 
     // Queue all slots for initial capture
@@ -261,14 +277,28 @@ void DmaCamera::start_capture() {
 }
 
 void DmaCamera::event_loop() {
+    // The libcamera CameraManager on Pi OS Bullseye dispatches events
+    // internally; we do not need to call processEvents() ourselves.
+    // This thread simply keeps running so that the thread handle stays
+    // valid for the lifetime of the capture session.
     while (running_)
-        lcam_mgr_->processEvents(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
 }
 
 // ── Request-complete callback (capture thread) ────────────────────────────────
 
 void DmaCamera::on_request_complete(Request* req) {
     if (!running_ || req->status() != Request::RequestComplete) return;
+
+    // ── Save metadata from the completed request (atomic writes) ─────────────
+    try {
+        const auto& meta     = req->metadata();
+        const auto& camCtrls = camera_->controls();   // ControlInfoMap (supported)
+        if (camCtrls.count(&controls::AfState))
+            last_af_state_.store(meta.get(controls::AfState));
+        if (camCtrls.count(&controls::LensPosition))
+            last_lens_pos_.store(meta.get(controls::LensPosition));
+    } catch (...) {}
 
     auto it = req_to_slot_.find(req);
     if (it == req_to_slot_.end()) return;
@@ -277,11 +307,14 @@ void DmaCamera::on_request_complete(Request* req) {
     std::lock_guard<std::mutex> lk(handoff_mtx_);
 
     // If there's already an unconsumed READY frame, drop it and requeue it
+    // with any pending control updates.
     if (ready_slot_ >= 0) {
         int drop = ready_slot_;
         slots_[drop].state = SlotState::CAPTURING;
-        slots_[drop].request->reuse(Request::ReuseBuffers);
-        camera_->queueRequest(slots_[drop].request);
+        auto* drop_req = slots_[drop].request;
+        drop_req->reuse(Request::ReuseBuffers);
+        apply_pending_controls(drop_req->controls());
+        camera_->queueRequest(drop_req);
     }
 
     slots_[slot_idx].state = SlotState::READY;
@@ -305,8 +338,10 @@ bool DmaCamera::draw() {
             // Promote ready → rendering; release previous render slot back to camera
             if (render_slot_ >= 0) {
                 slots_[render_slot_].state = SlotState::CAPTURING;
-                slots_[render_slot_].request->reuse(Request::ReuseBuffers);
-                camera_->queueRequest(slots_[render_slot_].request);
+                auto* prev = slots_[render_slot_].request;
+                prev->reuse(Request::ReuseBuffers);
+                apply_pending_controls(prev->controls());
+                camera_->queueRequest(prev);
             }
             render_slot_ = ready_slot_;
             ready_slot_  = -1;
@@ -431,7 +466,7 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
     sc.size        = { static_cast<unsigned>(cfg_.width),
                        static_cast<unsigned>(cfg_.height) };
     sc.bufferCount = NUM_SLOTS;
-    sc.frameRate   = cfg_.fps;
+    // frameRate is set via FrameDurationLimits in start_capture(), not here.
 
     if (cam_cfg_->validate() == CameraConfiguration::Invalid) {
         std::cerr << "[dma] reconfigure: invalid configuration "
@@ -442,7 +477,6 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
         sc2.pixelFormat = formats::NV12;
         sc2.size = { static_cast<unsigned>(old_w), static_cast<unsigned>(old_h) };
         sc2.bufferCount = NUM_SLOTS;
-        sc2.frameRate = old_fps;
         cam_cfg_->validate();
         camera_->configure(cam_cfg_.get());
         stream_ = cam_cfg_->at(0).stream();
@@ -460,7 +494,6 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
         sc2.pixelFormat = formats::NV12;
         sc2.size = { static_cast<unsigned>(old_w), static_cast<unsigned>(old_h) };
         sc2.bufferCount = NUM_SLOTS;
-        sc2.frameRate = old_fps;
         cam_cfg_->validate();
         camera_->configure(cam_cfg_.get());
         stream_ = cam_cfg_->at(0).stream();
@@ -488,99 +521,75 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
     return true;
 }
 
-// ── Focus Control (libcamera controls API) ────────────────────────────────────
+// ── Camera controls API ───────────────────────────────────────────────────────
+//
+// Controls cannot be set directly on a running camera via camera_->setControls()
+// (that method does not exist in the Bullseye libcamera).  Instead we use a
+// "pending controls" pattern:
+//   • The public set_* functions write to atomic members (pending_*).
+//   • apply_pending_controls() is called just before each request is requeued
+//     (in on_request_complete and draw()), injecting the controls into the
+//     Request::controls() ControlList for the next capture cycle.
+//   • AF state and lens position are read back from request metadata and stored
+//     in last_af_state_ / last_lens_pos_ atomics.
+
+void DmaCamera::apply_pending_controls(ControlList& ctrls) {
+    int af = pending_af_mode_.exchange(-1);
+    if (af >= 0)
+        ctrls.set(controls::AfMode, af);
+
+    float ev = pending_ev_.exchange(-9999.0f);
+    if (ev > -9998.0f)
+        ctrls.set(controls::ExposureValue, ev);
+
+    int sh = pending_shutter_us_.exchange(-1);
+    if (sh > 0)
+        ctrls.set(controls::ExposureTime, sh);
+
+    float lp = pending_lens_pos_.exchange(-1.0f);
+    if (lp >= 0.0f)
+        ctrls.set(controls::LensPosition, lp);
+}
 
 void DmaCamera::start_autofocus() {
     if (!camera_) return;
-    try {
-        auto& controls = camera_->controls();
-        if (controls.count(&controls::AfMode)) {
-            ControlList ctrls(controls);
-            ctrls.set(controls::AfMode, controls::AfModeEnum::Auto);
-            camera_->setControls(&ctrls);
-        }
-    } catch (...) {
-        std::cerr << "[dma] autofocus start failed\n";
-    }
+    if (camera_->controls().count(&controls::AfMode))
+        pending_af_mode_.store(controls::AfModeAuto);
 }
 
 void DmaCamera::stop_autofocus() {
     if (!camera_) return;
-    try {
-        auto& controls = camera_->controls();
-        if (controls.count(&controls::AfMode)) {
-            ControlList ctrls(controls);
-            ctrls.set(controls::AfMode, controls::AfModeEnum::Off);
-            camera_->setControls(&ctrls);
-        }
-    } catch (...) {
-        std::cerr << "[dma] autofocus stop failed\n";
-    }
+    if (camera_->controls().count(&controls::AfMode))
+        pending_af_mode_.store(controls::AfModeManual);
 }
 
 void DmaCamera::set_focus_position(int pos) {
     if (!camera_ || pos < 0 || pos > 1000) return;
-    try {
-        auto& controls = camera_->controls();
-        if (controls.count(&controls::FocusAbsolute)) {
-            ControlList ctrls(controls);
-            int normalized_pos = (pos * 32767) / 1000;
-            ctrls.set(controls::FocusAbsolute, normalized_pos);
-            camera_->setControls(&ctrls);
-        }
-    } catch (...) {
-        std::cerr << "[dma] focus position set failed\n";
+    if (camera_->controls().count(&controls::LensPosition)) {
+        // LensPosition is in diopters: 0.0 = infinity, ~10.0 = closest.
+        // Map our 0-1000 scale linearly over 0-10 diopters.
+        pending_lens_pos_.store((pos / 1000.0f) * 10.0f);
     }
 }
 
 int DmaCamera::get_focus_position() const {
-    if (!camera_) return 500;
-    try {
-        auto status = camera_->controls();
-        if (status.count(&controls::FocusAbsolute)) {
-            int pos = status.get(controls::FocusAbsolute).get<int>();
-            return (pos * 1000) / 32767;
-        }
-    } catch (...) {}
-    return 500;
+    // Convert diopters (0-10) back to our 0-1000 scale.
+    float lp = last_lens_pos_.load();
+    return static_cast<int>((lp / 10.0f) * 1000.0f);
 }
 
 bool DmaCamera::is_af_locked() const {
-    if (!camera_) return false;
-    try {
-        auto status = camera_->controls();
-        if (status.count(&controls::AfState)) {
-            auto state = status.get(controls::AfState).get<int>();
-            return state == controls::AfStateEnum::Focused;
-        }
-    } catch (...) {}
-    return false;
+    return last_af_state_.load() == controls::AfStateFocused;
 }
 
 void DmaCamera::set_exposure_ev(float ev) {
     if (!camera_) return;
-    try {
-        auto& controls = camera_->controls();
-        if (controls.count(&controls::ExposureValue)) {
-            ControlList ctrls(controls);
-            ctrls.set(controls::ExposureValue, ev);
-            camera_->setControls(&ctrls);
-        }
-    } catch (...) {
-        std::cerr << "[dma] exposure EV set failed\n";
-    }
+    if (camera_->controls().count(&controls::ExposureValue))
+        pending_ev_.store(ev);
 }
 
 void DmaCamera::set_shutter_speed_us(int us) {
     if (!camera_) return;
-    try {
-        auto& controls = camera_->controls();
-        if (controls.count(&controls::ExposureTime)) {
-            ControlList ctrls(controls);
-            ctrls.set(controls::ExposureTime, us);
-            camera_->setControls(&ctrls);
-        }
-    } catch (...) {
-        std::cerr << "[dma] shutter speed set failed\n";
-    }
+    if (camera_->controls().count(&controls::ExposureTime))
+        pending_shutter_us_.store(us);
 }
