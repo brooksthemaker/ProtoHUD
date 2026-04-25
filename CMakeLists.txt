@@ -17,7 +17,7 @@ set(CMAKE_CXX_FLAGS_DEBUG   "-g -DDEBUG")
 
 find_package(PkgConfig REQUIRED)
 
-# GLFW3 (window + input — X11 backend on Bullseye)
+# GLFW3 (window + input)
 # Try pkg-config first; fall back to CMake config (installed by the source build).
 pkg_check_modules(GLFW3 glfw3)   # not REQUIRED here — we handle failure below
 if(NOT GLFW3_FOUND)

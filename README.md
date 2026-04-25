@@ -32,7 +32,7 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Raspberry Pi CM5 (aarch64 · Bullseye)                               │
+│  Raspberry Pi CM5 (aarch64 · Bookworm / Trixie + RPT)                │
 │                                                                      │
 │  libcamera (NV12, zero-copy DMA) ──► DmaCamera ──► GLES2 shader     │
 │                          left FBO ◄────────────────────────────────  │
@@ -83,7 +83,7 @@ Optional async timewarp warps each eye FBO using the latest IMU pose before comp
 | Radio | RAK4631 LoRa mesh radio (868/915 MHz) |
 | Audio processor | RP2350 helmet audio board — 6-mic beamforming/NR, USB Audio UAC2 output |
 | Android device | Any ADB-capable Android phone (optional, for screen mirror) |
-| OS | Raspberry Pi OS Bullseye (64-bit, aarch64) |
+| OS | Raspberry Pi OS Bookworm · Debian Trixie + RPT packages (64-bit, aarch64) |
 
 ### GPIO Button Wiring
 
@@ -267,7 +267,7 @@ The optional GPS module connects to the RAK4631 via WisBlock Slot A UART (`Seria
 
 ## Quick Start
 
-Run the one-shot installer on the CM5 (Bullseye, aarch64). The script uses per-command `sudo` internally — **do not run it as root**:
+Run the one-shot installer on the CM5 (Bookworm or Debian Trixie with RPT packages, aarch64). The script uses per-command `sudo` internally — **do not run it as root**:
 
 ```bash
 git clone https://github.com/brooksthemaker/ProtoHUD ~/ProtoHUD

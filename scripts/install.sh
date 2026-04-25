@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
-#  ProtoHUD Installer — Raspberry Pi OS Bullseye (aarch64) on CM5
+#  ProtoHUD Installer — Raspberry Pi CM5 (aarch64)
+#  Supported: Raspberry Pi OS Bookworm · Debian Trixie + RPT packages
 #  Run once from the project root:
 #    chmod +x scripts/install.sh && ./scripts/install.sh
 #
 #  What this does (in order):
 #    1. Preflight  — check OS, arch, sudo availability
 #    2. Packages   — build tools, libraries, headers
-#    3. Overlay    — compile & install the cm5-6mic I2S DT overlay
-#    4. Boot cfg   — dtoverlay, gpu_mem, camera in /boot/config.txt
+#    3. RP2350     — check for USB audio device
+#    4. Boot cfg   — gpu_mem, camera_auto_detect in /boot/firmware/config.txt
 #    5. udev       — stable /dev/teensy, /dev/smartknob, /dev/lora symlinks
-#    6. Android    — v4l2loopback module config for Android mirror (scrcpy)
+#    6. Android    — v4l2loopback module config for Android mirror
 #    7. Groups     — add current user to gpio / dialout / video / render / audio
 #    8. Build      — cmake + ninja the project
 #    9. Libraries  — install VITURE SDK .so files to /usr/local/lib
@@ -56,7 +57,7 @@ sudo -v || fatal "sudo authentication failed"
 SUDO_KEEPALIVE_PID=$!
 trap 'kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null' EXIT
 
-# OS detection — Bullseye=/boot/config.txt, Bookworm=/boot/firmware/config.txt
+# OS detection — Bookworm/Trixie use /boot/firmware/config.txt; Bullseye used /boot/config.txt
 if [[ -f /boot/firmware/config.txt ]]; then
     BOOT_CFG="/boot/firmware/config.txt"
     OVERLAY_DIR="/boot/firmware/overlays"
@@ -80,6 +81,9 @@ PKGS=(
     device-tree-compiler       # dtc — compiles .dts → .dtbo
 
     # GLES2/EGL (handled separately — GLFW3 has its own fallback below)
+    # Trixie uses libgl-dev/libgles-dev/libegl-dev; Bookworm/Bullseye use the
+    # -mesa- prefixed names. The mesa names are transitional on Trixie and still
+    # resolve correctly, so we use them for backwards compatibility.
     libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev
 
     # Dear ImGui is fetched via CMake FetchContent — no apt package needed
@@ -93,7 +97,7 @@ PKGS=(
     # nlohmann/json
     nlohmann-json3-dev
 
-    # libgpiod v1.6 (GPIO buttons — Bullseye ships 1.6.x)
+    # libgpiod v2 (GPIO buttons — Bookworm/Trixie ship v2; code uses the v2 API)
     libgpiod-dev
 
     # ALSA (spatial audio)
@@ -130,8 +134,8 @@ else
 fi
 
 # ── GLFW3 (window + input) ───────────────────────────────────────────────────
-# libglfw3-dev is in the Bullseye repo but its pkg-config file sometimes lands
-# in a path CMake doesn't search, or the package may be absent entirely.
+# Trixie/Bookworm ship GLFW 3.4 in apt. Bullseye shipped 3.3 and sometimes put
+# the pkg-config file in a multiarch path CMake didn't search.
 # Strategy: try apt → verify pkg-config finds it → build from source if needed.
 section_inline() { echo -e "\n${BOLD}── $* ──${RESET}"; }
 section_inline "GLFW3"
@@ -225,7 +229,7 @@ boot_append() {
 # GPU memory split — 256 MB for the compositor / EGL
 boot_append "gpu_mem=256"
 
-# libcamera / camera auto-detect (needed on Bullseye for CSI)
+# Enable camera auto-detection (required for CSI cameras on all Pi OS variants)
 boot_append "camera_auto_detect=1"
 
 ok "Boot config updated: ${BOOT_CFG}"

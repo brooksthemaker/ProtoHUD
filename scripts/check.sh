@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
 #  ProtoHUD post-install health check
+#  Supported: Raspberry Pi OS Bookworm · Debian Trixie + RPT packages
 #  Run after reboot to verify all hardware and software is ready.
 #    chmod +x scripts/check.sh && ./scripts/check.sh
 # ══════════════════════════════════════════════════════════════════════════════
@@ -92,7 +93,30 @@ check_output "HDMI audio"         "vc4hdmi\|HDMI"
 
 # ── 6. CSI cameras (libcamera) ───────────────────────────────────────────────
 section "CSI cameras (OWLsight)"
-# Bookworm renamed libcamera-hello → rpicam-hello; try both
+
+# IPA modules required for Pi cameras — check all known locations:
+#   Bullseye/Pi OS:  /usr/lib/libcamera/
+#   Bookworm/Trixie: /usr/lib/aarch64-linux-gnu/libcamera/  (multiarch)
+IPA_FOUND=false
+for IPA_DIR in /usr/lib/libcamera /usr/lib/aarch64-linux-gnu/libcamera \
+               /usr/local/lib/libcamera /usr/local/lib/aarch64-linux-gnu/libcamera; do
+    if [[ -d "${IPA_DIR}" ]] && ls "${IPA_DIR}"/*.so* &>/dev/null 2>&1; then
+        IPA_FOUND=true
+        info "libcamera IPA modules: ${IPA_DIR}"
+        break
+    fi
+done
+if ! ${IPA_FOUND}; then
+    # libcamera-ipa package installed but path unknown — check via dpkg as fallback
+    if dpkg -l libcamera-ipa 2>/dev/null | grep -q "^ii"; then
+        IPA_FOUND=true
+        info "libcamera IPA modules: installed via libcamera-ipa package"
+    else
+        warn "libcamera IPA modules not found — install: sudo apt install libcamera-ipa"
+    fi
+fi
+
+# rpicam-hello (Bookworm/Trixie) or libcamera-hello (Bullseye)
 CAM_TOOL=""
 if command -v rpicam-hello &>/dev/null; then
     CAM_TOOL="rpicam-hello"
@@ -108,11 +132,10 @@ if [[ -n "${CAM_TOOL}" ]]; then
     elif [[ "${CAM_COUNT}" -eq 1 ]]; then
         warn "Only 1 camera detected (expected 2 OWLsight cameras) — check CSI ribbon cables"
     else
-        warn "No libcamera cameras detected — check CSI ribbon cables and camera_auto_detect boot config"
+        warn "No libcamera cameras detected — check CSI cables and camera_auto_detect in boot config"
     fi
 else
-    warn "Neither rpicam-hello nor libcamera-hello found — install rpicam-apps:"
-    info "  sudo apt install rpicam-apps"
+    warn "Neither rpicam-hello nor libcamera-hello found — install: sudo apt install rpicam-apps"
 fi
 
 # ── 7. v4l2loopback (Android mirror) ─────────────────────────────────────────
