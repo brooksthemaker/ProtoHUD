@@ -452,13 +452,16 @@ void HudRenderer::draw_lora_messages(ImDrawList* dl, const AppState& s,
 
 void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
                                      ImVec2 origin, float tw, float th) {
-    dl->AddRectFilled(origin, {origin.x + tw, origin.y + th}, col_.background);
-    dl->AddLine(origin, {origin.x + tw, origin.y}, col_.primary);
+    const float heading  = s.compass_heading;
+    const float ppd      = tw / 120.f; // 120° visible across full tape width
+    const float center_x = origin.x + tw / 2.f;
+    const float tick_y   = origin.y + th - 8.f;
 
-    const float heading   = s.compass_heading;
-    const float ppd       = tw / 120.f; // 120° visible across full tape width
-    const float center_x  = origin.x + tw / 2.f;
-    const float tick_y    = origin.y + th - 8.f;
+    constexpr ImU32 col_major  = IM_COL32(255, 160,  32, 255);
+    constexpr ImU32 col_mid    = IM_COL32(255, 140,  20, 180);
+    constexpr ImU32 col_minor  = IM_COL32(255, 130,  20, 110);
+    constexpr ImU32 col_glow1  = IM_COL32(255, 160,  32,  70);
+    constexpr ImU32 col_glow2  = IM_COL32(255, 160,  32,  28);
 
     if (font_mono_) ImGui::PushFont(font_mono_);
     for (int deg = 0; deg < 360; deg++) {
@@ -470,16 +473,18 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         if (px < origin.x || px > origin.x + tw) continue;
 
         if (deg % 45 == 0) {
-            dl->AddLine({px, origin.y + 2.f}, {px, tick_y}, col_.accent, 1.5f);
-            dl->AddText({px - 8.f, origin.y + 4.f}, col_.accent,
+            // Glow — wide dim halos behind the sharp tick
+            dl->AddLine({px, origin.y + 2.f}, {px, tick_y}, col_glow2, 9.f);
+            dl->AddLine({px, origin.y + 2.f}, {px, tick_y}, col_glow1, 4.f);
+            dl->AddLine({px, origin.y + 2.f}, {px, tick_y}, col_major, 1.5f);
+            dl->AddText({px - 8.f, origin.y + 4.f}, col_major,
                         cardinal_str(static_cast<float>(deg)));
         } else if (deg % 10 == 0) {
-            dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_.primary);
+            dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_mid);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
             dl->AddText({px - 8.f, tick_y - 28.f}, col_.text_dim, buf);
         } else if (deg % 5 == 0) {
-            ImU32 tick_col = (col_.primary & 0x00FFFFFF) | 0x99000000;
-            dl->AddLine({px, tick_y - 8.f}, {px, tick_y}, tick_col);
+            dl->AddLine({px, tick_y - 8.f}, {px, tick_y}, col_minor);
         }
     }
 
