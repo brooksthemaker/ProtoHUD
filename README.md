@@ -45,7 +45,7 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 │               ──► MenuSystem (ImGui windows) ──► camera / audio ctrl │
 │                                                                      │
 │  Serial threads:  Teensy (face LEDs) · SmartKnob · LoRa radio       │
-│  GPIO thread:     libgpiod v1 · 3 hardware buttons                  │
+│  GPIO thread:     libgpiod v2 · 3 hardware buttons                  │
 │  Audio thread:    ALSA · USB capture (RP2350) → gain → playback     │
 │  Android thread:  scrcpy subprocess → V4L2 loopback → OpenCV → GL  │
 └──────────────────────────────────────────────────────────────────────┘
@@ -278,16 +278,22 @@ chmod +x scripts/install.sh
 
 The installer runs 11 steps:
 1. **Preflight** — checks OS, arch, and sudo availability; caches credentials once
-2. **Packages** — apt dependencies (GLFW, GLES, libcamera, OpenCV, libgpiod, ALSA, v4l2loopback-dkms, adb, scrcpy)
-3. **Overlay** — compiles and installs the `cm5-6mic` I2S device-tree overlay (for boot config; not used for audio capture)
+2. **Packages** — apt dependencies (GLFW, GLES, libcamera, OpenCV, libgpiod, ALSA, v4l2loopback-dkms, adb)
+3. **RP2350 audio** — checks for RP2350 USB audio device on `hw:CARD=HelmetAudio6Mic`
 4. **Boot config** — sets `gpu_mem=256`, `camera_auto_detect=1` in `/boot/config.txt`
 5. **udev** — stable `/dev/teensy`, `/dev/smartknob`, `/dev/lora` symlinks
 6. **Android** — v4l2loopback module config for Android mirror (`/dev/video4`)
 7. **Groups** — adds current user to `gpio dialout video render audio input`
 8. **Build** — CMake + Ninja (ImGui fetched automatically on first run)
 9. **Libraries** — installs VITURE SDK `.so` files to `/usr/local/lib`
-10. **Symlink** — creates `./protohud` at project root pointing to `build/protohud`
+10. **Service** — optional systemd unit for auto-start
 11. **Summary** — lists what changed and what still needs a reboot
+
+> **scrcpy** is **not** installed by the script — install it separately afterward if you need Android mirror:
+> ```bash
+> sudo apt-get install scrcpy   # if available in your repo
+> # or build from source: https://github.com/Genymobile/scrcpy
+> ```
 
 After the installer finishes, **reboot once** to apply group membership and boot-config changes:
 
@@ -331,7 +337,7 @@ It checks (and prints PASS / WARN / FAIL for each):
 | CSI cameras | `libcamera-hello --list-cameras` finds ≥ 2 cameras |
 | v4l2loopback | Module loaded; `/dev/video4` ready |
 | Boot config | `gpu_mem=256` and `camera_auto_detect=1` set |
-| scrcpy | Binary present (optional — Android mirror) |
+| scrcpy | Binary present (optional — install separately for Android mirror) |
 
 All required checks must pass before launching. Fix any `[FAIL]` items, then re-run.
 
@@ -542,9 +548,13 @@ Streams an Android device screen into a portrait overlay in the HUD using **scrc
 
 ### Prerequisites
 
-1. `v4l2loopback` module loaded with `exclusive_caps=1` (the installer does this automatically).
-2. Android phone connected via USB with **USB debugging enabled** (`Settings → Developer options → USB debugging`).
-3. First connection: accept the ADB authorisation dialog on the phone.
+1. **scrcpy installed** — not included in the main installer; install it separately:
+   ```bash
+   sudo apt-get install scrcpy   # or build from source: https://github.com/Genymobile/scrcpy
+   ```
+2. `v4l2loopback` module loaded with `exclusive_caps=1` (the installer does this automatically).
+3. Android phone connected via USB with **USB debugging enabled** (`Settings → Developer options → USB debugging`).
+4. First connection: accept the ADB authorisation dialog on the phone.
 
 ```bash
 adb devices
@@ -978,7 +988,7 @@ ln -sf build/protohud ~/ProtoHUD/protohud
 │   │   ├── xr_display.h/.cpp       — GLFW window, eye FBOs, SBS composite
 │   │   └── timewarp.h/.cpp         — rotational homography warp shader
 │   ├── input/
-│   │   └── gpio_buttons.h/.cpp     — libgpiod v1 button handler
+│   │   └── gpio_buttons.h/.cpp     — libgpiod v2 button handler
 │   ├── serial/
 │   │   ├── serial_port.h/.cpp      — raw UART helpers
 │   │   ├── teensy_controller.h/.cpp
