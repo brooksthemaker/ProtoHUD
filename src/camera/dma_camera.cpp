@@ -547,7 +547,11 @@ void DmaCamera::apply_pending_controls(ControlList& ctrls) {
 void DmaCamera::start_autofocus() {
     if (!camera_) return;
     if (camera_->controls().count(&controls::AfMode))
-        pending_af_mode_.store(controls::AfModeAuto);
+        // AfModeContinuous: scans immediately and keeps tracking without needing
+        // a separate AfTrigger = AfTriggerStart control.
+        // AfModeAuto (one-shot stills mode) does nothing until a trigger arrives,
+        // which is why the startup autofocus appeared to have no effect.
+        pending_af_mode_.store(controls::AfModeContinuous);
 }
 
 void DmaCamera::stop_autofocus() {
