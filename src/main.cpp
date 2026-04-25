@@ -505,11 +505,13 @@ int main(int argc, char* argv[]) {
         usb1_cfg.device = jcam["usb_cam_1"].value("device", "/dev/video2");
         usb1_cfg.width  = jcam["usb_cam_1"].value("width",  1280);
         usb1_cfg.height = jcam["usb_cam_1"].value("height",  720);
+        usb1_cfg.fps    = jcam["usb_cam_1"].value("fps",      30);
     }
     if (jcam.contains("usb_cam_2")) {
         usb2_cfg.device = jcam["usb_cam_2"].value("device", "/dev/video3");
         usb2_cfg.width  = jcam["usb_cam_2"].value("width",  1280);
         usb2_cfg.height = jcam["usb_cam_2"].value("height",  720);
+        usb2_cfg.fps    = jcam["usb_cam_2"].value("fps",      30);
     }
 
     HudConfig hud_cfg;
