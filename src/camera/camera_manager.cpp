@@ -46,17 +46,23 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb1_cfg_ = usb1;
     usb2_cfg_ = usb2;
 
-    auto open_cap = [](cv::VideoCapture& cap, const UsbCamConfig& cfg) -> bool {
+    auto open_cap = [](cv::VideoCapture& cap, const UsbCamConfig& cfg,
+                       const char* name) -> bool {
         if (cfg.device.empty()) return false;
+        std::cerr << "[cam] " << name << ": opening " << cfg.device << " at startup\n";
         cap.open(cfg.device, cv::CAP_V4L2);
-        if (!cap.isOpened()) return false;
+        if (!cap.isOpened()) {
+            std::cerr << "[cam] " << name << ": startup open failed\n";
+            return false;
+        }
         cap.set(cv::CAP_PROP_FRAME_WIDTH,  cfg.width);
         cap.set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
         cap.set(cv::CAP_PROP_FPS,          cfg.fps);
+        std::cerr << "[cam] " << name << ": startup open ok\n";
         return true;
     };
-    usb1_ok_ = open_cap(usb_cap1_, usb1);
-    usb2_ok_ = open_cap(usb_cap2_, usb2);
+    usb1_ok_ = open_cap(usb_cap1_, usb1, "usb1");
+    usb2_ok_ = open_cap(usb_cap2_, usb2, "usb2");
 
     // Start thread whenever USB devices are configured so open/close can work
     // later even if the cameras were not available at startup.
@@ -145,36 +151,60 @@ void CameraManager::usb_capture_thread() {
 
 void CameraManager::open_usb1() {
     std::lock_guard<std::mutex> lk(usb1_cap_mtx_);
-    if (usb_cap1_.isOpened() || usb1_cfg_.device.empty()) return;
+    if (usb1_cfg_.device.empty()) {
+        std::cerr << "[cam] usb1: no device path configured\n"; return;
+    }
+    if (usb_cap1_.isOpened()) {
+        std::cerr << "[cam] usb1: already open\n"; return;
+    }
+    std::cerr << "[cam] usb1: opening " << usb1_cfg_.device << "\n";
     usb_cap1_.open(usb1_cfg_.device, cv::CAP_V4L2);
-    if (!usb_cap1_.isOpened()) { usb1_ok_ = false; return; }
+    if (!usb_cap1_.isOpened()) {
+        std::cerr << "[cam] usb1: open failed — check device path and permissions\n";
+        usb1_ok_ = false; return;
+    }
     usb_cap1_.set(cv::CAP_PROP_FRAME_WIDTH,  usb1_cfg_.width);
     usb_cap1_.set(cv::CAP_PROP_FRAME_HEIGHT, usb1_cfg_.height);
     usb_cap1_.set(cv::CAP_PROP_FPS,          usb1_cfg_.fps);
     usb1_ok_ = true;
+    std::cerr << "[cam] usb1: open ok (" << usb1_cfg_.width
+              << "x" << usb1_cfg_.height << " @" << usb1_cfg_.fps << "fps)\n";
 }
 
 void CameraManager::close_usb1() {
     std::lock_guard<std::mutex> lk(usb1_cap_mtx_);
     usb_cap1_.release();
     usb1_ok_ = false;
+    std::cerr << "[cam] usb1: closed\n";
 }
 
 void CameraManager::open_usb2() {
     std::lock_guard<std::mutex> lk(usb2_cap_mtx_);
-    if (usb_cap2_.isOpened() || usb2_cfg_.device.empty()) return;
+    if (usb2_cfg_.device.empty()) {
+        std::cerr << "[cam] usb2: no device path configured\n"; return;
+    }
+    if (usb_cap2_.isOpened()) {
+        std::cerr << "[cam] usb2: already open\n"; return;
+    }
+    std::cerr << "[cam] usb2: opening " << usb2_cfg_.device << "\n";
     usb_cap2_.open(usb2_cfg_.device, cv::CAP_V4L2);
-    if (!usb_cap2_.isOpened()) { usb2_ok_ = false; return; }
+    if (!usb_cap2_.isOpened()) {
+        std::cerr << "[cam] usb2: open failed — check device path and permissions\n";
+        usb2_ok_ = false; return;
+    }
     usb_cap2_.set(cv::CAP_PROP_FRAME_WIDTH,  usb2_cfg_.width);
     usb_cap2_.set(cv::CAP_PROP_FRAME_HEIGHT, usb2_cfg_.height);
     usb_cap2_.set(cv::CAP_PROP_FPS,          usb2_cfg_.fps);
     usb2_ok_ = true;
+    std::cerr << "[cam] usb2: open ok (" << usb2_cfg_.width
+              << "x" << usb2_cfg_.height << " @" << usb2_cfg_.fps << "fps)\n";
 }
 
 void CameraManager::close_usb2() {
     std::lock_guard<std::mutex> lk(usb2_cap_mtx_);
     usb_cap2_.release();
     usb2_ok_ = false;
+    std::cerr << "[cam] usb2: closed\n";
 }
 
 // ── USB texture upload (render thread) ────────────────────────────────────────
