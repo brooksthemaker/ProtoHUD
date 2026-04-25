@@ -67,8 +67,9 @@ if arecord -l 2>/dev/null | grep -qi "helmet\|HelmetAudio\|b350\|1209"; then
     CARD_LINE=$(arecord -l 2>/dev/null | grep -i "helmet\|HelmetAudio\|b350\|1209" | head -1)
     pass "RP2350 detected: ${CARD_LINE}"
 else
-    fail "RP2350 not detected — connect the RP2350 via USB-C, then re-run this check"
+    warn "RP2350 not detected — audio will be unavailable until connected"
     info "Expected: 'Helmet Audio 6-Mic' (USB VID:PID 1209:b350)"
+    info "Connect via USB-C then re-run this check, or set audio.enabled=false in config.json"
     info "List all audio inputs: arecord -l"
 fi
 
@@ -91,18 +92,27 @@ check_output "HDMI audio"         "vc4hdmi\|HDMI"
 
 # ── 6. CSI cameras (libcamera) ───────────────────────────────────────────────
 section "CSI cameras (OWLsight)"
-if command -v libcamera-hello &>/dev/null; then
-    CAM_LIST=$(libcamera-hello --list-cameras 2>&1)
+# Bookworm renamed libcamera-hello → rpicam-hello; try both
+CAM_TOOL=""
+if command -v rpicam-hello &>/dev/null; then
+    CAM_TOOL="rpicam-hello"
+elif command -v libcamera-hello &>/dev/null; then
+    CAM_TOOL="libcamera-hello"
+fi
+
+if [[ -n "${CAM_TOOL}" ]]; then
+    CAM_LIST=$(${CAM_TOOL} --list-cameras 2>&1)
     CAM_COUNT=$(echo "${CAM_LIST}" | grep -c "^\[" 2>/dev/null || true)
     if [[ "${CAM_COUNT}" -ge 2 ]]; then
-        pass "${CAM_COUNT} camera(s) found"
+        pass "${CAM_COUNT} camera(s) found (${CAM_TOOL})"
     elif [[ "${CAM_COUNT}" -eq 1 ]]; then
-        warn "Only 1 camera detected (expected 2 OWLsight cameras)"
+        warn "Only 1 camera detected (expected 2 OWLsight cameras) — check CSI ribbon cables"
     else
-        warn "No libcamera cameras detected — check CSI ribbon cables"
+        warn "No libcamera cameras detected — check CSI ribbon cables and camera_auto_detect boot config"
     fi
 else
-    warn "libcamera-hello not found — cannot check cameras"
+    warn "Neither rpicam-hello nor libcamera-hello found — install rpicam-apps:"
+    info "  sudo apt install rpicam-apps"
 fi
 
 # ── 7. v4l2loopback (Android mirror) ─────────────────────────────────────────
@@ -120,15 +130,16 @@ fi
 section "Boot config"
 for BOOT_CFG in /boot/firmware/config.txt /boot/config.txt; do
     [[ -f "${BOOT_CFG}" ]] || continue
-    if grep -qE "^gpu_mem=256" "${BOOT_CFG}"; then
+    if grep -qE "^[[:space:]]*gpu_mem=256" "${BOOT_CFG}"; then
         pass "gpu_mem=256 set in ${BOOT_CFG}"
     else
-        warn "gpu_mem=256 not found in ${BOOT_CFG} — run install.sh"
+        warn "gpu_mem=256 not found in ${BOOT_CFG} — add:  echo 'gpu_mem=256' | sudo tee -a ${BOOT_CFG}"
     fi
-    if grep -qE "^camera_auto_detect=1" "${BOOT_CFG}"; then
+    if grep -qE "^[[:space:]]*camera_auto_detect=1" "${BOOT_CFG}"; then
         pass "camera_auto_detect=1 set"
     else
-        warn "camera_auto_detect=1 not found — run install.sh"
+        warn "camera_auto_detect=1 not found — add:  echo 'camera_auto_detect=1' | sudo tee -a ${BOOT_CFG}"
+        info "Then reboot for cameras to be detected"
     fi
     break
 done
@@ -139,7 +150,8 @@ if command -v scrcpy &>/dev/null; then
     pass "scrcpy: $(scrcpy --version 2>&1 | head -1)"
 else
     warn "scrcpy not installed — Android mirror unavailable (non-critical)"
-    info "Install:  ./scripts/install.sh  (re-running is safe)"
+    info "Install separately:  sudo apt install scrcpy"
+    info "Or build from source: https://github.com/Genymobile/scrcpy"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
