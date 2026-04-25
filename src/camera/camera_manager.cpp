@@ -5,9 +5,12 @@
 
 #include <chrono>
 #include <cstring>
+#include <fcntl.h>
 #include <iostream>
 #include <thread>
 #include <unistd.h>
+#include <linux/videodev2.h>
+#include <sys/ioctl.h>
 
 // NOTE: do NOT add 'using namespace libcamera' here — libcamera::CameraManager
 // would collide with our own CameraManager class.
@@ -15,22 +18,37 @@
 CameraManager::CameraManager()  = default;
 CameraManager::~CameraManager() { shutdown(); }
 
-// Shared helper: open a V4L2 device, negotiate MJPEG + requested resolution,
-// log what was actually accepted by the driver.
+// Returns true if the device is a V4L2 video-capture node (not a sub-device).
+static bool is_capture_device(const std::string& path) {
+    int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct v4l2_capability cap {};
+    bool ok = (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) &&
+              (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE);
+    close(fd);
+    return ok;
+}
+
+// Shared helper: verify capture capability, open via OpenCV, negotiate MJPEG.
 static bool open_v4l2(cv::VideoCapture& cap, const UsbCamConfig& cfg,
                       const char* name) {
+    if (!is_capture_device(cfg.device)) {
+        std::cerr << "[cam] " << name << ": " << cfg.device
+                  << " is not a video-capture node (libcamera ISP sub-device?)"
+                  << " — check config.json and run: v4l2-ctl --list-devices\n";
+        return false;
+    }
     cap.open(cfg.device, cv::CAP_V4L2);
     if (!cap.isOpened()) {
         std::cerr << "[cam] " << name << ": open failed (" << cfg.device
-                  << ") — wrong path or no permission\n";
+                  << ") — check permissions (sudo usermod -aG video $USER)\n";
         return false;
     }
-    // Prefer MJPEG: far wider camera support and lower USB bandwidth than raw YUV.
+    // Prefer MJPEG: wider camera support and lower USB bandwidth than raw YUV.
     cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
     cap.set(cv::CAP_PROP_FRAME_WIDTH,  cfg.width);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
     cap.set(cv::CAP_PROP_FPS,          cfg.fps);
-    // Log what the driver actually negotiated (may differ from requested)
     int aw = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
     int ah = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
     int af = static_cast<int>(cap.get(cv::CAP_PROP_FPS));
@@ -71,12 +89,17 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb1_cfg_ = usb1;
     usb2_cfg_ = usb2;
 
-    // Scan and report available V4L2 devices so wrong paths are obvious
-    std::cerr << "[cam] scanning V4L2 devices:";
-    for (int i = 0; i <= 9; i++) {
+    // Scan /dev/video0-19 and flag which are real capture nodes
+    std::cerr << "[cam] V4L2 capture nodes:";
+    bool found_any = false;
+    for (int i = 0; i <= 19; i++) {
         std::string d = "/dev/video" + std::to_string(i);
-        if (access(d.c_str(), F_OK) == 0) std::cerr << " " << d;
+        if (access(d.c_str(), F_OK) == 0 && is_capture_device(d)) {
+            std::cerr << " " << d;
+            found_any = true;
+        }
     }
+    if (!found_any) std::cerr << " (none found)";
     std::cerr << "\n";
 
     usb1_ok_ = !usb1.device.empty() && open_v4l2(usb_cap1_, usb1, "usb1");
