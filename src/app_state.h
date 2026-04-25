@@ -122,7 +122,8 @@ struct AppState {
     size_t                   max_messages = 50;
 
     // Heading used for the HUD compass. Updated by LoRa or IMU.
-    float compass_heading = 0.0f;
+    float compass_heading    = 0.0f;
+    bool  compass_bg_enabled = false;
 
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;

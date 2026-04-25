@@ -465,7 +465,18 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     constexpr ImU32 col_glow1  = IM_COL32(255, 160,  32,  70);
     constexpr ImU32 col_glow2  = IM_COL32(255, 160,  32,  28);
 
+    // Optional gradient background: transparent at top, opaque at bottom
+    if (s.compass_bg_enabled) {
+        const uint8_t a = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
+        dl->AddRectFilledMultiColor(
+            {origin.x, origin.y}, {origin.x + tw, origin.y + th},
+            IM_COL32(8, 12, 18,  0), IM_COL32(8, 12, 18,  0),  // top: clear
+            IM_COL32(8, 12, 18,  a), IM_COL32(8, 12, 18,  a)); // bottom: solid
+    }
+
     if (font_mono_) ImGui::PushFont(font_mono_);
+
+    // Pass 1 — all tick lines so cardinal labels always render on top
     for (int deg = 0; deg < 360; deg++) {
         float offset = deg - heading;
         while (offset >  180.f) offset -= 360.f;
@@ -475,22 +486,32 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         if (px < origin.x || px > origin.x + tw) continue;
 
         if (deg % 45 == 0) {
-            // Glow — wide dim halos behind the sharp tick
-            dl->AddLine({px, origin.y + 2.f}, {px, tick_y}, col_glow2, 9.f);
-            dl->AddLine({px, origin.y + 2.f}, {px, tick_y}, col_glow1, 4.f);
-            dl->AddLine({px, origin.y + 2.f}, {px, tick_y}, col_major, 1.5f);
-            dl->AddText({px - 8.f, origin.y + 4.f}, col_major,
-                        cardinal_str(static_cast<float>(deg)));
+            dl->AddLine({px, origin.y}, {px, tick_y}, col_glow2, 9.f);
+            dl->AddLine({px, origin.y}, {px, tick_y}, col_glow1, 4.f);
+            dl->AddLine({px, origin.y}, {px, tick_y}, col_major, 1.5f);
         } else if (deg % 10 == 0) {
             dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_mid);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
-            dl->AddText({px - 8.f, tick_y - 28.f}, col_.text_dim, buf);
+            dl->AddText({px - 8.f, tick_y - 28.f}, col_major, buf);
         } else if (deg % 5 == 0) {
             dl->AddLine({px, tick_y - 8.f}, {px, tick_y}, col_minor);
         }
     }
 
-    // Centre cursor triangle — glow then sharp fill
+    // Pass 2 — cardinal labels float above the tick area
+    for (int deg = 0; deg < 360; deg += 45) {
+        float offset = deg - heading;
+        while (offset >  180.f) offset -= 360.f;
+        while (offset < -180.f) offset += 360.f;
+
+        float px = center_x + offset * ppd;
+        if (px < origin.x || px > origin.x + tw) continue;
+
+        dl->AddText({px - 8.f, origin.y - 16.f}, col_major,
+                    cardinal_str(static_cast<float>(deg)));
+    }
+
+    // Centre cursor triangle — glow halo then sharp fill
     dl->AddTriangleFilled(
         {center_x,        origin.y       },
         {center_x - 12.f, origin.y + 18.f},

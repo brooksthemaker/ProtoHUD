@@ -340,6 +340,14 @@ static std::vector<MenuItem> build_menu(
         { "Size",         nullptr, make_size_items(android_cfg)     },
     };
 
+    // ── Compass ───────────────────────────────────────────────────────────────
+    std::vector<MenuItem> compass_menu = {
+        { "BG On",  [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                               state.compass_bg_enabled = true;  }, {} },
+        { "BG Off", [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                               state.compass_bg_enabled = false; }, {} },
+    };
+
     return {
         { "Face Effects",    nullptr, std::move(effects)            },
         { "Face Color",      nullptr, std::move(colors)             },
@@ -348,6 +356,7 @@ static std::vector<MenuItem> build_menu(
         { "Lens Brightness", nullptr, std::move(glasses_brightness) },
         { "Camera",          nullptr, std::move(camera_menu)        },
         { "USB Cameras",     nullptr, std::move(pip_menu)           },
+        { "Compass",         nullptr, std::move(compass_menu)       },
         { "Audio",           nullptr, std::move(audio_menu)         },
         { "Headset",         nullptr, std::move(headset_menu)       },
         { "Android Mirror",  nullptr, std::move(android_menu)       },
@@ -486,6 +495,7 @@ int main(int argc, char* argv[]) {
     HudConfig hud_cfg;
     hud_cfg.compass_height        = jval(jhud, "compass_height_px",        60);
     hud_cfg.compass_bottom_margin = jval(jhud, "compass_bottom_margin_px",  20);
+    hud_cfg.compass_bg_opacity    = jval(jhud, "compass_bg_opacity",        0.75f);
     hud_cfg.panel_width          = jval(jhud, "panel_width_px",       200);
     hud_cfg.health_panel_opacity = jval(jhud, "health_panel_opacity", 0.71f);
     hud_cfg.opacity              = jval(jdisp,"hud_opacity",          0.85f);
@@ -516,7 +526,8 @@ int main(int argc, char* argv[]) {
     // ── Shared state ──────────────────────────────────────────────────────────
 
     AppState state;
-    state.max_messages = jval(jhud, "lora_message_history", 50);
+    state.max_messages        = jval(jhud, "lora_message_history", 50);
+    state.compass_bg_enabled  = jhud.value("compass_bg", false);
 
     if (cfg.contains("night_vision")) {
         auto& jnv = cfg["night_vision"];
@@ -777,8 +788,9 @@ int main(int argc, char* argv[]) {
             snap.audio           = state.audio;
             snap.lora_nodes      = state.lora_nodes;
             snap.lora_messages   = state.lora_messages;
-            snap.compass_heading = state.compass_heading;
-            snap.imu_pose        = state.imu_pose;
+            snap.compass_heading    = state.compass_heading;
+            snap.compass_bg_enabled = state.compass_bg_enabled;
+            snap.imu_pose           = state.imu_pose;
         }
 
         // Record render-time pose for timewarp
