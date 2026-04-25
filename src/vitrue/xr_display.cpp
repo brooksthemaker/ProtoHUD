@@ -154,21 +154,18 @@ void XRDisplay::composite() {
 
     gl::bind_quad(quad_vbo_);
 
-    if (device_) {
-        // 3D SBS: left eye → left half, right eye → right half (NDC)
-        glBindTexture(GL_TEXTURE_2D, rt_left_.tex);
-        glUniform4f(glGetUniformLocation(blit_prog_, "u_rect"), -1.f, -1.f, 0.f, 1.f);
-        gl::draw_quad();
+    // SBS layout: left eye → left half, right eye → right half.
+    // When glasses are connected (device_) the window is 3840×1080 and each eye
+    // fills 1920×1080 naturally.  In desktop fallback the window is 1920×1080 and
+    // both cameras are squeezed into 960×1080 each — useful for verifying that
+    // both camera feeds are alive without the glasses attached.
+    glBindTexture(GL_TEXTURE_2D, rt_left_.tex);
+    glUniform4f(glGetUniformLocation(blit_prog_, "u_rect"), -1.f, -1.f, 0.f, 1.f);
+    gl::draw_quad();
 
-        glBindTexture(GL_TEXTURE_2D, rt_right_.tex);
-        glUniform4f(glGetUniformLocation(blit_prog_, "u_rect"),  0.f, -1.f, 1.f, 1.f);
-        gl::draw_quad();
-    } else {
-        // Desktop: left eye fills window
-        glBindTexture(GL_TEXTURE_2D, rt_left_.tex);
-        glUniform4f(glGetUniformLocation(blit_prog_, "u_rect"), -1.f, -1.f, 1.f, 1.f);
-        gl::draw_quad();
-    }
+    glBindTexture(GL_TEXTURE_2D, rt_right_.tex);
+    glUniform4f(glGetUniformLocation(blit_prog_, "u_rect"),  0.f, -1.f, 1.f, 1.f);
+    gl::draw_quad();
 
     gl::unbind_quad();
     glUseProgram(0);

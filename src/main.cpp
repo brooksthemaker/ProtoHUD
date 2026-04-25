@@ -805,15 +805,16 @@ int main(int argc, char* argv[]) {
             int ew = xr.eye_width();
             int eh = xr.eye_height();
 
-            if (xr.glasses_found()) {
-                glViewport(0,  0, ew, eh);
-                timewarp.warp_frame(xr.eye_left().tex,  ew, eh, current_pose);
-                glViewport(ew, 0, ew, eh);
-                timewarp.warp_frame(xr.eye_right().tex, ew, eh, current_pose);
-            } else {
-                glViewport(0, 0, xr.display_width(), xr.display_height());
-                timewarp.warp_frame(xr.eye_left().tex, ew, eh, current_pose);
-            }
+            // SBS layout for both glasses and desktop preview.
+            // Glasses: window is 3840×1080 → each half is exactly 1920×1080.
+            // Desktop: window is 1920×1080 → each half is 960×1080 (squeezed
+            //          horizontally, fine for verifying both cameras are alive).
+            int half_w = xr.display_width() / 2;
+            int dh     = xr.display_height();
+            glViewport(0,      0, half_w, dh);
+            timewarp.warp_frame(xr.eye_left().tex,  ew, eh, current_pose);
+            glViewport(half_w, 0, half_w, dh);
+            timewarp.warp_frame(xr.eye_right().tex, ew, eh, current_pose);
         } else {
             // Standard composite (no latency correction)
             xr.composite();
