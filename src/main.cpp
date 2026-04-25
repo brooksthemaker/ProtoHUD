@@ -735,7 +735,8 @@ int main(int argc, char* argv[]) {
     int pip_trigger_ms  = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "pip_trigger_time_ms",2000);
 
     GpioButtons buttons(button_1_gpio, button_2_gpio, button_3_gpio, af_trigger_ms, pip_trigger_ms);
-    bool pip_left_active = false, pip_right_active = false;
+    bool pip_left_active  = false, pip_right_active  = false;  // GPIO-driven
+    bool kb_pip_left      = false, kb_pip_right      = false;  // keyboard-driven
 
     if (gpio_enabled) {
         if (buttons.init()) {
@@ -813,9 +814,10 @@ int main(int argc, char* argv[]) {
         // 1/2 = toggle PiP left/right   (short-press buttons 1/2)
         // 3   = menu select             (button 3 / aux)
         // 4/5 = autofocus left/right    (long-press buttons 1/2)
+        // kb_pip_* are independent of gpio; GPIO does not overwrite them.
         if (!menu.is_open()) {
-            if (key_pressed(ImGuiKey_1)) pip_left_active  = !pip_left_active;
-            if (key_pressed(ImGuiKey_2)) pip_right_active = !pip_right_active;
+            if (key_pressed(ImGuiKey_1)) kb_pip_left  = !kb_pip_left;
+            if (key_pressed(ImGuiKey_2)) kb_pip_right = !kb_pip_right;
         }
         if (key_pressed(ImGuiKey_3) && menu.is_open()) menu.select();
         if (key_pressed(ImGuiKey_4)) {
@@ -929,11 +931,11 @@ int main(int argc, char* argv[]) {
 
         hud.draw_pip(tex_usb1, "Cam 1",
                      xr.eye_width(), xr.eye_height(),
-                     pip_cam1_overlay_active || pip_left_active,
+                     pip_cam1_overlay_active || pip_left_active || kb_pip_left,
                      pip_overlay_cfg1);
         hud.draw_pip(tex_usb2, "Cam 2",
                      xr.eye_width(), xr.eye_height(),
-                     pip_cam2_overlay_active || pip_right_active,
+                     pip_cam2_overlay_active || pip_right_active || kb_pip_right,
                      pip_overlay_cfg2);
 
         hud.draw_android_overlay(tex_android,

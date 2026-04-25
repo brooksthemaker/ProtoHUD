@@ -179,13 +179,19 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
                       { pos.x + ov_w, pos.y + ov_h },
                       col_.background);
 
-    // Camera image or dark placeholder
+    // Camera image or "No Signal" placeholder
     if (tex) {
         dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
                      { pos.x, pos.y }, { pos.x + ov_w, pos.y + ov_h });
+    } else {
+        if (font_mono_) ImGui::PushFont(font_mono_);
+        const char* msg = "No Signal";
+        dl->AddText({ pos.x + ov_w * 0.5f - 36.f, pos.y + ov_h * 0.5f - 7.f },
+                    col_.text_dim, msg);
+        if (font_mono_) ImGui::PopFont();
     }
 
-    // Label (always on top so it's visible even with no signal)
+    // Label (top-left corner, always visible)
     if (font_mono_) ImGui::PushFont(font_mono_);
     dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.primary, label);
     if (font_mono_) ImGui::PopFont();
