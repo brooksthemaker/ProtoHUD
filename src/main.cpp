@@ -384,7 +384,23 @@ int main(int argc, char* argv[]) {
         return bin_dir + "/" + rel;
     };
 
-    std::string cfg_path = (argc > 1) ? argv[1] : res("config.json");
+    // Config search order (no explicit path argument):
+    //   1. <bin_dir>/../config/config.json  — in-tree dev layout (build/protohud →
+    //                                         ../config/config.json).  Edits here
+    //                                         take effect immediately without rebuild.
+    //   2. <bin_dir>/config.json            — installed/packaged layout fallback.
+    std::string cfg_path;
+    if (argc > 1) {
+        cfg_path = argv[1];
+    } else {
+        std::string dev_cfg = bin_dir + "/../config/config.json";
+        std::string def_cfg = res("config.json");
+        try {
+            cfg_path = fs::exists(dev_cfg) ? dev_cfg : def_cfg;
+        } catch (...) {
+            cfg_path = def_cfg;
+        }
+    }
     json cfg = load_config(cfg_path);
 
     // ── Config extraction ─────────────────────────────────────────────────────
