@@ -126,6 +126,8 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
         draw_lora_messages(dl, s,       { 0.f, th }, msg_w, mid_h);
     }
 
+    draw_health_dots(dl, s.health, {10.f, th + 8.f});
+
     draw_compass_tape(dl, s,            { 0.f, fh - ch }, fw, ch);
 }
 
@@ -234,10 +236,6 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
     float th = static_cast<float>(cfg_.top_bar_height);
 
     dl->AddRectFilled({0, 0}, {w, th}, col_.background);
-    dl->AddLine({0, th}, {w, th}, col_.primary);
-
-    // Health indicators
-    draw_health_dots(dl, s.health, {10.f, 4.f});
 
     // Unread messages badge
     int unread = s.unread_message_count();
@@ -255,21 +253,40 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
 void HudRenderer::draw_health_dots(ImDrawList* dl,
                                     const SystemHealth& h, ImVec2 origin) {
     struct Ind { const char* label; bool ok; };
-    Ind items[] = {
-        {"T", h.teensy_ok}, {"L", h.lora_ok}, {"K", h.knob_ok},
-        {"OL", h.cam_owl_left}, {"OR", h.cam_owl_right},
-        {"U1", h.cam_usb1},    {"U2", h.cam_usb2},
-        {"AU", h.audio_ok},    {"AN", h.android_mirror},
+    const Ind items[] = {
+        {"Proot",     h.teensy_ok},
+        {"LoRa",      h.lora_ok},
+        {"Interface", h.knob_ok},
+        {"Left Cam",  h.cam_owl_left},
+        {"Right Cam", h.cam_owl_right},
+        {"Cam 1",     h.cam_usb1},
+        {"Cam 2",     h.cam_usb2},
+        {"Audio",     h.audio_ok},
+        {"Android",   h.android_mirror},
     };
 
-    float cx = origin.x;
+    constexpr float row_h   = 20.f;
+    constexpr float dot_r   = 4.f;
+    constexpr float dot_cx  = 6.f;
+    constexpr float text_x  = 16.f;
+    constexpr int   n_items = 9;
+    constexpr float panel_w = 108.f;
+    constexpr float panel_h = row_h * n_items + 8.f;
+
+    const uint8_t alpha = static_cast<uint8_t>(cfg_.health_panel_opacity * 255.f);
+    dl->AddRectFilled(
+        {origin.x - 4.f, origin.y - 4.f},
+        {origin.x + panel_w, origin.y + panel_h},
+        IM_COL32(8, 12, 18, alpha));
+
     if (font_mono_) ImGui::PushFont(font_mono_);
-    for (auto& item : items) {
+    float y = origin.y;
+    for (const auto& item : items) {
         ImU32 dot_col  = item.ok ? col_.primary : col_.danger;
         ImU32 text_col = item.ok ? col_.text    : col_.text_dim;
-        dl->AddCircleFilled({cx + 5.f, origin.y + 24.f}, 5.f, dot_col);
-        dl->AddText({cx + 12.f, origin.y + 14.f}, text_col, item.label);
-        cx += 36.f;
+        dl->AddCircleFilled({origin.x + dot_cx, y + row_h * 0.5f}, dot_r, dot_col);
+        dl->AddText({origin.x + text_x, y + (row_h - 14.f) * 0.5f}, text_col, item.label);
+        y += row_h;
     }
     if (font_mono_) ImGui::PopFont();
 }

@@ -474,10 +474,11 @@ int main(int argc, char* argv[]) {
     }
 
     HudConfig hud_cfg;
-    hud_cfg.compass_height = jval(jhud, "compass_height_px", 60);
-    hud_cfg.panel_width    = jval(jhud, "panel_width_px",    200);
-    hud_cfg.opacity        = jval(jdisp,"hud_opacity",       0.85f);
-    hud_cfg.scale          = jval(jdisp,"hud_scale",         1.0f);
+    hud_cfg.compass_height       = jval(jhud, "compass_height_px",    60);
+    hud_cfg.panel_width          = jval(jhud, "panel_width_px",       200);
+    hud_cfg.health_panel_opacity = jval(jhud, "health_panel_opacity", 0.71f);
+    hud_cfg.opacity              = jval(jdisp,"hud_opacity",          0.85f);
+    hud_cfg.scale                = jval(jdisp,"hud_scale",            1.0f);
 
     AndroidMirrorConfig and_cfg;
     OverlayConfig       pip_overlay_cfg;
