@@ -829,7 +829,7 @@ int main(int argc, char* argv[]) {
                                &pip_overlay_cfg1, &pip_overlay_cfg2,
                                &pip_cam1_overlay_active, &pip_cam2_overlay_active,
                                &android_overlay_cfg,
-                               &hud_col, &hud_cfg, &menu_ptr));
+                               &hud.colors(), &hud.config(), &menu_ptr));
     menu_ptr = &menu;
 
     menu.set_detent_callback([&knob, &menu](int count) {
