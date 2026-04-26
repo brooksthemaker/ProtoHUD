@@ -28,6 +28,10 @@ struct HudColors {
     ImU32 text       = IM_COL32(200, 240, 230, 255);
     ImU32 text_dim   = IM_COL32(120, 160, 150, 200);
     ImU32 separator  = IM_COL32(  0, 160, 130, 140);
+    // Compass-matched orange palette
+    ImU32 orange      = IM_COL32(255, 160,  32, 255);
+    ImU32 orange_glow = IM_COL32(255, 160,  32,  70);
+    ImU32 orange_dim  = IM_COL32(255, 160,  32,  28);
 };
 
 struct HudConfig {

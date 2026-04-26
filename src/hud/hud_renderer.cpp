@@ -29,6 +29,21 @@ static std::string fmt_time(time_t t) {
     return buf;
 }
 
+// Draw text with an orange glow outline matching the compass tick style.
+// selected=true → full white + bright glow; false → dim white + faint glow.
+static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
+                           bool selected = true) {
+    constexpr ImU32 GLOW_ON  = IM_COL32(255, 160, 32,  72);
+    constexpr ImU32 GLOW_OFF = IM_COL32(255, 160, 32,  22);
+    constexpr ImU32 FILL_ON  = IM_COL32(255, 255, 255, 255);
+    constexpr ImU32 FILL_OFF = IM_COL32(255, 255, 255, 160);
+    const ImU32 glow = selected ? GLOW_ON  : GLOW_OFF;
+    const ImU32 fill = selected ? FILL_ON  : FILL_OFF;
+    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    dl->AddText(pos, fill, text);
+}
+
 // ── Construction ──────────────────────────────────────────────────────────────
 
 HudRenderer::HudRenderer(const HudConfig& cfg, const HudColors& colors)
@@ -372,10 +387,16 @@ void HudRenderer::draw_health_dots(ImDrawList* dl,
     if (font_mono_) ImGui::PushFont(font_mono_);
     float y = origin.y;
     for (const auto& item : items) {
-        ImU32 dot_col  = item.ok ? col_.primary : col_.danger;
-        ImU32 text_col = item.ok ? col_.text    : col_.text_dim;
-        dl->AddCircleFilled({origin.x + dot_cx, y + row_h * 0.5f}, dot_r, dot_col);
-        dl->AddText({origin.x + text_x, y + (row_h - 14.f) * 0.5f}, text_col, item.label);
+        // Dot: orange when OK (with glow halo), red when not OK
+        if (item.ok) {
+            dl->AddCircleFilled({origin.x + dot_cx, y + row_h * 0.5f}, dot_r + 2.f, col_.orange_dim);
+            dl->AddCircleFilled({origin.x + dot_cx, y + row_h * 0.5f}, dot_r,        col_.orange);
+        } else {
+            dl->AddCircleFilled({origin.x + dot_cx, y + row_h * 0.5f}, dot_r, col_.danger);
+        }
+        // Label: white+glow when OK, dim when not OK
+        hud_glow_text(dl, {origin.x + text_x, y + (row_h - 14.f) * 0.5f},
+                      item.label, item.ok);
         y += row_h;
     }
     if (font_mono_) ImGui::PopFont();
@@ -386,24 +407,23 @@ void HudRenderer::draw_health_dots(ImDrawList* dl,
 void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
                                     ImVec2 origin, float w) {
     if (!a.enabled) {
-        dl->AddText(origin, col_.text_dim, "AUDIO OFF");
+        hud_glow_text(dl, origin, "AUDIO OFF", false);
         return;
     }
-    ImU32 col = a.device_ok ? col_.accent : col_.warn;
 
     char buf[64];
     static const char* outputs[] = {"VITURE","JACK","HDMI"};
     const char* out_str = (a.output >= 0 && a.output < 3) ? outputs[a.output] : "?";
     snprintf(buf, sizeof(buf), "AU \xe2\x86\x92 %s  X:%d", out_str, a.xrun_count);
-    dl->AddText(origin, col, buf);
+    hud_glow_text(dl, origin, buf, a.device_ok);
 
     // CPU load bar
     float bar_y = origin.y + 20.f;
     dl->AddRectFilled({origin.x, bar_y}, {origin.x + w, bar_y + 6.f},
-                       IM_COL32(30, 40, 45, 200));
+                       IM_COL32(20, 20, 20, 180));
     float load_w = w * std::min(1.f, a.cpu_load);
     ImU32 load_col = (a.cpu_load > 0.8f) ? col_.danger :
-                     (a.cpu_load > 0.5f) ? col_.warn : col_.primary;
+                     (a.cpu_load > 0.5f) ? col_.warn : col_.orange;
     dl->AddRectFilled({origin.x, bar_y}, {origin.x + load_w, bar_y + 6.f}, load_col);
 }
 
@@ -411,46 +431,46 @@ void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
 
 void HudRenderer::draw_face_panel(ImDrawList* dl, const FaceState& f,
                                    ImVec2 origin, float pw, float ph) {
-    // Transparent background — no fill; left border line as visual anchor only
-    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.primary);
-    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y}, col_.separator);
+    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.orange);
+    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y},
+                IM_COL32(255, 160, 32, 60));
 
-    ImU32 hdr_col = f.connected ? col_.primary : col_.danger;
     if (font_ui_) ImGui::PushFont(font_ui_);
-    dl->AddText({origin.x + 4.f, origin.y + 6.f}, hdr_col, "FACE");
+    hud_glow_text(dl, {origin.x + 4.f, origin.y + 6.f}, "FACE");
 
     float py = origin.y + 28.f;
     const float lh = 22.f;
 
-    dl->AddText({origin.x + 4.f, py}, f.connected ? col_.accent : col_.danger,
-                f.connected ? "Connected" : "Offline");
+    if (f.connected)
+        hud_glow_text(dl, {origin.x + 4.f, py}, "Connected");
+    else
+        dl->AddText({origin.x + 4.f, py}, col_.danger, "Offline");
     py += lh;
 
     char buf[64];
     snprintf(buf, sizeof(buf), "Effect: %s", effect_name(f.effect_id));
-    dl->AddText({origin.x + 4.f, py}, col_.text, buf);
+    hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
     py += lh;
 
     if (f.playing_gif) {
         snprintf(buf, sizeof(buf), "GIF: #%d", f.gif_id);
-        dl->AddText({origin.x + 4.f, py}, col_.accent, buf);
     } else {
         snprintf(buf, sizeof(buf), "Palette: #%d", f.palette_id);
-        dl->AddText({origin.x + 4.f, py}, col_.text, buf);
     }
+    hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
     py += lh;
 
     // Color swatch
     ImU32 swatch = IM_COL32(f.r, f.g, f.b, 255);
     dl->AddRectFilled({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f}, swatch);
-    dl->AddRect      ({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f}, col_.text_dim);
+    dl->AddRect      ({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f},
+                      IM_COL32(255, 160, 32, 120));
     snprintf(buf, sizeof(buf), " R%d G%d B%d", f.r, f.g, f.b);
-    dl->AddText({origin.x + 30.f, py + 1.f}, col_.text, buf);
+    hud_glow_text(dl, {origin.x + 30.f, py + 1.f}, buf, false);
     py += lh;
 
-    // Brightness as a percentage number — no bar graph
     snprintf(buf, sizeof(buf), "Brt: %d%%", (f.brightness * 100) / 255);
-    dl->AddText({origin.x + 4.f, py}, col_.text_dim, buf);
+    hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
     if (font_ui_) ImGui::PopFont();
 }
 
@@ -458,12 +478,12 @@ void HudRenderer::draw_face_panel(ImDrawList* dl, const FaceState& f,
 
 void HudRenderer::draw_lora_panel(ImDrawList* dl, const AppState& s,
                                    ImVec2 origin, float pw, float ph) {
-    // Transparent background — no fill; left border line as visual anchor only
-    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.primary);
-    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y}, col_.separator);
+    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.orange);
+    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y},
+                IM_COL32(255, 160, 32, 60));
 
     if (font_ui_) ImGui::PushFont(font_ui_);
-    dl->AddText({origin.x + 4.f, origin.y + 6.f}, col_.primary, "LORA NODES");
+    hud_glow_text(dl, {origin.x + 4.f, origin.y + 6.f}, "LORA NODES");
 
     float py = origin.y + 28.f;
     time_t now = std::time(nullptr);
@@ -471,31 +491,31 @@ void HudRenderer::draw_lora_panel(ImDrawList* dl, const AppState& s,
     for (const auto& node : s.lora_nodes) {
         if (py + 44.f > origin.y + ph) break;
         double age = difftime(now, node.last_seen);
-        ImU32 node_col = (age < 30.0) ? col_.accent :
-                         (age < 120.0) ? col_.warn : col_.text_dim;
+        bool fresh = (age < 30.0);
 
         char buf[96];
         if (!node.name.empty()) {
-            snprintf(buf, sizeof(buf), "%-10s %03.0f° %.1fkm",
+            snprintf(buf, sizeof(buf), "%-10s %03.0f\xc2\xb0 %.1fkm",
                      node.name.substr(0, 10).c_str(),
                      node.heading_deg, node.distance_m / 1000.f);
         } else {
-            snprintf(buf, sizeof(buf), "ID:%08X  %03.0f° %.1fkm",
+            snprintf(buf, sizeof(buf), "ID:%08X  %03.0f\xc2\xb0 %.1fkm",
                      node.node_id, node.heading_deg, node.distance_m / 1000.f);
         }
-        dl->AddText({origin.x + 4.f, py}, node_col, buf);
+        hud_glow_text(dl, {origin.x + 4.f, py}, buf, fresh);
+        if (!fresh && age < 120.0)  // stale but not lost: warn tint
+            dl->AddText({origin.x + 4.f, py}, col_.warn, buf);
         py += 18.f;
 
         snprintf(buf, sizeof(buf), "  RSSI:%d SNR:%d %ds",
                  node.rssi, node.snr,
                  node.last_seen > 0 ? static_cast<int>(age) : -1);
-        dl->AddText({origin.x + 4.f, py}, col_.text_dim, buf);
+        hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
         py += 22.f;
     }
 
-    if (s.lora_nodes.empty()) {
-        dl->AddText({origin.x + 4.f, py}, col_.text_dim, "No nodes tracked");
-    }
+    if (s.lora_nodes.empty())
+        hud_glow_text(dl, {origin.x + 4.f, py}, "No nodes tracked", false);
     if (font_ui_) ImGui::PopFont();
 }
 
@@ -506,16 +526,15 @@ void HudRenderer::draw_lora_messages(ImDrawList* dl, const AppState& s,
     dl->AddRectFilled(origin, {origin.x + pw, origin.y + ph},
                       IM_COL32(10, 15, 20, 230));
     dl->AddLine({origin.x + pw, origin.y},
-                {origin.x + pw, origin.y + ph}, col_.primary);
+                {origin.x + pw, origin.y + ph}, col_.orange);
 
     if (font_ui_) ImGui::PushFont(font_ui_);
-    dl->AddText({origin.x + 8.f, origin.y + 6.f}, col_.primary, "MESSAGES");
+    hud_glow_text(dl, {origin.x + 8.f, origin.y + 6.f}, "MESSAGES");
 
     float py = origin.y + 28.f;
     for (const auto& msg : s.lora_messages) {
         if (py + 38.f > origin.y + ph) break;
 
-        // Look up sender name
         std::string sender;
         for (const auto& n : s.lora_nodes)
             if (n.local_id == msg.local_id) { sender = n.name; break; }
@@ -528,11 +547,10 @@ void HudRenderer::draw_lora_messages(ImDrawList* dl, const AppState& s,
         snprintf(hdr, sizeof(hdr), "[%s  %s]",
                  sender.substr(0, 10).c_str(),
                  fmt_time(msg.timestamp).c_str());
-        dl->AddText({origin.x + 8.f, py}, col_.accent, hdr);
+        hud_glow_text(dl, {origin.x + 8.f, py}, hdr);
         py += 16.f;
 
-        ImU32 txt_col = msg.read ? col_.text_dim : col_.text;
-        dl->AddText({origin.x + 8.f, py}, txt_col, msg.text.c_str());
+        hud_glow_text(dl, {origin.x + 8.f, py}, msg.text.c_str(), !msg.read);
         py += 22.f;
     }
     if (font_ui_) ImGui::PopFont();
