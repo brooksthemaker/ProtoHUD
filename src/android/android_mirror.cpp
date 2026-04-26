@@ -59,13 +59,25 @@ bool AndroidMirror::get_frame(GLuint& out) {
 
 void AndroidMirror::capture_loop() {
     cv::Mat frame, rgba;
+    int fail_streak = 0;
     while (running_) {
         if (!cap_.read(frame) || frame.empty()) {
             connected_ = false;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (++fail_streak > 50) {
+                // ~5 s of failures — reopen the v4l2 device in case scrcpy restarted
+                cap_.release();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                cap_.open(cfg_.v4l2_sink, cv::CAP_V4L2);
+                fail_streak = 0;
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
             continue;
         }
-        connected_ = true;
+        fail_streak = 0;
+        connected_  = true;
+        if (frame.cols > 0 && frame.rows > 0)
+            frame_aspect_.store(static_cast<float>(frame.cols) / static_cast<float>(frame.rows));
         cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
         {
             std::lock_guard<std::mutex> lk(slot_.mtx);
@@ -92,6 +104,7 @@ bool AndroidMirror::spawn_scrcpy() {
         "--no-audio",      // audio is handled by the spatial audio engine
         "--no-control",    // read-only mirror; disables touch/input injection
         "--no-playback",   // don't open a preview window (scrcpy 2.x+)
+        "--stay-awake",    // prevent phone screen from sleeping while mirroring
         "--video-codec=h264",
         max_size_arg,
         v4l2_arg,

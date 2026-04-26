@@ -285,7 +285,8 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
 
 void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
                                         bool active, bool connecting,
-                                        const OverlayConfig& cfg) {
+                                        const OverlayConfig& cfg,
+                                        float frame_aspect) {
     if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
@@ -293,7 +294,7 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     const float sw     = static_cast<float>(w);
     const float sh     = static_cast<float>(h);
     const float ov_h   = sh * cfg.size;
-    const float ov_w   = ov_h * (9.f / 16.f);   // phone portrait aspect
+    const float ov_w   = ov_h * frame_aspect;
     const float margin = static_cast<float>(cfg_.compass_height);
     const auto  pos    = overlay_origin(cfg, sw, sh, ov_w, ov_h, margin);
 

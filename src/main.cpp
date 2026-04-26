@@ -957,7 +957,8 @@ int main(int argc, char* argv[]) {
                                   xr.eye_width(), xr.eye_height(),
                                   android_overlay_active,
                                   android_mirror.is_running() && !android_mirror.is_connected(),
-                                  android_overlay_cfg);
+                                  android_overlay_cfg,
+                                  android_mirror.frame_aspect());
 
         hud.render_overlay();
 
