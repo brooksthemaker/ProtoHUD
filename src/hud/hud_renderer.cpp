@@ -385,7 +385,7 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
 
     constexpr float ROW_H = 18.f;
     constexpr float DOT_R = 4.f;
-    constexpr float ANGLE = 50.f * 3.14159265f / 180.f;  // complement of 40°
+    constexpr float ANGLE = 130.f * 3.14159265f / 180.f; // supplementary of 50°
 
     const float dir_x = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
     const float dir_y = -std::sin(ANGLE);
