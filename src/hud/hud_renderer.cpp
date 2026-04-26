@@ -197,7 +197,7 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
         ImGuiWindowFlags_NoInputs             |
         ImGuiWindowFlags_NoMove               |
         ImGuiWindowFlags_NoNav                |
-        ImGuiWindowFlags_NoBringToDisplayFront|
+        ImGuiWindowFlags_NoBringToFrontOnFocus|
         ImGuiWindowFlags_NoSavedSettings);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
@@ -305,7 +305,7 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
         ImGuiWindowFlags_NoInputs             |
         ImGuiWindowFlags_NoMove               |
         ImGuiWindowFlags_NoNav                |
-        ImGuiWindowFlags_NoBringToDisplayFront|
+        ImGuiWindowFlags_NoBringToFrontOnFocus|
         ImGuiWindowFlags_NoSavedSettings);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 

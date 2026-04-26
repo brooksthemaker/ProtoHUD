@@ -109,7 +109,6 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     constexpr ImU32 COL_ORANGE = IM_COL32(255, 160,  32, 255);
     constexpr ImU32 COL_SEP    = IM_COL32(255, 160,  32,  45);
 
-    ImGui::SetNextWindowBringToDisplayFront();
     ImGui::SetNextWindowPos ({ x, y }, ImGuiCond_Always);
     ImGui::SetNextWindowSize({ width, total_h }, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.88f);
@@ -140,8 +139,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
         // Empty-label selectable — provides background highlight + click detection
         char id[32]; snprintf(id, sizeof(id), "##item%d", i);
-        if (ImGui::Selectable(id, selected,
-                              ImGuiSelectableFlags_SpanAvailWidth,
+        if (ImGui::Selectable(id, selected, 0,
                               ImVec2(0.f, item_h - 1.f))) {
             cursor_ = i;
             select();
