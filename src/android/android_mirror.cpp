@@ -91,6 +91,7 @@ bool AndroidMirror::spawn_scrcpy() {
         "scrcpy",
         "--no-audio",      // audio is handled by the spatial audio engine
         "--no-control",    // read-only mirror; disables touch/input injection
+        "--no-playback",   // don't open a preview window (scrcpy 2.x+)
         "--video-codec=h264",
         max_size_arg,
         v4l2_arg,
