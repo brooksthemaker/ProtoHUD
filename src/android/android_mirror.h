@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <cstdint>
 
 #include <GLES2/gl2.h>
 #include <opencv2/videoio.hpp>
@@ -40,8 +41,10 @@ public:
     // Stops capture thread and kills scrcpy. Idempotent.
     void stop();
 
-    bool is_running()   const { return running_;   }
-    bool is_connected() const { return connected_; }
+    bool  is_running()    const { return running_;   }
+    bool  is_connected()  const { return connected_; }
+    // Aspect ratio (w/h) of the live frame; 9/16 until first frame arrives.
+    float frame_aspect()  const { return frame_aspect_.load(); }
 
     // Render-thread only: upload latest frame to a GL texture.
     // Returns true if a new frame was uploaded. out is always set to
@@ -71,6 +74,7 @@ private:
 
     cv::VideoCapture  cap_;
     std::thread       thread_;
-    std::atomic<bool> running_   { false };
-    std::atomic<bool> connected_ { false };
+    std::atomic<bool>  running_      { false };
+    std::atomic<bool>  connected_   { false };
+    std::atomic<float> frame_aspect_{ 9.f / 16.f };
 };

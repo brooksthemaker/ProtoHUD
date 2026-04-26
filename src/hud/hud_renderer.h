@@ -77,7 +77,8 @@ public:
     // connecting: scrcpy is running but no frame has arrived yet.
     // cfg controls anchor position and size as a fraction of screen height.
     void draw_android_overlay(unsigned int tex, int w, int h,
-                              bool active, bool connecting, const OverlayConfig& cfg);
+                              bool active, bool connecting, const OverlayConfig& cfg,
+                              float frame_aspect = 9.f / 16.f);
 
     // Execute ImGui::Render → flush to current GL framebuffer.
     void render_overlay();
