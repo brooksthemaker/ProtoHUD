@@ -375,24 +375,24 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const Ind left_items[]  = {{"Proot",     h.teensy_ok},
                                 {"LoRa",      h.lora_ok},
                                 {"Interface", h.knob_ok},
-                                {"Audio",     h.audio_ok},
-                                {"Android",   h.android_mirror}};
+                                {"Audio",     h.audio_ok}};
     const Ind right_items[] = {{"Left Cam",  h.cam_owl_left},
                                 {"Right Cam", h.cam_owl_right},
                                 {"Cam 1",     h.cam_usb1},
                                 {"Cam 2",     h.cam_usb2}};
     const Ind* items   = right_side ? right_items : left_items;
-    const int  n_items = right_side ? 4 : 5;
+    const int  n_items = 4;
 
     constexpr float ROW_H = 18.f;
     constexpr float DOT_R = 4.f;
-    constexpr float ANGLE = 40.f * 3.14159265f / 180.f;
+    constexpr float ANGLE = 50.f * 3.14159265f / 180.f;  // complement of 40°
 
     const float dir_x = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
     const float dir_y = -std::sin(ANGLE);
 
     // Diagonal glow line — drawn first so items render on top
-    const float diag_len = static_cast<float>(n_items) * ROW_H;
+    // extends to cover all items plus the 1-item lift offset
+    const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
     const ImVec2 diag_end = {anchor_x + dir_x * diag_len,
                               anchor_y + dir_y * diag_len};
     dl->AddLine({anchor_x, anchor_y}, diag_end, COL_GLW2, 5.f);
@@ -406,10 +406,10 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW1, 2.5f);
     dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_MAJ,  1.f);
 
-    // Indicators placed along the diagonal
+    // Indicators placed along the diagonal, lifted 1 item above anchor
     if (font_mono_) ImGui::PushFont(font_mono_);
     for (int i = 0; i < n_items; ++i) {
-        const float t  = static_cast<float>(i) * ROW_H;
+        const float t  = static_cast<float>(i + 1) * ROW_H;
         const float ix = anchor_x + dir_x * t;
         const float iy = anchor_y + dir_y * t;
 
