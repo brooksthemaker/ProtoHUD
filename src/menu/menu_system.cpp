@@ -16,7 +16,12 @@ MenuSystem::MenuSystem(std::vector<MenuItem> root)
 
 void MenuSystem::push_level(const std::vector<MenuItem>& items) {
     if (items.empty()) return;
-    stack_.push_back({ items });
+    std::vector<MenuItem> aug = items;
+    // Back only makes sense when there is a parent level
+    if (!stack_.empty())
+        aug.push_back({ "< Back", [this]{ back();  }, {} });
+    aug.push_back(    { "Exit",   [this]{ close(); }, {} });
+    stack_.push_back({ std::move(aug) });
     cursor_ = 0;
     emit_detents();
 }
@@ -52,7 +57,7 @@ void MenuSystem::select() {
         push_level(item.children);
     } else if (item.action) {
         item.action();
-        close();
+        // Menu stays open — user explicitly navigates away via Back or Exit.
     }
 }
 
@@ -69,24 +74,35 @@ const std::string& MenuSystem::current_label() const {
 
 // ── draw ──────────────────────────────────────────────────────────────────────
 
-// Draw text with an orange glow outline, matching the compass tick style.
-// selected = full white + bright glow; unselected = dim white + faint glow.
-static void draw_glow_text(ImDrawList* dl, ImVec2 pos, const char* text, bool selected) {
-    constexpr ImU32 GLOW_SEL = IM_COL32(255, 160, 32,  72);
-    constexpr ImU32 GLOW_DIM = IM_COL32(255, 160, 32,  22);
-    constexpr ImU32 FILL_SEL = IM_COL32(255, 255, 255, 255);
-    constexpr ImU32 FILL_DIM = IM_COL32(255, 255, 255, 160);
+// Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
+static ImU32 menu_with_alpha(ImU32 col, uint8_t a) {
+    return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
+}
 
-    const ImU32 glow = selected ? GLOW_SEL : GLOW_DIM;
-    const ImU32 fill = selected ? FILL_SEL : FILL_DIM;
+// Convert ImU32 to ImVec4, optionally overriding alpha.
+static ImVec4 col_to_vec4(ImU32 col, float alpha_override = -1.f) {
+    float r = ((col >>  0) & 0xFF) / 255.f;
+    float g = ((col >>  8) & 0xFF) / 255.f;
+    float b = ((col >> 16) & 0xFF) / 255.f;
+    float a = alpha_override >= 0.f ? alpha_override : ((col >> 24) & 0xFF) / 255.f;
+    return {r, g, b, a};
+}
 
-    // 8-direction glow at 1px, 4-cardinal at 2px
+// Draw text with a glow outline using the supplied accent color.
+// selected = full fill + bright glow; unselected = dim fill + faint glow.
+static void draw_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
+                            bool selected, ImU32 accent_col) {
+    const ImU32 glow     = selected ? menu_with_alpha(accent_col, 72) : menu_with_alpha(accent_col, 22);
+    const ImU32 glow_far = menu_with_alpha(accent_col, 28);
+    const ImU32 fill_sel = IM_COL32(255, 255, 255, 255);
+    const ImU32 fill_dim = IM_COL32(255, 255, 255, 160);
+    const ImU32 fill     = selected ? fill_sel : fill_dim;
+
     constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
     constexpr int D2[4][2] = {{-2,0},{2,0},{0,-2},{0,2}};
     for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
     if (selected)
-        for (auto& o : D2) dl->AddText({pos.x+o[0], pos.y+o[1]},
-                                       IM_COL32(255,160,32,28), text);
+        for (auto& o : D2) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow_far, text);
     dl->AddText(pos, fill, text);
 }
 
@@ -101,17 +117,14 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     const float total_h = pad_y * 2.f
                           + item_h * static_cast<float>(items.size());
 
-    // Left-side positioning, vertically centered
     const float x = 48.f;
     const float y = ((float)screen_h - total_h) * 0.5f;
 
-    // Compass orange palette
-    constexpr ImU32 COL_ORANGE = IM_COL32(255, 160,  32, 255);
-    constexpr ImU32 COL_SEP    = IM_COL32(255, 160,  32,  45);
+    const ImU32 COL_SEP = menu_with_alpha(accent_color_, 45);
 
     ImGui::SetNextWindowPos ({ x, y }, ImGuiCond_Always);
     ImGui::SetNextWindowSize({ width, total_h }, ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.88f);
+    if (!bg_enabled_) ImGui::SetNextWindowBgAlpha(0.f);
 
     ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoDecoration     |
@@ -119,10 +132,11 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         ImGuiWindowFlags_NoSavedSettings  |
         ImGuiWindowFlags_NoFocusOnAppearing;
 
-    ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(1.f, 0.627f, 0.125f, 0.86f));
-    ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(1.f, 0.627f, 0.125f, 0.10f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.f, 0.627f, 0.125f, 0.20f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(1.f, 0.627f, 0.125f, 0.32f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,      bg_color_);
+    ImGui::PushStyleColor(ImGuiCol_Border,        col_to_vec4(accent_color_, 0.86f));
+    ImGui::PushStyleColor(ImGuiCol_Header,        col_to_vec4(accent_color_, 0.10f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, col_to_vec4(accent_color_, 0.20f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive,  col_to_vec4(accent_color_, 0.32f));
     // Suppress Selectable's own text — we draw it manually via DrawList
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.f, 0.f, 0.f, 0.f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
@@ -132,12 +146,10 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     ImGui::Begin("##menu", nullptr, flags);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Item list
     const float line_h = ImGui::GetTextLineHeight();
     for (int i = 0; i < static_cast<int>(items.size()); i++) {
         bool selected = (i == cursor_);
 
-        // Empty-label selectable — provides background highlight + click detection
         char id[32]; snprintf(id, sizeof(id), "##item%d", i);
         if (ImGui::Selectable(id, selected, 0,
                               ImVec2(0.f, item_h - 1.f))) {
@@ -151,13 +163,13 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         // Left accent bar
         if (selected)
             dl->AddRectFilled({rmin.x - pad_x,       rmin.y},
-                              {rmin.x - pad_x + 4.f,  rmax.y}, COL_ORANGE);
+                              {rmin.x - pad_x + 4.f,  rmax.y}, accent_color_);
 
         // Glow text — vertically centered in the item row
         std::string label = to_upper(items[i].label);
         if (!items[i].children.empty()) label += "   >";
         ImVec2 tpos = {rmin.x + 4.f, rmin.y + (item_h - line_h) * 0.5f - 0.5f};
-        draw_glow_text(dl, tpos, label.c_str(), selected);
+        draw_glow_text(dl, tpos, label.c_str(), selected, accent_color_);
 
         // Thin bottom separator
         dl->AddLine({rmin.x - pad_x, rmax.y - 1.f},
@@ -166,5 +178,5 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
     ImGui::End();
     ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(5);
+    ImGui::PopStyleColor(6);
 }

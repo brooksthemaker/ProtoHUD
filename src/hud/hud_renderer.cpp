@@ -29,6 +29,11 @@ static std::string fmt_time(time_t t) {
     return buf;
 }
 
+// Replace the alpha byte of an ImU32 color (format: ABGR, alpha in high byte).
+static ImU32 with_alpha(ImU32 col, uint8_t a) {
+    return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
+}
+
 // Draw text with an orange glow outline matching the compass tick style.
 // selected=true → full white + bright glow; false → dim white + faint glow.
 static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
@@ -39,6 +44,17 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
     constexpr ImU32 FILL_OFF = IM_COL32(255, 255, 255, 160);
     const ImU32 glow = selected ? GLOW_ON  : GLOW_OFF;
     const ImU32 fill = selected ? FILL_ON  : FILL_OFF;
+    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    dl->AddText(pos, fill, text);
+}
+
+// Color-parameterized variant: glow_col and fill_col are full-brightness (alpha=255);
+// glow alphas are derived internally.
+static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
+                           bool selected, ImU32 glow_col, ImU32 fill_col) {
+    const ImU32 glow = selected ? with_alpha(glow_col, 72) : with_alpha(glow_col, 22);
+    const ImU32 fill = selected ? fill_col : with_alpha(fill_col, 160);
     constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
     for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
     dl->AddText(pos, fill, text);
@@ -363,13 +379,13 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const float tape_x   = fw / 2.f - tape_w / 2.f;
     const float fade_w   = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
-    const float anchor_y = fh - c_margin;  // bottom of compass tape
+    const float anchor_y = fh - c_margin;
     const float anchor_x = right_side ? tape_x + tape_w + fade_w
                                        : tape_x - fade_w;
 
-    constexpr ImU32 COL_MAJ  = IM_COL32(255, 160, 32, 255);
-    constexpr ImU32 COL_GLW1 = IM_COL32(255, 160, 32,  70);
-    constexpr ImU32 COL_GLW2 = IM_COL32(255, 160, 32,  28);
+    const ImU32 COL_MAJ  = col_.glow_base;
+    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
+    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
 
     struct Ind { const char* label; bool ok; };
     const Ind left_items[]  = {{"Proot",     h.teensy_ok},
@@ -383,24 +399,41 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const Ind* items   = right_side ? right_items : left_items;
     const int  n_items = 4;
 
-    constexpr float ROW_H = 18.f;
-    constexpr float DOT_R = 4.f;
-    constexpr float ANGLE = 130.f * 3.14159265f / 180.f; // supplementary of 50°
+    constexpr float ROW_H  = 18.f;
+    constexpr float DOT_R  = 4.f;
+    constexpr float ANGLE  = 130.f * 3.14159265f / 180.f;
+    constexpr float H_LEN  = 300.f;
 
-    const float dir_x = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
-    const float dir_y = -std::sin(ANGLE);
-
-    // Diagonal glow line — drawn first so items render on top
-    // extends to cover all items plus the 1-item lift offset
+    const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
+    const float dir_y    = -std::sin(ANGLE);
     const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
-    const ImVec2 diag_end = {anchor_x + dir_x * diag_len,
-                              anchor_y + dir_y * diag_len};
+
+    // Optional parallelogram background (same color/opacity as compass bg)
+    if (cfg_.indicator_bg_enabled) {
+        const uint8_t bg_a  = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
+        const ImU32   bg_col = with_alpha(col_.compass_bg_color, bg_a);
+        ImVec2 para[4];
+        if (right_side) {
+            para[0] = {anchor_x,                              anchor_y};
+            para[1] = {anchor_x + H_LEN,                      anchor_y};
+            para[2] = {anchor_x + H_LEN + dir_x * diag_len,   anchor_y + dir_y * diag_len};
+            para[3] = {anchor_x + dir_x * diag_len,            anchor_y + dir_y * diag_len};
+        } else {
+            para[0] = {anchor_x,                              anchor_y};
+            para[1] = {anchor_x + dir_x * diag_len,           anchor_y + dir_y * diag_len};
+            para[2] = {anchor_x - H_LEN + dir_x * diag_len,   anchor_y + dir_y * diag_len};
+            para[3] = {anchor_x - H_LEN,                      anchor_y};
+        }
+        dl->AddConvexPolyFilled(para, 4, bg_col);
+    }
+
+    // Diagonal glow line
+    const ImVec2 diag_end = {anchor_x + dir_x * diag_len, anchor_y + dir_y * diag_len};
     dl->AddLine({anchor_x, anchor_y}, diag_end, COL_GLW2, 5.f);
     dl->AddLine({anchor_x, anchor_y}, diag_end, COL_GLW1, 2.5f);
     dl->AddLine({anchor_x, anchor_y}, diag_end, COL_MAJ,  1.f);
 
-    // Horizontal glow line — 150px outward from anchor
-    constexpr float H_LEN = 150.f;
+    // Horizontal glow line — 300px outward from anchor
     const float h_end_x = anchor_x + (right_side ? H_LEN : -H_LEN);
     dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW2, 5.f);
     dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW1, 2.5f);
@@ -414,18 +447,20 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
         const float iy = anchor_y + dir_y * t;
 
         if (items[i].ok) {
-            dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, col_.orange_dim);
-            dl->AddCircleFilled({ix, iy}, DOT_R,        col_.orange);
+            dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, with_alpha(col_.ind_good, 28));
+            dl->AddCircleFilled({ix, iy}, DOT_R,        col_.ind_good);
         } else {
-            dl->AddCircleFilled({ix, iy}, DOT_R, col_.danger);
+            dl->AddCircleFilled({ix, iy}, DOT_R, col_.ind_fail);
         }
 
         const char* lbl = items[i].label;
         if (right_side) {
-            hud_glow_text(dl, {ix + DOT_R + 6.f, iy - 7.f}, lbl, items[i].ok);
+            hud_glow_text(dl, {ix + DOT_R + 6.f, iy - 7.f}, lbl, items[i].ok,
+                          col_.glow_base, col_.text_fill);
         } else {
             float tw = ImGui::CalcTextSize(lbl).x;
-            hud_glow_text(dl, {ix - DOT_R - 6.f - tw, iy - 7.f}, lbl, items[i].ok);
+            hud_glow_text(dl, {ix - DOT_R - 6.f - tw, iy - 7.f}, lbl, items[i].ok,
+                          col_.glow_base, col_.text_fill);
         }
     }
     if (font_mono_) ImGui::PopFont();
@@ -594,19 +629,17 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     const float center_x = origin.x + tw / 2.f;
     const float tick_y   = origin.y + th - 8.f;
 
-    constexpr ImU32 col_major  = IM_COL32(255, 160,  32, 255);
-    constexpr ImU32 col_mid    = IM_COL32(255, 140,  20, 180);
-    constexpr ImU32 col_minor  = IM_COL32(255, 130,  20, 110);
-    constexpr ImU32 col_glow1  = IM_COL32(255, 160,  32,  70);
-    constexpr ImU32 col_glow2  = IM_COL32(255, 160,  32,  28);
+    const ImU32 col_major = col_.compass_tick;
+    const ImU32 col_mid   = with_alpha(col_.compass_tick, 180);
+    const ImU32 col_minor = with_alpha(col_.compass_tick, 110);
+    const ImU32 col_glow1 = with_alpha(col_.compass_glow, 70);
+    const ImU32 col_glow2 = with_alpha(col_.compass_glow, 28);
 
-    // Optional gradient background: transparent at top and outer edges, opaque at bottom.
-    // Three strips so the left and right sides also fade in from transparent.
     if (s.compass_bg_enabled) {
         const uint8_t a  = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
         const float   fw = static_cast<float>(cfg_.compass_bg_side_fade);
-        const ImU32   T  = IM_COL32(8, 12, 18, 0);
-        const ImU32   A  = IM_COL32(8, 12, 18, a);
+        const ImU32   T  = with_alpha(col_.compass_bg_color, 0);
+        const ImU32   A  = with_alpha(col_.compass_bg_color, a);
         // Left strip: fully transparent outer edge, opaque only at inner-bottom corner
         dl->AddRectFilledMultiColor(
             {origin.x - fw, origin.y}, {origin.x,       origin.y + th}, T, T, A, T);

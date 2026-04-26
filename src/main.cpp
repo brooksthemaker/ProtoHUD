@@ -78,7 +78,8 @@ static std::vector<MenuItem> build_menu(
         AndroidMirror* android_mirror, bool* android_overlay,
         OverlayConfig* pip_cfg1, OverlayConfig* pip_cfg2,
         bool* pip_cam1_overlay, bool* pip_cam2_overlay,
-        OverlayConfig* android_cfg)
+        OverlayConfig* android_cfg,
+        HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp)
 {
     (void)lora; (void)knob;
 
@@ -360,14 +361,6 @@ static std::vector<MenuItem> build_menu(
         { "Size",         nullptr, make_size_items(android_cfg)     },
     };
 
-    // ── Compass ───────────────────────────────────────────────────────────────
-    std::vector<MenuItem> compass_menu = {
-        { "BG On",  [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
-                               state.compass_bg_enabled = true;  }, {} },
-        { "BG Off", [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
-                               state.compass_bg_enabled = false; }, {} },
-    };
-
     // ── Prototracer (face controller) submenu ─────────────────────────────────
     std::vector<MenuItem> prototracer_menu = {
         { "Effects",        nullptr, std::move(effects)            },
@@ -377,8 +370,132 @@ static std::vector<MenuItem> build_menu(
         { "Lens Brightness",nullptr, std::move(glasses_brightness) },
     };
 
-    // Compass tucked into Headset
-    headset_menu.push_back({ "Compass", nullptr, std::move(compass_menu) });
+    // ── HUD settings ──────────────────────────────────────────────────────────
+
+    // Compass submenu
+    auto make_color_items = [](std::vector<std::pair<const char*, ImU32>> presets,
+                                std::function<void(ImU32)> apply) {
+        std::vector<MenuItem> v;
+        for (auto& [lbl, col] : presets)
+            v.push_back({ lbl, [apply, col]{ apply(col); }, {} });
+        return v;
+    };
+
+    std::vector<MenuItem> compass_bg_color_menu = make_color_items({
+        { "Default", IM_COL32(  8,  12,  18, 255) },
+        { "Teal",    IM_COL32(  5,  30,  25, 255) },
+        { "Purple",  IM_COL32( 18,   8,  28, 255) },
+        { "Blue",    IM_COL32( 10,  10,  40, 255) },
+        { "Black",   IM_COL32(  0,   0,   0, 255) },
+    }, [hud_col](ImU32 c){ hud_col->compass_bg_color = c; });
+
+    std::vector<MenuItem> compass_tick_color_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+    }, [hud_col](ImU32 c){ hud_col->compass_tick = c; });
+
+    std::vector<MenuItem> compass_glow_color_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+    }, [hud_col](ImU32 c){ hud_col->compass_glow = c; });
+
+    std::vector<MenuItem> compass_menu = {
+        { "BG On",      [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.compass_bg_enabled = true;  }, {} },
+        { "BG Off",     [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.compass_bg_enabled = false; }, {} },
+        { "BG Color",   nullptr, std::move(compass_bg_color_menu)   },
+        { "Tick Color", nullptr, std::move(compass_tick_color_menu)  },
+        { "Glow Color", nullptr, std::move(compass_glow_color_menu)  },
+    };
+
+    // Text Color submenu
+    std::vector<MenuItem> text_color_menu = make_color_items({
+        { "White",  IM_COL32(255, 255, 255, 255) },
+        { "Cyan",   IM_COL32(  0, 240, 220, 255) },
+        { "Orange", IM_COL32(255, 200, 100, 255) },
+        { "Green",  IM_COL32(100, 255, 160, 255) },
+    }, [hud_col](ImU32 c){ hud_col->text_fill = c; });
+
+    // Glow Color submenu (applies to all HUD glow/outline effects)
+    std::vector<MenuItem> glow_color_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+    }, [hud_col](ImU32 c){ hud_col->glow_base = c; });
+
+    // Indicator Options submenu
+    std::vector<MenuItem> ind_good_color_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+    }, [hud_col](ImU32 c){ hud_col->ind_good = c; });
+
+    std::vector<MenuItem> ind_inactive_color_menu = make_color_items({
+        { "Gray",   IM_COL32(120, 120, 120, 255) },
+        { "Blue",   IM_COL32( 60,  80, 160, 255) },
+        { "Dim",    IM_COL32( 80,  80,  80, 255) },
+    }, [hud_col](ImU32 c){ hud_col->ind_inactive = c; });
+
+    std::vector<MenuItem> ind_fail_color_menu = make_color_items({
+        { "Red",    IM_COL32(255,  60,  60, 255) },
+        { "Orange", IM_COL32(255, 120,   0, 255) },
+        { "Yellow", IM_COL32(240, 220,   0, 255) },
+    }, [hud_col](ImU32 c){ hud_col->ind_fail = c; });
+
+    std::vector<MenuItem> indicator_options_menu = {
+        { "Active Color",   nullptr, std::move(ind_good_color_menu)     },
+        { "Inactive Color", nullptr, std::move(ind_inactive_color_menu) },
+        { "Fail Color",     nullptr, std::move(ind_fail_color_menu)     },
+        { "BG On",          [hud_cfg]{ hud_cfg->indicator_bg_enabled = true;  }, {} },
+        { "BG Off",         [hud_cfg]{ hud_cfg->indicator_bg_enabled = false; }, {} },
+    };
+
+    // Menu Options submenu
+    std::vector<MenuItem> menu_color_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_accent_color(c); });
+
+    std::vector<MenuItem> menu_bg_color_menu = make_color_items({
+        { "Dark",    IM_COL32( 10,  15,  20, 225) },
+        { "Teal",    IM_COL32(  5,  25,  22, 225) },
+        { "Purple",  IM_COL32( 20,   8,  28, 225) },
+        { "Navy",    IM_COL32(  8,   8,  35, 225) },
+        { "Black",   IM_COL32(  0,   0,   0, 230) },
+    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_color(c); });
+
+    std::vector<MenuItem> menu_options_menu = {
+        { "Menu Color",  nullptr, std::move(menu_color_menu)    },
+        { "BG Color",    nullptr, std::move(menu_bg_color_menu) },
+        { "BG On",  [menu_sys_pp]{ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(true);  }, {} },
+        { "BG Off", [menu_sys_pp]{ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(false); }, {} },
+    };
+
+    // HUD top-level menu
+    std::vector<MenuItem> hud_menu = {
+        { "Compass",           nullptr, std::move(compass_menu)          },
+        { "Text Color",        nullptr, std::move(text_color_menu)       },
+        { "Glow Color",        nullptr, std::move(glow_color_menu)       },
+        { "Indicator Options", nullptr, std::move(indicator_options_menu)},
+        { "Menu Options",      nullptr, std::move(menu_options_menu)     },
+    };
 
     return {
         { "Camera",         nullptr, std::move(camera_menu)        },
@@ -387,6 +504,7 @@ static std::vector<MenuItem> build_menu(
         { "Headset",        nullptr, std::move(headset_menu)       },
         { "Audio",          nullptr, std::move(audio_menu)         },
         { "Android Mirror", nullptr, std::move(android_menu)       },
+        { "HUD",            nullptr, std::move(hud_menu)           },
         { "Request Status", [teensy]{ teensy->request_status(); }, {} },
     };
 }
@@ -703,11 +821,16 @@ int main(int argc, char* argv[]) {
     bool pip_cam1_overlay_active = false;
     bool pip_cam2_overlay_active = false;
 
+    // menu_ptr is set to &menu after construction so HUD menu lambdas can call
+    // into MenuSystem without a circular dependency at build time.
+    MenuSystem* menu_ptr = nullptr;
     MenuSystem menu(build_menu(&teensy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2,
                                &pip_cam1_overlay_active, &pip_cam2_overlay_active,
-                               &android_overlay_cfg));
+                               &android_overlay_cfg,
+                               &hud_col, &hud_cfg, &menu_ptr));
+    menu_ptr = &menu;
 
     menu.set_detent_callback([&knob, &menu](int count) {
         knob.set_detents(count);
