@@ -98,8 +98,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     const float pad_x  = 18.f;
     const float pad_y  = 14.f;
     const float width  = 360.f;
-    const float crumb_h = 32.f;
-    const float total_h = pad_y * 2.f + crumb_h
+    const float total_h = pad_y * 2.f
                           + item_h * static_cast<float>(items.size());
 
     // Left-side positioning, vertically centered
@@ -109,7 +108,6 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     // Compass orange palette
     constexpr ImU32 COL_ORANGE = IM_COL32(255, 160,  32, 255);
     constexpr ImU32 COL_SEP    = IM_COL32(255, 160,  32,  45);
-    constexpr ImU32 COL_CRUMB  = IM_COL32(255, 160,  32, 200);
 
     ImGui::SetNextWindowBringToDisplayFront();
     ImGui::SetNextWindowPos ({ x, y }, ImGuiCond_Always);
@@ -134,25 +132,6 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
     ImGui::Begin("##menu", nullptr, flags);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    // Breadcrumb — built as a plain string, drawn in orange via DrawList
-    {
-        std::string crumb;
-        for (size_t d = 0; d < stack_.size(); d++) {
-            if (d > 0) crumb += "  >  ";
-            crumb += (d == 0) ? "MENU" : to_upper(stack_[d - 1].items[0].label);
-        }
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        dl->AddText(p, COL_CRUMB, crumb.c_str());
-        ImGui::Dummy({0.f, ImGui::GetTextLineHeight()});
-    }
-
-    // Separator under breadcrumb
-    {
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        dl->AddLine({x, p.y + 4.f}, {x + width, p.y + 4.f}, COL_SEP, 1.f);
-        ImGui::Dummy({0.f, 12.f});
-    }
 
     // Item list
     const float line_h = ImGui::GetTextLineHeight();
