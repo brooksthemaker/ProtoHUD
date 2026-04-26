@@ -75,6 +75,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     float y = (screen_h  - total_h) / 2.f;
 
     // Frameless, non-moving, non-resizable overlay window
+    ImGui::SetNextWindowBringToDisplayFront();
     ImGui::SetNextWindowPos ({ x - 4.f, y - 30.f }, ImGuiCond_Always);
     ImGui::SetNextWindowSize({ width + 8.f, total_h + 34.f }, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.88f);

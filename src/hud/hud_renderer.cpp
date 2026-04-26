@@ -161,45 +161,108 @@ static ImVec2 overlay_origin(const OverlayConfig& cfg,
 void HudRenderer::draw_pip(unsigned int tex, const char* label,
                             int w, int h, bool active, const OverlayConfig& cfg) {
     if (!active) return;
-    // One-shot diagnostic: confirm overlay is actually being rendered
-    { static bool once = false; if (!once) { once = true;
-        std::cerr << "[pip] " << label << " overlay active, tex=" << tex
-                  << " sw=" << w << " sh=" << h << "\n"; } }
 
     ImGui::SetCurrentContext(ctx_);
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
 
     const float sw     = static_cast<float>(w);
     const float sh     = static_cast<float>(h);
     const float ov_h   = sh * cfg.size;
-    const float ov_w   = ov_h * (16.f / 9.f);   // USB cameras are 16:9
+    const float ov_w   = ov_h * (16.f / 9.f);
     const float margin = static_cast<float>(cfg_.compass_height);
     const auto  pos    = overlay_origin(cfg, sw, sh, ov_w, ov_h, margin);
 
-    // Border + background
-    dl->AddRectFilled({ pos.x - 2.f, pos.y - 2.f },
-                      { pos.x + ov_w + 2.f, pos.y + ov_h + 2.f },
-                      col_.primary);
-    dl->AddRectFilled({ pos.x, pos.y },
-                      { pos.x + ov_w, pos.y + ov_h },
-                      col_.background);
+    // Passthrough window so the menu (drawn after) can appear on top via BringToDisplayFront
+    char win_id[32]; snprintf(win_id, sizeof(win_id), "##pip_%s", label);
+    ImGui::SetNextWindowPos ({0.f, 0.f});
+    ImGui::SetNextWindowSize({sw,  sh });
+    ImGui::SetNextWindowBgAlpha(0.f);
+    ImGui::Begin(win_id, nullptr,
+        ImGuiWindowFlags_NoDecoration         |
+        ImGuiWindowFlags_NoInputs             |
+        ImGuiWindowFlags_NoMove               |
+        ImGuiWindowFlags_NoNav                |
+        ImGuiWindowFlags_NoBringToDisplayFront|
+        ImGuiWindowFlags_NoSavedSettings);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Camera image or "No Signal" placeholder
+    // Build anchor-dependent chamfered polygon
+    const float C = cfg_.pip_corner_clip_px;
+    const float x = pos.x, y = pos.y, bw = ov_w, bh = ov_h;
+    ImVec2 pts[8];
+    int    n_pts;
+
+    using A = OverlayConfig::Anchor;
+    switch (cfg.anchor) {
+        case A::TOP_LEFT:
+        case A::BOTTOM_RIGHT:
+            // clip TL + BR
+            pts[0] = {x+C,    y   }; pts[1] = {x+bw,   y   };
+            pts[2] = {x+bw,   y+bh-C}; pts[3] = {x+bw-C, y+bh};
+            pts[4] = {x,      y+bh}; pts[5] = {x,      y+C };
+            n_pts = 6;
+            break;
+        case A::TOP_RIGHT:
+        case A::BOTTOM_LEFT:
+            // clip TR + BL
+            pts[0] = {x,      y   }; pts[1] = {x+bw-C, y   };
+            pts[2] = {x+bw,   y+C }; pts[3] = {x+bw,   y+bh};
+            pts[4] = {x+C,    y+bh}; pts[5] = {x,      y+bh-C};
+            n_pts = 6;
+            break;
+        default:
+            // TOP_CENTER / BOTTOM_CENTER — all 4 corners
+            pts[0] = {x+C,    y     }; pts[1] = {x+bw-C, y     };
+            pts[2] = {x+bw,   y+C   }; pts[3] = {x+bw,   y+bh-C};
+            pts[4] = {x+bw-C, y+bh  }; pts[5] = {x+C,    y+bh  };
+            pts[6] = {x,      y+bh-C}; pts[7] = {x,      y+C   };
+            n_pts = 8;
+            break;
+    }
+
+    // 1. Background fill
+    dl->AddConvexPolyFilled(pts, n_pts, col_.background);
+
+    // 2. Camera image or "No Signal" placeholder
     if (tex) {
         dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-                     { pos.x, pos.y }, { pos.x + ov_w, pos.y + ov_h });
+                     {x, y}, {x + bw, y + bh});
     } else {
         if (font_mono_) ImGui::PushFont(font_mono_);
-        const char* msg = "No Signal";
-        dl->AddText({ pos.x + ov_w * 0.5f - 36.f, pos.y + ov_h * 0.5f - 7.f },
-                    col_.text_dim, msg);
+        dl->AddText({x + bw * 0.5f - 36.f, y + bh * 0.5f - 7.f},
+                    col_.text_dim, "No Signal");
         if (font_mono_) ImGui::PopFont();
     }
 
-    // Label (top-left corner, always visible)
+    // 3. Mask image overflow at each clipped corner
+    constexpr ImU32 mask = IM_COL32(0, 0, 0, 255);
+    switch (cfg.anchor) {
+        case A::TOP_LEFT:
+        case A::BOTTOM_RIGHT:
+            dl->AddTriangleFilled({x,      y   }, {x+C,    y   }, {x,    y+C   }, mask);
+            dl->AddTriangleFilled({x+bw,   y+bh}, {x+bw-C, y+bh}, {x+bw, y+bh-C}, mask);
+            break;
+        case A::TOP_RIGHT:
+        case A::BOTTOM_LEFT:
+            dl->AddTriangleFilled({x+bw,   y   }, {x+bw-C, y   }, {x+bw, y+C   }, mask);
+            dl->AddTriangleFilled({x,      y+bh}, {x+C,    y+bh}, {x,    y+bh-C}, mask);
+            break;
+        default:
+            dl->AddTriangleFilled({x,      y   }, {x+C,    y   }, {x,    y+C   }, mask);
+            dl->AddTriangleFilled({x+bw,   y   }, {x+bw-C, y   }, {x+bw, y+C   }, mask);
+            dl->AddTriangleFilled({x,      y+bh}, {x+C,    y+bh}, {x,    y+bh-C}, mask);
+            dl->AddTriangleFilled({x+bw,   y+bh}, {x+bw-C, y+bh}, {x+bw, y+bh-C}, mask);
+            break;
+    }
+
+    // 4. Label
     if (font_mono_) ImGui::PushFont(font_mono_);
-    dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.primary, label);
+    dl->AddText({x + 4.f, y + 4.f}, col_.primary, label);
     if (font_mono_) ImGui::PopFont();
+
+    // 5. Chamfered border outline on top
+    dl->AddPolyline(pts, n_pts, col_.primary, ImDrawFlags_Closed, 2.f);
+
+    ImGui::End();
 }
 
 // ── Android mirror overlay ────────────────────────────────────────────────────
@@ -210,7 +273,6 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
 
     const float sw     = static_cast<float>(w);
     const float sh     = static_cast<float>(h);
@@ -218,6 +280,18 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     const float ov_w   = ov_h * (9.f / 16.f);   // phone portrait aspect
     const float margin = static_cast<float>(cfg_.compass_height);
     const auto  pos    = overlay_origin(cfg, sw, sh, ov_w, ov_h, margin);
+
+    ImGui::SetNextWindowPos ({0.f, 0.f});
+    ImGui::SetNextWindowSize({sw,  sh });
+    ImGui::SetNextWindowBgAlpha(0.f);
+    ImGui::Begin("##android", nullptr,
+        ImGuiWindowFlags_NoDecoration         |
+        ImGuiWindowFlags_NoInputs             |
+        ImGuiWindowFlags_NoMove               |
+        ImGuiWindowFlags_NoNav                |
+        ImGuiWindowFlags_NoBringToDisplayFront|
+        ImGuiWindowFlags_NoSavedSettings);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
 
     // Border
     dl->AddRect({ pos.x - 2.f, pos.y - 2.f },
@@ -242,6 +316,8 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     if (font_mono_) ImGui::PushFont(font_mono_);
     dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.accent, "ANDROID");
     if (font_mono_) ImGui::PopFont();
+
+    ImGui::End();
 }
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
@@ -493,6 +569,22 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         // Right strip: opaque only at inner-bottom corner, fully transparent outer edge
         dl->AddRectFilledMultiColor(
             {origin.x + tw, origin.y}, {origin.x + tw + fw, origin.y + th}, T, T, T, A);
+
+        // Extend background below tape, fading back to transparent
+        constexpr float LINE_GAP = 6.f;
+        constexpr float LINE_EXT = 8.f;
+        const float bot  = origin.y + th;
+        const float bot2 = bot + LINE_GAP + LINE_EXT;
+        dl->AddRectFilledMultiColor({origin.x - fw, bot}, {origin.x,        bot2}, T, A, T, T);
+        dl->AddRectFilledMultiColor({origin.x,      bot}, {origin.x + tw,   bot2}, A, A, T, T);
+        dl->AddRectFilledMultiColor({origin.x + tw, bot}, {origin.x+tw+fw,  bot2}, A, T, T, T);
+
+        // Glowing horizontal line below tape (same 3-pass glow as major ticks)
+        const float line_y = bot + LINE_GAP;
+        const float lx0 = origin.x - fw, lx1 = origin.x + tw + fw;
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow2, 5.f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow1, 2.5f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_major, 1.f);
     }
 
     if (font_mono_) ImGui::PushFont(font_mono_);

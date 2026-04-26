@@ -40,6 +40,7 @@ struct HudConfig {
     float opacity               = 0.85f;
     float scale                 = 1.0f;
     float health_panel_opacity  = 0.71f;
+    float pip_corner_clip_px    = 16.f;
 };
 
 class HudRenderer {

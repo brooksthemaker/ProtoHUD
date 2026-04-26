@@ -521,6 +521,7 @@ int main(int argc, char* argv[]) {
     hud_cfg.compass_bg_side_fade  = jval(jhud, "compass_bg_side_fade_px",   80);
     hud_cfg.panel_width          = jval(jhud, "panel_width_px",       200);
     hud_cfg.health_panel_opacity = jval(jhud, "health_panel_opacity", 0.71f);
+    hud_cfg.pip_corner_clip_px   = jval(jhud, "pip_corner_clip_px",   16.f);
     hud_cfg.opacity              = jval(jdisp,"hud_opacity",          0.85f);
     hud_cfg.scale                = jval(jdisp,"hud_scale",            1.0f);
 
