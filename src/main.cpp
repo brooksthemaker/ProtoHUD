@@ -368,19 +368,26 @@ static std::vector<MenuItem> build_menu(
                                state.compass_bg_enabled = false; }, {} },
     };
 
+    // ── Prototracer (face controller) submenu ─────────────────────────────────
+    std::vector<MenuItem> prototracer_menu = {
+        { "Effects",        nullptr, std::move(effects)            },
+        { "Color",          nullptr, std::move(colors)             },
+        { "Play GIF",       nullptr, std::move(gifs)               },
+        { "Brightness",     nullptr, std::move(face_brightness)    },
+        { "Lens Brightness",nullptr, std::move(glasses_brightness) },
+    };
+
+    // Compass tucked into Headset
+    headset_menu.push_back({ "Compass", nullptr, std::move(compass_menu) });
+
     return {
-        { "Face Effects",    nullptr, std::move(effects)            },
-        { "Face Color",      nullptr, std::move(colors)             },
-        { "Play GIF",        nullptr, std::move(gifs)               },
-        { "Face Brightness", nullptr, std::move(face_brightness)    },
-        { "Lens Brightness", nullptr, std::move(glasses_brightness) },
-        { "Camera",          nullptr, std::move(camera_menu)        },
-        { "USB Cameras",     nullptr, std::move(pip_menu)           },
-        { "Compass",         nullptr, std::move(compass_menu)       },
-        { "Audio",           nullptr, std::move(audio_menu)         },
-        { "Headset",         nullptr, std::move(headset_menu)       },
-        { "Android Mirror",  nullptr, std::move(android_menu)       },
-        { "Request Status",  [teensy]{ teensy->request_status(); }, {} },
+        { "Camera",         nullptr, std::move(camera_menu)        },
+        { "USB Cameras",    nullptr, std::move(pip_menu)           },
+        { "Prototracer",    nullptr, std::move(prototracer_menu)   },
+        { "Headset",        nullptr, std::move(headset_menu)       },
+        { "Audio",          nullptr, std::move(audio_menu)         },
+        { "Android Mirror", nullptr, std::move(android_menu)       },
+        { "Request Status", [teensy]{ teensy->request_status(); }, {} },
     };
 }
 
