@@ -3,6 +3,7 @@
 #include "dma_camera.h"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -86,6 +87,15 @@ public:
     bool usb1_ok()      const { return usb1_ok_; }
     bool usb2_ok()      const { return usb2_ok_; }
 
+    // ── Auto-reconnect ────────────────────────────────────────────────────────
+    // When enabled, the capture thread will attempt to reopen a disconnected
+    // USB camera every ~5 s. Calling close_usbN() disables reconnect for that
+    // camera so an explicit close stays closed.
+    void set_usb1_reconnect(bool v) { usb1_reconnect_ = v; }
+    void set_usb2_reconnect(bool v) { usb2_reconnect_ = v; }
+    bool usb1_reconnect_enabled() const { return usb1_reconnect_; }
+    bool usb2_reconnect_enabled() const { return usb2_reconnect_; }
+
 private:
     void usb_capture_thread();
     // Upload pixel data to a GL texture; creates/reallocates as needed.
@@ -104,6 +114,11 @@ private:
     std::mutex       usb1_cap_mtx_, usb2_cap_mtx_;
     std::atomic<bool> usb1_ok_ { false };
     std::atomic<bool> usb2_ok_ { false };
+    std::atomic<bool> usb1_reconnect_ { false };
+    std::atomic<bool> usb2_reconnect_ { false };
+    // Written only by the capture thread; no extra sync needed.
+    std::chrono::steady_clock::time_point usb1_last_retry_ {};
+    std::chrono::steady_clock::time_point usb2_last_retry_ {};
 
     // Per-USB-camera slot: capture thread writes buf/w/h, render thread uploads
     struct TexSlot {

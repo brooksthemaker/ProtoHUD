@@ -317,32 +317,36 @@ static std::vector<MenuItem> build_menu(
 
     // ── USB camera PiP layout ─────────────────────────────────────────────────
     std::vector<MenuItem> cam1_menu = {
-        { "Open",         [cameras, pip_cam1_overlay]{
-                              std::thread([cameras, pip_cam1_overlay]{
-                                  cameras->open_usb1();
-                                  *pip_cam1_overlay = true;
-                              }).detach(); }, {} },
-        { "Close",        [cameras, pip_cam1_overlay]{
-                              cameras->close_usb1();
-                              *pip_cam1_overlay = false; }, {} },
-        { "Show Overlay", [pip_cam1_overlay]{ *pip_cam1_overlay = true;  }, {} },
-        { "Hide Overlay", [pip_cam1_overlay]{ *pip_cam1_overlay = false; }, {} },
-        { "Position",     nullptr, make_position_items(pip_cfg1) },
-        { "Size",         nullptr, make_size_items(pip_cfg1)     },
+        { "Open",              [cameras, pip_cam1_overlay]{
+                                   std::thread([cameras, pip_cam1_overlay]{
+                                       cameras->open_usb1();
+                                       *pip_cam1_overlay = true;
+                                   }).detach(); }, {} },
+        { "Close",             [cameras, pip_cam1_overlay]{
+                                   cameras->close_usb1();   // also clears reconnect flag
+                                   *pip_cam1_overlay = false; }, {} },
+        { "Auto-Reconnect On", [cameras]{ cameras->set_usb1_reconnect(true);  }, {} },
+        { "Auto-Reconnect Off",[cameras]{ cameras->set_usb1_reconnect(false); }, {} },
+        { "Show Overlay",      [pip_cam1_overlay]{ *pip_cam1_overlay = true;  }, {} },
+        { "Hide Overlay",      [pip_cam1_overlay]{ *pip_cam1_overlay = false; }, {} },
+        { "Position",          nullptr, make_position_items(pip_cfg1) },
+        { "Size",              nullptr, make_size_items(pip_cfg1)     },
     };
     std::vector<MenuItem> cam2_menu = {
-        { "Open",         [cameras, pip_cam2_overlay]{
-                              std::thread([cameras, pip_cam2_overlay]{
-                                  cameras->open_usb2();
-                                  *pip_cam2_overlay = true;
-                              }).detach(); }, {} },
-        { "Close",        [cameras, pip_cam2_overlay]{
-                              cameras->close_usb2();
-                              *pip_cam2_overlay = false; }, {} },
-        { "Show Overlay", [pip_cam2_overlay]{ *pip_cam2_overlay = true;  }, {} },
-        { "Hide Overlay", [pip_cam2_overlay]{ *pip_cam2_overlay = false; }, {} },
-        { "Position",     nullptr, make_position_items(pip_cfg2) },
-        { "Size",         nullptr, make_size_items(pip_cfg2)     },
+        { "Open",              [cameras, pip_cam2_overlay]{
+                                   std::thread([cameras, pip_cam2_overlay]{
+                                       cameras->open_usb2();
+                                       *pip_cam2_overlay = true;
+                                   }).detach(); }, {} },
+        { "Close",             [cameras, pip_cam2_overlay]{
+                                   cameras->close_usb2();   // also clears reconnect flag
+                                   *pip_cam2_overlay = false; }, {} },
+        { "Auto-Reconnect On", [cameras]{ cameras->set_usb2_reconnect(true);  }, {} },
+        { "Auto-Reconnect Off",[cameras]{ cameras->set_usb2_reconnect(false); }, {} },
+        { "Show Overlay",      [pip_cam2_overlay]{ *pip_cam2_overlay = true;  }, {} },
+        { "Hide Overlay",      [pip_cam2_overlay]{ *pip_cam2_overlay = false; }, {} },
+        { "Position",          nullptr, make_position_items(pip_cfg2) },
+        { "Size",              nullptr, make_size_items(pip_cfg2)     },
     };
     std::vector<MenuItem> pip_menu = {
         { "Cam 1", nullptr, std::move(cam1_menu) },

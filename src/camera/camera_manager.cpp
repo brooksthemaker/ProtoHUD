@@ -168,12 +168,19 @@ bool CameraManager::set_resolution(int width, int height, int fps) {
 
 void CameraManager::usb_capture_thread() {
     cv::Mat frame, rgba;
-    int frames1 = 0, empty1 = 0;
-    int frames2 = 0, empty2 = 0;
+    int frames1 = 0, empty1 = 0, consec1 = 0;
+    int frames2 = 0, empty2 = 0, consec2 = 0;
+
+    // Consecutive empty reads before declaring a camera disconnected.
+    // At ~30fps with near-instant V4L2 failures this triggers in ~1 s.
+    constexpr int kDisconnectThreshold = 30;
+    // How often to attempt a reconnect when enabled.
+    constexpr auto kReconnectInterval = std::chrono::seconds(5);
 
     auto capture = [&](cv::VideoCapture& cap, std::mutex& cap_mtx,
                        TexSlot& slot, std::atomic<bool>& ok_flag,
-                       int& good, int& bad, const char* name) -> bool {
+                       int& good, int& bad, int& consec,
+                       const char* name) -> bool {
         bool got_frame = false;
         {
             std::lock_guard<std::mutex> lk(cap_mtx);
@@ -182,6 +189,7 @@ void CameraManager::usb_capture_thread() {
             if (!frame.empty()) {
                 cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
                 got_frame = true;
+                consec = 0;
                 ++good;
                 if (good == 1)
                     std::cerr << "[cam] " << name << ": first frame received ("
@@ -190,6 +198,14 @@ void CameraManager::usb_capture_thread() {
                 if (++bad % 30 == 1)
                     std::cerr << "[cam] " << name << ": " << bad
                               << " empty reads (good=" << good << ")\n";
+                // After enough consecutive failures (and we know the camera
+                // worked before), release it so reconnect logic can trigger.
+                if (++consec >= kDisconnectThreshold && good > 0) {
+                    std::cerr << "[cam] " << name << ": disconnected\n";
+                    ok_flag = false;
+                    cap.release();  // isOpened() now returns false
+                    consec = 0;
+                }
             }
         }
         if (got_frame) {
@@ -200,12 +216,32 @@ void CameraManager::usb_capture_thread() {
             std::memcpy(slot.buf.data(), rgba.data, slot.buf.size());
             slot.dirty = true;
         }
-        return true;
+        return got_frame || ok_flag.load();  // keep spinning while open even if no frame
     };
 
     while (running_) {
-        bool any = capture(usb_cap1_, usb1_cap_mtx_, usb1_slot_, usb1_ok_, frames1, empty1, "usb1");
-        any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_, frames2, empty2, "usb2");
+        bool any = capture(usb_cap1_, usb1_cap_mtx_, usb1_slot_, usb1_ok_,
+                           frames1, empty1, consec1, "usb1");
+        any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_,
+                            frames2, empty2, consec2, "usb2");
+
+        // Auto-reconnect: periodically reopen disconnected cameras when enabled.
+        auto now = std::chrono::steady_clock::now();
+        if (usb1_reconnect_ && !usb1_ok_ && !usb1_cfg_.device.empty() &&
+            now - usb1_last_retry_ >= kReconnectInterval) {
+            usb1_last_retry_ = now;
+            consec1 = 0; empty1 = 0;  // reset counters for the new attempt
+            std::cerr << "[cam] usb1: auto-reconnect attempt\n";
+            open_usb1();  // mutex already released by capture lambda
+        }
+        if (usb2_reconnect_ && !usb2_ok_ && !usb2_cfg_.device.empty() &&
+            now - usb2_last_retry_ >= kReconnectInterval) {
+            usb2_last_retry_ = now;
+            consec2 = 0; empty2 = 0;
+            std::cerr << "[cam] usb2: auto-reconnect attempt\n";
+            open_usb2();
+        }
+
         if (!any)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -225,6 +261,7 @@ void CameraManager::open_usb1() {
 }
 
 void CameraManager::close_usb1() {
+    usb1_reconnect_ = false;   // explicit close — don't auto-reopen
     std::lock_guard<std::mutex> lk(usb1_cap_mtx_);
     usb_cap1_.release();
     usb1_ok_ = false;
@@ -243,6 +280,7 @@ void CameraManager::open_usb2() {
 }
 
 void CameraManager::close_usb2() {
+    usb2_reconnect_ = false;   // explicit close — don't auto-reopen
     std::lock_guard<std::mutex> lk(usb2_cap_mtx_);
     usb_cap2_.release();
     usb2_ok_ = false;
