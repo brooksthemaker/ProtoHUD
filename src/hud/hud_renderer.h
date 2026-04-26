@@ -84,7 +84,8 @@ public:
 
 private:
     void draw_top_bar      (ImDrawList* dl, const AppState& s, float w);
-    void draw_health_dots  (ImDrawList* dl, const SystemHealth& h, ImVec2 origin);
+    void draw_health_side  (ImDrawList* dl, const SystemHealth& h,
+                            float fw, float fh, bool right_side);
     void draw_audio_strip  (ImDrawList* dl, const AudioState& a, ImVec2 origin, float w);
     void draw_face_panel   (ImDrawList* dl, const FaceState& f,
                             ImVec2 origin, float pw, float ph);

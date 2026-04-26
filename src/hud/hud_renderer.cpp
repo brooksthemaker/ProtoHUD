@@ -142,7 +142,8 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
         draw_lora_messages(dl, s,       { 0.f, th }, msg_w, mid_h);
     }
 
-    draw_health_dots(dl, s.health, {10.f, th + 8.f});
+    draw_health_side(dl, s.health, fw, fh, false);
+    draw_health_side(dl, s.health, fw, fh, true);
 
     const float cw      = fw / 3.f;
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
@@ -353,51 +354,78 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
     draw_audio_strip(dl, s.audio, {w - 180.f, 4.f}, 170.f);
 }
 
-// ── Health dots ───────────────────────────────────────────────────────────────
+// ── Health side indicators ────────────────────────────────────────────────────
 
-void HudRenderer::draw_health_dots(ImDrawList* dl,
-                                    const SystemHealth& h, ImVec2 origin) {
+void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
+                                    float fw, float fh, bool right_side) {
+    const float tape_w   = fw / 3.f;
+    const float tape_x   = fw / 2.f - tape_w / 2.f;
+    const float fade_w   = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    const float anchor_y = fh - c_margin;  // bottom of compass tape
+    const float anchor_x = right_side ? tape_x + tape_w + fade_w
+                                       : tape_x - fade_w;
+
+    constexpr ImU32 COL_MAJ  = IM_COL32(255, 160, 32, 255);
+    constexpr ImU32 COL_GLW1 = IM_COL32(255, 160, 32,  70);
+    constexpr ImU32 COL_GLW2 = IM_COL32(255, 160, 32,  28);
+
     struct Ind { const char* label; bool ok; };
-    const Ind items[] = {
-        {"Proot",     h.teensy_ok},
-        {"LoRa",      h.lora_ok},
-        {"Interface", h.knob_ok},
-        {"Left Cam",  h.cam_owl_left},
-        {"Right Cam", h.cam_owl_right},
-        {"Cam 1",     h.cam_usb1},
-        {"Cam 2",     h.cam_usb2},
-        {"Audio",     h.audio_ok},
-        {"Android",   h.android_mirror},
-    };
+    const Ind left_items[]  = {{"Proot",     h.teensy_ok},
+                                {"LoRa",      h.lora_ok},
+                                {"Interface", h.knob_ok},
+                                {"Audio",     h.audio_ok},
+                                {"Android",   h.android_mirror}};
+    const Ind right_items[] = {{"Left Cam",  h.cam_owl_left},
+                                {"Right Cam", h.cam_owl_right},
+                                {"Cam 1",     h.cam_usb1},
+                                {"Cam 2",     h.cam_usb2}};
+    const Ind* items   = right_side ? right_items : left_items;
+    const int  n_items = right_side ? 4 : 5;
 
-    constexpr float row_h   = 20.f;
-    constexpr float dot_r   = 4.f;
-    constexpr float dot_cx  = 6.f;
-    constexpr float text_x  = 16.f;
-    constexpr int   n_items = 9;
-    constexpr float panel_w = 108.f;
-    constexpr float panel_h = row_h * n_items + 8.f;
+    constexpr float ROW_H = 18.f;
+    constexpr float DOT_R = 4.f;
+    constexpr float ANGLE = 40.f * 3.14159265f / 180.f;
 
-    const uint8_t alpha = static_cast<uint8_t>(cfg_.health_panel_opacity * 255.f);
-    dl->AddRectFilled(
-        {origin.x - 4.f, origin.y - 4.f},
-        {origin.x + panel_w, origin.y + panel_h},
-        IM_COL32(8, 12, 18, alpha));
+    const float dir_x = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
+    const float dir_y = -std::sin(ANGLE);
 
+    // Diagonal glow line — drawn first so items render on top
+    const float diag_len = static_cast<float>(n_items) * ROW_H;
+    const ImVec2 diag_end = {anchor_x + dir_x * diag_len,
+                              anchor_y + dir_y * diag_len};
+    dl->AddLine({anchor_x, anchor_y}, diag_end, COL_GLW2, 5.f);
+    dl->AddLine({anchor_x, anchor_y}, diag_end, COL_GLW1, 2.5f);
+    dl->AddLine({anchor_x, anchor_y}, diag_end, COL_MAJ,  1.f);
+
+    // Horizontal glow line — 150px outward from anchor
+    constexpr float H_LEN = 150.f;
+    const float h_end_x = anchor_x + (right_side ? H_LEN : -H_LEN);
+    dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW2, 5.f);
+    dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW1, 2.5f);
+    dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_MAJ,  1.f);
+
+    // Indicators placed along the diagonal
     if (font_mono_) ImGui::PushFont(font_mono_);
-    float y = origin.y;
-    for (const auto& item : items) {
-        // Dot: orange when OK (with glow halo), red when not OK
-        if (item.ok) {
-            dl->AddCircleFilled({origin.x + dot_cx, y + row_h * 0.5f}, dot_r + 2.f, col_.orange_dim);
-            dl->AddCircleFilled({origin.x + dot_cx, y + row_h * 0.5f}, dot_r,        col_.orange);
+    for (int i = 0; i < n_items; ++i) {
+        const float t  = static_cast<float>(i) * ROW_H;
+        const float ix = anchor_x + dir_x * t;
+        const float iy = anchor_y + dir_y * t;
+
+        if (items[i].ok) {
+            dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, col_.orange_dim);
+            dl->AddCircleFilled({ix, iy}, DOT_R,        col_.orange);
         } else {
-            dl->AddCircleFilled({origin.x + dot_cx, y + row_h * 0.5f}, dot_r, col_.danger);
+            dl->AddCircleFilled({ix, iy}, DOT_R, col_.danger);
         }
-        // Label: white+glow when OK, dim when not OK
-        hud_glow_text(dl, {origin.x + text_x, y + (row_h - 14.f) * 0.5f},
-                      item.label, item.ok);
-        y += row_h;
+
+        const char* lbl = items[i].label;
+        if (right_side) {
+            hud_glow_text(dl, {ix + DOT_R + 6.f, iy - 7.f}, lbl, items[i].ok);
+        } else {
+            float tw = ImGui::CalcTextSize(lbl).x;
+            hud_glow_text(dl, {ix - DOT_R - 6.f - tw, iy - 7.f}, lbl, items[i].ok);
+        }
     }
     if (font_mono_) ImGui::PopFont();
 }
