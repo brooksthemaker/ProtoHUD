@@ -28,6 +28,10 @@ struct HudColors {
     ImU32 text       = IM_COL32(200, 240, 230, 255);
     ImU32 text_dim   = IM_COL32(120, 160, 150, 200);
     ImU32 separator  = IM_COL32(  0, 160, 130, 140);
+    // Compass-matched orange palette
+    ImU32 orange      = IM_COL32(255, 160,  32, 255);
+    ImU32 orange_glow = IM_COL32(255, 160,  32,  70);
+    ImU32 orange_dim  = IM_COL32(255, 160,  32,  28);
 };
 
 struct HudConfig {
@@ -40,6 +44,7 @@ struct HudConfig {
     float opacity               = 0.85f;
     float scale                 = 1.0f;
     float health_panel_opacity  = 0.71f;
+    float pip_corner_clip_px    = 16.f;
 };
 
 class HudRenderer {
@@ -79,7 +84,8 @@ public:
 
 private:
     void draw_top_bar      (ImDrawList* dl, const AppState& s, float w);
-    void draw_health_dots  (ImDrawList* dl, const SystemHealth& h, ImVec2 origin);
+    void draw_health_side  (ImDrawList* dl, const SystemHealth& h,
+                            float fw, float fh, bool right_side);
     void draw_audio_strip  (ImDrawList* dl, const AudioState& a, ImVec2 origin, float w);
     void draw_face_panel   (ImDrawList* dl, const FaceState& f,
                             ImVec2 origin, float pw, float ph);

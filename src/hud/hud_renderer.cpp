@@ -29,6 +29,21 @@ static std::string fmt_time(time_t t) {
     return buf;
 }
 
+// Draw text with an orange glow outline matching the compass tick style.
+// selected=true → full white + bright glow; false → dim white + faint glow.
+static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
+                           bool selected = true) {
+    constexpr ImU32 GLOW_ON  = IM_COL32(255, 160, 32,  72);
+    constexpr ImU32 GLOW_OFF = IM_COL32(255, 160, 32,  22);
+    constexpr ImU32 FILL_ON  = IM_COL32(255, 255, 255, 255);
+    constexpr ImU32 FILL_OFF = IM_COL32(255, 255, 255, 160);
+    const ImU32 glow = selected ? GLOW_ON  : GLOW_OFF;
+    const ImU32 fill = selected ? FILL_ON  : FILL_OFF;
+    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    dl->AddText(pos, fill, text);
+}
+
 // ── Construction ──────────────────────────────────────────────────────────────
 
 HudRenderer::HudRenderer(const HudConfig& cfg, const HudColors& colors)
@@ -127,7 +142,8 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
         draw_lora_messages(dl, s,       { 0.f, th }, msg_w, mid_h);
     }
 
-    draw_health_dots(dl, s.health, {10.f, th + 8.f});
+    draw_health_side(dl, s.health, fw, fh, false);
+    draw_health_side(dl, s.health, fw, fh, true);
 
     const float cw      = fw / 3.f;
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
@@ -161,45 +177,108 @@ static ImVec2 overlay_origin(const OverlayConfig& cfg,
 void HudRenderer::draw_pip(unsigned int tex, const char* label,
                             int w, int h, bool active, const OverlayConfig& cfg) {
     if (!active) return;
-    // One-shot diagnostic: confirm overlay is actually being rendered
-    { static bool once = false; if (!once) { once = true;
-        std::cerr << "[pip] " << label << " overlay active, tex=" << tex
-                  << " sw=" << w << " sh=" << h << "\n"; } }
 
     ImGui::SetCurrentContext(ctx_);
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
 
     const float sw     = static_cast<float>(w);
     const float sh     = static_cast<float>(h);
     const float ov_h   = sh * cfg.size;
-    const float ov_w   = ov_h * (16.f / 9.f);   // USB cameras are 16:9
+    const float ov_w   = ov_h * (16.f / 9.f);
     const float margin = static_cast<float>(cfg_.compass_height);
     const auto  pos    = overlay_origin(cfg, sw, sh, ov_w, ov_h, margin);
 
-    // Border + background
-    dl->AddRectFilled({ pos.x - 2.f, pos.y - 2.f },
-                      { pos.x + ov_w + 2.f, pos.y + ov_h + 2.f },
-                      col_.primary);
-    dl->AddRectFilled({ pos.x, pos.y },
-                      { pos.x + ov_w, pos.y + ov_h },
-                      col_.background);
+    // Passthrough window so the menu (drawn after) can appear on top via BringToDisplayFront
+    char win_id[32]; snprintf(win_id, sizeof(win_id), "##pip_%s", label);
+    ImGui::SetNextWindowPos ({0.f, 0.f});
+    ImGui::SetNextWindowSize({sw,  sh });
+    ImGui::SetNextWindowBgAlpha(0.f);
+    ImGui::Begin(win_id, nullptr,
+        ImGuiWindowFlags_NoDecoration         |
+        ImGuiWindowFlags_NoInputs             |
+        ImGuiWindowFlags_NoMove               |
+        ImGuiWindowFlags_NoNav                |
+        ImGuiWindowFlags_NoBringToDisplayFront|
+        ImGuiWindowFlags_NoSavedSettings);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Camera image or "No Signal" placeholder
+    // Build anchor-dependent chamfered polygon
+    const float C = cfg_.pip_corner_clip_px;
+    const float x = pos.x, y = pos.y, bw = ov_w, bh = ov_h;
+    ImVec2 pts[8];
+    int    n_pts;
+
+    using A = OverlayConfig::Anchor;
+    switch (cfg.anchor) {
+        case A::TOP_LEFT:
+        case A::BOTTOM_RIGHT:
+            // clip TL + BR
+            pts[0] = {x+C,    y   }; pts[1] = {x+bw,   y   };
+            pts[2] = {x+bw,   y+bh-C}; pts[3] = {x+bw-C, y+bh};
+            pts[4] = {x,      y+bh}; pts[5] = {x,      y+C };
+            n_pts = 6;
+            break;
+        case A::TOP_RIGHT:
+        case A::BOTTOM_LEFT:
+            // clip TR + BL
+            pts[0] = {x,      y   }; pts[1] = {x+bw-C, y   };
+            pts[2] = {x+bw,   y+C }; pts[3] = {x+bw,   y+bh};
+            pts[4] = {x+C,    y+bh}; pts[5] = {x,      y+bh-C};
+            n_pts = 6;
+            break;
+        default:
+            // TOP_CENTER / BOTTOM_CENTER — all 4 corners
+            pts[0] = {x+C,    y     }; pts[1] = {x+bw-C, y     };
+            pts[2] = {x+bw,   y+C   }; pts[3] = {x+bw,   y+bh-C};
+            pts[4] = {x+bw-C, y+bh  }; pts[5] = {x+C,    y+bh  };
+            pts[6] = {x,      y+bh-C}; pts[7] = {x,      y+C   };
+            n_pts = 8;
+            break;
+    }
+
+    // 1. Background fill
+    dl->AddConvexPolyFilled(pts, n_pts, col_.background);
+
+    // 2. Camera image or "No Signal" placeholder
     if (tex) {
         dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-                     { pos.x, pos.y }, { pos.x + ov_w, pos.y + ov_h });
+                     {x, y}, {x + bw, y + bh});
     } else {
         if (font_mono_) ImGui::PushFont(font_mono_);
-        const char* msg = "No Signal";
-        dl->AddText({ pos.x + ov_w * 0.5f - 36.f, pos.y + ov_h * 0.5f - 7.f },
-                    col_.text_dim, msg);
+        dl->AddText({x + bw * 0.5f - 36.f, y + bh * 0.5f - 7.f},
+                    col_.text_dim, "No Signal");
         if (font_mono_) ImGui::PopFont();
     }
 
-    // Label (top-left corner, always visible)
+    // 3. Mask image overflow at each clipped corner
+    constexpr ImU32 mask = IM_COL32(0, 0, 0, 255);
+    switch (cfg.anchor) {
+        case A::TOP_LEFT:
+        case A::BOTTOM_RIGHT:
+            dl->AddTriangleFilled({x,      y   }, {x+C,    y   }, {x,    y+C   }, mask);
+            dl->AddTriangleFilled({x+bw,   y+bh}, {x+bw-C, y+bh}, {x+bw, y+bh-C}, mask);
+            break;
+        case A::TOP_RIGHT:
+        case A::BOTTOM_LEFT:
+            dl->AddTriangleFilled({x+bw,   y   }, {x+bw-C, y   }, {x+bw, y+C   }, mask);
+            dl->AddTriangleFilled({x,      y+bh}, {x+C,    y+bh}, {x,    y+bh-C}, mask);
+            break;
+        default:
+            dl->AddTriangleFilled({x,      y   }, {x+C,    y   }, {x,    y+C   }, mask);
+            dl->AddTriangleFilled({x+bw,   y   }, {x+bw-C, y   }, {x+bw, y+C   }, mask);
+            dl->AddTriangleFilled({x,      y+bh}, {x+C,    y+bh}, {x,    y+bh-C}, mask);
+            dl->AddTriangleFilled({x+bw,   y+bh}, {x+bw-C, y+bh}, {x+bw, y+bh-C}, mask);
+            break;
+    }
+
+    // 4. Label
     if (font_mono_) ImGui::PushFont(font_mono_);
-    dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.primary, label);
+    dl->AddText({x + 4.f, y + 4.f}, col_.primary, label);
     if (font_mono_) ImGui::PopFont();
+
+    // 5. Chamfered border outline on top
+    dl->AddPolyline(pts, n_pts, col_.primary, ImDrawFlags_Closed, 2.f);
+
+    ImGui::End();
 }
 
 // ── Android mirror overlay ────────────────────────────────────────────────────
@@ -210,7 +289,6 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
 
     const float sw     = static_cast<float>(w);
     const float sh     = static_cast<float>(h);
@@ -218,6 +296,18 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     const float ov_w   = ov_h * (9.f / 16.f);   // phone portrait aspect
     const float margin = static_cast<float>(cfg_.compass_height);
     const auto  pos    = overlay_origin(cfg, sw, sh, ov_w, ov_h, margin);
+
+    ImGui::SetNextWindowPos ({0.f, 0.f});
+    ImGui::SetNextWindowSize({sw,  sh });
+    ImGui::SetNextWindowBgAlpha(0.f);
+    ImGui::Begin("##android", nullptr,
+        ImGuiWindowFlags_NoDecoration         |
+        ImGuiWindowFlags_NoInputs             |
+        ImGuiWindowFlags_NoMove               |
+        ImGuiWindowFlags_NoNav                |
+        ImGuiWindowFlags_NoBringToDisplayFront|
+        ImGuiWindowFlags_NoSavedSettings);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
 
     // Border
     dl->AddRect({ pos.x - 2.f, pos.y - 2.f },
@@ -242,6 +332,8 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     if (font_mono_) ImGui::PushFont(font_mono_);
     dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.accent, "ANDROID");
     if (font_mono_) ImGui::PopFont();
+
+    ImGui::End();
 }
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
@@ -262,45 +354,78 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
     draw_audio_strip(dl, s.audio, {w - 180.f, 4.f}, 170.f);
 }
 
-// ── Health dots ───────────────────────────────────────────────────────────────
+// ── Health side indicators ────────────────────────────────────────────────────
 
-void HudRenderer::draw_health_dots(ImDrawList* dl,
-                                    const SystemHealth& h, ImVec2 origin) {
+void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
+                                    float fw, float fh, bool right_side) {
+    const float tape_w   = fw / 3.f;
+    const float tape_x   = fw / 2.f - tape_w / 2.f;
+    const float fade_w   = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    const float anchor_y = fh - c_margin;  // bottom of compass tape
+    const float anchor_x = right_side ? tape_x + tape_w + fade_w
+                                       : tape_x - fade_w;
+
+    constexpr ImU32 COL_MAJ  = IM_COL32(255, 160, 32, 255);
+    constexpr ImU32 COL_GLW1 = IM_COL32(255, 160, 32,  70);
+    constexpr ImU32 COL_GLW2 = IM_COL32(255, 160, 32,  28);
+
     struct Ind { const char* label; bool ok; };
-    const Ind items[] = {
-        {"Proot",     h.teensy_ok},
-        {"LoRa",      h.lora_ok},
-        {"Interface", h.knob_ok},
-        {"Left Cam",  h.cam_owl_left},
-        {"Right Cam", h.cam_owl_right},
-        {"Cam 1",     h.cam_usb1},
-        {"Cam 2",     h.cam_usb2},
-        {"Audio",     h.audio_ok},
-        {"Android",   h.android_mirror},
-    };
+    const Ind left_items[]  = {{"Proot",     h.teensy_ok},
+                                {"LoRa",      h.lora_ok},
+                                {"Interface", h.knob_ok},
+                                {"Audio",     h.audio_ok},
+                                {"Android",   h.android_mirror}};
+    const Ind right_items[] = {{"Left Cam",  h.cam_owl_left},
+                                {"Right Cam", h.cam_owl_right},
+                                {"Cam 1",     h.cam_usb1},
+                                {"Cam 2",     h.cam_usb2}};
+    const Ind* items   = right_side ? right_items : left_items;
+    const int  n_items = right_side ? 4 : 5;
 
-    constexpr float row_h   = 20.f;
-    constexpr float dot_r   = 4.f;
-    constexpr float dot_cx  = 6.f;
-    constexpr float text_x  = 16.f;
-    constexpr int   n_items = 9;
-    constexpr float panel_w = 108.f;
-    constexpr float panel_h = row_h * n_items + 8.f;
+    constexpr float ROW_H = 18.f;
+    constexpr float DOT_R = 4.f;
+    constexpr float ANGLE = 40.f * 3.14159265f / 180.f;
 
-    const uint8_t alpha = static_cast<uint8_t>(cfg_.health_panel_opacity * 255.f);
-    dl->AddRectFilled(
-        {origin.x - 4.f, origin.y - 4.f},
-        {origin.x + panel_w, origin.y + panel_h},
-        IM_COL32(8, 12, 18, alpha));
+    const float dir_x = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
+    const float dir_y = -std::sin(ANGLE);
 
+    // Diagonal glow line — drawn first so items render on top
+    const float diag_len = static_cast<float>(n_items) * ROW_H;
+    const ImVec2 diag_end = {anchor_x + dir_x * diag_len,
+                              anchor_y + dir_y * diag_len};
+    dl->AddLine({anchor_x, anchor_y}, diag_end, COL_GLW2, 5.f);
+    dl->AddLine({anchor_x, anchor_y}, diag_end, COL_GLW1, 2.5f);
+    dl->AddLine({anchor_x, anchor_y}, diag_end, COL_MAJ,  1.f);
+
+    // Horizontal glow line — 150px outward from anchor
+    constexpr float H_LEN = 150.f;
+    const float h_end_x = anchor_x + (right_side ? H_LEN : -H_LEN);
+    dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW2, 5.f);
+    dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW1, 2.5f);
+    dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_MAJ,  1.f);
+
+    // Indicators placed along the diagonal
     if (font_mono_) ImGui::PushFont(font_mono_);
-    float y = origin.y;
-    for (const auto& item : items) {
-        ImU32 dot_col  = item.ok ? col_.primary : col_.danger;
-        ImU32 text_col = item.ok ? col_.text    : col_.text_dim;
-        dl->AddCircleFilled({origin.x + dot_cx, y + row_h * 0.5f}, dot_r, dot_col);
-        dl->AddText({origin.x + text_x, y + (row_h - 14.f) * 0.5f}, text_col, item.label);
-        y += row_h;
+    for (int i = 0; i < n_items; ++i) {
+        const float t  = static_cast<float>(i) * ROW_H;
+        const float ix = anchor_x + dir_x * t;
+        const float iy = anchor_y + dir_y * t;
+
+        if (items[i].ok) {
+            dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, col_.orange_dim);
+            dl->AddCircleFilled({ix, iy}, DOT_R,        col_.orange);
+        } else {
+            dl->AddCircleFilled({ix, iy}, DOT_R, col_.danger);
+        }
+
+        const char* lbl = items[i].label;
+        if (right_side) {
+            hud_glow_text(dl, {ix + DOT_R + 6.f, iy - 7.f}, lbl, items[i].ok);
+        } else {
+            float tw = ImGui::CalcTextSize(lbl).x;
+            hud_glow_text(dl, {ix - DOT_R - 6.f - tw, iy - 7.f}, lbl, items[i].ok);
+        }
     }
     if (font_mono_) ImGui::PopFont();
 }
@@ -310,24 +435,23 @@ void HudRenderer::draw_health_dots(ImDrawList* dl,
 void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
                                     ImVec2 origin, float w) {
     if (!a.enabled) {
-        dl->AddText(origin, col_.text_dim, "AUDIO OFF");
+        hud_glow_text(dl, origin, "AUDIO OFF", false);
         return;
     }
-    ImU32 col = a.device_ok ? col_.accent : col_.warn;
 
     char buf[64];
     static const char* outputs[] = {"VITURE","JACK","HDMI"};
     const char* out_str = (a.output >= 0 && a.output < 3) ? outputs[a.output] : "?";
     snprintf(buf, sizeof(buf), "AU \xe2\x86\x92 %s  X:%d", out_str, a.xrun_count);
-    dl->AddText(origin, col, buf);
+    hud_glow_text(dl, origin, buf, a.device_ok);
 
     // CPU load bar
     float bar_y = origin.y + 20.f;
     dl->AddRectFilled({origin.x, bar_y}, {origin.x + w, bar_y + 6.f},
-                       IM_COL32(30, 40, 45, 200));
+                       IM_COL32(20, 20, 20, 180));
     float load_w = w * std::min(1.f, a.cpu_load);
     ImU32 load_col = (a.cpu_load > 0.8f) ? col_.danger :
-                     (a.cpu_load > 0.5f) ? col_.warn : col_.primary;
+                     (a.cpu_load > 0.5f) ? col_.warn : col_.orange;
     dl->AddRectFilled({origin.x, bar_y}, {origin.x + load_w, bar_y + 6.f}, load_col);
 }
 
@@ -335,46 +459,46 @@ void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
 
 void HudRenderer::draw_face_panel(ImDrawList* dl, const FaceState& f,
                                    ImVec2 origin, float pw, float ph) {
-    // Transparent background — no fill; left border line as visual anchor only
-    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.primary);
-    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y}, col_.separator);
+    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.orange);
+    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y},
+                IM_COL32(255, 160, 32, 60));
 
-    ImU32 hdr_col = f.connected ? col_.primary : col_.danger;
     if (font_ui_) ImGui::PushFont(font_ui_);
-    dl->AddText({origin.x + 4.f, origin.y + 6.f}, hdr_col, "FACE");
+    hud_glow_text(dl, {origin.x + 4.f, origin.y + 6.f}, "FACE");
 
     float py = origin.y + 28.f;
     const float lh = 22.f;
 
-    dl->AddText({origin.x + 4.f, py}, f.connected ? col_.accent : col_.danger,
-                f.connected ? "Connected" : "Offline");
+    if (f.connected)
+        hud_glow_text(dl, {origin.x + 4.f, py}, "Connected");
+    else
+        dl->AddText({origin.x + 4.f, py}, col_.danger, "Offline");
     py += lh;
 
     char buf[64];
     snprintf(buf, sizeof(buf), "Effect: %s", effect_name(f.effect_id));
-    dl->AddText({origin.x + 4.f, py}, col_.text, buf);
+    hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
     py += lh;
 
     if (f.playing_gif) {
         snprintf(buf, sizeof(buf), "GIF: #%d", f.gif_id);
-        dl->AddText({origin.x + 4.f, py}, col_.accent, buf);
     } else {
         snprintf(buf, sizeof(buf), "Palette: #%d", f.palette_id);
-        dl->AddText({origin.x + 4.f, py}, col_.text, buf);
     }
+    hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
     py += lh;
 
     // Color swatch
     ImU32 swatch = IM_COL32(f.r, f.g, f.b, 255);
     dl->AddRectFilled({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f}, swatch);
-    dl->AddRect      ({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f}, col_.text_dim);
+    dl->AddRect      ({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f},
+                      IM_COL32(255, 160, 32, 120));
     snprintf(buf, sizeof(buf), " R%d G%d B%d", f.r, f.g, f.b);
-    dl->AddText({origin.x + 30.f, py + 1.f}, col_.text, buf);
+    hud_glow_text(dl, {origin.x + 30.f, py + 1.f}, buf, false);
     py += lh;
 
-    // Brightness as a percentage number — no bar graph
     snprintf(buf, sizeof(buf), "Brt: %d%%", (f.brightness * 100) / 255);
-    dl->AddText({origin.x + 4.f, py}, col_.text_dim, buf);
+    hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
     if (font_ui_) ImGui::PopFont();
 }
 
@@ -382,12 +506,12 @@ void HudRenderer::draw_face_panel(ImDrawList* dl, const FaceState& f,
 
 void HudRenderer::draw_lora_panel(ImDrawList* dl, const AppState& s,
                                    ImVec2 origin, float pw, float ph) {
-    // Transparent background — no fill; left border line as visual anchor only
-    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.primary);
-    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y}, col_.separator);
+    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.orange);
+    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y},
+                IM_COL32(255, 160, 32, 60));
 
     if (font_ui_) ImGui::PushFont(font_ui_);
-    dl->AddText({origin.x + 4.f, origin.y + 6.f}, col_.primary, "LORA NODES");
+    hud_glow_text(dl, {origin.x + 4.f, origin.y + 6.f}, "LORA NODES");
 
     float py = origin.y + 28.f;
     time_t now = std::time(nullptr);
@@ -395,31 +519,31 @@ void HudRenderer::draw_lora_panel(ImDrawList* dl, const AppState& s,
     for (const auto& node : s.lora_nodes) {
         if (py + 44.f > origin.y + ph) break;
         double age = difftime(now, node.last_seen);
-        ImU32 node_col = (age < 30.0) ? col_.accent :
-                         (age < 120.0) ? col_.warn : col_.text_dim;
+        bool fresh = (age < 30.0);
 
         char buf[96];
         if (!node.name.empty()) {
-            snprintf(buf, sizeof(buf), "%-10s %03.0f° %.1fkm",
+            snprintf(buf, sizeof(buf), "%-10s %03.0f\xc2\xb0 %.1fkm",
                      node.name.substr(0, 10).c_str(),
                      node.heading_deg, node.distance_m / 1000.f);
         } else {
-            snprintf(buf, sizeof(buf), "ID:%08X  %03.0f° %.1fkm",
+            snprintf(buf, sizeof(buf), "ID:%08X  %03.0f\xc2\xb0 %.1fkm",
                      node.node_id, node.heading_deg, node.distance_m / 1000.f);
         }
-        dl->AddText({origin.x + 4.f, py}, node_col, buf);
+        hud_glow_text(dl, {origin.x + 4.f, py}, buf, fresh);
+        if (!fresh && age < 120.0)  // stale but not lost: warn tint
+            dl->AddText({origin.x + 4.f, py}, col_.warn, buf);
         py += 18.f;
 
         snprintf(buf, sizeof(buf), "  RSSI:%d SNR:%d %ds",
                  node.rssi, node.snr,
                  node.last_seen > 0 ? static_cast<int>(age) : -1);
-        dl->AddText({origin.x + 4.f, py}, col_.text_dim, buf);
+        hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
         py += 22.f;
     }
 
-    if (s.lora_nodes.empty()) {
-        dl->AddText({origin.x + 4.f, py}, col_.text_dim, "No nodes tracked");
-    }
+    if (s.lora_nodes.empty())
+        hud_glow_text(dl, {origin.x + 4.f, py}, "No nodes tracked", false);
     if (font_ui_) ImGui::PopFont();
 }
 
@@ -430,16 +554,15 @@ void HudRenderer::draw_lora_messages(ImDrawList* dl, const AppState& s,
     dl->AddRectFilled(origin, {origin.x + pw, origin.y + ph},
                       IM_COL32(10, 15, 20, 230));
     dl->AddLine({origin.x + pw, origin.y},
-                {origin.x + pw, origin.y + ph}, col_.primary);
+                {origin.x + pw, origin.y + ph}, col_.orange);
 
     if (font_ui_) ImGui::PushFont(font_ui_);
-    dl->AddText({origin.x + 8.f, origin.y + 6.f}, col_.primary, "MESSAGES");
+    hud_glow_text(dl, {origin.x + 8.f, origin.y + 6.f}, "MESSAGES");
 
     float py = origin.y + 28.f;
     for (const auto& msg : s.lora_messages) {
         if (py + 38.f > origin.y + ph) break;
 
-        // Look up sender name
         std::string sender;
         for (const auto& n : s.lora_nodes)
             if (n.local_id == msg.local_id) { sender = n.name; break; }
@@ -452,11 +575,10 @@ void HudRenderer::draw_lora_messages(ImDrawList* dl, const AppState& s,
         snprintf(hdr, sizeof(hdr), "[%s  %s]",
                  sender.substr(0, 10).c_str(),
                  fmt_time(msg.timestamp).c_str());
-        dl->AddText({origin.x + 8.f, py}, col_.accent, hdr);
+        hud_glow_text(dl, {origin.x + 8.f, py}, hdr);
         py += 16.f;
 
-        ImU32 txt_col = msg.read ? col_.text_dim : col_.text;
-        dl->AddText({origin.x + 8.f, py}, txt_col, msg.text.c_str());
+        hud_glow_text(dl, {origin.x + 8.f, py}, msg.text.c_str(), !msg.read);
         py += 22.f;
     }
     if (font_ui_) ImGui::PopFont();
@@ -493,6 +615,22 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         // Right strip: opaque only at inner-bottom corner, fully transparent outer edge
         dl->AddRectFilledMultiColor(
             {origin.x + tw, origin.y}, {origin.x + tw + fw, origin.y + th}, T, T, T, A);
+
+        // Extend background below tape, fading back to transparent
+        constexpr float LINE_GAP = 6.f;
+        constexpr float LINE_EXT = 8.f;
+        const float bot  = origin.y + th;
+        const float bot2 = bot + LINE_GAP + LINE_EXT;
+        dl->AddRectFilledMultiColor({origin.x - fw, bot}, {origin.x,        bot2}, T, A, T, T);
+        dl->AddRectFilledMultiColor({origin.x,      bot}, {origin.x + tw,   bot2}, A, A, T, T);
+        dl->AddRectFilledMultiColor({origin.x + tw, bot}, {origin.x+tw+fw,  bot2}, A, T, T, T);
+
+        // Glowing horizontal line below tape (same 3-pass glow as major ticks)
+        const float line_y = bot + LINE_GAP;
+        const float lx0 = origin.x - fw, lx1 = origin.x + tw + fw;
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow2, 5.f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow1, 2.5f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_major, 1.f);
     }
 
     if (font_mono_) ImGui::PushFont(font_mono_);

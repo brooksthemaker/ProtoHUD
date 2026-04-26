@@ -73,7 +73,8 @@
     "lora_message_history": 50,
     "show_secondary_cams": true,
     "secondary_cam_size": 0.22,
-    "health_panel_opacity": 0.71
+    "health_panel_opacity": 0.71,
+    "pip_corner_clip_px": 16
   },
   "gpio": {
     "enabled": true,

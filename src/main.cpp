@@ -368,19 +368,26 @@ static std::vector<MenuItem> build_menu(
                                state.compass_bg_enabled = false; }, {} },
     };
 
+    // ── Prototracer (face controller) submenu ─────────────────────────────────
+    std::vector<MenuItem> prototracer_menu = {
+        { "Effects",        nullptr, std::move(effects)            },
+        { "Color",          nullptr, std::move(colors)             },
+        { "Play GIF",       nullptr, std::move(gifs)               },
+        { "Brightness",     nullptr, std::move(face_brightness)    },
+        { "Lens Brightness",nullptr, std::move(glasses_brightness) },
+    };
+
+    // Compass tucked into Headset
+    headset_menu.push_back({ "Compass", nullptr, std::move(compass_menu) });
+
     return {
-        { "Face Effects",    nullptr, std::move(effects)            },
-        { "Face Color",      nullptr, std::move(colors)             },
-        { "Play GIF",        nullptr, std::move(gifs)               },
-        { "Face Brightness", nullptr, std::move(face_brightness)    },
-        { "Lens Brightness", nullptr, std::move(glasses_brightness) },
-        { "Camera",          nullptr, std::move(camera_menu)        },
-        { "USB Cameras",     nullptr, std::move(pip_menu)           },
-        { "Compass",         nullptr, std::move(compass_menu)       },
-        { "Audio",           nullptr, std::move(audio_menu)         },
-        { "Headset",         nullptr, std::move(headset_menu)       },
-        { "Android Mirror",  nullptr, std::move(android_menu)       },
-        { "Request Status",  [teensy]{ teensy->request_status(); }, {} },
+        { "Camera",         nullptr, std::move(camera_menu)        },
+        { "USB Cameras",    nullptr, std::move(pip_menu)           },
+        { "Prototracer",    nullptr, std::move(prototracer_menu)   },
+        { "Headset",        nullptr, std::move(headset_menu)       },
+        { "Audio",          nullptr, std::move(audio_menu)         },
+        { "Android Mirror", nullptr, std::move(android_menu)       },
+        { "Request Status", [teensy]{ teensy->request_status(); }, {} },
     };
 }
 
@@ -521,6 +528,7 @@ int main(int argc, char* argv[]) {
     hud_cfg.compass_bg_side_fade  = jval(jhud, "compass_bg_side_fade_px",   80);
     hud_cfg.panel_width          = jval(jhud, "panel_width_px",       200);
     hud_cfg.health_panel_opacity = jval(jhud, "health_panel_opacity", 0.71f);
+    hud_cfg.pip_corner_clip_px   = jval(jhud, "pip_corner_clip_px",   16.f);
     hud_cfg.opacity              = jval(jdisp,"hud_opacity",          0.85f);
     hud_cfg.scale                = jval(jdisp,"hud_scale",            1.0f);
 
@@ -692,9 +700,8 @@ int main(int argc, char* argv[]) {
 
     // ── Menu system ───────────────────────────────────────────────────────────
 
-    // Auto-show overlay for cameras that opened successfully at startup
-    bool pip_cam1_overlay_active = cameras.usb1_ok();
-    bool pip_cam2_overlay_active = cameras.usb2_ok();
+    bool pip_cam1_overlay_active = false;
+    bool pip_cam2_overlay_active = false;
 
     MenuSystem menu(build_menu(&teensy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
