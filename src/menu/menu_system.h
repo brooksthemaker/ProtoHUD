@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <imgui.h>
 
 struct MenuItem {
     std::string label;
@@ -21,6 +22,11 @@ public:
     explicit MenuSystem(std::vector<MenuItem> root);
 
     void set_detent_callback(DetentCallback cb) { detent_cb_ = std::move(cb); }
+
+    // Runtime style setters — take effect immediately on the next draw() call.
+    void set_accent_color(ImU32 c) { accent_color_ = c; }
+    void set_bg_enabled(bool e)    { bg_enabled_   = e; }
+    void set_bg_color(ImU32 c)     { bg_color_     = c; }
 
     // Drive from knob events
     void navigate(int direction);   // +1 = next, -1 = prev
@@ -50,4 +56,9 @@ private:
     int                         cursor_ = 0;
     bool                        open_   = false;
     DetentCallback              detent_cb_;
+
+    // Runtime style
+    ImU32 accent_color_ = IM_COL32(255, 160,  32, 255);
+    bool  bg_enabled_   = true;
+    ImU32 bg_color_     = IM_COL32( 10,  15,  20, 225);
 };

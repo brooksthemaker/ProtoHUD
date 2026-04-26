@@ -32,6 +32,15 @@ struct HudColors {
     ImU32 orange      = IM_COL32(255, 160,  32, 255);
     ImU32 orange_glow = IM_COL32(255, 160,  32,  70);
     ImU32 orange_dim  = IM_COL32(255, 160,  32,  28);
+    // Runtime-configurable HUD palette (full RGB, alpha=255; glow alphas derived at draw time)
+    ImU32 glow_base       = IM_COL32(255, 160,  32, 255); // outline/glow base color
+    ImU32 text_fill       = IM_COL32(255, 255, 255, 255); // main text fill
+    ImU32 ind_good        = IM_COL32(255, 160,  32, 255); // indicator OK dot
+    ImU32 ind_inactive    = IM_COL32(120, 120, 120, 255); // indicator inactive/disconnected dot
+    ImU32 ind_fail        = IM_COL32(255,  60,  60, 255); // indicator failure dot
+    ImU32 compass_tick    = IM_COL32(255, 160,  32, 255); // compass major tick
+    ImU32 compass_glow    = IM_COL32(255, 160,  32, 255); // compass glow (alphas derived at draw time)
+    ImU32 compass_bg_color= IM_COL32(  8,  12,  18, 255); // compass bg RGB (alpha from opacity cfg)
 };
 
 struct HudConfig {
@@ -45,12 +54,19 @@ struct HudConfig {
     float scale                 = 1.0f;
     float health_panel_opacity  = 0.71f;
     float pip_corner_clip_px    = 16.f;
+    bool  indicator_bg_enabled  = false;  // parallelogram bg behind health indicators
 };
 
 class HudRenderer {
 public:
     HudRenderer(const HudConfig& cfg, const HudColors& colors);
     ~HudRenderer();
+
+    // Runtime access to palette and layout config for live menu editing.
+    HudColors&       colors()       { return col_; }
+    const HudColors& colors() const { return col_; }
+    HudConfig&       config()       { return cfg_; }
+    const HudConfig& config() const { return cfg_; }
 
     // Call after GL context is current. Sets up ImGui context and loads fonts.
     // glfw_window: the GLFW window ImGui should attach to for input bridging.
