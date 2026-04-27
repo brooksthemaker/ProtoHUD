@@ -62,6 +62,31 @@ static OverlayConfig::Anchor parse_anchor(const std::string& s) {
     return OverlayConfig::Anchor::TOP_CENTER;
 }
 
+// ── Color serialization helpers ───────────────────────────────────────────────
+// ImU32 is ABGR: alpha in high byte, red in low byte.
+
+static ImU32 jcolor(const json& j, const std::string& key, ImU32 def) {
+    if (!j.contains(key)) return def;
+    try {
+        const auto& a = j[key];
+        if (a.is_array() && a.size() >= 3) {
+            int r = a[0].get<int>(), g = a[1].get<int>(), b = a[2].get<int>();
+            int al = a.size() >= 4 ? a[3].get<int>() : 255;
+            return IM_COL32(r, g, b, al);
+        }
+    } catch (...) {}
+    return def;
+}
+
+static json color_to_json(ImU32 col) {
+    return json::array({
+        int((col >>  0) & 0xFF),   // R
+        int((col >>  8) & 0xFF),   // G
+        int((col >> 16) & 0xFF),   // B
+        int((col >> 24) & 0xFF),   // A
+    });
+}
+
 // ── GLFW key edge detection ───────────────────────────────────────────────────
 // Returns true on the frame the key transitions from released to pressed.
 // ImGui intercepts GLFW callbacks; after begin_frame() we use ImGui's key state.
@@ -650,9 +675,10 @@ int main(int argc, char* argv[]) {
     hud_cfg.compass_bg_side_fade  = jval(jhud, "compass_bg_side_fade_px",   80);
     hud_cfg.panel_width          = jval(jhud, "panel_width_px",       200);
     hud_cfg.health_panel_opacity = jval(jhud, "health_panel_opacity", 0.71f);
-    hud_cfg.pip_corner_clip_px   = jval(jhud, "pip_corner_clip_px",   16.f);
-    hud_cfg.opacity              = jval(jdisp,"hud_opacity",          0.85f);
-    hud_cfg.scale                = jval(jdisp,"hud_scale",            1.0f);
+    hud_cfg.pip_corner_clip_px    = jval(jhud, "pip_corner_clip_px",   16.f);
+    hud_cfg.opacity               = jval(jdisp,"hud_opacity",          0.85f);
+    hud_cfg.scale                 = jval(jdisp,"hud_scale",            1.0f);
+    hud_cfg.indicator_bg_enabled  = jval(jhud, "indicator_bg_enabled", false);
 
     AndroidMirrorConfig and_cfg;
     OverlayConfig       pip_overlay_cfg1, pip_overlay_cfg2;
@@ -747,7 +773,19 @@ int main(int argc, char* argv[]) {
     // ── HUD renderer ──────────────────────────────────────────────────────────
     // Must be after xr.init() so the GLFW window + GL context exist.
 
-    HudColors   hud_col;
+    HudColors hud_col;
+    // Load runtime palette (saved by a previous session via menu edits).
+    if (cfg.contains("hud_colors")) {
+        auto& jc = cfg["hud_colors"];
+        hud_col.glow_base        = jcolor(jc, "glow_base",        hud_col.glow_base);
+        hud_col.text_fill        = jcolor(jc, "text_fill",        hud_col.text_fill);
+        hud_col.ind_good         = jcolor(jc, "ind_good",         hud_col.ind_good);
+        hud_col.ind_inactive     = jcolor(jc, "ind_inactive",     hud_col.ind_inactive);
+        hud_col.ind_fail         = jcolor(jc, "ind_fail",         hud_col.ind_fail);
+        hud_col.compass_tick     = jcolor(jc, "compass_tick",     hud_col.compass_tick);
+        hud_col.compass_glow     = jcolor(jc, "compass_glow",     hud_col.compass_glow);
+        hud_col.compass_bg_color = jcolor(jc, "compass_bg_color", hud_col.compass_bg_color);
+    }
     HudRenderer hud(hud_cfg, hud_col);
     hud.load(xr.glfw_window());
 
@@ -835,6 +873,14 @@ int main(int argc, char* argv[]) {
                                &android_overlay_cfg,
                                &hud.colors(), &hud.config(), &menu_ptr));
     menu_ptr = &menu;
+
+    // Restore menu style from a previous session.
+    if (cfg.contains("menu_style")) {
+        auto& jm = cfg["menu_style"];
+        menu.set_accent_color(jcolor(jm, "accent_color", menu.accent_color()));
+        menu.set_bg_color    (jcolor(jm, "bg_color",     menu.bg_color()));
+        menu.set_bg_enabled  (jval  (jm, "bg_enabled",   menu.bg_enabled()));
+    }
 
     menu.set_detent_callback([&knob, &menu](int count) {
         knob.set_detents(count);
@@ -1091,6 +1137,40 @@ int main(int argc, char* argv[]) {
 
         // ── Swap ──────────────────────────────────────────────────────────────
         xr.present();
+    }
+
+    // ── Persist runtime settings ──────────────────────────────────────────────
+    // Capture whatever colors/flags the user set via the HUD menu and write
+    // them back to the config file so they survive a restart.
+    try {
+        auto& jc = cfg["hud_colors"];
+        jc["glow_base"]        = color_to_json(hud.colors().glow_base);
+        jc["text_fill"]        = color_to_json(hud.colors().text_fill);
+        jc["ind_good"]         = color_to_json(hud.colors().ind_good);
+        jc["ind_inactive"]     = color_to_json(hud.colors().ind_inactive);
+        jc["ind_fail"]         = color_to_json(hud.colors().ind_fail);
+        jc["compass_tick"]     = color_to_json(hud.colors().compass_tick);
+        jc["compass_glow"]     = color_to_json(hud.colors().compass_glow);
+        jc["compass_bg_color"] = color_to_json(hud.colors().compass_bg_color);
+
+        cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
+
+        auto& jm = cfg["menu_style"];
+        jm["accent_color"] = color_to_json(menu.accent_color());
+        jm["bg_color"]     = color_to_json(menu.bg_color());
+        jm["bg_enabled"]   = menu.bg_enabled();
+
+        FILE* f = fopen(cfg_path.c_str(), "w");
+        if (f) {
+            std::string s = cfg.dump(2);
+            fwrite(s.c_str(), 1, s.size(), f);
+            fclose(f);
+            std::cout << "[cfg] settings saved to " << cfg_path << "\n";
+        } else {
+            std::cerr << "[cfg] cannot write to " << cfg_path << "\n";
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[cfg] save failed: " << e.what() << "\n";
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
