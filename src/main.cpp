@@ -637,6 +637,7 @@ int main(int argc, char* argv[]) {
     xr_cfg.target_fps       = jval(jdisp, "target_fps",       90);
     xr_cfg.use_beast_camera = jval(jvtr,  "use_beast_camera", true);
     xr_cfg.enable_imu       = jval(jvtr,  "enable_imu",       true);
+    xr_cfg.frameless        = jval(jdisp, "frameless",         false);
 
     CamConfig owl_left, owl_right;
     if (jcam.contains("owlsight_left")) {

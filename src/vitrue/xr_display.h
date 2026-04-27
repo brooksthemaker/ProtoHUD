@@ -28,6 +28,7 @@ struct XRConfig {
     int  target_fps      = 90;
     bool use_beast_camera = true;
     bool enable_imu       = true;
+    bool frameless        = false;  // remove OS window decorations (windowed mode only)
 };
 
 class XRDisplay {

@@ -95,7 +95,8 @@ bool XRDisplay::init() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
     glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
     glfwWindowHint(GLFW_DOUBLEBUFFER,          GLFW_TRUE);
-    glfwWindowHint(GLFW_RESIZABLE,             GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE,  GLFW_FALSE);
+    glfwWindowHint(GLFW_DECORATED,  cfg_.frameless ? GLFW_FALSE : GLFW_TRUE);
 
     mon = choose_monitor();
     window_ = glfwCreateWindow(disp_w_, disp_h_, "ProtoHUD", mon, nullptr);

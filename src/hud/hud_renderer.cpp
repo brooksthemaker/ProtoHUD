@@ -158,12 +158,12 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
         draw_lora_messages(dl, s,       { 0.f, th }, msg_w, mid_h);
     }
 
+    const float cw       = fw / 3.f;
+    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    // Compass (bg + ticks) drawn first so health indicators render on top of it.
+    draw_compass_tape(dl, s, {fw / 2.f - cw / 2.f, fh - ch - c_margin}, cw, ch);
     draw_health_side(dl, s.health, fw, fh, false);
     draw_health_side(dl, s.health, fw, fh, true);
-
-    const float cw      = fw / 3.f;
-    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
-    draw_compass_tape(dl, s, {fw / 2.f - cw / 2.f, fh - ch - c_margin}, cw, ch);
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -416,7 +416,10 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
         for (int i = 0; i < N; i++) {
             const float t0 = float(i)     / float(N);
             const float t1 = float(i + 1) / float(N);
-            const uint8_t a0 = static_cast<uint8_t>(bg_a * (1.f - t0));
+            constexpr float FADE_START = 0.9f;
+            const float fade_t = (t0 < FADE_START) ? 0.f
+                                 : (t0 - FADE_START) / (1.f - FADE_START);
+            const uint8_t a0 = static_cast<uint8_t>(bg_a * (1.f - fade_t));
             ImVec2 strip[4] = {
                 {anchor_x + outer_sign * t0 * H_LEN,                    anchor_y},
                 {anchor_x + outer_sign * t0 * H_LEN + dir_x * diag_len, anchor_y + dir_y * diag_len},
