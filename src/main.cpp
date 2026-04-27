@@ -151,17 +151,35 @@ static std::vector<MenuItem> build_menu(
 
     // Camera controls
     std::vector<MenuItem> focus_modes = {
-        { "Manual", [&state]{ state.focus_left.mode = CameraFocusState::Mode::MANUAL;
-                              state.focus_right.mode = CameraFocusState::Mode::MANUAL; }, {} },
-        { "Auto",   [&state]{ state.focus_left.mode = CameraFocusState::Mode::AUTO;
-                              state.focus_right.mode = CameraFocusState::Mode::AUTO; }, {} },
-        { "Slave",  [&state]{ state.focus_left.mode = CameraFocusState::Mode::SLAVE;
-                              state.focus_right.mode = CameraFocusState::Mode::SLAVE; }, {} },
+        { "Manual", [cameras, &state]{
+            state.focus_left.mode  = CameraFocusState::Mode::MANUAL;
+            state.focus_right.mode = CameraFocusState::Mode::MANUAL;
+            if (cameras) {
+                if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
+                if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
+            }
+        }, {} },
+        { "Auto", [cameras, &state]{
+            state.focus_left.mode  = CameraFocusState::Mode::AUTO;
+            state.focus_right.mode = CameraFocusState::Mode::AUTO;
+            if (cameras) {
+                if (cameras->owl_left())  cameras->owl_left()->start_autofocus();
+                if (cameras->owl_right()) cameras->owl_right()->start_autofocus();
+            }
+        }, {} },
+        { "Slave", [cameras, &state]{
+            state.focus_left.mode  = CameraFocusState::Mode::SLAVE;
+            state.focus_right.mode = CameraFocusState::Mode::SLAVE;
+            if (cameras) {
+                if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
+                if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
+            }
+        }, {} },
     };
 
     std::vector<MenuItem> af_triggers = {
         { "Left",  [cameras, &state]{
-            if (!cameras) return;
+            if (!cameras || !cameras->owl_left()) return;
             cameras->owl_left()->start_autofocus();
             if (state.focus_left.mode == CameraFocusState::Mode::SLAVE && cameras->owl_right()) {
                 std::thread([cameras]() {
@@ -173,7 +191,7 @@ static std::vector<MenuItem> build_menu(
             }
         }, {} },
         { "Right", [cameras, &state]{
-            if (!cameras) return;
+            if (!cameras || !cameras->owl_right()) return;
             cameras->owl_right()->start_autofocus();
             if (state.focus_right.mode == CameraFocusState::Mode::SLAVE && cameras->owl_left()) {
                 std::thread([cameras]() {
@@ -186,8 +204,8 @@ static std::vector<MenuItem> build_menu(
         }, {} },
         { "Both",  [cameras, &state]{
             if (!cameras) return;
-            cameras->owl_left()->start_autofocus();
-            cameras->owl_right()->start_autofocus();
+            if (cameras->owl_left())  cameras->owl_left()->start_autofocus();
+            if (cameras->owl_right()) cameras->owl_right()->start_autofocus();
             if ((state.focus_left.mode  == CameraFocusState::Mode::SLAVE ||
                  state.focus_right.mode == CameraFocusState::Mode::SLAVE) &&
                 cameras->owl_left() && cameras->owl_right()) {
