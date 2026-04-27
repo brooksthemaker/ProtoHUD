@@ -28,6 +28,11 @@ public:
     void set_bg_enabled(bool e)    { bg_enabled_   = e; }
     void set_bg_color(ImU32 c)     { bg_color_     = c; }
 
+    // Runtime style getters — for persisting user changes to config on exit.
+    ImU32 accent_color() const { return accent_color_; }
+    ImU32 bg_color()     const { return bg_color_;     }
+    bool  bg_enabled()   const { return bg_enabled_;   }
+
     // Drive from knob events
     void navigate(int direction);   // +1 = next, -1 = prev
     void select();                  // confirm current item (also callable from GPIO)

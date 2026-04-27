@@ -408,23 +408,23 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const float dir_y    = -std::sin(ANGLE);
     const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
 
-    // Optional parallelogram background (same color/opacity as compass bg)
+    // Parallelogram background — 16 strips fading from opaque (inner) to transparent (outer).
     if (cfg_.indicator_bg_enabled) {
-        const uint8_t bg_a  = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
-        const ImU32   bg_col = with_alpha(col_.compass_bg_color, bg_a);
-        ImVec2 para[4];
-        if (right_side) {
-            para[0] = {anchor_x,                              anchor_y};
-            para[1] = {anchor_x + H_LEN,                      anchor_y};
-            para[2] = {anchor_x + H_LEN + dir_x * diag_len,   anchor_y + dir_y * diag_len};
-            para[3] = {anchor_x + dir_x * diag_len,            anchor_y + dir_y * diag_len};
-        } else {
-            para[0] = {anchor_x,                              anchor_y};
-            para[1] = {anchor_x + dir_x * diag_len,           anchor_y + dir_y * diag_len};
-            para[2] = {anchor_x - H_LEN + dir_x * diag_len,   anchor_y + dir_y * diag_len};
-            para[3] = {anchor_x - H_LEN,                      anchor_y};
+        const uint8_t bg_a       = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
+        const float   outer_sign = right_side ? 1.f : -1.f;
+        constexpr int N = 16;
+        for (int i = 0; i < N; i++) {
+            const float t0 = float(i)     / float(N);
+            const float t1 = float(i + 1) / float(N);
+            const uint8_t a0 = static_cast<uint8_t>(bg_a * (1.f - t0));
+            ImVec2 strip[4] = {
+                {anchor_x + outer_sign * t0 * H_LEN,                    anchor_y},
+                {anchor_x + outer_sign * t0 * H_LEN + dir_x * diag_len, anchor_y + dir_y * diag_len},
+                {anchor_x + outer_sign * t1 * H_LEN + dir_x * diag_len, anchor_y + dir_y * diag_len},
+                {anchor_x + outer_sign * t1 * H_LEN,                    anchor_y},
+            };
+            dl->AddConvexPolyFilled(strip, 4, with_alpha(col_.compass_bg_color, a0));
         }
-        dl->AddConvexPolyFilled(para, 4, bg_col);
     }
 
     // Diagonal glow line
@@ -635,33 +635,32 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     const ImU32 col_glow1 = with_alpha(col_.compass_glow, 70);
     const ImU32 col_glow2 = with_alpha(col_.compass_glow, 28);
 
+    const float fw = static_cast<float>(cfg_.compass_bg_side_fade);
     if (s.compass_bg_enabled) {
-        const uint8_t a  = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
-        const float   fw = static_cast<float>(cfg_.compass_bg_side_fade);
-        const ImU32   T  = with_alpha(col_.compass_bg_color, 0);
-        const ImU32   A  = with_alpha(col_.compass_bg_color, a);
-        // Left strip: fully transparent outer edge, opaque only at inner-bottom corner
-        dl->AddRectFilledMultiColor(
-            {origin.x - fw, origin.y}, {origin.x,       origin.y + th}, T, T, A, T);
-        // Center: transparent top, opaque bottom
-        dl->AddRectFilledMultiColor(
-            {origin.x,      origin.y}, {origin.x + tw,  origin.y + th}, T, T, A, A);
-        // Right strip: opaque only at inner-bottom corner, fully transparent outer edge
-        dl->AddRectFilledMultiColor(
-            {origin.x + tw, origin.y}, {origin.x + tw + fw, origin.y + th}, T, T, T, A);
+        const uint8_t a = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
+        const ImU32   A = with_alpha(col_.compass_bg_color, a);
 
-        // Extend background below tape, fading back to transparent
-        constexpr float LINE_GAP = 6.f;
-        constexpr float LINE_EXT = 8.f;
-        const float bot  = origin.y + th;
-        const float bot2 = bot + LINE_GAP + LINE_EXT;
-        dl->AddRectFilledMultiColor({origin.x - fw, bot}, {origin.x,        bot2}, T, A, T, T);
-        dl->AddRectFilledMultiColor({origin.x,      bot}, {origin.x + tw,   bot2}, A, A, T, T);
-        dl->AddRectFilledMultiColor({origin.x + tw, bot}, {origin.x+tw+fw,  bot2}, A, T, T, T);
+        // Diagonal inset at the top edge to match the health indicator 130° angle.
+        // Both sides taper inward as height increases, connecting flush to the
+        // health indicator diagonal lines when those are also enabled.
+        constexpr float kIndAngle = 130.f * 3.14159265f / 180.f;
+        const float inset = std::abs(std::cos(kIndAngle)) / std::sin(kIndAngle) * th;
 
-        // Glowing horizontal line below tape (same 3-pass glow as major ticks)
-        const float line_y = bot + LINE_GAP;
+        // Solid trapezoid — wider at bottom (anchor_y), narrower at top.
+        ImVec2 bg[4] = {
+            {origin.x - fw + inset,      origin.y     },  // TL
+            {origin.x + tw + fw - inset, origin.y     },  // TR
+            {origin.x + tw + fw,         origin.y + th},  // BR
+            {origin.x - fw,              origin.y + th},  // BL
+        };
+        dl->AddConvexPolyFilled(bg, 4, A);
+    }
+
+    // Glow line at the tape base — always visible, connects flush to the health
+    // indicator horizontal lines when those are also enabled.
+    {
         const float lx0 = origin.x - fw, lx1 = origin.x + tw + fw;
+        const float line_y = origin.y + th;
         dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow2, 5.f);
         dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow1, 2.5f);
         dl->AddLine({lx0, line_y}, {lx1, line_y}, col_major, 1.f);
@@ -683,10 +682,13 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
             dl->AddLine({px, origin.y}, {px, tick_y}, col_glow1, 4.f);
             dl->AddLine({px, origin.y}, {px, tick_y}, col_major, 1.5f);
         } else if (deg % 10 == 0) {
+            dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_glow2, 3.f);
             dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_mid);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
-            dl->AddText({px - 8.f, tick_y - 28.f}, col_major, buf);
+            hud_glow_text(dl, {px - 8.f, tick_y - 28.f}, buf,
+                          true, col_.compass_glow, col_.compass_tick);
         } else if (deg % 5 == 0) {
+            dl->AddLine({px, tick_y - 8.f}, {px, tick_y}, col_glow2, 2.f);
             dl->AddLine({px, tick_y - 8.f}, {px, tick_y}, col_minor);
         }
     }
@@ -700,8 +702,9 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         float px = center_x + offset * ppd;
         if (px < origin.x || px > origin.x + tw) continue;
 
-        dl->AddText({px - 8.f, origin.y - 16.f}, col_major,
-                    cardinal_str(static_cast<float>(deg)));
+        hud_glow_text(dl, {px - 8.f, origin.y - 16.f},
+                      cardinal_str(static_cast<float>(deg)),
+                      true, col_.compass_glow, col_.compass_tick);
     }
 
     // Centre cursor triangle — glow halo then sharp fill
@@ -718,7 +721,8 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
 
     // Heading readout
     char hdg[16]; snprintf(hdg, sizeof(hdg), "%03.0f°", heading);
-    dl->AddText({center_x - 16.f, origin.y + 16.f}, col_major, hdg);
+    hud_glow_text(dl, {center_x - 16.f, origin.y + 16.f}, hdg,
+                  true, col_.compass_glow, col_.compass_tick);
 
     if (font_mono_) ImGui::PopFont();
 }
