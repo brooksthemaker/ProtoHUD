@@ -3,6 +3,7 @@
     "width": 1920,
     "height": 1080,
     "fullscreen": true,
+    "frameless": false,
     "target_fps": 90,
     "eye_separation": 0.064,
     "hud_opacity": 0.85,
