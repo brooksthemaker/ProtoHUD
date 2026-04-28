@@ -281,8 +281,12 @@ static std::vector<MenuItem> build_menu(
     }
 
     std::vector<MenuItem> nv_menu = {
-        { "NV On",  [&state]{ state.night_vision.nv_enabled = true;  state.night_vision.exposure_ev = 3.0f; state.night_vision.shutter_us = 40000; }, {} },
-        { "NV Off", [&state]{ state.night_vision.nv_enabled = false; state.night_vision.exposure_ev = 0.0f; state.night_vision.shutter_us = 16667; }, {} },
+        { "Night Vision", [&state]{
+            bool& nv = state.night_vision.nv_enabled;
+            nv = !nv;
+            state.night_vision.exposure_ev = nv ? 3.0f : 0.0f;
+            state.night_vision.shutter_us  = nv ? 40000 : 16667;
+        }, {}, [&state]{ return state.night_vision.nv_enabled; } },
         { "Exposure (EV)",  nullptr, std::move(exposure_ev)    },
         { "Shutter Speed",  nullptr, std::move(shutter_speeds) },
     };
@@ -332,8 +336,8 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> audio_menu = {
-        { "Enable",  [audio]{ if (audio) audio->set_enabled(true);  }, {} },
-        { "Disable", [audio]{ if (audio) audio->set_enabled(false); }, {} },
+        { "Enable", [audio]{ if (audio) audio->set_enabled(!audio->is_enabled()); }, {},
+          [audio]{ return audio && audio->is_enabled(); } },
         { "Volume",  nullptr, std::move(volume_levels) },
         { "Output",  nullptr, std::move(output_menu)   },
     };
@@ -374,10 +378,10 @@ static std::vector<MenuItem> build_menu(
         { "Close",             [cameras, pip_cam1_overlay]{
                                    cameras->close_usb1();   // also clears reconnect flag
                                    *pip_cam1_overlay = false; }, {} },
-        { "Auto-Reconnect On", [cameras]{ cameras->set_usb1_reconnect(true);  }, {} },
-        { "Auto-Reconnect Off",[cameras]{ cameras->set_usb1_reconnect(false); }, {} },
-        { "Show Overlay",      [pip_cam1_overlay]{ *pip_cam1_overlay = true;  }, {} },
-        { "Hide Overlay",      [pip_cam1_overlay]{ *pip_cam1_overlay = false; }, {} },
+        { "Auto-Reconnect", [cameras]{ cameras->set_usb1_reconnect(!cameras->usb1_reconnect_enabled()); }, {},
+          [cameras]{ return cameras->usb1_reconnect_enabled(); } },
+        { "Show Overlay", [pip_cam1_overlay]{ *pip_cam1_overlay = !*pip_cam1_overlay; }, {},
+          [pip_cam1_overlay]{ return *pip_cam1_overlay; } },
         { "Position",          nullptr, make_position_items(pip_cfg1) },
         { "Size",              nullptr, make_size_items(pip_cfg1)     },
     };
@@ -390,10 +394,10 @@ static std::vector<MenuItem> build_menu(
         { "Close",             [cameras, pip_cam2_overlay]{
                                    cameras->close_usb2();   // also clears reconnect flag
                                    *pip_cam2_overlay = false; }, {} },
-        { "Auto-Reconnect On", [cameras]{ cameras->set_usb2_reconnect(true);  }, {} },
-        { "Auto-Reconnect Off",[cameras]{ cameras->set_usb2_reconnect(false); }, {} },
-        { "Show Overlay",      [pip_cam2_overlay]{ *pip_cam2_overlay = true;  }, {} },
-        { "Hide Overlay",      [pip_cam2_overlay]{ *pip_cam2_overlay = false; }, {} },
+        { "Auto-Reconnect", [cameras]{ cameras->set_usb2_reconnect(!cameras->usb2_reconnect_enabled()); }, {},
+          [cameras]{ return cameras->usb2_reconnect_enabled(); } },
+        { "Show Overlay", [pip_cam2_overlay]{ *pip_cam2_overlay = !*pip_cam2_overlay; }, {},
+          [pip_cam2_overlay]{ return *pip_cam2_overlay; } },
         { "Position",          nullptr, make_position_items(pip_cfg2) },
         { "Size",              nullptr, make_size_items(pip_cfg2)     },
     };
@@ -404,12 +408,12 @@ static std::vector<MenuItem> build_menu(
 
     // ── Android mirror ────────────────────────────────────────────────────────
     std::vector<MenuItem> android_menu = {
-        { "Start Mirror", [android_mirror]() {
-            std::thread([android_mirror]() { android_mirror->start(); }).detach();
-        }, {} },
-        { "Stop Mirror",  [android_mirror]() { android_mirror->stop(); }, {} },
-        { "Show Overlay", [android_overlay]() { *android_overlay = true;  }, {} },
-        { "Hide Overlay", [android_overlay]() { *android_overlay = false; }, {} },
+        { "Mirror", [android_mirror]() {
+            if (android_mirror->is_running()) android_mirror->stop();
+            else std::thread([android_mirror]() { android_mirror->start(); }).detach();
+        }, {}, [android_mirror]{ return android_mirror->is_running(); } },
+        { "Show Overlay", [android_overlay]() { *android_overlay = !*android_overlay; }, {},
+          [android_overlay]{ return *android_overlay; } },
         { "Position",     nullptr, make_position_items(android_cfg) },
         { "Size",         nullptr, make_size_items(android_cfg)     },
     };
@@ -461,10 +465,10 @@ static std::vector<MenuItem> build_menu(
     }, [hud_col](ImU32 c){ hud_col->compass_glow = c; });
 
     std::vector<MenuItem> compass_menu = {
-        { "BG On",      [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
-                                   state.compass_bg_enabled = true;  }, {} },
-        { "BG Off",     [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
-                                   state.compass_bg_enabled = false; }, {} },
+        { "Background", [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.compass_bg_enabled = !state.compass_bg_enabled;
+        }, {}, [&state]{ return state.compass_bg_enabled; } },
         { "BG Color",   nullptr, std::move(compass_bg_color_menu)   },
         { "Tick Color", nullptr, std::move(compass_tick_color_menu)  },
         { "Glow Color", nullptr, std::move(compass_glow_color_menu)  },
@@ -513,8 +517,8 @@ static std::vector<MenuItem> build_menu(
         { "Active Color",   nullptr, std::move(ind_good_color_menu)     },
         { "Inactive Color", nullptr, std::move(ind_inactive_color_menu) },
         { "Fail Color",     nullptr, std::move(ind_fail_color_menu)     },
-        { "BG On",          [hud_cfg]{ hud_cfg->indicator_bg_enabled = true;  }, {} },
-        { "BG Off",         [hud_cfg]{ hud_cfg->indicator_bg_enabled = false; }, {} },
+        { "Background", [hud_cfg]{ hud_cfg->indicator_bg_enabled = !hud_cfg->indicator_bg_enabled; }, {},
+          [hud_cfg]{ return hud_cfg->indicator_bg_enabled; } },
     };
 
     // Menu Options submenu
@@ -537,8 +541,9 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> menu_options_menu = {
         { "Menu Color",  nullptr, std::move(menu_color_menu)    },
         { "BG Color",    nullptr, std::move(menu_bg_color_menu) },
-        { "BG On",  [menu_sys_pp]{ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(true);  }, {} },
-        { "BG Off", [menu_sys_pp]{ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(false); }, {} },
+        { "Background", [menu_sys_pp]{
+            if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(!(*menu_sys_pp)->bg_enabled());
+        }, {}, [menu_sys_pp]{ return *menu_sys_pp && (*menu_sys_pp)->bg_enabled(); } },
     };
 
     // HUD top-level menu

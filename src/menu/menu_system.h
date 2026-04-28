@@ -9,6 +9,7 @@ struct MenuItem {
     std::string label;
     std::function<void()> action;        // leaf item: execute this
     std::vector<MenuItem> children;      // submenu items
+    std::function<bool()> get_state;     // if set: toggle item; draws radio indicator
 };
 
 // Stack-based menu driven by SmartKnob detents.
