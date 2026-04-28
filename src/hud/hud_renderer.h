@@ -86,7 +86,9 @@ public:
     // label: short name shown in the overlay corner.
     // cfg controls anchor position and size as a fraction of screen height.
     void draw_pip(unsigned int tex, const char* label,
-                  int w, int h, bool active, const OverlayConfig& cfg);
+                  int w, int h, bool active, const OverlayConfig& cfg,
+                  const CameraFocusState& focus = {},
+                  bool nv_active = false);
 
     // Build Android mirror overlay (portrait 9:16 aspect).
     // tex: GLuint from AndroidMirror::get_frame() — 0 shows a status placeholder.
@@ -102,7 +104,10 @@ public:
 private:
     void draw_top_bar      (ImDrawList* dl, const AppState& s, float w);
     void draw_health_side  (ImDrawList* dl, const SystemHealth& h,
-                            float fw, float fh, bool right_side);
+                            float fw, float fh, bool right_side,
+                            const CameraFocusState& focus_left,
+                            const CameraFocusState& focus_right,
+                            bool nv_enabled);
     void draw_audio_strip  (ImDrawList* dl, const AudioState& a, ImVec2 origin, float w);
     void draw_face_panel   (ImDrawList* dl, const FaceState& f,
                             ImVec2 origin, float pw, float ph);

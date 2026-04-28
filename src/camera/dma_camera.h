@@ -74,6 +74,7 @@ public:
     void set_focus_position(int pos);   // 0-1000
     int  get_focus_position() const;
     bool is_af_locked() const;
+    bool is_af_scanning() const;
     void set_exposure_ev(float ev);     // -3.0 to +3.0
     void set_shutter_speed_us(int us);  // microseconds
 

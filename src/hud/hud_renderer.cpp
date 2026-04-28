@@ -162,8 +162,10 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
     // Compass (bg + ticks) drawn first so health indicators render on top of it.
     draw_compass_tape(dl, s, {fw / 2.f - cw / 2.f, fh - ch - c_margin}, cw, ch);
-    draw_health_side(dl, s.health, fw, fh, false);
-    draw_health_side(dl, s.health, fw, fh, true);
+    draw_health_side(dl, s.health, fw, fh, false,
+                     s.focus_left, s.focus_right, s.night_vision.nv_enabled);
+    draw_health_side(dl, s.health, fw, fh, true,
+                     s.focus_left, s.focus_right, s.night_vision.nv_enabled);
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -191,7 +193,8 @@ static ImVec2 overlay_origin(const OverlayConfig& cfg,
 // ── PiP ──────────────────────────────────────────────────────────────────────
 
 void HudRenderer::draw_pip(unsigned int tex, const char* label,
-                            int w, int h, bool active, const OverlayConfig& cfg) {
+                            int w, int h, bool active, const OverlayConfig& cfg,
+                            const CameraFocusState& focus, bool nv_active) {
     if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
@@ -286,12 +289,33 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
             break;
     }
 
-    // 4. Label
+    // 4. Label (top-left)
     if (font_mono_) ImGui::PushFont(font_mono_);
     dl->AddText({x + 4.f, y + 4.f}, col_.primary, label);
     if (font_mono_) ImGui::PopFont();
 
-    // 5. Chamfered border outline on top
+    // 5. Focus mode + NV status strip (bottom-left)
+    {
+        const char* focus_str =
+            (focus.mode == CameraFocusState::Mode::MANUAL) ? "MAN" :
+            (focus.mode == CameraFocusState::Mode::SLAVE)  ? "SLV" :
+            focus.af_locked ? "LOCK" :
+            focus.af_active ? "SCAN" : "AF";
+        const bool  af_on   = (focus.mode == CameraFocusState::Mode::AUTO);
+        if (font_mono_) ImGui::PushFont(font_mono_);
+        const float lh      = ImGui::GetTextLineHeight();
+        const float sy      = y + bh - lh - 5.f;
+        hud_glow_text(dl, {x + 6.f, sy}, focus_str, af_on,
+                      col_.glow_base, col_.text_fill);
+        if (nv_active) {
+            const float off = ImGui::CalcTextSize(focus_str).x + 8.f;
+            hud_glow_text(dl, {x + 6.f + off, sy}, "NV", true,
+                          col_.glow_base, col_.text_fill);
+        }
+        if (font_mono_) ImGui::PopFont();
+    }
+
+    // 6. Chamfered border outline on top
     dl->AddPolyline(pts, n_pts, col_.primary, ImDrawFlags_Closed, 2.f);
 
     ImGui::End();
@@ -374,7 +398,10 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
 // ── Health side indicators ────────────────────────────────────────────────────
 
 void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
-                                    float fw, float fh, bool right_side) {
+                                    float fw, float fh, bool right_side,
+                                    const CameraFocusState& focus_left,
+                                    const CameraFocusState& focus_right,
+                                    bool nv_enabled) {
     const float tape_w   = fw / 3.f;
     const float tape_x   = fw / 2.f - tape_w / 2.f;
     const float fade_w   = static_cast<float>(cfg_.compass_bg_side_fade);
@@ -387,13 +414,24 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
     const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
 
+    auto focus_suffix = [](const CameraFocusState& f) -> const char* {
+        if (f.mode == CameraFocusState::Mode::MANUAL) return " MAN";
+        if (f.mode == CameraFocusState::Mode::SLAVE)  return " SLV";
+        if (f.af_locked) return " LOCK";
+        if (f.af_active) return " SCAN";
+        return " AUTO";
+    };
+    char lcam_lbl[24], rcam_lbl[24];
+    snprintf(lcam_lbl, sizeof(lcam_lbl), "L.Cam%s", focus_suffix(focus_left));
+    snprintf(rcam_lbl, sizeof(rcam_lbl), "R.Cam%s", focus_suffix(focus_right));
+
     struct Ind { const char* label; bool ok; };
     const Ind left_items[]  = {{"Proot",     h.teensy_ok},
                                 {"LoRa",      h.lora_ok},
                                 {"Interface", h.knob_ok},
                                 {"Audio",     h.audio_ok}};
-    const Ind right_items[] = {{"Left Cam",  h.cam_owl_left},
-                                {"Right Cam", h.cam_owl_right},
+    const Ind right_items[] = {{lcam_lbl,    h.cam_owl_left},
+                                {rcam_lbl,    h.cam_owl_right},
                                 {"Cam 1",     h.cam_usb1},
                                 {"Cam 2",     h.cam_usb2}};
     const Ind* items   = right_side ? right_items : left_items;
@@ -441,6 +479,14 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW2, 5.f);
     dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW1, 2.5f);
     dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_MAJ,  1.f);
+
+    // NV badge at end of horizontal line when night vision is active
+    if (nv_enabled) {
+        const float nv_x = right_side ? h_end_x + 6.f : h_end_x - ImGui::CalcTextSize("NV").x - 6.f;
+        if (font_mono_) ImGui::PushFont(font_mono_);
+        hud_glow_text(dl, {nv_x, anchor_y - 7.f}, "NV", true, col_.glow_base, col_.text_fill);
+        if (font_mono_) ImGui::PopFont();
+    }
 
     // Indicators placed along the diagonal, lifted 1 item above anchor
     if (font_mono_) ImGui::PushFont(font_mono_);
@@ -681,9 +727,10 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         if (px < origin.x || px > origin.x + tw) continue;
 
         if (deg % 45 == 0) {
-            dl->AddLine({px, origin.y}, {px, tick_y}, col_glow2, 9.f);
-            dl->AddLine({px, origin.y}, {px, tick_y}, col_glow1, 4.f);
-            dl->AddLine({px, origin.y}, {px, tick_y}, col_major, 1.5f);
+            // Major tick starts below the cardinal label (label is 4px inside + ~14px tall)
+            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_glow2, 9.f);
+            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_glow1, 4.f);
+            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_major, 1.5f);
         } else if (deg % 10 == 0) {
             dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_glow2, 3.f);
             dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_mid);
@@ -705,7 +752,7 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         float px = center_x + offset * ppd;
         if (px < origin.x || px > origin.x + tw) continue;
 
-        hud_glow_text(dl, {px - 8.f, origin.y - 16.f},
+        hud_glow_text(dl, {px - 8.f, origin.y + 4.f},
                       cardinal_str(static_cast<float>(deg)),
                       true, col_.compass_glow, col_.compass_tick);
     }

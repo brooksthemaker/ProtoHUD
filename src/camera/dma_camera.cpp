@@ -579,6 +579,10 @@ bool DmaCamera::is_af_locked() const {
     return last_af_state_.load() == controls::AfStateFocused;
 }
 
+bool DmaCamera::is_af_scanning() const {
+    return last_af_state_.load() == controls::AfStateScanning;
+}
+
 void DmaCamera::set_exposure_ev(float ev) {
     if (!camera_) return;
     if (camera_->controls().count(&controls::ExposureValue))

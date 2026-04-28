@@ -171,6 +171,20 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         ImVec2 tpos = {rmin.x + 4.f, rmin.y + (item_h - line_h) * 0.5f - 0.5f};
         draw_glow_text(dl, tpos, label.c_str(), selected, accent_color_);
 
+        // Radio indicator for toggle items (right edge of row)
+        if (items[i].get_state) {
+            bool on      = items[i].get_state();
+            const float r  = 5.f;
+            const float cx = rmax.x - 10.f;
+            const float cy = rmin.y + item_h * 0.5f;
+            if (on) {
+                dl->AddCircleFilled({cx, cy}, r,    accent_color_);
+                dl->AddCircleFilled({cx, cy}, 2.5f, IM_COL32(255, 255, 255, 255));
+            } else {
+                dl->AddCircle({cx, cy}, r, menu_with_alpha(accent_color_, 60), 0, 1.5f);
+            }
+        }
+
         // Thin bottom separator
         dl->AddLine({rmin.x - pad_x, rmax.y - 1.f},
                     {rmax.x + pad_x, rmax.y - 1.f}, COL_SEP, 1.f);
