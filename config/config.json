@@ -127,6 +127,14 @@
     "anchor":    "bottom_left",
     "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
   },
+  "post_process": {
+    "edge_enabled": false,
+    "edge_strength": 0.7,
+    "edge_color": [255, 160, 32, 255],
+    "desat_enabled": false,
+    "desat_strength": 0.8,
+    "contrast_threshold": 0.15
+  },
   "colors": {
     "hud_primary":    [0, 220, 180, 220],
     "hud_accent":     [0, 180, 255, 255],

@@ -25,6 +25,7 @@
 #include "vitrue/xr_display.h"
 #include "vitrue/timewarp.h"
 #include "audio/audio_engine.h"
+#include "post_process.h"
 
 using json = nlohmann::json;
 
@@ -555,6 +556,48 @@ static std::vector<MenuItem> build_menu(
         { "Menu Options",      nullptr, std::move(menu_options_menu)     },
     };
 
+    // ── Vision Assist (post-processing depth cues) ────────────────────────────
+
+    std::vector<MenuItem> edge_strength_menu = {
+        { "10%",  [&state]{ state.pp_cfg.edge_strength = 0.10f; }, {} },
+        { "30%",  [&state]{ state.pp_cfg.edge_strength = 0.30f; }, {} },
+        { "50%",  [&state]{ state.pp_cfg.edge_strength = 0.50f; }, {} },
+        { "70%",  [&state]{ state.pp_cfg.edge_strength = 0.70f; }, {} },
+        { "100%", [&state]{ state.pp_cfg.edge_strength = 1.00f; }, {} },
+    };
+
+    std::vector<MenuItem> edge_color_menu = {
+        { "Orange", [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 160,  32, 255); }, {} },
+        { "Teal",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 220, 180, 255); }, {} },
+        { "Cyan",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 180, 255, 255); }, {} },
+        { "Green",  [&state]{ state.pp_cfg.edge_color = IM_COL32( 30, 220,  60, 255); }, {} },
+        { "White",  [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 255, 255, 255); }, {} },
+    };
+
+    std::vector<MenuItem> desat_strength_menu = {
+        { "25%",  [&state]{ state.pp_cfg.desat_strength = 0.25f; }, {} },
+        { "50%",  [&state]{ state.pp_cfg.desat_strength = 0.50f; }, {} },
+        { "75%",  [&state]{ state.pp_cfg.desat_strength = 0.75f; }, {} },
+        { "100%", [&state]{ state.pp_cfg.desat_strength = 1.00f; }, {} },
+    };
+
+    std::vector<MenuItem> bg_threshold_menu = {
+        { "Subtle (0.25)",     [&state]{ state.pp_cfg.contrast_threshold = 0.25f; }, {} },
+        { "Medium (0.15)",     [&state]{ state.pp_cfg.contrast_threshold = 0.15f; }, {} },
+        { "Aggressive (0.07)", [&state]{ state.pp_cfg.contrast_threshold = 0.07f; }, {} },
+    };
+
+    std::vector<MenuItem> vision_menu = {
+        { "Edge Highlight", [&state]{ state.pp_cfg.edge_enabled  = !state.pp_cfg.edge_enabled;  }, {},
+          [&state]{ return state.pp_cfg.edge_enabled;  } },
+        { "Edge Strength",  nullptr, std::move(edge_strength_menu) },
+        { "Edge Color",     nullptr, std::move(edge_color_menu)    },
+        { "Bg Desaturate",  [&state]{ state.pp_cfg.desat_enabled = !state.pp_cfg.desat_enabled; }, {},
+          [&state]{ return state.pp_cfg.desat_enabled; } },
+        { "Desat Strength", nullptr, std::move(desat_strength_menu) },
+        { "BG Threshold",   nullptr, std::move(bg_threshold_menu)   },
+    };
+
     return {
         { "Camera",         nullptr, std::move(camera_menu)        },
         { "USB Cameras",    nullptr, std::move(pip_menu)           },
@@ -563,6 +606,7 @@ static std::vector<MenuItem> build_menu(
         { "Audio",          nullptr, std::move(audio_menu)         },
         { "Android Mirror", nullptr, std::move(android_menu)       },
         { "HUD",            nullptr, std::move(hud_menu)           },
+        { "Vision Assist",  nullptr, std::move(vision_menu)        },
         { "Request Status", [teensy]{ teensy->request_status(); }, {} },
         { "Close Program",  [&state]{ state.quit = true; },         {} },
     };
@@ -755,6 +799,22 @@ int main(int argc, char* argv[]) {
         state.night_vision.shutter_us  = jnv.value("shutter_us",  33333);
     }
 
+    if (cfg.contains("post_process")) {
+        auto& jpp = cfg["post_process"];
+        state.pp_cfg.edge_enabled       = jpp.value("edge_enabled",       false);
+        state.pp_cfg.edge_strength      = jpp.value("edge_strength",      0.7f);
+        state.pp_cfg.desat_enabled      = jpp.value("desat_enabled",      false);
+        state.pp_cfg.desat_strength     = jpp.value("desat_strength",     0.8f);
+        state.pp_cfg.contrast_threshold = jpp.value("contrast_threshold", 0.15f);
+        if (jpp.contains("edge_color") && jpp["edge_color"].is_array() &&
+            jpp["edge_color"].size() >= 3) {
+            auto& jc = jpp["edge_color"];
+            uint8_t r = jc[0], g = jc[1], b = jc[2];
+            uint8_t a = jpp["edge_color"].size() >= 4 ? (uint8_t)jc[3] : 255;
+            state.pp_cfg.edge_color = IM_COL32(r, g, b, a);
+        }
+    }
+
     // Seed resolution state from whatever the OWLsight config says
     state.camera_resolution.width  = owl_left.width;
     state.camera_resolution.height = owl_left.height;
@@ -795,6 +855,21 @@ int main(int argc, char* argv[]) {
     bool use_timewarp = timewarp.init();
     if (!use_timewarp)
         std::cerr << "[main] timewarp shader unavailable — skipping\n";
+
+    // ── Post-processing (Vision Assist) ───────────────────────────────────────
+
+    PostProcessor post_proc;
+    gl::Fbo pp_fbo_left, pp_fbo_right;
+    const bool pp_ok = post_proc.init(
+        xr.eye_width(), xr.eye_height(),
+        res("assets/shaders/postprocess.vs").c_str(),
+        res("assets/shaders/postprocess.fs").c_str());
+    if (pp_ok) {
+        pp_fbo_left  = gl::make_fbo(xr.eye_width(), xr.eye_height());
+        pp_fbo_right = gl::make_fbo(xr.eye_width(), xr.eye_height());
+    } else {
+        std::cerr << "[main] post-process shader unavailable — Vision Assist disabled\n";
+    }
 
     // ── Spatial audio ─────────────────────────────────────────────────────────
 
@@ -1080,6 +1155,7 @@ int main(int argc, char* argv[]) {
             snap.focus_left         = state.focus_left;
             snap.focus_right        = state.focus_right;
             snap.night_vision       = state.night_vision;
+            snap.pp_cfg             = state.pp_cfg;
         }
 
         // Record render-time pose for timewarp
@@ -1128,6 +1204,17 @@ int main(int argc, char* argv[]) {
             xr.eye_right().unbind();
         }
 
+        // ── Post-processing (Vision Assist depth cues) ────────────────────────
+        GLuint left_src  = xr.eye_left().tex;
+        GLuint right_src = xr.eye_right().tex;
+        if (pp_ok && post_proc.any_enabled(snap.pp_cfg) &&
+                pp_fbo_left.valid() && pp_fbo_right.valid()) {
+            post_proc.process(xr.eye_left().tex,  pp_fbo_left,  snap.pp_cfg);
+            post_proc.process(xr.eye_right().tex, pp_fbo_right, snap.pp_cfg);
+            left_src  = pp_fbo_left.tex;
+            right_src = pp_fbo_right.tex;
+        }
+
         // ── Composite or timewarp ─────────────────────────────────────────────
         ImuPose current_pose = xr.get_latest_imu_pose();
 
@@ -1148,9 +1235,9 @@ int main(int argc, char* argv[]) {
             int half_w = xr.display_width() / 2;
             int dh     = xr.display_height();
             glViewport(0,      0, half_w, dh);
-            timewarp.warp_frame(xr.eye_left().tex,  ew, eh, current_pose);
+            timewarp.warp_frame(left_src,  ew, eh, current_pose);
             glViewport(half_w, 0, half_w, dh);
-            timewarp.warp_frame(xr.eye_right().tex, ew, eh, current_pose);
+            timewarp.warp_frame(right_src, ew, eh, current_pose);
         } else {
             // Standard composite (no latency correction)
             xr.composite();
@@ -1201,6 +1288,14 @@ int main(int argc, char* argv[]) {
 
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
 
+        auto& jpp = cfg["post_process"];
+        jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
+        jpp["edge_strength"]      = state.pp_cfg.edge_strength;
+        jpp["edge_color"]         = color_to_json(state.pp_cfg.edge_color);
+        jpp["desat_enabled"]      = state.pp_cfg.desat_enabled;
+        jpp["desat_strength"]     = state.pp_cfg.desat_strength;
+        jpp["contrast_threshold"] = state.pp_cfg.contrast_threshold;
+
         auto& jm = cfg["menu_style"];
         jm["accent_color"] = color_to_json(menu.accent_color());
         jm["bg_color"]     = color_to_json(menu.bg_color());
@@ -1234,6 +1329,10 @@ int main(int argc, char* argv[]) {
     if (tex_usb2)    glDeleteTextures(1, &tex_usb2);
     if (tex_beast)   glDeleteTextures(1, &tex_beast);
     if (tex_android) glDeleteTextures(1, &tex_android);
+
+    pp_fbo_left.destroy();
+    pp_fbo_right.destroy();
+    post_proc.shutdown();
 
     xr.shutdown();
     return 0;

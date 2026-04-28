@@ -122,6 +122,7 @@ set(SOURCES
     src/vitrue/xr_display.cpp
     src/vitrue/timewarp.cpp
     src/audio/audio_engine.cpp
+    src/post_process.cpp
 )
 
 add_executable(protohud ${SOURCES})
