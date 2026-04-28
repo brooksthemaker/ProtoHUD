@@ -102,7 +102,10 @@ public:
 private:
     void draw_top_bar      (ImDrawList* dl, const AppState& s, float w);
     void draw_health_side  (ImDrawList* dl, const SystemHealth& h,
-                            float fw, float fh, bool right_side);
+                            float fw, float fh, bool right_side,
+                            const CameraFocusState& focus_left,
+                            const CameraFocusState& focus_right,
+                            bool nv_enabled);
     void draw_audio_strip  (ImDrawList* dl, const AudioState& a, ImVec2 origin, float w);
     void draw_face_panel   (ImDrawList* dl, const FaceState& f,
                             ImVec2 origin, float pw, float ph);

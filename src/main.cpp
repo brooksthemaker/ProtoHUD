@@ -280,13 +280,19 @@ static std::vector<MenuItem> build_menu(
         });
     }
 
+    std::vector<MenuItem> nv_menu = {
+        { "NV On",  [&state]{ state.night_vision.nv_enabled = true;  state.night_vision.exposure_ev = 3.0f; state.night_vision.shutter_us = 40000; }, {} },
+        { "NV Off", [&state]{ state.night_vision.nv_enabled = false; state.night_vision.exposure_ev = 0.0f; state.night_vision.shutter_us = 16667; }, {} },
+        { "Exposure (EV)",  nullptr, std::move(exposure_ev)    },
+        { "Shutter Speed",  nullptr, std::move(shutter_speeds) },
+    };
+
     std::vector<MenuItem> camera_menu = {
         { "Resolution",     nullptr, std::move(resolution_presets) },
         { "Focus Mode",     nullptr, std::move(focus_modes)        },
         { "Focus Position", nullptr, std::move(focus_positions)    },
         { "Autofocus",      nullptr, std::move(af_triggers)        },
-        { "Exposure (EV)",  nullptr, std::move(exposure_ev)        },
-        { "Shutter Speed",  nullptr, std::move(shutter_speeds)     },
+        { "Night Vision",   nullptr, std::move(nv_menu)            },
     };
 
     // VITURE Headset controls
@@ -1042,6 +1048,16 @@ int main(int argc, char* argv[]) {
             state.health.android_mirror = android_mirror.is_connected();
         }
 
+        // ── Update AF / focus state from cameras (atomics, no mutex needed) ─────
+        if (cameras.owl_left()) {
+            state.focus_left.af_locked = cameras.owl_left()->is_af_locked();
+            state.focus_left.af_active = cameras.owl_left()->is_af_scanning();
+        }
+        if (cameras.owl_right()) {
+            state.focus_right.af_locked = cameras.owl_right()->is_af_locked();
+            state.focus_right.af_active = cameras.owl_right()->is_af_scanning();
+        }
+
         // ── State snapshot ────────────────────────────────────────────────────
         AppState snap;
         {
@@ -1055,6 +1071,9 @@ int main(int argc, char* argv[]) {
             snap.compass_heading    = state.compass_heading;
             snap.compass_bg_enabled = state.compass_bg_enabled;
             snap.imu_pose           = state.imu_pose;
+            snap.focus_left         = state.focus_left;
+            snap.focus_right        = state.focus_right;
+            snap.night_vision       = state.night_vision;
         }
 
         // Record render-time pose for timewarp

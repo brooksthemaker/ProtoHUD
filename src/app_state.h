@@ -90,7 +90,8 @@ struct CameraFocusState {
 
 struct NightVisionState {
     float exposure_ev = 0.0f;  // -3.0 to +3.0
-    int shutter_us = 33333;    // microseconds (40 to 1000000)
+    int   shutter_us  = 33333; // microseconds (40 to 1000000)
+    bool  nv_enabled  = false; // night vision preset active (HUD indicator + apply flag)
 };
 
 struct CameraResolutionState {
