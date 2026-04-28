@@ -313,6 +313,52 @@ void CameraManager::upload_texture(GLuint& tex, int w, int h,
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
+// ── USB camera scan/reconnect ──────────────────────────────────────────────────
+// Stops the capture thread so no concurrent cap.read() is in flight, then probes
+// /dev/video0..9 until a device opens successfully. The thread is restarted if
+// at least one USB slot is now open. Returns true if this slot is now open.
+
+bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
+                              const UsbCamConfig& cfg)
+{
+    // Stop the capture thread so nothing else is calling cap.read()
+    running_ = false;
+    if (usb_thread_.joinable()) usb_thread_.join();
+
+    cap.release();
+    ok = false;
+
+    for (int dev = 0; dev < 64; dev++) {
+        std::string path = "/dev/video" + std::to_string(dev);
+        if (!is_usb_capture_device(path)) continue;
+        UsbCamConfig test_cfg = cfg;
+        test_cfg.device = path;
+        if (open_v4l2(cap, test_cfg, "scan")) {
+            cv::Mat test;
+            if (cap.read(test) && !test.empty()) {
+                std::cerr << "[cam] USB scan found device at " << path << "\n";
+                ok = true;
+                break;
+            }
+            cap.release();
+        }
+    }
+
+    if (!ok)
+        std::cerr << "[cam] USB scan found no working device\n";
+
+    // Restart the capture thread if either slot is now usable
+    if (usb1_ok_ || usb2_ok_) {
+        running_ = true;
+        usb_thread_ = std::thread(&CameraManager::usb_capture_thread, this);
+    }
+
+    return ok.load();
+}
+
+bool CameraManager::scan_usb1() { return scan_usb(usb_cap1_, usb1_ok_, usb1_cfg_); }
+bool CameraManager::scan_usb2() { return scan_usb(usb_cap2_, usb2_ok_, usb2_cfg_); }
+
 bool CameraManager::get_usb1(GLuint& out) {
     std::lock_guard<std::mutex> lk(usb1_slot_.mtx);
     if (!usb1_slot_.dirty || usb1_slot_.buf.empty()) { out = usb1_slot_.tex; return false; }

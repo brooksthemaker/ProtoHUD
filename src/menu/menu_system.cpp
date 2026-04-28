@@ -3,6 +3,9 @@
 #include <imgui.h>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <cmath>
 #include <string>
 
 static std::string to_upper(const std::string& s) {
@@ -11,17 +14,63 @@ static std::string to_upper(const std::string& s) {
     return r;
 }
 
+// Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
+static ImU32 menu_with_alpha(ImU32 col, uint8_t a) {
+    return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
+}
+
+// Convert ImU32 to ImVec4, optionally overriding alpha.
+static ImVec4 col_to_vec4(ImU32 col, float alpha_override = -1.f) {
+    float r = ((col >>  0) & 0xFF) / 255.f;
+    float g = ((col >>  8) & 0xFF) / 255.f;
+    float b = ((col >> 16) & 0xFF) / 255.f;
+    float a = alpha_override >= 0.f ? alpha_override : ((col >> 24) & 0xFF) / 255.f;
+    return {r, g, b, a};
+}
+
+// Draw text with a glow outline using the supplied accent color.
+static void draw_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
+                            bool selected, ImU32 accent_col) {
+    const ImU32 glow     = selected ? menu_with_alpha(accent_col, 72) : menu_with_alpha(accent_col, 22);
+    const ImU32 glow_far = menu_with_alpha(accent_col, 28);
+    const ImU32 fill_sel = IM_COL32(255, 255, 255, 255);
+    const ImU32 fill_dim = IM_COL32(255, 255, 255, 160);
+    const ImU32 fill     = selected ? fill_sel : fill_dim;
+
+    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+    constexpr int D2[4][2] = {{-2,0},{2,0},{0,-2},{0,2}};
+    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    if (selected)
+        for (auto& o : D2) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow_far, text);
+    dl->AddText(pos, fill, text);
+}
+
+static void format_slider_value(char* buf, size_t bufsz,
+                                float val, float min, float max,
+                                const std::string& unit)
+{
+    if (unit == "%") {
+        // "percentage of max" scaling: face brightness 0-255 → 0%-100%
+        float pct = (max > min) ? (val - min) / (max - min) * 100.f : 0.f;
+        std::snprintf(buf, bufsz, "%.0f%%", pct);
+    } else if (!unit.empty()) {
+        // literal suffix: " %", " EV", etc.
+        if (unit == " EV" && val > 0.f)
+            std::snprintf(buf, bufsz, "+%.1f%s", val, unit.c_str());
+        else
+            std::snprintf(buf, bufsz, "%.1f%s", val, unit.c_str());
+    } else {
+        std::snprintf(buf, bufsz, "%.0f", val);
+    }
+    (void)min;
+}
+
 MenuSystem::MenuSystem(std::vector<MenuItem> root)
     : root_items_(std::move(root)) {}
 
 void MenuSystem::push_level(const std::vector<MenuItem>& items) {
     if (items.empty()) return;
-    std::vector<MenuItem> aug = items;
-    // Back only makes sense when there is a parent level
-    if (!stack_.empty())
-        aug.push_back({ "< Back", [this]{ back();  }, {} });
-    aug.push_back(    { "Exit",   [this]{ close(); }, {} });
-    stack_.push_back({ std::move(aug) });
+    stack_.push_back({ items });
     cursor_ = 0;
     emit_detents();
 }
@@ -41,11 +90,40 @@ void MenuSystem::emit_detents() {
         detent_cb_(static_cast<int>(stack_.back().items.size()));
 }
 
+void MenuSystem::emit_detents_override(int count) {
+    if (detent_cb_) detent_cb_(count);
+}
+
+// ── navigate ──────────────────────────────────────────────────────────────────
+
 void MenuSystem::navigate(int direction) {
     if (!open_ || stack_.empty()) return;
+
+    if (in_edit_mode_) {
+        auto& item = stack_.back().items[cursor_];
+
+        if (item.type == MenuItemType::COLOR_PICKER) {
+            if (in_channel_edit_) {
+                float* ch = (edit_channel_ == 0) ? &edit_r_
+                          : (edit_channel_ == 1) ? &edit_g_
+                          :                        &edit_b_;
+                *ch = std::clamp(*ch + static_cast<float>(direction), 0.f, 255.f);
+            } else {
+                edit_channel_ = ((edit_channel_ + direction) % 3 + 3) % 3;
+            }
+        } else if (item.type == MenuItemType::SLIDER) {
+            edit_float_ = std::clamp(
+                edit_float_ + static_cast<float>(direction) * item.slider.step,
+                item.slider.min, item.slider.max);
+        }
+        return;
+    }
+
     int n = static_cast<int>(stack_.back().items.size());
     cursor_ = ((cursor_ + direction) % n + n) % n;
 }
+
+// ── select ────────────────────────────────────────────────────────────────────
 
 void MenuSystem::select() {
     if (!open_ || stack_.empty()) return;
@@ -53,15 +131,90 @@ void MenuSystem::select() {
     if (cursor_ >= static_cast<int>(items.size())) return;
     auto& item = items[cursor_];
 
-    if (!item.children.empty()) {
-        push_level(item.children);
-    } else if (item.action) {
-        item.action();
-        // Menu stays open — user explicitly navigates away via Back or Exit.
+    switch (item.type) {
+    case MenuItemType::SUBMENU:
+        if (!item.children.empty())
+            push_level(item.children);
+        break;
+
+    case MenuItemType::LEAF:
+        if (item.action) { item.action(); close(); }
+        break;
+
+    case MenuItemType::TOGGLE:
+        if (item.get_toggle && item.set_toggle)
+            item.set_toggle(!item.get_toggle());
+        // stay open — no close(), no push
+        break;
+
+    case MenuItemType::SLIDER:
+        if (!in_edit_mode_) {
+            edit_float_   = item.slider.get_value ? item.slider.get_value() : item.slider.min;
+            in_edit_mode_ = true;
+            int steps = (item.slider.step > 0.f)
+                ? static_cast<int>((item.slider.max - item.slider.min) / item.slider.step) + 1
+                : 64;
+            emit_detents_override(steps);
+        } else {
+            if (item.slider.set_value) item.slider.set_value(edit_float_);
+            in_edit_mode_ = false;
+            emit_detents();
+        }
+        break;
+
+    case MenuItemType::COLOR_PICKER:
+        if (!in_edit_mode_) {
+            if (item.color.get_color) {
+                auto [r, g, b] = item.color.get_color();
+                edit_r_ = static_cast<float>(r);
+                edit_g_ = static_cast<float>(g);
+                edit_b_ = static_cast<float>(b);
+            } else {
+                edit_r_ = edit_g_ = edit_b_ = 128.f;
+            }
+            edit_channel_    = 0;
+            in_channel_edit_ = false;
+            in_edit_mode_    = true;
+            emit_detents_override(3);
+        } else if (!in_channel_edit_) {
+            in_channel_edit_ = true;
+            emit_detents_override(256);
+        } else {
+            in_channel_edit_ = false;
+            edit_channel_    = (edit_channel_ + 1) % 3;
+            if (edit_channel_ == 0) {
+                if (item.color.set_color)
+                    item.color.set_color(
+                        static_cast<uint8_t>(edit_r_),
+                        static_cast<uint8_t>(edit_g_),
+                        static_cast<uint8_t>(edit_b_));
+                in_edit_mode_ = false;
+                emit_detents();
+            } else {
+                emit_detents_override(3);
+            }
+        }
+        break;
     }
 }
 
-void MenuSystem::back() { pop_level(); }
+// ── back ──────────────────────────────────────────────────────────────────────
+
+void MenuSystem::back() {
+    if (in_channel_edit_) {
+        in_channel_edit_ = false;
+        emit_detents_override(3);
+        return;
+    }
+    if (in_edit_mode_) {
+        in_edit_mode_ = false;
+        emit_detents();
+        return;
+    }
+    pop_level();
+}
+
+// ── current_label ─────────────────────────────────────────────────────────────
 
 const std::string& MenuSystem::current_label() const {
     static std::string empty;
@@ -74,49 +227,27 @@ const std::string& MenuSystem::current_label() const {
 
 // ── draw ──────────────────────────────────────────────────────────────────────
 
-// Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
-static ImU32 menu_with_alpha(ImU32 col, uint8_t a) {
-    return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
-}
-
-// Convert ImU32 to ImVec4, optionally overriding alpha.
-static ImVec4 col_to_vec4(ImU32 col, float alpha_override = -1.f) {
-    float r = ((col >>  0) & 0xFF) / 255.f;
-    float g = ((col >>  8) & 0xFF) / 255.f;
-    float b = ((col >> 16) & 0xFF) / 255.f;
-    float a = alpha_override >= 0.f ? alpha_override : ((col >> 24) & 0xFF) / 255.f;
-    return {r, g, b, a};
-}
-
-// Draw text with a glow outline using the supplied accent color.
-// selected = full fill + bright glow; unselected = dim fill + faint glow.
-static void draw_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
-                            bool selected, ImU32 accent_col) {
-    const ImU32 glow     = selected ? menu_with_alpha(accent_col, 72) : menu_with_alpha(accent_col, 22);
-    const ImU32 glow_far = menu_with_alpha(accent_col, 28);
-    const ImU32 fill_sel = IM_COL32(255, 255, 255, 255);
-    const ImU32 fill_dim = IM_COL32(255, 255, 255, 160);
-    const ImU32 fill     = selected ? fill_sel : fill_dim;
-
-    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
-    constexpr int D2[4][2] = {{-2,0},{2,0},{0,-2},{0,2}};
-    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
-    if (selected)
-        for (auto& o : D2) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow_far, text);
-    dl->AddText(pos, fill, text);
-}
-
 void MenuSystem::draw(int screen_w, int screen_h) {
     if (!open_ || stack_.empty()) return;
+    (void)screen_w;
 
     const auto& items  = stack_.back().items;
     const float item_h = 38.f;
     const float pad_x  = 18.f;
     const float pad_y  = 14.f;
-    const float width  = 360.f;
-    const float total_h = pad_y * 2.f
-                          + item_h * static_cast<float>(items.size());
+    const float width  = 380.f;
 
+    // Extra height for expanded editing rows
+    float extra = 0.f;
+    if (in_edit_mode_ && cursor_ < static_cast<int>(items.size())) {
+        const auto& sel = items[cursor_];
+        if (sel.type == MenuItemType::SLIDER)       extra = 30.f;
+        if (sel.type == MenuItemType::COLOR_PICKER) extra = 96.f;
+    }
+
+    const float total_h = pad_y * 2.f
+                        + item_h * static_cast<float>(items.size())
+                        + extra;
     const float x = 48.f;
     const float y = ((float)screen_h - total_h) * 0.5f;
 
@@ -132,7 +263,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         ImGuiWindowFlags_NoSavedSettings  |
         ImGuiWindowFlags_NoFocusOnAppearing;
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg,      bg_color_);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,      col_to_vec4(bg_color_));
     ImGui::PushStyleColor(ImGuiCol_Border,        col_to_vec4(accent_color_, 0.86f));
     ImGui::PushStyleColor(ImGuiCol_Header,        col_to_vec4(accent_color_, 0.10f));
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, col_to_vec4(accent_color_, 0.20f));
@@ -147,12 +278,20 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     const float line_h = ImGui::GetTextLineHeight();
+
     for (int i = 0; i < static_cast<int>(items.size()); i++) {
         bool selected = (i == cursor_);
+        const auto& item = items[i];
+
+        // Row height: expanded for the selected item in edit mode
+        float row_h = item_h - 1.f;
+        if (selected && in_edit_mode_) {
+            if (item.type == MenuItemType::SLIDER)       row_h = item_h + 25.f;
+            if (item.type == MenuItemType::COLOR_PICKER) row_h = item_h + 95.f;
+        }
 
         char id[32]; snprintf(id, sizeof(id), "##item%d", i);
-        if (ImGui::Selectable(id, selected, 0,
-                              ImVec2(0.f, item_h - 1.f))) {
+        if (ImGui::Selectable(id, selected, 0, ImVec2(0.f, row_h))) {
             cursor_ = i;
             select();
         }
@@ -160,28 +299,163 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         const ImVec2 rmin = ImGui::GetItemRectMin();
         const ImVec2 rmax = ImGui::GetItemRectMax();
 
-        // Left accent bar
+        // Left accent bar for selected item
         if (selected)
             dl->AddRectFilled({rmin.x - pad_x,       rmin.y},
-                              {rmin.x - pad_x + 4.f,  rmax.y}, accent_color_);
+                              {rmin.x - pad_x + 4.f, rmax.y}, accent_color_);
 
-        // Glow text — vertically centered in the item row
-        std::string label = to_upper(items[i].label);
-        if (!items[i].children.empty()) label += "   >";
-        ImVec2 tpos = {rmin.x + 4.f, rmin.y + (item_h - line_h) * 0.5f - 0.5f};
-        draw_glow_text(dl, tpos, label.c_str(), selected, accent_color_);
+        // Text Y position (vertically centered in the base item_h row)
+        float ty = rmin.y + (item_h - line_h) * 0.5f - 0.5f;
 
-        // Radio indicator for toggle items (right edge of row)
-        if (items[i].get_state) {
-            bool on      = items[i].get_state();
-            const float r  = 5.f;
-            const float cx = rmax.x - 10.f;
-            const float cy = rmin.y + item_h * 0.5f;
-            if (on) {
-                dl->AddCircleFilled({cx, cy}, r,    accent_color_);
-                dl->AddCircleFilled({cx, cy}, 2.5f, IM_COL32(255, 255, 255, 255));
+        // ── TOGGLE ────────────────────────────────────────────────────────────
+        if (item.type == MenuItemType::TOGGLE) {
+            bool on = item.get_toggle ? item.get_toggle() : false;
+
+            draw_glow_text(dl, {rmin.x + 4.f, ty}, to_upper(item.label).c_str(),
+                           selected, accent_color_);
+
+            const char* ind   = on ? "\xE2\x97\x8F ON " : "\xE2\x97\x8B OFF";
+            ImU32       ind_col = on ? IM_COL32(0, 220, 100, 255)
+                                     : IM_COL32(130, 130, 130, 200);
+            ImVec2 ind_sz = ImGui::CalcTextSize(ind);
+            dl->AddText({rmax.x - ind_sz.x - 6.f, ty}, ind_col, ind);
+
+        // ── SLIDER ────────────────────────────────────────────────────────────
+        } else if (item.type == MenuItemType::SLIDER) {
+            bool  editing = selected && in_edit_mode_;
+            float val = editing
+                ? edit_float_
+                : (item.slider.get_value ? item.slider.get_value() : item.slider.min);
+            float range = item.slider.max - item.slider.min;
+            float fill  = (range > 0.f)
+                ? std::clamp((val - item.slider.min) / range, 0.f, 1.f) : 0.f;
+
+            char val_str[32];
+            format_slider_value(val_str, sizeof(val_str),
+                                val, item.slider.min, item.slider.max, item.slider.unit);
+
+            draw_glow_text(dl, {rmin.x + 4.f, ty}, to_upper(item.label).c_str(),
+                           selected, accent_color_);
+
+            if (editing) {
+                float bx = rmin.x + 4.f;
+                float by = rmin.y + item_h - 2.f;
+                float bw = (rmax.x - rmin.x) - 64.f;
+                float bh = 10.f;
+                dl->AddRectFilled({bx, by}, {bx + bw, by + bh},
+                                  menu_with_alpha(accent_color_, 60), 3.f);
+                dl->AddRectFilled({bx, by}, {bx + bw * fill, by + bh},
+                                  menu_with_alpha(accent_color_, 220), 3.f);
+                float tick_x = bx + bw * fill;
+                dl->AddLine({tick_x, by - 2.f}, {tick_x, by + bh + 2.f},
+                            IM_COL32(255, 255, 255, 200), 2.f);
+                dl->AddText({bx + bw + 6.f, by}, IM_COL32(255, 255, 255, 255), val_str);
+                dl->AddText({bx, by - 14.f},
+                            menu_with_alpha(accent_color_, 180),
+                            "knob  \xC2\xB7  select=confirm  \xC2\xB7  back=cancel");
             } else {
-                dl->AddCircle({cx, cy}, r, menu_with_alpha(accent_color_, 60), 0, 1.5f);
+                float win_w = rmax.x - rmin.x;
+                float bx = rmin.x + win_w * 0.46f;
+                float by = ty + 1.f;
+                float bw = win_w * 0.30f;
+                float bh = 7.f;
+                dl->AddRectFilled({bx, by}, {bx + bw, by + bh},
+                                  menu_with_alpha(accent_color_, 50), 2.f);
+                dl->AddRectFilled({bx, by}, {bx + bw * fill, by + bh},
+                                  menu_with_alpha(accent_color_, 180), 2.f);
+                ImVec2 vsz = ImGui::CalcTextSize(val_str);
+                dl->AddText({rmax.x - vsz.x - 4.f, by - 1.f},
+                            menu_with_alpha(accent_color_, 200), val_str);
+            }
+
+        // ── COLOR_PICKER ──────────────────────────────────────────────────────
+        } else if (item.type == MenuItemType::COLOR_PICKER) {
+            bool editing = selected && in_edit_mode_;
+
+            draw_glow_text(dl, {rmin.x + 4.f, ty}, to_upper(item.label).c_str(),
+                           selected, accent_color_);
+
+            if (!editing) {
+                float sw_x = rmax.x - 36.f;
+                float sw_y = ty;
+                uint8_t pr = 128, pg = 128, pb = 128;
+                if (item.color.get_color) {
+                    auto [r, g, b] = item.color.get_color();
+                    pr = r; pg = g; pb = b;
+                }
+                dl->AddRectFilled({sw_x, sw_y}, {sw_x + 28.f, sw_y + 14.f},
+                                  IM_COL32(pr, pg, pb, 255), 2.f);
+                dl->AddRect({sw_x, sw_y}, {sw_x + 28.f, sw_y + 14.f},
+                            menu_with_alpha(accent_color_, 140), 2.f);
+            } else {
+                const float ch_vals[3] = { edit_r_, edit_g_, edit_b_ };
+                const char* ch_names[3] = { "R", "G", "B" };
+                const ImU32 ch_cols[3]  = {
+                    IM_COL32(220, 60,  60,  200),
+                    IM_COL32(60,  200, 60,  200),
+                    IM_COL32(60,  80,  220, 200),
+                };
+                float bx = rmin.x + 4.f;
+                float bw = (rmax.x - rmin.x) - 56.f;
+
+                for (int c = 0; c < 3; c++) {
+                    float by     = rmin.y + item_h + static_cast<float>(c) * 28.f;
+                    float fill_c = ch_vals[c] / 255.f;
+                    bool  is_sel    = (c == edit_channel_);
+                    bool  is_active = is_sel && in_channel_edit_;
+                    ImU32 text_col  = is_sel ? IM_COL32(255, 255, 255, 255)
+                                             : IM_COL32(140, 170, 160, 200);
+                    dl->AddText({bx, by + 5.f}, text_col, ch_names[c]);
+                    float rx = bx + 16.f, rw = bw - 16.f;
+                    dl->AddRectFilled({rx, by + 4.f}, {rx + rw, by + 16.f},
+                                      menu_with_alpha(accent_color_, 50), 2.f);
+                    ImU32 fill_col = is_active
+                        ? (ch_cols[c] & 0x00FFFFFFu) | 0xFF000000u
+                        : ch_cols[c];
+                    dl->AddRectFilled({rx, by + 4.f}, {rx + rw * fill_c, by + 16.f},
+                                      fill_col);
+                    if (is_sel)
+                        dl->AddRect({rx - 1.f, by + 3.f}, {rx + rw + 1.f, by + 17.f},
+                                    menu_with_alpha(accent_color_, 200), 2.f);
+                    char cv[8]; snprintf(cv, sizeof(cv), "%.0f", ch_vals[c]);
+                    ImVec2 vsz = ImGui::CalcTextSize(cv);
+                    dl->AddText({rmax.x - vsz.x - 6.f, by + 4.f}, text_col, cv);
+                }
+
+                float hint_y = rmin.y + item_h + 3 * 28.f + 2.f;
+                const char* hint = !in_channel_edit_
+                    ? "knob=channel  \xC2\xB7  select=edit  \xC2\xB7  back=cancel"
+                    : "knob adjusts  \xC2\xB7  select=next  \xC2\xB7  back=cancel";
+                dl->AddText({bx, hint_y}, menu_with_alpha(accent_color_, 180), hint);
+
+                float sw_y = hint_y + 16.f;
+                dl->AddRectFilled({bx, sw_y}, {bx + 52.f, sw_y + 16.f},
+                                  IM_COL32(static_cast<uint8_t>(edit_r_),
+                                           static_cast<uint8_t>(edit_g_),
+                                           static_cast<uint8_t>(edit_b_), 255), 3.f);
+                dl->AddRect({bx, sw_y}, {bx + 52.f, sw_y + 16.f},
+                            menu_with_alpha(accent_color_, 150), 3.f);
+            }
+
+        // ── LEAF / SUBMENU ────────────────────────────────────────────────────
+        } else {
+            std::string label = to_upper(item.label);
+            if (item.type == MenuItemType::SUBMENU || !item.children.empty())
+                label += "   >";
+            draw_glow_text(dl, {rmin.x + 4.f, ty}, label.c_str(), selected, accent_color_);
+
+            // Legacy radio indicator for items that still carry get_state
+            if (item.get_state) {
+                bool on = item.get_state();
+                const float r  = 5.f;
+                const float cx = rmax.x - 10.f;
+                const float cy = rmin.y + item_h * 0.5f;
+                if (on) {
+                    dl->AddCircleFilled({cx, cy}, r,    accent_color_);
+                    dl->AddCircleFilled({cx, cy}, 2.5f, IM_COL32(255, 255, 255, 255));
+                } else {
+                    dl->AddCircle({cx, cy}, r, menu_with_alpha(accent_color_, 60), 0, 1.5f);
+                }
             }
         }
 

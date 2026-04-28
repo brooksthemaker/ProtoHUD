@@ -109,108 +109,155 @@ static std::vector<MenuItem> build_menu(
 {
     (void)lora; (void)knob;
 
-    // Face effects
+    // ── Factory helpers ───────────────────────────────────────────────────────
+
+    auto leaf = [](std::string lbl, std::function<void()> fn) -> MenuItem {
+        MenuItem m;
+        m.label  = std::move(lbl);
+        m.type   = MenuItemType::LEAF;
+        m.action = std::move(fn);
+        return m;
+    };
+
+    auto submenu = [](std::string lbl, std::vector<MenuItem> ch) -> MenuItem {
+        MenuItem m;
+        m.label    = std::move(lbl);
+        m.type     = MenuItemType::SUBMENU;
+        m.children = std::move(ch);
+        return m;
+    };
+
+    auto toggle = [](std::string lbl,
+                     std::function<bool()>     get_fn,
+                     std::function<void(bool)> set_fn) -> MenuItem {
+        MenuItem m;
+        m.label      = std::move(lbl);
+        m.type       = MenuItemType::TOGGLE;
+        m.get_toggle = std::move(get_fn);
+        m.set_toggle = std::move(set_fn);
+        return m;
+    };
+
+    auto slider = [](std::string lbl,
+                     float mn, float mx, float step, std::string unit,
+                     std::function<float()>     get_fn,
+                     std::function<void(float)> set_fn) -> MenuItem {
+        MenuItem m;
+        m.label            = std::move(lbl);
+        m.type             = MenuItemType::SLIDER;
+        m.slider.min       = mn;
+        m.slider.max       = mx;
+        m.slider.step      = step;
+        m.slider.unit      = std::move(unit);
+        m.slider.get_value = std::move(get_fn);
+        m.slider.set_value = std::move(set_fn);
+        return m;
+    };
+
+    auto color_picker = [](std::string lbl,
+                            std::function<void(uint8_t,uint8_t,uint8_t)> set_fn,
+                            std::function<std::tuple<uint8_t,uint8_t,uint8_t>()> get_fn
+                                = nullptr) -> MenuItem {
+        MenuItem m;
+        m.label           = std::move(lbl);
+        m.type            = MenuItemType::COLOR_PICKER;
+        m.color.set_color = std::move(set_fn);
+        m.color.get_color = std::move(get_fn);
+        return m;
+    };
+
+    // ── Face effects ──────────────────────────────────────────────────────────
     std::vector<MenuItem> effects;
     for (uint8_t id = 0; id < 10; id++) {
         const char* names[] = { "Idle","Blink","Angry","Happy","Sad",
                                  "Shocked","Rainbow","Pulse","Wave","Custom" };
-        effects.push_back({ names[id], [teensy, id]() { teensy->set_effect(id); }, {} });
+        effects.push_back(leaf(names[id], [teensy, id]{ teensy->set_effect(id); }));
     }
 
-    // Face colors
-    std::vector<MenuItem> colors = {
-        { "Teal",   [teensy]{ teensy->set_color(0,220,180);   }, {} },
-        { "Cyan",   [teensy]{ teensy->set_color(0,180,255);   }, {} },
-        { "Red",    [teensy]{ teensy->set_color(220,30,30);   }, {} },
-        { "Green",  [teensy]{ teensy->set_color(30,220,60);   }, {} },
-        { "Purple", [teensy]{ teensy->set_color(180,30,220);  }, {} },
-        { "White",  [teensy]{ teensy->set_color(255,255,255); }, {} },
-    };
+    // ── Face colors (presets + custom picker) ─────────────────────────────────
+    std::vector<MenuItem> colors;
+    colors.push_back(leaf("Teal",   [teensy]{ teensy->set_color(0,220,180);   }));
+    colors.push_back(leaf("Cyan",   [teensy]{ teensy->set_color(0,180,255);   }));
+    colors.push_back(leaf("Red",    [teensy]{ teensy->set_color(220,30,30);   }));
+    colors.push_back(leaf("Green",  [teensy]{ teensy->set_color(30,220,60);   }));
+    colors.push_back(leaf("Purple", [teensy]{ teensy->set_color(180,30,220);  }));
+    colors.push_back(leaf("White",  [teensy]{ teensy->set_color(255,255,255); }));
+    colors.push_back(color_picker(
+        "Custom Color",
+        [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b); },
+        [&state]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+            return { state.face.r, state.face.g, state.face.b };
+        }
+    ));
 
-    // GIFs
+    // ── GIFs ─────────────────────────────────────────────────────────────────
     std::vector<MenuItem> gifs;
     for (uint8_t i = 0; i < 8; i++) {
         char lbl[16]; snprintf(lbl, sizeof(lbl), "GIF #%d", i);
-        gifs.push_back({ lbl, [teensy, i]() { teensy->play_gif(i); }, {} });
+        gifs.push_back(leaf(lbl, [teensy, i]{ teensy->play_gif(i); }));
     }
 
-    // Face brightness
-    std::vector<MenuItem> face_brightness = {
-        { "25%",  [teensy]{ teensy->set_brightness(64);  }, {} },
-        { "50%",  [teensy]{ teensy->set_brightness(128); }, {} },
-        { "75%",  [teensy]{ teensy->set_brightness(192); }, {} },
-        { "100%", [teensy]{ teensy->set_brightness(255); }, {} },
-    };
-
-    // Glasses display brightness (via VITURE SDK)
-    std::vector<MenuItem> glasses_brightness = {
-        { "Low",    [xr]{ xr->set_brightness(1); }, {} },
-        { "Medium", [xr]{ xr->set_brightness(3); }, {} },
-        { "High",   [xr]{ xr->set_brightness(5); }, {} },
-        { "Max",    [xr]{ xr->set_brightness(7); }, {} },
-    };
-
-    // Camera controls
+    // ── Camera controls ───────────────────────────────────────────────────────
     std::vector<MenuItem> focus_modes = {
-        { "Manual", [cameras, &state]{
+        leaf("Manual", [cameras, &state]{
             state.focus_left.mode  = CameraFocusState::Mode::MANUAL;
             state.focus_right.mode = CameraFocusState::Mode::MANUAL;
             if (cameras) {
                 if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
                 if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
             }
-        }, {} },
-        { "Auto", [cameras, &state]{
+        }),
+        leaf("Auto", [cameras, &state]{
             state.focus_left.mode  = CameraFocusState::Mode::AUTO;
             state.focus_right.mode = CameraFocusState::Mode::AUTO;
             if (cameras) {
                 if (cameras->owl_left())  cameras->owl_left()->start_autofocus();
                 if (cameras->owl_right()) cameras->owl_right()->start_autofocus();
             }
-        }, {} },
-        { "Slave", [cameras, &state]{
+        }),
+        leaf("Slave", [cameras, &state]{
             state.focus_left.mode  = CameraFocusState::Mode::SLAVE;
             state.focus_right.mode = CameraFocusState::Mode::SLAVE;
             if (cameras) {
                 if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
                 if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
             }
-        }, {} },
+        }),
     };
 
     std::vector<MenuItem> af_triggers = {
-        { "Left",  [cameras, &state]{
+        leaf("Left",  [cameras, &state]{
             if (!cameras || !cameras->owl_left()) return;
             cameras->owl_left()->start_autofocus();
             if (state.focus_left.mode == CameraFocusState::Mode::SLAVE && cameras->owl_right()) {
-                std::thread([cameras]() {
+                std::thread([cameras](){
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     if (cameras->owl_left() && cameras->owl_right())
                         cameras->owl_right()->set_focus_position(
                             cameras->owl_left()->get_focus_position());
                 }).detach();
             }
-        }, {} },
-        { "Right", [cameras, &state]{
+        }),
+        leaf("Right", [cameras, &state]{
             if (!cameras || !cameras->owl_right()) return;
             cameras->owl_right()->start_autofocus();
             if (state.focus_right.mode == CameraFocusState::Mode::SLAVE && cameras->owl_left()) {
-                std::thread([cameras]() {
+                std::thread([cameras](){
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     if (cameras->owl_left() && cameras->owl_right())
                         cameras->owl_left()->set_focus_position(
                             cameras->owl_right()->get_focus_position());
                 }).detach();
             }
-        }, {} },
-        { "Both",  [cameras, &state]{
+        }),
+        leaf("Both",  [cameras, &state]{
             if (!cameras) return;
             if (cameras->owl_left())  cameras->owl_left()->start_autofocus();
             if (cameras->owl_right()) cameras->owl_right()->start_autofocus();
             if ((state.focus_left.mode  == CameraFocusState::Mode::SLAVE ||
                  state.focus_right.mode == CameraFocusState::Mode::SLAVE) &&
                 cameras->owl_left() && cameras->owl_right()) {
-                std::thread([cameras]() {
+                std::thread([cameras](){
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     int avg = (cameras->owl_left()->get_focus_position()
                              + cameras->owl_right()->get_focus_position()) / 2;
@@ -218,224 +265,231 @@ static std::vector<MenuItem> build_menu(
                     cameras->owl_right()->set_focus_position(avg);
                 }).detach();
             }
-        }, {} },
-    };
-
-    std::vector<MenuItem> exposure_ev = {
-        { "-3.0", [&state]{ state.night_vision.exposure_ev = -3.0f; }, {} },
-        { "-2.0", [&state]{ state.night_vision.exposure_ev = -2.0f; }, {} },
-        { "-1.0", [&state]{ state.night_vision.exposure_ev = -1.0f; }, {} },
-        { "0.0",  [&state]{ state.night_vision.exposure_ev =  0.0f; }, {} },
-        { "+1.0", [&state]{ state.night_vision.exposure_ev =  1.0f; }, {} },
-        { "+2.0", [&state]{ state.night_vision.exposure_ev =  2.0f; }, {} },
-        { "+3.0", [&state]{ state.night_vision.exposure_ev =  3.0f; }, {} },
+        }),
     };
 
     std::vector<MenuItem> shutter_speeds = {
-        { "1/4000", [&state]{ state.night_vision.shutter_us =   250; }, {} },
-        { "1/2000", [&state]{ state.night_vision.shutter_us =   500; }, {} },
-        { "1/1000", [&state]{ state.night_vision.shutter_us =  1000; }, {} },
-        { "1/500",  [&state]{ state.night_vision.shutter_us =  2000; }, {} },
-        { "1/250",  [&state]{ state.night_vision.shutter_us =  4000; }, {} },
-        { "1/125",  [&state]{ state.night_vision.shutter_us =  8000; }, {} },
-        { "1/60",   [&state]{ state.night_vision.shutter_us = 16667; }, {} },
-        { "1/30",   [&state]{ state.night_vision.shutter_us = 33333; }, {} },
-        { "1/25",   [&state]{ state.night_vision.shutter_us = 40000; }, {} },
+        leaf("1/4000", [&state]{ state.night_vision.shutter_us =   250; }),
+        leaf("1/2000", [&state]{ state.night_vision.shutter_us =   500; }),
+        leaf("1/1000", [&state]{ state.night_vision.shutter_us =  1000; }),
+        leaf("1/500",  [&state]{ state.night_vision.shutter_us =  2000; }),
+        leaf("1/250",  [&state]{ state.night_vision.shutter_us =  4000; }),
+        leaf("1/125",  [&state]{ state.night_vision.shutter_us =  8000; }),
+        leaf("1/60",   [&state]{ state.night_vision.shutter_us = 16667; }),
+        leaf("1/30",   [&state]{ state.night_vision.shutter_us = 33333; }),
+        leaf("1/25",   [&state]{ state.night_vision.shutter_us = 40000; }),
     };
 
-    std::vector<MenuItem> focus_positions;
-    for (int i = 0; i <= 10; i++) {
-        int pos = i * 100;
-        char lbl[8]; snprintf(lbl, sizeof(lbl), "%d", pos);
-        focus_positions.push_back({ lbl, [cameras, pos]{
-            if (cameras) {
-                if (cameras->owl_left())  cameras->owl_left()->set_focus_position(pos);
-                if (cameras->owl_right()) cameras->owl_right()->set_focus_position(pos);
-            }
-        }, {} });
-    }
-
     // ── Resolution presets ────────────────────────────────────────────────────
-    // Preset list: {label, width, height, fps}
-    // libcamera will snap to the nearest sensor mode it supports.
     struct ResPreset { const char* label; int w, h, fps; };
     static const ResPreset RES_PRESETS[] = {
-        { "640×400  @120fps",  640,  400, 120 },
-        { "1280×800  @60fps", 1280,  800,  60 },  // default
-        { "1920×1080 @30fps", 1920, 1080,  30 },
-        { "2560×1440 @15fps", 2560, 1440,  15 },
+        { "640x400  @120fps",  640,  400, 120 },
+        { "1280x800  @60fps", 1280,  800,  60 },  // default
+        { "1920x1080 @30fps", 1920, 1080,  30 },
+        { "2560x1440 @15fps", 2560, 1440,  15 },
     };
 
     std::vector<MenuItem> resolution_presets;
     for (const auto& p : RES_PRESETS) {
-        resolution_presets.push_back({
+        resolution_presets.push_back(leaf(
             p.label,
-            [cameras, &state, w = p.w, h = p.h, fps = p.fps]() {
+            [cameras, &state, w = p.w, h = p.h, fps = p.fps](){
                 if (!cameras) return;
                 if (cameras->set_resolution(w, h, fps)) {
                     std::lock_guard<std::mutex> lk(state.mtx);
                     state.camera_resolution = { w, h, fps };
                 }
-            },
-            {}
-        });
+            }
+        ));
     }
 
     std::vector<MenuItem> nv_menu = {
-        { "Night Vision", [&state]{
-            bool& nv = state.night_vision.nv_enabled;
-            nv = !nv;
-            state.night_vision.exposure_ev = nv ? 3.0f : 0.0f;
-            state.night_vision.shutter_us  = nv ? 40000 : 16667;
-        }, {}, [&state]{ return state.night_vision.nv_enabled; } },
-        { "Exposure (EV)",  nullptr, std::move(exposure_ev)    },
-        { "Shutter Speed",  nullptr, std::move(shutter_speeds) },
+        toggle("Night Vision",
+            [&state]{ return state.night_vision.nv_enabled; },
+            [&state](bool v){
+                state.night_vision.nv_enabled  = v;
+                state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
+                state.night_vision.shutter_us  = v ? 40000 : 16667;
+            }),
+        slider("Exposure (EV)", -3.f, 3.f, 0.5f, " EV",
+            [&state]{ return state.night_vision.exposure_ev; },
+            [&state](float v){ state.night_vision.exposure_ev = v; }),
+        submenu("Shutter Speed", std::move(shutter_speeds)),
     };
 
     std::vector<MenuItem> camera_menu = {
-        { "Resolution",     nullptr, std::move(resolution_presets) },
-        { "Focus Mode",     nullptr, std::move(focus_modes)        },
-        { "Focus Position", nullptr, std::move(focus_positions)    },
-        { "Autofocus",      nullptr, std::move(af_triggers)        },
-        { "Night Vision",   nullptr, std::move(nv_menu)            },
+        submenu("Resolution",  std::move(resolution_presets)),
+        submenu("Focus Mode",  std::move(focus_modes)),
+        slider("Focus Position", 0.f, 1000.f, 10.f, "",
+            [&state]{ return static_cast<float>(state.focus_left.focus_position); },
+            [cameras, &state](float v){
+                int pos = static_cast<int>(v);
+                if (cameras) {
+                    if (cameras->owl_left())  cameras->owl_left()->set_focus_position(pos);
+                    if (cameras->owl_right()) cameras->owl_right()->set_focus_position(pos);
+                }
+                state.focus_left.focus_position  = pos;
+                state.focus_right.focus_position = pos;
+            }),
+        submenu("Autofocus",    std::move(af_triggers)),
+        submenu("Night Vision", std::move(nv_menu)),
     };
 
-    // VITURE Headset controls
-    std::vector<MenuItem> dimming_levels;
-    for (int i = 0; i <= 9; i++) {
-        char lbl[8]; snprintf(lbl, sizeof(lbl), "Level %d", i);
-        dimming_levels.push_back({ lbl, [xr, i]{ if (xr) xr->set_dimming(i); }, {} });
-    }
-
-    std::vector<MenuItem> hud_brightness_levels;
-    for (int i = 1; i <= 9; i++) {
-        char lbl[8]; snprintf(lbl, sizeof(lbl), "Level %d", i);
-        hud_brightness_levels.push_back({ lbl, [xr, i]{ if (xr) xr->set_hud_brightness(i); }, {} });
-    }
-
+    // ── Headset controls ──────────────────────────────────────────────────────
     std::vector<MenuItem> headset_menu = {
-        { "Dimming",    nullptr, std::move(dimming_levels)        },
-        { "HUD Bright", nullptr, std::move(hud_brightness_levels) },
-        { "Recenter",   [xr]{ if (xr) xr->recenter_tracking(); }, {} },
-        { "Gaze Lock",  [xr]{ if (xr) xr->toggle_gaze_lock(); },  {} },
-        { "3D SBS",     [xr]{ if (xr) xr->set_3d_mode(true); },   {} },
+        slider("Dimming", 0.f, 9.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.xr_dimming); },
+            [xr, &state](float v){
+                state.xr_dimming = static_cast<int>(v);
+                if (xr) xr->set_dimming(static_cast<int>(v));
+            }),
+        slider("HUD Bright", 1.f, 9.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.xr_hud_brightness); },
+            [xr, &state](float v){
+                state.xr_hud_brightness = static_cast<int>(v);
+                if (xr) xr->set_hud_brightness(static_cast<int>(v));
+            }),
+        leaf("Recenter",  [xr]{ if (xr) xr->recenter_tracking(); }),
+        leaf("Gaze Lock", [xr]{ if (xr) xr->toggle_gaze_lock(); }),
+        leaf("3D SBS",    [xr]{ if (xr) xr->set_3d_mode(true); }),
     };
 
-    // Audio controls — beamforming and noise suppression are handled by the
-    // RP2350; CM5 only controls output routing and volume.
-    std::vector<MenuItem> volume_levels;
-    for (int pct : {25, 50, 75, 100, 125, 150}) {
-        char lbl[8]; snprintf(lbl, sizeof(lbl), "%d%%", pct);
-        float g = pct / 100.0f;
-        volume_levels.push_back({ lbl, [audio, g]{ if (audio) audio->set_master_gain(g); }, {} });
-    }
-
+    // ── Audio controls ────────────────────────────────────────────────────────
+    // Beamforming / noise suppression handled by RP2350; CM5 controls output + volume.
     std::vector<MenuItem> output_menu = {
-        { "VITURE",     [audio]{ if (audio) audio->set_output(AudioOutput::VITURE);     }, {} },
-        { "Headphones", [audio]{ if (audio) audio->set_output(AudioOutput::HEADPHONES); }, {} },
-        { "HDMI",       [audio]{ if (audio) audio->set_output(AudioOutput::HDMI);       }, {} },
+        leaf("VITURE",     [audio]{ if (audio) audio->set_output(AudioOutput::VITURE);     }),
+        leaf("Headphones", [audio]{ if (audio) audio->set_output(AudioOutput::HEADPHONES); }),
+        leaf("HDMI",       [audio]{ if (audio) audio->set_output(AudioOutput::HDMI);       }),
     };
 
     std::vector<MenuItem> audio_menu = {
-        { "Enable", [audio]{ if (audio) audio->set_enabled(!audio->is_enabled()); }, {},
-          [audio]{ return audio && audio->is_enabled(); } },
-        { "Volume",  nullptr, std::move(volume_levels) },
-        { "Output",  nullptr, std::move(output_menu)   },
+        toggle("Audio",
+            [audio]{ return audio ? audio->is_enabled() : false; },
+            [audio](bool v){ if (audio) audio->set_enabled(v); }),
+        slider("Volume", 25.f, 150.f, 5.f, " %",
+            [audio]{ return audio ? audio->get_master_gain() * 100.f : 100.f; },
+            [audio](float v){ if (audio) audio->set_master_gain(v / 100.f); }),
+        submenu("Output", std::move(output_menu)),
     };
 
-    // ── Shared helpers for overlay position / size menus ─────────────────────
+    // ── Overlay position / size helpers ───────────────────────────────────────
     using A = OverlayConfig::Anchor;
 
-    auto make_position_items = [](OverlayConfig* cfg) {
+    auto make_position_items = [&leaf](OverlayConfig* cfg) {
         return std::vector<MenuItem>{
-            { "Top Left",      [cfg]{ cfg->anchor = A::TOP_LEFT;      }, {} },
-            { "Top Center",    [cfg]{ cfg->anchor = A::TOP_CENTER;    }, {} },
-            { "Top Right",     [cfg]{ cfg->anchor = A::TOP_RIGHT;     }, {} },
-            { "Bottom Left",   [cfg]{ cfg->anchor = A::BOTTOM_LEFT;   }, {} },
-            { "Bottom Center", [cfg]{ cfg->anchor = A::BOTTOM_CENTER; }, {} },
-            { "Bottom Right",  [cfg]{ cfg->anchor = A::BOTTOM_RIGHT;  }, {} },
+            leaf("Top Left",      [cfg]{ cfg->anchor = A::TOP_LEFT;      }),
+            leaf("Top Center",    [cfg]{ cfg->anchor = A::TOP_CENTER;    }),
+            leaf("Top Right",     [cfg]{ cfg->anchor = A::TOP_RIGHT;     }),
+            leaf("Bottom Left",   [cfg]{ cfg->anchor = A::BOTTOM_LEFT;   }),
+            leaf("Bottom Center", [cfg]{ cfg->anchor = A::BOTTOM_CENTER; }),
+            leaf("Bottom Right",  [cfg]{ cfg->anchor = A::BOTTOM_RIGHT;  }),
         };
     };
 
-    auto make_size_items = [](OverlayConfig* cfg) {
-        return std::vector<MenuItem>{
-            { "15%", [cfg]{ cfg->size = 0.15f; }, {} },
-            { "20%", [cfg]{ cfg->size = 0.20f; }, {} },
-            { "25%", [cfg]{ cfg->size = 0.25f; }, {} },
-            { "30%", [cfg]{ cfg->size = 0.30f; }, {} },
-            { "40%", [cfg]{ cfg->size = 0.40f; }, {} },
-            { "50%", [cfg]{ cfg->size = 0.50f; }, {} },
-            { "60%", [cfg]{ cfg->size = 0.60f; }, {} },
-        };
+    auto make_size_slider = [&slider](std::string lbl, OverlayConfig* cfg) -> MenuItem {
+        return slider(std::move(lbl), 15.f, 60.f, 5.f, " %",
+            [cfg]{ return cfg->size * 100.f; },
+            [cfg](float v){ cfg->size = v / 100.f; });
     };
 
     // ── USB camera PiP layout ─────────────────────────────────────────────────
     std::vector<MenuItem> cam1_menu = {
-        { "Open",              [cameras, pip_cam1_overlay]{
-                                   std::thread([cameras, pip_cam1_overlay]{
-                                       cameras->open_usb1();
-                                       *pip_cam1_overlay = true;
-                                   }).detach(); }, {} },
-        { "Close",             [cameras, pip_cam1_overlay]{
-                                   cameras->close_usb1();   // also clears reconnect flag
-                                   *pip_cam1_overlay = false; }, {} },
-        { "Auto-Reconnect", [cameras]{ cameras->set_usb1_reconnect(!cameras->usb1_reconnect_enabled()); }, {},
-          [cameras]{ return cameras->usb1_reconnect_enabled(); } },
-        { "Show Overlay", [pip_cam1_overlay]{ *pip_cam1_overlay = !*pip_cam1_overlay; }, {},
-          [pip_cam1_overlay]{ return *pip_cam1_overlay; } },
-        { "Position",          nullptr, make_position_items(pip_cfg1) },
-        { "Size",              nullptr, make_size_items(pip_cfg1)     },
+        leaf("Open", [cameras, pip_cam1_overlay]{
+            std::thread([cameras, pip_cam1_overlay]{
+                cameras->open_usb1();
+                *pip_cam1_overlay = true;
+            }).detach();
+        }),
+        leaf("Close", [cameras, pip_cam1_overlay]{
+            cameras->close_usb1();
+            *pip_cam1_overlay = false;
+        }),
+        toggle("Auto-Reconnect",
+            [cameras]{ return cameras->usb1_reconnect_enabled(); },
+            [cameras](bool v){ cameras->set_usb1_reconnect(v); }),
+        toggle("Show Overlay",
+            [pip_cam1_overlay]{ return *pip_cam1_overlay; },
+            [pip_cam1_overlay](bool v){ *pip_cam1_overlay = v; }),
+        submenu("Position", make_position_items(pip_cfg1)),
+        make_size_slider("Size", pip_cfg1),
+        leaf("Scan", [cameras, &state]{
+            if (cameras) {
+                bool ok = cameras->scan_usb1();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.health.cam_usb1 = ok;
+            }
+        }),
     };
     std::vector<MenuItem> cam2_menu = {
-        { "Open",              [cameras, pip_cam2_overlay]{
-                                   std::thread([cameras, pip_cam2_overlay]{
-                                       cameras->open_usb2();
-                                       *pip_cam2_overlay = true;
-                                   }).detach(); }, {} },
-        { "Close",             [cameras, pip_cam2_overlay]{
-                                   cameras->close_usb2();   // also clears reconnect flag
-                                   *pip_cam2_overlay = false; }, {} },
-        { "Auto-Reconnect", [cameras]{ cameras->set_usb2_reconnect(!cameras->usb2_reconnect_enabled()); }, {},
-          [cameras]{ return cameras->usb2_reconnect_enabled(); } },
-        { "Show Overlay", [pip_cam2_overlay]{ *pip_cam2_overlay = !*pip_cam2_overlay; }, {},
-          [pip_cam2_overlay]{ return *pip_cam2_overlay; } },
-        { "Position",          nullptr, make_position_items(pip_cfg2) },
-        { "Size",              nullptr, make_size_items(pip_cfg2)     },
+        leaf("Open", [cameras, pip_cam2_overlay]{
+            std::thread([cameras, pip_cam2_overlay]{
+                cameras->open_usb2();
+                *pip_cam2_overlay = true;
+            }).detach();
+        }),
+        leaf("Close", [cameras, pip_cam2_overlay]{
+            cameras->close_usb2();
+            *pip_cam2_overlay = false;
+        }),
+        toggle("Auto-Reconnect",
+            [cameras]{ return cameras->usb2_reconnect_enabled(); },
+            [cameras](bool v){ cameras->set_usb2_reconnect(v); }),
+        toggle("Show Overlay",
+            [pip_cam2_overlay]{ return *pip_cam2_overlay; },
+            [pip_cam2_overlay](bool v){ *pip_cam2_overlay = v; }),
+        submenu("Position", make_position_items(pip_cfg2)),
+        make_size_slider("Size", pip_cfg2),
+        leaf("Scan", [cameras, &state]{
+            if (cameras) {
+                bool ok = cameras->scan_usb2();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.health.cam_usb2 = ok;
+            }
+        }),
     };
     std::vector<MenuItem> pip_menu = {
-        { "Cam 1", nullptr, std::move(cam1_menu) },
-        { "Cam 2", nullptr, std::move(cam2_menu) },
+        submenu("Cam 1", std::move(cam1_menu)),
+        submenu("Cam 2", std::move(cam2_menu)),
     };
 
     // ── Android mirror ────────────────────────────────────────────────────────
     std::vector<MenuItem> android_menu = {
-        { "Mirror", [android_mirror]() {
-            if (android_mirror->is_running()) android_mirror->stop();
-            else std::thread([android_mirror]() { android_mirror->start(); }).detach();
-        }, {}, [android_mirror]{ return android_mirror->is_running(); } },
-        { "Show Overlay", [android_overlay]() { *android_overlay = !*android_overlay; }, {},
-          [android_overlay]{ return *android_overlay; } },
-        { "Position",     nullptr, make_position_items(android_cfg) },
-        { "Size",         nullptr, make_size_items(android_cfg)     },
+        toggle("Mirror",
+            [android_mirror]{ return android_mirror->is_running(); },
+            [android_mirror](bool v){
+                if (v) std::thread([android_mirror]{ android_mirror->start(); }).detach();
+                else   android_mirror->stop();
+            }),
+        toggle("Show Overlay",
+            [android_overlay]{ return *android_overlay; },
+            [android_overlay](bool v){ *android_overlay = v; }),
+        submenu("Position", make_position_items(android_cfg)),
+        make_size_slider("Size", android_cfg),
     };
 
     // ── Prototracer (face controller) submenu ─────────────────────────────────
     std::vector<MenuItem> prototracer_menu = {
-        { "Effects",        nullptr, std::move(effects)            },
-        { "Color",          nullptr, std::move(colors)             },
-        { "Play GIF",       nullptr, std::move(gifs)               },
-        { "Brightness",     nullptr, std::move(face_brightness)    },
-        { "Lens Brightness",nullptr, std::move(glasses_brightness) },
+        submenu("Effects",  std::move(effects)),
+        submenu("Color",    std::move(colors)),
+        submenu("Play GIF", std::move(gifs)),
+        slider("Brightness", 0.f, 255.f, 1.f, "%",
+            [&state]{ return static_cast<float>(state.face.brightness); },
+            [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
+        slider("Lens Brightness", 1.f, 7.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.xr_brightness); },
+            [xr, &state](float v){
+                state.xr_brightness = static_cast<int>(v);
+                if (xr) xr->set_brightness(static_cast<int>(v));
+            }),
     };
 
     // ── HUD settings ──────────────────────────────────────────────────────────
 
-    // Compass submenu
-    auto make_color_items = [](std::vector<std::pair<const char*, ImU32>> presets,
-                                std::function<void(ImU32)> apply) {
+    auto make_color_items = [&leaf](std::vector<std::pair<const char*, ImU32>> presets,
+                                     std::function<void(ImU32)> apply) {
         std::vector<MenuItem> v;
         for (auto& [lbl, col] : presets)
-            v.push_back({ lbl, [apply, col]{ apply(col); }, {} });
+            v.push_back(leaf(lbl, [apply, col]{ apply(col); }));
         return v;
     };
 
@@ -466,16 +520,14 @@ static std::vector<MenuItem> build_menu(
     }, [hud_col](ImU32 c){ hud_col->compass_glow = c; });
 
     std::vector<MenuItem> compass_menu = {
-        { "Background", [&state]{
-            std::lock_guard<std::mutex> lk(state.mtx);
-            state.compass_bg_enabled = !state.compass_bg_enabled;
-        }, {}, [&state]{ return state.compass_bg_enabled; } },
-        { "BG Color",   nullptr, std::move(compass_bg_color_menu)   },
-        { "Tick Color", nullptr, std::move(compass_tick_color_menu)  },
-        { "Glow Color", nullptr, std::move(compass_glow_color_menu)  },
+        toggle("Background",
+            [&state]{ return state.compass_bg_enabled; },
+            [&state](bool v){ std::lock_guard<std::mutex> lk(state.mtx); state.compass_bg_enabled = v; }),
+        submenu("BG Color",   std::move(compass_bg_color_menu)),
+        submenu("Tick Color", std::move(compass_tick_color_menu)),
+        submenu("Glow Color", std::move(compass_glow_color_menu)),
     };
 
-    // Text Color submenu
     std::vector<MenuItem> text_color_menu = make_color_items({
         { "White",  IM_COL32(255, 255, 255, 255) },
         { "Cyan",   IM_COL32(  0, 240, 220, 255) },
@@ -483,7 +535,6 @@ static std::vector<MenuItem> build_menu(
         { "Green",  IM_COL32(100, 255, 160, 255) },
     }, [hud_col](ImU32 c){ hud_col->text_fill = c; });
 
-    // Glow Color submenu (applies to all HUD glow/outline effects)
     std::vector<MenuItem> glow_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
         { "Teal",   IM_COL32(  0, 220, 180, 255) },
@@ -493,7 +544,6 @@ static std::vector<MenuItem> build_menu(
         { "White",  IM_COL32(255, 255, 255, 255) },
     }, [hud_col](ImU32 c){ hud_col->glow_base = c; });
 
-    // Indicator Options submenu
     std::vector<MenuItem> ind_good_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
         { "Green",  IM_COL32( 30, 220,  60, 255) },
@@ -515,14 +565,14 @@ static std::vector<MenuItem> build_menu(
     }, [hud_col](ImU32 c){ hud_col->ind_fail = c; });
 
     std::vector<MenuItem> indicator_options_menu = {
-        { "Active Color",   nullptr, std::move(ind_good_color_menu)     },
-        { "Inactive Color", nullptr, std::move(ind_inactive_color_menu) },
-        { "Fail Color",     nullptr, std::move(ind_fail_color_menu)     },
-        { "Background", [hud_cfg]{ hud_cfg->indicator_bg_enabled = !hud_cfg->indicator_bg_enabled; }, {},
-          [hud_cfg]{ return hud_cfg->indicator_bg_enabled; } },
+        submenu("Active Color",   std::move(ind_good_color_menu)),
+        submenu("Inactive Color", std::move(ind_inactive_color_menu)),
+        submenu("Fail Color",     std::move(ind_fail_color_menu)),
+        toggle("Background",
+            [hud_cfg]{ return hud_cfg->indicator_bg_enabled; },
+            [hud_cfg](bool v){ hud_cfg->indicator_bg_enabled = v; }),
     };
 
-    // Menu Options submenu
     std::vector<MenuItem> menu_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
         { "Teal",   IM_COL32(  0, 220, 180, 255) },
@@ -532,83 +582,84 @@ static std::vector<MenuItem> build_menu(
     }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_accent_color(c); });
 
     std::vector<MenuItem> menu_bg_color_menu = make_color_items({
-        { "Dark",    IM_COL32( 10,  15,  20, 225) },
-        { "Teal",    IM_COL32(  5,  25,  22, 225) },
-        { "Purple",  IM_COL32( 20,   8,  28, 225) },
-        { "Navy",    IM_COL32(  8,   8,  35, 225) },
-        { "Black",   IM_COL32(  0,   0,   0, 230) },
+        { "Dark",   IM_COL32( 10,  15,  20, 225) },
+        { "Teal",   IM_COL32(  5,  25,  22, 225) },
+        { "Purple", IM_COL32( 20,   8,  28, 225) },
+        { "Navy",   IM_COL32(  8,   8,  35, 225) },
+        { "Black",  IM_COL32(  0,   0,   0, 230) },
     }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_color(c); });
 
     std::vector<MenuItem> menu_options_menu = {
-        { "Menu Color",  nullptr, std::move(menu_color_menu)    },
-        { "BG Color",    nullptr, std::move(menu_bg_color_menu) },
-        { "Background", [menu_sys_pp]{
-            if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(!(*menu_sys_pp)->bg_enabled());
-        }, {}, [menu_sys_pp]{ return *menu_sys_pp && (*menu_sys_pp)->bg_enabled(); } },
+        submenu("Menu Color",  std::move(menu_color_menu)),
+        submenu("BG Color",    std::move(menu_bg_color_menu)),
+        toggle("Background",
+            [menu_sys_pp]{ return *menu_sys_pp && (*menu_sys_pp)->bg_enabled(); },
+            [menu_sys_pp](bool v){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(v); }),
     };
 
-    // HUD top-level menu
     std::vector<MenuItem> hud_menu = {
-        { "Compass",           nullptr, std::move(compass_menu)          },
-        { "Text Color",        nullptr, std::move(text_color_menu)       },
-        { "Glow Color",        nullptr, std::move(glow_color_menu)       },
-        { "Indicator Options", nullptr, std::move(indicator_options_menu)},
-        { "Menu Options",      nullptr, std::move(menu_options_menu)     },
+        submenu("Compass",           std::move(compass_menu)),
+        submenu("Text Color",        std::move(text_color_menu)),
+        submenu("Glow Color",        std::move(glow_color_menu)),
+        submenu("Indicator Options", std::move(indicator_options_menu)),
+        submenu("Menu Options",      std::move(menu_options_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
 
     std::vector<MenuItem> edge_strength_menu = {
-        { "10%",  [&state]{ state.pp_cfg.edge_strength = 0.10f; }, {} },
-        { "30%",  [&state]{ state.pp_cfg.edge_strength = 0.30f; }, {} },
-        { "50%",  [&state]{ state.pp_cfg.edge_strength = 0.50f; }, {} },
-        { "70%",  [&state]{ state.pp_cfg.edge_strength = 0.70f; }, {} },
-        { "100%", [&state]{ state.pp_cfg.edge_strength = 1.00f; }, {} },
+        leaf("10%",  [&state]{ state.pp_cfg.edge_strength = 0.10f; }),
+        leaf("30%",  [&state]{ state.pp_cfg.edge_strength = 0.30f; }),
+        leaf("50%",  [&state]{ state.pp_cfg.edge_strength = 0.50f; }),
+        leaf("70%",  [&state]{ state.pp_cfg.edge_strength = 0.70f; }),
+        leaf("100%", [&state]{ state.pp_cfg.edge_strength = 1.00f; }),
     };
 
     std::vector<MenuItem> edge_color_menu = {
-        { "Orange", [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 160,  32, 255); }, {} },
-        { "Teal",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 220, 180, 255); }, {} },
-        { "Cyan",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 180, 255, 255); }, {} },
-        { "Green",  [&state]{ state.pp_cfg.edge_color = IM_COL32( 30, 220,  60, 255); }, {} },
-        { "White",  [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 255, 255, 255); }, {} },
+        leaf("Orange", [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 160,  32, 255); }),
+        leaf("Teal",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 220, 180, 255); }),
+        leaf("Cyan",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 180, 255, 255); }),
+        leaf("Green",  [&state]{ state.pp_cfg.edge_color = IM_COL32( 30, 220,  60, 255); }),
+        leaf("White",  [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 255, 255, 255); }),
     };
 
     std::vector<MenuItem> desat_strength_menu = {
-        { "25%",  [&state]{ state.pp_cfg.desat_strength = 0.25f; }, {} },
-        { "50%",  [&state]{ state.pp_cfg.desat_strength = 0.50f; }, {} },
-        { "75%",  [&state]{ state.pp_cfg.desat_strength = 0.75f; }, {} },
-        { "100%", [&state]{ state.pp_cfg.desat_strength = 1.00f; }, {} },
+        leaf("25%",  [&state]{ state.pp_cfg.desat_strength = 0.25f; }),
+        leaf("50%",  [&state]{ state.pp_cfg.desat_strength = 0.50f; }),
+        leaf("75%",  [&state]{ state.pp_cfg.desat_strength = 0.75f; }),
+        leaf("100%", [&state]{ state.pp_cfg.desat_strength = 1.00f; }),
     };
 
     std::vector<MenuItem> bg_threshold_menu = {
-        { "Subtle (0.25)",     [&state]{ state.pp_cfg.contrast_threshold = 0.25f; }, {} },
-        { "Medium (0.15)",     [&state]{ state.pp_cfg.contrast_threshold = 0.15f; }, {} },
-        { "Aggressive (0.07)", [&state]{ state.pp_cfg.contrast_threshold = 0.07f; }, {} },
+        leaf("Subtle (0.25)",     [&state]{ state.pp_cfg.contrast_threshold = 0.25f; }),
+        leaf("Medium (0.15)",     [&state]{ state.pp_cfg.contrast_threshold = 0.15f; }),
+        leaf("Aggressive (0.07)", [&state]{ state.pp_cfg.contrast_threshold = 0.07f; }),
     };
 
     std::vector<MenuItem> vision_menu = {
-        { "Edge Highlight", [&state]{ state.pp_cfg.edge_enabled  = !state.pp_cfg.edge_enabled;  }, {},
-          [&state]{ return state.pp_cfg.edge_enabled;  } },
-        { "Edge Strength",  nullptr, std::move(edge_strength_menu) },
-        { "Edge Color",     nullptr, std::move(edge_color_menu)    },
-        { "Bg Desaturate",  [&state]{ state.pp_cfg.desat_enabled = !state.pp_cfg.desat_enabled; }, {},
-          [&state]{ return state.pp_cfg.desat_enabled; } },
-        { "Desat Strength", nullptr, std::move(desat_strength_menu) },
-        { "BG Threshold",   nullptr, std::move(bg_threshold_menu)   },
+        toggle("Edge Highlight",
+            [&state]{ return state.pp_cfg.edge_enabled; },
+            [&state](bool v){ state.pp_cfg.edge_enabled = v; }),
+        submenu("Edge Strength",  std::move(edge_strength_menu)),
+        submenu("Edge Color",     std::move(edge_color_menu)),
+        toggle("Bg Desaturate",
+            [&state]{ return state.pp_cfg.desat_enabled; },
+            [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
+        submenu("Desat Strength", std::move(desat_strength_menu)),
+        submenu("BG Threshold",   std::move(bg_threshold_menu)),
     };
 
     return {
-        { "Camera",         nullptr, std::move(camera_menu)        },
-        { "USB Cameras",    nullptr, std::move(pip_menu)           },
-        { "Prototracer",    nullptr, std::move(prototracer_menu)   },
-        { "Headset",        nullptr, std::move(headset_menu)       },
-        { "Audio",          nullptr, std::move(audio_menu)         },
-        { "Android Mirror", nullptr, std::move(android_menu)       },
-        { "HUD",            nullptr, std::move(hud_menu)           },
-        { "Vision Assist",  nullptr, std::move(vision_menu)        },
-        { "Request Status", [teensy]{ teensy->request_status(); }, {} },
-        { "Close Program",  [&state]{ state.quit = true; },         {} },
+        submenu("Camera",         std::move(camera_menu)),
+        submenu("USB Cameras",    std::move(pip_menu)),
+        submenu("Prototracer",    std::move(prototracer_menu)),
+        submenu("Headset",        std::move(headset_menu)),
+        submenu("Audio",          std::move(audio_menu)),
+        submenu("Android Mirror", std::move(android_menu)),
+        submenu("HUD",            std::move(hud_menu)),
+        submenu("Vision Assist",  std::move(vision_menu)),
+        leaf("Request Status",    [teensy]{ teensy->request_status(); }),
+        leaf("Close Program",     [&state]{ state.quit = true; }),
     };
 }
 

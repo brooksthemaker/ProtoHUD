@@ -151,6 +151,11 @@ struct AppState {
     // Post-processing (edge highlight + background desaturation)
     PostProcessConfig    pp_cfg;
 
+    // Cached XR display control values (no SDK getter; updated when menu writes).
+    int xr_brightness     = 5;   // 1–7; mirrors last xr->set_brightness() call
+    int xr_dimming        = 5;   // 0–9; mirrors last xr->set_dimming() call
+    int xr_hud_brightness = 5;   // 1–9; mirrors last xr->set_hud_brightness() call
+
     // Signals render thread to quit.
     std::atomic<bool> quit { false };
 
