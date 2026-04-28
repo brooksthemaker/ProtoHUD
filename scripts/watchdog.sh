@@ -12,7 +12,7 @@
 
 BINARY="$(cd "$(dirname "$0")/.." && pwd)/build/ProtoHUD"
 MAX_RESTARTS=10
-RESTART_DELAY=3
+RESTART_DELAY=1
 
 if [ ! -x "$BINARY" ]; then
     echo "[watchdog] ERROR: binary not found or not executable: $BINARY" >&2
