@@ -564,6 +564,7 @@ static std::vector<MenuItem> build_menu(
         { "Android Mirror", nullptr, std::move(android_menu)       },
         { "HUD",            nullptr, std::move(hud_menu)           },
         { "Request Status", [teensy]{ teensy->request_status(); }, {} },
+        { "Close Program",  [&state]{ state.quit = true; },         {} },
     };
 }
 
