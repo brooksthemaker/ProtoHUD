@@ -6,6 +6,20 @@
 #include <vector>
 #include <cstdint>
 #include <ctime>
+#include <imgui.h>
+
+// ── Post-processing config ────────────────────────────────────────────────────
+// Modified from menu (any thread); read by the render thread via snap.
+// Simple struct — individual fields are written atomically enough for a bool/float.
+
+struct PostProcessConfig {
+    bool  edge_enabled       = false;
+    float edge_strength      = 0.7f;
+    ImU32 edge_color         = IM_COL32(255, 160, 32, 255);
+    bool  desat_enabled      = false;
+    float desat_strength     = 0.8f;
+    float contrast_threshold = 0.15f;  // 0.07 = aggressive, 0.25 = subtle
+};
 
 // ── Overlay layout config (PiP and Android mirror) ───────────────────────────
 // Modified at runtime by menu actions; read exclusively on the render thread,
@@ -133,6 +147,9 @@ struct AppState {
     CameraFocusState     focus_left, focus_right;
     NightVisionState     night_vision;
     CameraResolutionState camera_resolution;
+
+    // Post-processing (edge highlight + background desaturation)
+    PostProcessConfig    pp_cfg;
 
     // Signals render thread to quit.
     std::atomic<bool> quit { false };
