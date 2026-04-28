@@ -86,7 +86,9 @@ public:
     // label: short name shown in the overlay corner.
     // cfg controls anchor position and size as a fraction of screen height.
     void draw_pip(unsigned int tex, const char* label,
-                  int w, int h, bool active, const OverlayConfig& cfg);
+                  int w, int h, bool active, const OverlayConfig& cfg,
+                  const CameraFocusState& focus = {},
+                  bool nv_active = false);
 
     // Build Android mirror overlay (portrait 9:16 aspect).
     // tex: GLuint from AndroidMirror::get_frame() — 0 shows a status placeholder.

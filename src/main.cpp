@@ -1163,11 +1163,13 @@ int main(int argc, char* argv[]) {
         hud.draw_pip(tex_usb1, "Cam 1",
                      xr.eye_width(), xr.eye_height(),
                      pip_cam1_overlay_active || pip_left_active || kb_pip_left,
-                     pip_overlay_cfg1);
+                     pip_overlay_cfg1,
+                     snap.focus_left, snap.night_vision.nv_enabled);
         hud.draw_pip(tex_usb2, "Cam 2",
                      xr.eye_width(), xr.eye_height(),
                      pip_cam2_overlay_active || pip_right_active || kb_pip_right,
-                     pip_overlay_cfg2);
+                     pip_overlay_cfg2,
+                     snap.focus_right, snap.night_vision.nv_enabled);
 
         hud.draw_android_overlay(tex_android,
                                   xr.eye_width(), xr.eye_height(),

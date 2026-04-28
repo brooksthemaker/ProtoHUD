@@ -193,7 +193,8 @@ static ImVec2 overlay_origin(const OverlayConfig& cfg,
 // ── PiP ──────────────────────────────────────────────────────────────────────
 
 void HudRenderer::draw_pip(unsigned int tex, const char* label,
-                            int w, int h, bool active, const OverlayConfig& cfg) {
+                            int w, int h, bool active, const OverlayConfig& cfg,
+                            const CameraFocusState& focus, bool nv_active) {
     if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
@@ -288,12 +289,33 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
             break;
     }
 
-    // 4. Label
+    // 4. Label (top-left)
     if (font_mono_) ImGui::PushFont(font_mono_);
     dl->AddText({x + 4.f, y + 4.f}, col_.primary, label);
     if (font_mono_) ImGui::PopFont();
 
-    // 5. Chamfered border outline on top
+    // 5. Focus mode + NV status strip (bottom-left)
+    {
+        const char* focus_str =
+            (focus.mode == CameraFocusState::Mode::MANUAL) ? "MAN" :
+            (focus.mode == CameraFocusState::Mode::SLAVE)  ? "SLV" :
+            focus.af_locked ? "LOCK" :
+            focus.af_active ? "SCAN" : "AF";
+        const bool  af_on   = (focus.mode == CameraFocusState::Mode::AUTO);
+        if (font_mono_) ImGui::PushFont(font_mono_);
+        const float lh      = ImGui::GetTextLineHeight();
+        const float sy      = y + bh - lh - 5.f;
+        hud_glow_text(dl, {x + 6.f, sy}, focus_str, af_on,
+                      col_.glow_base, col_.text_fill);
+        if (nv_active) {
+            const float off = ImGui::CalcTextSize(focus_str).x + 8.f;
+            hud_glow_text(dl, {x + 6.f + off, sy}, "NV", true,
+                          col_.glow_base, col_.text_fill);
+        }
+        if (font_mono_) ImGui::PopFont();
+    }
+
+    // 6. Chamfered border outline on top
     dl->AddPolyline(pts, n_pts, col_.primary, ImDrawFlags_Closed, 2.f);
 
     ImGui::End();
