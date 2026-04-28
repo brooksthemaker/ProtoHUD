@@ -705,9 +705,10 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         if (px < origin.x || px > origin.x + tw) continue;
 
         if (deg % 45 == 0) {
-            dl->AddLine({px, origin.y}, {px, tick_y}, col_glow2, 9.f);
-            dl->AddLine({px, origin.y}, {px, tick_y}, col_glow1, 4.f);
-            dl->AddLine({px, origin.y}, {px, tick_y}, col_major, 1.5f);
+            // Major tick starts below the cardinal label (label is 4px inside + ~14px tall)
+            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_glow2, 9.f);
+            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_glow1, 4.f);
+            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_major, 1.5f);
         } else if (deg % 10 == 0) {
             dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_glow2, 3.f);
             dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_mid);
@@ -729,7 +730,7 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         float px = center_x + offset * ppd;
         if (px < origin.x || px > origin.x + tw) continue;
 
-        hud_glow_text(dl, {px - 8.f, origin.y - 16.f},
+        hud_glow_text(dl, {px - 8.f, origin.y + 4.f},
                       cardinal_str(static_cast<float>(deg)),
                       true, col_.compass_glow, col_.compass_tick);
     }
