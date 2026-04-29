@@ -38,13 +38,15 @@ private:
     GLuint vbo_  = 0;
 
     // Cached uniform locations (set at init time)
-    GLint loc_scene_     = -1;
-    GLint loc_texel_     = -1;
-    GLint loc_edge_str_  = -1;
-    GLint loc_desat_str_ = -1;
-    GLint loc_edge_col_  = -1;
-    GLint loc_threshold_ = -1;
-    GLint loc_has_depth_ = -1;
+    GLint loc_scene_      = -1;
+    GLint loc_texel_      = -1;
+    GLint loc_edge_str_   = -1;
+    GLint loc_desat_str_  = -1;
+    GLint loc_edge_col_   = -1;
+    GLint loc_threshold_  = -1;
+    GLint loc_has_depth_  = -1;
+    GLint loc_edge_scale_ = -1;
+    GLint loc_edge_thresh_= -1;
 
     int w_ = 0, h_ = 0;
 };

@@ -709,6 +709,20 @@ static std::vector<MenuItem> build_menu(
         leaf("White",  [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 255, 255, 255); }),
     };
 
+    std::vector<MenuItem> edge_detail_menu = {
+        leaf("Fine (1x)",       [&state]{ state.pp_cfg.edge_scale = 1.0f; }),
+        leaf("Standard (2x)",   [&state]{ state.pp_cfg.edge_scale = 2.0f; }),
+        leaf("Coarse (3x)",     [&state]{ state.pp_cfg.edge_scale = 3.0f; }),
+        leaf("Silhouette (5x)", [&state]{ state.pp_cfg.edge_scale = 5.0f; }),
+    };
+
+    std::vector<MenuItem> edge_threshold_menu = {
+        leaf("None",   [&state]{ state.pp_cfg.edge_threshold = 0.00f; }),
+        leaf("Low",    [&state]{ state.pp_cfg.edge_threshold = 0.15f; }),
+        leaf("Medium", [&state]{ state.pp_cfg.edge_threshold = 0.30f; }),
+        leaf("High",   [&state]{ state.pp_cfg.edge_threshold = 0.50f; }),
+    };
+
     std::vector<MenuItem> desat_strength_menu = {
         leaf("25%",  [&state]{ state.pp_cfg.desat_strength = 0.25f; }),
         leaf("50%",  [&state]{ state.pp_cfg.desat_strength = 0.50f; }),
@@ -728,6 +742,8 @@ static std::vector<MenuItem> build_menu(
             [&state](bool v){ state.pp_cfg.edge_enabled = v; }),
         submenu("Edge Strength",  std::move(edge_strength_menu)),
         submenu("Edge Color",     std::move(edge_color_menu)),
+        submenu("Edge Detail",    std::move(edge_detail_menu)),
+        submenu("Edge Threshold", std::move(edge_threshold_menu)),
         toggle("Bg Desaturate",
             [&state]{ return state.pp_cfg.desat_enabled; },
             [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
@@ -962,6 +978,8 @@ int main(int argc, char* argv[]) {
         state.pp_cfg.desat_enabled      = jpp.value("desat_enabled",      false);
         state.pp_cfg.desat_strength     = jpp.value("desat_strength",     0.8f);
         state.pp_cfg.contrast_threshold = jpp.value("contrast_threshold", 0.15f);
+        state.pp_cfg.edge_scale         = jpp.value("edge_scale",         2.0f);
+        state.pp_cfg.edge_threshold     = jpp.value("edge_threshold",     0.0f);
         if (jpp.contains("edge_color") && jpp["edge_color"].is_array() &&
             jpp["edge_color"].size() >= 3) {
             auto& jc = jpp["edge_color"];
@@ -1477,6 +1495,8 @@ int main(int argc, char* argv[]) {
         jpp["desat_enabled"]      = state.pp_cfg.desat_enabled;
         jpp["desat_strength"]     = state.pp_cfg.desat_strength;
         jpp["contrast_threshold"] = state.pp_cfg.contrast_threshold;
+        jpp["edge_scale"]         = state.pp_cfg.edge_scale;
+        jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"] = color_to_json(menu.accent_color());

@@ -146,7 +146,9 @@
     "edge_color": [255, 160, 32, 255],
     "desat_enabled": false,
     "desat_strength": 0.8,
-    "contrast_threshold": 0.15
+    "contrast_threshold": 0.15,
+    "edge_scale": 2.0,
+    "edge_threshold": 0.0
   },
   "colors": {
     "hud_primary":    [0, 220, 180, 220],

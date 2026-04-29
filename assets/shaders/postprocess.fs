@@ -23,6 +23,8 @@ uniform float     u_desat_str;  // 0.0–1.0 background desaturation intensity
 uniform vec3      u_edge_col;   // edge overlay colour (normalised RGB)
 uniform float     u_threshold;  // local contrast below this = background (0.07–0.25)
 uniform float     u_has_depth;  // 0.0 = use contrast proxy, 1.0 = sample u_depth
+uniform float     u_edge_scale; // sampling step multiplier (1.0–5.0); larger = coarser outline
+uniform float     u_edge_thresh;// minimum edge magnitude (0.0–0.6); suppresses weak interior edges
 
 varying vec2 v_uv;
 
@@ -32,15 +34,17 @@ float luma(vec3 c) {
 
 void main() {
     // ── Sample 3×3 neighbourhood ──────────────────────────────────────────────
-    vec3 c00 = texture2D(u_scene, v_uv + vec2(-1.0, -1.0) * u_texel).rgb;
-    vec3 c10 = texture2D(u_scene, v_uv + vec2( 0.0, -1.0) * u_texel).rgb;
-    vec3 c20 = texture2D(u_scene, v_uv + vec2( 1.0, -1.0) * u_texel).rgb;
-    vec3 c01 = texture2D(u_scene, v_uv + vec2(-1.0,  0.0) * u_texel).rgb;
+    // u_edge_scale widens the kernel: scale=1 detects all texture, scale=5 = silhouette only
+    vec2 step = u_texel * u_edge_scale;
+    vec3 c00 = texture2D(u_scene, v_uv + vec2(-1.0, -1.0) * step).rgb;
+    vec3 c10 = texture2D(u_scene, v_uv + vec2( 0.0, -1.0) * step).rgb;
+    vec3 c20 = texture2D(u_scene, v_uv + vec2( 1.0, -1.0) * step).rgb;
+    vec3 c01 = texture2D(u_scene, v_uv + vec2(-1.0,  0.0) * step).rgb;
     vec3 c11 = texture2D(u_scene, v_uv).rgb;
-    vec3 c21 = texture2D(u_scene, v_uv + vec2( 1.0,  0.0) * u_texel).rgb;
-    vec3 c02 = texture2D(u_scene, v_uv + vec2(-1.0,  1.0) * u_texel).rgb;
-    vec3 c12 = texture2D(u_scene, v_uv + vec2( 0.0,  1.0) * u_texel).rgb;
-    vec3 c22 = texture2D(u_scene, v_uv + vec2( 1.0,  1.0) * u_texel).rgb;
+    vec3 c21 = texture2D(u_scene, v_uv + vec2( 1.0,  0.0) * step).rgb;
+    vec3 c02 = texture2D(u_scene, v_uv + vec2(-1.0,  1.0) * step).rgb;
+    vec3 c12 = texture2D(u_scene, v_uv + vec2( 0.0,  1.0) * step).rgb;
+    vec3 c22 = texture2D(u_scene, v_uv + vec2( 1.0,  1.0) * step).rgb;
 
     float l00 = luma(c00); float l10 = luma(c10); float l20 = luma(c20);
     float l01 = luma(c01); float l11 = luma(c11); float l21 = luma(c21);
@@ -49,7 +53,9 @@ void main() {
     // ── Sobel edge detection ──────────────────────────────────────────────────
     float gx = -l00 - 2.0*l01 - l02 + l20 + 2.0*l21 + l22;
     float gy = -l00 - 2.0*l10 - l20 + l02 + 2.0*l12 + l22;
-    float edge = clamp(sqrt(gx*gx + gy*gy) * 4.0, 0.0, 1.0);
+    float raw_edge = clamp(sqrt(gx*gx + gy*gy) * 4.0, 0.0, 1.0);
+    // Remap so edges below u_edge_thresh vanish and strong edges stay at 1.0
+    float edge = clamp((raw_edge - u_edge_thresh) / (1.0 - u_edge_thresh + 0.001), 0.0, 1.0);
 
     // ── Background weight ─────────────────────────────────────────────────────
     float bg_weight;
@@ -66,8 +72,10 @@ void main() {
     }
 
     // ── Desaturate background ─────────────────────────────────────────────────
+    // Outlined pixels stay in full color: strong edges suppress desaturation.
+    // When edge detection is off (u_edge_str=0) this reduces to standard bg_weight behaviour.
     vec3  grey  = vec3(l11);
-    vec3  color = mix(c11, grey, bg_weight * u_desat_str);
+    vec3  color = mix(c11, grey, bg_weight * (1.0 - edge * u_edge_str) * u_desat_str);
 
     // ── Overlay edges ─────────────────────────────────────────────────────────
     color = mix(color, u_edge_col, edge * u_edge_str);
