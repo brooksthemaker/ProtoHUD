@@ -356,23 +356,6 @@ static std::vector<MenuItem> build_menu(
         leaf("3D SBS",    [xr]{ if (xr) xr->set_3d_mode(true); }),
     };
 
-    // ── MPU-9250 backup compass ───────────────────────────────────────────────
-    std::vector<MenuItem> mpu_menu = {
-        toggle("Enabled",
-            [mpu9250]{ return mpu9250 && mpu9250->is_running(); },
-            [mpu9250](bool v){
-                if (!mpu9250) return;
-                if (v) mpu9250->start(); else mpu9250->stop();
-            }),
-        toggle("Calibrating",
-            [mpu9250]{ return mpu9250 && mpu9250->is_calibrating(); },
-            [mpu9250](bool v){
-                if (!mpu9250) return;
-                if (v) mpu9250->begin_calibration();
-                else   mpu9250->end_calibration();
-            }),
-    };
-
     // ── Audio controls ────────────────────────────────────────────────────────
     // Beamforming / noise suppression handled by RP2350; CM5 controls output + volume.
     std::vector<MenuItem> output_menu = {
@@ -536,57 +519,43 @@ static std::vector<MenuItem> build_menu(
         return v;
     };
 
-    std::vector<MenuItem> compass_bg_color_menu = make_color_items({
-        { "Default", IM_COL32(  8,  12,  18, 255) },
-        { "Teal",    IM_COL32(  5,  30,  25, 255) },
-        { "Purple",  IM_COL32( 18,   8,  28, 255) },
-        { "Blue",    IM_COL32( 10,  10,  40, 255) },
-        { "Black",   IM_COL32(  0,   0,   0, 255) },
-    }, [hud_col](ImU32 c){ hud_col->compass_bg_color = c; });
-
-    std::vector<MenuItem> compass_tick_color_menu = make_color_items({
-        { "Orange", IM_COL32(255, 160,  32, 255) },
-        { "Teal",   IM_COL32(  0, 220, 180, 255) },
-        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
-        { "Green",  IM_COL32( 30, 220,  60, 255) },
-        { "Purple", IM_COL32(180,  30, 220, 255) },
-        { "White",  IM_COL32(255, 255, 255, 255) },
-    }, [hud_col](ImU32 c){ hud_col->compass_tick = c; });
-
-    std::vector<MenuItem> compass_glow_color_menu = make_color_items({
-        { "Orange", IM_COL32(255, 160,  32, 255) },
-        { "Teal",   IM_COL32(  0, 220, 180, 255) },
-        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
-        { "Green",  IM_COL32( 30, 220,  60, 255) },
-        { "Purple", IM_COL32(180,  30, 220, 255) },
-        { "White",  IM_COL32(255, 255, 255, 255) },
-    }, [hud_col](ImU32 c){ hud_col->compass_glow = c; });
-
-    std::vector<MenuItem> compass_menu = {
-        toggle("Background",
-            [&state]{ return state.compass_bg_enabled; },
-            [&state](bool v){ std::lock_guard<std::mutex> lk(state.mtx); state.compass_bg_enabled = v; }),
-        submenu("BG Color",   std::move(compass_bg_color_menu)),
-        submenu("Tick Color", std::move(compass_tick_color_menu)),
-        submenu("Glow Color", std::move(compass_glow_color_menu)),
-    };
-
+    // ── Text Options ──────────────────────────────────────────────────────────
     std::vector<MenuItem> text_color_menu = make_color_items({
         { "White",  IM_COL32(255, 255, 255, 255) },
         { "Cyan",   IM_COL32(  0, 240, 220, 255) },
         { "Orange", IM_COL32(255, 200, 100, 255) },
+        { "Amber",  IM_COL32(255, 190,  50, 255) },
         { "Green",  IM_COL32(100, 255, 160, 255) },
+        { "Yellow", IM_COL32(255, 240, 100, 255) },
+        { "Red",    IM_COL32(255, 100, 100, 255) },
+        { "Purple", IM_COL32(200, 130, 255, 255) },
+        { "Blue",   IM_COL32(100, 160, 255, 255) },
+        { "Pink",   IM_COL32(255, 130, 200, 255) },
     }, [hud_col](ImU32 c){ hud_col->text_fill = c; });
 
     std::vector<MenuItem> glow_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
         { "Teal",   IM_COL32(  0, 220, 180, 255) },
         { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Amber",  IM_COL32(255, 190,  50, 255) },
         { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Yellow", IM_COL32(255, 240,  50, 255) },
+        { "Red",    IM_COL32(255,  50,  50, 255) },
         { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "Blue",   IM_COL32( 60, 100, 255, 255) },
+        { "Pink",   IM_COL32(255,  80, 200, 255) },
         { "White",  IM_COL32(255, 255, 255, 255) },
     }, [hud_col](ImU32 c){ hud_col->glow_base = c; });
 
+    std::vector<MenuItem> text_options_menu = {
+        submenu("Color",     std::move(text_color_menu)),
+        slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
+            [hud_cfg]{ return hud_cfg->text_scale; },
+            [hud_cfg](float v){ hud_cfg->text_scale = v; }),
+        submenu("Glow Color", std::move(glow_color_menu)),
+    };
+
+    // ── Indicator Options ─────────────────────────────────────────────────────
     std::vector<MenuItem> ind_good_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
         { "Green",  IM_COL32( 30, 220,  60, 255) },
@@ -616,6 +585,72 @@ static std::vector<MenuItem> build_menu(
             [hud_cfg](bool v){ hud_cfg->indicator_bg_enabled = v; }),
     };
 
+    // ── Compass ───────────────────────────────────────────────────────────────
+    // Onboard MPU-9250 backup compass (moved from root "Backup Compass")
+    std::vector<MenuItem> onboard_compass_menu = {
+        toggle("Active",
+            [mpu9250]{ return mpu9250 && mpu9250->is_running(); },
+            [mpu9250](bool v){
+                if (!mpu9250) return;
+                if (v) mpu9250->start(); else mpu9250->stop();
+            }),
+        toggle("Calibrate",
+            [mpu9250]{ return mpu9250 && mpu9250->is_calibrating(); },
+            [mpu9250](bool v){
+                if (!mpu9250) return;
+                if (v) mpu9250->begin_calibration();
+                else   mpu9250->end_calibration();
+            }),
+    };
+
+    std::vector<MenuItem> compass_bg_color_menu = make_color_items({
+        { "Default", IM_COL32(  8,  12,  18, 255) },
+        { "Teal",    IM_COL32(  5,  30,  25, 255) },
+        { "Purple",  IM_COL32( 18,   8,  28, 255) },
+        { "Blue",    IM_COL32( 10,  10,  40, 255) },
+        { "Black",   IM_COL32(  0,   0,   0, 255) },
+    }, [hud_col](ImU32 c){ hud_col->compass_bg_color = c; });
+
+    std::vector<MenuItem> compass_bg_options_menu = {
+        toggle("Show Background",
+            [&state]{ return state.compass_bg_enabled; },
+            [&state](bool v){ std::lock_guard<std::mutex> lk(state.mtx); state.compass_bg_enabled = v; }),
+        slider("Tape Height", 50.f, 120.f, 5.f, "",
+            [hud_cfg]{ return static_cast<float>(hud_cfg->compass_height); },
+            [hud_cfg](float v){ hud_cfg->compass_height = static_cast<int>(v); }),
+        submenu("Color", std::move(compass_bg_color_menu)),
+    };
+
+    std::vector<MenuItem> compass_tick_color_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+    }, [hud_col](ImU32 c){ hud_col->compass_tick = c; });
+
+    std::vector<MenuItem> compass_glow_color_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+    }, [hud_col](ImU32 c){ hud_col->compass_glow = c; });
+
+    std::vector<MenuItem> compass_color_options_menu = {
+        submenu("Tick Color", std::move(compass_tick_color_menu)),
+        submenu("Glow Color", std::move(compass_glow_color_menu)),
+    };
+
+    std::vector<MenuItem> compass_menu = {
+        submenu("Onboard Compass",   std::move(onboard_compass_menu)),
+        submenu("Background Options",std::move(compass_bg_options_menu)),
+        submenu("Color Options",     std::move(compass_color_options_menu)),
+    };
+
+    // ── Menu Options ──────────────────────────────────────────────────────────
     std::vector<MenuItem> menu_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
         { "Teal",   IM_COL32(  0, 220, 180, 255) },
@@ -641,10 +676,9 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> hud_menu = {
-        submenu("Compass",           std::move(compass_menu)),
-        submenu("Text Color",        std::move(text_color_menu)),
-        submenu("Glow Color",        std::move(glow_color_menu)),
+        submenu("Text Options",      std::move(text_options_menu)),
         submenu("Indicator Options", std::move(indicator_options_menu)),
+        submenu("Compass",           std::move(compass_menu)),
         submenu("Menu Options",      std::move(menu_options_menu)),
     };
 
@@ -692,17 +726,20 @@ static std::vector<MenuItem> build_menu(
         submenu("BG Threshold",   std::move(bg_threshold_menu)),
     };
 
-    return {
-        submenu("Cameras",        std::move(cameras_menu)),
-        submenu("Prototracer",    std::move(prototracer_menu)),
+    std::vector<MenuItem> settings_menu = {
         submenu("Headset",        std::move(headset_menu)),
-        submenu("Backup Compass", std::move(mpu_menu)),
         submenu("Audio",          std::move(audio_menu)),
-        submenu("Android Mirror", std::move(android_menu)),
         submenu("HUD",            std::move(hud_menu)),
-        submenu("Vision Assist",  std::move(vision_menu)),
-        leaf("Request Status",    [teensy]{ teensy->request_status(); }),
-        leaf("Close Program",     [&state]{ state.quit = true; }),
+        submenu("Android Mirror", std::move(android_menu)),
+    };
+
+    return {
+        submenu("Cameras",       std::move(cameras_menu)),
+        submenu("Prototracer",   std::move(prototracer_menu)),
+        submenu("Settings",      std::move(settings_menu)),
+        submenu("Vision Assist", std::move(vision_menu)),
+        leaf("Request Status",   [teensy]{ teensy->request_status(); }),
+        leaf("Close Program",    [&state]{ state.quit = true; }),
     };
 }
 

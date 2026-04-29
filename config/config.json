@@ -65,7 +65,7 @@
     "enable_imu": true
   },
   "hud": {
-    "compass_height_px": 60,
+    "compass_height_px": 80,
     "compass_bottom_margin_px": 20,
     "compass_bg": false,
     "compass_bg_opacity": 0.75,

@@ -127,6 +127,7 @@ void HudRenderer::begin_frame(float /*dt*/) {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    ImGui::GetIO().FontGlobalScale = cfg_.text_scale;
 }
 
 void HudRenderer::render_overlay() {

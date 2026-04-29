@@ -287,7 +287,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                         + item_h * static_cast<float>(items.size())
                         + extra;
     const float x = 48.f;
-    const float y = ((float)screen_h - total_h) * 0.5f;
+    const float y = 48.f;   // top-anchored: fixed distance from screen top
 
     const ImU32 COL_SEP = menu_with_alpha(accent_color_, 45);
 
