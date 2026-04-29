@@ -112,12 +112,10 @@ private:
                             const CameraFocusState& focus_left,
                             const CameraFocusState& focus_right,
                             bool nv_enabled);
-    void draw_audio_strip  (ImDrawList* dl, const AudioState& a, ImVec2 origin, float w);
-    void draw_face_panel   (ImDrawList* dl, const FaceState& f,
-                            ImVec2 origin, float pw, float ph);
-    void draw_lora_panel   (ImDrawList* dl, const AppState& s,
-                            ImVec2 origin, float pw, float ph);
-    void draw_lora_messages(ImDrawList* dl, const AppState& s,
+    void draw_audio_strip    (ImDrawList* dl, const AudioState& a, ImVec2 origin, float w);
+    void draw_face_indicator (ImDrawList* dl, const FaceState& f, float fw, float fh);
+    void draw_lora_indicator (ImDrawList* dl, const AppState& s,  float fw, float fh);
+    void draw_lora_messages  (ImDrawList* dl, const AppState& s,
                             ImVec2 origin, float pw, float ph);
     void draw_compass_tape (ImDrawList* dl, const AppState& s,
                             ImVec2 origin, float tw, float th);
