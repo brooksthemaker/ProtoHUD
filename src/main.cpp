@@ -707,6 +707,7 @@ static std::vector<MenuItem> build_menu(
         leaf("Cyan",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 180, 255, 255); }),
         leaf("Green",  [&state]{ state.pp_cfg.edge_color = IM_COL32( 30, 220,  60, 255); }),
         leaf("White",  [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 255, 255, 255); }),
+        leaf("Black",  [&state]{ state.pp_cfg.edge_color = IM_COL32(  0,   0,   0, 255); }),
     };
 
     std::vector<MenuItem> edge_detail_menu = {
@@ -714,6 +715,7 @@ static std::vector<MenuItem> build_menu(
         leaf("Standard (2x)",   [&state]{ state.pp_cfg.edge_scale = 2.0f; }),
         leaf("Coarse (3x)",     [&state]{ state.pp_cfg.edge_scale = 3.0f; }),
         leaf("Silhouette (5x)", [&state]{ state.pp_cfg.edge_scale = 5.0f; }),
+        leaf("Wide (7x)",       [&state]{ state.pp_cfg.edge_scale = 7.0f; }),
     };
 
     std::vector<MenuItem> edge_threshold_menu = {

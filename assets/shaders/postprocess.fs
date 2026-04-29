@@ -56,7 +56,7 @@ void main() {
     // ── Sobel edge detection ──────────────────────────────────────────────────
     float gx = -l00 - 2.0*l01 - l02 + l20 + 2.0*l21 + l22;
     float gy = -l00 - 2.0*l10 - l20 + l02 + 2.0*l12 + l22;
-    float raw_edge = clamp(sqrt(gx*gx + gy*gy) * 4.0, 0.0, 1.0);
+    float raw_edge = clamp(sqrt(gx*gx + gy*gy) * 1.5, 0.0, 1.0);
     // Remap so edges below u_edge_thresh vanish and strong edges stay at 1.0
     float edge = clamp((raw_edge - u_edge_thresh) / (1.0 - u_edge_thresh + 0.001), 0.0, 1.0);
 
@@ -76,7 +76,7 @@ void main() {
         float g22 = luma(texture2D(u_scene, v_uv + vec2( 1.0, 1.0)*step2).rgb);
         float gx2 = -g00 - 2.0*g01 - g02 + g20 + 2.0*g21 + g22;
         float gy2 = -g00 - 2.0*g10 - g20 + g02 + 2.0*g12 + g22;
-        float edge2 = clamp(sqrt(gx2*gx2 + gy2*gy2) * 4.0, 0.0, 1.0);
+        float edge2 = clamp(sqrt(gx2*gx2 + gy2*gy2) * 1.5, 0.0, 1.0);
         edge = edge * edge2;
     }
 
