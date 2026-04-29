@@ -23,6 +23,7 @@ bool PostProcessor::init(int w, int h, const char* vs_path, const char* fs_path)
     loc_edge_thresh_ = glGetUniformLocation(prog_, "u_edge_thresh");
     loc_focus_str_   = glGetUniformLocation(prog_, "u_focus_str");
     loc_focus_sens_  = glGetUniformLocation(prog_, "u_focus_sens");
+    loc_gate_scale_  = glGetUniformLocation(prog_, "u_gate_scale");
 
     vbo_ = gl::make_quad_vbo();
     if (!vbo_) {
@@ -72,6 +73,7 @@ void PostProcessor::process(GLuint src_tex, const gl::Fbo& dst,
     const float focus_norm = static_cast<float>(cfg.focus_lens_pos) / 1000.0f;
     glUniform1f(loc_focus_str_,  cfg.focus_str);
     glUniform1f(loc_focus_sens_, 1.0f + focus_norm * 3.0f);
+    glUniform1f(loc_gate_scale_, cfg.edge_gate_scale);
 
     gl::bind_quad(vbo_);
     gl::draw_quad();

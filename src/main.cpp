@@ -743,6 +743,12 @@ static std::vector<MenuItem> build_menu(
         leaf("Full",   [&state]{ state.pp_cfg.focus_str = 1.0f; }),
     };
 
+    std::vector<MenuItem> size_filter_menu = {
+        leaf("Off",        [&state]{ state.pp_cfg.edge_gate_scale = 0.0f; }),
+        leaf("Medium (2x)",[&state]{ state.pp_cfg.edge_gate_scale = 2.0f; }),
+        leaf("Strong (3x)",[&state]{ state.pp_cfg.edge_gate_scale = 3.0f; }),
+    };
+
     std::vector<MenuItem> vision_menu = {
         toggle("Edge Highlight",
             [&state]{ return state.pp_cfg.edge_enabled; },
@@ -751,6 +757,7 @@ static std::vector<MenuItem> build_menu(
         submenu("Edge Color",     std::move(edge_color_menu)),
         submenu("Edge Detail",    std::move(edge_detail_menu)),
         submenu("Edge Threshold", std::move(edge_threshold_menu)),
+        submenu("Size Filter",    std::move(size_filter_menu)),
         toggle("Bg Desaturate",
             [&state]{ return state.pp_cfg.desat_enabled; },
             [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
@@ -989,6 +996,7 @@ int main(int argc, char* argv[]) {
         state.pp_cfg.edge_scale         = jpp.value("edge_scale",         3.0f);
         state.pp_cfg.edge_threshold     = jpp.value("edge_threshold",     0.15f);
         state.pp_cfg.focus_str          = jpp.value("focus_str",          0.0f);
+        state.pp_cfg.edge_gate_scale    = jpp.value("edge_gate_scale",    2.0f);
         if (jpp.contains("edge_color") && jpp["edge_color"].is_array() &&
             jpp["edge_color"].size() >= 3) {
             auto& jc = jpp["edge_color"];
@@ -1511,6 +1519,7 @@ int main(int argc, char* argv[]) {
         jpp["edge_scale"]         = state.pp_cfg.edge_scale;
         jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
         jpp["focus_str"]          = state.pp_cfg.focus_str;
+        jpp["edge_gate_scale"]    = state.pp_cfg.edge_gate_scale;
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"] = color_to_json(menu.accent_color());

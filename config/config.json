@@ -149,7 +149,8 @@
     "contrast_threshold": 0.15,
     "edge_scale": 3.0,
     "edge_threshold": 0.15,
-    "focus_str": 0.0
+    "focus_str": 0.0,
+    "edge_gate_scale": 2.0
   },
   "colors": {
     "hud_primary":    [0, 220, 180, 220],
