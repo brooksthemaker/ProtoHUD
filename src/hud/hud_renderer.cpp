@@ -732,46 +732,29 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         if (px < origin.x || px > origin.x + tw) continue;
 
         if (deg % 45 == 0) {
-            // Major cardinal tick — shorter than before (12 px)
-            dl->AddLine({px, tick_bottom - 12.f}, {px, tick_bottom}, col_glow2, 6.f);
-            dl->AddLine({px, tick_bottom - 12.f}, {px, tick_bottom}, col_glow1, 3.f);
-            dl->AddLine({px, tick_bottom - 12.f}, {px, tick_bottom}, col_major, 1.5f);
+            // Major cardinal tick — 24 px
+            dl->AddLine({px, tick_bottom - 24.f}, {px, tick_bottom}, col_glow2, 12.f);
+            dl->AddLine({px, tick_bottom - 24.f}, {px, tick_bottom}, col_glow1,  6.f);
+            dl->AddLine({px, tick_bottom - 24.f}, {px, tick_bottom}, col_major,  3.f);
             // Cardinal label centred below the tick
             const char* card = cardinal_str(static_cast<float>(deg));
             ImVec2 csz = ImGui::CalcTextSize(card);
             hud_glow_text(dl, {px - csz.x * 0.5f, label_y},
                           card, true, col_.compass_glow, col_.compass_tick);
         } else if (deg % 10 == 0) {
-            // 10° tick (8 px) + degree number below
-            dl->AddLine({px, tick_bottom - 8.f}, {px, tick_bottom}, col_glow2, 3.f);
-            dl->AddLine({px, tick_bottom - 8.f}, {px, tick_bottom}, col_mid);
+            // 10° tick — 16 px
+            dl->AddLine({px, tick_bottom - 16.f}, {px, tick_bottom}, col_glow2, 6.f);
+            dl->AddLine({px, tick_bottom - 16.f}, {px, tick_bottom}, col_mid,   2.f);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
             ImVec2 bsz = ImGui::CalcTextSize(buf);
             hud_glow_text(dl, {px - bsz.x * 0.5f, label_y}, buf,
                           true, col_.compass_glow, col_.compass_tick);
         } else if (deg % 5 == 0) {
-            // Minor 5° tick (5 px) — no label
-            dl->AddLine({px, tick_bottom - 5.f}, {px, tick_bottom}, col_glow2, 2.f);
-            dl->AddLine({px, tick_bottom - 5.f}, {px, tick_bottom}, col_minor);
+            // Minor 5° tick — 10 px
+            dl->AddLine({px, tick_bottom - 10.f}, {px, tick_bottom}, col_glow2, 4.f);
+            dl->AddLine({px, tick_bottom - 10.f}, {px, tick_bottom}, col_minor, 2.f);
         }
     }
-
-    // Centre cursor triangle — glow halo then sharp fill
-    dl->AddTriangleFilled(
-        {center_x,        origin.y       },
-        {center_x - 12.f, origin.y + 18.f},
-        {center_x + 12.f, origin.y + 18.f},
-        col_glow2);
-    dl->AddTriangleFilled(
-        {center_x,       origin.y       },
-        {center_x - 8.f, origin.y + 14.f},
-        {center_x + 8.f, origin.y + 14.f},
-        col_major);
-
-    // Heading readout
-    char hdg[16]; snprintf(hdg, sizeof(hdg), "%03.0f°", heading);
-    hud_glow_text(dl, {center_x - 16.f, origin.y + 16.f}, hdg,
-                  true, col_.compass_glow, col_.compass_tick);
 
     if (font_mono_) ImGui::PopFont();
 }
