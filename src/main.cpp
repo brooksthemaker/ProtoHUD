@@ -654,6 +654,9 @@ static std::vector<MenuItem> build_menu(
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
             [hud_cfg](float v){ hud_cfg->compass_tick_length = static_cast<int>(v); }),
+        toggle("Tick Glow",
+            [hud_cfg]{ return hud_cfg->compass_tick_glow; },
+            [hud_cfg](bool v){ hud_cfg->compass_tick_glow = v; }),
     };
 
     // ── Menu Options ──────────────────────────────────────────────────────────

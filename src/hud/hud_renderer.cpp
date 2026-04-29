@@ -741,23 +741,28 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         float px = center_x + offset * ppd;
         if (px < origin.x || px > origin.x + tw) continue;
 
+        const bool tick_glow = cfg_.compass_tick_glow;
         if (deg % 45 == 0) {
-            dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow2, t_maj * 0.5f);
-            dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow1, t_maj * 0.25f);
+            if (tick_glow) {
+                dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow2, t_maj * 0.5f);
+                dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow1, t_maj * 0.25f);
+            }
             dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_major, 3.f);
             const char* card = cardinal_str(static_cast<float>(deg));
             ImVec2 csz = ImGui::CalcTextSize(card);
             hud_glow_text(dl, {px - csz.x * 0.5f, label_y},
                           card, true, col_.glow_base, col_.text_fill);
         } else if (deg % 10 == 0) {
-            dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_glow2, t_mid * 0.375f);
+            if (tick_glow)
+                dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_glow2, t_mid * 0.375f);
             dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_mid,   2.f);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
             ImVec2 bsz = ImGui::CalcTextSize(buf);
             hud_glow_text(dl, {px - bsz.x * 0.5f, label_y}, buf,
                           true, col_.glow_base, col_.text_fill);
         } else if (deg % 5 == 0) {
-            dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_glow2, t_min * 0.4f);
+            if (tick_glow)
+                dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_glow2, t_min * 0.4f);
             dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_minor, 2.f);
         }
     }
