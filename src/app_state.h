@@ -84,6 +84,7 @@ struct SystemHealth {
     bool cam_usb2        = false;
     bool audio_ok        = false;  // Spatial audio engine running
     bool android_mirror  = false;  // scrcpy connected and streaming
+    bool mpu9250_ok      = false;  // MPU-9250 backup compass running
 };
 
 struct AudioState {

@@ -26,6 +26,7 @@
 #include "vitrue/timewarp.h"
 #include "audio/audio_engine.h"
 #include "post_process.h"
+#include "sensor/mpu9250.h"
 
 using json = nlohmann::json;
 
@@ -105,7 +106,8 @@ static std::vector<MenuItem> build_menu(
         OverlayConfig* pip_cfg1, OverlayConfig* pip_cfg2,
         bool* pip_cam1_overlay, bool* pip_cam2_overlay,
         OverlayConfig* android_cfg,
-        HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp)
+        HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp,
+        Mpu9250* mpu9250)
 {
     (void)lora; (void)knob;
 
@@ -352,6 +354,23 @@ static std::vector<MenuItem> build_menu(
         leaf("Recenter",  [xr]{ if (xr) xr->recenter_tracking(); }),
         leaf("Gaze Lock", [xr]{ if (xr) xr->toggle_gaze_lock(); }),
         leaf("3D SBS",    [xr]{ if (xr) xr->set_3d_mode(true); }),
+    };
+
+    // ── MPU-9250 backup compass ───────────────────────────────────────────────
+    std::vector<MenuItem> mpu_menu = {
+        toggle("Enabled",
+            [mpu9250]{ return mpu9250 && mpu9250->is_running(); },
+            [mpu9250](bool v){
+                if (!mpu9250) return;
+                if (v) mpu9250->start(); else mpu9250->stop();
+            }),
+        toggle("Calibrating",
+            [mpu9250]{ return mpu9250 && mpu9250->is_calibrating(); },
+            [mpu9250](bool v){
+                if (!mpu9250) return;
+                if (v) mpu9250->begin_calibration();
+                else   mpu9250->end_calibration();
+            }),
     };
 
     // ── Audio controls ────────────────────────────────────────────────────────
@@ -654,6 +673,7 @@ static std::vector<MenuItem> build_menu(
         submenu("USB Cameras",    std::move(pip_menu)),
         submenu("Prototracer",    std::move(prototracer_menu)),
         submenu("Headset",        std::move(headset_menu)),
+        submenu("Backup Compass", std::move(mpu_menu)),
         submenu("Audio",          std::move(audio_menu)),
         submenu("Android Mirror", std::move(android_menu)),
         submenu("HUD",            std::move(hud_menu)),
@@ -806,6 +826,22 @@ int main(int argc, char* argv[]) {
     hud_cfg.scale                 = jval(jdisp,"hud_scale",            1.0f);
     hud_cfg.indicator_bg_enabled  = jval(jhud, "indicator_bg_enabled", false);
 
+    Mpu9250::Config mpu_cfg;
+    if (cfg.contains("mpu9250")) {
+        auto& jm = cfg["mpu9250"];
+        mpu_cfg.enabled         = jval(jm, "enabled",        false);
+        mpu_cfg.i2c_bus         = jm.value("i2c_bus",        std::string("/dev/i2c-1"));
+        mpu_cfg.mpu_addr        = jval(jm, "mpu_addr",       0x68);
+        mpu_cfg.declination_deg = jval(jm, "declination_deg", 0.0f);
+        mpu_cfg.heading_offset  = jval(jm, "heading_offset",  0.0f);
+        if (jm.contains("mag_bias") && jm["mag_bias"].is_array() &&
+            jm["mag_bias"].size() >= 3) {
+            mpu_cfg.mag_bias_x = jm["mag_bias"][0].get<float>();
+            mpu_cfg.mag_bias_y = jm["mag_bias"][1].get<float>();
+            mpu_cfg.mag_bias_z = jm["mag_bias"][2].get<float>();
+        }
+    }
+
     AndroidMirrorConfig and_cfg;
     OverlayConfig       pip_overlay_cfg1, pip_overlay_cfg2;
     OverlayConfig       android_overlay_cfg;
@@ -886,7 +922,12 @@ int main(int argc, char* argv[]) {
     }
 
     // IMU → compass heading + spatial audio head tracking
-    xr.on_imu_pose([&state](float roll, float pitch, float yaw) {
+    // Timestamp lets the MPU-9250 backup detect when the XR glasses go offline.
+    std::atomic<int64_t> last_xr_imu_us { 0 };
+
+    xr.on_imu_pose([&state, &last_xr_imu_us](float roll, float pitch, float yaw) {
+        last_xr_imu_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         float bearing = fmod(360.0f - yaw, 360.0f);
         std::lock_guard<std::mutex> lk(state.mtx);
         state.compass_heading = bearing;
@@ -896,6 +937,25 @@ int main(int argc, char* argv[]) {
     xr.on_state_changed([](int id, int val) {
         std::cout << "[xr] state change id=" << id << " val=" << val << "\n";
     });
+
+    // ── MPU-9250 backup compass ───────────────────────────────────────────────
+    // Takes over compass_heading when the XR glasses haven't sent an IMU frame
+    // for more than 2 seconds (glasses off, disconnected, or XR disabled).
+
+    Mpu9250 mpu9250(mpu_cfg);
+    mpu9250.set_heading_callback([&state, &last_xr_imu_us](float heading) {
+        auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        bool xr_fresh = (now_us - last_xr_imu_us.load()) < 2'000'000LL; // 2 s
+
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.health.mpu9250_ok = true;
+        if (!xr_fresh)
+            state.compass_heading = heading;
+    });
+
+    if (!mpu9250.start() && mpu_cfg.enabled)
+        std::cerr << "[main] MPU-9250 backup compass unavailable\n";
 
     // ── Async Timewarp ────────────────────────────────────────────────────────
 
@@ -1028,7 +1088,8 @@ int main(int argc, char* argv[]) {
                                &pip_overlay_cfg1, &pip_overlay_cfg2,
                                &pip_cam1_overlay_active, &pip_cam2_overlay_active,
                                &android_overlay_cfg,
-                               &hud.colors(), &hud.config(), &menu_ptr));
+                               &hud.colors(), &hud.config(), &menu_ptr,
+                               &mpu9250));
     menu_ptr = &menu;
 
     // Restore menu style from a previous session.
@@ -1352,6 +1413,13 @@ int main(int argc, char* argv[]) {
         jm["bg_color"]     = color_to_json(menu.bg_color());
         jm["bg_enabled"]   = menu.bg_enabled();
 
+        // Persist MPU-9250 calibration biases so they survive a restart
+        if (mpu9250.is_running() || cfg.contains("mpu9250")) {
+            float bx, by, bz;
+            mpu9250.get_mag_bias(bx, by, bz);
+            cfg["mpu9250"]["mag_bias"] = json::array({ bx, by, bz });
+        }
+
         FILE* f = fopen(cfg_path.c_str(), "w");
         if (f) {
             std::string s = cfg.dump(2);
@@ -1367,6 +1435,7 @@ int main(int argc, char* argv[]) {
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
+    mpu9250.stop();
     audio.stop();
     android_mirror.stop();
     hud.unload();
