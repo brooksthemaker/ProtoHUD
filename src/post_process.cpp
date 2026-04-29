@@ -12,13 +12,15 @@ bool PostProcessor::init(int w, int h, const char* vs_path, const char* fs_path)
         return false;
     }
 
-    loc_scene_     = glGetUniformLocation(prog_, "u_scene");
-    loc_texel_     = glGetUniformLocation(prog_, "u_texel");
-    loc_edge_str_  = glGetUniformLocation(prog_, "u_edge_str");
-    loc_desat_str_ = glGetUniformLocation(prog_, "u_desat_str");
-    loc_edge_col_  = glGetUniformLocation(prog_, "u_edge_col");
-    loc_threshold_ = glGetUniformLocation(prog_, "u_threshold");
-    loc_has_depth_ = glGetUniformLocation(prog_, "u_has_depth");
+    loc_scene_       = glGetUniformLocation(prog_, "u_scene");
+    loc_texel_       = glGetUniformLocation(prog_, "u_texel");
+    loc_edge_str_    = glGetUniformLocation(prog_, "u_edge_str");
+    loc_desat_str_   = glGetUniformLocation(prog_, "u_desat_str");
+    loc_edge_col_    = glGetUniformLocation(prog_, "u_edge_col");
+    loc_threshold_   = glGetUniformLocation(prog_, "u_threshold");
+    loc_has_depth_   = glGetUniformLocation(prog_, "u_has_depth");
+    loc_edge_scale_  = glGetUniformLocation(prog_, "u_edge_scale");
+    loc_edge_thresh_ = glGetUniformLocation(prog_, "u_edge_thresh");
 
     vbo_ = gl::make_quad_vbo();
     if (!vbo_) {
@@ -59,8 +61,10 @@ void PostProcessor::process(GLuint src_tex, const gl::Fbo& dst,
     const float eb = ((cfg.edge_color >> 16) & 0xFF) / 255.f;
     glUniform3f(loc_edge_col_, er, eg, eb);
 
-    glUniform1f(loc_threshold_, cfg.contrast_threshold);
-    glUniform1f(loc_has_depth_, 0.f);
+    glUniform1f(loc_threshold_,   cfg.contrast_threshold);
+    glUniform1f(loc_has_depth_,   0.f);
+    glUniform1f(loc_edge_scale_,  cfg.edge_scale);
+    glUniform1f(loc_edge_thresh_, cfg.edge_threshold);
 
     gl::bind_quad(vbo_);
     gl::draw_quad();

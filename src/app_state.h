@@ -19,6 +19,8 @@ struct PostProcessConfig {
     bool  desat_enabled      = false;
     float desat_strength     = 0.8f;
     float contrast_threshold = 0.15f;  // 0.07 = aggressive, 0.25 = subtle
+    float edge_scale         = 2.0f;   // 1.0–5.0; larger step = coarser outline, fewer interior edges
+    float edge_threshold     = 0.0f;   // 0.0–0.6; suppress edges weaker than this magnitude
 };
 
 // ── Overlay layout config (PiP and Android mirror) ───────────────────────────
