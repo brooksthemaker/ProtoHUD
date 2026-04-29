@@ -476,19 +476,18 @@ static std::vector<MenuItem> build_menu(
         }),
     };
 
-    std::vector<MenuItem> auto_reconnect_menu = {
-        toggle("Cam 1",
-            [cameras]{ return cameras && cameras->usb1_reconnect_enabled(); },
-            [cameras](bool v){ if (cameras) cameras->set_usb1_reconnect(v); }),
-        toggle("Cam 2",
-            [cameras]{ return cameras && cameras->usb2_reconnect_enabled(); },
-            [cameras](bool v){ if (cameras) cameras->set_usb2_reconnect(v); }),
-    };
-
     std::vector<MenuItem> usb_cameras_menu = {
-        submenu("USB Cam 1",       std::move(usb_cam1_menu)),
-        submenu("USB Cam 2",       std::move(usb_cam2_menu)),
-        submenu("Auto-Reconnect",  std::move(auto_reconnect_menu)),
+        submenu("USB Cam 1",  std::move(usb_cam1_menu)),
+        submenu("USB Cam 2",  std::move(usb_cam2_menu)),
+        toggle("Auto-Reconnect",
+            [cameras]{ return cameras &&
+                              cameras->usb1_reconnect_enabled() &&
+                              cameras->usb2_reconnect_enabled(); },
+            [cameras](bool v){
+                if (!cameras) return;
+                cameras->set_usb1_reconnect(v);
+                cameras->set_usb2_reconnect(v);
+            }),
     };
 
     std::vector<MenuItem> cameras_menu = {
