@@ -25,6 +25,8 @@ uniform float     u_threshold;  // local contrast below this = background (0.07�
 uniform float     u_has_depth;  // 0.0 = use contrast proxy, 1.0 = sample u_depth
 uniform float     u_edge_scale; // sampling step multiplier (1.0–5.0); larger = coarser outline
 uniform float     u_edge_thresh;// minimum edge magnitude (0.0–0.6); suppresses weak interior edges
+uniform float     u_focus_str;  // 0.0=contrast proxy only, 1.0=Laplacian sharpness only for bg_weight
+uniform float     u_focus_sens; // Laplacian sensitivity (scales with lens proximity)
 
 varying vec2 v_uv;
 
@@ -70,6 +72,14 @@ void main() {
         float contrast = hi - lo;
         bg_weight = clamp(1.0 - contrast / max(u_threshold, 0.01), 0.0, 1.0);
     }
+
+    // ── Focus-based sharpness refinement ──────────────────────────────────────
+    // Laplacian at center pixel: measures how sharp/in-focus this pixel is.
+    // High = sharp (in focus = foreground). Low = blurry (out of focus = background).
+    // Sensitivity scales with lens proximity: close focus → narrow DoF → stronger separation.
+    float lap        = abs(8.0*l11 - l00 - l10 - l20 - l01 - l21 - l02 - l12 - l22);
+    float sharpness  = clamp(lap * u_focus_sens, 0.0, 1.0);
+    bg_weight        = mix(bg_weight, 1.0 - sharpness, u_focus_str);
 
     // ── Desaturate background ─────────────────────────────────────────────────
     // Outlined pixels stay in full color: strong edges suppress desaturation.
