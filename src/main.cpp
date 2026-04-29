@@ -736,6 +736,13 @@ static std::vector<MenuItem> build_menu(
         leaf("Aggressive (0.07)", [&state]{ state.pp_cfg.contrast_threshold = 0.07f; }),
     };
 
+    std::vector<MenuItem> focus_blend_menu = {
+        leaf("Off",    [&state]{ state.pp_cfg.focus_str = 0.0f; }),
+        leaf("Low",    [&state]{ state.pp_cfg.focus_str = 0.3f; }),
+        leaf("Medium", [&state]{ state.pp_cfg.focus_str = 0.6f; }),
+        leaf("Full",   [&state]{ state.pp_cfg.focus_str = 1.0f; }),
+    };
+
     std::vector<MenuItem> vision_menu = {
         toggle("Edge Highlight",
             [&state]{ return state.pp_cfg.edge_enabled; },
@@ -749,6 +756,7 @@ static std::vector<MenuItem> build_menu(
             [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
         submenu("Desat Strength", std::move(desat_strength_menu)),
         submenu("BG Threshold",   std::move(bg_threshold_menu)),
+        submenu("Focus Blend",    std::move(focus_blend_menu)),
     };
 
     std::vector<MenuItem> settings_menu = {
@@ -978,8 +986,9 @@ int main(int argc, char* argv[]) {
         state.pp_cfg.desat_enabled      = jpp.value("desat_enabled",      false);
         state.pp_cfg.desat_strength     = jpp.value("desat_strength",     0.8f);
         state.pp_cfg.contrast_threshold = jpp.value("contrast_threshold", 0.15f);
-        state.pp_cfg.edge_scale         = jpp.value("edge_scale",         2.0f);
-        state.pp_cfg.edge_threshold     = jpp.value("edge_threshold",     0.0f);
+        state.pp_cfg.edge_scale         = jpp.value("edge_scale",         3.0f);
+        state.pp_cfg.edge_threshold     = jpp.value("edge_threshold",     0.15f);
+        state.pp_cfg.focus_str          = jpp.value("focus_str",          0.0f);
         if (jpp.contains("edge_color") && jpp["edge_color"].is_array() &&
             jpp["edge_color"].size() >= 3) {
             auto& jc = jpp["edge_color"];
@@ -1357,6 +1366,10 @@ int main(int argc, char* argv[]) {
             snap.pp_cfg             = state.pp_cfg;
         }
 
+        // Inject live AF lens position into the snapshot (atomic read, no lock needed)
+        if (cameras.owl_left())
+            snap.pp_cfg.focus_lens_pos = cameras.owl_left()->get_focus_position();
+
         // Record render-time pose for timewarp
         timewarp.begin_frame(snap.imu_pose);
 
@@ -1497,6 +1510,7 @@ int main(int argc, char* argv[]) {
         jpp["contrast_threshold"] = state.pp_cfg.contrast_threshold;
         jpp["edge_scale"]         = state.pp_cfg.edge_scale;
         jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
+        jpp["focus_str"]          = state.pp_cfg.focus_str;
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"] = color_to_json(menu.accent_color());

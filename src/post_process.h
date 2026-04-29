@@ -45,8 +45,10 @@ private:
     GLint loc_edge_col_   = -1;
     GLint loc_threshold_  = -1;
     GLint loc_has_depth_  = -1;
-    GLint loc_edge_scale_ = -1;
-    GLint loc_edge_thresh_= -1;
+    GLint loc_edge_scale_  = -1;
+    GLint loc_edge_thresh_ = -1;
+    GLint loc_focus_str_   = -1;
+    GLint loc_focus_sens_  = -1;
 
     int w_ = 0, h_ = 0;
 };

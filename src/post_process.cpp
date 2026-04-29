@@ -21,6 +21,8 @@ bool PostProcessor::init(int w, int h, const char* vs_path, const char* fs_path)
     loc_has_depth_   = glGetUniformLocation(prog_, "u_has_depth");
     loc_edge_scale_  = glGetUniformLocation(prog_, "u_edge_scale");
     loc_edge_thresh_ = glGetUniformLocation(prog_, "u_edge_thresh");
+    loc_focus_str_   = glGetUniformLocation(prog_, "u_focus_str");
+    loc_focus_sens_  = glGetUniformLocation(prog_, "u_focus_sens");
 
     vbo_ = gl::make_quad_vbo();
     if (!vbo_) {
@@ -65,6 +67,11 @@ void PostProcessor::process(GLuint src_tex, const gl::Fbo& dst,
     glUniform1f(loc_has_depth_,   0.f);
     glUniform1f(loc_edge_scale_,  cfg.edge_scale);
     glUniform1f(loc_edge_thresh_, cfg.edge_threshold);
+
+    // Focus-based sharpness: sensitivity scales with lens proximity (close = narrow DoF = stronger separation)
+    const float focus_norm = static_cast<float>(cfg.focus_lens_pos) / 1000.0f;
+    glUniform1f(loc_focus_str_,  cfg.focus_str);
+    glUniform1f(loc_focus_sens_, 1.0f + focus_norm * 3.0f);
 
     gl::bind_quad(vbo_);
     gl::draw_quad();
