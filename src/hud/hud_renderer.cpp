@@ -676,7 +676,6 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     const float heading  = s.compass_heading;
     const float ppd      = tw / 120.f; // 120° visible across full tape width
     const float center_x = origin.x + tw / 2.f;
-    const float tick_y   = origin.y + th - 8.f;
 
     const ImU32 col_major = col_.compass_tick;
     const ImU32 col_mid   = with_alpha(col_.compass_tick, 180);
@@ -715,9 +714,15 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         dl->AddLine({lx0, line_y}, {lx1, line_y}, col_major, 1.f);
     }
 
+    // Tick zone: ticks hang down from tick_top; labels sit below tick_bottom.
+    // Compass height is 60 px; leave ~20 px at the bottom for labels.
+    const float tick_bottom = origin.y + th - 20.f;   // where all ticks end
+    const float label_y     = tick_bottom + 3.f;       // top of label text
+
     if (font_mono_) ImGui::PushFont(font_mono_);
 
-    // Pass 1 — all tick lines so cardinal labels always render on top
+    // Single pass — ticks drawn first (bottom-up), labels drawn immediately after
+    // so they overlap nothing (labels are below the tick zone).
     for (int deg = 0; deg < 360; deg++) {
         float offset = deg - heading;
         while (offset >  180.f) offset -= 360.f;
@@ -727,34 +732,28 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         if (px < origin.x || px > origin.x + tw) continue;
 
         if (deg % 45 == 0) {
-            // Major tick starts below the cardinal label (label is 4px inside + ~14px tall)
-            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_glow2, 9.f);
-            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_glow1, 4.f);
-            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_major, 1.5f);
+            // Major cardinal tick — shorter than before (12 px)
+            dl->AddLine({px, tick_bottom - 12.f}, {px, tick_bottom}, col_glow2, 6.f);
+            dl->AddLine({px, tick_bottom - 12.f}, {px, tick_bottom}, col_glow1, 3.f);
+            dl->AddLine({px, tick_bottom - 12.f}, {px, tick_bottom}, col_major, 1.5f);
+            // Cardinal label centred below the tick
+            const char* card = cardinal_str(static_cast<float>(deg));
+            ImVec2 csz = ImGui::CalcTextSize(card);
+            hud_glow_text(dl, {px - csz.x * 0.5f, label_y},
+                          card, true, col_.compass_glow, col_.compass_tick);
         } else if (deg % 10 == 0) {
-            dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_glow2, 3.f);
-            dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_mid);
+            // 10° tick (8 px) + degree number below
+            dl->AddLine({px, tick_bottom - 8.f}, {px, tick_bottom}, col_glow2, 3.f);
+            dl->AddLine({px, tick_bottom - 8.f}, {px, tick_bottom}, col_mid);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
-            hud_glow_text(dl, {px - 8.f, tick_y - 28.f}, buf,
+            ImVec2 bsz = ImGui::CalcTextSize(buf);
+            hud_glow_text(dl, {px - bsz.x * 0.5f, label_y}, buf,
                           true, col_.compass_glow, col_.compass_tick);
         } else if (deg % 5 == 0) {
-            dl->AddLine({px, tick_y - 8.f}, {px, tick_y}, col_glow2, 2.f);
-            dl->AddLine({px, tick_y - 8.f}, {px, tick_y}, col_minor);
+            // Minor 5° tick (5 px) — no label
+            dl->AddLine({px, tick_bottom - 5.f}, {px, tick_bottom}, col_glow2, 2.f);
+            dl->AddLine({px, tick_bottom - 5.f}, {px, tick_bottom}, col_minor);
         }
-    }
-
-    // Pass 2 — cardinal labels float above the tick area
-    for (int deg = 0; deg < 360; deg += 45) {
-        float offset = deg - heading;
-        while (offset >  180.f) offset -= 360.f;
-        while (offset < -180.f) offset += 360.f;
-
-        float px = center_x + offset * ppd;
-        if (px < origin.x || px > origin.x + tw) continue;
-
-        hud_glow_text(dl, {px - 8.f, origin.y + 4.f},
-                      cardinal_str(static_cast<float>(deg)),
-                      true, col_.compass_glow, col_.compass_tick);
     }
 
     // Centre cursor triangle — glow halo then sharp fill

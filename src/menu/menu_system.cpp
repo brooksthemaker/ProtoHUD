@@ -70,7 +70,17 @@ MenuSystem::MenuSystem(std::vector<MenuItem> root)
 
 void MenuSystem::push_level(const std::vector<MenuItem>& items) {
     if (items.empty()) return;
-    stack_.push_back({ items });
+    std::vector<MenuItem> level = items;
+
+    // Append navigation item: "Close Menu" at root, "< Back" in submenus.
+    // When selected, back() pops the level (or closes at root depth=1).
+    MenuItem nav;
+    nav.type   = MenuItemType::LEAF;
+    nav.label  = stack_.empty() ? "Close Menu" : "< Back";
+    nav.action = [this] { this->back(); };
+    level.push_back(nav);
+
+    stack_.push_back({ level });
     cursor_ = 0;
     emit_detents();
 }
@@ -138,7 +148,8 @@ void MenuSystem::select() {
         break;
 
     case MenuItemType::LEAF:
-        if (item.action) { item.action(); close(); }
+        if (item.action) { item.action(); }
+        // Menu stays open — only "Close Menu" / "< Back" items call close()/back()
         break;
 
     case MenuItemType::TOGGLE:
@@ -314,11 +325,23 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             draw_glow_text(dl, {rmin.x + 4.f, ty}, to_upper(item.label).c_str(),
                            selected, accent_color_);
 
-            const char* ind   = on ? "\xE2\x97\x8F ON " : "\xE2\x97\x8B OFF";
-            ImU32       ind_col = on ? IM_COL32(0, 220, 100, 255)
-                                     : IM_COL32(130, 130, 130, 200);
-            ImVec2 ind_sz = ImGui::CalcTextSize(ind);
-            dl->AddText({rmax.x - ind_sz.x - 6.f, ty}, ind_col, ind);
+            // Radio-style circle + " ON" / " OFF" text, both using accent_color_.
+            const char* state_str = on ? " ON" : " OFF";
+            ImVec2      state_sz  = ImGui::CalcTextSize(state_str);
+            constexpr float dot_r = 5.f;
+            const float text_x    = rmax.x - state_sz.x - 6.f;
+            const float dot_cx    = text_x - dot_r - 4.f;
+            const float dot_cy    = rmin.y + item_h * 0.5f;
+
+            if (on) {
+                dl->AddCircleFilled({dot_cx, dot_cy}, dot_r,   accent_color_);
+                dl->AddCircleFilled({dot_cx, dot_cy}, 2.5f,    IM_COL32(255, 255, 255, 255));
+            } else {
+                dl->AddCircle({dot_cx, dot_cy}, dot_r,
+                              menu_with_alpha(accent_color_, 100), 0, 1.5f);
+            }
+            const ImU32 text_col = on ? accent_color_ : menu_with_alpha(accent_color_, 120);
+            dl->AddText({text_x, ty}, text_col, state_str);
 
         // ── SLIDER ────────────────────────────────────────────────────────────
         } else if (item.type == MenuItemType::SLIDER) {

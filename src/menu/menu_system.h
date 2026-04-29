@@ -96,7 +96,7 @@ public:
     void draw(int screen_w, int screen_h);
 
     bool is_open()    const { return open_; }
-    void open()             { open_ = true; push_level(root_items_); }
+    void open()             { stack_.clear(); open_ = true; push_level(root_items_); }
     void close() {
         open_            = false;
         in_edit_mode_    = false;
