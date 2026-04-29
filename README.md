@@ -24,8 +24,9 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 14. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
 15. [Audio Routing](#audio-routing)
 16. [HUD Layout](#hud-layout)
-17. [Configuration Reference](#configuration-reference)
-18. [Troubleshooting](#troubleshooting)
+17. [Onboard Compass (MPU-9250 / GY-9250)](#onboard-compass-mpu-9250--gy-9250)
+18. [Configuration Reference](#configuration-reference)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -61,8 +62,8 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 
 **Rendering pipeline per frame:**
 
-1. Each OWLsight camera DMA buffer imported as `EGLImageKHR` → bound to `GL_TEXTURE_2D`
-2. NV12→RGB GLSL shader draws into per-eye `gl::Fbo` (1920×1080 each)
+1. Each OWLsight camera DMA buffer imported as a single multi-plane `DRM_FORMAT_NV12` `EGLImageKHR` → bound to `GL_TEXTURE_EXTERNAL_OES`; Mesa V3D handles YCbCr→RGB in the TMU automatically
+2. `samplerExternalOES` fragment shader draws into per-eye `gl::Fbo` (1920×1080 each)
 3. `xr.composite()` — blits both FBOs side-by-side into default framebuffer
 4. `hud.begin_frame()` → `draw_frame()` → `menu.draw()` → `render_overlay()` — ImGui on top
 5. `xr.present()` — `glfwSwapBuffers` + `glfwPollEvents`
@@ -83,6 +84,7 @@ Optional async timewarp warps each eye FBO using the latest IMU pose before comp
 | Input | SmartKnob (ESP32-S3 haptic knob) + 3 GPIO buttons |
 | Radio | RAK4631 LoRa mesh radio (868/915 MHz) |
 | Audio processor | RP2350 helmet audio board — 6-mic beamforming/NR, USB Audio UAC2 output |
+| Backup compass | HiLetgo GY-9250 / MPU-9250 9-axis IMU — heading fallback when XR glasses are offline (optional) |
 | Android device | Any ADB-capable Android phone (optional, for screen mirror) |
 | OS | Raspberry Pi OS Bookworm · Debian Trixie + RPT packages (64-bit, aarch64) |
 
@@ -114,7 +116,7 @@ This section lists every physical connection for each controller in the system a
   OWLsight Right ────┤ CSI1             USB-A ├──────────────────── SmartKnob (ESP32-S3)
                      │                  USB-A ├──────────────────── RAK4631 LoRa radio
   GPIO 17, 27, 22 ───┤ GPIO             USB-A ├──────────────────── RP2350 Helmet Audio
-                     │                  USB-C ├──────────────────── VITURE Beast XR glasses
+  MPU-9250 (GY-9250)─┤ I2C-1 (GPIO2/3) USB-C ├──────────────────── VITURE Beast XR glasses
                      └─────────────────────────────────────────┘
 ```
 
@@ -133,6 +135,18 @@ The CM5 is the central hub. All other controllers connect to it.
 | GPIO 22  | 15    | Button 3 — menu select              | Pushbutton → GND |
 
 All buttons are wired to GND; internal pull-ups are configured by `libgpiod`.
+
+#### GPIO — I2C Backup Compass (MPU-9250)
+
+| CM5 Pin # | Signal   | MPU-9250 pin | Notes |
+|-----------|----------|--------------|-------|
+| 1         | 3.3 V    | VCC          | Do **not** use 5 V — MPU-9250 is 3.3 V only |
+| 3         | GPIO 2 (SDA1) | SDA     | I2C-1 data; 4.7 kΩ pull-up to 3.3 V (on GY-9250 board) |
+| 5         | GPIO 3 (SCL1) | SCL     | I2C-1 clock; 4.7 kΩ pull-up to 3.3 V (on GY-9250 board) |
+| 6         | GND      | GND          | Signal ground |
+| —         | —        | AD0          | Tie to GND → I2C address 0x68; tie to 3.3 V → 0x69 |
+
+The GY-9250 breakout board includes onboard 4.7 kΩ pull-up resistors on SDA and SCL, so no external pull-ups are needed. See [Onboard Compass (MPU-9250 / GY-9250)](#onboard-compass-mpu-9250--gy-9250) for software setup and calibration.
 
 #### USB Ports — Serial & Audio Controllers
 
@@ -396,6 +410,7 @@ Keyboard shortcuts while running:
 | `Enter` | Select menu item |
 | `Backspace` | Go back one menu level |
 | `Esc` | Quit |
+| `Ctrl+Q` / `Ctrl+K` | Force-kill the process immediately |
 
 ---
 
@@ -427,7 +442,15 @@ Menu → Camera → Resolution → <preset>
 }
 ```
 
-Changes made via the menu are applied immediately but **not persisted** — edit `config.json` to make them permanent.
+Changes made via the menu are applied immediately but **not persisted** — edit `config/config.json` to make them permanent.
+
+### Aspect-Ratio Crop Note
+
+At the default **1280×800** preset the OWLsight sensor (native 1920×1080, 16:9) is read out at 8:5. This creates roughly a **10% horizontal crop** compared to the full sensor width — you see slightly less of the scene left-to-right than you would at 1920×1080. Switch to the `1920×1080 @30fps` preset to eliminate the crop if field of view matters more than frame rate.
+
+### Desktop Preview (No Glasses)
+
+When VITURE glasses are not connected ProtoHUD falls back to a 1920×1080 desktop window and shows both cameras **side-by-side** (squeezed to 960×1080 each). This is intentional — it lets you verify both feeds and the HUD layout on a standard monitor during development.
 
 ---
 
@@ -448,6 +471,10 @@ Menu → Camera → Focus Mode    → Manual / Auto / Slave
 Menu → Camera → Focus Position → 0 / 100 / … / 1000  (Manual only)
 Menu → Camera → Autofocus     → Left / Right / Both
 ```
+
+### Startup Autofocus
+
+When `"autofocus_on_startup": true` is set in `config.json`, both cameras are placed into **continuous AF mode** (`AfModeContinuous`) immediately on launch — no trigger required. The lens scans within the first few frames and then tracks focus continuously. This is the recommended setting for helmet use where you can't press a button to trigger a one-shot AF scan.
 
 ### GPIO Trigger
 
@@ -776,6 +803,127 @@ Background opacity of the health panel is configurable via `hud.health_panel_opa
 
 ---
 
+## Onboard Compass (MPU-9250 / GY-9250)
+
+The **HiLetgo GY-9250** (MPU-9250) is an optional backup compass. It reads heading from the onboard magnetometer and takes over the HUD compass tape whenever the VITURE XR glasses haven't sent an IMU frame for more than 2 seconds — glasses off-head, cable disconnected, or XR disabled. When the glasses reconnect the primary IMU resumes automatically.
+
+### Wiring
+
+Wire the GY-9250 to the CM5's 40-pin header using the I2C-1 bus (GPIO 2 / GPIO 3):
+
+```
+CM5 40-pin header
+                         ┌─────────────┐
+  Pin 1  ── 3.3 V ──────►│ VCC         │
+  Pin 3  ── GPIO 2 (SDA)─►│ SDA         │  GY-9250 / MPU-9250
+  Pin 5  ── GPIO 3 (SCL)─►│ SCL         │
+  Pin 6  ── GND ─────────►│ GND         │
+                          │ AD0 ── GND  │  (address 0x68)
+                          └─────────────┘
+```
+
+| CM5 pin | Signal        | GY-9250 pin | Notes |
+|---------|---------------|-------------|-------|
+| 1       | 3.3 V         | VCC         | 3.3 V **only** — do not use 5 V |
+| 3       | GPIO 2 (SDA1) | SDA         | I2C data; pull-up resistors are on the GY-9250 board |
+| 5       | GPIO 3 (SCL1) | SCL         | I2C clock |
+| 6       | GND           | GND         | |
+| —       | —             | AD0 → GND   | Sets I2C address to 0x68 (default) |
+
+> **Address conflict:** If another I2C device on the bus already uses 0x68, tie AD0 to 3.3 V to use 0x69 and update `mpu_addr` to `105` in `config.json`.
+
+### Enable I2C-1 on the CM5
+
+The I2C-1 bus is disabled by default. Enable it once with `raspi-config` or by editing the boot config directly:
+
+```bash
+# Option A — raspi-config (recommended)
+sudo raspi-config
+# Interface Options → I2C → Enable
+
+# Option B — manual edit
+echo 'dtparam=i2c_arm=on' | sudo tee -a /boot/config.txt
+sudo reboot
+```
+
+Verify the bus is up after reboot:
+
+```bash
+ls /dev/i2c-*     # should list /dev/i2c-1
+sudo apt install i2c-tools
+i2cdetect -y 1    # 0x68 (or 0x69) should appear in the grid
+```
+
+Expected output with GY-9250 at default address:
+
+```
+     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
+00:          -- -- -- -- -- -- -- -- -- -- -- -- --
+...
+60: -- -- -- -- -- -- -- -- 68 -- -- -- -- -- -- --
+```
+
+If `0x68` does not appear: check wiring, confirm 3.3 V on VCC, and verify `dtparam=i2c_arm=on` is present in `/boot/config.txt`.
+
+### Config
+
+```jsonc
+"mpu9250": {
+  "enabled":         false,          // set to true to activate
+  "i2c_bus":         "/dev/i2c-1",
+  "mpu_addr":        104,            // 104 = 0x68 (AD0 low) · 105 = 0x69 (AD0 high)
+  "declination_deg": 0.0,            // local magnetic declination — see note below
+  "heading_offset":  0.0,            // mechanical mounting offset in degrees
+  "mag_bias":        [0.0, 0.0, 0.0] // hard-iron calibration; auto-updated by Calibrate Compass
+}
+```
+
+**Magnetic declination** is the angle between magnetic north and true north at your location. Find yours at [ngdc.noaa.gov/geomag](https://www.ngdc.noaa.gov/geomag/calculators/magcalc.shtml). Positive = east of true north, negative = west. Example: `"declination_deg": -14.5` for the US Pacific coast.
+
+**Heading offset** compensates for the physical mounting angle of the sensor in the helmet. Adjust until the compass reads 0° when the sensor physically points north.
+
+### Activating at Runtime
+
+```
+Menu → Settings → HUD → Compass → Onboard Compass → Active  (toggle ON)
+```
+
+The backup heading takes over the compass tape immediately. To stop it:
+
+```
+Menu → Settings → HUD → Compass → Onboard Compass → Active  (toggle OFF)
+```
+
+### Hard-Iron Calibration
+
+The onboard magnetometer is affected by the helmet's permanent magnets and ferrous metal. The **Calibrate Compass** routine cancels this **hard-iron distortion**:
+
+1. Open the menu:
+   ```
+   Menu → Settings → HUD → Compass → Onboard Compass → Calibrate  (toggle ON)
+   ```
+2. **Slowly rotate the helmet through a full 360° in each axis** — roll, pitch, and yaw. Spend ~30 seconds on each rotation axis. The sensor samples the field extremes during this motion.
+3. Stop the calibration:
+   ```
+   Menu → Settings → HUD → Compass → Onboard Compass → Calibrate  (toggle OFF)
+   ```
+4. The computed `mag_bias` values are automatically written to `config.json` when the program exits so they persist across restarts.
+
+Recalibrate any time the helmet's magnetic environment changes significantly (new hardware installed near the sensor, different venue).
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| Compass heading stuck at 0° | MPU-9250 not enabled or I2C fail | Enable in config; check `i2cdetect -y 1` |
+| `[mpu] I2C open failed` in log | Wrong bus or address | Verify `i2c_bus` and `mpu_addr` in config |
+| Heading drifts ~30° | Magnetic declination not set | Add local `declination_deg` value |
+| Heading offset (reads N but not pointing N) | Mounting angle | Adjust `heading_offset` in degrees |
+| Heading noisy / jumpy | Hard-iron interference | Run Calibrate Compass routine |
+| Backup heading ignored (XR heading used instead) | XR glasses still active | XR IMU suppresses MPU-9250 when fresh (<2 s old) — disconnect glasses to test MPU-9250 alone |
+
+---
+
 ## Configuration Reference
 
 Full `config/config.json` layout:
@@ -855,7 +1003,7 @@ Full `config/config.json` layout:
 
   "hud": {
     "compass_height_px":    60,
-    "panel_width_px":       320,
+    "panel_width_px":       200,
     "lora_message_history": 50,
     "show_secondary_cams":  true,
     "secondary_cam_size":   0.22,
@@ -885,7 +1033,13 @@ Full `config/config.json` layout:
 }
 ```
 
-Config changes take effect on restart. Night vision EV/shutter and focus mode are applied live each frame — no restart needed. Audio output can be switched live from the menu.
+**Config hot-reload:** Edit `config/config.json` directly — no rebuild or reconfigure step needed. The binary always reads from the source file on startup, so changes take effect the next time you launch.
+
+Night vision EV/shutter and focus mode are applied live each frame — no restart needed. Audio output can be switched live from the menu.
+
+### HUD Side Panels
+
+The left and right HUD side panels have **transparent backgrounds** — only the border line and text are drawn, keeping the camera feed visible underneath. Brightness is shown as a percentage number (`Brt: 72%`) rather than a graphical bar. Panel width defaults to **200 px**; adjust with `panel_width_px`.
 
 ---
 
