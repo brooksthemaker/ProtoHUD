@@ -319,10 +319,10 @@ static std::vector<MenuItem> build_menu(
         submenu("Shutter Speed", std::move(shutter_speeds)),
     };
 
-    std::vector<MenuItem> camera_menu = {
+    std::vector<MenuItem> main_cameras_menu = {
         submenu("Resolution",  std::move(resolution_presets)),
         submenu("Focus Mode",  std::move(focus_modes)),
-        slider("Focus Position", 0.f, 1000.f, 10.f, "",
+        slider("Focus Position", 0.f, 1000.f, 50.f, "",
             [&state]{ return static_cast<float>(state.focus_left.focus_position); },
             [cameras, &state](float v){
                 int pos = static_cast<int>(v);
@@ -411,27 +411,31 @@ static std::vector<MenuItem> build_menu(
             [cfg](float v){ cfg->size = v / 100.f; });
     };
 
-    // ── USB camera PiP layout ─────────────────────────────────────────────────
-    std::vector<MenuItem> cam1_menu = {
-        leaf("Open", [cameras, pip_cam1_overlay]{
-            std::thread([cameras, pip_cam1_overlay]{
-                cameras->open_usb1();
-                *pip_cam1_overlay = true;
-            }).detach();
-        }),
-        leaf("Close", [cameras, pip_cam1_overlay]{
-            cameras->close_usb1();
-            *pip_cam1_overlay = false;
-        }),
-        toggle("Auto-Reconnect",
-            [cameras]{ return cameras->usb1_reconnect_enabled(); },
-            [cameras](bool v){ cameras->set_usb1_reconnect(v); }),
+    // ── USB camera menus ──────────────────────────────────────────────────────
+    std::vector<MenuItem> cam1_overlay_menu = {
         toggle("Show Overlay",
             [pip_cam1_overlay]{ return *pip_cam1_overlay; },
             [pip_cam1_overlay](bool v){ *pip_cam1_overlay = v; }),
         submenu("Position", make_position_items(pip_cfg1)),
         make_size_slider("Size", pip_cfg1),
-        leaf("Scan", [cameras, &state]{
+    };
+    std::vector<MenuItem> usb_cam1_menu = {
+        toggle("Open Stream",
+            [cameras]{ return cameras && cameras->usb1_ok(); },
+            [cameras, pip_cam1_overlay](bool v){
+                if (!cameras) return;
+                if (v) {
+                    std::thread([cameras, pip_cam1_overlay]{
+                        cameras->open_usb1();
+                        *pip_cam1_overlay = true;
+                    }).detach();
+                } else {
+                    cameras->close_usb1();
+                    *pip_cam1_overlay = false;
+                }
+            }),
+        submenu("Overlay", std::move(cam1_overlay_menu)),
+        leaf("Scan for Camera", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb1();
                 std::lock_guard<std::mutex> lk(state.mtx);
@@ -439,26 +443,31 @@ static std::vector<MenuItem> build_menu(
             }
         }),
     };
-    std::vector<MenuItem> cam2_menu = {
-        leaf("Open", [cameras, pip_cam2_overlay]{
-            std::thread([cameras, pip_cam2_overlay]{
-                cameras->open_usb2();
-                *pip_cam2_overlay = true;
-            }).detach();
-        }),
-        leaf("Close", [cameras, pip_cam2_overlay]{
-            cameras->close_usb2();
-            *pip_cam2_overlay = false;
-        }),
-        toggle("Auto-Reconnect",
-            [cameras]{ return cameras->usb2_reconnect_enabled(); },
-            [cameras](bool v){ cameras->set_usb2_reconnect(v); }),
+
+    std::vector<MenuItem> cam2_overlay_menu = {
         toggle("Show Overlay",
             [pip_cam2_overlay]{ return *pip_cam2_overlay; },
             [pip_cam2_overlay](bool v){ *pip_cam2_overlay = v; }),
         submenu("Position", make_position_items(pip_cfg2)),
         make_size_slider("Size", pip_cfg2),
-        leaf("Scan", [cameras, &state]{
+    };
+    std::vector<MenuItem> usb_cam2_menu = {
+        toggle("Open Stream",
+            [cameras]{ return cameras && cameras->usb2_ok(); },
+            [cameras, pip_cam2_overlay](bool v){
+                if (!cameras) return;
+                if (v) {
+                    std::thread([cameras, pip_cam2_overlay]{
+                        cameras->open_usb2();
+                        *pip_cam2_overlay = true;
+                    }).detach();
+                } else {
+                    cameras->close_usb2();
+                    *pip_cam2_overlay = false;
+                }
+            }),
+        submenu("Overlay", std::move(cam2_overlay_menu)),
+        leaf("Scan for Camera", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb2();
                 std::lock_guard<std::mutex> lk(state.mtx);
@@ -466,9 +475,25 @@ static std::vector<MenuItem> build_menu(
             }
         }),
     };
-    std::vector<MenuItem> pip_menu = {
-        submenu("Cam 1", std::move(cam1_menu)),
-        submenu("Cam 2", std::move(cam2_menu)),
+
+    std::vector<MenuItem> auto_reconnect_menu = {
+        toggle("Cam 1",
+            [cameras]{ return cameras && cameras->usb1_reconnect_enabled(); },
+            [cameras](bool v){ if (cameras) cameras->set_usb1_reconnect(v); }),
+        toggle("Cam 2",
+            [cameras]{ return cameras && cameras->usb2_reconnect_enabled(); },
+            [cameras](bool v){ if (cameras) cameras->set_usb2_reconnect(v); }),
+    };
+
+    std::vector<MenuItem> usb_cameras_menu = {
+        submenu("USB Cam 1",       std::move(usb_cam1_menu)),
+        submenu("USB Cam 2",       std::move(usb_cam2_menu)),
+        submenu("Auto-Reconnect",  std::move(auto_reconnect_menu)),
+    };
+
+    std::vector<MenuItem> cameras_menu = {
+        submenu("Main Cameras", std::move(main_cameras_menu)),
+        submenu("USB Cameras",  std::move(usb_cameras_menu)),
     };
 
     // ── Android mirror ────────────────────────────────────────────────────────
@@ -669,8 +694,7 @@ static std::vector<MenuItem> build_menu(
     };
 
     return {
-        submenu("Camera",         std::move(camera_menu)),
-        submenu("USB Cameras",    std::move(pip_menu)),
+        submenu("Cameras",        std::move(cameras_menu)),
         submenu("Prototracer",    std::move(prototracer_menu)),
         submenu("Headset",        std::move(headset_menu)),
         submenu("Backup Compass", std::move(mpu_menu)),
