@@ -46,12 +46,16 @@ struct HudColors {
 struct HudConfig {
     int   compass_height        = 72;
     int   compass_bottom_margin = 20;
+    int   compass_tick_length   = 24;   // major tick height in px; minor ticks scaled proportionally
+    bool  compass_tick_glow     = true; // when false, wide glow lines behind ticks are skipped
     float compass_bg_opacity    = 0.75f;
     int   compass_bg_side_fade  = 80;    // extra px on each side; also the fade zone width
     int   panel_width           = 200;
     int   top_bar_height        = 52;
     float opacity               = 0.85f;
     float scale                 = 1.0f;
+    float text_scale            = 1.0f;  // FontGlobalScale, applied each frame; live-editable
+    bool  glow_enabled          = true;  // when false, glow outline layers are skipped globally
     float health_panel_opacity  = 0.71f;
     float pip_corner_clip_px    = 16.f;
     bool  indicator_bg_enabled  = false;  // parallelogram bg behind health indicators

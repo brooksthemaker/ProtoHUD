@@ -34,6 +34,9 @@ static ImU32 with_alpha(ImU32 col, uint8_t a) {
     return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
 }
 
+// Frame-scope glow flag — set each frame in begin_frame() from cfg_.glow_enabled.
+static bool s_glow = true;
+
 // Draw text with an orange glow outline matching the compass tick style.
 // selected=true → full white + bright glow; false → dim white + faint glow.
 static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
@@ -42,10 +45,12 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
     constexpr ImU32 GLOW_OFF = IM_COL32(255, 160, 32,  22);
     constexpr ImU32 FILL_ON  = IM_COL32(255, 255, 255, 255);
     constexpr ImU32 FILL_OFF = IM_COL32(255, 255, 255, 160);
-    const ImU32 glow = selected ? GLOW_ON  : GLOW_OFF;
     const ImU32 fill = selected ? FILL_ON  : FILL_OFF;
-    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
-    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    if (s_glow) {
+        const ImU32 glow = selected ? GLOW_ON : GLOW_OFF;
+        constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+        for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    }
     dl->AddText(pos, fill, text);
 }
 
@@ -53,10 +58,12 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
 // glow alphas are derived internally.
 static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
                            bool selected, ImU32 glow_col, ImU32 fill_col) {
-    const ImU32 glow = selected ? with_alpha(glow_col, 72) : with_alpha(glow_col, 22);
     const ImU32 fill = selected ? fill_col : with_alpha(fill_col, 160);
-    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
-    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    if (s_glow) {
+        const ImU32 glow = selected ? with_alpha(glow_col, 72) : with_alpha(glow_col, 22);
+        constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+        for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    }
     dl->AddText(pos, fill, text);
 }
 
@@ -127,6 +134,8 @@ void HudRenderer::begin_frame(float /*dt*/) {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    ImGui::GetIO().FontGlobalScale = cfg_.text_scale;
+    s_glow = cfg_.glow_enabled;
 }
 
 void HudRenderer::render_overlay() {
@@ -505,11 +514,11 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
         const char* lbl = items[i].label;
         if (right_side) {
             hud_glow_text(dl, {ix + DOT_R + 6.f, iy - 7.f}, lbl, items[i].ok,
-                          col_.glow_base, col_.text_fill);
+                          col_.text_fill, col_.text_fill);
         } else {
             float tw = ImGui::CalcTextSize(lbl).x;
             hud_glow_text(dl, {ix - DOT_R - 6.f - tw, iy - 7.f}, lbl, items[i].ok,
-                          col_.glow_base, col_.text_fill);
+                          col_.text_fill, col_.text_fill);
         }
     }
     if (font_mono_) ImGui::PopFont();
@@ -676,7 +685,6 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     const float heading  = s.compass_heading;
     const float ppd      = tw / 120.f; // 120° visible across full tape width
     const float center_x = origin.x + tw / 2.f;
-    const float tick_y   = origin.y + th - 8.f;
 
     const ImU32 col_major = col_.compass_tick;
     const ImU32 col_mid   = with_alpha(col_.compass_tick, 180);
@@ -705,19 +713,26 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         dl->AddConvexPolyFilled(bg, 4, A);
     }
 
-    // Glow line at the tape base — always visible, connects flush to the health
-    // indicator horizontal lines when those are also enabled.
+    // Glow line at the tape base — color matches the health indicator lines (glow_base).
     {
         const float lx0 = origin.x - fw, lx1 = origin.x + tw + fw;
         const float line_y = origin.y + th;
-        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow2, 5.f);
-        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow1, 2.5f);
-        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_major, 1.f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 28), 5.f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 70), 2.5f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_.glow_base, 1.f);
     }
+
+    // Tick lengths — major is user-configurable; mid and minor scale proportionally.
+    const float t_maj = static_cast<float>(cfg_.compass_tick_length);
+    const float t_mid = t_maj * (16.f / 24.f);
+    const float t_min = t_maj * (10.f / 24.f);
+
+    // Tick zone: leave 20 px at the bottom for labels.
+    const float tick_bottom = origin.y + th - 20.f;
+    const float label_y     = tick_bottom + 3.f;
 
     if (font_mono_) ImGui::PushFont(font_mono_);
 
-    // Pass 1 — all tick lines so cardinal labels always render on top
     for (int deg = 0; deg < 360; deg++) {
         float offset = deg - heading;
         while (offset >  180.f) offset -= 360.f;
@@ -726,53 +741,31 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         float px = center_x + offset * ppd;
         if (px < origin.x || px > origin.x + tw) continue;
 
+        const bool tick_glow = cfg_.compass_tick_glow;
         if (deg % 45 == 0) {
-            // Major tick starts below the cardinal label (label is 4px inside + ~14px tall)
-            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_glow2, 9.f);
-            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_glow1, 4.f);
-            dl->AddLine({px, origin.y + 22.f}, {px, tick_y}, col_major, 1.5f);
+            if (tick_glow) {
+                dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow2, t_maj * 0.5f);
+                dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow1, t_maj * 0.25f);
+            }
+            dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_major, 3.f);
+            const char* card = cardinal_str(static_cast<float>(deg));
+            ImVec2 csz = ImGui::CalcTextSize(card);
+            hud_glow_text(dl, {px - csz.x * 0.5f, label_y},
+                          card, true, col_.glow_base, col_.text_fill);
         } else if (deg % 10 == 0) {
-            dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_glow2, 3.f);
-            dl->AddLine({px, tick_y - 12.f}, {px, tick_y}, col_mid);
+            if (tick_glow)
+                dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_glow2, t_mid * 0.375f);
+            dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_mid,   2.f);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
-            hud_glow_text(dl, {px - 8.f, tick_y - 28.f}, buf,
-                          true, col_.compass_glow, col_.compass_tick);
+            ImVec2 bsz = ImGui::CalcTextSize(buf);
+            hud_glow_text(dl, {px - bsz.x * 0.5f, label_y}, buf,
+                          true, col_.glow_base, col_.text_fill);
         } else if (deg % 5 == 0) {
-            dl->AddLine({px, tick_y - 8.f}, {px, tick_y}, col_glow2, 2.f);
-            dl->AddLine({px, tick_y - 8.f}, {px, tick_y}, col_minor);
+            if (tick_glow)
+                dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_glow2, t_min * 0.4f);
+            dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_minor, 2.f);
         }
     }
-
-    // Pass 2 — cardinal labels float above the tick area
-    for (int deg = 0; deg < 360; deg += 45) {
-        float offset = deg - heading;
-        while (offset >  180.f) offset -= 360.f;
-        while (offset < -180.f) offset += 360.f;
-
-        float px = center_x + offset * ppd;
-        if (px < origin.x || px > origin.x + tw) continue;
-
-        hud_glow_text(dl, {px - 8.f, origin.y + 4.f},
-                      cardinal_str(static_cast<float>(deg)),
-                      true, col_.compass_glow, col_.compass_tick);
-    }
-
-    // Centre cursor triangle — glow halo then sharp fill
-    dl->AddTriangleFilled(
-        {center_x,        origin.y       },
-        {center_x - 12.f, origin.y + 18.f},
-        {center_x + 12.f, origin.y + 18.f},
-        col_glow2);
-    dl->AddTriangleFilled(
-        {center_x,       origin.y       },
-        {center_x - 8.f, origin.y + 14.f},
-        {center_x + 8.f, origin.y + 14.f},
-        col_major);
-
-    // Heading readout
-    char hdg[16]; snprintf(hdg, sizeof(hdg), "%03.0f°", heading);
-    hud_glow_text(dl, {center_x - 16.f, origin.y + 16.f}, hdg,
-                  true, col_.compass_glow, col_.compass_tick);
 
     if (font_mono_) ImGui::PopFont();
 }

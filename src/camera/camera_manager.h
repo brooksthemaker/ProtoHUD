@@ -81,6 +81,13 @@ public:
     void open_usb2();
     void close_usb2();
 
+    // ── USB camera scan ───────────────────────────────────────────────────────
+    // Stops the capture thread, probes /dev/video0..N until a device opens,
+    // then restarts the thread. Safe to call from the render thread.
+    // Returns true if the slot is now open.
+    bool scan_usb1();
+    bool scan_usb2();
+
     // ── Status ────────────────────────────────────────────────────────────────
     bool owl_left_ok()  const { return owl_left_  && owl_left_->is_ok();  }
     bool owl_right_ok() const { return owl_right_ && owl_right_->is_ok(); }
@@ -100,6 +107,9 @@ private:
     void usb_capture_thread();
     // Upload pixel data to a GL texture; creates/reallocates as needed.
     void upload_texture(GLuint& tex, int w, int h, const unsigned char* rgba);
+    // Stop the capture thread, probe video devices, restart thread.
+    bool scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
+                  const UsbCamConfig& cfg);
 
     // Shared libcamera camera manager (one per process)
     std::unique_ptr<libcamera::CameraManager> lcam_mgr_;

@@ -48,6 +48,7 @@ public:
 
     void  set_enabled(bool en)      { enabled_.store(en);    }
     void  set_master_gain(float g)  { master_gain_.store(g); }
+    float get_master_gain() const   { return master_gain_.load(); }
     bool  is_enabled()   const      { return enabled_.load(); }
     float get_cpu_load() const      { return cpu_load_.load(); }
     bool  is_running()   const      { return running_.load(); }

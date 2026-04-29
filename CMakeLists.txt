@@ -123,6 +123,7 @@ set(SOURCES
     src/vitrue/timewarp.cpp
     src/audio/audio_engine.cpp
     src/post_process.cpp
+    src/sensor/mpu9250.cpp
 )
 
 add_executable(protohud ${SOURCES})

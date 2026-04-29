@@ -19,6 +19,8 @@ struct PostProcessConfig {
     bool  desat_enabled      = false;
     float desat_strength     = 0.8f;
     float contrast_threshold = 0.15f;  // 0.07 = aggressive, 0.25 = subtle
+    float edge_scale         = 2.0f;   // 1.0–5.0; larger step = coarser outline, fewer interior edges
+    float edge_threshold     = 0.0f;   // 0.0–0.6; suppress edges weaker than this magnitude
 };
 
 // ── Overlay layout config (PiP and Android mirror) ───────────────────────────
@@ -84,6 +86,7 @@ struct SystemHealth {
     bool cam_usb2        = false;
     bool audio_ok        = false;  // Spatial audio engine running
     bool android_mirror  = false;  // scrcpy connected and streaming
+    bool mpu9250_ok      = false;  // MPU-9250 backup compass running
 };
 
 struct AudioState {
@@ -150,6 +153,11 @@ struct AppState {
 
     // Post-processing (edge highlight + background desaturation)
     PostProcessConfig    pp_cfg;
+
+    // Cached XR display control values (no SDK getter; updated when menu writes).
+    int xr_brightness     = 5;   // 1–7; mirrors last xr->set_brightness() call
+    int xr_dimming        = 5;   // 0–9; mirrors last xr->set_dimming() call
+    int xr_hud_brightness = 5;   // 1–9; mirrors last xr->set_hud_brightness() call
 
     // Signals render thread to quit.
     std::atomic<bool> quit { false };

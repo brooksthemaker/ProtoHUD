@@ -22,7 +22,10 @@ CameraManager::~CameraManager() { shutdown(); }
 // Rejects known libcamera ISP/pipeline drivers that have VIDEO_CAPTURE
 // but produce no frames when opened directly.
 static bool is_usb_capture_device(const std::string& path, std::string* info_out = nullptr) {
-    int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    // Use O_RDWR so only devices that OpenCV can also open are reported.
+    // O_RDONLY can succeed on ISP metadata nodes without video-group membership,
+    // causing a misleading permission error when OpenCV then tries O_RDWR.
+    int fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
     if (fd < 0) return false;
     struct v4l2_capability cap {};
     bool ok = false;
@@ -117,6 +120,35 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
 
     usb1_ok_ = !usb1.device.empty() && open_v4l2(usb_cap1_, usb1, "usb1");
     usb2_ok_ = !usb2.device.empty() && open_v4l2(usb_cap2_, usb2, "usb2");
+
+    // Auto-scan: if a camera failed to open with the configured path, probe all
+    // /dev/video* nodes (before the capture thread starts) to find a working one.
+    auto startup_scan = [&](cv::VideoCapture& cap, std::atomic<bool>& ok_flag,
+                             UsbCamConfig& cfg, const char* name,
+                             const std::string& skip_path) {
+        if (ok_flag) return;
+        std::cerr << "[cam] " << name << ": auto-scanning for a camera...\n";
+        for (int dev = 0; dev < 64; dev++) {
+            std::string path = "/dev/video" + std::to_string(dev);
+            if (path == skip_path) continue;
+            if (!is_usb_capture_device(path)) continue;
+            UsbCamConfig try_cfg = cfg;
+            try_cfg.device = path;
+            if (open_v4l2(cap, try_cfg, name)) {
+                cv::Mat f;
+                if (cap.read(f) && !f.empty()) {
+                    cfg.device = path;
+                    ok_flag = true;
+                    std::cerr << "[cam] " << name << ": found at " << path << "\n";
+                    return;
+                }
+                cap.release();
+            }
+        }
+        std::cerr << "[cam] " << name << ": auto-scan found no working camera\n";
+    };
+    startup_scan(usb_cap1_, usb1_ok_, usb1_cfg_, "usb1", "");
+    startup_scan(usb_cap2_, usb2_ok_, usb2_cfg_, "usb2", usb1_cfg_.device);
 
     // Start thread whenever USB devices are configured so open/close can work
     // later even if the cameras were not available at startup.
@@ -312,6 +344,55 @@ void CameraManager::upload_texture(GLuint& tex, int w, int h,
 
     glBindTexture(GL_TEXTURE_2D, 0);
 }
+
+// ── USB camera scan/reconnect ──────────────────────────────────────────────────
+// Stops the capture thread so no concurrent cap.read() is in flight, then probes
+// /dev/video0..9 until a device opens successfully. The thread is restarted if
+// at least one USB slot is now open. Returns true if this slot is now open.
+
+bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
+                              const UsbCamConfig& cfg)
+{
+    // Stop the capture thread so nothing else is calling cap.read()
+    running_ = false;
+    if (usb_thread_.joinable()) usb_thread_.join();
+
+    cap.release();
+    ok = false;
+
+    for (int dev = 0; dev < 64; dev++) {
+        std::string path = "/dev/video" + std::to_string(dev);
+        if (!is_usb_capture_device(path)) continue;
+        UsbCamConfig test_cfg = cfg;
+        test_cfg.device = path;
+        if (open_v4l2(cap, test_cfg, "scan")) {
+            cv::Mat test;
+            if (cap.read(test) && !test.empty()) {
+                std::cerr << "[cam] USB scan found device at " << path << "\n";
+                ok = true;
+                break;
+            }
+            cap.release();
+        }
+    }
+
+    if (!ok) {
+        std::cerr << "[cam] USB scan found no working device\n"
+                  << "  If cameras are plugged in, check group membership:\n"
+                  << "    sudo usermod -aG video $USER  (then log out and back in)\n";
+    }
+
+    // Restart the capture thread if either slot is now usable
+    if (usb1_ok_ || usb2_ok_) {
+        running_ = true;
+        usb_thread_ = std::thread(&CameraManager::usb_capture_thread, this);
+    }
+
+    return ok.load();
+}
+
+bool CameraManager::scan_usb1() { return scan_usb(usb_cap1_, usb1_ok_, usb1_cfg_); }
+bool CameraManager::scan_usb2() { return scan_usb(usb_cap2_, usb2_ok_, usb2_cfg_); }
 
 bool CameraManager::get_usb1(GLuint& out) {
     std::lock_guard<std::mutex> lk(usb1_slot_.mtx);
