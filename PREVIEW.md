@@ -13,24 +13,32 @@ top of the live camera feed.
 ║                                                              AU → VITURE   ║  ← top bar (52 px)
 ║                            [MSG:3]                           X:0  ████░░  ║
 ╠═════════════════════════════════════════════════════════════════════════════╣  ← y=52
-║ ● Proot      ║                                         ║ FACE              ║
-║ ● LoRa       ║                                         ║ Connected         ║
-║ ● Interface  ║                                         ║ Effect: Idle      ║
-║ ● Left Cam   ║                                         ║ Palette: #2       ║
-║ ● Right Cam  ║         Live camera feed                ║  ██████░░  R0 G… ║
-║ ○ Cam 1      ║         (NV12 → RGB, zero-copy)         ║ Brt: 75%          ║
-║ ● Cam 2      ║                                         ╠═══════════════════╣
-║ ● Audio      ║                                         ║ LORA NODES        ║
-║ ● Android    ║                                         ║ Alpha      045° … ║
-║              ║                                         ║   RSSI:-87 SNR:6  ║
-║              ║                                         ║                   ║
-║              ╠══════════════════════════╣              ║                   ║  ← compass strip
-║              ║  NE    ENE    E   95°   ║              ║                   ║  ← floats above
-║              ╚══════════════════════════╝              ║                   ║     bottom edge
-╚══════════════════════════════════════════════════════════════════════════════╝  ← y=1080
+║                          ║                                  ║              ║
+║                          ║                                  ║              ║
+║   ●  Brt:75%   |  /      ║                                  ║      \  |   ●  LORA ●     ║
+║  ●  R0G220B180 | /    ●  Audio      Live camera feed        ● Audio |\    ●  Alpha 045° ║
+║ ●  Palette:#2  |/  ●  Interface     (NV12→RGB, zero-copy)  ●  I/F  | \   ●  Bravo 230° ║
+║●  FACE ●      /  ●  LoRa                                   ●  LoRa |  \                ║
+║              /  ●  Proot                                   ●  Proo |   \                ║
+║             /                                                      |    \               ║
+║════════════/══════════════════════════════════════════════════\════╝     \══════════════║
+║           ║      NE          ENE      E  95°   ESE           ║                          ║
+║           ╚══════════════════════════════════════════════════╝                          ║
+╚═════════════════════════════════════════════════════════════════════════════════════════╝
 ```
 
-**●** = subsystem OK (teal dot)  **○** = subsystem fault (red dot, label dimmed)
+Left-to-right at bottom baseline (x values for 1920-wide single eye):
+- x≈120 — outer extension of FACE arm
+- x≈260 — FACE arm diagonal anchor
+- x≈410 — left separator diagonal (master divider)
+- x≈560 — left health indicators diagonal
+- compass tape (x≈640–1280)
+- x≈1360 — right health indicators diagonal
+- x≈1510 — right separator diagonal (master divider)
+- x≈1660 — LoRa arm diagonal anchor
+- x≈1800 — outer extension of LoRa arm
+
+**●** = subsystem OK (orange dot + glow)  **○** = fault (red dot, label dimmed)
 
 ---
 
@@ -106,34 +114,46 @@ remain visible through their own background rect.
 
 ---
 
-## Right Panels (320 px wide, right edge)
+## Indicator Arms (bottom edge, both sides)
 
-### Face Panel (upper half)
+The right-side panels have been replaced by indicator-style diagonal arms that
+mirror the health indicator design. Three parallel diagonal lines at 130° appear
+on each side of the compass tape.
 
-```
-┌─────────────────────┐
-│ FACE                │
-│ Connected           │
-│ Effect: Idle        │
-│ Palette: #2         │
-│ ████░░  R0 G220 B18 │
-│ Brt: 75%            │
-└─────────────────────┘
-```
-
-### LoRa Nodes Panel (lower half)
+### Left side — FACE arm + separator + health indicators
 
 ```
-┌─────────────────────┐
-│ LORA NODES          │
-│ Alpha    045° 1.2km │
-│   RSSI:-87 SNR:6 8s │
-│ Bravo    230° 3.4km │
-│   RSSI:-92 SNR:3 47s│
-└─────────────────────┘
+   ●  Brt: 75%     ╱    ╱            ●  Audio
+  ●  R0 G220 B180 ╱    ╱           ●  Interface
+ ●  Palette: #2  ╱    ╱           ●  LoRa
+●  FACE ●       ╱    ╱           ●  Proot
+               ╱    ╱
+──────────────────────────────────────────────
+x≈120  x≈260  x≈410           x≈560
+[ext]  [FACE] [sep]            [health anchor]
 ```
 
-Node color by age: teal < 30 s · cyan 30–120 s · dim > 120 s
+- **FACE** dot: orange = connected, red = offline
+- Items: FACE status · effect · GIF/palette · R G B · brightness
+- Labels drawn to the LEFT of each dot
+
+### Right side — health indicators + separator + LoRa arm
+
+```
+      ●  Audio  ╲    ╲          ●  LORA ●
+   ●  Interface  ╲    ╲        ●  Alpha  045° 1.2k
+      ●  L.Cam    ╲    ╲      ●  Bravo  230° 3.4k
+      ●  R.Cam     ╲    ╲
+                    ╲    ╲
+──────────────────────────────────────────────────
+       x≈1360       x≈1510  x≈1660      x≈1800
+      [health]      [sep]  [LoRa]       [ext]
+```
+
+- **LORA** dot: ok/fail from `health.lora_ok`
+- Node rows (up to 3): name (6 chars) + heading° + distance in km
+- Node dot: orange if age < 120 s, red if stale or unseen
+- Labels drawn to the RIGHT of each dot
 
 ---
 
