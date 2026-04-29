@@ -27,6 +27,7 @@ uniform float     u_edge_scale; // sampling step multiplier (1.0–5.0); larger 
 uniform float     u_edge_thresh;// minimum edge magnitude (0.0–0.6); suppresses weak interior edges
 uniform float     u_focus_str;  // 0.0=contrast proxy only, 1.0=Laplacian sharpness only for bg_weight
 uniform float     u_focus_sens; // Laplacian sensitivity (scales with lens proximity)
+uniform float     u_gate_scale; // 0.0=off, else=step multiplier for confirmatory coarse Sobel (size filter)
 
 varying vec2 v_uv;
 
@@ -58,6 +59,26 @@ void main() {
     float raw_edge = clamp(sqrt(gx*gx + gy*gy) * 4.0, 0.0, 1.0);
     // Remap so edges below u_edge_thresh vanish and strong edges stay at 1.0
     float edge = clamp((raw_edge - u_edge_thresh) / (1.0 - u_edge_thresh + 0.001), 0.0, 1.0);
+
+    // ── Dual-scale size gate ──────────────────────────────────────────────────
+    // Confirm edge at a coarser scale: small objects/noise vanish at larger step,
+    // so the product suppresses them while large objects pass both tests.
+    // g11 (center) is shared with l11 — 8 new samples only.
+    if (u_gate_scale >= 1.0) {
+        vec2 step2  = step * u_gate_scale;
+        float g00 = luma(texture2D(u_scene, v_uv + vec2(-1.0,-1.0)*step2).rgb);
+        float g10 = luma(texture2D(u_scene, v_uv + vec2( 0.0,-1.0)*step2).rgb);
+        float g20 = luma(texture2D(u_scene, v_uv + vec2( 1.0,-1.0)*step2).rgb);
+        float g01 = luma(texture2D(u_scene, v_uv + vec2(-1.0, 0.0)*step2).rgb);
+        float g21 = luma(texture2D(u_scene, v_uv + vec2( 1.0, 0.0)*step2).rgb);
+        float g02 = luma(texture2D(u_scene, v_uv + vec2(-1.0, 1.0)*step2).rgb);
+        float g12 = luma(texture2D(u_scene, v_uv + vec2( 0.0, 1.0)*step2).rgb);
+        float g22 = luma(texture2D(u_scene, v_uv + vec2( 1.0, 1.0)*step2).rgb);
+        float gx2 = -g00 - 2.0*g01 - g02 + g20 + 2.0*g21 + g22;
+        float gy2 = -g00 - 2.0*g10 - g20 + g02 + 2.0*g12 + g22;
+        float edge2 = clamp(sqrt(gx2*gx2 + gy2*gy2) * 4.0, 0.0, 1.0);
+        edge = edge * edge2;
+    }
 
     // ── Background weight ─────────────────────────────────────────────────────
     float bg_weight;

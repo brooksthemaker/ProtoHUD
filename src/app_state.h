@@ -23,6 +23,7 @@ struct PostProcessConfig {
     float edge_threshold     = 0.15f;  // 0.0–0.6; suppress edges weaker than this magnitude
     float focus_str          = 0.0f;   // 0.0–1.0; blend Laplacian sharpness into bg_weight
     int   focus_lens_pos     = 500;    // 0–1000 from AF; set each frame — not persisted
+    float edge_gate_scale    = 2.0f;   // 0.0=off, else=step multiplier for coarse confirmatory Sobel
 };
 
 // ── Overlay layout config (PiP and Android mirror) ───────────────────────────
