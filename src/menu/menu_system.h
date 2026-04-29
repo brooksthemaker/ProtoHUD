@@ -122,6 +122,8 @@ private:
     int   edit_channel_    = 0;       // 0=R 1=G 2=B for COLOR_PICKER
     bool  in_channel_edit_ = false;   // true when knob adjusts channel value
     float edit_r_ = 0.f, edit_g_ = 0.f, edit_b_ = 0.f;
+    float orig_float_ = 0.f;                              // pre-edit value for SLIDER cancel/restore
+    float orig_r_ = 0.f, orig_g_ = 0.f, orig_b_ = 0.f;  // pre-edit RGB for COLOR_PICKER cancel/restore
 
     std::vector<MenuItem>  root_items_;
     std::vector<Level>     stack_;

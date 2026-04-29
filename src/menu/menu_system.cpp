@@ -118,6 +118,11 @@ void MenuSystem::navigate(int direction) {
                           : (edit_channel_ == 1) ? &edit_g_
                           :                        &edit_b_;
                 *ch = std::clamp(*ch + static_cast<float>(direction), 0.f, 255.f);
+                // Live preview — apply immediately so the user sees/feels the change
+                if (item.color.set_color)
+                    item.color.set_color(static_cast<uint8_t>(edit_r_),
+                                         static_cast<uint8_t>(edit_g_),
+                                         static_cast<uint8_t>(edit_b_));
             } else {
                 edit_channel_ = ((edit_channel_ + direction) % 3 + 3) % 3;
             }
@@ -125,6 +130,8 @@ void MenuSystem::navigate(int direction) {
             edit_float_ = std::clamp(
                 edit_float_ + static_cast<float>(direction) * item.slider.step,
                 item.slider.min, item.slider.max);
+            // Live preview — apply immediately so the user hears/sees the change
+            if (item.slider.set_value) item.slider.set_value(edit_float_);
         }
         return;
     }
@@ -161,6 +168,7 @@ void MenuSystem::select() {
     case MenuItemType::SLIDER:
         if (!in_edit_mode_) {
             edit_float_   = item.slider.get_value ? item.slider.get_value() : item.slider.min;
+            orig_float_   = edit_float_;   // snapshot for cancel/restore
             in_edit_mode_ = true;
             int steps = (item.slider.step > 0.f)
                 ? static_cast<int>((item.slider.max - item.slider.min) / item.slider.step) + 1
@@ -183,6 +191,7 @@ void MenuSystem::select() {
             } else {
                 edit_r_ = edit_g_ = edit_b_ = 128.f;
             }
+            orig_r_ = edit_r_; orig_g_ = edit_g_; orig_b_ = edit_b_;  // snapshot for cancel
             edit_channel_    = 0;
             in_channel_edit_ = false;
             in_edit_mode_    = true;
@@ -212,15 +221,33 @@ void MenuSystem::select() {
 // ── back ──────────────────────────────────────────────────────────────────────
 
 void MenuSystem::back() {
-    if (in_channel_edit_) {
-        in_channel_edit_ = false;
-        emit_detents_override(3);
-        return;
-    }
-    if (in_edit_mode_) {
-        in_edit_mode_ = false;
-        emit_detents();
-        return;
+    if (!stack_.empty() && cursor_ < static_cast<int>(stack_.back().items.size())) {
+        auto& item = stack_.back().items[cursor_];
+
+        if (in_channel_edit_) {
+            // Restore original color, reset working copies, exit channel-edit
+            if (item.color.set_color)
+                item.color.set_color(static_cast<uint8_t>(orig_r_),
+                                     static_cast<uint8_t>(orig_g_),
+                                     static_cast<uint8_t>(orig_b_));
+            edit_r_ = orig_r_; edit_g_ = orig_g_; edit_b_ = orig_b_;
+            in_channel_edit_ = false;
+            emit_detents_override(3);
+            return;
+        }
+        if (in_edit_mode_) {
+            if (item.type == MenuItemType::SLIDER) {
+                if (item.slider.set_value) item.slider.set_value(orig_float_);
+            } else if (item.type == MenuItemType::COLOR_PICKER) {
+                if (item.color.set_color)
+                    item.color.set_color(static_cast<uint8_t>(orig_r_),
+                                         static_cast<uint8_t>(orig_g_),
+                                         static_cast<uint8_t>(orig_b_));
+            }
+            in_edit_mode_ = false;
+            emit_detents();
+            return;
+        }
     }
     pop_level();
 }
