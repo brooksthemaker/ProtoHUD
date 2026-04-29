@@ -81,6 +81,7 @@ public:
     void set_accent_color(ImU32 c) { accent_color_ = c; }
     void set_bg_enabled(bool e)    { bg_enabled_   = e; }
     void set_bg_color(ImU32 c)     { bg_color_     = c; }
+    void set_glow_enabled(bool e)  { glow_enabled_ = e; }
 
     // Runtime style getters — for persisting user changes to config on exit.
     ImU32 accent_color() const { return accent_color_; }
@@ -135,4 +136,5 @@ private:
     ImU32 accent_color_ = IM_COL32(255, 160,  32, 255);
     bool  bg_enabled_   = true;
     ImU32 bg_color_     = IM_COL32( 10,  15,  20, 225);
+    bool  glow_enabled_ = true;
 };

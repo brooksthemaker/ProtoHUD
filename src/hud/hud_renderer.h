@@ -53,6 +53,7 @@ struct HudConfig {
     float opacity               = 0.85f;
     float scale                 = 1.0f;
     float text_scale            = 1.0f;  // FontGlobalScale, applied each frame; live-editable
+    bool  glow_enabled          = true;  // when false, glow outline layers are skipped globally
     float health_panel_opacity  = 0.71f;
     float pip_corner_clip_px    = 16.f;
     bool  indicator_bg_enabled  = false;  // parallelogram bg behind health indicators

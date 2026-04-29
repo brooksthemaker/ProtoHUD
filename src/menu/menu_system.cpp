@@ -8,6 +8,8 @@
 #include <cmath>
 #include <string>
 
+static bool s_menu_glow = true;
+
 static std::string to_upper(const std::string& s) {
     std::string r; r.reserve(s.size());
     for (unsigned char c : s) r += static_cast<char>(::toupper(c));
@@ -31,17 +33,19 @@ static ImVec4 col_to_vec4(ImU32 col, float alpha_override = -1.f) {
 // Draw text with a glow outline using the supplied accent color.
 static void draw_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
                             bool selected, ImU32 accent_col) {
-    const ImU32 glow     = selected ? menu_with_alpha(accent_col, 72) : menu_with_alpha(accent_col, 22);
-    const ImU32 glow_far = menu_with_alpha(accent_col, 28);
     const ImU32 fill_sel = IM_COL32(255, 255, 255, 255);
     const ImU32 fill_dim = IM_COL32(255, 255, 255, 160);
     const ImU32 fill     = selected ? fill_sel : fill_dim;
 
-    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
-    constexpr int D2[4][2] = {{-2,0},{2,0},{0,-2},{0,2}};
-    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
-    if (selected)
-        for (auto& o : D2) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow_far, text);
+    if (s_menu_glow) {
+        const ImU32 glow     = selected ? menu_with_alpha(accent_col, 72) : menu_with_alpha(accent_col, 22);
+        const ImU32 glow_far = menu_with_alpha(accent_col, 28);
+        constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+        constexpr int D2[4][2] = {{-2,0},{2,0},{0,-2},{0,2}};
+        for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+        if (selected)
+            for (auto& o : D2) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow_far, text);
+    }
     dl->AddText(pos, fill, text);
 }
 
@@ -268,6 +272,7 @@ const std::string& MenuSystem::current_label() const {
 void MenuSystem::draw(int screen_w, int screen_h) {
     if (!open_ || stack_.empty()) return;
     (void)screen_w;
+    s_menu_glow = glow_enabled_;
 
     const auto& items  = stack_.back().items;
     const float item_h = 38.f;

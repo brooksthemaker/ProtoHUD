@@ -34,6 +34,9 @@ static ImU32 with_alpha(ImU32 col, uint8_t a) {
     return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
 }
 
+// Frame-scope glow flag — set each frame in begin_frame() from cfg_.glow_enabled.
+static bool s_glow = true;
+
 // Draw text with an orange glow outline matching the compass tick style.
 // selected=true → full white + bright glow; false → dim white + faint glow.
 static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
@@ -42,10 +45,12 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
     constexpr ImU32 GLOW_OFF = IM_COL32(255, 160, 32,  22);
     constexpr ImU32 FILL_ON  = IM_COL32(255, 255, 255, 255);
     constexpr ImU32 FILL_OFF = IM_COL32(255, 255, 255, 160);
-    const ImU32 glow = selected ? GLOW_ON  : GLOW_OFF;
     const ImU32 fill = selected ? FILL_ON  : FILL_OFF;
-    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
-    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    if (s_glow) {
+        const ImU32 glow = selected ? GLOW_ON : GLOW_OFF;
+        constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+        for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    }
     dl->AddText(pos, fill, text);
 }
 
@@ -53,10 +58,12 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
 // glow alphas are derived internally.
 static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
                            bool selected, ImU32 glow_col, ImU32 fill_col) {
-    const ImU32 glow = selected ? with_alpha(glow_col, 72) : with_alpha(glow_col, 22);
     const ImU32 fill = selected ? fill_col : with_alpha(fill_col, 160);
-    constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
-    for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    if (s_glow) {
+        const ImU32 glow = selected ? with_alpha(glow_col, 72) : with_alpha(glow_col, 22);
+        constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+        for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
+    }
     dl->AddText(pos, fill, text);
 }
 
@@ -128,6 +135,7 @@ void HudRenderer::begin_frame(float /*dt*/) {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     ImGui::GetIO().FontGlobalScale = cfg_.text_scale;
+    s_glow = cfg_.glow_enabled;
 }
 
 void HudRenderer::render_overlay() {
@@ -506,11 +514,11 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
         const char* lbl = items[i].label;
         if (right_side) {
             hud_glow_text(dl, {ix + DOT_R + 6.f, iy - 7.f}, lbl, items[i].ok,
-                          col_.glow_base, col_.text_fill);
+                          col_.text_fill, col_.text_fill);
         } else {
             float tw = ImGui::CalcTextSize(lbl).x;
             hud_glow_text(dl, {ix - DOT_R - 6.f - tw, iy - 7.f}, lbl, items[i].ok,
-                          col_.glow_base, col_.text_fill);
+                          col_.text_fill, col_.text_fill);
         }
     }
     if (font_mono_) ImGui::PopFont();
@@ -705,14 +713,13 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         dl->AddConvexPolyFilled(bg, 4, A);
     }
 
-    // Glow line at the tape base — always visible, connects flush to the health
-    // indicator horizontal lines when those are also enabled.
+    // Glow line at the tape base — color matches the health indicator lines (glow_base).
     {
         const float lx0 = origin.x - fw, lx1 = origin.x + tw + fw;
         const float line_y = origin.y + th;
-        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow2, 5.f);
-        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_glow1, 2.5f);
-        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_major, 1.f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 28), 5.f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 70), 2.5f);
+        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_.glow_base, 1.f);
     }
 
     // Tick zone: ticks hang down from tick_top; labels sit below tick_bottom.

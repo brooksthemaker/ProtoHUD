@@ -553,6 +553,9 @@ static std::vector<MenuItem> build_menu(
             [hud_cfg]{ return hud_cfg->text_scale; },
             [hud_cfg](float v){ hud_cfg->text_scale = v; }),
         submenu("Glow Color", std::move(glow_color_menu)),
+        toggle("Glow Enable",
+            [hud_cfg]{ return hud_cfg->glow_enabled; },
+            [hud_cfg](bool v){ hud_cfg->glow_enabled = v; }),
     };
 
     // ── Indicator Options ─────────────────────────────────────────────────────
@@ -1418,6 +1421,7 @@ int main(int argc, char* argv[]) {
         // ── ImGui HUD overlay (renders to default framebuffer, on top of camera) ──
 
         hud.draw_frame(snap, xr.eye_width(), xr.eye_height());
+        menu.set_glow_enabled(hud.config().glow_enabled);
         menu.draw(xr.eye_width(), xr.eye_height());
 
         hud.draw_pip(tex_usb1, "Cam 1",

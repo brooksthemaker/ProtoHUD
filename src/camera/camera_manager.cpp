@@ -121,6 +121,35 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb1_ok_ = !usb1.device.empty() && open_v4l2(usb_cap1_, usb1, "usb1");
     usb2_ok_ = !usb2.device.empty() && open_v4l2(usb_cap2_, usb2, "usb2");
 
+    // Auto-scan: if a camera failed to open with the configured path, probe all
+    // /dev/video* nodes (before the capture thread starts) to find a working one.
+    auto startup_scan = [&](cv::VideoCapture& cap, std::atomic<bool>& ok_flag,
+                             UsbCamConfig& cfg, const char* name,
+                             const std::string& skip_path) {
+        if (ok_flag) return;
+        std::cerr << "[cam] " << name << ": auto-scanning for a camera...\n";
+        for (int dev = 0; dev < 64; dev++) {
+            std::string path = "/dev/video" + std::to_string(dev);
+            if (path == skip_path) continue;
+            if (!is_usb_capture_device(path)) continue;
+            UsbCamConfig try_cfg = cfg;
+            try_cfg.device = path;
+            if (open_v4l2(cap, try_cfg, name)) {
+                cv::Mat f;
+                if (cap.read(f) && !f.empty()) {
+                    cfg.device = path;
+                    ok_flag = true;
+                    std::cerr << "[cam] " << name << ": found at " << path << "\n";
+                    return;
+                }
+                cap.release();
+            }
+        }
+        std::cerr << "[cam] " << name << ": auto-scan found no working camera\n";
+    };
+    startup_scan(usb_cap1_, usb1_ok_, usb1_cfg_, "usb1", "");
+    startup_scan(usb_cap2_, usb2_ok_, usb2_cfg_, "usb2", usb1_cfg_.device);
+
     // Start thread whenever USB devices are configured so open/close can work
     // later even if the cameras were not available at startup.
     if (!usb1.device.empty() || !usb2.device.empty()) {
