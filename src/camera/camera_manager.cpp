@@ -22,7 +22,10 @@ CameraManager::~CameraManager() { shutdown(); }
 // Rejects known libcamera ISP/pipeline drivers that have VIDEO_CAPTURE
 // but produce no frames when opened directly.
 static bool is_usb_capture_device(const std::string& path, std::string* info_out = nullptr) {
-    int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    // Use O_RDWR so only devices that OpenCV can also open are reported.
+    // O_RDONLY can succeed on ISP metadata nodes without video-group membership,
+    // causing a misleading permission error when OpenCV then tries O_RDWR.
+    int fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
     if (fd < 0) return false;
     struct v4l2_capability cap {};
     bool ok = false;
@@ -344,8 +347,11 @@ bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
         }
     }
 
-    if (!ok)
-        std::cerr << "[cam] USB scan found no working device\n";
+    if (!ok) {
+        std::cerr << "[cam] USB scan found no working device\n"
+                  << "  If cameras are plugged in, check group membership:\n"
+                  << "    sudo usermod -aG video $USER  (then log out and back in)\n";
+    }
 
     // Restart the capture thread if either slot is now usable
     if (usb1_ok_ || usb2_ok_) {
