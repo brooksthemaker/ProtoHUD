@@ -46,6 +46,7 @@ struct HudColors {
 struct HudConfig {
     int   compass_height        = 72;
     int   compass_bottom_margin = 20;
+    int   compass_tick_length   = 24;   // major tick height in px; minor ticks scaled proportionally
     float compass_bg_opacity    = 0.75f;
     int   compass_bg_side_fade  = 80;    // extra px on each side; also the fade zone width
     int   panel_width           = 200;

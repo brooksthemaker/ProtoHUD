@@ -651,6 +651,9 @@ static std::vector<MenuItem> build_menu(
         submenu("Onboard Compass",   std::move(onboard_compass_menu)),
         submenu("Background Options",std::move(compass_bg_options_menu)),
         submenu("Color Options",     std::move(compass_color_options_menu)),
+        slider("Tick Length", 8.f, 48.f, 2.f, "",
+            [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
+            [hud_cfg](float v){ hud_cfg->compass_tick_length = static_cast<int>(v); }),
     };
 
     // ── Menu Options ──────────────────────────────────────────────────────────

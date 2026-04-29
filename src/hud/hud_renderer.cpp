@@ -722,15 +722,17 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         dl->AddLine({lx0, line_y}, {lx1, line_y}, col_.glow_base, 1.f);
     }
 
-    // Tick zone: ticks hang down from tick_top; labels sit below tick_bottom.
-    // Compass height is 60 px; leave ~20 px at the bottom for labels.
-    const float tick_bottom = origin.y + th - 20.f;   // where all ticks end
-    const float label_y     = tick_bottom + 3.f;       // top of label text
+    // Tick lengths — major is user-configurable; mid and minor scale proportionally.
+    const float t_maj = static_cast<float>(cfg_.compass_tick_length);
+    const float t_mid = t_maj * (16.f / 24.f);
+    const float t_min = t_maj * (10.f / 24.f);
+
+    // Tick zone: leave 20 px at the bottom for labels.
+    const float tick_bottom = origin.y + th - 20.f;
+    const float label_y     = tick_bottom + 3.f;
 
     if (font_mono_) ImGui::PushFont(font_mono_);
 
-    // Single pass — ticks drawn first (bottom-up), labels drawn immediately after
-    // so they overlap nothing (labels are below the tick zone).
     for (int deg = 0; deg < 360; deg++) {
         float offset = deg - heading;
         while (offset >  180.f) offset -= 360.f;
@@ -740,27 +742,23 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         if (px < origin.x || px > origin.x + tw) continue;
 
         if (deg % 45 == 0) {
-            // Major cardinal tick — 24 px
-            dl->AddLine({px, tick_bottom - 24.f}, {px, tick_bottom}, col_glow2, 12.f);
-            dl->AddLine({px, tick_bottom - 24.f}, {px, tick_bottom}, col_glow1,  6.f);
-            dl->AddLine({px, tick_bottom - 24.f}, {px, tick_bottom}, col_major,  3.f);
-            // Cardinal label centred below the tick
+            dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow2, t_maj * 0.5f);
+            dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow1, t_maj * 0.25f);
+            dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_major, 3.f);
             const char* card = cardinal_str(static_cast<float>(deg));
             ImVec2 csz = ImGui::CalcTextSize(card);
             hud_glow_text(dl, {px - csz.x * 0.5f, label_y},
-                          card, true, col_.compass_glow, col_.compass_tick);
+                          card, true, col_.glow_base, col_.text_fill);
         } else if (deg % 10 == 0) {
-            // 10° tick — 16 px
-            dl->AddLine({px, tick_bottom - 16.f}, {px, tick_bottom}, col_glow2, 6.f);
-            dl->AddLine({px, tick_bottom - 16.f}, {px, tick_bottom}, col_mid,   2.f);
+            dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_glow2, t_mid * 0.375f);
+            dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_mid,   2.f);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
             ImVec2 bsz = ImGui::CalcTextSize(buf);
             hud_glow_text(dl, {px - bsz.x * 0.5f, label_y}, buf,
-                          true, col_.compass_glow, col_.compass_tick);
+                          true, col_.glow_base, col_.text_fill);
         } else if (deg % 5 == 0) {
-            // Minor 5° tick — 10 px
-            dl->AddLine({px, tick_bottom - 10.f}, {px, tick_bottom}, col_glow2, 4.f);
-            dl->AddLine({px, tick_bottom - 10.f}, {px, tick_bottom}, col_minor, 2.f);
+            dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_glow2, t_min * 0.4f);
+            dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_minor, 2.f);
         }
     }
 
