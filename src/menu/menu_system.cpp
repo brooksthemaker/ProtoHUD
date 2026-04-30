@@ -308,19 +308,55 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         ImGuiWindowFlags_NoSavedSettings  |
         ImGuiWindowFlags_NoFocusOnAppearing;
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg,      col_to_vec4(bg_color_));
+    // Window bg is transparent — drawn manually below as a chamfered shape.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,      ImVec4(0.f, 0.f, 0.f, 0.f));
     ImGui::PushStyleColor(ImGuiCol_Border,        col_to_vec4(accent_color_, 0.86f));
     ImGui::PushStyleColor(ImGuiCol_Header,        col_to_vec4(accent_color_, 0.10f));
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, col_to_vec4(accent_color_, 0.20f));
     ImGui::PushStyleColor(ImGuiCol_HeaderActive,  col_to_vec4(accent_color_, 0.32f));
     // Suppress Selectable's own text — we draw it manually via DrawList
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.f, 0.f, 0.f, 0.f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, border_enabled_ ? 1.5f : 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);  // manual border below
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(pad_x, pad_y));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(0.f, 0.f));
 
     ImGui::Begin("##menu", nullptr, flags);
     ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // ── Chamfered background + border ────────────────────────────────────────
+    {
+        constexpr float C   = 8.f;   // chamfer distance (corner cut)
+        constexpr float GAP = 3.f;   // transparent strip between bg fill and border
+
+        const ImVec2 wp = ImGui::GetWindowPos();
+        const ImVec2 ws = ImGui::GetWindowSize();
+
+        // Background fill inset by GAP — chamfered octagon
+        const ImVec2 bmin = {wp.x + GAP,        wp.y + GAP};
+        const ImVec2 bmax = {wp.x + ws.x - GAP, wp.y + ws.y - GAP};
+        const ImVec2 bg_pts[8] = {
+            {bmin.x + C, bmin.y}, {bmax.x - C, bmin.y},
+            {bmax.x, bmin.y + C}, {bmax.x, bmax.y - C},
+            {bmax.x - C, bmax.y}, {bmin.x + C, bmax.y},
+            {bmin.x, bmax.y - C}, {bmin.x, bmin.y + C},
+        };
+        const ImU32 bg_col = bg_enabled_ ? bg_color_ : IM_COL32(0, 0, 0, 0);
+        dl->AddConvexPolyFilled(bg_pts, 8, bg_col);
+
+        // Border at window edge — chamfered polyline
+        if (border_enabled_) {
+            const ImVec2 emin = {wp.x,        wp.y};
+            const ImVec2 emax = {wp.x + ws.x, wp.y + ws.y};
+            const ImVec2 bdr_pts[8] = {
+                {emin.x + C, emin.y}, {emax.x - C, emin.y},
+                {emax.x, emin.y + C}, {emax.x, emax.y - C},
+                {emax.x - C, emax.y}, {emin.x + C, emax.y},
+                {emin.x, emax.y - C}, {emin.x, emin.y + C},
+            };
+            dl->AddPolyline(bdr_pts, 8, menu_with_alpha(accent_color_, 220),
+                            ImDrawFlags_Closed, 1.5f);
+        }
+    }
 
     const float line_h = ImGui::GetTextLineHeight();
 

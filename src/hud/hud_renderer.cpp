@@ -60,9 +60,10 @@ static ImU32 with_alpha(ImU32 col, uint8_t a) {
     return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
 }
 
-// Frame-scope glow state — set each frame from HudConfig.
-static bool  s_glow          = true;
-static float s_glow_intensity = 1.0f;
+// Frame-scope glow state — set each frame from HudConfig / HudColors.
+static bool  s_glow            = true;
+static float s_glow_intensity  = 1.0f;
+static ImU32 s_glow_color_base = IM_COL32(255, 160, 32, 255); // text glow halo color
 
 // Draw text with an orange glow outline matching the compass tick style.
 // selected=true → full white + bright glow; false → dim white + faint glow.
@@ -73,7 +74,7 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
     const ImU32 fill = selected ? FILL_ON  : FILL_OFF;
     if (s_glow && s_glow_intensity > 0.f) {
         const uint8_t ga = static_cast<uint8_t>((selected ? 72 : 22) * s_glow_intensity);
-        const ImU32 glow = IM_COL32(255, 160, 32, ga);
+        const ImU32 glow = with_alpha(s_glow_color_base, ga);
         constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
         for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
     }
@@ -176,8 +177,9 @@ void HudRenderer::begin_frame(float /*dt*/) {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     ImGui::GetIO().FontGlobalScale = cfg_.text_scale;
-    s_glow          = cfg_.glow_enabled;
-    s_glow_intensity = cfg_.glow_intensity;
+    s_glow            = cfg_.glow_enabled;
+    s_glow_intensity  = cfg_.glow_intensity;
+    s_glow_color_base = col_.glow_color;
 }
 
 void HudRenderer::render_overlay() {
