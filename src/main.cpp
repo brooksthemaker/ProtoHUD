@@ -767,6 +767,28 @@ static std::vector<MenuItem> build_menu(
         leaf("Strong (3x)",[&state]{ state.pp_cfg.edge_gate_scale = 3.0f; }),
     };
 
+    std::vector<MenuItem> motion_sensitivity_menu = {
+        leaf("Low",       [&state]{ state.pp_cfg.motion_thresh = 0.10f; }),
+        leaf("Medium",    [&state]{ state.pp_cfg.motion_thresh = 0.04f; }),
+        leaf("High",      [&state]{ state.pp_cfg.motion_thresh = 0.02f; }),
+        leaf("Very High", [&state]{ state.pp_cfg.motion_thresh = 0.01f; }),
+    };
+
+    std::vector<MenuItem> motion_spread_menu = {
+        leaf("None (1px)",    [&state]{ state.pp_cfg.motion_radius =  1.0f; }),
+        leaf("Small (5px)",   [&state]{ state.pp_cfg.motion_radius =  5.0f; }),
+        leaf("Medium (10px)", [&state]{ state.pp_cfg.motion_radius = 10.0f; }),
+        leaf("Large (20px)",  [&state]{ state.pp_cfg.motion_radius = 20.0f; }),
+    };
+
+    std::vector<MenuItem> motion_color_menu = {
+        leaf("Green",  [&state]{ state.pp_cfg.motion_color = IM_COL32(  0, 255, 100, 255); }),
+        leaf("Cyan",   [&state]{ state.pp_cfg.motion_color = IM_COL32(  0, 200, 255, 255); }),
+        leaf("Yellow", [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 220,   0, 255); }),
+        leaf("White",  [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 255, 255, 255); }),
+        leaf("Orange", [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 140,   0, 255); }),
+    };
+
     std::vector<MenuItem> vision_menu = {
         toggle("Edge Highlight",
             [&state]{ return state.pp_cfg.edge_enabled; },
@@ -776,6 +798,12 @@ static std::vector<MenuItem> build_menu(
         submenu("Edge Detail",    std::move(edge_detail_menu)),
         submenu("Edge Threshold", std::move(edge_threshold_menu)),
         submenu("Size Filter",    std::move(size_filter_menu)),
+        toggle("Motion Highlight",
+            [&state]{ return state.pp_cfg.motion_enabled; },
+            [&state](bool v){ state.pp_cfg.motion_enabled = v; }),
+        submenu("Motion Sensitivity", std::move(motion_sensitivity_menu)),
+        submenu("Motion Spread",      std::move(motion_spread_menu)),
+        submenu("Motion Color",       std::move(motion_color_menu)),
         toggle("Bg Desaturate",
             [&state]{ return state.pp_cfg.desat_enabled; },
             [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
@@ -1024,6 +1052,17 @@ int main(int argc, char* argv[]) {
             uint8_t a = jpp["edge_color"].size() >= 4 ? (uint8_t)jc[3] : 255;
             state.pp_cfg.edge_color = IM_COL32(r, g, b, a);
         }
+        state.pp_cfg.motion_enabled  = jpp.value("motion_enabled",  false);
+        state.pp_cfg.motion_strength = jpp.value("motion_strength", 0.9f);
+        state.pp_cfg.motion_thresh   = jpp.value("motion_thresh",   0.04f);
+        state.pp_cfg.motion_radius   = jpp.value("motion_radius",   10.0f);
+        if (jpp.contains("motion_color") && jpp["motion_color"].is_array() &&
+            jpp["motion_color"].size() >= 3) {
+            auto& jc = jpp["motion_color"];
+            uint8_t r = jc[0], g = jc[1], b = jc[2];
+            uint8_t a = jpp["motion_color"].size() >= 4 ? (uint8_t)jc[3] : 255;
+            state.pp_cfg.motion_color = IM_COL32(r, g, b, a);
+        }
     }
 
     // Seed resolution state from whatever the OWLsight config says
@@ -1095,13 +1134,16 @@ int main(int argc, char* argv[]) {
 
     PostProcessor post_proc;
     gl::Fbo pp_fbo_left, pp_fbo_right;
+    gl::Fbo pp_prev_left, pp_prev_right;
     const bool pp_ok = post_proc.init(
         xr.eye_width(), xr.eye_height(),
         res("assets/shaders/postprocess.vs").c_str(),
         res("assets/shaders/postprocess.fs").c_str());
     if (pp_ok) {
-        pp_fbo_left  = gl::make_fbo(xr.eye_width(), xr.eye_height());
-        pp_fbo_right = gl::make_fbo(xr.eye_width(), xr.eye_height());
+        pp_fbo_left   = gl::make_fbo(xr.eye_width(), xr.eye_height());
+        pp_fbo_right  = gl::make_fbo(xr.eye_width(), xr.eye_height());
+        pp_prev_left  = gl::make_fbo(xr.eye_width(), xr.eye_height());
+        pp_prev_right = gl::make_fbo(xr.eye_width(), xr.eye_height());
     } else {
         std::cerr << "[main] post-process shader unavailable — Vision Assist disabled\n";
     }
@@ -1449,8 +1491,8 @@ int main(int argc, char* argv[]) {
         GLuint right_src = xr.eye_right().tex;
         if (pp_ok && post_proc.any_enabled(snap.pp_cfg) &&
                 pp_fbo_left.valid() && pp_fbo_right.valid()) {
-            post_proc.process(xr.eye_left().tex,  pp_fbo_left,  snap.pp_cfg);
-            post_proc.process(xr.eye_right().tex, pp_fbo_right, snap.pp_cfg);
+            post_proc.process(xr.eye_left().tex,  pp_prev_left,  pp_fbo_left,  snap.pp_cfg);
+            post_proc.process(xr.eye_right().tex, pp_prev_right, pp_fbo_right, snap.pp_cfg);
             left_src  = pp_fbo_left.tex;
             right_src = pp_fbo_right.tex;
         }
@@ -1540,6 +1582,11 @@ int main(int argc, char* argv[]) {
         jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
         jpp["focus_str"]          = state.pp_cfg.focus_str;
         jpp["edge_gate_scale"]    = state.pp_cfg.edge_gate_scale;
+        jpp["motion_enabled"]     = state.pp_cfg.motion_enabled;
+        jpp["motion_strength"]    = state.pp_cfg.motion_strength;
+        jpp["motion_thresh"]      = state.pp_cfg.motion_thresh;
+        jpp["motion_radius"]      = state.pp_cfg.motion_radius;
+        jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
 
         cfg["cameras"]["usb_cam_1"]["brightness"] = cameras.usb1_brightness();
         cfg["cameras"]["usb_cam_2"]["brightness"] = cameras.usb2_brightness();
@@ -1588,6 +1635,8 @@ int main(int argc, char* argv[]) {
 
     pp_fbo_left.destroy();
     pp_fbo_right.destroy();
+    pp_prev_left.destroy();
+    pp_prev_right.destroy();
     post_proc.shutdown();
 
     xr.shutdown();

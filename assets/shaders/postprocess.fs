@@ -28,6 +28,11 @@ uniform float     u_edge_thresh;// minimum edge magnitude (0.0–0.6); suppresse
 uniform float     u_focus_str;  // 0.0=contrast proxy only, 1.0=Laplacian sharpness only for bg_weight
 uniform float     u_focus_sens; // Laplacian sensitivity (scales with lens proximity)
 uniform float     u_gate_scale; // 0.0=off, else=step multiplier for confirmatory coarse Sobel (size filter)
+uniform sampler2D u_prev_frame;    // unit 2: previous raw frame (RGBA8) for motion detection
+uniform float     u_motion_str;    // 0.0=off; motion highlight intensity
+uniform float     u_motion_thresh; // min luma delta to count as motion (0.01–0.15)
+uniform float     u_motion_radius; // dilation radius in texels; connects nearby motion blobs
+uniform vec3      u_motion_col;    // motion highlight colour (normalised RGB)
 
 varying vec2 v_uv;
 
@@ -110,6 +115,30 @@ void main() {
 
     // ── Overlay edges ─────────────────────────────────────────────────────────
     color = mix(color, u_edge_col, edge * u_edge_str);
+
+    // ── Motion highlight (temporal frame diff + blob dilation) ────────────────
+    // Compares current luma to previous frame at center + 4 diagonal neighbors.
+    // Taking the max means any pixel within u_motion_radius texels of a moving
+    // pixel also lights up, connecting scattered detections into visible blobs.
+    // Works regardless of local contrast — detects low-contrast moving objects
+    // that Sobel and the contrast proxy miss entirely.
+    if (u_motion_str > 0.0) {
+        vec2 mstep = u_texel * u_motion_radius;
+        float p11 = luma(texture2D(u_prev_frame, v_uv).rgb);
+        float p00 = luma(texture2D(u_prev_frame, v_uv + vec2(-1.0,-1.0)*mstep).rgb);
+        float p20 = luma(texture2D(u_prev_frame, v_uv + vec2( 1.0,-1.0)*mstep).rgb);
+        float p02 = luma(texture2D(u_prev_frame, v_uv + vec2(-1.0, 1.0)*mstep).rgb);
+        float p22 = luma(texture2D(u_prev_frame, v_uv + vec2( 1.0, 1.0)*mstep).rgb);
+        float s00 = luma(texture2D(u_scene, v_uv + vec2(-1.0,-1.0)*mstep).rgb);
+        float s20 = luma(texture2D(u_scene, v_uv + vec2( 1.0,-1.0)*mstep).rgb);
+        float s02 = luma(texture2D(u_scene, v_uv + vec2(-1.0, 1.0)*mstep).rgb);
+        float s22 = luma(texture2D(u_scene, v_uv + vec2( 1.0, 1.0)*mstep).rgb);
+        float motion = max(abs(l11 - p11),
+                       max(max(abs(s00-p00), abs(s20-p20)),
+                           max(abs(s02-p02), abs(s22-p22))));
+        float mw = clamp((motion - u_motion_thresh) / (1.0 - u_motion_thresh + 0.001), 0.0, 1.0);
+        color = mix(color, u_motion_col, mw * u_motion_str);
+    }
 
     gl_FragColor = vec4(color, 1.0);
 }

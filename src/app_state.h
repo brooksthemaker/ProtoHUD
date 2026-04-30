@@ -24,6 +24,13 @@ struct PostProcessConfig {
     float focus_str          = 0.0f;   // 0.0–1.0; blend Laplacian sharpness into bg_weight
     int   focus_lens_pos     = 500;    // 0–1000 from AF; set each frame — not persisted
     float edge_gate_scale    = 2.0f;   // 0.0=off, else=step multiplier for coarse confirmatory Sobel
+
+    // Motion highlight (temporal frame-difference)
+    bool  motion_enabled  = false;
+    float motion_strength = 0.9f;
+    float motion_thresh   = 0.04f;   // min luma delta to count as motion (~4%); noise ~1-2%
+    float motion_radius   = 10.0f;   // dilation radius in texels for blob connection
+    ImU32 motion_color    = IM_COL32(0, 255, 100, 255);
 };
 
 // ── Overlay layout config (PiP and Android mirror) ───────────────────────────
