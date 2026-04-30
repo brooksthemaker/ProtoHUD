@@ -44,7 +44,17 @@
   "serial": {
     "teensy": {
       "port": "/dev/ttyACM0",
-      "baud": 115200
+      "baud": 115200,
+      "gif_names": [
+        "GIF #0",
+        "GIF #1",
+        "GIF #2",
+        "GIF #3",
+        "GIF #4",
+        "GIF #5",
+        "GIF #6",
+        "GIF #7"
+      ]
     },
     "lora": {
       "port": "/dev/ttyACM2",

@@ -580,7 +580,7 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
     constexpr float SEG_W   = 75.f;
     constexpr float ARM_EXT = 140.f;
     constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
-    constexpr int   N_ITEMS = 5;
+    constexpr int   N_ITEMS = 6;
 
     const float tape_w        = fw / 3.f;
     const float tape_x        = fw / 2.f - tape_w / 2.f;
@@ -620,6 +620,7 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
         snprintf(mode_lbl, sizeof(mode_lbl), "Pal #%d", f.palette_id);
     snprintf(rgb_lbl, sizeof(rgb_lbl), "R%d G%d B%d", f.r, f.g, f.b);
     snprintf(brt_lbl, sizeof(brt_lbl), "Brt %d%%", (f.brightness * 100) / 255);
+    const char* ctrl_lbl = f.hud_control ? "HUD" : "AUTO";
 
     struct Ind { const char* label; bool ok; };
     const Ind items[N_ITEMS] = {
@@ -628,6 +629,7 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
         {mode_lbl,    f.connected},
         {rgb_lbl,     f.connected},
         {brt_lbl,     f.connected},
+        {ctrl_lbl,    f.connected},
     };
 
     if (font_mono_) ImGui::PushFont(font_mono_);

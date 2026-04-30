@@ -107,7 +107,8 @@ static std::vector<MenuItem> build_menu(
         bool* pip_cam1_overlay, bool* pip_cam2_overlay,
         OverlayConfig* android_cfg,
         HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp,
-        Mpu9250* mpu9250)
+        Mpu9250* mpu9250,
+        const std::vector<std::string>& gif_names)
 {
     (void)lora; (void)knob;
 
@@ -178,15 +179,15 @@ static std::vector<MenuItem> build_menu(
 
     // ── Face colors (presets + custom picker) ─────────────────────────────────
     std::vector<MenuItem> colors;
-    colors.push_back(leaf("Teal",   [teensy]{ teensy->set_color(0,220,180);   }));
-    colors.push_back(leaf("Cyan",   [teensy]{ teensy->set_color(0,180,255);   }));
-    colors.push_back(leaf("Red",    [teensy]{ teensy->set_color(220,30,30);   }));
-    colors.push_back(leaf("Green",  [teensy]{ teensy->set_color(30,220,60);   }));
-    colors.push_back(leaf("Purple", [teensy]{ teensy->set_color(180,30,220);  }));
-    colors.push_back(leaf("White",  [teensy]{ teensy->set_color(255,255,255); }));
+    colors.push_back(leaf("Teal",   [teensy]{ teensy->set_color(0,220,180,1);   }));
+    colors.push_back(leaf("Cyan",   [teensy]{ teensy->set_color(0,180,255,1);   }));
+    colors.push_back(leaf("Red",    [teensy]{ teensy->set_color(220,30,30,1);   }));
+    colors.push_back(leaf("Green",  [teensy]{ teensy->set_color(30,220,60,1);   }));
+    colors.push_back(leaf("Purple", [teensy]{ teensy->set_color(180,30,220,1);  }));
+    colors.push_back(leaf("White",  [teensy]{ teensy->set_color(255,255,255,1); }));
     colors.push_back(color_picker(
         "Custom Color",
-        [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b); },
+        [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b, 1); },
         [&state]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
             return { state.face.r, state.face.g, state.face.b };
         }
@@ -195,7 +196,9 @@ static std::vector<MenuItem> build_menu(
     // ── GIFs ─────────────────────────────────────────────────────────────────
     std::vector<MenuItem> gifs;
     for (uint8_t i = 0; i < 8; i++) {
-        char lbl[16]; snprintf(lbl, sizeof(lbl), "GIF #%d", i);
+        std::string lbl = (i < gif_names.size() && !gif_names[i].empty())
+                          ? gif_names[i]
+                          : "GIF #" + std::to_string(i);
         gifs.push_back(leaf(lbl, [teensy, i]{ teensy->play_gif(i); }));
     }
 
@@ -511,9 +514,9 @@ static std::vector<MenuItem> build_menu(
 
     // ── Prototracer (face controller) submenu ─────────────────────────────────
     std::vector<MenuItem> prototracer_menu = {
-        submenu("Effects",  std::move(effects)),
-        submenu("Color",    std::move(colors)),
-        submenu("Play GIF", std::move(gifs)),
+        submenu("Faces",      std::move(effects)),
+        submenu("Color",      std::move(colors)),
+        submenu("Animations", std::move(gifs)),
         slider("Brightness", 0.f, 255.f, 1.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
@@ -523,6 +526,7 @@ static std::vector<MenuItem> build_menu(
                 state.xr_brightness = static_cast<int>(v);
                 if (xr) xr->set_brightness(static_cast<int>(v));
             }),
+        leaf("Release Control", [teensy]{ teensy->release_control(); }),
     };
 
     // ── HUD settings ──────────────────────────────────────────────────────────
@@ -1280,6 +1284,16 @@ int main(int argc, char* argv[]) {
     bool pip_cam1_overlay_active = false;
     bool pip_cam2_overlay_active = false;
 
+    std::vector<std::string> gif_names;
+    if (jser.contains("teensy")) {
+        const auto& jt = jser["teensy"];
+        if (jt.contains("gif_names") && jt["gif_names"].is_array()) {
+            for (const auto& n : jt["gif_names"])
+                gif_names.push_back(n.get<std::string>());
+        }
+    }
+    gif_names.resize(8);
+
     // menu_ptr is set to &menu after construction so HUD menu lambdas can call
     // into MenuSystem without a circular dependency at build time.
     MenuSystem* menu_ptr = nullptr;
@@ -1289,7 +1303,7 @@ int main(int argc, char* argv[]) {
                                &pip_cam1_overlay_active, &pip_cam2_overlay_active,
                                &android_overlay_cfg,
                                &hud.colors(), &hud.config(), &menu_ptr,
-                               &mpu9250));
+                               &mpu9250, gif_names));
     menu_ptr = &menu;
 
     // Restore menu style from a previous session.

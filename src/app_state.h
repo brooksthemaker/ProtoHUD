@@ -56,6 +56,7 @@ struct FaceState {
     uint8_t  palette_id   = 0;
     bool     playing_gif  = false;
     bool     connected    = false;
+    bool     hud_control  = false;  // true = HUD has taken manual control; false = Teensy autonomous
 };
 
 struct LoRaNode {
