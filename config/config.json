@@ -87,7 +87,8 @@
     "show_secondary_cams": true,
     "secondary_cam_size": 0.22,
     "health_panel_opacity": 0.71,
-    "pip_corner_clip_px": 16
+    "pip_corner_clip_px": 16,
+    "indicator_bg_enabled": true
   },
   "gpio": {
     "enabled": true,
@@ -154,15 +155,15 @@
   },
   "post_process": {
     "edge_enabled": false,
-    "edge_strength": 0.7,
-    "edge_color": [255, 160, 32, 255],
+    "edge_strength": 1.0,
+    "edge_color": [30, 220, 60, 255],
     "desat_enabled": false,
     "desat_strength": 0.8,
     "contrast_threshold": 0.15,
-    "edge_scale": 3.0,
-    "edge_threshold": 0.15,
+    "edge_scale": 1.0,
+    "edge_threshold": 0.30,
     "focus_str": 0.0,
-    "edge_gate_scale": 2.0,
+    "edge_gate_scale": 0.0,
     "motion_enabled": false,
     "motion_strength": 0.9,
     "motion_thresh": 0.04,
