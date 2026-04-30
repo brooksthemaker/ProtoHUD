@@ -402,6 +402,13 @@ static std::vector<MenuItem> build_menu(
         submenu("Position", make_position_items(pip_cfg1)),
         make_size_slider("Size", pip_cfg1),
     };
+    std::vector<MenuItem> usb1_brightness_menu = {
+        leaf("50%",  [cameras]{ if (cameras) cameras->set_usb1_brightness(0.5f); }),
+        leaf("100%", [cameras]{ if (cameras) cameras->set_usb1_brightness(1.0f); }),
+        leaf("150%", [cameras]{ if (cameras) cameras->set_usb1_brightness(1.5f); }),
+        leaf("200%", [cameras]{ if (cameras) cameras->set_usb1_brightness(2.0f); }),
+        leaf("300%", [cameras]{ if (cameras) cameras->set_usb1_brightness(3.0f); }),
+    };
     std::vector<MenuItem> usb_cam1_menu = {
         toggle("Open Stream",
             [cameras]{ return cameras && cameras->usb1_ok(); },
@@ -417,7 +424,8 @@ static std::vector<MenuItem> build_menu(
                     *pip_cam1_overlay = false;
                 }
             }),
-        submenu("Overlay", std::move(cam1_overlay_menu)),
+        submenu("Overlay",     std::move(cam1_overlay_menu)),
+        submenu("Brightness",  std::move(usb1_brightness_menu)),
         leaf("Scan for Camera", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb1();
@@ -434,6 +442,13 @@ static std::vector<MenuItem> build_menu(
         submenu("Position", make_position_items(pip_cfg2)),
         make_size_slider("Size", pip_cfg2),
     };
+    std::vector<MenuItem> usb2_brightness_menu = {
+        leaf("50%",  [cameras]{ if (cameras) cameras->set_usb2_brightness(0.5f); }),
+        leaf("100%", [cameras]{ if (cameras) cameras->set_usb2_brightness(1.0f); }),
+        leaf("150%", [cameras]{ if (cameras) cameras->set_usb2_brightness(1.5f); }),
+        leaf("200%", [cameras]{ if (cameras) cameras->set_usb2_brightness(2.0f); }),
+        leaf("300%", [cameras]{ if (cameras) cameras->set_usb2_brightness(3.0f); }),
+    };
     std::vector<MenuItem> usb_cam2_menu = {
         toggle("Open Stream",
             [cameras]{ return cameras && cameras->usb2_ok(); },
@@ -449,7 +464,8 @@ static std::vector<MenuItem> build_menu(
                     *pip_cam2_overlay = false;
                 }
             }),
-        submenu("Overlay", std::move(cam2_overlay_menu)),
+        submenu("Overlay",    std::move(cam2_overlay_menu)),
+        submenu("Brightness", std::move(usb2_brightness_menu)),
         leaf("Scan for Camera", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb2();
@@ -904,16 +920,18 @@ int main(int argc, char* argv[]) {
 
     UsbCamConfig usb1_cfg, usb2_cfg;
     if (jcam.contains("usb_cam_1")) {
-        usb1_cfg.device = jcam["usb_cam_1"].value("device", "/dev/video2");
-        usb1_cfg.width  = jcam["usb_cam_1"].value("width",  1280);
-        usb1_cfg.height = jcam["usb_cam_1"].value("height",  720);
-        usb1_cfg.fps    = jcam["usb_cam_1"].value("fps",      30);
+        usb1_cfg.device     = jcam["usb_cam_1"].value("device",     "/dev/video2");
+        usb1_cfg.width      = jcam["usb_cam_1"].value("width",       1280);
+        usb1_cfg.height     = jcam["usb_cam_1"].value("height",       720);
+        usb1_cfg.fps        = jcam["usb_cam_1"].value("fps",           30);
+        usb1_cfg.brightness = jcam["usb_cam_1"].value("brightness",   1.0f);
     }
     if (jcam.contains("usb_cam_2")) {
-        usb2_cfg.device = jcam["usb_cam_2"].value("device", "/dev/video3");
-        usb2_cfg.width  = jcam["usb_cam_2"].value("width",  1280);
-        usb2_cfg.height = jcam["usb_cam_2"].value("height",  720);
-        usb2_cfg.fps    = jcam["usb_cam_2"].value("fps",      30);
+        usb2_cfg.device     = jcam["usb_cam_2"].value("device",     "/dev/video3");
+        usb2_cfg.width      = jcam["usb_cam_2"].value("width",       1280);
+        usb2_cfg.height     = jcam["usb_cam_2"].value("height",       720);
+        usb2_cfg.fps        = jcam["usb_cam_2"].value("fps",           30);
+        usb2_cfg.brightness = jcam["usb_cam_2"].value("brightness",   1.0f);
     }
 
     HudConfig hud_cfg;
@@ -1522,6 +1540,9 @@ int main(int argc, char* argv[]) {
         jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
         jpp["focus_str"]          = state.pp_cfg.focus_str;
         jpp["edge_gate_scale"]    = state.pp_cfg.edge_gate_scale;
+
+        cfg["cameras"]["usb_cam_1"]["brightness"] = cameras.usb1_brightness();
+        cfg["cameras"]["usb_cam_2"]["brightness"] = cameras.usb2_brightness();
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"] = color_to_json(menu.accent_color());
