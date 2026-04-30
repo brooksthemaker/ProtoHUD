@@ -149,6 +149,9 @@ private:
     };
     TexSlot usb1_slot_, usb2_slot_;
 
+    std::atomic<float> usb1_brightness_ { 1.0f };
+    std::atomic<float> usb2_brightness_ { 1.0f };
+
     std::atomic<bool> running_ { false };
     std::thread       usb_thread_;
 };
