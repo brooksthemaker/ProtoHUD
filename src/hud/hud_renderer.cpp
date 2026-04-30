@@ -169,12 +169,14 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
     // Compass drawn first; indicator arms and health sides render on top.
     draw_compass_tape    (dl, s, {fw / 2.f - cw / 2.f, fh - ch - c_margin}, cw, ch);
-    draw_face_indicator  (dl, s.face, fw, fh);
-    draw_lora_indicator  (dl, s,      fw, fh);
+    // Health sides drawn first so their background sits behind arm content.
     draw_health_side(dl, s.health, fw, fh, false,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
     draw_health_side(dl, s.health, fw, fh, true,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
+    // Arm indicators drawn on top of the health-side background.
+    draw_face_indicator  (dl, s.face, fw, fh);
+    draw_lora_indicator  (dl, s,      fw, fh);
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -449,8 +451,8 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     constexpr float ROW_H   = 18.f;
     constexpr float DOT_R   = 4.f;
     constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
-    constexpr float H_LEN   = 300.f;  // health horiz line (SEG_W * 2)
-    constexpr float BG_FULL = 440.f;  // H_LEN + ARM_EXT; covers FACE/LoRa arm area too
+    constexpr float H_LEN   = 150.f;  // health horiz line (SEG_W * 2; SEG_W=75)
+    constexpr float BG_FULL = 290.f;  // H_LEN + ARM_EXT; covers FACE/LoRa arm area too
 
     const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
     const float dir_y    = -std::sin(ANGLE);
@@ -554,13 +556,13 @@ void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
 // ── Face indicator arm (left side) ───────────────────────────────────────────
 // Two parallel diagonal arms at 130°: [proto arm]  [health indicators]
 // The health indicator diagonal itself is the visual divider between sections.
-// SEG_W=150 puts proto at anchor_x-300 (= end of health side's 300px horiz line).
+// SEG_W=75 puts proto at anchor_x-150 (= end of health side's 150px horiz line).
 
 void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
                                        float fw, float fh) {
     constexpr float ROW_H   = 18.f;
     constexpr float DOT_R   = 4.f;
-    constexpr float SEG_W   = 150.f;
+    constexpr float SEG_W   = 75.f;
     constexpr float ARM_EXT = 140.f;
     constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
     constexpr int   N_ITEMS = 5;
@@ -637,13 +639,13 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
 // ── LoRa indicator arm (right side) ──────────────────────────────────────────
 // Two parallel diagonal arms at 130°: [health indicators]  [lora arm]
 // The health indicator diagonal itself is the visual divider between sections.
-// SEG_W=150 puts lora at anchor_x+300 (= end of health side's 300px horiz line).
+// SEG_W=75 puts lora at anchor_x+150 (= end of health side's 150px horiz line).
 
 void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
                                        float fw, float fh) {
     constexpr float ROW_H    = 18.f;
     constexpr float DOT_R    = 4.f;
-    constexpr float SEG_W    = 150.f;
+    constexpr float SEG_W    = 75.f;
     constexpr float ARM_EXT  = 140.f;
     constexpr float ANGLE    = 130.f * 3.14159265f / 180.f;
     constexpr int   MAX_ROWS = 4;   // 1 header + up to 3 nodes
