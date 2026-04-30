@@ -58,7 +58,7 @@ struct HudConfig {
     bool  glow_enabled          = true;  // when false, glow outline layers are skipped globally
     float health_panel_opacity  = 0.71f;
     float pip_corner_clip_px    = 16.f;
-    bool  indicator_bg_enabled  = false;  // parallelogram bg behind health indicators
+    bool  indicator_bg_enabled  = true;   // parallelogram bg behind health indicators
 };
 
 class HudRenderer {

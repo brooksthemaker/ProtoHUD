@@ -14,13 +14,13 @@
 
 struct PostProcessConfig {
     bool  edge_enabled       = false;
-    float edge_strength      = 0.7f;
-    ImU32 edge_color         = IM_COL32(255, 160, 32, 255);
+    float edge_strength      = 1.0f;
+    ImU32 edge_color         = IM_COL32(30, 220, 60, 255);
     bool  desat_enabled      = false;
     float desat_strength     = 0.8f;
     float contrast_threshold = 0.15f;  // 0.07 = aggressive, 0.25 = subtle
-    float edge_scale         = 3.0f;   // 1.0–5.0; larger step = coarser outline, fewer interior edges
-    float edge_threshold     = 0.15f;  // 0.0–0.6; suppress edges weaker than this magnitude
+    float edge_scale         = 1.0f;   // 1.0–5.0; larger step = coarser outline, fewer interior edges
+    float edge_threshold     = 0.30f;  // 0.0–0.6; suppress edges weaker than this magnitude
     float focus_str          = 0.0f;   // 0.0–1.0; blend Laplacian sharpness into bg_weight
     int   focus_lens_pos     = 500;    // 0–1000 from AF; set each frame — not persisted
     float edge_gate_scale    = 2.0f;   // 0.0=off, else=step multiplier for coarse confirmatory Sobel

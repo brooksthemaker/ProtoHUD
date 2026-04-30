@@ -762,11 +762,11 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> size_filter_menu = {
-        leaf("Off",          [&state]{ state.pp_cfg.edge_gate_scale = 0.0f; }),
-        leaf("Light (1.5x)", [&state]{ state.pp_cfg.edge_gate_scale = 1.5f; }),
-        leaf("Medium (2x)",  [&state]{ state.pp_cfg.edge_gate_scale = 2.0f; }),
-        leaf("Strong (3x)",  [&state]{ state.pp_cfg.edge_gate_scale = 3.0f; }),
-        leaf("Heavy (4x)",   [&state]{ state.pp_cfg.edge_gate_scale = 4.0f; }),
+        leaf("Off",           [&state]{ state.pp_cfg.edge_gate_scale =  0.0f; }),
+        leaf("Tiny (5x)",     [&state]{ state.pp_cfg.edge_gate_scale =  5.0f; }),
+        leaf("Small (10x)",   [&state]{ state.pp_cfg.edge_gate_scale = 10.0f; }),
+        leaf("Medium (20x)",  [&state]{ state.pp_cfg.edge_gate_scale = 20.0f; }),
+        leaf("Large (40x)",   [&state]{ state.pp_cfg.edge_gate_scale = 40.0f; }),
     };
 
     std::vector<MenuItem> motion_sensitivity_menu = {
@@ -991,7 +991,7 @@ int main(int argc, char* argv[]) {
     hud_cfg.pip_corner_clip_px    = jval(jhud, "pip_corner_clip_px",   16.f);
     hud_cfg.opacity               = jval(jdisp,"hud_opacity",          0.85f);
     hud_cfg.scale                 = jval(jdisp,"hud_scale",            1.0f);
-    hud_cfg.indicator_bg_enabled  = jval(jhud, "indicator_bg_enabled", false);
+    hud_cfg.indicator_bg_enabled  = jval(jhud, "indicator_bg_enabled", true);
 
     Mpu9250::Config mpu_cfg;
     if (cfg.contains("mpu9250")) {
@@ -1373,7 +1373,7 @@ int main(int argc, char* argv[]) {
         hud.begin_frame(dt);
 
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
-        if (key_pressed(ImGuiKey_Escape)) { state.quit = true; break; }
+        if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_P)) { state.quit = true; break; }
         // Ctrl+Q / Ctrl+K — force-kill (immediate exit, skips graceful cleanup)
         if (ImGui::GetIO().KeyCtrl &&
             (key_pressed(ImGuiKey_Q) || key_pressed(ImGuiKey_K))) {
@@ -1384,10 +1384,12 @@ int main(int argc, char* argv[]) {
             else                menu.open();
         }
         if (menu.is_open()) {
-            if (key_pressed(ImGuiKey_UpArrow))    menu.navigate(-1);
-            if (key_pressed(ImGuiKey_DownArrow))  menu.navigate(+1);
-            if (key_pressed(ImGuiKey_Enter))      menu.select();
-            if (key_pressed(ImGuiKey_Backspace))  menu.back();
+            if (key_pressed(ImGuiKey_UpArrow))    menu.navigate(+1);
+            if (key_pressed(ImGuiKey_DownArrow))  menu.navigate(-1);
+            if (key_pressed(ImGuiKey_Enter) ||
+                key_pressed(ImGuiKey_RightArrow)) menu.select();
+            if (key_pressed(ImGuiKey_Backspace) ||
+                key_pressed(ImGuiKey_LeftArrow))  menu.back();
         }
 
         // ── Camera texture uploads (CPU paths) ────────────────────────────────

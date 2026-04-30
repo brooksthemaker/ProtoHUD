@@ -82,7 +82,7 @@ void main() {
         float g22 = luma(texture2D(u_scene, v_uv + vec2( 1.0, 1.0)*step2).rgb);
         float gx2 = -g00 - 2.0*g01 - g02 + g20 + 2.0*g21 + g22;
         float gy2 = -g00 - 2.0*g10 - g20 + g02 + 2.0*g12 + g22;
-        float edge2 = clamp(sqrt(gx2*gx2 + gy2*gy2) * 1.5, 0.0, 1.0);
+        float edge2 = clamp(sqrt(gx2*gx2 + gy2*gy2), 0.0, 1.0);
         edge = edge * edge2;
     }
 
