@@ -531,6 +531,11 @@ void DmaCamera::apply_pending_controls(ControlList& ctrls) {
     if (af >= 0)
         ctrls.set(controls::AfMode, af);
 
+    // AeEnable must be applied before ExposureTime so manual shutter takes effect.
+    int ae = pending_ae_enable_.exchange(-1);
+    if (ae >= 0)
+        ctrls.set(controls::AeEnable, ae == 1);
+
     float ev = pending_ev_.exchange(-9999.0f);
     if (ev > -9998.0f)
         ctrls.set(controls::ExposureValue, ev);
@@ -593,4 +598,10 @@ void DmaCamera::set_shutter_speed_us(int us) {
     if (!camera_) return;
     if (camera_->controls().count(&controls::ExposureTime))
         pending_shutter_us_.store(us);
+}
+
+void DmaCamera::set_ae_enable(bool ae_on) {
+    if (!camera_) return;
+    if (camera_->controls().count(&controls::AeEnable))
+        pending_ae_enable_.store(ae_on ? 1 : 0);
 }
