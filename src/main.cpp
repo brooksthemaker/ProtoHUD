@@ -564,31 +564,6 @@ static std::vector<MenuItem> build_menu(
         { "Pink",   IM_COL32(255, 130, 200, 255) },
     }, [hud_col](ImU32 c){ hud_col->text_fill = c; });
 
-    std::vector<MenuItem> glow_color_menu = make_color_items({
-        { "Orange", IM_COL32(255, 160,  32, 255) },
-        { "Teal",   IM_COL32(  0, 220, 180, 255) },
-        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
-        { "Amber",  IM_COL32(255, 190,  50, 255) },
-        { "Green",  IM_COL32( 30, 220,  60, 255) },
-        { "Yellow", IM_COL32(255, 240,  50, 255) },
-        { "Red",    IM_COL32(255,  50,  50, 255) },
-        { "Purple", IM_COL32(180,  30, 220, 255) },
-        { "Blue",   IM_COL32( 60, 100, 255, 255) },
-        { "Pink",   IM_COL32(255,  80, 200, 255) },
-        { "White",  IM_COL32(255, 255, 255, 255) },
-    }, [hud_col](ImU32 c){ hud_col->glow_base = c; });
-
-    std::vector<MenuItem> text_options_menu = {
-        submenu("Color",     std::move(text_color_menu)),
-        slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
-            [hud_cfg]{ return hud_cfg->text_scale; },
-            [hud_cfg](float v){ hud_cfg->text_scale = v; }),
-        submenu("Glow Color", std::move(glow_color_menu)),
-        toggle("Glow Enable",
-            [hud_cfg]{ return hud_cfg->glow_enabled; },
-            [hud_cfg](bool v){ hud_cfg->glow_enabled = v; }),
-    };
-
     // ── Indicator Options ─────────────────────────────────────────────────────
     std::vector<MenuItem> ind_good_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
@@ -609,12 +584,6 @@ static std::vector<MenuItem> build_menu(
         { "Orange", IM_COL32(255, 120,   0, 255) },
         { "Yellow", IM_COL32(240, 220,   0, 255) },
     }, [hud_col](ImU32 c){ hud_col->ind_fail = c; });
-
-    std::vector<MenuItem> indicator_options_menu = {
-        submenu("Active Color",   std::move(ind_good_color_menu)),
-        submenu("Inactive Color", std::move(ind_inactive_color_menu)),
-        submenu("Fail Color",     std::move(ind_fail_color_menu)),
-    };
 
     // ── Compass ───────────────────────────────────────────────────────────────
     // Onboard MPU-9250 backup compass (moved from root "Backup Compass")
@@ -672,16 +641,187 @@ static std::vector<MenuItem> build_menu(
         submenu("Glow Color", std::move(compass_glow_color_menu)),
     };
 
+    // ── Tagged Radio Colors (per LoRa node compass markers) ──────────────────
+    static const struct { const char* name; ImU32 col; } kNodeColors[] = {
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Yellow", IM_COL32(255, 220,   0, 255) },
+        { "Purple", IM_COL32(220,  30, 220, 255) },
+        { "Red",    IM_COL32(255,  60,  60, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+    };
+    std::vector<MenuItem> tagged_radio_colors_menu;
+    for (int n = 0; n < 8; n++) {
+        std::vector<MenuItem> node_presets;
+        for (int c = 0; c < 8; c++) {
+            ImU32 cv = kNodeColors[c].col;
+            node_presets.push_back(leaf_sel(kNodeColors[c].name,
+                [n, cv, &state]{ state.lora_node_colors[n] = cv; },
+                [n, cv, &state]{ return state.lora_node_colors[n] == cv; }));
+        }
+        char lbl[16]; snprintf(lbl, sizeof(lbl), "Node %d", n + 1);
+        tagged_radio_colors_menu.push_back(submenu(lbl, std::move(node_presets)));
+    }
+
     std::vector<MenuItem> compass_menu = {
-        submenu("Onboard Compass",   std::move(onboard_compass_menu)),
-        submenu("Background Options",std::move(compass_bg_options_menu)),
-        submenu("Color Options",     std::move(compass_color_options_menu)),
+        submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
             [hud_cfg](float v){ hud_cfg->compass_tick_length = static_cast<int>(v); }),
+        submenu("Tagged Radio Colors", std::move(tagged_radio_colors_menu)),
+        submenu("Background Options",  std::move(compass_bg_options_menu)),
+        submenu("Color Options",       std::move(compass_color_options_menu)),
         toggle("Tick Glow",
             [hud_cfg]{ return hud_cfg->compass_tick_glow; },
             [hud_cfg](bool v){ hud_cfg->compass_tick_glow = v; }),
+    };
+
+    // ── Clock & Timers ────────────────────────────────────────────────────────
+    std::vector<MenuItem> timer_presets_menu = {
+        leaf_sel("5 min",  [&state]{ state.timer_alarm.timer_active = true;
+                                      state.timer_alarm.timer_end = time(nullptr) + 300; },
+                 [&state]{ return state.timer_alarm.timer_active
+                              && (state.timer_alarm.timer_end - time(nullptr)) <= 300
+                              && (state.timer_alarm.timer_end - time(nullptr)) > 0; }),
+        leaf_sel("10 min", [&state]{ state.timer_alarm.timer_active = true;
+                                      state.timer_alarm.timer_end = time(nullptr) + 600; },
+                 [&state]{ return state.timer_alarm.timer_active
+                              && (state.timer_alarm.timer_end - time(nullptr)) <= 600
+                              && (state.timer_alarm.timer_end - time(nullptr)) > 300; }),
+        leaf_sel("30 min", [&state]{ state.timer_alarm.timer_active = true;
+                                      state.timer_alarm.timer_end = time(nullptr) + 1800; },
+                 [&state]{ return state.timer_alarm.timer_active
+                              && (state.timer_alarm.timer_end - time(nullptr)) <= 1800
+                              && (state.timer_alarm.timer_end - time(nullptr)) > 600; }),
+        leaf_sel("60 min", [&state]{ state.timer_alarm.timer_active = true;
+                                      state.timer_alarm.timer_end = time(nullptr) + 3600; },
+                 [&state]{ return state.timer_alarm.timer_active
+                              && (state.timer_alarm.timer_end - time(nullptr)) > 1800; }),
+        leaf("Cancel Timer", [&state]{ state.timer_alarm.timer_active = false; }),
+    };
+
+    std::vector<MenuItem> alarm_picker_menu = {
+        slider("Hour",   0.f, 23.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.timer_alarm.alarm_hour); },
+            [&state](float v){ state.timer_alarm.alarm_hour = static_cast<int>(v); }),
+        slider("Minute", 0.f, 59.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.timer_alarm.alarm_minute); },
+            [&state](float v){ state.timer_alarm.alarm_minute = static_cast<int>(v); }),
+        leaf("Confirm", [&state]{
+            time_t now = time(nullptr);
+            struct tm t = *localtime(&now);
+            t.tm_hour = state.timer_alarm.alarm_hour;
+            t.tm_min  = state.timer_alarm.alarm_minute;
+            t.tm_sec  = 0;
+            time_t fire = mktime(&t);
+            if (fire <= now) fire += 86400;
+            state.timer_alarm.alarm_active  = true;
+            state.timer_alarm.alarm_fire_at = fire;
+        }),
+        leaf("Delete Alarm", [&state]{
+            state.timer_alarm.alarm_active    = false;
+            state.timer_alarm.alarm_triggered = false;
+        }),
+    };
+
+    std::vector<MenuItem> timers_alarm_menu = {
+        submenu("Set Timer",   std::move(timer_presets_menu)),
+        submenu("Set Alarm",   std::move(alarm_picker_menu)),
+        leaf("Dismiss Alarm", [&state]{ state.timer_alarm.alarm_triggered = false; }),
+    };
+
+    // ── Color Options > HUD ───────────────────────────────────────────────────
+    std::vector<MenuItem> borders_lines_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Yellow", IM_COL32(255, 240,  50, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+        { "Red",    IM_COL32(255,  50,  50, 255) },
+    }, [hud_col](ImU32 c){ hud_col->glow_base = c; });
+
+    std::vector<MenuItem> glow_options_menu = {
+        toggle("Glow Enable",
+            [hud_cfg]{ return hud_cfg->glow_enabled; },
+            [hud_cfg](bool v){ hud_cfg->glow_enabled = v; }),
+        slider("Glow Intensity", 0.f, 100.f, 5.f, " %",
+            [hud_cfg]{ return hud_cfg->glow_intensity * 100.f; },
+            [hud_cfg](float v){ hud_cfg->glow_intensity = v / 100.f; }),
+    };
+
+    std::vector<MenuItem> indicator_colors_menu = {
+        submenu("Active Color",   std::move(ind_good_color_menu)),
+        submenu("Inactive Color", std::move(ind_inactive_color_menu)),
+        submenu("Fail Color",     std::move(ind_fail_color_menu)),
+        toggle("Background",
+            [hud_cfg]{ return hud_cfg->indicator_bg_enabled; },
+            [hud_cfg](bool v){ hud_cfg->indicator_bg_enabled = v; }),
+    };
+
+    // Themes — apply a coordinated batch of HudColors + MenuSystem styles
+    auto apply_theme = [hud_col, hud_cfg, menu_sys_pp](
+            ImU32 glow, ImU32 text, ImU32 tick, ImU32 tick_glow,
+            bool border, SelectionStyle style,
+            ImU32 menu_accent, ImU32 menu_bg) {
+        hud_col->glow_base    = glow;
+        hud_col->text_fill    = text;
+        hud_col->compass_tick = tick;
+        hud_col->compass_glow = tick_glow;
+        if (*menu_sys_pp) {
+            (*menu_sys_pp)->set_accent_color(menu_accent);
+            (*menu_sys_pp)->set_border_enabled(border);
+            (*menu_sys_pp)->set_selection_style(style);
+        }
+    };
+
+    std::vector<MenuItem> themes_menu = {
+        leaf("Solar", [apply_theme]{
+            apply_theme(IM_COL32(255,160, 32,255), IM_COL32(255,255,255,255),
+                        IM_COL32(255,160, 32,255), IM_COL32(255,160, 32,255),
+                        true, SelectionStyle::ACCENT_BAR,
+                        IM_COL32(255,160, 32,255), IM_COL32(10,15,20,225));
+        }),
+        leaf("Halo",  [apply_theme]{
+            apply_theme(IM_COL32(255,255,255,255), IM_COL32(255,255,255,255),
+                        IM_COL32(255,255,255,255), IM_COL32(255,255,255,180),
+                        false, SelectionStyle::FILLED_ROW,
+                        IM_COL32(255,255,255,255), IM_COL32(10,15,20,225));
+        }),
+        leaf("Teal",  [apply_theme]{
+            apply_theme(IM_COL32(  0,220,180,255), IM_COL32(200,255,245,255),
+                        IM_COL32(  0,220,180,255), IM_COL32(  0,220,180,255),
+                        true, SelectionStyle::ACCENT_BAR,
+                        IM_COL32(  0,220,180,255), IM_COL32(5,25,22,225));
+        }),
+        leaf("Cyan",  [apply_theme]{
+            apply_theme(IM_COL32(  0,180,255,255), IM_COL32(200,235,255,255),
+                        IM_COL32(  0,180,255,255), IM_COL32(  0,180,255,255),
+                        true, SelectionStyle::ACCENT_BAR,
+                        IM_COL32(  0,180,255,255), IM_COL32(5,10,35,225));
+        }),
+        leaf("Night", [apply_theme]{
+            apply_theme(IM_COL32(200,  0,  0,255), IM_COL32(255,200,200,255),
+                        IM_COL32(180,  0,  0,255), IM_COL32(180,  0,  0,255),
+                        true, SelectionStyle::ACCENT_BAR,
+                        IM_COL32(200,  0,  0,255), IM_COL32(20,5,5,225));
+        }),
+    };
+
+    std::vector<MenuItem> hud_color_menu = {
+        submenu("Borders & Lines",  std::move(borders_lines_menu)),
+        submenu("Compass Tick",     std::move(compass_tick_color_menu)),
+        submenu("Text Color",       std::move(text_color_menu)),
+        submenu("Glow",             std::move(glow_options_menu)),
+        submenu("Indicator Colors", std::move(indicator_colors_menu)),
+        submenu("Themes",           std::move(themes_menu)),
+    };
+
+    std::vector<MenuItem> color_options_menu = {
+        submenu("HUD", std::move(hud_color_menu)),
     };
 
     // ── Menu Options ──────────────────────────────────────────────────────────
@@ -729,22 +869,18 @@ static std::vector<MenuItem> build_menu(
         slider("Font Size", 1.f, 3.f, 0.25f, "x",
             [&state]{ return state.clock_cfg.font_scale; },
             [&state](float v){ state.clock_cfg.font_scale = v; }),
-        submenu("Time Offset", std::move(clock_offset_menu)),
+        submenu("Time Offset",      std::move(clock_offset_menu)),
+        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
     };
 
     std::vector<MenuItem> hud_menu = {
-        toggle("Show Backgrounds",
-            [hud_cfg, &state]{ return hud_cfg->indicator_bg_enabled && state.compass_bg_enabled; },
-            [hud_cfg, &state](bool v){
-                hud_cfg->indicator_bg_enabled = v;
-                std::lock_guard<std::mutex> lk(state.mtx);
-                state.compass_bg_enabled = v;
-            }),
-        submenu("Text Options",      std::move(text_options_menu)),
-        submenu("Indicator Options", std::move(indicator_options_menu)),
-        submenu("Compass",           std::move(compass_menu)),
-        submenu("Clock",             std::move(clock_menu)),
-        submenu("Menu Options",      std::move(menu_options_menu)),
+        slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
+            [hud_cfg]{ return hud_cfg->text_scale; },
+            [hud_cfg](float v){ hud_cfg->text_scale = v; }),
+        submenu("Compass",       std::move(compass_menu)),
+        submenu("Clock",         std::move(clock_menu)),
+        submenu("Color Options", std::move(color_options_menu)),
+        submenu("Menu Options",  std::move(menu_options_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
@@ -1032,6 +1168,7 @@ int main(int argc, char* argv[]) {
     hud_cfg.opacity               = jval(jdisp,"hud_opacity",          0.85f);
     hud_cfg.scale                 = jval(jdisp,"hud_scale",            1.0f);
     hud_cfg.indicator_bg_enabled  = jval(jhud, "indicator_bg_enabled", true);
+    hud_cfg.glow_intensity        = jval(jhud, "glow_intensity",       1.0f);
 
     Mpu9250::Config mpu_cfg;
     if (cfg.contains("mpu9250")) {
@@ -1498,6 +1635,20 @@ int main(int argc, char* argv[]) {
             state.health.android_mirror = android_mirror.is_connected();
         }
 
+        // ── Timer / alarm expiry check ────────────────────────────────────────
+        {
+            auto& ta = state.timer_alarm;
+            time_t now_t = time(nullptr);
+            if (ta.timer_active && now_t >= ta.timer_end) {
+                ta.timer_active    = false;
+                ta.alarm_triggered = true;
+            }
+            if (ta.alarm_active && now_t >= ta.alarm_fire_at) {
+                ta.alarm_active    = false;
+                ta.alarm_triggered = true;
+            }
+        }
+
         // ── Update AF / focus state from cameras (atomics, no mutex needed) ─────
         if (cameras.owl_left()) {
             state.focus_left.af_locked = cameras.owl_left()->is_af_locked();
@@ -1526,6 +1677,9 @@ int main(int argc, char* argv[]) {
             snap.night_vision       = state.night_vision;
             snap.clock_cfg          = state.clock_cfg;
             snap.pp_cfg             = state.pp_cfg;
+            snap.timer_alarm        = state.timer_alarm;
+            memcpy(snap.lora_node_colors, state.lora_node_colors,
+                   sizeof(state.lora_node_colors));
         }
 
         // Inject live AF lens position into the snapshot (atomic read, no lock needed)
@@ -1685,7 +1839,8 @@ int main(int argc, char* argv[]) {
         jc["compass_bg_color"] = color_to_json(hud.colors().compass_bg_color);
 
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
-        cfg["hud"]["compass_bg"]           = state.compass_bg_enabled;
+        cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
+        cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
 
         cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
         cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;
