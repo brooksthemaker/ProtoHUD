@@ -756,11 +756,11 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> edge_detail_menu = {
-        leaf("Fine (1x)",       [&state]{ state.pp_cfg.edge_scale = 1.0f; }),
-        leaf("Standard (2x)",   [&state]{ state.pp_cfg.edge_scale = 2.0f; }),
-        leaf("Coarse (3x)",     [&state]{ state.pp_cfg.edge_scale = 3.0f; }),
-        leaf("Silhouette (5x)", [&state]{ state.pp_cfg.edge_scale = 5.0f; }),
-        leaf("Wide (7x)",       [&state]{ state.pp_cfg.edge_scale = 7.0f; }),
+        leaf("Ultra Fine (0.5x)", [&state]{ state.pp_cfg.edge_scale = 0.5f; }),
+        leaf("Fine (1x)",         [&state]{ state.pp_cfg.edge_scale = 1.0f; }),
+        leaf("Standard (2x)",     [&state]{ state.pp_cfg.edge_scale = 2.0f; }),
+        leaf("Coarse (3x)",       [&state]{ state.pp_cfg.edge_scale = 3.0f; }),
+        leaf("Silhouette (5x)",   [&state]{ state.pp_cfg.edge_scale = 5.0f; }),
     };
 
     std::vector<MenuItem> edge_threshold_menu = {
@@ -791,9 +791,11 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> size_filter_menu = {
-        leaf("Off",        [&state]{ state.pp_cfg.edge_gate_scale = 0.0f; }),
-        leaf("Medium (2x)",[&state]{ state.pp_cfg.edge_gate_scale = 2.0f; }),
-        leaf("Strong (3x)",[&state]{ state.pp_cfg.edge_gate_scale = 3.0f; }),
+        leaf("Off",          [&state]{ state.pp_cfg.edge_gate_scale = 0.0f; }),
+        leaf("Light (1.5x)", [&state]{ state.pp_cfg.edge_gate_scale = 1.5f; }),
+        leaf("Medium (2x)",  [&state]{ state.pp_cfg.edge_gate_scale = 2.0f; }),
+        leaf("Strong (3x)",  [&state]{ state.pp_cfg.edge_gate_scale = 3.0f; }),
+        leaf("Heavy (4x)",   [&state]{ state.pp_cfg.edge_gate_scale = 4.0f; }),
     };
 
     std::vector<MenuItem> motion_sensitivity_menu = {
@@ -803,11 +805,16 @@ static std::vector<MenuItem> build_menu(
         leaf("Very High", [&state]{ state.pp_cfg.motion_thresh = 0.01f; }),
     };
 
+    std::vector<MenuItem> motion_mode_menu = {
+        leaf("Fine Line", [&state]{ state.pp_cfg.motion_line = 1.0f; }),
+        leaf("Fill",      [&state]{ state.pp_cfg.motion_line = 0.0f; }),
+    };
+
     std::vector<MenuItem> motion_spread_menu = {
-        leaf("None (1px)",    [&state]{ state.pp_cfg.motion_radius =  1.0f; }),
-        leaf("Small (5px)",   [&state]{ state.pp_cfg.motion_radius =  5.0f; }),
-        leaf("Medium (10px)", [&state]{ state.pp_cfg.motion_radius = 10.0f; }),
-        leaf("Large (20px)",  [&state]{ state.pp_cfg.motion_radius = 20.0f; }),
+        leaf("Tight (2px)",  [&state]{ state.pp_cfg.motion_radius =  2.0f; }),
+        leaf("Close (4px)",  [&state]{ state.pp_cfg.motion_radius =  4.0f; }),
+        leaf("Medium (8px)", [&state]{ state.pp_cfg.motion_radius =  8.0f; }),
+        leaf("Wide (16px)",  [&state]{ state.pp_cfg.motion_radius = 16.0f; }),
     };
 
     std::vector<MenuItem> motion_color_menu = {
@@ -830,6 +837,7 @@ static std::vector<MenuItem> build_menu(
         toggle("Motion Highlight",
             [&state]{ return state.pp_cfg.motion_enabled; },
             [&state](bool v){ state.pp_cfg.motion_enabled = v; }),
+        submenu("Motion Mode",        std::move(motion_mode_menu)),
         submenu("Motion Sensitivity", std::move(motion_sensitivity_menu)),
         submenu("Motion Spread",      std::move(motion_spread_menu)),
         submenu("Motion Color",       std::move(motion_color_menu)),
@@ -1093,7 +1101,8 @@ int main(int argc, char* argv[]) {
         state.pp_cfg.motion_enabled  = jpp.value("motion_enabled",  false);
         state.pp_cfg.motion_strength = jpp.value("motion_strength", 0.9f);
         state.pp_cfg.motion_thresh   = jpp.value("motion_thresh",   0.04f);
-        state.pp_cfg.motion_radius   = jpp.value("motion_radius",   10.0f);
+        state.pp_cfg.motion_radius   = jpp.value("motion_radius",   3.0f);
+        state.pp_cfg.motion_line     = jpp.value("motion_line",     1.0f);
         if (jpp.contains("motion_color") && jpp["motion_color"].is_array() &&
             jpp["motion_color"].size() >= 3) {
             auto& jc = jpp["motion_color"];
@@ -1659,6 +1668,7 @@ int main(int argc, char* argv[]) {
         jpp["motion_strength"]    = state.pp_cfg.motion_strength;
         jpp["motion_thresh"]      = state.pp_cfg.motion_thresh;
         jpp["motion_radius"]      = state.pp_cfg.motion_radius;
+        jpp["motion_line"]        = state.pp_cfg.motion_line;
         jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
 
         cfg["cameras"]["usb_cam_1"]["brightness"] = cameras.usb1_brightness();
