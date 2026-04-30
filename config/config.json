@@ -168,6 +168,7 @@
     "motion_thresh": 0.04,
     "motion_radius": 3.0,
     "motion_line": 1.0,
+    "motion_update_rate": 0.5,
     "motion_color": [0, 255, 100, 255]
   },
   "colors": {
