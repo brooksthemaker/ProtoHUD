@@ -1027,29 +1027,50 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Extended (~30fr)",   [&state]{ state.pp_cfg.motion_update_rate = 0.03f; }, [&state]{ return state.pp_cfg.motion_update_rate == 0.03f; }),
     };
 
+    std::vector<MenuItem> edge_menu = {
+        toggle("Edge Highlight",
+            [&state]{ return state.pp_cfg.edge_enabled; },
+            [&state](bool v){ state.pp_cfg.edge_enabled = v; }),
+        submenu("Strength",  std::move(edge_strength_menu)),
+        submenu("Color",     std::move(edge_color_menu)),
+        submenu("Detail",    std::move(edge_detail_menu)),
+        submenu("Threshold", std::move(edge_threshold_menu)),
+        submenu("Size Filter", std::move(size_filter_menu)),
+    };
+
+    std::vector<MenuItem> motion_menu = {
+        toggle("Motion Highlight",
+            [&state]{ return state.pp_cfg.motion_enabled; },
+            [&state](bool v){ state.pp_cfg.motion_enabled = v; }),
+        submenu("Mode",        std::move(motion_mode_menu)),
+        submenu("Sensitivity", std::move(motion_sensitivity_menu)),
+        submenu("Spread",      std::move(motion_spread_menu)),
+        submenu("Trail",       std::move(motion_trail_menu)),
+        submenu("Color",       std::move(motion_color_menu)),
+    };
+
+    std::vector<MenuItem> desat_menu = {
+        toggle("Bg Desaturate",
+            [&state]{ return state.pp_cfg.desat_enabled; },
+            [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
+        submenu("Strength",    std::move(desat_strength_menu)),
+        submenu("BG Threshold", std::move(bg_threshold_menu)),
+        submenu("Focus Blend", std::move(focus_blend_menu)),
+    };
+
     std::vector<MenuItem> vision_menu = {
         toggle("Edge Highlight",
             [&state]{ return state.pp_cfg.edge_enabled; },
             [&state](bool v){ state.pp_cfg.edge_enabled = v; }),
-        submenu("Edge Strength",  std::move(edge_strength_menu)),
-        submenu("Edge Color",     std::move(edge_color_menu)),
-        submenu("Edge Detail",    std::move(edge_detail_menu)),
-        submenu("Edge Threshold", std::move(edge_threshold_menu)),
-        submenu("Size Filter",    std::move(size_filter_menu)),
         toggle("Motion Highlight",
             [&state]{ return state.pp_cfg.motion_enabled; },
             [&state](bool v){ state.pp_cfg.motion_enabled = v; }),
-        submenu("Motion Mode",        std::move(motion_mode_menu)),
-        submenu("Motion Sensitivity", std::move(motion_sensitivity_menu)),
-        submenu("Motion Spread",      std::move(motion_spread_menu)),
-        submenu("Motion Trail",       std::move(motion_trail_menu)),
-        submenu("Motion Color",       std::move(motion_color_menu)),
         toggle("Bg Desaturate",
             [&state]{ return state.pp_cfg.desat_enabled; },
             [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
-        submenu("Desat Strength", std::move(desat_strength_menu)),
-        submenu("BG Threshold",   std::move(bg_threshold_menu)),
-        submenu("Focus Blend",    std::move(focus_blend_menu)),
+        submenu("Edge Highlight", std::move(edge_menu)),
+        submenu("Motion Highlight", std::move(motion_menu)),
+        submenu("Bg Desaturate",  std::move(desat_menu)),
     };
 
     std::vector<MenuItem> settings_menu = {
