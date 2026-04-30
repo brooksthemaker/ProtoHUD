@@ -69,6 +69,12 @@ inline GLuint build_program(const char* vs_path, const char* fs_path) {
     return link_program(vs, fs);
 }
 
+inline GLuint build_program_from_strings(const char* vs_src, const char* fs_src) {
+    GLuint vs = compile_shader(GL_VERTEX_SHADER,   vs_src);
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_src);
+    return link_program(vs, fs);
+}
+
 // ── Fullscreen quad VBO ───────────────────────────────────────────────────────
 // Positions in NDC [-1,1], UVs in [0,1]. Layout: {x, y, u, v}.
 // Draw with GL_TRIANGLE_STRIP, 4 vertices.

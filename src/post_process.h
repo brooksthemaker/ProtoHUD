@@ -26,30 +26,38 @@ public:
     void shutdown();
 
     // Apply the post-process pass: read src_tex, write result to dst.
+    // prev_fbo holds the previous raw frame for motion detection; updated each call.
     // dst must be a valid gl::Fbo with matching dimensions.
-    void process(GLuint src_tex, const gl::Fbo& dst, const PostProcessConfig& cfg);
+    void process(GLuint src_tex, gl::Fbo& prev_fbo, const gl::Fbo& dst,
+                 const PostProcessConfig& cfg);
 
     bool any_enabled(const PostProcessConfig& cfg) const {
-        return cfg.edge_enabled || cfg.desat_enabled;
+        return cfg.edge_enabled || cfg.desat_enabled || cfg.motion_enabled;
     }
 
 private:
-    GLuint prog_ = 0;
-    GLuint vbo_  = 0;
+    GLuint prog_      = 0;
+    GLuint blit_prog_ = 0;   // trivial src→prev blit shader (inline GLSL)
+    GLuint vbo_       = 0;
 
     // Cached uniform locations (set at init time)
-    GLint loc_scene_      = -1;
-    GLint loc_texel_      = -1;
-    GLint loc_edge_str_   = -1;
-    GLint loc_desat_str_  = -1;
-    GLint loc_edge_col_   = -1;
-    GLint loc_threshold_  = -1;
-    GLint loc_has_depth_  = -1;
-    GLint loc_edge_scale_  = -1;
-    GLint loc_edge_thresh_ = -1;
-    GLint loc_focus_str_   = -1;
-    GLint loc_focus_sens_  = -1;
-    GLint loc_gate_scale_  = -1;
+    GLint loc_scene_         = -1;
+    GLint loc_texel_         = -1;
+    GLint loc_edge_str_      = -1;
+    GLint loc_desat_str_     = -1;
+    GLint loc_edge_col_      = -1;
+    GLint loc_threshold_     = -1;
+    GLint loc_has_depth_     = -1;
+    GLint loc_edge_scale_    = -1;
+    GLint loc_edge_thresh_   = -1;
+    GLint loc_focus_str_     = -1;
+    GLint loc_focus_sens_    = -1;
+    GLint loc_gate_scale_    = -1;
+    GLint loc_prev_frame_    = -1;
+    GLint loc_motion_str_    = -1;
+    GLint loc_motion_thresh_ = -1;
+    GLint loc_motion_radius_ = -1;
+    GLint loc_motion_col_    = -1;
 
     int w_ = 0, h_ = 0;
 };

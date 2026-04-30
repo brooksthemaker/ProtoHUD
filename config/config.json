@@ -152,7 +152,12 @@
     "edge_scale": 3.0,
     "edge_threshold": 0.15,
     "focus_str": 0.0,
-    "edge_gate_scale": 2.0
+    "edge_gate_scale": 2.0,
+    "motion_enabled": false,
+    "motion_strength": 0.9,
+    "motion_thresh": 0.04,
+    "motion_radius": 10.0,
+    "motion_color": [0, 255, 100, 255]
   },
   "colors": {
     "hud_primary":    [0, 220, 180, 220],
