@@ -115,6 +115,7 @@ private:
     void draw_audio_strip    (ImDrawList* dl, const AudioState& a, ImVec2 origin, float w);
     void draw_face_indicator (ImDrawList* dl, const FaceState& f, float fw, float fh);
     void draw_lora_indicator (ImDrawList* dl, const AppState& s,  float fw, float fh);
+    void draw_clock_indicator(ImDrawList* dl, const AppState& s,  float fw, float fh);
     void draw_lora_messages  (ImDrawList* dl, const AppState& s,
                             ImVec2 origin, float pw, float ph);
     void draw_compass_tape (ImDrawList* dl, const AppState& s,
