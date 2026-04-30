@@ -47,6 +47,7 @@ namespace TeensyCmd {
     static constexpr uint8_t SET_BRIGHTNESS  = 0x04;  // brightness(1)
     static constexpr uint8_t SET_PALETTE     = 0x05;  // palette_id(1)
     static constexpr uint8_t REQ_STATUS      = 0x06;  // no payload
+    static constexpr uint8_t RELEASE_CONTROL = 0x07;  // no payload — return Teensy to autonomous mode
 
     // Teensy → CM5
     static constexpr uint8_t STATUS          = 0x81;  // see FaceStatusPayload
