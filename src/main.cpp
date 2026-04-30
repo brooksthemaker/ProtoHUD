@@ -1402,14 +1402,31 @@ int main(int argc, char* argv[]) {
         // Record render-time pose for timewarp
         timewarp.begin_frame(snap.imu_pose);
 
-        // ── Apply camera settings (exposure, shutter) ─────────────────────────
-        if (cameras.owl_left()) {
-            cameras.owl_left()->set_exposure_ev(state.night_vision.exposure_ev);
-            cameras.owl_left()->set_shutter_speed_us(state.night_vision.shutter_us);
-        }
-        if (cameras.owl_right()) {
-            cameras.owl_right()->set_exposure_ev(state.night_vision.exposure_ev);
-            cameras.owl_right()->set_shutter_speed_us(state.night_vision.shutter_us);
+        // ── Apply camera settings (exposure, shutter) — only on change ────────
+        // NV mode off: AE enabled + ExposureValue compensation.
+        // NV mode on:  AE disabled + manual ExposureTime (shutter speed).
+        // AeEnable must be sent before ExposureTime or it is silently ignored.
+        {
+            static NightVisionState s_last_nv{};
+            static bool s_first = true;
+            const auto& nv = snap.night_vision;
+            if (s_first ||
+                nv.nv_enabled  != s_last_nv.nv_enabled  ||
+                nv.exposure_ev != s_last_nv.exposure_ev  ||
+                nv.shutter_us  != s_last_nv.shutter_us) {
+                auto apply = [&](DmaCamera* cam) {
+                    if (!cam) return;
+                    cam->set_ae_enable(!nv.nv_enabled);
+                    if (nv.nv_enabled)
+                        cam->set_shutter_speed_us(nv.shutter_us);
+                    else
+                        cam->set_exposure_ev(nv.exposure_ev);
+                };
+                apply(cameras.owl_left());
+                apply(cameras.owl_right());
+                s_last_nv = nv;
+                s_first   = false;
+            }
         }
 
         // ── Render cameras into per-eye FBOs ──────────────────────────────────
