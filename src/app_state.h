@@ -58,6 +58,7 @@ struct FaceState {
     uint8_t  palette_id   = 0;
     bool     playing_gif  = false;
     bool     connected    = false;
+    bool     hud_control  = false;  // true = HUD has taken manual control; false = Teensy autonomous
 };
 
 struct LoRaNode {
@@ -123,6 +124,14 @@ struct NightVisionState {
     bool  nv_enabled  = false; // night vision preset active (HUD indicator + apply flag)
 };
 
+struct ClockConfig {
+    bool  use_24h         = true;
+    bool  show_seconds    = true;
+    bool  show_date       = false;
+    float font_scale      = 1.5f;  // multiplied against font_mono_->FontSize at draw time
+    int   manual_offset_s = 0;     // seconds added to system time; 0 = pure system clock
+};
+
 struct CameraResolutionState {
     int width  = 1280;
     int height = 800;
@@ -171,6 +180,7 @@ struct AppState {
     // Camera focus, night vision, and resolution control
     CameraFocusState     focus_left, focus_right;
     NightVisionState     night_vision;
+    ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;
 
     // Post-processing (edge highlight + background desaturation)

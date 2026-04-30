@@ -75,8 +75,9 @@ public:
     int  get_focus_position() const;
     bool is_af_locked() const;
     bool is_af_scanning() const;
-    void set_exposure_ev(float ev);     // -3.0 to +3.0
-    void set_shutter_speed_us(int us);  // microseconds
+    void set_exposure_ev(float ev);     // -3.0 to +3.0 (AE compensation; requires AE on)
+    void set_shutter_speed_us(int us);  // microseconds (requires AE off / manual mode)
+    void set_ae_enable(bool ae_on);     // true = auto-exposure, false = manual shutter
 
     bool is_ok()  const { return ok_; }
     int  width()  const { return cfg_.width; }
@@ -147,6 +148,7 @@ private:
     std::atomic<int>   pending_af_mode_    { -1 };       // AfModeEnum value, -1 = no-op
     std::atomic<float> pending_ev_         { -9999.0f }; // ExposureValue, sentinel = no-op
     std::atomic<int>   pending_shutter_us_ { -1 };       // ExposureTime µs, -1 = no-op
+    std::atomic<int>   pending_ae_enable_  { -1 };       // 1=on 0=off -1=no-op
     std::atomic<float> pending_lens_pos_   { -1.0f };    // LensPosition diopters, -1 = no-op
 
     // ── Latest camera metadata (written by capture thread via atomics) ────────

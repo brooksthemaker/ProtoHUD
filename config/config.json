@@ -44,7 +44,17 @@
   "serial": {
     "teensy": {
       "port": "/dev/ttyACM0",
-      "baud": 115200
+      "baud": 115200,
+      "gif_names": [
+        "GIF #0",
+        "GIF #1",
+        "GIF #2",
+        "GIF #3",
+        "GIF #4",
+        "GIF #5",
+        "GIF #6",
+        "GIF #7"
+      ]
     },
     "lora": {
       "port": "/dev/ttyACM2",
@@ -79,11 +89,6 @@
     "health_panel_opacity": 0.71,
     "pip_corner_clip_px": 16,
     "indicator_bg_enabled": true,
-    "show_clock": true,
-    "clock_24h": false,
-    "clock_show_date": false,
-    "clock_show_seconds": false,
-    "clock_font_scale": 1.0,
     "glow_intensity": 1.0
   },
   "gpio": {
@@ -174,5 +179,12 @@
     "hud_warn":       [255, 180, 0,  255],
     "hud_danger":     [255, 60,  60, 255],
     "hud_background": [10,  15,  20, 180]
+  },
+  "clock": {
+    "use_24h":         true,
+    "show_seconds":    true,
+    "show_date":       false,
+    "font_scale":      1.5,
+    "manual_offset_s": 0
   }
 }

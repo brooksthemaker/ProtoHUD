@@ -107,7 +107,8 @@ static std::vector<MenuItem> build_menu(
         bool* pip_cam1_overlay, bool* pip_cam2_overlay,
         OverlayConfig* android_cfg,
         HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp,
-        Mpu9250* mpu9250)
+        Mpu9250* mpu9250,
+        const std::vector<std::string>& gif_names)
 {
     (void)lora; (void)knob;
 
@@ -189,15 +190,15 @@ static std::vector<MenuItem> build_menu(
 
     // ── Face colors (presets + custom picker) ─────────────────────────────────
     std::vector<MenuItem> colors;
-    colors.push_back(leaf("Teal",   [teensy]{ teensy->set_color(0,220,180);   }));
-    colors.push_back(leaf("Cyan",   [teensy]{ teensy->set_color(0,180,255);   }));
-    colors.push_back(leaf("Red",    [teensy]{ teensy->set_color(220,30,30);   }));
-    colors.push_back(leaf("Green",  [teensy]{ teensy->set_color(30,220,60);   }));
-    colors.push_back(leaf("Purple", [teensy]{ teensy->set_color(180,30,220);  }));
-    colors.push_back(leaf("White",  [teensy]{ teensy->set_color(255,255,255); }));
+    colors.push_back(leaf("Teal",   [teensy]{ teensy->set_color(0,220,180,1);   }));
+    colors.push_back(leaf("Cyan",   [teensy]{ teensy->set_color(0,180,255,1);   }));
+    colors.push_back(leaf("Red",    [teensy]{ teensy->set_color(220,30,30,1);   }));
+    colors.push_back(leaf("Green",  [teensy]{ teensy->set_color(30,220,60,1);   }));
+    colors.push_back(leaf("Purple", [teensy]{ teensy->set_color(180,30,220,1);  }));
+    colors.push_back(leaf("White",  [teensy]{ teensy->set_color(255,255,255,1); }));
     colors.push_back(color_picker(
         "Custom Color",
-        [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b); },
+        [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b, 1); },
         [&state]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
             return { state.face.r, state.face.g, state.face.b };
         }
@@ -206,7 +207,9 @@ static std::vector<MenuItem> build_menu(
     // ── GIFs ─────────────────────────────────────────────────────────────────
     std::vector<MenuItem> gifs;
     for (uint8_t i = 0; i < 8; i++) {
-        char lbl[16]; snprintf(lbl, sizeof(lbl), "GIF #%d", i);
+        std::string lbl = (i < gif_names.size() && !gif_names[i].empty())
+                          ? gif_names[i]
+                          : "GIF #" + std::to_string(i);
         gifs.push_back(leaf(lbl, [teensy, i]{ teensy->play_gif(i); }));
     }
 
@@ -522,9 +525,9 @@ static std::vector<MenuItem> build_menu(
 
     // ── Prototracer (face controller) submenu ─────────────────────────────────
     std::vector<MenuItem> prototracer_menu = {
-        submenu("Effects",  std::move(effects)),
-        submenu("Color",    std::move(colors)),
-        submenu("Play GIF", std::move(gifs)),
+        submenu("Faces",      std::move(effects)),
+        submenu("Color",      std::move(colors)),
+        submenu("Animations", std::move(gifs)),
         slider("Brightness", 0.f, 255.f, 1.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
@@ -534,6 +537,7 @@ static std::vector<MenuItem> build_menu(
                 state.xr_brightness = static_cast<int>(v);
                 if (xr) xr->set_brightness(static_cast<int>(v));
             }),
+        leaf("Release Control", [teensy]{ teensy->release_control(); }),
     };
 
     // ── HUD settings ──────────────────────────────────────────────────────────
@@ -608,9 +612,6 @@ static std::vector<MenuItem> build_menu(
     }, [hud_col](ImU32 c){ hud_col->compass_bg_color = c; });
 
     std::vector<MenuItem> compass_bg_options_menu = {
-        toggle("Show Background",
-            [&state]{ return state.compass_bg_enabled; },
-            [&state](bool v){ std::lock_guard<std::mutex> lk(state.mtx); state.compass_bg_enabled = v; }),
         slider("Tape Height", 50.f, 120.f, 5.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_height); },
             [hud_cfg](float v){ hud_cfg->compass_height = static_cast<int>(v); }),
@@ -731,22 +732,6 @@ static std::vector<MenuItem> build_menu(
         leaf("Dismiss Alarm", [&state]{ state.timer_alarm.alarm_triggered = false; }),
     };
 
-    std::vector<MenuItem> clock_menu = {
-        slider("Font Size", 0.5f, 2.0f, 0.1f, "x",
-            [hud_cfg]{ return hud_cfg->clock_font_scale; },
-            [hud_cfg](float v){ hud_cfg->clock_font_scale = v; }),
-        toggle("Show Date",
-            [hud_cfg]{ return hud_cfg->clock_show_date; },
-            [hud_cfg](bool v){ hud_cfg->clock_show_date = v; }),
-        toggle("24-Hour Clock",
-            [hud_cfg]{ return hud_cfg->clock_24h; },
-            [hud_cfg](bool v){ hud_cfg->clock_24h = v; }),
-        toggle("Show Seconds",
-            [hud_cfg]{ return hud_cfg->clock_show_seconds; },
-            [hud_cfg](bool v){ hud_cfg->clock_show_seconds = v; }),
-        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
-    };
-
     // ── Color Options > HUD ───────────────────────────────────────────────────
     std::vector<MenuItem> borders_lines_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
@@ -862,6 +847,30 @@ static std::vector<MenuItem> build_menu(
         toggle("Background",
             [menu_sys_pp]{ return *menu_sys_pp && (*menu_sys_pp)->bg_enabled(); },
             [menu_sys_pp](bool v){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(v); }),
+    };
+
+    std::vector<MenuItem> clock_offset_menu = {
+        leaf("+1 hour",   [&state]{ state.clock_cfg.manual_offset_s += 3600; }),
+        leaf("-1 hour",   [&state]{ state.clock_cfg.manual_offset_s -= 3600; }),
+        leaf("+1 minute", [&state]{ state.clock_cfg.manual_offset_s +=   60; }),
+        leaf("-1 minute", [&state]{ state.clock_cfg.manual_offset_s -=   60; }),
+        leaf("Reset",     [&state]{ state.clock_cfg.manual_offset_s  =    0; }),
+    };
+    std::vector<MenuItem> clock_menu = {
+        toggle("24-Hour",
+            [&state]{ return state.clock_cfg.use_24h; },
+            [&state](bool v){ state.clock_cfg.use_24h = v; }),
+        toggle("Seconds",
+            [&state]{ return state.clock_cfg.show_seconds; },
+            [&state](bool v){ state.clock_cfg.show_seconds = v; }),
+        toggle("Show Date",
+            [&state]{ return state.clock_cfg.show_date; },
+            [&state](bool v){ state.clock_cfg.show_date = v; }),
+        slider("Font Size", 1.f, 3.f, 0.25f, "x",
+            [&state]{ return state.clock_cfg.font_scale; },
+            [&state](float v){ state.clock_cfg.font_scale = v; }),
+        submenu("Time Offset",      std::move(clock_offset_menu)),
+        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
     };
 
     std::vector<MenuItem> hud_menu = {
@@ -1159,12 +1168,7 @@ int main(int argc, char* argv[]) {
     hud_cfg.opacity               = jval(jdisp,"hud_opacity",          0.85f);
     hud_cfg.scale                 = jval(jdisp,"hud_scale",            1.0f);
     hud_cfg.indicator_bg_enabled  = jval(jhud, "indicator_bg_enabled", true);
-    hud_cfg.show_clock         = jval(jhud, "show_clock",         true);
-    hud_cfg.clock_24h          = jval(jhud, "clock_24h",          false);
-    hud_cfg.clock_show_date    = jval(jhud, "clock_show_date",    false);
-    hud_cfg.clock_show_seconds = jval(jhud, "clock_show_seconds", false);
-    hud_cfg.clock_font_scale   = jval(jhud, "clock_font_scale",   1.0f);
-    hud_cfg.glow_intensity     = jval(jhud, "glow_intensity",     1.0f);
+    hud_cfg.glow_intensity        = jval(jhud, "glow_intensity",       1.0f);
 
     Mpu9250::Config mpu_cfg;
     if (cfg.contains("mpu9250")) {
@@ -1224,6 +1228,15 @@ int main(int argc, char* argv[]) {
         auto& jnv = cfg["night_vision"];
         state.night_vision.exposure_ev = jnv.value("exposure_ev",  0.0f);
         state.night_vision.shutter_us  = jnv.value("shutter_us",  33333);
+    }
+
+    if (cfg.contains("clock")) {
+        auto& jck = cfg["clock"];
+        state.clock_cfg.use_24h         = jck.value("use_24h",         true);
+        state.clock_cfg.show_seconds    = jck.value("show_seconds",     true);
+        state.clock_cfg.show_date       = jck.value("show_date",        false);
+        state.clock_cfg.font_scale      = jck.value("font_scale",       1.5f);
+        state.clock_cfg.manual_offset_s = jck.value("manual_offset_s",  0);
     }
 
     if (cfg.contains("post_process")) {
@@ -1445,6 +1458,16 @@ int main(int argc, char* argv[]) {
     bool pip_cam1_overlay_active = false;
     bool pip_cam2_overlay_active = false;
 
+    std::vector<std::string> gif_names;
+    if (jser.contains("teensy")) {
+        const auto& jt = jser["teensy"];
+        if (jt.contains("gif_names") && jt["gif_names"].is_array()) {
+            for (const auto& n : jt["gif_names"])
+                gif_names.push_back(n.get<std::string>());
+        }
+    }
+    gif_names.resize(8);
+
     // menu_ptr is set to &menu after construction so HUD menu lambdas can call
     // into MenuSystem without a circular dependency at build time.
     MenuSystem* menu_ptr = nullptr;
@@ -1454,7 +1477,7 @@ int main(int argc, char* argv[]) {
                                &pip_cam1_overlay_active, &pip_cam2_overlay_active,
                                &android_overlay_cfg,
                                &hud.colors(), &hud.config(), &menu_ptr,
-                               &mpu9250));
+                               &mpu9250, gif_names));
     menu_ptr = &menu;
 
     // Restore menu style from a previous session.
@@ -1652,6 +1675,7 @@ int main(int argc, char* argv[]) {
             snap.focus_left         = state.focus_left;
             snap.focus_right        = state.focus_right;
             snap.night_vision       = state.night_vision;
+            snap.clock_cfg          = state.clock_cfg;
             snap.pp_cfg             = state.pp_cfg;
             snap.timer_alarm        = state.timer_alarm;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
@@ -1665,14 +1689,31 @@ int main(int argc, char* argv[]) {
         // Record render-time pose for timewarp
         timewarp.begin_frame(snap.imu_pose);
 
-        // ── Apply camera settings (exposure, shutter) ─────────────────────────
-        if (cameras.owl_left()) {
-            cameras.owl_left()->set_exposure_ev(state.night_vision.exposure_ev);
-            cameras.owl_left()->set_shutter_speed_us(state.night_vision.shutter_us);
-        }
-        if (cameras.owl_right()) {
-            cameras.owl_right()->set_exposure_ev(state.night_vision.exposure_ev);
-            cameras.owl_right()->set_shutter_speed_us(state.night_vision.shutter_us);
+        // ── Apply camera settings (exposure, shutter) — only on change ────────
+        // NV mode off: AE enabled + ExposureValue compensation.
+        // NV mode on:  AE disabled + manual ExposureTime (shutter speed).
+        // AeEnable must be sent before ExposureTime or it is silently ignored.
+        {
+            static NightVisionState s_last_nv{};
+            static bool s_first = true;
+            const auto& nv = snap.night_vision;
+            if (s_first ||
+                nv.nv_enabled  != s_last_nv.nv_enabled  ||
+                nv.exposure_ev != s_last_nv.exposure_ev  ||
+                nv.shutter_us  != s_last_nv.shutter_us) {
+                auto apply = [&](DmaCamera* cam) {
+                    if (!cam) return;
+                    cam->set_ae_enable(!nv.nv_enabled);
+                    if (nv.nv_enabled)
+                        cam->set_shutter_speed_us(nv.shutter_us);
+                    else
+                        cam->set_exposure_ev(nv.exposure_ev);
+                };
+                apply(cameras.owl_left());
+                apply(cameras.owl_right());
+                s_last_nv = nv;
+                s_first   = false;
+            }
         }
 
         // ── Render cameras into per-eye FBOs ──────────────────────────────────
@@ -1798,12 +1839,14 @@ int main(int argc, char* argv[]) {
         jc["compass_bg_color"] = color_to_json(hud.colors().compass_bg_color);
 
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
-        cfg["hud"]["show_clock"]          = hud.config().show_clock;
-        cfg["hud"]["clock_24h"]           = hud.config().clock_24h;
-        cfg["hud"]["clock_show_date"]     = hud.config().clock_show_date;
-        cfg["hud"]["clock_show_seconds"]  = hud.config().clock_show_seconds;
-        cfg["hud"]["clock_font_scale"]    = hud.config().clock_font_scale;
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
+        cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
+
+        cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
+        cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;
+        cfg["clock"]["show_date"]       = state.clock_cfg.show_date;
+        cfg["clock"]["font_scale"]      = state.clock_cfg.font_scale;
+        cfg["clock"]["manual_offset_s"] = state.clock_cfg.manual_offset_s;
 
         auto& jpp = cfg["post_process"];
         jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;

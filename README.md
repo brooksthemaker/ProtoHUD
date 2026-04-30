@@ -924,6 +924,38 @@ Recalibrate any time the helmet's magnetic environment changes significantly (ne
 
 ---
 
+## Clock & RTC Battery
+
+The HUD clock arm reads the CM5 system clock via `std::time()` — no extra hardware is required. However, **the CM5 has no RTC battery by default**, which means:
+
+- On every cold boot without a network / NTP server, the clock resets to **1970-01-01 00:00:00**.
+- Once the system reaches NTP it syncs automatically, but in the field you may have no internet.
+
+**Fix: install a CR2032 coin cell** into the RTC battery connector on your carrier board:
+
+| Carrier board | Connector | Notes |
+|---------------|-----------|-------|
+| Official CM5 IO Board | J9 (2-pin, near USB-C) | Polarity marked on silkscreen |
+| Custom / third-party boards | Varies — check schematic | Typically a BAT+ / GND footprint |
+
+Verify the RTC is holding time after power-off:
+```bash
+timedatectl status          # look for "System clock synchronized: yes"
+hwclock --show              # reads directly from the hardware RTC
+```
+
+### In-HUD Clock Options (Menu → Settings → HUD → Clock)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| 24-Hour | on | Toggle 12 / 24-hour format |
+| Seconds | on | Show or hide the seconds field |
+| Show Date | off | Add a date row (e.g., `Wed 30 Apr`) below the time |
+| Font Size | 1.5× | Scale the clock text relative to the standard HUD mono font |
+| Time Offset → +1h / -1h / +1m / -1m / Reset | 0 | Shift displayed time without touching the system clock — useful for timezone differences in the field |
+
+---
+
 ## Configuration Reference
 
 Full `config/config.json` layout:

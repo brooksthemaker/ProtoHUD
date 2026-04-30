@@ -1,7 +1,9 @@
 #pragma once
 #include "serial_port.h"
 #include "../app_state.h"
+#include <atomic>
 #include <string>
+#include <thread>
 
 // Manages bidirectional communication with the Teensy 4.0 running Prototracer.
 // Reads status frames and updates AppState::face.
@@ -21,10 +23,13 @@ public:
     void set_brightness(uint8_t value);
     void set_palette(uint8_t palette_id);
     void request_status();
+    void release_control();
 
 private:
     void on_frame(uint8_t cmd, const uint8_t* payload, uint8_t len);
 
-    SerialPort port_;
-    AppState&  state_;
+    SerialPort           port_;
+    AppState&            state_;
+    std::thread          poll_thread_;
+    std::atomic<bool>    poll_running_ { false };
 };

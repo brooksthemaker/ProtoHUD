@@ -24,11 +24,12 @@ set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 
-info()    { echo -e "${CYAN}[info]${RESET}  $*"; }
-ok()      { echo -e "${GREEN}[ ok ]${RESET}  $*"; }
-warn()    { echo -e "${YELLOW}[warn]${RESET}  $*"; }
-fatal()   { echo -e "${RED}[FAIL]${RESET}  $*" >&2; exit 1; }
-section() { echo -e "\n${BOLD}══ $* ══${RESET}"; }
+info()         { echo -e "${CYAN}[info]${RESET}  $*"; }
+ok()           { echo -e "${GREEN}[ ok ]${RESET}  $*"; }
+warn()         { echo -e "${YELLOW}[warn]${RESET}  $*"; }
+fatal()        { echo -e "${RED}[FAIL]${RESET}  $*" >&2; exit 1; }
+section()      { echo -e "\n${BOLD}══ $* ══${RESET}"; }
+section_inline(){ echo -e "\n${BOLD}── $* ──${RESET}"; }
 
 # ── Locate project root (directory containing this script/../) ────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -137,10 +138,12 @@ fi
 # Trixie/Bookworm ship GLFW 3.4 in apt. Bullseye shipped 3.3 and sometimes put
 # the pkg-config file in a multiarch path CMake didn't search.
 # Strategy: try apt → verify pkg-config finds it → build from source if needed.
-section_inline() { echo -e "\n${BOLD}── $* ──${RESET}"; }
 section_inline "GLFW3"
 
-glfw3_ok() { pkg-config --exists glfw3 2>/dev/null; }
+glfw3_ok() {
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+    pkg-config --exists glfw3 2>/dev/null
+}
 
 if glfw3_ok; then
     ok "GLFW3 already found by pkg-config ($(pkg-config --modversion glfw3))"
@@ -163,6 +166,23 @@ else
     else
         warn "libglfw3-dev pkg-config not usable — building GLFW3 from source (~2 min)"
 
+        # Detect available display backends.
+        # Pi OS Bookworm 64-bit defaults to Wayland (Labwc/Wayfire); build both
+        # X11 and Wayland backends so the binary runs under either compositor.
+        _GLFW_X11=ON
+        _GLFW_WAYLAND=OFF
+
+        if pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
+            _GLFW_WAYLAND=ON
+            info "Wayland headers found — building GLFW with Wayland + X11 backends"
+        else
+            sudo apt-get install -y libwayland-dev libxkbcommon-dev wayland-protocols \
+                2>/dev/null \
+                && { _GLFW_WAYLAND=ON
+                     info "Wayland dev packages installed — building with Wayland + X11 backends"; } \
+                || info "Wayland dev packages unavailable — building X11 backend only"
+        fi
+
         sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev \
                                 libxcursor-dev libxi-dev libxext-dev
 
@@ -173,8 +193,8 @@ else
         cmake -S "${GLFW_TMP}" -B "${GLFW_TMP}/build" \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
-            -DGLFW_BUILD_X11=ON \
-            -DGLFW_BUILD_WAYLAND=OFF \
+            -DGLFW_BUILD_X11="${_GLFW_X11}" \
+            -DGLFW_BUILD_WAYLAND="${_GLFW_WAYLAND}" \
             -DGLFW_BUILD_EXAMPLES=OFF \
             -DGLFW_BUILD_TESTS=OFF \
             -DGLFW_BUILD_DOCS=OFF \
@@ -184,8 +204,11 @@ else
         sudo ldconfig
         rm -rf "${GLFW_TMP}"
 
+        # cmake's default install prefix is /usr/local; ensure pkg-config can find it.
+        export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
         if glfw3_ok; then
-            ok "GLFW3 built and installed ($(pkg-config --modversion glfw3))"
+            ok "GLFW3 built and installed ($(PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" pkg-config --modversion glfw3))"
         else
             fatal "GLFW3 installation failed — cannot continue"
         fi

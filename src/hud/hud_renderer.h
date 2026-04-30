@@ -59,12 +59,6 @@ struct HudConfig {
     float health_panel_opacity  = 0.71f;
     float pip_corner_clip_px    = 16.f;
     bool  indicator_bg_enabled  = true;   // parallelogram bg behind health indicators
-    // Clock widget
-    bool  show_clock         = true;
-    bool  clock_24h          = false;
-    bool  clock_show_date    = false;
-    bool  clock_show_seconds = false;
-    float clock_font_scale   = 1.0f;   // 0.5–2.0
     // Glow intensity multiplier (scales all glow alphas)
     float glow_intensity     = 1.0f;   // 0.0=no glow, 1.0=full
 };
@@ -120,12 +114,11 @@ private:
                             const CameraFocusState& focus_left,
                             const CameraFocusState& focus_right,
                             bool nv_enabled);
-    void draw_audio_strip  (ImDrawList* dl, const AudioState& a, ImVec2 origin, float w);
-    void draw_face_panel   (ImDrawList* dl, const FaceState& f,
-                            ImVec2 origin, float pw, float ph);
-    void draw_lora_panel   (ImDrawList* dl, const AppState& s,
-                            ImVec2 origin, float pw, float ph);
-    void draw_lora_messages(ImDrawList* dl, const AppState& s,
+    void draw_audio_strip    (ImDrawList* dl, const AudioState& a, ImVec2 origin, float w);
+    void draw_face_indicator (ImDrawList* dl, const FaceState& f, float fw, float fh);
+    void draw_lora_indicator (ImDrawList* dl, const AppState& s,  float fw, float fh);
+    void draw_clock_indicator(ImDrawList* dl, const AppState& s,  float fw, float fh);
+    void draw_lora_messages  (ImDrawList* dl, const AppState& s,
                             ImVec2 origin, float pw, float ph);
     void draw_compass_tape (ImDrawList* dl, const AppState& s,
                             ImVec2 origin, float tw, float th);

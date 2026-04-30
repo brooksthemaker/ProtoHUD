@@ -94,6 +94,20 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
     dl->AddText(pos, fill, text);
 }
 
+// Font-size-explicit overload for scaled text (e.g., clock arm).
+// Respects s_glow and uses caller-supplied palette colors.
+static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
+                           ImFont* font, float font_size,
+                           ImU32 glow_col, ImU32 fill_col) {
+    if (s_glow) {
+        const ImU32 glow = with_alpha(glow_col, 72);
+        constexpr int D[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+        for (auto& o : D)
+            dl->AddText(font, font_size, {pos.x + o[0], pos.y + o[1]}, glow, text);
+    }
+    dl->AddText(font, font_size, pos, fill_col, text);
+}
+
 // ── Construction ──────────────────────────────────────────────────────────────
 
 HudRenderer::HudRenderer(const HudConfig& cfg, const HudColors& colors)
@@ -179,30 +193,33 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     ImGui::SetCurrentContext(ctx_);
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
-    const float fw = static_cast<float>(w);
-    const float fh = static_cast<float>(h);
-    const float th = static_cast<float>(cfg_.top_bar_height);
-    const float ch = static_cast<float>(cfg_.compass_height);
-    const float pw = static_cast<float>(cfg_.panel_width);
-    const float mid_h = fh - th; // compass is center-third only; panels use full height
+    const float fw    = static_cast<float>(w);
+    const float fh    = static_cast<float>(h);
+    const float th    = static_cast<float>(cfg_.top_bar_height);
+    const float ch    = static_cast<float>(cfg_.compass_height);
+    const float mid_h = fh - th;
 
-    draw_top_bar     (dl, s, fw);
-    draw_face_panel  (dl, s.face,       { fw - pw, th },  pw, mid_h * 0.5f);
-    draw_lora_panel  (dl, s,            { fw - pw, th + mid_h * 0.5f }, pw, mid_h * 0.5f);
+    draw_top_bar(dl, s, fw);
 
     if (!s.lora_messages.empty()) {
+        float pw    = static_cast<float>(cfg_.panel_width);
         float msg_w = std::min(pw, fw / 3.f);
-        draw_lora_messages(dl, s,       { 0.f, th }, msg_w, mid_h);
+        draw_lora_messages(dl, s, { 0.f, th }, msg_w, mid_h);
     }
 
     const float cw       = fw / 3.f;
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
-    // Compass (bg + ticks) drawn first so health indicators render on top of it.
-    draw_compass_tape(dl, s, {fw / 2.f - cw / 2.f, fh - ch - c_margin}, cw, ch);
+    // Compass drawn first; indicator arms and health sides render on top.
+    draw_compass_tape    (dl, s, {fw / 2.f - cw / 2.f, fh - ch - c_margin}, cw, ch);
+    // Health sides drawn first so their background sits behind arm content.
     draw_health_side(dl, s.health, fw, fh, false,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
     draw_health_side(dl, s.health, fw, fh, true,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
+    // Arm indicators drawn on top of the health-side background.
+    draw_face_indicator  (dl, s.face, fw, fh);
+    draw_lora_indicator  (dl, s,      fw, fh);
+    draw_clock_indicator (dl, s,      fw, fh);
 
     // Alarm overlay: pulsing red border when alarm has triggered
     if (s.timer_alarm.alarm_triggered) {
@@ -432,31 +449,29 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
 
     dl->AddRectFilled({0, 0}, {w, th}, col_.background);
 
-    // Clock (centered in top bar)
-    if (cfg_.show_clock) {
-        ImGui::PushFont(nullptr);  // use current scaled font
+    // Clock (centered in top bar) — uses AppState::ClockConfig
+    {
+        ImGui::PushFont(nullptr);
         float saved_scale = ImGui::GetIO().FontGlobalScale;
-        ImGui::GetIO().FontGlobalScale = saved_scale * cfg_.clock_font_scale;
+        const float cscale = std::max(0.5f, s.clock_cfg.font_scale) * 0.8f; // slightly smaller for top bar
+        ImGui::GetIO().FontGlobalScale = saved_scale * cscale;
 
-        std::string time_str = fmt_clock(cfg_.clock_24h, cfg_.clock_show_seconds);
+        std::string time_str = fmt_clock(s.clock_cfg.use_24h, s.clock_cfg.show_seconds);
         ImVec2 tsz = ImGui::CalcTextSize(time_str.c_str());
         float cx = w * 0.5f - tsz.x * 0.5f;
-        float cy = th * 0.5f - tsz.y * 0.5f - (cfg_.clock_show_date ? tsz.y * 0.5f : 0.f);
+        float cy = th * 0.5f - tsz.y * 0.5f - (s.clock_cfg.show_date ? tsz.y * 0.5f : 0.f);
         hud_glow_text(dl, {cx, cy}, time_str.c_str(), true, col_.glow_base, col_.text_fill);
 
         // Second line: countdown timer or date
         if (s.timer_alarm.timer_active) {
             std::string cd = fmt_countdown(s.timer_alarm.timer_end);
+            ImGui::GetIO().FontGlobalScale = saved_scale * cscale * 0.75f;
             ImVec2 csz = ImGui::CalcTextSize(cd.c_str());
-            float scale = 0.75f;
-            ImGui::GetIO().FontGlobalScale = saved_scale * cfg_.clock_font_scale * scale;
-            csz = ImGui::CalcTextSize(cd.c_str());
             hud_glow_text(dl, {w * 0.5f - csz.x * 0.5f, cy + tsz.y + 1.f},
                           cd.c_str(), true, col_.warn, col_.warn);
-        } else if (cfg_.clock_show_date) {
+        } else if (s.clock_cfg.show_date) {
             std::string date_str = fmt_date();
-            float scale = 0.75f;
-            ImGui::GetIO().FontGlobalScale = saved_scale * cfg_.clock_font_scale * scale;
+            ImGui::GetIO().FontGlobalScale = saved_scale * cscale * 0.75f;
             ImVec2 dsz = ImGui::CalcTextSize(date_str.c_str());
             hud_glow_text(dl, {w * 0.5f - dsz.x * 0.5f, cy + tsz.y + 1.f},
                           date_str.c_str(), false, col_.glow_base, col_.text_fill);
@@ -466,12 +481,11 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
         ImGui::PopFont();
     }
 
-    // Unread messages badge (shifted left of center when clock is shown)
+    // Unread messages badge (left-of-center to avoid clock overlap)
     int unread = s.unread_message_count();
     if (unread > 0) {
         char buf[32]; snprintf(buf, sizeof(buf), "MSG:%d", unread);
-        float bx = cfg_.show_clock ? w * 0.25f : w * 0.5f + 10.f;
-        dl->AddText({bx, 10.f}, col_.warn, buf);
+        dl->AddText({w * 0.25f, 10.f}, col_.warn, buf);
     }
 
     // Audio strip (right side)
@@ -520,16 +534,18 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const Ind* items   = right_side ? right_items : left_items;
     const int  n_items = 4;
 
-    constexpr float ROW_H  = 18.f;
-    constexpr float DOT_R  = 4.f;
-    constexpr float ANGLE  = 130.f * 3.14159265f / 180.f;
-    constexpr float H_LEN  = 300.f;
+    constexpr float ROW_H   = 18.f;
+    constexpr float DOT_R   = 4.f;
+    constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
+    constexpr float H_LEN   = 150.f;  // health horiz line (SEG_W * 2; SEG_W=75)
+    constexpr float BG_FULL = 440.f;  // H_LEN + ARM_EXT*2 + SEG_W*2; covers health + LoRa + clock
 
     const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
     const float dir_y    = -std::sin(ANGLE);
     const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
 
     // Parallelogram background — 16 strips fading from opaque (inner) to transparent (outer).
+    // Extends BG_FULL px outward to cover both health indicators and the adjacent arm area.
     if (cfg_.indicator_bg_enabled) {
         const uint8_t bg_a       = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
         const float   outer_sign = right_side ? 1.f : -1.f;
@@ -542,10 +558,10 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
                                  : (t0 - FADE_START) / (1.f - FADE_START);
             const uint8_t a0 = static_cast<uint8_t>(bg_a * (1.f - fade_t));
             ImVec2 strip[4] = {
-                {anchor_x + outer_sign * t0 * H_LEN,                    anchor_y},
-                {anchor_x + outer_sign * t0 * H_LEN + dir_x * diag_len, anchor_y + dir_y * diag_len},
-                {anchor_x + outer_sign * t1 * H_LEN + dir_x * diag_len, anchor_y + dir_y * diag_len},
-                {anchor_x + outer_sign * t1 * H_LEN,                    anchor_y},
+                {anchor_x + outer_sign * t0 * BG_FULL,                    anchor_y},
+                {anchor_x + outer_sign * t0 * BG_FULL + dir_x * diag_len, anchor_y + dir_y * diag_len},
+                {anchor_x + outer_sign * t1 * BG_FULL + dir_x * diag_len, anchor_y + dir_y * diag_len},
+                {anchor_x + outer_sign * t1 * BG_FULL,                    anchor_y},
             };
             dl->AddConvexPolyFilled(strip, 4, with_alpha(col_.compass_bg_color, a0));
         }
@@ -623,96 +639,257 @@ void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
     dl->AddRectFilled({origin.x, bar_y}, {origin.x + load_w, bar_y + 6.f}, load_col);
 }
 
-// ── Face panel ────────────────────────────────────────────────────────────────
+// ── Face indicator arm (left side) ───────────────────────────────────────────
+// Two parallel diagonal arms at 130°: [proto arm]  [health indicators]
+// The health indicator diagonal itself is the visual divider between sections.
+// SEG_W=75 puts proto at anchor_x-150 (= end of health side's 150px horiz line).
 
-void HudRenderer::draw_face_panel(ImDrawList* dl, const FaceState& f,
-                                   ImVec2 origin, float pw, float ph) {
-    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.orange);
-    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y},
-                IM_COL32(255, 160, 32, 60));
+void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
+                                       float fw, float fh) {
+    constexpr float ROW_H   = 18.f;
+    constexpr float DOT_R   = 4.f;
+    constexpr float SEG_W   = 75.f;
+    constexpr float ARM_EXT = 140.f;
+    constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
+    constexpr int   N_ITEMS = 6;
 
-    if (font_ui_) ImGui::PushFont(font_ui_);
-    hud_glow_text(dl, {origin.x + 4.f, origin.y + 6.f}, "FACE");
+    const float tape_w        = fw / 3.f;
+    const float tape_x        = fw / 2.f - tape_w / 2.f;
+    const float fade_w        = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin      = static_cast<float>(cfg_.compass_bottom_margin);
+    const float anchor_y      = fh - c_margin;
+    const float ind_anchor_x  = tape_x - fade_w;
+    const float proto_anchor_x = ind_anchor_x - SEG_W * 2.f;
 
-    float py = origin.y + 28.f;
-    const float lh = 22.f;
+    const float dir_x    = std::cos(ANGLE) * -1.f;   // left side: goes right
+    const float dir_y    = -std::sin(ANGLE);           // goes up
+    const float diag_len = static_cast<float>(N_ITEMS + 1) * ROW_H;
 
-    if (f.connected)
-        hud_glow_text(dl, {origin.x + 4.f, py}, "Connected");
+    const ImU32 COL_MAJ  = col_.glow_base;
+    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
+    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+
+    // Proto arm: short horizontal extension leftward
+    const float h_ext_x = proto_anchor_x - ARM_EXT;
+    dl->AddLine({proto_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW2, 5.f);
+    dl->AddLine({proto_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW1, 2.5f);
+    dl->AddLine({proto_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_MAJ,  1.f);
+
+    // Proto arm diagonal
+    const ImVec2 proto_end = {proto_anchor_x + dir_x * diag_len,
+                               anchor_y       + dir_y * diag_len};
+    dl->AddLine({proto_anchor_x, anchor_y}, proto_end, COL_GLW2, 5.f);
+    dl->AddLine({proto_anchor_x, anchor_y}, proto_end, COL_GLW1, 2.5f);
+    dl->AddLine({proto_anchor_x, anchor_y}, proto_end, COL_MAJ,  1.f);
+
+    // Build items
+    char effect_lbl[24], mode_lbl[24], rgb_lbl[24], brt_lbl[24];
+    snprintf(effect_lbl, sizeof(effect_lbl), "%s", effect_name(f.effect_id));
+    if (f.playing_gif)
+        snprintf(mode_lbl, sizeof(mode_lbl), "GIF #%d", f.gif_id);
     else
-        dl->AddText({origin.x + 4.f, py}, col_.danger, "Offline");
-    py += lh;
+        snprintf(mode_lbl, sizeof(mode_lbl), "Pal #%d", f.palette_id);
+    snprintf(rgb_lbl, sizeof(rgb_lbl), "R%d G%d B%d", f.r, f.g, f.b);
+    snprintf(brt_lbl, sizeof(brt_lbl), "Brt %d%%", (f.brightness * 100) / 255);
+    const char* ctrl_lbl = f.hud_control ? "HUD" : "AUTO";
 
-    char buf[64];
-    snprintf(buf, sizeof(buf), "Effect: %s", effect_name(f.effect_id));
-    hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
-    py += lh;
+    struct Ind { const char* label; bool ok; };
+    const Ind items[N_ITEMS] = {
+        {"FACE",      f.connected},
+        {effect_lbl,  f.connected},
+        {mode_lbl,    f.connected},
+        {rgb_lbl,     f.connected},
+        {brt_lbl,     f.connected},
+        {ctrl_lbl,    f.connected},
+    };
 
-    if (f.playing_gif) {
-        snprintf(buf, sizeof(buf), "GIF: #%d", f.gif_id);
-    } else {
-        snprintf(buf, sizeof(buf), "Palette: #%d", f.palette_id);
+    if (font_mono_) ImGui::PushFont(font_mono_);
+    for (int i = 0; i < N_ITEMS; ++i) {
+        const float t  = static_cast<float>(i + 1) * ROW_H;
+        const float ix = proto_anchor_x + dir_x * t;
+        const float iy = anchor_y       + dir_y * t;
+
+        if (items[i].ok) {
+            dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, with_alpha(col_.ind_good, 28));
+            dl->AddCircleFilled({ix, iy}, DOT_R,        col_.ind_good);
+        } else {
+            dl->AddCircleFilled({ix, iy}, DOT_R, col_.ind_fail);
+        }
+
+        const char* lbl = items[i].label;
+        float lbl_w = ImGui::CalcTextSize(lbl).x;
+        hud_glow_text(dl, {ix - DOT_R - 6.f - lbl_w, iy - 7.f}, lbl, items[i].ok,
+                      col_.text_fill, col_.text_fill);
     }
-    hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
-    py += lh;
-
-    // Color swatch
-    ImU32 swatch = IM_COL32(f.r, f.g, f.b, 255);
-    dl->AddRectFilled({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f}, swatch);
-    dl->AddRect      ({origin.x + 4.f, py}, {origin.x + 28.f, py + 16.f},
-                      IM_COL32(255, 160, 32, 120));
-    snprintf(buf, sizeof(buf), " R%d G%d B%d", f.r, f.g, f.b);
-    hud_glow_text(dl, {origin.x + 30.f, py + 1.f}, buf, false);
-    py += lh;
-
-    snprintf(buf, sizeof(buf), "Brt: %d%%", (f.brightness * 100) / 255);
-    hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
-    if (font_ui_) ImGui::PopFont();
+    if (font_mono_) ImGui::PopFont();
 }
 
-// ── LoRa nodes panel ──────────────────────────────────────────────────────────
+// ── LoRa indicator arm (right side) ──────────────────────────────────────────
+// Two parallel diagonal arms at 130°: [health indicators]  [lora arm]
+// The health indicator diagonal itself is the visual divider between sections.
+// SEG_W=75 puts lora at anchor_x+150 (= end of health side's 150px horiz line).
 
-void HudRenderer::draw_lora_panel(ImDrawList* dl, const AppState& s,
-                                   ImVec2 origin, float pw, float ph) {
-    dl->AddLine({origin.x, origin.y}, {origin.x, origin.y + ph}, col_.orange);
-    dl->AddLine({origin.x, origin.y}, {origin.x + pw, origin.y},
-                IM_COL32(255, 160, 32, 60));
+void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
+                                       float fw, float fh) {
+    constexpr float ROW_H    = 18.f;
+    constexpr float DOT_R    = 4.f;
+    constexpr float SEG_W    = 75.f;
+    constexpr float ARM_EXT  = 140.f;
+    constexpr float ANGLE    = 130.f * 3.14159265f / 180.f;
+    constexpr int   MAX_ROWS = 4;   // 1 header + up to 3 nodes
 
-    if (font_ui_) ImGui::PushFont(font_ui_);
-    hud_glow_text(dl, {origin.x + 4.f, origin.y + 6.f}, "LORA NODES");
+    const float tape_w       = fw / 3.f;
+    const float tape_x       = fw / 2.f - tape_w / 2.f;
+    const float fade_w       = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin     = static_cast<float>(cfg_.compass_bottom_margin);
+    const float anchor_y     = fh - c_margin;
+    const float ind_anchor_x = tape_x + tape_w + fade_w;
+    const float lora_anchor_x = ind_anchor_x + SEG_W * 2.f;
 
-    float py = origin.y + 28.f;
+    const float dir_x    = std::cos(ANGLE) * 1.f;   // right side: goes left
+    const float dir_y    = -std::sin(ANGLE);          // goes up
+    const float diag_len = static_cast<float>(MAX_ROWS + 1) * ROW_H;
+
+    const ImU32 COL_MAJ  = col_.glow_base;
+    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
+    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+
+    // LoRa arm: short horizontal extension rightward
+    const float h_ext_x = lora_anchor_x + ARM_EXT;
+    dl->AddLine({lora_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW2, 5.f);
+    dl->AddLine({lora_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW1, 2.5f);
+    dl->AddLine({lora_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_MAJ,  1.f);
+
+    // LoRa arm diagonal
+    const ImVec2 lora_end = {lora_anchor_x + dir_x * diag_len,
+                              anchor_y      + dir_y * diag_len};
+    dl->AddLine({lora_anchor_x, anchor_y}, lora_end, COL_GLW2, 5.f);
+    dl->AddLine({lora_anchor_x, anchor_y}, lora_end, COL_GLW1, 2.5f);
+    dl->AddLine({lora_anchor_x, anchor_y}, lora_end, COL_MAJ,  1.f);
+
+    // Build items: header row + one row per tracked node (capped at MAX_ROWS-1)
+    struct Ind { char label[32]; bool ok; };
+    Ind items[MAX_ROWS] = {};
+    int n_items = 0;
+
+    snprintf(items[n_items].label, sizeof(items[n_items].label), "LORA");
+    items[n_items].ok = s.health.lora_ok;
+    n_items++;
+
     time_t now = std::time(nullptr);
-
     for (const auto& node : s.lora_nodes) {
-        if (py + 44.f > origin.y + ph) break;
+        if (n_items >= MAX_ROWS) break;
         double age = difftime(now, node.last_seen);
-        bool fresh = (age < 30.0);
-
-        char buf[96];
-        if (!node.name.empty()) {
-            snprintf(buf, sizeof(buf), "%-10s %03.0f\xc2\xb0 %.1fkm",
-                     node.name.substr(0, 10).c_str(),
-                     node.heading_deg, node.distance_m / 1000.f);
-        } else {
-            snprintf(buf, sizeof(buf), "ID:%08X  %03.0f\xc2\xb0 %.1fkm",
-                     node.node_id, node.heading_deg, node.distance_m / 1000.f);
-        }
-        hud_glow_text(dl, {origin.x + 4.f, py}, buf, fresh);
-        if (!fresh && age < 120.0)  // stale but not lost: warn tint
-            dl->AddText({origin.x + 4.f, py}, col_.warn, buf);
-        py += 18.f;
-
-        snprintf(buf, sizeof(buf), "  RSSI:%d SNR:%d %ds",
-                 node.rssi, node.snr,
-                 node.last_seen > 0 ? static_cast<int>(age) : -1);
-        hud_glow_text(dl, {origin.x + 4.f, py}, buf, false);
-        py += 22.f;
+        const char* nm = node.name.empty() ? "???" : node.name.c_str();
+        snprintf(items[n_items].label, sizeof(items[n_items].label),
+                 "%-6.6s %03.0f\xc2\xb0 %.1fk",
+                 nm, node.heading_deg, node.distance_m / 1000.f);
+        items[n_items].ok = (node.last_seen > 0 && age < 120.0);
+        n_items++;
     }
 
-    if (s.lora_nodes.empty())
-        hud_glow_text(dl, {origin.x + 4.f, py}, "No nodes tracked", false);
-    if (font_ui_) ImGui::PopFont();
+    if (font_mono_) ImGui::PushFont(font_mono_);
+    for (int i = 0; i < n_items; ++i) {
+        const float t  = static_cast<float>(i + 1) * ROW_H;
+        const float ix = lora_anchor_x + dir_x * t;
+        const float iy = anchor_y      + dir_y * t;
+
+        if (items[i].ok) {
+            dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, with_alpha(col_.ind_good, 28));
+            dl->AddCircleFilled({ix, iy}, DOT_R,        col_.ind_good);
+        } else {
+            dl->AddCircleFilled({ix, iy}, DOT_R, col_.ind_fail);
+        }
+
+        hud_glow_text(dl, {ix + DOT_R + 6.f, iy - 7.f}, items[i].label, items[i].ok,
+                      col_.text_fill, col_.text_fill);
+    }
+    if (font_mono_) ImGui::PopFont();
+}
+
+// ── Clock arm (right side, outboard of LoRa arm) ─────────────────────────────
+// Parallel diagonal arm at 130°. No dots — time and date rendered at font_scale.
+// clock_anchor_x = lora_anchor_x + SEG_W*2 (another 150px right of LoRa anchor).
+
+void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
+                                        float fw, float fh) {
+    constexpr float ROW_H   = 18.f;
+    constexpr float DOT_R   = 4.f;   // x-offset reference kept consistent with other arms
+    constexpr float SEG_W   = 75.f;
+    constexpr float ARM_EXT = 140.f;
+    constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
+
+    const float tape_w         = fw / 3.f;
+    const float tape_x         = fw / 2.f - tape_w / 2.f;
+    const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin       = static_cast<float>(cfg_.compass_bottom_margin);
+    const float anchor_y       = fh - c_margin;
+    const float ind_anchor_x   = tape_x + tape_w + fade_w;
+    const float lora_anchor_x  = ind_anchor_x   + SEG_W * 2.f;
+    const float clock_anchor_x = lora_anchor_x  + SEG_W * 2.f;
+
+    const float dir_x = std::cos(ANGLE);
+    const float dir_y = -std::sin(ANGLE);
+
+    const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
+    const float eff_row_h = ROW_H * scale;
+    const int   n_rows    = s.clock_cfg.show_date ? 2 : 1;
+    const float diag_len  = static_cast<float>(n_rows + 1) * eff_row_h;
+
+    const ImU32 COL_MAJ  = col_.glow_base;
+    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
+    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+
+    // Horizontal extension rightward
+    const float h_ext_x = clock_anchor_x + ARM_EXT;
+    dl->AddLine({clock_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW2, 5.f);
+    dl->AddLine({clock_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW1, 2.5f);
+    dl->AddLine({clock_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_MAJ,  1.f);
+
+    // Diagonal
+    const ImVec2 clk_end = {clock_anchor_x + dir_x * diag_len,
+                              anchor_y      + dir_y * diag_len};
+    dl->AddLine({clock_anchor_x, anchor_y}, clk_end, COL_GLW2, 5.f);
+    dl->AddLine({clock_anchor_x, anchor_y}, clk_end, COL_GLW1, 2.5f);
+    dl->AddLine({clock_anchor_x, anchor_y}, clk_end, COL_MAJ,  1.f);
+
+    // Build time / date strings
+    time_t now = std::time(nullptr) + static_cast<time_t>(s.clock_cfg.manual_offset_s);
+    struct tm tm_buf = {};
+    localtime_r(&now, &tm_buf);
+
+    char time_str[24], date_str[24];
+    if (s.clock_cfg.use_24h) {
+        if (s.clock_cfg.show_seconds)
+            snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
+                     tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+        else
+            snprintf(time_str, sizeof(time_str), "%02d:%02d",
+                     tm_buf.tm_hour, tm_buf.tm_min);
+    } else {
+        int h12 = tm_buf.tm_hour % 12;
+        if (h12 == 0) h12 = 12;
+        snprintf(time_str, sizeof(time_str), "%d:%02d %s",
+                 h12, tm_buf.tm_min, tm_buf.tm_hour < 12 ? "AM" : "PM");
+    }
+
+    static const char* dow[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char* mon[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                  "Jul","Aug","Sep","Oct","Nov","Dec"};
+    snprintf(date_str, sizeof(date_str), "%s %d %s",
+             dow[tm_buf.tm_wday], tm_buf.tm_mday, mon[tm_buf.tm_mon]);
+
+    // Render rows using explicit font size — respects global glow flag + palette
+    const float font_size = font_mono_ ? font_mono_->FontSize * scale
+                                       : ImGui::GetFontSize() * scale;
+    const char* rows[2] = { time_str, date_str };
+    for (int i = 0; i < n_rows; ++i) {
+        const float t  = static_cast<float>(i + 1) * eff_row_h;
+        const float ix = clock_anchor_x + dir_x * t;
+        const float iy = anchor_y       + dir_y * t;
+        hud_glow_text(dl, {ix + DOT_R + 6.f, iy - font_size * 0.5f}, rows[i],
+                      font_mono_, font_size, col_.glow_base, col_.text_fill);
+    }
 }
 
 // ── LoRa messages panel ───────────────────────────────────────────────────────
