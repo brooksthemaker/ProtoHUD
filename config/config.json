@@ -160,5 +160,12 @@
     "hud_warn":       [255, 180, 0,  255],
     "hud_danger":     [255, 60,  60, 255],
     "hud_background": [10,  15,  20, 180]
+  },
+  "clock": {
+    "use_24h":         true,
+    "show_seconds":    true,
+    "show_date":       false,
+    "font_scale":      1.5,
+    "manual_offset_s": 0
   }
 }

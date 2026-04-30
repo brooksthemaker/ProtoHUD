@@ -67,6 +67,20 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
     dl->AddText(pos, fill, text);
 }
 
+// Font-size-explicit overload for scaled text (e.g., clock arm).
+// Respects s_glow and uses caller-supplied palette colors.
+static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
+                           ImFont* font, float font_size,
+                           ImU32 glow_col, ImU32 fill_col) {
+    if (s_glow) {
+        const ImU32 glow = with_alpha(glow_col, 72);
+        constexpr int D[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
+        for (auto& o : D)
+            dl->AddText(font, font_size, {pos.x + o[0], pos.y + o[1]}, glow, text);
+    }
+    dl->AddText(font, font_size, pos, fill_col, text);
+}
+
 // ── Construction ──────────────────────────────────────────────────────────────
 
 HudRenderer::HudRenderer(const HudConfig& cfg, const HudColors& colors)
@@ -177,6 +191,7 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     // Arm indicators drawn on top of the health-side background.
     draw_face_indicator  (dl, s.face, fw, fh);
     draw_lora_indicator  (dl, s,      fw, fh);
+    draw_clock_indicator (dl, s,      fw, fh);
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -452,7 +467,7 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     constexpr float DOT_R   = 4.f;
     constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
     constexpr float H_LEN   = 150.f;  // health horiz line (SEG_W * 2; SEG_W=75)
-    constexpr float BG_FULL = 290.f;  // H_LEN + ARM_EXT; covers FACE/LoRa arm area too
+    constexpr float BG_FULL = 440.f;  // H_LEN + ARM_EXT*2 + SEG_W*2; covers health + LoRa + clock
 
     const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
     const float dir_y    = -std::sin(ANGLE);
@@ -717,6 +732,91 @@ void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
                       col_.text_fill, col_.text_fill);
     }
     if (font_mono_) ImGui::PopFont();
+}
+
+// ── Clock arm (right side, outboard of LoRa arm) ─────────────────────────────
+// Parallel diagonal arm at 130°. No dots — time and date rendered at font_scale.
+// clock_anchor_x = lora_anchor_x + SEG_W*2 (another 150px right of LoRa anchor).
+
+void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
+                                        float fw, float fh) {
+    constexpr float ROW_H   = 18.f;
+    constexpr float DOT_R   = 4.f;   // x-offset reference kept consistent with other arms
+    constexpr float SEG_W   = 75.f;
+    constexpr float ARM_EXT = 140.f;
+    constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
+
+    const float tape_w         = fw / 3.f;
+    const float tape_x         = fw / 2.f - tape_w / 2.f;
+    const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin       = static_cast<float>(cfg_.compass_bottom_margin);
+    const float anchor_y       = fh - c_margin;
+    const float ind_anchor_x   = tape_x + tape_w + fade_w;
+    const float lora_anchor_x  = ind_anchor_x   + SEG_W * 2.f;
+    const float clock_anchor_x = lora_anchor_x  + SEG_W * 2.f;
+
+    const float dir_x = std::cos(ANGLE);
+    const float dir_y = -std::sin(ANGLE);
+
+    const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
+    const float eff_row_h = ROW_H * scale;
+    const int   n_rows    = s.clock_cfg.show_date ? 2 : 1;
+    const float diag_len  = static_cast<float>(n_rows + 1) * eff_row_h;
+
+    const ImU32 COL_MAJ  = col_.glow_base;
+    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
+    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+
+    // Horizontal extension rightward
+    const float h_ext_x = clock_anchor_x + ARM_EXT;
+    dl->AddLine({clock_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW2, 5.f);
+    dl->AddLine({clock_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW1, 2.5f);
+    dl->AddLine({clock_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_MAJ,  1.f);
+
+    // Diagonal
+    const ImVec2 clk_end = {clock_anchor_x + dir_x * diag_len,
+                              anchor_y      + dir_y * diag_len};
+    dl->AddLine({clock_anchor_x, anchor_y}, clk_end, COL_GLW2, 5.f);
+    dl->AddLine({clock_anchor_x, anchor_y}, clk_end, COL_GLW1, 2.5f);
+    dl->AddLine({clock_anchor_x, anchor_y}, clk_end, COL_MAJ,  1.f);
+
+    // Build time / date strings
+    time_t now = std::time(nullptr) + static_cast<time_t>(s.clock_cfg.manual_offset_s);
+    struct tm tm_buf = {};
+    localtime_r(&now, &tm_buf);
+
+    char time_str[24], date_str[24];
+    if (s.clock_cfg.use_24h) {
+        if (s.clock_cfg.show_seconds)
+            snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
+                     tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+        else
+            snprintf(time_str, sizeof(time_str), "%02d:%02d",
+                     tm_buf.tm_hour, tm_buf.tm_min);
+    } else {
+        int h12 = tm_buf.tm_hour % 12;
+        if (h12 == 0) h12 = 12;
+        snprintf(time_str, sizeof(time_str), "%d:%02d %s",
+                 h12, tm_buf.tm_min, tm_buf.tm_hour < 12 ? "AM" : "PM");
+    }
+
+    static const char* dow[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char* mon[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                  "Jul","Aug","Sep","Oct","Nov","Dec"};
+    snprintf(date_str, sizeof(date_str), "%s %d %s",
+             dow[tm_buf.tm_wday], tm_buf.tm_mday, mon[tm_buf.tm_mon]);
+
+    // Render rows using explicit font size — respects global glow flag + palette
+    const float font_size = font_mono_ ? font_mono_->FontSize * scale
+                                       : ImGui::GetFontSize() * scale;
+    const char* rows[2] = { time_str, date_str };
+    for (int i = 0; i < n_rows; ++i) {
+        const float t  = static_cast<float>(i + 1) * eff_row_h;
+        const float ix = clock_anchor_x + dir_x * t;
+        const float iy = anchor_y       + dir_y * t;
+        hud_glow_text(dl, {ix + DOT_R + 6.f, iy - font_size * 0.5f}, rows[i],
+                      font_mono_, font_size, col_.glow_base, col_.text_fill);
+    }
 }
 
 // ── LoRa messages panel ───────────────────────────────────────────────────────

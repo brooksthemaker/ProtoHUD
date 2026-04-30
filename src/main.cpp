@@ -694,6 +694,29 @@ static std::vector<MenuItem> build_menu(
             [menu_sys_pp](bool v){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(v); }),
     };
 
+    std::vector<MenuItem> clock_offset_menu = {
+        leaf("+1 hour",   [&state]{ state.clock_cfg.manual_offset_s += 3600; }),
+        leaf("-1 hour",   [&state]{ state.clock_cfg.manual_offset_s -= 3600; }),
+        leaf("+1 minute", [&state]{ state.clock_cfg.manual_offset_s +=   60; }),
+        leaf("-1 minute", [&state]{ state.clock_cfg.manual_offset_s -=   60; }),
+        leaf("Reset",     [&state]{ state.clock_cfg.manual_offset_s  =    0; }),
+    };
+    std::vector<MenuItem> clock_menu = {
+        toggle("24-Hour",
+            [&state]{ return state.clock_cfg.use_24h; },
+            [&state](bool v){ state.clock_cfg.use_24h = v; }),
+        toggle("Seconds",
+            [&state]{ return state.clock_cfg.show_seconds; },
+            [&state](bool v){ state.clock_cfg.show_seconds = v; }),
+        toggle("Show Date",
+            [&state]{ return state.clock_cfg.show_date; },
+            [&state](bool v){ state.clock_cfg.show_date = v; }),
+        slider("Font Size", 1.f, 3.f, 0.25f, "x",
+            [&state]{ return state.clock_cfg.font_scale; },
+            [&state](float v){ state.clock_cfg.font_scale = v; }),
+        submenu("Time Offset", std::move(clock_offset_menu)),
+    };
+
     std::vector<MenuItem> hud_menu = {
         toggle("Show Backgrounds",
             [hud_cfg, &state]{ return hud_cfg->indicator_bg_enabled && state.compass_bg_enabled; },
@@ -705,6 +728,7 @@ static std::vector<MenuItem> build_menu(
         submenu("Text Options",      std::move(text_options_menu)),
         submenu("Indicator Options", std::move(indicator_options_menu)),
         submenu("Compass",           std::move(compass_menu)),
+        submenu("Clock",             std::move(clock_menu)),
         submenu("Menu Options",      std::move(menu_options_menu)),
     };
 
@@ -1005,6 +1029,15 @@ int main(int argc, char* argv[]) {
         auto& jnv = cfg["night_vision"];
         state.night_vision.exposure_ev = jnv.value("exposure_ev",  0.0f);
         state.night_vision.shutter_us  = jnv.value("shutter_us",  33333);
+    }
+
+    if (cfg.contains("clock")) {
+        auto& jck = cfg["clock"];
+        state.clock_cfg.use_24h         = jck.value("use_24h",         true);
+        state.clock_cfg.show_seconds    = jck.value("show_seconds",     true);
+        state.clock_cfg.show_date       = jck.value("show_date",        false);
+        state.clock_cfg.font_scale      = jck.value("font_scale",       1.5f);
+        state.clock_cfg.manual_offset_s = jck.value("manual_offset_s",  0);
     }
 
     if (cfg.contains("post_process")) {
@@ -1392,6 +1425,7 @@ int main(int argc, char* argv[]) {
             snap.focus_left         = state.focus_left;
             snap.focus_right        = state.focus_right;
             snap.night_vision       = state.night_vision;
+            snap.clock_cfg          = state.clock_cfg;
             snap.pp_cfg             = state.pp_cfg;
         }
 
@@ -1547,6 +1581,12 @@ int main(int argc, char* argv[]) {
 
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
         cfg["hud"]["compass_bg"]           = state.compass_bg_enabled;
+
+        cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
+        cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;
+        cfg["clock"]["show_date"]       = state.clock_cfg.show_date;
+        cfg["clock"]["font_scale"]      = state.clock_cfg.font_scale;
+        cfg["clock"]["manual_offset_s"] = state.clock_cfg.manual_offset_s;
 
         auto& jpp = cfg["post_process"];
         jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
