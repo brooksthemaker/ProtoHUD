@@ -796,6 +796,16 @@ static std::vector<MenuItem> build_menu(
         leaf("Orange", [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 140,   0, 255); }),
     };
 
+    // EMA update rate: how fast the reference frame tracks the scene.
+    // Lower = reference lags further behind = outline lingers longer after motion stops.
+    std::vector<MenuItem> motion_trail_menu = {
+        leaf("Instant (1 frame)",  [&state]{ state.pp_cfg.motion_update_rate = 1.00f; }),
+        leaf("Short  (~3 frames)", [&state]{ state.pp_cfg.motion_update_rate = 0.50f; }),
+        leaf("Medium (~8 frames)", [&state]{ state.pp_cfg.motion_update_rate = 0.20f; }),
+        leaf("Long   (~15 frames)",[&state]{ state.pp_cfg.motion_update_rate = 0.08f; }),
+        leaf("Extended (~30fr)",   [&state]{ state.pp_cfg.motion_update_rate = 0.03f; }),
+    };
+
     std::vector<MenuItem> vision_menu = {
         toggle("Edge Highlight",
             [&state]{ return state.pp_cfg.edge_enabled; },
@@ -811,6 +821,7 @@ static std::vector<MenuItem> build_menu(
         submenu("Motion Mode",        std::move(motion_mode_menu)),
         submenu("Motion Sensitivity", std::move(motion_sensitivity_menu)),
         submenu("Motion Spread",      std::move(motion_spread_menu)),
+        submenu("Motion Trail",       std::move(motion_trail_menu)),
         submenu("Motion Color",       std::move(motion_color_menu)),
         toggle("Bg Desaturate",
             [&state]{ return state.pp_cfg.desat_enabled; },
@@ -1064,7 +1075,8 @@ int main(int argc, char* argv[]) {
         state.pp_cfg.motion_strength = jpp.value("motion_strength", 0.9f);
         state.pp_cfg.motion_thresh   = jpp.value("motion_thresh",   0.04f);
         state.pp_cfg.motion_radius   = jpp.value("motion_radius",   3.0f);
-        state.pp_cfg.motion_line     = jpp.value("motion_line",     1.0f);
+        state.pp_cfg.motion_line        = jpp.value("motion_line",        1.0f);
+        state.pp_cfg.motion_update_rate = jpp.value("motion_update_rate", 0.5f);
         if (jpp.contains("motion_color") && jpp["motion_color"].is_array() &&
             jpp["motion_color"].size() >= 3) {
             auto& jc = jpp["motion_color"];
@@ -1143,7 +1155,10 @@ int main(int argc, char* argv[]) {
 
     PostProcessor post_proc;
     gl::Fbo pp_fbo_left, pp_fbo_right;
-    gl::Fbo pp_prev_left, pp_prev_right;
+    // Ping-pong pairs for motion EMA reference frames (GLES 2.0 can't read+write same FBO)
+    gl::Fbo pp_prev_left[2], pp_prev_right[2];
+    bool    pp_ping_left  = false;   // index of the current READ buffer (0 or 1)
+    bool    pp_ping_right = false;
     const bool pp_ok = post_proc.init(
         xr.eye_width(), xr.eye_height(),
         res("assets/shaders/postprocess.vs").c_str(),
@@ -1151,8 +1166,10 @@ int main(int argc, char* argv[]) {
     if (pp_ok) {
         pp_fbo_left   = gl::make_fbo(xr.eye_width(), xr.eye_height());
         pp_fbo_right  = gl::make_fbo(xr.eye_width(), xr.eye_height());
-        pp_prev_left  = gl::make_fbo(xr.eye_width(), xr.eye_height());
-        pp_prev_right = gl::make_fbo(xr.eye_width(), xr.eye_height());
+        pp_prev_left[0]  = gl::make_fbo(xr.eye_width(), xr.eye_height());
+        pp_prev_left[1]  = gl::make_fbo(xr.eye_width(), xr.eye_height());
+        pp_prev_right[0] = gl::make_fbo(xr.eye_width(), xr.eye_height());
+        pp_prev_right[1] = gl::make_fbo(xr.eye_width(), xr.eye_height());
     } else {
         std::cerr << "[main] post-process shader unavailable — Vision Assist disabled\n";
     }
@@ -1500,8 +1517,14 @@ int main(int argc, char* argv[]) {
         GLuint right_src = xr.eye_right().tex;
         if (pp_ok && post_proc.any_enabled(snap.pp_cfg) &&
                 pp_fbo_left.valid() && pp_fbo_right.valid()) {
-            post_proc.process(xr.eye_left().tex,  pp_prev_left,  pp_fbo_left,  snap.pp_cfg);
-            post_proc.process(xr.eye_right().tex, pp_prev_right, pp_fbo_right, snap.pp_cfg);
+            post_proc.process(xr.eye_left().tex,
+                              pp_prev_left[pp_ping_left],   pp_prev_left[!pp_ping_left],
+                              pp_fbo_left,  snap.pp_cfg);
+            pp_ping_left = !pp_ping_left;
+            post_proc.process(xr.eye_right().tex,
+                              pp_prev_right[pp_ping_right], pp_prev_right[!pp_ping_right],
+                              pp_fbo_right, snap.pp_cfg);
+            pp_ping_right = !pp_ping_right;
             left_src  = pp_fbo_left.tex;
             right_src = pp_fbo_right.tex;
         }
@@ -1596,6 +1619,7 @@ int main(int argc, char* argv[]) {
         jpp["motion_thresh"]      = state.pp_cfg.motion_thresh;
         jpp["motion_radius"]      = state.pp_cfg.motion_radius;
         jpp["motion_line"]        = state.pp_cfg.motion_line;
+        jpp["motion_update_rate"] = state.pp_cfg.motion_update_rate;
         jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
 
         cfg["cameras"]["usb_cam_1"]["brightness"] = cameras.usb1_brightness();
@@ -1645,8 +1669,8 @@ int main(int argc, char* argv[]) {
 
     pp_fbo_left.destroy();
     pp_fbo_right.destroy();
-    pp_prev_left.destroy();
-    pp_prev_right.destroy();
+    pp_prev_left[0].destroy();  pp_prev_left[1].destroy();
+    pp_prev_right[0].destroy(); pp_prev_right[1].destroy();
     post_proc.shutdown();
 
     xr.shutdown();

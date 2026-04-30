@@ -31,18 +31,31 @@ bool PostProcessor::init(int w, int h, const char* vs_path, const char* fs_path)
     loc_motion_col_    = glGetUniformLocation(prog_, "u_motion_col");
     loc_motion_line_   = glGetUniformLocation(prog_, "u_motion_line");
 
+    // EMA blit: blends current frame with previous EMA reference.
+    // update_rate=1.0 → hard copy (1-frame trail), lower → longer exponential trail.
     static const char* kBlitVs =
         "attribute vec2 a_pos; attribute vec2 a_uv;"
         "varying vec2 v_uv;"
         "void main(){ v_uv = a_uv; gl_Position = vec4(a_pos, 0.0, 1.0); }";
     static const char* kBlitFs =
         "precision mediump float;"
-        "uniform sampler2D u_tex;"
+        "uniform sampler2D u_cur;"
+        "uniform sampler2D u_prev;"
+        "uniform float u_rate;"
         "varying vec2 v_uv;"
-        "void main(){ gl_FragColor = texture2D(u_tex, v_uv); }";
+        "void main(){"
+        "    vec4 c = texture2D(u_cur,  v_uv);"
+        "    vec4 p = texture2D(u_prev, v_uv);"
+        "    gl_FragColor = mix(p, c, u_rate);"
+        "}";
     blit_prog_ = gl::build_program_from_strings(kBlitVs, kBlitFs);
-    if (!blit_prog_)
-        std::cerr << "[post_process] blit shader build failed — motion prev-frame copy disabled\n";
+    if (!blit_prog_) {
+        std::cerr << "[post_process] blit shader build failed — motion trail disabled\n";
+    } else {
+        loc_blit_cur_  = glGetUniformLocation(blit_prog_, "u_cur");
+        loc_blit_prev_ = glGetUniformLocation(blit_prog_, "u_prev");
+        loc_blit_rate_ = glGetUniformLocation(blit_prog_, "u_rate");
+    }
 
     vbo_ = gl::make_quad_vbo();
     if (!vbo_) {
@@ -60,8 +73,11 @@ void PostProcessor::shutdown() {
     if (vbo_)       { glDeleteBuffers(1, &vbo_);    vbo_       = 0; }
 }
 
-void PostProcessor::process(GLuint src_tex, gl::Fbo& prev_fbo, const gl::Fbo& dst,
+void PostProcessor::process(GLuint src_tex,
+                             const gl::Fbo& prev_read, gl::Fbo& prev_write,
+                             const gl::Fbo& dst,
                              const PostProcessConfig& cfg) {
+    // ── Main effect pass ──────────────────────────────────────────────────────
     dst.bind();
     glClearColor(0.f, 0.f, 0.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -72,9 +88,9 @@ void PostProcessor::process(GLuint src_tex, gl::Fbo& prev_fbo, const gl::Fbo& ds
     glBindTexture(GL_TEXTURE_2D, src_tex);
     glUniform1i(loc_scene_, 0);
 
-    // Bind previous frame for motion detection (unit 2; stays black until second frame)
+    // Bind EMA reference frame for motion detection (unit 2)
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, prev_fbo.valid() ? prev_fbo.tex : 0);
+    glBindTexture(GL_TEXTURE_2D, prev_read.valid() ? prev_read.tex : 0);
     glUniform1i(loc_prev_frame_, 2);
 
     glUniform2f(loc_texel_, 1.f / static_cast<float>(w_),
@@ -94,13 +110,11 @@ void PostProcessor::process(GLuint src_tex, gl::Fbo& prev_fbo, const gl::Fbo& ds
     glUniform1f(loc_edge_scale_,  cfg.edge_scale);
     glUniform1f(loc_edge_thresh_, cfg.edge_threshold);
 
-    // Focus-based sharpness: sensitivity scales with lens proximity (close = narrow DoF = stronger separation)
     const float focus_norm = static_cast<float>(cfg.focus_lens_pos) / 1000.0f;
     glUniform1f(loc_focus_str_,  cfg.focus_str);
     glUniform1f(loc_focus_sens_, 1.0f + focus_norm * 3.0f);
     glUniform1f(loc_gate_scale_, cfg.edge_gate_scale);
 
-    // Motion highlight uniforms
     const float mr = ((cfg.motion_color >>  0) & 0xFF) / 255.f;
     const float mg = ((cfg.motion_color >>  8) & 0xFF) / 255.f;
     const float mb = ((cfg.motion_color >> 16) & 0xFF) / 255.f;
@@ -117,17 +131,24 @@ void PostProcessor::process(GLuint src_tex, gl::Fbo& prev_fbo, const gl::Fbo& ds
     glUseProgram(0);
     dst.unbind();
 
-    // Copy src_tex → prev_fbo so next frame can compare against this one.
-    if (prev_fbo.valid() && blit_prog_) {
-        prev_fbo.bind();
+    // ── EMA blit: blend src_tex into prev_write using prev_read as old value ──
+    // prev_write becomes the new reference frame for next frame's motion detection.
+    // update_rate=1.0 → hard copy (crisp, 1-frame trail)
+    // update_rate<1.0 → exponential moving average → smooth, longer trail
+    if (prev_write.valid() && blit_prog_) {
+        prev_write.bind();
         glUseProgram(blit_prog_);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, src_tex);
-        glUniform1i(glGetUniformLocation(blit_prog_, "u_tex"), 0);
+        glUniform1i(loc_blit_cur_, 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, prev_read.valid() ? prev_read.tex : src_tex);
+        glUniform1i(loc_blit_prev_, 1);
+        glUniform1f(loc_blit_rate_, cfg.motion_update_rate);
         gl::bind_quad(vbo_);
         gl::draw_quad();
         gl::unbind_quad();
         glUseProgram(0);
-        prev_fbo.unbind();
+        prev_write.unbind();
     }
 }

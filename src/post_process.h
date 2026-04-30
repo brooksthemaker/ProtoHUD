@@ -26,9 +26,12 @@ public:
     void shutdown();
 
     // Apply the post-process pass: read src_tex, write result to dst.
-    // prev_fbo holds the previous raw frame for motion detection; updated each call.
-    // dst must be a valid gl::Fbo with matching dimensions.
-    void process(GLuint src_tex, gl::Fbo& prev_fbo, const gl::Fbo& dst,
+    // prev_read: EMA-smoothed reference frame used for motion detection.
+    // prev_write: receives the new EMA frame (prev_read blended with src_tex).
+    // Use a ping-pong pair per eye; swap read/write each frame.
+    void process(GLuint src_tex,
+                 const gl::Fbo& prev_read, gl::Fbo& prev_write,
+                 const gl::Fbo& dst,
                  const PostProcessConfig& cfg);
 
     bool any_enabled(const PostProcessConfig& cfg) const {
@@ -37,8 +40,13 @@ public:
 
 private:
     GLuint prog_      = 0;
-    GLuint blit_prog_ = 0;   // trivial src→prev blit shader (inline GLSL)
+    GLuint blit_prog_ = 0;   // EMA blit: blends src_tex with prev to produce new reference
     GLuint vbo_       = 0;
+
+    // Cached blit uniform locations
+    GLint  loc_blit_cur_  = -1;
+    GLint  loc_blit_prev_ = -1;
+    GLint  loc_blit_rate_ = -1;
 
     // Cached uniform locations (set at init time)
     GLint loc_scene_         = -1;
