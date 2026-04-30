@@ -121,6 +121,17 @@ static std::vector<MenuItem> build_menu(
         return m;
     };
 
+    // leaf with a radio-indicator getter — shows filled dot when get_state() is true
+    auto leaf_sel = [](std::string lbl, std::function<void()> fn,
+                       std::function<bool()> state_fn) -> MenuItem {
+        MenuItem m;
+        m.label     = std::move(lbl);
+        m.type      = MenuItemType::LEAF;
+        m.action    = std::move(fn);
+        m.get_state = std::move(state_fn);
+        return m;
+    };
+
     auto submenu = [](std::string lbl, std::vector<MenuItem> ch) -> MenuItem {
         MenuItem m;
         m.label    = std::move(lbl);
@@ -271,15 +282,15 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> shutter_speeds = {
-        leaf("1/4000", [&state]{ state.night_vision.shutter_us =   250; }),
-        leaf("1/2000", [&state]{ state.night_vision.shutter_us =   500; }),
-        leaf("1/1000", [&state]{ state.night_vision.shutter_us =  1000; }),
-        leaf("1/500",  [&state]{ state.night_vision.shutter_us =  2000; }),
-        leaf("1/250",  [&state]{ state.night_vision.shutter_us =  4000; }),
-        leaf("1/125",  [&state]{ state.night_vision.shutter_us =  8000; }),
-        leaf("1/60",   [&state]{ state.night_vision.shutter_us = 16667; }),
-        leaf("1/30",   [&state]{ state.night_vision.shutter_us = 33333; }),
-        leaf("1/25",   [&state]{ state.night_vision.shutter_us = 40000; }),
+        leaf_sel("1/4000", [&state]{ state.night_vision.shutter_us =   250; }, [&state]{ return state.night_vision.shutter_us ==   250; }),
+        leaf_sel("1/2000", [&state]{ state.night_vision.shutter_us =   500; }, [&state]{ return state.night_vision.shutter_us ==   500; }),
+        leaf_sel("1/1000", [&state]{ state.night_vision.shutter_us =  1000; }, [&state]{ return state.night_vision.shutter_us ==  1000; }),
+        leaf_sel("1/500",  [&state]{ state.night_vision.shutter_us =  2000; }, [&state]{ return state.night_vision.shutter_us ==  2000; }),
+        leaf_sel("1/250",  [&state]{ state.night_vision.shutter_us =  4000; }, [&state]{ return state.night_vision.shutter_us ==  4000; }),
+        leaf_sel("1/125",  [&state]{ state.night_vision.shutter_us =  8000; }, [&state]{ return state.night_vision.shutter_us ==  8000; }),
+        leaf_sel("1/60",   [&state]{ state.night_vision.shutter_us = 16667; }, [&state]{ return state.night_vision.shutter_us == 16667; }),
+        leaf_sel("1/30",   [&state]{ state.night_vision.shutter_us = 33333; }, [&state]{ return state.night_vision.shutter_us == 33333; }),
+        leaf_sel("1/25",   [&state]{ state.night_vision.shutter_us = 40000; }, [&state]{ return state.night_vision.shutter_us == 40000; }),
     };
 
     // ── Resolution presets ────────────────────────────────────────────────────
@@ -359,9 +370,9 @@ static std::vector<MenuItem> build_menu(
     // ── Audio controls ────────────────────────────────────────────────────────
     // Beamforming / noise suppression handled by RP2350; CM5 controls output + volume.
     std::vector<MenuItem> output_menu = {
-        leaf("VITURE",     [audio]{ if (audio) audio->set_output(AudioOutput::VITURE);     }),
-        leaf("Headphones", [audio]{ if (audio) audio->set_output(AudioOutput::HEADPHONES); }),
-        leaf("HDMI",       [audio]{ if (audio) audio->set_output(AudioOutput::HDMI);       }),
+        leaf_sel("VITURE",     [audio]{ if (audio) audio->set_output(AudioOutput::VITURE);     }, [&state]{ return state.audio.output == 0; }),
+        leaf_sel("Headphones", [audio]{ if (audio) audio->set_output(AudioOutput::HEADPHONES); }, [&state]{ return state.audio.output == 1; }),
+        leaf_sel("HDMI",       [audio]{ if (audio) audio->set_output(AudioOutput::HDMI);       }, [&state]{ return state.audio.output == 2; }),
     };
 
     std::vector<MenuItem> audio_menu = {
@@ -718,92 +729,92 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> edge_color_menu = {
-        leaf("Orange", [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 160,  32, 255); }),
-        leaf("Teal",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 220, 180, 255); }),
-        leaf("Cyan",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 180, 255, 255); }),
-        leaf("Green",  [&state]{ state.pp_cfg.edge_color = IM_COL32( 30, 220,  60, 255); }),
-        leaf("White",  [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 255, 255, 255); }),
-        leaf("Black",  [&state]{ state.pp_cfg.edge_color = IM_COL32(  0,   0,   0, 255); }),
+        leaf_sel("Orange", [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 160,  32, 255); }, [&state]{ return state.pp_cfg.edge_color == IM_COL32(255, 160,  32, 255); }),
+        leaf_sel("Teal",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 220, 180, 255); }, [&state]{ return state.pp_cfg.edge_color == IM_COL32(  0, 220, 180, 255); }),
+        leaf_sel("Cyan",   [&state]{ state.pp_cfg.edge_color = IM_COL32(  0, 180, 255, 255); }, [&state]{ return state.pp_cfg.edge_color == IM_COL32(  0, 180, 255, 255); }),
+        leaf_sel("Green",  [&state]{ state.pp_cfg.edge_color = IM_COL32( 30, 220,  60, 255); }, [&state]{ return state.pp_cfg.edge_color == IM_COL32( 30, 220,  60, 255); }),
+        leaf_sel("White",  [&state]{ state.pp_cfg.edge_color = IM_COL32(255, 255, 255, 255); }, [&state]{ return state.pp_cfg.edge_color == IM_COL32(255, 255, 255, 255); }),
+        leaf_sel("Black",  [&state]{ state.pp_cfg.edge_color = IM_COL32(  0,   0,   0, 255); }, [&state]{ return state.pp_cfg.edge_color == IM_COL32(  0,   0,   0, 255); }),
     };
 
     std::vector<MenuItem> edge_detail_menu = {
-        leaf("Ultra Fine (0.5x)", [&state]{ state.pp_cfg.edge_scale = 0.5f; }),
-        leaf("Fine (1x)",         [&state]{ state.pp_cfg.edge_scale = 1.0f; }),
-        leaf("Standard (2x)",     [&state]{ state.pp_cfg.edge_scale = 2.0f; }),
-        leaf("Coarse (3x)",       [&state]{ state.pp_cfg.edge_scale = 3.0f; }),
-        leaf("Silhouette (5x)",   [&state]{ state.pp_cfg.edge_scale = 5.0f; }),
+        leaf_sel("Ultra Fine (0.5x)", [&state]{ state.pp_cfg.edge_scale = 0.5f; }, [&state]{ return state.pp_cfg.edge_scale == 0.5f; }),
+        leaf_sel("Fine (1x)",         [&state]{ state.pp_cfg.edge_scale = 1.0f; }, [&state]{ return state.pp_cfg.edge_scale == 1.0f; }),
+        leaf_sel("Standard (2x)",     [&state]{ state.pp_cfg.edge_scale = 2.0f; }, [&state]{ return state.pp_cfg.edge_scale == 2.0f; }),
+        leaf_sel("Coarse (3x)",       [&state]{ state.pp_cfg.edge_scale = 3.0f; }, [&state]{ return state.pp_cfg.edge_scale == 3.0f; }),
+        leaf_sel("Silhouette (5x)",   [&state]{ state.pp_cfg.edge_scale = 5.0f; }, [&state]{ return state.pp_cfg.edge_scale == 5.0f; }),
     };
 
     std::vector<MenuItem> edge_threshold_menu = {
-        leaf("None",   [&state]{ state.pp_cfg.edge_threshold = 0.00f; }),
-        leaf("Low",    [&state]{ state.pp_cfg.edge_threshold = 0.15f; }),
-        leaf("Medium", [&state]{ state.pp_cfg.edge_threshold = 0.30f; }),
-        leaf("High",   [&state]{ state.pp_cfg.edge_threshold = 0.50f; }),
+        leaf_sel("None",   [&state]{ state.pp_cfg.edge_threshold = 0.00f; }, [&state]{ return state.pp_cfg.edge_threshold == 0.00f; }),
+        leaf_sel("Low",    [&state]{ state.pp_cfg.edge_threshold = 0.15f; }, [&state]{ return state.pp_cfg.edge_threshold == 0.15f; }),
+        leaf_sel("Medium", [&state]{ state.pp_cfg.edge_threshold = 0.30f; }, [&state]{ return state.pp_cfg.edge_threshold == 0.30f; }),
+        leaf_sel("High",   [&state]{ state.pp_cfg.edge_threshold = 0.50f; }, [&state]{ return state.pp_cfg.edge_threshold == 0.50f; }),
     };
 
     std::vector<MenuItem> desat_strength_menu = {
-        leaf("25%",  [&state]{ state.pp_cfg.desat_strength = 0.25f; }),
-        leaf("50%",  [&state]{ state.pp_cfg.desat_strength = 0.50f; }),
-        leaf("75%",  [&state]{ state.pp_cfg.desat_strength = 0.75f; }),
-        leaf("100%", [&state]{ state.pp_cfg.desat_strength = 1.00f; }),
+        leaf_sel("25%",  [&state]{ state.pp_cfg.desat_strength = 0.25f; }, [&state]{ return state.pp_cfg.desat_strength == 0.25f; }),
+        leaf_sel("50%",  [&state]{ state.pp_cfg.desat_strength = 0.50f; }, [&state]{ return state.pp_cfg.desat_strength == 0.50f; }),
+        leaf_sel("75%",  [&state]{ state.pp_cfg.desat_strength = 0.75f; }, [&state]{ return state.pp_cfg.desat_strength == 0.75f; }),
+        leaf_sel("100%", [&state]{ state.pp_cfg.desat_strength = 1.00f; }, [&state]{ return state.pp_cfg.desat_strength == 1.00f; }),
     };
 
     std::vector<MenuItem> bg_threshold_menu = {
-        leaf("Subtle (0.25)",     [&state]{ state.pp_cfg.contrast_threshold = 0.25f; }),
-        leaf("Medium (0.15)",     [&state]{ state.pp_cfg.contrast_threshold = 0.15f; }),
-        leaf("Aggressive (0.07)", [&state]{ state.pp_cfg.contrast_threshold = 0.07f; }),
+        leaf_sel("Subtle (0.25)",     [&state]{ state.pp_cfg.contrast_threshold = 0.25f; }, [&state]{ return state.pp_cfg.contrast_threshold == 0.25f; }),
+        leaf_sel("Medium (0.15)",     [&state]{ state.pp_cfg.contrast_threshold = 0.15f; }, [&state]{ return state.pp_cfg.contrast_threshold == 0.15f; }),
+        leaf_sel("Aggressive (0.07)", [&state]{ state.pp_cfg.contrast_threshold = 0.07f; }, [&state]{ return state.pp_cfg.contrast_threshold == 0.07f; }),
     };
 
     std::vector<MenuItem> focus_blend_menu = {
-        leaf("Off",    [&state]{ state.pp_cfg.focus_str = 0.0f; }),
-        leaf("Low",    [&state]{ state.pp_cfg.focus_str = 0.3f; }),
-        leaf("Medium", [&state]{ state.pp_cfg.focus_str = 0.6f; }),
-        leaf("Full",   [&state]{ state.pp_cfg.focus_str = 1.0f; }),
+        leaf_sel("Off",    [&state]{ state.pp_cfg.focus_str = 0.0f; }, [&state]{ return state.pp_cfg.focus_str == 0.0f; }),
+        leaf_sel("Low",    [&state]{ state.pp_cfg.focus_str = 0.3f; }, [&state]{ return state.pp_cfg.focus_str == 0.3f; }),
+        leaf_sel("Medium", [&state]{ state.pp_cfg.focus_str = 0.6f; }, [&state]{ return state.pp_cfg.focus_str == 0.6f; }),
+        leaf_sel("Full",   [&state]{ state.pp_cfg.focus_str = 1.0f; }, [&state]{ return state.pp_cfg.focus_str == 1.0f; }),
     };
 
     std::vector<MenuItem> size_filter_menu = {
-        leaf("Off",           [&state]{ state.pp_cfg.edge_gate_scale =  0.0f; }),
-        leaf("Tiny (5x)",     [&state]{ state.pp_cfg.edge_gate_scale =  5.0f; }),
-        leaf("Small (10x)",   [&state]{ state.pp_cfg.edge_gate_scale = 10.0f; }),
-        leaf("Medium (20x)",  [&state]{ state.pp_cfg.edge_gate_scale = 20.0f; }),
-        leaf("Large (40x)",   [&state]{ state.pp_cfg.edge_gate_scale = 40.0f; }),
+        leaf_sel("Off",           [&state]{ state.pp_cfg.edge_gate_scale =  0.0f; }, [&state]{ return state.pp_cfg.edge_gate_scale ==  0.0f; }),
+        leaf_sel("Tiny (5x)",     [&state]{ state.pp_cfg.edge_gate_scale =  5.0f; }, [&state]{ return state.pp_cfg.edge_gate_scale ==  5.0f; }),
+        leaf_sel("Small (10x)",   [&state]{ state.pp_cfg.edge_gate_scale = 10.0f; }, [&state]{ return state.pp_cfg.edge_gate_scale == 10.0f; }),
+        leaf_sel("Medium (20x)",  [&state]{ state.pp_cfg.edge_gate_scale = 20.0f; }, [&state]{ return state.pp_cfg.edge_gate_scale == 20.0f; }),
+        leaf_sel("Large (40x)",   [&state]{ state.pp_cfg.edge_gate_scale = 40.0f; }, [&state]{ return state.pp_cfg.edge_gate_scale == 40.0f; }),
     };
 
     std::vector<MenuItem> motion_sensitivity_menu = {
-        leaf("Low",       [&state]{ state.pp_cfg.motion_thresh = 0.10f; }),
-        leaf("Medium",    [&state]{ state.pp_cfg.motion_thresh = 0.04f; }),
-        leaf("High",      [&state]{ state.pp_cfg.motion_thresh = 0.02f; }),
-        leaf("Very High", [&state]{ state.pp_cfg.motion_thresh = 0.01f; }),
+        leaf_sel("Low",       [&state]{ state.pp_cfg.motion_thresh = 0.10f; }, [&state]{ return state.pp_cfg.motion_thresh == 0.10f; }),
+        leaf_sel("Medium",    [&state]{ state.pp_cfg.motion_thresh = 0.04f; }, [&state]{ return state.pp_cfg.motion_thresh == 0.04f; }),
+        leaf_sel("High",      [&state]{ state.pp_cfg.motion_thresh = 0.02f; }, [&state]{ return state.pp_cfg.motion_thresh == 0.02f; }),
+        leaf_sel("Very High", [&state]{ state.pp_cfg.motion_thresh = 0.01f; }, [&state]{ return state.pp_cfg.motion_thresh == 0.01f; }),
     };
 
     std::vector<MenuItem> motion_mode_menu = {
-        leaf("Fine Line", [&state]{ state.pp_cfg.motion_line = 1.0f; }),
-        leaf("Fill",      [&state]{ state.pp_cfg.motion_line = 0.0f; }),
+        leaf_sel("Fine Line", [&state]{ state.pp_cfg.motion_line = 1.0f; }, [&state]{ return state.pp_cfg.motion_line == 1.0f; }),
+        leaf_sel("Fill",      [&state]{ state.pp_cfg.motion_line = 0.0f; }, [&state]{ return state.pp_cfg.motion_line == 0.0f; }),
     };
 
     std::vector<MenuItem> motion_spread_menu = {
-        leaf("Tight (2px)",  [&state]{ state.pp_cfg.motion_radius =  2.0f; }),
-        leaf("Close (4px)",  [&state]{ state.pp_cfg.motion_radius =  4.0f; }),
-        leaf("Medium (8px)", [&state]{ state.pp_cfg.motion_radius =  8.0f; }),
-        leaf("Wide (16px)",  [&state]{ state.pp_cfg.motion_radius = 16.0f; }),
+        leaf_sel("Tight (2px)",  [&state]{ state.pp_cfg.motion_radius =  2.0f; }, [&state]{ return state.pp_cfg.motion_radius ==  2.0f; }),
+        leaf_sel("Close (4px)",  [&state]{ state.pp_cfg.motion_radius =  4.0f; }, [&state]{ return state.pp_cfg.motion_radius ==  4.0f; }),
+        leaf_sel("Medium (8px)", [&state]{ state.pp_cfg.motion_radius =  8.0f; }, [&state]{ return state.pp_cfg.motion_radius ==  8.0f; }),
+        leaf_sel("Wide (16px)",  [&state]{ state.pp_cfg.motion_radius = 16.0f; }, [&state]{ return state.pp_cfg.motion_radius == 16.0f; }),
     };
 
     std::vector<MenuItem> motion_color_menu = {
-        leaf("Green",  [&state]{ state.pp_cfg.motion_color = IM_COL32(  0, 255, 100, 255); }),
-        leaf("Cyan",   [&state]{ state.pp_cfg.motion_color = IM_COL32(  0, 200, 255, 255); }),
-        leaf("Yellow", [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 220,   0, 255); }),
-        leaf("White",  [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 255, 255, 255); }),
-        leaf("Orange", [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 140,   0, 255); }),
+        leaf_sel("Green",  [&state]{ state.pp_cfg.motion_color = IM_COL32(  0, 255, 100, 255); }, [&state]{ return state.pp_cfg.motion_color == IM_COL32(  0, 255, 100, 255); }),
+        leaf_sel("Cyan",   [&state]{ state.pp_cfg.motion_color = IM_COL32(  0, 200, 255, 255); }, [&state]{ return state.pp_cfg.motion_color == IM_COL32(  0, 200, 255, 255); }),
+        leaf_sel("Yellow", [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 220,   0, 255); }, [&state]{ return state.pp_cfg.motion_color == IM_COL32(255, 220,   0, 255); }),
+        leaf_sel("White",  [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 255, 255, 255); }, [&state]{ return state.pp_cfg.motion_color == IM_COL32(255, 255, 255, 255); }),
+        leaf_sel("Orange", [&state]{ state.pp_cfg.motion_color = IM_COL32(255, 140,   0, 255); }, [&state]{ return state.pp_cfg.motion_color == IM_COL32(255, 140,   0, 255); }),
     };
 
     // EMA update rate: how fast the reference frame tracks the scene.
     // Lower = reference lags further behind = outline lingers longer after motion stops.
     std::vector<MenuItem> motion_trail_menu = {
-        leaf("Instant (1 frame)",  [&state]{ state.pp_cfg.motion_update_rate = 1.00f; }),
-        leaf("Short  (~3 frames)", [&state]{ state.pp_cfg.motion_update_rate = 0.50f; }),
-        leaf("Medium (~8 frames)", [&state]{ state.pp_cfg.motion_update_rate = 0.20f; }),
-        leaf("Long   (~15 frames)",[&state]{ state.pp_cfg.motion_update_rate = 0.08f; }),
-        leaf("Extended (~30fr)",   [&state]{ state.pp_cfg.motion_update_rate = 0.03f; }),
+        leaf_sel("Instant (1 frame)",  [&state]{ state.pp_cfg.motion_update_rate = 1.00f; }, [&state]{ return state.pp_cfg.motion_update_rate == 1.00f; }),
+        leaf_sel("Short  (~3 frames)", [&state]{ state.pp_cfg.motion_update_rate = 0.50f; }, [&state]{ return state.pp_cfg.motion_update_rate == 0.50f; }),
+        leaf_sel("Medium (~8 frames)", [&state]{ state.pp_cfg.motion_update_rate = 0.20f; }, [&state]{ return state.pp_cfg.motion_update_rate == 0.20f; }),
+        leaf_sel("Long   (~15 frames)",[&state]{ state.pp_cfg.motion_update_rate = 0.08f; }, [&state]{ return state.pp_cfg.motion_update_rate == 0.08f; }),
+        leaf_sel("Extended (~30fr)",   [&state]{ state.pp_cfg.motion_update_rate = 0.03f; }, [&state]{ return state.pp_cfg.motion_update_rate == 0.03f; }),
     };
 
     std::vector<MenuItem> vision_menu = {
@@ -1384,13 +1395,17 @@ int main(int argc, char* argv[]) {
             else                menu.open();
         }
         if (menu.is_open()) {
-            if (key_pressed(ImGuiKey_UpArrow))    menu.navigate(+1);
-            if (key_pressed(ImGuiKey_DownArrow))  menu.navigate(-1);
+            if (key_pressed(ImGuiKey_UpArrow))    menu.navigate(-1);
+            if (key_pressed(ImGuiKey_DownArrow))  menu.navigate(+1);
             if (key_pressed(ImGuiKey_Enter) ||
                 key_pressed(ImGuiKey_RightArrow)) menu.select();
             if (key_pressed(ImGuiKey_Backspace) ||
                 key_pressed(ImGuiKey_LeftArrow))  menu.back();
         }
+        // Vision-assist hotkeys — work whether or not the menu is open
+        if (key_pressed(ImGuiKey_E)) state.pp_cfg.edge_enabled   = !state.pp_cfg.edge_enabled;
+        if (key_pressed(ImGuiKey_D)) state.pp_cfg.desat_enabled  = !state.pp_cfg.desat_enabled;
+        if (key_pressed(ImGuiKey_W)) state.pp_cfg.motion_enabled = !state.pp_cfg.motion_enabled;
 
         // ── Camera texture uploads (CPU paths) ────────────────────────────────
         if (use_beast_cam) beast_cam.get_frame(tex_beast);
