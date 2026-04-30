@@ -59,6 +59,14 @@ struct HudConfig {
     float health_panel_opacity  = 0.71f;
     float pip_corner_clip_px    = 16.f;
     bool  indicator_bg_enabled  = true;   // parallelogram bg behind health indicators
+    // Clock widget
+    bool  show_clock         = true;
+    bool  clock_24h          = false;
+    bool  clock_show_date    = false;
+    bool  clock_show_seconds = false;
+    float clock_font_scale   = 1.0f;   // 0.5–2.0
+    // Glow intensity multiplier (scales all glow alphas)
+    float glow_intensity     = 1.0f;   // 0.0=no glow, 1.0=full
 };
 
 class HudRenderer {

@@ -294,7 +294,9 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     const float x = 48.f;
     const float y = 48.f;   // top-anchored: fixed distance from screen top
 
-    const ImU32 COL_SEP = menu_with_alpha(accent_color_, 45);
+    const bool   filled_row  = (selection_style_ == SelectionStyle::FILLED_ROW);
+    const ImU32  COL_SEP     = menu_with_alpha(accent_color_, 45);
+    const ImU32  COL_SEP_EFF = filled_row ? IM_COL32(255, 255, 255, 60) : COL_SEP;
 
     ImGui::SetNextWindowPos ({ x, y }, ImGuiCond_Always);
     ImGui::SetNextWindowSize({ width, total_h }, ImGuiCond_Always);
@@ -313,7 +315,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     ImGui::PushStyleColor(ImGuiCol_HeaderActive,  col_to_vec4(accent_color_, 0.32f));
     // Suppress Selectable's own text — we draw it manually via DrawList
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.f, 0.f, 0.f, 0.f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, border_enabled_ ? 1.5f : 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(pad_x, pad_y));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(0.f, 0.f));
 
@@ -321,6 +323,18 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     const float line_h = ImGui::GetTextLineHeight();
+
+    // Text drawing helper: FILLED_ROW selected rows use bold-style black text,
+    // all others use the standard glow system.
+    auto draw_item_text = [&](ImVec2 pos, const char* text, bool sel) {
+        if (filled_row && sel) {
+            dl->AddText({pos.x - 0.6f, pos.y}, IM_COL32(0, 0, 0, 255), text);
+            dl->AddText({pos.x + 0.6f, pos.y}, IM_COL32(0, 0, 0, 255), text);
+            dl->AddText(pos,                   IM_COL32(0, 0, 0, 255), text);
+        } else {
+            draw_glow_text(dl, pos, text, sel, accent_color_);
+        }
+    };
 
     for (int i = 0; i < static_cast<int>(items.size()); i++) {
         bool selected = (i == cursor_);
@@ -342,10 +356,15 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         const ImVec2 rmin = ImGui::GetItemRectMin();
         const ImVec2 rmax = ImGui::GetItemRectMax();
 
-        // Left accent bar for selected item
-        if (selected)
-            dl->AddRectFilled({rmin.x - pad_x,       rmin.y},
-                              {rmin.x - pad_x + 4.f, rmax.y}, accent_color_);
+        // Selection highlight: filled white row (Halo) or left accent bar (default)
+        if (selected) {
+            if (filled_row)
+                dl->AddRectFilled({rmin.x - pad_x, rmin.y},
+                                  {rmax.x + pad_x, rmax.y}, IM_COL32(255, 255, 255, 235));
+            else
+                dl->AddRectFilled({rmin.x - pad_x,       rmin.y},
+                                  {rmin.x - pad_x + 4.f, rmax.y}, accent_color_);
+        }
 
         // Text Y position (vertically centered in the base item_h row)
         float ty = rmin.y + (item_h - line_h) * 0.5f - 0.5f;
@@ -354,8 +373,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         if (item.type == MenuItemType::TOGGLE) {
             bool on = item.get_toggle ? item.get_toggle() : false;
 
-            draw_glow_text(dl, {rmin.x + 4.f, ty}, to_upper(item.label).c_str(),
-                           selected, accent_color_);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
 
             // Radio-style circle + " ON" / " OFF" text, both using accent_color_.
             const char* state_str = on ? " ON" : " OFF";
@@ -365,14 +383,17 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             const float dot_cx    = text_x - dot_r - 4.f;
             const float dot_cy    = rmin.y + item_h * 0.5f;
 
+            const ImU32 dot_col   = (filled_row && selected) ? IM_COL32(0,0,0,200) : accent_color_;
             if (on) {
-                dl->AddCircleFilled({dot_cx, dot_cy}, dot_r,   accent_color_);
-                dl->AddCircleFilled({dot_cx, dot_cy}, 2.5f,    IM_COL32(255, 255, 255, 255));
+                dl->AddCircleFilled({dot_cx, dot_cy}, dot_r,   dot_col);
+                dl->AddCircleFilled({dot_cx, dot_cy}, 2.5f,    IM_COL32(255, 255, 255, 200));
             } else {
                 dl->AddCircle({dot_cx, dot_cy}, dot_r,
-                              menu_with_alpha(accent_color_, 100), 0, 1.5f);
+                              menu_with_alpha(dot_col, 100), 0, 1.5f);
             }
-            const ImU32 text_col = on ? accent_color_ : menu_with_alpha(accent_color_, 120);
+            const ImU32 text_col = (filled_row && selected)
+                ? IM_COL32(0, 0, 0, 200)
+                : (on ? accent_color_ : menu_with_alpha(accent_color_, 120));
             dl->AddText({text_x, ty}, text_col, state_str);
 
         // ── SLIDER ────────────────────────────────────────────────────────────
@@ -389,8 +410,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             format_slider_value(val_str, sizeof(val_str),
                                 val, item.slider.min, item.slider.max, item.slider.unit);
 
-            draw_glow_text(dl, {rmin.x + 4.f, ty}, to_upper(item.label).c_str(),
-                           selected, accent_color_);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
 
             if (editing) {
                 float bx = rmin.x + 4.f;
@@ -427,8 +447,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         } else if (item.type == MenuItemType::COLOR_PICKER) {
             bool editing = selected && in_edit_mode_;
 
-            draw_glow_text(dl, {rmin.x + 4.f, ty}, to_upper(item.label).c_str(),
-                           selected, accent_color_);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
 
             if (!editing) {
                 float sw_x = rmax.x - 36.f;
@@ -497,7 +516,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             std::string label = to_upper(item.label);
             if (item.type == MenuItemType::SUBMENU || !item.children.empty())
                 label += "   >";
-            draw_glow_text(dl, {rmin.x + 4.f, ty}, label.c_str(), selected, accent_color_);
+            draw_item_text({rmin.x + 4.f, ty}, label.c_str(), selected);
 
             // Legacy radio indicator for items that still carry get_state
             if (item.get_state) {
@@ -516,7 +535,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
         // Thin bottom separator
         dl->AddLine({rmin.x - pad_x, rmax.y - 1.f},
-                    {rmax.x + pad_x, rmax.y - 1.f}, COL_SEP, 1.f);
+                    {rmax.x + pad_x, rmax.y - 1.f}, COL_SEP_EFF, 1.f);
     }
 
     ImGui::End();

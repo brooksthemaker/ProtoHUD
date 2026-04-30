@@ -135,6 +135,16 @@ struct ImuPose {
     float yaw   = 0.0f;
 };
 
+struct TimerAlarmState {
+    bool   timer_active    = false;
+    time_t timer_end       = 0;       // epoch when countdown expires
+    bool   alarm_active    = false;
+    time_t alarm_fire_at   = 0;       // epoch when alarm fires
+    bool   alarm_triggered = false;   // true → pulsing red overlay is shown
+    int    alarm_hour      = 0;       // picker working value (0–23)
+    int    alarm_minute    = 0;       // picker working value (0–59)
+};
+
 // ── Master state ──────────────────────────────────────────────────────────────
 // Mutable fields are updated from serial/camera threads and read by the
 // render thread.  Callers must hold the mutex for any multi-field access.
@@ -165,6 +175,21 @@ struct AppState {
 
     // Post-processing (edge highlight + background desaturation)
     PostProcessConfig    pp_cfg;
+
+    // Timer / alarm state (managed on render thread; no mutex needed for reads)
+    TimerAlarmState      timer_alarm;
+
+    // Per-LoRa-node compass marker colors (indexed by node.local_id % 8)
+    ImU32 lora_node_colors[8] = {
+        IM_COL32(255, 160,  32, 255),  // 0 orange
+        IM_COL32(  0, 220, 180, 255),  // 1 teal
+        IM_COL32(  0, 180, 255, 255),  // 2 cyan
+        IM_COL32( 30, 220,  60, 255),  // 3 green
+        IM_COL32(255, 220,   0, 255),  // 4 yellow
+        IM_COL32(220,  30, 220, 255),  // 5 purple
+        IM_COL32(255,  60,  60, 255),  // 6 red
+        IM_COL32(255, 255, 255, 255),  // 7 white
+    };
 
     // Cached XR display control values (no SDK getter; updated when menu writes).
     int xr_brightness     = 5;   // 1–7; mirrors last xr->set_brightness() call

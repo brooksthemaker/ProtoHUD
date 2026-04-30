@@ -29,25 +29,51 @@ static std::string fmt_time(time_t t) {
     return buf;
 }
 
+static std::string fmt_clock(bool h24, bool seconds) {
+    time_t now = time(nullptr);
+    struct tm* t = localtime(&now);
+    char buf[32];
+    const char* fmt = h24 ? (seconds ? "%H:%M:%S" : "%H:%M")
+                           : (seconds ? "%I:%M:%S %p" : "%I:%M %p");
+    strftime(buf, sizeof(buf), fmt, t);
+    return buf;
+}
+
+static std::string fmt_date() {
+    time_t now = time(nullptr);
+    struct tm* t = localtime(&now);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%a %b %d", t);
+    return buf;
+}
+
+static std::string fmt_countdown(time_t end) {
+    int remaining = static_cast<int>(end - time(nullptr));
+    if (remaining < 0) remaining = 0;
+    int mm = remaining / 60, ss = remaining % 60;
+    char buf[16]; snprintf(buf, sizeof(buf), "%02d:%02d", mm, ss);
+    return buf;
+}
+
 // Replace the alpha byte of an ImU32 color (format: ABGR, alpha in high byte).
 static ImU32 with_alpha(ImU32 col, uint8_t a) {
     return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
 }
 
-// Frame-scope glow flag — set each frame in begin_frame() from cfg_.glow_enabled.
-static bool s_glow = true;
+// Frame-scope glow state — set each frame from HudConfig.
+static bool  s_glow          = true;
+static float s_glow_intensity = 1.0f;
 
 // Draw text with an orange glow outline matching the compass tick style.
 // selected=true → full white + bright glow; false → dim white + faint glow.
 static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
                            bool selected = true) {
-    constexpr ImU32 GLOW_ON  = IM_COL32(255, 160, 32,  72);
-    constexpr ImU32 GLOW_OFF = IM_COL32(255, 160, 32,  22);
-    constexpr ImU32 FILL_ON  = IM_COL32(255, 255, 255, 255);
-    constexpr ImU32 FILL_OFF = IM_COL32(255, 255, 255, 160);
+    const ImU32 FILL_ON  = IM_COL32(255, 255, 255, 255);
+    const ImU32 FILL_OFF = IM_COL32(255, 255, 255, 160);
     const ImU32 fill = selected ? FILL_ON  : FILL_OFF;
-    if (s_glow) {
-        const ImU32 glow = selected ? GLOW_ON : GLOW_OFF;
+    if (s_glow && s_glow_intensity > 0.f) {
+        const uint8_t ga = static_cast<uint8_t>((selected ? 72 : 22) * s_glow_intensity);
+        const ImU32 glow = IM_COL32(255, 160, 32, ga);
         constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
         for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
     }
@@ -55,12 +81,13 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
 }
 
 // Color-parameterized variant: glow_col and fill_col are full-brightness (alpha=255);
-// glow alphas are derived internally.
+// glow alphas are derived internally and scaled by s_glow_intensity.
 static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
                            bool selected, ImU32 glow_col, ImU32 fill_col) {
     const ImU32 fill = selected ? fill_col : with_alpha(fill_col, 160);
-    if (s_glow) {
-        const ImU32 glow = selected ? with_alpha(glow_col, 72) : with_alpha(glow_col, 22);
+    if (s_glow && s_glow_intensity > 0.f) {
+        const uint8_t ga = static_cast<uint8_t>((selected ? 72 : 22) * s_glow_intensity);
+        const ImU32 glow = selected ? with_alpha(glow_col, ga) : with_alpha(glow_col, ga);
         constexpr int D1[8][2] = {{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}};
         for (auto& o : D1) dl->AddText({pos.x+o[0], pos.y+o[1]}, glow, text);
     }
@@ -135,7 +162,8 @@ void HudRenderer::begin_frame(float /*dt*/) {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     ImGui::GetIO().FontGlobalScale = cfg_.text_scale;
-    s_glow = cfg_.glow_enabled;
+    s_glow          = cfg_.glow_enabled;
+    s_glow_intensity = cfg_.glow_intensity;
 }
 
 void HudRenderer::render_overlay() {
@@ -175,6 +203,17 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
     draw_health_side(dl, s.health, fw, fh, true,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
+
+    // Alarm overlay: pulsing red border when alarm has triggered
+    if (s.timer_alarm.alarm_triggered) {
+        float pulse = 0.5f + 0.5f * std::sin(ImGui::GetTime() * 6.0f);
+        ImU32 red = IM_COL32(255, 0, 0, static_cast<int>(180 * pulse));
+        dl->AddRect({0.f, 0.f}, {fw, fh}, red, 0.f, 0, 10.f);
+        const char* alarm_str = "! ALARM !";
+        ImVec2 asz = ImGui::CalcTextSize(alarm_str);
+        hud_glow_text(dl, {fw * 0.5f - asz.x * 0.5f, fh * 0.5f - asz.y * 0.5f},
+                      alarm_str, true, IM_COL32(255,0,0,255), IM_COL32(255,255,255,255));
+    }
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -393,11 +432,46 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
 
     dl->AddRectFilled({0, 0}, {w, th}, col_.background);
 
-    // Unread messages badge
+    // Clock (centered in top bar)
+    if (cfg_.show_clock) {
+        ImGui::PushFont(nullptr);  // use current scaled font
+        float saved_scale = ImGui::GetIO().FontGlobalScale;
+        ImGui::GetIO().FontGlobalScale = saved_scale * cfg_.clock_font_scale;
+
+        std::string time_str = fmt_clock(cfg_.clock_24h, cfg_.clock_show_seconds);
+        ImVec2 tsz = ImGui::CalcTextSize(time_str.c_str());
+        float cx = w * 0.5f - tsz.x * 0.5f;
+        float cy = th * 0.5f - tsz.y * 0.5f - (cfg_.clock_show_date ? tsz.y * 0.5f : 0.f);
+        hud_glow_text(dl, {cx, cy}, time_str.c_str(), true, col_.glow_base, col_.text_fill);
+
+        // Second line: countdown timer or date
+        if (s.timer_alarm.timer_active) {
+            std::string cd = fmt_countdown(s.timer_alarm.timer_end);
+            ImVec2 csz = ImGui::CalcTextSize(cd.c_str());
+            float scale = 0.75f;
+            ImGui::GetIO().FontGlobalScale = saved_scale * cfg_.clock_font_scale * scale;
+            csz = ImGui::CalcTextSize(cd.c_str());
+            hud_glow_text(dl, {w * 0.5f - csz.x * 0.5f, cy + tsz.y + 1.f},
+                          cd.c_str(), true, col_.warn, col_.warn);
+        } else if (cfg_.clock_show_date) {
+            std::string date_str = fmt_date();
+            float scale = 0.75f;
+            ImGui::GetIO().FontGlobalScale = saved_scale * cfg_.clock_font_scale * scale;
+            ImVec2 dsz = ImGui::CalcTextSize(date_str.c_str());
+            hud_glow_text(dl, {w * 0.5f - dsz.x * 0.5f, cy + tsz.y + 1.f},
+                          date_str.c_str(), false, col_.glow_base, col_.text_fill);
+        }
+
+        ImGui::GetIO().FontGlobalScale = saved_scale;
+        ImGui::PopFont();
+    }
+
+    // Unread messages badge (shifted left of center when clock is shown)
     int unread = s.unread_message_count();
     if (unread > 0) {
         char buf[32]; snprintf(buf, sizeof(buf), "MSG:%d", unread);
-        dl->AddText({w / 2.f + 10.f, 10.f}, col_.warn, buf);
+        float bx = cfg_.show_clock ? w * 0.25f : w * 0.5f + 10.f;
+        dl->AddText({bx, 10.f}, col_.warn, buf);
     }
 
     // Audio strip (right side)
@@ -768,6 +842,22 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     }
 
     if (font_mono_) ImGui::PopFont();
+
+    // LoRa node bearing markers — small colored triangles above the ticks
+    for (const auto& node : s.lora_nodes) {
+        if (node.distance_m <= 0.f) continue;  // no fix yet
+        float offset = node.heading_deg - heading;
+        while (offset >  180.f) offset -= 360.f;
+        while (offset < -180.f) offset += 360.f;
+        float px = center_x + offset * ppd;
+        if (px < origin.x || px > origin.x + tw) continue;
+
+        ImU32 node_col = s.lora_node_colors[node.local_id % 8];
+        float mx = px, my = tick_bottom - t_maj - 6.f;
+        ImVec2 tri[3] = {{mx - 5.f, my}, {mx + 5.f, my}, {mx, my + 9.f}};
+        dl->AddConvexPolyFilled(tri, 3, node_col);
+        dl->AddPolyline(tri, 3, with_alpha(node_col, 200), ImDrawFlags_Closed, 1.f);
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -78,7 +78,13 @@
     "secondary_cam_size": 0.22,
     "health_panel_opacity": 0.71,
     "pip_corner_clip_px": 16,
-    "indicator_bg_enabled": true
+    "indicator_bg_enabled": true,
+    "show_clock": true,
+    "clock_24h": false,
+    "clock_show_date": false,
+    "clock_show_seconds": false,
+    "clock_font_scale": 1.0,
+    "glow_intensity": 1.0
   },
   "gpio": {
     "enabled": true,
