@@ -446,16 +446,18 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const Ind* items   = right_side ? right_items : left_items;
     const int  n_items = 4;
 
-    constexpr float ROW_H  = 18.f;
-    constexpr float DOT_R  = 4.f;
-    constexpr float ANGLE  = 130.f * 3.14159265f / 180.f;
-    constexpr float H_LEN  = 300.f;
+    constexpr float ROW_H   = 18.f;
+    constexpr float DOT_R   = 4.f;
+    constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
+    constexpr float H_LEN   = 300.f;  // health horiz line (SEG_W * 2)
+    constexpr float BG_FULL = 440.f;  // H_LEN + ARM_EXT; covers FACE/LoRa arm area too
 
     const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
     const float dir_y    = -std::sin(ANGLE);
     const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
 
     // Parallelogram background — 16 strips fading from opaque (inner) to transparent (outer).
+    // Extends BG_FULL px outward to cover both health indicators and the adjacent arm area.
     if (cfg_.indicator_bg_enabled) {
         const uint8_t bg_a       = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
         const float   outer_sign = right_side ? 1.f : -1.f;
@@ -468,10 +470,10 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
                                  : (t0 - FADE_START) / (1.f - FADE_START);
             const uint8_t a0 = static_cast<uint8_t>(bg_a * (1.f - fade_t));
             ImVec2 strip[4] = {
-                {anchor_x + outer_sign * t0 * H_LEN,                    anchor_y},
-                {anchor_x + outer_sign * t0 * H_LEN + dir_x * diag_len, anchor_y + dir_y * diag_len},
-                {anchor_x + outer_sign * t1 * H_LEN + dir_x * diag_len, anchor_y + dir_y * diag_len},
-                {anchor_x + outer_sign * t1 * H_LEN,                    anchor_y},
+                {anchor_x + outer_sign * t0 * BG_FULL,                    anchor_y},
+                {anchor_x + outer_sign * t0 * BG_FULL + dir_x * diag_len, anchor_y + dir_y * diag_len},
+                {anchor_x + outer_sign * t1 * BG_FULL + dir_x * diag_len, anchor_y + dir_y * diag_len},
+                {anchor_x + outer_sign * t1 * BG_FULL,                    anchor_y},
             };
             dl->AddConvexPolyFilled(strip, 4, with_alpha(col_.compass_bg_color, a0));
         }
@@ -550,7 +552,8 @@ void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
 }
 
 // ── Face indicator arm (left side) ───────────────────────────────────────────
-// Three parallel diagonal arms at 130°: [proto arm] [separator] [health indicators]
+// Two parallel diagonal arms at 130°: [proto arm]  [health indicators]
+// The health indicator diagonal itself is the visual divider between sections.
 // SEG_W=150 puts proto at anchor_x-300 (= end of health side's 300px horiz line).
 
 void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
@@ -568,7 +571,6 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
     const float c_margin      = static_cast<float>(cfg_.compass_bottom_margin);
     const float anchor_y      = fh - c_margin;
     const float ind_anchor_x  = tape_x - fade_w;
-    const float sep_anchor_x  = ind_anchor_x - SEG_W;
     const float proto_anchor_x = ind_anchor_x - SEG_W * 2.f;
 
     const float dir_x    = std::cos(ANGLE) * -1.f;   // left side: goes right
@@ -591,13 +593,6 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
     dl->AddLine({proto_anchor_x, anchor_y}, proto_end, COL_GLW2, 5.f);
     dl->AddLine({proto_anchor_x, anchor_y}, proto_end, COL_GLW1, 2.5f);
     dl->AddLine({proto_anchor_x, anchor_y}, proto_end, COL_MAJ,  1.f);
-
-    // Master separator diagonal (glow only, no dots, no horizontal)
-    const ImVec2 sep_end = {sep_anchor_x + dir_x * diag_len,
-                             anchor_y     + dir_y * diag_len};
-    dl->AddLine({sep_anchor_x, anchor_y}, sep_end, COL_GLW2, 5.f);
-    dl->AddLine({sep_anchor_x, anchor_y}, sep_end, COL_GLW1, 2.5f);
-    dl->AddLine({sep_anchor_x, anchor_y}, sep_end, COL_MAJ,  1.f);
 
     // Build items
     char effect_lbl[24], mode_lbl[24], rgb_lbl[24], brt_lbl[24];
@@ -640,7 +635,8 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
 }
 
 // ── LoRa indicator arm (right side) ──────────────────────────────────────────
-// Three parallel diagonal arms at 130°: [health indicators] [separator] [lora arm]
+// Two parallel diagonal arms at 130°: [health indicators]  [lora arm]
+// The health indicator diagonal itself is the visual divider between sections.
 // SEG_W=150 puts lora at anchor_x+300 (= end of health side's 300px horiz line).
 
 void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
@@ -658,7 +654,6 @@ void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
     const float c_margin     = static_cast<float>(cfg_.compass_bottom_margin);
     const float anchor_y     = fh - c_margin;
     const float ind_anchor_x = tape_x + tape_w + fade_w;
-    const float sep_anchor_x = ind_anchor_x + SEG_W;
     const float lora_anchor_x = ind_anchor_x + SEG_W * 2.f;
 
     const float dir_x    = std::cos(ANGLE) * 1.f;   // right side: goes left
@@ -681,13 +676,6 @@ void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
     dl->AddLine({lora_anchor_x, anchor_y}, lora_end, COL_GLW2, 5.f);
     dl->AddLine({lora_anchor_x, anchor_y}, lora_end, COL_GLW1, 2.5f);
     dl->AddLine({lora_anchor_x, anchor_y}, lora_end, COL_MAJ,  1.f);
-
-    // Master separator diagonal (glow only, no dots, no horizontal)
-    const ImVec2 sep_end = {sep_anchor_x + dir_x * diag_len,
-                             anchor_y     + dir_y * diag_len};
-    dl->AddLine({sep_anchor_x, anchor_y}, sep_end, COL_GLW2, 5.f);
-    dl->AddLine({sep_anchor_x, anchor_y}, sep_end, COL_GLW1, 2.5f);
-    dl->AddLine({sep_anchor_x, anchor_y}, sep_end, COL_MAJ,  1.f);
 
     // Build items: header row + one row per tracked node (capped at MAX_ROWS-1)
     struct Ind { char label[32]; bool ok; };
