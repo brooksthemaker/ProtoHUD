@@ -24,9 +24,10 @@ struct CamConfig {
 
 struct UsbCamConfig {
     std::string device;
-    int width  = 1280;
-    int height = 720;
-    int fps    = 30;
+    int   width      = 1280;
+    int   height     = 720;
+    int   fps        = 30;
+    float brightness = 1.0f;  // software multiplier: 1.0=normal, 2.0=double, 0.5=half
 };
 
 // CameraManager owns:
@@ -102,6 +103,12 @@ public:
     void set_usb2_reconnect(bool v) { usb2_reconnect_ = v; }
     bool usb1_reconnect_enabled() const { return usb1_reconnect_; }
     bool usb2_reconnect_enabled() const { return usb2_reconnect_; }
+
+    // ── USB brightness (software multiplier, safe to call from any thread) ────
+    void  set_usb1_brightness(float v) { usb1_brightness_ = v; }
+    void  set_usb2_brightness(float v) { usb2_brightness_ = v; }
+    float usb1_brightness()      const { return usb1_brightness_.load(); }
+    float usb2_brightness()      const { return usb2_brightness_.load(); }
 
 private:
     void usb_capture_thread();

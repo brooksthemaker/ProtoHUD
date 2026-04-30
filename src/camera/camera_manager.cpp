@@ -65,6 +65,7 @@ static bool open_v4l2(cv::VideoCapture& cap, const UsbCamConfig& cfg,
     cap.set(cv::CAP_PROP_FRAME_WIDTH,  cfg.width);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
     cap.set(cv::CAP_PROP_FPS,          cfg.fps);
+    cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 0.75);  // request auto-exposure (driver best-effort)
     int aw = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
     int ah = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
     int af = static_cast<int>(cap.get(cv::CAP_PROP_FPS));
@@ -104,6 +105,8 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     // ── USB cameras (OpenCV) ──────────────────────────────────────────────────
     usb1_cfg_ = usb1;
     usb2_cfg_ = usb2;
+    usb1_brightness_ = usb1.brightness;
+    usb2_brightness_ = usb2.brightness;
 
     // Scan /dev/video0-63 and list non-ISP capture nodes
     std::cerr << "[cam] USB cameras found:\n";
@@ -212,6 +215,7 @@ void CameraManager::usb_capture_thread() {
     auto capture = [&](cv::VideoCapture& cap, std::mutex& cap_mtx,
                        TexSlot& slot, std::atomic<bool>& ok_flag,
                        int& good, int& bad, int& consec,
+                       std::atomic<float>& brightness_ref,
                        const char* name) -> bool {
         bool got_frame = false;
         {
@@ -219,6 +223,9 @@ void CameraManager::usb_capture_thread() {
             if (!cap.isOpened()) { ok_flag = false; return false; }
             cap.read(frame);
             if (!frame.empty()) {
+                float b = brightness_ref.load();
+                if (b != 1.0f)
+                    frame.convertTo(frame, -1, static_cast<double>(b), 0.0);
                 cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
                 got_frame = true;
                 consec = 0;
@@ -253,9 +260,9 @@ void CameraManager::usb_capture_thread() {
 
     while (running_) {
         bool any = capture(usb_cap1_, usb1_cap_mtx_, usb1_slot_, usb1_ok_,
-                           frames1, empty1, consec1, "usb1");
+                           frames1, empty1, consec1, usb1_brightness_, "usb1");
         any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_,
-                            frames2, empty2, consec2, "usb2");
+                            frames2, empty2, consec2, usb2_brightness_, "usb2");
 
         // Auto-reconnect: periodically reopen disconnected cameras when enabled.
         auto now = std::chrono::steady_clock::now();
