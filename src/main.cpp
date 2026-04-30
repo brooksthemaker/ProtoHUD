@@ -599,9 +599,6 @@ static std::vector<MenuItem> build_menu(
         submenu("Active Color",   std::move(ind_good_color_menu)),
         submenu("Inactive Color", std::move(ind_inactive_color_menu)),
         submenu("Fail Color",     std::move(ind_fail_color_menu)),
-        toggle("Background",
-            [hud_cfg]{ return hud_cfg->indicator_bg_enabled; },
-            [hud_cfg](bool v){ hud_cfg->indicator_bg_enabled = v; }),
     };
 
     // ── Compass ───────────────────────────────────────────────────────────────
@@ -631,9 +628,6 @@ static std::vector<MenuItem> build_menu(
     }, [hud_col](ImU32 c){ hud_col->compass_bg_color = c; });
 
     std::vector<MenuItem> compass_bg_options_menu = {
-        toggle("Show Background",
-            [&state]{ return state.compass_bg_enabled; },
-            [&state](bool v){ std::lock_guard<std::mutex> lk(state.mtx); state.compass_bg_enabled = v; }),
         slider("Tape Height", 50.f, 120.f, 5.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_height); },
             [hud_cfg](float v){ hud_cfg->compass_height = static_cast<int>(v); }),
@@ -701,6 +695,13 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> hud_menu = {
+        toggle("Show Backgrounds",
+            [hud_cfg, &state]{ return hud_cfg->indicator_bg_enabled && state.compass_bg_enabled; },
+            [hud_cfg, &state](bool v){
+                hud_cfg->indicator_bg_enabled = v;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.compass_bg_enabled = v;
+            }),
         submenu("Text Options",      std::move(text_options_menu)),
         submenu("Indicator Options", std::move(indicator_options_menu)),
         submenu("Compass",           std::move(compass_menu)),
@@ -1528,6 +1529,7 @@ int main(int argc, char* argv[]) {
         jc["compass_bg_color"] = color_to_json(hud.colors().compass_bg_color);
 
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
+        cfg["hud"]["compass_bg"]           = state.compass_bg_enabled;
 
         auto& jpp = cfg["post_process"];
         jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
