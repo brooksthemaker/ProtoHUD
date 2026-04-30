@@ -29,6 +29,7 @@ bool PostProcessor::init(int w, int h, const char* vs_path, const char* fs_path)
     loc_motion_thresh_ = glGetUniformLocation(prog_, "u_motion_thresh");
     loc_motion_radius_ = glGetUniformLocation(prog_, "u_motion_radius");
     loc_motion_col_    = glGetUniformLocation(prog_, "u_motion_col");
+    loc_motion_line_   = glGetUniformLocation(prog_, "u_motion_line");
 
     static const char* kBlitVs =
         "attribute vec2 a_pos; attribute vec2 a_uv;"
@@ -107,6 +108,7 @@ void PostProcessor::process(GLuint src_tex, gl::Fbo& prev_fbo, const gl::Fbo& ds
     glUniform1f(loc_motion_thresh_, cfg.motion_thresh);
     glUniform1f(loc_motion_radius_, cfg.motion_radius);
     glUniform3f(loc_motion_col_,    mr, mg, mb);
+    glUniform1f(loc_motion_line_,   cfg.motion_line);
 
     gl::bind_quad(vbo_);
     gl::draw_quad();

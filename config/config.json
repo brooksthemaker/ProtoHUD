@@ -156,7 +156,8 @@
     "motion_enabled": false,
     "motion_strength": 0.9,
     "motion_thresh": 0.04,
-    "motion_radius": 10.0,
+    "motion_radius": 3.0,
+    "motion_line": 1.0,
     "motion_color": [0, 255, 100, 255]
   },
   "colors": {

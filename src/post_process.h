@@ -58,6 +58,7 @@ private:
     GLint loc_motion_thresh_ = -1;
     GLint loc_motion_radius_ = -1;
     GLint loc_motion_col_    = -1;
+    GLint loc_motion_line_   = -1;
 
     int w_ = 0, h_ = 0;
 };

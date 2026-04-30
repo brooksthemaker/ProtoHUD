@@ -29,8 +29,9 @@ struct PostProcessConfig {
     bool  motion_enabled  = false;
     float motion_strength = 0.9f;
     float motion_thresh   = 0.04f;   // min luma delta to count as motion (~4%); noise ~1-2%
-    float motion_radius   = 10.0f;   // dilation radius in texels for blob connection
+    float motion_radius   = 3.0f;    // sampling step in texels (smaller = tighter line)
     ImU32 motion_color    = IM_COL32(0, 255, 100, 255);
+    float motion_line     = 1.0f;    // 0.0=filled blob, 1.0=fine boundary line
 };
 
 // ── Overlay layout config (PiP and Android mirror) ───────────────────────────

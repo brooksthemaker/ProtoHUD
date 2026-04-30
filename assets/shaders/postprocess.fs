@@ -31,8 +31,9 @@ uniform float     u_gate_scale; // 0.0=off, else=step multiplier for confirmator
 uniform sampler2D u_prev_frame;    // unit 2: previous raw frame (RGBA8) for motion detection
 uniform float     u_motion_str;    // 0.0=off; motion highlight intensity
 uniform float     u_motion_thresh; // min luma delta to count as motion (0.01–0.15)
-uniform float     u_motion_radius; // dilation radius in texels; connects nearby motion blobs
+uniform float     u_motion_radius; // sampling step in texels (controls detection tightness)
 uniform vec3      u_motion_col;    // motion highlight colour (normalised RGB)
+uniform float     u_motion_line;   // 0.0=filled blob, 1.0=fine boundary line
 
 varying vec2 v_uv;
 
@@ -116,12 +117,11 @@ void main() {
     // ── Overlay edges ─────────────────────────────────────────────────────────
     color = mix(color, u_edge_col, edge * u_edge_str);
 
-    // ── Motion highlight (temporal frame diff + blob dilation) ────────────────
-    // Compares current luma to previous frame at center + 4 diagonal neighbors.
-    // Taking the max means any pixel within u_motion_radius texels of a moving
-    // pixel also lights up, connecting scattered detections into visible blobs.
-    // Works regardless of local contrast — detects low-contrast moving objects
-    // that Sobel and the contrast proxy miss entirely.
+    // ── Motion highlight (temporal frame diff) ────────────────────────────────
+    // Fine-line mode (u_motion_line=1): uses the RANGE of motion values across
+    // the 5-sample neighborhood — high range means this pixel is at the boundary
+    // between moving and still regions, giving a 1-2px line hugging the silhouette.
+    // Fill mode (u_motion_line=0): uses the MAX (dilation), floods the whole region.
     if (u_motion_str > 0.0) {
         vec2 mstep = u_texel * u_motion_radius;
         float p11 = luma(texture2D(u_prev_frame, v_uv).rgb);
@@ -133,9 +133,15 @@ void main() {
         float s20 = luma(texture2D(u_scene, v_uv + vec2( 1.0,-1.0)*mstep).rgb);
         float s02 = luma(texture2D(u_scene, v_uv + vec2(-1.0, 1.0)*mstep).rgb);
         float s22 = luma(texture2D(u_scene, v_uv + vec2( 1.0, 1.0)*mstep).rgb);
-        float motion = max(abs(l11 - p11),
-                       max(max(abs(s00-p00), abs(s20-p20)),
-                           max(abs(s02-p02), abs(s22-p22))));
+        float mc   = abs(l11  - p11);
+        float mn00 = abs(s00  - p00);
+        float mn20 = abs(s20  - p20);
+        float mn02 = abs(s02  - p02);
+        float mn22 = abs(s22  - p22);
+        float m_max = max(mc, max(max(mn00, mn20), max(mn02, mn22)));
+        float m_min = min(mc, min(min(mn00, mn20), min(mn02, mn22)));
+        // Fine-line: only pixels at the motion boundary (range = max - min is large)
+        float motion = mix(m_max, m_max - m_min, u_motion_line);
         float mw = clamp((motion - u_motion_thresh) / (1.0 - u_motion_thresh + 0.001), 0.0, 1.0);
         color = mix(color, u_motion_col, mw * u_motion_str);
     }
