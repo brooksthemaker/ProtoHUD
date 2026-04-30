@@ -33,7 +33,8 @@ struct HudColors {
     ImU32 orange_glow = IM_COL32(255, 160,  32,  70);
     ImU32 orange_dim  = IM_COL32(255, 160,  32,  28);
     // Runtime-configurable HUD palette (full RGB, alpha=255; glow alphas derived at draw time)
-    ImU32 glow_base       = IM_COL32(255, 160,  32, 255); // outline/glow base color
+    ImU32 glow_base       = IM_COL32(255, 160,  32, 255); // line/outline base color
+    ImU32 glow_color      = IM_COL32(255, 160,  32, 255); // text glow halo color (independent)
     ImU32 text_fill       = IM_COL32(255, 255, 255, 255); // main text fill
     ImU32 ind_good        = IM_COL32(255, 160,  32, 255); // indicator OK dot
     ImU32 ind_inactive    = IM_COL32(120, 120, 120, 255); // indicator inactive/disconnected dot

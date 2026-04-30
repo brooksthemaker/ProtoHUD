@@ -732,7 +732,9 @@ static std::vector<MenuItem> build_menu(
         leaf("Dismiss Alarm", [&state]{ state.timer_alarm.alarm_triggered = false; }),
     };
 
-    // ── Color Options > HUD ───────────────────────────────────────────────────
+    // ── Color Options ─────────────────────────────────────────────────────────
+
+    // HUD > Borders & Lines
     std::vector<MenuItem> borders_lines_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
         { "Teal",   IM_COL32(  0, 220, 180, 255) },
@@ -744,30 +746,13 @@ static std::vector<MenuItem> build_menu(
         { "Red",    IM_COL32(255,  50,  50, 255) },
     }, [hud_col](ImU32 c){ hud_col->glow_base = c; });
 
-    std::vector<MenuItem> glow_options_menu = {
-        toggle("Glow Enable",
-            [hud_cfg]{ return hud_cfg->glow_enabled; },
-            [hud_cfg](bool v){ hud_cfg->glow_enabled = v; }),
-        slider("Glow Intensity", 0.f, 100.f, 5.f, " %",
-            [hud_cfg]{ return hud_cfg->glow_intensity * 100.f; },
-            [hud_cfg](float v){ hud_cfg->glow_intensity = v / 100.f; }),
-    };
-
-    std::vector<MenuItem> indicator_colors_menu = {
-        submenu("Active Color",   std::move(ind_good_color_menu)),
-        submenu("Inactive Color", std::move(ind_inactive_color_menu)),
-        submenu("Fail Color",     std::move(ind_fail_color_menu)),
-        toggle("Background",
-            [hud_cfg]{ return hud_cfg->indicator_bg_enabled; },
-            [hud_cfg](bool v){ hud_cfg->indicator_bg_enabled = v; }),
-    };
-
-    // Themes — apply a coordinated batch of HudColors + MenuSystem styles
-    auto apply_theme = [hud_col, hud_cfg, menu_sys_pp](
-            ImU32 glow, ImU32 text, ImU32 tick, ImU32 tick_glow,
-            bool border, SelectionStyle style,
-            ImU32 menu_accent, ImU32 menu_bg) {
+    // Themes — apply a coordinated set of HudColors + MenuSystem styles
+    auto apply_theme = [hud_col, menu_sys_pp](
+            ImU32 glow, ImU32 glow_col, ImU32 text,
+            ImU32 tick, ImU32 tick_glow,
+            bool border, SelectionStyle style, ImU32 menu_accent) {
         hud_col->glow_base    = glow;
+        hud_col->glow_color   = glow_col;
         hud_col->text_fill    = text;
         hud_col->compass_tick = tick;
         hud_col->compass_glow = tick_glow;
@@ -779,49 +764,121 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> themes_menu = {
-        leaf("Solar", [apply_theme]{
-            apply_theme(IM_COL32(255,160, 32,255), IM_COL32(255,255,255,255),
-                        IM_COL32(255,160, 32,255), IM_COL32(255,160, 32,255),
-                        true, SelectionStyle::ACCENT_BAR,
-                        IM_COL32(255,160, 32,255), IM_COL32(10,15,20,225));
-        }),
-        leaf("Halo",  [apply_theme]{
+        leaf("Halo", [apply_theme]{
             apply_theme(IM_COL32(255,255,255,255), IM_COL32(255,255,255,255),
+                        IM_COL32(255,255,255,255),
                         IM_COL32(255,255,255,255), IM_COL32(255,255,255,180),
                         false, SelectionStyle::FILLED_ROW,
-                        IM_COL32(255,255,255,255), IM_COL32(10,15,20,225));
+                        IM_COL32(255,255,255,255));
         }),
-        leaf("Teal",  [apply_theme]{
-            apply_theme(IM_COL32(  0,220,180,255), IM_COL32(200,255,245,255),
-                        IM_COL32(  0,220,180,255), IM_COL32(  0,220,180,255),
+        leaf("Solar", [apply_theme]{
+            apply_theme(IM_COL32(255,160, 32,255), IM_COL32(255,160, 32,255),
+                        IM_COL32(255,255,255,255),
+                        IM_COL32(255,160, 32,255), IM_COL32(255,160, 32,255),
                         true, SelectionStyle::ACCENT_BAR,
-                        IM_COL32(  0,220,180,255), IM_COL32(5,25,22,225));
+                        IM_COL32(255,160, 32,255));
         }),
-        leaf("Cyan",  [apply_theme]{
-            apply_theme(IM_COL32(  0,180,255,255), IM_COL32(200,235,255,255),
-                        IM_COL32(  0,180,255,255), IM_COL32(  0,180,255,255),
+        leaf("Fallout", [apply_theme]{
+            apply_theme(IM_COL32(  0,200, 50,255), IM_COL32(  0,200, 50,255),
+                        IM_COL32(  0,255, 80,255),
+                        IM_COL32(  0,200, 50,255), IM_COL32(  0,200, 50,255),
                         true, SelectionStyle::ACCENT_BAR,
-                        IM_COL32(  0,180,255,255), IM_COL32(5,10,35,225));
+                        IM_COL32(  0,200, 50,255));
         }),
-        leaf("Night", [apply_theme]{
-            apply_theme(IM_COL32(200,  0,  0,255), IM_COL32(255,200,200,255),
-                        IM_COL32(180,  0,  0,255), IM_COL32(180,  0,  0,255),
+        leaf("Space", [apply_theme]{
+            apply_theme(IM_COL32( 80,100,255,255), IM_COL32( 80,100,255,255),
+                        IM_COL32(200,220,255,255),
+                        IM_COL32( 80,100,255,255), IM_COL32( 80,100,255,255),
                         true, SelectionStyle::ACCENT_BAR,
-                        IM_COL32(200,  0,  0,255), IM_COL32(20,5,5,225));
+                        IM_COL32( 80,100,255,255));
         }),
     };
 
-    std::vector<MenuItem> hud_color_menu = {
-        submenu("Borders & Lines",  std::move(borders_lines_menu)),
-        submenu("Compass Tick",     std::move(compass_tick_color_menu)),
-        submenu("Text Color",       std::move(text_color_menu)),
-        submenu("Glow",             std::move(glow_options_menu)),
-        submenu("Indicator Colors", std::move(indicator_colors_menu)),
-        submenu("Themes",           std::move(themes_menu)),
+    std::vector<MenuItem> hud_submenu = {
+        submenu("Borders & Lines", std::move(borders_lines_menu)),
+        submenu("Themes",          std::move(themes_menu)),
+    };
+
+    // Compass Tick Color — sets tick + glow together
+    std::vector<MenuItem> compass_tick_color_menu2 = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+        { "Red",    IM_COL32(255,  50,  50, 255) },
+    }, [hud_col](ImU32 c){ hud_col->compass_tick = c; hud_col->compass_glow = c; });
+
+    // Backgrounds
+    std::vector<MenuItem> menu_bg_color_menu = make_color_items({
+        { "Dark",   IM_COL32( 10,  15,  20, 225) },
+        { "Teal",   IM_COL32(  5,  25,  22, 225) },
+        { "Purple", IM_COL32( 20,   8,  28, 225) },
+        { "Navy",   IM_COL32(  8,   8,  35, 225) },
+        { "Black",  IM_COL32(  0,   0,   0, 230) },
+    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_color(c); });
+
+    std::vector<MenuItem> hud_bg_color_menu = make_color_items({
+        { "Dark",   IM_COL32( 10,  15,  20, 210) },
+        { "Navy",   IM_COL32(  5,  10,  25, 210) },
+        { "Black",  IM_COL32(  0,   0,   0, 220) },
+        { "Teal",   IM_COL32(  5,  20,  18, 210) },
+        { "Green",  IM_COL32(  0,  18,   5, 210) },
+        { "Space",  IM_COL32(  4,   4,  22, 210) },
+    }, [hud_col](ImU32 c){
+        hud_col->background       = c;
+        hud_col->compass_bg_color = c;
+    });
+
+    std::vector<MenuItem> backgrounds_menu = {
+        toggle("HUD Background",
+            [hud_cfg]{ return hud_cfg->indicator_bg_enabled; },
+            [hud_cfg, &state](bool v){
+                hud_cfg->indicator_bg_enabled = v;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.compass_bg_enabled = v;
+            }),
+        toggle("Menu Background",
+            [menu_sys_pp]{ return *menu_sys_pp && (*menu_sys_pp)->bg_enabled(); },
+            [menu_sys_pp](bool v){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(v); }),
+        submenu("HUD Background Color",  std::move(hud_bg_color_menu)),
+        submenu("Menu Background Color", std::move(menu_bg_color_menu)),
+    };
+
+    // Indicators
+    std::vector<MenuItem> indicators_menu = {
+        submenu("Active Color",   std::move(ind_good_color_menu)),
+        submenu("Inactive Color", std::move(ind_inactive_color_menu)),
+        submenu("Fail Color",     std::move(ind_fail_color_menu)),
+    };
+
+    // Glow
+    std::vector<MenuItem> glow_color_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+        { "Yellow", IM_COL32(255, 240,  50, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "Red",    IM_COL32(255,  50,  50, 255) },
+    }, [hud_col](ImU32 c){ hud_col->glow_color = c; });
+
+    std::vector<MenuItem> glow_menu = {
+        toggle("Text Glow",
+            [hud_cfg]{ return hud_cfg->glow_enabled; },
+            [hud_cfg](bool v){ hud_cfg->glow_enabled = v; }),
+        submenu("Glow Color", std::move(glow_color_menu)),
     };
 
     std::vector<MenuItem> color_options_menu = {
-        submenu("HUD", std::move(hud_color_menu)),
+        submenu("HUD",                std::move(hud_submenu)),
+        submenu("Compass Tick Color", std::move(compass_tick_color_menu2)),
+        submenu("Text Color",         std::move(text_color_menu)),
+        submenu("Backgrounds",        std::move(backgrounds_menu)),
+        submenu("Indicators",         std::move(indicators_menu)),
+        submenu("Glow",               std::move(glow_menu)),
     };
 
     // ── Menu Options ──────────────────────────────────────────────────────────
@@ -833,20 +890,8 @@ static std::vector<MenuItem> build_menu(
         { "Purple", IM_COL32(180,  30, 220, 255) },
     }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_accent_color(c); });
 
-    std::vector<MenuItem> menu_bg_color_menu = make_color_items({
-        { "Dark",   IM_COL32( 10,  15,  20, 225) },
-        { "Teal",   IM_COL32(  5,  25,  22, 225) },
-        { "Purple", IM_COL32( 20,   8,  28, 225) },
-        { "Navy",   IM_COL32(  8,   8,  35, 225) },
-        { "Black",  IM_COL32(  0,   0,   0, 230) },
-    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_color(c); });
-
     std::vector<MenuItem> menu_options_menu = {
-        submenu("Menu Color",  std::move(menu_color_menu)),
-        submenu("BG Color",    std::move(menu_bg_color_menu)),
-        toggle("Background",
-            [menu_sys_pp]{ return *menu_sys_pp && (*menu_sys_pp)->bg_enabled(); },
-            [menu_sys_pp](bool v){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(v); }),
+        submenu("Menu Color", std::move(menu_color_menu)),
     };
 
     std::vector<MenuItem> clock_offset_menu = {
