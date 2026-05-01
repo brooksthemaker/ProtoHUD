@@ -702,7 +702,6 @@ static std::vector<MenuItem> build_menu(
         slider("Tape Height", 50.f, 120.f, 5.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_height); },
             [hud_cfg](float v){ hud_cfg->compass_height = static_cast<int>(v); }),
-        submenu("Color", std::move(compass_bg_color_menu)),
     };
 
     std::vector<MenuItem> compass_tick_color_menu = make_color_items({
@@ -855,6 +854,7 @@ static std::vector<MenuItem> build_menu(
         if (*menu_sys_pp) {
             (*menu_sys_pp)->set_accent_color(menu_accent);
             (*menu_sys_pp)->set_border_enabled(border);
+            (*menu_sys_pp)->set_border_color(menu_accent);
             (*menu_sys_pp)->set_selection_style(style);
         }
     };
@@ -864,7 +864,7 @@ static std::vector<MenuItem> build_menu(
             apply_theme(IM_COL32(255,255,255,255), IM_COL32(255,255,255,255),
                         IM_COL32(255,255,255,255),
                         IM_COL32(255,255,255,255), IM_COL32(255,255,255,180),
-                        false, SelectionStyle::FILLED_ROW,
+                        true, SelectionStyle::FILLED_ROW,
                         IM_COL32(255,255,255,255));
         }),
         leaf("Solar", [apply_theme]{
@@ -920,11 +920,6 @@ static std::vector<MenuItem> build_menu(
 
     themes_menu.push_back(submenu("Effects", std::move(effects_menu)));
 
-    std::vector<MenuItem> hud_submenu = {
-        submenu("Borders & Lines",    std::move(borders_lines_menu)),
-        submenu("Themes and Effects", std::move(themes_menu)),
-    };
-
     // Backgrounds
     std::vector<MenuItem> menu_bg_color_menu = make_color_items({
         { "Dark",   IM_COL32( 10,  15,  20, 225) },
@@ -947,13 +942,16 @@ static std::vector<MenuItem> build_menu(
     });
 
     std::vector<MenuItem> backgrounds_menu = {
-        toggle("HUD Background",
+        toggle("Indicator Background",
             [hud_cfg]{ return hud_cfg->indicator_bg_enabled; },
-            [hud_cfg, &state](bool v){
-                hud_cfg->indicator_bg_enabled = v;
+            [hud_cfg](bool v){ hud_cfg->indicator_bg_enabled = v; }),
+        toggle("Compass Background",
+            [&state]{ return state.compass_bg_enabled; },
+            [&state](bool v){
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.compass_bg_enabled = v;
             }),
+        submenu("Compass Background Color", std::move(compass_bg_color_menu)),
         toggle("Menu Background",
             [menu_sys_pp]{ return *menu_sys_pp && (*menu_sys_pp)->bg_enabled(); },
             [menu_sys_pp](bool v){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_enabled(v); }),
@@ -1023,7 +1021,8 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> color_options_menu = {
-        submenu("HUD",                std::move(hud_submenu)),
+        submenu("Borders & Lines",    std::move(borders_lines_menu)),
+        submenu("Themes and Effects", std::move(themes_menu)),
         submenu("Compass Tick Color", std::move(compass_tick_color_menu)),
         submenu("Compass Glow Color", std::move(compass_glow_color_menu)),
         submenu("Text Color",         std::move(text_color_menu)),
