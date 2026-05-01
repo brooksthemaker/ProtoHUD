@@ -29,7 +29,66 @@
 #include "post_process.h"
 #include "sensor/mpu9250.h"
 
+#include <fstream>
+#include <unistd.h>
+
 using json = nlohmann::json;
+
+// ── Serial port auto-discovery ────────────────────────────────────────────────
+// Tries the configured path first; if it doesn't exist, scans up to 8 nodes
+// with the same prefix (ttyACM/ttyUSB) and optionally matches by USB VID:PID
+// read from sysfs. Returns the best match (or the original path so the
+// caller's open() fails with the right error message).
+static std::string resolve_serial_port(const std::string& configured,
+                                        uint16_t vid = 0, uint16_t pid = 0) {
+    if (access(configured.c_str(), F_OK) == 0) return configured;
+
+    // Determine prefix (ttyACM / ttyUSB)
+    const char* pfx = nullptr;
+    if (configured.find("/dev/ttyACM") == 0) pfx = "/dev/ttyACM";
+    else if (configured.find("/dev/ttyUSB") == 0) pfx = "/dev/ttyUSB";
+    if (!pfx) return configured;
+
+    std::string tty_prefix(pfx);
+    std::string sys_prefix = "/sys/class/tty/" + tty_prefix.substr(5); // strip /dev/
+
+    std::string first_available;
+    for (int n = 0; n < 8; n++) {
+        std::string dev = tty_prefix + std::to_string(n);
+        if (access(dev.c_str(), F_OK) != 0) continue;
+
+        // If VID:PID were provided, check sysfs uevent for a match
+        if (vid != 0) {
+            std::string uevent = sys_prefix + std::to_string(n) + "/device/uevent";
+            std::ifstream f(uevent);
+            bool match = false;
+            if (f) {
+                std::string line;
+                while (std::getline(f, line)) {
+                    if (line.find("PRODUCT=") != 0) continue;
+                    unsigned rv = 0, rp = 0;
+                    if (sscanf(line.c_str(), "PRODUCT=%x/%x", &rv, &rp) == 2)
+                        match = (rv == vid && rp == pid);
+                    break;
+                }
+            }
+            if (match) {
+                std::cerr << "[serial] " << configured << " not found — using "
+                          << dev << " (VID:PID match)\n";
+                return dev;
+            }
+        }
+        if (first_available.empty()) first_available = dev;
+    }
+
+    // No VID:PID match found; fall back to first available node with same prefix
+    if (!first_available.empty() && vid == 0) {
+        std::cerr << "[serial] " << configured << " not found — trying "
+                  << first_available << "\n";
+        return first_available;
+    }
+    return configured; // give up; caller logs the real open() error
+}
 
 // ── Config loading ────────────────────────────────────────────────────────────
 
@@ -335,6 +394,27 @@ static std::vector<MenuItem> build_menu(
         submenu("Shutter Speed", std::move(shutter_speeds)),
     };
 
+    // ── White balance (OWLsight CSI cameras) ─────────────────────────────────
+    std::vector<MenuItem> wb_temp_menu = {
+        leaf_sel("Tungsten (2800K)",  [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(2800); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(2800); } }, []{ return false; }),
+        leaf_sel("Warm WB (3500K)",   [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(3500); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(3500); } }, []{ return false; }),
+        leaf_sel("Neutral (4500K)",   [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(4500); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(4500); } }, []{ return false; }),
+        leaf_sel("Daylight (5600K)",  [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(5600); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(5600); } }, []{ return false; }),
+        leaf_sel("Cool Blue (7000K)", [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(7000); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(7000); } }, []{ return false; }),
+    };
+
+    std::vector<MenuItem> awb_menu = {
+        toggle("Auto WB",
+            [&state]{ return state.night_vision.csi_awb_on; },
+            [cameras, &state](bool v){
+                state.night_vision.csi_awb_on = v;
+                if (!cameras) return;
+                if (cameras->owl_left())  cameras->owl_left()->set_awb_enable(v);
+                if (cameras->owl_right()) cameras->owl_right()->set_awb_enable(v);
+            }),
+        submenu("Colour Temp", std::move(wb_temp_menu)),
+    };
+
     std::vector<MenuItem> main_cameras_menu = {
         submenu("Resolution",  std::move(resolution_presets)),
         submenu("Focus Mode",  std::move(focus_modes)),
@@ -350,6 +430,7 @@ static std::vector<MenuItem> build_menu(
                 state.focus_right.focus_position = pos;
             }),
         submenu("Autofocus",    std::move(af_triggers)),
+        submenu("White Balance", std::move(awb_menu)),
         submenu("Night Vision", std::move(nv_menu)),
     };
 
@@ -1384,15 +1465,17 @@ int main(int argc, char* argv[]) {
 
     CamConfig owl_left, owl_right;
     if (jcam.contains("owlsight_left")) {
-        auto& jl          = jcam["owlsight_left"];
+        auto& jl              = jcam["owlsight_left"];
         owl_left.libcamera_id = jl.value("libcamera_id", 0);
+        owl_left.model_name   = jl.value("model_name",   std::string(""));
         owl_left.width        = jl.value("width",  1280);
         owl_left.height       = jl.value("height",  800);
         owl_left.fps          = jl.value("fps",      60);
     }
     if (jcam.contains("owlsight_right")) {
-        auto& jr           = jcam["owlsight_right"];
+        auto& jr               = jcam["owlsight_right"];
         owl_right.libcamera_id = jr.value("libcamera_id", 1);
+        owl_right.model_name   = jr.value("model_name",   std::string(""));
         owl_right.width        = jr.value("width",  1280);
         owl_right.height       = jr.value("height",  800);
         owl_right.fps          = jr.value("fps",      60);
@@ -1707,13 +1790,20 @@ int main(int argc, char* argv[]) {
     if (jser.contains("lora"))      lora_port   = jser["lora"].value("port",      lora_port);
     if (jser.contains("smartknob")) knob_port   = jser["smartknob"].value("port", knob_port);
 
+    // Auto-discover serial ports by USB VID:PID when configured paths are absent.
+    // Teensy 4.1: VID=0x16C0, PID=0x0483.  LoRa CH340: VID=0x1A86, PID=0x7523.
+    // SmartKnob (ESP32-S3 dev board): scan ttyACM without VID filter (varies by board).
+    teensy_port = resolve_serial_port(teensy_port, 0x16C0, 0x0483);
+    lora_port   = resolve_serial_port(lora_port,   0x1A86, 0x7523);
+    knob_port   = resolve_serial_port(knob_port);
+
     TeensyController teensy(teensy_port, baud, state);
     LoRaRadio        lora  (lora_port,   baud, state);
     SmartKnob        knob  (knob_port,   baud, state);
 
-    teensy.start();
-    lora.start();
-    knob.start();
+    if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
+    if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
+    if (!knob.start())   std::cerr << "[main] SmartKnob not available on " << knob_port << "\n";
 
     uint16_t sleep_tmo = 30;
     if (jser.contains("smartknob"))

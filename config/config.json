@@ -12,6 +12,7 @@
   "cameras": {
     "owlsight_left": {
       "libcamera_id": 0,
+      "model_name": "",
       "width": 1280,
       "height": 800,
       "fps": 60,
@@ -20,6 +21,7 @@
     },
     "owlsight_right": {
       "libcamera_id": 1,
+      "model_name": "",
       "width": 1280,
       "height": 800,
       "fps": 60,

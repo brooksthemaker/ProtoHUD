@@ -16,10 +16,11 @@
 namespace libcamera { class CameraManager; }
 
 struct CamConfig {
-    int  libcamera_id = 0;
-    int  width        = 1280;
-    int  height       = 800;
-    int  fps          = 60;
+    int         libcamera_id = 0;
+    std::string model_name;   // if non-empty, select camera by model string first
+    int         width        = 1280;
+    int         height       = 800;
+    int         fps          = 60;
 };
 
 struct UsbCamConfig {

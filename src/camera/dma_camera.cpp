@@ -12,11 +12,12 @@
 #include <cstring>
 #include <chrono>
 #include <thread>
+#include <vector>
 
 // DRM fourcc codes — avoids depending on drm/drm_fourcc.h
-// NV12: semi-planar 4:2:0 — Y plane, then interleaved Cb/Cr (UV) plane.
-// fourcc_code('N','V','1','2') = 0x3231564E (little-endian).
-#define DRM_FORMAT_NV12 0x3231564Eu
+#define DRM_FORMAT_NV12   0x3231564Eu  // semi-planar 4:2:0: Y + interleaved UV
+#define DRM_FORMAT_YUV420 0x32315559u  // planar 4:2:0: Y + U + V
+#define DRM_FORMAT_YUYV   0x56595559u  // packed 4:2:2: Y0 Cb Y1 Cr interleaved
 
 using namespace libcamera;
 
@@ -70,53 +71,100 @@ bool DmaCamera::load_egl_procs() {
 
 bool DmaCamera::configure_camera() {
     auto cameras = lcam_mgr_->cameras();
-    if (static_cast<int>(cameras.size()) <= cfg_.libcamera_id) {
-        std::cerr << "[dma] camera id " << cfg_.libcamera_id
-                  << " not found (" << cameras.size() << " cameras)\n";
-        return false;
-    }
 
-    camera_ = lcam_mgr_->get(cameras[cfg_.libcamera_id]->id());
+    // ── Select camera: by model string if provided, else by index ────────────
+    if (!cfg_.model_name.empty()) {
+        for (auto& desc : cameras) {
+            auto c = lcam_mgr_->get(desc->id());
+            try {
+                auto m = c->properties().get(properties::Model);
+                if (m && *m == cfg_.model_name) {
+                    camera_ = c;
+                    break;
+                }
+            } catch (...) {}
+        }
+        if (!camera_)
+            std::cerr << "[dma] model '" << cfg_.model_name
+                      << "' not found, falling back to id " << cfg_.libcamera_id << "\n";
+    }
+    if (!camera_) {
+        if (static_cast<int>(cameras.size()) <= cfg_.libcamera_id) {
+            std::cerr << "[dma] camera id " << cfg_.libcamera_id
+                      << " not found (" << cameras.size() << " cameras)\n";
+            return false;
+        }
+        camera_ = lcam_mgr_->get(cameras[cfg_.libcamera_id]->id());
+    }
     if (!camera_ || camera_->acquire()) {
-        std::cerr << "[dma] failed to acquire camera " << cfg_.libcamera_id << "\n";
+        std::cerr << "[dma] failed to acquire camera\n";
         return false;
     }
 
-    cam_cfg_ = camera_->generateConfiguration({ StreamRole::Viewfinder });
-    auto& sc = cam_cfg_->at(0);
-    sc.pixelFormat = formats::NV12;   // native ISP output — no ISP RGB conversion
-    sc.size        = { static_cast<unsigned>(cfg_.width),
-                       static_cast<unsigned>(cfg_.height) };
-    sc.bufferCount = NUM_SLOTS;
-    // Frame rate is set via FrameDurationLimits control on camera_->start(),
-    // not via StreamConfiguration (frameRate field does not exist on Bullseye).
-
-    auto status = cam_cfg_->validate();
-    if (status == CameraConfiguration::Invalid) {
-        std::cerr << "[dma] camera configuration invalid\n";
-        return false;
+    // ── Log supported modes so users can identify valid resolutions ───────────
+    {
+        auto probe = camera_->generateConfiguration({ StreamRole::Viewfinder });
+        std::cout << "[dma] camera " << cfg_.libcamera_id << " supported modes:\n";
+        for (size_t i = 0; i < probe->size(); ++i) {
+            const auto& s = probe->at(i);
+            std::cout << "  [" << i << "] " << s.pixelFormat
+                      << " " << s.size.width << "×" << s.size.height << "\n";
+        }
     }
-    if (status == CameraConfiguration::Adjusted) {
-        // libcamera snapped the requested size to the nearest supported mode.
-        // Update cfg_ so EGL image dimensions match the actual buffer layout.
+
+    // ── Format negotiation: NV12 → YUV420 → YUYV ─────────────────────────────
+    // NV12 is preferred (native ISP semi-planar, zero-copy via EGL).
+    // YUV420 (3-plane) and YUYV (packed) are fallbacks for sensors/bridges that
+    // do not expose NV12. The samplerExternalOES path handles all three on V3D.
+    const struct { libcamera::PixelFormat fmt; uint32_t drm; int planes; const char* name; }
+    kFmtPrefs[] = {
+        { formats::NV12,   DRM_FORMAT_NV12,   2, "NV12"   },
+        { formats::YUV420, DRM_FORMAT_YUV420, 3, "YUV420" },
+        { formats::YUYV,   DRM_FORMAT_YUYV,   1, "YUYV"   },
+    };
+
+    bool configured = false;
+    for (const auto& fp : kFmtPrefs) {
+        cam_cfg_ = camera_->generateConfiguration({ StreamRole::Viewfinder });
+        auto& sc = cam_cfg_->at(0);
+        sc.pixelFormat = fp.fmt;
+        sc.size        = { static_cast<unsigned>(cfg_.width),
+                           static_cast<unsigned>(cfg_.height) };
+        sc.bufferCount = NUM_SLOTS;
+        auto st = cam_cfg_->validate();
+        if (st == CameraConfiguration::Invalid) continue;
+
+        if (st == CameraConfiguration::Adjusted) {
+            std::cout << "[dma] size adjusted: "
+                      << cfg_.width << "×" << cfg_.height
+                      << " → " << sc.size.width << "×" << sc.size.height << "\n";
+            cfg_.width  = sc.size.width;
+            cfg_.height = sc.size.height;
+        }
+        fmt_drm_    = fp.drm;
+        fmt_planes_ = fp.planes;
+        configured  = true;
         std::cout << "[dma] camera " << cfg_.libcamera_id
-                  << " size adjusted by libcamera: "
-                  << cfg_.width << "×" << cfg_.height
-                  << " → " << sc.size.width << "×" << sc.size.height << "\n";
-        cfg_.width  = sc.size.width;
-        cfg_.height = sc.size.height;
+                  << " using format " << fp.name << "\n";
+        break;
     }
+    if (!configured) {
+        std::cerr << "[dma] no supported pixel format (tried NV12, YUV420, YUYV)\n";
+        return false;
+    }
+
     if (camera_->configure(cam_cfg_.get())) {
         std::cerr << "[dma] camera_->configure() failed\n";
         return false;
     }
 
+    auto& sc = cam_cfg_->at(0);
     stream_ = sc.stream();
     stride_ = sc.stride;
 
     std::cout << "[dma] camera " << cfg_.libcamera_id
               << " configured: " << cfg_.width << "×" << cfg_.height
-              << " NV12 stride=" << stride_ << " fps=" << cfg_.fps << "\n";
+              << " stride=" << stride_ << " fps=" << cfg_.fps << "\n";
     return true;
 }
 
@@ -157,42 +205,52 @@ bool DmaCamera::allocate_buffers_and_egl() {
 
 bool DmaCamera::create_egl_image(const FrameBuffer* buf, Slot& slot) {
     const auto& planes = buf->planes();
-    if (planes.size() < 2) {
-        std::cerr << "[dma] NV12 buffer has fewer than 2 planes\n";
+    if (static_cast<int>(planes.size()) < fmt_planes_) {
+        std::cerr << "[dma] buffer has " << planes.size()
+                  << " planes but format requires " << fmt_planes_ << "\n";
         return false;
     }
 
-    int fd_y    = planes[0].fd.get();
-    int fd_uv   = planes[1].fd.get();
-    auto off_y  = static_cast<EGLint>(planes[0].offset);
-    auto off_uv = static_cast<EGLint>(planes[1].offset);
-    auto pitch  = static_cast<EGLint>(stride_);
+    auto pitch = static_cast<EGLint>(stride_);
 
-    // Import the full NV12 buffer as a single multi-plane EGLImage.
-    // PLANE0 = Y (luma, full resolution), PLANE1 = UV (chroma, interleaved Cb/Cr).
-    // Mesa V3D on Pi5 supports DRM_FORMAT_NV12 natively; sampling via
-    // GL_TEXTURE_EXTERNAL_OES + samplerExternalOES returns RGB (TMU does YCbCr→RGB).
-    // This avoids DRM_FORMAT_RG88 which is not supported on V3D (EGL_BAD_MATCH).
-    EGLint attr[] = {
+    // Build the EGL attribute list for the negotiated DRM format.
+    // NV12 / YUV420 / YUYV all use the same EGL_LINUX_DMA_BUF_EXT path;
+    // only the fourcc and plane count differ.
+    std::vector<EGLint> attr = {
         EGL_WIDTH,                         cfg_.width,
         EGL_HEIGHT,                        cfg_.height,
-        EGL_LINUX_DRM_FOURCC_EXT,          (EGLint)DRM_FORMAT_NV12,
-        EGL_DMA_BUF_PLANE0_FD_EXT,         fd_y,
-        EGL_DMA_BUF_PLANE0_OFFSET_EXT,     off_y,
+        EGL_LINUX_DRM_FOURCC_EXT,          (EGLint)fmt_drm_,
+        // Plane 0 — Y (luma) or packed data (YUYV)
+        EGL_DMA_BUF_PLANE0_FD_EXT,         planes[0].fd.get(),
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT,     (EGLint)planes[0].offset,
         EGL_DMA_BUF_PLANE0_PITCH_EXT,      pitch,
-        EGL_DMA_BUF_PLANE1_FD_EXT,         fd_uv,
-        EGL_DMA_BUF_PLANE1_OFFSET_EXT,     off_uv,
-        EGL_DMA_BUF_PLANE1_PITCH_EXT,      pitch,
-        EGL_NONE
     };
+    if (fmt_planes_ >= 2) {
+        // Plane 1 — UV interleaved (NV12) or U/Cb (YUV420)
+        attr.insert(attr.end(), {
+            EGL_DMA_BUF_PLANE1_FD_EXT,     planes[1].fd.get(),
+            EGL_DMA_BUF_PLANE1_OFFSET_EXT, (EGLint)planes[1].offset,
+            EGL_DMA_BUF_PLANE1_PITCH_EXT,  pitch / 2,
+        });
+    }
+    if (fmt_planes_ >= 3) {
+        // Plane 2 — V/Cr (YUV420 only)
+        attr.insert(attr.end(), {
+            EGL_DMA_BUF_PLANE2_FD_EXT,     planes[2].fd.get(),
+            EGL_DMA_BUF_PLANE2_OFFSET_EXT, (EGLint)planes[2].offset,
+            EGL_DMA_BUF_PLANE2_PITCH_EXT,  pitch / 2,
+        });
+    }
+    attr.push_back(EGL_NONE);
+
     slot.img_y = pfn_create_image_(egl_display_, EGL_NO_CONTEXT,
-                                   EGL_LINUX_DMA_BUF_EXT, nullptr, attr);
+                                   EGL_LINUX_DMA_BUF_EXT, nullptr, attr.data());
     if (slot.img_y == EGL_NO_IMAGE_KHR) {
-        std::cerr << "[dma] eglCreateImageKHR for NV12 failed (err 0x"
+        std::cerr << "[dma] eglCreateImageKHR failed (err 0x"
                   << std::hex << eglGetError() << std::dec << ")\n";
         return false;
     }
-    slot.img_uv = EGL_NO_IMAGE_KHR;   // unused — full NV12 encoded in img_y
+    slot.img_uv = EGL_NO_IMAGE_KHR;  // unused — full frame encoded in img_y
     return true;
 }
 
@@ -444,36 +502,39 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
     cfg_.height = height;
     cfg_.fps    = fps;
 
-    // 5. Reconfigure the libcamera stream (camera stays acquired)
-    cam_cfg_ = camera_->generateConfiguration({ StreamRole::Viewfinder });
-    auto& sc = cam_cfg_->at(0);
-    sc.pixelFormat = formats::NV12;
-    sc.size        = { static_cast<unsigned>(cfg_.width),
-                       static_cast<unsigned>(cfg_.height) };
-    sc.bufferCount = NUM_SLOTS;
-    // frameRate is set via FrameDurationLimits in start_capture(), not here.
+    // 5. Reconfigure — reuse the same format that was negotiated at init time.
+    // Changing resolution does not change the pixel format, so we keep fmt_drm_/fmt_planes_.
+    const struct { libcamera::PixelFormat fmt; uint32_t drm; int planes; } kPrefs[] = {
+        { formats::NV12,   0x3231564Eu, 2 },
+        { formats::YUV420, 0x32315559u, 3 },
+        { formats::YUYV,   0x56595559u, 1 },
+    };
 
-    auto rcfg_status = cam_cfg_->validate();
-    if (rcfg_status == CameraConfiguration::Adjusted) {
-        std::cout << "[dma] reconfigure: size adjusted "
-                  << cfg_.width << "×" << cfg_.height
-                  << " → " << sc.size.width << "×" << sc.size.height << "\n";
-        cfg_.width  = sc.size.width;
-        cfg_.height = sc.size.height;
-    }
-    if (rcfg_status == CameraConfiguration::Invalid) {
-        std::cerr << "[dma] reconfigure: invalid configuration "
-                  << width << "×" << height << " @" << fps << "fps — reverting\n";
-        cfg_.width = old_w;  cfg_.height = old_h;  cfg_.fps = old_fps;
+    bool recfg_ok = false;
+    for (const auto& fp : kPrefs) {
         cam_cfg_ = camera_->generateConfiguration({ StreamRole::Viewfinder });
-        auto& sc2 = cam_cfg_->at(0);
-        sc2.pixelFormat = formats::NV12;
-        sc2.size = { static_cast<unsigned>(old_w), static_cast<unsigned>(old_h) };
-        sc2.bufferCount = NUM_SLOTS;
-        cam_cfg_->validate();
-        camera_->configure(cam_cfg_.get());
-        stream_ = cam_cfg_->at(0).stream();
-        stride_ = cam_cfg_->at(0).stride;
+        auto& sc = cam_cfg_->at(0);
+        sc.pixelFormat = fp.fmt;
+        sc.size        = { static_cast<unsigned>(cfg_.width),
+                           static_cast<unsigned>(cfg_.height) };
+        sc.bufferCount = NUM_SLOTS;
+        auto st = cam_cfg_->validate();
+        if (st == CameraConfiguration::Invalid) continue;
+        if (st == CameraConfiguration::Adjusted) {
+            std::cout << "[dma] reconfigure: size adjusted "
+                      << cfg_.width << "×" << cfg_.height
+                      << " → " << sc.size.width << "×" << sc.size.height << "\n";
+            cfg_.width  = sc.size.width;
+            cfg_.height = sc.size.height;
+        }
+        fmt_drm_    = fp.drm;
+        fmt_planes_ = fp.planes;
+        recfg_ok    = true;
+        break;
+    }
+    if (!recfg_ok) {
+        std::cerr << "[dma] reconfigure: no valid format found — reverting\n";
+        cfg_.width = old_w;  cfg_.height = old_h;  cfg_.fps = old_fps;
         if (allocate_buffers_and_egl()) start_capture();
         return false;
     }
@@ -481,12 +542,8 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
     if (camera_->configure(cam_cfg_.get())) {
         std::cerr << "[dma] reconfigure: camera_->configure() failed — reverting\n";
         cfg_.width = old_w;  cfg_.height = old_h;  cfg_.fps = old_fps;
-        // best-effort revert
         cam_cfg_ = camera_->generateConfiguration({ StreamRole::Viewfinder });
-        auto& sc2 = cam_cfg_->at(0);
-        sc2.pixelFormat = formats::NV12;
-        sc2.size = { static_cast<unsigned>(old_w), static_cast<unsigned>(old_h) };
-        sc2.bufferCount = NUM_SLOTS;
+        cam_cfg_->at(0).size = { static_cast<unsigned>(old_w), static_cast<unsigned>(old_h) };
         cam_cfg_->validate();
         camera_->configure(cam_cfg_.get());
         stream_ = cam_cfg_->at(0).stream();
@@ -495,6 +552,7 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
         return false;
     }
 
+    auto& sc = cam_cfg_->at(0);
     stream_ = sc.stream();
     stride_ = sc.stride;
 
@@ -547,6 +605,17 @@ void DmaCamera::apply_pending_controls(ControlList& ctrls) {
     float lp = pending_lens_pos_.exchange(-1.0f);
     if (lp >= 0.0f)
         ctrls.set(controls::LensPosition, lp);
+
+    int awb = pending_awb_enable_.exchange(-1);
+    if (awb >= 0 && camera_->controls().count(&controls::AwbEnable))
+        ctrls.set(controls::AwbEnable, awb == 1);
+
+    float rg = pending_rg_gain_.exchange(-1.0f);
+    float bg = pending_bg_gain_.exchange(-1.0f);
+    if (rg >= 0.0f && bg >= 0.0f && camera_->controls().count(&controls::ColourGains)) {
+        float gains[2] = { rg, bg };
+        ctrls.set(controls::ColourGains, Span<const float, 2>(gains));
+    }
 }
 
 void DmaCamera::start_autofocus() {
@@ -604,4 +673,43 @@ void DmaCamera::set_ae_enable(bool ae_on) {
     if (!camera_) return;
     if (camera_->controls().count(&controls::AeEnable))
         pending_ae_enable_.store(ae_on ? 1 : 0);
+}
+
+void DmaCamera::set_awb_enable(bool awb_on) {
+    if (!camera_) return;
+    if (camera_->controls().count(&controls::AwbEnable))
+        pending_awb_enable_.store(awb_on ? 1 : 0);
+}
+
+void DmaCamera::set_colour_gains(float rg, float bg) {
+    if (!camera_) return;
+    if (camera_->controls().count(&controls::ColourGains)) {
+        pending_rg_gain_.store(rg);
+        pending_bg_gain_.store(bg);
+    }
+}
+
+void DmaCamera::set_colour_temp(int kelvin) {
+    // Approximate Pi ISP ColourGains (Rg, Bg) for common colour temperatures.
+    // Lower Kelvin = warmer/more red = higher Rg, lower Bg.
+    // Higher Kelvin = cooler/more blue = lower Rg, higher Bg.
+    static const struct { int k; float rg, bg; } lut[] = {
+        { 2800, 2.20f, 1.15f },
+        { 3500, 1.90f, 1.40f },
+        { 4500, 1.60f, 1.65f },
+        { 5600, 1.30f, 1.90f },
+        { 7000, 1.05f, 2.30f },
+    };
+    static constexpr int n = sizeof(lut) / sizeof(lut[0]);
+    if (kelvin <= lut[0].k)   { set_colour_gains(lut[0].rg, lut[0].bg); return; }
+    if (kelvin >= lut[n-1].k) { set_colour_gains(lut[n-1].rg, lut[n-1].bg); return; }
+    for (int i = 1; i < n; i++) {
+        if (kelvin <= lut[i].k) {
+            float t = static_cast<float>(kelvin - lut[i-1].k) /
+                      static_cast<float>(lut[i].k - lut[i-1].k);
+            set_colour_gains(lut[i-1].rg + t * (lut[i].rg - lut[i-1].rg),
+                             lut[i-1].bg + t * (lut[i].bg - lut[i-1].bg));
+            return;
+        }
+    }
 }
