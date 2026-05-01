@@ -794,9 +794,39 @@ static std::vector<MenuItem> build_menu(
         }),
     };
 
+    // Effects — particle overlays with palette options
+    std::vector<MenuItem> fx_palette_menu = {
+        leaf_sel("Match Theme", [&state]{ state.effects_cfg.palette = EffectPalette::Theme;   },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Theme;   }),
+        leaf_sel("Halo",        [&state]{ state.effects_cfg.palette = EffectPalette::Halo;    },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Halo;    }),
+        leaf_sel("Solar",       [&state]{ state.effects_cfg.palette = EffectPalette::Solar;   },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Solar;   }),
+        leaf_sel("Fallout",     [&state]{ state.effects_cfg.palette = EffectPalette::Fallout; },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Fallout; }),
+        leaf_sel("Space",       [&state]{ state.effects_cfg.palette = EffectPalette::Space;   },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Space;   }),
+    };
+
+    std::vector<MenuItem> effects_menu = {
+        leaf_sel("None",               [&state]{ state.effects_cfg.effect = EffectType::None;               },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::None;               }),
+        leaf_sel("Arm Glints",         [&state]{ state.effects_cfg.effect = EffectType::ArmGlints;          },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::ArmGlints;          }),
+        leaf_sel("Corner Drift",       [&state]{ state.effects_cfg.effect = EffectType::CornerDrift;        },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::CornerDrift;        }),
+        leaf_sel("Popup Burst",        [&state]{ state.effects_cfg.effect = EffectType::PopupBurst;         },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::PopupBurst;         }),
+        leaf_sel("Compass Turbulence", [&state]{ state.effects_cfg.effect = EffectType::CompassTurbulence;  },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::CompassTurbulence;  }),
+        submenu("Color Palette", std::move(fx_palette_menu)),
+    };
+
+    themes_menu.push_back(submenu("Effects", std::move(effects_menu)));
+
     std::vector<MenuItem> hud_submenu = {
-        submenu("Borders & Lines", std::move(borders_lines_menu)),
-        submenu("Themes",          std::move(themes_menu)),
+        submenu("Borders & Lines",    std::move(borders_lines_menu)),
+        submenu("Themes and Effects", std::move(themes_menu)),
     };
 
     // Compass Tick Color — sets tick + glow together
@@ -1239,6 +1269,12 @@ int main(int argc, char* argv[]) {
     hud_cfg.indicator_bg_enabled  = jval(jhud, "indicator_bg_enabled", true);
     hud_cfg.glow_intensity        = jval(jhud, "glow_intensity",       1.0f);
     hud_cfg.hud_flip_vertical     = jval(jhud, "flip_vertical",        false);
+
+    if (jhud.contains("effects")) {
+        auto& jfx = jhud["effects"];
+        state.effects_cfg.effect  = static_cast<EffectType> (jval(jfx, "type",    0));
+        state.effects_cfg.palette = static_cast<EffectPalette>(jval(jfx, "palette", 0));
+    }
 
     Mpu9250::Config mpu_cfg;
     if (cfg.contains("mpu9250")) {
@@ -1756,6 +1792,7 @@ int main(int argc, char* argv[]) {
             snap.clock_cfg          = state.clock_cfg;
             snap.pp_cfg             = state.pp_cfg;
             snap.timer_alarm        = state.timer_alarm;
+            snap.effects_cfg        = state.effects_cfg;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
         }
@@ -1922,7 +1959,9 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
-        cfg["hud"]["flip_vertical"]       = hud.config().hud_flip_vertical;
+        cfg["hud"]["flip_vertical"]             = hud.config().hud_flip_vertical;
+        cfg["hud"]["effects"]["type"]           = static_cast<int>(state.effects_cfg.effect);
+        cfg["hud"]["effects"]["palette"]        = static_cast<int>(state.effects_cfg.palette);
 
         cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
         cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;

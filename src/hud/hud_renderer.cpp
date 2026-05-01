@@ -171,7 +171,8 @@ void HudRenderer::unload() {
 
 // ── Per-frame ─────────────────────────────────────────────────────────────────
 
-void HudRenderer::begin_frame(float /*dt*/) {
+void HudRenderer::begin_frame(float dt) {
+    frame_dt_ = dt;
     ImGui::SetCurrentContext(ctx_);
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
@@ -180,6 +181,7 @@ void HudRenderer::begin_frame(float /*dt*/) {
     s_glow            = cfg_.glow_enabled;
     s_glow_intensity  = cfg_.glow_intensity;
     s_glow_color_base = col_.glow_color;
+    fx_tick(dt);
 }
 
 void HudRenderer::render_overlay() {
@@ -228,6 +230,8 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     draw_lora_indicator  (dl, s,      fw, fh);
     draw_clock_indicator (dl, s,      fw, fh);
 
+    // Particle effects drawn on top of all HUD chrome.
+    fx_update(dl, s, fw, fh, frame_dt_);
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -1277,4 +1281,217 @@ const char* HudRenderer::cardinal_str(float deg) {
     static const char* pts[] = {"N","NE","E","SE","S","SW","W","NW"};
     int idx = static_cast<int>((deg + 22.5f) / 45.f) % 8;
     return pts[idx];
+}
+
+// ── Particle effects ──────────────────────────────────────────────────────────
+
+// Palette colors for each EffectPalette option.
+// "Theme" reads from the live HudColors glow_base; the rest are fixed.
+static ImU32 kPaletteColors[5] = {
+    IM_COL32(  0,   0,   0, 255),  // 0 = Theme — overridden at runtime
+    IM_COL32(255, 255, 255, 255),  // 1 = Halo   (white)
+    IM_COL32(255, 140,  20, 255),  // 2 = Solar  (amber orange)
+    IM_COL32(  0, 210,  50, 255),  // 3 = Fallout (radioactive green)
+    IM_COL32( 80, 100, 255, 255),  // 4 = Space  (electric blue)
+};
+
+ImU32 HudRenderer::fx_palette_color(const AppState& s) const {
+    const int idx = static_cast<int>(s.effects_cfg.palette);
+    if (idx == 0) return col_.glow_base;  // Theme: match current HUD palette
+    if (idx >= 1 && idx <= 4) return kPaletteColors[idx];
+    return col_.glow_base;
+}
+
+void HudRenderer::fx_tick(float dt) {
+    if (dt <= 0.f || n_particles_ == 0) return;
+    int i = 0;
+    while (i < n_particles_) {
+        Particle& p = particles_[i];
+        p.life -= dt;
+        if (p.life <= 0.f) {
+            // Remove by swap-with-last
+            particles_[i] = particles_[--n_particles_];
+        } else {
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            ++i;
+        }
+    }
+}
+
+void HudRenderer::fx_emit(float x, float y, float vx, float vy,
+                           float life, float size, ImU32 color) {
+    if (n_particles_ >= kMaxParticles) {
+        // Replace the oldest particle (index 0 after swap churn is approximately oldest)
+        particles_[0] = { x, y, vx, vy, life, life, color, size };
+        return;
+    }
+    particles_[n_particles_++] = { x, y, vx, vy, life, life, color, size };
+}
+
+void HudRenderer::fx_draw(ImDrawList* dl) const {
+    for (int i = 0; i < n_particles_; ++i) {
+        const Particle& p = particles_[i];
+        const float frac  = p.life / p.life_total;
+        const uint8_t a   = static_cast<uint8_t>(frac * 220.f);
+        const ImU32  col  = with_alpha(p.color, a);
+        dl->AddCircleFilled({p.x, p.y}, p.size, col, 6);
+    }
+}
+
+// Emit a handful of sparks at random positions along an indicator arm.
+void HudRenderer::fx_emit_arm_glint(float ax, float ay, float dx, float dy,
+                                     float diag_len, ImU32 c, float dt) {
+    // ~3 glints per second per arm
+    const float rate = 3.0f;
+    const float prob = rate * dt;
+    // Simple deterministic-ish per-frame: if prob > random threshold, emit
+    static unsigned rng = 0x12345678u;
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;  // xorshift32
+    const float r0 = static_cast<float>(rng & 0xFFFF) / 65535.f;
+    if (r0 > prob) return;
+
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+    const float t  = static_cast<float>(rng & 0xFFFF) / 65535.f;   // position along arm
+    const float px = ax + dx * t * diag_len;
+    const float py = ay + dy * t * diag_len;
+
+    // Velocity mostly along arm direction, slight spread
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+    const float spread = ((rng & 0xFF) / 255.f - 0.5f) * 30.f;
+    const float speed  = 18.f + (rng & 0x3F);
+    const float vx = dx * speed + dy * spread;
+    const float vy = dy * speed - dx * spread;
+
+    fx_emit(px, py, vx, vy, 0.45f + (rng & 0x3F) * 0.004f, 2.0f, c);
+}
+
+// Emit drifting particles from a corner of the compass tape.
+void HudRenderer::fx_emit_corner_drift(float cx, float cy, ImU32 c, float dt) {
+    const float rate = 2.5f;
+    const float prob = rate * dt;
+    static unsigned rng2 = 0xABCDEF01u;
+    rng2 ^= rng2 << 13; rng2 ^= rng2 >> 17; rng2 ^= rng2 << 5;
+    if (static_cast<float>(rng2 & 0xFFFF) / 65535.f > prob) return;
+
+    rng2 ^= rng2 << 13; rng2 ^= rng2 >> 17; rng2 ^= rng2 << 5;
+    const float angle = ((rng2 & 0xFFFF) / 65535.f) * 2.f * 3.14159f;
+    const float speed = 12.f + (rng2 & 0x1F);
+    fx_emit(cx, cy, std::cos(angle) * speed, std::sin(angle) * speed,
+            0.6f + (rng2 & 0x3F) * 0.005f, 1.8f, c);
+}
+
+// One-shot ring of particles radiating outward from (cx, cy).
+void HudRenderer::fx_emit_burst(float cx, float cy, int count, ImU32 c) {
+    for (int i = 0; i < count; ++i) {
+        const float angle = (static_cast<float>(i) / count) * 2.f * 3.14159f;
+        const float speed = 40.f + (i % 3) * 15.f;
+        fx_emit(cx, cy,
+                std::cos(angle) * speed, std::sin(angle) * speed,
+                0.7f + i * 0.01f, 2.5f, c);
+    }
+}
+
+// Continuous random sparks within the compass tape bounding box.
+void HudRenderer::fx_emit_turbulence(float tape_cx, float tape_y,
+                                      float tw, float th_tape,
+                                      ImU32 c, float dt) {
+    const float rate = 12.f;
+    const float prob = rate * dt;
+    static unsigned rng3 = 0xDEADBEEFu;
+    rng3 ^= rng3 << 13; rng3 ^= rng3 >> 17; rng3 ^= rng3 << 5;
+    const float frac = static_cast<float>(rng3 & 0xFFFF) / 65535.f;
+    const int n = static_cast<int>(prob) + (frac < (prob - std::floor(prob)) ? 1 : 0);
+    for (int i = 0; i < n; ++i) {
+        rng3 ^= rng3 << 13; rng3 ^= rng3 >> 17; rng3 ^= rng3 << 5;
+        const float rx = (rng3 & 0xFFFF) / 65535.f;
+        rng3 ^= rng3 << 13; rng3 ^= rng3 >> 17; rng3 ^= rng3 << 5;
+        const float ry = (rng3 & 0xFFFF) / 65535.f;
+        const float px = tape_cx - tw * 0.5f + rx * tw;
+        const float py = tape_y  + ry * th_tape;
+        rng3 ^= rng3 << 13; rng3 ^= rng3 >> 17; rng3 ^= rng3 << 5;
+        const float angle = (rng3 & 0xFFFF) / 65535.f * 2.f * 3.14159f;
+        const float speed = 5.f + (rng3 & 0x1F);
+        fx_emit(px, py, std::cos(angle) * speed, std::sin(angle) * speed,
+                0.3f + (rng3 & 0x3F) * 0.004f, 1.5f, c);
+    }
+}
+
+// Master dispatcher — derives arm geometry the same way the draw_* helpers do.
+void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
+                             float fw, float fh, float dt) {
+    const EffectType effect = s.effects_cfg.effect;
+
+    // Popup burst: event-driven, fires once when a popup opens (only if PopupBurst selected)
+    PopupKind cur_popup = popup_kind_;
+    if (effect == EffectType::PopupBurst &&
+        cur_popup != fx_prev_popup_ && cur_popup != PopupKind::None) {
+        const ImU32 bc = (cur_popup == PopupKind::Alarm)
+                         ? IM_COL32(220, 50, 50, 255)
+                         : IM_COL32(220, 140, 20, 255);
+        fx_emit_burst(fw * 0.5f, fh * 0.5f, 24, bc);
+    }
+    fx_prev_popup_ = cur_popup;
+
+    if (effect == EffectType::None) {
+        fx_draw(dl);
+        return;
+    }
+
+    const ImU32 c = fx_palette_color(s);
+
+    const float ch       = static_cast<float>(cfg_.compass_height);
+    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    const bool  flip     = cfg_.hud_flip_vertical;
+
+    // Compass tape geometry (same formula as draw_frame)
+    const float cw       = fw / 3.f;
+    const float compass_y = flip ? c_margin : fh - ch - c_margin;
+    const float tape_cx   = fw * 0.5f;
+
+    if (effect == EffectType::CompassTurbulence) {
+        fx_emit_turbulence(tape_cx, compass_y, cw, ch, c, dt);
+    }
+
+    if (effect == EffectType::CornerDrift) {
+        // Four corners of the compass tape
+        const float x0 = tape_cx - cw * 0.5f;
+        const float x1 = tape_cx + cw * 0.5f;
+        const float y0 = compass_y;
+        const float y1 = compass_y + ch;
+        fx_emit_corner_drift(x0, y0, c, dt);
+        fx_emit_corner_drift(x1, y0, c, dt);
+        fx_emit_corner_drift(x0, y1, c, dt);
+        fx_emit_corner_drift(x1, y1, c, dt);
+    }
+
+    if (effect == EffectType::ArmGlints) {
+        // Arm geometry mirrors draw_face_indicator / draw_lora_indicator / draw_clock_indicator.
+        // Arms are at fixed angles: face ~210°, lora ~270°, clock ~330° (left side)
+        // and mirrored on right side for health.
+        // Use the same anchor_y the draw helpers use.
+        const float anchor_y = flip ? c_margin + ch : fh - c_margin;
+
+        // Each indicator arm: left-center is ~ fw/3 wide; right ~2fw/3
+        struct ArmDef { float ax; float angle_deg; };
+        const ArmDef arms[] = {
+            { fw * 0.33f, 225.f },   // face (left)
+            { fw * 0.33f, 270.f },   // lora (left)
+            { fw * 0.33f, 315.f },   // clock (left)
+            { fw * 0.67f, 315.f },   // health right arm 1
+            { fw * 0.67f, 270.f },   // health right arm 2
+        };
+        const float diag_len = std::min(fw, fh) * 0.22f;
+        for (const auto& arm : arms) {
+            const float rad   = arm.angle_deg * 3.14159f / 180.f;
+            const float dx    =  std::cos(rad);
+            const float dy_n  = -std::sin(rad);  // normal: arm goes up (negative y)
+            const float dy    = flip ? std::sin(rad) : dy_n;
+            fx_emit_arm_glint(arm.ax, anchor_y, dx, dy, diag_len, c, dt);
+        }
+    }
+
+    // PopupBurst is event-driven (handled above); no per-frame emission needed.
+
+    fx_draw(dl);
 }

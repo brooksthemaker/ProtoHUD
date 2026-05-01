@@ -90,7 +90,8 @@
     "pip_corner_clip_px": 16,
     "indicator_bg_enabled": true,
     "glow_intensity": 1.0,
-    "flip_vertical": false
+    "flip_vertical": false,
+    "effects": { "type": 0, "palette": 0 }
   },
   "gpio": {
     "enabled": true,
