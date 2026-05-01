@@ -271,7 +271,6 @@ const std::string& MenuSystem::current_label() const {
 
 void MenuSystem::draw(int screen_w, int screen_h) {
     if (!open_ || stack_.empty()) return;
-    (void)screen_w;
     s_menu_glow = glow_enabled_;
 
     const auto& items  = stack_.back().items;
@@ -291,8 +290,15 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     const float total_h = pad_y * 2.f
                         + item_h * static_cast<float>(items.size())
                         + extra;
-    const float x = 48.f;
-    const float y = 48.f;   // top-anchored: fixed distance from screen top
+    const float margin = 48.f;
+    float x, y;
+    switch (anchor_) {
+        default:
+        case MenuAnchor::TopLeft:     x = margin;                          y = margin;                          break;
+        case MenuAnchor::TopRight:    x = screen_w - width - margin;       y = margin;                          break;
+        case MenuAnchor::BottomLeft:  x = margin;                          y = screen_h - total_h - margin;     break;
+        case MenuAnchor::BottomRight: x = screen_w - width - margin;       y = screen_h - total_h - margin;     break;
+    }
 
     const bool   filled_row  = (selection_style_ == SelectionStyle::FILLED_ROW);
     const ImU32  COL_SEP     = menu_with_alpha(accent_color_, 45);

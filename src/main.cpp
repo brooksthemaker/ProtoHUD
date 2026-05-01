@@ -967,8 +967,22 @@ static std::vector<MenuItem> build_menu(
         slider("Font Size", 1.f, 3.f, 0.25f, "x",
             [&state]{ return state.clock_cfg.font_scale; },
             [&state](float v){ state.clock_cfg.font_scale = v; }),
-        submenu("Time Offset",      std::move(clock_offset_menu)),
-        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
+        submenu("Time Offset", std::move(clock_offset_menu)),
+    };
+
+    std::vector<MenuItem> menu_position_menu = {
+        leaf_sel("Top Left",
+            [menu_sys_pp]{ (*menu_sys_pp)->set_anchor(MenuAnchor::TopLeft); },
+            [menu_sys_pp]{ return (*menu_sys_pp)->anchor() == MenuAnchor::TopLeft; }),
+        leaf_sel("Top Right",
+            [menu_sys_pp]{ (*menu_sys_pp)->set_anchor(MenuAnchor::TopRight); },
+            [menu_sys_pp]{ return (*menu_sys_pp)->anchor() == MenuAnchor::TopRight; }),
+        leaf_sel("Bottom Left",
+            [menu_sys_pp]{ (*menu_sys_pp)->set_anchor(MenuAnchor::BottomLeft); },
+            [menu_sys_pp]{ return (*menu_sys_pp)->anchor() == MenuAnchor::BottomLeft; }),
+        leaf_sel("Bottom Right",
+            [menu_sys_pp]{ (*menu_sys_pp)->set_anchor(MenuAnchor::BottomRight); },
+            [menu_sys_pp]{ return (*menu_sys_pp)->anchor() == MenuAnchor::BottomRight; }),
     };
 
     std::vector<MenuItem> hud_menu = {
@@ -978,9 +992,10 @@ static std::vector<MenuItem> build_menu(
         slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
             [hud_cfg]{ return hud_cfg->text_scale; },
             [hud_cfg](float v){ hud_cfg->text_scale = v; }),
-        submenu("Compass", std::move(compass_menu)),
-        submenu("Clock",   std::move(clock_menu)),
-        submenu("Color",   std::move(color_options_menu)),
+        submenu("Compass",       std::move(compass_menu)),
+        submenu("Clock",         std::move(clock_menu)),
+        submenu("Color",         std::move(color_options_menu)),
+        submenu("Menu Position", std::move(menu_position_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
@@ -1136,12 +1151,13 @@ static std::vector<MenuItem> build_menu(
     };
 
     return {
-        submenu("Cameras",       std::move(cameras_menu)),
-        submenu("Prototracer",   std::move(prototracer_menu)),
-        submenu("Settings",      std::move(settings_menu)),
-        submenu("Vision Assist", std::move(vision_menu)),
-        leaf("Request Status",   [teensy]{ teensy->request_status(); }),
-        leaf("Close Program",    [&state]{ state.quit = true; }),
+        submenu("Cameras",          std::move(cameras_menu)),
+        submenu("Prototracer",      std::move(prototracer_menu)),
+        submenu("Settings",         std::move(settings_menu)),
+        submenu("Vision Assist",    std::move(vision_menu)),
+        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
+        leaf("Request Status",      [teensy]{ teensy->request_status(); }),
+        leaf("Close Program",       [&state]{ state.quit = true; }),
     };
 }
 
@@ -1617,6 +1633,13 @@ int main(int argc, char* argv[]) {
         menu.set_border_color    (jcolor(jm, "border_color",     menu.border_color()));
         menu.set_border_thickness(jval  (jm, "border_thickness", menu.border_thickness()));
         menu.set_border_enabled  (jval  (jm, "border_enabled",   menu.border_enabled()));
+        {
+            std::string a = jm.value("anchor", "top_left");
+            if      (a == "top_right")    menu.set_anchor(MenuAnchor::TopRight);
+            else if (a == "bottom_left")  menu.set_anchor(MenuAnchor::BottomLeft);
+            else if (a == "bottom_right") menu.set_anchor(MenuAnchor::BottomRight);
+            else                          menu.set_anchor(MenuAnchor::TopLeft);
+        }
     }
 
     menu.set_detent_callback([&knob, &menu](int count) {
@@ -1821,6 +1844,9 @@ int main(int argc, char* argv[]) {
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
         }
+        // Overlay-active flags are render-thread-local; inject after mutex release.
+        snap.health.cam_usb1_overlay = pip_cam1_overlay_active;
+        snap.health.cam_usb2_overlay = pip_cam2_overlay_active;
 
         // Inject live AF lens position into the snapshot (atomic read, no lock needed)
         if (cameras.owl_left())
@@ -2023,6 +2049,16 @@ int main(int argc, char* argv[]) {
         jm["border_color"]     = color_to_json(menu.border_color());
         jm["border_thickness"] = menu.border_thickness();
         jm["border_enabled"]   = menu.border_enabled();
+        {
+            const char* a = "top_left";
+            switch (menu.anchor()) {
+                case MenuAnchor::TopRight:    a = "top_right";    break;
+                case MenuAnchor::BottomLeft:  a = "bottom_left";  break;
+                case MenuAnchor::BottomRight: a = "bottom_right"; break;
+                default: break;
+            }
+            jm["anchor"] = a;
+        }
 
         // Persist MPU-9250 calibration biases so they survive a restart
         if (mpu9250.is_running() || cfg.contains("mpu9250")) {

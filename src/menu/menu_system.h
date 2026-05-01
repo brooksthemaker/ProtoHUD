@@ -64,6 +64,9 @@ struct MenuItem {
     ColorPickerConfig color;
 };
 
+// ── Menu anchor ───────────────────────────────────────────────────────────────
+enum class MenuAnchor { TopLeft, TopRight, BottomLeft, BottomRight };
+
 // ── Selection style ───────────────────────────────────────────────────────────
 enum class SelectionStyle {
     ACCENT_BAR,  // left colored bar + subtle header fill (default)
@@ -92,14 +95,16 @@ public:
     void set_border_color(ImU32 c)        { border_color_     = c; }
     void set_border_thickness(float t)    { border_thickness_ = t; }
     void set_selection_style(SelectionStyle s) { selection_style_ = s; }
+    void set_anchor(MenuAnchor a)              { anchor_          = a; }
 
     // Runtime style getters — for persisting user changes to config on exit.
-    ImU32 accent_color()     const { return accent_color_;     }
-    ImU32 bg_color()         const { return bg_color_;         }
-    bool  bg_enabled()       const { return bg_enabled_;       }
-    bool  border_enabled()   const { return border_enabled_;   }
-    ImU32 border_color()     const { return border_color_;     }
-    float border_thickness() const { return border_thickness_; }
+    ImU32       accent_color()     const { return accent_color_;     }
+    ImU32       bg_color()         const { return bg_color_;         }
+    bool        bg_enabled()       const { return bg_enabled_;       }
+    bool        border_enabled()   const { return border_enabled_;   }
+    ImU32       border_color()     const { return border_color_;     }
+    float       border_thickness() const { return border_thickness_; }
+    MenuAnchor  anchor()           const { return anchor_;           }
 
     // Drive from knob events
     void navigate(int direction);   // +1 = next, -1 = prev (or adjust value in edit mode)
@@ -154,4 +159,5 @@ private:
     ImU32          border_color_     = IM_COL32(255, 160,  32, 255);
     float          border_thickness_ = 1.5f;
     SelectionStyle selection_style_  = SelectionStyle::ACCENT_BAR;
+    MenuAnchor     anchor_           = MenuAnchor::TopLeft;
 };
