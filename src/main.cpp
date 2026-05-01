@@ -9,6 +9,7 @@
 
 #include <GLFW/glfw3.h>
 #include <GLES2/gl2.h>
+#include <linux/videodev2.h>
 #include <imgui.h>
 #include <nlohmann/json.hpp>
 
@@ -423,6 +424,48 @@ static std::vector<MenuItem> build_menu(
         leaf("200%", [cameras]{ if (cameras) cameras->set_usb1_brightness(2.0f); }),
         leaf("300%", [cameras]{ if (cameras) cameras->set_usb1_brightness(3.0f); }),
     };
+    std::vector<MenuItem> usb1_exposure_menu = {
+        toggle("Auto Exposure",
+            [cameras]{ return !cameras || cameras->usb1_cfg().auto_exposure; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb1_cfg(); c.auto_exposure = v;
+                cameras->update_usb1_cfg(c);
+                cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_AUTO, v ? 3 : 1);
+            }),
+        slider("Exposure Time", 1.f, 5000.f, 10.f, "",
+            [cameras]{ return cameras ? (float)cameras->usb1_cfg().exposure_time : 157.f; },
+            [cameras](float v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb1_cfg(); c.exposure_time = (int)v;
+                cameras->update_usb1_cfg(c);
+                cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, (int)v);
+            }),
+        toggle("Auto White Balance",
+            [cameras]{ return !cameras || cameras->usb1_cfg().auto_wb; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb1_cfg(); c.auto_wb = v;
+                cameras->update_usb1_cfg(c);
+                cameras->set_usb1_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, v ? 1 : 0);
+            }),
+        slider("WB Temperature", 2800.f, 6500.f, 100.f, "K",
+            [cameras]{ return cameras ? (float)cameras->usb1_cfg().wb_temp : 4600.f; },
+            [cameras](float v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb1_cfg(); c.wb_temp = (int)v;
+                cameras->update_usb1_cfg(c);
+                cameras->set_usb1_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, (int)v);
+            }),
+        toggle("Dynamic Framerate",
+            [cameras]{ return cameras && cameras->usb1_cfg().dynamic_framerate; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb1_cfg(); c.dynamic_framerate = v;
+                cameras->update_usb1_cfg(c);
+                cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_DYNAMIC_FRAMERATE, v ? 1 : 0);
+            }),
+    };
     std::vector<MenuItem> usb_cam1_menu = {
         toggle("Open Stream",
             [cameras]{ return cameras && cameras->usb1_ok(); },
@@ -440,6 +483,7 @@ static std::vector<MenuItem> build_menu(
             }),
         submenu("Overlay",     std::move(cam1_overlay_menu)),
         submenu("Brightness",  std::move(usb1_brightness_menu)),
+        submenu("Exposure",    std::move(usb1_exposure_menu)),
         leaf("Scan for Camera", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb1();
@@ -463,6 +507,48 @@ static std::vector<MenuItem> build_menu(
         leaf("200%", [cameras]{ if (cameras) cameras->set_usb2_brightness(2.0f); }),
         leaf("300%", [cameras]{ if (cameras) cameras->set_usb2_brightness(3.0f); }),
     };
+    std::vector<MenuItem> usb2_exposure_menu = {
+        toggle("Auto Exposure",
+            [cameras]{ return !cameras || cameras->usb2_cfg().auto_exposure; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb2_cfg(); c.auto_exposure = v;
+                cameras->update_usb2_cfg(c);
+                cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_AUTO, v ? 3 : 1);
+            }),
+        slider("Exposure Time", 1.f, 5000.f, 10.f, "",
+            [cameras]{ return cameras ? (float)cameras->usb2_cfg().exposure_time : 157.f; },
+            [cameras](float v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb2_cfg(); c.exposure_time = (int)v;
+                cameras->update_usb2_cfg(c);
+                cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, (int)v);
+            }),
+        toggle("Auto White Balance",
+            [cameras]{ return !cameras || cameras->usb2_cfg().auto_wb; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb2_cfg(); c.auto_wb = v;
+                cameras->update_usb2_cfg(c);
+                cameras->set_usb2_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, v ? 1 : 0);
+            }),
+        slider("WB Temperature", 2800.f, 6500.f, 100.f, "K",
+            [cameras]{ return cameras ? (float)cameras->usb2_cfg().wb_temp : 4600.f; },
+            [cameras](float v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb2_cfg(); c.wb_temp = (int)v;
+                cameras->update_usb2_cfg(c);
+                cameras->set_usb2_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, (int)v);
+            }),
+        toggle("Dynamic Framerate",
+            [cameras]{ return cameras && cameras->usb2_cfg().dynamic_framerate; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb2_cfg(); c.dynamic_framerate = v;
+                cameras->update_usb2_cfg(c);
+                cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_DYNAMIC_FRAMERATE, v ? 1 : 0);
+            }),
+    };
     std::vector<MenuItem> usb_cam2_menu = {
         toggle("Open Stream",
             [cameras]{ return cameras && cameras->usb2_ok(); },
@@ -480,6 +566,7 @@ static std::vector<MenuItem> build_menu(
             }),
         submenu("Overlay",    std::move(cam2_overlay_menu)),
         submenu("Brightness", std::move(usb2_brightness_menu)),
+        submenu("Exposure",   std::move(usb2_exposure_menu)),
         leaf("Scan for Camera", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb2();
@@ -1280,18 +1367,30 @@ int main(int argc, char* argv[]) {
 
     UsbCamConfig usb1_cfg, usb2_cfg;
     if (jcam.contains("usb_cam_1")) {
-        usb1_cfg.device     = jcam["usb_cam_1"].value("device",     "/dev/video2");
-        usb1_cfg.width      = jcam["usb_cam_1"].value("width",       1280);
-        usb1_cfg.height     = jcam["usb_cam_1"].value("height",       720);
-        usb1_cfg.fps        = jcam["usb_cam_1"].value("fps",           30);
-        usb1_cfg.brightness = jcam["usb_cam_1"].value("brightness",   1.0f);
+        auto& j1 = jcam["usb_cam_1"];
+        usb1_cfg.device             = j1.value("device",             "/dev/video2");
+        usb1_cfg.width              = j1.value("width",               1280);
+        usb1_cfg.height             = j1.value("height",               720);
+        usb1_cfg.fps                = j1.value("fps",                   30);
+        usb1_cfg.brightness         = j1.value("brightness",           1.0f);
+        usb1_cfg.dynamic_framerate  = j1.value("dynamic_framerate",    false);
+        usb1_cfg.auto_exposure      = j1.value("auto_exposure",        true);
+        usb1_cfg.exposure_time      = j1.value("exposure_time",        157);
+        usb1_cfg.auto_wb            = j1.value("auto_wb",              true);
+        usb1_cfg.wb_temp            = j1.value("wb_temp",              4600);
     }
     if (jcam.contains("usb_cam_2")) {
-        usb2_cfg.device     = jcam["usb_cam_2"].value("device",     "/dev/video3");
-        usb2_cfg.width      = jcam["usb_cam_2"].value("width",       1280);
-        usb2_cfg.height     = jcam["usb_cam_2"].value("height",       720);
-        usb2_cfg.fps        = jcam["usb_cam_2"].value("fps",           30);
-        usb2_cfg.brightness = jcam["usb_cam_2"].value("brightness",   1.0f);
+        auto& j2 = jcam["usb_cam_2"];
+        usb2_cfg.device             = j2.value("device",             "/dev/video3");
+        usb2_cfg.width              = j2.value("width",               1280);
+        usb2_cfg.height             = j2.value("height",               720);
+        usb2_cfg.fps                = j2.value("fps",                   30);
+        usb2_cfg.brightness         = j2.value("brightness",           1.0f);
+        usb2_cfg.dynamic_framerate  = j2.value("dynamic_framerate",    false);
+        usb2_cfg.auto_exposure      = j2.value("auto_exposure",        true);
+        usb2_cfg.exposure_time      = j2.value("exposure_time",        157);
+        usb2_cfg.auto_wb            = j2.value("auto_wb",              true);
+        usb2_cfg.wb_temp            = j2.value("wb_temp",              4600);
     }
 
     HudConfig hud_cfg;
@@ -2074,8 +2173,18 @@ int main(int argc, char* argv[]) {
         jpp["motion_update_rate"] = state.pp_cfg.motion_update_rate;
         jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
 
-        cfg["cameras"]["usb_cam_1"]["brightness"] = cameras.usb1_brightness();
-        cfg["cameras"]["usb_cam_2"]["brightness"] = cameras.usb2_brightness();
+        cfg["cameras"]["usb_cam_1"]["brightness"]        = cameras.usb1_brightness();
+        cfg["cameras"]["usb_cam_1"]["dynamic_framerate"] = cameras.usb1_cfg().dynamic_framerate;
+        cfg["cameras"]["usb_cam_1"]["auto_exposure"]     = cameras.usb1_cfg().auto_exposure;
+        cfg["cameras"]["usb_cam_1"]["exposure_time"]     = cameras.usb1_cfg().exposure_time;
+        cfg["cameras"]["usb_cam_1"]["auto_wb"]           = cameras.usb1_cfg().auto_wb;
+        cfg["cameras"]["usb_cam_1"]["wb_temp"]           = cameras.usb1_cfg().wb_temp;
+        cfg["cameras"]["usb_cam_2"]["brightness"]        = cameras.usb2_brightness();
+        cfg["cameras"]["usb_cam_2"]["dynamic_framerate"] = cameras.usb2_cfg().dynamic_framerate;
+        cfg["cameras"]["usb_cam_2"]["auto_exposure"]     = cameras.usb2_cfg().auto_exposure;
+        cfg["cameras"]["usb_cam_2"]["exposure_time"]     = cameras.usb2_cfg().exposure_time;
+        cfg["cameras"]["usb_cam_2"]["auto_wb"]           = cameras.usb2_cfg().auto_wb;
+        cfg["cameras"]["usb_cam_2"]["wb_temp"]           = cameras.usb2_cfg().wb_temp;
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"]     = color_to_json(menu.accent_color());
