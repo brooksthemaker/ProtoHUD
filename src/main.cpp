@@ -240,6 +240,18 @@ static std::vector<MenuItem> build_menu(
         return m;
     };
 
+    auto face_picker = [](std::string lbl, int face_count,
+                           std::function<int()>     get_fn,
+                           std::function<void(int)> set_fn) -> MenuItem {
+        MenuItem m;
+        m.label                   = std::move(lbl);
+        m.type                    = MenuItemType::FACE_PICKER;
+        m.face_picker.face_count  = face_count;
+        m.face_picker.get_face    = std::move(get_fn);
+        m.face_picker.set_face    = std::move(set_fn);
+        return m;
+    };
+
     // ── Face effects ──────────────────────────────────────────────────────────
     std::vector<MenuItem> effects;
     for (uint8_t id = 0; id < 10; id++) {
@@ -263,6 +275,21 @@ static std::vector<MenuItem> build_menu(
             return { state.face.r, state.face.g, state.face.b };
         }
     ));
+
+    // ── ProtoTracer material color presets (Menu::GetFaceColor() index 0–11) ──
+    std::vector<MenuItem> proto_colors;
+    proto_colors.push_back(leaf("Default",      [teensy]{ teensy->set_menu_item(8, 0);  }));
+    proto_colors.push_back(leaf("Yellow",       [teensy]{ teensy->set_menu_item(8, 1);  }));
+    proto_colors.push_back(leaf("Orange",       [teensy]{ teensy->set_menu_item(8, 2);  }));
+    proto_colors.push_back(leaf("White",        [teensy]{ teensy->set_menu_item(8, 3);  }));
+    proto_colors.push_back(leaf("Green",        [teensy]{ teensy->set_menu_item(8, 4);  }));
+    proto_colors.push_back(leaf("Purple",       [teensy]{ teensy->set_menu_item(8, 5);  }));
+    proto_colors.push_back(leaf("Red",          [teensy]{ teensy->set_menu_item(8, 6);  }));
+    proto_colors.push_back(leaf("Blue",         [teensy]{ teensy->set_menu_item(8, 7);  }));
+    proto_colors.push_back(leaf("Rainbow",      [teensy]{ teensy->set_menu_item(8, 8);  }));
+    proto_colors.push_back(leaf("Flow Noise",   [teensy]{ teensy->set_menu_item(8, 9);  }));
+    proto_colors.push_back(leaf("H Rainbow",    [teensy]{ teensy->set_menu_item(8, 10); }));
+    proto_colors.push_back(leaf("Black",        [teensy]{ teensy->set_menu_item(8, 11); }));
 
     // ── GIFs ─────────────────────────────────────────────────────────────────
     std::vector<MenuItem> gifs;
@@ -695,9 +722,10 @@ static std::vector<MenuItem> build_menu(
     // ── Prototracer (face controller) submenu ─────────────────────────────────
     std::vector<MenuItem> prototracer_menu = {
         submenu("Faces",      std::move(effects)),
-        submenu("Color",      std::move(colors)),
-        submenu("Animations", std::move(gifs)),
-        slider("Brightness", 0.f, 255.f, 1.f, "%",
+        submenu("Color",          std::move(colors)),
+        submenu("Material Color", std::move(proto_colors)),
+        submenu("Animations",     std::move(gifs)),
+        slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
         slider("Lens Brightness", 1.f, 7.f, 1.f, "",
@@ -707,13 +735,12 @@ static std::vector<MenuItem> build_menu(
                 if (xr) xr->set_brightness(static_cast<int>(v));
             }),
         leaf("Release Control", [teensy]{ teensy->release_control(); }),
-        slider("Face", 0.f, 10.f, 1.f, "",
-            [&state]{ return static_cast<float>(state.face.face_index); },
-            [&state, teensy](float v){
-                uint8_t val = static_cast<uint8_t>(v);
-                teensy->set_menu_item(0, val);
+        face_picker("Face", 10,
+            [&state]{ return static_cast<int>(state.face.face_index); },
+            [&state, teensy](int v){
+                teensy->set_menu_item(0, static_cast<uint8_t>(v));
                 std::lock_guard<std::mutex> lk(state.mtx);
-                state.face.face_index = val;
+                state.face.face_index = static_cast<uint8_t>(v);
             }),
         slider("Accent Bright", 0.f, 10.f, 1.f, "",
             [&state]{ return static_cast<float>(state.face.accent_bright); },

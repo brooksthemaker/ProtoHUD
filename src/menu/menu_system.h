@@ -15,6 +15,7 @@ enum class MenuItemType {
     TOGGLE,        // flips a bool; menu stays open; shows ON/OFF indicator
     SLIDER,        // enters numeric edit mode; knob adjusts value
     COLOR_PICKER,  // enters R/G/B channel edit mode
+    FACE_PICKER,   // radial dot selector for face index
 };
 
 // ── Slider config ─────────────────────────────────────────────────────────────
@@ -31,6 +32,14 @@ struct SliderConfig {
     std::string unit;
     std::function<float()>     get_value;
     std::function<void(float)> set_value;
+};
+
+// ── Face picker config ────────────────────────────────────────────────────────
+
+struct FacePickerConfig {
+    int face_count = 10;
+    std::function<int()>     get_face;
+    std::function<void(int)> set_face;
 };
 
 // ── Color picker config ───────────────────────────────────────────────────────
@@ -59,6 +68,9 @@ struct MenuItem {
 
     // SLIDER
     SliderConfig slider;
+
+    // FACE_PICKER
+    FacePickerConfig face_picker;
 
     // COLOR_PICKER
     ColorPickerConfig color;

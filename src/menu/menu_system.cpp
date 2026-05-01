@@ -138,6 +138,11 @@ void MenuSystem::navigate(int direction) {
                 item.slider.min, item.slider.max);
             // Live preview — apply immediately so the user hears/sees the change
             if (item.slider.set_value) item.slider.set_value(edit_float_);
+        } else if (item.type == MenuItemType::FACE_PICKER) {
+            int n   = item.face_picker.face_count;
+            int val = ((static_cast<int>(edit_float_) + direction) % n + n) % n;
+            edit_float_ = static_cast<float>(val);
+            if (item.face_picker.set_face) item.face_picker.set_face(val);
         }
         return;
     }
@@ -182,6 +187,21 @@ void MenuSystem::select() {
             emit_detents_override(steps);
         } else {
             if (item.slider.set_value) item.slider.set_value(edit_float_);
+            in_edit_mode_ = false;
+            emit_detents();
+        }
+        break;
+
+    case MenuItemType::FACE_PICKER:
+        if (!in_edit_mode_) {
+            edit_float_   = item.face_picker.get_face
+                            ? static_cast<float>(item.face_picker.get_face()) : 0.f;
+            orig_float_   = edit_float_;
+            in_edit_mode_ = true;
+            emit_detents_override(item.face_picker.face_count);
+        } else {
+            if (item.face_picker.set_face)
+                item.face_picker.set_face(static_cast<int>(edit_float_));
             in_edit_mode_ = false;
             emit_detents();
         }
@@ -244,6 +264,9 @@ void MenuSystem::back() {
         if (in_edit_mode_) {
             if (item.type == MenuItemType::SLIDER) {
                 if (item.slider.set_value) item.slider.set_value(orig_float_);
+            } else if (item.type == MenuItemType::FACE_PICKER) {
+                if (item.face_picker.set_face)
+                    item.face_picker.set_face(static_cast<int>(orig_float_));
             } else if (item.type == MenuItemType::COLOR_PICKER) {
                 if (item.color.set_color)
                     item.color.set_color(static_cast<uint8_t>(orig_r_),
@@ -286,6 +309,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     if (in_edit_mode_ && cursor_ < static_cast<int>(items.size())) {
         const auto& sel = items[cursor_];
         if (sel.type == MenuItemType::SLIDER)       extra = 30.f;
+        if (sel.type == MenuItemType::FACE_PICKER)  extra = 90.f;
         if (sel.type == MenuItemType::COLOR_PICKER) extra = 96.f;
     }
 
@@ -394,6 +418,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         float row_h = item_h - 1.f;
         if (selected && in_edit_mode_) {
             if (item.type == MenuItemType::SLIDER)       row_h = item_h + 25.f;
+            if (item.type == MenuItemType::FACE_PICKER)  row_h = item_h + 85.f;
             if (item.type == MenuItemType::COLOR_PICKER) row_h = item_h + 95.f;
         }
 
@@ -494,6 +519,54 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                 ImVec2 vsz = ImGui::CalcTextSize(val_str);
                 dl->AddText({rmax.x - vsz.x - 4.f, by - 1.f},
                             inv ? IM_COL32(0,0,0,200) : menu_with_alpha(accent_color_, 200), val_str);
+            }
+
+        // ── FACE_PICKER ───────────────────────────────────────────────────────
+        } else if (item.type == MenuItemType::FACE_PICKER) {
+            bool editing  = selected && in_edit_mode_;
+            int  cur_face = editing
+                ? static_cast<int>(edit_float_)
+                : (item.face_picker.get_face ? item.face_picker.get_face() : 0);
+
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
+
+            const bool inv = (filled_row && selected);
+
+            if (!editing) {
+                char val_str[8]; snprintf(val_str, sizeof(val_str), "%d", cur_face);
+                ImVec2 vsz = ImGui::CalcTextSize(val_str);
+                dl->AddText({rmax.x - vsz.x - 4.f, ty},
+                            inv ? IM_COL32(0,0,0,200) : menu_with_alpha(accent_color_, 200), val_str);
+            } else {
+                int   n   = item.face_picker.face_count;
+                float cx  = rmin.x + (rmax.x - rmin.x) * 0.5f;
+                float cy  = rmin.y + item_h + 36.f;
+                float rad = std::min(30.f, (rmax.x - rmin.x) * 0.5f - 22.f);
+
+                for (int f = 0; f < n; f++) {
+                    float angle  = -static_cast<float>(M_PI) * 0.5f
+                                   + (2.f * static_cast<float>(M_PI) * f) / static_cast<float>(n);
+                    float fx     = cx + rad * std::cos(angle);
+                    float fy     = cy + rad * std::sin(angle);
+                    bool  is_sel = (f == cur_face);
+                    if (is_sel) {
+                        dl->AddCircleFilled({fx, fy}, 7.f, menu_with_alpha(accent_color_, 220));
+                        dl->AddCircleFilled({fx, fy}, 2.5f, IM_COL32(255, 255, 255, 220));
+                    } else {
+                        dl->AddCircle({fx, fy}, 4.5f, menu_with_alpha(accent_color_, 110), 0, 1.5f);
+                    }
+                }
+
+                // Current face index in the center of the ring
+                char cnum[4]; snprintf(cnum, sizeof(cnum), "%d", cur_face);
+                ImVec2 csz = ImGui::CalcTextSize(cnum);
+                dl->AddText({cx - csz.x * 0.5f, cy - csz.y * 0.5f},
+                            IM_COL32(255, 255, 255, 200), cnum);
+
+                float hint_y = cy + rad + 10.f;
+                dl->AddText({rmin.x + 4.f, hint_y},
+                            menu_with_alpha(accent_color_, 180),
+                            "knob  \xC2\xB7  select=confirm  \xC2\xB7  back=cancel");
             }
 
         // ── COLOR_PICKER ──────────────────────────────────────────────────────
