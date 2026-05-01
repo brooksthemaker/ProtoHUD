@@ -84,7 +84,9 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items) {
     nav.action = [this] { this->back(); };
     level.push_back(nav);
 
-    stack_.push_back({ level });
+    if (!stack_.empty())
+        stack_.back().cursor = cursor_;  // remember where we were on the parent page
+    stack_.push_back({ level, 0 });
     cursor_ = 0;
     emit_detents();
 }
@@ -92,7 +94,7 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items) {
 void MenuSystem::pop_level() {
     if (stack_.size() > 1) {
         stack_.pop_back();
-        cursor_ = 0;
+        cursor_ = stack_.back().cursor;  // restore cursor to where user was on this page
         emit_detents();
     } else {
         close();
@@ -368,7 +370,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
     // Text drawing helper: FILLED_ROW selected rows use bold-style black text,
     // all others use the standard glow system.
-    const bool bold_text = !bg_enabled_;
+    const bool bold_text = bold_text_ || !bg_enabled_;
     auto draw_item_text = [&](ImVec2 pos, const char* text, bool sel) {
         if (filled_row && sel) {
             dl->AddText({pos.x - 0.6f, pos.y}, IM_COL32(0, 0, 0, 255), text);

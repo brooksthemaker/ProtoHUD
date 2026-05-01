@@ -91,6 +91,7 @@ public:
     void set_bg_enabled(bool e)           { bg_enabled_       = e; }
     void set_bg_color(ImU32 c)            { bg_color_         = c; }
     void set_glow_enabled(bool e)         { glow_enabled_     = e; }
+    void set_bold_text(bool b)            { bold_text_        = b; }
     void set_border_enabled(bool e)       { border_enabled_   = e; }
     void set_border_color(ImU32 c)        { border_color_     = c; }
     void set_border_thickness(float t)    { border_thickness_ = t; }
@@ -129,7 +130,7 @@ public:
     const std::string& current_label() const;
 
 private:
-    struct Level { std::vector<MenuItem> items; };
+    struct Level { std::vector<MenuItem> items; int cursor = 0; };
 
     void push_level(const std::vector<MenuItem>& items);
     void pop_level();
@@ -155,7 +156,8 @@ private:
     ImU32          accent_color_     = IM_COL32(255, 255, 255, 255);  // Halo default: white
     bool           bg_enabled_       = true;
     ImU32          bg_color_         = IM_COL32( 10,  15,  20, 225);
-    bool           glow_enabled_     = true;
+    bool           glow_enabled_     = false;   // Halo default: no glow
+    bool           bold_text_        = true;    // Halo default: bold
     bool           border_enabled_   = true;
     ImU32          border_color_     = IM_COL32(255, 255, 255, 255);  // Halo default: white
     float          border_thickness_ = 5.0f;                           // Halo default

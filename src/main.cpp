@@ -858,7 +858,9 @@ static std::vector<MenuItem> build_menu(
     auto apply_theme = [hud_col, menu_sys_pp](
             ImU32 glow, ImU32 glow_col, ImU32 text,
             ImU32 tick, ImU32 tick_glow,
-            bool border, float thickness, SelectionStyle style, ImU32 menu_accent) {
+            bool border, float thickness, SelectionStyle style,
+            bool menu_glow, bool menu_bold,
+            ImU32 menu_accent) {
         hud_col->glow_base    = glow;
         hud_col->glow_color   = glow_col;
         hud_col->text_fill    = text;
@@ -870,6 +872,8 @@ static std::vector<MenuItem> build_menu(
             (*menu_sys_pp)->set_border_color(menu_accent);
             (*menu_sys_pp)->set_border_thickness(thickness);
             (*menu_sys_pp)->set_selection_style(style);
+            (*menu_sys_pp)->set_glow_enabled(menu_glow);
+            (*menu_sys_pp)->set_bold_text(menu_bold);
         }
     };
 
@@ -879,6 +883,7 @@ static std::vector<MenuItem> build_menu(
                         IM_COL32(255,255,255,255),
                         IM_COL32(255,255,255,255), IM_COL32(255,255,255,180),
                         true, 5.f, SelectionStyle::FILLED_ROW,
+                        false, true,
                         IM_COL32(255,255,255,255));
         }),
         leaf("Solar", [apply_theme]{
@@ -886,6 +891,7 @@ static std::vector<MenuItem> build_menu(
                         IM_COL32(255,255,255,255),
                         IM_COL32(255,160, 32,255), IM_COL32(255,160, 32,255),
                         true, 1.5f, SelectionStyle::ACCENT_BAR,
+                        true, false,
                         IM_COL32(255,160, 32,255));
         }),
         leaf("Fallout", [apply_theme]{
@@ -893,6 +899,7 @@ static std::vector<MenuItem> build_menu(
                         IM_COL32(  0,255, 80,255),
                         IM_COL32(  0,200, 50,255), IM_COL32(  0,200, 50,255),
                         true, 1.5f, SelectionStyle::ACCENT_BAR,
+                        true, false,
                         IM_COL32(  0,200, 50,255));
         }),
         leaf("Space", [apply_theme]{
@@ -900,6 +907,7 @@ static std::vector<MenuItem> build_menu(
                         IM_COL32(200,220,255,255),
                         IM_COL32( 80,100,255,255), IM_COL32( 80,100,255,255),
                         true, 1.5f, SelectionStyle::ACCENT_BAR,
+                        true, false,
                         IM_COL32( 80,100,255,255));
         }),
     };
