@@ -247,7 +247,7 @@ static ImVec2 overlay_origin(const OverlayConfig& cfg,
     const float bottom_y = sh - ov_h - bottom_margin - kEdge;
     switch (cfg.anchor) {
         case OverlayConfig::Anchor::TOP_LEFT:      return { kEdge,                  kEdge    };
-        case OverlayConfig::Anchor::TOP_CENTER:    return { (sw - ov_w) * 0.5f,     kEdge    };
+        case OverlayConfig::Anchor::TOP_CENTER:    return { (sw - ov_w) * 0.5f,     kEdge + bottom_margin };
         case OverlayConfig::Anchor::TOP_RIGHT:     return { sw - ov_w - kEdge,      kEdge    };
         case OverlayConfig::Anchor::BOTTOM_LEFT:   return { kEdge,                  bottom_y };
         case OverlayConfig::Anchor::BOTTOM_CENTER: return { (sw - ov_w) * 0.5f,     bottom_y };
@@ -382,7 +382,7 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
     }
 
     // 6. Chamfered border outline on top
-    dl->AddPolyline(pts, n_pts, col_.primary, ImDrawFlags_Closed, 2.f);
+    dl->AddPolyline(pts, n_pts, col_.glow_base, ImDrawFlags_Closed, 2.f);
 
     ImGui::End();
 }
