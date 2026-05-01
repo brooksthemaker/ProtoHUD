@@ -506,7 +506,7 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
     const float ch       = static_cast<float>(cfg_.compass_height);
     const bool  flip     = cfg_.hud_flip_vertical;
-    const float anchor_y = flip ? c_margin + ch : fh - c_margin;
+    const float anchor_y = flip ? c_margin : fh - c_margin;
     const float anchor_x = right_side ? tape_x + tape_w + fade_w
                                        : tape_x - fade_w;
 
@@ -1470,7 +1470,7 @@ void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
         // Arms are at fixed angles: face ~210°, lora ~270°, clock ~330° (left side)
         // and mirrored on right side for health.
         // Use the same anchor_y the draw helpers use.
-        const float anchor_y = flip ? c_margin + ch : fh - c_margin;
+        const float anchor_y = flip ? c_margin : fh - c_margin;
 
         // Each indicator arm: left-center is ~ fw/3 wide; right ~2fw/3
         struct ArmDef { float ax; float angle_deg; };

@@ -1322,7 +1322,7 @@ int main(int argc, char* argv[]) {
 
     AppState state;
     state.max_messages        = jval(jhud, "lora_message_history", 50);
-    state.compass_bg_enabled  = jhud.value("compass_bg", false);
+    state.compass_bg_enabled  = jhud.value("compass_bg", true);
 
     if (jhud.contains("effects")) {
         auto& jfx = jhud["effects"];
