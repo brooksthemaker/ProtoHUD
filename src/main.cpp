@@ -707,6 +707,70 @@ static std::vector<MenuItem> build_menu(
                 if (xr) xr->set_brightness(static_cast<int>(v));
             }),
         leaf("Release Control", [teensy]{ teensy->release_control(); }),
+        slider("Face", 0.f, 10.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.face.face_index); },
+            [&state, teensy](float v){
+                uint8_t val = static_cast<uint8_t>(v);
+                teensy->set_menu_item(0, val);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.face_index = val;
+            }),
+        slider("Accent Bright", 0.f, 10.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.face.accent_bright); },
+            [&state, teensy](float v){
+                uint8_t val = static_cast<uint8_t>(v);
+                teensy->set_menu_item(2, val);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.accent_bright = val;
+            }),
+        toggle("Microphone",
+            [&state]{ return state.face.microphone != 0; },
+            [&state, teensy](bool on){
+                uint8_t val = on ? 1 : 0;
+                teensy->set_menu_item(3, val);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.microphone = val;
+            }),
+        slider("Mic Level", 0.f, 10.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.face.mic_level); },
+            [&state, teensy](float v){
+                uint8_t val = static_cast<uint8_t>(v);
+                teensy->set_menu_item(4, val);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.mic_level = val;
+            }),
+        toggle("Boop Sensor",
+            [&state]{ return state.face.boop_sensor != 0; },
+            [&state, teensy](bool on){
+                uint8_t val = on ? 1 : 0;
+                teensy->set_menu_item(5, val);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.boop_sensor = val;
+            }),
+        toggle("Spectrum Mirror",
+            [&state]{ return state.face.spectrum_mirror != 0; },
+            [&state, teensy](bool on){
+                uint8_t val = on ? 1 : 0;
+                teensy->set_menu_item(6, val);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.spectrum_mirror = val;
+            }),
+        slider("Face Size", 0.f, 10.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.face.face_size); },
+            [&state, teensy](float v){
+                uint8_t val = static_cast<uint8_t>(v);
+                teensy->set_menu_item(7, val);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.face_size = val;
+            }),
+        slider("Fan Speed", 0.f, 10.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.face.fan_speed); },
+            [&state, teensy](float v){
+                uint8_t val = static_cast<uint8_t>(v);
+                teensy->set_menu_item(12, val);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.fan_speed = val;
+            }),
     };
 
     // ── HUD settings ──────────────────────────────────────────────────────────

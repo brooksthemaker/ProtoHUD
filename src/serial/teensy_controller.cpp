@@ -72,6 +72,12 @@ void TeensyController::set_palette(uint8_t palette_id) {
     port_.send(TeensyCmd::SET_PALETTE, &palette_id, 1);
 }
 
+void TeensyController::set_menu_item(uint8_t menu_index, uint8_t value) {
+    TeensyMenuPayload p { menu_index, value };
+    port_.send(TeensyCmd::SET_MENU_ITEM,
+               reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+}
+
 void TeensyController::request_status() {
     port_.send(TeensyCmd::REQ_STATUS);
 }

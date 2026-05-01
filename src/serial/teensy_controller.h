@@ -22,6 +22,7 @@ public:
     void play_gif(uint8_t gif_id);
     void set_brightness(uint8_t value);
     void set_palette(uint8_t palette_id);
+    void set_menu_item(uint8_t menu_index, uint8_t value);
     void request_status();
     void release_control();
 

@@ -57,7 +57,15 @@ struct FaceState {
     uint8_t  gif_id       = 0;
     uint8_t  r = 0, g = 220, b = 180;
     uint8_t  brightness   = 200;
-    uint8_t  palette_id   = 0;
+    uint8_t  palette_id      = 0;
+    uint8_t  face_index      = 0;
+    uint8_t  accent_bright   = 5;
+    uint8_t  microphone      = 0;
+    uint8_t  mic_level       = 5;
+    uint8_t  boop_sensor     = 0;
+    uint8_t  spectrum_mirror = 0;
+    uint8_t  face_size       = 5;
+    uint8_t  fan_speed       = 5;
     bool     playing_gif  = false;
     bool     connected    = false;
     bool     hud_control  = false;  // true = HUD has taken manual control; false = Teensy autonomous
