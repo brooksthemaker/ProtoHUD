@@ -1239,6 +1239,12 @@ static std::vector<MenuItem> build_menu(
         submenu("Strength",    std::move(desat_strength_menu)),
         submenu("BG Threshold", std::move(bg_threshold_menu)),
         submenu("Focus Blend", std::move(focus_blend_menu)),
+        slider("Color Protect", 0.f, 100.f, 10.f, " %",
+            [&state]{ return state.pp_cfg.color_protect * 100.f; },
+            [&state](float v){ state.pp_cfg.color_protect = v / 100.f; }),
+        slider("Edge Expand", 0.f, 3.f, 0.5f, "",
+            [&state]{ return state.pp_cfg.edge_dilate; },
+            [&state](float v){ state.pp_cfg.edge_dilate = v; }),
     };
 
     std::vector<MenuItem> vision_menu = {
@@ -1527,6 +1533,8 @@ int main(int argc, char* argv[]) {
             uint8_t a = jpp["edge_color"].size() >= 4 ? (uint8_t)jc[3] : 255;
             state.pp_cfg.edge_color = IM_COL32(r, g, b, a);
         }
+        state.pp_cfg.color_protect   = jpp.value("color_protect",   0.5f);
+        state.pp_cfg.edge_dilate     = jpp.value("edge_dilate",     1.0f);
         state.pp_cfg.motion_enabled  = jpp.value("motion_enabled",  false);
         state.pp_cfg.motion_strength = jpp.value("motion_strength", 0.9f);
         state.pp_cfg.motion_thresh   = jpp.value("motion_thresh",   0.04f);
@@ -2197,6 +2205,8 @@ int main(int argc, char* argv[]) {
         jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
         jpp["focus_str"]          = state.pp_cfg.focus_str;
         jpp["edge_gate_scale"]    = state.pp_cfg.edge_gate_scale;
+        jpp["color_protect"]      = state.pp_cfg.color_protect;
+        jpp["edge_dilate"]        = state.pp_cfg.edge_dilate;
         jpp["motion_enabled"]     = state.pp_cfg.motion_enabled;
         jpp["motion_strength"]    = state.pp_cfg.motion_strength;
         jpp["motion_thresh"]      = state.pp_cfg.motion_thresh;

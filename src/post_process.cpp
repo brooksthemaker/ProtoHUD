@@ -30,6 +30,8 @@ bool PostProcessor::init(int w, int h, const char* vs_path, const char* fs_path)
     loc_motion_radius_ = glGetUniformLocation(prog_, "u_motion_radius");
     loc_motion_col_    = glGetUniformLocation(prog_, "u_motion_col");
     loc_motion_line_   = glGetUniformLocation(prog_, "u_motion_line");
+    loc_color_prot_    = glGetUniformLocation(prog_, "u_color_prot");
+    loc_edge_dilate_   = glGetUniformLocation(prog_, "u_edge_dilate");
 
     // EMA blit: blends current frame with previous EMA reference.
     // update_rate=1.0 → hard copy (1-frame trail), lower → longer exponential trail.
@@ -123,6 +125,9 @@ void PostProcessor::process(GLuint src_tex,
     glUniform1f(loc_motion_radius_, cfg.motion_radius);
     glUniform3f(loc_motion_col_,    mr, mg, mb);
     glUniform1f(loc_motion_line_,   cfg.motion_line);
+
+    glUniform1f(loc_color_prot_,  cfg.desat_enabled ? cfg.color_protect : 0.f);
+    glUniform1f(loc_edge_dilate_,  cfg.desat_enabled ? cfg.edge_dilate   : 0.f);
 
     gl::bind_quad(vbo_);
     gl::draw_quad();
