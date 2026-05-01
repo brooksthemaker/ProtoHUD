@@ -368,12 +368,18 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
     // Text drawing helper: FILLED_ROW selected rows use bold-style black text,
     // all others use the standard glow system.
+    const bool bold_text = !bg_enabled_;
     auto draw_item_text = [&](ImVec2 pos, const char* text, bool sel) {
         if (filled_row && sel) {
             dl->AddText({pos.x - 0.6f, pos.y}, IM_COL32(0, 0, 0, 255), text);
             dl->AddText({pos.x + 0.6f, pos.y}, IM_COL32(0, 0, 0, 255), text);
             dl->AddText(pos,                   IM_COL32(0, 0, 0, 255), text);
         } else {
+            if (bold_text) {
+                // Extra shifted pass simulates bold when there is no bg for contrast
+                const ImU32 fill = sel ? IM_COL32(255,255,255,255) : IM_COL32(255,255,255,160);
+                dl->AddText({pos.x + 0.7f, pos.y}, fill, text);
+            }
             draw_glow_text(dl, pos, text, sel, accent_color_);
         }
     };

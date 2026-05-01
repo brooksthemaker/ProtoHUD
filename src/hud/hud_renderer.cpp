@@ -607,13 +607,16 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
         }
 
         const char* lbl = items[i].label;
+        const bool  bold = !cfg_.indicator_bg_enabled;
         if (right_side) {
-            hud_glow_text(dl, {ix + DOT_R + 6.f, iy - 7.f}, lbl, items[i].ok,
-                          col_.text_fill, col_.text_fill);
+            const ImVec2 lp = {ix + DOT_R + 6.f, iy - 7.f};
+            if (bold) dl->AddText({lp.x + 0.7f, lp.y}, items[i].ok ? col_.text_fill : with_alpha(col_.text_fill, 160), lbl);
+            hud_glow_text(dl, lp, lbl, items[i].ok, col_.text_fill, col_.text_fill);
         } else {
             float tw = ImGui::CalcTextSize(lbl).x;
-            hud_glow_text(dl, {ix - DOT_R - 6.f - tw, iy - 7.f}, lbl, items[i].ok,
-                          col_.text_fill, col_.text_fill);
+            const ImVec2 lp = {ix - DOT_R - 6.f - tw, iy - 7.f};
+            if (bold) dl->AddText({lp.x + 0.7f, lp.y}, items[i].ok ? col_.text_fill : with_alpha(col_.text_fill, 160), lbl);
+            hud_glow_text(dl, lp, lbl, items[i].ok, col_.text_fill, col_.text_fill);
         }
     }
     if (font_mono_) ImGui::PopFont();
