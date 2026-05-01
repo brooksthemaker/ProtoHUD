@@ -216,30 +216,30 @@ static std::vector<MenuItem> build_menu(
 
     // ── Camera controls ───────────────────────────────────────────────────────
     std::vector<MenuItem> focus_modes = {
-        leaf("Manual", [cameras, &state]{
+        leaf_sel("Manual", [cameras, &state]{
             state.focus_left.mode  = CameraFocusState::Mode::MANUAL;
             state.focus_right.mode = CameraFocusState::Mode::MANUAL;
             if (cameras) {
                 if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
                 if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
             }
-        }),
-        leaf("Auto", [cameras, &state]{
+        }, [&state]{ return state.focus_left.mode == CameraFocusState::Mode::MANUAL; }),
+        leaf_sel("Auto", [cameras, &state]{
             state.focus_left.mode  = CameraFocusState::Mode::AUTO;
             state.focus_right.mode = CameraFocusState::Mode::AUTO;
             if (cameras) {
                 if (cameras->owl_left())  cameras->owl_left()->start_autofocus();
                 if (cameras->owl_right()) cameras->owl_right()->start_autofocus();
             }
-        }),
-        leaf("Slave", [cameras, &state]{
+        }, [&state]{ return state.focus_left.mode == CameraFocusState::Mode::AUTO; }),
+        leaf_sel("Slave", [cameras, &state]{
             state.focus_left.mode  = CameraFocusState::Mode::SLAVE;
             state.focus_right.mode = CameraFocusState::Mode::SLAVE;
             if (cameras) {
                 if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
                 if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
             }
-        }),
+        }, [&state]{ return state.focus_left.mode == CameraFocusState::Mode::SLAVE; }),
     };
 
     std::vector<MenuItem> af_triggers = {
@@ -308,7 +308,7 @@ static std::vector<MenuItem> build_menu(
 
     std::vector<MenuItem> resolution_presets;
     for (const auto& p : RES_PRESETS) {
-        resolution_presets.push_back(leaf(
+        resolution_presets.push_back(leaf_sel(
             p.label,
             [cameras, &state, w = p.w, h = p.h, fps = p.fps](){
                 if (!cameras) return;
@@ -316,7 +316,8 @@ static std::vector<MenuItem> build_menu(
                     std::lock_guard<std::mutex> lk(state.mtx);
                     state.camera_resolution = { w, h, fps };
                 }
-            }
+            },
+            [&state, w = p.w, h = p.h]{ return state.camera_resolution.width == w && state.camera_resolution.height == h; }
         ));
     }
 
@@ -392,14 +393,14 @@ static std::vector<MenuItem> build_menu(
     // ── Overlay position / size helpers ───────────────────────────────────────
     using A = OverlayConfig::Anchor;
 
-    auto make_position_items = [&leaf](OverlayConfig* cfg) {
+    auto make_position_items = [&leaf, &leaf_sel](OverlayConfig* cfg) {
         return std::vector<MenuItem>{
-            leaf("Top Left",      [cfg]{ cfg->anchor = A::TOP_LEFT;      }),
-            leaf("Top Center",    [cfg]{ cfg->anchor = A::TOP_CENTER;    }),
-            leaf("Top Right",     [cfg]{ cfg->anchor = A::TOP_RIGHT;     }),
-            leaf("Bottom Left",   [cfg]{ cfg->anchor = A::BOTTOM_LEFT;   }),
-            leaf("Bottom Center", [cfg]{ cfg->anchor = A::BOTTOM_CENTER; }),
-            leaf("Bottom Right",  [cfg]{ cfg->anchor = A::BOTTOM_RIGHT;  }),
+            leaf_sel("Top Left",      [cfg]{ cfg->anchor = A::TOP_LEFT;      }, [cfg]{ return cfg->anchor == A::TOP_LEFT;      }),
+            leaf_sel("Top Center",    [cfg]{ cfg->anchor = A::TOP_CENTER;    }, [cfg]{ return cfg->anchor == A::TOP_CENTER;    }),
+            leaf_sel("Top Right",     [cfg]{ cfg->anchor = A::TOP_RIGHT;     }, [cfg]{ return cfg->anchor == A::TOP_RIGHT;     }),
+            leaf_sel("Bottom Left",   [cfg]{ cfg->anchor = A::BOTTOM_LEFT;   }, [cfg]{ return cfg->anchor == A::BOTTOM_LEFT;   }),
+            leaf_sel("Bottom Center", [cfg]{ cfg->anchor = A::BOTTOM_CENTER; }, [cfg]{ return cfg->anchor == A::BOTTOM_CENTER; }),
+            leaf_sel("Bottom Right",  [cfg]{ cfg->anchor = A::BOTTOM_RIGHT;  }, [cfg]{ return cfg->anchor == A::BOTTOM_RIGHT;  }),
         };
     };
 
@@ -418,11 +419,11 @@ static std::vector<MenuItem> build_menu(
         make_size_slider("Size", pip_cfg1),
     };
     std::vector<MenuItem> usb1_brightness_menu = {
-        leaf("50%",  [cameras]{ if (cameras) cameras->set_usb1_brightness(0.5f); }),
-        leaf("100%", [cameras]{ if (cameras) cameras->set_usb1_brightness(1.0f); }),
-        leaf("150%", [cameras]{ if (cameras) cameras->set_usb1_brightness(1.5f); }),
-        leaf("200%", [cameras]{ if (cameras) cameras->set_usb1_brightness(2.0f); }),
-        leaf("300%", [cameras]{ if (cameras) cameras->set_usb1_brightness(3.0f); }),
+        leaf_sel("50%",  [cameras]{ if (cameras) cameras->set_usb1_brightness(0.5f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 0.5f; }),
+        leaf_sel("100%", [cameras]{ if (cameras) cameras->set_usb1_brightness(1.0f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 1.0f; }),
+        leaf_sel("150%", [cameras]{ if (cameras) cameras->set_usb1_brightness(1.5f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 1.5f; }),
+        leaf_sel("200%", [cameras]{ if (cameras) cameras->set_usb1_brightness(2.0f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 2.0f; }),
+        leaf_sel("300%", [cameras]{ if (cameras) cameras->set_usb1_brightness(3.0f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 3.0f; }),
     };
     std::vector<MenuItem> usb1_exposure_menu = {
         toggle("Auto Exposure",
@@ -501,11 +502,11 @@ static std::vector<MenuItem> build_menu(
         make_size_slider("Size", pip_cfg2),
     };
     std::vector<MenuItem> usb2_brightness_menu = {
-        leaf("50%",  [cameras]{ if (cameras) cameras->set_usb2_brightness(0.5f); }),
-        leaf("100%", [cameras]{ if (cameras) cameras->set_usb2_brightness(1.0f); }),
-        leaf("150%", [cameras]{ if (cameras) cameras->set_usb2_brightness(1.5f); }),
-        leaf("200%", [cameras]{ if (cameras) cameras->set_usb2_brightness(2.0f); }),
-        leaf("300%", [cameras]{ if (cameras) cameras->set_usb2_brightness(3.0f); }),
+        leaf_sel("50%",  [cameras]{ if (cameras) cameras->set_usb2_brightness(0.5f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 0.5f; }),
+        leaf_sel("100%", [cameras]{ if (cameras) cameras->set_usb2_brightness(1.0f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 1.0f; }),
+        leaf_sel("150%", [cameras]{ if (cameras) cameras->set_usb2_brightness(1.5f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 1.5f; }),
+        leaf_sel("200%", [cameras]{ if (cameras) cameras->set_usb2_brightness(2.0f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 2.0f; }),
+        leaf_sel("300%", [cameras]{ if (cameras) cameras->set_usb2_brightness(3.0f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 3.0f; }),
     };
     std::vector<MenuItem> usb2_exposure_menu = {
         toggle("Auto Exposure",
@@ -629,11 +630,18 @@ static std::vector<MenuItem> build_menu(
 
     // ── HUD settings ──────────────────────────────────────────────────────────
 
-    auto make_color_items = [&leaf](std::vector<std::pair<const char*, ImU32>> presets,
-                                     std::function<void(ImU32)> apply) {
+    auto make_color_items = [&leaf, &leaf_sel](
+            std::vector<std::pair<const char*, ImU32>> presets,
+            std::function<void(ImU32)> apply,
+            std::function<ImU32()> get_fn = nullptr) {
         std::vector<MenuItem> v;
-        for (auto& [lbl, col] : presets)
-            v.push_back(leaf(lbl, [apply, col]{ apply(col); }));
+        for (auto& [lbl, col] : presets) {
+            if (get_fn)
+                v.push_back(leaf_sel(lbl, [apply, col]{ apply(col); },
+                                     [get_fn, col]{ return get_fn() == col; }));
+            else
+                v.push_back(leaf(lbl, [apply, col]{ apply(col); }));
+        }
         return v;
     };
 
@@ -649,7 +657,8 @@ static std::vector<MenuItem> build_menu(
         { "Purple", IM_COL32(200, 130, 255, 255) },
         { "Blue",   IM_COL32(100, 160, 255, 255) },
         { "Pink",   IM_COL32(255, 130, 200, 255) },
-    }, [hud_col](ImU32 c){ hud_col->text_fill = c; });
+    }, [hud_col](ImU32 c){ hud_col->text_fill = c; },
+    [hud_col]{ return hud_col->text_fill; });
 
     // ── Indicator Options ─────────────────────────────────────────────────────
     std::vector<MenuItem> ind_good_color_menu = make_color_items({
@@ -658,19 +667,22 @@ static std::vector<MenuItem> build_menu(
         { "Teal",   IM_COL32(  0, 220, 180, 255) },
         { "Cyan",   IM_COL32(  0, 180, 255, 255) },
         { "White",  IM_COL32(255, 255, 255, 255) },
-    }, [hud_col](ImU32 c){ hud_col->ind_good = c; });
+    }, [hud_col](ImU32 c){ hud_col->ind_good = c; },
+    [hud_col]{ return hud_col->ind_good; });
 
     std::vector<MenuItem> ind_inactive_color_menu = make_color_items({
         { "Gray",   IM_COL32(120, 120, 120, 255) },
         { "Blue",   IM_COL32( 60,  80, 160, 255) },
         { "Dim",    IM_COL32( 80,  80,  80, 255) },
-    }, [hud_col](ImU32 c){ hud_col->ind_inactive = c; });
+    }, [hud_col](ImU32 c){ hud_col->ind_inactive = c; },
+    [hud_col]{ return hud_col->ind_inactive; });
 
     std::vector<MenuItem> ind_fail_color_menu = make_color_items({
         { "Red",    IM_COL32(255,  60,  60, 255) },
         { "Orange", IM_COL32(255, 120,   0, 255) },
         { "Yellow", IM_COL32(240, 220,   0, 255) },
-    }, [hud_col](ImU32 c){ hud_col->ind_fail = c; });
+    }, [hud_col](ImU32 c){ hud_col->ind_fail = c; },
+    [hud_col]{ return hud_col->ind_fail; });
 
     // ── Compass ───────────────────────────────────────────────────────────────
     // Onboard MPU-9250 backup compass (moved from root "Backup Compass")
@@ -696,7 +708,8 @@ static std::vector<MenuItem> build_menu(
         { "Purple",  IM_COL32( 18,   8,  28, 255) },
         { "Blue",    IM_COL32( 10,  10,  40, 255) },
         { "Black",   IM_COL32(  0,   0,   0, 255) },
-    }, [hud_col](ImU32 c){ hud_col->compass_bg_color = c; });
+    }, [hud_col](ImU32 c){ hud_col->compass_bg_color = c; },
+    [hud_col]{ return hud_col->compass_bg_color; });
 
 
     std::vector<MenuItem> compass_tick_color_menu = make_color_items({
@@ -706,7 +719,8 @@ static std::vector<MenuItem> build_menu(
         { "Green",  IM_COL32( 30, 220,  60, 255) },
         { "Purple", IM_COL32(180,  30, 220, 255) },
         { "White",  IM_COL32(255, 255, 255, 255) },
-    }, [hud_col](ImU32 c){ hud_col->compass_tick = c; });
+    }, [hud_col](ImU32 c){ hud_col->compass_tick = c; },
+    [hud_col]{ return hud_col->compass_tick; });
 
     std::vector<MenuItem> compass_glow_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
@@ -715,7 +729,8 @@ static std::vector<MenuItem> build_menu(
         { "Green",  IM_COL32( 30, 220,  60, 255) },
         { "Purple", IM_COL32(180,  30, 220, 255) },
         { "White",  IM_COL32(255, 255, 255, 255) },
-    }, [hud_col](ImU32 c){ hud_col->compass_glow = c; });
+    }, [hud_col](ImU32 c){ hud_col->compass_glow = c; },
+    [hud_col]{ return hud_col->compass_glow; });
 
     // ── Tagged Radio Colors (per LoRa node compass markers) ──────────────────
     static const struct { const char* name; ImU32 col; } kNodeColors[] = {
@@ -836,7 +851,8 @@ static std::vector<MenuItem> build_menu(
         { "Purple", IM_COL32(180,  30, 220, 255) },
         { "White",  IM_COL32(255, 255, 255, 255) },
         { "Red",    IM_COL32(255,  50,  50, 255) },
-    }, [hud_col](ImU32 c){ hud_col->glow_base = c; });
+    }, [hud_col](ImU32 c){ hud_col->glow_base = c; },
+    [hud_col]{ return hud_col->glow_base; });
 
     // Themes — apply a coordinated set of HudColors + MenuSystem styles
     auto apply_theme = [hud_col, menu_sys_pp](
@@ -924,7 +940,8 @@ static std::vector<MenuItem> build_menu(
         { "Purple", IM_COL32( 20,   8,  28, 225) },
         { "Navy",   IM_COL32(  8,   8,  35, 225) },
         { "Black",  IM_COL32(  0,   0,   0, 230) },
-    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_color(c); });
+    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_bg_color(c); },
+    [menu_sys_pp]{ return *menu_sys_pp ? (*menu_sys_pp)->bg_color() : IM_COL32(10,15,20,225); });
 
     std::vector<MenuItem> hud_bg_color_menu = make_color_items({
         { "Dark",   IM_COL32( 10,  15,  20, 210) },
@@ -936,7 +953,8 @@ static std::vector<MenuItem> build_menu(
     }, [hud_col](ImU32 c){
         hud_col->background       = c;
         hud_col->compass_bg_color = c;
-    });
+    },
+    [hud_col]{ return hud_col->background; });
 
     std::vector<MenuItem> backgrounds_menu = {
         toggle("Indicator Background",
@@ -973,7 +991,8 @@ static std::vector<MenuItem> build_menu(
         { "Yellow", IM_COL32(255, 240,  50, 255) },
         { "Purple", IM_COL32(180,  30, 220, 255) },
         { "Red",    IM_COL32(255,  50,  50, 255) },
-    }, [hud_col](ImU32 c){ hud_col->glow_color = c; });
+    }, [hud_col](ImU32 c){ hud_col->glow_color = c; },
+    [hud_col]{ return hud_col->glow_color; });
 
     std::vector<MenuItem> glow_menu = {
         toggle("Text Glow",
@@ -994,7 +1013,8 @@ static std::vector<MenuItem> build_menu(
         { "Cyan",   IM_COL32(  0, 180, 255, 255) },
         { "Green",  IM_COL32( 30, 220,  60, 255) },
         { "Purple", IM_COL32(180,  30, 220, 255) },
-    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_accent_color(c); });
+    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_accent_color(c); },
+    [menu_sys_pp]{ return *menu_sys_pp ? (*menu_sys_pp)->accent_color() : IM_COL32(255,160,32,255); });
 
     std::vector<MenuItem> menu_border_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
@@ -1005,7 +1025,8 @@ static std::vector<MenuItem> build_menu(
         { "Purple", IM_COL32(180,  30, 220, 255) },
         { "White",  IM_COL32(255, 255, 255, 255) },
         { "Red",    IM_COL32(255,  50,  50, 255) },
-    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_border_color(c); });
+    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_border_color(c); },
+    [menu_sys_pp]{ return *menu_sys_pp ? (*menu_sys_pp)->border_color() : IM_COL32(255,160,32,255); });
 
     std::vector<MenuItem> menu_border_menu = {
         toggle("Border",
