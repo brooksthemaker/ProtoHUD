@@ -1844,9 +1844,9 @@ int main(int argc, char* argv[]) {
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
         }
-        // Overlay-active flags are render-thread-local; inject after mutex release.
-        snap.health.cam_usb1_overlay = pip_cam1_overlay_active;
-        snap.health.cam_usb2_overlay = pip_cam2_overlay_active;
+        // Overlay-active flags mirror the exact condition used in draw_pip calls.
+        snap.health.cam_usb1_overlay = pip_cam1_overlay_active || pip_left_active  || kb_pip_left;
+        snap.health.cam_usb2_overlay = pip_cam2_overlay_active || pip_right_active || kb_pip_right;
 
         // Inject live AF lens position into the snapshot (atomic read, no lock needed)
         if (cameras.owl_left())
