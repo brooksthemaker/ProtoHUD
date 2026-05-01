@@ -1270,12 +1270,6 @@ int main(int argc, char* argv[]) {
     hud_cfg.glow_intensity        = jval(jhud, "glow_intensity",       1.0f);
     hud_cfg.hud_flip_vertical     = jval(jhud, "flip_vertical",        false);
 
-    if (jhud.contains("effects")) {
-        auto& jfx = jhud["effects"];
-        state.effects_cfg.effect  = static_cast<EffectType> (jval(jfx, "type",    0));
-        state.effects_cfg.palette = static_cast<EffectPalette>(jval(jfx, "palette", 0));
-    }
-
     Mpu9250::Config mpu_cfg;
     if (cfg.contains("mpu9250")) {
         auto& jm = cfg["mpu9250"];
@@ -1329,6 +1323,12 @@ int main(int argc, char* argv[]) {
     AppState state;
     state.max_messages        = jval(jhud, "lora_message_history", 50);
     state.compass_bg_enabled  = jhud.value("compass_bg", false);
+
+    if (jhud.contains("effects")) {
+        auto& jfx = jhud["effects"];
+        state.effects_cfg.effect  = static_cast<EffectType> (jval(jfx, "type",    0));
+        state.effects_cfg.palette = static_cast<EffectPalette>(jval(jfx, "palette", 0));
+    }
 
     if (cfg.contains("night_vision")) {
         auto& jnv = cfg["night_vision"];
