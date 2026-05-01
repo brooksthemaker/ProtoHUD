@@ -673,9 +673,6 @@ static std::vector<MenuItem> build_menu(
         submenu("Tagged Radio Colors", std::move(tagged_radio_colors_menu)),
         submenu("Background Options",  std::move(compass_bg_options_menu)),
         submenu("Color Options",       std::move(compass_color_options_menu)),
-        toggle("Tick Glow",
-            [hud_cfg]{ return hud_cfg->compass_tick_glow; },
-            [hud_cfg](bool v){ hud_cfg->compass_tick_glow = v; }),
     };
 
     // ── Clock & Timers ────────────────────────────────────────────────────────
@@ -899,6 +896,12 @@ static std::vector<MenuItem> build_menu(
         toggle("Text Glow",
             [hud_cfg]{ return hud_cfg->glow_enabled; },
             [hud_cfg](bool v){ hud_cfg->glow_enabled = v; }),
+        toggle("Tick Glow",
+            [hud_cfg]{ return hud_cfg->compass_tick_glow; },
+            [hud_cfg](bool v){ hud_cfg->compass_tick_glow = v; }),
+        slider("Glow Intensity", 0.f, 2.f, 0.05f, "",
+            [hud_cfg]{ return hud_cfg->glow_intensity; },
+            [hud_cfg](float v){ hud_cfg->glow_intensity = v; }),
         submenu("Glow Color", std::move(glow_color_menu)),
     };
 
