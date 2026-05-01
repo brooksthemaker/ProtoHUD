@@ -1783,9 +1783,10 @@ int main(int argc, char* argv[]) {
                 if (edge(1, GLFW_KEY_1)) kb_pip_left  = !kb_pip_left;
                 if (edge(2, GLFW_KEY_2)) kb_pip_right = !kb_pip_right;
             }
-            if (edge(3, GLFW_KEY_3) && menu.is_open()) menu.select();
+            bool key3 = edge(3, GLFW_KEY_3);
+            if (key3 && menu.is_open()) menu.select();
             // 3: toggle manual/auto focus
-            if (edge(3, GLFW_KEY_3) && !menu.is_open()) {
+            if (key3 && !menu.is_open()) {
                 bool go_manual = (state.focus_left.mode != CameraFocusState::Mode::MANUAL);
                 if (go_manual) {
                     if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
