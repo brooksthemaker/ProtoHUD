@@ -24,10 +24,17 @@ struct CamConfig {
 
 struct UsbCamConfig {
     std::string device;
-    int   width      = 1280;
-    int   height     = 720;
-    int   fps        = 30;
-    float brightness = 1.0f;  // software multiplier: 1.0=normal, 2.0=double, 0.5=half
+    int   width             = 1280;
+    int   height            = 720;
+    int   fps               = 30;
+    float brightness        = 1.0f;  // software multiplier: 1.0=normal, 2.0=double, 0.5=half
+    // Exposure / framerate
+    bool  dynamic_framerate = false;  // false = disable fps throttle from long exposures
+    bool  auto_exposure     = true;   // false = manual exposure
+    int   exposure_time     = 157;    // 1-5000 (100µs units), used when auto_exposure=false
+    // White balance
+    bool  auto_wb           = true;   // false = manual white balance
+    int   wb_temp           = 4600;   // 2800-6500 K, used when auto_wb=false
 };
 
 // CameraManager owns:
@@ -109,6 +116,16 @@ public:
     void  set_usb2_brightness(float v) { usb2_brightness_ = v; }
     float usb1_brightness()      const { return usb1_brightness_.load(); }
     float usb2_brightness()      const { return usb2_brightness_.load(); }
+
+    // ── USB V4L2 control (applies ioctl live; camera may briefly drop frames) ─
+    void set_usb1_ctrl(uint32_t id, int32_t value);
+    void set_usb2_ctrl(uint32_t id, int32_t value);
+
+    // ── USB config access (for menu read-back and config-save persistence) ────
+    void                update_usb1_cfg(const UsbCamConfig& c) { usb1_cfg_ = c; }
+    void                update_usb2_cfg(const UsbCamConfig& c) { usb2_cfg_ = c; }
+    const UsbCamConfig& usb1_cfg() const { return usb1_cfg_; }
+    const UsbCamConfig& usb2_cfg() const { return usb2_cfg_; }
 
 private:
     void usb_capture_thread();

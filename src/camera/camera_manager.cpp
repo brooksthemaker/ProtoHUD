@@ -66,6 +66,27 @@ static bool open_v4l2(cv::VideoCapture& cap, const UsbCamConfig& cfg,
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
     cap.set(cv::CAP_PROP_FPS,          cfg.fps);
     cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 0.75);  // request auto-exposure (driver best-effort)
+
+    // Apply UVC controls not exposed by OpenCV via direct V4L2 ioctl.
+    {
+        int fd = open(cfg.device.c_str(), O_RDWR);
+        if (fd >= 0) {
+            auto set_ctrl = [&](uint32_t id, int32_t val) {
+                v4l2_control c{}; c.id = id; c.value = val;
+                ioctl(fd, VIDIOC_S_CTRL, &c);
+            };
+            // Disable dynamic framerate throttle (keeps fps at configured rate).
+            set_ctrl(V4L2_CID_EXPOSURE_DYNAMIC_FRAMERATE, cfg.dynamic_framerate ? 1 : 0);
+            set_ctrl(V4L2_CID_EXPOSURE_AUTO, cfg.auto_exposure ? 3 : 1);  // 3=AP, 1=Manual
+            if (!cfg.auto_exposure)
+                set_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, cfg.exposure_time);
+            set_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, cfg.auto_wb ? 1 : 0);
+            if (!cfg.auto_wb)
+                set_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, cfg.wb_temp);
+            close(fd);
+        }
+    }
+
     int aw = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
     int ah = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
     int af = static_cast<int>(cap.get(cv::CAP_PROP_FPS));
@@ -400,6 +421,16 @@ bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
 
 bool CameraManager::scan_usb1() { return scan_usb(usb_cap1_, usb1_ok_, usb1_cfg_); }
 bool CameraManager::scan_usb2() { return scan_usb(usb_cap2_, usb2_ok_, usb2_cfg_); }
+
+static void v4l2_set_ctrl(const std::string& dev, uint32_t id, int32_t val) {
+    int fd = open(dev.c_str(), O_RDWR);
+    if (fd < 0) return;
+    v4l2_control c{}; c.id = id; c.value = val;
+    ioctl(fd, VIDIOC_S_CTRL, &c);
+    close(fd);
+}
+void CameraManager::set_usb1_ctrl(uint32_t id, int32_t val) { v4l2_set_ctrl(usb1_cfg_.device, id, val); }
+void CameraManager::set_usb2_ctrl(uint32_t id, int32_t val) { v4l2_set_ctrl(usb2_cfg_.device, id, val); }
 
 bool CameraManager::get_usb1(GLuint& out) {
     std::lock_guard<std::mutex> lk(usb1_slot_.mtx);
