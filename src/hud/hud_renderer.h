@@ -62,6 +62,7 @@ struct HudConfig {
     bool  indicator_bg_enabled  = true;   // parallelogram bg behind health indicators
     // Glow intensity multiplier (scales all glow alphas)
     float glow_intensity     = 1.0f;   // 0.0=no glow, 1.0=full
+    bool  hud_flip_vertical  = false;  // move compass+arms to top, status bar to bottom
 };
 
 class HudRenderer {
@@ -108,8 +109,26 @@ public:
     // Execute ImGui::Render → flush to current GL framebuffer.
     void render_overlay();
 
+    // ── Popup API (alarm / timer-expired overlays) ────────────────────────────
+
+    // True when an alarm or timer-expired popup is currently visible.
+    bool popup_active() const;
+
+    // Move the popup button cursor (delta = +1 / -1 from knob rotate).
+    void popup_navigate(int delta);
+
+    // Activate the currently highlighted popup button.
+    // Action is deferred and executed the next time draw_popups() is called.
+    void popup_select();
+
+    // Draw alarm / timer-expired popups and execute any pending button action.
+    // Must be called inside an active ImGui frame, after draw_frame() and
+    // menu.draw(), so the popup renders on top of both.
+    // Returns true if a popup was drawn this frame.
+    bool draw_popups(AppState& state, int w, int h);
+
 private:
-    void draw_top_bar      (ImDrawList* dl, const AppState& s, float w);
+    void draw_top_bar      (ImDrawList* dl, const AppState& s, float w, float bar_y = 0.f);
     void draw_health_side  (ImDrawList* dl, const SystemHealth& h,
                             float fw, float fh, bool right_side,
                             const CameraFocusState& focus_left,
@@ -126,9 +145,61 @@ private:
 
     static const char* cardinal_str(float deg);
 
+    // Popup drawing helpers — called from draw_popups().
+    void draw_alarm_popup (ImDrawList* dl, float fw, float fh);
+    void draw_timer_popup (ImDrawList* dl, float fw, float fh,
+                           const TimerAlarmState& ta);
+
+    // ── Particle effects (render-thread only) ─────────────────────────────────
+    struct Particle {
+        float x, y;          // position
+        float vx, vy;        // velocity (px/s)
+        float life;          // remaining life (seconds)
+        float life_total;    // initial life (for alpha fade)
+        ImU32 color;         // base color (alpha overridden at draw)
+        float size;          // radius in pixels
+    };
+    static constexpr int kMaxParticles = 256;
+    Particle  particles_[kMaxParticles] = {};
+    int       n_particles_ = 0;
+    float     fx_prev_heading_ = 0.f;   // for turbulence heading delta
+
+    // Resolve palette → color given current snap
+    ImU32 fx_palette_color(const AppState& s) const;
+
+    // Low-level pool management
+    void  fx_tick(float dt);
+    void  fx_emit(float x, float y, float vx, float vy,
+                  float life, float size, ImU32 color);
+    void  fx_draw(ImDrawList* dl) const;
+
+    // Per-effect emitters (called from fx_update each frame)
+    void  fx_emit_arm_glint    (float ax, float ay, float dx, float dy,
+                                 float diag_len, ImU32 c, float dt);
+    void  fx_emit_corner_drift (float cx, float cy, ImU32 c, float dt);
+    void  fx_emit_burst        (float cx, float cy, int count, ImU32 c);
+    void  fx_emit_turbulence   (float tape_cx, float tape_y,
+                                 float tw, float th, ImU32 c, float dt);
+
+    // Master dispatcher — called at end of draw_frame
+    void  fx_update(ImDrawList* dl, const AppState& s,
+                    float fw, float fh, float dt);
+
     HudConfig     cfg_;
     HudColors     col_;
     ImGuiContext* ctx_ = nullptr;
     ImFont*       font_ui_   = nullptr;
     ImFont*       font_mono_ = nullptr;
+    float         frame_dt_  = 0.f;  // set each begin_frame, used by fx_update
+
+    // ── Popup state (render-thread only, no mutex needed) ─────────────────────
+    enum class PopupKind   { None, Alarm, Timer };
+    enum class PopupAction { None,
+                             AlarmDismiss,
+                             TimerDismiss, TimerAdd2, TimerAdd5, TimerAdd10 };
+
+    PopupKind   popup_kind_    = PopupKind::None;
+    int         popup_cursor_  = 0;
+    PopupAction popup_pending_ = PopupAction::None;
+    PopupKind   fx_prev_popup_ = PopupKind::None;  // burst trigger on popup open
 };

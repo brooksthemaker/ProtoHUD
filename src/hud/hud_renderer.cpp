@@ -171,7 +171,8 @@ void HudRenderer::unload() {
 
 // ── Per-frame ─────────────────────────────────────────────────────────────────
 
-void HudRenderer::begin_frame(float /*dt*/) {
+void HudRenderer::begin_frame(float dt) {
+    frame_dt_ = dt;
     ImGui::SetCurrentContext(ctx_);
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
@@ -180,6 +181,7 @@ void HudRenderer::begin_frame(float /*dt*/) {
     s_glow            = cfg_.glow_enabled;
     s_glow_intensity  = cfg_.glow_intensity;
     s_glow_color_base = col_.glow_color;
+    fx_tick(dt);
 }
 
 void HudRenderer::render_overlay() {
@@ -195,24 +197,29 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     ImGui::SetCurrentContext(ctx_);
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
-    const float fw    = static_cast<float>(w);
-    const float fh    = static_cast<float>(h);
-    const float th    = static_cast<float>(cfg_.top_bar_height);
-    const float ch    = static_cast<float>(cfg_.compass_height);
-    const float mid_h = fh - th;
+    const float fw       = static_cast<float>(w);
+    const float fh       = static_cast<float>(h);
+    const float th       = static_cast<float>(cfg_.top_bar_height);
+    const float ch       = static_cast<float>(cfg_.compass_height);
+    const float mid_h    = fh - th;
+    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    const bool  flip     = cfg_.hud_flip_vertical;
 
-    draw_top_bar(dl, s, fw);
+    const float bar_y    = flip ? fh - th : 0.f;
+    draw_top_bar(dl, s, fw, bar_y);
 
     if (!s.lora_messages.empty()) {
         float pw    = static_cast<float>(cfg_.panel_width);
         float msg_w = std::min(pw, fw / 3.f);
-        draw_lora_messages(dl, s, { 0.f, th }, msg_w, mid_h);
+        // Flipped: messages appear just below the compass at top; normal: just below status bar.
+        float msg_y = flip ? (c_margin + ch) : th;
+        draw_lora_messages(dl, s, { 0.f, msg_y }, msg_w, mid_h);
     }
 
-    const float cw       = fw / 3.f;
-    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    const float cw        = fw / 3.f;
+    const float compass_y = flip ? c_margin : fh - ch - c_margin;
     // Compass drawn first; indicator arms and health sides render on top.
-    draw_compass_tape    (dl, s, {fw / 2.f - cw / 2.f, fh - ch - c_margin}, cw, ch);
+    draw_compass_tape    (dl, s, {fw / 2.f - cw / 2.f, compass_y}, cw, ch);
     // Health sides drawn first so their background sits behind arm content.
     draw_health_side(dl, s.health, fw, fh, false,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
@@ -223,16 +230,8 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     draw_lora_indicator  (dl, s,      fw, fh);
     draw_clock_indicator (dl, s,      fw, fh);
 
-    // Alarm overlay: pulsing red border when alarm has triggered
-    if (s.timer_alarm.alarm_triggered) {
-        float pulse = 0.5f + 0.5f * std::sin(ImGui::GetTime() * 6.0f);
-        ImU32 red = IM_COL32(255, 0, 0, static_cast<int>(180 * pulse));
-        dl->AddRect({0.f, 0.f}, {fw, fh}, red, 0.f, 0, 10.f);
-        const char* alarm_str = "! ALARM !";
-        ImVec2 asz = ImGui::CalcTextSize(alarm_str);
-        hud_glow_text(dl, {fw * 0.5f - asz.x * 0.5f, fh * 0.5f - asz.y * 0.5f},
-                      alarm_str, true, IM_COL32(255,0,0,255), IM_COL32(255,255,255,255));
-    }
+    // Particle effects drawn on top of all HUD chrome.
+    fx_update(dl, s, fw, fh, frame_dt_);
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -446,22 +445,22 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
 
-void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
+void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w, float bar_y) {
     float th = static_cast<float>(cfg_.top_bar_height);
 
-    dl->AddRectFilled({0, 0}, {w, th}, col_.background);
+    dl->AddRectFilled({0, bar_y}, {w, bar_y + th}, col_.background);
 
-    // Clock (centered in top bar) — uses AppState::ClockConfig
+    // Clock (centered in bar) — uses AppState::ClockConfig
     {
         ImGui::PushFont(nullptr);
         float saved_scale = ImGui::GetIO().FontGlobalScale;
-        const float cscale = std::max(0.5f, s.clock_cfg.font_scale) * 0.8f; // slightly smaller for top bar
+        const float cscale = std::max(0.5f, s.clock_cfg.font_scale) * 0.8f;
         ImGui::GetIO().FontGlobalScale = saved_scale * cscale;
 
         std::string time_str = fmt_clock(s.clock_cfg.use_24h, s.clock_cfg.show_seconds);
         ImVec2 tsz = ImGui::CalcTextSize(time_str.c_str());
         float cx = w * 0.5f - tsz.x * 0.5f;
-        float cy = th * 0.5f - tsz.y * 0.5f - (s.clock_cfg.show_date ? tsz.y * 0.5f : 0.f);
+        float cy = bar_y + th * 0.5f - tsz.y * 0.5f - (s.clock_cfg.show_date ? tsz.y * 0.5f : 0.f);
         hud_glow_text(dl, {cx, cy}, time_str.c_str(), true, col_.glow_base, col_.text_fill);
 
         // Second line: countdown timer or date
@@ -487,11 +486,11 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
     int unread = s.unread_message_count();
     if (unread > 0) {
         char buf[32]; snprintf(buf, sizeof(buf), "MSG:%d", unread);
-        dl->AddText({w * 0.25f, 10.f}, col_.warn, buf);
+        dl->AddText({w * 0.25f, bar_y + 10.f}, col_.warn, buf);
     }
 
     // Audio strip (right side)
-    draw_audio_strip(dl, s.audio, {w - 180.f, 4.f}, 170.f);
+    draw_audio_strip(dl, s.audio, {w - 180.f, bar_y + 4.f}, 170.f);
 }
 
 // ── Health side indicators ────────────────────────────────────────────────────
@@ -505,7 +504,9 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const float tape_x   = fw / 2.f - tape_w / 2.f;
     const float fade_w   = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
-    const float anchor_y = fh - c_margin;
+    const float ch       = static_cast<float>(cfg_.compass_height);
+    const bool  flip     = cfg_.hud_flip_vertical;
+    const float anchor_y = flip ? c_margin + ch : fh - c_margin;
     const float anchor_x = right_side ? tape_x + tape_w + fade_w
                                        : tape_x - fade_w;
 
@@ -543,7 +544,7 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     constexpr float BG_FULL = 440.f;  // H_LEN + ARM_EXT*2 + SEG_W*2; covers health + LoRa + clock
 
     const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
-    const float dir_y    = -std::sin(ANGLE);
+    const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
 
     // Parallelogram background — 16 strips fading from opaque (inner) to transparent (outer).
@@ -659,12 +660,14 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
     const float tape_x        = fw / 2.f - tape_w / 2.f;
     const float fade_w        = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin      = static_cast<float>(cfg_.compass_bottom_margin);
-    const float anchor_y      = fh - c_margin;
+    const float ch            = static_cast<float>(cfg_.compass_height);
+    const bool  flip          = cfg_.hud_flip_vertical;
+    const float anchor_y      = flip ? c_margin + ch : fh - c_margin;
     const float ind_anchor_x  = tape_x - fade_w;
     const float proto_anchor_x = ind_anchor_x - SEG_W * 2.f;
 
-    const float dir_x    = std::cos(ANGLE) * -1.f;   // left side: goes right
-    const float dir_y    = -std::sin(ANGLE);           // goes up
+    const float dir_x    = std::cos(ANGLE) * -1.f;
+    const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(N_ITEMS + 1) * ROW_H;
 
     const ImU32 COL_MAJ  = col_.glow_base;
@@ -744,12 +747,14 @@ void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
     const float tape_x       = fw / 2.f - tape_w / 2.f;
     const float fade_w       = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin     = static_cast<float>(cfg_.compass_bottom_margin);
-    const float anchor_y     = fh - c_margin;
+    const float ch           = static_cast<float>(cfg_.compass_height);
+    const bool  flip         = cfg_.hud_flip_vertical;
+    const float anchor_y     = flip ? c_margin + ch : fh - c_margin;
     const float ind_anchor_x = tape_x + tape_w + fade_w;
     const float lora_anchor_x = ind_anchor_x + SEG_W * 2.f;
 
-    const float dir_x    = std::cos(ANGLE) * 1.f;   // right side: goes left
-    const float dir_y    = -std::sin(ANGLE);          // goes up
+    const float dir_x    = std::cos(ANGLE) * 1.f;
+    const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(MAX_ROWS + 1) * ROW_H;
 
     const ImU32 COL_MAJ  = col_.glow_base;
@@ -825,13 +830,15 @@ void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
     const float tape_x         = fw / 2.f - tape_w / 2.f;
     const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin       = static_cast<float>(cfg_.compass_bottom_margin);
-    const float anchor_y       = fh - c_margin;
+    const float ch             = static_cast<float>(cfg_.compass_height);
+    const bool  flip           = cfg_.hud_flip_vertical;
+    const float anchor_y       = flip ? c_margin + ch : fh - c_margin;
     const float ind_anchor_x   = tape_x + tape_w + fade_w;
     const float lora_anchor_x  = ind_anchor_x   + SEG_W * 2.f;
     const float clock_anchor_x = lora_anchor_x  + SEG_W * 2.f;
 
     const float dir_x = std::cos(ANGLE);
-    const float dir_y = -std::sin(ANGLE);
+    const float dir_y = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
 
     const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
     const float eff_row_h = ROW_H * scale;
@@ -945,31 +952,38 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     const ImU32 col_glow1 = with_alpha(col_.compass_glow, 70);
     const ImU32 col_glow2 = with_alpha(col_.compass_glow, 28);
 
-    const float fw = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float fade_w = static_cast<float>(cfg_.compass_bg_side_fade);
+    const bool  flip   = cfg_.hud_flip_vertical;
+
     if (s.compass_bg_enabled) {
         const uint8_t a = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
         const ImU32   A = with_alpha(col_.compass_bg_color, a);
 
-        // Diagonal inset at the top edge to match the health indicator 130° angle.
-        // Both sides taper inward as height increases, connecting flush to the
-        // health indicator diagonal lines when those are also enabled.
         constexpr float kIndAngle = 130.f * 3.14159265f / 180.f;
         const float inset = std::abs(std::cos(kIndAngle)) / std::sin(kIndAngle) * th;
 
-        // Solid trapezoid — wider at bottom (anchor_y), narrower at top.
-        ImVec2 bg[4] = {
-            {origin.x - fw + inset,      origin.y     },  // TL
-            {origin.x + tw + fw - inset, origin.y     },  // TR
-            {origin.x + tw + fw,         origin.y + th},  // BR
-            {origin.x - fw,              origin.y + th},  // BL
-        };
+        // Trapezoid: narrower on the side that faces the indicator arms.
+        // Normal: narrower at top (origin.y), wider at bottom (origin.y+th).
+        // Flipped: narrower at bottom (origin.y+th), wider at top (origin.y).
+        ImVec2 bg[4];
+        if (!flip) {
+            bg[0] = {origin.x - fade_w + inset,      origin.y     };  // TL (inset)
+            bg[1] = {origin.x + tw + fade_w - inset, origin.y     };  // TR (inset)
+            bg[2] = {origin.x + tw + fade_w,         origin.y + th};  // BR
+            bg[3] = {origin.x - fade_w,              origin.y + th};  // BL
+        } else {
+            bg[0] = {origin.x - fade_w,              origin.y     };  // TL
+            bg[1] = {origin.x + tw + fade_w,         origin.y     };  // TR
+            bg[2] = {origin.x + tw + fade_w - inset, origin.y + th};  // BR (inset)
+            bg[3] = {origin.x - fade_w + inset,      origin.y + th};  // BL (inset)
+        }
         dl->AddConvexPolyFilled(bg, 4, A);
     }
 
-    // Glow line at the tape base — color matches the health indicator lines (glow_base).
+    // Glow line — at tape edge that meets the indicator arms.
     {
-        const float lx0 = origin.x - fw, lx1 = origin.x + tw + fw;
-        const float line_y = origin.y + th;
+        const float lx0    = origin.x - fade_w, lx1 = origin.x + tw + fade_w;
+        const float line_y = flip ? origin.y : origin.y + th;
         dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 28), 5.f);
         dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 70), 2.5f);
         dl->AddLine({lx0, line_y}, {lx1, line_y}, col_.glow_base, 1.f);
@@ -980,9 +994,12 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     const float t_mid = t_maj * (16.f / 24.f);
     const float t_min = t_maj * (10.f / 24.f);
 
-    // Tick zone: leave 20 px at the bottom for labels.
-    const float tick_bottom = origin.y + th - 20.f;
-    const float label_y     = tick_bottom + 3.f;
+    // Tick zone: 20 px label strip on the arm-facing edge; ticks grow inward.
+    // Normal: label strip at bottom, ticks grow upward.
+    // Flipped: label strip at top, ticks grow downward.
+    const float tick_base   = flip ? origin.y + 20.f : origin.y + th - 20.f;
+    const float tick_sign   = flip ? 1.f : -1.f;   // +1 = down, -1 = up
+    const float label_y     = flip ? origin.y + 3.f : tick_base + 3.f;
 
     if (font_mono_) ImGui::PushFont(font_mono_);
 
@@ -997,34 +1014,36 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         const bool tick_glow = cfg_.compass_tick_glow;
         if (deg % 45 == 0) {
             if (tick_glow) {
-                dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow2, t_maj * 0.5f);
-                dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow1, t_maj * 0.25f);
+                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_maj}, col_glow2, t_maj * 0.5f);
+                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_maj}, col_glow1, t_maj * 0.25f);
             }
-            dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_major, 3.f);
+            dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_maj}, col_major, 3.f);
             const char* card = cardinal_str(static_cast<float>(deg));
             ImVec2 csz = ImGui::CalcTextSize(card);
             hud_glow_text(dl, {px - csz.x * 0.5f, label_y},
                           card, true, col_.glow_base, col_.text_fill);
         } else if (deg % 10 == 0) {
             if (tick_glow)
-                dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_glow2, t_mid * 0.375f);
-            dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_mid,   2.f);
+                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_mid}, col_glow2, t_mid * 0.375f);
+            dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_mid}, col_mid, 2.f);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
             ImVec2 bsz = ImGui::CalcTextSize(buf);
             hud_glow_text(dl, {px - bsz.x * 0.5f, label_y}, buf,
                           true, col_.glow_base, col_.text_fill);
         } else if (deg % 5 == 0) {
             if (tick_glow)
-                dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_glow2, t_min * 0.4f);
-            dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_minor, 2.f);
+                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_min}, col_glow2, t_min * 0.4f);
+            dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_min}, col_minor, 2.f);
         }
     }
 
     if (font_mono_) ImGui::PopFont();
 
-    // LoRa node bearing markers — small colored triangles above the ticks
+    // LoRa node bearing markers — small triangles on the inner (non-label) side of the ticks.
+    // Normal: triangles above the tick tops (pointing down into tape).
+    // Flipped: triangles below the tick bottoms (pointing up into tape).
     for (const auto& node : s.lora_nodes) {
-        if (node.distance_m <= 0.f) continue;  // no fix yet
+        if (node.distance_m <= 0.f) continue;
         float offset = node.heading_deg - heading;
         while (offset >  180.f) offset -= 360.f;
         while (offset < -180.f) offset += 360.f;
@@ -1032,11 +1051,228 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         if (px < origin.x || px > origin.x + tw) continue;
 
         ImU32 node_col = s.lora_node_colors[node.local_id % 8];
-        float mx = px, my = tick_bottom - t_maj - 6.f;
-        ImVec2 tri[3] = {{mx - 5.f, my}, {mx + 5.f, my}, {mx, my + 9.f}};
+        float mx = px;
+        float my, tri_tip_dy;
+        if (!flip) {
+            my = tick_base + tick_sign * t_maj - 6.f;  // above tick tops
+            tri_tip_dy = 9.f;                            // tip points downward
+        } else {
+            my = tick_base + tick_sign * t_maj + 6.f;  // below tick bottoms
+            tri_tip_dy = -9.f;                           // tip points upward
+        }
+        ImVec2 tri[3] = {{mx - 5.f, my}, {mx + 5.f, my}, {mx, my + tri_tip_dy}};
         dl->AddConvexPolyFilled(tri, 3, node_col);
         dl->AddPolyline(tri, 3, with_alpha(node_col, 200), ImDrawFlags_Closed, 1.f);
     }
+}
+
+// ── Alarm / Timer popups ──────────────────────────────────────────────────────
+
+// Helper: draw an 8-point chamfered shape.  pts_out must be ImVec2[8].
+static void chamfer_pts(ImVec2 mn, ImVec2 mx, float c, ImVec2 pts[8]) {
+    pts[0] = {mn.x + c, mn.y}; pts[1] = {mx.x - c, mn.y};
+    pts[2] = {mx.x, mn.y + c}; pts[3] = {mx.x, mx.y - c};
+    pts[4] = {mx.x - c, mx.y}; pts[5] = {mn.x + c, mx.y};
+    pts[6] = {mn.x, mx.y - c}; pts[7] = {mn.x, mn.y + c};
+}
+
+// Draw one selectable button. Returns true if this button's slot == cursor.
+static bool popup_button(ImDrawList* dl, ImVec2 pos, const char* label,
+                          bool selected,
+                          ImU32 sel_bg, ImU32 sel_text,
+                          ImU32 def_bg, ImU32 def_text,
+                          float pad_x = 14.f, float pad_y = 7.f) {
+    ImVec2 tsz = ImGui::CalcTextSize(label);
+    float  bw  = tsz.x + pad_x * 2.f;
+    float  bh  = tsz.y + pad_y * 2.f;
+    ImVec2 bmax = {pos.x + bw, pos.y + bh};
+    ImU32  bg  = selected ? sel_bg   : def_bg;
+    ImU32  fg  = selected ? sel_text : def_text;
+    dl->AddRectFilled(pos, bmax, bg, 5.f);
+    if (selected)
+        dl->AddRect(pos, bmax, sel_text, 5.f, 0, 1.5f);
+    dl->AddText({pos.x + pad_x, pos.y + pad_y}, fg, label);
+    return selected;
+}
+
+void HudRenderer::draw_alarm_popup(ImDrawList* dl, float fw, float fh) {
+    constexpr float W   = 380.f, H = 180.f;
+    constexpr float C   = 8.f,  GAP = 3.f;
+    const float x = fw * 0.5f - W * 0.5f;
+    const float y = fh * 0.5f - H * 0.5f;
+
+    // Light grey background (chamfered, inset by GAP)
+    ImVec2 bg_pts[8];
+    chamfer_pts({x + GAP, y + GAP}, {x + W - GAP, y + H - GAP}, C, bg_pts);
+    dl->AddConvexPolyFilled(bg_pts, 8, IM_COL32(220, 220, 220, 248));
+
+    // Red chamfered border at window edge
+    ImVec2 bdr_pts[8];
+    chamfer_pts({x, y}, {x + W, y + H}, C, bdr_pts);
+    dl->AddPolyline(bdr_pts, 8, IM_COL32(210, 30, 30, 255), ImDrawFlags_Closed, 2.5f);
+
+    // Title
+    const char* title = "!! ALARM !!";
+    ImVec2 tsz = ImGui::CalcTextSize(title);
+    dl->AddText({x + W * 0.5f - tsz.x * 0.5f, y + 32.f},
+                IM_COL32(190, 20, 20, 255), title);
+
+    // Dismiss button (centered; always selected — only one button)
+    float btn_y = y + H - 60.f;
+    ImVec2 dsz  = ImGui::CalcTextSize("DISMISS");
+    float  bw   = dsz.x + 28.f;
+    float  bx   = x + W * 0.5f - bw * 0.5f;
+    popup_button(dl, {bx, btn_y}, "DISMISS", true,
+                 IM_COL32(200, 30, 30, 230), IM_COL32(255, 255, 255, 255),
+                 IM_COL32(180, 180, 180, 200), IM_COL32(40, 40, 40, 255));
+}
+
+void HudRenderer::draw_timer_popup(ImDrawList* dl, float fw, float fh,
+                                    const TimerAlarmState& /*ta*/) {
+    constexpr float W   = 460.f, H = 190.f;
+    constexpr float C   = 8.f,  GAP = 3.f;
+    const float x = fw * 0.5f - W * 0.5f;
+    const float y = fh * 0.5f - H * 0.5f;
+
+    // Golden-orange colors
+    constexpr ImU32 ORANGE_BORDER = IM_COL32(220, 140, 20, 255);
+    constexpr ImU32 ORANGE_SEL    = IM_COL32(210, 130, 15, 230);
+
+    // Light grey background
+    ImVec2 bg_pts[8];
+    chamfer_pts({x + GAP, y + GAP}, {x + W - GAP, y + H - GAP}, C, bg_pts);
+    dl->AddConvexPolyFilled(bg_pts, 8, IM_COL32(220, 220, 220, 248));
+
+    // Golden-orange chamfered border
+    ImVec2 bdr_pts[8];
+    chamfer_pts({x, y}, {x + W, y + H}, C, bdr_pts);
+    dl->AddPolyline(bdr_pts, 8, ORANGE_BORDER, ImDrawFlags_Closed, 2.5f);
+
+    // Title
+    const char* title = "TIMER EXPIRED";
+    ImVec2 tsz = ImGui::CalcTextSize(title);
+    dl->AddText({x + W * 0.5f - tsz.x * 0.5f, y + 28.f},
+                IM_COL32(160, 100, 10, 255), title);
+
+    // Four buttons: Dismiss | +2 Min | +5 Min | +10 Min
+    static const char* labels[4] = {"DISMISS", "+2 MIN", "+5 MIN", "+10 MIN"};
+    float btn_y     = y + H - 64.f;
+    float total_w   = 0.f;
+    float btn_ws[4];
+    for (int i = 0; i < 4; i++) {
+        btn_ws[i] = ImGui::CalcTextSize(labels[i]).x + 28.f;
+        total_w  += btn_ws[i];
+    }
+    float gap = (W - 24.f - total_w) / 3.f;
+    float bx  = x + 12.f;
+    for (int i = 0; i < 4; i++) {
+        bool sel = (popup_cursor_ == i);
+        popup_button(dl, {bx, btn_y}, labels[i], sel,
+                     ORANGE_SEL, IM_COL32(255, 255, 255, 255),
+                     IM_COL32(185, 185, 185, 210), IM_COL32(50, 50, 50, 255));
+        bx += btn_ws[i] + (i < 3 ? gap : 0.f);
+    }
+}
+
+bool HudRenderer::popup_active() const {
+    return popup_kind_ != PopupKind::None;
+}
+
+void HudRenderer::popup_navigate(int delta) {
+    if (popup_kind_ == PopupKind::Timer) {
+        popup_cursor_ = (popup_cursor_ + delta + 4) % 4;
+    }
+    // Alarm has only one button; navigation is a no-op.
+}
+
+void HudRenderer::popup_select() {
+    if (popup_kind_ == PopupKind::Alarm) {
+        popup_pending_ = PopupAction::AlarmDismiss;
+    } else if (popup_kind_ == PopupKind::Timer) {
+        switch (popup_cursor_) {
+            case 0:  popup_pending_ = PopupAction::TimerDismiss; break;
+            case 1:  popup_pending_ = PopupAction::TimerAdd2;    break;
+            case 2:  popup_pending_ = PopupAction::TimerAdd5;    break;
+            default: popup_pending_ = PopupAction::TimerAdd10;   break;
+        }
+    }
+}
+
+bool HudRenderer::draw_popups(AppState& state, int w, int h) {
+    ImGui::SetCurrentContext(ctx_);
+
+    // Determine current popup kind (alarm takes priority)
+    PopupKind kind = PopupKind::None;
+    if (state.timer_alarm.alarm_triggered)   kind = PopupKind::Alarm;
+    else if (state.timer_alarm.timer_triggered) kind = PopupKind::Timer;
+
+    // Reset cursor when a new popup type appears
+    if (kind != popup_kind_) {
+        popup_cursor_ = 0;
+        popup_kind_   = kind;
+    }
+
+    // Execute any pending button action
+    if (popup_pending_ != PopupAction::None) {
+        auto& ta = state.timer_alarm;
+        switch (popup_pending_) {
+            case PopupAction::AlarmDismiss:
+                ta.alarm_triggered = false;
+                break;
+            case PopupAction::TimerDismiss:
+                ta.timer_triggered = false;
+                break;
+            case PopupAction::TimerAdd2:
+                ta.timer_end = time(nullptr) + 120;
+                ta.timer_active    = true;
+                ta.timer_triggered = false;
+                break;
+            case PopupAction::TimerAdd5:
+                ta.timer_end = time(nullptr) + 300;
+                ta.timer_active    = true;
+                ta.timer_triggered = false;
+                break;
+            case PopupAction::TimerAdd10:
+                ta.timer_end = time(nullptr) + 600;
+                ta.timer_active    = true;
+                ta.timer_triggered = false;
+                break;
+            default: break;
+        }
+        popup_pending_ = PopupAction::None;
+        // Update kind immediately after dismissal
+        if (!state.timer_alarm.alarm_triggered && !state.timer_alarm.timer_triggered) {
+            popup_kind_ = PopupKind::None;
+            return false;
+        }
+    }
+
+    if (popup_kind_ == PopupKind::None) return false;
+
+    const float fw = static_cast<float>(w);
+    const float fh = static_cast<float>(h);
+
+    // Use a full-screen transparent ImGui window so popup is on top of the HUD.
+    ImGui::SetNextWindowPos ({0.f, 0.f}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({fw,  fh},  ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.f, 0.f, 0.f, 0.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(0.f, 0.f));
+    ImGui::Begin("##popup", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                 ImGuiWindowFlags_NoInputs);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    if (popup_kind_ == PopupKind::Alarm)
+        draw_alarm_popup(dl, fw, fh);
+    else
+        draw_timer_popup(dl, fw, fh, state.timer_alarm);
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    return true;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1045,4 +1281,217 @@ const char* HudRenderer::cardinal_str(float deg) {
     static const char* pts[] = {"N","NE","E","SE","S","SW","W","NW"};
     int idx = static_cast<int>((deg + 22.5f) / 45.f) % 8;
     return pts[idx];
+}
+
+// ── Particle effects ──────────────────────────────────────────────────────────
+
+// Palette colors for each EffectPalette option.
+// "Theme" reads from the live HudColors glow_base; the rest are fixed.
+static ImU32 kPaletteColors[5] = {
+    IM_COL32(  0,   0,   0, 255),  // 0 = Theme — overridden at runtime
+    IM_COL32(255, 255, 255, 255),  // 1 = Halo   (white)
+    IM_COL32(255, 140,  20, 255),  // 2 = Solar  (amber orange)
+    IM_COL32(  0, 210,  50, 255),  // 3 = Fallout (radioactive green)
+    IM_COL32( 80, 100, 255, 255),  // 4 = Space  (electric blue)
+};
+
+ImU32 HudRenderer::fx_palette_color(const AppState& s) const {
+    const int idx = static_cast<int>(s.effects_cfg.palette);
+    if (idx == 0) return col_.glow_base;  // Theme: match current HUD palette
+    if (idx >= 1 && idx <= 4) return kPaletteColors[idx];
+    return col_.glow_base;
+}
+
+void HudRenderer::fx_tick(float dt) {
+    if (dt <= 0.f || n_particles_ == 0) return;
+    int i = 0;
+    while (i < n_particles_) {
+        Particle& p = particles_[i];
+        p.life -= dt;
+        if (p.life <= 0.f) {
+            // Remove by swap-with-last
+            particles_[i] = particles_[--n_particles_];
+        } else {
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            ++i;
+        }
+    }
+}
+
+void HudRenderer::fx_emit(float x, float y, float vx, float vy,
+                           float life, float size, ImU32 color) {
+    if (n_particles_ >= kMaxParticles) {
+        // Replace the oldest particle (index 0 after swap churn is approximately oldest)
+        particles_[0] = { x, y, vx, vy, life, life, color, size };
+        return;
+    }
+    particles_[n_particles_++] = { x, y, vx, vy, life, life, color, size };
+}
+
+void HudRenderer::fx_draw(ImDrawList* dl) const {
+    for (int i = 0; i < n_particles_; ++i) {
+        const Particle& p = particles_[i];
+        const float frac  = p.life / p.life_total;
+        const uint8_t a   = static_cast<uint8_t>(frac * 220.f);
+        const ImU32  col  = with_alpha(p.color, a);
+        dl->AddCircleFilled({p.x, p.y}, p.size, col, 6);
+    }
+}
+
+// Emit a handful of sparks at random positions along an indicator arm.
+void HudRenderer::fx_emit_arm_glint(float ax, float ay, float dx, float dy,
+                                     float diag_len, ImU32 c, float dt) {
+    // ~3 glints per second per arm
+    const float rate = 3.0f;
+    const float prob = rate * dt;
+    // Simple deterministic-ish per-frame: if prob > random threshold, emit
+    static unsigned rng = 0x12345678u;
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;  // xorshift32
+    const float r0 = static_cast<float>(rng & 0xFFFF) / 65535.f;
+    if (r0 > prob) return;
+
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+    const float t  = static_cast<float>(rng & 0xFFFF) / 65535.f;   // position along arm
+    const float px = ax + dx * t * diag_len;
+    const float py = ay + dy * t * diag_len;
+
+    // Velocity mostly along arm direction, slight spread
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+    const float spread = ((rng & 0xFF) / 255.f - 0.5f) * 30.f;
+    const float speed  = 18.f + (rng & 0x3F);
+    const float vx = dx * speed + dy * spread;
+    const float vy = dy * speed - dx * spread;
+
+    fx_emit(px, py, vx, vy, 0.45f + (rng & 0x3F) * 0.004f, 2.0f, c);
+}
+
+// Emit drifting particles from a corner of the compass tape.
+void HudRenderer::fx_emit_corner_drift(float cx, float cy, ImU32 c, float dt) {
+    const float rate = 2.5f;
+    const float prob = rate * dt;
+    static unsigned rng2 = 0xABCDEF01u;
+    rng2 ^= rng2 << 13; rng2 ^= rng2 >> 17; rng2 ^= rng2 << 5;
+    if (static_cast<float>(rng2 & 0xFFFF) / 65535.f > prob) return;
+
+    rng2 ^= rng2 << 13; rng2 ^= rng2 >> 17; rng2 ^= rng2 << 5;
+    const float angle = ((rng2 & 0xFFFF) / 65535.f) * 2.f * 3.14159f;
+    const float speed = 12.f + (rng2 & 0x1F);
+    fx_emit(cx, cy, std::cos(angle) * speed, std::sin(angle) * speed,
+            0.6f + (rng2 & 0x3F) * 0.005f, 1.8f, c);
+}
+
+// One-shot ring of particles radiating outward from (cx, cy).
+void HudRenderer::fx_emit_burst(float cx, float cy, int count, ImU32 c) {
+    for (int i = 0; i < count; ++i) {
+        const float angle = (static_cast<float>(i) / count) * 2.f * 3.14159f;
+        const float speed = 40.f + (i % 3) * 15.f;
+        fx_emit(cx, cy,
+                std::cos(angle) * speed, std::sin(angle) * speed,
+                0.7f + i * 0.01f, 2.5f, c);
+    }
+}
+
+// Continuous random sparks within the compass tape bounding box.
+void HudRenderer::fx_emit_turbulence(float tape_cx, float tape_y,
+                                      float tw, float th_tape,
+                                      ImU32 c, float dt) {
+    const float rate = 12.f;
+    const float prob = rate * dt;
+    static unsigned rng3 = 0xDEADBEEFu;
+    rng3 ^= rng3 << 13; rng3 ^= rng3 >> 17; rng3 ^= rng3 << 5;
+    const float frac = static_cast<float>(rng3 & 0xFFFF) / 65535.f;
+    const int n = static_cast<int>(prob) + (frac < (prob - std::floor(prob)) ? 1 : 0);
+    for (int i = 0; i < n; ++i) {
+        rng3 ^= rng3 << 13; rng3 ^= rng3 >> 17; rng3 ^= rng3 << 5;
+        const float rx = (rng3 & 0xFFFF) / 65535.f;
+        rng3 ^= rng3 << 13; rng3 ^= rng3 >> 17; rng3 ^= rng3 << 5;
+        const float ry = (rng3 & 0xFFFF) / 65535.f;
+        const float px = tape_cx - tw * 0.5f + rx * tw;
+        const float py = tape_y  + ry * th_tape;
+        rng3 ^= rng3 << 13; rng3 ^= rng3 >> 17; rng3 ^= rng3 << 5;
+        const float angle = (rng3 & 0xFFFF) / 65535.f * 2.f * 3.14159f;
+        const float speed = 5.f + (rng3 & 0x1F);
+        fx_emit(px, py, std::cos(angle) * speed, std::sin(angle) * speed,
+                0.3f + (rng3 & 0x3F) * 0.004f, 1.5f, c);
+    }
+}
+
+// Master dispatcher — derives arm geometry the same way the draw_* helpers do.
+void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
+                             float fw, float fh, float dt) {
+    const EffectType effect = s.effects_cfg.effect;
+
+    // Popup burst: event-driven, fires once when a popup opens (only if PopupBurst selected)
+    PopupKind cur_popup = popup_kind_;
+    if (effect == EffectType::PopupBurst &&
+        cur_popup != fx_prev_popup_ && cur_popup != PopupKind::None) {
+        const ImU32 bc = (cur_popup == PopupKind::Alarm)
+                         ? IM_COL32(220, 50, 50, 255)
+                         : IM_COL32(220, 140, 20, 255);
+        fx_emit_burst(fw * 0.5f, fh * 0.5f, 24, bc);
+    }
+    fx_prev_popup_ = cur_popup;
+
+    if (effect == EffectType::None) {
+        fx_draw(dl);
+        return;
+    }
+
+    const ImU32 c = fx_palette_color(s);
+
+    const float ch       = static_cast<float>(cfg_.compass_height);
+    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    const bool  flip     = cfg_.hud_flip_vertical;
+
+    // Compass tape geometry (same formula as draw_frame)
+    const float cw       = fw / 3.f;
+    const float compass_y = flip ? c_margin : fh - ch - c_margin;
+    const float tape_cx   = fw * 0.5f;
+
+    if (effect == EffectType::CompassTurbulence) {
+        fx_emit_turbulence(tape_cx, compass_y, cw, ch, c, dt);
+    }
+
+    if (effect == EffectType::CornerDrift) {
+        // Four corners of the compass tape
+        const float x0 = tape_cx - cw * 0.5f;
+        const float x1 = tape_cx + cw * 0.5f;
+        const float y0 = compass_y;
+        const float y1 = compass_y + ch;
+        fx_emit_corner_drift(x0, y0, c, dt);
+        fx_emit_corner_drift(x1, y0, c, dt);
+        fx_emit_corner_drift(x0, y1, c, dt);
+        fx_emit_corner_drift(x1, y1, c, dt);
+    }
+
+    if (effect == EffectType::ArmGlints) {
+        // Arm geometry mirrors draw_face_indicator / draw_lora_indicator / draw_clock_indicator.
+        // Arms are at fixed angles: face ~210°, lora ~270°, clock ~330° (left side)
+        // and mirrored on right side for health.
+        // Use the same anchor_y the draw helpers use.
+        const float anchor_y = flip ? c_margin + ch : fh - c_margin;
+
+        // Each indicator arm: left-center is ~ fw/3 wide; right ~2fw/3
+        struct ArmDef { float ax; float angle_deg; };
+        const ArmDef arms[] = {
+            { fw * 0.33f, 225.f },   // face (left)
+            { fw * 0.33f, 270.f },   // lora (left)
+            { fw * 0.33f, 315.f },   // clock (left)
+            { fw * 0.67f, 315.f },   // health right arm 1
+            { fw * 0.67f, 270.f },   // health right arm 2
+        };
+        const float diag_len = std::min(fw, fh) * 0.22f;
+        for (const auto& arm : arms) {
+            const float rad   = arm.angle_deg * 3.14159f / 180.f;
+            const float dx    =  std::cos(rad);
+            const float dy_n  = -std::sin(rad);  // normal: arm goes up (negative y)
+            const float dy    = flip ? std::sin(rad) : dy_n;
+            fx_emit_arm_glint(arm.ax, anchor_y, dx, dy, diag_len, c, dt);
+        }
+    }
+
+    // PopupBurst is event-driven (handled above); no per-frame emission needed.
+
+    fx_draw(dl);
 }

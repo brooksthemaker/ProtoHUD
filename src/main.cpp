@@ -794,9 +794,39 @@ static std::vector<MenuItem> build_menu(
         }),
     };
 
+    // Effects — particle overlays with palette options
+    std::vector<MenuItem> fx_palette_menu = {
+        leaf_sel("Match Theme", [&state]{ state.effects_cfg.palette = EffectPalette::Theme;   },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Theme;   }),
+        leaf_sel("Halo",        [&state]{ state.effects_cfg.palette = EffectPalette::Halo;    },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Halo;    }),
+        leaf_sel("Solar",       [&state]{ state.effects_cfg.palette = EffectPalette::Solar;   },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Solar;   }),
+        leaf_sel("Fallout",     [&state]{ state.effects_cfg.palette = EffectPalette::Fallout; },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Fallout; }),
+        leaf_sel("Space",       [&state]{ state.effects_cfg.palette = EffectPalette::Space;   },
+                               [&state]{ return state.effects_cfg.palette == EffectPalette::Space;   }),
+    };
+
+    std::vector<MenuItem> effects_menu = {
+        leaf_sel("None",               [&state]{ state.effects_cfg.effect = EffectType::None;               },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::None;               }),
+        leaf_sel("Arm Glints",         [&state]{ state.effects_cfg.effect = EffectType::ArmGlints;          },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::ArmGlints;          }),
+        leaf_sel("Corner Drift",       [&state]{ state.effects_cfg.effect = EffectType::CornerDrift;        },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::CornerDrift;        }),
+        leaf_sel("Popup Burst",        [&state]{ state.effects_cfg.effect = EffectType::PopupBurst;         },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::PopupBurst;         }),
+        leaf_sel("Compass Turbulence", [&state]{ state.effects_cfg.effect = EffectType::CompassTurbulence;  },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::CompassTurbulence;  }),
+        submenu("Color Palette", std::move(fx_palette_menu)),
+    };
+
+    themes_menu.push_back(submenu("Effects", std::move(effects_menu)));
+
     std::vector<MenuItem> hud_submenu = {
-        submenu("Borders & Lines", std::move(borders_lines_menu)),
-        submenu("Themes",          std::move(themes_menu)),
+        submenu("Borders & Lines",    std::move(borders_lines_menu)),
+        submenu("Themes and Effects", std::move(themes_menu)),
     };
 
     // Compass Tick Color — sets tick + glow together
@@ -919,6 +949,9 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> hud_menu = {
+        toggle("Flip to Top",
+            [hud_cfg]{ return hud_cfg->hud_flip_vertical; },
+            [hud_cfg](bool v){ hud_cfg->hud_flip_vertical = v; }),
         slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
             [hud_cfg]{ return hud_cfg->text_scale; },
             [hud_cfg](float v){ hud_cfg->text_scale = v; }),
@@ -1027,29 +1060,50 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Extended (~30fr)",   [&state]{ state.pp_cfg.motion_update_rate = 0.03f; }, [&state]{ return state.pp_cfg.motion_update_rate == 0.03f; }),
     };
 
+    std::vector<MenuItem> edge_menu = {
+        toggle("Edge Highlight",
+            [&state]{ return state.pp_cfg.edge_enabled; },
+            [&state](bool v){ state.pp_cfg.edge_enabled = v; }),
+        submenu("Strength",  std::move(edge_strength_menu)),
+        submenu("Color",     std::move(edge_color_menu)),
+        submenu("Detail",    std::move(edge_detail_menu)),
+        submenu("Threshold", std::move(edge_threshold_menu)),
+        submenu("Size Filter", std::move(size_filter_menu)),
+    };
+
+    std::vector<MenuItem> motion_menu = {
+        toggle("Motion Highlight",
+            [&state]{ return state.pp_cfg.motion_enabled; },
+            [&state](bool v){ state.pp_cfg.motion_enabled = v; }),
+        submenu("Mode",        std::move(motion_mode_menu)),
+        submenu("Sensitivity", std::move(motion_sensitivity_menu)),
+        submenu("Spread",      std::move(motion_spread_menu)),
+        submenu("Trail",       std::move(motion_trail_menu)),
+        submenu("Color",       std::move(motion_color_menu)),
+    };
+
+    std::vector<MenuItem> desat_menu = {
+        toggle("Bg Desaturate",
+            [&state]{ return state.pp_cfg.desat_enabled; },
+            [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
+        submenu("Strength",    std::move(desat_strength_menu)),
+        submenu("BG Threshold", std::move(bg_threshold_menu)),
+        submenu("Focus Blend", std::move(focus_blend_menu)),
+    };
+
     std::vector<MenuItem> vision_menu = {
         toggle("Edge Highlight",
             [&state]{ return state.pp_cfg.edge_enabled; },
             [&state](bool v){ state.pp_cfg.edge_enabled = v; }),
-        submenu("Edge Strength",  std::move(edge_strength_menu)),
-        submenu("Edge Color",     std::move(edge_color_menu)),
-        submenu("Edge Detail",    std::move(edge_detail_menu)),
-        submenu("Edge Threshold", std::move(edge_threshold_menu)),
-        submenu("Size Filter",    std::move(size_filter_menu)),
         toggle("Motion Highlight",
             [&state]{ return state.pp_cfg.motion_enabled; },
             [&state](bool v){ state.pp_cfg.motion_enabled = v; }),
-        submenu("Motion Mode",        std::move(motion_mode_menu)),
-        submenu("Motion Sensitivity", std::move(motion_sensitivity_menu)),
-        submenu("Motion Spread",      std::move(motion_spread_menu)),
-        submenu("Motion Trail",       std::move(motion_trail_menu)),
-        submenu("Motion Color",       std::move(motion_color_menu)),
         toggle("Bg Desaturate",
             [&state]{ return state.pp_cfg.desat_enabled; },
             [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
-        submenu("Desat Strength", std::move(desat_strength_menu)),
-        submenu("BG Threshold",   std::move(bg_threshold_menu)),
-        submenu("Focus Blend",    std::move(focus_blend_menu)),
+        submenu("Edge Highlight", std::move(edge_menu)),
+        submenu("Motion Highlight", std::move(motion_menu)),
+        submenu("Bg Desaturate",  std::move(desat_menu)),
     };
 
     std::vector<MenuItem> settings_menu = {
@@ -1214,6 +1268,13 @@ int main(int argc, char* argv[]) {
     hud_cfg.scale                 = jval(jdisp,"hud_scale",            1.0f);
     hud_cfg.indicator_bg_enabled  = jval(jhud, "indicator_bg_enabled", true);
     hud_cfg.glow_intensity        = jval(jhud, "glow_intensity",       1.0f);
+    hud_cfg.hud_flip_vertical     = jval(jhud, "flip_vertical",        false);
+
+    if (jhud.contains("effects")) {
+        auto& jfx = jhud["effects"];
+        state.effects_cfg.effect  = static_cast<EffectType> (jval(jfx, "type",    0));
+        state.effects_cfg.palette = static_cast<EffectPalette>(jval(jfx, "palette", 0));
+    }
 
     Mpu9250::Config mpu_cfg;
     if (cfg.contains("mpu9250")) {
@@ -1542,8 +1603,9 @@ int main(int argc, char* argv[]) {
         knob.set_haptic(amp, freq, strength);
     });
 
-    knob.on_move([&menu](int8_t dir, int) {
-        if (menu.is_open()) menu.navigate(dir);
+    knob.on_move([&menu, &hud](int8_t dir, int) {
+        if      (hud.popup_active())  hud.popup_navigate(dir);
+        else if (menu.is_open())      menu.navigate(dir);
     });
 
     knob.on_status([&state](uint8_t status, uint8_t param) {
@@ -1584,7 +1646,10 @@ int main(int argc, char* argv[]) {
             });
             buttons.on_pip_left ([&pip_left_active] () { pip_left_active  = true; });
             buttons.on_pip_right([&pip_right_active]() { pip_right_active = true; });
-            buttons.on_select   ([&menu]()             { if (menu.is_open()) menu.select(); });
+            buttons.on_select   ([&menu, &hud]() {
+                if      (hud.popup_active()) hud.popup_select();
+                else if (menu.is_open())     menu.select();
+            });
         } else {
             std::cerr << "[main] GPIO button init failed\n";
         }
@@ -1624,7 +1689,11 @@ int main(int argc, char* argv[]) {
             if (menu.is_open()) menu.close();
             else                menu.open();
         }
-        if (menu.is_open()) {
+        if (hud.popup_active()) {
+            if (key_pressed(ImGuiKey_LeftArrow))  hud.popup_navigate(-1);
+            if (key_pressed(ImGuiKey_RightArrow)) hud.popup_navigate(+1);
+            if (key_pressed(ImGuiKey_Enter))      hud.popup_select();
+        } else if (menu.is_open()) {
             if (key_pressed(ImGuiKey_UpArrow))    menu.navigate(-1);
             if (key_pressed(ImGuiKey_DownArrow))  menu.navigate(+1);
             if (key_pressed(ImGuiKey_Enter) ||
@@ -1686,11 +1755,11 @@ int main(int argc, char* argv[]) {
             time_t now_t = time(nullptr);
             if (ta.timer_active && now_t >= ta.timer_end) {
                 ta.timer_active    = false;
-                ta.alarm_triggered = true;
+                ta.timer_triggered = true;  // shows timer-expired popup
             }
             if (ta.alarm_active && now_t >= ta.alarm_fire_at) {
                 ta.alarm_active    = false;
-                ta.alarm_triggered = true;
+                ta.alarm_triggered = true;  // shows alarm popup
             }
         }
 
@@ -1723,6 +1792,7 @@ int main(int argc, char* argv[]) {
             snap.clock_cfg          = state.clock_cfg;
             snap.pp_cfg             = state.pp_cfg;
             snap.timer_alarm        = state.timer_alarm;
+            snap.effects_cfg        = state.effects_cfg;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
         }
@@ -1863,6 +1933,9 @@ int main(int argc, char* argv[]) {
                                   android_overlay_cfg,
                                   android_mirror.frame_aspect());
 
+        // Alarm / timer-expired popups render on top of everything.
+        hud.draw_popups(state, xr.eye_width(), xr.eye_height());
+
         hud.render_overlay();
 
         // ── Swap ──────────────────────────────────────────────────────────────
@@ -1886,6 +1959,9 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
+        cfg["hud"]["flip_vertical"]             = hud.config().hud_flip_vertical;
+        cfg["hud"]["effects"]["type"]           = static_cast<int>(state.effects_cfg.effect);
+        cfg["hud"]["effects"]["palette"]        = static_cast<int>(state.effects_cfg.palette);
 
         cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
         cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;

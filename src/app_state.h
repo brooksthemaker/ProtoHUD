@@ -144,12 +144,26 @@ struct ImuPose {
     float yaw   = 0.0f;
 };
 
+// ── Particle effects ──────────────────────────────────────────────────────────
+
+enum class EffectType : uint8_t {
+    None = 0, ArmGlints, CornerDrift, PopupBurst, CompassTurbulence
+};
+enum class EffectPalette : uint8_t {
+    Theme = 0, Halo, Solar, Fallout, Space
+};
+struct EffectsConfig {
+    EffectType    effect  = EffectType::None;
+    EffectPalette palette = EffectPalette::Theme;
+};
+
 struct TimerAlarmState {
     bool   timer_active    = false;
     time_t timer_end       = 0;       // epoch when countdown expires
     bool   alarm_active    = false;
     time_t alarm_fire_at   = 0;       // epoch when alarm fires
-    bool   alarm_triggered = false;   // true → pulsing red overlay is shown
+    bool   alarm_triggered = false;   // true → alarm popup is shown
+    bool   timer_triggered = false;   // true → timer-expired popup is shown
     int    alarm_hour      = 0;       // picker working value (0–23)
     int    alarm_minute    = 0;       // picker working value (0–59)
 };
@@ -188,6 +202,9 @@ struct AppState {
 
     // Timer / alarm state (managed on render thread; no mutex needed for reads)
     TimerAlarmState      timer_alarm;
+
+    // Particle effects config (render-thread only)
+    EffectsConfig        effects_cfg;
 
     // Per-LoRa-node compass marker colors (indexed by node.local_id % 8)
     ImU32 lora_node_colors[8] = {
