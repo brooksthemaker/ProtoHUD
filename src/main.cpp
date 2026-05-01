@@ -463,7 +463,7 @@ static std::vector<MenuItem> build_menu(
                 if (!cameras) return;
                 UsbCamConfig c = cameras->usb1_cfg(); c.dynamic_framerate = v;
                 cameras->update_usb1_cfg(c);
-                cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_DYNAMIC_FRAMERATE, v ? 1 : 0);
+                cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, v ? 1 : 0);
             }),
     };
     std::vector<MenuItem> usb_cam1_menu = {
@@ -546,7 +546,7 @@ static std::vector<MenuItem> build_menu(
                 if (!cameras) return;
                 UsbCamConfig c = cameras->usb2_cfg(); c.dynamic_framerate = v;
                 cameras->update_usb2_cfg(c);
-                cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_DYNAMIC_FRAMERATE, v ? 1 : 0);
+                cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, v ? 1 : 0);
             }),
     };
     std::vector<MenuItem> usb_cam2_menu = {

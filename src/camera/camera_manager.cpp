@@ -76,7 +76,7 @@ static bool open_v4l2(cv::VideoCapture& cap, const UsbCamConfig& cfg,
                 ioctl(fd, VIDIOC_S_CTRL, &c);
             };
             // Disable dynamic framerate throttle (keeps fps at configured rate).
-            set_ctrl(V4L2_CID_EXPOSURE_DYNAMIC_FRAMERATE, cfg.dynamic_framerate ? 1 : 0);
+            set_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, cfg.dynamic_framerate ? 1 : 0);
             set_ctrl(V4L2_CID_EXPOSURE_AUTO, cfg.auto_exposure ? 3 : 1);  // 3=AP, 1=Manual
             if (!cfg.auto_exposure)
                 set_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, cfg.exposure_time);
