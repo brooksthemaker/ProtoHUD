@@ -525,15 +525,15 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     snprintf(lcam_lbl, sizeof(lcam_lbl), "L.Cam%s", focus_suffix(focus_left));
     snprintf(rcam_lbl, sizeof(rcam_lbl), "R.Cam%s", focus_suffix(focus_right));
 
-    struct Ind { const char* label; bool ok; };
+    struct Ind { const char* label; bool ok; bool inactive = false; };
     const Ind left_items[]  = {{"Proot",     h.teensy_ok},
                                 {"LoRa",      h.lora_ok},
                                 {"Interface", h.knob_ok},
                                 {"Audio",     h.audio_ok}};
-    const Ind right_items[] = {{lcam_lbl,    h.cam_owl_left},
-                                {rcam_lbl,    h.cam_owl_right},
-                                {"Cam 1",     h.cam_usb1},
-                                {"Cam 2",     h.cam_usb2}};
+    const Ind right_items[] = {{lcam_lbl,    h.cam_owl_left,  false},
+                                {rcam_lbl,    h.cam_owl_right, false},
+                                {"Cam 1",     h.cam_usb1,      h.cam_usb1 && !h.cam_usb1_overlay},
+                                {"Cam 2",     h.cam_usb2,      h.cam_usb2 && !h.cam_usb2_overlay}};
     const Ind* items   = right_side ? right_items : left_items;
     const int  n_items = 4;
 
@@ -597,7 +597,9 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
         const float ix = anchor_x + dir_x * t;
         const float iy = anchor_y + dir_y * t;
 
-        if (items[i].ok) {
+        if (items[i].inactive) {
+            dl->AddCircleFilled({ix, iy}, DOT_R, col_.ind_inactive);
+        } else if (items[i].ok) {
             dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, with_alpha(col_.ind_good, 28));
             dl->AddCircleFilled({ix, iy}, DOT_R,        col_.ind_good);
         } else {

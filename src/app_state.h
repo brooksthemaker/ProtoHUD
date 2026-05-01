@@ -100,6 +100,9 @@ struct SystemHealth {
     bool audio_ok        = false;  // Spatial audio engine running
     bool android_mirror  = false;  // scrcpy connected and streaming
     bool mpu9250_ok      = false;  // MPU-9250 backup compass running
+    // Render-thread-only: connected AND overlay enabled
+    bool cam_usb1_overlay = false;
+    bool cam_usb2_overlay = false;
 };
 
 struct AudioState {
