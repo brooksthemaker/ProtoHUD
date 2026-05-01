@@ -21,6 +21,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <array>
 #include <unordered_map>
@@ -44,10 +45,11 @@ namespace libcamera {
 class DmaCamera {
 public:
     struct Config {
-        int libcamera_id = 0;
-        int width        = 1280;
-        int height       = 800;
-        int fps          = 60;
+        int         libcamera_id = 0;
+        std::string model_name;   // if non-empty, match camera by model string first
+        int         width        = 1280;
+        int         height       = 800;
+        int         fps          = 60;
     };
 
     DmaCamera();
@@ -79,6 +81,11 @@ public:
     void set_shutter_speed_us(int us);  // microseconds (requires AE off / manual mode)
     void set_ae_enable(bool ae_on);     // true = auto-exposure, false = manual shutter
 
+    // ── White balance control (libcamera controls API) ─────────────────────────
+    void set_awb_enable(bool awb_on);              // true = auto WB, false = manual
+    void set_colour_gains(float rg, float bg);     // raw ISP gains (typically 0.5–4.0)
+    void set_colour_temp(int kelvin);              // maps 2800–7500 K → ColourGains LUT
+
     bool is_ok()  const { return ok_; }
     int  width()  const { return cfg_.width; }
     int  height() const { return cfg_.height; }
@@ -104,6 +111,10 @@ private:
     void on_request_complete(libcamera::Request* req);
     // Apply any pending control updates to a request's ControlList before requeuing.
     void apply_pending_controls(libcamera::ControlList& ctrls);
+
+    // Negotiated pixel format (set by configure_camera before allocate_buffers_and_egl)
+    uint32_t fmt_drm_    = 0x3231564Eu; // DRM_FORMAT_NV12 default
+    int      fmt_planes_ = 2;           // number of DMA planes for the format
 
     // libcamera
     libcamera::CameraManager*                         lcam_mgr_  = nullptr;
@@ -150,6 +161,9 @@ private:
     std::atomic<int>   pending_shutter_us_ { -1 };       // ExposureTime µs, -1 = no-op
     std::atomic<int>   pending_ae_enable_  { -1 };       // 1=on 0=off -1=no-op
     std::atomic<float> pending_lens_pos_   { -1.0f };    // LensPosition diopters, -1 = no-op
+    std::atomic<int>   pending_awb_enable_ { -1 };       // AwbEnable: 1=on 0=off -1=no-op
+    std::atomic<float> pending_rg_gain_    { -1.0f };    // ColourGains R, -1 = no-op
+    std::atomic<float> pending_bg_gain_    { -1.0f };    // ColourGains B, -1 = no-op
 
     // ── Latest camera metadata (written by capture thread via atomics) ────────
     std::atomic<int>   last_af_state_      { 0 };        // AfState enum value

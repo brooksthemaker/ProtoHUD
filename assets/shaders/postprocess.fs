@@ -34,6 +34,8 @@ uniform float     u_motion_thresh; // min luma delta to count as motion (0.01–
 uniform float     u_motion_radius; // sampling step in texels (controls detection tightness)
 uniform vec3      u_motion_col;    // motion highlight colour (normalised RGB)
 uniform float     u_motion_line;   // 0.0=filled blob, 1.0=fine boundary line
+uniform float     u_color_prot;    // 0.0–1.0; saturated pixels resist desaturation
+uniform float     u_edge_dilate;   // 0.0–3.0; widens colour protection around edges
 
 varying vec2 v_uv;
 
@@ -108,11 +110,29 @@ void main() {
     float sharpness  = clamp(lap * u_focus_sens, 0.0, 1.0);
     bg_weight        = mix(bg_weight, 1.0 - sharpness, u_focus_str);
 
+    // ── Saturation-based colour protection ───────────────────────────────────
+    // Pixels that are already saturated (colourful) should resist desaturation.
+    // Background surfaces (concrete, asphalt, sky) are typically grey/neutral;
+    // foreground objects (faces, gear, clothing) tend to be more colourful.
+    float cmax = max(c11.r, max(c11.g, c11.b));
+    float cmin = min(c11.r, min(c11.g, c11.b));
+    float sat  = (cmax > 0.001) ? (cmax - cmin) / cmax : 0.0;
+    bg_weight *= (1.0 - sat * u_color_prot);
+
+    // ── Dilated edge protection ───────────────────────────────────────────────
+    // Expand the colour-kept zone by one pixel in each cardinal direction using
+    // already-sampled luma differences — no extra texture fetches needed.
+    float edge_n = clamp(abs(l10 - l11) * 4.0 * u_edge_dilate, 0.0, 1.0);
+    float edge_s = clamp(abs(l12 - l11) * 4.0 * u_edge_dilate, 0.0, 1.0);
+    float edge_w = clamp(abs(l01 - l11) * 4.0 * u_edge_dilate, 0.0, 1.0);
+    float edge_e = clamp(abs(l21 - l11) * 4.0 * u_edge_dilate, 0.0, 1.0);
+    float edge_dil = max(edge, max(edge_n, max(edge_s, max(edge_w, edge_e))));
+
     // ── Desaturate background ─────────────────────────────────────────────────
     // Outlined pixels stay in full color: strong edges suppress desaturation.
     // When edge detection is off (u_edge_str=0) this reduces to standard bg_weight behaviour.
     vec3  grey  = vec3(l11);
-    vec3  color = mix(c11, grey, bg_weight * (1.0 - edge * u_edge_str) * u_desat_str);
+    vec3  color = mix(c11, grey, bg_weight * (1.0 - edge_dil * u_edge_str) * u_desat_str);
 
     // ── Overlay edges ─────────────────────────────────────────────────────────
     color = mix(color, u_edge_col, edge * u_edge_str);

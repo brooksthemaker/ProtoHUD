@@ -24,6 +24,8 @@ struct PostProcessConfig {
     float focus_str          = 0.0f;   // 0.0–1.0; blend Laplacian sharpness into bg_weight
     int   focus_lens_pos     = 500;    // 0–1000 from AF; set each frame — not persisted
     float edge_gate_scale    = 2.0f;   // 0.0=off, else=step multiplier for coarse confirmatory Sobel
+    float color_protect      = 0.5f;   // 0.0–1.0; saturated pixels resist desaturation
+    float edge_dilate        = 1.0f;   // 0.0–3.0; widens colour-kept zone around object edges
 
     // Motion highlight (temporal frame-difference)
     bool  motion_enabled  = false;
@@ -122,9 +124,10 @@ struct CameraFocusState {
 };
 
 struct NightVisionState {
-    float exposure_ev = 0.0f;  // -3.0 to +3.0
-    int   shutter_us  = 33333; // microseconds (40 to 1000000)
-    bool  nv_enabled  = false; // night vision preset active (HUD indicator + apply flag)
+    float exposure_ev   = 0.0f;  // -3.0 to +3.0
+    int   shutter_us    = 33333; // microseconds (40 to 1000000)
+    bool  nv_enabled    = false; // night vision preset active (HUD indicator + apply flag)
+    bool  csi_awb_on    = true;  // CSI camera auto white balance (applies to both OWLsight eyes)
 };
 
 struct ClockConfig {

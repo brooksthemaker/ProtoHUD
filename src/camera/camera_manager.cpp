@@ -108,14 +108,14 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
 
     // ── OWLsight cameras (zero-copy DMA) ─────────────────────────────────────
     if (lcam_mgr_) {
-        DmaCamera::Config lc { left.libcamera_id, left.width, left.height, left.fps };
+        DmaCamera::Config lc { left.libcamera_id, left.model_name, left.width, left.height, left.fps };
         owl_left_ = std::make_unique<DmaCamera>();
         if (!owl_left_->init(lcam_mgr_.get(), lc, nv12_vs, nv12_fs)) {
             std::cerr << "[cam] OWLsight left init failed\n";
             owl_left_.reset();
         }
 
-        DmaCamera::Config rc { right.libcamera_id, right.width, right.height, right.fps };
+        DmaCamera::Config rc { right.libcamera_id, right.model_name, right.width, right.height, right.fps };
         owl_right_ = std::make_unique<DmaCamera>();
         if (!owl_right_->init(lcam_mgr_.get(), rc, nv12_vs, nv12_fs)) {
             std::cerr << "[cam] OWLsight right init failed\n";
