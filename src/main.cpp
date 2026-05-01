@@ -986,11 +986,11 @@ static std::vector<MenuItem> build_menu(
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
 
     std::vector<MenuItem> edge_strength_menu = {
-        leaf("10%",  [&state]{ state.pp_cfg.edge_strength = 0.10f; }),
-        leaf("30%",  [&state]{ state.pp_cfg.edge_strength = 0.30f; }),
-        leaf("50%",  [&state]{ state.pp_cfg.edge_strength = 0.50f; }),
-        leaf("70%",  [&state]{ state.pp_cfg.edge_strength = 0.70f; }),
-        leaf("100%", [&state]{ state.pp_cfg.edge_strength = 1.00f; }),
+        leaf_sel("10%",  [&state]{ state.pp_cfg.edge_strength = 0.10f; }, [&state]{ return state.pp_cfg.edge_strength == 0.10f; }),
+        leaf_sel("30%",  [&state]{ state.pp_cfg.edge_strength = 0.30f; }, [&state]{ return state.pp_cfg.edge_strength == 0.30f; }),
+        leaf_sel("50%",  [&state]{ state.pp_cfg.edge_strength = 0.50f; }, [&state]{ return state.pp_cfg.edge_strength == 0.50f; }),
+        leaf_sel("70%",  [&state]{ state.pp_cfg.edge_strength = 0.70f; }, [&state]{ return state.pp_cfg.edge_strength == 0.70f; }),
+        leaf_sel("100%", [&state]{ state.pp_cfg.edge_strength = 1.00f; }, [&state]{ return state.pp_cfg.edge_strength == 1.00f; }),
     };
 
     std::vector<MenuItem> edge_color_menu = {
