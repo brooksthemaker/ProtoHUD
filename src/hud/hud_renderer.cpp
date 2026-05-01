@@ -226,9 +226,9 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     draw_health_side(dl, s.health, fw, fh, true,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
     // Arm indicators drawn on top of the health-side background.
-    draw_face_indicator  (dl, s.face, fw, fh);
-    draw_lora_indicator  (dl, s,      fw, fh);
-    draw_clock_indicator (dl, s,      fw, fh);
+    draw_face_indicator         (dl, s.face, fw, fh);
+    draw_clock_indicator        (dl, s,      fw, fh);
+    draw_timer_alarm_indicator  (dl, s,      fw, fh);
 
     // Particle effects drawn on top of all HUD chrome.
     fx_update(dl, s, fw, fh, frame_dt_);
@@ -834,8 +834,7 @@ void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
     const bool  flip           = cfg_.hud_flip_vertical;
     const float anchor_y       = flip ? c_margin : fh - c_margin;
     const float ind_anchor_x   = tape_x + tape_w + fade_w;
-    const float lora_anchor_x  = ind_anchor_x   + SEG_W * 2.f;
-    const float clock_anchor_x = lora_anchor_x  + SEG_W * 2.f;
+    const float clock_anchor_x = ind_anchor_x   + SEG_W * 2.f;
 
     const float dir_x = std::cos(ANGLE);
     const float dir_y = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
@@ -899,6 +898,102 @@ void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
         hud_glow_text(dl, {ix + DOT_R + 6.f, iy - font_size * 0.5f}, rows[i],
                       font_mono_, font_size, col_.glow_base, col_.text_fill);
     }
+}
+
+// ── Timer / Alarm indicator arm (right side, outboard of clock arm) ──────────
+// Visible only when a timer or alarm is active.
+// Timer row: countdown to expiry (MM:SS).  Alarm row: set time (HH:MM).
+
+void HudRenderer::draw_timer_alarm_indicator(ImDrawList* dl, const AppState& s,
+                                              float fw, float fh) {
+    const auto& ta = s.timer_alarm;
+    const bool  show_timer = ta.timer_active;
+    const bool  show_alarm = ta.alarm_active;
+    if (!show_timer && !show_alarm) return;
+
+    constexpr float ROW_H   = 18.f;
+    constexpr float DOT_R   = 4.f;
+    constexpr float SEG_W   = 75.f;
+    constexpr float ARM_EXT = 140.f;
+    constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
+
+    const float tape_w    = fw / 3.f;
+    const float tape_x    = fw / 2.f - tape_w / 2.f;
+    const float fade_w    = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin  = static_cast<float>(cfg_.compass_bottom_margin);
+    const float ch        = static_cast<float>(cfg_.compass_height);
+    const bool  flip      = cfg_.hud_flip_vertical;
+    const float anchor_y  = flip ? c_margin : fh - c_margin;
+    // Outboard of clock arm (which is now at ind + SEG_W*2)
+    const float ind_anchor_x = tape_x + tape_w + fade_w;
+    const float ta_anchor_x  = ind_anchor_x + SEG_W * 4.f;
+
+    const float dir_x = std::cos(ANGLE);
+    const float dir_y = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
+
+    // Build display rows
+    struct Row { char text[24]; ImU32 accent; };
+    Row rows[2];
+    int n_rows = 0;
+
+    if (show_timer) {
+        int remaining = static_cast<int>(ta.timer_end - time(nullptr));
+        if (remaining < 0) remaining = 0;
+        const int mm = remaining / 60, ss = remaining % 60;
+        snprintf(rows[n_rows].text, sizeof(rows[0].text), "TMR %02d:%02d", mm, ss);
+        // Orange when nearly done (< 60 s), else normal
+        rows[n_rows].accent = (remaining < 60) ? col_.warn : col_.glow_base;
+        ++n_rows;
+    }
+    if (show_alarm) {
+        if (s.clock_cfg.use_24h) {
+            snprintf(rows[n_rows].text, sizeof(rows[0].text),
+                     "ALM %02d:%02d", ta.alarm_hour, ta.alarm_minute);
+        } else {
+            int h = ta.alarm_hour % 12;
+            if (h == 0) h = 12;
+            snprintf(rows[n_rows].text, sizeof(rows[0].text),
+                     "ALM %d:%02d%s", h, ta.alarm_minute,
+                     ta.alarm_hour < 12 ? "A" : "P");
+        }
+        rows[n_rows].accent = col_.glow_base;
+        ++n_rows;
+    }
+
+    const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
+    const float eff_row_h = ROW_H * scale;
+    const float diag_len  = static_cast<float>(n_rows + 1) * eff_row_h;
+    const float font_size = font_mono_ ? font_mono_->FontSize * scale
+                                       : ImGui::GetFontSize() * scale;
+
+    const ImU32 COL_MAJ  = col_.glow_base;
+    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
+    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+
+    // Horizontal extension rightward
+    const float h_ext_x = ta_anchor_x + ARM_EXT;
+    dl->AddLine({ta_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW2, 5.f);
+    dl->AddLine({ta_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW1, 2.5f);
+    dl->AddLine({ta_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_MAJ,  1.f);
+
+    // Diagonal
+    const ImVec2 arm_end = {ta_anchor_x + dir_x * diag_len,
+                             anchor_y    + dir_y * diag_len};
+    dl->AddLine({ta_anchor_x, anchor_y}, arm_end, COL_GLW2, 5.f);
+    dl->AddLine({ta_anchor_x, anchor_y}, arm_end, COL_GLW1, 2.5f);
+    dl->AddLine({ta_anchor_x, anchor_y}, arm_end, COL_MAJ,  1.f);
+
+    // Text rows
+    if (font_mono_) ImGui::PushFont(font_mono_);
+    for (int i = 0; i < n_rows; ++i) {
+        const float t  = static_cast<float>(i + 1) * eff_row_h;
+        const float ix = ta_anchor_x + dir_x * t;
+        const float iy = anchor_y    + dir_y * t;
+        hud_glow_text(dl, {ix + DOT_R + 6.f, iy - font_size * 0.5f},
+                      rows[i].text, font_mono_, font_size,
+                      rows[i].accent, col_.text_fill);
+    }
+    if (font_mono_) ImGui::PopFont();
 }
 
 // ── LoRa messages panel ───────────────────────────────────────────────────────
