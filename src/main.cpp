@@ -698,11 +698,6 @@ static std::vector<MenuItem> build_menu(
         { "Black",   IM_COL32(  0,   0,   0, 255) },
     }, [hud_col](ImU32 c){ hud_col->compass_bg_color = c; });
 
-    std::vector<MenuItem> compass_bg_options_menu = {
-        slider("Tape Height", 50.f, 120.f, 5.f, "",
-            [hud_cfg]{ return static_cast<float>(hud_cfg->compass_height); },
-            [hud_cfg](float v){ hud_cfg->compass_height = static_cast<int>(v); }),
-    };
 
     std::vector<MenuItem> compass_tick_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
@@ -752,7 +747,9 @@ static std::vector<MenuItem> build_menu(
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
             [hud_cfg](float v){ hud_cfg->compass_tick_length = static_cast<int>(v); }),
         submenu("Tagged Radio Colors", std::move(tagged_radio_colors_menu)),
-        submenu("Background Options",  std::move(compass_bg_options_menu)),
+        slider("Tape Height", 50.f, 120.f, 5.f, "",
+            [hud_cfg]{ return static_cast<float>(hud_cfg->compass_height); },
+            [hud_cfg](float v){ hud_cfg->compass_height = static_cast<int>(v); }),
     };
 
     // ── Clock & Timers ────────────────────────────────────────────────────────
@@ -1236,11 +1233,12 @@ static std::vector<MenuItem> build_menu(
         submenu("Android Mirror", std::move(android_menu)),
     };
 
+    cameras_menu.push_back(submenu("Vision Assist", std::move(vision_menu)));
+
     return {
         submenu("Cameras",          std::move(cameras_menu)),
         submenu("Prototracer",      std::move(prototracer_menu)),
         submenu("Settings",         std::move(settings_menu)),
-        submenu("Vision Assist",    std::move(vision_menu)),
         submenu("Timers and Alarm", std::move(timers_alarm_menu)),
         leaf("Request Status",      [teensy]{ teensy->request_status(); }),
         leaf("Close Program",       [&state]{ state.quit = true; }),
