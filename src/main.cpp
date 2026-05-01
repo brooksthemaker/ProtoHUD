@@ -1680,7 +1680,7 @@ int main(int argc, char* argv[]) {
     bool kb_pip_left      = false, kb_pip_right      = false;  // keyboard-driven
 
     // Edge-detection state for direct GLFW key polling (keys 1-5)
-    bool prev_key[6] = {};  // indexed by key number 1-5
+    bool prev_key[8] = {};  // indexed by key number 1-6 + extras
 
     if (gpio_enabled) {
         if (buttons.init()) {
@@ -1767,11 +1767,10 @@ int main(int argc, char* argv[]) {
             pip_right_active = buttons.pip_right_active();
         }
 
-        // ── Keyboard button emulation (number keys, direct GLFW polling) ─────
-        // Uses glfwGetKey() directly — independent of ImGui key mapping and
-        // the glfwPollEvents/begin_frame ordering.  Edge detection via prev_key[].
-        // 1/2 = toggle PiP left/right   4/5 = autofocus left/right
-        // 3   = menu select
+        // ── Keyboard button emulation (direct GLFW polling, edge-detected) ──
+        // 1/2  = toggle PiP left/right    3 = menu select (when open)
+        // 3    = toggle manual focus      4 = autofocus both cameras
+        // ,/.  = focus in / focus out (step 20 of 0-1000)
         {
             GLFWwindow* win = static_cast<GLFWwindow*>(xr.glfw_window());
             auto edge = [&](int n, int glfw_key) -> bool {
@@ -1785,8 +1784,43 @@ int main(int argc, char* argv[]) {
                 if (edge(2, GLFW_KEY_2)) kb_pip_right = !kb_pip_right;
             }
             if (edge(3, GLFW_KEY_3) && menu.is_open()) menu.select();
-            if (edge(4, GLFW_KEY_4) && cameras.owl_left())  cameras.owl_left()->start_autofocus();
-            if (edge(5, GLFW_KEY_5) && cameras.owl_right()) cameras.owl_right()->start_autofocus();
+            // 3: toggle manual/auto focus
+            if (edge(3, GLFW_KEY_3) && !menu.is_open()) {
+                bool go_manual = (state.focus_left.mode != CameraFocusState::Mode::MANUAL);
+                if (go_manual) {
+                    if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
+                    if (cameras.owl_right()) cameras.owl_right()->stop_autofocus();
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.focus_left.mode  = CameraFocusState::Mode::MANUAL;
+                    state.focus_right.mode = CameraFocusState::Mode::MANUAL;
+                } else {
+                    if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+                    if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.focus_left.mode  = CameraFocusState::Mode::AUTO;
+                    state.focus_right.mode = CameraFocusState::Mode::AUTO;
+                }
+            }
+            // 4: autofocus both cameras
+            if (edge(4, GLFW_KEY_4)) {
+                if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+                if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.focus_left.mode  = CameraFocusState::Mode::AUTO;
+                state.focus_right.mode = CameraFocusState::Mode::AUTO;
+            }
+            // , / . : manual focus step (near / far)
+            constexpr int FOCUS_STEP = 20;
+            if (edge(5, GLFW_KEY_COMMA) && cameras.owl_left()) {
+                int pos = std::max(0, cameras.owl_left()->get_focus_position() - FOCUS_STEP);
+                cameras.owl_left()->set_focus_position(pos);
+                if (cameras.owl_right()) cameras.owl_right()->set_focus_position(pos);
+            }
+            if (edge(6, GLFW_KEY_PERIOD) && cameras.owl_left()) {
+                int pos = std::min(1000, cameras.owl_left()->get_focus_position() + FOCUS_STEP);
+                cameras.owl_left()->set_focus_position(pos);
+                if (cameras.owl_right()) cameras.owl_right()->set_focus_position(pos);
+            }
         }
 
         // ── USB camera / Android mirror health update ─────────────────────────
