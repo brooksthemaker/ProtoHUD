@@ -186,7 +186,7 @@ struct AppState {
 
     // Heading used for the HUD compass. Updated by LoRa or IMU.
     float compass_heading    = 0.0f;
-    bool  compass_bg_enabled = false;
+    bool  compass_bg_enabled = true;
 
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;

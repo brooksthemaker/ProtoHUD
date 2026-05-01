@@ -79,7 +79,7 @@
   "hud": {
     "compass_height_px": 80,
     "compass_bottom_margin_px": 20,
-    "compass_bg": false,
+    "compass_bg": true,
     "compass_bg_opacity": 0.75,
     "compass_bg_side_fade_px": 80,
     "panel_width_px": 320,
