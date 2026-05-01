@@ -142,6 +142,8 @@ private:
                             ImVec2 origin, float pw, float ph);
     void draw_compass_tape (ImDrawList* dl, const AppState& s,
                             ImVec2 origin, float tw, float th);
+    void draw_timer_alarm_indicator(ImDrawList* dl, const AppState& s,
+                            float fw, float fh);
 
     static const char* cardinal_str(float deg);
 
