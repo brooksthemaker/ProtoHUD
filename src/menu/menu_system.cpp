@@ -324,16 +324,12 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     // ── Chamfered background + border ────────────────────────────────────────
+    // wp/ws/GAP hoisted so the item loop can use them for highlight clipping.
+    const ImVec2 wp  = ImGui::GetWindowPos();
+    const ImVec2 ws  = ImGui::GetWindowSize();
+    const float  GAP = 3.f + border_thickness_ * 0.5f;
     {
         constexpr float C = 8.f;  // chamfer distance (corner cut)
-        // GAP keeps exactly 3px of transparent strip between the inner edge of
-        // the border line and the outer edge of the bg fill, regardless of
-        // border thickness (border line is centered on the window edge, so its
-        // inner edge is at thickness/2 inward; bg fill is inset by GAP).
-        const float GAP = 3.f + border_thickness_ * 0.5f;
-
-        const ImVec2 wp = ImGui::GetWindowPos();
-        const ImVec2 ws = ImGui::GetWindowSize();
 
         // Background fill inset by GAP — chamfered octagon
         const ImVec2 bmin = {wp.x + GAP,        wp.y + GAP};
@@ -399,8 +395,8 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         // Selection highlight: filled white row (Halo) or left accent bar (default)
         if (selected) {
             if (filled_row)
-                dl->AddRectFilled({rmin.x - pad_x, rmin.y},
-                                  {rmax.x + pad_x, rmax.y}, IM_COL32(255, 255, 255, 235));
+                dl->AddRectFilled({wp.x + GAP,        rmin.y},
+                                  {wp.x + ws.x - GAP, rmax.y}, IM_COL32(255, 255, 255, 235));
             else
                 dl->AddRectFilled({rmin.x - pad_x,       rmin.y},
                                   {rmin.x - pad_x + 4.f, rmax.y}, accent_color_);
@@ -452,21 +448,24 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
             draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
 
+            const bool inv = (filled_row && selected);
+
             if (editing) {
                 float bx = rmin.x + 4.f;
                 float by = rmin.y + item_h - 2.f;
                 float bw = (rmax.x - rmin.x) - 64.f;
                 float bh = 10.f;
                 dl->AddRectFilled({bx, by}, {bx + bw, by + bh},
-                                  menu_with_alpha(accent_color_, 60), 3.f);
+                                  inv ? IM_COL32(0,0,0,60) : menu_with_alpha(accent_color_, 60), 3.f);
                 dl->AddRectFilled({bx, by}, {bx + bw * fill, by + bh},
-                                  menu_with_alpha(accent_color_, 220), 3.f);
+                                  inv ? IM_COL32(0,0,0,220) : menu_with_alpha(accent_color_, 220), 3.f);
                 float tick_x = bx + bw * fill;
                 dl->AddLine({tick_x, by - 2.f}, {tick_x, by + bh + 2.f},
-                            IM_COL32(255, 255, 255, 200), 2.f);
-                dl->AddText({bx + bw + 6.f, by}, IM_COL32(255, 255, 255, 255), val_str);
+                            inv ? IM_COL32(0,0,0,200) : IM_COL32(255, 255, 255, 200), 2.f);
+                dl->AddText({bx + bw + 6.f, by},
+                            inv ? IM_COL32(0,0,0,255) : IM_COL32(255, 255, 255, 255), val_str);
                 dl->AddText({bx, by - 14.f},
-                            menu_with_alpha(accent_color_, 180),
+                            inv ? IM_COL32(0,0,0,180) : menu_with_alpha(accent_color_, 180),
                             "knob  \xC2\xB7  select=confirm  \xC2\xB7  back=cancel");
             } else {
                 float win_w = rmax.x - rmin.x;
@@ -475,12 +474,12 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                 float bw = win_w * 0.30f;
                 float bh = 7.f;
                 dl->AddRectFilled({bx, by}, {bx + bw, by + bh},
-                                  menu_with_alpha(accent_color_, 50), 2.f);
+                                  inv ? IM_COL32(0,0,0,50) : menu_with_alpha(accent_color_, 50), 2.f);
                 dl->AddRectFilled({bx, by}, {bx + bw * fill, by + bh},
-                                  menu_with_alpha(accent_color_, 180), 2.f);
+                                  inv ? IM_COL32(0,0,0,180) : menu_with_alpha(accent_color_, 180), 2.f);
                 ImVec2 vsz = ImGui::CalcTextSize(val_str);
                 dl->AddText({rmax.x - vsz.x - 4.f, by - 1.f},
-                            menu_with_alpha(accent_color_, 200), val_str);
+                            inv ? IM_COL32(0,0,0,200) : menu_with_alpha(accent_color_, 200), val_str);
             }
 
         // ── COLOR_PICKER ──────────────────────────────────────────────────────

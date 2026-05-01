@@ -166,6 +166,8 @@ struct TimerAlarmState {
     bool   timer_triggered = false;   // true → timer-expired popup is shown
     int    alarm_hour      = 0;       // picker working value (0–23)
     int    alarm_minute    = 0;       // picker working value (0–59)
+    int    custom_timer_min = 0;      // custom timer minutes (0–99)
+    int    custom_timer_sec = 0;      // custom timer seconds (0–59)
 };
 
 // ── Master state ──────────────────────────────────────────────────────────────

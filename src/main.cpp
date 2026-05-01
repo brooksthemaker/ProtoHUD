@@ -670,7 +670,25 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── Clock & Timers ────────────────────────────────────────────────────────
+    std::vector<MenuItem> custom_timer_menu = {
+        slider("Minutes", 0.f, 99.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.timer_alarm.custom_timer_min); },
+            [&state](float v){ state.timer_alarm.custom_timer_min = static_cast<int>(v); }),
+        slider("Seconds", 0.f, 59.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.timer_alarm.custom_timer_sec); },
+            [&state](float v){ state.timer_alarm.custom_timer_sec = static_cast<int>(v); }),
+        leaf("Start", [&state]{
+            int secs = state.timer_alarm.custom_timer_min * 60
+                     + state.timer_alarm.custom_timer_sec;
+            if (secs > 0) {
+                state.timer_alarm.timer_active = true;
+                state.timer_alarm.timer_end    = time(nullptr) + secs;
+            }
+        }),
+    };
+
     std::vector<MenuItem> timer_presets_menu = {
+        submenu("Custom", std::move(custom_timer_menu)),
         leaf_sel("5 min",  [&state]{ state.timer_alarm.timer_active = true;
                                       state.timer_alarm.timer_end = time(nullptr) + 300; },
                  [&state]{ return state.timer_alarm.timer_active
