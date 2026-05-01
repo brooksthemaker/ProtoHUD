@@ -226,11 +226,13 @@ bool DmaCamera::create_egl_image(const FrameBuffer* buf, Slot& slot) {
         EGL_DMA_BUF_PLANE0_PITCH_EXT,      pitch,
     };
     if (fmt_planes_ >= 2) {
-        // Plane 1 — UV interleaved (NV12) or U/Cb (YUV420)
+        // NV12: UV plane has the same row stride as Y (interleaved, same width).
+        // YUV420: U plane is half width, so stride is halved.
+        EGLint plane1_pitch = (fmt_drm_ == DRM_FORMAT_NV12) ? pitch : pitch / 2;
         attr.insert(attr.end(), {
             EGL_DMA_BUF_PLANE1_FD_EXT,     planes[1].fd.get(),
             EGL_DMA_BUF_PLANE1_OFFSET_EXT, (EGLint)planes[1].offset,
-            EGL_DMA_BUF_PLANE1_PITCH_EXT,  pitch / 2,
+            EGL_DMA_BUF_PLANE1_PITCH_EXT,  plane1_pitch,
         });
     }
     if (fmt_planes_ >= 3) {
