@@ -228,16 +228,6 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     draw_lora_indicator  (dl, s,      fw, fh);
     draw_clock_indicator (dl, s,      fw, fh);
 
-    // Alarm overlay: pulsing red border when alarm has triggered
-    if (s.timer_alarm.alarm_triggered) {
-        float pulse = 0.5f + 0.5f * std::sin(ImGui::GetTime() * 6.0f);
-        ImU32 red = IM_COL32(255, 0, 0, static_cast<int>(180 * pulse));
-        dl->AddRect({0.f, 0.f}, {fw, fh}, red, 0.f, 0, 10.f);
-        const char* alarm_str = "! ALARM !";
-        ImVec2 asz = ImGui::CalcTextSize(alarm_str);
-        hud_glow_text(dl, {fw * 0.5f - asz.x * 0.5f, fh * 0.5f - asz.y * 0.5f},
-                      alarm_str, true, IM_COL32(255,0,0,255), IM_COL32(255,255,255,255));
-    }
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -1070,6 +1060,215 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         dl->AddConvexPolyFilled(tri, 3, node_col);
         dl->AddPolyline(tri, 3, with_alpha(node_col, 200), ImDrawFlags_Closed, 1.f);
     }
+}
+
+// ── Alarm / Timer popups ──────────────────────────────────────────────────────
+
+// Helper: draw an 8-point chamfered shape.  pts_out must be ImVec2[8].
+static void chamfer_pts(ImVec2 mn, ImVec2 mx, float c, ImVec2 pts[8]) {
+    pts[0] = {mn.x + c, mn.y}; pts[1] = {mx.x - c, mn.y};
+    pts[2] = {mx.x, mn.y + c}; pts[3] = {mx.x, mx.y - c};
+    pts[4] = {mx.x - c, mx.y}; pts[5] = {mn.x + c, mx.y};
+    pts[6] = {mn.x, mx.y - c}; pts[7] = {mn.x, mn.y + c};
+}
+
+// Draw one selectable button. Returns true if this button's slot == cursor.
+static bool popup_button(ImDrawList* dl, ImVec2 pos, const char* label,
+                          bool selected,
+                          ImU32 sel_bg, ImU32 sel_text,
+                          ImU32 def_bg, ImU32 def_text,
+                          float pad_x = 14.f, float pad_y = 7.f) {
+    ImVec2 tsz = ImGui::CalcTextSize(label);
+    float  bw  = tsz.x + pad_x * 2.f;
+    float  bh  = tsz.y + pad_y * 2.f;
+    ImVec2 bmax = {pos.x + bw, pos.y + bh};
+    ImU32  bg  = selected ? sel_bg   : def_bg;
+    ImU32  fg  = selected ? sel_text : def_text;
+    dl->AddRectFilled(pos, bmax, bg, 5.f);
+    if (selected)
+        dl->AddRect(pos, bmax, sel_text, 5.f, 0, 1.5f);
+    dl->AddText({pos.x + pad_x, pos.y + pad_y}, fg, label);
+    return selected;
+}
+
+void HudRenderer::draw_alarm_popup(ImDrawList* dl, float fw, float fh) {
+    constexpr float W   = 380.f, H = 180.f;
+    constexpr float C   = 8.f,  GAP = 3.f;
+    const float x = fw * 0.5f - W * 0.5f;
+    const float y = fh * 0.5f - H * 0.5f;
+
+    // Light grey background (chamfered, inset by GAP)
+    ImVec2 bg_pts[8];
+    chamfer_pts({x + GAP, y + GAP}, {x + W - GAP, y + H - GAP}, C, bg_pts);
+    dl->AddConvexPolyFilled(bg_pts, 8, IM_COL32(220, 220, 220, 248));
+
+    // Red chamfered border at window edge
+    ImVec2 bdr_pts[8];
+    chamfer_pts({x, y}, {x + W, y + H}, C, bdr_pts);
+    dl->AddPolyline(bdr_pts, 8, IM_COL32(210, 30, 30, 255), ImDrawFlags_Closed, 2.5f);
+
+    // Title
+    const char* title = "!! ALARM !!";
+    ImVec2 tsz = ImGui::CalcTextSize(title);
+    dl->AddText({x + W * 0.5f - tsz.x * 0.5f, y + 32.f},
+                IM_COL32(190, 20, 20, 255), title);
+
+    // Dismiss button (centered; always selected — only one button)
+    float btn_y = y + H - 60.f;
+    ImVec2 dsz  = ImGui::CalcTextSize("DISMISS");
+    float  bw   = dsz.x + 28.f;
+    float  bx   = x + W * 0.5f - bw * 0.5f;
+    popup_button(dl, {bx, btn_y}, "DISMISS", true,
+                 IM_COL32(200, 30, 30, 230), IM_COL32(255, 255, 255, 255),
+                 IM_COL32(180, 180, 180, 200), IM_COL32(40, 40, 40, 255));
+}
+
+void HudRenderer::draw_timer_popup(ImDrawList* dl, float fw, float fh,
+                                    const TimerAlarmState& /*ta*/) {
+    constexpr float W   = 460.f, H = 190.f;
+    constexpr float C   = 8.f,  GAP = 3.f;
+    const float x = fw * 0.5f - W * 0.5f;
+    const float y = fh * 0.5f - H * 0.5f;
+
+    // Golden-orange colors
+    constexpr ImU32 ORANGE_BORDER = IM_COL32(220, 140, 20, 255);
+    constexpr ImU32 ORANGE_SEL    = IM_COL32(210, 130, 15, 230);
+
+    // Light grey background
+    ImVec2 bg_pts[8];
+    chamfer_pts({x + GAP, y + GAP}, {x + W - GAP, y + H - GAP}, C, bg_pts);
+    dl->AddConvexPolyFilled(bg_pts, 8, IM_COL32(220, 220, 220, 248));
+
+    // Golden-orange chamfered border
+    ImVec2 bdr_pts[8];
+    chamfer_pts({x, y}, {x + W, y + H}, C, bdr_pts);
+    dl->AddPolyline(bdr_pts, 8, ORANGE_BORDER, ImDrawFlags_Closed, 2.5f);
+
+    // Title
+    const char* title = "TIMER EXPIRED";
+    ImVec2 tsz = ImGui::CalcTextSize(title);
+    dl->AddText({x + W * 0.5f - tsz.x * 0.5f, y + 28.f},
+                IM_COL32(160, 100, 10, 255), title);
+
+    // Four buttons: Dismiss | +2 Min | +5 Min | +10 Min
+    static const char* labels[4] = {"DISMISS", "+2 MIN", "+5 MIN", "+10 MIN"};
+    float btn_y     = y + H - 64.f;
+    float total_w   = 0.f;
+    float btn_ws[4];
+    for (int i = 0; i < 4; i++) {
+        btn_ws[i] = ImGui::CalcTextSize(labels[i]).x + 28.f;
+        total_w  += btn_ws[i];
+    }
+    float gap = (W - 24.f - total_w) / 3.f;
+    float bx  = x + 12.f;
+    for (int i = 0; i < 4; i++) {
+        bool sel = (popup_cursor_ == i);
+        popup_button(dl, {bx, btn_y}, labels[i], sel,
+                     ORANGE_SEL, IM_COL32(255, 255, 255, 255),
+                     IM_COL32(185, 185, 185, 210), IM_COL32(50, 50, 50, 255));
+        bx += btn_ws[i] + (i < 3 ? gap : 0.f);
+    }
+}
+
+bool HudRenderer::popup_active() const {
+    return popup_kind_ != PopupKind::None;
+}
+
+void HudRenderer::popup_navigate(int delta) {
+    if (popup_kind_ == PopupKind::Timer) {
+        popup_cursor_ = (popup_cursor_ + delta + 4) % 4;
+    }
+    // Alarm has only one button; navigation is a no-op.
+}
+
+void HudRenderer::popup_select() {
+    if (popup_kind_ == PopupKind::Alarm) {
+        popup_pending_ = PopupAction::AlarmDismiss;
+    } else if (popup_kind_ == PopupKind::Timer) {
+        switch (popup_cursor_) {
+            case 0:  popup_pending_ = PopupAction::TimerDismiss; break;
+            case 1:  popup_pending_ = PopupAction::TimerAdd2;    break;
+            case 2:  popup_pending_ = PopupAction::TimerAdd5;    break;
+            default: popup_pending_ = PopupAction::TimerAdd10;   break;
+        }
+    }
+}
+
+bool HudRenderer::draw_popups(AppState& state, int w, int h) {
+    ImGui::SetCurrentContext(ctx_);
+
+    // Determine current popup kind (alarm takes priority)
+    PopupKind kind = PopupKind::None;
+    if (state.timer_alarm.alarm_triggered)   kind = PopupKind::Alarm;
+    else if (state.timer_alarm.timer_triggered) kind = PopupKind::Timer;
+
+    // Reset cursor when a new popup type appears
+    if (kind != popup_kind_) {
+        popup_cursor_ = 0;
+        popup_kind_   = kind;
+    }
+
+    // Execute any pending button action
+    if (popup_pending_ != PopupAction::None) {
+        auto& ta = state.timer_alarm;
+        switch (popup_pending_) {
+            case PopupAction::AlarmDismiss:
+                ta.alarm_triggered = false;
+                break;
+            case PopupAction::TimerDismiss:
+                ta.timer_triggered = false;
+                break;
+            case PopupAction::TimerAdd2:
+                ta.timer_end = time(nullptr) + 120;
+                ta.timer_active    = true;
+                ta.timer_triggered = false;
+                break;
+            case PopupAction::TimerAdd5:
+                ta.timer_end = time(nullptr) + 300;
+                ta.timer_active    = true;
+                ta.timer_triggered = false;
+                break;
+            case PopupAction::TimerAdd10:
+                ta.timer_end = time(nullptr) + 600;
+                ta.timer_active    = true;
+                ta.timer_triggered = false;
+                break;
+            default: break;
+        }
+        popup_pending_ = PopupAction::None;
+        // Update kind immediately after dismissal
+        if (!state.timer_alarm.alarm_triggered && !state.timer_alarm.timer_triggered) {
+            popup_kind_ = PopupKind::None;
+            return false;
+        }
+    }
+
+    if (popup_kind_ == PopupKind::None) return false;
+
+    const float fw = static_cast<float>(w);
+    const float fh = static_cast<float>(h);
+
+    // Use a full-screen transparent ImGui window so popup is on top of the HUD.
+    ImGui::SetNextWindowPos ({0.f, 0.f}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({fw,  fh},  ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.f, 0.f, 0.f, 0.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(0.f, 0.f));
+    ImGui::Begin("##popup", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                 ImGuiWindowFlags_NoInputs);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    if (popup_kind_ == PopupKind::Alarm)
+        draw_alarm_popup(dl, fw, fh);
+    else
+        draw_timer_popup(dl, fw, fh, state.timer_alarm);
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    return true;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

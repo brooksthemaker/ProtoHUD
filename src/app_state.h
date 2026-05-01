@@ -149,7 +149,8 @@ struct TimerAlarmState {
     time_t timer_end       = 0;       // epoch when countdown expires
     bool   alarm_active    = false;
     time_t alarm_fire_at   = 0;       // epoch when alarm fires
-    bool   alarm_triggered = false;   // true → pulsing red overlay is shown
+    bool   alarm_triggered = false;   // true → alarm popup is shown
+    bool   timer_triggered = false;   // true → timer-expired popup is shown
     int    alarm_hour      = 0;       // picker working value (0–23)
     int    alarm_minute    = 0;       // picker working value (0–59)
 };

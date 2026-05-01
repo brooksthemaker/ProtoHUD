@@ -1567,8 +1567,9 @@ int main(int argc, char* argv[]) {
         knob.set_haptic(amp, freq, strength);
     });
 
-    knob.on_move([&menu](int8_t dir, int) {
-        if (menu.is_open()) menu.navigate(dir);
+    knob.on_move([&menu, &hud](int8_t dir, int) {
+        if      (hud.popup_active())  hud.popup_navigate(dir);
+        else if (menu.is_open())      menu.navigate(dir);
     });
 
     knob.on_status([&state](uint8_t status, uint8_t param) {
@@ -1609,7 +1610,10 @@ int main(int argc, char* argv[]) {
             });
             buttons.on_pip_left ([&pip_left_active] () { pip_left_active  = true; });
             buttons.on_pip_right([&pip_right_active]() { pip_right_active = true; });
-            buttons.on_select   ([&menu]()             { if (menu.is_open()) menu.select(); });
+            buttons.on_select   ([&menu, &hud]() {
+                if      (hud.popup_active()) hud.popup_select();
+                else if (menu.is_open())     menu.select();
+            });
         } else {
             std::cerr << "[main] GPIO button init failed\n";
         }
@@ -1649,7 +1653,11 @@ int main(int argc, char* argv[]) {
             if (menu.is_open()) menu.close();
             else                menu.open();
         }
-        if (menu.is_open()) {
+        if (hud.popup_active()) {
+            if (key_pressed(ImGuiKey_LeftArrow))  hud.popup_navigate(-1);
+            if (key_pressed(ImGuiKey_RightArrow)) hud.popup_navigate(+1);
+            if (key_pressed(ImGuiKey_Enter))      hud.popup_select();
+        } else if (menu.is_open()) {
             if (key_pressed(ImGuiKey_UpArrow))    menu.navigate(-1);
             if (key_pressed(ImGuiKey_DownArrow))  menu.navigate(+1);
             if (key_pressed(ImGuiKey_Enter) ||
@@ -1711,11 +1719,11 @@ int main(int argc, char* argv[]) {
             time_t now_t = time(nullptr);
             if (ta.timer_active && now_t >= ta.timer_end) {
                 ta.timer_active    = false;
-                ta.alarm_triggered = true;
+                ta.timer_triggered = true;  // shows timer-expired popup
             }
             if (ta.alarm_active && now_t >= ta.alarm_fire_at) {
                 ta.alarm_active    = false;
-                ta.alarm_triggered = true;
+                ta.alarm_triggered = true;  // shows alarm popup
             }
         }
 
@@ -1887,6 +1895,9 @@ int main(int argc, char* argv[]) {
                                   android_mirror.is_running() && !android_mirror.is_connected(),
                                   android_overlay_cfg,
                                   android_mirror.frame_aspect());
+
+        // Alarm / timer-expired popups render on top of everything.
+        hud.draw_popups(state, xr.eye_width(), xr.eye_height());
 
         hud.render_overlay();
 

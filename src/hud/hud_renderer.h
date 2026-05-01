@@ -109,6 +109,24 @@ public:
     // Execute ImGui::Render → flush to current GL framebuffer.
     void render_overlay();
 
+    // ── Popup API (alarm / timer-expired overlays) ────────────────────────────
+
+    // True when an alarm or timer-expired popup is currently visible.
+    bool popup_active() const;
+
+    // Move the popup button cursor (delta = +1 / -1 from knob rotate).
+    void popup_navigate(int delta);
+
+    // Activate the currently highlighted popup button.
+    // Action is deferred and executed the next time draw_popups() is called.
+    void popup_select();
+
+    // Draw alarm / timer-expired popups and execute any pending button action.
+    // Must be called inside an active ImGui frame, after draw_frame() and
+    // menu.draw(), so the popup renders on top of both.
+    // Returns true if a popup was drawn this frame.
+    bool draw_popups(AppState& state, int w, int h);
+
 private:
     void draw_top_bar      (ImDrawList* dl, const AppState& s, float w, float bar_y = 0.f);
     void draw_health_side  (ImDrawList* dl, const SystemHealth& h,
@@ -127,9 +145,24 @@ private:
 
     static const char* cardinal_str(float deg);
 
+    // Popup drawing helpers — called from draw_popups().
+    void draw_alarm_popup (ImDrawList* dl, float fw, float fh);
+    void draw_timer_popup (ImDrawList* dl, float fw, float fh,
+                           const TimerAlarmState& ta);
+
     HudConfig     cfg_;
     HudColors     col_;
     ImGuiContext* ctx_ = nullptr;
     ImFont*       font_ui_   = nullptr;
     ImFont*       font_mono_ = nullptr;
+
+    // ── Popup state (render-thread only, no mutex needed) ─────────────────────
+    enum class PopupKind   { None, Alarm, Timer };
+    enum class PopupAction { None,
+                             AlarmDismiss,
+                             TimerDismiss, TimerAdd2, TimerAdd5, TimerAdd10 };
+
+    PopupKind   popup_kind_   = PopupKind::None;
+    int         popup_cursor_ = 0;              // which button is highlighted
+    PopupAction popup_pending_ = PopupAction::None;  // deferred button action
 };
