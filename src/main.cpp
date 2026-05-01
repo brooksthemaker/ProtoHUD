@@ -257,7 +257,14 @@ static std::vector<MenuItem> build_menu(
     for (uint8_t id = 0; id < 10; id++) {
         const char* names[] = { "Idle","Blink","Angry","Happy","Sad",
                                  "Shocked","Rainbow","Pulse","Wave","Custom" };
-        effects.push_back(leaf(names[id], [teensy, id]{ teensy->set_effect(id); }));
+        effects.push_back(leaf_sel(names[id],
+            [teensy, id, &state]{
+                teensy->set_effect(id);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.effect_id = id;
+            },
+            [&state, id]{ return state.face.effect_id == id; }
+        ));
     }
 
     // ── Face colors (presets + custom picker) ─────────────────────────────────
@@ -278,18 +285,25 @@ static std::vector<MenuItem> build_menu(
 
     // ── ProtoTracer material color presets (Menu::GetFaceColor() index 0–11) ──
     std::vector<MenuItem> proto_colors;
-    proto_colors.push_back(leaf("Default",      [teensy]{ teensy->set_menu_item(8, 0);  }));
-    proto_colors.push_back(leaf("Yellow",       [teensy]{ teensy->set_menu_item(8, 1);  }));
-    proto_colors.push_back(leaf("Orange",       [teensy]{ teensy->set_menu_item(8, 2);  }));
-    proto_colors.push_back(leaf("White",        [teensy]{ teensy->set_menu_item(8, 3);  }));
-    proto_colors.push_back(leaf("Green",        [teensy]{ teensy->set_menu_item(8, 4);  }));
-    proto_colors.push_back(leaf("Purple",       [teensy]{ teensy->set_menu_item(8, 5);  }));
-    proto_colors.push_back(leaf("Red",          [teensy]{ teensy->set_menu_item(8, 6);  }));
-    proto_colors.push_back(leaf("Blue",         [teensy]{ teensy->set_menu_item(8, 7);  }));
-    proto_colors.push_back(leaf("Rainbow",      [teensy]{ teensy->set_menu_item(8, 8);  }));
-    proto_colors.push_back(leaf("Flow Noise",   [teensy]{ teensy->set_menu_item(8, 9);  }));
-    proto_colors.push_back(leaf("H Rainbow",    [teensy]{ teensy->set_menu_item(8, 10); }));
-    proto_colors.push_back(leaf("Black",        [teensy]{ teensy->set_menu_item(8, 11); }));
+    {
+        struct PCEntry { const char* label; uint8_t idx; };
+        const PCEntry pc_entries[] = {
+            { "Default",    0  }, { "Yellow",     1  }, { "Orange",     2  },
+            { "White",      3  }, { "Green",      4  }, { "Purple",     5  },
+            { "Red",        6  }, { "Blue",       7  }, { "Rainbow",    8  },
+            { "Flow Noise", 9  }, { "H Rainbow",  10 }, { "Black",      11 },
+        };
+        for (const auto& e : pc_entries) {
+            proto_colors.push_back(leaf_sel(e.label,
+                [teensy, idx = e.idx, &state]{
+                    teensy->set_menu_item(8, idx);
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.face.material_color = idx;
+                },
+                [&state, idx = e.idx]{ return state.face.material_color == idx; }
+            ));
+        }
+    }
 
     // ── GIFs ─────────────────────────────────────────────────────────────────
     std::vector<MenuItem> gifs;

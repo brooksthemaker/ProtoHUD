@@ -66,6 +66,7 @@ struct FaceState {
     uint8_t  spectrum_mirror = 0;
     uint8_t  face_size       = 5;
     uint8_t  fan_speed       = 5;
+    uint8_t  material_color  = 0;   // SET_MENU_ITEM(8) index 0-11
     bool     playing_gif  = false;
     bool     connected    = false;
     bool     hud_control  = false;  // true = HUD has taken manual control; false = Teensy autonomous
