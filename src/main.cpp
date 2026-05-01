@@ -636,11 +636,6 @@ static std::vector<MenuItem> build_menu(
         { "White",  IM_COL32(255, 255, 255, 255) },
     }, [hud_col](ImU32 c){ hud_col->compass_glow = c; });
 
-    std::vector<MenuItem> compass_color_options_menu = {
-        submenu("Tick Color", std::move(compass_tick_color_menu)),
-        submenu("Glow Color", std::move(compass_glow_color_menu)),
-    };
-
     // ── Tagged Radio Colors (per LoRa node compass markers) ──────────────────
     static const struct { const char* name; ImU32 col; } kNodeColors[] = {
         { "Orange", IM_COL32(255, 160,  32, 255) },
@@ -672,7 +667,6 @@ static std::vector<MenuItem> build_menu(
             [hud_cfg](float v){ hud_cfg->compass_tick_length = static_cast<int>(v); }),
         submenu("Tagged Radio Colors", std::move(tagged_radio_colors_menu)),
         submenu("Background Options",  std::move(compass_bg_options_menu)),
-        submenu("Color Options",       std::move(compass_color_options_menu)),
     };
 
     // ── Clock & Timers ────────────────────────────────────────────────────────
@@ -826,17 +820,6 @@ static std::vector<MenuItem> build_menu(
         submenu("Themes and Effects", std::move(themes_menu)),
     };
 
-    // Compass Tick Color — sets tick + glow together
-    std::vector<MenuItem> compass_tick_color_menu2 = make_color_items({
-        { "Orange", IM_COL32(255, 160,  32, 255) },
-        { "Teal",   IM_COL32(  0, 220, 180, 255) },
-        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
-        { "Green",  IM_COL32( 30, 220,  60, 255) },
-        { "Purple", IM_COL32(180,  30, 220, 255) },
-        { "White",  IM_COL32(255, 255, 255, 255) },
-        { "Red",    IM_COL32(255,  50,  50, 255) },
-    }, [hud_col](ImU32 c){ hud_col->compass_tick = c; hud_col->compass_glow = c; });
-
     // Backgrounds
     std::vector<MenuItem> menu_bg_color_menu = make_color_items({
         { "Dark",   IM_COL32( 10,  15,  20, 225) },
@@ -905,16 +888,6 @@ static std::vector<MenuItem> build_menu(
         submenu("Glow Color", std::move(glow_color_menu)),
     };
 
-    std::vector<MenuItem> color_options_menu = {
-        submenu("HUD",                std::move(hud_submenu)),
-        submenu("Compass Tick Color", std::move(compass_tick_color_menu2)),
-        submenu("Text Color",         std::move(text_color_menu)),
-        submenu("Backgrounds",        std::move(backgrounds_menu)),
-        submenu("Indicators",         std::move(indicators_menu)),
-        submenu("Glow",               std::move(glow_menu)),
-    };
-
-    // ── Menu Options ──────────────────────────────────────────────────────────
     std::vector<MenuItem> menu_color_menu = make_color_items({
         { "Orange", IM_COL32(255, 160,  32, 255) },
         { "Teal",   IM_COL32(  0, 220, 180, 255) },
@@ -923,8 +896,15 @@ static std::vector<MenuItem> build_menu(
         { "Purple", IM_COL32(180,  30, 220, 255) },
     }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_accent_color(c); });
 
-    std::vector<MenuItem> menu_options_menu = {
-        submenu("Menu Color", std::move(menu_color_menu)),
+    std::vector<MenuItem> color_options_menu = {
+        submenu("HUD",                std::move(hud_submenu)),
+        submenu("Compass Tick Color", std::move(compass_tick_color_menu)),
+        submenu("Compass Glow Color", std::move(compass_glow_color_menu)),
+        submenu("Text Color",         std::move(text_color_menu)),
+        submenu("Menu Color",         std::move(menu_color_menu)),
+        submenu("Backgrounds",        std::move(backgrounds_menu)),
+        submenu("Indicators",         std::move(indicators_menu)),
+        submenu("Glow",               std::move(glow_menu)),
     };
 
     std::vector<MenuItem> clock_offset_menu = {
@@ -958,10 +938,9 @@ static std::vector<MenuItem> build_menu(
         slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
             [hud_cfg]{ return hud_cfg->text_scale; },
             [hud_cfg](float v){ hud_cfg->text_scale = v; }),
-        submenu("Compass",       std::move(compass_menu)),
-        submenu("Clock",         std::move(clock_menu)),
-        submenu("Color Options", std::move(color_options_menu)),
-        submenu("Menu Options",  std::move(menu_options_menu)),
+        submenu("Compass", std::move(compass_menu)),
+        submenu("Clock",   std::move(clock_menu)),
+        submenu("Color",   std::move(color_options_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
