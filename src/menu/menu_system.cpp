@@ -325,8 +325,12 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
     // ── Chamfered background + border ────────────────────────────────────────
     {
-        constexpr float C   = 8.f;   // chamfer distance (corner cut)
-        constexpr float GAP = 3.f;   // transparent strip between bg fill and border
+        constexpr float C = 8.f;  // chamfer distance (corner cut)
+        // GAP keeps exactly 3px of transparent strip between the inner edge of
+        // the border line and the outer edge of the bg fill, regardless of
+        // border thickness (border line is centered on the window edge, so its
+        // inner edge is at thickness/2 inward; bg fill is inset by GAP).
+        const float GAP = 3.f + border_thickness_ * 0.5f;
 
         const ImVec2 wp = ImGui::GetWindowPos();
         const ImVec2 ws = ImGui::GetWindowSize();
@@ -353,8 +357,8 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                 {emax.x - C, emax.y}, {emin.x + C, emax.y},
                 {emin.x, emax.y - C}, {emin.x, emin.y + C},
             };
-            dl->AddPolyline(bdr_pts, 8, menu_with_alpha(accent_color_, 220),
-                            ImDrawFlags_Closed, 1.5f);
+            dl->AddPolyline(bdr_pts, 8, menu_with_alpha(border_color_, 220),
+                            ImDrawFlags_Closed, border_thickness_);
         }
     }
 

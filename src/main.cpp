@@ -896,12 +896,34 @@ static std::vector<MenuItem> build_menu(
         { "Purple", IM_COL32(180,  30, 220, 255) },
     }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_accent_color(c); });
 
+    std::vector<MenuItem> menu_border_color_menu = make_color_items({
+        { "Orange", IM_COL32(255, 160,  32, 255) },
+        { "Teal",   IM_COL32(  0, 220, 180, 255) },
+        { "Cyan",   IM_COL32(  0, 180, 255, 255) },
+        { "Green",  IM_COL32( 30, 220,  60, 255) },
+        { "Yellow", IM_COL32(255, 240,  50, 255) },
+        { "Purple", IM_COL32(180,  30, 220, 255) },
+        { "White",  IM_COL32(255, 255, 255, 255) },
+        { "Red",    IM_COL32(255,  50,  50, 255) },
+    }, [menu_sys_pp](ImU32 c){ if (*menu_sys_pp) (*menu_sys_pp)->set_border_color(c); });
+
+    std::vector<MenuItem> menu_border_menu = {
+        toggle("Border",
+            [menu_sys_pp]{ return *menu_sys_pp && (*menu_sys_pp)->border_enabled(); },
+            [menu_sys_pp](bool v){ if (*menu_sys_pp) (*menu_sys_pp)->set_border_enabled(v); }),
+        slider("Thickness", 0.5f, 8.f, 0.5f, "px",
+            [menu_sys_pp]{ return *menu_sys_pp ? (*menu_sys_pp)->border_thickness() : 1.5f; },
+            [menu_sys_pp](float v){ if (*menu_sys_pp) (*menu_sys_pp)->set_border_thickness(v); }),
+        submenu("Border Color", std::move(menu_border_color_menu)),
+    };
+
     std::vector<MenuItem> color_options_menu = {
         submenu("HUD",                std::move(hud_submenu)),
         submenu("Compass Tick Color", std::move(compass_tick_color_menu)),
         submenu("Compass Glow Color", std::move(compass_glow_color_menu)),
         submenu("Text Color",         std::move(text_color_menu)),
         submenu("Menu Color",         std::move(menu_color_menu)),
+        submenu("Menu Border",        std::move(menu_border_menu)),
         submenu("Backgrounds",        std::move(backgrounds_menu)),
         submenu("Indicators",         std::move(indicators_menu)),
         submenu("Glow",               std::move(glow_menu)),
@@ -1571,9 +1593,12 @@ int main(int argc, char* argv[]) {
     // Restore menu style from a previous session.
     if (cfg.contains("menu_style")) {
         auto& jm = cfg["menu_style"];
-        menu.set_accent_color(jcolor(jm, "accent_color", menu.accent_color()));
-        menu.set_bg_color    (jcolor(jm, "bg_color",     menu.bg_color()));
-        menu.set_bg_enabled  (jval  (jm, "bg_enabled",   menu.bg_enabled()));
+        menu.set_accent_color    (jcolor(jm, "accent_color",     menu.accent_color()));
+        menu.set_bg_color        (jcolor(jm, "bg_color",         menu.bg_color()));
+        menu.set_bg_enabled      (jval  (jm, "bg_enabled",       menu.bg_enabled()));
+        menu.set_border_color    (jcolor(jm, "border_color",     menu.border_color()));
+        menu.set_border_thickness(jval  (jm, "border_thickness", menu.border_thickness()));
+        menu.set_border_enabled  (jval  (jm, "border_enabled",   menu.border_enabled()));
     }
 
     menu.set_detent_callback([&knob, &menu](int count) {
@@ -1974,9 +1999,12 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_2"]["brightness"] = cameras.usb2_brightness();
 
         auto& jm = cfg["menu_style"];
-        jm["accent_color"] = color_to_json(menu.accent_color());
-        jm["bg_color"]     = color_to_json(menu.bg_color());
-        jm["bg_enabled"]   = menu.bg_enabled();
+        jm["accent_color"]     = color_to_json(menu.accent_color());
+        jm["bg_color"]         = color_to_json(menu.bg_color());
+        jm["bg_enabled"]       = menu.bg_enabled();
+        jm["border_color"]     = color_to_json(menu.border_color());
+        jm["border_thickness"] = menu.border_thickness();
+        jm["border_enabled"]   = menu.border_enabled();
 
         // Persist MPU-9250 calibration biases so they survive a restart
         if (mpu9250.is_running() || cfg.contains("mpu9250")) {
