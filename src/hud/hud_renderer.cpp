@@ -662,7 +662,7 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
     const float c_margin      = static_cast<float>(cfg_.compass_bottom_margin);
     const float ch            = static_cast<float>(cfg_.compass_height);
     const bool  flip          = cfg_.hud_flip_vertical;
-    const float anchor_y      = flip ? c_margin + ch : fh - c_margin;
+    const float anchor_y      = flip ? c_margin : fh - c_margin;
     const float ind_anchor_x  = tape_x - fade_w;
     const float proto_anchor_x = ind_anchor_x - SEG_W * 2.f;
 
@@ -749,7 +749,7 @@ void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
     const float c_margin     = static_cast<float>(cfg_.compass_bottom_margin);
     const float ch           = static_cast<float>(cfg_.compass_height);
     const bool  flip         = cfg_.hud_flip_vertical;
-    const float anchor_y     = flip ? c_margin + ch : fh - c_margin;
+    const float anchor_y     = flip ? c_margin : fh - c_margin;
     const float ind_anchor_x = tape_x + tape_w + fade_w;
     const float lora_anchor_x = ind_anchor_x + SEG_W * 2.f;
 
@@ -832,7 +832,7 @@ void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
     const float c_margin       = static_cast<float>(cfg_.compass_bottom_margin);
     const float ch             = static_cast<float>(cfg_.compass_height);
     const bool  flip           = cfg_.hud_flip_vertical;
-    const float anchor_y       = flip ? c_margin + ch : fh - c_margin;
+    const float anchor_y       = flip ? c_margin : fh - c_margin;
     const float ind_anchor_x   = tape_x + tape_w + fade_w;
     const float lora_anchor_x  = ind_anchor_x   + SEG_W * 2.f;
     const float clock_anchor_x = lora_anchor_x  + SEG_W * 2.f;
