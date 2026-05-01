@@ -195,24 +195,29 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     ImGui::SetCurrentContext(ctx_);
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
-    const float fw    = static_cast<float>(w);
-    const float fh    = static_cast<float>(h);
-    const float th    = static_cast<float>(cfg_.top_bar_height);
-    const float ch    = static_cast<float>(cfg_.compass_height);
-    const float mid_h = fh - th;
+    const float fw       = static_cast<float>(w);
+    const float fh       = static_cast<float>(h);
+    const float th       = static_cast<float>(cfg_.top_bar_height);
+    const float ch       = static_cast<float>(cfg_.compass_height);
+    const float mid_h    = fh - th;
+    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    const bool  flip     = cfg_.hud_flip_vertical;
 
-    draw_top_bar(dl, s, fw);
+    const float bar_y    = flip ? fh - th : 0.f;
+    draw_top_bar(dl, s, fw, bar_y);
 
     if (!s.lora_messages.empty()) {
         float pw    = static_cast<float>(cfg_.panel_width);
         float msg_w = std::min(pw, fw / 3.f);
-        draw_lora_messages(dl, s, { 0.f, th }, msg_w, mid_h);
+        // Flipped: messages appear just below the compass at top; normal: just below status bar.
+        float msg_y = flip ? (c_margin + ch) : th;
+        draw_lora_messages(dl, s, { 0.f, msg_y }, msg_w, mid_h);
     }
 
-    const float cw       = fw / 3.f;
-    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
+    const float cw        = fw / 3.f;
+    const float compass_y = flip ? c_margin : fh - ch - c_margin;
     // Compass drawn first; indicator arms and health sides render on top.
-    draw_compass_tape    (dl, s, {fw / 2.f - cw / 2.f, fh - ch - c_margin}, cw, ch);
+    draw_compass_tape    (dl, s, {fw / 2.f - cw / 2.f, compass_y}, cw, ch);
     // Health sides drawn first so their background sits behind arm content.
     draw_health_side(dl, s.health, fw, fh, false,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
@@ -446,22 +451,22 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
 
-void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
+void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w, float bar_y) {
     float th = static_cast<float>(cfg_.top_bar_height);
 
-    dl->AddRectFilled({0, 0}, {w, th}, col_.background);
+    dl->AddRectFilled({0, bar_y}, {w, bar_y + th}, col_.background);
 
-    // Clock (centered in top bar) — uses AppState::ClockConfig
+    // Clock (centered in bar) — uses AppState::ClockConfig
     {
         ImGui::PushFont(nullptr);
         float saved_scale = ImGui::GetIO().FontGlobalScale;
-        const float cscale = std::max(0.5f, s.clock_cfg.font_scale) * 0.8f; // slightly smaller for top bar
+        const float cscale = std::max(0.5f, s.clock_cfg.font_scale) * 0.8f;
         ImGui::GetIO().FontGlobalScale = saved_scale * cscale;
 
         std::string time_str = fmt_clock(s.clock_cfg.use_24h, s.clock_cfg.show_seconds);
         ImVec2 tsz = ImGui::CalcTextSize(time_str.c_str());
         float cx = w * 0.5f - tsz.x * 0.5f;
-        float cy = th * 0.5f - tsz.y * 0.5f - (s.clock_cfg.show_date ? tsz.y * 0.5f : 0.f);
+        float cy = bar_y + th * 0.5f - tsz.y * 0.5f - (s.clock_cfg.show_date ? tsz.y * 0.5f : 0.f);
         hud_glow_text(dl, {cx, cy}, time_str.c_str(), true, col_.glow_base, col_.text_fill);
 
         // Second line: countdown timer or date
@@ -487,11 +492,11 @@ void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w) {
     int unread = s.unread_message_count();
     if (unread > 0) {
         char buf[32]; snprintf(buf, sizeof(buf), "MSG:%d", unread);
-        dl->AddText({w * 0.25f, 10.f}, col_.warn, buf);
+        dl->AddText({w * 0.25f, bar_y + 10.f}, col_.warn, buf);
     }
 
     // Audio strip (right side)
-    draw_audio_strip(dl, s.audio, {w - 180.f, 4.f}, 170.f);
+    draw_audio_strip(dl, s.audio, {w - 180.f, bar_y + 4.f}, 170.f);
 }
 
 // ── Health side indicators ────────────────────────────────────────────────────
@@ -505,7 +510,9 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const float tape_x   = fw / 2.f - tape_w / 2.f;
     const float fade_w   = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
-    const float anchor_y = fh - c_margin;
+    const float ch       = static_cast<float>(cfg_.compass_height);
+    const bool  flip     = cfg_.hud_flip_vertical;
+    const float anchor_y = flip ? c_margin + ch : fh - c_margin;
     const float anchor_x = right_side ? tape_x + tape_w + fade_w
                                        : tape_x - fade_w;
 
@@ -543,7 +550,7 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     constexpr float BG_FULL = 440.f;  // H_LEN + ARM_EXT*2 + SEG_W*2; covers health + LoRa + clock
 
     const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
-    const float dir_y    = -std::sin(ANGLE);
+    const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
 
     // Parallelogram background — 16 strips fading from opaque (inner) to transparent (outer).
@@ -659,12 +666,14 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
     const float tape_x        = fw / 2.f - tape_w / 2.f;
     const float fade_w        = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin      = static_cast<float>(cfg_.compass_bottom_margin);
-    const float anchor_y      = fh - c_margin;
+    const float ch            = static_cast<float>(cfg_.compass_height);
+    const bool  flip          = cfg_.hud_flip_vertical;
+    const float anchor_y      = flip ? c_margin + ch : fh - c_margin;
     const float ind_anchor_x  = tape_x - fade_w;
     const float proto_anchor_x = ind_anchor_x - SEG_W * 2.f;
 
-    const float dir_x    = std::cos(ANGLE) * -1.f;   // left side: goes right
-    const float dir_y    = -std::sin(ANGLE);           // goes up
+    const float dir_x    = std::cos(ANGLE) * -1.f;
+    const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(N_ITEMS + 1) * ROW_H;
 
     const ImU32 COL_MAJ  = col_.glow_base;
@@ -744,12 +753,14 @@ void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
     const float tape_x       = fw / 2.f - tape_w / 2.f;
     const float fade_w       = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin     = static_cast<float>(cfg_.compass_bottom_margin);
-    const float anchor_y     = fh - c_margin;
+    const float ch           = static_cast<float>(cfg_.compass_height);
+    const bool  flip         = cfg_.hud_flip_vertical;
+    const float anchor_y     = flip ? c_margin + ch : fh - c_margin;
     const float ind_anchor_x = tape_x + tape_w + fade_w;
     const float lora_anchor_x = ind_anchor_x + SEG_W * 2.f;
 
-    const float dir_x    = std::cos(ANGLE) * 1.f;   // right side: goes left
-    const float dir_y    = -std::sin(ANGLE);          // goes up
+    const float dir_x    = std::cos(ANGLE) * 1.f;
+    const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(MAX_ROWS + 1) * ROW_H;
 
     const ImU32 COL_MAJ  = col_.glow_base;
@@ -825,13 +836,15 @@ void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
     const float tape_x         = fw / 2.f - tape_w / 2.f;
     const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin       = static_cast<float>(cfg_.compass_bottom_margin);
-    const float anchor_y       = fh - c_margin;
+    const float ch             = static_cast<float>(cfg_.compass_height);
+    const bool  flip           = cfg_.hud_flip_vertical;
+    const float anchor_y       = flip ? c_margin + ch : fh - c_margin;
     const float ind_anchor_x   = tape_x + tape_w + fade_w;
     const float lora_anchor_x  = ind_anchor_x   + SEG_W * 2.f;
     const float clock_anchor_x = lora_anchor_x  + SEG_W * 2.f;
 
     const float dir_x = std::cos(ANGLE);
-    const float dir_y = -std::sin(ANGLE);
+    const float dir_y = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
 
     const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
     const float eff_row_h = ROW_H * scale;
@@ -945,31 +958,38 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     const ImU32 col_glow1 = with_alpha(col_.compass_glow, 70);
     const ImU32 col_glow2 = with_alpha(col_.compass_glow, 28);
 
-    const float fw = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float fade_w = static_cast<float>(cfg_.compass_bg_side_fade);
+    const bool  flip   = cfg_.hud_flip_vertical;
+
     if (s.compass_bg_enabled) {
         const uint8_t a = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
         const ImU32   A = with_alpha(col_.compass_bg_color, a);
 
-        // Diagonal inset at the top edge to match the health indicator 130° angle.
-        // Both sides taper inward as height increases, connecting flush to the
-        // health indicator diagonal lines when those are also enabled.
         constexpr float kIndAngle = 130.f * 3.14159265f / 180.f;
         const float inset = std::abs(std::cos(kIndAngle)) / std::sin(kIndAngle) * th;
 
-        // Solid trapezoid — wider at bottom (anchor_y), narrower at top.
-        ImVec2 bg[4] = {
-            {origin.x - fw + inset,      origin.y     },  // TL
-            {origin.x + tw + fw - inset, origin.y     },  // TR
-            {origin.x + tw + fw,         origin.y + th},  // BR
-            {origin.x - fw,              origin.y + th},  // BL
-        };
+        // Trapezoid: narrower on the side that faces the indicator arms.
+        // Normal: narrower at top (origin.y), wider at bottom (origin.y+th).
+        // Flipped: narrower at bottom (origin.y+th), wider at top (origin.y).
+        ImVec2 bg[4];
+        if (!flip) {
+            bg[0] = {origin.x - fade_w + inset,      origin.y     };  // TL (inset)
+            bg[1] = {origin.x + tw + fade_w - inset, origin.y     };  // TR (inset)
+            bg[2] = {origin.x + tw + fade_w,         origin.y + th};  // BR
+            bg[3] = {origin.x - fade_w,              origin.y + th};  // BL
+        } else {
+            bg[0] = {origin.x - fade_w,              origin.y     };  // TL
+            bg[1] = {origin.x + tw + fade_w,         origin.y     };  // TR
+            bg[2] = {origin.x + tw + fade_w - inset, origin.y + th};  // BR (inset)
+            bg[3] = {origin.x - fade_w + inset,      origin.y + th};  // BL (inset)
+        }
         dl->AddConvexPolyFilled(bg, 4, A);
     }
 
-    // Glow line at the tape base — color matches the health indicator lines (glow_base).
+    // Glow line — at tape edge that meets the indicator arms.
     {
-        const float lx0 = origin.x - fw, lx1 = origin.x + tw + fw;
-        const float line_y = origin.y + th;
+        const float lx0    = origin.x - fade_w, lx1 = origin.x + tw + fade_w;
+        const float line_y = flip ? origin.y : origin.y + th;
         dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 28), 5.f);
         dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 70), 2.5f);
         dl->AddLine({lx0, line_y}, {lx1, line_y}, col_.glow_base, 1.f);
@@ -980,9 +1000,12 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
     const float t_mid = t_maj * (16.f / 24.f);
     const float t_min = t_maj * (10.f / 24.f);
 
-    // Tick zone: leave 20 px at the bottom for labels.
-    const float tick_bottom = origin.y + th - 20.f;
-    const float label_y     = tick_bottom + 3.f;
+    // Tick zone: 20 px label strip on the arm-facing edge; ticks grow inward.
+    // Normal: label strip at bottom, ticks grow upward.
+    // Flipped: label strip at top, ticks grow downward.
+    const float tick_base   = flip ? origin.y + 20.f : origin.y + th - 20.f;
+    const float tick_sign   = flip ? 1.f : -1.f;   // +1 = down, -1 = up
+    const float label_y     = flip ? origin.y + 3.f : tick_base + 3.f;
 
     if (font_mono_) ImGui::PushFont(font_mono_);
 
@@ -997,34 +1020,36 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         const bool tick_glow = cfg_.compass_tick_glow;
         if (deg % 45 == 0) {
             if (tick_glow) {
-                dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow2, t_maj * 0.5f);
-                dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_glow1, t_maj * 0.25f);
+                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_maj}, col_glow2, t_maj * 0.5f);
+                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_maj}, col_glow1, t_maj * 0.25f);
             }
-            dl->AddLine({px, tick_bottom - t_maj}, {px, tick_bottom}, col_major, 3.f);
+            dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_maj}, col_major, 3.f);
             const char* card = cardinal_str(static_cast<float>(deg));
             ImVec2 csz = ImGui::CalcTextSize(card);
             hud_glow_text(dl, {px - csz.x * 0.5f, label_y},
                           card, true, col_.glow_base, col_.text_fill);
         } else if (deg % 10 == 0) {
             if (tick_glow)
-                dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_glow2, t_mid * 0.375f);
-            dl->AddLine({px, tick_bottom - t_mid}, {px, tick_bottom}, col_mid,   2.f);
+                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_mid}, col_glow2, t_mid * 0.375f);
+            dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_mid}, col_mid, 2.f);
             char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
             ImVec2 bsz = ImGui::CalcTextSize(buf);
             hud_glow_text(dl, {px - bsz.x * 0.5f, label_y}, buf,
                           true, col_.glow_base, col_.text_fill);
         } else if (deg % 5 == 0) {
             if (tick_glow)
-                dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_glow2, t_min * 0.4f);
-            dl->AddLine({px, tick_bottom - t_min}, {px, tick_bottom}, col_minor, 2.f);
+                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_min}, col_glow2, t_min * 0.4f);
+            dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_min}, col_minor, 2.f);
         }
     }
 
     if (font_mono_) ImGui::PopFont();
 
-    // LoRa node bearing markers — small colored triangles above the ticks
+    // LoRa node bearing markers — small triangles on the inner (non-label) side of the ticks.
+    // Normal: triangles above the tick tops (pointing down into tape).
+    // Flipped: triangles below the tick bottoms (pointing up into tape).
     for (const auto& node : s.lora_nodes) {
-        if (node.distance_m <= 0.f) continue;  // no fix yet
+        if (node.distance_m <= 0.f) continue;
         float offset = node.heading_deg - heading;
         while (offset >  180.f) offset -= 360.f;
         while (offset < -180.f) offset += 360.f;
@@ -1032,8 +1057,16 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
         if (px < origin.x || px > origin.x + tw) continue;
 
         ImU32 node_col = s.lora_node_colors[node.local_id % 8];
-        float mx = px, my = tick_bottom - t_maj - 6.f;
-        ImVec2 tri[3] = {{mx - 5.f, my}, {mx + 5.f, my}, {mx, my + 9.f}};
+        float mx = px;
+        float my, tri_tip_dy;
+        if (!flip) {
+            my = tick_base + tick_sign * t_maj - 6.f;  // above tick tops
+            tri_tip_dy = 9.f;                            // tip points downward
+        } else {
+            my = tick_base + tick_sign * t_maj + 6.f;  // below tick bottoms
+            tri_tip_dy = -9.f;                           // tip points upward
+        }
+        ImVec2 tri[3] = {{mx - 5.f, my}, {mx + 5.f, my}, {mx, my + tri_tip_dy}};
         dl->AddConvexPolyFilled(tri, 3, node_col);
         dl->AddPolyline(tri, 3, with_alpha(node_col, 200), ImDrawFlags_Closed, 1.f);
     }

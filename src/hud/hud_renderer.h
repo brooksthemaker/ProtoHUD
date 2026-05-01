@@ -62,6 +62,7 @@ struct HudConfig {
     bool  indicator_bg_enabled  = true;   // parallelogram bg behind health indicators
     // Glow intensity multiplier (scales all glow alphas)
     float glow_intensity     = 1.0f;   // 0.0=no glow, 1.0=full
+    bool  hud_flip_vertical  = false;  // move compass+arms to top, status bar to bottom
 };
 
 class HudRenderer {
@@ -109,7 +110,7 @@ public:
     void render_overlay();
 
 private:
-    void draw_top_bar      (ImDrawList* dl, const AppState& s, float w);
+    void draw_top_bar      (ImDrawList* dl, const AppState& s, float w, float bar_y = 0.f);
     void draw_health_side  (ImDrawList* dl, const SystemHealth& h,
                             float fw, float fh, bool right_side,
                             const CameraFocusState& focus_left,

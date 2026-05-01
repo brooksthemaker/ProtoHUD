@@ -89,7 +89,8 @@
     "health_panel_opacity": 0.71,
     "pip_corner_clip_px": 16,
     "indicator_bg_enabled": true,
-    "glow_intensity": 1.0
+    "glow_intensity": 1.0,
+    "flip_vertical": false
   },
   "gpio": {
     "enabled": true,

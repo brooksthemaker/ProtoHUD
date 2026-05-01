@@ -919,6 +919,9 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> hud_menu = {
+        toggle("Flip to Top",
+            [hud_cfg]{ return hud_cfg->hud_flip_vertical; },
+            [hud_cfg](bool v){ hud_cfg->hud_flip_vertical = v; }),
         slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
             [hud_cfg]{ return hud_cfg->text_scale; },
             [hud_cfg](float v){ hud_cfg->text_scale = v; }),
@@ -1235,6 +1238,7 @@ int main(int argc, char* argv[]) {
     hud_cfg.scale                 = jval(jdisp,"hud_scale",            1.0f);
     hud_cfg.indicator_bg_enabled  = jval(jhud, "indicator_bg_enabled", true);
     hud_cfg.glow_intensity        = jval(jhud, "glow_intensity",       1.0f);
+    hud_cfg.hud_flip_vertical     = jval(jhud, "flip_vertical",        false);
 
     Mpu9250::Config mpu_cfg;
     if (cfg.contains("mpu9250")) {
@@ -1907,6 +1911,7 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
+        cfg["hud"]["flip_vertical"]       = hud.config().hud_flip_vertical;
 
         cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
         cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;
