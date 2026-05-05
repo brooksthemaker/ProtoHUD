@@ -18,6 +18,8 @@
 #include "camera/camera_manager.h"
 #include "camera/viture_camera.h"
 #include "input/gpio_buttons.h"
+#include "serial/face_controller.h"
+#include "serial/protoface_controller.h"
 #include "serial/teensy_controller.h"
 #include "serial/lora_radio.h"
 #include "serial/smartknob.h"
@@ -160,7 +162,7 @@ static bool key_pressed(ImGuiKey key) {
 // ── Menu definition ───────────────────────────────────────────────────────────
 
 static std::vector<MenuItem> build_menu(
-        TeensyController* teensy, XRDisplay* xr, CameraManager* cameras,
+        IFaceController* teensy, XRDisplay* xr, CameraManager* cameras,
         LoRaRadio* lora, SmartKnob* knob, AudioEngine* audio, AppState& state,
         AndroidMirror* android_mirror, bool* android_overlay,
         OverlayConfig* pip_cfg1, OverlayConfig* pip_cfg2,
@@ -168,7 +170,13 @@ static std::vector<MenuItem> build_menu(
         OverlayConfig* android_cfg,
         HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp,
         Mpu9250* mpu9250,
-        const std::vector<std::string>& gif_names)
+        const std::vector<std::string>& gif_names,
+        // Face Source switching — pass null fp_option to hide Protoface entry
+        IFaceController** active_face_pp  = nullptr,
+        IFaceController*  teensy_option   = nullptr,
+        IFaceController*  fp_option       = nullptr,
+        // Panel preview toggle (Protoface shm → ProtoHUD ImGui window)
+        bool*             panel_preview_pp = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -733,6 +741,19 @@ static std::vector<MenuItem> build_menu(
         make_size_slider("Size", android_cfg),
     };
 
+    // ── Face Source (Teensy vs Protoface) ────────────────────────────────────
+    std::vector<MenuItem> face_source_menu;
+    if (active_face_pp && teensy_option && fp_option) {
+        face_source_menu.push_back(leaf_sel("Teensy (ProtoTracer)",
+            [active_face_pp, teensy_option]{ *active_face_pp = teensy_option; },
+            [active_face_pp, teensy_option]{ return *active_face_pp == teensy_option; }
+        ));
+        face_source_menu.push_back(leaf_sel("Protoface",
+            [active_face_pp, fp_option]{ *active_face_pp = fp_option; },
+            [active_face_pp, fp_option]{ return *active_face_pp == fp_option; }
+        ));
+    }
+
     // ── Prototracer (face controller) submenu ─────────────────────────────────
     std::vector<MenuItem> prototracer_menu = {
         submenu("Faces",      std::move(effects)),
@@ -813,6 +834,12 @@ static std::vector<MenuItem> build_menu(
                 state.face.fan_speed = val;
             }),
     };
+    if (!face_source_menu.empty())
+        prototracer_menu.push_back(submenu("Face Source", std::move(face_source_menu)));
+    if (panel_preview_pp)
+        prototracer_menu.push_back(toggle("Panel Preview",
+            [panel_preview_pp]{ return *panel_preview_pp; },
+            [panel_preview_pp](bool v){ *panel_preview_pp = v; }));
 
     // ── HUD settings ──────────────────────────────────────────────────────────
 
@@ -1902,13 +1929,21 @@ int main(int argc, char* argv[]) {
     lora_port   = resolve_serial_port(lora_port,   0x1A86, 0x7523);
     knob_port   = resolve_serial_port(knob_port);
 
-    TeensyController teensy(teensy_port, baud, state);
-    LoRaRadio        lora  (lora_port,   baud, state);
-    SmartKnob        knob  (knob_port,   baud, state);
+    TeensyController     teensy(teensy_port, baud, state);
+    ProtoFaceController  protoface_ctrl;
+    LoRaRadio            lora  (lora_port,   baud, state);
+    SmartKnob            knob  (knob_port,   baud, state);
 
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
+    protoface_ctrl.start();   // connects async; no-op if socket absent
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
     if (!knob.start())   std::cerr << "[main] SmartKnob not available on " << knob_port << "\n";
+
+    // Active face backend: prefer Protoface if its socket already exists at startup.
+    IFaceController* active_face = ProtoFaceController::socket_exists()
+        ? static_cast<IFaceController*>(&protoface_ctrl)
+        : static_cast<IFaceController*>(&teensy);
+    FaceProxy face_proxy(&active_face);
 
     uint16_t sleep_tmo = 30;
     if (jser.contains("smartknob"))
@@ -1943,14 +1978,19 @@ int main(int argc, char* argv[]) {
 
     // menu_ptr is set to &menu after construction so HUD menu lambdas can call
     // into MenuSystem without a circular dependency at build time.
+    bool panel_preview_enabled = false;
     MenuSystem* menu_ptr = nullptr;
-    MenuSystem menu(build_menu(&teensy, &xr, &cameras, &lora, &knob, &audio, state,
+    MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2,
                                &pip_cam1_overlay_active, &pip_cam2_overlay_active,
                                &android_overlay_cfg,
                                &hud.colors(), &hud.config(), &menu_ptr,
-                               &mpu9250, gif_names));
+                               &mpu9250, gif_names,
+                               &active_face,
+                               static_cast<IFaceController*>(&teensy),
+                               static_cast<IFaceController*>(&protoface_ctrl),
+                               &panel_preview_enabled));
     menu_ptr = &menu;
 
     // Restore menu style from a previous session.
@@ -2353,6 +2393,13 @@ int main(int argc, char* argv[]) {
                                   android_overlay_cfg,
                                   android_mirror.frame_aspect());
 
+        // Protoface LED preview (top-right corner, above popups).
+        if (panel_preview_enabled) {
+            GLuint panel_tex = 0;
+            protoface_ctrl.get_frame_texture(panel_tex);
+            hud.draw_panel_preview(panel_tex, xr.eye_width(), xr.eye_height());
+        }
+
         // Alarm / timer-expired popups render on top of everything.
         hud.draw_popups(state, xr.eye_width(), xr.eye_height());
 
@@ -2472,6 +2519,7 @@ int main(int argc, char* argv[]) {
     beast_cam.stop();
     cameras.shutdown();
     teensy.stop();
+    protoface_ctrl.stop();
     lora.stop();
     knob.stop();
 

@@ -40,3 +40,6 @@ overlays/*.dtbo
 
 # Convenience symlink created by install.sh
 /protohud
+
+# Claude local config
+.claude/

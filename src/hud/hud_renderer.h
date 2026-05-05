@@ -106,6 +106,13 @@ public:
                               bool active, bool connecting, const OverlayConfig& cfg,
                               float frame_aspect = 9.f / 16.f);
 
+    // Draw a floating panel preview window showing the 64×32 HUB75 LED face
+    // at *scale* times its native resolution with nearest-neighbour filtering.
+    // tex: GLuint from ProtoFaceController::get_frame_texture() — 0 = hidden.
+    // anchor: top-left corner of the window in screen pixels.
+    void draw_panel_preview(unsigned int tex, int screen_w, int screen_h,
+                            float scale = 3.f);
+
     // Execute ImGui::Render → flush to current GL framebuffer.
     void render_overlay();
 

@@ -1,4 +1,5 @@
 #include "hud_renderer.h"
+#include "../serial/shm_frame_reader.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -438,6 +439,67 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     // Label (top-left corner of the box, drawn after image so it's always visible)
     if (font_mono_) ImGui::PushFont(font_mono_);
     dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.accent, "ANDROID");
+    if (font_mono_) ImGui::PopFont();
+
+    ImGui::End();
+}
+
+// ── Panel preview (FacePanel HUB75 live feed) ─────────────────────────────────
+
+void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_h,
+                                     float scale) {
+    if (tex == 0) return;
+
+    ImGui::SetCurrentContext(ctx_);
+
+    // Native LED canvas dimensions (128×64 for 4-panel 2×2 layout).
+    const float PW = static_cast<float>(ShmFrameReader::W);
+    const float PH = static_cast<float>(ShmFrameReader::H);
+    const float pw = PW * scale;
+    const float ph = PH * scale;
+
+    // Padding around the image inside the window.
+    const float pad = 6.f;
+    const float win_w = pw + pad * 2.f;
+    const float win_h = ph + pad * 2.f;
+
+    // Anchor: top-right with a small margin so it doesn't clip the screen edge.
+    const float margin = 12.f;
+    const float wx = static_cast<float>(screen_w) - win_w - margin;
+    const float wy = margin;
+
+    ImGui::SetNextWindowPos ({wx, wy}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({win_w, win_h}, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.f);
+    ImGui::Begin("##panel_preview", nullptr,
+        ImGuiWindowFlags_NoDecoration          |
+        ImGuiWindowFlags_NoInputs              |
+        ImGuiWindowFlags_NoMove                |
+        ImGuiWindowFlags_NoNav                 |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoSavedSettings);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p  = ImGui::GetWindowPos();
+
+    // Dark backing rectangle
+    dl->AddRectFilled({p.x, p.y}, {p.x + win_w, p.y + win_h},
+                      IM_COL32(8, 12, 18, 220), 4.f);
+
+    // The LED panel image — GL_NEAREST is set at texture creation time so
+    // ImGui renders it crisp.
+    const ImVec2 img0 = {p.x + pad, p.y + pad};
+    const ImVec2 img1 = {p.x + pad + pw, p.y + pad + ph};
+    dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
+                 img0, img1);
+
+    // Accent border
+    dl->AddRect({p.x, p.y}, {p.x + win_w, p.y + win_h},
+                col_.accent, 4.f, 0, 1.5f);
+
+    // Small "LED" label in the corner
+    if (font_mono_) ImGui::PushFont(font_mono_);
+    dl->AddText({p.x + 4.f, p.y + 4.f}, col_.accent, "LED");
     if (font_mono_) ImGui::PopFont();
 
     ImGui::End();
