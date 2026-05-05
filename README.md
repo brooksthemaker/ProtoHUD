@@ -80,7 +80,7 @@ Optional async timewarp warps each eye FBO using the latest IMU pose before comp
 | Display | VITURE Beast XR glasses (3840×1080 SBS, 60/90/120 Hz) |
 | Cameras | 2× OWLsight CSI cameras (libcamera NV12 zero-copy path) |
 | USB cameras | 2× USB webcams for PiP overlays (optional) |
-| Face LEDs | Teensy 4.1 running Prototracer firmware |
+| Face LEDs | Teensy 4.1 running Prototracer firmware **or** Protoface (4× HUB75 P2.5 panels, CM5-native) |
 | Input | SmartKnob (ESP32-S3 haptic knob) + 3 GPIO buttons |
 | Radio | RAK4631 LoRa mesh radio (868/915 MHz) |
 | Audio processor | RP2350 helmet audio board — 6-mic beamforming/NR, USB Audio UAC2 output |
@@ -677,7 +677,13 @@ Root
 │   ├── Hide Overlay
 │   ├── Position       (Top Left · Top Center · Top Right · Bottom Left · Bottom Center · Bottom Right)
 │   └── Size           (15% · 20% · 25% · 30% · 40% · 50% · 60%)
-└── Request Status
+├── Request Status
+└── Face
+    ├── Face Source    (Teensy / Protoface)
+    ├── Effect         (Idle · Blink · Angry · Happy · … · Presets)
+    ├── Color          (Teal · Cyan · Red · Green · Purple · White)
+    ├── Brightness     (25% · 50% · 75% · 100%)
+    └── Panel Preview  (toggle — 384×192 px LED panel overlay in HMD)
 ```
 
 ### Haptic Profiles
@@ -1075,6 +1081,56 @@ The left and right HUD side panels have **transparent backgrounds** — only the
 
 ---
 
+## Protoface LED Panels
+
+[Protoface](https://github.com/brooksthemaker/ProtoFace) is a Python daemon that drives 4× 64×32 P2.5 HUB75 LED panels in a 2×2 grid (128×64 canvas). It runs alongside ProtoHUD on the same CM5 and replaces the Teensy/ProtoTracer face LED backend.
+
+The Protoface repo is included as a git submodule at `Protoface/`:
+
+```bash
+git submodule update --init    # pull Protoface after cloning ProtoHUD
+```
+
+### Communication channels
+
+| Channel | Direction | Path | Purpose |
+|---------|-----------|------|---------|
+| Unix socket | ProtoHUD → Protoface | `/run/protoface.sock` | Commands (set_effect, set_color, …) |
+| Shared memory | Protoface → ProtoHUD | `/dev/shm/protoface_frame` | Live 128×64 panel preview in HMD |
+
+### Panel Preview
+
+Enable the live LED preview overlay from the HUD menu:
+
+```
+Menu → Face → Panel Preview  (toggle ON)
+```
+
+The overlay renders at 3× scale (384×192 px) anchored to the top-right corner of each eye, above the PiP overlays.
+
+### Running Protoface
+
+```bash
+cd ~/Protoface
+sudo python run.py    # HUB75 output; requires root for DMA
+```
+
+Set `display.preview: true` in `Protoface/config.yaml` for a pygame preview window during development (no Pi hardware needed).
+
+### GPIO conflicts
+
+Running both processes on the same CM5 requires resolving three GPIO conflicts:
+
+| Conflict | Fix |
+|----------|-----|
+| I2S mic GPIO 19/20 vs HUB75 parallel row-2 | Use USB microphone (`inputs.microphone.type: usb`) |
+| SPI0 IMU GPIO 9/11 vs HUB75 data row-1 | Move ProtoHUD IMU to I2C bus 1 (GPIO 2/3, address 0x69) |
+| Boop sensor default GPIO 17 vs HUB75 CLK | Reassign to GPIO 16 (`inputs.boop.gpio_pin: 16`) |
+
+See [Protoface/INTEGRATION.md](Protoface/INTEGRATION.md) for the full GPIO analysis, CPU budget, systemd service files, and minimal working configuration.
+
+---
+
 ## Troubleshooting
 
 ### Camera shows black / no image
@@ -1218,8 +1274,11 @@ ln -sf build/protohud ~/ProtoHUD/protohud
 │   ├── input/
 │   │   └── gpio_buttons.h/.cpp     — libgpiod v2 button handler
 │   ├── serial/
-│   │   ├── serial_port.h/.cpp      — raw UART helpers
-│   │   ├── teensy_controller.h/.cpp
+│   │   ├── serial_port.h/.cpp          — raw UART helpers
+│   │   ├── face_controller.h           — IFaceController interface + FaceProxy
+│   │   ├── teensy_controller.h/.cpp    — ProtoTracer USB serial backend
+│   │   ├── protoface_controller.h/.cpp — Protoface Unix socket backend
+│   │   ├── shm_frame_reader.h/.cpp     — /dev/shm/protoface_frame → GL texture
 │   │   ├── lora_radio.h/.cpp
 │   │   └── smartknob.h/.cpp
 │   └── audio/
@@ -1230,6 +1289,7 @@ ln -sf build/protohud ~/ProtoHUD/protohud
 ├── config/config.json
 ├── overlays/cm5-6mic.dts           — 6-ch I2S DT overlay (boot config; audio handled by RP2350)
 ├── vendor/viture/                  — VITURE XR SDK (pre-built aarch64 .so)
+├── Protoface/                      — git submodule: HUB75 LED face daemon
 └── scripts/
     ├── install.sh                  — one-shot CM5 installer (11 steps)
     ├── check.sh                    — post-reboot health check
