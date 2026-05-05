@@ -1,3 +1,3 @@
 [submodule "Protoface"]
 	path = Protoface
-	url = file:///D:/Raspi Projects/Protoface
+	url = https://github.com/brooksthemaker/ProtoFace.git
