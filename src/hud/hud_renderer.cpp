@@ -201,21 +201,18 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
 
     const float fw       = static_cast<float>(w);
     const float fh       = static_cast<float>(h);
-    const float th       = static_cast<float>(cfg_.top_bar_height);
     const float ch       = static_cast<float>(cfg_.compass_height);
-    const float mid_h    = fh - th;
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
     const bool  flip     = cfg_.hud_flip_vertical;
 
-    const float bar_y    = flip ? fh - th : 0.f;
-    draw_top_bar(dl, s, fw, bar_y);
+    // Particle/nebula effects drawn first so all HUD chrome renders on top.
+    fx_update(dl, s, fw, fh, frame_dt_);
 
     if (!s.lora_messages.empty()) {
         float pw    = static_cast<float>(cfg_.panel_width);
         float msg_w = std::min(pw, fw / 3.f);
-        // Flipped: messages appear just below the compass at top; normal: just below status bar.
-        float msg_y = flip ? (c_margin + ch) : th;
-        draw_lora_messages(dl, s, { 0.f, msg_y }, msg_w, mid_h);
+        float msg_y = flip ? (c_margin + ch) : 0.f;
+        draw_lora_messages(dl, s, { 0.f, msg_y }, msg_w, fh);
     }
 
     const float cw        = fw / 3.f;
@@ -231,9 +228,6 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     draw_face_indicator         (dl, s.face, fw, fh);
     draw_clock_indicator        (dl, s,      fw, fh);
     draw_timer_alarm_indicator  (dl, s,      fw, fh);
-
-    // Particle effects drawn on top of all HUD chrome.
-    fx_update(dl, s, fw, fh, frame_dt_);
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
