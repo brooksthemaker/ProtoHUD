@@ -172,6 +172,7 @@ private:
     Particle  particles_[kMaxParticles] = {};
     int       n_particles_ = 0;
     float     fx_prev_heading_ = 0.f;   // for turbulence heading delta
+    float     fx_pulse_phase_  = 1.f;  // 0→1 over 1.5 s per alarm/timer cycle; 1=idle
 
     struct LineParticle {
         float x, y;
@@ -207,6 +208,9 @@ private:
     void  fx_emit_turbulence   (float tape_cx, float tape_y,
                                  float tw, float th, ImU32 c, float dt);
     void  fx_emit_nebula_edge  (float fw, float fh, float dt);
+
+    // Edge heartbeat pulse drawn on top of HUD chrome when alarm/timer fires
+    void  fx_draw_alarm_pulse(ImDrawList* dl, const AppState& s, float fw, float fh);
 
     // Master dispatcher — called at end of draw_frame
     void  fx_update(ImDrawList* dl, const AppState& s,
