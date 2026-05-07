@@ -115,6 +115,8 @@ set(SOURCES
     src/input/gpio_buttons.cpp
     src/serial/serial_port.cpp
     src/serial/teensy_controller.cpp
+    src/serial/protoface_controller.cpp
+    src/serial/shm_frame_reader.cpp
     src/serial/lora_radio.cpp
     src/serial/smartknob.cpp
     src/hud/hud_renderer.cpp
