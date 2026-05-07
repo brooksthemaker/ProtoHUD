@@ -126,6 +126,19 @@ static OverlayConfig::Anchor parse_anchor(const std::string& s) {
     return OverlayConfig::Anchor::TOP_CENTER;
 }
 
+static const char* anchor_to_str(OverlayConfig::Anchor a) {
+    using A = OverlayConfig::Anchor;
+    switch (a) {
+        case A::TOP_LEFT:      return "top_left";
+        case A::TOP_CENTER:    return "top_center";
+        case A::TOP_RIGHT:     return "top_right";
+        case A::BOTTOM_LEFT:   return "bottom_left";
+        case A::BOTTOM_CENTER: return "bottom_center";
+        case A::BOTTOM_RIGHT:  return "bottom_right";
+    }
+    return "top_left";
+}
+
 // ── Color serialization helpers ───────────────────────────────────────────────
 // ImU32 is ABGR: alpha in high byte, red in low byte.
 
@@ -2453,6 +2466,11 @@ int main(int argc, char* argv[]) {
         cfg["clock"]["show_date"]       = state.clock_cfg.show_date;
         cfg["clock"]["font_scale"]      = state.clock_cfg.font_scale;
         cfg["clock"]["manual_offset_s"] = state.clock_cfg.manual_offset_s;
+
+        cfg["pip"]["cam1"]["anchor"] = anchor_to_str(pip_overlay_cfg1.anchor);
+        cfg["pip"]["cam1"]["size"]   = pip_overlay_cfg1.size;
+        cfg["pip"]["cam2"]["anchor"] = anchor_to_str(pip_overlay_cfg2.anchor);
+        cfg["pip"]["cam2"]["size"]   = pip_overlay_cfg2.size;
 
         auto& jpp = cfg["post_process"];
         jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
