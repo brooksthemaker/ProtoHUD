@@ -632,6 +632,20 @@ static std::vector<MenuItem> build_menu(
                 UsbCamConfig c = cameras->usb1_cfg(); c.flip = v;
                 cameras->update_usb1_cfg(c);
             }),
+        toggle("Auto Brightness",
+            [cameras]{ return cameras && cameras->usb1_cfg().auto_brightness; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb1_cfg(); c.auto_brightness = v;
+                cameras->update_usb1_cfg(c);
+            }),
+        slider("Brightness Target", 40.f, 220.f, 5.f, "",
+            [cameras]{ return cameras ? cameras->usb1_cfg().auto_brightness_target : 100.f; },
+            [cameras](float v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb1_cfg(); c.auto_brightness_target = v;
+                cameras->update_usb1_cfg(c);
+            }),
         submenu("Overlay",     std::move(cam1_overlay_menu)),
         submenu("Brightness",  std::move(usb1_brightness_menu)),
         submenu("Exposure",    std::move(usb1_exposure_menu)),
@@ -720,6 +734,20 @@ static std::vector<MenuItem> build_menu(
             [cameras](bool v){
                 if (!cameras) return;
                 UsbCamConfig c = cameras->usb2_cfg(); c.flip = v;
+                cameras->update_usb2_cfg(c);
+            }),
+        toggle("Auto Brightness",
+            [cameras]{ return cameras && cameras->usb2_cfg().auto_brightness; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb2_cfg(); c.auto_brightness = v;
+                cameras->update_usb2_cfg(c);
+            }),
+        slider("Brightness Target", 40.f, 220.f, 5.f, "",
+            [cameras]{ return cameras ? cameras->usb2_cfg().auto_brightness_target : 100.f; },
+            [cameras](float v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb2_cfg(); c.auto_brightness_target = v;
                 cameras->update_usb2_cfg(c);
             }),
         submenu("Overlay",    std::move(cam2_overlay_menu)),
@@ -1655,7 +1683,9 @@ int main(int argc, char* argv[]) {
         usb1_cfg.exposure_time      = j1.value("exposure_time",        157);
         usb1_cfg.auto_wb            = j1.value("auto_wb",              true);
         usb1_cfg.wb_temp            = j1.value("wb_temp",              4600);
-        usb1_cfg.flip               = j1.value("flip",                 false);
+        usb1_cfg.flip                    = j1.value("flip",                    false);
+        usb1_cfg.auto_brightness         = j1.value("auto_brightness",         false);
+        usb1_cfg.auto_brightness_target  = j1.value("auto_brightness_target",  100.f);
     }
     if (jcam.contains("usb_cam_2")) {
         auto& j2 = jcam["usb_cam_2"];
@@ -1669,7 +1699,9 @@ int main(int argc, char* argv[]) {
         usb2_cfg.exposure_time      = j2.value("exposure_time",        157);
         usb2_cfg.auto_wb            = j2.value("auto_wb",              true);
         usb2_cfg.wb_temp            = j2.value("wb_temp",              4600);
-        usb2_cfg.flip               = j2.value("flip",                 false);
+        usb2_cfg.flip                    = j2.value("flip",                    false);
+        usb2_cfg.auto_brightness         = j2.value("auto_brightness",         false);
+        usb2_cfg.auto_brightness_target  = j2.value("auto_brightness_target",  100.f);
     }
 
     HudConfig hud_cfg;
@@ -2499,14 +2531,18 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_1"]["exposure_time"]     = cameras.usb1_cfg().exposure_time;
         cfg["cameras"]["usb_cam_1"]["auto_wb"]           = cameras.usb1_cfg().auto_wb;
         cfg["cameras"]["usb_cam_1"]["wb_temp"]           = cameras.usb1_cfg().wb_temp;
-        cfg["cameras"]["usb_cam_1"]["flip"]              = cameras.usb1_cfg().flip;
+        cfg["cameras"]["usb_cam_1"]["flip"]                   = cameras.usb1_cfg().flip;
+        cfg["cameras"]["usb_cam_1"]["auto_brightness"]        = cameras.usb1_cfg().auto_brightness;
+        cfg["cameras"]["usb_cam_1"]["auto_brightness_target"] = cameras.usb1_cfg().auto_brightness_target;
         cfg["cameras"]["usb_cam_2"]["brightness"]        = cameras.usb2_brightness();
         cfg["cameras"]["usb_cam_2"]["dynamic_framerate"] = cameras.usb2_cfg().dynamic_framerate;
         cfg["cameras"]["usb_cam_2"]["auto_exposure"]     = cameras.usb2_cfg().auto_exposure;
         cfg["cameras"]["usb_cam_2"]["exposure_time"]     = cameras.usb2_cfg().exposure_time;
         cfg["cameras"]["usb_cam_2"]["auto_wb"]           = cameras.usb2_cfg().auto_wb;
         cfg["cameras"]["usb_cam_2"]["wb_temp"]           = cameras.usb2_cfg().wb_temp;
-        cfg["cameras"]["usb_cam_2"]["flip"]              = cameras.usb2_cfg().flip;
+        cfg["cameras"]["usb_cam_2"]["flip"]                   = cameras.usb2_cfg().flip;
+        cfg["cameras"]["usb_cam_2"]["auto_brightness"]        = cameras.usb2_cfg().auto_brightness;
+        cfg["cameras"]["usb_cam_2"]["auto_brightness_target"] = cameras.usb2_cfg().auto_brightness_target;
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"]     = color_to_json(menu.accent_color());

@@ -128,8 +128,12 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb2_cfg_ = usb2;
     usb1_brightness_ = usb1.brightness;
     usb2_brightness_ = usb2.brightness;
-    usb1_flip_       = usb1.flip;
-    usb2_flip_       = usb2.flip;
+    usb1_flip_                   = usb1.flip;
+    usb2_flip_                   = usb2.flip;
+    usb1_auto_brightness_        = usb1.auto_brightness;
+    usb1_auto_brightness_target_ = usb1.auto_brightness_target;
+    usb2_auto_brightness_        = usb2.auto_brightness;
+    usb2_auto_brightness_target_ = usb2.auto_brightness_target;
 
     // Scan /dev/video0-63 and list non-ISP capture nodes
     std::cerr << "[cam] USB cameras found:\n";
@@ -228,6 +232,7 @@ void CameraManager::usb_capture_thread() {
     cv::Mat frame, rgba;
     int frames1 = 0, empty1 = 0, consec1 = 0;
     int frames2 = 0, empty2 = 0, consec2 = 0;
+    int luma_tick1 = 0, luma_tick2 = 0;
 
     // Consecutive empty reads before declaring a camera disconnected.
     // At ~30fps with near-instant V4L2 failures this triggers in ~1 s.
@@ -240,6 +245,9 @@ void CameraManager::usb_capture_thread() {
                        int& good, int& bad, int& consec,
                        std::atomic<float>& brightness_ref,
                        std::atomic<bool>& flip_ref,
+                       std::atomic<bool>&  auto_brightness_ref,
+                       std::atomic<float>& auto_brightness_target_ref,
+                       int& luma_tick,
                        const char* name) -> bool {
         bool got_frame = false;
         {
@@ -247,6 +255,20 @@ void CameraManager::usb_capture_thread() {
             if (!cap.isOpened()) { ok_flag = false; return false; }
             cap.read(frame);
             if (!frame.empty()) {
+                // Adaptive luma compensation: sample every 15 frames (~2/sec at 30fps)
+                if (auto_brightness_ref.load() && ++luma_tick >= 15) {
+                    luma_tick = 0;
+                    cv::Scalar m = cv::mean(frame);  // BGR: [0]=B [1]=G [2]=R
+                    float luma = m[2] * 0.299f + m[1] * 0.587f + m[0] * 0.114f;
+                    if (luma > 1.f) {
+                        float target = auto_brightness_target_ref.load();
+                        float ratio  = target / luma;
+                        float cur    = brightness_ref.load();
+                        float next   = cur + (cur * ratio - cur) * 0.15f;
+                        next = std::clamp(next, 0.25f, 4.0f);
+                        brightness_ref.store(next);
+                    }
+                }
                 float b = brightness_ref.load();
                 if (b != 1.0f)
                     frame.convertTo(frame, -1, static_cast<double>(b), 0.0);
@@ -286,9 +308,11 @@ void CameraManager::usb_capture_thread() {
 
     while (running_) {
         bool any = capture(usb_cap1_, usb1_cap_mtx_, usb1_slot_, usb1_ok_,
-                           frames1, empty1, consec1, usb1_brightness_, usb1_flip_, "usb1");
+                           frames1, empty1, consec1, usb1_brightness_, usb1_flip_,
+                           usb1_auto_brightness_, usb1_auto_brightness_target_, luma_tick1, "usb1");
         any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_,
-                            frames2, empty2, consec2, usb2_brightness_, usb2_flip_, "usb2");
+                            frames2, empty2, consec2, usb2_brightness_, usb2_flip_,
+                            usb2_auto_brightness_, usb2_auto_brightness_target_, luma_tick2, "usb2");
 
         // Auto-reconnect: periodically reopen disconnected cameras when enabled.
         auto now = std::chrono::steady_clock::now();
