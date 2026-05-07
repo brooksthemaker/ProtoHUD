@@ -178,9 +178,7 @@ private:
         float vx, vy;
         float life;
         float life_total;
-        float len;          // half-length in pixels
-        float angle;        // orientation in radians
-        float angle_drift;  // rad/s wobble
+        float len;          // tail length behind head in pixels
         ImU32 color;
     };
     static constexpr int kMaxLineParticles = 64;
@@ -196,10 +194,10 @@ private:
     void  fx_emit(float x, float y, float vx, float vy,
                   float life, float size, ImU32 color);
     void  fx_emit_line(float x, float y, float vx, float vy,
-                       float life, float len, float angle,
-                       float angle_drift, ImU32 color);
+                       float life, float len, ImU32 color);
     void  fx_draw(ImDrawList* dl) const;
     void  fx_draw_lines(ImDrawList* dl) const;
+    void  fx_draw_nebula_cloud(ImDrawList* dl, float fw, float fh) const;
 
     // Per-effect emitters (called from fx_update each frame)
     void  fx_emit_arm_glint    (float ax, float ay, float dx, float dy,
