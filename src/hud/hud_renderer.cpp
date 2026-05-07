@@ -228,6 +228,9 @@ void HudRenderer::draw_frame(const AppState& s, int w, int h) {
     draw_face_indicator         (dl, s.face, fw, fh);
     draw_clock_indicator        (dl, s,      fw, fh);
     draw_timer_alarm_indicator  (dl, s,      fw, fh);
+
+    // Alarm/timer heartbeat pulse — drawn last so it sits above all HUD chrome.
+    fx_draw_alarm_pulse(dl, s, fw, fh);
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -1575,6 +1578,47 @@ void HudRenderer::fx_draw_nebula_cloud(ImDrawList* dl, float fw, float fh) const
         // Right: transparent at left of band, dark at right col
         dl->AddRectFilledMultiColor({ fw-d, 0.f }, { fw, fh },     kClear, c, c, kClear);
     }
+}
+
+// ── Alarm / timer heartbeat pulse ────────────────────────────────────────────
+
+void HudRenderer::fx_draw_alarm_pulse(ImDrawList* dl, const AppState& s,
+                                       float fw, float fh) {
+    const bool alarm_on = s.timer_alarm.alarm_triggered;
+    const bool timer_on = s.timer_alarm.timer_triggered;
+
+    if (!alarm_on && !timer_on) {
+        fx_pulse_phase_ = 1.f;   // park at cycle-end so next trigger starts fresh
+        return;
+    }
+
+    fx_pulse_phase_ += frame_dt_ / 1.5f;
+    if (fx_pulse_phase_ >= 1.f) fx_pulse_phase_ -= 1.f;
+
+    const float phase = fx_pulse_phase_;
+
+    // Alpha: instantaneous attack, exponential decay over the full 1.5 s
+    const float alpha_frac = std::exp(-phase * 4.f);   // 1.0→~0.02 over one cycle
+    const uint8_t a = static_cast<uint8_t>(alpha_frac * 210.f);
+    if (a == 0) return;
+
+    // Depth: sweeps inward during first 30 % of cycle, then holds
+    const float max_depth = std::min(fw, fh) * 0.32f;
+    const float depth     = max_depth * std::min(phase / 0.30f, 1.f);
+    if (depth < 1.f) return;
+
+    const ImU32 base  = alarm_on ? col_.danger : col_.warn;
+    const ImU32 edge  = with_alpha(base, a);
+    const ImU32 clear = with_alpha(base, 0);
+
+    // Left edge: opaque at left, transparent at right
+    dl->AddRectFilledMultiColor({0.f,       0.f}, {depth, fh},       edge,  clear, clear, edge);
+    // Right edge: transparent at left, opaque at right
+    dl->AddRectFilledMultiColor({fw-depth,  0.f}, {fw,    fh},       clear, edge,  edge,  clear);
+    // Top edge: opaque at top, transparent at bottom
+    dl->AddRectFilledMultiColor({0.f,       0.f}, {fw,    depth},    edge,  edge,  clear, clear);
+    // Bottom edge: transparent at top, opaque at bottom
+    dl->AddRectFilledMultiColor({0.f, fh-depth},  {fw,    fh},       clear, clear, edge,  edge);
 }
 
 // Nebula color palette — blue/violet/purple spectrum with occasional pale star
