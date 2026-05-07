@@ -128,6 +128,8 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb2_cfg_ = usb2;
     usb1_brightness_ = usb1.brightness;
     usb2_brightness_ = usb2.brightness;
+    usb1_flip_       = usb1.flip;
+    usb2_flip_       = usb2.flip;
 
     // Scan /dev/video0-63 and list non-ISP capture nodes
     std::cerr << "[cam] USB cameras found:\n";
@@ -237,6 +239,7 @@ void CameraManager::usb_capture_thread() {
                        TexSlot& slot, std::atomic<bool>& ok_flag,
                        int& good, int& bad, int& consec,
                        std::atomic<float>& brightness_ref,
+                       std::atomic<bool>& flip_ref,
                        const char* name) -> bool {
         bool got_frame = false;
         {
@@ -247,6 +250,8 @@ void CameraManager::usb_capture_thread() {
                 float b = brightness_ref.load();
                 if (b != 1.0f)
                     frame.convertTo(frame, -1, static_cast<double>(b), 0.0);
+                if (flip_ref.load())
+                    cv::flip(frame, frame, -1);  // -1 = 180° rotation (both axes)
                 cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
                 got_frame = true;
                 consec = 0;
@@ -281,9 +286,9 @@ void CameraManager::usb_capture_thread() {
 
     while (running_) {
         bool any = capture(usb_cap1_, usb1_cap_mtx_, usb1_slot_, usb1_ok_,
-                           frames1, empty1, consec1, usb1_brightness_, "usb1");
+                           frames1, empty1, consec1, usb1_brightness_, usb1_flip_, "usb1");
         any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_,
-                            frames2, empty2, consec2, usb2_brightness_, "usb2");
+                            frames2, empty2, consec2, usb2_brightness_, usb2_flip_, "usb2");
 
         // Auto-reconnect: periodically reopen disconnected cameras when enabled.
         auto now = std::chrono::steady_clock::now();

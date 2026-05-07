@@ -36,6 +36,7 @@ struct UsbCamConfig {
     // White balance
     bool  auto_wb           = true;   // false = manual white balance
     int   wb_temp           = 4600;   // 2800-6500 K, used when auto_wb=false
+    bool  flip              = false;  // true = rotate 180° (correct upside-down mount)
 };
 
 // CameraManager owns:
@@ -123,8 +124,8 @@ public:
     void set_usb2_ctrl(uint32_t id, int32_t value);
 
     // ── USB config access (for menu read-back and config-save persistence) ────
-    void                update_usb1_cfg(const UsbCamConfig& c) { usb1_cfg_ = c; }
-    void                update_usb2_cfg(const UsbCamConfig& c) { usb2_cfg_ = c; }
+    void                update_usb1_cfg(const UsbCamConfig& c) { usb1_cfg_ = c; usb1_flip_ = c.flip; }
+    void                update_usb2_cfg(const UsbCamConfig& c) { usb2_cfg_ = c; usb2_flip_ = c.flip; }
     const UsbCamConfig& usb1_cfg() const { return usb1_cfg_; }
     const UsbCamConfig& usb2_cfg() const { return usb2_cfg_; }
 
@@ -169,6 +170,8 @@ private:
 
     std::atomic<float> usb1_brightness_ { 1.0f };
     std::atomic<float> usb2_brightness_ { 1.0f };
+    std::atomic<bool>  usb1_flip_       { false };
+    std::atomic<bool>  usb2_flip_       { false };
 
     std::atomic<bool> running_ { false };
     std::thread       usb_thread_;
