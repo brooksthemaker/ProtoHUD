@@ -1150,6 +1150,8 @@ static std::vector<MenuItem> build_menu(
                                        [&state]{ return state.effects_cfg.effect == EffectType::PopupBurst;         }),
         leaf_sel("Compass Turbulence", [&state]{ state.effects_cfg.effect = EffectType::CompassTurbulence;  },
                                        [&state]{ return state.effects_cfg.effect == EffectType::CompassTurbulence;  }),
+        leaf_sel("Nebula Edge",        [&state]{ state.effects_cfg.effect = EffectType::NebulaEdge;         },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::NebulaEdge;         }),
         submenu("Color Palette", std::move(fx_palette_menu)),
     };
 
