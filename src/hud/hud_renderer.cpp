@@ -1597,14 +1597,28 @@ void HudRenderer::fx_draw_alarm_pulse(ImDrawList* dl, const AppState& s,
 
     const float phase = fx_pulse_phase_;
 
-    // Alpha: instantaneous attack, exponential decay over the full 1.5 s
-    const float alpha_frac = std::exp(-phase * 4.f);   // 1.0→~0.02 over one cycle
+    // Double heartbeat envelope: two quick beats in the first 35% of the 1.5 s cycle,
+    // then silence until the next cycle.
+    // kTau  — per-beat decay time constant in phase units (~0.09 s real time at 1.5 s cycle)
+    // kBeat2 — onset of the weaker second beat (lub-DUB gap ~0.22 s real time)
+    static constexpr float kTau   = 0.06f;
+    static constexpr float kBeat2 = 0.15f;
+
+    float alpha_frac = 0.f;
+    if (phase < 0.35f) {
+        const float beat1 = std::exp(-phase / kTau);
+        const float beat2 = (phase >= kBeat2)
+                            ? 0.70f * std::exp(-(phase - kBeat2) / kTau)
+                            : 0.f;
+        alpha_frac = std::max(beat1, beat2);
+    }
+
     const uint8_t a = static_cast<uint8_t>(alpha_frac * 210.f);
     if (a == 0) return;
 
-    // Depth: sweeps inward during first 30 % of cycle, then holds
+    // Depth uses sqrt so the glow lingers spatially a beat longer than the alpha
     const float max_depth = std::min(fw, fh) * 0.32f;
-    const float depth     = max_depth * std::min(phase / 0.30f, 1.f);
+    const float depth     = max_depth * std::sqrt(alpha_frac);
     if (depth < 1.f) return;
 
     const ImU32 base  = alarm_on ? col_.danger : col_.warn;
