@@ -1511,37 +1511,75 @@ void HudRenderer::fx_tick_lines(float dt) {
         if (p.life <= 0.f) {
             line_particles_[i] = line_particles_[--n_line_particles_];
         } else {
-            p.x     += p.vx * dt;
-            p.y     += p.vy * dt;
-            p.angle += p.angle_drift * dt;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
             ++i;
         }
     }
 }
 
 void HudRenderer::fx_emit_line(float x, float y, float vx, float vy,
-                                float life, float len, float angle,
-                                float angle_drift, ImU32 color) {
+                                float life, float len, ImU32 color) {
     if (n_line_particles_ >= kMaxLineParticles) {
-        line_particles_[0] = { x, y, vx, vy, life, life, len, angle, angle_drift, color };
+        line_particles_[0] = { x, y, vx, vy, life, life, len, color };
         return;
     }
-    line_particles_[n_line_particles_++] = { x, y, vx, vy, life, life, len, angle, angle_drift, color };
+    line_particles_[n_line_particles_++] = { x, y, vx, vy, life, life, len, color };
 }
 
+// Draw comets: bright head circle + three-segment tail that fades to transparent.
+// Direction is derived from velocity so the tail always trails the direction of travel.
 void HudRenderer::fx_draw_lines(ImDrawList* dl) const {
     for (int i = 0; i < n_line_particles_; ++i) {
         const LineParticle& p = line_particles_[i];
         const float frac = p.life / p.life_total;
         float af;
-        if      (frac > 0.85f) af = (1.f - frac) / 0.15f;  // fade in
-        else if (frac < 0.25f) af = frac / 0.25f;           // fade out
+        if      (frac > 0.85f) af = (1.f - frac) / 0.15f;
+        else if (frac < 0.25f) af = frac / 0.25f;
         else                   af = 1.f;
-        const uint8_t a   = static_cast<uint8_t>(af * 190.f);
-        const ImU32   col = with_alpha(p.color, a);
-        const float   cx  = std::cos(p.angle) * p.len;
-        const float   cy  = std::sin(p.angle) * p.len;
-        dl->AddLine({ p.x - cx, p.y - cy }, { p.x + cx, p.y + cy }, col, 1.4f);
+
+        // Head leads in direction of travel; tail extends behind
+        const float spd = std::sqrt(p.vx * p.vx + p.vy * p.vy);
+        float dx = 1.f, dy = 0.f;
+        if (spd > 0.01f) { dx = p.vx / spd; dy = p.vy / spd; }
+
+        const ImVec2 head = { p.x + dx * 3.f,           p.y + dy * 3.f };
+        const ImVec2 q1   = { p.x - dx * p.len * 0.25f, p.y - dy * p.len * 0.25f };
+        const ImVec2 q2   = { p.x - dx * p.len * 0.60f, p.y - dy * p.len * 0.60f };
+        const ImVec2 tail = { p.x - dx * p.len,          p.y - dy * p.len };
+
+        const ImU32 c0 = with_alpha(p.color, static_cast<uint8_t>(af * 230.f));
+        const ImU32 c1 = with_alpha(p.color, static_cast<uint8_t>(af * 110.f));
+        const ImU32 c2 = with_alpha(p.color, static_cast<uint8_t>(af *  38.f));
+
+        dl->AddCircleFilled(head, 1.7f, c0, 6);
+        dl->AddLine(head, q1,  c0, 1.5f);
+        dl->AddLine(q1,   q2,  c1, 1.1f);
+        dl->AddLine(q2,   tail, c2, 0.8f);
+    }
+}
+
+// Layered dark-blue/violet gradient vignette along all four edges to evoke a nebula cloud.
+void HudRenderer::fx_draw_nebula_cloud(ImDrawList* dl, float fw, float fh) const {
+    struct CloudLayer { float depth; ImU32 edge_col; };
+    static const CloudLayer layers[] = {
+        {  80.f, IM_COL32(  3,   2,  18, 215) },   // outermost — near-opaque dark blue
+        { 130.f, IM_COL32(  8,   4,  38, 130) },   // mid       — deep violet
+        { 195.f, IM_COL32( 20,   8,  65,  55) },   // inner     — faint purple haze
+    };
+    const ImU32 kClear = IM_COL32(0, 0, 0, 0);
+
+    for (const auto& l : layers) {
+        const float d = l.depth;
+        const ImU32 c = l.edge_col;
+        // Top: dark at top row, transparent at bottom of band
+        dl->AddRectFilledMultiColor({ 0.f, 0.f },   { fw, d },      c, c, kClear, kClear);
+        // Bottom: transparent at top of band, dark at bottom row
+        dl->AddRectFilledMultiColor({ 0.f, fh-d }, { fw, fh },     kClear, kClear, c, c);
+        // Left: dark at left col, transparent at right of band
+        dl->AddRectFilledMultiColor({ 0.f, 0.f },   { d, fh },      c, kClear, kClear, c);
+        // Right: transparent at left of band, dark at right col
+        dl->AddRectFilledMultiColor({ fw-d, 0.f }, { fw, fh },     kClear, c, c, kClear);
     }
 }
 
@@ -1574,18 +1612,16 @@ void HudRenderer::fx_emit_nebula_edge(float fw, float fh, float dt) {
     // Each edge described by: spawn origin, along-edge unit vector, inward unit vector,
     // edge length, and base line-segment angle (parallel to edge).
     struct EdgeDef {
-        float ox, oy;          // start corner
-        float ax, ay;          // along-edge direction
-        float ix, iy;          // inward-normal direction
+        float ox, oy;   // start corner
+        float ax, ay;   // along-edge unit vector
+        float ix, iy;   // inward-normal unit vector
         float edge_len;
-        float seg_angle;       // base orientation for line segments (rad)
     };
-    static constexpr float kPi = 3.14159265f;
     const EdgeDef edges[] = {
-        { 0.f,  0.f,  1.f, 0.f,  0.f,  1.f, fw, 0.f            },  // top    → drift down
-        { 0.f,  fh,   1.f, 0.f,  0.f, -1.f, fw, 0.f            },  // bottom → drift up
-        { 0.f,  0.f,  0.f, 1.f,  1.f,  0.f, fh, kPi * 0.5f    },  // left   → drift right
-        { fw,   0.f,  0.f, 1.f, -1.f,  0.f, fh, kPi * 0.5f    },  // right  → drift left
+        { 0.f, 0.f,  1.f, 0.f,  0.f,  1.f, fw },  // top    → drift down
+        { 0.f, fh,   1.f, 0.f,  0.f, -1.f, fw },  // bottom → drift up
+        { 0.f, 0.f,  0.f, 1.f,  1.f,  0.f, fh },  // left   → drift right
+        { fw,  0.f,  0.f, 1.f, -1.f,  0.f, fh },  // right  → drift left
     };
 
     for (const auto& e : edges) {
@@ -1601,18 +1637,16 @@ void HudRenderer::fx_emit_nebula_edge(float fw, float fh, float dt) {
             fx_emit(px, py, vx, vy, 1.6f + rf() * 2.2f, sz, ncol());
         }
 
-        // Line segment particle
+        // Comet streak particle — tail length drives visual length
         if (rf() < line_rate * dt) {
-            const float t     = rf() * e.edge_len;
-            const float px    = e.ox + e.ax * t;
-            const float py    = e.oy + e.ay * t;
-            const float spd   = 3.f + rf() * 12.f;
-            const float vx    = e.ix * spd + e.ax * (rf() - 0.5f) * 6.f;
-            const float vy    = e.iy * spd + e.ay * (rf() - 0.5f) * 6.f;
-            const float len   = 5.f + rf() * 22.f;
-            const float angle = e.seg_angle + (rf() - 0.5f) * 0.45f;
-            const float drift = (rf() - 0.5f) * 0.22f;
-            fx_emit_line(px, py, vx, vy, 2.2f + rf() * 2.5f, len, angle, drift, ncol());
+            const float t   = rf() * e.edge_len;
+            const float px  = e.ox + e.ax * t;
+            const float py  = e.oy + e.ay * t;
+            const float spd = 4.f + rf() * 14.f;
+            const float vx  = e.ix * spd + e.ax * (rf() - 0.5f) * 6.f;
+            const float vy  = e.iy * spd + e.ay * (rf() - 0.5f) * 6.f;
+            const float len = 14.f + rf() * 38.f;   // 14–52 px tail
+            fx_emit_line(px, py, vx, vy, 2.2f + rf() * 2.5f, len, ncol());
         }
     }
 }
@@ -1772,6 +1806,7 @@ void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
     // PopupBurst is event-driven (handled above); no per-frame emission needed.
 
     if (effect == EffectType::NebulaEdge) {
+        fx_draw_nebula_cloud(dl, fw, fh);   // cloud vignette drawn first, under particles
         fx_emit_nebula_edge(fw, fh, dt);
     }
 
