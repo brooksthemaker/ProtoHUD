@@ -347,6 +347,8 @@ void DmaCamera::on_request_complete(Request* req) {
             last_af_state_.store(meta.get(controls::AfState).value_or(0));
         if (camCtrls.count(&controls::LensPosition))
             last_lens_pos_.store(meta.get(controls::LensPosition).value_or(0.0f));
+        if (camCtrls.count(&controls::AnalogueGain))
+            last_analogue_gain_.store(meta.get(controls::AnalogueGain).value_or(1.0f));
     } catch (...) {}
 
     auto it = req_to_slot_.find(req);

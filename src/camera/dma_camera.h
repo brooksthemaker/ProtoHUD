@@ -86,9 +86,10 @@ public:
     void set_colour_gains(float rg, float bg);     // raw ISP gains (typically 0.5–4.0)
     void set_colour_temp(int kelvin);              // maps 2800–7500 K → ColourGains LUT
 
-    bool is_ok()  const { return ok_; }
-    int  width()  const { return cfg_.width; }
-    int  height() const { return cfg_.height; }
+    bool  is_ok()           const { return ok_; }
+    int   width()           const { return cfg_.width; }
+    int   height()          const { return cfg_.height; }
+    float analogue_gain()   const { return last_analogue_gain_.load(); }
 
 private:
     enum class SlotState { IDLE, CAPTURING, READY, RENDERING };
@@ -168,6 +169,7 @@ private:
     // ── Latest camera metadata (written by capture thread via atomics) ────────
     std::atomic<int>   last_af_state_      { 0 };        // AfState enum value
     std::atomic<float> last_lens_pos_      { 0.0f };     // LensPosition diopters
+    std::atomic<float> last_analogue_gain_ { 1.0f };     // AnalogueGain (1.0 = ISO100 equiv)
 
     Config cfg_;
     bool   ok_ = false;

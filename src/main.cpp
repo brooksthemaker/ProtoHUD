@@ -450,6 +450,12 @@ static std::vector<MenuItem> build_menu(
                 state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
                 state.night_vision.shutter_us  = v ? 40000 : 16667;
             }),
+        toggle("Auto Night Vision",
+            [&state]{ return state.night_vision.auto_nv; },
+            [&state](bool v){ state.night_vision.auto_nv = v; }),
+        slider("Auto NV Gain Threshold", 1.5f, 16.f, 0.5f, "x",
+            [&state]{ return state.night_vision.auto_nv_gain_threshold; },
+            [&state](float v){ state.night_vision.auto_nv_gain_threshold = v; }),
         slider("Exposure (EV)", -3.f, 3.f, 0.5f, " EV",
             [&state]{ return state.night_vision.exposure_ev; },
             [&state](float v){ state.night_vision.exposure_ev = v; }),
@@ -1780,8 +1786,10 @@ int main(int argc, char* argv[]) {
 
     if (cfg.contains("night_vision")) {
         auto& jnv = cfg["night_vision"];
-        state.night_vision.exposure_ev = jnv.value("exposure_ev",  0.0f);
-        state.night_vision.shutter_us  = jnv.value("shutter_us",  33333);
+        state.night_vision.exposure_ev            = jnv.value("exposure_ev",             0.0f);
+        state.night_vision.shutter_us             = jnv.value("shutter_us",              33333);
+        state.night_vision.auto_nv                = jnv.value("auto_nv",                 false);
+        state.night_vision.auto_nv_gain_threshold = jnv.value("auto_nv_gain_threshold",  4.0f);
     }
 
     if (cfg.contains("clock")) {
@@ -2334,7 +2342,29 @@ int main(int argc, char* argv[]) {
         {
             static NightVisionState s_last_nv{};
             static bool s_first = true;
-            const auto& nv = snap.night_vision;
+            auto& nv = snap.night_vision;
+
+            // Auto-NV: enable/disable NV based on ISP analogue gain as a dark proxy.
+            // High gain (bright amplification) means the ISP is compensating for low light.
+            if (nv.auto_nv) {
+                float gain_l = cameras.owl_left()  ? cameras.owl_left()->analogue_gain()  : 1.f;
+                float gain_r = cameras.owl_right() ? cameras.owl_right()->analogue_gain() : 1.f;
+                float gain   = std::max(gain_l, gain_r);
+                bool  want   = (gain >= nv.auto_nv_gain_threshold);
+                if (want != nv.nv_enabled) {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.night_vision.nv_enabled = want;
+                    if (want) {
+                        state.night_vision.exposure_ev = 3.0f;
+                        state.night_vision.shutter_us  = 40000;
+                    } else {
+                        state.night_vision.exposure_ev = 0.0f;
+                        state.night_vision.shutter_us  = 16667;
+                    }
+                    nv = state.night_vision;
+                }
+            }
+
             if (s_first ||
                 nv.nv_enabled  != s_last_nv.nv_enabled  ||
                 nv.exposure_ev != s_last_nv.exposure_ev  ||
@@ -2492,6 +2522,11 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["flip_vertical"]             = hud.config().hud_flip_vertical;
         cfg["hud"]["effects"]["type"]           = static_cast<int>(state.effects_cfg.effect);
         cfg["hud"]["effects"]["palette"]        = static_cast<int>(state.effects_cfg.palette);
+
+        cfg["night_vision"]["exposure_ev"]            = state.night_vision.exposure_ev;
+        cfg["night_vision"]["shutter_us"]             = state.night_vision.shutter_us;
+        cfg["night_vision"]["auto_nv"]                = state.night_vision.auto_nv;
+        cfg["night_vision"]["auto_nv_gain_threshold"] = state.night_vision.auto_nv_gain_threshold;
 
         cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
         cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;

@@ -133,10 +133,12 @@ struct CameraFocusState {
 };
 
 struct NightVisionState {
-    float exposure_ev   = 0.0f;  // -3.0 to +3.0
-    int   shutter_us    = 33333; // microseconds (40 to 1000000)
-    bool  nv_enabled    = false; // night vision preset active (HUD indicator + apply flag)
-    bool  csi_awb_on    = true;  // CSI camera auto white balance (applies to both OWLsight eyes)
+    float exposure_ev        = 0.0f;  // -3.0 to +3.0
+    int   shutter_us         = 33333; // microseconds (40 to 1000000)
+    bool  nv_enabled         = false; // night vision preset active (HUD indicator + apply flag)
+    bool  csi_awb_on         = true;  // CSI camera auto white balance (applies to both OWLsight eyes)
+    bool  auto_nv            = false; // auto-enable NV when scene is dark
+    float auto_nv_gain_threshold = 4.0f; // AnalogueGain above which auto-NV activates
 };
 
 struct ClockConfig {
