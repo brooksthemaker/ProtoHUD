@@ -173,14 +173,33 @@ private:
     int       n_particles_ = 0;
     float     fx_prev_heading_ = 0.f;   // for turbulence heading delta
 
+    struct LineParticle {
+        float x, y;
+        float vx, vy;
+        float life;
+        float life_total;
+        float len;          // half-length in pixels
+        float angle;        // orientation in radians
+        float angle_drift;  // rad/s wobble
+        ImU32 color;
+    };
+    static constexpr int kMaxLineParticles = 64;
+    LineParticle  line_particles_[kMaxLineParticles] = {};
+    int           n_line_particles_ = 0;
+
     // Resolve palette → color given current snap
     ImU32 fx_palette_color(const AppState& s) const;
 
     // Low-level pool management
     void  fx_tick(float dt);
+    void  fx_tick_lines(float dt);
     void  fx_emit(float x, float y, float vx, float vy,
                   float life, float size, ImU32 color);
+    void  fx_emit_line(float x, float y, float vx, float vy,
+                       float life, float len, float angle,
+                       float angle_drift, ImU32 color);
     void  fx_draw(ImDrawList* dl) const;
+    void  fx_draw_lines(ImDrawList* dl) const;
 
     // Per-effect emitters (called from fx_update each frame)
     void  fx_emit_arm_glint    (float ax, float ay, float dx, float dy,
@@ -189,6 +208,7 @@ private:
     void  fx_emit_burst        (float cx, float cy, int count, ImU32 c);
     void  fx_emit_turbulence   (float tape_cx, float tape_y,
                                  float tw, float th, ImU32 c, float dt);
+    void  fx_emit_nebula_edge  (float fw, float fh, float dt);
 
     // Master dispatcher — called at end of draw_frame
     void  fx_update(ImDrawList* dl, const AppState& s,

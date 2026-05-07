@@ -183,6 +183,7 @@ void HudRenderer::begin_frame(float dt) {
     s_glow_intensity  = cfg_.glow_intensity;
     s_glow_color_base = col_.glow_color;
     fx_tick(dt);
+    fx_tick_lines(dt);
 }
 
 void HudRenderer::render_overlay() {
@@ -1501,6 +1502,121 @@ void HudRenderer::fx_draw(ImDrawList* dl) const {
     }
 }
 
+void HudRenderer::fx_tick_lines(float dt) {
+    if (dt <= 0.f || n_line_particles_ == 0) return;
+    int i = 0;
+    while (i < n_line_particles_) {
+        LineParticle& p = line_particles_[i];
+        p.life -= dt;
+        if (p.life <= 0.f) {
+            line_particles_[i] = line_particles_[--n_line_particles_];
+        } else {
+            p.x     += p.vx * dt;
+            p.y     += p.vy * dt;
+            p.angle += p.angle_drift * dt;
+            ++i;
+        }
+    }
+}
+
+void HudRenderer::fx_emit_line(float x, float y, float vx, float vy,
+                                float life, float len, float angle,
+                                float angle_drift, ImU32 color) {
+    if (n_line_particles_ >= kMaxLineParticles) {
+        line_particles_[0] = { x, y, vx, vy, life, life, len, angle, angle_drift, color };
+        return;
+    }
+    line_particles_[n_line_particles_++] = { x, y, vx, vy, life, life, len, angle, angle_drift, color };
+}
+
+void HudRenderer::fx_draw_lines(ImDrawList* dl) const {
+    for (int i = 0; i < n_line_particles_; ++i) {
+        const LineParticle& p = line_particles_[i];
+        const float frac = p.life / p.life_total;
+        float af;
+        if      (frac > 0.85f) af = (1.f - frac) / 0.15f;  // fade in
+        else if (frac < 0.25f) af = frac / 0.25f;           // fade out
+        else                   af = 1.f;
+        const uint8_t a   = static_cast<uint8_t>(af * 190.f);
+        const ImU32   col = with_alpha(p.color, a);
+        const float   cx  = std::cos(p.angle) * p.len;
+        const float   cy  = std::sin(p.angle) * p.len;
+        dl->AddLine({ p.x - cx, p.y - cy }, { p.x + cx, p.y + cy }, col, 1.4f);
+    }
+}
+
+// Nebula color palette — blue/violet/purple spectrum with occasional pale star
+static const ImU32 kNebulaColors[] = {
+    IM_COL32( 30,  10,  90, 255),   // deep indigo
+    IM_COL32( 60,  30, 180, 255),   // blue-violet
+    IM_COL32( 30, 100, 200, 255),   // steel blue
+    IM_COL32(150, 130, 240, 255),   // pale lavender
+    IM_COL32(200, 200, 255, 255),   // near-white blue
+    IM_COL32(120,  30, 200, 255),   // hot purple
+    IM_COL32( 80,  60, 220, 255),   // periwinkle
+    IM_COL32(  0,  80, 160, 255),   // deep ocean blue
+};
+static constexpr int kNebCount = static_cast<int>(sizeof(kNebulaColors) / sizeof(kNebulaColors[0]));
+
+// Emit nebula-style dot and line particles along all four screen edges.
+void HudRenderer::fx_emit_nebula_edge(float fw, float fh, float dt) {
+    static unsigned rngN = 0x7F3A9B1Cu;
+    auto step  = [&]() -> unsigned {
+        rngN ^= rngN << 13; rngN ^= rngN >> 17; rngN ^= rngN << 5;
+        return rngN;
+    };
+    auto rf    = [&]() { return static_cast<float>(step() & 0xFFFF) / 65535.f; };
+    auto ncol  = [&]() { return kNebulaColors[step() % kNebCount]; };
+
+    const float dot_rate  = 9.0f;   // per edge per second
+    const float line_rate = 3.5f;
+
+    // Each edge described by: spawn origin, along-edge unit vector, inward unit vector,
+    // edge length, and base line-segment angle (parallel to edge).
+    struct EdgeDef {
+        float ox, oy;          // start corner
+        float ax, ay;          // along-edge direction
+        float ix, iy;          // inward-normal direction
+        float edge_len;
+        float seg_angle;       // base orientation for line segments (rad)
+    };
+    static constexpr float kPi = 3.14159265f;
+    const EdgeDef edges[] = {
+        { 0.f,  0.f,  1.f, 0.f,  0.f,  1.f, fw, 0.f            },  // top    → drift down
+        { 0.f,  fh,   1.f, 0.f,  0.f, -1.f, fw, 0.f            },  // bottom → drift up
+        { 0.f,  0.f,  0.f, 1.f,  1.f,  0.f, fh, kPi * 0.5f    },  // left   → drift right
+        { fw,   0.f,  0.f, 1.f, -1.f,  0.f, fh, kPi * 0.5f    },  // right  → drift left
+    };
+
+    for (const auto& e : edges) {
+        // Dot particle
+        if (rf() < dot_rate * dt) {
+            const float t   = rf() * e.edge_len;
+            const float px  = e.ox + e.ax * t;
+            const float py  = e.oy + e.ay * t;
+            const float spd = 5.f + rf() * 18.f;
+            const float vx  = e.ix * spd + e.ax * (rf() - 0.5f) * 8.f;
+            const float vy  = e.iy * spd + e.ay * (rf() - 0.5f) * 8.f;
+            const float sz  = 0.8f + rf() * 2.4f;
+            fx_emit(px, py, vx, vy, 1.6f + rf() * 2.2f, sz, ncol());
+        }
+
+        // Line segment particle
+        if (rf() < line_rate * dt) {
+            const float t     = rf() * e.edge_len;
+            const float px    = e.ox + e.ax * t;
+            const float py    = e.oy + e.ay * t;
+            const float spd   = 3.f + rf() * 12.f;
+            const float vx    = e.ix * spd + e.ax * (rf() - 0.5f) * 6.f;
+            const float vy    = e.iy * spd + e.ay * (rf() - 0.5f) * 6.f;
+            const float len   = 5.f + rf() * 22.f;
+            const float angle = e.seg_angle + (rf() - 0.5f) * 0.45f;
+            const float drift = (rf() - 0.5f) * 0.22f;
+            fx_emit_line(px, py, vx, vy, 2.2f + rf() * 2.5f, len, angle, drift, ncol());
+        }
+    }
+}
+
 // Emit a handful of sparks at random positions along an indicator arm.
 void HudRenderer::fx_emit_arm_glint(float ax, float ay, float dx, float dy,
                                      float diag_len, ImU32 c, float dt) {
@@ -1655,5 +1771,10 @@ void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
 
     // PopupBurst is event-driven (handled above); no per-frame emission needed.
 
+    if (effect == EffectType::NebulaEdge) {
+        fx_emit_nebula_edge(fw, fh, dt);
+    }
+
     fx_draw(dl);
+    fx_draw_lines(dl);
 }
