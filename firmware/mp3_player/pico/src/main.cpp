@@ -14,13 +14,15 @@
 #include "input/encoder.h"
 #include "ble/ble_control.h"
 #include "ui/display.h"
+#include "ui/toast.h"
 #include "ui/screens/now_playing.h"
 #include "ui/screens/file_browser.h"
 #include "ui/screens/settings.h"
 #include "ui/screens/bt_devices.h"
+#include "ui/screens/charging_overlay.h"
 #include "../include/pins.h"
 
-// ── Global instances ──────────────────────────────────────────────────────────
+// ── Global instances ─────────────────────────────────────────────────────
 
 static AppState         g_state;
 static SdCard           g_sd;
@@ -32,17 +34,17 @@ static UsbMsc           g_msc;
 static Display          g_display(g_state, g_encoder);
 
 // UI screens (created on their LVGL parent objects in setup()).
-static NowPlayingScreen g_scr_now;
+static NowPlayingScreen  g_scr_now;
 static FileBrowserScreen g_scr_files;
-static SettingsScreen   g_scr_settings;
-static BtDevicesScreen  g_scr_bt;
+static SettingsScreen    g_scr_settings;
+static BtDevicesScreen   g_scr_bt;
 
-static lv_obj_t* g_scr_now_obj     = nullptr;
-static lv_obj_t* g_scr_files_obj   = nullptr;
-static lv_obj_t* g_scr_settings_obj= nullptr;
-static lv_obj_t* g_scr_bt_obj      = nullptr;
+static lv_obj_t* g_scr_now_obj      = nullptr;
+static lv_obj_t* g_scr_files_obj    = nullptr;
+static lv_obj_t* g_scr_settings_obj = nullptr;
+static lv_obj_t* g_scr_bt_obj       = nullptr;
 
-// ── Core 1 — audio decode loop ────────────────────────────────────────────────
+// ── Core 1 — audio decode loop ────────────────────────────────────────────
 
 void setup1() { /* Core 1 stack is ready */ }
 
@@ -51,7 +53,7 @@ void loop1() {
     g_player.run();
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────────
 
 static void switch_screen(lv_obj_t* scr) {
     lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_FADE_ON, 150, 0, false);
@@ -105,7 +107,13 @@ static void apply_mode_switch(AppMode target) {
     g_state.mode_switch_pending.store(false);
 }
 
-// ── Setup ─────────────────────────────────────────────────────────────────────
+// Called from NowPlayingScreen::update() (Core 0) when the track changes.
+// Separate from Toast::show() to keep now_playing.cpp free of toast.h dependency.
+void Toast_show_from_update(const char* title) {
+    Toast::show(title);
+}
+
+// ── Setup ────────────────────────────────────────────────────────────────
 
 void setup() {
     g_state.init();
@@ -156,11 +164,15 @@ void setup() {
         g_bridge.send_audio_frame(pcm, pairs);
     };
     g_player.on_track_changed = [](const TrackInfo& info) {
-        g_ble.notify_track(info);
+        g_ble.notify_track(info);  // BLE notification (not LVGL — safe from Core 1)
     };
 
     // Display + LVGL.
     g_display.begin();
+
+    // Toast and charging overlay live on lv_layer_top(); init after lv_init().
+    Toast::init();
+    ChargingOverlay::init();
 
     // Create LVGL screens.
     g_scr_now_obj      = lv_obj_create(nullptr);
@@ -209,6 +221,9 @@ void setup() {
     g_scr_settings.on_volume_change = [](uint8_t v) {
         g_player.set_volume(v);
         g_bridge.set_volume(v);
+        char buf[24];
+        snprintf(buf, sizeof(buf), "Volume: %u%%", v);
+        Toast::show(buf, 1500);
     };
     g_scr_settings.on_shuffle_change = [](bool s) {
         AppLock lk(g_state);
@@ -260,12 +275,20 @@ void setup() {
         g_player.play();
 }
 
-// ── Main loop (Core 0) ────────────────────────────────────────────────────────
+// ── Main loop (Core 0) ───────────────────────────────────────────────────
 
 void loop() {
     // Handle pending mode switches (requested by UI or BLE).
     if (g_state.mode_switch_pending.load()) {
         apply_mode_switch(g_state.requested_mode.load());
+    }
+
+    // Show / hide USB overlay when USB MSC state changes.
+    static bool s_last_usb = false;
+    const bool  usb_now    = g_state.usb_active;
+    if (usb_now != s_last_usb) {
+        s_last_usb = usb_now;
+        ChargingOverlay::set_visible(usb_now);
     }
 
     // Drive USB MSC and BLE.
@@ -278,14 +301,16 @@ void loop() {
     // Update LVGL + encoder + display at ~30 fps.
     g_display.task();
 
-    // Update Now Playing screen ~1 Hz (cheap string ops).
+    // Drive toast slide-out timer.
+    Toast::task();
+
+    // Update Now Playing screen ~1 Hz (cheap string ops + art refresh).
     static uint32_t last_ui_update = 0;
     const uint32_t now = millis();
     if (now - last_ui_update >= 1000) {
         last_ui_update = now;
-        AppState* s = &g_state;  // snapshot under lock not needed for display
-        g_scr_now.update(*s);
-        g_scr_settings.update(*s);
+        g_scr_now.update(g_state);
+        g_scr_settings.update(g_state);
     }
 
     // Tiny yield so FreeRTOS idle task can run.

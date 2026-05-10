@@ -142,6 +142,7 @@ bool SdPlayer::open_track(const std::string& path) {
     TrackInfo info;
     strncpy(info.path, path.c_str(), sizeof(info.path) - 1);
     read_tags(path, info);
+    extract_cover_art(path);  // fills state_.cover_art before mutex section
 
     mutex_enter_blocking(&state_.mtx);
     state_.playback.current = info;
@@ -186,7 +187,43 @@ void SdPlayer::read_tags(const std::string& path, TrackInfo& out) {
     }
 }
 
-// ── Thread-safe controls ──────────────────────────────────────────────────────
+void SdPlayer::extract_cover_art(const std::string& track_path) {
+    CoverArtBuf& art = state_.cover_art;
+
+    // Compute the directory containing this track.
+    const size_t slash = track_path.rfind('/');
+    const std::string dir = (slash != std::string::npos)
+                            ? track_path.substr(0, slash)
+                            : std::string("/");
+
+    // Common cover art filenames, tried in order.
+    static const char* const k_names[] = {
+        "cover.jpg", "Cover.jpg", "folder.jpg", "Folder.jpg",
+        "album.jpg", "Album.jpg", nullptr
+    };
+
+    for (const char* const* n = k_names; *n; ++n) {
+        const std::string p = dir + "/" + *n;
+        File f = SD.open(p.c_str(), FILE_READ);
+        if (!f) continue;
+
+        const size_t got = f.read(art.data, CoverArtBuf::MAX_BYTES);
+        f.close();
+
+        // Validate JPEG SOI marker (FF D8).
+        if (got >= 4 && art.data[0] == 0xFF && art.data[1] == 0xD8) {
+            art.len.store(static_cast<int32_t>(got), std::memory_order_relaxed);
+            art.generation.fetch_add(1, std::memory_order_release);
+            return;
+        }
+    }
+
+    // No art found for this track.
+    art.len.store(-1, std::memory_order_relaxed);
+    art.generation.fetch_add(1, std::memory_order_release);
+}
+
+// ── Thread-safe controls ───────────────────────────────────────────────────
 
 void SdPlayer::play()   { playing_.store(true); }
 void SdPlayer::pause()  { playing_.store(false); }

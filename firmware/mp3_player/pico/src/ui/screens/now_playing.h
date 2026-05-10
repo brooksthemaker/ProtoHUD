@@ -4,25 +4,21 @@
 
 // Now Playing screen layout (320×240):
 //
-//  ┌──────────────────────────────────────────────────┐
+//  ┌────────────────────────────────────────────────┐
 //  │  ♪ MP3Player        [BLE] [BT]     vol 80%       │ h=28 status bar
-//  ├──────────────────────────────────────────────────┤
-//  │        Artist Name                               │ y=55
-//  │        Track Title (scrolls if long)             │ y=80
-//  │        Album · 4:12                              │ y=110
+//  ├────────────────────────────────────────────────┤
+//  │ [────]  Artist Name                           │ y=32 art (80×80)
+//  │ [ art]  Track Title (scrolls if long)        │ y=52 title
+//  │ [────]  Album                                 │ y=74 album
 //  │  ────────────────────────────────────────────    │
-//  │  1:32  ████████░░░░░░░░░░░░░░░░░░░░░░  4:12     │ y=145 seek bar
-//  │  ────────────────────────────────────────────    │
-//  │   [|◄◄]        [ ►► / ‖‖ ]        [►►|]         │ y=178
-//  │  Shuffle: ON   Repeat: ALL   7 / 43              │ y=218
-//  └──────────────────────────────────────────────────┘
+//  │  1:32  ████████░░░░░░░░░░░░░░░░░░░░░░  4:12     │ y=118 seek bar
+//  │   [|◄◄]       [ ►► / ‖‖ ]       [►►|]         │ y=148
+//  │  Shuffle: ON   Repeat: ALL   7 / 43              │ bottom
+//  └────────────────────────────────────────────────┘
 
 class NowPlayingScreen {
 public:
-    // Create LVGL objects on the given parent screen object.
     void create(lv_obj_t* parent);
-
-    // Call ~1 Hz or whenever playback state changes.
     void update(const AppState& state);
 
 private:
@@ -40,5 +36,6 @@ private:
     lv_obj_t* lbl_ble_      = nullptr;
     lv_obj_t* lbl_bt_       = nullptr;
 
-    static char fmt_time(char* buf, uint32_t secs);
+    // Generation counter from CoverArtBuf; UINT32_MAX forces load on first update.
+    uint32_t last_art_gen_  = 0xFFFFFFFFu;
 };

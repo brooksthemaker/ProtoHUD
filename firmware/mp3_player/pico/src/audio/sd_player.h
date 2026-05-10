@@ -46,6 +46,9 @@ private:
     bool open_track(const std::string& path);
     void apply_volume(int16_t* pcm, size_t samples);
     void read_tags(const std::string& path, TrackInfo& out);
+    // Scans for cover.jpg / folder.jpg in the track directory and fills
+    // state_.cover_art. Increments generation (release) so Core 0 sees the data.
+    void extract_cover_art(const std::string& track_path);
 
     AppState& state_;
 

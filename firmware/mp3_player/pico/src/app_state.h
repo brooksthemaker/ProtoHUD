@@ -41,6 +41,17 @@ struct BtBridgeState {
     bool    bridge_ready     = false;
 };
 
+// Cover art shared between Core 1 (fills JPEG) and Core 0 (renders to canvas).
+// Write protocol: Core 1 fills data[], stores len (relaxed), then increments
+// generation with memory_order_release. Core 0 reads generation with acquire
+// to establish the happens-before relationship before reading data[].
+struct CoverArtBuf {
+    static constexpr size_t MAX_BYTES = 16384;
+    uint8_t               data[MAX_BYTES];
+    std::atomic<int32_t>  len        { 0 };  // -1 = no art; 0 = not yet set; >0 = JPEG bytes
+    std::atomic<uint32_t> generation { 0 };  // incremented by Core 1 on each track open
+};
+
 // Shared state accessed by both cores and all tasks.
 // Hot-path fields use std::atomic; multi-field reads use the pico mutex.
 struct AppState {
@@ -53,6 +64,7 @@ struct AppState {
     // Playback (guard with mtx for multi-field reads)
     PlaybackState  playback;
     BtBridgeState  bt;
+    CoverArtBuf    cover_art;
 
     bool sd_mounted = false;
     bool usb_active = false;
