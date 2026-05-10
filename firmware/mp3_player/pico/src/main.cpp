@@ -107,12 +107,6 @@ static void apply_mode_switch(AppMode target) {
     g_state.mode_switch_pending.store(false);
 }
 
-// Called from NowPlayingScreen::update() (Core 0) when the track changes.
-// Separate from Toast::show() to keep now_playing.cpp free of toast.h dependency.
-void Toast_show_from_update(const char* title) {
-    Toast::show(title);
-}
-
 // ── Setup ────────────────────────────────────────────────────────────────
 
 void setup() {
@@ -164,7 +158,7 @@ void setup() {
         g_bridge.send_audio_frame(pcm, pairs);
     };
     g_player.on_track_changed = [](const TrackInfo& info) {
-        g_ble.notify_track(info);  // BLE notification (not LVGL — safe from Core 1)
+        g_ble.notify_track(info);  // BLE AVRCP notification (safe from Core 1)
     };
 
     // Display + LVGL.
@@ -205,7 +199,6 @@ void setup() {
         auto tracks = sd.collect_tracks(path.substr(0, path.rfind('/')));
         TrackQueue q;
         q.load(tracks, g_state.playback.shuffled);
-        // Jump to the selected file.
         for (size_t i = 0; i < tracks.size(); ++i) {
             if (tracks[i] == path) { q.jump(i); break; }
         }
@@ -221,6 +214,7 @@ void setup() {
     g_scr_settings.on_volume_change = [](uint8_t v) {
         g_player.set_volume(v);
         g_bridge.set_volume(v);
+        // Toast::show() is safe here: this callback fires inside lv_task_handler().
         char buf[24];
         snprintf(buf, sizeof(buf), "Volume: %u%%", v);
         Toast::show(buf, 1500);
@@ -304,7 +298,7 @@ void loop() {
     // Drive toast slide-out timer.
     Toast::task();
 
-    // Update Now Playing screen ~1 Hz (cheap string ops + art refresh).
+    // Update Now Playing screen ~1 Hz (cheap string ops + cover art refresh).
     static uint32_t last_ui_update = 0;
     const uint32_t now = millis();
     if (now - last_ui_update >= 1000) {

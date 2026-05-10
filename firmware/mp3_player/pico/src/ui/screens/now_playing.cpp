@@ -1,6 +1,7 @@
 #include "now_playing.h"
 #include "../theme.h"
 #include "../album_art.h"
+#include "../toast.h"
 #include <cstdio>
 #include <cstring>
 
@@ -46,7 +47,7 @@ void NowPlayingScreen::create(lv_obj_t* parent) {
     // ── Album art (80×80, x=8, y=32) ───────────────────────────────────
     s_art.create(parent, 8, 32);
 
-    // ── Track info (right of art, x=96) ───────────────────────────────
+    // ── Track info (right of art, x=96, w=218) ──────────────────────────
     lbl_artist_ = lv_label_create(parent);
     lv_label_set_text(lbl_artist_, "Artist");
     lv_label_set_long_mode(lbl_artist_, LV_LABEL_LONG_DOT);
@@ -126,19 +127,20 @@ void NowPlayingScreen::create(lv_obj_t* parent) {
 }
 
 void NowPlayingScreen::update(const AppState& state) {
-    // Refresh album art when Core 1 signals a new track (generation change).
+    // Refresh album art and show toast when Core 1 opens a new track.
+    // update() runs inside lv_task_handler() on Core 0, so Toast::show() is safe.
     const uint32_t gen = state.cover_art.generation.load(std::memory_order_acquire);
     if (gen != last_art_gen_) {
         last_art_gen_ = gen;
         const int32_t len = state.cover_art.len.load(std::memory_order_relaxed);
-        if (len > 0) {
+        if (len > 0)
             s_art.load_jpeg(state.cover_art.data, static_cast<size_t>(len));
-        } else {
+        else
             s_art.show_placeholder();
-        }
-        // Toast the track title whenever the art generation changes (i.e. track changed).
+
+        // Toast the track title on every track change.
         const char* title = state.playback.current.title;
-        Toast_show_from_update(title[0] ? title : state.playback.current.path);
+        Toast::show(title[0] ? title : "Unknown Track");
     }
 
     char buf[64];
