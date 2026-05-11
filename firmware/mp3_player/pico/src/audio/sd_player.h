@@ -5,6 +5,7 @@
 #include <atomic>
 #include "track_queue.h"
 #include "../app_state.h"
+#include "eq.h"
 
 // MP3/FLAC decoder running on Core 1.
 // Reads compressed audio from SD, decodes frame-by-frame, and calls
@@ -28,6 +29,7 @@ public:
     void skip_next();
     void skip_prev();
     void set_volume(uint8_t vol_0_100);   // applied as integer gain shift
+    void set_eq_preset(EqPreset p);       // picked up by Core 1 between frames
     void load_queue(TrackQueue q, bool play_immediately = true);
     void jump_to(size_t queue_index);
 
@@ -46,21 +48,21 @@ private:
     bool open_track(const std::string& path);
     void apply_volume(int16_t* pcm, size_t samples);
     void read_tags(const std::string& path, TrackInfo& out);
-    // Scans for cover.jpg / folder.jpg in the track directory and fills
-    // state_.cover_art. Increments generation (release) so Core 0 sees the data.
     void extract_cover_art(const std::string& track_path);
 
     AppState& state_;
+    Eq        eq_;
 
     TrackQueue queue_;
     TrackInfo  current_info_;
 
-    std::atomic<bool>    playing_      { false };
-    std::atomic<bool>    skip_next_    { false };
-    std::atomic<bool>    skip_prev_    { false };
-    std::atomic<bool>    stop_req_     { false };
-    std::atomic<bool>    queue_dirty_  { false };
-    std::atomic<uint8_t> volume_       { 80 };
+    std::atomic<bool>    playing_        { false };
+    std::atomic<bool>    skip_next_      { false };
+    std::atomic<bool>    skip_prev_      { false };
+    std::atomic<bool>    stop_req_       { false };
+    std::atomic<bool>    queue_dirty_    { false };
+    std::atomic<uint8_t> volume_         { 80 };
+    std::atomic<uint8_t> eq_preset_req_  { 0xFF };  // 0xFF = no change pending
 
     mutex_t queue_mtx_;
 

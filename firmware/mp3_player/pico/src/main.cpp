@@ -50,7 +50,6 @@ static lv_obj_t* g_scr_bt_obj       = nullptr;
 void setup1() { /* Core 1 stack is ready */ }
 
 void loop1() {
-    // SdPlayer::run() never returns; it blocks waiting for play state.
     g_player.run();
 }
 
@@ -64,7 +63,6 @@ static void apply_mode_switch(AppMode target) {
     const AppMode current = g_state.mode.load();
     if (target == current) return;
 
-    // Stop current mode.
     switch (current) {
     case AppMode::SD_PLAYBACK:
         g_player.pause();
@@ -74,10 +72,9 @@ static void apply_mode_switch(AppMode target) {
     case AppMode::BT_SINK:
         g_player.pause();
         g_bridge.bt_stop();
-        vTaskDelay(pdMS_TO_TICKS(700));  // BT stack teardown
+        vTaskDelay(pdMS_TO_TICKS(700));
         break;
     case AppMode::USB_MSC:
-        // USB MSC mode is exited automatically when cable disconnects.
         break;
     default: break;
     }
@@ -113,19 +110,16 @@ static void apply_mode_switch(AppMode target) {
 void setup() {
     g_state.init();
 
-    // I2C for ANO encoder (400 kHz Fast Mode).
     Wire.setSDA(PIN_I2C_SDA);
     Wire.setSCL(PIN_I2C_SCL);
     Wire.begin();
     Wire.setClock(400000);
 
-    // SPI for ILI9341 + SD.
     SPI.setRX(PIN_SPI_MISO);
     SPI.setTX(PIN_SPI_MOSI);
     SPI.setSCK(PIN_SPI_SCK);
     SPI.begin();
 
-    // SD card.
     if (g_sd.begin(PIN_SD_CS)) {
         g_state.sd_mounted = true;
 
@@ -142,7 +136,6 @@ void setup() {
         }
     }
 
-    // UART bridge to ESP32.
     g_bridge.begin();
     g_bridge.on_bt_connected = [](bool /*connected*/, const char* name) {
         AppLock lk(g_state);
@@ -158,26 +151,22 @@ void setup() {
         g_state.bt.sink_connected   = false;
     };
 
-    // Apply stored volume to player and bridge now that bridge is initialized.
+    // Apply stored volume and EQ to player and bridge.
     g_player.set_volume(g_state.playback.volume);
+    g_player.set_eq_preset(g_state.playback.eq_preset);
     g_bridge.set_volume(g_state.playback.volume);
 
-    // SdPlayer output → bridge.
     g_player.on_pcm_frame = [](const int16_t* pcm, size_t pairs) {
         g_bridge.send_audio_frame(pcm, pairs);
     };
     g_player.on_track_changed = [](const TrackInfo& info) {
-        g_ble.notify_track(info);  // BLE AVRCP notification (safe from Core 1)
+        g_ble.notify_track(info);
     };
 
-    // Display + LVGL.
     g_display.begin();
-
-    // Toast and charging overlay live on lv_layer_top(); init after lv_init().
     Toast::init();
     ChargingOverlay::init();
 
-    // Create LVGL screens.
     g_scr_now_obj      = lv_obj_create(nullptr);
     g_scr_files_obj    = lv_obj_create(nullptr);
     g_scr_settings_obj = lv_obj_create(nullptr);
@@ -190,19 +179,17 @@ void setup() {
 
     lv_scr_load(g_scr_now_obj);
 
-    // Encoder navigation wiring.
     g_encoder.on_up    = []() { switch_screen(g_scr_now_obj);      };
     g_encoder.on_down  = []() { switch_screen(g_scr_files_obj);    };
     g_encoder.on_right = []() { switch_screen(g_scr_settings_obj); };
     g_encoder.on_left  = []() { switch_screen(g_scr_bt_obj);       };
     g_encoder.on_select_long = []() {
         g_player.toggle();
-        g_bridge.play();  // or pause — bridge mirrors player state
+        g_bridge.play();
     };
     if (!g_encoder.begin(PIN_ANO_INT))
-        ; // encoder not found — continue without it
+        ;
 
-    // File browser callbacks.
     g_scr_files.on_play = [](const std::string& path) {
         SdCard sd;
         auto tracks = sd.collect_tracks(path.substr(0, path.rfind('/')));
@@ -215,7 +202,6 @@ void setup() {
         switch_screen(g_scr_now_obj);
     };
 
-    // Settings callbacks.
     g_scr_settings.on_mode_change = [](AppMode m) {
         g_state.requested_mode.store(m);
         g_state.mode_switch_pending.store(true);
@@ -223,28 +209,39 @@ void setup() {
     g_scr_settings.on_volume_change = [](uint8_t v) {
         g_player.set_volume(v);
         g_bridge.set_volume(v);
-        // Toast::show() is safe here: callback fires inside lv_task_handler() on Core 0.
         char buf[24];
         snprintf(buf, sizeof(buf), "Volume: %u%%", v);
         Toast::show(buf, 1500);
-        Settings::request_save({v, g_state.playback.shuffled, g_state.playback.repeat});
+        Settings::request_save({v, g_state.playback.shuffled,
+                                g_state.playback.repeat, g_state.playback.eq_preset});
     };
     g_scr_settings.on_shuffle_change = [](bool s) {
         {
             AppLock lk(g_state);
             g_state.playback.shuffled = s;
         }
-        Settings::request_save({g_state.playback.volume, s, g_state.playback.repeat});
+        Settings::request_save({g_state.playback.volume, s,
+                                g_state.playback.repeat, g_state.playback.eq_preset});
     };
     g_scr_settings.on_repeat_change = [](RepeatMode r) {
         {
             AppLock lk(g_state);
             g_state.playback.repeat = r;
         }
-        Settings::request_save({g_state.playback.volume, g_state.playback.shuffled, r});
+        Settings::request_save({g_state.playback.volume, g_state.playback.shuffled,
+                                r, g_state.playback.eq_preset});
+    };
+    g_scr_settings.on_eq_change = [](EqPreset p) {
+        g_player.set_eq_preset(p);  // thread-safe: writes atomic, Core 1 picks up
+        char buf[24];
+        const char* names[] = {"Flat", "Bass Boost", "Vocal", "Treble", "Custom"};
+        snprintf(buf, sizeof(buf), "EQ: %s",
+                 names[static_cast<int>(p) < 5 ? static_cast<int>(p) : 0]);
+        Toast::show(buf, 1500);
+        Settings::request_save({g_state.playback.volume, g_state.playback.shuffled,
+                                g_state.playback.repeat, p});
     };
 
-    // BLE.
     g_ble.begin("MP3Player");
     g_ble.on_play_pause = [](bool play) {
         if (play) { g_player.play(); g_bridge.play(); }
@@ -262,7 +259,6 @@ void setup() {
         g_state.mode_switch_pending.store(true);
     };
 
-    // USB MSC — SD hands off to TinyUSB when cable is plugged.
     g_msc.on_msc_start = []() {
         g_player.pause();
         g_bridge.mute(true);
@@ -280,7 +276,6 @@ void setup() {
     };
     g_msc.begin(PIN_SD_CS);
 
-    // Start audio playback if SD is ready.
     if (g_state.sd_mounted)
         g_player.play();
 }
@@ -288,12 +283,10 @@ void setup() {
 // ── Main loop (Core 0) ──────────────────────────────────────────────────
 
 void loop() {
-    // Handle pending mode switches (requested by UI or BLE).
     if (g_state.mode_switch_pending.load()) {
         apply_mode_switch(g_state.requested_mode.load());
     }
 
-    // Show / hide USB overlay when USB MSC state changes.
     static bool s_last_usb = false;
     const bool  usb_now    = g_state.usb_active;
     if (usb_now != s_last_usb) {
@@ -301,23 +294,13 @@ void loop() {
         ChargingOverlay::set_visible(usb_now);
     }
 
-    // Drive USB MSC and BLE.
     g_msc.task();
     g_ble.task();
-
-    // Poll UART bridge for status frames from ESP32.
     g_bridge.poll();
-
-    // Update LVGL + encoder + display at ~30 fps.
     g_display.task();
-
-    // Drive toast slide-out timer.
     Toast::task();
-
-    // Flush debounced settings writes to SD.
     Settings::task();
 
-    // Update Now Playing screen ~1 Hz (cheap string ops + cover art refresh).
     static uint32_t last_ui_update = 0;
     const uint32_t now = millis();
     if (now - last_ui_update >= 1000) {
@@ -326,6 +309,5 @@ void loop() {
         g_scr_settings.update(g_state);
     }
 
-    // Tiny yield so FreeRTOS idle task can run.
     vTaskDelay(1);
 }

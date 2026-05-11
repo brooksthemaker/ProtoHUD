@@ -14,6 +14,15 @@ enum class AppMode : uint8_t {
 
 enum class RepeatMode : uint8_t { OFF = 0, ONE, ALL };
 
+enum class EqPreset : uint8_t {
+    FLAT = 0,
+    BASS_BOOST,
+    VOCAL,
+    TREBLE,
+    CUSTOM,
+    COUNT
+};
+
 struct TrackInfo {
     char    path[256]    = {};
     char    title[128]   = {};
@@ -28,6 +37,7 @@ struct PlaybackState {
     bool       shuffled  = false;
     RepeatMode repeat    = RepeatMode::OFF;
     uint8_t    volume    = 80;
+    EqPreset   eq_preset = EqPreset::FLAT;
     TrackInfo  current;
     uint16_t   queue_index = 0;
     uint16_t   queue_total = 0;

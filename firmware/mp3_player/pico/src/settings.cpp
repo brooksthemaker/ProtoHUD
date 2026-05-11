@@ -11,8 +11,9 @@ uint32_t        Settings::s_last_req_ms_ = 0;
 //   [3]     version: 0x01
 //   [4]     volume  (0-100)
 //   [5]     shuffled (0/1)
-//   [6]     repeat  (RepeatMode)
-//   [7..8]  reserved (0)
+//   [6]     repeat  (RepeatMode cast to uint8_t)
+//   [7]     eq_preset (EqPreset cast to uint8_t)
+//   [8]     reserved (0)
 //   [9]     XOR checksum of bytes 0..8
 static constexpr uint8_t MAGIC[3] = {'P', 'H', 'S'};
 static constexpr uint8_t VERSION  = 0x01;
@@ -34,6 +35,8 @@ void Settings::load(PlaybackState& out) {
     out.shuffled = (buf[5] != 0);
     if (buf[6] <= static_cast<uint8_t>(RepeatMode::ALL))
         out.repeat = static_cast<RepeatMode>(buf[6]);
+    if (buf[7] < static_cast<uint8_t>(EqPreset::COUNT))
+        out.eq_preset = static_cast<EqPreset>(buf[7]);
 }
 
 void Settings::request_save(Data d) {
@@ -56,12 +59,12 @@ void Settings::do_save(const Data& in) {
     buf[4] = in.volume;
     buf[5] = in.shuffled ? 1u : 0u;
     buf[6] = static_cast<uint8_t>(in.repeat);
-    // buf[7] and buf[8] are reserved, already 0
+    buf[7] = static_cast<uint8_t>(in.eq_preset);
+    // buf[8] reserved = 0
     uint8_t csum = 0;
     for (int i = 0; i < 9; ++i) csum ^= buf[i];
     buf[9] = csum;
 
-    // Overwrite existing file (SD library FILE_WRITE truncates on open).
     SD.remove(PATH);
     File f = SD.open(PATH, FILE_WRITE);
     if (!f) return;

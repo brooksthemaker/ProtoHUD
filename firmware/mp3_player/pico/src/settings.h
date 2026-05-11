@@ -12,6 +12,7 @@ struct Settings {
         uint8_t    volume;    // 0-100
         bool       shuffled;
         RepeatMode repeat;
+        EqPreset   eq_preset;
     };
 
     // Populate out from SD. Silently leaves out unchanged on missing/corrupt file.
