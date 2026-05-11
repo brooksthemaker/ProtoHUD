@@ -13,6 +13,156 @@
 #define DR_FLAC_NO_STDIO
 #include "vendor/dr_flac.h"
 
+// ── Syncsafe / big-endian helpers ─────────────────────────────────────────
+
+static uint32_t syncsafe_to_uint32(const uint8_t b[4]) {
+    return ((uint32_t)b[0] << 21) | ((uint32_t)b[1] << 14) |
+           ((uint32_t)b[2] << 7)  | b[3];
+}
+
+static uint32_t be32(const uint8_t b[4]) {
+    return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+           ((uint32_t)b[2] << 8)  | b[3];
+}
+
+// ── ID3v2 text decoding ────────────────────────────────────────────────────
+// Converts an ID3v2 text frame payload to null-terminated UTF-8 in dst.
+// enc: 0=ISO-8859-1, 1=UTF-16 w/BOM, 2=UTF-16BE, 3=UTF-8.
+static void decode_id3_text(uint8_t enc, const uint8_t* raw, size_t len,
+                             char* dst, size_t cap) {
+    if (cap == 0) return;
+    size_t di = 0;
+
+    auto emit_utf8 = [&](uint32_t cp) {
+        if (cp < 0x80) {
+            if (di + 1 < cap) dst[di++] = static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            if (di + 2 < cap) {
+                dst[di++] = static_cast<char>(0xC0 | (cp >> 6));
+                dst[di++] = static_cast<char>(0x80 | (cp & 0x3F));
+            }
+        } else if (cp < 0x10000) {
+            if (di + 3 < cap) {
+                dst[di++] = static_cast<char>(0xE0 | (cp >> 12));
+                dst[di++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                dst[di++] = static_cast<char>(0x80 | (cp & 0x3F));
+            }
+        }
+        // Supplementary planes omitted — not needed for music metadata.
+    };
+
+    if (enc == 0) {
+        // ISO-8859-1: code points equal Unicode code points.
+        for (size_t i = 0; i < len; ++i) {
+            uint8_t c = raw[i];
+            if (c == 0) break;
+            emit_utf8(c);
+        }
+    } else if (enc == 3) {
+        // UTF-8 passthrough.
+        for (size_t i = 0; i < len; ++i) {
+            if (raw[i] == 0) break;
+            if (di + 1 < cap) dst[di++] = static_cast<char>(raw[i]);
+        }
+    } else {
+        // UTF-16 (enc=1 w/BOM, enc=2 BE w/o BOM).
+        size_t start = 0;
+        bool be_order = (enc == 2);
+        if (enc == 1 && len >= 2) {
+            if      (raw[0] == 0xFE && raw[1] == 0xFF) { be_order = true;  start = 2; }
+            else if (raw[0] == 0xFF && raw[1] == 0xFE) { be_order = false; start = 2; }
+        }
+        for (size_t i = start; i + 1 < len; i += 2) {
+            uint16_t cp = be_order
+                ? (static_cast<uint16_t>(raw[i]) << 8 | raw[i + 1])
+                : (static_cast<uint16_t>(raw[i + 1]) << 8 | raw[i]);
+            if (cp == 0) break;
+            emit_utf8(cp);
+        }
+    }
+    dst[di] = '\0';
+}
+
+// ── MP3 duration estimation ────────────────────────────────────────────────
+// MPEG1 Layer3 bitrate table (kbps), indexed by the 4-bit header field.
+static const uint16_t k_mpeg1_l3_kbps[16] = {
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0
+};
+
+// Estimate MP3 playback duration by inspecting the Xing/Info VBR header or
+// falling back to CBR file-size arithmetic.
+static uint32_t estimate_mp3_duration(File& f, uint32_t audio_start,
+                                      uint32_t file_size) {
+    if (!f.seek(audio_start)) return 0;
+
+    static uint8_t scan_buf[4096];
+    const size_t n = f.read(scan_buf, sizeof(scan_buf));
+    if (n < 4) return 0;
+
+    // Find first valid MPEG Layer3 sync word.
+    uint8_t  hdr[4] = {};
+    uint32_t frame_file_offset = audio_start;
+    bool found = false;
+    for (size_t i = 0; i + 4 <= n; ++i) {
+        if (scan_buf[i] != 0xFF) continue;
+        const uint8_t b1 = scan_buf[i + 1];
+        if ((b1 & 0xE0) != 0xE0) continue;     // not sync
+        if ((b1 & 0x06) != 0x02) continue;     // not Layer3
+        if ((b1 & 0x18) == 0x08) continue;     // reserved MPEG version
+        const uint8_t br_idx = (scan_buf[i + 2] >> 4) & 0x0F;
+        if (br_idx == 0 || br_idx == 15) continue;
+        if (((scan_buf[i + 2] >> 2) & 0x03) == 3) continue;  // reserved sample rate
+        memcpy(hdr, scan_buf + i, 4);
+        frame_file_offset = audio_start + static_cast<uint32_t>(i);
+        found = true;
+        break;
+    }
+    if (!found) return 0;
+
+    const uint8_t mpeg_ver = (hdr[1] >> 3) & 0x03;  // 3=MPEG1, 2=MPEG2, 0=MPEG2.5
+    const bool    is_mono  = ((hdr[3] >> 6) & 0x03) == 3;
+    const uint8_t sr_idx   = (hdr[2] >> 2) & 0x03;
+
+    const uint32_t k_sr1[4]  = { 44100, 48000, 32000, 0 };
+    const uint32_t k_sr2[4]  = { 22050, 24000, 16000, 0 };
+    const uint32_t k_sr25[4] = { 11025, 12000,  8000, 0 };
+    const uint32_t sample_rate = (mpeg_ver == 3) ? k_sr1[sr_idx]
+                               : (mpeg_ver == 2) ? k_sr2[sr_idx]
+                               : k_sr25[sr_idx];
+    if (sample_rate == 0) return 0;
+
+    // Side-info sizes: MPEG1 stereo=32 mono=17, MPEG2/2.5 stereo=17 mono=9.
+    const uint8_t si_sz = (mpeg_ver == 3) ? (is_mono ? 17u : 32u)
+                                           : (is_mono ?  9u : 17u);
+
+    // Seek to the Xing/Info tag position (right after frame header + side info).
+    if (!f.seek(frame_file_offset + 4 + si_sz)) return 0;
+    uint8_t xhdr[8];
+    if (f.read(xhdr, 8) != 8) return 0;
+
+    if (memcmp(xhdr, "Xing", 4) == 0 || memcmp(xhdr, "Info", 4) == 0) {
+        const uint32_t xflags = be32(xhdr + 4);
+        if (xflags & 0x01) {  // bit 0 = total frame count present
+            uint8_t tf[4];
+            if (f.read(tf, 4) == 4) {
+                const uint32_t total_frames = be32(tf);
+                if (total_frames > 0)
+                    return static_cast<uint32_t>((uint64_t)total_frames * 1152 / sample_rate);
+            }
+        }
+    }
+
+    // CBR fallback: audio_bytes / (bitrate_bps / 8).
+    const uint8_t  br_idx     = (hdr[2] >> 4) & 0x0F;
+    const uint32_t br_kbps    = k_mpeg1_l3_kbps[br_idx];
+    if (br_kbps == 0) return 0;
+    const uint32_t audio_bytes = (file_size > frame_file_offset)
+                                 ? (file_size - frame_file_offset) : 0;
+    return static_cast<uint32_t>((uint64_t)audio_bytes * 8 / (br_kbps * 1000));
+}
+
+// ── SdPlayer implementation ────────────────────────────────────────────────
+
 SdPlayer::SdPlayer(AppState& state) : state_(state) {
     mutex_init(&queue_mtx_);
 }
@@ -24,10 +174,8 @@ void SdPlayer::run() {
             continue;
         }
 
-        // Reload queue if requested from Core 0.
         if (queue_dirty_.load()) {
             queue_dirty_.store(false);
-            // queue_ was updated under queue_mtx_ by load_queue().
         }
 
         if (queue_.empty()) {
@@ -38,7 +186,6 @@ void SdPlayer::run() {
 
         const std::string path = queue_.current();
         if (open_track(path)) {
-            // Identify format by extension.
             const char* ext = strrchr(path.c_str(), '.');
             bool is_flac = ext && (strcasecmp(ext, ".flac") == 0);
 
@@ -54,7 +201,6 @@ void SdPlayer::run() {
         if (skip_next_.load())  { skip_next_.store(false); }
         if (skip_prev_.load())  { skip_prev_.store(false); queue_.prev(); queue_.prev(); }
 
-        // Advance queue on natural end-of-track.
         if (!queue_.next(state_.playback.repeat))
             playing_.store(false);
     }
@@ -66,39 +212,40 @@ void SdPlayer::decode_mp3(File& f) {
 
     static uint8_t  file_buf[16384];
     static int16_t  pcm_buf[DECODE_BUF_SAMPLES];
-    size_t buf_filled = 0;
+    size_t   buf_filled = 0;
+    uint64_t total_pcm_samples = 0;  // 64-bit to avoid integer-division truncation
 
     for (;;) {
         if (stop_req_.load() || skip_next_.load() || skip_prev_.load()) break;
 
         if (!playing_.load()) { sleep_ms(5); continue; }
 
-        // Refill file buffer.
         const size_t space = sizeof(file_buf) - buf_filled;
         if (space > 0 && f.available()) {
             const size_t got = f.read(file_buf + buf_filled, space);
             buf_filled += got;
         }
-        if (buf_filled == 0) break;  // EOF
+        if (buf_filled == 0) break;
 
         mp3dec_frame_info_t info;
-        const int samples = mp3dec_decode_frame(&dec, file_buf, static_cast<int>(buf_filled),
-                                                 pcm_buf, &info);
-        if (info.frame_bytes == 0) break;  // sync error / EOF
+        const int samples = mp3dec_decode_frame(&dec, file_buf,
+                                                static_cast<int>(buf_filled),
+                                                pcm_buf, &info);
+        if (info.frame_bytes == 0) break;
         buf_filled -= info.frame_bytes;
         memmove(file_buf, file_buf + info.frame_bytes, buf_filled);
 
         if (samples > 0) {
             apply_volume(pcm_buf, static_cast<size_t>(samples) * info.channels);
             if (on_pcm_frame) on_pcm_frame(pcm_buf, static_cast<size_t>(samples));
-        }
 
-        // Update position.
-        if (info.hz > 0 && samples > 0) {
-            mutex_enter_blocking(&state_.mtx);
-            state_.playback.current.position_s =
-                state_.playback.current.position_s + samples / info.hz;
-            mutex_exit(&state_.mtx);
+            total_pcm_samples += static_cast<uint64_t>(samples);
+            if (info.hz > 0) {
+                mutex_enter_blocking(&state_.mtx);
+                state_.playback.current.position_s =
+                    static_cast<uint32_t>(total_pcm_samples / info.hz);
+                mutex_exit(&state_.mtx);
+            }
         }
     }
 }
@@ -118,7 +265,8 @@ void SdPlayer::decode_flac(File& f) {
     if (!pFlac) return;
 
     static int16_t pcm_buf[DECODE_BUF_SAMPLES];
-    constexpr drflac_uint64 CHUNK = DECODE_BUF_SAMPLES / 2;  // sample pairs
+    constexpr drflac_uint64 CHUNK = DECODE_BUF_SAMPLES / 2;
+    uint64_t total_pcm_frames = 0;  // 64-bit to avoid integer-division truncation
 
     for (;;) {
         if (stop_req_.load() || skip_next_.load() || skip_prev_.load()) break;
@@ -130,10 +278,13 @@ void SdPlayer::decode_flac(File& f) {
         apply_volume(pcm_buf, static_cast<size_t>(got) * pFlac->channels);
         if (on_pcm_frame) on_pcm_frame(pcm_buf, static_cast<size_t>(got));
 
-        mutex_enter_blocking(&state_.mtx);
-        if (pFlac->sampleRate > 0)
-            state_.playback.current.position_s += static_cast<uint32_t>(got / pFlac->sampleRate);
-        mutex_exit(&state_.mtx);
+        total_pcm_frames += got;
+        if (pFlac->sampleRate > 0) {
+            mutex_enter_blocking(&state_.mtx);
+            state_.playback.current.position_s =
+                static_cast<uint32_t>(total_pcm_frames / pFlac->sampleRate);
+            mutex_exit(&state_.mtx);
+        }
     }
     drflac_close(pFlac);
 }
@@ -142,6 +293,23 @@ bool SdPlayer::open_track(const std::string& path) {
     TrackInfo info;
     strncpy(info.path, path.c_str(), sizeof(info.path) - 1);
     read_tags(path, info);
+
+    // FLAC: get exact duration from STREAMINFO metadata block.
+    const char* ext = strrchr(path.c_str(), '.');
+    if (ext && strcasecmp(ext, ".flac") == 0 && info.duration_s == 0) {
+        File fmeta = SD.open(path.c_str(), FILE_READ);
+        if (fmeta) {
+            drflac* pf = drflac_open(drflac_read_cb, drflac_seek_cb, &fmeta, nullptr);
+            if (pf) {
+                if (pf->sampleRate > 0)
+                    info.duration_s = static_cast<uint32_t>(
+                        pf->totalPCMFrameCount / pf->sampleRate);
+                drflac_close(pf);
+            }
+            fmeta.close();
+        }
+    }
+
     extract_cover_art(path);  // fills state_.cover_art before mutex section
 
     mutex_enter_blocking(&state_.mtx);
@@ -161,42 +329,140 @@ void SdPlayer::apply_volume(int16_t* pcm, size_t samples) {
 }
 
 void SdPlayer::read_tags(const std::string& path, TrackInfo& out) {
-    // Minimal ID3v1 (last 128 bytes of file): TAG + 30-byte title + 30-byte artist + ...
     File f = SD.open(path.c_str(), FILE_READ);
     if (!f) return;
-    const size_t fsize = f.size();
-    if (fsize >= 128) {
-        f.seek(fsize - 128);
-        uint8_t tag[128];
-        f.read(tag, 128);
-        if (tag[0] == 'T' && tag[1] == 'A' && tag[2] == 'G') {
-            memcpy(out.title,  tag +  3, 30);  out.title[30]  = '\0';
-            memcpy(out.artist, tag + 33, 30);  out.artist[30] = '\0';
-            memcpy(out.album,  tag + 63, 30);  out.album[30]  = '\0';
+    const uint32_t file_size = static_cast<uint32_t>(f.size());
+
+    const char* dot = strrchr(path.c_str(), '.');
+    const bool is_mp3 = dot && strcasecmp(dot, ".mp3") == 0;
+
+    uint32_t id3v2_end = 0;  // byte offset where audio data begins (0 if no ID3v2)
+
+    // ── ID3v2 ──────────────────────────────────────────────────────────────
+    uint8_t id3_hdr[10];
+    if (f.read(id3_hdr, 10) == 10 &&
+        id3_hdr[0] == 'I' && id3_hdr[1] == 'D' && id3_hdr[2] == '3') {
+
+        const uint8_t  ver     = id3_hdr[3];
+        const uint8_t  flags   = id3_hdr[5];
+        const uint32_t tag_sz  = syncsafe_to_uint32(id3_hdr + 6);
+        id3v2_end = 10 + tag_sz;
+
+        if (ver == 3 || ver == 4) {
+            uint32_t pos = 10;
+
+            // Skip extended header if present (flags bit 6).
+            if (flags & 0x40) {
+                uint8_t exhdr[4];
+                if (f.read(exhdr, 4) == 4) {
+                    // v2.4: syncsafe size includes itself.
+                    // v2.3: big-endian size excludes itself (add the 4 we just read).
+                    const uint32_t exsz = (ver == 4) ? syncsafe_to_uint32(exhdr)
+                                                     : (4 + be32(exhdr));
+                    f.seek(pos + exsz);
+                    pos += exsz;
+                }
+            }
+
+            static uint8_t payload[512];  // static: Core 1 only, non-reentrant
+
+            while (pos + 10 <= id3v2_end) {
+                uint8_t fhdr[10];
+                if (f.read(fhdr, 10) != 10) break;
+                if (fhdr[0] == 0) break;  // zero-padding reached
+
+                const uint32_t fsize = (ver == 4) ? syncsafe_to_uint32(fhdr + 4)
+                                                   : be32(fhdr + 4);
+                pos += 10;
+                if (fsize == 0 || pos + fsize > id3v2_end) {
+                    f.seek(pos + fsize);
+                    pos += fsize;
+                    continue;
+                }
+
+                const bool is_tit2 = memcmp(fhdr, "TIT2", 4) == 0;
+                const bool is_tpe1 = memcmp(fhdr, "TPE1", 4) == 0;
+                const bool is_talb = memcmp(fhdr, "TALB", 4) == 0;
+                const bool is_tlen = memcmp(fhdr, "TLEN", 4) == 0;
+
+                if ((is_tit2 || is_tpe1 || is_talb || is_tlen) && fsize >= 2) {
+                    const size_t to_read = fsize < sizeof(payload) ? fsize : sizeof(payload);
+                    const size_t got = f.read(payload, to_read);
+                    if (fsize > sizeof(payload)) f.seek(pos + fsize);
+
+                    if (got >= 2) {
+                        char tmp[128];
+                        decode_id3_text(payload[0], payload + 1, got - 1, tmp, sizeof(tmp));
+
+                        if (is_tit2 && out.title[0]  == '\0')
+                            strncpy(out.title,  tmp, sizeof(out.title)  - 1);
+                        if (is_tpe1 && out.artist[0] == '\0')
+                            strncpy(out.artist, tmp, sizeof(out.artist) - 1);
+                        if (is_talb && out.album[0]  == '\0')
+                            strncpy(out.album,  tmp, sizeof(out.album)  - 1);
+                        if (is_tlen && out.duration_s == 0) {
+                            const long ms = atol(tmp);
+                            if (ms > 0) out.duration_s = static_cast<uint32_t>(ms / 1000);
+                        }
+                    }
+                } else {
+                    f.seek(pos + fsize);
+                }
+                pos += fsize;
+            }
         }
     }
+
+    // ── ID3v1 fallback ─────────────────────────────────────────────────────
+    if ((out.title[0] == '\0' || out.artist[0] == '\0' || out.album[0] == '\0')
+        && file_size >= 128) {
+        f.seek(file_size - 128);
+        uint8_t tag[128];
+        if (f.read(tag, 128) == 128 &&
+            tag[0] == 'T' && tag[1] == 'A' && tag[2] == 'G') {
+            // Strip trailing spaces/nulls from fixed-width ID3v1 fields.
+            auto strip = [](char* s, size_t n) {
+                for (int i = static_cast<int>(n) - 1; i >= 0; --i) {
+                    if (s[i] == ' ' || s[i] == '\0') s[i] = '\0'; else break;
+                }
+            };
+            if (out.title[0]  == '\0') {
+                memcpy(out.title,  tag +  3, 30); out.title[30]  = '\0'; strip(out.title,  30);
+            }
+            if (out.artist[0] == '\0') {
+                memcpy(out.artist, tag + 33, 30); out.artist[30] = '\0'; strip(out.artist, 30);
+            }
+            if (out.album[0]  == '\0') {
+                memcpy(out.album,  tag + 63, 30); out.album[30]  = '\0'; strip(out.album,  30);
+            }
+        }
+    }
+
+    // ── MP3 duration ───────────────────────────────────────────────────────
+    if (is_mp3 && out.duration_s == 0)
+        out.duration_s = estimate_mp3_duration(f, id3v2_end, file_size);
+
     f.close();
 
-    // Fallback: use filename stripped of extension as title.
+    // Filename fallback for title.
     if (out.title[0] == '\0') {
         const char* slash = strrchr(path.c_str(), '/');
         const char* name  = slash ? slash + 1 : path.c_str();
-        const char* dot   = strrchr(name, '.');
-        const size_t len  = dot ? static_cast<size_t>(dot - name) : strlen(name);
-        strncpy(out.title, name, len < sizeof(out.title) - 1 ? len : sizeof(out.title) - 1);
+        const char* ddot  = strrchr(name, '.');
+        const size_t len  = ddot ? static_cast<size_t>(ddot - name) : strlen(name);
+        const size_t cap  = sizeof(out.title) - 1;
+        strncpy(out.title, name, len < cap ? len : cap);
     }
 }
 
 void SdPlayer::extract_cover_art(const std::string& track_path) {
     CoverArtBuf& art = state_.cover_art;
 
-    // Compute the directory containing this track.
     const size_t slash = track_path.rfind('/');
     const std::string dir = (slash != std::string::npos)
                             ? track_path.substr(0, slash)
                             : std::string("/");
 
-    // Common cover art filenames, tried in order.
     static const char* const k_names[] = {
         "cover.jpg", "Cover.jpg", "folder.jpg", "Folder.jpg",
         "album.jpg", "Album.jpg", nullptr
@@ -210,7 +476,6 @@ void SdPlayer::extract_cover_art(const std::string& track_path) {
         const size_t got = f.read(art.data, CoverArtBuf::MAX_BYTES);
         f.close();
 
-        // Validate JPEG SOI marker (FF D8).
         if (got >= 4 && art.data[0] == 0xFF && art.data[1] == 0xD8) {
             art.len.store(static_cast<int32_t>(got), std::memory_order_relaxed);
             art.generation.fetch_add(1, std::memory_order_release);
@@ -218,7 +483,6 @@ void SdPlayer::extract_cover_art(const std::string& track_path) {
         }
     }
 
-    // No art found for this track.
     art.len.store(-1, std::memory_order_relaxed);
     art.generation.fetch_add(1, std::memory_order_release);
 }
