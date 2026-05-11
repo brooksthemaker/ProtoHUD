@@ -8,8 +8,10 @@
 // Two 320×20-line draw buffers in static RAM (~25 KB total).
 // Flush uses TFT_eSPI::pushImageDMA for DMA-backed transfers.
 //
-// Call begin() once from setup() (Core 0).
-// Call task()  from the UI FreeRTOS task at ~30 fps.
+// Backlight PWM on PIN_TFT_BL (GPIO 28):
+//   - Dims to 30% after DIM_TIMEOUT_MS of no encoder input.
+//   - Turns off after OFF_TIMEOUT_MS of no encoder input.
+//   - Any encoder rotation or press wakes the screen immediately.
 
 class Display {
 public:
@@ -17,6 +19,16 @@ public:
 
     bool begin();
     void task();  // drives lv_task_handler() and encoder input
+
+    // Set backlight level 0–100 (0 = off, 100 = full).
+    static void set_brightness(uint8_t pct);
+
+    // Call on any user-visible interaction to reset the inactivity timer.
+    void on_activity();
+
+    // Inactivity thresholds.
+    static constexpr uint32_t DIM_TIMEOUT_MS = 30000;  // 30 s → dim to 30%
+    static constexpr uint32_t OFF_TIMEOUT_MS = 60000;  // 60 s → backlight off
 
 private:
     static void flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
@@ -39,4 +51,8 @@ private:
     // Encoder state passed to LVGL indev callback.
     static int    enc_delta_;
     static bool   enc_select_;
+
+    // Backlight state (Core 0 only).
+    static uint32_t s_last_activity_ms_;
+    static uint8_t  s_brightness_pct_;
 };
