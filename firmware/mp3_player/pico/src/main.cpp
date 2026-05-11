@@ -7,6 +7,7 @@
 #include <freertos/task.h>
 
 #include "app_state.h"
+#include "settings.h"
 #include "audio/sd_player.h"
 #include "bridge/esp32_bridge.h"
 #include "storage/sd_card.h"
@@ -44,7 +45,7 @@ static lv_obj_t* g_scr_files_obj    = nullptr;
 static lv_obj_t* g_scr_settings_obj = nullptr;
 static lv_obj_t* g_scr_bt_obj       = nullptr;
 
-// ── Core 1 — audio decode loop ────────────────────────────────────────────
+// ── Core 1 — audio decode loop ──────────────────────────────────────────────
 
 void setup1() { /* Core 1 stack is ready */ }
 
@@ -53,7 +54,7 @@ void loop1() {
     g_player.run();
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────
 
 static void switch_screen(lv_obj_t* scr) {
     lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_FADE_ON, 150, 0, false);
@@ -107,7 +108,7 @@ static void apply_mode_switch(AppMode target) {
     g_state.mode_switch_pending.store(false);
 }
 
-// ── Setup ────────────────────────────────────────────────────────────────
+// ── Setup ────────────────────────────────────────────────────────────
 
 void setup() {
     g_state.init();
@@ -127,9 +128,13 @@ void setup() {
     // SD card.
     if (g_sd.begin(PIN_SD_CS)) {
         g_state.sd_mounted = true;
+
+        // Restore persisted settings before building the queue.
+        Settings::load(g_state.playback);
+
         const auto tracks = g_sd.collect_tracks("/");
         TrackQueue q;
-        q.load(tracks, false);
+        q.load(tracks, g_state.playback.shuffled);
         g_player.load_queue(std::move(q), false);
         {
             AppLock lk(g_state);
@@ -152,6 +157,10 @@ void setup() {
         g_state.bt.source_connected = false;
         g_state.bt.sink_connected   = false;
     };
+
+    // Apply stored volume to player and bridge now that bridge is initialized.
+    g_player.set_volume(g_state.playback.volume);
+    g_bridge.set_volume(g_state.playback.volume);
 
     // SdPlayer output → bridge.
     g_player.on_pcm_frame = [](const int16_t* pcm, size_t pairs) {
@@ -207,25 +216,32 @@ void setup() {
     };
 
     // Settings callbacks.
-    g_scr_settings.on_mode_change   = [](AppMode m) {
+    g_scr_settings.on_mode_change = [](AppMode m) {
         g_state.requested_mode.store(m);
         g_state.mode_switch_pending.store(true);
     };
     g_scr_settings.on_volume_change = [](uint8_t v) {
         g_player.set_volume(v);
         g_bridge.set_volume(v);
-        // Toast::show() is safe here: this callback fires inside lv_task_handler().
+        // Toast::show() is safe here: callback fires inside lv_task_handler() on Core 0.
         char buf[24];
         snprintf(buf, sizeof(buf), "Volume: %u%%", v);
         Toast::show(buf, 1500);
+        Settings::request_save({v, g_state.playback.shuffled, g_state.playback.repeat});
     };
     g_scr_settings.on_shuffle_change = [](bool s) {
-        AppLock lk(g_state);
-        g_state.playback.shuffled = s;
+        {
+            AppLock lk(g_state);
+            g_state.playback.shuffled = s;
+        }
+        Settings::request_save({g_state.playback.volume, s, g_state.playback.repeat});
     };
     g_scr_settings.on_repeat_change = [](RepeatMode r) {
-        AppLock lk(g_state);
-        g_state.playback.repeat = r;
+        {
+            AppLock lk(g_state);
+            g_state.playback.repeat = r;
+        }
+        Settings::request_save({g_state.playback.volume, g_state.playback.shuffled, r});
     };
 
     // BLE.
@@ -234,14 +250,14 @@ void setup() {
         if (play) { g_player.play(); g_bridge.play(); }
         else       { g_player.pause(); g_bridge.pause(); }
     };
-    g_ble.on_skip      = [](int8_t dir) {
+    g_ble.on_skip = [](int8_t dir) {
         if (dir > 0) g_player.skip_next(); else g_player.skip_prev();
     };
-    g_ble.on_volume    = [](uint8_t v) {
+    g_ble.on_volume = [](uint8_t v) {
         g_player.set_volume(v);
         g_bridge.set_volume(v);
     };
-    g_ble.on_mode      = [](AppMode m) {
+    g_ble.on_mode = [](AppMode m) {
         g_state.requested_mode.store(m);
         g_state.mode_switch_pending.store(true);
     };
@@ -269,7 +285,7 @@ void setup() {
         g_player.play();
 }
 
-// ── Main loop (Core 0) ───────────────────────────────────────────────────
+// ── Main loop (Core 0) ──────────────────────────────────────────────────
 
 void loop() {
     // Handle pending mode switches (requested by UI or BLE).
@@ -297,6 +313,9 @@ void loop() {
 
     // Drive toast slide-out timer.
     Toast::task();
+
+    // Flush debounced settings writes to SD.
+    Settings::task();
 
     // Update Now Playing screen ~1 Hz (cheap string ops + cover art refresh).
     static uint32_t last_ui_update = 0;
