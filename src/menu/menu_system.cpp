@@ -102,8 +102,12 @@ void MenuSystem::pop_level() {
 }
 
 void MenuSystem::emit_detents() {
-    if (detent_cb_ && !stack_.empty())
-        detent_cb_(static_cast<int>(stack_.back().items.size()));
+    if (detent_cb_ && !stack_.empty()) {
+        int count = 0;
+        for (const auto& it : stack_.back().items)
+            if (!it.visible_fn || it.visible_fn()) ++count;
+        detent_cb_(count);
+    }
 }
 
 void MenuSystem::emit_detents_override(int count) {
@@ -147,8 +151,18 @@ void MenuSystem::navigate(int direction) {
         return;
     }
 
-    int n = static_cast<int>(stack_.back().items.size());
-    cursor_ = ((cursor_ + direction) % n + n) % n;
+    const auto& items = stack_.back().items;
+    int n = static_cast<int>(items.size());
+    if (n == 0) return;
+
+    // Advance cursor, skipping invisible items (up to n steps to avoid infinite loop).
+    int next = ((cursor_ + direction) % n + n) % n;
+    for (int tries = 0; tries < n; ++tries) {
+        const auto& it = items[next];
+        if (!it.visible_fn || it.visible_fn()) break;
+        next = ((next + direction) % n + n) % n;
+    }
+    cursor_ = next;
 }
 
 // ── select ────────────────────────────────────────────────────────────────────
@@ -304,6 +318,26 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     const float pad_y  = 14.f;
     const float width  = 380.f;
 
+    // Snap cursor off any newly-hidden item before doing any rendering.
+    {
+        int n = static_cast<int>(items.size());
+        if (n > 0) {
+            const auto& cur_item = items[cursor_];
+            if (cur_item.visible_fn && !cur_item.visible_fn()) {
+                for (int tries = 0; tries < n; ++tries) {
+                    cursor_ = (cursor_ + 1) % n;
+                    const auto& t = items[cursor_];
+                    if (!t.visible_fn || t.visible_fn()) break;
+                }
+            }
+        }
+    }
+
+    // Count only visible items for layout.
+    int visible_count = 0;
+    for (const auto& it : items)
+        if (!it.visible_fn || it.visible_fn()) ++visible_count;
+
     // Extra height for expanded editing rows
     float extra = 0.f;
     if (in_edit_mode_ && cursor_ < static_cast<int>(items.size())) {
@@ -314,7 +348,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     }
 
     const float total_h = pad_y * 2.f
-                        + item_h * static_cast<float>(items.size())
+                        + item_h * static_cast<float>(visible_count)
                         + extra;
     const float margin = 48.f;
     float x, y;
@@ -411,8 +445,10 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     };
 
     for (int i = 0; i < static_cast<int>(items.size()); i++) {
-        bool selected = (i == cursor_);
         const auto& item = items[i];
+        if (item.visible_fn && !item.visible_fn()) continue;
+
+        bool selected = (i == cursor_);
 
         // Row height: expanded for the selected item in edit mode
         float row_h = item_h - 1.f;

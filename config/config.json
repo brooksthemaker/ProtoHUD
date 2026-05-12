@@ -51,6 +51,21 @@
       "exposure_time": 157,
       "auto_wb": true,
       "wb_temp": 4600
+    },
+    "usb_cam_3": {
+      "device": "",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "brightness": 1.0,
+      "dynamic_framerate": false,
+      "auto_exposure": true,
+      "exposure_time": 157,
+      "auto_wb": true,
+      "wb_temp": 4600,
+      "flip": false,
+      "auto_brightness": false,
+      "auto_brightness_target": 100.0
     }
   },
   "serial": {

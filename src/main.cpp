@@ -178,8 +178,8 @@ static std::vector<MenuItem> build_menu(
         IFaceController* teensy, XRDisplay* xr, CameraManager* cameras,
         LoRaRadio* lora, SmartKnob* knob, AudioEngine* audio, AppState& state,
         AndroidMirror* android_mirror, bool* android_overlay,
-        OverlayConfig* pip_cfg1, OverlayConfig* pip_cfg2,
-        bool* pip_cam1_overlay, bool* pip_cam2_overlay,
+        OverlayConfig* pip_cfg1, OverlayConfig* pip_cfg2, OverlayConfig* pip_cfg3,
+        bool* pip_cam1_overlay, bool* pip_cam2_overlay, bool* pip_cam3_overlay,
         OverlayConfig* android_cfg,
         HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp,
         Mpu9250* mpu9250,
@@ -768,18 +768,147 @@ static std::vector<MenuItem> build_menu(
         }),
     };
 
+    std::vector<MenuItem> cam3_overlay_menu = {
+        toggle("Show Overlay",
+            [pip_cam3_overlay]{ return *pip_cam3_overlay; },
+            [pip_cam3_overlay](bool v){ *pip_cam3_overlay = v; }),
+        submenu("Position", make_position_items(pip_cfg3)),
+        make_size_slider("Size", pip_cfg3),
+    };
+    std::vector<MenuItem> usb3_brightness_menu = {
+        leaf_sel("50%",  [cameras]{ if (cameras) cameras->set_usb3_brightness(0.5f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 0.5f; }),
+        leaf_sel("100%", [cameras]{ if (cameras) cameras->set_usb3_brightness(1.0f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 1.0f; }),
+        leaf_sel("150%", [cameras]{ if (cameras) cameras->set_usb3_brightness(1.5f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 1.5f; }),
+        leaf_sel("200%", [cameras]{ if (cameras) cameras->set_usb3_brightness(2.0f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 2.0f; }),
+        leaf_sel("300%", [cameras]{ if (cameras) cameras->set_usb3_brightness(3.0f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 3.0f; }),
+    };
+    std::vector<MenuItem> usb3_exposure_menu = {
+        toggle("Auto Exposure",
+            [cameras]{ return !cameras || cameras->usb3_cfg().auto_exposure; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb3_cfg(); c.auto_exposure = v;
+                cameras->update_usb3_cfg(c);
+                cameras->set_usb3_ctrl(V4L2_CID_EXPOSURE_AUTO, v ? 3 : 1);
+            }),
+        slider("Exposure Time", 1.f, 5000.f, 10.f, "",
+            [cameras]{ return cameras ? (float)cameras->usb3_cfg().exposure_time : 157.f; },
+            [cameras](float v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb3_cfg(); c.exposure_time = (int)v;
+                cameras->update_usb3_cfg(c);
+                cameras->set_usb3_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, (int)v);
+            }),
+        toggle("Auto White Balance",
+            [cameras]{ return !cameras || cameras->usb3_cfg().auto_wb; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb3_cfg(); c.auto_wb = v;
+                cameras->update_usb3_cfg(c);
+                cameras->set_usb3_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, v ? 1 : 0);
+            }),
+        slider("WB Temperature", 2800.f, 6500.f, 100.f, "K",
+            [cameras]{ return cameras ? (float)cameras->usb3_cfg().wb_temp : 4600.f; },
+            [cameras](float v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb3_cfg(); c.wb_temp = (int)v;
+                cameras->update_usb3_cfg(c);
+                cameras->set_usb3_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, (int)v);
+            }),
+        toggle("Dynamic Framerate",
+            [cameras]{ return cameras && cameras->usb3_cfg().dynamic_framerate; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb3_cfg(); c.dynamic_framerate = v;
+                cameras->update_usb3_cfg(c);
+                cameras->set_usb3_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, v ? 1 : 0);
+            }),
+    };
+    std::vector<MenuItem> usb_cam3_menu = {
+        toggle("Open Stream",
+            [cameras]{ return cameras && cameras->usb3_ok(); },
+            [cameras, pip_cam3_overlay](bool v){
+                if (!cameras) return;
+                if (v) {
+                    std::thread([cameras, pip_cam3_overlay]{
+                        cameras->open_usb3();
+                        *pip_cam3_overlay = true;
+                    }).detach();
+                } else {
+                    cameras->close_usb3();
+                    *pip_cam3_overlay = false;
+                }
+            }),
+        toggle("Flip Upside Down",
+            [cameras]{ return cameras && cameras->usb3_cfg().flip; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb3_cfg(); c.flip = v;
+                cameras->update_usb3_cfg(c);
+            }),
+        toggle("Auto Brightness",
+            [cameras]{ return cameras && cameras->usb3_cfg().auto_brightness; },
+            [cameras](bool v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb3_cfg(); c.auto_brightness = v;
+                cameras->update_usb3_cfg(c);
+            }),
+        slider("Brightness Target", 40.f, 220.f, 5.f, "",
+            [cameras]{ return cameras ? cameras->usb3_cfg().auto_brightness_target : 100.f; },
+            [cameras](float v){
+                if (!cameras) return;
+                UsbCamConfig c = cameras->usb3_cfg(); c.auto_brightness_target = v;
+                cameras->update_usb3_cfg(c);
+            }),
+        submenu("Overlay",     std::move(cam3_overlay_menu)),
+        submenu("Brightness",  std::move(usb3_brightness_menu)),
+        submenu("Exposure",    std::move(usb3_exposure_menu)),
+        leaf("Scan for Camera", [cameras, &state]{
+            if (cameras) {
+                bool ok = cameras->scan_usb3();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.health.cam_usb3 = ok;
+            }
+        }),
+    };
+
+    // Build USB cam submenu items with visibility predicates so slots without a
+    // connected or configured camera are hidden from the menu.
+    auto make_usb_cam_item = [&](const char* label, std::vector<MenuItem> menu,
+                                  std::function<bool()> vis) -> MenuItem {
+        auto item = submenu(label, std::move(menu));
+        item.visible_fn = std::move(vis);
+        return item;
+    };
+
     std::vector<MenuItem> usb_cameras_menu = {
-        submenu("USB Cam 1",  std::move(usb_cam1_menu)),
-        submenu("USB Cam 2",  std::move(usb_cam2_menu)),
+        make_usb_cam_item("USB Cam 1", std::move(usb_cam1_menu),
+            [cameras]{ return cameras && (cameras->usb1_ok() || !cameras->usb1_cfg().device.empty()); }),
+        make_usb_cam_item("USB Cam 2", std::move(usb_cam2_menu),
+            [cameras]{ return cameras && (cameras->usb2_ok() || !cameras->usb2_cfg().device.empty()); }),
+        make_usb_cam_item("USB Cam 3", std::move(usb_cam3_menu),
+            [cameras]{ return cameras && (cameras->usb3_ok() || !cameras->usb3_cfg().device.empty()); }),
         toggle("Auto-Reconnect",
             [cameras]{ return cameras &&
                               cameras->usb1_reconnect_enabled() &&
-                              cameras->usb2_reconnect_enabled(); },
+                              cameras->usb2_reconnect_enabled() &&
+                              cameras->usb3_reconnect_enabled(); },
             [cameras](bool v){
                 if (!cameras) return;
                 cameras->set_usb1_reconnect(v);
                 cameras->set_usb2_reconnect(v);
+                cameras->set_usb3_reconnect(v);
             }),
+        leaf("Scan for Cameras", [cameras, &state]{
+            if (!cameras) return;
+            bool ok1 = cameras->scan_usb1();
+            bool ok2 = cameras->scan_usb2();
+            bool ok3 = cameras->scan_usb3();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.health.cam_usb1 = ok1;
+            state.health.cam_usb2 = ok2;
+            state.health.cam_usb3 = ok3;
+        }),
     };
 
     std::vector<MenuItem> cameras_menu = {
@@ -1676,7 +1805,7 @@ int main(int argc, char* argv[]) {
         owl_right.fps          = jr.value("fps",      60);
     }
 
-    UsbCamConfig usb1_cfg, usb2_cfg;
+    UsbCamConfig usb1_cfg, usb2_cfg, usb3_cfg;
     if (jcam.contains("usb_cam_1")) {
         auto& j1 = jcam["usb_cam_1"];
         usb1_cfg.device             = j1.value("device",             "/dev/video2");
@@ -1708,6 +1837,22 @@ int main(int argc, char* argv[]) {
         usb2_cfg.flip                    = j2.value("flip",                    false);
         usb2_cfg.auto_brightness         = j2.value("auto_brightness",         false);
         usb2_cfg.auto_brightness_target  = j2.value("auto_brightness_target",  100.f);
+    }
+    if (jcam.contains("usb_cam_3")) {
+        auto& j3 = jcam["usb_cam_3"];
+        usb3_cfg.device             = j3.value("device",             "");
+        usb3_cfg.width              = j3.value("width",               1280);
+        usb3_cfg.height             = j3.value("height",               720);
+        usb3_cfg.fps                = j3.value("fps",                   30);
+        usb3_cfg.brightness         = j3.value("brightness",           1.0f);
+        usb3_cfg.dynamic_framerate  = j3.value("dynamic_framerate",    false);
+        usb3_cfg.auto_exposure      = j3.value("auto_exposure",        true);
+        usb3_cfg.exposure_time      = j3.value("exposure_time",        157);
+        usb3_cfg.auto_wb            = j3.value("auto_wb",              true);
+        usb3_cfg.wb_temp            = j3.value("wb_temp",              4600);
+        usb3_cfg.flip                    = j3.value("flip",                    false);
+        usb3_cfg.auto_brightness         = j3.value("auto_brightness",         false);
+        usb3_cfg.auto_brightness_target  = j3.value("auto_brightness_target",  100.f);
     }
 
     HudConfig hud_cfg;
@@ -1741,7 +1886,7 @@ int main(int argc, char* argv[]) {
     }
 
     AndroidMirrorConfig and_cfg;
-    OverlayConfig       pip_overlay_cfg1, pip_overlay_cfg2;
+    OverlayConfig       pip_overlay_cfg1, pip_overlay_cfg2, pip_overlay_cfg3;
     OverlayConfig       android_overlay_cfg;
 
     if (cfg.contains("pip")) {
@@ -1951,7 +2096,7 @@ int main(int argc, char* argv[]) {
     // ── Camera manager ────────────────────────────────────────────────────────
 
     CameraManager cameras;
-    cameras.init(owl_left, owl_right, usb1_cfg, usb2_cfg,
+    cameras.init(owl_left, owl_right, usb1_cfg, usb2_cfg, usb3_cfg,
                  res("assets/shaders/nv12.vs").c_str(),
                  res("assets/shaders/nv12.fs").c_str());
     {
@@ -1960,6 +2105,7 @@ int main(int argc, char* argv[]) {
         state.health.cam_owl_right = cameras.owl_right_ok();
         state.health.cam_usb1      = cameras.usb1_ok();
         state.health.cam_usb2      = cameras.usb2_ok();
+        state.health.cam_usb3      = cameras.usb3_ok();
     }
 
     // Startup autofocus
@@ -2036,6 +2182,7 @@ int main(int argc, char* argv[]) {
 
     bool pip_cam1_overlay_active = false;
     bool pip_cam2_overlay_active = false;
+    bool pip_cam3_overlay_active = false;
 
     std::vector<std::string> gif_names;
     if (jser.contains("teensy")) {
@@ -2053,8 +2200,8 @@ int main(int argc, char* argv[]) {
     MenuSystem* menu_ptr = nullptr;
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
-                               &pip_overlay_cfg1, &pip_overlay_cfg2,
-                               &pip_cam1_overlay_active, &pip_cam2_overlay_active,
+                               &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
+                               &pip_cam1_overlay_active, &pip_cam2_overlay_active, &pip_cam3_overlay_active,
                                &android_overlay_cfg,
                                &hud.colors(), &hud.config(), &menu_ptr,
                                &mpu9250, gif_names,
@@ -2152,6 +2299,7 @@ int main(int argc, char* argv[]) {
 
     GLuint tex_usb1  = 0;
     GLuint tex_usb2  = 0;
+    GLuint tex_usb3  = 0;
     GLuint tex_beast = 0;
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -2203,6 +2351,7 @@ int main(int argc, char* argv[]) {
         if (use_beast_cam) beast_cam.get_frame(tex_beast);
         cameras.get_usb1(tex_usb1);
         cameras.get_usb2(tex_usb2);
+        cameras.get_usb3(tex_usb3);
         android_mirror.get_frame(tex_android);
 
         // ── GPIO PiP button state ─────────────────────────────────────────────
@@ -2274,6 +2423,7 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.health.cam_usb1       = cameras.usb1_ok();
             state.health.cam_usb2       = cameras.usb2_ok();
+            state.health.cam_usb3       = cameras.usb3_ok();
             state.health.android_mirror = android_mirror.is_connected();
         }
 
@@ -2327,6 +2477,7 @@ int main(int argc, char* argv[]) {
         // Overlay-active flags mirror the exact condition used in draw_pip calls.
         snap.health.cam_usb1_overlay = pip_cam1_overlay_active || pip_left_active  || kb_pip_left;
         snap.health.cam_usb2_overlay = pip_cam2_overlay_active || pip_right_active || kb_pip_right;
+        snap.health.cam_usb3_overlay = pip_cam3_overlay_active;
 
         // Inject live AF lens position into the snapshot (atomic read, no lock needed)
         if (cameras.owl_left())
@@ -2478,6 +2629,11 @@ int main(int argc, char* argv[]) {
                      pip_cam2_overlay_active || pip_right_active || kb_pip_right,
                      pip_overlay_cfg2,
                      snap.focus_right, snap.night_vision.nv_enabled);
+        hud.draw_pip(tex_usb3, "Cam 3",
+                     xr.eye_width(), xr.eye_height(),
+                     pip_cam3_overlay_active,
+                     pip_overlay_cfg3,
+                     snap.focus_left, snap.night_vision.nv_enabled);
 
         hud.draw_android_overlay(tex_android,
                                   xr.eye_width(), xr.eye_height(),
@@ -2560,6 +2716,7 @@ int main(int argc, char* argv[]) {
         jpp["motion_update_rate"] = state.pp_cfg.motion_update_rate;
         jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
 
+        cfg["cameras"]["usb_cam_1"]["device"]            = cameras.usb1_cfg().device;
         cfg["cameras"]["usb_cam_1"]["brightness"]        = cameras.usb1_brightness();
         cfg["cameras"]["usb_cam_1"]["dynamic_framerate"] = cameras.usb1_cfg().dynamic_framerate;
         cfg["cameras"]["usb_cam_1"]["auto_exposure"]     = cameras.usb1_cfg().auto_exposure;
@@ -2569,6 +2726,7 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_1"]["flip"]                   = cameras.usb1_cfg().flip;
         cfg["cameras"]["usb_cam_1"]["auto_brightness"]        = cameras.usb1_cfg().auto_brightness;
         cfg["cameras"]["usb_cam_1"]["auto_brightness_target"] = cameras.usb1_cfg().auto_brightness_target;
+        cfg["cameras"]["usb_cam_2"]["device"]            = cameras.usb2_cfg().device;
         cfg["cameras"]["usb_cam_2"]["brightness"]        = cameras.usb2_brightness();
         cfg["cameras"]["usb_cam_2"]["dynamic_framerate"] = cameras.usb2_cfg().dynamic_framerate;
         cfg["cameras"]["usb_cam_2"]["auto_exposure"]     = cameras.usb2_cfg().auto_exposure;
@@ -2578,6 +2736,16 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_2"]["flip"]                   = cameras.usb2_cfg().flip;
         cfg["cameras"]["usb_cam_2"]["auto_brightness"]        = cameras.usb2_cfg().auto_brightness;
         cfg["cameras"]["usb_cam_2"]["auto_brightness_target"] = cameras.usb2_cfg().auto_brightness_target;
+        cfg["cameras"]["usb_cam_3"]["device"]            = cameras.usb3_cfg().device;
+        cfg["cameras"]["usb_cam_3"]["brightness"]        = cameras.usb3_brightness();
+        cfg["cameras"]["usb_cam_3"]["dynamic_framerate"] = cameras.usb3_cfg().dynamic_framerate;
+        cfg["cameras"]["usb_cam_3"]["auto_exposure"]     = cameras.usb3_cfg().auto_exposure;
+        cfg["cameras"]["usb_cam_3"]["exposure_time"]     = cameras.usb3_cfg().exposure_time;
+        cfg["cameras"]["usb_cam_3"]["auto_wb"]           = cameras.usb3_cfg().auto_wb;
+        cfg["cameras"]["usb_cam_3"]["wb_temp"]           = cameras.usb3_cfg().wb_temp;
+        cfg["cameras"]["usb_cam_3"]["flip"]                   = cameras.usb3_cfg().flip;
+        cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
+        cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"]     = color_to_json(menu.accent_color());
@@ -2634,6 +2802,7 @@ int main(int argc, char* argv[]) {
 
     if (tex_usb1)    glDeleteTextures(1, &tex_usb1);
     if (tex_usb2)    glDeleteTextures(1, &tex_usb2);
+    if (tex_usb3)    glDeleteTextures(1, &tex_usb3);
     if (tex_beast)   glDeleteTextures(1, &tex_beast);
     if (tex_android) glDeleteTextures(1, &tex_android);
 
