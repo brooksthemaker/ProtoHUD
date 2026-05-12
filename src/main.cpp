@@ -30,6 +30,15 @@
 #include "audio/audio_engine.h"
 #include "post_process.h"
 #include "sensor/mpu9250.h"
+#include "sys/system_monitor.h"
+#include "net/wifi_monitor.h"
+#include "net/ping_monitor.h"
+#include "net/bt_monitor.h"
+#include "crash_reporter.h"
+
+#ifndef GIT_HASH
+#define GIT_HASH "unknown"
+#endif
 
 #include <fstream>
 #include <unistd.h>
@@ -184,6 +193,9 @@ static std::vector<MenuItem> build_menu(
         HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp,
         Mpu9250* mpu9250,
         const std::vector<std::string>& gif_names,
+        BtMonitor* bt_mon,
+        bool* sys_panel_active,
+        AppState* state_ptr,
         // Face Source switching — pass null fp_option to hide Protoface entry
         IFaceController** active_face_pp  = nullptr,
         IFaceController*  teensy_option   = nullptr,
@@ -1676,11 +1688,40 @@ static std::vector<MenuItem> build_menu(
 
     cameras_menu.push_back(submenu("Vision Assist", std::move(vision_menu)));
 
+    // ── System / dev menu ─────────────────────────────────────────────────────
+    std::vector<MenuItem> software_menu = {
+        leaf("Check for Updates", []{
+            system("git -C /home/user/ProtoHUD fetch origin main 2>&1 | logger -t protohud &");
+        }),
+        leaf("Pull && Rebuild", []{
+            system("cd /home/user/ProtoHUD && git pull origin main && ./scripts/build.sh 2>&1 | logger -t protohud &");
+        }),
+    };
+
+    std::vector<MenuItem> system_menu = {
+        toggle("System Panel",
+            [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
+            [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
+        toggle("SSH Access",
+            [state_ptr]{ return state_ptr && state_ptr->ssh.active; },
+            [state_ptr](bool v){
+                system(v ? "systemctl start ssh 2>&1 | logger -t protohud &"
+                         : "systemctl stop ssh 2>&1 | logger -t protohud &");
+                if (state_ptr) {
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    state_ptr->ssh.active = v;
+                }
+            }),
+        leaf("Refresh Bluetooth", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
+        submenu("Software", std::move(software_menu)),
+    };
+
     return {
         submenu("Cameras",          std::move(cameras_menu)),
         submenu("Prototracer",      std::move(prototracer_menu)),
         submenu("Settings",         std::move(settings_menu)),
         submenu("Timers and Alarm", std::move(timers_alarm_menu)),
+        submenu("System",           std::move(system_menu)),
         leaf("Request Status",      [teensy]{ teensy->request_status(); }),
         leaf("Close Program",       [&state]{ state.quit = true; }),
     };
@@ -1981,6 +2022,20 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // System monitor / network config
+    std::string cfg_ping_host  = "8.8.8.8";
+    std::string cfg_wifi_iface = "wlan0";
+    std::string cfg_crash_dir  = "/tmp";
+    int         cfg_ssh_port   = 22;
+    if (cfg.contains("system")) {
+        auto& js         = cfg["system"];
+        cfg_ping_host    = js.value("ping_host",  cfg_ping_host);
+        cfg_wifi_iface   = js.value("wifi_iface", cfg_wifi_iface);
+        cfg_crash_dir    = js.value("crash_dir",  cfg_crash_dir);
+        cfg_ssh_port     = js.value("ssh_port",   cfg_ssh_port);
+    }
+    state.ssh.port = cfg_ssh_port;
+
     // Seed resolution state from whatever the OWLsight config says
     state.camera_resolution.width  = owl_left.width;
     state.camera_resolution.height = owl_left.height;
@@ -2035,6 +2090,19 @@ int main(int argc, char* argv[]) {
 
     if (!mpu9250.start() && mpu_cfg.enabled)
         std::cerr << "[main] MPU-9250 backup compass unavailable\n";
+
+    // ── Dev/debug monitors ────────────────────────────────────────────────────
+
+    SystemMonitor sys_mon;
+    WifiMonitor   wifi_mon;
+    PingMonitor   ping_mon;
+    BtMonitor     bt_mon;
+
+    sys_mon.start(&state);
+    wifi_mon.start(&state, cfg_wifi_iface);
+    ping_mon.start(&state, cfg_ping_host);
+    bt_mon.start(&state);
+    CrashReporter::install(&state, cfg_crash_dir, GIT_HASH);
 
     // ── Async Timewarp ────────────────────────────────────────────────────────
 
@@ -2183,6 +2251,7 @@ int main(int argc, char* argv[]) {
     bool pip_cam1_overlay_active = false;
     bool pip_cam2_overlay_active = false;
     bool pip_cam3_overlay_active = false;
+    bool sys_panel_active        = false;
 
     std::vector<std::string> gif_names;
     if (jser.contains("teensy")) {
@@ -2205,6 +2274,7 @@ int main(int argc, char* argv[]) {
                                &android_overlay_cfg,
                                &hud.colors(), &hud.config(), &menu_ptr,
                                &mpu9250, gif_names,
+                               &bt_mon, &sys_panel_active, &state,
                                &active_face,
                                static_cast<IFaceController*>(&teensy),
                                static_cast<IFaceController*>(&protoface_ctrl),
@@ -2649,6 +2719,9 @@ int main(int argc, char* argv[]) {
             hud.draw_panel_preview(panel_tex, xr.eye_width(), xr.eye_height());
         }
 
+        // System status panel (CPU/RAM/WiFi/ping/BT/SSH).
+        hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), sys_panel_active);
+
         // Alarm / timer-expired popups render on top of everything.
         hud.draw_popups(state, xr.eye_width(), xr.eye_height());
 
@@ -2789,6 +2862,10 @@ int main(int argc, char* argv[]) {
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
+    bt_mon.stop();
+    ping_mon.stop();
+    wifi_mon.stop();
+    sys_mon.stop();
     mpu9250.stop();
     audio.stop();
     android_mirror.stop();

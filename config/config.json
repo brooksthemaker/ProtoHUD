@@ -215,5 +215,11 @@
     "show_date":       false,
     "font_scale":      1.5,
     "manual_offset_s": 0
+  },
+  "system": {
+    "ping_host":  "8.8.8.8",
+    "wifi_iface": "wlan0",
+    "ssh_port":   22,
+    "crash_dir":  "/tmp"
   }
 }
