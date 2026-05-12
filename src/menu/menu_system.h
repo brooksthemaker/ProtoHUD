@@ -74,6 +74,10 @@ struct MenuItem {
 
     // COLOR_PICKER
     ColorPickerConfig color;
+
+    // Optional visibility predicate — item is hidden when this returns false.
+    // When unset, the item is always visible.
+    std::function<bool()> visible_fn;
 };
 
 // ── Menu anchor ───────────────────────────────────────────────────────────────

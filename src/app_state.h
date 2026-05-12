@@ -108,12 +108,16 @@ struct SystemHealth {
     bool cam_owl_right   = false;
     bool cam_usb1        = false;
     bool cam_usb2        = false;
+    bool cam_usb3        = false;
     bool audio_ok        = false;  // Spatial audio engine running
     bool android_mirror  = false;  // scrcpy connected and streaming
     bool mpu9250_ok      = false;  // MPU-9250 backup compass running
+    bool wifi_ok         = false;  // Wi-Fi associated
+    bool ssh_active      = false;  // SSH daemon is running
     // Render-thread-only: connected AND overlay enabled
     bool cam_usb1_overlay = false;
     bool cam_usb2_overlay = false;
+    bool cam_usb3_overlay = false;
 };
 
 struct AudioState {
@@ -187,6 +191,46 @@ struct TimerAlarmState {
     int    custom_timer_sec = 0;      // custom timer seconds (0–59)
 };
 
+// ── System metrics ────────────────────────────────────────────────────────────
+static constexpr int kSysHistLen  = 60;
+static constexpr int kPingHistLen = 30;
+
+struct SysMetrics {
+    uint64_t uptime_s     = 0;
+    float    cpu_pct      = 0.f;      // 0–100
+    float    ram_used_mb  = 0.f;
+    float    ram_total_mb = 0.f;
+    float    cpu_history [kSysHistLen]  = {};
+    float    ram_history [kSysHistLen]  = {};
+    int      history_head = 0;
+};
+
+struct WifiState {
+    bool        connected  = false;
+    std::string ssid;
+    std::string ip;
+    int         signal_dbm = -100;
+};
+
+struct PingState {
+    bool        reachable    = false;
+    float       latency_ms   = 0.f;
+    float       history[kPingHistLen] = {};
+    int         history_head = 0;
+    std::string host;
+};
+
+struct BtDevice {
+    std::string name;
+    std::string mac;
+    bool        connected = false;
+};
+
+struct SshState {
+    bool active = false;
+    int  port   = 22;
+};
+
 // ── Master state ──────────────────────────────────────────────────────────────
 // Mutable fields are updated from serial/camera threads and read by the
 // render thread.  Callers must hold the mutex for any multi-field access.
@@ -236,6 +280,13 @@ struct AppState {
         IM_COL32(255,  60,  60, 255),  // 6 red
         IM_COL32(255, 255, 255, 255),  // 7 white
     };
+
+    // System monitor / network / Bluetooth state
+    SysMetrics             sys_metrics;
+    WifiState              wifi;
+    PingState              ping;
+    SshState               ssh;
+    std::vector<BtDevice>  bt_devices;
 
     // Cached XR display control values (no SDK getter; updated when menu writes).
     int xr_brightness     = 5;   // 1–7; mirrors last xr->set_brightness() call

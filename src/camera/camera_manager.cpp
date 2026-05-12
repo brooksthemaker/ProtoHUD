@@ -97,6 +97,7 @@ static bool open_v4l2(cv::VideoCapture& cap, const UsbCamConfig& cfg,
 
 bool CameraManager::init(const CamConfig& left, const CamConfig& right,
                          const UsbCamConfig& usb1, const UsbCamConfig& usb2,
+                         const UsbCamConfig& usb3,
                          const char* nv12_vs, const char* nv12_fs) {
     // ── libcamera manager (shared between both DmaCamera instances) ───────────
     lcam_mgr_ = std::make_unique<libcamera::CameraManager>();
@@ -126,14 +127,19 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     // ── USB cameras (OpenCV) ──────────────────────────────────────────────────
     usb1_cfg_ = usb1;
     usb2_cfg_ = usb2;
+    usb3_cfg_ = usb3;
     usb1_brightness_ = usb1.brightness;
     usb2_brightness_ = usb2.brightness;
+    usb3_brightness_ = usb3.brightness;
     usb1_flip_                   = usb1.flip;
     usb2_flip_                   = usb2.flip;
+    usb3_flip_                   = usb3.flip;
     usb1_auto_brightness_        = usb1.auto_brightness;
     usb1_auto_brightness_target_ = usb1.auto_brightness_target;
     usb2_auto_brightness_        = usb2.auto_brightness;
     usb2_auto_brightness_target_ = usb2.auto_brightness_target;
+    usb3_auto_brightness_        = usb3.auto_brightness;
+    usb3_auto_brightness_target_ = usb3.auto_brightness_target;
 
     // Scan /dev/video0-63 and list non-ISP capture nodes
     std::cerr << "[cam] USB cameras found:\n";
@@ -150,17 +156,20 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
 
     usb1_ok_ = !usb1.device.empty() && open_v4l2(usb_cap1_, usb1, "usb1");
     usb2_ok_ = !usb2.device.empty() && open_v4l2(usb_cap2_, usb2, "usb2");
+    usb3_ok_ = !usb3.device.empty() && open_v4l2(usb_cap3_, usb3, "usb3");
 
     // Auto-scan: if a camera failed to open with the configured path, probe all
     // /dev/video* nodes (before the capture thread starts) to find a working one.
     auto startup_scan = [&](cv::VideoCapture& cap, std::atomic<bool>& ok_flag,
                              UsbCamConfig& cfg, const char* name,
-                             const std::string& skip_path) {
+                             std::initializer_list<std::string> skip_paths) {
         if (ok_flag) return;
         std::cerr << "[cam] " << name << ": auto-scanning for a camera...\n";
         for (int dev = 0; dev < 64; dev++) {
             std::string path = "/dev/video" + std::to_string(dev);
-            if (path == skip_path) continue;
+            bool skip = false;
+            for (const auto& s : skip_paths) if (!s.empty() && path == s) { skip = true; break; }
+            if (skip) continue;
             if (!is_usb_capture_device(path)) continue;
             UsbCamConfig try_cfg = cfg;
             try_cfg.device = path;
@@ -177,17 +186,18 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
         }
         std::cerr << "[cam] " << name << ": auto-scan found no working camera\n";
     };
-    startup_scan(usb_cap1_, usb1_ok_, usb1_cfg_, "usb1", "");
-    startup_scan(usb_cap2_, usb2_ok_, usb2_cfg_, "usb2", usb1_cfg_.device);
+    startup_scan(usb_cap1_, usb1_ok_, usb1_cfg_, "usb1", {});
+    startup_scan(usb_cap2_, usb2_ok_, usb2_cfg_, "usb2", {usb1_cfg_.device});
+    startup_scan(usb_cap3_, usb3_ok_, usb3_cfg_, "usb3", {usb1_cfg_.device, usb2_cfg_.device});
 
     // Start thread whenever USB devices are configured so open/close can work
     // later even if the cameras were not available at startup.
-    if (!usb1.device.empty() || !usb2.device.empty()) {
+    if (!usb1.device.empty() || !usb2.device.empty() || !usb3.device.empty()) {
         running_ = true;
         usb_thread_ = std::thread(&CameraManager::usb_capture_thread, this);
     }
 
-    return owl_left_ok() || owl_right_ok() || usb1_ok_ || usb2_ok_;
+    return owl_left_ok() || owl_right_ok() || usb1_ok_ || usb2_ok_ || usb3_ok_;
 }
 
 void CameraManager::shutdown() {
@@ -199,10 +209,12 @@ void CameraManager::shutdown() {
 
     usb_cap1_.release();
     usb_cap2_.release();
+    usb_cap3_.release();
 
     // Clean up GL textures allocated for USB cams (must be called from render thread)
     if (usb1_slot_.tex) { glDeleteTextures(1, &usb1_slot_.tex); usb1_slot_.tex = 0; }
     if (usb2_slot_.tex) { glDeleteTextures(1, &usb2_slot_.tex); usb2_slot_.tex = 0; }
+    if (usb3_slot_.tex) { glDeleteTextures(1, &usb3_slot_.tex); usb3_slot_.tex = 0; }
 
     if (lcam_mgr_) { lcam_mgr_->stop(); lcam_mgr_.reset(); }
 }
@@ -232,7 +244,8 @@ void CameraManager::usb_capture_thread() {
     cv::Mat frame, rgba;
     int frames1 = 0, empty1 = 0, consec1 = 0;
     int frames2 = 0, empty2 = 0, consec2 = 0;
-    int luma_tick1 = 0, luma_tick2 = 0;
+    int frames3 = 0, empty3 = 0, consec3 = 0;
+    int luma_tick1 = 0, luma_tick2 = 0, luma_tick3 = 0;
 
     // Consecutive empty reads before declaring a camera disconnected.
     // At ~30fps with near-instant V4L2 failures this triggers in ~1 s.
@@ -313,6 +326,9 @@ void CameraManager::usb_capture_thread() {
         any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_,
                             frames2, empty2, consec2, usb2_brightness_, usb2_flip_,
                             usb2_auto_brightness_, usb2_auto_brightness_target_, luma_tick2, "usb2");
+        any      |= capture(usb_cap3_, usb3_cap_mtx_, usb3_slot_, usb3_ok_,
+                            frames3, empty3, consec3, usb3_brightness_, usb3_flip_,
+                            usb3_auto_brightness_, usb3_auto_brightness_target_, luma_tick3, "usb3");
 
         // Auto-reconnect: periodically reopen disconnected cameras when enabled.
         auto now = std::chrono::steady_clock::now();
@@ -329,6 +345,13 @@ void CameraManager::usb_capture_thread() {
             consec2 = 0; empty2 = 0;
             std::cerr << "[cam] usb2: auto-reconnect attempt\n";
             open_usb2();
+        }
+        if (usb3_reconnect_ && !usb3_ok_ && !usb3_cfg_.device.empty() &&
+            now - usb3_last_retry_ >= kReconnectInterval) {
+            usb3_last_retry_ = now;
+            consec3 = 0; empty3 = 0;
+            std::cerr << "[cam] usb3: auto-reconnect attempt\n";
+            open_usb3();
         }
 
         if (!any)
@@ -376,6 +399,25 @@ void CameraManager::close_usb2() {
     std::cerr << "[cam] usb2: closed\n";
 }
 
+void CameraManager::open_usb3() {
+    std::lock_guard<std::mutex> lk(usb3_cap_mtx_);
+    if (usb3_cfg_.device.empty()) {
+        std::cerr << "[cam] usb3: no device configured\n"; return;
+    }
+    if (usb_cap3_.isOpened()) {
+        std::cerr << "[cam] usb3: already open\n"; return;
+    }
+    usb3_ok_ = open_v4l2(usb_cap3_, usb3_cfg_, "usb3");
+}
+
+void CameraManager::close_usb3() {
+    usb3_reconnect_ = false;   // explicit close — don't auto-reopen
+    std::lock_guard<std::mutex> lk(usb3_cap_mtx_);
+    usb_cap3_.release();
+    usb3_ok_ = false;
+    std::cerr << "[cam] usb3: closed\n";
+}
+
 // ── USB texture upload (render thread) ────────────────────────────────────────
 // Creates or reallocates the GL texture if dimensions changed, then uploads pixels.
 
@@ -408,7 +450,8 @@ void CameraManager::upload_texture(GLuint& tex, int w, int h,
 // at least one USB slot is now open. Returns true if this slot is now open.
 
 bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
-                              const UsbCamConfig& cfg)
+                              UsbCamConfig& cfg,
+                              const std::vector<std::string>& skip_paths)
 {
     // Stop the capture thread so nothing else is calling cap.read()
     running_ = false;
@@ -419,6 +462,9 @@ bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
 
     for (int dev = 0; dev < 64; dev++) {
         std::string path = "/dev/video" + std::to_string(dev);
+        bool skip = false;
+        for (const auto& s : skip_paths) if (!s.empty() && path == s) { skip = true; break; }
+        if (skip) continue;
         if (!is_usb_capture_device(path)) continue;
         UsbCamConfig test_cfg = cfg;
         test_cfg.device = path;
@@ -426,6 +472,7 @@ bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
             cv::Mat test;
             if (cap.read(test) && !test.empty()) {
                 std::cerr << "[cam] USB scan found device at " << path << "\n";
+                cfg.device = path;
                 ok = true;
                 break;
             }
@@ -439,8 +486,8 @@ bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
                   << "    sudo usermod -aG video $USER  (then log out and back in)\n";
     }
 
-    // Restart the capture thread if either slot is now usable
-    if (usb1_ok_ || usb2_ok_) {
+    // Restart the capture thread if any slot is now usable
+    if (usb1_ok_ || usb2_ok_ || usb3_ok_) {
         running_ = true;
         usb_thread_ = std::thread(&CameraManager::usb_capture_thread, this);
     }
@@ -449,7 +496,8 @@ bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
 }
 
 bool CameraManager::scan_usb1() { return scan_usb(usb_cap1_, usb1_ok_, usb1_cfg_); }
-bool CameraManager::scan_usb2() { return scan_usb(usb_cap2_, usb2_ok_, usb2_cfg_); }
+bool CameraManager::scan_usb2() { return scan_usb(usb_cap2_, usb2_ok_, usb2_cfg_, {usb1_cfg_.device}); }
+bool CameraManager::scan_usb3() { return scan_usb(usb_cap3_, usb3_ok_, usb3_cfg_, {usb1_cfg_.device, usb2_cfg_.device}); }
 
 static void v4l2_set_ctrl(const std::string& dev, uint32_t id, int32_t val) {
     int fd = open(dev.c_str(), O_RDWR);
@@ -460,6 +508,7 @@ static void v4l2_set_ctrl(const std::string& dev, uint32_t id, int32_t val) {
 }
 void CameraManager::set_usb1_ctrl(uint32_t id, int32_t val) { v4l2_set_ctrl(usb1_cfg_.device, id, val); }
 void CameraManager::set_usb2_ctrl(uint32_t id, int32_t val) { v4l2_set_ctrl(usb2_cfg_.device, id, val); }
+void CameraManager::set_usb3_ctrl(uint32_t id, int32_t val) { v4l2_set_ctrl(usb3_cfg_.device, id, val); }
 
 bool CameraManager::get_usb1(GLuint& out) {
     std::lock_guard<std::mutex> lk(usb1_slot_.mtx);
@@ -476,5 +525,14 @@ bool CameraManager::get_usb2(GLuint& out) {
     upload_texture(usb2_slot_.tex, usb2_slot_.w, usb2_slot_.h, usb2_slot_.buf.data());
     usb2_slot_.dirty = false;
     out = usb2_slot_.tex;
+    return true;
+}
+
+bool CameraManager::get_usb3(GLuint& out) {
+    std::lock_guard<std::mutex> lk(usb3_slot_.mtx);
+    if (!usb3_slot_.dirty || usb3_slot_.buf.empty()) { out = usb3_slot_.tex; return false; }
+    upload_texture(usb3_slot_.tex, usb3_slot_.w, usb3_slot_.h, usb3_slot_.buf.data());
+    usb3_slot_.dirty = false;
+    out = usb3_slot_.tex;
     return true;
 }

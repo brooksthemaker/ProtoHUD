@@ -589,13 +589,14 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const Ind left_items[]  = {{"Proot",     h.teensy_ok},
                                 {"LoRa",      h.lora_ok},
                                 {"Interface", h.knob_ok},
-                                {"Audio",     h.audio_ok}};
+                                {"Audio",     h.audio_ok},
+                                {"WiFi",      h.wifi_ok}};
     const Ind right_items[] = {{lcam_lbl,    h.cam_owl_left,  false},
                                 {rcam_lbl,    h.cam_owl_right, false},
                                 {"Cam 1",     h.cam_usb1,      h.cam_usb1 && !h.cam_usb1_overlay},
                                 {"Cam 2",     h.cam_usb2,      h.cam_usb2 && !h.cam_usb2_overlay}};
     const Ind* items   = right_side ? right_items : left_items;
-    const int  n_items = 4;
+    const int  n_items = right_side ? 4 : 5;
 
     constexpr float ROW_H   = 18.f;
     constexpr float DOT_R   = 4.f;
@@ -1864,4 +1865,212 @@ void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
 
     fx_draw(dl);
     fx_draw_lines(dl);
+}
+
+// ── System status panel ───────────────────────────────────────────────────────
+
+void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active) {
+    if (!active) return;
+
+    ImGui::SetCurrentContext(ctx_);
+
+    const float sw = static_cast<float>(w);
+    const float sh = static_cast<float>(h);
+
+    ImGui::SetNextWindowPos ({0.f, 0.f});
+    ImGui::SetNextWindowSize({sw,  sh });
+    ImGui::SetNextWindowBgAlpha(0.f);
+    ImGui::Begin("##sys_panel", nullptr,
+        ImGuiWindowFlags_NoDecoration          |
+        ImGuiWindowFlags_NoInputs              |
+        ImGuiWindowFlags_NoMove                |
+        ImGuiWindowFlags_NoNav                 |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoSavedSettings);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Panel geometry — top-left, fixed size
+    constexpr float PW    = 340.f;
+    constexpr float PH    = 440.f;
+    constexpr float PAD   = 10.f;
+    constexpr float MRG   = 14.f;   // left margin from screen edge
+    const float px = MRG;
+    const float py = MRG;
+
+    // Background + border
+    dl->AddRectFilled({px, py}, {px + PW, py + PH}, col_.panel_bg, 6.f);
+    dl->AddRect      ({px, py}, {px + PW, py + PH}, col_.primary,  6.f, 0, 1.5f);
+
+    if (font_mono_) ImGui::PushFont(font_mono_);
+    const float lh = ImGui::GetTextLineHeight();
+
+    float cy = py + PAD;   // current y cursor
+
+    // Helper: draw a section header + separator
+    auto section = [&](const char* title) {
+        hud_glow_text(dl, {px + PAD, cy}, title, true, col_.primary, col_.primary);
+        cy += lh + 2.f;
+        dl->AddLine({px + PAD, cy}, {px + PW - PAD, cy}, with_alpha(col_.primary, 80), 1.f);
+        cy += 5.f;
+    };
+
+    // Sparkline helper: draws oldest→newest from circular ring buffer
+    auto sparkline = [&](const float* buf, int n, int head,
+                         ImVec2 origin, float spw, float sph,
+                         float scale_max, ImU32 col) {
+        if (scale_max <= 0.f) return;
+        const float step = spw / float(n - 1);
+        for (int i = 0; i < n - 1; ++i) {
+            const int   idx0 = (head + 1 + i)     % n;
+            const int   idx1 = (head + 1 + i + 1) % n;
+            const float v0   = std::min(buf[idx0], scale_max) / scale_max;
+            const float v1   = std::min(buf[idx1], scale_max) / scale_max;
+            dl->AddLine({origin.x + i * step,       origin.y + sph * (1.f - v0)},
+                        {origin.x + (i+1) * step,   origin.y + sph * (1.f - v1)},
+                        col, 1.5f);
+        }
+        // Frame
+        dl->AddRect({origin.x, origin.y}, {origin.x + spw, origin.y + sph},
+                    with_alpha(col, 60), 0.f, 0, 1.f);
+    };
+
+    // ── SYSTEM ────────────────────────────────────────────────────────────────
+    section("SYSTEM");
+
+    // Uptime
+    {
+        const uint64_t s = snap.sys_metrics.uptime_s;
+        const uint32_t d = static_cast<uint32_t>(s / 86400);
+        const uint32_t hh = static_cast<uint32_t>((s % 86400) / 3600);
+        const uint32_t mm = static_cast<uint32_t>((s % 3600) / 60);
+        char buf[48];
+        snprintf(buf, sizeof(buf), "Up: %ud %02uh %02um", d, hh, mm);
+        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
+        cy += lh + 4.f;
+    }
+
+    // CPU sparkline row
+    {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "CPU  %3.0f%%", static_cast<double>(snap.sys_metrics.cpu_pct));
+        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
+        const float spw = PW - PAD * 2.f - 80.f;
+        sparkline(snap.sys_metrics.cpu_history, kSysHistLen, snap.sys_metrics.history_head,
+                  {px + PAD + 78.f, cy}, spw, lh,
+                  100.f, col_.accent);
+        cy += lh + 6.f;
+    }
+
+    // RAM sparkline row
+    {
+        const float used  = snap.sys_metrics.ram_used_mb;
+        const float total = snap.sys_metrics.ram_total_mb;
+        char buf[40];
+        snprintf(buf, sizeof(buf), "RAM  %.0f/%.0f", static_cast<double>(used),
+                                                      static_cast<double>(total));
+        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
+        const float spw = PW - PAD * 2.f - 80.f;
+        sparkline(snap.sys_metrics.ram_history, kSysHistLen, snap.sys_metrics.history_head,
+                  {px + PAD + 78.f, cy}, spw, lh,
+                  total > 0.f ? total : 4096.f, col_.warn);
+        cy += lh + 8.f;
+    }
+
+    // ── NETWORK ───────────────────────────────────────────────────────────────
+    section("NETWORK");
+
+    // Wi-Fi
+    {
+        char buf[80];
+        if (snap.wifi.connected) {
+            snprintf(buf, sizeof(buf), "WiFi: %s", snap.wifi.ssid.c_str());
+        } else {
+            snprintf(buf, sizeof(buf), "WiFi: --");
+        }
+        hud_glow_text(dl, {px + PAD, cy}, buf, snap.wifi.connected,
+                      col_.glow_base, col_.text_fill);
+        cy += lh + 2.f;
+
+        if (snap.wifi.connected) {
+            // IP + signal bars
+            const int dbm   = snap.wifi.signal_dbm;
+            const int bars  = (dbm >= -50) ? 4 : (dbm >= -65) ? 3 : (dbm >= -75) ? 2 : 1;
+            snprintf(buf, sizeof(buf), "  %s  %d dBm", snap.wifi.ip.c_str(), dbm);
+            hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
+            // Draw signal bars (4 rectangles of increasing height)
+            const float bx = px + PW - PAD - 28.f;
+            const float by = cy + lh;
+            for (int i = 0; i < 4; ++i) {
+                const float bh2  = (i + 1) * 4.f;
+                const ImU32 bcol = (i < bars) ? col_.ind_good : with_alpha(col_.ind_inactive, 100);
+                dl->AddRectFilled({bx + i * 7.f, by - bh2}, {bx + i * 7.f + 5.f, by}, bcol);
+            }
+            cy += lh + 4.f;
+        } else {
+            cy += 4.f;
+        }
+    }
+
+    // Ping
+    {
+        char buf[80];
+        if (snap.ping.reachable) {
+            snprintf(buf, sizeof(buf), "Ping  %.0fms  %s",
+                     static_cast<double>(snap.ping.latency_ms),
+                     snap.ping.host.c_str());
+        } else {
+            snprintf(buf, sizeof(buf), "Ping  --  %s", snap.ping.host.c_str());
+        }
+        hud_glow_text(dl, {px + PAD, cy}, buf, snap.ping.reachable,
+                      col_.glow_base, col_.text_fill);
+        const float spw = PW - PAD * 2.f - 80.f;
+        // Scale: 500 ms max
+        sparkline(snap.ping.history, kPingHistLen, snap.ping.history_head,
+                  {px + PAD + 78.f, cy}, spw, lh,
+                  500.f, snap.ping.reachable ? col_.primary : with_alpha(col_.primary, 80));
+        cy += lh + 8.f;
+    }
+
+    // ── BLUETOOTH ─────────────────────────────────────────────────────────────
+    section("BLUETOOTH");
+
+    if (snap.bt_devices.empty()) {
+        hud_glow_text(dl, {px + PAD, cy}, "No devices", false, col_.glow_base, col_.text_dim);
+        cy += lh + 4.f;
+    } else {
+        constexpr int MAX_BT = 4;
+        int shown = 0;
+        for (const auto& dev : snap.bt_devices) {
+            if (shown >= MAX_BT) break;
+            const ImU32 dot_col = dev.connected ? col_.ind_good : col_.ind_inactive;
+            dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f, dot_col);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "  %s", dev.name.c_str());
+            hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, dev.connected,
+                          col_.glow_base, col_.text_fill);
+            cy += lh + 2.f;
+            ++shown;
+        }
+        cy += 4.f;
+    }
+
+    // ── SSH ───────────────────────────────────────────────────────────────────
+    {
+        dl->AddLine({px + PAD, cy}, {px + PW - PAD, cy}, with_alpha(col_.primary, 80), 1.f);
+        cy += 5.f;
+        char buf[32];
+        if (snap.ssh.active) {
+            snprintf(buf, sizeof(buf), "SSH  Active :%d", snap.ssh.port);
+            dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f, col_.ind_good);
+        } else {
+            snprintf(buf, sizeof(buf), "SSH  Inactive");
+            dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f, col_.ind_fail);
+        }
+        hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, snap.ssh.active,
+                      col_.glow_base, col_.text_fill);
+    }
+
+    if (font_mono_) ImGui::PopFont();
+
+    ImGui::End();
 }

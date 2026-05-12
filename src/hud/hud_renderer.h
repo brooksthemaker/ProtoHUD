@@ -113,6 +113,10 @@ public:
     void draw_panel_preview(unsigned int tex, int screen_w, int screen_h,
                             float scale = 3.f);
 
+    // Draw the system status panel (CPU/RAM sparklines, Wi-Fi, ping, BT, SSH).
+    // active=false skips rendering entirely.
+    void draw_sys_panel(const AppState& snap, int w, int h, bool active);
+
     // Execute ImGui::Render → flush to current GL framebuffer.
     void render_overlay();
 

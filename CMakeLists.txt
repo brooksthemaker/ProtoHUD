@@ -13,6 +13,18 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O2")
 set(CMAKE_CXX_FLAGS_DEBUG   "-g -DDEBUG")
 
+# ── Git hash compile definition ───────────────────────────────────────────────
+
+execute_process(
+    COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short HEAD
+    OUTPUT_VARIABLE GIT_HASH_STR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT GIT_HASH_STR)
+    set(GIT_HASH_STR "unknown")
+endif()
+
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
 find_package(PkgConfig REQUIRED)
@@ -126,6 +138,11 @@ set(SOURCES
     src/audio/audio_engine.cpp
     src/post_process.cpp
     src/sensor/mpu9250.cpp
+    src/sys/system_monitor.cpp
+    src/net/wifi_monitor.cpp
+    src/net/ping_monitor.cpp
+    src/net/bt_monitor.cpp
+    src/crash_reporter.cpp
 )
 
 add_executable(protohud ${SOURCES})
@@ -163,6 +180,10 @@ target_compile_options(protohud PRIVATE
     ${EGL_CFLAGS_OTHER}
     ${GLES_CFLAGS_OTHER}
     ${GLFW3_CFLAGS_OTHER}
+)
+
+target_compile_definitions(protohud PRIVATE
+    GIT_HASH="${GIT_HASH_STR}"
 )
 
 # Ensure libglasses.so is found at runtime relative to the binary

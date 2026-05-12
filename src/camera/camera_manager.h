@@ -58,6 +58,7 @@ public:
 
     bool init(const CamConfig& left, const CamConfig& right,
               const UsbCamConfig& usb1, const UsbCamConfig& usb2,
+              const UsbCamConfig& usb3,
               const char* nv12_vs_path, const char* nv12_fs_path);
     void shutdown();
 
@@ -72,6 +73,7 @@ public:
     // Returns true if a new frame was uploaded this call.
     bool get_usb1(GLuint& out);
     bool get_usb2(GLuint& out);
+    bool get_usb3(GLuint& out);
 
     // ── Resolution hot-swap ───────────────────────────────────────────────────
     // Reconfigures both OWLsight cameras to the given resolution and fps.
@@ -93,6 +95,8 @@ public:
     void close_usb1();
     void open_usb2();
     void close_usb2();
+    void open_usb3();
+    void close_usb3();
 
     // ── USB camera scan ───────────────────────────────────────────────────────
     // Stops the capture thread, probes /dev/video0..N until a device opens,
@@ -100,12 +104,14 @@ public:
     // Returns true if the slot is now open.
     bool scan_usb1();
     bool scan_usb2();
+    bool scan_usb3();
 
     // ── Status ────────────────────────────────────────────────────────────────
     bool owl_left_ok()  const { return owl_left_  && owl_left_->is_ok();  }
     bool owl_right_ok() const { return owl_right_ && owl_right_->is_ok(); }
     bool usb1_ok()      const { return usb1_ok_; }
     bool usb2_ok()      const { return usb2_ok_; }
+    bool usb3_ok()      const { return usb3_ok_; }
 
     // ── Auto-reconnect ────────────────────────────────────────────────────────
     // When enabled, the capture thread will attempt to reopen a disconnected
@@ -113,18 +119,23 @@ public:
     // camera so an explicit close stays closed.
     void set_usb1_reconnect(bool v) { usb1_reconnect_ = v; }
     void set_usb2_reconnect(bool v) { usb2_reconnect_ = v; }
+    void set_usb3_reconnect(bool v) { usb3_reconnect_ = v; }
     bool usb1_reconnect_enabled() const { return usb1_reconnect_; }
     bool usb2_reconnect_enabled() const { return usb2_reconnect_; }
+    bool usb3_reconnect_enabled() const { return usb3_reconnect_; }
 
     // ── USB brightness (software multiplier, safe to call from any thread) ────
     void  set_usb1_brightness(float v) { usb1_brightness_ = v; }
     void  set_usb2_brightness(float v) { usb2_brightness_ = v; }
+    void  set_usb3_brightness(float v) { usb3_brightness_ = v; }
     float usb1_brightness()      const { return usb1_brightness_.load(); }
     float usb2_brightness()      const { return usb2_brightness_.load(); }
+    float usb3_brightness()      const { return usb3_brightness_.load(); }
 
     // ── USB V4L2 control (applies ioctl live; camera may briefly drop frames) ─
     void set_usb1_ctrl(uint32_t id, int32_t value);
     void set_usb2_ctrl(uint32_t id, int32_t value);
+    void set_usb3_ctrl(uint32_t id, int32_t value);
 
     // ── USB config access (for menu read-back and config-save persistence) ────
     void update_usb1_cfg(const UsbCamConfig& c) {
@@ -139,8 +150,15 @@ public:
         usb2_auto_brightness_        = c.auto_brightness;
         usb2_auto_brightness_target_ = c.auto_brightness_target;
     }
+    void update_usb3_cfg(const UsbCamConfig& c) {
+        usb3_cfg_ = c;
+        usb3_flip_                   = c.flip;
+        usb3_auto_brightness_        = c.auto_brightness;
+        usb3_auto_brightness_target_ = c.auto_brightness_target;
+    }
     const UsbCamConfig& usb1_cfg() const { return usb1_cfg_; }
     const UsbCamConfig& usb2_cfg() const { return usb2_cfg_; }
+    const UsbCamConfig& usb3_cfg() const { return usb3_cfg_; }
 
 private:
     void usb_capture_thread();
@@ -148,7 +166,8 @@ private:
     void upload_texture(GLuint& tex, int w, int h, const unsigned char* rgba);
     // Stop the capture thread, probe video devices, restart thread.
     bool scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
-                  const UsbCamConfig& cfg);
+                  UsbCamConfig& cfg,
+                  const std::vector<std::string>& skip_paths = {});
 
     // Shared libcamera camera manager (one per process)
     std::unique_ptr<libcamera::CameraManager> lcam_mgr_;
@@ -158,16 +177,19 @@ private:
     std::unique_ptr<DmaCamera> owl_right_;
 
     // USB cameras (OpenCV capture)
-    UsbCamConfig     usb1_cfg_, usb2_cfg_;
-    cv::VideoCapture usb_cap1_, usb_cap2_;
-    std::mutex       usb1_cap_mtx_, usb2_cap_mtx_;
+    UsbCamConfig     usb1_cfg_, usb2_cfg_, usb3_cfg_;
+    cv::VideoCapture usb_cap1_, usb_cap2_, usb_cap3_;
+    std::mutex       usb1_cap_mtx_, usb2_cap_mtx_, usb3_cap_mtx_;
     std::atomic<bool> usb1_ok_ { false };
     std::atomic<bool> usb2_ok_ { false };
+    std::atomic<bool> usb3_ok_ { false };
     std::atomic<bool> usb1_reconnect_ { false };
     std::atomic<bool> usb2_reconnect_ { false };
+    std::atomic<bool> usb3_reconnect_ { false };
     // Written only by the capture thread; no extra sync needed.
     std::chrono::steady_clock::time_point usb1_last_retry_ {};
     std::chrono::steady_clock::time_point usb2_last_retry_ {};
+    std::chrono::steady_clock::time_point usb3_last_retry_ {};
 
     // Per-USB-camera slot: capture thread writes buf/w/h, render thread uploads
     struct TexSlot {
@@ -179,16 +201,20 @@ private:
         int                 w = 0, h = 0;
         bool                dirty = false;
     };
-    TexSlot usb1_slot_, usb2_slot_;
+    TexSlot usb1_slot_, usb2_slot_, usb3_slot_;
 
     std::atomic<float> usb1_brightness_ { 1.0f };
     std::atomic<float> usb2_brightness_ { 1.0f };
+    std::atomic<float> usb3_brightness_ { 1.0f };
     std::atomic<bool>  usb1_flip_       { false };
     std::atomic<bool>  usb2_flip_       { false };
+    std::atomic<bool>  usb3_flip_       { false };
     std::atomic<bool>  usb1_auto_brightness_        { false };
     std::atomic<bool>  usb2_auto_brightness_        { false };
+    std::atomic<bool>  usb3_auto_brightness_        { false };
     std::atomic<float> usb1_auto_brightness_target_ { 100.f };
     std::atomic<float> usb2_auto_brightness_target_ { 100.f };
+    std::atomic<float> usb3_auto_brightness_target_ { 100.f };
 
     std::atomic<bool> running_ { false };
     std::thread       usb_thread_;
