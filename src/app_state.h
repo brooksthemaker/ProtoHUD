@@ -202,7 +202,19 @@ struct SysMetrics {
     float    ram_total_mb = 0.f;
     float    cpu_history [kSysHistLen]  = {};
     float    ram_history [kSysHistLen]  = {};
-    int      history_head = 0;
+    int      history_head = 0;        // shared head for cpu/ram (updated by SystemMonitor)
+    // Frame-time metrics — updated by render thread each frame
+    float    frame_time_ms  = 0.f;    // last frame duration in ms
+    float    fps_avg        = 0.f;    // 1000 / frame_time_ms (instantaneous)
+    float    ft_history[kSysHistLen]  = {};
+    int      ft_history_head = 0;
+};
+
+struct SerialMetrics {
+    float  teensy_rtt_ms     = -1.f;  // round-trip time for REQ_STATUS→STATUS; -1 = no sample
+    float  knob_event_age_ms = -1.f;  // ms since last SmartKnob event; -1 = no events yet
+    int8_t lora_rssi         = 0;     // last RADIO_STATUS RSSI (dBm)
+    float  lora_snr          = 0.f;   // last RADIO_STATUS SNR (dB)
 };
 
 struct WifiState {
@@ -287,6 +299,7 @@ struct AppState {
     PingState              ping;
     SshState               ssh;
     std::vector<BtDevice>  bt_devices;
+    SerialMetrics          serial_metrics;
 
     // Cached XR display control values (no SDK getter; updated when menu writes).
     int xr_brightness     = 5;   // 1–7; mirrors last xr->set_brightness() call

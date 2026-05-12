@@ -1,6 +1,7 @@
 #pragma once
 #include "serial_port.h"
 #include "../app_state.h"
+#include <atomic>
 #include <functional>
 #include <string>
 #include <vector>
@@ -30,12 +31,16 @@ public:
     void on_wake(KnobWakeCallback cb)   { wake_cb_   = std::move(cb); }
     void on_status(KnobStatusCallback cb) { status_cb_ = std::move(cb); }
 
+    // Returns ms since the last event from the knob, or -1 if no events yet.
+    float event_age_ms() const;
+
 private:
     void on_frame(uint8_t cmd, const uint8_t* payload, uint8_t len);
 
-    SerialPort      port_;
-    AppState&       state_;
-    KnobMoveCallback move_cb_;
-    KnobWakeCallback wake_cb_;
+    SerialPort         port_;
+    AppState&          state_;
+    KnobMoveCallback   move_cb_;
+    KnobWakeCallback   wake_cb_;
     KnobStatusCallback status_cb_;
+    std::atomic<int64_t> last_event_us_ { 0 };  // steady_clock µs of last received frame
 };

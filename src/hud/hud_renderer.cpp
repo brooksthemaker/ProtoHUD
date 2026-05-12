@@ -1891,7 +1891,7 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
 
     // Panel geometry — top-left, fixed size
     constexpr float PW    = 340.f;
-    constexpr float PH    = 440.f;
+    constexpr float PH    = 580.f;
     constexpr float PAD   = 10.f;
     constexpr float MRG   = 14.f;   // left margin from screen edge
     const float px = MRG;
@@ -2054,6 +2054,82 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         cy += 4.f;
     }
 
+    // ── PERFORMANCE ───────────────────────────────────────────────────────────
+    section("PERFORMANCE");
+
+    // FPS + frame time sparkline
+    {
+        const float fps = snap.sys_metrics.fps_avg;
+        const float ft  = snap.sys_metrics.frame_time_ms;
+        char buf[48];
+        if (fps > 0.f)
+            snprintf(buf, sizeof(buf), "FPS  %4.1f", static_cast<double>(fps));
+        else
+            snprintf(buf, sizeof(buf), "FPS  --");
+        hud_glow_text(dl, {px + PAD, cy}, buf, fps > 0.f, col_.glow_base, col_.text_fill);
+        const float spw = PW - PAD * 2.f - 80.f;
+        // Sparkline: frame time in ms, capped at 50ms (20 FPS floor)
+        sparkline(snap.sys_metrics.ft_history, kSysHistLen, snap.sys_metrics.ft_history_head,
+                  {px + PAD + 78.f, cy}, spw, lh, 50.f, col_.primary);
+        cy += lh + 4.f;
+
+        if (ft > 0.f)
+            snprintf(buf, sizeof(buf), "Frame  %.1fms", static_cast<double>(ft));
+        else
+            snprintf(buf, sizeof(buf), "Frame  --");
+        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
+        cy += lh + 8.f;
+    }
+
+    // ── SERIAL ────────────────────────────────────────────────────────────────
+    section("SERIAL LATENCY");
+
+    // Teensy RTT
+    {
+        const float rtt = snap.serial_metrics.teensy_rtt_ms;
+        const bool ok   = snap.health.teensy_ok;
+        char buf[40];
+        if (rtt >= 0.f)
+            snprintf(buf, sizeof(buf), "  Teensy   %.0fms", static_cast<double>(rtt));
+        else
+            snprintf(buf, sizeof(buf), "  Teensy   --");
+        dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f,
+                            ok ? col_.ind_good : col_.ind_fail);
+        hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, ok, col_.glow_base, col_.text_fill);
+        cy += lh + 4.f;
+    }
+
+    // SmartKnob event age
+    {
+        const float age = snap.serial_metrics.knob_event_age_ms;
+        const bool  ok  = snap.health.knob_ok;
+        char buf[40];
+        if (age >= 0.f)
+            snprintf(buf, sizeof(buf), "  Knob   <%.0fms ago", static_cast<double>(age));
+        else
+            snprintf(buf, sizeof(buf), "  Knob   --");
+        dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f,
+                            ok ? col_.ind_good : col_.ind_inactive);
+        hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, ok, col_.glow_base, col_.text_fill);
+        cy += lh + 4.f;
+    }
+
+    // LoRa RSSI / SNR
+    {
+        const bool ok = snap.health.lora_ok;
+        char buf[48];
+        if (ok)
+            snprintf(buf, sizeof(buf), "  LoRa   %ddBm  %.1fdB",
+                     static_cast<int>(snap.serial_metrics.lora_rssi),
+                     static_cast<double>(snap.serial_metrics.lora_snr));
+        else
+            snprintf(buf, sizeof(buf), "  LoRa   --");
+        dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f,
+                            ok ? col_.ind_good : col_.ind_inactive);
+        hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, ok, col_.glow_base, col_.text_fill);
+        cy += lh + 8.f;
+    }
+
     // ── SSH ───────────────────────────────────────────────────────────────────
     {
         dl->AddLine({px + PAD, cy}, {px + PW - PAD, cy}, with_alpha(col_.primary, 80), 1.f);
@@ -2072,5 +2148,58 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
 
     if (font_mono_) ImGui::PopFont();
 
+    ImGui::End();
+}
+
+// ── FPS overlay ───────────────────────────────────────────────────────────────
+
+void HudRenderer::draw_fps_overlay(const AppState& snap, int w, int h, bool active) {
+    if (!active) return;
+    ImGui::SetCurrentContext(ctx_);
+
+    const float sw = static_cast<float>(w);
+    const float sh = static_cast<float>(h);
+
+    ImGui::SetNextWindowPos ({0.f, 0.f});
+    ImGui::SetNextWindowSize({sw, sh});
+    ImGui::SetNextWindowBgAlpha(0.f);
+    ImGui::Begin("##fps_overlay", nullptr,
+        ImGuiWindowFlags_NoDecoration          |
+        ImGuiWindowFlags_NoInputs              |
+        ImGuiWindowFlags_NoMove                |
+        ImGuiWindowFlags_NoNav                 |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoSavedSettings);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    if (font_mono_) ImGui::PushFont(font_mono_);
+    const float lh  = ImGui::GetTextLineHeight();
+    const float fps = snap.sys_metrics.fps_avg;
+    const float ft  = snap.sys_metrics.frame_time_ms;
+
+    char buf[32];
+    if (fps > 0.f)
+        snprintf(buf, sizeof(buf), "%.0f FPS  %.1fms", static_cast<double>(fps),
+                                                        static_cast<double>(ft));
+    else
+        snprintf(buf, sizeof(buf), "-- FPS");
+
+    const ImU32 col    = with_alpha(col_.text_fill, 160);
+    const ImU32 bg_col = IM_COL32(6, 8, 10, 140);
+    const float margin = 8.f;
+
+    // Draw in top-right corner of each eye half
+    const float eye_w = sw * 0.5f;
+    for (int eye = 0; eye < 2; ++eye) {
+        const float off  = eye * eye_w;
+        ImVec2 ts = ImGui::CalcTextSize(buf);
+        const float bx = off + eye_w - ts.x - margin * 2.f;
+        const float by = margin;
+        dl->AddRectFilled({bx - 4.f, by - 2.f}, {bx + ts.x + 4.f, by + lh + 2.f},
+                          bg_col, 3.f);
+        dl->AddText({bx, by}, col, buf);
+    }
+
+    if (font_mono_) ImGui::PopFont();
     ImGui::End();
 }

@@ -155,10 +155,12 @@ void LoRaRadio::on_frame(uint8_t cmd, const uint8_t* payload, uint8_t len) {
     // ── RADIO_STATUS ──────────────────────────────────────────────────────────
     case LoRaCmd::RADIO_STATUS: {
         if (len < 2) break;
-        // Currently just marks the radio as alive; could surface RSSI/SNR
-        // to a dedicated AppState field if needed.
+        const int8_t rssi = static_cast<int8_t>(payload[0]);
+        const float  snr  = static_cast<float>(static_cast<int8_t>(payload[1]));
         std::lock_guard<std::mutex> lk(state_.mtx);
-        state_.health.lora_ok = true;
+        state_.health.lora_ok           = true;
+        state_.serial_metrics.lora_rssi = rssi;
+        state_.serial_metrics.lora_snr  = snr;
         break;
     }
 

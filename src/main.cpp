@@ -196,6 +196,7 @@ static std::vector<MenuItem> build_menu(
         const std::vector<std::string>& gif_names,
         BtMonitor* bt_mon,
         bool* sys_panel_active,
+        bool* fps_overlay_active,
         AppState* state_ptr,
         // Face Source switching — pass null fp_option to hide Protoface entry
         IFaceController** active_face_pp  = nullptr,
@@ -1703,6 +1704,9 @@ static std::vector<MenuItem> build_menu(
         toggle("System Panel",
             [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
             [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
+        toggle("FPS Overlay",
+            [fps_overlay_active]{ return fps_overlay_active && *fps_overlay_active; },
+            [fps_overlay_active](bool v){ if (fps_overlay_active) *fps_overlay_active = v; }),
         toggle("SSH Access",
             [state_ptr]{ return state_ptr && state_ptr->ssh.active; },
             [state_ptr](bool v){
@@ -2299,6 +2303,7 @@ int main(int argc, char* argv[]) {
     bool pip_cam2_overlay_active = false;
     bool pip_cam3_overlay_active = false;
     bool sys_panel_active        = false;
+    bool fps_overlay_active      = false;
 
     std::vector<std::string> gif_names;
     if (jser.contains("teensy")) {
@@ -2321,7 +2326,7 @@ int main(int argc, char* argv[]) {
                                &android_overlay_cfg,
                                &hud.colors(), &hud.config(), &menu_ptr,
                                &mpu9250, gif_names,
-                               &bt_mon, &sys_panel_active, &state,
+                               &bt_mon, &sys_panel_active, &fps_overlay_active, &state,
                                &active_face,
                                static_cast<IFaceController*>(&teensy),
                                static_cast<IFaceController*>(&protoface_ctrl),
@@ -2582,9 +2587,24 @@ int main(int argc, char* argv[]) {
         }
 
         // ── State snapshot ────────────────────────────────────────────────────
+        // Also update render-thread metrics (frame time, knob event age) here
+        // so they're included in the snapshot under a single lock acquisition.
         AppState snap;
         {
             std::lock_guard<std::mutex> lk(state.mtx);
+
+            // Frame time / FPS into SysMetrics
+            {
+                auto& m = state.sys_metrics;
+                m.frame_time_ms = dt * 1000.f;
+                m.fps_avg       = dt > 0.f ? 1.f / dt : 0.f;
+                const int h2    = (m.ft_history_head + 1) % kSysHistLen;
+                m.ft_history[h2]   = m.frame_time_ms;
+                m.ft_history_head  = h2;
+            }
+            // Knob event age (computed on render thread, written here)
+            state.serial_metrics.knob_event_age_ms = knob.event_age_ms();
+
             snap.face            = state.face;
             snap.health          = state.health;
             snap.knob            = state.knob;
@@ -2601,6 +2621,13 @@ int main(int argc, char* argv[]) {
             snap.pp_cfg             = state.pp_cfg;
             snap.timer_alarm        = state.timer_alarm;
             snap.effects_cfg        = state.effects_cfg;
+            snap.sys_metrics        = state.sys_metrics;
+            snap.wifi               = state.wifi;
+            snap.ping               = state.ping;
+            snap.ssh                = state.ssh;
+            snap.bt_devices         = state.bt_devices;
+            snap.serial_metrics     = state.serial_metrics;
+            snap.camera_resolution  = state.camera_resolution;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
         }
@@ -2779,8 +2806,11 @@ int main(int argc, char* argv[]) {
             hud.draw_panel_preview(panel_tex, xr.eye_width(), xr.eye_height());
         }
 
-        // System status panel (CPU/RAM/WiFi/ping/BT/SSH).
+        // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
         hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), sys_panel_active);
+
+        // FPS / frame-time corner overlay (drawn in both eye halves).
+        hud.draw_fps_overlay(snap, xr.eye_width() * 2, xr.eye_height(), fps_overlay_active);
 
         // Alarm / timer-expired popups render on top of everything.
         hud.draw_popups(state, xr.eye_width(), xr.eye_height());
