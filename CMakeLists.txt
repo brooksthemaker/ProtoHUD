@@ -83,6 +83,13 @@ FetchContent_Declare(imgui
 )
 FetchContent_MakeAvailable(imgui)
 
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(stb)
+
 # ImGui has no CMakeLists — build it as a static library here.
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -143,6 +150,7 @@ set(SOURCES
     src/net/ping_monitor.cpp
     src/net/bt_monitor.cpp
     src/crash_reporter.cpp
+    src/splash.cpp
 )
 
 add_executable(protohud ${SOURCES})
@@ -151,6 +159,7 @@ target_include_directories(protohud PRIVATE
     src/
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
+    ${stb_SOURCE_DIR}
     ${VITURE_INCLUDE}
     ${OpenCV_INCLUDE_DIRS}
     ${LIBCAMERA_INCLUDE_DIRS}

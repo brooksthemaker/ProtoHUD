@@ -221,5 +221,13 @@
     "wifi_iface": "wlan0",
     "ssh_port":   22,
     "crash_dir":  "/tmp"
+  },
+  "splash": {
+    "enabled":       true,
+    "animated":      true,
+    "image":         "",
+    "min_display_s": 2.0,
+    "title":         "PROTOHUD",
+    "subtitle":      "XR HUD System"
   }
 }

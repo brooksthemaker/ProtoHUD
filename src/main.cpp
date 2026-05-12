@@ -35,6 +35,7 @@
 #include "net/ping_monitor.h"
 #include "net/bt_monitor.h"
 #include "crash_reporter.h"
+#include "splash.h"
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -2036,6 +2037,20 @@ int main(int argc, char* argv[]) {
     }
     state.ssh.port = cfg_ssh_port;
 
+    SplashConfig splash_cfg;
+    if (cfg.contains("splash")) {
+        auto& js             = cfg["splash"];
+        splash_cfg.enabled       = js.value("enabled",       splash_cfg.enabled);
+        splash_cfg.animated      = js.value("animated",      splash_cfg.animated);
+        splash_cfg.image_path    = js.value("image",         splash_cfg.image_path);
+        splash_cfg.min_display_s = js.value("min_display_s", splash_cfg.min_display_s);
+        splash_cfg.title         = js.value("title",         splash_cfg.title);
+        splash_cfg.subtitle      = js.value("subtitle",      splash_cfg.subtitle);
+    }
+    // Resolve relative image path against the binary directory.
+    if (!splash_cfg.image_path.empty() && splash_cfg.image_path[0] != '/')
+        splash_cfg.image_path = res(splash_cfg.image_path);
+
     // Seed resolution state from whatever the OWLsight config says
     state.camera_resolution.width  = owl_left.width;
     state.camera_resolution.height = owl_left.height;
@@ -2161,6 +2176,34 @@ int main(int argc, char* argv[]) {
     HudRenderer hud(hud_cfg, hud_col);
     hud.load(xr.glfw_window());
 
+    // ── Splash screen ─────────────────────────────────────────────────────────
+    // Render a splash frame between heavy init steps so the display isn't black
+    // while cameras, serial ports, and the menu system initialise.
+
+    SplashScreen splash(splash_cfg);
+    if (!splash_cfg.image_path.empty())
+        splash.load_image(splash_cfg.image_path);
+
+    double splash_t0 = glfwGetTime();
+
+    auto splash_frame = [&](const char* status, float progress) {
+        if (!splash_cfg.enabled) return;
+        int fw = 0, fh = 0;
+        glfwGetFramebufferSize(xr.glfw_window(), &fw, &fh);
+        glViewport(0, 0, fw, fh);
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        hud.begin_frame(0.016f);
+        float t = static_cast<float>(glfwGetTime() - splash_t0);
+        splash.draw(ImGui::GetBackgroundDrawList(),
+                    static_cast<float>(fw), static_cast<float>(fh),
+                    t, status, progress);
+        hud.render_overlay();
+        xr.present();
+    };
+
+    splash_frame("Initializing cameras...", 0.20f);
+
     // ── Camera manager ────────────────────────────────────────────────────────
 
     CameraManager cameras;
@@ -2195,6 +2238,8 @@ int main(int argc, char* argv[]) {
         if (!use_beast_cam)
             std::cerr << "[main] Beast camera unavailable — using OWLsight\n";
     }
+
+    splash_frame("Connecting serial devices...", 0.50f);
 
     // ── Serial devices ────────────────────────────────────────────────────────
 
@@ -2245,6 +2290,8 @@ int main(int argc, char* argv[]) {
         std::thread([&android_mirror]() { android_mirror.start(); }).detach();
         android_overlay_active = true;
     }
+
+    splash_frame("Building menu...", 0.75f);
 
     // ── Menu system ───────────────────────────────────────────────────────────
 
@@ -2372,8 +2419,21 @@ int main(int argc, char* argv[]) {
     GLuint tex_usb3  = 0;
     GLuint tex_beast = 0;
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
     teensy.request_status();
+
+    // ── Splash hold ───────────────────────────────────────────────────────────
+    // Keep splash visible until minimum display time elapses, then show "Ready"
+    // for a brief moment so the animation completes cleanly.
+    if (splash_cfg.enabled) {
+        splash_frame("Ready", 1.0f);
+        while (static_cast<float>(glfwGetTime() - splash_t0) < splash_cfg.min_display_s) {
+            splash_frame("Ready", 1.0f);
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+        // One extra frame with full bar so the glow pulse completes
+        for (int i = 0; i < 6; ++i)
+            splash_frame("Ready", 1.0f);
+    }
 
     // ── Main render loop ──────────────────────────────────────────────────────
 
