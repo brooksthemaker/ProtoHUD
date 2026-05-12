@@ -113,9 +113,13 @@ public:
     void draw_panel_preview(unsigned int tex, int screen_w, int screen_h,
                             float scale = 3.f);
 
-    // Draw the system status panel (CPU/RAM sparklines, Wi-Fi, ping, BT, SSH).
-    // active=false skips rendering entirely.
+    // Draw the system status panel (CPU/RAM sparklines, Wi-Fi, ping, BT, SSH,
+    // performance, and serial latency).  active=false skips rendering entirely.
     void draw_sys_panel(const AppState& snap, int w, int h, bool active);
+
+    // Draw a small FPS/frame-time counter in the top-right corner of each eye.
+    // active=false skips rendering.  Pass the full display width (eye_w * 2).
+    void draw_fps_overlay(const AppState& snap, int w, int h, bool active);
 
     // Execute ImGui::Render → flush to current GL framebuffer.
     void render_overlay();

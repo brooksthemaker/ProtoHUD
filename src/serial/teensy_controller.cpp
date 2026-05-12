@@ -79,6 +79,9 @@ void TeensyController::set_menu_item(uint8_t menu_index, uint8_t value) {
 }
 
 void TeensyController::request_status() {
+    using namespace std::chrono;
+    last_req_us_.store(
+        duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
     port_.send(TeensyCmd::REQ_STATUS);
 }
 
@@ -93,7 +96,18 @@ void TeensyController::on_frame(uint8_t cmd, const uint8_t* payload, uint8_t len
         TeensyStatusPayload s {};
         std::memcpy(&s, payload, sizeof(s));
 
+        // Compute round-trip time from last REQ_STATUS
+        int64_t req = last_req_us_.exchange(0);
+        float rtt = -1.f;
+        if (req > 0) {
+            using namespace std::chrono;
+            int64_t now_us = duration_cast<microseconds>(
+                steady_clock::now().time_since_epoch()).count();
+            rtt = static_cast<float>(now_us - req) / 1000.f;
+        }
+
         std::lock_guard<std::mutex> lk(state_.mtx);
+        if (rtt >= 0.f) state_.serial_metrics.teensy_rtt_ms = rtt;
         state_.face.effect_id    = s.effect_id;
         state_.face.gif_id       = s.gif_id;
         state_.face.r            = s.r;

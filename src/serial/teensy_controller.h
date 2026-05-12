@@ -34,4 +34,5 @@ private:
     AppState&            state_;
     std::thread          poll_thread_;
     std::atomic<bool>    poll_running_ { false };
+    std::atomic<int64_t> last_req_us_  { 0 };  // steady_clock µs when last REQ_STATUS sent
 };

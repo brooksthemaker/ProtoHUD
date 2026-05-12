@@ -1,5 +1,6 @@
 #include "smartknob.h"
 #include "../protocols.h"
+#include <chrono>
 #include <cstring>
 #include <vector>
 
@@ -65,7 +66,23 @@ void SmartKnob::set_haptic(uint8_t amplitude, uint8_t frequency, uint8_t detent_
     port_.send(KnobCmd::SET_HAPTIC, buf, 3);
 }
 
+float SmartKnob::event_age_ms() const {
+    int64_t t = last_event_us_.load();
+    if (t <= 0) return -1.f;
+    using namespace std::chrono;
+    int64_t now_us = duration_cast<microseconds>(
+        steady_clock::now().time_since_epoch()).count();
+    return static_cast<float>(now_us - t) / 1000.f;
+}
+
 void SmartKnob::on_frame(uint8_t cmd, const uint8_t* payload, uint8_t len) {
+    // Stamp every received frame so event_age_ms() stays current
+    {
+        using namespace std::chrono;
+        last_event_us_.store(duration_cast<microseconds>(
+            steady_clock::now().time_since_epoch()).count());
+    }
+
     if (cmd == KnobCmd::POSITION_UPDATE && len >= sizeof(KnobPositionPayload)) {
         KnobPositionPayload p {};
         std::memcpy(&p, payload, sizeof(p));
