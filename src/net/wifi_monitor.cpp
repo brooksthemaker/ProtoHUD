@@ -1,15 +1,15 @@
 #include "wifi_monitor.h"
 
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <linux/wireless.h>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <ifaddrs.h>
-#include <linux/wireless.h>
-#include <net/if.h>
-#include <netinet/in.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 
