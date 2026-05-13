@@ -1014,7 +1014,7 @@ void HudRenderer::draw_clock_indicator(NVGcontext* vg, const AppState& s,
         const float t  = static_cast<float>(i + 1) * eff_row_h;
         const float ix = clock_anchor_x + dir_x * t;
         const float iy = anchor_y       + dir_y * t;
-        nvg_glow_text(vg, ix + DOT_R + 6.f, iy - font_size * 0.5f,
+        nvg_glow_text(vg, ix + 6.f, iy - font_size * 0.5f,
                       rows[i], true, col_.glow_base, col_.text_fill);
     }
 }
@@ -1082,7 +1082,7 @@ void HudRenderer::draw_timer_alarm_indicator(NVGcontext* vg, const AppState& s,
         const float t  = static_cast<float>(i + 1) * eff_row_h;
         const float ix = ta_anchor_x + dir_x * t;
         const float iy = anchor_y    + dir_y * t;
-        nvg_glow_text(vg, ix + DOT_R + 6.f, iy - font_size * 0.5f,
+        nvg_glow_text(vg, ix + 6.f, iy - font_size * 0.5f,
                       rows[i].text, true, rows[i].accent, col_.text_fill);
     }
 }
