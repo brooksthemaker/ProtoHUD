@@ -2791,8 +2791,10 @@ int main(int argc, char* argv[]) {
         }
 
         // ── Phase 1: NanoVG HUD chrome (compass, arms, particles) ───────────
-        // Drawn first so ImGui overlays composite on top.
-        hud.draw_hud_frame(snap, xr.eye_width(), xr.eye_height(), fps_overlay_active);
+        // Reset viewport to full framebuffer — timewarp leaves it at right-eye half.
+        // Pass full display dimensions so NanoVG covers both eye halves.
+        glViewport(0, 0, xr.display_width(), xr.display_height());
+        hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
 
         // ── Phase 2: ImGui overlays (pip, menu, popups) ───────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
