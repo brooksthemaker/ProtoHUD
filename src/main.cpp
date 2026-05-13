@@ -1691,6 +1691,65 @@ static std::vector<MenuItem> build_menu(
     cameras_menu.push_back(submenu("Vision Assist", std::move(vision_menu)));
 
     // ── System / dev menu ─────────────────────────────────────────────────────
+
+    // Helper: push a notification to the live queue (thread-safe).
+    auto push_notif = [state_ptr](NotifType type, std::string title, std::string body,
+                                   float auto_dismiss_s,
+                                   std::vector<NotifAction> actions = {}) {
+        if (!state_ptr) return;
+        Notification n;
+        n.type           = type;
+        n.title          = std::move(title);
+        n.body           = std::move(body);
+        n.timestamp      = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count();
+        n.auto_dismiss_s = auto_dismiss_s;
+        n.actions        = std::move(actions);
+        std::lock_guard<std::mutex> lk(state_ptr->mtx);
+        state_ptr->notifs.push(std::move(n));
+    };
+
+    std::vector<MenuItem> demo_menu = {
+        leaf("Trigger Alarm", [state_ptr, push_notif]{
+            if (!state_ptr) return;
+            { std::lock_guard<std::mutex> lk(state_ptr->mtx);
+              state_ptr->timer_alarm.alarm_triggered = true; }
+            push_notif(NotifType::Alarm, "Test Alarm", "Demo alarm fired", 0.f,
+                {{"DISMISS", [](AppState& s){ s.timer_alarm.alarm_triggered = false; }}});
+        }),
+        leaf("Trigger Timer Done", [state_ptr, push_notif]{
+            if (!state_ptr) return;
+            { std::lock_guard<std::mutex> lk(state_ptr->mtx);
+              state_ptr->timer_alarm.timer_triggered = true; }
+            push_notif(NotifType::Timer, "Timer Done", "Demo 5:00 timer expired", 0.f,
+                {{"DISMISS", [](AppState& s){ s.timer_alarm.timer_triggered = false; }},
+                 {"+2 MIN",  [](AppState& s){ s.timer_alarm.timer_end = time(nullptr)+120; s.timer_alarm.timer_active=true; s.timer_alarm.timer_triggered=false; }},
+                 {"+5 MIN",  [](AppState& s){ s.timer_alarm.timer_end = time(nullptr)+300; s.timer_alarm.timer_active=true; s.timer_alarm.timer_triggered=false; }}});
+        }),
+        leaf("LoRa Message (Node-2)", [state_ptr, push_notif]{
+            if (!state_ptr) return;
+            { std::lock_guard<std::mutex> lk(state_ptr->mtx);
+              state_ptr->push_lora_message({2, time(nullptr), "Demo: en route to objective"}); }
+            push_notif(NotifType::LoRa, "Node-2", "Demo: en route to objective", 8.f);
+        }),
+        leaf("App Toast", [push_notif]{
+            push_notif(NotifType::App, "ProtoHUD", "Demo app notification", 4.f);
+        }),
+        leaf("Toast Stack (x4)", [push_notif]{
+            push_notif(NotifType::Alarm, "Alarm",  "Demo alarm",  0.f);
+            push_notif(NotifType::Timer, "Timer",  "Demo timer",  0.f);
+            push_notif(NotifType::LoRa,  "Node-3", "Demo LoRa",  8.f);
+            push_notif(NotifType::App,   "System", "Demo app",   4.f);
+        }),
+        leaf("Clear All", [state_ptr]{
+            if (!state_ptr) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->notifs.dismiss_all();
+            state_ptr->timer_alarm.alarm_triggered = false;
+            state_ptr->timer_alarm.timer_triggered = false;
+        }),
+    };
+
     std::vector<MenuItem> software_menu = {
         leaf("Check for Updates", []{
             system("git -C /home/user/ProtoHUD fetch origin main 2>&1 | logger -t protohud &");
@@ -1718,7 +1777,8 @@ static std::vector<MenuItem> build_menu(
                 }
             }),
         leaf("Refresh Bluetooth", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
-        submenu("Software", std::move(software_menu)),
+        submenu("Software",   std::move(software_menu)),
+        submenu("Demo Mode",  std::move(demo_menu)),
     };
 
     return {
@@ -2367,8 +2427,9 @@ int main(int argc, char* argv[]) {
     });
 
     knob.on_move([&menu, &hud](int8_t dir, int) {
-        if      (hud.popup_active())  hud.popup_navigate(dir);
-        else if (menu.is_open())      menu.navigate(dir);
+        if      (hud.popup_active())    hud.popup_navigate(dir);
+        else if (menu.is_open())        menu.navigate(dir);
+        else if (hud.toast_has_focused()) hud.toast_navigate(dir);
     });
 
     knob.on_status([&state](uint8_t status, uint8_t param) {
@@ -2409,9 +2470,10 @@ int main(int argc, char* argv[]) {
             });
             buttons.on_pip_left ([&pip_left_active] () { pip_left_active  = true; });
             buttons.on_pip_right([&pip_right_active]() { pip_right_active = true; });
-            buttons.on_select   ([&menu, &hud]() {
-                if      (hud.popup_active()) hud.popup_select();
-                else if (menu.is_open())     menu.select();
+            buttons.on_select   ([&menu, &hud, &state]() {
+                if      (hud.popup_active())      hud.popup_select();
+                else if (menu.is_open())           menu.select();
+                else if (hud.toast_has_focused())  hud.toast_select(state);
             });
         } else {
             std::cerr << "[main] GPIO button init failed\n";
@@ -2471,6 +2533,10 @@ int main(int argc, char* argv[]) {
             if (key_pressed(ImGuiKey_LeftArrow))  hud.popup_navigate(-1);
             if (key_pressed(ImGuiKey_RightArrow)) hud.popup_navigate(+1);
             if (key_pressed(ImGuiKey_Enter))      hud.popup_select();
+        } else if (hud.toast_has_focused()) {
+            if (key_pressed(ImGuiKey_LeftArrow))  hud.toast_navigate(-1);
+            if (key_pressed(ImGuiKey_RightArrow)) hud.toast_navigate(+1);
+            if (key_pressed(ImGuiKey_Enter))      hud.toast_select(state);
         } else if (menu.is_open()) {
             if (key_pressed(ImGuiKey_UpArrow))    menu.navigate(-1);
             if (key_pressed(ImGuiKey_DownArrow))  menu.navigate(+1);
@@ -2795,6 +2861,7 @@ int main(int argc, char* argv[]) {
         // Pass full display dimensions so NanoVG covers both eye halves.
         glViewport(0, 0, xr.display_width(), xr.display_height());
         hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
+        hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
 
         // ── Phase 2: ImGui overlays (pip, menu, popups) ───────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);

@@ -15,6 +15,7 @@
 //   hud.render_menu_overlay();                 // ImGui::Render + RenderDrawData
 
 #include "../app_state.h"
+#include "toast_renderer.h"
 #include <imgui.h>
 #include <nanovg.h>
 #include <string>
@@ -94,6 +95,12 @@ public:
     // NanoVG FPS counter pass — small independent NVG frame for the fps text.
     // If draw_hud_frame was called with show_fps=true this is a no-op safe to skip.
     void draw_fps_overlay(const AppState& snap, int w, int h, bool active);
+
+    // NanoVG toast pass — separate NVG frame; takes live queue for dismiss mutations.
+    void draw_toasts(NotificationQueue& live_q, int w, int h);
+    bool toast_has_focused() const { return toast_renderer_.has_focused_toast(); }
+    void toast_navigate(int delta)  { toast_renderer_.navigate(delta); }
+    void toast_select(AppState& s)  { toast_renderer_.select(s); }
 
     // Start an ImGui frame for menu + debug overlays.
     void begin_menu_frame();
@@ -205,6 +212,8 @@ private:
 
     void  fx_update(NVGcontext* vg, const AppState& s,
                     float fw, float fh, float dt);
+
+    ToastRenderer toast_renderer_;
 
     HudConfig     cfg_;
     HudColors     col_;
