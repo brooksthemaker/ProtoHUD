@@ -1692,6 +1692,24 @@ static std::vector<MenuItem> build_menu(
 
     // ── LoRa menu ─────────────────────────────────────────────────────────────
 
+    // Helper: push a notification to the live queue (thread-safe).
+    // Defined here so both the LoRa menu and the Demo Mode menu can capture it.
+    auto push_notif = [state_ptr](NotifType type, std::string title, std::string body,
+                                   float auto_dismiss_s,
+                                   std::vector<NotifAction> actions = {}) {
+        if (!state_ptr) return;
+        Notification n;
+        n.type           = type;
+        n.title          = std::move(title);
+        n.body           = std::move(body);
+        n.timestamp      = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count();
+        n.auto_dismiss_s = auto_dismiss_s;
+        n.actions        = std::move(actions);
+        std::lock_guard<std::mutex> lk(state_ptr->mtx);
+        state_ptr->notifs.push(std::move(n));
+    };
+
     // Node lookup: one leaf per possible node slot (1–8); hidden when no data.
     // Selecting pushes an App toast with live telemetry at that moment.
     std::vector<MenuItem> lora_nodes_menu;
@@ -1755,23 +1773,6 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── System / dev menu ─────────────────────────────────────────────────────
-
-    // Helper: push a notification to the live queue (thread-safe).
-    auto push_notif = [state_ptr](NotifType type, std::string title, std::string body,
-                                   float auto_dismiss_s,
-                                   std::vector<NotifAction> actions = {}) {
-        if (!state_ptr) return;
-        Notification n;
-        n.type           = type;
-        n.title          = std::move(title);
-        n.body           = std::move(body);
-        n.timestamp      = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::system_clock::now().time_since_epoch()).count();
-        n.auto_dismiss_s = auto_dismiss_s;
-        n.actions        = std::move(actions);
-        std::lock_guard<std::mutex> lk(state_ptr->mtx);
-        state_ptr->notifs.push(std::move(n));
-    };
 
     std::vector<MenuItem> demo_menu = {
         leaf("Trigger Alarm", [state_ptr, push_notif]{
