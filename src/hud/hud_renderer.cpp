@@ -5,8 +5,8 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <GLFW/glfw3.h>
-#include <nanovg_gl.h>
 #include <GLES2/gl2.h>
+#include <nanovg_gl.h>
 
 #include <cmath>
 #include <ctime>
