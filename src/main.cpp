@@ -2493,8 +2493,8 @@ int main(int argc, char* argv[]) {
     });
 
     knob.on_move([&menu, &hud](int8_t dir, int) {
-        if      (hud.popup_active())    hud.popup_navigate(dir);
-        else if (menu.is_open())        menu.navigate(dir);
+        // if (hud.popup_active())    hud.popup_navigate(dir);  // modal popup disabled
+        if      (menu.is_open())        menu.navigate(dir);
         else if (hud.toast_has_focused()) hud.toast_navigate(dir);
     });
 
@@ -2537,8 +2537,8 @@ int main(int argc, char* argv[]) {
             buttons.on_pip_left ([&pip_left_active] () { pip_left_active  = true; });
             buttons.on_pip_right([&pip_right_active]() { pip_right_active = true; });
             buttons.on_select   ([&menu, &hud, &state]() {
-                if      (hud.popup_active())      hud.popup_select();
-                else if (menu.is_open())           menu.select();
+                // if (hud.popup_active()) hud.popup_select();  // modal popup disabled
+                if      (menu.is_open())           menu.select();
                 else if (hud.toast_has_focused())  hud.toast_select(state);
             });
         } else {
@@ -2595,11 +2595,13 @@ int main(int argc, char* argv[]) {
             if (menu.is_open()) menu.close();
             else                menu.open();
         }
-        if (hud.popup_active()) {
-            if (key_pressed(ImGuiKey_LeftArrow))  hud.popup_navigate(-1);
-            if (key_pressed(ImGuiKey_RightArrow)) hud.popup_navigate(+1);
-            if (key_pressed(ImGuiKey_Enter))      hud.popup_select();
-        } else if (hud.toast_has_focused()) {
+        // Modal alarm/timer popup disabled — toasts handle notification display.
+        // if (hud.popup_active()) {
+        //     if (key_pressed(ImGuiKey_LeftArrow))  hud.popup_navigate(-1);
+        //     if (key_pressed(ImGuiKey_RightArrow)) hud.popup_navigate(+1);
+        //     if (key_pressed(ImGuiKey_Enter))      hud.popup_select();
+        // } else
+        if (hud.toast_has_focused()) {
             if (key_pressed(ImGuiKey_LeftArrow))  hud.toast_navigate(-1);
             if (key_pressed(ImGuiKey_RightArrow)) hud.toast_navigate(+1);
             if (key_pressed(ImGuiKey_Enter))      hud.toast_select(state);
@@ -2966,8 +2968,8 @@ int main(int argc, char* argv[]) {
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
         hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), sys_panel_active);
 
-        // Alarm / timer-expired popups render on top of everything.
-        hud.draw_popups(state, xr.eye_width(), xr.eye_height());
+        // Alarm / timer-expired popups — disabled, toasts handle these now.
+        // hud.draw_popups(state, xr.eye_width(), xr.eye_height());
 
         hud.render_menu_overlay();
 
