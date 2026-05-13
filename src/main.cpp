@@ -2197,12 +2197,13 @@ int main(int argc, char* argv[]) {
         glViewport(0, 0, fw, fh);
         glClearColor(0.f, 0.f, 0.f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
-        hud.begin_frame(0.016f);
+        hud.set_dt(0.016f);
+        hud.begin_menu_frame();
         float t = static_cast<float>(glfwGetTime() - splash_t0);
         splash.draw(ImGui::GetBackgroundDrawList(),
                     static_cast<float>(fw), static_cast<float>(fh),
                     t, status, progress);
-        hud.render_overlay();
+        hud.render_menu_overlay();
         xr.present();
     };
 
@@ -2451,8 +2452,9 @@ int main(int argc, char* argv[]) {
         float  dt  = static_cast<float>(now - prev_time);
         prev_time  = now;
 
-        // ── Start ImGui frame (also processes GLFW input events) ──────────────
-        hud.begin_frame(dt);
+        // ── Start frame: tick HUD state + begin ImGui for input/menu ─────────
+        hud.set_dt(dt);
+        hud.begin_menu_frame();
 
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
         if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_P)) { state.quit = true; break; }
@@ -2568,11 +2570,28 @@ int main(int argc, char* argv[]) {
             time_t now_t = time(nullptr);
             if (ta.timer_active && now_t >= ta.timer_end) {
                 ta.timer_active    = false;
-                ta.timer_triggered = true;  // shows timer-expired popup
+                ta.timer_triggered = true;
+                Notification n;
+                n.type  = NotifType::Timer;
+                n.title = "Timer Expired";
+                n.timestamp = static_cast<int64_t>(now_t);
+                n.auto_dismiss_s = 0.f;
+                n.actions.push_back({"DISMISS", [](AppState& s){ s.timer_alarm.timer_triggered = false; }});
+                n.actions.push_back({"+2 MIN",  [](AppState& s){ s.timer_alarm.timer_end = time(nullptr)+120; s.timer_alarm.timer_active=true; s.timer_alarm.timer_triggered=false; }});
+                n.actions.push_back({"+5 MIN",  [](AppState& s){ s.timer_alarm.timer_end = time(nullptr)+300; s.timer_alarm.timer_active=true; s.timer_alarm.timer_triggered=false; }});
+                n.actions.push_back({"+10 MIN", [](AppState& s){ s.timer_alarm.timer_end = time(nullptr)+600; s.timer_alarm.timer_active=true; s.timer_alarm.timer_triggered=false; }});
+                state.notifs.push(std::move(n));
             }
             if (ta.alarm_active && now_t >= ta.alarm_fire_at) {
                 ta.alarm_active    = false;
-                ta.alarm_triggered = true;  // shows alarm popup
+                ta.alarm_triggered = true;
+                Notification n;
+                n.type  = NotifType::Alarm;
+                n.title = "!! ALARM !!";
+                n.timestamp = static_cast<int64_t>(now_t);
+                n.auto_dismiss_s = 0.f;
+                n.actions.push_back({"DISMISS", [](AppState& s){ s.timer_alarm.alarm_triggered = false; }});
+                state.notifs.push(std::move(n));
             }
         }
 
@@ -2628,6 +2647,7 @@ int main(int argc, char* argv[]) {
             snap.bt_devices         = state.bt_devices;
             snap.serial_metrics     = state.serial_metrics;
             snap.camera_resolution  = state.camera_resolution;
+            snap.notifs             = state.notifs;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
         }
@@ -2770,9 +2790,11 @@ int main(int argc, char* argv[]) {
             xr.composite();
         }
 
-        // ── ImGui HUD overlay (renders to default framebuffer, on top of camera) ──
+        // ── Phase 1: NanoVG HUD chrome (compass, arms, particles) ───────────
+        // Drawn first so ImGui overlays composite on top.
+        hud.draw_hud_frame(snap, xr.eye_width(), xr.eye_height(), fps_overlay_active);
 
-        hud.draw_frame(snap, xr.eye_width(), xr.eye_height());
+        // ── Phase 2: ImGui overlays (pip, menu, popups) ───────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
         menu.draw(xr.eye_width(), xr.eye_height());
 
@@ -2809,13 +2831,10 @@ int main(int argc, char* argv[]) {
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
         hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), sys_panel_active);
 
-        // FPS / frame-time corner overlay (drawn in both eye halves).
-        hud.draw_fps_overlay(snap, xr.eye_width() * 2, xr.eye_height(), fps_overlay_active);
-
         // Alarm / timer-expired popups render on top of everything.
         hud.draw_popups(state, xr.eye_width(), xr.eye_height());
 
-        hud.render_overlay();
+        hud.render_menu_overlay();
 
         // ── Swap ──────────────────────────────────────────────────────────────
         xr.present();

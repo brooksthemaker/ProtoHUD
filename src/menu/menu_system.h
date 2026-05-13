@@ -16,6 +16,7 @@ enum class MenuItemType {
     SLIDER,        // enters numeric edit mode; knob adjusts value
     COLOR_PICKER,  // enters R/G/B channel edit mode
     FACE_PICKER,   // radial dot selector for face index
+    NOTIF_LOG,     // scrollable notification history list
 };
 
 // ── Slider config ─────────────────────────────────────────────────────────────
@@ -49,6 +50,12 @@ struct ColorPickerConfig {
     std::function<std::tuple<uint8_t, uint8_t, uint8_t>()>          get_color; // optional seed
 };
 
+// ── Notification log config ───────────────────────────────────────────────────
+
+struct NotifLogConfig {
+    NotificationQueue* queue = nullptr;   // pointer into AppState::notifs
+};
+
 // ── Menu item ─────────────────────────────────────────────────────────────────
 
 struct MenuItem {
@@ -74,6 +81,9 @@ struct MenuItem {
 
     // COLOR_PICKER
     ColorPickerConfig color;
+
+    // NOTIF_LOG
+    NotifLogConfig notif_log;
 
     // Optional visibility predicate — item is hidden when this returns false.
     // When unset, the item is always visible.

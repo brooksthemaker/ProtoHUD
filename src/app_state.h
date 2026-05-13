@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -243,6 +244,58 @@ struct SshState {
     int  port   = 22;
 };
 
+// ── Notification system ───────────────────────────────────────────────────────
+
+enum class NotifType : uint8_t { Alarm, Timer, LoRa, App };
+
+struct NotifAction {
+    std::string label;                              // "DISMISS", "+2 MIN", etc.
+    std::function<void(struct AppState&)> fn;
+};
+
+struct Notification {
+    uint32_t    id           = 0;
+    NotifType   type         = NotifType::App;
+    std::string title;
+    std::string body;
+    int64_t     timestamp    = 0;   // epoch seconds
+    float       auto_dismiss_s = 8.f;  // 0 = manual only
+    bool        read         = false;
+    bool        dismissed    = false;
+    std::vector<NotifAction> actions;
+};
+
+struct NotificationQueue {
+    std::deque<Notification> items;   // newest first
+    static constexpr int kMax = 50;
+    uint32_t next_id = 1;
+
+    void push(Notification n) {
+        n.id = next_id++;
+        if (n.timestamp == 0) n.timestamp = static_cast<int64_t>(time(nullptr));
+        items.push_front(std::move(n));
+        while (static_cast<int>(items.size()) > kMax) items.pop_back();
+    }
+
+    int unread_count() const {
+        int c = 0;
+        for (const auto& n : items) c += (!n.read && !n.dismissed);
+        return c;
+    }
+
+    void mark_read(uint32_t id) {
+        for (auto& n : items) if (n.id == id) { n.read = true; return; }
+    }
+
+    void dismiss(uint32_t id) {
+        for (auto& n : items) if (n.id == id) { n.dismissed = true; n.read = true; return; }
+    }
+
+    void dismiss_all() {
+        for (auto& n : items) { n.dismissed = true; n.read = true; }
+    }
+};
+
 // ── Master state ──────────────────────────────────────────────────────────────
 // Mutable fields are updated from serial/camera threads and read by the
 // render thread.  Callers must hold the mutex for any multi-field access.
@@ -277,6 +330,9 @@ struct AppState {
 
     // Timer / alarm state (managed on render thread; no mutex needed for reads)
     TimerAlarmState      timer_alarm;
+
+    // Notification queue — render-thread owned; push from main thread while holding mtx
+    NotificationQueue    notifs;
 
     // Particle effects config (render-thread only)
     EffectsConfig        effects_cfg;

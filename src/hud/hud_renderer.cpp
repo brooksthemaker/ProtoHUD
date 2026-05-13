@@ -5,6 +5,8 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <GLFW/glfw3.h>
+#include <nanovg_gl.h>
+#include <GLES2/gl2.h>
 
 #include <cmath>
 #include <ctime>
@@ -61,6 +63,26 @@ static ImU32 with_alpha(ImU32 col, uint8_t a) {
     return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
 }
 
+// NVG color conversion: ImU32 (0-7=R,8-15=G,16-23=B,24-31=A) → NVGcolor
+static inline NVGcolor nvg_col(ImU32 c) {
+    return nvgRGBA(c & 0xFF, (c>>8) & 0xFF, (c>>16) & 0xFF, c>>24);
+}
+static inline NVGcolor nvg_col_a(ImU32 c, uint8_t a) {
+    return nvgRGBA(c & 0xFF, (c>>8) & 0xFF, (c>>16) & 0xFF, a);
+}
+
+// NVG three-layer glow line helper (wide glow2 → narrow glow1 → sharp major)
+static void nvg_glow_line(NVGcontext* vg,
+                           float x0, float y0, float x1, float y1,
+                           NVGcolor col_maj, NVGcolor col_g1, NVGcolor col_g2) {
+    nvgBeginPath(vg); nvgMoveTo(vg,x0,y0); nvgLineTo(vg,x1,y1);
+    nvgStrokeWidth(vg, 5.f); nvgStrokeColor(vg, col_g2); nvgStroke(vg);
+    nvgBeginPath(vg); nvgMoveTo(vg,x0,y0); nvgLineTo(vg,x1,y1);
+    nvgStrokeWidth(vg, 2.5f); nvgStrokeColor(vg, col_g1); nvgStroke(vg);
+    nvgBeginPath(vg); nvgMoveTo(vg,x0,y0); nvgLineTo(vg,x1,y1);
+    nvgStrokeWidth(vg, 1.f); nvgStrokeColor(vg, col_maj); nvgStroke(vg);
+}
+
 // Frame-scope glow state — set each frame from HudConfig / HudColors.
 static bool  s_glow            = true;
 static float s_glow_intensity  = 1.0f;
@@ -108,6 +130,34 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
             dl->AddText(font, font_size, {pos.x + o[0], pos.y + o[1]}, glow, text);
     }
     dl->AddText(font, font_size, pos, fill_col, text);
+}
+
+// NVG glow text — 2-pass (blur+sharp) replaces 9-call ImGui offset pattern
+static void nvg_glow_text(NVGcontext* vg, float x, float y, const char* text,
+                           bool selected = true) {
+    const ImU32 fill_u = selected ? IM_COL32(255,255,255,255) : IM_COL32(255,255,255,160);
+    if (s_glow && s_glow_intensity > 0.f) {
+        const uint8_t ga = static_cast<uint8_t>((selected ? 72 : 22) * s_glow_intensity);
+        nvgFontBlur(vg, 3.0f);
+        nvgFillColor(vg, nvg_col_a(s_glow_color_base, ga));
+        nvgText(vg, x, y, text, nullptr);
+        nvgFontBlur(vg, 0.f);
+    }
+    nvgFillColor(vg, nvg_col(fill_u));
+    nvgText(vg, x, y, text, nullptr);
+}
+static void nvg_glow_text(NVGcontext* vg, float x, float y, const char* text,
+                           bool selected, ImU32 glow_col, ImU32 fill_col) {
+    const ImU32 fill = selected ? fill_col : with_alpha(fill_col, 160);
+    if (s_glow && s_glow_intensity > 0.f) {
+        const uint8_t ga = static_cast<uint8_t>((selected ? 72 : 22) * s_glow_intensity);
+        nvgFontBlur(vg, 3.0f);
+        nvgFillColor(vg, nvg_col_a(glow_col, ga));
+        nvgText(vg, x, y, text, nullptr);
+        nvgFontBlur(vg, 0.f);
+    }
+    nvgFillColor(vg, nvg_col(fill));
+    nvgText(vg, x, y, text, nullptr);
 }
 
 // ── Construction ──────────────────────────────────────────────────────────────
@@ -159,10 +209,19 @@ void HudRenderer::load(void* glfw_window) {
     if (!font_mono_) font_mono_ = io.FontDefault;
 
     ImGui_ImplOpenGL3_CreateFontsTexture();
+
+    nvg_ = nvgCreateGLES2(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
+    if (nvg_) {
+        nvg_font_ui_   = nvgCreateFont(nvg_, "sans",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+        nvg_font_mono_ = nvgCreateFont(nvg_, "mono",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf");
+    }
 }
 
 void HudRenderer::unload() {
     if (!ctx_) return;
+    if (nvg_) { nvgDeleteGLES2(nvg_); nvg_ = nullptr; }
     ImGui::SetCurrentContext(ctx_);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
@@ -172,13 +231,9 @@ void HudRenderer::unload() {
 
 // ── Per-frame ─────────────────────────────────────────────────────────────────
 
-void HudRenderer::begin_frame(float dt) {
-    frame_dt_ = dt;
-    ImGui::SetCurrentContext(ctx_);
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
-    ImGui::NewFrame();
-    ImGui::GetIO().FontGlobalScale = cfg_.text_scale;
+void HudRenderer::set_dt(float dt) {
+    frame_dt_         = dt;
+    fps_shown_in_hud_ = false;
     s_glow            = cfg_.glow_enabled;
     s_glow_intensity  = cfg_.glow_intensity;
     s_glow_color_base = col_.glow_color;
@@ -186,51 +241,115 @@ void HudRenderer::begin_frame(float dt) {
     fx_tick_lines(dt);
 }
 
-void HudRenderer::render_overlay() {
+void HudRenderer::begin_menu_frame() {
+    ImGui::SetCurrentContext(ctx_);
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    ImGui::GetIO().FontGlobalScale = cfg_.text_scale;
+}
+
+void HudRenderer::render_menu_overlay() {
     ImGui::SetCurrentContext(ctx_);
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
-// ── draw_frame ────────────────────────────────────────────────────────────────
+void HudRenderer::nvg_set_font_ui(float sz) {
+    nvgFontFaceId(nvg_, nvg_font_ui_);
+    nvgFontSize(nvg_, sz > 0.f ? sz : 16.f * cfg_.text_scale);
+    nvgFontBlur(nvg_, 0.f);
+    nvgTextAlign(nvg_, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+}
 
-void HudRenderer::draw_frame(const AppState& s, int w, int h) {
-    // Use the background draw list so elements appear behind any ImGui windows
-    ImGui::SetCurrentContext(ctx_);
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+void HudRenderer::nvg_set_font_mono(float sz) {
+    nvgFontFaceId(nvg_, nvg_font_mono_);
+    nvgFontSize(nvg_, sz > 0.f ? sz : 14.f * cfg_.text_scale);
+    nvgFontBlur(nvg_, 0.f);
+    nvgTextAlign(nvg_, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+}
 
+// ── NVG HUD frame ─────────────────────────────────────────────────────────────
+
+void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps) {
+    if (!nvg_) return;
     const float fw       = static_cast<float>(w);
     const float fh       = static_cast<float>(h);
     const float ch       = static_cast<float>(cfg_.compass_height);
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
     const bool  flip     = cfg_.hud_flip_vertical;
 
-    // Particle/nebula effects drawn first so all HUD chrome renders on top.
-    fx_update(dl, s, fw, fh, frame_dt_);
+    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+
+    fx_update(nvg_, s, fw, fh, frame_dt_);
 
     if (!s.lora_messages.empty()) {
         float pw    = static_cast<float>(cfg_.panel_width);
         float msg_w = std::min(pw, fw / 3.f);
         float msg_y = flip ? (c_margin + ch) : 0.f;
-        draw_lora_messages(dl, s, { 0.f, msg_y }, msg_w, fh);
+        draw_lora_messages(nvg_, s, 0.f, msg_y, msg_w, fh);
     }
 
     const float cw        = fw / 3.f;
     const float compass_y = flip ? c_margin : fh - ch - c_margin;
-    // Compass drawn first; indicator arms and health sides render on top.
-    draw_compass_tape    (dl, s, {fw / 2.f - cw / 2.f, compass_y}, cw, ch);
-    // Health sides drawn first so their background sits behind arm content.
-    draw_health_side(dl, s.health, fw, fh, false,
+    draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
+    draw_health_side(nvg_, s.health, fw, fh, false,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
-    draw_health_side(dl, s.health, fw, fh, true,
+    draw_health_side(nvg_, s.health, fw, fh, true,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
-    // Arm indicators drawn on top of the health-side background.
-    draw_face_indicator         (dl, s.face, fw, fh);
-    draw_clock_indicator        (dl, s,      fw, fh);
-    draw_timer_alarm_indicator  (dl, s,      fw, fh);
+    draw_face_indicator        (nvg_, s.face, fw, fh);
+    draw_clock_indicator       (nvg_, s,      fw, fh);
+    draw_timer_alarm_indicator (nvg_, s,      fw, fh);
+    fx_draw_alarm_pulse(nvg_, s, fw, fh);
 
-    // Alarm/timer heartbeat pulse — drawn last so it sits above all HUD chrome.
-    fx_draw_alarm_pulse(dl, s, fw, fh);
+    if (show_fps) {
+        draw_fps_nvg(nvg_, s, fw, fh);
+        fps_shown_in_hud_ = true;
+    }
+
+    nvgEndFrame(nvg_);
+    // Restore GL state NanoVG leaves dirty (stencil test, cull face)
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glStencilMask(0xFF);
+}
+
+void HudRenderer::draw_fps_overlay(const AppState& snap, int w, int h, bool active) {
+    if (!active || fps_shown_in_hud_ || !nvg_) return;
+    const float fw = static_cast<float>(w);
+    const float fh = static_cast<float>(h);
+    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    draw_fps_nvg(nvg_, snap, fw, fh);
+    nvgEndFrame(nvg_);
+    glDisable(GL_STENCIL_TEST);
+    glStencilMask(0xFF);
+}
+
+void HudRenderer::draw_fps_nvg(NVGcontext* vg, const AppState& snap, float fw, float fh) {
+    const float fps = snap.sys_metrics.fps_avg;
+    const float ft  = snap.sys_metrics.frame_time_ms;
+    char buf[32];
+    if (fps > 0.f)
+        snprintf(buf, sizeof(buf), "%.0f FPS  %.1fms",
+                 static_cast<double>(fps), static_cast<double>(ft));
+    else
+        snprintf(buf, sizeof(buf), "-- FPS");
+
+    nvg_set_font_mono();
+    const float margin = 8.f;
+    const float eye_w  = fw * 0.5f;
+    const float text_w = nvgTextBounds(vg, 0, 0, buf, nullptr, nullptr);
+    for (int eye = 0; eye < 2; ++eye) {
+        const float off = eye * eye_w;
+        const float bx  = off + eye_w - text_w - margin * 2.f;
+        const float by  = margin;
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, bx - 4.f, by - 2.f, text_w + 8.f, 14.f * cfg_.text_scale + 4.f, 3.f);
+        nvgFillColor(vg, nvgRGBA(6, 8, 10, 140));
+        nvgFill(vg);
+        nvgFillColor(vg, nvg_col_a(col_.text_fill, 160));
+        nvgText(vg, bx, by, buf, nullptr);
+    }
 }
 
 // ── Shared overlay layout helper ──────────────────────────────────────────────
@@ -505,57 +624,51 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
 
-void HudRenderer::draw_top_bar(ImDrawList* dl, const AppState& s, float w, float bar_y) {
-    float th = static_cast<float>(cfg_.top_bar_height);
+void HudRenderer::draw_top_bar(NVGcontext* vg, const AppState& s, float w, float bar_y) {
+    const float th = static_cast<float>(cfg_.top_bar_height);
+    nvgBeginPath(vg);
+    nvgRect(vg, 0.f, bar_y, w, th);
+    nvgFillColor(vg, nvg_col(col_.background));
+    nvgFill(vg);
 
-    dl->AddRectFilled({0, bar_y}, {w, bar_y + th}, col_.background);
+    const float scale     = std::max(0.5f, s.clock_cfg.font_scale) * 0.8f;
+    const float font_size = 16.f * cfg_.text_scale * scale;
+    nvg_set_font_ui(font_size);
+    std::string time_str = fmt_clock(s.clock_cfg.use_24h, s.clock_cfg.show_seconds);
+    float tsz_w = nvgTextBounds(vg, 0, 0, time_str.c_str(), nullptr, nullptr);
+    const bool show_second = s.clock_cfg.show_date || s.timer_alarm.timer_active;
+    float cy = bar_y + th * 0.5f - font_size * 0.5f - (show_second ? font_size * 0.5f : 0.f);
+    nvg_glow_text(vg, w * 0.5f - tsz_w * 0.5f, cy, time_str.c_str(), true,
+                  col_.glow_base, col_.text_fill);
 
-    // Clock (centered in bar) — uses AppState::ClockConfig
-    {
-        ImGui::PushFont(nullptr);
-        float saved_scale = ImGui::GetIO().FontGlobalScale;
-        const float cscale = std::max(0.5f, s.clock_cfg.font_scale) * 0.8f;
-        ImGui::GetIO().FontGlobalScale = saved_scale * cscale;
-
-        std::string time_str = fmt_clock(s.clock_cfg.use_24h, s.clock_cfg.show_seconds);
-        ImVec2 tsz = ImGui::CalcTextSize(time_str.c_str());
-        float cx = w * 0.5f - tsz.x * 0.5f;
-        float cy = bar_y + th * 0.5f - tsz.y * 0.5f - (s.clock_cfg.show_date ? tsz.y * 0.5f : 0.f);
-        hud_glow_text(dl, {cx, cy}, time_str.c_str(), true, col_.glow_base, col_.text_fill);
-
-        // Second line: countdown timer or date
-        if (s.timer_alarm.timer_active) {
-            std::string cd = fmt_countdown(s.timer_alarm.timer_end);
-            ImGui::GetIO().FontGlobalScale = saved_scale * cscale * 0.75f;
-            ImVec2 csz = ImGui::CalcTextSize(cd.c_str());
-            hud_glow_text(dl, {w * 0.5f - csz.x * 0.5f, cy + tsz.y + 1.f},
-                          cd.c_str(), true, col_.warn, col_.warn);
-        } else if (s.clock_cfg.show_date) {
-            std::string date_str = fmt_date();
-            ImGui::GetIO().FontGlobalScale = saved_scale * cscale * 0.75f;
-            ImVec2 dsz = ImGui::CalcTextSize(date_str.c_str());
-            hud_glow_text(dl, {w * 0.5f - dsz.x * 0.5f, cy + tsz.y + 1.f},
-                          date_str.c_str(), false, col_.glow_base, col_.text_fill);
-        }
-
-        ImGui::GetIO().FontGlobalScale = saved_scale;
-        ImGui::PopFont();
+    const float small = font_size * 0.75f;
+    nvg_set_font_ui(small);
+    if (s.timer_alarm.timer_active) {
+        std::string cd = fmt_countdown(s.timer_alarm.timer_end);
+        float cw2 = nvgTextBounds(vg, 0, 0, cd.c_str(), nullptr, nullptr);
+        nvg_glow_text(vg, w * 0.5f - cw2 * 0.5f, cy + font_size + 1.f,
+                      cd.c_str(), true, col_.warn, col_.warn);
+    } else if (s.clock_cfg.show_date) {
+        std::string ds = fmt_date();
+        float dw = nvgTextBounds(vg, 0, 0, ds.c_str(), nullptr, nullptr);
+        nvg_glow_text(vg, w * 0.5f - dw * 0.5f, cy + font_size + 1.f,
+                      ds.c_str(), false, col_.glow_base, col_.text_fill);
     }
 
-    // Unread messages badge (left-of-center to avoid clock overlap)
     int unread = s.unread_message_count();
     if (unread > 0) {
         char buf[32]; snprintf(buf, sizeof(buf), "MSG:%d", unread);
-        dl->AddText({w * 0.25f, bar_y + 10.f}, col_.warn, buf);
+        nvg_set_font_mono();
+        nvgFillColor(vg, nvg_col(col_.warn));
+        nvgText(vg, w * 0.25f, bar_y + 10.f, buf, nullptr);
     }
 
-    // Audio strip (right side)
-    draw_audio_strip(dl, s.audio, {w - 180.f, bar_y + 4.f}, 170.f);
+    draw_audio_strip(vg, s.audio, w - 180.f, bar_y + 4.f, 170.f);
 }
 
 // ── Health side indicators ────────────────────────────────────────────────────
 
-void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
+void HudRenderer::draw_health_side(NVGcontext* vg, const SystemHealth& h,
                                     float fw, float fh, bool right_side,
                                     const CameraFocusState& focus_left,
                                     const CameraFocusState& focus_right,
@@ -564,15 +677,9 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     const float tape_x   = fw / 2.f - tape_w / 2.f;
     const float fade_w   = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
-    const float ch       = static_cast<float>(cfg_.compass_height);
     const bool  flip     = cfg_.hud_flip_vertical;
     const float anchor_y = flip ? c_margin : fh - c_margin;
-    const float anchor_x = right_side ? tape_x + tape_w + fade_w
-                                       : tape_x - fade_w;
-
-    const ImU32 COL_MAJ  = col_.glow_base;
-    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
-    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+    const float anchor_x = right_side ? tape_x + tape_w + fade_w : tape_x - fade_w;
 
     auto focus_suffix = [](const CameraFocusState& f) -> const char* {
         if (f.mode == CameraFocusState::Mode::MANUAL) return " MAN";
@@ -601,111 +708,99 @@ void HudRenderer::draw_health_side(ImDrawList* dl, const SystemHealth& h,
     constexpr float ROW_H   = 18.f;
     constexpr float DOT_R   = 4.f;
     constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
-    constexpr float H_LEN   = 150.f;  // health horiz line (SEG_W * 2; SEG_W=75)
-    constexpr float BG_FULL = 440.f;  // H_LEN + ARM_EXT*2 + SEG_W*2; covers health + LoRa + clock
+    constexpr float H_LEN   = 150.f;
+    constexpr float BG_FULL = 440.f;
 
     const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
     const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
 
-    // Parallelogram background — 16 strips fading from opaque (inner) to transparent (outer).
-    // Extends BG_FULL px outward to cover both health indicators and the adjacent arm area.
+    // Parallelogram bg via linear gradient (replaces 16 strip loop)
     if (cfg_.indicator_bg_enabled) {
-        const uint8_t bg_a       = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
-        const float   outer_sign = right_side ? 1.f : -1.f;
-        constexpr int N = 16;
-        for (int i = 0; i < N; i++) {
-            const float t0 = float(i)     / float(N);
-            const float t1 = float(i + 1) / float(N);
-            constexpr float FADE_START = 0.9f;
-            const float fade_t = (t0 < FADE_START) ? 0.f
-                                 : (t0 - FADE_START) / (1.f - FADE_START);
-            const uint8_t a0 = static_cast<uint8_t>(bg_a * (1.f - fade_t));
-            ImVec2 strip[4] = {
-                {anchor_x + outer_sign * t0 * BG_FULL,                    anchor_y},
-                {anchor_x + outer_sign * t0 * BG_FULL + dir_x * diag_len, anchor_y + dir_y * diag_len},
-                {anchor_x + outer_sign * t1 * BG_FULL + dir_x * diag_len, anchor_y + dir_y * diag_len},
-                {anchor_x + outer_sign * t1 * BG_FULL,                    anchor_y},
-            };
-            dl->AddConvexPolyFilled(strip, 4, with_alpha(col_.compass_bg_color, a0));
-        }
+        const uint8_t bg_a     = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
+        const float outer_sign = right_side ? 1.f : -1.f;
+        const float p1x = anchor_x + outer_sign * BG_FULL;
+        NVGpaint grad = nvgLinearGradient(vg,
+            anchor_x, anchor_y, p1x, anchor_y,
+            nvg_col_a(col_.compass_bg_color, bg_a),
+            nvg_col_a(col_.compass_bg_color, 0));
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, anchor_x, anchor_y);
+        nvgLineTo(vg, p1x, anchor_y);
+        nvgLineTo(vg, p1x + dir_x * diag_len, anchor_y + dir_y * diag_len);
+        nvgLineTo(vg, anchor_x + dir_x * diag_len, anchor_y + dir_y * diag_len);
+        nvgClosePath(vg);
+        nvgFillPaint(vg, grad); nvgFill(vg);
     }
 
-    // Diagonal glow line
-    const ImVec2 diag_end = {anchor_x + dir_x * diag_len, anchor_y + dir_y * diag_len};
-    dl->AddLine({anchor_x, anchor_y}, diag_end, COL_GLW2, 5.f);
-    dl->AddLine({anchor_x, anchor_y}, diag_end, COL_GLW1, 2.5f);
-    dl->AddLine({anchor_x, anchor_y}, diag_end, COL_MAJ,  1.f);
-
-    // Horizontal glow line — 300px outward from anchor
+    NVGcolor cm = nvg_col(col_.glow_base);
+    NVGcolor g1 = nvg_col_a(col_.glow_base, 70);
+    NVGcolor g2 = nvg_col_a(col_.glow_base, 28);
+    const float diag_ex = anchor_x + dir_x * diag_len;
+    const float diag_ey = anchor_y + dir_y * diag_len;
+    nvg_glow_line(vg, anchor_x, anchor_y, diag_ex, diag_ey, cm, g1, g2);
     const float h_end_x = anchor_x + (right_side ? H_LEN : -H_LEN);
-    dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW2, 5.f);
-    dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_GLW1, 2.5f);
-    dl->AddLine({anchor_x, anchor_y}, {h_end_x, anchor_y}, COL_MAJ,  1.f);
+    nvg_glow_line(vg, anchor_x, anchor_y, h_end_x, anchor_y, cm, g1, g2);
 
-    // NV badge at end of horizontal line when night vision is active
     if (nv_enabled) {
-        const float nv_x = right_side ? h_end_x + 6.f : h_end_x - ImGui::CalcTextSize("NV").x - 6.f;
-        if (font_mono_) ImGui::PushFont(font_mono_);
-        hud_glow_text(dl, {nv_x, anchor_y - 7.f}, "NV", true, col_.glow_base, col_.text_fill);
-        if (font_mono_) ImGui::PopFont();
+        nvg_set_font_mono();
+        const float nv_tw = nvgTextBounds(vg, 0, 0, "NV", nullptr, nullptr);
+        const float nv_x  = right_side ? h_end_x + 6.f : h_end_x - nv_tw - 6.f;
+        nvg_glow_text(vg, nv_x, anchor_y - 7.f, "NV", true, col_.glow_base, col_.text_fill);
     }
 
-    // Indicators placed along the diagonal, lifted 1 item above anchor
-    if (font_mono_) ImGui::PushFont(font_mono_);
+    nvg_set_font_mono();
     for (int i = 0; i < n_items; ++i) {
         const float t  = static_cast<float>(i + 1) * ROW_H;
         const float ix = anchor_x + dir_x * t;
         const float iy = anchor_y + dir_y * t;
-
         if (items[i].inactive) {
-            dl->AddCircleFilled({ix, iy}, DOT_R, col_.ind_inactive);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R);
+            nvgFillColor(vg, nvg_col(col_.ind_inactive)); nvgFill(vg);
         } else if (items[i].ok) {
-            dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, with_alpha(col_.ind_good, 28));
-            dl->AddCircleFilled({ix, iy}, DOT_R,        col_.ind_good);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R + 2.f);
+            nvgFillColor(vg, nvg_col_a(col_.ind_good, 28)); nvgFill(vg);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R);
+            nvgFillColor(vg, nvg_col(col_.ind_good)); nvgFill(vg);
         } else {
-            dl->AddCircleFilled({ix, iy}, DOT_R, col_.ind_fail);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R);
+            nvgFillColor(vg, nvg_col(col_.ind_fail)); nvgFill(vg);
         }
-
         const char* lbl = items[i].label;
-        const bool  bold = !cfg_.indicator_bg_enabled;
         if (right_side) {
-            const ImVec2 lp = {ix + DOT_R + 6.f, iy - 7.f};
-            if (bold) dl->AddText({lp.x + 0.7f, lp.y}, items[i].ok ? col_.text_fill : with_alpha(col_.text_fill, 160), lbl);
-            hud_glow_text(dl, lp, lbl, items[i].ok, col_.text_fill, col_.text_fill);
+            nvg_glow_text(vg, ix + DOT_R + 6.f, iy - 7.f, lbl, items[i].ok,
+                          col_.text_fill, col_.text_fill);
         } else {
-            float tw = ImGui::CalcTextSize(lbl).x;
-            const ImVec2 lp = {ix - DOT_R - 6.f - tw, iy - 7.f};
-            if (bold) dl->AddText({lp.x + 0.7f, lp.y}, items[i].ok ? col_.text_fill : with_alpha(col_.text_fill, 160), lbl);
-            hud_glow_text(dl, lp, lbl, items[i].ok, col_.text_fill, col_.text_fill);
+            float lw = nvgTextBounds(vg, 0, 0, lbl, nullptr, nullptr);
+            nvg_glow_text(vg, ix - DOT_R - 6.f - lw, iy - 7.f, lbl, items[i].ok,
+                          col_.text_fill, col_.text_fill);
         }
     }
-    if (font_mono_) ImGui::PopFont();
 }
 
 // ── Audio strip ───────────────────────────────────────────────────────────────
 
-void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
-                                    ImVec2 origin, float w) {
+void HudRenderer::draw_audio_strip(NVGcontext* vg, const AudioState& a,
+                                    float ox, float oy, float w) {
+    nvg_set_font_mono();
     if (!a.enabled) {
-        hud_glow_text(dl, origin, "AUDIO OFF", false);
+        nvg_glow_text(vg, ox, oy, "AUDIO OFF", false);
         return;
     }
-
     char buf[64];
     static const char* outputs[] = {"VITURE","JACK","HDMI"};
     const char* out_str = (a.output >= 0 && a.output < 3) ? outputs[a.output] : "?";
     snprintf(buf, sizeof(buf), "AU \xe2\x86\x92 %s  X:%d", out_str, a.xrun_count);
-    hud_glow_text(dl, origin, buf, a.device_ok);
+    nvg_glow_text(vg, ox, oy, buf, a.device_ok);
 
-    // CPU load bar
-    float bar_y = origin.y + 20.f;
-    dl->AddRectFilled({origin.x, bar_y}, {origin.x + w, bar_y + 6.f},
-                       IM_COL32(20, 20, 20, 180));
-    float load_w = w * std::min(1.f, a.cpu_load);
-    ImU32 load_col = (a.cpu_load > 0.8f) ? col_.danger :
-                     (a.cpu_load > 0.5f) ? col_.warn : col_.orange;
-    dl->AddRectFilled({origin.x, bar_y}, {origin.x + load_w, bar_y + 6.f}, load_col);
+    const float bar_y = oy + 20.f;
+    nvgBeginPath(vg); nvgRect(vg, ox, bar_y, w, 6.f);
+    nvgFillColor(vg, nvgRGBA(20, 20, 20, 180)); nvgFill(vg);
+    const float load_w = w * std::min(1.f, a.cpu_load);
+    const ImU32 load_u = (a.cpu_load > 0.8f) ? col_.danger :
+                         (a.cpu_load > 0.5f) ? col_.warn : col_.orange;
+    nvgBeginPath(vg); nvgRect(vg, ox, bar_y, load_w, 6.f);
+    nvgFillColor(vg, nvg_col(load_u)); nvgFill(vg);
 }
 
 // ── Face indicator arm (left side) ───────────────────────────────────────────
@@ -713,7 +808,7 @@ void HudRenderer::draw_audio_strip(ImDrawList* dl, const AudioState& a,
 // The health indicator diagonal itself is the visual divider between sections.
 // SEG_W=75 puts proto at anchor_x-150 (= end of health side's 150px horiz line).
 
-void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
+void HudRenderer::draw_face_indicator(NVGcontext* vg, const FaceState& f,
                                        float fw, float fh) {
     constexpr float ROW_H   = 18.f;
     constexpr float DOT_R   = 4.f;
@@ -722,77 +817,58 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
     constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
     constexpr int   N_ITEMS = 6;
 
-    const float tape_w        = fw / 3.f;
-    const float tape_x        = fw / 2.f - tape_w / 2.f;
-    const float fade_w        = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float c_margin      = static_cast<float>(cfg_.compass_bottom_margin);
-    const float ch            = static_cast<float>(cfg_.compass_height);
-    const bool  flip          = cfg_.hud_flip_vertical;
-    const float anchor_y      = flip ? c_margin : fh - c_margin;
-    const float ind_anchor_x  = tape_x - fade_w;
-    const float proto_anchor_x = ind_anchor_x - SEG_W * 2.f;
+    const float tape_w         = fw / 3.f;
+    const float tape_x         = fw / 2.f - tape_w / 2.f;
+    const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin       = static_cast<float>(cfg_.compass_bottom_margin);
+    const bool  flip           = cfg_.hud_flip_vertical;
+    const float anchor_y       = flip ? c_margin : fh - c_margin;
+    const float proto_anchor_x = tape_x - fade_w - SEG_W * 2.f;
 
     const float dir_x    = std::cos(ANGLE) * -1.f;
     const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(N_ITEMS + 1) * ROW_H;
 
-    const ImU32 COL_MAJ  = col_.glow_base;
-    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
-    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+    NVGcolor cm = nvg_col(col_.glow_base);
+    NVGcolor g1 = nvg_col_a(col_.glow_base, 70);
+    NVGcolor g2 = nvg_col_a(col_.glow_base, 28);
+    nvg_glow_line(vg, proto_anchor_x, anchor_y, proto_anchor_x - ARM_EXT, anchor_y, cm, g1, g2);
+    nvg_glow_line(vg, proto_anchor_x, anchor_y,
+                  proto_anchor_x + dir_x * diag_len, anchor_y + dir_y * diag_len, cm, g1, g2);
 
-    // Proto arm: short horizontal extension leftward
-    const float h_ext_x = proto_anchor_x - ARM_EXT;
-    dl->AddLine({proto_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW2, 5.f);
-    dl->AddLine({proto_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW1, 2.5f);
-    dl->AddLine({proto_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_MAJ,  1.f);
-
-    // Proto arm diagonal
-    const ImVec2 proto_end = {proto_anchor_x + dir_x * diag_len,
-                               anchor_y       + dir_y * diag_len};
-    dl->AddLine({proto_anchor_x, anchor_y}, proto_end, COL_GLW2, 5.f);
-    dl->AddLine({proto_anchor_x, anchor_y}, proto_end, COL_GLW1, 2.5f);
-    dl->AddLine({proto_anchor_x, anchor_y}, proto_end, COL_MAJ,  1.f);
-
-    // Build items
     char effect_lbl[24], mode_lbl[24], rgb_lbl[24], brt_lbl[24];
     snprintf(effect_lbl, sizeof(effect_lbl), "%s", effect_name(f.effect_id));
-    if (f.playing_gif)
-        snprintf(mode_lbl, sizeof(mode_lbl), "GIF #%d", f.gif_id);
-    else
-        snprintf(mode_lbl, sizeof(mode_lbl), "Pal #%d", f.palette_id);
+    if (f.playing_gif) snprintf(mode_lbl, sizeof(mode_lbl), "GIF #%d", f.gif_id);
+    else               snprintf(mode_lbl, sizeof(mode_lbl), "Pal #%d", f.palette_id);
     snprintf(rgb_lbl, sizeof(rgb_lbl), "R%d G%d B%d", f.r, f.g, f.b);
     snprintf(brt_lbl, sizeof(brt_lbl), "Brt %d%%", (f.brightness * 100) / 255);
     const char* ctrl_lbl = f.hud_control ? "HUD" : "AUTO";
 
     struct Ind { const char* label; bool ok; };
     const Ind items[N_ITEMS] = {
-        {"FACE",      f.connected},
-        {effect_lbl,  f.connected},
-        {mode_lbl,    f.connected},
-        {rgb_lbl,     f.connected},
-        {brt_lbl,     f.connected},
-        {ctrl_lbl,    f.connected},
+        {"FACE", f.connected}, {effect_lbl, f.connected}, {mode_lbl, f.connected},
+        {rgb_lbl, f.connected}, {brt_lbl, f.connected}, {ctrl_lbl, f.connected},
     };
 
-    if (font_mono_) ImGui::PushFont(font_mono_);
+    nvg_set_font_mono();
     for (int i = 0; i < N_ITEMS; ++i) {
         const float t  = static_cast<float>(i + 1) * ROW_H;
         const float ix = proto_anchor_x + dir_x * t;
         const float iy = anchor_y       + dir_y * t;
-
         if (items[i].ok) {
-            dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, with_alpha(col_.ind_good, 28));
-            dl->AddCircleFilled({ix, iy}, DOT_R,        col_.ind_good);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R + 2.f);
+            nvgFillColor(vg, nvg_col_a(col_.ind_good, 28)); nvgFill(vg);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R);
+            nvgFillColor(vg, nvg_col(col_.ind_good)); nvgFill(vg);
         } else {
-            dl->AddCircleFilled({ix, iy}, DOT_R, col_.ind_fail);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R);
+            nvgFillColor(vg, nvg_col(col_.ind_fail)); nvgFill(vg);
         }
-
         const char* lbl = items[i].label;
-        float lbl_w = ImGui::CalcTextSize(lbl).x;
-        hud_glow_text(dl, {ix - DOT_R - 6.f - lbl_w, iy - 7.f}, lbl, items[i].ok,
+        float lw = nvgTextBounds(vg, 0, 0, lbl, nullptr, nullptr);
+        nvg_glow_text(vg, ix - DOT_R - 6.f - lw, iy - 7.f, lbl, items[i].ok,
                       col_.text_fill, col_.text_fill);
     }
-    if (font_mono_) ImGui::PopFont();
 }
 
 // ── LoRa indicator arm (right side) ──────────────────────────────────────────
@@ -800,54 +876,39 @@ void HudRenderer::draw_face_indicator(ImDrawList* dl, const FaceState& f,
 // The health indicator diagonal itself is the visual divider between sections.
 // SEG_W=75 puts lora at anchor_x+150 (= end of health side's 150px horiz line).
 
-void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
+void HudRenderer::draw_lora_indicator(NVGcontext* vg, const AppState& s,
                                        float fw, float fh) {
     constexpr float ROW_H    = 18.f;
     constexpr float DOT_R    = 4.f;
     constexpr float SEG_W    = 75.f;
     constexpr float ARM_EXT  = 140.f;
     constexpr float ANGLE    = 130.f * 3.14159265f / 180.f;
-    constexpr int   MAX_ROWS = 4;   // 1 header + up to 3 nodes
+    constexpr int   MAX_ROWS = 4;
 
-    const float tape_w       = fw / 3.f;
-    const float tape_x       = fw / 2.f - tape_w / 2.f;
-    const float fade_w       = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float c_margin     = static_cast<float>(cfg_.compass_bottom_margin);
-    const float ch           = static_cast<float>(cfg_.compass_height);
-    const bool  flip         = cfg_.hud_flip_vertical;
-    const float anchor_y     = flip ? c_margin : fh - c_margin;
-    const float ind_anchor_x = tape_x + tape_w + fade_w;
-    const float lora_anchor_x = ind_anchor_x + SEG_W * 2.f;
+    const float tape_w        = fw / 3.f;
+    const float tape_x        = fw / 2.f - tape_w / 2.f;
+    const float fade_w        = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin      = static_cast<float>(cfg_.compass_bottom_margin);
+    const bool  flip          = cfg_.hud_flip_vertical;
+    const float anchor_y      = flip ? c_margin : fh - c_margin;
+    const float lora_anchor_x = tape_x + tape_w + fade_w + SEG_W * 2.f;
 
-    const float dir_x    = std::cos(ANGLE) * 1.f;
+    const float dir_x    = std::cos(ANGLE);
     const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(MAX_ROWS + 1) * ROW_H;
 
-    const ImU32 COL_MAJ  = col_.glow_base;
-    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
-    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+    NVGcolor cm = nvg_col(col_.glow_base);
+    NVGcolor g1 = nvg_col_a(col_.glow_base, 70);
+    NVGcolor g2 = nvg_col_a(col_.glow_base, 28);
+    nvg_glow_line(vg, lora_anchor_x, anchor_y, lora_anchor_x + ARM_EXT, anchor_y, cm, g1, g2);
+    nvg_glow_line(vg, lora_anchor_x, anchor_y,
+                  lora_anchor_x + dir_x * diag_len, anchor_y + dir_y * diag_len, cm, g1, g2);
 
-    // LoRa arm: short horizontal extension rightward
-    const float h_ext_x = lora_anchor_x + ARM_EXT;
-    dl->AddLine({lora_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW2, 5.f);
-    dl->AddLine({lora_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW1, 2.5f);
-    dl->AddLine({lora_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_MAJ,  1.f);
-
-    // LoRa arm diagonal
-    const ImVec2 lora_end = {lora_anchor_x + dir_x * diag_len,
-                              anchor_y      + dir_y * diag_len};
-    dl->AddLine({lora_anchor_x, anchor_y}, lora_end, COL_GLW2, 5.f);
-    dl->AddLine({lora_anchor_x, anchor_y}, lora_end, COL_GLW1, 2.5f);
-    dl->AddLine({lora_anchor_x, anchor_y}, lora_end, COL_MAJ,  1.f);
-
-    // Build items: header row + one row per tracked node (capped at MAX_ROWS-1)
     struct Ind { char label[32]; bool ok; };
     Ind items[MAX_ROWS] = {};
     int n_items = 0;
-
     snprintf(items[n_items].label, sizeof(items[n_items].label), "LORA");
-    items[n_items].ok = s.health.lora_ok;
-    n_items++;
+    items[n_items].ok = s.health.lora_ok; n_items++;
 
     time_t now = std::time(nullptr);
     for (const auto& node : s.lora_nodes) {
@@ -855,39 +916,38 @@ void HudRenderer::draw_lora_indicator(ImDrawList* dl, const AppState& s,
         double age = difftime(now, node.last_seen);
         const char* nm = node.name.empty() ? "???" : node.name.c_str();
         snprintf(items[n_items].label, sizeof(items[n_items].label),
-                 "%-6.6s %03.0f\xc2\xb0 %.1fk",
-                 nm, node.heading_deg, node.distance_m / 1000.f);
+                 "%-6.6s %03.0f\xc2\xb0 %.1fk", nm, node.heading_deg, node.distance_m/1000.f);
         items[n_items].ok = (node.last_seen > 0 && age < 120.0);
         n_items++;
     }
 
-    if (font_mono_) ImGui::PushFont(font_mono_);
+    nvg_set_font_mono();
     for (int i = 0; i < n_items; ++i) {
         const float t  = static_cast<float>(i + 1) * ROW_H;
         const float ix = lora_anchor_x + dir_x * t;
         const float iy = anchor_y      + dir_y * t;
-
         if (items[i].ok) {
-            dl->AddCircleFilled({ix, iy}, DOT_R + 2.f, with_alpha(col_.ind_good, 28));
-            dl->AddCircleFilled({ix, iy}, DOT_R,        col_.ind_good);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R+2.f);
+            nvgFillColor(vg, nvg_col_a(col_.ind_good,28)); nvgFill(vg);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R);
+            nvgFillColor(vg, nvg_col(col_.ind_good)); nvgFill(vg);
         } else {
-            dl->AddCircleFilled({ix, iy}, DOT_R, col_.ind_fail);
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, DOT_R);
+            nvgFillColor(vg, nvg_col(col_.ind_fail)); nvgFill(vg);
         }
-
-        hud_glow_text(dl, {ix + DOT_R + 6.f, iy - 7.f}, items[i].label, items[i].ok,
+        nvg_glow_text(vg, ix+DOT_R+6.f, iy-7.f, items[i].label, items[i].ok,
                       col_.text_fill, col_.text_fill);
     }
-    if (font_mono_) ImGui::PopFont();
 }
 
 // ── Clock arm (right side, outboard of LoRa arm) ─────────────────────────────
 // Parallel diagonal arm at 130°. No dots — time and date rendered at font_scale.
 // clock_anchor_x = lora_anchor_x + SEG_W*2 (another 150px right of LoRa anchor).
 
-void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
+void HudRenderer::draw_clock_indicator(NVGcontext* vg, const AppState& s,
                                         float fw, float fh) {
     constexpr float ROW_H   = 18.f;
-    constexpr float DOT_R   = 4.f;   // x-offset reference kept consistent with other arms
+    constexpr float DOT_R   = 4.f;
     constexpr float SEG_W   = 75.f;
     constexpr float ARM_EXT = 140.f;
     constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
@@ -896,73 +956,54 @@ void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
     const float tape_x         = fw / 2.f - tape_w / 2.f;
     const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
     const float c_margin       = static_cast<float>(cfg_.compass_bottom_margin);
-    const float ch             = static_cast<float>(cfg_.compass_height);
     const bool  flip           = cfg_.hud_flip_vertical;
     const float anchor_y       = flip ? c_margin : fh - c_margin;
-    const float ind_anchor_x   = tape_x + tape_w + fade_w;
-    const float clock_anchor_x = ind_anchor_x   + SEG_W * 2.f;
+    const float clock_anchor_x = tape_x + tape_w + fade_w + SEG_W * 2.f;
 
-    const float dir_x = std::cos(ANGLE);
-    const float dir_y = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
-
+    const float dir_x     = std::cos(ANGLE);
+    const float dir_y     = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
     const float eff_row_h = ROW_H * scale;
     const int   n_rows    = s.clock_cfg.show_date ? 2 : 1;
     const float diag_len  = static_cast<float>(n_rows + 1) * eff_row_h;
 
-    const ImU32 COL_MAJ  = col_.glow_base;
-    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
-    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+    NVGcolor cm = nvg_col(col_.glow_base);
+    NVGcolor g1 = nvg_col_a(col_.glow_base, 70);
+    NVGcolor g2 = nvg_col_a(col_.glow_base, 28);
+    nvg_glow_line(vg, clock_anchor_x, anchor_y, clock_anchor_x + ARM_EXT, anchor_y, cm, g1, g2);
+    nvg_glow_line(vg, clock_anchor_x, anchor_y,
+                  clock_anchor_x + dir_x * diag_len, anchor_y + dir_y * diag_len, cm, g1, g2);
 
-    // Horizontal extension rightward
-    const float h_ext_x = clock_anchor_x + ARM_EXT;
-    dl->AddLine({clock_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW2, 5.f);
-    dl->AddLine({clock_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW1, 2.5f);
-    dl->AddLine({clock_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_MAJ,  1.f);
-
-    // Diagonal
-    const ImVec2 clk_end = {clock_anchor_x + dir_x * diag_len,
-                              anchor_y      + dir_y * diag_len};
-    dl->AddLine({clock_anchor_x, anchor_y}, clk_end, COL_GLW2, 5.f);
-    dl->AddLine({clock_anchor_x, anchor_y}, clk_end, COL_GLW1, 2.5f);
-    dl->AddLine({clock_anchor_x, anchor_y}, clk_end, COL_MAJ,  1.f);
-
-    // Build time / date strings
     time_t now = std::time(nullptr) + static_cast<time_t>(s.clock_cfg.manual_offset_s);
     struct tm tm_buf = {};
     localtime_r(&now, &tm_buf);
-
     char time_str[24], date_str[24];
     if (s.clock_cfg.use_24h) {
         if (s.clock_cfg.show_seconds)
             snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
                      tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
         else
-            snprintf(time_str, sizeof(time_str), "%02d:%02d",
-                     tm_buf.tm_hour, tm_buf.tm_min);
+            snprintf(time_str, sizeof(time_str), "%02d:%02d", tm_buf.tm_hour, tm_buf.tm_min);
     } else {
-        int h12 = tm_buf.tm_hour % 12;
-        if (h12 == 0) h12 = 12;
+        int h12 = tm_buf.tm_hour % 12; if (h12 == 0) h12 = 12;
         snprintf(time_str, sizeof(time_str), "%d:%02d %s",
                  h12, tm_buf.tm_min, tm_buf.tm_hour < 12 ? "AM" : "PM");
     }
-
     static const char* dow[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     static const char* mon[] = {"Jan","Feb","Mar","Apr","May","Jun",
                                   "Jul","Aug","Sep","Oct","Nov","Dec"};
     snprintf(date_str, sizeof(date_str), "%s %d %s",
              dow[tm_buf.tm_wday], tm_buf.tm_mday, mon[tm_buf.tm_mon]);
 
-    // Render rows using explicit font size — respects global glow flag + palette
-    const float font_size = font_mono_ ? font_mono_->FontSize * scale
-                                       : ImGui::GetFontSize() * scale;
+    const float font_size = 14.f * cfg_.text_scale * scale;
+    nvg_set_font_mono(font_size);
     const char* rows[2] = { time_str, date_str };
     for (int i = 0; i < n_rows; ++i) {
         const float t  = static_cast<float>(i + 1) * eff_row_h;
         const float ix = clock_anchor_x + dir_x * t;
         const float iy = anchor_y       + dir_y * t;
-        hud_glow_text(dl, {ix + DOT_R + 6.f, iy - font_size * 0.5f}, rows[i],
-                      font_mono_, font_size, col_.glow_base, col_.text_fill);
+        nvg_glow_text(vg, ix + DOT_R + 6.f, iy - font_size * 0.5f,
+                      rows[i], true, col_.glow_base, col_.text_fill);
     }
 }
 
@@ -970,12 +1011,10 @@ void HudRenderer::draw_clock_indicator(ImDrawList* dl, const AppState& s,
 // Visible only when a timer or alarm is active.
 // Timer row: countdown to expiry (MM:SS).  Alarm row: set time (HH:MM).
 
-void HudRenderer::draw_timer_alarm_indicator(ImDrawList* dl, const AppState& s,
+void HudRenderer::draw_timer_alarm_indicator(NVGcontext* vg, const AppState& s,
                                               float fw, float fh) {
     const auto& ta = s.timer_alarm;
-    const bool  show_timer = ta.timer_active;
-    const bool  show_alarm = ta.alarm_active;
-    if (!show_timer && !show_alarm) return;
+    if (!ta.timer_active && !ta.alarm_active) return;
 
     constexpr float ROW_H   = 18.f;
     constexpr float DOT_R   = 4.f;
@@ -983,101 +1022,75 @@ void HudRenderer::draw_timer_alarm_indicator(ImDrawList* dl, const AppState& s,
     constexpr float ARM_EXT = 140.f;
     constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
 
-    const float tape_w    = fw / 3.f;
-    const float tape_x    = fw / 2.f - tape_w / 2.f;
-    const float fade_w    = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float c_margin  = static_cast<float>(cfg_.compass_bottom_margin);
-    const float ch        = static_cast<float>(cfg_.compass_height);
-    const bool  flip      = cfg_.hud_flip_vertical;
-    const float anchor_y  = flip ? c_margin : fh - c_margin;
-    // Outboard of clock arm (which is now at ind + SEG_W*2)
-    const float ind_anchor_x = tape_x + tape_w + fade_w;
-    const float ta_anchor_x  = ind_anchor_x + SEG_W * 4.f;
+    const float tape_w      = fw / 3.f;
+    const float tape_x      = fw / 2.f - tape_w / 2.f;
+    const float fade_w      = static_cast<float>(cfg_.compass_bg_side_fade);
+    const float c_margin    = static_cast<float>(cfg_.compass_bottom_margin);
+    const bool  flip        = cfg_.hud_flip_vertical;
+    const float anchor_y    = flip ? c_margin : fh - c_margin;
+    const float ta_anchor_x = tape_x + tape_w + fade_w + SEG_W * 4.f;
 
     const float dir_x = std::cos(ANGLE);
     const float dir_y = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
 
-    // Build display rows
     struct Row { char text[24]; ImU32 accent; };
-    Row rows[2];
-    int n_rows = 0;
-
-    if (show_timer) {
-        int remaining = static_cast<int>(ta.timer_end - time(nullptr));
-        if (remaining < 0) remaining = 0;
-        const int mm = remaining / 60, ss = remaining % 60;
-        snprintf(rows[n_rows].text, sizeof(rows[0].text), "TMR %02d:%02d", mm, ss);
-        // Orange when nearly done (< 60 s), else normal
-        rows[n_rows].accent = (remaining < 60) ? col_.warn : col_.glow_base;
-        ++n_rows;
+    Row rows[2]; int n_rows = 0;
+    if (ta.timer_active) {
+        int rem = static_cast<int>(ta.timer_end - time(nullptr));
+        if (rem < 0) rem = 0;
+        snprintf(rows[n_rows].text, sizeof(rows[0].text), "TMR %02d:%02d", rem/60, rem%60);
+        rows[n_rows].accent = (rem < 60) ? col_.warn : col_.glow_base; ++n_rows;
     }
-    if (show_alarm) {
-        if (s.clock_cfg.use_24h) {
+    if (ta.alarm_active) {
+        if (s.clock_cfg.use_24h)
             snprintf(rows[n_rows].text, sizeof(rows[0].text),
                      "ALM %02d:%02d", ta.alarm_hour, ta.alarm_minute);
-        } else {
-            int h = ta.alarm_hour % 12;
-            if (h == 0) h = 12;
+        else {
+            int h = ta.alarm_hour % 12; if (h==0) h=12;
             snprintf(rows[n_rows].text, sizeof(rows[0].text),
-                     "ALM %d:%02d%s", h, ta.alarm_minute,
-                     ta.alarm_hour < 12 ? "A" : "P");
+                     "ALM %d:%02d%s", h, ta.alarm_minute, ta.alarm_hour<12?"A":"P");
         }
-        rows[n_rows].accent = col_.glow_base;
-        ++n_rows;
+        rows[n_rows].accent = col_.glow_base; ++n_rows;
     }
 
     const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
     const float eff_row_h = ROW_H * scale;
     const float diag_len  = static_cast<float>(n_rows + 1) * eff_row_h;
-    const float font_size = font_mono_ ? font_mono_->FontSize * scale
-                                       : ImGui::GetFontSize() * scale;
+    const float font_size = 14.f * cfg_.text_scale * scale;
 
-    const ImU32 COL_MAJ  = col_.glow_base;
-    const ImU32 COL_GLW1 = with_alpha(col_.glow_base, 70);
-    const ImU32 COL_GLW2 = with_alpha(col_.glow_base, 28);
+    NVGcolor cm = nvg_col(col_.glow_base);
+    NVGcolor g1 = nvg_col_a(col_.glow_base, 70);
+    NVGcolor g2 = nvg_col_a(col_.glow_base, 28);
+    nvg_glow_line(vg, ta_anchor_x, anchor_y, ta_anchor_x + ARM_EXT, anchor_y, cm, g1, g2);
+    nvg_glow_line(vg, ta_anchor_x, anchor_y,
+                  ta_anchor_x + dir_x * diag_len, anchor_y + dir_y * diag_len, cm, g1, g2);
 
-    // Horizontal extension rightward
-    const float h_ext_x = ta_anchor_x + ARM_EXT;
-    dl->AddLine({ta_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW2, 5.f);
-    dl->AddLine({ta_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_GLW1, 2.5f);
-    dl->AddLine({ta_anchor_x, anchor_y}, {h_ext_x, anchor_y}, COL_MAJ,  1.f);
-
-    // Diagonal
-    const ImVec2 arm_end = {ta_anchor_x + dir_x * diag_len,
-                             anchor_y    + dir_y * diag_len};
-    dl->AddLine({ta_anchor_x, anchor_y}, arm_end, COL_GLW2, 5.f);
-    dl->AddLine({ta_anchor_x, anchor_y}, arm_end, COL_GLW1, 2.5f);
-    dl->AddLine({ta_anchor_x, anchor_y}, arm_end, COL_MAJ,  1.f);
-
-    // Text rows
-    if (font_mono_) ImGui::PushFont(font_mono_);
+    nvg_set_font_mono(font_size);
     for (int i = 0; i < n_rows; ++i) {
         const float t  = static_cast<float>(i + 1) * eff_row_h;
         const float ix = ta_anchor_x + dir_x * t;
         const float iy = anchor_y    + dir_y * t;
-        hud_glow_text(dl, {ix + DOT_R + 6.f, iy - font_size * 0.5f},
-                      rows[i].text, font_mono_, font_size,
-                      rows[i].accent, col_.text_fill);
+        nvg_glow_text(vg, ix + DOT_R + 6.f, iy - font_size * 0.5f,
+                      rows[i].text, true, rows[i].accent, col_.text_fill);
     }
-    if (font_mono_) ImGui::PopFont();
 }
 
 // ── LoRa messages panel ───────────────────────────────────────────────────────
 
-void HudRenderer::draw_lora_messages(ImDrawList* dl, const AppState& s,
-                                      ImVec2 origin, float pw, float ph) {
-    dl->AddRectFilled(origin, {origin.x + pw, origin.y + ph},
-                      IM_COL32(10, 15, 20, 230));
-    dl->AddLine({origin.x + pw, origin.y},
-                {origin.x + pw, origin.y + ph}, col_.orange);
+void HudRenderer::draw_lora_messages(NVGcontext* vg, const AppState& s,
+                                      float ox, float oy, float pw, float ph) {
+    nvgBeginPath(vg); nvgRect(vg, ox, oy, pw, ph);
+    nvgFillColor(vg, nvgRGBA(10, 15, 20, 230)); nvgFill(vg);
+    nvgBeginPath(vg); nvgMoveTo(vg, ox+pw, oy); nvgLineTo(vg, ox+pw, oy+ph);
+    nvgStrokeWidth(vg, 1.5f); nvgStrokeColor(vg, nvg_col(col_.orange)); nvgStroke(vg);
 
-    if (font_ui_) ImGui::PushFont(font_ui_);
-    hud_glow_text(dl, {origin.x + 8.f, origin.y + 6.f}, "MESSAGES");
+    nvg_set_font_ui();
+    nvg_glow_text(vg, ox + 8.f, oy + 6.f, "MESSAGES");
 
-    float py = origin.y + 28.f;
+    nvg_set_font_mono();
+    float py = oy + 28.f;
     for (const auto& msg : s.lora_messages) {
-        if (py + 38.f > origin.y + ph) break;
-
+        if (py + 38.f > oy + ph) break;
         std::string sender;
         for (const auto& n : s.lora_nodes)
             if (n.local_id == msg.local_id) { sender = n.name; break; }
@@ -1085,27 +1098,23 @@ void HudRenderer::draw_lora_messages(ImDrawList* dl, const AppState& s,
             char id[12]; snprintf(id, sizeof(id), "ID:%02X", msg.local_id);
             sender = id;
         }
-
         char hdr[64];
         snprintf(hdr, sizeof(hdr), "[%s  %s]",
-                 sender.substr(0, 10).c_str(),
-                 fmt_time(msg.timestamp).c_str());
-        hud_glow_text(dl, {origin.x + 8.f, py}, hdr);
+                 sender.substr(0, 10).c_str(), fmt_time(msg.timestamp).c_str());
+        nvg_glow_text(vg, ox + 8.f, py, hdr);
         py += 16.f;
-
-        hud_glow_text(dl, {origin.x + 8.f, py}, msg.text.c_str(), !msg.read);
+        nvg_glow_text(vg, ox + 8.f, py, msg.text.c_str(), !msg.read);
         py += 22.f;
     }
-    if (font_ui_) ImGui::PopFont();
 }
 
 // ── Compass tape ──────────────────────────────────────────────────────────────
 
-void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
-                                     ImVec2 origin, float tw, float th) {
+void HudRenderer::draw_compass_tape(NVGcontext* vg, const AppState& s,
+                                     float ox, float oy, float tw, float th) {
     const float heading  = s.compass_heading;
-    const float ppd      = tw / 120.f; // 120° visible across full tape width
-    const float center_x = origin.x + tw / 2.f;
+    const float ppd      = tw / 120.f;
+    const float center_x = ox + tw / 2.f;
 
     const ImU32 col_major = col_.compass_tick;
     const ImU32 col_mid   = with_alpha(col_.compass_tick, 180);
@@ -1118,112 +1127,144 @@ void HudRenderer::draw_compass_tape(ImDrawList* dl, const AppState& s,
 
     if (s.compass_bg_enabled) {
         const uint8_t a = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
-        const ImU32   A = with_alpha(col_.compass_bg_color, a);
-
         constexpr float kIndAngle = 130.f * 3.14159265f / 180.f;
         const float inset = std::abs(std::cos(kIndAngle)) / std::sin(kIndAngle) * th;
 
-        // Trapezoid: narrower on the side that faces the indicator arms.
-        // Normal: narrower at top (origin.y), wider at bottom (origin.y+th).
-        // Flipped: narrower at bottom (origin.y+th), wider at top (origin.y).
-        ImVec2 bg[4];
+        nvgBeginPath(vg);
         if (!flip) {
-            bg[0] = {origin.x - fade_w + inset,      origin.y     };  // TL (inset)
-            bg[1] = {origin.x + tw + fade_w - inset, origin.y     };  // TR (inset)
-            bg[2] = {origin.x + tw + fade_w,         origin.y + th};  // BR
-            bg[3] = {origin.x - fade_w,              origin.y + th};  // BL
+            nvgMoveTo(vg, ox - fade_w + inset,      oy);
+            nvgLineTo(vg, ox + tw + fade_w - inset, oy);
+            nvgLineTo(vg, ox + tw + fade_w,         oy + th);
+            nvgLineTo(vg, ox - fade_w,              oy + th);
         } else {
-            bg[0] = {origin.x - fade_w,              origin.y     };  // TL
-            bg[1] = {origin.x + tw + fade_w,         origin.y     };  // TR
-            bg[2] = {origin.x + tw + fade_w - inset, origin.y + th};  // BR (inset)
-            bg[3] = {origin.x - fade_w + inset,      origin.y + th};  // BL (inset)
+            nvgMoveTo(vg, ox - fade_w,              oy);
+            nvgLineTo(vg, ox + tw + fade_w,         oy);
+            nvgLineTo(vg, ox + tw + fade_w - inset, oy + th);
+            nvgLineTo(vg, ox - fade_w + inset,      oy + th);
         }
-        dl->AddConvexPolyFilled(bg, 4, A);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nvg_col_a(col_.compass_bg_color, a));
+        nvgFill(vg);
     }
 
-    // Glow line — at tape edge that meets the indicator arms.
+    // Glow line at tape edge that meets the indicator arms
     {
-        const float lx0    = origin.x - fade_w, lx1 = origin.x + tw + fade_w;
-        const float line_y = flip ? origin.y : origin.y + th;
-        dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 28), 5.f);
-        dl->AddLine({lx0, line_y}, {lx1, line_y}, with_alpha(col_.glow_base, 70), 2.5f);
-        dl->AddLine({lx0, line_y}, {lx1, line_y}, col_.glow_base, 1.f);
+        const float lx0    = ox - fade_w, lx1 = ox + tw + fade_w;
+        const float line_y = flip ? oy : oy + th;
+        nvg_glow_line(vg, lx0, line_y, lx1, line_y,
+                      nvg_col(col_.glow_base),
+                      nvg_col_a(col_.glow_base, 70),
+                      nvg_col_a(col_.glow_base, 28));
     }
 
-    // Tick lengths — major is user-configurable; mid and minor scale proportionally.
     const float t_maj = static_cast<float>(cfg_.compass_tick_length);
     const float t_mid = t_maj * (16.f / 24.f);
     const float t_min = t_maj * (10.f / 24.f);
 
-    // Tick zone: 20 px label strip on the arm-facing edge; ticks grow inward.
-    // Normal: label strip at bottom, ticks grow upward.
-    // Flipped: label strip at top, ticks grow downward.
-    const float tick_base   = flip ? origin.y + 20.f : origin.y + th - 20.f;
-    const float tick_sign   = flip ? 1.f : -1.f;   // +1 = down, -1 = up
-    const float label_y     = flip ? origin.y + 3.f : tick_base + 3.f;
+    const float tick_base = flip ? oy + 20.f : oy + th - 20.f;
+    const float tick_sign = flip ? 1.f : -1.f;
+    const float label_y   = flip ? oy + 3.f : tick_base + 3.f;
+    const bool  tick_glow = cfg_.compass_tick_glow;
 
-    if (font_mono_) ImGui::PushFont(font_mono_);
+    // Collect tick positions per tier for batched drawing
+    float maj_px[8];  int n_maj = 0;
+    float mid_px[36]; int n_mid = 0;
+    float min_px[24]; int n_min = 0;
+
+    struct LabelEntry { float px; char buf[8]; };
+    LabelEntry labels[44]; int n_labels = 0;
 
     for (int deg = 0; deg < 360; deg++) {
-        float offset = deg - heading;
+        float offset = static_cast<float>(deg) - heading;
         while (offset >  180.f) offset -= 360.f;
         while (offset < -180.f) offset += 360.f;
 
         float px = center_x + offset * ppd;
-        if (px < origin.x || px > origin.x + tw) continue;
+        if (px < ox || px > ox + tw) continue;
 
-        const bool tick_glow = cfg_.compass_tick_glow;
         if (deg % 45 == 0) {
-            if (tick_glow) {
-                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_maj}, col_glow2, t_maj * 0.5f);
-                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_maj}, col_glow1, t_maj * 0.25f);
+            if (n_maj < 8) maj_px[n_maj++] = px;
+            if (n_labels < 44) {
+                labels[n_labels].px = px;
+                strncpy(labels[n_labels].buf, cardinal_str(static_cast<float>(deg)), 7);
+                labels[n_labels].buf[7] = '\0';
+                ++n_labels;
             }
-            dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_maj}, col_major, 3.f);
-            const char* card = cardinal_str(static_cast<float>(deg));
-            ImVec2 csz = ImGui::CalcTextSize(card);
-            hud_glow_text(dl, {px - csz.x * 0.5f, label_y},
-                          card, true, col_.glow_base, col_.text_fill);
         } else if (deg % 10 == 0) {
-            if (tick_glow)
-                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_mid}, col_glow2, t_mid * 0.375f);
-            dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_mid}, col_mid, 2.f);
-            char buf[8]; snprintf(buf, sizeof(buf), "%d", deg);
-            ImVec2 bsz = ImGui::CalcTextSize(buf);
-            hud_glow_text(dl, {px - bsz.x * 0.5f, label_y}, buf,
-                          true, col_.glow_base, col_.text_fill);
+            if (n_mid < 36) mid_px[n_mid++] = px;
+            if (n_labels < 44) {
+                labels[n_labels].px = px;
+                snprintf(labels[n_labels].buf, 8, "%d", deg);
+                ++n_labels;
+            }
         } else if (deg % 5 == 0) {
-            if (tick_glow)
-                dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_min}, col_glow2, t_min * 0.4f);
-            dl->AddLine({px, tick_base}, {px, tick_base + tick_sign * t_min}, col_minor, 2.f);
+            if (n_min < 24) min_px[n_min++] = px;
         }
     }
 
-    if (font_mono_) ImGui::PopFont();
+    // Batched glow passes (one path per tier per glow layer)
+    if (tick_glow) {
+        auto draw_tick_batch = [&](float* px_arr, int n, float len, float w, NVGcolor col) {
+            nvgBeginPath(vg);
+            for (int i = 0; i < n; ++i) {
+                nvgMoveTo(vg, px_arr[i], tick_base);
+                nvgLineTo(vg, px_arr[i], tick_base + tick_sign * len);
+            }
+            nvgStrokeWidth(vg, w); nvgStrokeColor(vg, col); nvgStroke(vg);
+        };
+        draw_tick_batch(maj_px, n_maj, t_maj, t_maj * 0.5f,  nvg_col(col_glow2));
+        draw_tick_batch(maj_px, n_maj, t_maj, t_maj * 0.25f, nvg_col(col_glow1));
+        draw_tick_batch(mid_px, n_mid, t_mid, t_mid * 0.375f, nvg_col(col_glow2));
+        draw_tick_batch(min_px, n_min, t_min, t_min * 0.4f,  nvg_col(col_glow2));
+    }
 
-    // LoRa node bearing markers — small triangles on the inner (non-label) side of the ticks.
-    // Normal: triangles above the tick tops (pointing down into tape).
-    // Flipped: triangles below the tick bottoms (pointing up into tape).
+    // Batched solid tick draws
+    {
+        auto draw_solid = [&](float* px_arr, int n, float len, float w, NVGcolor col) {
+            nvgBeginPath(vg);
+            for (int i = 0; i < n; ++i) {
+                nvgMoveTo(vg, px_arr[i], tick_base);
+                nvgLineTo(vg, px_arr[i], tick_base + tick_sign * len);
+            }
+            nvgStrokeWidth(vg, w); nvgStrokeColor(vg, col); nvgStroke(vg);
+        };
+        draw_solid(maj_px, n_maj, t_maj, 3.f, nvg_col(col_major));
+        draw_solid(mid_px, n_mid, t_mid, 2.f, nvg_col(col_mid));
+        draw_solid(min_px, n_min, t_min, 2.f, nvg_col(col_minor));
+    }
+
+    // Labels
+    nvg_set_font_mono(0.f);
+    for (int i = 0; i < n_labels; ++i) {
+        float bounds[4];
+        nvgTextBounds(vg, 0, 0, labels[i].buf, nullptr, bounds);
+        float lw = bounds[2] - bounds[0];
+        nvg_glow_text(vg, labels[i].px - lw * 0.5f, label_y, labels[i].buf,
+                      true, col_.glow_base, col_.text_fill);
+    }
+
+    // LoRa node bearing markers — triangles on the inner (non-label) side of ticks
     for (const auto& node : s.lora_nodes) {
         if (node.distance_m <= 0.f) continue;
         float offset = node.heading_deg - heading;
         while (offset >  180.f) offset -= 360.f;
         while (offset < -180.f) offset += 360.f;
         float px = center_x + offset * ppd;
-        if (px < origin.x || px > origin.x + tw) continue;
+        if (px < ox || px > ox + tw) continue;
 
-        ImU32 node_col = s.lora_node_colors[node.local_id % 8];
-        float mx = px;
-        float my, tri_tip_dy;
-        if (!flip) {
-            my = tick_base + tick_sign * t_maj - 6.f;  // above tick tops
-            tri_tip_dy = 9.f;                            // tip points downward
-        } else {
-            my = tick_base + tick_sign * t_maj + 6.f;  // below tick bottoms
-            tri_tip_dy = -9.f;                           // tip points upward
-        }
-        ImVec2 tri[3] = {{mx - 5.f, my}, {mx + 5.f, my}, {mx, my + tri_tip_dy}};
-        dl->AddConvexPolyFilled(tri, 3, node_col);
-        dl->AddPolyline(tri, 3, with_alpha(node_col, 200), ImDrawFlags_Closed, 1.f);
+        float my = tick_base + tick_sign * t_maj + (flip ? 6.f : -6.f);
+        float tri_tip_dy = flip ? -9.f : 9.f;
+
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, px - 5.f, my);
+        nvgLineTo(vg, px + 5.f, my);
+        nvgLineTo(vg, px, my + tri_tip_dy);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nvg_col(s.lora_node_colors[node.local_id % 8]));
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvg_col_a(s.lora_node_colors[node.local_id % 8], 200));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
     }
 }
 
@@ -1490,13 +1531,29 @@ void HudRenderer::fx_emit(float x, float y, float vx, float vy,
     particles_[n_particles_++] = { x, y, vx, vy, life, life, color, size };
 }
 
-void HudRenderer::fx_draw(ImDrawList* dl) const {
+void HudRenderer::fx_draw(NVGcontext* vg) const {
+    if (n_particles_ == 0) return;
+    // Batch by base color (strip alpha) — reduces 256 particles × 2 GL calls to ≤ 8 × 2
+    ImU32 unique_cols[32]; int n_unique = 0;
     for (int i = 0; i < n_particles_; ++i) {
-        const Particle& p = particles_[i];
-        const float frac  = p.life / p.life_total;
-        const uint8_t a   = static_cast<uint8_t>(frac * 220.f);
-        const ImU32  col  = with_alpha(p.color, a);
-        dl->AddCircleFilled({p.x, p.y}, p.size, col, 6);
+        ImU32 base = particles_[i].color & 0x00FFFFFFu;
+        bool found = false;
+        for (int j = 0; j < n_unique; ++j) if (unique_cols[j] == base) { found = true; break; }
+        if (!found && n_unique < 32) unique_cols[n_unique++] = base;
+    }
+    for (int ci = 0; ci < n_unique; ++ci) {
+        ImU32 base = unique_cols[ci];
+        nvgBeginPath(vg);
+        uint8_t max_a = 0;
+        for (int i = 0; i < n_particles_; ++i) {
+            if ((particles_[i].color & 0x00FFFFFFu) != base) continue;
+            const Particle& p = particles_[i];
+            uint8_t a = static_cast<uint8_t>((p.life / p.life_total) * 220.f);
+            if (a > max_a) max_a = a;
+            nvgCircle(vg, p.x, p.y, p.size);
+        }
+        nvgFillColor(vg, nvgRGBA(base & 0xFF, (base>>8) & 0xFF, (base>>16) & 0xFF, max_a));
+        nvgFill(vg);
     }
 }
 
@@ -1526,8 +1583,7 @@ void HudRenderer::fx_emit_line(float x, float y, float vx, float vy,
 }
 
 // Draw comets: bright head circle + three-segment tail that fades to transparent.
-// Direction is derived from velocity so the tail always trails the direction of travel.
-void HudRenderer::fx_draw_lines(ImDrawList* dl) const {
+void HudRenderer::fx_draw_lines(NVGcontext* vg) const {
     for (int i = 0; i < n_line_particles_; ++i) {
         const LineParticle& p = line_particles_[i];
         const float frac = p.life / p.life_total;
@@ -1536,54 +1592,67 @@ void HudRenderer::fx_draw_lines(ImDrawList* dl) const {
         else if (frac < 0.25f) af = frac / 0.25f;
         else                   af = 1.f;
 
-        // Head leads in direction of travel; tail extends behind
         const float spd = std::sqrt(p.vx * p.vx + p.vy * p.vy);
         float dx = 1.f, dy = 0.f;
         if (spd > 0.01f) { dx = p.vx / spd; dy = p.vy / spd; }
 
-        const ImVec2 head = { p.x + dx * 3.f,           p.y + dy * 3.f };
-        const ImVec2 q1   = { p.x - dx * p.len * 0.25f, p.y - dy * p.len * 0.25f };
-        const ImVec2 q2   = { p.x - dx * p.len * 0.60f, p.y - dy * p.len * 0.60f };
-        const ImVec2 tail = { p.x - dx * p.len,          p.y - dy * p.len };
+        const float hx   = p.x + dx * 3.f,           hy   = p.y + dy * 3.f;
+        const float q1x  = p.x - dx * p.len * 0.25f, q1y  = p.y - dy * p.len * 0.25f;
+        const float q2x  = p.x - dx * p.len * 0.60f, q2y  = p.y - dy * p.len * 0.60f;
+        const float tx   = p.x - dx * p.len,          ty   = p.y - dy * p.len;
 
-        const ImU32 c0 = with_alpha(p.color, static_cast<uint8_t>(af * 230.f));
-        const ImU32 c1 = with_alpha(p.color, static_cast<uint8_t>(af * 110.f));
-        const ImU32 c2 = with_alpha(p.color, static_cast<uint8_t>(af *  38.f));
+        const NVGcolor c0 = nvg_col_a(p.color, static_cast<uint8_t>(af * 230.f));
+        const NVGcolor c1 = nvg_col_a(p.color, static_cast<uint8_t>(af * 110.f));
+        const NVGcolor c2 = nvg_col_a(p.color, static_cast<uint8_t>(af *  38.f));
 
-        dl->AddCircleFilled(head, 1.7f, c0, 6);
-        dl->AddLine(head, q1,  c0, 1.5f);
-        dl->AddLine(q1,   q2,  c1, 1.1f);
-        dl->AddLine(q2,   tail, c2, 0.8f);
+        // Head
+        nvgBeginPath(vg); nvgCircle(vg, hx, hy, 1.7f);
+        nvgFillColor(vg, c0); nvgFill(vg);
+        // Tail segments
+        nvgBeginPath(vg); nvgMoveTo(vg, hx, hy); nvgLineTo(vg, q1x, q1y);
+        nvgStrokeWidth(vg, 1.5f); nvgStrokeColor(vg, c0); nvgStroke(vg);
+        nvgBeginPath(vg); nvgMoveTo(vg, q1x, q1y); nvgLineTo(vg, q2x, q2y);
+        nvgStrokeWidth(vg, 1.1f); nvgStrokeColor(vg, c1); nvgStroke(vg);
+        nvgBeginPath(vg); nvgMoveTo(vg, q2x, q2y); nvgLineTo(vg, tx, ty);
+        nvgStrokeWidth(vg, 0.8f); nvgStrokeColor(vg, c2); nvgStroke(vg);
     }
 }
 
 // Layered dark-blue/violet gradient vignette along all four edges to evoke a nebula cloud.
-void HudRenderer::fx_draw_nebula_cloud(ImDrawList* dl, float fw, float fh) const {
-    struct CloudLayer { float depth; ImU32 edge_col; };
+void HudRenderer::fx_draw_nebula_cloud(NVGcontext* vg, float fw, float fh) const {
+    struct CloudLayer { float depth; uint8_t r, g, b, a; };
     static const CloudLayer layers[] = {
-        {  80.f, IM_COL32(  3,   2,  18, 215) },   // outermost — near-opaque dark blue
-        { 130.f, IM_COL32(  8,   4,  38, 130) },   // mid       — deep violet
-        { 195.f, IM_COL32( 20,   8,  65,  55) },   // inner     — faint purple haze
+        {  80.f,  3,  2, 18, 215 },
+        { 130.f,  8,  4, 38, 130 },
+        { 195.f, 20,  8, 65,  55 },
     };
-    const ImU32 kClear = IM_COL32(0, 0, 0, 0);
-
     for (const auto& l : layers) {
         const float d = l.depth;
-        const ImU32 c = l.edge_col;
-        // Top: dark at top row, transparent at bottom of band
-        dl->AddRectFilledMultiColor({ 0.f, 0.f },   { fw, d },      c, c, kClear, kClear);
-        // Bottom: transparent at top of band, dark at bottom row
-        dl->AddRectFilledMultiColor({ 0.f, fh-d }, { fw, fh },     kClear, kClear, c, c);
-        // Left: dark at left col, transparent at right of band
-        dl->AddRectFilledMultiColor({ 0.f, 0.f },   { d, fh },      c, kClear, kClear, c);
-        // Right: transparent at left of band, dark at right col
-        dl->AddRectFilledMultiColor({ fw-d, 0.f }, { fw, fh },     kClear, c, c, kClear);
+        const NVGcolor edge  = nvgRGBA(l.r, l.g, l.b, l.a);
+        const NVGcolor clear = nvgRGBA(l.r, l.g, l.b, 0);
+        NVGpaint p;
+        // Top
+        p = nvgLinearGradient(vg, 0, 0, 0, d, edge, clear);
+        nvgBeginPath(vg); nvgRect(vg, 0, 0, fw, d);
+        nvgFillPaint(vg, p); nvgFill(vg);
+        // Bottom
+        p = nvgLinearGradient(vg, 0, fh - d, 0, fh, clear, edge);
+        nvgBeginPath(vg); nvgRect(vg, 0, fh - d, fw, d);
+        nvgFillPaint(vg, p); nvgFill(vg);
+        // Left
+        p = nvgLinearGradient(vg, 0, 0, d, 0, edge, clear);
+        nvgBeginPath(vg); nvgRect(vg, 0, 0, d, fh);
+        nvgFillPaint(vg, p); nvgFill(vg);
+        // Right
+        p = nvgLinearGradient(vg, fw - d, 0, fw, 0, clear, edge);
+        nvgBeginPath(vg); nvgRect(vg, fw - d, 0, d, fh);
+        nvgFillPaint(vg, p); nvgFill(vg);
     }
 }
 
 // ── Alarm / timer heartbeat pulse ────────────────────────────────────────────
 
-void HudRenderer::fx_draw_alarm_pulse(ImDrawList* dl, const AppState& s,
+void HudRenderer::fx_draw_alarm_pulse(NVGcontext* vg, const AppState& s,
                                        float fw, float fh) {
     const bool alarm_on = s.timer_alarm.alarm_triggered;
     const bool timer_on = s.timer_alarm.timer_triggered;
@@ -1622,18 +1691,27 @@ void HudRenderer::fx_draw_alarm_pulse(ImDrawList* dl, const AppState& s,
     const float depth     = max_depth * std::sqrt(alpha_frac);
     if (depth < 1.f) return;
 
-    const ImU32 base  = alarm_on ? col_.danger : col_.warn;
-    const ImU32 edge  = with_alpha(base, a);
-    const ImU32 clear = with_alpha(base, 0);
+    const ImU32 base = alarm_on ? col_.danger : col_.warn;
+    const NVGcolor edge  = nvg_col_a(base, a);
+    const NVGcolor clear = nvg_col_a(base, 0);
 
-    // Left edge: opaque at left, transparent at right
-    dl->AddRectFilledMultiColor({0.f,       0.f}, {depth, fh},       edge,  clear, clear, edge);
-    // Right edge: transparent at left, opaque at right
-    dl->AddRectFilledMultiColor({fw-depth,  0.f}, {fw,    fh},       clear, edge,  edge,  clear);
-    // Top edge: opaque at top, transparent at bottom
-    dl->AddRectFilledMultiColor({0.f,       0.f}, {fw,    depth},    edge,  edge,  clear, clear);
-    // Bottom edge: transparent at top, opaque at bottom
-    dl->AddRectFilledMultiColor({0.f, fh-depth},  {fw,    fh},       clear, clear, edge,  edge);
+    NVGpaint p;
+    // Left edge
+    p = nvgLinearGradient(vg, 0, 0, depth, 0, edge, clear);
+    nvgBeginPath(vg); nvgRect(vg, 0, 0, depth, fh);
+    nvgFillPaint(vg, p); nvgFill(vg);
+    // Right edge
+    p = nvgLinearGradient(vg, fw - depth, 0, fw, 0, clear, edge);
+    nvgBeginPath(vg); nvgRect(vg, fw - depth, 0, depth, fh);
+    nvgFillPaint(vg, p); nvgFill(vg);
+    // Top edge
+    p = nvgLinearGradient(vg, 0, 0, 0, depth, edge, clear);
+    nvgBeginPath(vg); nvgRect(vg, 0, 0, fw, depth);
+    nvgFillPaint(vg, p); nvgFill(vg);
+    // Bottom edge
+    p = nvgLinearGradient(vg, 0, fh - depth, 0, fh, clear, edge);
+    nvgBeginPath(vg); nvgRect(vg, 0, fh - depth, fw, depth);
+    nvgFillPaint(vg, p); nvgFill(vg);
 }
 
 // Nebula color palette — blue/violet/purple spectrum with occasional pale star
@@ -1783,7 +1861,7 @@ void HudRenderer::fx_emit_turbulence(float tape_cx, float tape_y,
 }
 
 // Master dispatcher — derives arm geometry the same way the draw_* helpers do.
-void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
+void HudRenderer::fx_update(NVGcontext* vg, const AppState& s,
                              float fw, float fh, float dt) {
     const EffectType effect = s.effects_cfg.effect;
 
@@ -1799,7 +1877,7 @@ void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
     fx_prev_popup_ = cur_popup;
 
     if (effect == EffectType::None) {
-        fx_draw(dl);
+        fx_draw(vg);
         return;
     }
 
@@ -1809,8 +1887,7 @@ void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
     const bool  flip     = cfg_.hud_flip_vertical;
 
-    // Compass tape geometry (same formula as draw_frame)
-    const float cw       = fw / 3.f;
+    const float cw        = fw / 3.f;
     const float compass_y = flip ? c_margin : fh - ch - c_margin;
     const float tape_cx   = fw * 0.5f;
 
@@ -1819,7 +1896,6 @@ void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
     }
 
     if (effect == EffectType::CornerDrift) {
-        // Four corners of the compass tape
         const float x0 = tape_cx - cw * 0.5f;
         const float x1 = tape_cx + cw * 0.5f;
         const float y0 = compass_y;
@@ -1831,40 +1907,32 @@ void HudRenderer::fx_update(ImDrawList* dl, const AppState& s,
     }
 
     if (effect == EffectType::ArmGlints) {
-        // Arm geometry mirrors draw_face_indicator / draw_lora_indicator / draw_clock_indicator.
-        // Arms are at fixed angles: face ~210°, lora ~270°, clock ~330° (left side)
-        // and mirrored on right side for health.
-        // Use the same anchor_y the draw helpers use.
         const float anchor_y = flip ? c_margin : fh - c_margin;
-
-        // Each indicator arm: left-center is ~ fw/3 wide; right ~2fw/3
         struct ArmDef { float ax; float angle_deg; };
         const ArmDef arms[] = {
-            { fw * 0.33f, 225.f },   // face (left)
-            { fw * 0.33f, 270.f },   // lora (left)
-            { fw * 0.33f, 315.f },   // clock (left)
-            { fw * 0.67f, 315.f },   // health right arm 1
-            { fw * 0.67f, 270.f },   // health right arm 2
+            { fw * 0.33f, 225.f },
+            { fw * 0.33f, 270.f },
+            { fw * 0.33f, 315.f },
+            { fw * 0.67f, 315.f },
+            { fw * 0.67f, 270.f },
         };
         const float diag_len = std::min(fw, fh) * 0.22f;
         for (const auto& arm : arms) {
-            const float rad   = arm.angle_deg * 3.14159f / 180.f;
-            const float dx    =  std::cos(rad);
-            const float dy_n  = -std::sin(rad);  // normal: arm goes up (negative y)
-            const float dy    = flip ? std::sin(rad) : dy_n;
+            const float rad  = arm.angle_deg * 3.14159f / 180.f;
+            const float dx   =  std::cos(rad);
+            const float dy_n = -std::sin(rad);
+            const float dy   = flip ? std::sin(rad) : dy_n;
             fx_emit_arm_glint(arm.ax, anchor_y, dx, dy, diag_len, c, dt);
         }
     }
 
-    // PopupBurst is event-driven (handled above); no per-frame emission needed.
-
     if (effect == EffectType::NebulaEdge) {
-        fx_draw_nebula_cloud(dl, fw, fh);   // cloud vignette drawn first, under particles
+        fx_draw_nebula_cloud(vg, fw, fh);
         fx_emit_nebula_edge(fw, fh, dt);
     }
 
-    fx_draw(dl);
-    fx_draw_lines(dl);
+    fx_draw(vg);
+    fx_draw_lines(vg);
 }
 
 // ── System status panel ───────────────────────────────────────────────────────
@@ -2151,55 +2219,3 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     ImGui::End();
 }
 
-// ── FPS overlay ───────────────────────────────────────────────────────────────
-
-void HudRenderer::draw_fps_overlay(const AppState& snap, int w, int h, bool active) {
-    if (!active) return;
-    ImGui::SetCurrentContext(ctx_);
-
-    const float sw = static_cast<float>(w);
-    const float sh = static_cast<float>(h);
-
-    ImGui::SetNextWindowPos ({0.f, 0.f});
-    ImGui::SetNextWindowSize({sw, sh});
-    ImGui::SetNextWindowBgAlpha(0.f);
-    ImGui::Begin("##fps_overlay", nullptr,
-        ImGuiWindowFlags_NoDecoration          |
-        ImGuiWindowFlags_NoInputs              |
-        ImGuiWindowFlags_NoMove                |
-        ImGuiWindowFlags_NoNav                 |
-        ImGuiWindowFlags_NoBringToFrontOnFocus |
-        ImGuiWindowFlags_NoSavedSettings);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    if (font_mono_) ImGui::PushFont(font_mono_);
-    const float lh  = ImGui::GetTextLineHeight();
-    const float fps = snap.sys_metrics.fps_avg;
-    const float ft  = snap.sys_metrics.frame_time_ms;
-
-    char buf[32];
-    if (fps > 0.f)
-        snprintf(buf, sizeof(buf), "%.0f FPS  %.1fms", static_cast<double>(fps),
-                                                        static_cast<double>(ft));
-    else
-        snprintf(buf, sizeof(buf), "-- FPS");
-
-    const ImU32 col    = with_alpha(col_.text_fill, 160);
-    const ImU32 bg_col = IM_COL32(6, 8, 10, 140);
-    const float margin = 8.f;
-
-    // Draw in top-right corner of each eye half
-    const float eye_w = sw * 0.5f;
-    for (int eye = 0; eye < 2; ++eye) {
-        const float off  = eye * eye_w;
-        ImVec2 ts = ImGui::CalcTextSize(buf);
-        const float bx = off + eye_w - ts.x - margin * 2.f;
-        const float by = margin;
-        dl->AddRectFilled({bx - 4.f, by - 2.f}, {bx + ts.x + 4.f, by + lh + 2.f},
-                          bg_col, 3.f);
-        dl->AddText({bx, by}, col, buf);
-    }
-
-    if (font_mono_) ImGui::PopFont();
-    ImGui::End();
-}
