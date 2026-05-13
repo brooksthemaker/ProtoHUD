@@ -1690,6 +1690,70 @@ static std::vector<MenuItem> build_menu(
 
     cameras_menu.push_back(submenu("Vision Assist", std::move(vision_menu)));
 
+    // ── LoRa menu ─────────────────────────────────────────────────────────────
+
+    // Node lookup: one leaf per possible node slot (1–8); hidden when no data.
+    // Selecting pushes an App toast with live telemetry at that moment.
+    std::vector<MenuItem> lora_nodes_menu;
+    for (int n = 1; n <= 8; ++n) {
+        char lbl[16]; snprintf(lbl, sizeof(lbl), "Node %d", n);
+        lora_nodes_menu.push_back({
+            .label      = lbl,
+            .type       = MenuItemType::LEAF,
+            .action     = [n, state_ptr, push_notif]{
+                if (!state_ptr) return;
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                for (const auto& nd : state_ptr->lora_nodes) {
+                    if (nd.local_id != static_cast<uint8_t>(n)) continue;
+                    char body[128];
+                    char since[32] = "never";
+                    if (nd.last_seen) {
+                        int secs = static_cast<int>(time(nullptr) - nd.last_seen);
+                        if (secs < 60)       snprintf(since, sizeof(since), "%ds ago", secs);
+                        else if (secs < 3600) snprintf(since, sizeof(since), "%dm ago", secs/60);
+                        else                  snprintf(since, sizeof(since), "%dh ago", secs/3600);
+                    }
+                    snprintf(body, sizeof(body),
+                             "%.0fm  %.0f\xC2\xB0  RSSI %d dBm  SNR %d  %s",
+                             static_cast<double>(nd.distance_m),
+                             static_cast<double>(nd.heading_deg),
+                             static_cast<int>(nd.rssi),
+                             static_cast<int>(nd.snr),
+                             since);
+                    std::string title = nd.name.empty()
+                                        ? std::string("Node ") + std::to_string(n)
+                                        : nd.name;
+                    push_notif(NotifType::LoRa, std::move(title), body, 6.f);
+                    return;
+                }
+                // Node slot known to menu but not yet seen
+                push_notif(NotifType::App, std::string("Node ") + std::to_string(n),
+                           "No data received yet", 4.f);
+            },
+            .visible_fn = [n, state_ptr]{
+                if (!state_ptr) return false;
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                for (const auto& nd : state_ptr->lora_nodes)
+                    if (nd.local_id == static_cast<uint8_t>(n)) return true;
+                return false;
+            },
+        });
+    }
+
+    std::vector<MenuItem> lora_menu = {
+        leaf("Clear Messages",      [state_ptr]{
+            if (!state_ptr) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->lora_messages.clear();
+        }),
+        leaf("Clear Notifications", [state_ptr]{
+            if (!state_ptr) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->notifs.dismiss_all();
+        }),
+        submenu("Lookup Node",      std::move(lora_nodes_menu)),
+    };
+
     // ── System / dev menu ─────────────────────────────────────────────────────
 
     // Helper: push a notification to the live queue (thread-safe).
@@ -1786,6 +1850,7 @@ static std::vector<MenuItem> build_menu(
         submenu("Prototracer",      std::move(prototracer_menu)),
         submenu("Settings",         std::move(settings_menu)),
         submenu("Timers and Alarm", std::move(timers_alarm_menu)),
+        submenu("LoRa",             std::move(lora_menu)),
         submenu("System",           std::move(system_menu)),
         leaf("Request Status",      [teensy]{ teensy->request_status(); }),
         leaf("Close Program",       [&state]{ state.quit = true; }),
