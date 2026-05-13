@@ -91,6 +91,9 @@ FetchContent_MakeAvailable(nanovg)
 add_library(nanovg STATIC "${_nanovg_src}/src/nanovg.c")
 target_include_directories(nanovg PUBLIC "${_nanovg_src}/src" ${GLES_INCLUDE_DIRS})
 target_compile_definitions(nanovg PUBLIC NANOVG_GLES2)
+# nanovg.c embeds stb_image.h with STB_IMAGE_IMPLEMENTATION; STB_IMAGE_STATIC
+# makes those symbols file-local so they don't collide with splash.cpp's copy.
+target_compile_definitions(nanovg PRIVATE STB_IMAGE_STATIC)
 target_link_libraries(nanovg PUBLIC ${GLES_LIBRARIES})
 
 FetchContent_Declare(imgui
