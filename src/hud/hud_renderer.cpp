@@ -314,6 +314,18 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     glStencilMask(0xFF);
 }
 
+void HudRenderer::draw_toasts(NotificationQueue& live_q, int w, int h) {
+    if (!nvg_) return;
+    const float fw = static_cast<float>(w);
+    const float fh = static_cast<float>(h);
+    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    toast_renderer_.draw(nvg_, live_q, fw, fh, frame_dt_, nvg_font_ui_, nvg_font_mono_);
+    nvgEndFrame(nvg_);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glStencilMask(0xFF);
+}
+
 void HudRenderer::draw_fps_overlay(const AppState& snap, int w, int h, bool active) {
     if (!active || fps_shown_in_hud_ || !nvg_) return;
     const float fw = static_cast<float>(w);
