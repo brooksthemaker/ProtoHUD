@@ -77,20 +77,19 @@ pkg_check_modules(ALSA REQUIRED alsa)
 include(FetchContent)
 
 # ── NanoVG (vector graphics renderer for the HUD layer) ──────────────────────
-# nanovg has no CMakeLists.txt — use Populate (not MakeAvailable) so that
-# nanovg_SOURCE_DIR is guaranteed to be set before the add_library call.
+# nanovg has no CMakeLists.txt. Pin SOURCE_DIR explicitly so the path used in
+# add_library is always correct regardless of FetchContent variable scope.
+set(_nanovg_src "${CMAKE_BINARY_DIR}/_deps/nanovg-src")
 FetchContent_Declare(nanovg
     GIT_REPOSITORY https://github.com/memononen/nanovg.git
     GIT_TAG        master
     GIT_SHALLOW    TRUE
+    SOURCE_DIR     "${_nanovg_src}"
 )
-FetchContent_GetProperties(nanovg)
-if(NOT nanovg_POPULATED)
-    FetchContent_Populate(nanovg)
-endif()
+FetchContent_MakeAvailable(nanovg)
 
-add_library(nanovg STATIC ${nanovg_SOURCE_DIR}/src/nanovg.c)
-target_include_directories(nanovg PUBLIC ${nanovg_SOURCE_DIR}/src ${GLES_INCLUDE_DIRS})
+add_library(nanovg STATIC "${_nanovg_src}/src/nanovg.c")
+target_include_directories(nanovg PUBLIC "${_nanovg_src}/src" ${GLES_INCLUDE_DIRS})
 target_link_libraries(nanovg PUBLIC ${GLES_LIBRARIES})
 
 FetchContent_Declare(imgui
