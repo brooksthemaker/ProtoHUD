@@ -76,6 +76,18 @@ pkg_check_modules(ALSA REQUIRED alsa)
 # Fetched once by CMake; cached in build/_deps after first configure.
 include(FetchContent)
 
+# ── NanoVG (vector graphics renderer for the HUD layer) ──────────────────────
+FetchContent_Declare(nanovg
+    GIT_REPOSITORY https://github.com/memononen/nanovg.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(nanovg)
+
+add_library(nanovg STATIC ${nanovg_SOURCE_DIR}/src/nanovg.c)
+target_include_directories(nanovg PUBLIC ${nanovg_SOURCE_DIR}/src ${GLES_INCLUDE_DIRS})
+target_link_libraries(nanovg PUBLIC ${GLES_LIBRARIES})
+
 FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
     GIT_TAG        v1.91.0
@@ -151,6 +163,8 @@ set(SOURCES
     src/net/bt_monitor.cpp
     src/crash_reporter.cpp
     src/splash.cpp
+    src/nanovg_gl_impl.cpp
+    src/hud/toast_renderer.cpp
 )
 
 add_executable(protohud ${SOURCES})
@@ -160,6 +174,7 @@ target_include_directories(protohud PRIVATE
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
     ${stb_SOURCE_DIR}
+    ${nanovg_SOURCE_DIR}/src
     ${VITURE_INCLUDE}
     ${OpenCV_INCLUDE_DIRS}
     ${LIBCAMERA_INCLUDE_DIRS}
@@ -172,6 +187,7 @@ target_include_directories(protohud PRIVATE
 
 target_link_libraries(protohud PRIVATE
     imgui
+    nanovg
     glasses
     ${OpenCV_LIBS}
     ${LIBCAMERA_LIBRARIES}

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <ctime>
 #include <string>
 
 static bool s_menu_glow = true;
@@ -255,6 +256,10 @@ void MenuSystem::select() {
             }
         }
         break;
+
+    case MenuItemType::NOTIF_LOG:
+        if (item.notif_log.queue) item.notif_log.queue->dismiss_all();
+        break;
     }
 }
 
@@ -345,6 +350,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         if (sel.type == MenuItemType::SLIDER)       extra = 30.f;
         if (sel.type == MenuItemType::FACE_PICKER)  extra = 90.f;
         if (sel.type == MenuItemType::COLOR_PICKER) extra = 96.f;
+        if (sel.type == MenuItemType::NOTIF_LOG)    extra = 200.f;
     }
 
     const float total_h = pad_y * 2.f
@@ -456,6 +462,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             if (item.type == MenuItemType::SLIDER)       row_h = item_h + 25.f;
             if (item.type == MenuItemType::FACE_PICKER)  row_h = item_h + 85.f;
             if (item.type == MenuItemType::COLOR_PICKER) row_h = item_h + 95.f;
+            if (item.type == MenuItemType::NOTIF_LOG)    row_h = item_h + 195.f;
         }
 
         char id[32]; snprintf(id, sizeof(id), "##item%d", i);
@@ -671,6 +678,63 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                                            static_cast<uint8_t>(edit_b_), 255), 3.f);
                 dl->AddRect({bx, sw_y}, {bx + 52.f, sw_y + 16.f},
                             menu_with_alpha(accent_color_, 150), 3.f);
+            }
+
+        // ── NOTIF_LOG ─────────────────────────────────────────────────────────
+        } else if (item.type == MenuItemType::NOTIF_LOG) {
+            // Label row (unread badge)
+            NotificationQueue* q = item.notif_log.queue;
+            int unread = q ? q->unread_count() : 0;
+            std::string lbl = to_upper(item.label);
+            if (unread > 0) { char badge[16]; snprintf(badge, sizeof(badge), " (%d)", unread); lbl += badge; }
+            draw_item_text({rmin.x + 4.f, ty}, lbl.c_str(), selected);
+
+            if (selected && q) {
+                // Scrollable notification list below the label row
+                float ly = rmin.y + item_h + 4.f;
+                const float list_h = 190.f;
+                const float lh_row = 36.f;
+                constexpr int kMaxShow = 5;
+                int shown = 0;
+                for (auto& n : q->items) {
+                    if (n.dismissed) continue;
+                    if (shown >= kMaxShow) break;
+                    if (ly + lh_row > rmin.y + item_h + list_h) break;
+
+                    // Type badge color
+                    ImU32 tc;
+                    switch (n.type) {
+                        case NotifType::Alarm: tc = IM_COL32(255, 60, 60, 255); break;
+                        case NotifType::Timer: tc = IM_COL32(255,160, 32, 255); break;
+                        case NotifType::LoRa:  tc = IM_COL32(  0,180,255, 255); break;
+                        default:               tc = IM_COL32( 80,140,255, 255); break;
+                    }
+                    // Row bg
+                    dl->AddRectFilled({rmin.x + 2.f, ly}, {rmax.x - 2.f, ly + lh_row - 2.f},
+                                      IM_COL32(15, 20, 25, 200), 3.f);
+                    dl->AddRectFilled({rmin.x + 2.f, ly}, {rmin.x + 4.f, ly + lh_row - 2.f}, tc, 0.f);
+                    // Title + time
+                    char ts[8]; time_t t = (time_t)n.timestamp;
+                    struct tm* tm = localtime(&t);
+                    strftime(ts, sizeof(ts), "%H:%M", tm);
+                    dl->AddText({rmin.x + 8.f, ly + 3.f}, IM_COL32(255,255,255,220), n.title.c_str());
+                    ImVec2 tsz = ImGui::CalcTextSize(ts);
+                    dl->AddText({rmax.x - tsz.x - 4.f, ly + 3.f}, IM_COL32(160,160,160,180), ts);
+                    // Body
+                    if (!n.body.empty())
+                        dl->AddText({rmin.x + 8.f, ly + 18.f}, IM_COL32(180,180,180,180), n.body.substr(0,40).c_str());
+                    ly += lh_row;
+                    ++shown;
+                    n.read = true;
+                }
+                if (shown == 0) {
+                    dl->AddText({rmin.x + 8.f, rmin.y + item_h + 10.f},
+                                menu_with_alpha(accent_color_, 120), "No notifications");
+                }
+                // "Clear All" hint
+                dl->AddText({rmin.x + 4.f, rmin.y + item_h + list_h + 2.f},
+                            menu_with_alpha(accent_color_, 120),
+                            "select = clear all");
             }
 
         // ── LEAF / SUBMENU ────────────────────────────────────────────────────

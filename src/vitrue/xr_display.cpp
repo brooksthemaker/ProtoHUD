@@ -95,6 +95,7 @@ bool XRDisplay::init() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
     glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
     glfwWindowHint(GLFW_DOUBLEBUFFER,          GLFW_TRUE);
+    glfwWindowHint(GLFW_STENCIL_BITS,          8);  // required for NanoVG stencil fills
     glfwWindowHint(GLFW_RESIZABLE,  GLFW_FALSE);
     glfwWindowHint(GLFW_DECORATED,  cfg_.frameless ? GLFW_FALSE : GLFW_TRUE);
 
