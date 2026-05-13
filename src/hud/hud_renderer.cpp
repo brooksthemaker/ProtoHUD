@@ -688,9 +688,7 @@ void HudRenderer::draw_health_side(NVGcontext* vg, const SystemHealth& h,
     const float tape_w   = fw / 3.f;
     const float tape_x   = fw / 2.f - tape_w / 2.f;
     const float fade_w   = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
-    const bool  flip     = cfg_.hud_flip_vertical;
-    const float anchor_y = flip ? c_margin : fh - c_margin;
+    const float anchor_y = static_cast<float>(cfg_.top_bar_height) + 4.f;
     const float anchor_x = right_side ? tape_x + tape_w + fade_w : tape_x - fade_w;
 
     auto focus_suffix = [](const CameraFocusState& f) -> const char* {
@@ -724,7 +722,7 @@ void HudRenderer::draw_health_side(NVGcontext* vg, const SystemHealth& h,
     constexpr float BG_FULL = 440.f;
 
     const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
-    const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
+    const float dir_y    = std::sin(ANGLE);  // arms hang downward from top bar
     const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
 
     // Parallelogram bg via linear gradient (replaces 16 strip loop)
@@ -832,13 +830,11 @@ void HudRenderer::draw_face_indicator(NVGcontext* vg, const FaceState& f,
     const float tape_w         = fw / 3.f;
     const float tape_x         = fw / 2.f - tape_w / 2.f;
     const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float c_margin       = static_cast<float>(cfg_.compass_bottom_margin);
-    const bool  flip           = cfg_.hud_flip_vertical;
-    const float anchor_y       = flip ? c_margin : fh - c_margin;
+    const float anchor_y       = static_cast<float>(cfg_.top_bar_height) + 4.f;
     const float proto_anchor_x = tape_x - fade_w - SEG_W * 2.f;
 
     const float dir_x    = std::cos(ANGLE) * -1.f;
-    const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
+    const float dir_y    = std::sin(ANGLE);
     const float diag_len = static_cast<float>(N_ITEMS + 1) * ROW_H;
 
     NVGcolor cm = nvg_col(col_.glow_base);
@@ -900,13 +896,11 @@ void HudRenderer::draw_lora_indicator(NVGcontext* vg, const AppState& s,
     const float tape_w        = fw / 3.f;
     const float tape_x        = fw / 2.f - tape_w / 2.f;
     const float fade_w        = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float c_margin      = static_cast<float>(cfg_.compass_bottom_margin);
-    const bool  flip          = cfg_.hud_flip_vertical;
-    const float anchor_y      = flip ? c_margin : fh - c_margin;
+    const float anchor_y      = static_cast<float>(cfg_.top_bar_height) + 4.f;
     const float lora_anchor_x = tape_x + tape_w + fade_w + SEG_W * 2.f;
 
     const float dir_x    = std::cos(ANGLE);
-    const float dir_y    = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
+    const float dir_y    = std::sin(ANGLE);
     const float diag_len = static_cast<float>(MAX_ROWS + 1) * ROW_H;
 
     NVGcolor cm = nvg_col(col_.glow_base);
@@ -967,13 +961,11 @@ void HudRenderer::draw_clock_indicator(NVGcontext* vg, const AppState& s,
     const float tape_w         = fw / 3.f;
     const float tape_x         = fw / 2.f - tape_w / 2.f;
     const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float c_margin       = static_cast<float>(cfg_.compass_bottom_margin);
-    const bool  flip           = cfg_.hud_flip_vertical;
-    const float anchor_y       = flip ? c_margin : fh - c_margin;
+    const float anchor_y       = static_cast<float>(cfg_.top_bar_height) + 4.f;
     const float clock_anchor_x = tape_x + tape_w + fade_w + SEG_W * 2.f;
 
     const float dir_x     = std::cos(ANGLE);
-    const float dir_y     = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
+    const float dir_y     = std::sin(ANGLE);
     const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
     const float eff_row_h = ROW_H * scale;
     const int   n_rows    = s.clock_cfg.show_date ? 2 : 1;
@@ -1037,13 +1029,11 @@ void HudRenderer::draw_timer_alarm_indicator(NVGcontext* vg, const AppState& s,
     const float tape_w      = fw / 3.f;
     const float tape_x      = fw / 2.f - tape_w / 2.f;
     const float fade_w      = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float c_margin    = static_cast<float>(cfg_.compass_bottom_margin);
-    const bool  flip        = cfg_.hud_flip_vertical;
-    const float anchor_y    = flip ? c_margin : fh - c_margin;
+    const float anchor_y    = static_cast<float>(cfg_.top_bar_height) + 4.f;
     const float ta_anchor_x = tape_x + tape_w + fade_w + SEG_W * 4.f;
 
     const float dir_x = std::cos(ANGLE);
-    const float dir_y = flip ? std::sin(ANGLE) : -std::sin(ANGLE);
+    const float dir_y = std::sin(ANGLE);
 
     struct Row { char text[24]; ImU32 accent; };
     Row rows[2]; int n_rows = 0;
