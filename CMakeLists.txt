@@ -90,6 +90,7 @@ FetchContent_MakeAvailable(nanovg)
 
 add_library(nanovg STATIC "${_nanovg_src}/src/nanovg.c")
 target_include_directories(nanovg PUBLIC "${_nanovg_src}/src" ${GLES_INCLUDE_DIRS})
+target_compile_definitions(nanovg PUBLIC NANOVG_GLES2)
 target_link_libraries(nanovg PUBLIC ${GLES_LIBRARIES})
 
 FetchContent_Declare(imgui
