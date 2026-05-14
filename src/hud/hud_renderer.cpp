@@ -1629,6 +1629,10 @@ void HudRenderer::fx_draw_lines(NVGcontext* vg) const {
 
 // Layered dark-blue/violet gradient vignette along all four edges to evoke a nebula cloud.
 void HudRenderer::fx_draw_nebula_cloud(NVGcontext* vg, float fw, float fh) const {
+    // Each layer uses nvgBoxGradient over a fullscreen rect: one draw call covers
+    // all four edges and corners simultaneously instead of four separate strips.
+    // The inner box sits `depth` pixels from each screen edge; the feather of
+    // `depth` pixels then carries the gradient outward to the screen boundary.
     struct CloudLayer { float depth; uint8_t r, g, b, a; };
     static const CloudLayer layers[] = {
         {  80.f,  3,  2, 18, 215 },
@@ -1636,26 +1640,38 @@ void HudRenderer::fx_draw_nebula_cloud(NVGcontext* vg, float fw, float fh) const
         { 195.f, 20,  8, 65,  55 },
     };
     for (const auto& l : layers) {
-        const float d = l.depth;
+        const float d    = l.depth;
+        const NVGcolor clear = nvgRGBA(l.r, l.g, l.b,    0);
         const NVGcolor edge  = nvgRGBA(l.r, l.g, l.b, l.a);
-        const NVGcolor clear = nvgRGBA(l.r, l.g, l.b, 0);
-        NVGpaint p;
-        // Top
-        p = nvgLinearGradient(vg, 0, 0, 0, d, edge, clear);
-        nvgBeginPath(vg); nvgRect(vg, 0, 0, fw, d);
-        nvgFillPaint(vg, p); nvgFill(vg);
-        // Bottom
-        p = nvgLinearGradient(vg, 0, fh - d, 0, fh, clear, edge);
-        nvgBeginPath(vg); nvgRect(vg, 0, fh - d, fw, d);
-        nvgFillPaint(vg, p); nvgFill(vg);
-        // Left
-        p = nvgLinearGradient(vg, 0, 0, d, 0, edge, clear);
-        nvgBeginPath(vg); nvgRect(vg, 0, 0, d, fh);
-        nvgFillPaint(vg, p); nvgFill(vg);
-        // Right
-        p = nvgLinearGradient(vg, fw - d, 0, fw, 0, clear, edge);
-        nvgBeginPath(vg); nvgRect(vg, fw - d, 0, d, fh);
-        nvgFillPaint(vg, p); nvgFill(vg);
+        NVGpaint p = nvgBoxGradient(vg, d, d, fw - 2.f*d, fh - 2.f*d,
+                                    0.f, d, clear, edge);
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, fw, fh);
+        nvgFillPaint(vg, p);
+        nvgFill(vg);
+    }
+}
+
+void HudRenderer::fx_draw_vignette(NVGcontext* vg, float fw, float fh) const {
+    // Soft outer band: wide, gentle dark falloff from edges
+    {
+        constexpr float d = 200.f;
+        NVGpaint p = nvgBoxGradient(vg, d, d, fw - 2.f*d, fh - 2.f*d,
+                                    0.f, d, nvgRGBA(0,0,0,0), nvgRGBA(0,0,0,160));
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, fw, fh);
+        nvgFillPaint(vg, p);
+        nvgFill(vg);
+    }
+    // Hard inner ring: thin strip at the very edge for a clean border line
+    {
+        constexpr float d = 55.f;
+        NVGpaint p = nvgBoxGradient(vg, d, d, fw - 2.f*d, fh - 2.f*d,
+                                    0.f, d, nvgRGBA(0,0,0,0), nvgRGBA(0,0,0,220));
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, fw, fh);
+        nvgFillPaint(vg, p);
+        nvgFill(vg);
     }
 }
 
@@ -1939,6 +1955,9 @@ void HudRenderer::fx_update(NVGcontext* vg, const AppState& s,
         fx_draw_nebula_cloud(vg, fw, fh);
         fx_emit_nebula_edge(fw, fh, dt);
     }
+
+    if (effect == EffectType::DarkVignette)
+        fx_draw_vignette(vg, fw, fh);
 
     fx_draw(vg);
     fx_draw_lines(vg);

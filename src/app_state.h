@@ -181,7 +181,7 @@ struct ImuPose {
 // ── Particle effects ──────────────────────────────────────────────────────────
 
 enum class EffectType : uint8_t {
-    None = 0, ArmGlints, CornerDrift, PopupBurst, CompassTurbulence, NebulaEdge
+    None = 0, ArmGlints, CornerDrift, PopupBurst, CompassTurbulence, NebulaEdge, DarkVignette
 };
 enum class EffectPalette : uint8_t {
     Theme = 0, Halo, Solar, Fallout, Space

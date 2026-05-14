@@ -200,6 +200,7 @@ private:
     void  fx_draw      (NVGcontext* vg) const;
     void  fx_draw_lines(NVGcontext* vg) const;
     void  fx_draw_nebula_cloud(NVGcontext* vg, float fw, float fh) const;
+    void  fx_draw_vignette    (NVGcontext* vg, float fw, float fh) const;
     void  fx_draw_alarm_pulse (NVGcontext* vg, const AppState& s, float fw, float fh);
 
     void  fx_emit_arm_glint    (float ax, float ay, float dx, float dy,
