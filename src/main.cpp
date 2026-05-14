@@ -2229,8 +2229,18 @@ int main(int argc, char* argv[]) {
 
         std::lock_guard<std::mutex> lk(state.mtx);
         state.health.mpu9250_ok = true;
-        if (!xr_fresh)
-            state.compass_heading = heading;
+        if (!xr_fresh) {
+            // Circular low-pass filter — operate on sin/cos to handle 0/360 wrap.
+            // alpha=0.1 at 50 Hz → ~0.19 s time constant; raise to smooth more.
+            constexpr float kAlpha = 0.1f;
+            constexpr float kDeg2Rad = 3.14159265f / 180.f;
+            float prev = state.compass_heading;
+            float fs = std::sinf(prev * kDeg2Rad) + kAlpha * (std::sinf(heading * kDeg2Rad) - std::sinf(prev * kDeg2Rad));
+            float fc = std::cosf(prev * kDeg2Rad) + kAlpha * (std::cosf(heading * kDeg2Rad) - std::cosf(prev * kDeg2Rad));
+            float filtered = std::atan2f(fs, fc) / kDeg2Rad;
+            if (filtered < 0.f) filtered += 360.f;
+            state.compass_heading = filtered;
+        }
     });
 
     if (!mpu9250.start() && mpu_cfg.enabled)
