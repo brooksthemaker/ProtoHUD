@@ -497,8 +497,65 @@ static std::vector<MenuItem> build_menu(
         submenu("Colour Temp", std::move(wb_temp_menu)),
     };
 
+    // ── Digital zoom presets (both eyes together) ─────────────────────────────
+    struct ZoomPreset { const char* label; float zoom; };
+    static const ZoomPreset ZOOM_PRESETS[] = {
+        { "1.0× (Full)", 1.00f },
+        { "1.25×",       1.25f },
+        { "1.5×",        1.50f },
+        { "2.0×",        2.00f },
+        { "3.0×",        3.00f },
+    };
+
+    std::vector<MenuItem> zoom_level_menu;
+    for (const auto& z : ZOOM_PRESETS) {
+        zoom_level_menu.push_back(leaf_sel(
+            z.label,
+            [&state, zoom = z.zoom]{
+                state.zoom_left.zoom  = zoom;
+                state.zoom_right.zoom = zoom;
+            },
+            [&state, zoom = z.zoom]{ return state.zoom_left.zoom == zoom; }
+        ));
+    }
+
+    struct CropPreset { const char* label; float cx, cy; };
+    static const CropPreset CROP_PRESETS[] = {
+        { "Center",       0.5f, 0.5f },
+        { "Top",          0.5f, 0.25f },
+        { "Bottom",       0.5f, 0.75f },
+        { "Left",         0.25f, 0.5f },
+        { "Right",        0.75f, 0.5f },
+    };
+
+    std::vector<MenuItem> crop_center_menu;
+    for (const auto& c : CROP_PRESETS) {
+        crop_center_menu.push_back(leaf_sel(
+            c.label,
+            [&state, cx = c.cx, cy = c.cy]{
+                state.zoom_left.center_x  = cx;
+                state.zoom_left.center_y  = cy;
+                state.zoom_right.center_x = cx;
+                state.zoom_right.center_y = cy;
+            },
+            [&state, cx = c.cx, cy = c.cy]{
+                return state.zoom_left.center_x == cx && state.zoom_left.center_y == cy;
+            }
+        ));
+    }
+
+    std::vector<MenuItem> zoom_menu = {
+        submenu("Zoom Level",  std::move(zoom_level_menu)),
+        submenu("Crop Center", std::move(crop_center_menu)),
+        leaf("Reset Zoom", [&state]{
+            state.zoom_left  = ZoomCropState{};
+            state.zoom_right = ZoomCropState{};
+        }),
+    };
+
     std::vector<MenuItem> main_cameras_menu = {
         submenu("Resolution",  std::move(resolution_presets)),
+        submenu("Digital Zoom", std::move(zoom_menu)),
         submenu("Focus Mode",  std::move(focus_modes)),
         slider("Focus Position", 0.f, 1000.f, 50.f, "",
             [&state]{ return static_cast<float>(state.focus_left.focus_position); },
@@ -2791,6 +2848,8 @@ int main(int argc, char* argv[]) {
             snap.bt_devices         = state.bt_devices;
             snap.serial_metrics     = state.serial_metrics;
             snap.camera_resolution  = state.camera_resolution;
+            snap.zoom_left          = state.zoom_left;
+            snap.zoom_right         = state.zoom_right;
             snap.notifs             = state.notifs;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
@@ -2869,7 +2928,8 @@ int main(int argc, char* argv[]) {
                 // For now: TODO: render tex_beast as fullscreen quad
                 drew = false;  // fallback to OWLsight below
             }
-            if (!drew) drew = cameras.draw_owl_left();
+            if (!drew) drew = cameras.draw_owl_left(
+                snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
 
             xr.eye_left().unbind();
         }
@@ -2884,7 +2944,8 @@ int main(int argc, char* argv[]) {
             if (use_beast_cam && tex_beast != 0) {
                 drew = false;  // fallback to OWLsight below
             }
-            if (!drew) drew = cameras.draw_owl_right();
+            if (!drew) drew = cameras.draw_owl_right(
+                snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
 
             xr.eye_right().unbind();
         }

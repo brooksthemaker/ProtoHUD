@@ -276,11 +276,15 @@ bool DmaCamera::create_gl_resources(const char* vs_path, const char* fs_path) {
         return false;
     }
 
-    // Cache the sampler uniform location (uniform name "tex" in nv12.fs)
-    loc_tex_y_ = glGetUniformLocation(nv12_prog_, "tex");
+    // Cache uniform locations
+    loc_tex_y_  = glGetUniformLocation(nv12_prog_, "tex");
+    loc_zoom_   = glGetUniformLocation(nv12_prog_, "u_zoom");
+    loc_center_ = glGetUniformLocation(nv12_prog_, "u_center");
 
     glUseProgram(nv12_prog_);
     if (loc_tex_y_ >= 0) glUniform1i(loc_tex_y_, 0);   // GL_TEXTURE0
+    if (loc_zoom_   >= 0) glUniform1f(loc_zoom_,  1.0f);
+    if (loc_center_ >= 0) glUniform2f(loc_center_, 0.5f, 0.5f);
     glUseProgram(0);
 
     // Fullscreen quad VBO (NDC, shared across draws)
@@ -376,7 +380,7 @@ void DmaCamera::on_request_complete(Request* req) {
 // Draws the latest frame filling the current GL viewport.
 // Returns false if no frame has ever arrived.
 
-bool DmaCamera::draw() {
+bool DmaCamera::draw(float zoom, float cx, float cy) {
     int slot = -1;
 
     {
@@ -411,6 +415,11 @@ bool DmaCamera::draw() {
     // ── Draw fullscreen NV12 → RGB quad ──────────────────────────────────────
 
     glUseProgram(nv12_prog_);
+
+    // Apply digital zoom; clamp zoom to [1.0, 8.0] to avoid degenerate UVs.
+    float safe_zoom = (zoom < 1.0f) ? 1.0f : (zoom > 8.0f ? 8.0f : zoom);
+    if (loc_zoom_   >= 0) glUniform1f(loc_zoom_,  safe_zoom);
+    if (loc_center_ >= 0) glUniform2f(loc_center_, cx, cy);
 
     gl::bind_quad(quad_vbo_);
     gl::draw_quad();

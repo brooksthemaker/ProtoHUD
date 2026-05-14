@@ -221,8 +221,8 @@ void CameraManager::shutdown() {
 
 // ── OWLsight draw (zero-copy, render thread) ──────────────────────────────────
 
-bool CameraManager::draw_owl_left()  { return owl_left_  && owl_left_->draw();  }
-bool CameraManager::draw_owl_right() { return owl_right_ && owl_right_->draw(); }
+bool CameraManager::draw_owl_left( float zoom, float cx, float cy) { return owl_left_  && owl_left_->draw(zoom, cx, cy);  }
+bool CameraManager::draw_owl_right(float zoom, float cx, float cy) { return owl_right_ && owl_right_->draw(zoom, cx, cy); }
 
 // ── Resolution hot-swap ────────────────────────────────────────────────────────
 

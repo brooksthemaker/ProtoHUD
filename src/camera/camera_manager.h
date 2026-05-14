@@ -64,9 +64,10 @@ public:
 
     // ── OWLsight (zero-copy DMA) ──────────────────────────────────────────────
     // Draw directly into the current render target (fills viewport).
+    // zoom=1.0 → full frame; zoom>1.0 → digital crop around (cx,cy).
     // Returns false if no frame is ready yet.
-    bool draw_owl_left();
-    bool draw_owl_right();
+    bool draw_owl_left( float zoom = 1.0f, float cx = 0.5f, float cy = 0.5f);
+    bool draw_owl_right(float zoom = 1.0f, float cx = 0.5f, float cy = 0.5f);
 
     // ── USB cameras (CPU→GPU upload) ──────────────────────────────────────────
     // Upload latest frame; out receives the GL texture id (0 if unavailable).

@@ -61,8 +61,9 @@ public:
     void shutdown();
 
     // Draw the latest frame filling the current GL viewport.
+    // zoom=1.0 → full frame; zoom>1.0 → digital crop around (cx,cy).
     // Returns false if no frame is available yet.
-    bool draw();
+    bool draw(float zoom = 1.0f, float cx = 0.5f, float cy = 0.5f);
 
     // Hot-swap the capture resolution / frame-rate without destroying GL resources.
     // Stops capture, reconfigures libcamera, reallocates DMA buffers, restarts.
@@ -149,6 +150,8 @@ private:
     GLuint nv12_prog_  = 0;
     GLuint quad_vbo_   = 0;
     GLint  loc_tex_y_  = -1;   // uniform location of "tex" (samplerExternalOES)
+    GLint  loc_zoom_   = -1;   // uniform location of "u_zoom"
+    GLint  loc_center_ = -1;   // uniform location of "u_center"
 
     // Capture thread
     std::atomic<bool> running_ { false };
