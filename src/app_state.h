@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <ctime>
 #include <imgui.h>
+#include "capture.h"
 
 // ── Post-processing config ────────────────────────────────────────────────────
 // Modified from menu (any thread); read by the render thread via snap.
@@ -160,6 +161,17 @@ struct CameraResolutionState {
     int fps    = 60;
 };
 
+// Digital zoom / crop for OWLsight cameras.
+// zoom=1.0 → full frame (identity). zoom>1.0 → crops to 1/zoom of the frame.
+// center_x / center_y are normalized (0.0–1.0) screen-space coordinates.
+// Option B hook: the same values are forwarded to libcamera ScalerCrop when
+// apply_pending_controls() implements it.
+struct ZoomCropState {
+    float zoom     = 1.0f;
+    float center_x = 0.5f;
+    float center_y = 0.5f;
+};
+
 struct ImuPose {
     float roll  = 0.0f;
     float pitch = 0.0f;
@@ -169,7 +181,7 @@ struct ImuPose {
 // ── Particle effects ──────────────────────────────────────────────────────────
 
 enum class EffectType : uint8_t {
-    None = 0, ArmGlints, CornerDrift, PopupBurst, CompassTurbulence, NebulaEdge
+    None = 0, ArmGlints, CornerDrift, PopupBurst, CompassTurbulence, NebulaEdge, DarkVignette
 };
 enum class EffectPalette : uint8_t {
     Theme = 0, Halo, Solar, Fallout, Space
@@ -316,14 +328,29 @@ struct AppState {
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
 
+    // Theater mode: render OWLsight cameras at their native aspect ratio with
+    // black bars filling the remaining FBO area. Letterbox or pillarbox depending
+    // on camera AR vs. display AR. Future: USB cameras fill the black bar regions.
+    bool  theater_mode = false;
+
+    // Photo capture: set by menu or GPIO long-press; consumed by the render thread.
+    CaptureRequest capture_request = CaptureRequest::None;
+
+    // QR / barcode scanning (requires libzbar-dev).
+    // qr_scan_main: periodic glReadPixels from OWLsight FBO → ZBar.
+    // qr_scan_usb:  scanned in the USB capture thread from the raw BGR frame.
+    bool qr_scan_main = false;
+    bool qr_scan_usb  = false;
+
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;
 
-    // Camera focus, night vision, and resolution control
+    // Camera focus, night vision, resolution, and digital zoom
     CameraFocusState     focus_left, focus_right;
     NightVisionState     night_vision;
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;
+    ZoomCropState        zoom_left, zoom_right;
 
     // Post-processing (edge highlight + background desaturation)
     PostProcessConfig    pp_cfg;

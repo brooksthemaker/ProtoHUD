@@ -1,4 +1,5 @@
 #include "camera_manager.h"
+#include "qr_scanner.h"
 
 #include <libcamera/libcamera.h>
 #include <opencv2/imgproc.hpp>
@@ -221,8 +222,8 @@ void CameraManager::shutdown() {
 
 // ── OWLsight draw (zero-copy, render thread) ──────────────────────────────────
 
-bool CameraManager::draw_owl_left()  { return owl_left_  && owl_left_->draw();  }
-bool CameraManager::draw_owl_right() { return owl_right_ && owl_right_->draw(); }
+bool CameraManager::draw_owl_left( float zoom, float cx, float cy) { return owl_left_  && owl_left_->draw(zoom, cx, cy);  }
+bool CameraManager::draw_owl_right(float zoom, float cx, float cy) { return owl_right_ && owl_right_->draw(zoom, cx, cy); }
 
 // ── Resolution hot-swap ────────────────────────────────────────────────────────
 
@@ -288,6 +289,16 @@ void CameraManager::usb_capture_thread() {
                 if (flip_ref.load())
                     cv::flip(frame, frame, -1);  // -1 = 180° rotation (both axes)
                 cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
+                // QR scan: convert BGR frame to grayscale and submit to scanner.
+                // submit_gray() is rate-limited internally; safe to call every frame.
+                if (qr_scanner_ && qr_scan_usb_.load()) {
+                    cv::Mat gray;
+                    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+                    qr_scanner_->submit_gray(
+                        std::vector<uint8_t>(gray.data,
+                                             gray.data + gray.total()),
+                        gray.cols, gray.rows);
+                }
                 got_frame = true;
                 consec = 0;
                 ++good;

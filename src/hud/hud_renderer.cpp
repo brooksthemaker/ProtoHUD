@@ -453,10 +453,26 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
     // 1. Background fill
     dl->AddConvexPolyFilled(pts, n_pts, col_.background);
 
-    // 2. Camera image or "No Signal" placeholder
+    // 2. Camera image or "No Signal" placeholder — rounded corners match chamfer shape
     if (tex) {
-        dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-                     {x, y}, {x + bw, y + bh});
+        ImDrawFlags corner_flags;
+        switch (cfg.anchor) {
+            case A::TOP_LEFT:
+            case A::BOTTOM_RIGHT:
+                corner_flags = ImDrawFlags_RoundCornersTopLeft | ImDrawFlags_RoundCornersBottomRight;
+                break;
+            case A::TOP_RIGHT:
+            case A::BOTTOM_LEFT:
+                corner_flags = ImDrawFlags_RoundCornersTopRight | ImDrawFlags_RoundCornersBottomLeft;
+                break;
+            default:
+                corner_flags = ImDrawFlags_RoundCornersAll;
+                break;
+        }
+        dl->AddImageRounded(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
+                            {x, y}, {x + bw, y + bh},
+                            {0.f, 0.f}, {1.f, 1.f},
+                            IM_COL32_WHITE, C, corner_flags);
     } else {
         if (font_mono_) ImGui::PushFont(font_mono_);
         dl->AddText({x + bw * 0.5f - 36.f, y + bh * 0.5f - 7.f},
@@ -464,28 +480,7 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
         if (font_mono_) ImGui::PopFont();
     }
 
-    // 3. Mask image overflow at each clipped corner
-    constexpr ImU32 mask = IM_COL32(0, 0, 0, 255);
-    switch (cfg.anchor) {
-        case A::TOP_LEFT:
-        case A::BOTTOM_RIGHT:
-            dl->AddTriangleFilled({x,      y   }, {x+C,    y   }, {x,    y+C   }, mask);
-            dl->AddTriangleFilled({x+bw,   y+bh}, {x+bw-C, y+bh}, {x+bw, y+bh-C}, mask);
-            break;
-        case A::TOP_RIGHT:
-        case A::BOTTOM_LEFT:
-            dl->AddTriangleFilled({x+bw,   y   }, {x+bw-C, y   }, {x+bw, y+C   }, mask);
-            dl->AddTriangleFilled({x,      y+bh}, {x+C,    y+bh}, {x,    y+bh-C}, mask);
-            break;
-        default:
-            dl->AddTriangleFilled({x,      y   }, {x+C,    y   }, {x,    y+C   }, mask);
-            dl->AddTriangleFilled({x+bw,   y   }, {x+bw-C, y   }, {x+bw, y+C   }, mask);
-            dl->AddTriangleFilled({x,      y+bh}, {x+C,    y+bh}, {x,    y+bh-C}, mask);
-            dl->AddTriangleFilled({x+bw,   y+bh}, {x+bw-C, y+bh}, {x+bw, y+bh-C}, mask);
-            break;
-    }
-
-    // 4. Label (top-left)
+    // 3. Label (top-left)
     if (font_mono_) ImGui::PushFont(font_mono_);
     dl->AddText({x + 4.f, y + 4.f}, col_.primary, label);
     if (font_mono_) ImGui::PopFont();
@@ -1634,6 +1629,10 @@ void HudRenderer::fx_draw_lines(NVGcontext* vg) const {
 
 // Layered dark-blue/violet gradient vignette along all four edges to evoke a nebula cloud.
 void HudRenderer::fx_draw_nebula_cloud(NVGcontext* vg, float fw, float fh) const {
+    // Each layer uses nvgBoxGradient over a fullscreen rect: one draw call covers
+    // all four edges and corners simultaneously instead of four separate strips.
+    // The inner box sits `depth` pixels from each screen edge; the feather of
+    // `depth` pixels then carries the gradient outward to the screen boundary.
     struct CloudLayer { float depth; uint8_t r, g, b, a; };
     static const CloudLayer layers[] = {
         {  80.f,  3,  2, 18, 215 },
@@ -1641,26 +1640,38 @@ void HudRenderer::fx_draw_nebula_cloud(NVGcontext* vg, float fw, float fh) const
         { 195.f, 20,  8, 65,  55 },
     };
     for (const auto& l : layers) {
-        const float d = l.depth;
+        const float d    = l.depth;
+        const NVGcolor clear = nvgRGBA(l.r, l.g, l.b,    0);
         const NVGcolor edge  = nvgRGBA(l.r, l.g, l.b, l.a);
-        const NVGcolor clear = nvgRGBA(l.r, l.g, l.b, 0);
-        NVGpaint p;
-        // Top
-        p = nvgLinearGradient(vg, 0, 0, 0, d, edge, clear);
-        nvgBeginPath(vg); nvgRect(vg, 0, 0, fw, d);
-        nvgFillPaint(vg, p); nvgFill(vg);
-        // Bottom
-        p = nvgLinearGradient(vg, 0, fh - d, 0, fh, clear, edge);
-        nvgBeginPath(vg); nvgRect(vg, 0, fh - d, fw, d);
-        nvgFillPaint(vg, p); nvgFill(vg);
-        // Left
-        p = nvgLinearGradient(vg, 0, 0, d, 0, edge, clear);
-        nvgBeginPath(vg); nvgRect(vg, 0, 0, d, fh);
-        nvgFillPaint(vg, p); nvgFill(vg);
-        // Right
-        p = nvgLinearGradient(vg, fw - d, 0, fw, 0, clear, edge);
-        nvgBeginPath(vg); nvgRect(vg, fw - d, 0, d, fh);
-        nvgFillPaint(vg, p); nvgFill(vg);
+        NVGpaint p = nvgBoxGradient(vg, d, d, fw - 2.f*d, fh - 2.f*d,
+                                    0.f, d, clear, edge);
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, fw, fh);
+        nvgFillPaint(vg, p);
+        nvgFill(vg);
+    }
+}
+
+void HudRenderer::fx_draw_vignette(NVGcontext* vg, float fw, float fh) const {
+    // Soft outer band: wide, gentle dark falloff from edges
+    {
+        constexpr float d = 200.f;
+        NVGpaint p = nvgBoxGradient(vg, d, d, fw - 2.f*d, fh - 2.f*d,
+                                    0.f, d, nvgRGBA(0,0,0,0), nvgRGBA(0,0,0,160));
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, fw, fh);
+        nvgFillPaint(vg, p);
+        nvgFill(vg);
+    }
+    // Hard inner ring: thin strip at the very edge for a clean border line
+    {
+        constexpr float d = 55.f;
+        NVGpaint p = nvgBoxGradient(vg, d, d, fw - 2.f*d, fh - 2.f*d,
+                                    0.f, d, nvgRGBA(0,0,0,0), nvgRGBA(0,0,0,220));
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, fw, fh);
+        nvgFillPaint(vg, p);
+        nvgFill(vg);
     }
 }
 
@@ -1944,6 +1955,9 @@ void HudRenderer::fx_update(NVGcontext* vg, const AppState& s,
         fx_draw_nebula_cloud(vg, fw, fh);
         fx_emit_nebula_edge(fw, fh, dt);
     }
+
+    if (effect == EffectType::DarkVignette)
+        fx_draw_vignette(vg, fw, fh);
 
     fx_draw(vg);
     fx_draw_lines(vg);

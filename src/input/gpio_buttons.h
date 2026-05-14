@@ -10,17 +10,21 @@ public:
     using ButtonCallback = std::function<void()>;
 
     GpioButtons(int pin_left, int pin_right, int pin_aux,
-                int af_trigger_ms = 1500, int pip_trigger_ms = 2000);
+                int af_trigger_ms      = 1500,
+                int pip_trigger_ms     = 2000,
+                int capture_trigger_ms = 5000);
     ~GpioButtons();
 
     bool init();
     void shutdown();
 
-    void on_af_left(ButtonCallback cb)   { af_left_cb_   = std::move(cb); }
-    void on_af_right(ButtonCallback cb)  { af_right_cb_  = std::move(cb); }
-    void on_pip_left(ButtonCallback cb)  { pip_left_cb_  = std::move(cb); }
-    void on_pip_right(ButtonCallback cb) { pip_right_cb_ = std::move(cb); }
-    void on_select(ButtonCallback cb)    { select_cb_    = std::move(cb); }
+    void on_af_left(ButtonCallback cb)       { af_left_cb_      = std::move(cb); }
+    void on_af_right(ButtonCallback cb)      { af_right_cb_     = std::move(cb); }
+    void on_pip_left(ButtonCallback cb)      { pip_left_cb_     = std::move(cb); }
+    void on_pip_right(ButtonCallback cb)     { pip_right_cb_    = std::move(cb); }
+    void on_select(ButtonCallback cb)        { select_cb_       = std::move(cb); }
+    void on_capture_left(ButtonCallback cb)  { capture_left_cb_ = std::move(cb); }
+    void on_capture_right(ButtonCallback cb) { capture_right_cb_= std::move(cb); }
 
     bool button_left_held()  const { return button_left_held_.load(); }
     bool button_right_held() const { return button_right_held_.load(); }
@@ -38,7 +42,7 @@ private:
     void handle_button_event(int pin, int state);
 
     int pin_left_, pin_right_, pin_aux_;
-    int af_trigger_ms_, pip_trigger_ms_;
+    int af_trigger_ms_, pip_trigger_ms_, capture_trigger_ms_;
 
     std::atomic<bool> running_ { false };
     std::thread poll_thread_;
@@ -58,4 +62,6 @@ private:
     ButtonCallback pip_left_cb_;
     ButtonCallback pip_right_cb_;
     ButtonCallback select_cb_;
+    ButtonCallback capture_left_cb_;
+    ButtonCallback capture_right_cb_;
 };

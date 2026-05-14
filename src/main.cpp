@@ -35,6 +35,8 @@
 #include "net/ping_monitor.h"
 #include "net/bt_monitor.h"
 #include "crash_reporter.h"
+#include "capture.h"
+#include "qr_scanner.h"
 #include "splash.h"
 
 #ifndef GIT_HASH
@@ -497,8 +499,75 @@ static std::vector<MenuItem> build_menu(
         submenu("Colour Temp", std::move(wb_temp_menu)),
     };
 
+    // ── Digital zoom presets (both eyes together) ─────────────────────────────
+    struct ZoomPreset { const char* label; float zoom; };
+    static const ZoomPreset ZOOM_PRESETS[] = {
+        { "1.0× (Full)", 1.00f },
+        { "1.25×",       1.25f },
+        { "1.5×",        1.50f },
+        { "2.0×",        2.00f },
+        { "3.0×",        3.00f },
+    };
+
+    std::vector<MenuItem> zoom_level_menu;
+    for (const auto& z : ZOOM_PRESETS) {
+        zoom_level_menu.push_back(leaf_sel(
+            z.label,
+            [&state, zoom = z.zoom]{
+                state.zoom_left.zoom  = zoom;
+                state.zoom_right.zoom = zoom;
+            },
+            [&state, zoom = z.zoom]{ return state.zoom_left.zoom == zoom; }
+        ));
+    }
+
+    struct CropPreset { const char* label; float cx, cy; };
+    static const CropPreset CROP_PRESETS[] = {
+        { "Center",       0.5f, 0.5f },
+        { "Top",          0.5f, 0.25f },
+        { "Bottom",       0.5f, 0.75f },
+        { "Left",         0.25f, 0.5f },
+        { "Right",        0.75f, 0.5f },
+    };
+
+    std::vector<MenuItem> crop_center_menu;
+    for (const auto& c : CROP_PRESETS) {
+        crop_center_menu.push_back(leaf_sel(
+            c.label,
+            [&state, cx = c.cx, cy = c.cy]{
+                state.zoom_left.center_x  = cx;
+                state.zoom_left.center_y  = cy;
+                state.zoom_right.center_x = cx;
+                state.zoom_right.center_y = cy;
+            },
+            [&state, cx = c.cx, cy = c.cy]{
+                return state.zoom_left.center_x == cx && state.zoom_left.center_y == cy;
+            }
+        ));
+    }
+
+    std::vector<MenuItem> zoom_menu = {
+        submenu("Zoom Level",  std::move(zoom_level_menu)),
+        submenu("Crop Center", std::move(crop_center_menu)),
+        leaf("Reset Zoom", [&state]{
+            state.zoom_left  = ZoomCropState{};
+            state.zoom_right = ZoomCropState{};
+        }),
+    };
+
     std::vector<MenuItem> main_cameras_menu = {
+        toggle("Theater Mode",
+            [&state]{ return state.theater_mode; },
+            [&state](bool v){ state.theater_mode = v; }),
         submenu("Resolution",  std::move(resolution_presets)),
+        leaf("Capture Left",   [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Left;   }),
+        leaf("Capture Right",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Right;  }),
+        leaf("Capture Stereo", [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Stereo; }),
+        toggle("QR Scan Main Cams", [&state]{ return state.qr_scan_main; },
+                                    [&state](bool v){ state.qr_scan_main = v; }),
+        toggle("QR Scan USB Cams",  [&state]{ return state.qr_scan_usb; },
+                                    [&state](bool v){ state.qr_scan_usb = v; }),
+        submenu("Digital Zoom", std::move(zoom_menu)),
         submenu("Focus Mode",  std::move(focus_modes)),
         slider("Focus Position", 0.f, 1000.f, 50.f, "",
             [&state]{ return static_cast<float>(state.focus_left.focus_position); },
@@ -1356,6 +1425,8 @@ static std::vector<MenuItem> build_menu(
                                        [&state]{ return state.effects_cfg.effect == EffectType::CompassTurbulence;  }),
         leaf_sel("Nebula Edge",        [&state]{ state.effects_cfg.effect = EffectType::NebulaEdge;         },
                                        [&state]{ return state.effects_cfg.effect == EffectType::NebulaEdge;         }),
+        leaf_sel("Dark Vignette",      [&state]{ state.effects_cfg.effect = EffectType::DarkVignette;       },
+                                       [&state]{ return state.effects_cfg.effect == EffectType::DarkVignette;       }),
         submenu("Color Palette", std::move(fx_palette_menu)),
     };
 
@@ -1681,14 +1752,8 @@ static std::vector<MenuItem> build_menu(
         submenu("Bg Desaturate",  std::move(desat_menu)),
     };
 
-    std::vector<MenuItem> settings_menu = {
-        submenu("Headset",        std::move(headset_menu)),
-        submenu("Audio",          std::move(audio_menu)),
-        submenu("HUD",            std::move(hud_menu)),
-        submenu("Android Mirror", std::move(android_menu)),
-    };
-
-    cameras_menu.push_back(submenu("Vision Assist", std::move(vision_menu)));
+    cameras_menu.push_back(submenu("Android Mirror", std::move(android_menu)));
+    cameras_menu.push_back(submenu("Vision Assist",  std::move(vision_menu)));
 
     // ── LoRa menu ─────────────────────────────────────────────────────────────
 
@@ -1825,6 +1890,9 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> system_menu = {
+        submenu("Headset",          std::move(headset_menu)),
+        submenu("Audio",            std::move(audio_menu)),
+        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
         toggle("System Panel",
             [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
             [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
@@ -1844,17 +1912,16 @@ static std::vector<MenuItem> build_menu(
         leaf("Refresh Bluetooth", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
         submenu("Software",   std::move(software_menu)),
         submenu("Demo Mode",  std::move(demo_menu)),
+        leaf("Request Status", [teensy]{ teensy->request_status(); }),
+        leaf("Close Program",  [&state]{ state.quit = true; }),
     };
 
     return {
-        submenu("Cameras",          std::move(cameras_menu)),
-        submenu("Prototracer",      std::move(prototracer_menu)),
-        submenu("Settings",         std::move(settings_menu)),
-        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
-        submenu("LoRa",             std::move(lora_menu)),
-        submenu("System",           std::move(system_menu)),
-        leaf("Request Status",      [teensy]{ teensy->request_status(); }),
-        leaf("Close Program",       [&state]{ state.quit = true; }),
+        submenu("Vision",       std::move(cameras_menu)),
+        submenu("HUD",          std::move(hud_menu)),
+        submenu("Face Display", std::move(prototracer_menu)),
+        submenu("LoRa",         std::move(lora_menu)),
+        submenu("System",       std::move(system_menu)),
     };
 }
 
@@ -2157,12 +2224,14 @@ int main(int argc, char* argv[]) {
     std::string cfg_ping_host  = "8.8.8.8";
     std::string cfg_wifi_iface = "wlan0";
     std::string cfg_crash_dir  = "/tmp";
+    std::string cfg_photo_dir  = "/home/user/Pictures/protohud";
     int         cfg_ssh_port   = 22;
     if (cfg.contains("system")) {
         auto& js         = cfg["system"];
         cfg_ping_host    = js.value("ping_host",  cfg_ping_host);
         cfg_wifi_iface   = js.value("wifi_iface", cfg_wifi_iface);
         cfg_crash_dir    = js.value("crash_dir",  cfg_crash_dir);
+        cfg_photo_dir    = js.value("photo_dir",  cfg_photo_dir);
         cfg_ssh_port     = js.value("ssh_port",   cfg_ssh_port);
     }
     state.ssh.port = cfg_ssh_port;
@@ -2407,6 +2476,19 @@ int main(int argc, char* argv[]) {
 
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
     protoface_ctrl.start();   // connects async; no-op if socket absent
+
+    // QR / barcode scanner — active when either scan toggle is enabled.
+    QrScanner qr_scanner;
+    qr_scanner.set_callback([&state](const std::string& text, const std::string& type) {
+        Notification n;
+        n.type          = NotifType::App;
+        n.title         = type + " Detected";
+        n.body          = text;
+        n.auto_dismiss_s = 12.f;
+        std::lock_guard lk(state.mtx);
+        state.notifs.push(std::move(n));
+    });
+    cameras.set_qr_scanner(&qr_scanner);
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
     if (!knob.start())   std::cerr << "[main] SmartKnob not available on " << knob_port << "\n";
 
@@ -2524,10 +2606,12 @@ int main(int argc, char* argv[]) {
     int button_1_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_1_gpio",     17);
     int button_2_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_2_gpio",     27);
     int button_3_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_3_gpio",     22);
-    int af_trigger_ms   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "af_trigger_time_ms", 1500);
-    int pip_trigger_ms  = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "pip_trigger_time_ms",2000);
+    int af_trigger_ms      = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "af_trigger_time_ms",      1500);
+    int pip_trigger_ms     = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "pip_trigger_time_ms",     2000);
+    int capture_trigger_ms = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "capture_trigger_time_ms", 5000);
 
-    GpioButtons buttons(button_1_gpio, button_2_gpio, button_3_gpio, af_trigger_ms, pip_trigger_ms);
+    GpioButtons buttons(button_1_gpio, button_2_gpio, button_3_gpio,
+                        af_trigger_ms, pip_trigger_ms, capture_trigger_ms);
     bool pip_left_active  = false, pip_right_active  = false;  // GPIO-driven
     bool kb_pip_left      = false, kb_pip_right      = false;  // keyboard-driven
 
@@ -2543,6 +2627,16 @@ int main(int argc, char* argv[]) {
             buttons.on_af_right([&cameras]() {
                 std::cout << "[gpio] AF right\n";
                 if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+            });
+            buttons.on_capture_left([&state]() {
+                std::cout << "[gpio] capture left\n";
+                std::lock_guard lk(state.mtx);
+                state.capture_request = CaptureRequest::Left;
+            });
+            buttons.on_capture_right([&state]() {
+                std::cout << "[gpio] capture right\n";
+                std::lock_guard lk(state.mtx);
+                state.capture_request = CaptureRequest::Right;
             });
             buttons.on_pip_left ([&pip_left_active] () { pip_left_active  = true; });
             buttons.on_pip_right([&pip_right_active]() { pip_right_active = true; });
@@ -2791,6 +2885,12 @@ int main(int argc, char* argv[]) {
             snap.bt_devices         = state.bt_devices;
             snap.serial_metrics     = state.serial_metrics;
             snap.camera_resolution  = state.camera_resolution;
+            snap.zoom_left          = state.zoom_left;
+            snap.zoom_right         = state.zoom_right;
+            snap.theater_mode       = state.theater_mode;
+            snap.capture_request    = state.capture_request;
+            snap.qr_scan_main       = state.qr_scan_main;
+            snap.qr_scan_usb        = state.qr_scan_usb;
             snap.notifs             = state.notifs;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
@@ -2857,11 +2957,43 @@ int main(int argc, char* argv[]) {
         }
 
         // ── Render cameras into per-eye FBOs ──────────────────────────────────
+        // Theater mode: compute a letterbox/pillarbox sub-viewport that preserves
+        // the camera's native aspect ratio. Black bars are filled by glClear().
+        // When theater_mode is false the camera fills the entire FBO (legacy).
+        //
+        // TODO (USB layout): when placing USB camera feeds in the black region,
+        // shift the main feed flush to the opposite edge so all empty space
+        // is a single contiguous rectangle (e.g. pillarbox → main feed flush
+        // left, one wide black column on the right; letterbox → main feed flush
+        // top, one tall black strip at the bottom). That gives a clean
+        // rectangular region to fill with the USB feed rather than two thin
+        // split bars. vp_x / vp_y below should be set to 0 (or 0, fh-vp_h
+        // respectively) instead of the centered offset.
+        auto make_theater_vp = [&snap](int fw, int fh) -> std::array<int,4> {
+            float cam_ar  = (float)snap.camera_resolution.width
+                          / snap.camera_resolution.height;
+            float disp_ar = (float)fw / fh;
+            int vp_w, vp_h, vp_x, vp_y;
+            if (cam_ar < disp_ar) {        // pillarbox (bars left/right)
+                vp_h = fh; vp_w = (int)(fh * cam_ar);
+                vp_x = (fw - vp_w) / 2; vp_y = 0;
+            } else {                       // letterbox (bars top/bottom)
+                vp_w = fw; vp_h = (int)(fw / cam_ar);
+                vp_x = 0; vp_y = (fh - vp_h) / 2;
+            }
+            return { vp_x, vp_y, vp_w, vp_h };
+        };
+
         // Left eye
         {
             xr.eye_left().bind();
             glClearColor(0.f, 0.f, 0.f, 1.f);
             glClear(GL_COLOR_BUFFER_BIT);
+
+            if (snap.theater_mode) {
+                auto vp = make_theater_vp(xr.eye_left().w, xr.eye_left().h);
+                glViewport(vp[0], vp[1], vp[2], vp[3]);
+            }
 
             bool drew = false;
             if (use_beast_cam && tex_beast != 0) {
@@ -2869,7 +3001,11 @@ int main(int argc, char* argv[]) {
                 // For now: TODO: render tex_beast as fullscreen quad
                 drew = false;  // fallback to OWLsight below
             }
-            if (!drew) drew = cameras.draw_owl_left();
+            if (!drew) drew = cameras.draw_owl_left(
+                snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
+
+            if (snap.theater_mode)
+                glViewport(0, 0, xr.eye_left().w, xr.eye_left().h);
 
             xr.eye_left().unbind();
         }
@@ -2880,11 +3016,20 @@ int main(int argc, char* argv[]) {
             glClearColor(0.f, 0.f, 0.f, 1.f);
             glClear(GL_COLOR_BUFFER_BIT);
 
+            if (snap.theater_mode) {
+                auto vp = make_theater_vp(xr.eye_right().w, xr.eye_right().h);
+                glViewport(vp[0], vp[1], vp[2], vp[3]);
+            }
+
             bool drew = false;
             if (use_beast_cam && tex_beast != 0) {
                 drew = false;  // fallback to OWLsight below
             }
-            if (!drew) drew = cameras.draw_owl_right();
+            if (!drew) drew = cameras.draw_owl_right(
+                snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+
+            if (snap.theater_mode)
+                glViewport(0, 0, xr.eye_right().w, xr.eye_right().h);
 
             xr.eye_right().unbind();
         }
@@ -2904,6 +3049,30 @@ int main(int argc, char* argv[]) {
             pp_ping_right = !pp_ping_right;
             left_src  = pp_fbo_left.tex;
             right_src = pp_fbo_right.tex;
+        }
+
+        // ── Photo capture ─────────────────────────────────────────────────────
+        // Reads directly from the camera eye FBOs (no HUD). Async PNG write.
+        if (snap.capture_request != CaptureRequest::None)
+            do_capture(snap.capture_request, xr, cfg_photo_dir, state);
+
+        // ── QR scan — main cameras ────────────────────────────────────────────
+        // Periodic glReadPixels from the left eye FBO (rate-limited to 2 Hz by
+        // the timer below; ZBar's own interval also guards the worker thread).
+        cameras.enable_qr_usb(snap.qr_scan_usb);
+        if (snap.qr_scan_main) {
+            static auto s_last_qr = std::chrono::steady_clock::now();
+            auto now_qr = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now_qr - s_last_qr).count() >= 500) {
+                s_last_qr = now_qr;
+                const int qw = xr.eye_left().w, qh = xr.eye_left().h;
+                std::vector<uint8_t> px(static_cast<size_t>(qw * qh * 4));
+                xr.eye_left().bind();
+                glReadPixels(0, 0, qw, qh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                xr.eye_left().unbind();
+                qr_scanner.submit_rgba(px.data(), qw, qh);
+            }
         }
 
         // ── Composite or timewarp ─────────────────────────────────────────────
