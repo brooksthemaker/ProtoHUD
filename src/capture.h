@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 
 enum class CaptureRequest : uint8_t { None, Left, Right, Stereo };
