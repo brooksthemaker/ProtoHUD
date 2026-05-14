@@ -170,6 +170,7 @@ set(SOURCES
     src/net/ping_monitor.cpp
     src/net/bt_monitor.cpp
     src/crash_reporter.cpp
+    src/capture.cpp
     src/splash.cpp
     src/nanovg_gl_impl.cpp
     src/hud/toast_renderer.cpp

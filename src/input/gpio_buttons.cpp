@@ -14,9 +14,11 @@
 //   GPIOD_LINE_EVENT_*         → GPIOD_EDGE_EVENT_*
 
 GpioButtons::GpioButtons(int pin_left, int pin_right, int pin_aux,
-                         int af_trigger_ms, int pip_trigger_ms)
+                         int af_trigger_ms, int pip_trigger_ms,
+                         int capture_trigger_ms)
     : pin_left_(pin_left), pin_right_(pin_right), pin_aux_(pin_aux),
-      af_trigger_ms_(af_trigger_ms), pip_trigger_ms_(pip_trigger_ms) {}
+      af_trigger_ms_(af_trigger_ms), pip_trigger_ms_(pip_trigger_ms),
+      capture_trigger_ms_(capture_trigger_ms) {}
 
 GpioButtons::~GpioButtons() {
     shutdown();
@@ -153,12 +155,14 @@ void GpioButtons::handle_button_event(int pin, int state) {
             button_left_held_ = true;
             pip_left_threshold_reached_ = false;
         } else {
-            // Released
+            // Released — thresholds (highest first to avoid fall-through)
             auto hold_ms = get_left_hold_ms();
             button_left_held_ = false;
             pip_left_threshold_reached_ = false;
 
-            if (hold_ms >= af_trigger_ms_) {
+            if (hold_ms >= capture_trigger_ms_) {
+                if (capture_left_cb_) capture_left_cb_();
+            } else if (hold_ms >= af_trigger_ms_) {
                 if (af_left_cb_) af_left_cb_();
             } else {
                 pip_left_active_ = !pip_left_active_.load();
@@ -172,11 +176,14 @@ void GpioButtons::handle_button_event(int pin, int state) {
             button_right_held_ = true;
             pip_right_threshold_reached_ = false;
         } else {
+            // Released — thresholds (highest first)
             auto hold_ms = get_right_hold_ms();
             button_right_held_ = false;
             pip_right_threshold_reached_ = false;
 
-            if (hold_ms >= af_trigger_ms_) {
+            if (hold_ms >= capture_trigger_ms_) {
+                if (capture_right_cb_) capture_right_cb_();
+            } else if (hold_ms >= af_trigger_ms_) {
                 if (af_right_cb_) af_right_cb_();
             } else {
                 pip_right_active_ = !pip_right_active_.load();

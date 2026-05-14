@@ -35,6 +35,7 @@
 #include "net/ping_monitor.h"
 #include "net/bt_monitor.h"
 #include "crash_reporter.h"
+#include "capture.h"
 #include "splash.h"
 
 #ifndef GIT_HASH
@@ -558,6 +559,9 @@ static std::vector<MenuItem> build_menu(
             [&state]{ return state.theater_mode; },
             [&state](bool v){ state.theater_mode = v; }),
         submenu("Resolution",  std::move(resolution_presets)),
+        leaf("Capture Left",   [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Left;   }),
+        leaf("Capture Right",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Right;  }),
+        leaf("Capture Stereo", [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Stereo; }),
         submenu("Digital Zoom", std::move(zoom_menu)),
         submenu("Focus Mode",  std::move(focus_modes)),
         slider("Focus Position", 0.f, 1000.f, 50.f, "",
@@ -2213,12 +2217,14 @@ int main(int argc, char* argv[]) {
     std::string cfg_ping_host  = "8.8.8.8";
     std::string cfg_wifi_iface = "wlan0";
     std::string cfg_crash_dir  = "/tmp";
+    std::string cfg_photo_dir  = "/home/user/Pictures/protohud";
     int         cfg_ssh_port   = 22;
     if (cfg.contains("system")) {
         auto& js         = cfg["system"];
         cfg_ping_host    = js.value("ping_host",  cfg_ping_host);
         cfg_wifi_iface   = js.value("wifi_iface", cfg_wifi_iface);
         cfg_crash_dir    = js.value("crash_dir",  cfg_crash_dir);
+        cfg_photo_dir    = js.value("photo_dir",  cfg_photo_dir);
         cfg_ssh_port     = js.value("ssh_port",   cfg_ssh_port);
     }
     state.ssh.port = cfg_ssh_port;
@@ -2580,10 +2586,12 @@ int main(int argc, char* argv[]) {
     int button_1_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_1_gpio",     17);
     int button_2_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_2_gpio",     27);
     int button_3_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_3_gpio",     22);
-    int af_trigger_ms   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "af_trigger_time_ms", 1500);
-    int pip_trigger_ms  = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "pip_trigger_time_ms",2000);
+    int af_trigger_ms      = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "af_trigger_time_ms",      1500);
+    int pip_trigger_ms     = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "pip_trigger_time_ms",     2000);
+    int capture_trigger_ms = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "capture_trigger_time_ms", 5000);
 
-    GpioButtons buttons(button_1_gpio, button_2_gpio, button_3_gpio, af_trigger_ms, pip_trigger_ms);
+    GpioButtons buttons(button_1_gpio, button_2_gpio, button_3_gpio,
+                        af_trigger_ms, pip_trigger_ms, capture_trigger_ms);
     bool pip_left_active  = false, pip_right_active  = false;  // GPIO-driven
     bool kb_pip_left      = false, kb_pip_right      = false;  // keyboard-driven
 
@@ -2599,6 +2607,16 @@ int main(int argc, char* argv[]) {
             buttons.on_af_right([&cameras]() {
                 std::cout << "[gpio] AF right\n";
                 if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+            });
+            buttons.on_capture_left([&state]() {
+                std::cout << "[gpio] capture left\n";
+                std::lock_guard lk(state.mtx);
+                state.capture_request = CaptureRequest::Left;
+            });
+            buttons.on_capture_right([&state]() {
+                std::cout << "[gpio] capture right\n";
+                std::lock_guard lk(state.mtx);
+                state.capture_request = CaptureRequest::Right;
             });
             buttons.on_pip_left ([&pip_left_active] () { pip_left_active  = true; });
             buttons.on_pip_right([&pip_right_active]() { pip_right_active = true; });
@@ -2850,6 +2868,7 @@ int main(int argc, char* argv[]) {
             snap.zoom_left          = state.zoom_left;
             snap.zoom_right         = state.zoom_right;
             snap.theater_mode       = state.theater_mode;
+            snap.capture_request    = state.capture_request;
             snap.notifs             = state.notifs;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
@@ -3009,6 +3028,11 @@ int main(int argc, char* argv[]) {
             left_src  = pp_fbo_left.tex;
             right_src = pp_fbo_right.tex;
         }
+
+        // ── Photo capture ─────────────────────────────────────────────────────
+        // Reads directly from the camera eye FBOs (no HUD). Async PNG write.
+        if (snap.capture_request != CaptureRequest::None)
+            do_capture(snap.capture_request, xr, cfg_photo_dir, state);
 
         // ── Composite or timewarp ─────────────────────────────────────────────
         ImuPose current_pose = xr.get_latest_imu_pose();

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <ctime>
 #include <imgui.h>
+#include "capture.h"
 
 // ── Post-processing config ────────────────────────────────────────────────────
 // Modified from menu (any thread); read by the render thread via snap.
@@ -331,6 +332,9 @@ struct AppState {
     // black bars filling the remaining FBO area. Letterbox or pillarbox depending
     // on camera AR vs. display AR. Future: USB cameras fill the black bar regions.
     bool  theater_mode = false;
+
+    // Photo capture: set by menu or GPIO long-press; consumed by the render thread.
+    CaptureRequest capture_request = CaptureRequest::None;
 
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;
