@@ -2919,6 +2919,15 @@ int main(int argc, char* argv[]) {
         // Theater mode: compute a letterbox/pillarbox sub-viewport that preserves
         // the camera's native aspect ratio. Black bars are filled by glClear().
         // When theater_mode is false the camera fills the entire FBO (legacy).
+        //
+        // TODO (USB layout): when placing USB camera feeds in the black region,
+        // shift the main feed flush to the opposite edge so all empty space
+        // is a single contiguous rectangle (e.g. pillarbox → main feed flush
+        // left, one wide black column on the right; letterbox → main feed flush
+        // top, one tall black strip at the bottom). That gives a clean
+        // rectangular region to fill with the USB feed rather than two thin
+        // split bars. vp_x / vp_y below should be set to 0 (or 0, fh-vp_h
+        // respectively) instead of the centered offset.
         auto make_theater_vp = [&snap](int fw, int fh) -> std::array<int,4> {
             float cam_ar  = (float)snap.camera_resolution.width
                           / snap.camera_resolution.height;
