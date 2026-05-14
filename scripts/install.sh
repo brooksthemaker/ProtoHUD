@@ -113,6 +113,7 @@ PKGS=(
     # scrcpy itself is NOT installed here — install it separately afterward.
     v4l2loopback-dkms
     adb
+    i2c-tools                    # i2cdetect — verify I2C devices (compass, etc.)
 )
 
 # Only install packages that are not already present
@@ -254,6 +255,10 @@ boot_append "gpu_mem=256"
 
 # Enable camera auto-detection (required for CSI cameras on all Pi OS variants)
 boot_append "camera_auto_detect=1"
+
+# I2C-1 bus — required for MPU-9250 backup compass (GPIO 2/3)
+# Safe to enable even without the compass connected.
+boot_append "dtparam=i2c_arm=on"
 
 ok "Boot config updated: ${BOOT_CFG}"
 
