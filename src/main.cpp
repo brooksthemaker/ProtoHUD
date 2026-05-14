@@ -1738,14 +1738,8 @@ static std::vector<MenuItem> build_menu(
         submenu("Bg Desaturate",  std::move(desat_menu)),
     };
 
-    std::vector<MenuItem> settings_menu = {
-        submenu("Headset",        std::move(headset_menu)),
-        submenu("Audio",          std::move(audio_menu)),
-        submenu("HUD",            std::move(hud_menu)),
-        submenu("Android Mirror", std::move(android_menu)),
-    };
-
-    cameras_menu.push_back(submenu("Vision Assist", std::move(vision_menu)));
+    cameras_menu.push_back(submenu("Android Mirror", std::move(android_menu)));
+    cameras_menu.push_back(submenu("Vision Assist",  std::move(vision_menu)));
 
     // ── LoRa menu ─────────────────────────────────────────────────────────────
 
@@ -1882,6 +1876,9 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> system_menu = {
+        submenu("Headset",          std::move(headset_menu)),
+        submenu("Audio",            std::move(audio_menu)),
+        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
         toggle("System Panel",
             [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
             [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
@@ -1901,17 +1898,16 @@ static std::vector<MenuItem> build_menu(
         leaf("Refresh Bluetooth", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
         submenu("Software",   std::move(software_menu)),
         submenu("Demo Mode",  std::move(demo_menu)),
+        leaf("Request Status", [teensy]{ teensy->request_status(); }),
+        leaf("Close Program",  [&state]{ state.quit = true; }),
     };
 
     return {
-        submenu("Cameras",          std::move(cameras_menu)),
-        submenu("Prototracer",      std::move(prototracer_menu)),
-        submenu("Settings",         std::move(settings_menu)),
-        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
-        submenu("LoRa",             std::move(lora_menu)),
-        submenu("System",           std::move(system_menu)),
-        leaf("Request Status",      [teensy]{ teensy->request_status(); }),
-        leaf("Close Program",       [&state]{ state.quit = true; }),
+        submenu("Vision",       std::move(cameras_menu)),
+        submenu("HUD",          std::move(hud_menu)),
+        submenu("Face Display", std::move(prototracer_menu)),
+        submenu("LoRa",         std::move(lora_menu)),
+        submenu("System",       std::move(system_menu)),
     };
 }
 
