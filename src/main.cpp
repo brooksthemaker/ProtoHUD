@@ -2302,20 +2302,22 @@ int main(int argc, char* argv[]) {
     std::string cfg_ping_host  = "8.8.8.8";
     std::string cfg_wifi_iface = "wlan0";
     std::string cfg_crash_dir  = "/tmp";
-    std::string cfg_photo_dir  = "/home/user/Pictures/protohud";
-    std::string cfg_map_dir    = "/home/user/Pictures/protohud/maps";
+    const char* home_env = getenv("HOME");
+    std::string home_dir = home_env ? home_env : "/home/user";
+    std::string cfg_photo_dir  = home_dir + "/Pictures/protohud";
+    std::string cfg_map_dir    = home_dir + "/Pictures/protohud/maps";
     int         cfg_ssh_port   = 22;
     if (cfg.contains("system")) {
         auto& js         = cfg["system"];
         cfg_ping_host    = js.value("ping_host",  cfg_ping_host);
         cfg_wifi_iface   = js.value("wifi_iface", cfg_wifi_iface);
         cfg_crash_dir    = js.value("crash_dir",  cfg_crash_dir);
-        cfg_photo_dir    = js.value("photo_dir",  cfg_photo_dir);
-        cfg_map_dir      = js.value("map_dir",    cfg_map_dir);
+        { auto v = js.value("photo_dir", std::string{}); if (!v.empty()) cfg_photo_dir = v; }
+        { auto v = js.value("map_dir",   std::string{}); if (!v.empty()) cfg_map_dir   = v; }
         cfg_ssh_port     = js.value("ssh_port",   cfg_ssh_port);
     }
     // Ensure the maps directory exists
-    std::filesystem::create_directories(cfg_map_dir);
+    { std::error_code ec; std::filesystem::create_directories(cfg_map_dir, ec); }
     state.ssh.port = cfg_ssh_port;
 
     SplashConfig splash_cfg;
