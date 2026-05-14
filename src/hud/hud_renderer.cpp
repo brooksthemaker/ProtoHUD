@@ -708,14 +708,13 @@ void HudRenderer::draw_health_side(NVGcontext* vg, const SystemHealth& h,
     const Ind left_items[]  = {{"Proot",     h.teensy_ok},
                                 {"LoRa",      h.lora_ok},
                                 {"Interface", h.knob_ok},
-                                {"Audio",     h.audio_ok},
                                 {"WiFi",      h.wifi_ok}};
     const Ind right_items[] = {{lcam_lbl,    h.cam_owl_left,  false},
                                 {rcam_lbl,    h.cam_owl_right, false},
                                 {"Cam 1",     h.cam_usb1,      h.cam_usb1 && !h.cam_usb1_overlay},
                                 {"Cam 2",     h.cam_usb2,      h.cam_usb2 && !h.cam_usb2_overlay}};
     const Ind* items   = right_side ? right_items : left_items;
-    const int  n_items = right_side ? 4 : 5;
+    const int  n_items = 4;
 
     constexpr float ROW_H   = 18.f;
     constexpr float DOT_R   = 4.f;
@@ -827,7 +826,7 @@ void HudRenderer::draw_face_indicator(NVGcontext* vg, const FaceState& f,
     constexpr float SEG_W   = 75.f;
     constexpr float ARM_EXT = 140.f;
     constexpr float ANGLE   = 130.f * 3.14159265f / 180.f;
-    constexpr int   N_ITEMS = 6;
+    constexpr int   N_ITEMS = 4;
 
     const float tape_w         = fw / 3.f;
     const float tape_x         = fw / 2.f - tape_w / 2.f;
@@ -848,18 +847,17 @@ void HudRenderer::draw_face_indicator(NVGcontext* vg, const FaceState& f,
     nvg_glow_line(vg, proto_anchor_x, anchor_y,
                   proto_anchor_x + dir_x * diag_len, anchor_y + dir_y * diag_len, cm, g1, g2);
 
-    char effect_lbl[24], mode_lbl[24], rgb_lbl[24], brt_lbl[24];
+    char effect_lbl[24], mode_lbl[24], brt_lbl[24];
     snprintf(effect_lbl, sizeof(effect_lbl), "%s", effect_name(f.effect_id));
     if (f.playing_gif) snprintf(mode_lbl, sizeof(mode_lbl), "GIF #%d", f.gif_id);
     else               snprintf(mode_lbl, sizeof(mode_lbl), "Pal #%d", f.palette_id);
-    snprintf(rgb_lbl, sizeof(rgb_lbl), "R%d G%d B%d", f.r, f.g, f.b);
     snprintf(brt_lbl, sizeof(brt_lbl), "Brt %d%%", (f.brightness * 100) / 255);
     const char* ctrl_lbl = f.hud_control ? "HUD" : "AUTO";
 
     struct Ind { const char* label; bool ok; };
     const Ind items[N_ITEMS] = {
-        {"FACE", f.connected}, {effect_lbl, f.connected}, {mode_lbl, f.connected},
-        {rgb_lbl, f.connected}, {brt_lbl, f.connected}, {ctrl_lbl, f.connected},
+        {effect_lbl, f.connected}, {mode_lbl, f.connected},
+        {brt_lbl, f.connected},    {ctrl_lbl, f.connected},
     };
 
     nvg_set_font_mono();
@@ -1173,9 +1171,13 @@ void HudRenderer::draw_compass_tape(NVGcontext* vg, const AppState& s,
     const float t_mid = t_maj * (16.f / 24.f);
     const float t_min = t_maj * (10.f / 24.f);
 
-    const float tick_base = flip ? oy + 20.f : oy + th - 20.f;
+    // Align degree labels with the first dot row of the indicator arms.
+    // arm anchor sits at oy+th; first dot row = anchor - sin(130°)*ROW_H
+    constexpr float kArmAngle = 130.f * 3.14159265f / 180.f;
+    constexpr float kRowH     = 18.f;
+    const float label_y   = flip ? oy + 3.f : (oy + th) - std::sin(kArmAngle) * kRowH;
+    const float tick_base = flip ? oy + 20.f : label_y - 3.f;
     const float tick_sign = flip ? 1.f : -1.f;
-    const float label_y   = flip ? oy + 3.f : tick_base + 3.f;
     const bool  tick_glow = cfg_.compass_tick_glow;
 
     // Collect tick positions per tier for batched drawing
