@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <chrono>
 
+// Some distros ship ZBar as a C++ library with all symbols in namespace zbar.
+using namespace zbar;
+
 using clock_t2 = std::chrono::steady_clock;
 
 QrScanner::QrScanner() {
