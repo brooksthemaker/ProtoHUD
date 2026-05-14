@@ -281,8 +281,6 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
 
     nvgBeginFrame(nvg_, fw, fh, 1.0f);
 
-    draw_top_bar(nvg_, s, fw, 0.f);
-
     fx_update(nvg_, s, fw, fh, frame_dt_);
 
     if (!s.lora_messages.empty()) {
@@ -293,7 +291,7 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     }
 
     const float cw        = fw / 3.f;
-    const float compass_y = flip ? c_margin : fh - ch - c_margin;
+    const float compass_y = flip ? c_margin : fh - ch;
     draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
     draw_health_side(nvg_, s.health, fw, fh, false,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
@@ -690,7 +688,8 @@ void HudRenderer::draw_health_side(NVGcontext* vg, const SystemHealth& h,
     const float tape_w   = fw / 3.f;
     const float tape_x   = fw / 2.f - tape_w / 2.f;
     const float fade_w   = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float anchor_y = 0.f;
+    const float ch       = static_cast<float>(cfg_.compass_height);
+    const float anchor_y = cfg_.hud_flip_vertical ? ch : fh - ch;
     const float anchor_x = right_side ? tape_x + tape_w : tape_x;
 
     auto focus_suffix = [](const CameraFocusState& f) -> const char* {
@@ -724,7 +723,7 @@ void HudRenderer::draw_health_side(NVGcontext* vg, const SystemHealth& h,
     constexpr float BG_FULL = 440.f;
 
     const float dir_x    = std::cos(ANGLE) * (right_side ? 1.f : -1.f);
-    const float dir_y    = std::sin(ANGLE);  // arms hang downward from top bar
+    const float dir_y    = cfg_.hud_flip_vertical ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(n_items + 1) * ROW_H;
 
     // Parallelogram bg via linear gradient (replaces 16 strip loop)
@@ -758,7 +757,7 @@ void HudRenderer::draw_health_side(NVGcontext* vg, const SystemHealth& h,
         nvg_set_font_mono();
         const float nv_tw = nvgTextBounds(vg, 0, 0, "NV", nullptr, nullptr);
         const float nv_x  = right_side ? h_end_x + 6.f : h_end_x - nv_tw - 6.f;
-        nvg_glow_text(vg, nv_x, anchor_y + 4.f, "NV", true, col_.glow_base, col_.text_fill);
+        nvg_glow_text(vg, nv_x, anchor_y - 7.f, "NV", true, col_.glow_base, col_.text_fill);
     }
 
     nvg_set_font_mono();
@@ -831,11 +830,12 @@ void HudRenderer::draw_face_indicator(NVGcontext* vg, const FaceState& f,
     const float tape_w         = fw / 3.f;
     const float tape_x         = fw / 2.f - tape_w / 2.f;
     const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float anchor_y       = 0.f;
-    const float proto_anchor_x = tape_x - fade_w;
+    const float ch             = static_cast<float>(cfg_.compass_height);
+    const float anchor_y       = cfg_.hud_flip_vertical ? ch : fh - ch;
+    const float proto_anchor_x = tape_x - fade_w - SEG_W * 2.f;
 
     const float dir_x    = std::cos(ANGLE) * -1.f;
-    const float dir_y    = std::sin(ANGLE);
+    const float dir_y    = cfg_.hud_flip_vertical ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(N_ITEMS + 1) * ROW_H;
 
     NVGcolor cm = nvg_col(col_.glow_base);
@@ -897,11 +897,12 @@ void HudRenderer::draw_lora_indicator(NVGcontext* vg, const AppState& s,
     const float tape_w        = fw / 3.f;
     const float tape_x        = fw / 2.f - tape_w / 2.f;
     const float fade_w        = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float anchor_y      = 0.f;
-    const float lora_anchor_x = tape_x + tape_w + fade_w;
+    const float ch            = static_cast<float>(cfg_.compass_height);
+    const float anchor_y      = cfg_.hud_flip_vertical ? ch : fh - ch;
+    const float lora_anchor_x = tape_x + tape_w + fade_w + SEG_W * 2.f;
 
     const float dir_x    = std::cos(ANGLE);
-    const float dir_y    = std::sin(ANGLE);
+    const float dir_y    = cfg_.hud_flip_vertical ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float diag_len = static_cast<float>(MAX_ROWS + 1) * ROW_H;
 
     NVGcolor cm = nvg_col(col_.glow_base);
@@ -961,11 +962,12 @@ void HudRenderer::draw_clock_indicator(NVGcontext* vg, const AppState& s,
     const float tape_w         = fw / 3.f;
     const float tape_x         = fw / 2.f - tape_w / 2.f;
     const float fade_w         = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float anchor_y       = 0.f;
-    const float clock_anchor_x = tape_x + tape_w + fade_w;
+    const float ch             = static_cast<float>(cfg_.compass_height);
+    const float anchor_y       = cfg_.hud_flip_vertical ? ch : fh - ch;
+    const float clock_anchor_x = tape_x + tape_w + fade_w + SEG_W * 2.f;
 
     const float dir_x     = std::cos(ANGLE);
-    const float dir_y     = std::sin(ANGLE);
+    const float dir_y     = cfg_.hud_flip_vertical ? std::sin(ANGLE) : -std::sin(ANGLE);
     const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
     const float eff_row_h = ROW_H * scale;
     const int   n_rows    = s.clock_cfg.show_date ? 2 : 1;
@@ -1029,11 +1031,12 @@ void HudRenderer::draw_timer_alarm_indicator(NVGcontext* vg, const AppState& s,
     const float tape_w      = fw / 3.f;
     const float tape_x      = fw / 2.f - tape_w / 2.f;
     const float fade_w      = static_cast<float>(cfg_.compass_bg_side_fade);
-    const float anchor_y    = 0.f;
-    const float ta_anchor_x = tape_x + tape_w + fade_w + SEG_W * 2.f;
+    const float ch          = static_cast<float>(cfg_.compass_height);
+    const float anchor_y    = cfg_.hud_flip_vertical ? ch : fh - ch;
+    const float ta_anchor_x = tape_x + tape_w + fade_w + SEG_W * 4.f;
 
     const float dir_x = std::cos(ANGLE);
-    const float dir_y = std::sin(ANGLE);
+    const float dir_y = cfg_.hud_flip_vertical ? std::sin(ANGLE) : -std::sin(ANGLE);
 
     struct Row { char text[24]; ImU32 accent; };
     Row rows[2]; int n_rows = 0;
@@ -1890,7 +1893,7 @@ void HudRenderer::fx_update(NVGcontext* vg, const AppState& s,
     const bool  flip     = cfg_.hud_flip_vertical;
 
     const float cw        = fw / 3.f;
-    const float compass_y = flip ? c_margin : fh - ch - c_margin;
+    const float compass_y = flip ? c_margin : fh - ch;
     const float tape_cx   = fw * 0.5f;
 
     if (effect == EffectType::CompassTurbulence) {
