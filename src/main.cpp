@@ -554,6 +554,9 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> main_cameras_menu = {
+        toggle("Theater Mode",
+            [&state]{ return state.theater_mode; },
+            [&state](bool v){ state.theater_mode = v; }),
         submenu("Resolution",  std::move(resolution_presets)),
         submenu("Digital Zoom", std::move(zoom_menu)),
         submenu("Focus Mode",  std::move(focus_modes)),
@@ -2846,6 +2849,7 @@ int main(int argc, char* argv[]) {
             snap.camera_resolution  = state.camera_resolution;
             snap.zoom_left          = state.zoom_left;
             snap.zoom_right         = state.zoom_right;
+            snap.theater_mode       = state.theater_mode;
             snap.notifs             = state.notifs;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
@@ -2912,11 +2916,34 @@ int main(int argc, char* argv[]) {
         }
 
         // ── Render cameras into per-eye FBOs ──────────────────────────────────
+        // Theater mode: compute a letterbox/pillarbox sub-viewport that preserves
+        // the camera's native aspect ratio. Black bars are filled by glClear().
+        // When theater_mode is false the camera fills the entire FBO (legacy).
+        auto make_theater_vp = [&snap](int fw, int fh) -> std::array<int,4> {
+            float cam_ar  = (float)snap.camera_resolution.width
+                          / snap.camera_resolution.height;
+            float disp_ar = (float)fw / fh;
+            int vp_w, vp_h, vp_x, vp_y;
+            if (cam_ar < disp_ar) {        // pillarbox (bars left/right)
+                vp_h = fh; vp_w = (int)(fh * cam_ar);
+                vp_x = (fw - vp_w) / 2; vp_y = 0;
+            } else {                       // letterbox (bars top/bottom)
+                vp_w = fw; vp_h = (int)(fw / cam_ar);
+                vp_x = 0; vp_y = (fh - vp_h) / 2;
+            }
+            return { vp_x, vp_y, vp_w, vp_h };
+        };
+
         // Left eye
         {
             xr.eye_left().bind();
             glClearColor(0.f, 0.f, 0.f, 1.f);
             glClear(GL_COLOR_BUFFER_BIT);
+
+            if (snap.theater_mode) {
+                auto vp = make_theater_vp(xr.eye_left().w, xr.eye_left().h);
+                glViewport(vp[0], vp[1], vp[2], vp[3]);
+            }
 
             bool drew = false;
             if (use_beast_cam && tex_beast != 0) {
@@ -2927,6 +2954,9 @@ int main(int argc, char* argv[]) {
             if (!drew) drew = cameras.draw_owl_left(
                 snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
 
+            if (snap.theater_mode)
+                glViewport(0, 0, xr.eye_left().w, xr.eye_left().h);
+
             xr.eye_left().unbind();
         }
 
@@ -2936,12 +2966,20 @@ int main(int argc, char* argv[]) {
             glClearColor(0.f, 0.f, 0.f, 1.f);
             glClear(GL_COLOR_BUFFER_BIT);
 
+            if (snap.theater_mode) {
+                auto vp = make_theater_vp(xr.eye_right().w, xr.eye_right().h);
+                glViewport(vp[0], vp[1], vp[2], vp[3]);
+            }
+
             bool drew = false;
             if (use_beast_cam && tex_beast != 0) {
                 drew = false;  // fallback to OWLsight below
             }
             if (!drew) drew = cameras.draw_owl_right(
                 snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+
+            if (snap.theater_mode)
+                glViewport(0, 0, xr.eye_right().w, xr.eye_right().h);
 
             xr.eye_right().unbind();
         }

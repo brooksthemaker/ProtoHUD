@@ -327,6 +327,11 @@ struct AppState {
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
 
+    // Theater mode: render OWLsight cameras at their native aspect ratio with
+    // black bars filling the remaining FBO area. Letterbox or pillarbox depending
+    // on camera AR vs. display AR. Future: USB cameras fill the black bar regions.
+    bool  theater_mode = false;
+
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;
 
