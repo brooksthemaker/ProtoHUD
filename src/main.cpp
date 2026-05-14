@@ -1636,12 +1636,6 @@ static std::vector<MenuItem> build_menu(
         leaf("Reset Rotation",  [&state]{ state.map_overlay.image_rotate_deg =  0.f; }),
     };
 
-    std::vector<MenuItem> map_opacity_menu = {
-        leaf_sel("25%",  [&state]{ state.map_overlay.opacity = 0.25f; }, [&state]{ return state.map_overlay.opacity == 0.25f; }),
-        leaf_sel("50%",  [&state]{ state.map_overlay.opacity = 0.50f; }, [&state]{ return state.map_overlay.opacity == 0.50f; }),
-        leaf_sel("75%",  [&state]{ state.map_overlay.opacity = 0.75f; }, [&state]{ return state.map_overlay.opacity == 0.75f; }),
-        leaf_sel("100%", [&state]{ state.map_overlay.opacity = 1.00f; }, [&state]{ return state.map_overlay.opacity == 1.00f; }),
-    };
 
     std::vector<MenuItem> map_size_menu = {
         leaf_sel("Small  (200px)", [&state]{ state.map_overlay.size_px = 200.f; }, [&state]{ return state.map_overlay.size_px == 200.f; }),
@@ -1665,7 +1659,9 @@ static std::vector<MenuItem> build_menu(
             state.map_overlay.map_north_deg = state.compass_heading;
             state.map_overlay.calibrated    = true;
         }),
-        submenu("Opacity",              std::move(map_opacity_menu)),
+        slider("Transparency", 0.f, 1.f, 0.05f, "",
+            [&state]{ return state.map_overlay.opacity; },
+            [&state](float v){ state.map_overlay.opacity = v; }),
         submenu("Size",                 std::move(map_size_menu)),
     };
 
