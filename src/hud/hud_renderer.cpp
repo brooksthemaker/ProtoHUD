@@ -453,10 +453,26 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
     // 1. Background fill
     dl->AddConvexPolyFilled(pts, n_pts, col_.background);
 
-    // 2. Camera image or "No Signal" placeholder
+    // 2. Camera image or "No Signal" placeholder — rounded corners match chamfer shape
     if (tex) {
-        dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-                     {x, y}, {x + bw, y + bh});
+        ImDrawFlags corner_flags;
+        switch (cfg.anchor) {
+            case A::TOP_LEFT:
+            case A::BOTTOM_RIGHT:
+                corner_flags = ImDrawFlags_RoundCornersTopLeft | ImDrawFlags_RoundCornersBottomRight;
+                break;
+            case A::TOP_RIGHT:
+            case A::BOTTOM_LEFT:
+                corner_flags = ImDrawFlags_RoundCornersTopRight | ImDrawFlags_RoundCornersBottomLeft;
+                break;
+            default:
+                corner_flags = ImDrawFlags_RoundCornersAll;
+                break;
+        }
+        dl->AddImageRounded(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
+                            {x, y}, {x + bw, y + bh},
+                            {0.f, 0.f}, {1.f, 1.f},
+                            IM_COL32_WHITE, C, corner_flags);
     } else {
         if (font_mono_) ImGui::PushFont(font_mono_);
         dl->AddText({x + bw * 0.5f - 36.f, y + bh * 0.5f - 7.f},
@@ -464,28 +480,7 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
         if (font_mono_) ImGui::PopFont();
     }
 
-    // 3. Mask image overflow at each clipped corner
-    constexpr ImU32 mask = IM_COL32(0, 0, 0, 255);
-    switch (cfg.anchor) {
-        case A::TOP_LEFT:
-        case A::BOTTOM_RIGHT:
-            dl->AddTriangleFilled({x,      y   }, {x+C,    y   }, {x,    y+C   }, mask);
-            dl->AddTriangleFilled({x+bw,   y+bh}, {x+bw-C, y+bh}, {x+bw, y+bh-C}, mask);
-            break;
-        case A::TOP_RIGHT:
-        case A::BOTTOM_LEFT:
-            dl->AddTriangleFilled({x+bw,   y   }, {x+bw-C, y   }, {x+bw, y+C   }, mask);
-            dl->AddTriangleFilled({x,      y+bh}, {x+C,    y+bh}, {x,    y+bh-C}, mask);
-            break;
-        default:
-            dl->AddTriangleFilled({x,      y   }, {x+C,    y   }, {x,    y+C   }, mask);
-            dl->AddTriangleFilled({x+bw,   y   }, {x+bw-C, y   }, {x+bw, y+C   }, mask);
-            dl->AddTriangleFilled({x,      y+bh}, {x+C,    y+bh}, {x,    y+bh-C}, mask);
-            dl->AddTriangleFilled({x+bw,   y+bh}, {x+bw-C, y+bh}, {x+bw, y+bh-C}, mask);
-            break;
-    }
-
-    // 4. Label (top-left)
+    // 3. Label (top-left)
     if (font_mono_) ImGui::PushFont(font_mono_);
     dl->AddText({x + 4.f, y + 4.f}, col_.primary, label);
     if (font_mono_) ImGui::PopFont();
