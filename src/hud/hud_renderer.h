@@ -156,6 +156,7 @@ private:
     void draw_timer_alarm_indicator(NVGcontext* vg, const AppState& s,
                             float fw, float fh);
     void draw_fps_nvg      (NVGcontext* vg, const AppState& snap, float fw, float fh);
+    void draw_map_overlay  (NVGcontext* vg, const AppState& s, float fw, float fh);
 
     // ── ImGui popup draw methods (stay in ImGui pass) ─────────────────────────
     static const char* cardinal_str(float deg);
@@ -215,6 +216,12 @@ private:
                     float fw, float fh, float dt);
 
     ToastRenderer toast_renderer_;
+
+    // Map overlay image state (render-thread only)
+    int         map_img_      = -1;
+    int         map_img_w_    = 0;
+    int         map_img_h_    = 0;
+    std::string map_img_path_;
 
     HudConfig     cfg_;
     HudColors     col_;

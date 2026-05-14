@@ -178,6 +178,23 @@ struct ImuPose {
     float yaw   = 0.0f;
 };
 
+// ── Map overlay ───────────────────────────────────────────────────────────────
+
+struct MapOverlayConfig {
+    bool        enabled             = false;
+    std::string map_path;            // full filesystem path to loaded image
+    float       anchor_x            = 0.5f;   // screen fraction (centre by default)
+    float       anchor_y            = 0.5f;
+    float       size_px             = 300.f;  // half-width of the displayed map in pixels
+    float       opacity             = 0.80f;
+    float       pan_x               = 0.f;    // pixel offset from anchor
+    float       pan_y               = 0.f;
+    float       map_north_deg       = 0.f;    // compass_heading saved at calibration
+    bool        calibrated          = false;
+    bool        rotate_with_heading = true;
+    float       image_rotate_deg    = 0.f;    // manual image rotation offset (degrees)
+};
+
 // ── Particle effects ──────────────────────────────────────────────────────────
 
 enum class EffectType : uint8_t {
@@ -363,6 +380,9 @@ struct AppState {
 
     // Particle effects config (render-thread only)
     EffectsConfig        effects_cfg;
+
+    // Map overlay config (render-thread owned; menu writes while holding mtx)
+    MapOverlayConfig     map_overlay;
 
     // Per-LoRa-node compass marker colors (indexed by node.local_id % 8)
     ImU32 lora_node_colors[8] = {

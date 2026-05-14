@@ -221,6 +221,7 @@ void HudRenderer::load(void* glfw_window) {
 
 void HudRenderer::unload() {
     if (!ctx_) return;
+    if (nvg_ && map_img_ >= 0) { nvgDeleteImage(nvg_, map_img_); map_img_ = -1; }
     if (nvg_) { nvgDeleteGLES2(nvg_); nvg_ = nullptr; }
     ImGui::SetCurrentContext(ctx_);
     ImGui_ImplOpenGL3_Shutdown();
@@ -281,6 +282,7 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
 
     nvgBeginFrame(nvg_, fw, fh, 1.0f);
 
+    draw_map_overlay(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
 
     if (!s.lora_messages.empty()) {
@@ -335,6 +337,72 @@ void HudRenderer::draw_fps_overlay(const AppState& snap, int w, int h, bool acti
     nvgEndFrame(nvg_);
     glDisable(GL_STENCIL_TEST);
     glStencilMask(0xFF);
+}
+
+void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, float fh) {
+    const auto& cfg = s.map_overlay;
+    if (!cfg.enabled) return;
+
+    // Reload image on render thread when path changes
+    if (cfg.map_path != map_img_path_) {
+        if (map_img_ >= 0) { nvgDeleteImage(vg, map_img_); map_img_ = -1; }
+        map_img_path_.clear();
+        if (!cfg.map_path.empty()) {
+            map_img_ = nvgCreateImage(vg, cfg.map_path.c_str(), 0);
+            if (map_img_ >= 0) {
+                nvgImageSize(vg, map_img_, &map_img_w_, &map_img_h_);
+                map_img_path_ = cfg.map_path;
+            }
+        }
+    }
+    if (map_img_ < 0) return;
+
+    const float cx     = fw * cfg.anchor_x + cfg.pan_x;
+    const float cy     = fh * cfg.anchor_y + cfg.pan_y;
+    const float half   = cfg.size_px;
+    const float aspect = (map_img_h_ > 0 && map_img_w_ > 0)
+                         ? (float)map_img_h_ / (float)map_img_w_ : 1.f;
+    const float hw     = half;
+    const float hh     = half * aspect;
+
+    nvgSave(vg);
+    nvgTranslate(vg, cx, cy);
+
+    // Manual image rotation (corrects map orientation) applied first
+    if (cfg.image_rotate_deg != 0.f)
+        nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
+
+    // Heading-up rotation: map counter-rotates as wearer turns
+    if (cfg.rotate_with_heading && cfg.calibrated)
+        nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
+
+    // Clip to square display window to hide rotated corners
+    nvgScissor(vg, -half, -half, half * 2.f, half * 2.f);
+
+    NVGpaint img = nvgImagePattern(vg, -hw, -hh, hw * 2.f, hh * 2.f, 0.f, map_img_, cfg.opacity);
+    nvgBeginPath(vg);
+    nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
+    nvgFillPaint(vg, img);
+    nvgFill(vg);
+
+    nvgResetScissor(vg);
+
+    // Subtle border around the overlay
+    nvgBeginPath(vg);
+    nvgRect(vg, -half, -half, half * 2.f, half * 2.f);
+    nvgStrokeColor(vg, nvgRGBA(100, 130, 160, 160));
+    nvgStrokeWidth(vg, 1.5f);
+    nvgStroke(vg);
+
+    // Red crosshair at centre = wearer's position on the map
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, -9.f, 0.f); nvgLineTo(vg, 9.f, 0.f);
+    nvgMoveTo(vg, 0.f, -9.f); nvgLineTo(vg, 0.f, 9.f);
+    nvgStrokeColor(vg, nvgRGBA(255, 70, 70, 220));
+    nvgStrokeWidth(vg, 1.5f);
+    nvgStroke(vg);
+
+    nvgRestore(vg);
 }
 
 void HudRenderer::draw_fps_nvg(NVGcontext* vg, const AppState& snap, float fw, float fh) {
