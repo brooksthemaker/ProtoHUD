@@ -1,6 +1,6 @@
 # ProtoHUD
 
-A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a protogen costume helmet. It composites zero-copy libcamera frames from two OWLsight CSI cameras into a VITURE Beast XR glasses display (3840×1080 SBS), overlays a Dear ImGui HUD, and integrates audio routing, LoRa mesh radio, a haptic SmartKnob, and GPIO hardware buttons.
+A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a protogen costume helmet. It composites zero-copy libcamera frames from two OWLsight CSI cameras into a VITURE Beast XR glasses display (3840×1080 SBS), overlays a NanoVG HUD and Dear ImGui menu, and integrates audio routing, LoRa mesh radio, a haptic SmartKnob, and GPIO hardware buttons.
 
 Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival) is handled by a companion **RP2350 helmet audio processor** over USB Audio. The CM5 receives pre-processed stereo and routes it to VITURE glasses, headphones, or HDMI.
 
@@ -43,7 +43,8 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 │  GLFW / EGL context  ──► XRDisplay (3840×1080 SBS)                  │
 │                           composite() → ImGui overlay → present()   │
 │                                                                      │
-│  Dear ImGui  ──► HudRenderer (DrawList)  ──► compass, LoRa, audio   │
+│  NanoVG      ──► HudRenderer (NVG pass)  ──► compass, arms, particles│
+│  Dear ImGui  ──► HudRenderer (ImGui pass) ──► menu, PiP, popups      │
 │               ──► MenuSystem (ImGui windows) ──► camera / audio ctrl │
 │                                                                      │
 │  Serial threads:  Teensy (face LEDs) · SmartKnob · LoRa radio       │
@@ -65,8 +66,10 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 1. Each OWLsight camera DMA buffer imported as a single multi-plane `DRM_FORMAT_NV12` `EGLImageKHR` → bound to `GL_TEXTURE_EXTERNAL_OES`; Mesa V3D handles YCbCr→RGB in the TMU automatically
 2. `samplerExternalOES` fragment shader draws into per-eye `gl::Fbo` (1920×1080 each)
 3. `xr.composite()` — blits both FBOs side-by-side into default framebuffer
-4. `hud.begin_frame()` → `draw_frame()` → `menu.draw()` → `render_overlay()` — ImGui on top
-5. `xr.present()` — `glfwSwapBuffers` + `glfwPollEvents`
+4. `hud.set_dt(dt)` → `draw_hud_frame()` — NanoVG HUD chrome (compass, arms, particles)
+5. `hud.draw_toasts()` — NanoVG toast notification pass
+6. `hud.begin_menu_frame()` → `menu.draw()` → `hud.render_menu_overlay()` — ImGui menu + PiP on top
+7. `xr.present()` — `glfwSwapBuffers` + `glfwPollEvents`
 
 Optional async timewarp warps each eye FBO using the latest IMU pose before compositing, reducing rotational latency to ~4 ms.
 
@@ -619,7 +622,7 @@ Or set `"android"."enabled": true` in `config.json` to auto-start on launch.
 Both the USB camera PiP and the Android mirror overlay use the same anchor system.
 
 ```
-┌──────────────────────────────────────────────┐  ← top bar
+┌──────────────────────────────────────────────┐  ← screen top
 │  top_left      top_center      top_right      │
 │                                               │
 │  bottom_left  bottom_center  bottom_right     │
@@ -740,7 +743,7 @@ Menu → Audio → Output → VITURE / Headphones / HDMI
 
 The switch takes effect at the start of the next ALSA period (~5 ms) with no dropout or gap in audio.
 
-The audio strip in the HUD top bar shows the current output and xrun count:
+The audio status appears in the system panel (`Menu → System → System Status`) showing the current output and xrun count:
 
 ```
 AU → VITURE  X:0
@@ -771,41 +774,53 @@ AU → VITURE  X:0
 
 ## HUD Layout
 
+The HUD is rendered by NanoVG as a single cohesive unit anchored to the screen bottom. All elements share a common geometry — the compass tape sits flush at the screen edge, and the indicator arms radiate upward from its corners at 130°.
+
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  ░░░░░░░░░  Top bar (background fill, no border)           Audio strip       │
-│             [clock · unread message badge]           AU → VITURE  X:0  ████ │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ ● Proot      │                                        │ FACE                │
-│ ● LoRa       │                                        │ Connected           │
-│ ● Interface  │      Left eye / Right eye camera       │ Effect: Idle        │
-│ ● Left Cam   │      (stereo SBS 3840×1080)            │ Palette: #0         │
-│ ● Right Cam  │                                        ├─────────────────────┤
-│ ● Cam 1      │  [LoRa messages panel — left side,     │ LORA NODES          │
-│ ● Cam 2      │   shown only when messages present]    │ NodeName  045° 1.2km│
-│ ● Audio      │                                        │   RSSI:-87 SNR:6 8s │
-│ ● Android    │                                        │                     │
-├─────────────────────────────────────────────────────────────────────────────┤
-│░░░░░░░░░░░░░░░░░░░░░  Compass tape  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│                         [camera feed — stereo SBS]                          │
+│                                                                              │
+│  [LoRa msg panel]                                  [toast notifications →]  │
+│                                                                              │
+│        ●●●● Face arm                  Clock arm ●●●●                        │
+│       ●●●● Left arm    Compass    Right arm ●●●●                             │
+│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│░░░░░░░░░░░░░░░  Compass tape (ticks · cardinal labels · degree labels)  ░░░░│
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Health indicator column** (left edge, below top bar):
-Each row shows a filled dot — teal = OK, red = fault — followed by its label.
+**Left arm** (diagonal from left compass edge, extending upward-left):
 
-| Label | Subsystem |
-|-------|-----------|
-| Proot | Prototracer face LED controller (Teensy) |
+| Dot | Subsystem |
+|-----|-----------|
+| Proot | Prototracer / Protoface face LED controller |
 | LoRa | LoRa mesh radio |
 | Interface | SmartKnob haptic controller |
-| Left Cam | OWLsight left CSI camera |
-| Right Cam | OWLsight right CSI camera |
+| WiFi | Network connectivity |
+
+**Right arm** (diagonal from right compass edge, extending upward-right):
+
+| Dot | Subsystem |
+|-----|-----------|
+| L.Cam | OWLsight left CSI camera |
+| R.Cam | OWLsight right CSI camera |
 | Cam 1 | USB camera 1 (PiP source) |
 | Cam 2 | USB camera 2 (PiP source) |
-| Audio | Spatial audio engine |
-| Android | Android screen mirror (scrcpy) |
 
-Background opacity of the health panel is configurable via `hud.health_panel_opacity` (0.0–1.0).
+**Face arm** — outboard of the left arm, shows Protoface LED panel state: Effect, Mode (Palette/GIF), Brightness, Control (HUD/AUTO).
+
+**Clock arm** — outboard of the right arm, shows current time and optionally date.
+
+**Timer arm** — further outboard right, visible only when a timer or alarm is active: `TMR MM:SS` / `ALM HH:MM`.
+
+**LoRa arm** — outboard right, shows active LoRa node positions: node name, bearing, distance.
+
+**LoRa panel** — scrolling message log at the far left edge, shown only when LoRa messages are present.
+
+**Toasts** — slide-in notification cards from the right screen edge. Auto-dismiss after a configurable timeout; action buttons appear when a toast is focused (knob navigates them).
+
+Background opacity of the indicator arms is configurable via `hud.health_panel_opacity` (0.0–1.0).
 
 ---
 
@@ -1174,7 +1189,7 @@ If the card is not listed, the RP2350 is not connected or not enumerated. Connec
 aplay -l     # look for VITUREXRGlasses, Headphones, vc4hdmi0
 ```
 
-**Check the audio strip** in the HUD top bar — `AU → VITURE  X:0` is normal. A rising xrun count (X:N) means the system is too busy; try reducing camera resolution. Also check that the **Audio** indicator in the left-side health column is teal (not red).
+**Check audio status** in the system panel (`Menu → System → System Status`) — `AU → VITURE  X:0` is normal. A rising xrun count (X:N) means the system is too busy; try reducing camera resolution.
 
 **Check group membership:**
 
@@ -1265,7 +1280,8 @@ ln -sf build/protohud ~/ProtoHUD/protohud
 │   │   ├── v4l2_camera.h/.cpp      — V4L2 USB camera capture
 │   │   └── viture_camera.h/.cpp    — Beast built-in passthrough camera
 │   ├── hud/
-│   │   └── hud_renderer.h/.cpp     — Dear ImGui DrawList HUD
+│   │   ├── hud_renderer.h/.cpp     — NanoVG HUD chrome + ImGui menu overlay
+│   │   └── toast_renderer.h/.cpp   — slide-in toast notification overlay (NanoVG)
 │   ├── menu/
 │   │   └── menu_system.h/.cpp      — stack-based ImGui menu
 │   ├── vitrue/
@@ -1281,6 +1297,8 @@ ln -sf build/protohud ~/ProtoHUD/protohud
 │   │   ├── shm_frame_reader.h/.cpp     — /dev/shm/protoface_frame → GL texture
 │   │   ├── lora_radio.h/.cpp
 │   │   └── smartknob.h/.cpp
+│   ├── sensor/
+│   │   └── mpu9250.h/.cpp          — MPU-9250 I2C backup compass (50 Hz heading)
 │   └── audio/
 │       └── audio_engine.h/.cpp     — ALSA USB capture → gain → playback routing
 ├── assets/shaders/
@@ -1308,6 +1326,7 @@ ProtoHUD integrates:
 - **SmartKnob** (Scott Bezek) — haptic input knob firmware
 - **VITURE XR SDK** — proprietary — XR glasses display & IMU
 - **OpenCV** — Apache 2.0 — USB camera decode
+- **NanoVG** (Mikko Mononen) — zlib — vector graphics for the HUD overlay
 - **nlohmann/json** — MIT — config parsing
 
 See individual projects for full license details.
