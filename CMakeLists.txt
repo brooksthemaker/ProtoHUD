@@ -72,6 +72,14 @@ pkg_check_modules(LIBGPIOD REQUIRED libgpiod)
 # ALSA (audio capture from RP2350 USB Audio + playback to output device)
 pkg_check_modules(ALSA REQUIRED alsa)
 
+# ZBar (QR / barcode scanning) — optional; install with: sudo apt install libzbar-dev
+pkg_check_modules(ZBAR zbar)
+if(ZBAR_FOUND)
+    message(STATUS "ZBar found — QR scanning enabled")
+else()
+    message(STATUS "ZBar not found — QR scanning disabled (sudo apt install libzbar-dev)")
+endif()
+
 # ── Dear ImGui (vendored source, no external install required) ───────────────
 # Fetched once by CMake; cached in build/_deps after first configure.
 include(FetchContent)
@@ -171,6 +179,7 @@ set(SOURCES
     src/net/bt_monitor.cpp
     src/crash_reporter.cpp
     src/capture.cpp
+    src/qr_scanner.cpp
     src/splash.cpp
     src/nanovg_gl_impl.cpp
     src/hud/toast_renderer.cpp
@@ -192,6 +201,7 @@ target_include_directories(protohud PRIVATE
     ${GLFW3_INCLUDE_DIRS}
     ${LIBGPIOD_INCLUDE_DIRS}
     ${ALSA_INCLUDE_DIRS}
+    $<$<BOOL:${ZBAR_FOUND}>:${ZBAR_INCLUDE_DIRS}>
 )
 
 target_link_libraries(protohud PRIVATE
@@ -207,7 +217,12 @@ target_link_libraries(protohud PRIVATE
     ${ALSA_LIBRARIES}
     nlohmann_json::nlohmann_json
     Threads::Threads
+    $<$<BOOL:${ZBAR_FOUND}>:${ZBAR_LIBRARIES}>
 )
+
+if(ZBAR_FOUND)
+    target_compile_definitions(protohud PRIVATE HAVE_ZBAR)
+endif()
 
 target_compile_options(protohud PRIVATE
     ${LIBCAMERA_CFLAGS_OTHER}

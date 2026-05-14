@@ -336,6 +336,12 @@ struct AppState {
     // Photo capture: set by menu or GPIO long-press; consumed by the render thread.
     CaptureRequest capture_request = CaptureRequest::None;
 
+    // QR / barcode scanning (requires libzbar-dev).
+    // qr_scan_main: periodic glReadPixels from OWLsight FBO → ZBar.
+    // qr_scan_usb:  scanned in the USB capture thread from the raw BGR frame.
+    bool qr_scan_main = false;
+    bool qr_scan_usb  = false;
+
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;
 

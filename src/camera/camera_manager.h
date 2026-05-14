@@ -14,6 +14,7 @@
 #include <opencv2/videoio.hpp>
 
 namespace libcamera { class CameraManager; }
+class QrScanner;
 
 struct CamConfig {
     int         libcamera_id = 0;
@@ -125,6 +126,12 @@ public:
     bool usb2_reconnect_enabled() const { return usb2_reconnect_; }
     bool usb3_reconnect_enabled() const { return usb3_reconnect_; }
 
+    // ── QR / barcode scanning ─────────────────────────────────────────────────
+    // set_qr_scanner: register the shared scanner instance (call before init).
+    // enable_qr_usb:  hot-toggle USB scanning from any thread (atomic).
+    void set_qr_scanner(QrScanner* s)  { qr_scanner_  = s; }
+    void enable_qr_usb(bool v)         { qr_scan_usb_ = v; }
+
     // ── USB brightness (software multiplier, safe to call from any thread) ────
     void  set_usb1_brightness(float v) { usb1_brightness_ = v; }
     void  set_usb2_brightness(float v) { usb2_brightness_ = v; }
@@ -217,6 +224,9 @@ private:
     std::atomic<float> usb2_auto_brightness_target_ { 100.f };
     std::atomic<float> usb3_auto_brightness_target_ { 100.f };
 
-    std::atomic<bool> running_ { false };
+    std::atomic<bool> running_     { false };
     std::thread       usb_thread_;
+
+    QrScanner*        qr_scanner_  { nullptr };
+    std::atomic<bool> qr_scan_usb_ { false };
 };

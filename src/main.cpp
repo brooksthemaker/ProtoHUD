@@ -36,6 +36,7 @@
 #include "net/bt_monitor.h"
 #include "crash_reporter.h"
 #include "capture.h"
+#include "qr_scanner.h"
 #include "splash.h"
 
 #ifndef GIT_HASH
@@ -562,6 +563,10 @@ static std::vector<MenuItem> build_menu(
         leaf("Capture Left",   [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Left;   }),
         leaf("Capture Right",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Right;  }),
         leaf("Capture Stereo", [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Stereo; }),
+        toggle("QR Scan Main Cams", [&state]{ return state.qr_scan_main; },
+                                    [&state](bool v){ state.qr_scan_main = v; }),
+        toggle("QR Scan USB Cams",  [&state]{ return state.qr_scan_usb; },
+                                    [&state](bool v){ state.qr_scan_usb = v; }),
         submenu("Digital Zoom", std::move(zoom_menu)),
         submenu("Focus Mode",  std::move(focus_modes)),
         slider("Focus Position", 0.f, 1000.f, 50.f, "",
@@ -2471,6 +2476,19 @@ int main(int argc, char* argv[]) {
 
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
     protoface_ctrl.start();   // connects async; no-op if socket absent
+
+    // QR / barcode scanner — active when either scan toggle is enabled.
+    QrScanner qr_scanner;
+    qr_scanner.set_callback([&state](const std::string& text, const std::string& type) {
+        Notification n;
+        n.type          = NotifType::App;
+        n.title         = type + " Detected";
+        n.body          = text;
+        n.auto_dismiss_s = 12.f;
+        std::lock_guard lk(state.mtx);
+        state.notifs.push(std::move(n));
+    });
+    cameras.set_qr_scanner(&qr_scanner);
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
     if (!knob.start())   std::cerr << "[main] SmartKnob not available on " << knob_port << "\n";
 
@@ -2871,6 +2889,8 @@ int main(int argc, char* argv[]) {
             snap.zoom_right         = state.zoom_right;
             snap.theater_mode       = state.theater_mode;
             snap.capture_request    = state.capture_request;
+            snap.qr_scan_main       = state.qr_scan_main;
+            snap.qr_scan_usb        = state.qr_scan_usb;
             snap.notifs             = state.notifs;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
@@ -3035,6 +3055,25 @@ int main(int argc, char* argv[]) {
         // Reads directly from the camera eye FBOs (no HUD). Async PNG write.
         if (snap.capture_request != CaptureRequest::None)
             do_capture(snap.capture_request, xr, cfg_photo_dir, state);
+
+        // ── QR scan — main cameras ────────────────────────────────────────────
+        // Periodic glReadPixels from the left eye FBO (rate-limited to 2 Hz by
+        // the timer below; ZBar's own interval also guards the worker thread).
+        cameras.enable_qr_usb(snap.qr_scan_usb);
+        if (snap.qr_scan_main) {
+            static auto s_last_qr = std::chrono::steady_clock::now();
+            auto now_qr = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now_qr - s_last_qr).count() >= 500) {
+                s_last_qr = now_qr;
+                const int qw = xr.eye_left().w, qh = xr.eye_left().h;
+                std::vector<uint8_t> px(static_cast<size_t>(qw * qh * 4));
+                xr.eye_left().bind();
+                glReadPixels(0, 0, qw, qh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                xr.eye_left().unbind();
+                qr_scanner.submit_rgba(px.data(), qw, qh);
+            }
+        }
 
         // ── Composite or timewarp ─────────────────────────────────────────────
         ImuPose current_pose = xr.get_latest_imu_pose();
