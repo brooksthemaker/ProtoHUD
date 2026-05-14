@@ -221,8 +221,8 @@
     "wifi_iface": "wlan0",
     "ssh_port":   22,
     "crash_dir":  "/tmp",
-    "photo_dir":  "/home/user/Pictures/protohud",
-    "map_dir":    "/home/user/Pictures/protohud/maps"
+    "photo_dir":  "",
+    "map_dir":    ""
   },
   "splash": {
     "enabled":       true,
