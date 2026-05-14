@@ -205,7 +205,8 @@ static std::vector<MenuItem> build_menu(
         IFaceController*  teensy_option   = nullptr,
         IFaceController*  fp_option       = nullptr,
         // Panel preview toggle (Protoface shm → ProtoHUD ImGui window)
-        bool*             panel_preview_pp = nullptr)
+        bool*             panel_preview_pp = nullptr,
+        std::string       map_dir         = "/home/user/Pictures/protohud/maps")
 {
     (void)lora; (void)knob;
 
@@ -1588,6 +1589,86 @@ static std::vector<MenuItem> build_menu(
             [menu_sys_pp]{ return (*menu_sys_pp)->anchor() == MenuAnchor::BottomRight; }),
     };
 
+    // ── Map Overlay ───────────────────────────────────────────────────────────
+    // Scan map directory for PNG/JPG files at menu-build time.
+    auto scan_map_dir = [](const std::string& dir) {
+        std::vector<std::string> paths;
+        std::error_code ec;
+        for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+            auto ext = e.path().extension().string();
+            if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+                ext == ".PNG" || ext == ".JPG" || ext == ".JPEG")
+                paths.push_back(e.path().string());
+        }
+        std::sort(paths.begin(), paths.end());
+        return paths;
+    };
+    auto map_files = scan_map_dir(map_dir);
+
+    std::vector<MenuItem> map_select_items;
+    for (auto& path : map_files) {
+        std::string name = std::filesystem::path(path).stem().string();
+        map_select_items.push_back(
+            leaf_sel(name,
+                [&state, path]{ std::lock_guard<std::mutex> lk(state.mtx); state.map_overlay.map_path = path; },
+                [&state, path]{ return state.map_overlay.map_path == path; }));
+    }
+    if (map_select_items.empty())
+        map_select_items.push_back(leaf("(no maps in " + map_dir + ")", []{}));
+
+    std::vector<MenuItem> map_pan_menu = {
+        leaf("Left  -20px",  [&state]{ state.map_overlay.pan_x -= 20.f; }),
+        leaf("Right +20px",  [&state]{ state.map_overlay.pan_x += 20.f; }),
+        leaf("Up    -20px",  [&state]{ state.map_overlay.pan_y -= 20.f; }),
+        leaf("Down  +20px",  [&state]{ state.map_overlay.pan_y += 20.f; }),
+        leaf("Reset Pan",    [&state]{ state.map_overlay.pan_x = 0.f; state.map_overlay.pan_y = 0.f; }),
+    };
+
+    std::vector<MenuItem> map_rotate_menu = {
+        leaf("CCW  -90°",       [&state]{ state.map_overlay.image_rotate_deg -= 90.f; }),
+        leaf("CCW  -45°",       [&state]{ state.map_overlay.image_rotate_deg -= 45.f; }),
+        leaf("CCW  -15°",       [&state]{ state.map_overlay.image_rotate_deg -= 15.f; }),
+        leaf("CCW   -5°",       [&state]{ state.map_overlay.image_rotate_deg -=  5.f; }),
+        leaf("CW    +5°",       [&state]{ state.map_overlay.image_rotate_deg +=  5.f; }),
+        leaf("CW   +15°",       [&state]{ state.map_overlay.image_rotate_deg += 15.f; }),
+        leaf("CW   +45°",       [&state]{ state.map_overlay.image_rotate_deg += 45.f; }),
+        leaf("CW   +90°",       [&state]{ state.map_overlay.image_rotate_deg += 90.f; }),
+        leaf("Reset Rotation",  [&state]{ state.map_overlay.image_rotate_deg =  0.f; }),
+    };
+
+    std::vector<MenuItem> map_opacity_menu = {
+        leaf_sel("25%",  [&state]{ state.map_overlay.opacity = 0.25f; }, [&state]{ return state.map_overlay.opacity == 0.25f; }),
+        leaf_sel("50%",  [&state]{ state.map_overlay.opacity = 0.50f; }, [&state]{ return state.map_overlay.opacity == 0.50f; }),
+        leaf_sel("75%",  [&state]{ state.map_overlay.opacity = 0.75f; }, [&state]{ return state.map_overlay.opacity == 0.75f; }),
+        leaf_sel("100%", [&state]{ state.map_overlay.opacity = 1.00f; }, [&state]{ return state.map_overlay.opacity == 1.00f; }),
+    };
+
+    std::vector<MenuItem> map_size_menu = {
+        leaf_sel("Small  (200px)", [&state]{ state.map_overlay.size_px = 200.f; }, [&state]{ return state.map_overlay.size_px == 200.f; }),
+        leaf_sel("Medium (300px)", [&state]{ state.map_overlay.size_px = 300.f; }, [&state]{ return state.map_overlay.size_px == 300.f; }),
+        leaf_sel("Large  (450px)", [&state]{ state.map_overlay.size_px = 450.f; }, [&state]{ return state.map_overlay.size_px == 450.f; }),
+        leaf_sel("Full   (600px)", [&state]{ state.map_overlay.size_px = 600.f; }, [&state]{ return state.map_overlay.size_px == 600.f; }),
+    };
+
+    std::vector<MenuItem> map_overlay_menu = {
+        toggle("Enabled",
+            [&state]{ return state.map_overlay.enabled; },
+            [&state](bool v){ state.map_overlay.enabled = v; }),
+        submenu("Select Map",           std::move(map_select_items)),
+        submenu("Rotate Image",         std::move(map_rotate_menu)),
+        submenu("Pan",                  std::move(map_pan_menu)),
+        toggle("Rotate with Heading",
+            [&state]{ return state.map_overlay.rotate_with_heading; },
+            [&state](bool v){ state.map_overlay.rotate_with_heading = v; }),
+        leaf("Set My Direction", [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.map_overlay.map_north_deg = state.compass_heading;
+            state.map_overlay.calibrated    = true;
+        }),
+        submenu("Opacity",              std::move(map_opacity_menu)),
+        submenu("Size",                 std::move(map_size_menu)),
+    };
+
     std::vector<MenuItem> hud_menu = {
         toggle("Flip to Top",
             [hud_cfg]{ return hud_cfg->hud_flip_vertical; },
@@ -1599,6 +1680,7 @@ static std::vector<MenuItem> build_menu(
         submenu("Clock",         std::move(clock_menu)),
         submenu("Color",         std::move(color_options_menu)),
         submenu("Menu Position", std::move(menu_position_menu)),
+        submenu("Map Overlay",   std::move(map_overlay_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
@@ -2225,6 +2307,7 @@ int main(int argc, char* argv[]) {
     std::string cfg_wifi_iface = "wlan0";
     std::string cfg_crash_dir  = "/tmp";
     std::string cfg_photo_dir  = "/home/user/Pictures/protohud";
+    std::string cfg_map_dir    = "/home/user/Pictures/protohud/maps";
     int         cfg_ssh_port   = 22;
     if (cfg.contains("system")) {
         auto& js         = cfg["system"];
@@ -2232,8 +2315,11 @@ int main(int argc, char* argv[]) {
         cfg_wifi_iface   = js.value("wifi_iface", cfg_wifi_iface);
         cfg_crash_dir    = js.value("crash_dir",  cfg_crash_dir);
         cfg_photo_dir    = js.value("photo_dir",  cfg_photo_dir);
+        cfg_map_dir      = js.value("map_dir",    cfg_map_dir);
         cfg_ssh_port     = js.value("ssh_port",   cfg_ssh_port);
     }
+    // Ensure the maps directory exists
+    std::filesystem::create_directories(cfg_map_dir);
     state.ssh.port = cfg_ssh_port;
 
     SplashConfig splash_cfg;
@@ -2549,7 +2635,8 @@ int main(int argc, char* argv[]) {
                                &active_face,
                                static_cast<IFaceController*>(&teensy),
                                static_cast<IFaceController*>(&protoface_ctrl),
-                               &panel_preview_enabled));
+                               &panel_preview_enabled,
+                               cfg_map_dir));
     menu_ptr = &menu;
 
     // Restore menu style from a previous session.
@@ -2878,6 +2965,7 @@ int main(int argc, char* argv[]) {
             snap.pp_cfg             = state.pp_cfg;
             snap.timer_alarm        = state.timer_alarm;
             snap.effects_cfg        = state.effects_cfg;
+            snap.map_overlay        = state.map_overlay;
             snap.sys_metrics        = state.sys_metrics;
             snap.wifi               = state.wifi;
             snap.ping               = state.ping;
