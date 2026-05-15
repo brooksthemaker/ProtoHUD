@@ -39,7 +39,8 @@ static constexpr uint8_t AK_MODE_CONT2_16BIT = 0x16; // 100 Hz, 16-bit output
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
 
-Mpu9250::Mpu9250(const Config& cfg) : cfg_(cfg), mount_rotation_(cfg.mount_rotation) {}
+Mpu9250::Mpu9250(const Config& cfg)
+    : cfg_(cfg), mount_rotation_(cfg.mount_rotation), heading_axes_(cfg.heading_axes) {}
 
 Mpu9250::~Mpu9250() { stop(); }
 
@@ -148,53 +149,69 @@ bool Mpu9250::init_ak8963() {
 void Mpu9250::set_mount_rotation(int r) { mount_rotation_.store(r & 3); }
 int  Mpu9250::get_mount_rotation() const { return mount_rotation_.load(); }
 
+void Mpu9250::set_heading_axes(int a) { heading_axes_.store(a); }
+int  Mpu9250::get_heading_axes() const { return heading_axes_.load(); }
+
 // ── Heading computation ───────────────────────────────────────────────────────
-// Tilt-compensated heading using accelerometer pitch/roll.
-// Axis convention for GY-9250 breakout (chip face up, connector down):
-//   MPU accel: X = forward, Y = right, Z = up (right-hand)
-//   AK8963 mag: X = forward, Y = left, Z = up
-//   (AK8963 Y is inverted relative to MPU Y — applied below)
-// Output is degrees true north, 0–360, increasing clockwise.
+// Preset 0 (default):  chip face-up,       X=fwd, Y=left, Z=up
+//   → tilt-compensated atan2(-my_h, mx_h)
+// Presets 1-5: chip in non-horizontal orientation — flat (no tilt comp)
+//   The formula is atan2(-B, A) where A/B are chosen per preset:
+//   1  ZY   chip face-forward / perpendicular to face (Z=fwd, Y=left)
+//   2  XZ   chip on its left side  (X=fwd, Z=left)
+//   3  ZX   chip face-forward, rotated 90° (Z=fwd, X=left)
+//   4  YX   chip on its right side (Y=fwd, X=left)
+//   5  YZ   chip face-up, alt 90°  (Y=fwd, Z=left)
+// mount_rotation (0-3) first rotates the XY plane in 90° CCW steps; use
+// this for fine-tuning within a given preset.
 
 float Mpu9250::compute_heading(float mx, float my, float mz,
                                 int16_t ax, int16_t ay, int16_t az) const {
-    // Normalize accelerometer to unit vector
-    float ax_f = ax / 16384.0f; // ±2g range → LSB/g = 16384
+    float ax_f = ax / 16384.0f;
     float ay_f = ay / 16384.0f;
     float az_f = az / 16384.0f;
 
-    // Rotate mag and accel XY plane to compensate for non-standard chip mounting.
-    // Each step is 90° CCW: (x, y) → (−y, x).  Z is always vertical so unchanged.
+    // In-plane mounting correction (XY rotation, 90° CCW per step)
     for (int i = 0, r = mount_rotation_.load() & 3; i < r; ++i) {
         float t;
         t = mx; mx = -my; my = t;
         t = ax_f; ax_f = -ay_f; ay_f = t;
     }
-    float norm  = sqrtf(ax_f*ax_f + ay_f*ay_f + az_f*az_f);
 
-    if (norm < 0.1f) {
-        // Sensor in free-fall or uninitialised — flat heading only
-        float heading = atan2f(-my, mx) * (180.0f / M_PI)
-                      + cfg_.declination_deg + cfg_.heading_offset;
-        if (heading < 0.f)   heading += 360.f;
-        if (heading >= 360.f) heading -= 360.f;
-        return heading;
+    // Select axis pair for the heading formula atan2(-B, A)
+    const int axes = heading_axes_.load();
+    float A, B;
+    switch (axes) {
+        case 1:  A =  mz; B =  my; break;   // ZY  — face-forward
+        case 2:  A =  mx; B = -mz; break;   // XZ  — left-side
+        case 3:  A = -mz; B =  mx; break;   // ZX  — face-forward 90°
+        case 4:  A =  my; B = -mx; break;   // YX  — right-side
+        case 5:  A =  my; B =  mz; break;   // YZ  — face-up alt
+        default: A =  mx; B =  my; break;   // 0: XY standard
     }
-    ax_f /= norm; ay_f /= norm; az_f /= norm;
 
-    // Pitch and roll from accelerometer (small-angle NED convention)
-    float pitch = asinf(-ax_f);               // nose-up positive
-    float roll  = atan2f(ay_f, az_f);         // right-up positive
+    float heading;
+    if (axes == 0) {
+        // Full tilt-compensated heading for the standard face-up orientation
+        float norm = sqrtf(ax_f*ax_f + ay_f*ay_f + az_f*az_f);
+        if (norm >= 0.1f) {
+            ax_f /= norm; ay_f /= norm; az_f /= norm;
+            float pitch = asinf(-ax_f);
+            float roll  = atan2f(ay_f, az_f);
+            float cp = cosf(pitch), sp = sinf(pitch);
+            float cr = cosf(roll),  sr = sinf(roll);
+            float mx_h =  mx * cp + mz * sp;
+            float my_h =  mx * sr * sp + my * cr - mz * sr * cp;
+            heading = atan2f(-my_h, mx_h) * (180.0f / M_PI);
+        } else {
+            heading = atan2f(-B, A) * (180.0f / M_PI);
+        }
+    } else {
+        // Flat heading for non-face-up orientations (no tilt compensation)
+        heading = atan2f(-B, A) * (180.0f / M_PI);
+    }
 
-    float cp = cosf(pitch), sp = sinf(pitch);
-    float cr = cosf(roll),  sr = sinf(roll);
-
-    // Rotate magnetometer into horizontal plane
-    float mx_h =  mx * cp + mz * sp;
-    float my_h =  mx * sr * sp + my * cr - mz * sr * cp;
-
-    float heading = atan2f(-my_h, mx_h) * (180.0f / M_PI)
-                  + cfg_.declination_deg + cfg_.heading_offset;
+    heading += cfg_.declination_deg + cfg_.heading_offset;
     if (heading < 0.f)   heading += 360.f;
     if (heading >= 360.f) heading -= 360.f;
     return heading;

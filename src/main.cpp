@@ -1346,6 +1346,27 @@ static std::vector<MenuItem> build_menu(
             [mpu9250]{ return mpu9250 && mpu9250->get_mount_rotation() == 3; }),
     };
 
+    std::vector<MenuItem> mpu_axes_menu = {
+        leaf_sel("0 — XY (chip flat, default)",
+            [mpu9250]{ if (mpu9250) mpu9250->set_heading_axes(0); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_heading_axes() == 0; }),
+        leaf_sel("1 — ZY (chip face-forward)",
+            [mpu9250]{ if (mpu9250) mpu9250->set_heading_axes(1); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_heading_axes() == 1; }),
+        leaf_sel("2 — XZ (chip on left side)",
+            [mpu9250]{ if (mpu9250) mpu9250->set_heading_axes(2); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_heading_axes() == 2; }),
+        leaf_sel("3 — ZX (chip face-forward 90°)",
+            [mpu9250]{ if (mpu9250) mpu9250->set_heading_axes(3); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_heading_axes() == 3; }),
+        leaf_sel("4 — YX (chip on right side)",
+            [mpu9250]{ if (mpu9250) mpu9250->set_heading_axes(4); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_heading_axes() == 4; }),
+        leaf_sel("5 — YZ (chip face-up alt)",
+            [mpu9250]{ if (mpu9250) mpu9250->set_heading_axes(5); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_heading_axes() == 5; }),
+    };
+
     std::vector<MenuItem> onboard_compass_menu = {
         toggle("Active",
             [mpu9250]{ return mpu9250 && mpu9250->is_running(); },
@@ -1361,6 +1382,7 @@ static std::vector<MenuItem> build_menu(
                 else   mpu9250->end_calibration();
             }),
         submenu("Mounting Orientation", std::move(mpu_mount_menu)),
+        submenu("Heading Axes",         std::move(mpu_axes_menu)),
     };
 
     std::vector<MenuItem> compass_bg_color_menu = make_color_items({
@@ -2442,6 +2464,7 @@ int main(int argc, char* argv[]) {
         mpu_cfg.declination_deg = jval(jm, "declination_deg", 0.0f);
         mpu_cfg.heading_offset  = jval(jm, "heading_offset",  0.0f);
         mpu_cfg.mount_rotation  = jval(jm, "mount_rotation",  0);
+        mpu_cfg.heading_axes    = jval(jm, "heading_axes",    0);
         if (jm.contains("mag_bias") && jm["mag_bias"].is_array() &&
             jm["mag_bias"].size() >= 3) {
             mpu_cfg.mag_bias_x = jm["mag_bias"][0].get<float>();
@@ -4014,6 +4037,7 @@ int main(int argc, char* argv[]) {
             mpu9250.get_mag_bias(bx, by, bz);
             cfg["mpu9250"]["mag_bias"]       = json::array({ bx, by, bz });
             cfg["mpu9250"]["mount_rotation"] = mpu9250.get_mount_rotation();
+            cfg["mpu9250"]["heading_axes"]   = mpu9250.get_heading_axes();
         }
 
         FILE* f = fopen(cfg_path.c_str(), "w");
