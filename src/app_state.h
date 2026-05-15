@@ -145,7 +145,8 @@ struct NightVisionState {
     float exposure_ev        = 0.0f;  // -3.0 to +3.0
     int   shutter_us         = 33333; // microseconds (40 to 1000000)
     bool  nv_enabled         = false; // night vision preset active (HUD indicator + apply flag)
-    bool  csi_awb_on         = true;  // CSI camera auto white balance (applies to both OWLsight eyes)
+    bool  csi_awb_left       = true;  // left OWLsight auto white balance
+    bool  csi_awb_right      = true;  // right OWLsight auto white balance
     bool  auto_nv            = false; // auto-enable NV when scene is dark
     float auto_nv_gain_threshold = 4.0f; // AnalogueGain above which auto-NV activates
 };
@@ -372,7 +373,8 @@ struct AppState {
     // Theater mode: render OWLsight cameras at their native aspect ratio with
     // black bars filling the remaining FBO area. Letterbox or pillarbox depending
     // on camera AR vs. display AR. Future: USB cameras fill the black bar regions.
-    bool  theater_mode = false;
+    bool  theater_mode    = false;
+    bool  cameras_swapped = false; // swap left ↔ right OWLsight draw assignment
 
     // Photo capture: set by menu or GPIO long-press; consumed by the render thread.
     CaptureRequest capture_request = CaptureRequest::None;
