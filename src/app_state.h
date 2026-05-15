@@ -381,8 +381,10 @@ struct AppState {
     // Theater mode anchor: controls which edge the letterbox/pillarbox bars sit on.
     // Center: cameras pushed to inner edges (meet at seam, black on outer sides).
     // Outside: cameras pushed to outer edges (black gap in centre of display).
+    // Left: both feeds on the right side, black on the left.
+    // Right: both feeds on the left side, black on the right.
     // Top/Bottom: letterbox-mode vertical anchor only.
-    enum class TheaterAnchor { Center = 0, Outside, Top, Bottom };
+    enum class TheaterAnchor { Center = 0, Outside, Left, Right, Top, Bottom };
     TheaterAnchor theater_anchor = TheaterAnchor::Center;
 
     // Photo capture: set by menu or GPIO long-press; consumed by the render thread.

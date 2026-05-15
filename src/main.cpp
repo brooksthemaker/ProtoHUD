@@ -687,6 +687,8 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> theater_pos_menu = {
         leaf_sel("Center",  [&state]{ state.theater_anchor = TA::Center;  }, [&state]{ return state.theater_anchor == TA::Center;  }),
         leaf_sel("Outside", [&state]{ state.theater_anchor = TA::Outside; }, [&state]{ return state.theater_anchor == TA::Outside; }),
+        leaf_sel("Left",    [&state]{ state.theater_anchor = TA::Left;    }, [&state]{ return state.theater_anchor == TA::Left;    }),
+        leaf_sel("Right",   [&state]{ state.theater_anchor = TA::Right;   }, [&state]{ return state.theater_anchor == TA::Right;   }),
         leaf_sel("Top",     [&state]{ state.theater_anchor = TA::Top;     }, [&state]{ return state.theater_anchor == TA::Top;     }),
         leaf_sel("Bottom",  [&state]{ state.theater_anchor = TA::Bottom;  }, [&state]{ return state.theater_anchor == TA::Bottom;  }),
         leaf("Reset",       [&state]{ state.theater_anchor = TA::Center;  }),
@@ -2481,9 +2483,9 @@ int main(int argc, char* argv[]) {
         using TA = AppState::TheaterAnchor;
         static const std::pair<const char*, TA> kAnchors[] = {
             {"center",  TA::Center},  {"outside", TA::Outside},
+            {"left",    TA::Left},    {"right",   TA::Right},
             {"top",     TA::Top},     {"bottom",  TA::Bottom},
             // legacy values → nearest equivalent
-            {"left", TA::Outside}, {"right", TA::Outside},
             {"top_left", TA::Outside}, {"top_right", TA::Outside},
             {"bottom_left", TA::Outside}, {"bottom_right", TA::Outside},
         };
@@ -3562,6 +3564,8 @@ int main(int argc, char* argv[]) {
         // right_eye: true for the right eye FBO so horizontal placement mirrors left.
         // Center:  left eye pushes right, right eye pushes left  → cameras touch at seam.
         // Outside: left eye pushes left,  right eye pushes right → cameras on outer edges.
+        // Left:    both feeds on screen-right side, black on screen-left.
+        // Right:   both feeds on screen-left side, black on screen-right.
         auto make_theater_vp = [&snap](int fw, int fh, bool right_eye) -> std::array<int,4> {
             using TA = AppState::TheaterAnchor;
             float cam_ar  = (float)snap.camera_resolution.width
@@ -3578,6 +3582,14 @@ int main(int argc, char* argv[]) {
                     case TA::Outside:
                         // outer edge: left eye pushes left, right eye pushes right
                         vp_x = right_eye ? fw - vp_w : 0;
+                        break;
+                    case TA::Left:
+                        // both feeds on screen-right: both FBOs push to their right edge
+                        vp_x = fw - vp_w;
+                        break;
+                    case TA::Right:
+                        // both feeds on screen-left: both FBOs push to their left edge
+                        vp_x = 0;
                         break;
                     default:
                         vp_x = (fw - vp_w) / 2;
@@ -3889,7 +3901,7 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
         cfg["cameras"]["swapped"] = state.cameras_swapped;
         {
-            static const char* kNames[] = { "center","outside","top","bottom" };
+            static const char* kNames[] = { "center","outside","left","right","top","bottom" };
             cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
         }
 
