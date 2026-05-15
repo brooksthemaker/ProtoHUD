@@ -2643,12 +2643,6 @@ int main(int argc, char* argv[]) {
         last_xr_imu_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         std::lock_guard<std::mutex> lk(state.mtx);
-        const float vals[3] = { roll, pitch, yaw };
-        float raw = vals[static_cast<int>(state.compass_axis)];
-        float bearing = state.compass_invert
-            ? fmod(raw + 360.0f, 360.0f)
-            : fmod(360.0f - raw, 360.0f);
-        state.compass_heading = bearing;
         state.imu_pose = { roll, pitch, yaw };
     });
 
@@ -3465,6 +3459,27 @@ int main(int argc, char* argv[]) {
             snap.notifs             = state.notifs;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
+        }
+
+        // If XR glasses IMU is fresh, recompute compass heading from the selected
+        // axis on the render thread.  axis/invert are only read and written on the
+        // render thread so no mutex is needed — avoids the data race that made the
+        // menu setting invisible to the SDK IMU callback thread.
+        {
+            auto now_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            bool xr_fresh = (now_us - last_xr_imu_us.load()) < 2'000'000ULL;
+            if (xr_fresh) {
+                const float vals[3] = {
+                    snap.imu_pose.roll, snap.imu_pose.pitch, snap.imu_pose.yaw
+                };
+                float raw = vals[static_cast<int>(state.compass_axis)];
+                snap.compass_heading = state.compass_invert
+                    ? fmod(raw + 360.0f, 360.0f)
+                    : fmod(360.0f - raw, 360.0f);
+            }
+            // else: snap.compass_heading already holds the MPU-9250 value from the snapshot
         }
 
         // Smooth compass heading on the render thread so the rate is constant
