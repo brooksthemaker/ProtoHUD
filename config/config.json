@@ -95,6 +95,12 @@
       "baud": 115200,
       "sleep_timeout_s": 30,
       "wake_degrees": 5.0
+    },
+    "wireless_controller": {
+      "port": "/dev/ttyACM3",
+      "baud": 115200,
+      "enabled": false,
+      "_note": "ESP32-C3 USB-serial bridge for ESP-NOW in-paw controller. Set enabled:true and adjust port once the bridge is connected."
     }
   },
   "vitrue": {

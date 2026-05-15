@@ -107,6 +107,8 @@ struct SystemHealth {
     bool knob_ok         = false;
     bool knob_ready      = false;  // Motor calibration complete
     bool gamepad_ok      = false;
+    bool wireless_ok     = false;
+    int  wireless_battery_pct = -1;  // -1 = unknown
     bool cam_owl_left    = false;
     bool cam_owl_right   = false;
     bool cam_usb1        = false;

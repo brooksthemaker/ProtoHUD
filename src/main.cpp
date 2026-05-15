@@ -21,6 +21,7 @@
 #include "camera/viture_camera.h"
 #include "input/gpio_buttons.h"
 #include "input/gamepad_input.h"
+#include "input/wireless_controller.h"
 #include "serial/face_controller.h"
 #include "serial/protoface_controller.h"
 #include "serial/teensy_controller.h"
@@ -2540,14 +2541,21 @@ int main(int argc, char* argv[]) {
 
     // ── Serial devices ────────────────────────────────────────────────────────
 
-    std::string teensy_port = "/dev/ttyACM0";
-    std::string lora_port   = "/dev/ttyUSB0";
-    std::string knob_port   = "/dev/ttyACM1";
-    int         baud        = 115200;
+    std::string teensy_port    = "/dev/ttyACM0";
+    std::string lora_port      = "/dev/ttyUSB0";
+    std::string knob_port      = "/dev/ttyACM1";
+    std::string wireless_port  = "/dev/ttyACM3";
+    bool        wireless_enabled = false;
+    int         baud           = 115200;
 
     if (jser.contains("teensy"))    teensy_port = jser["teensy"].value("port",    teensy_port);
     if (jser.contains("lora"))      lora_port   = jser["lora"].value("port",      lora_port);
     if (jser.contains("smartknob")) knob_port   = jser["smartknob"].value("port", knob_port);
+    if (jser.contains("wireless_controller")) {
+        const auto& jwc = jser["wireless_controller"];
+        wireless_port    = jwc.value("port",    wireless_port);
+        wireless_enabled = jwc.value("enabled", false);
+    }
 
     // Auto-discover serial ports by USB VID:PID when configured paths are absent.
     // Teensy 4.1: VID=0x16C0, PID=0x0483.  LoRa CH340: VID=0x1A86, PID=0x7523.
@@ -2556,10 +2564,11 @@ int main(int argc, char* argv[]) {
     lora_port   = resolve_serial_port(lora_port,   0x1A86, 0x7523);
     knob_port   = resolve_serial_port(knob_port);
 
-    TeensyController     teensy(teensy_port, baud, state);
+    TeensyController     teensy  (teensy_port,   baud, state);
     ProtoFaceController  protoface_ctrl;
-    LoRaRadio            lora  (lora_port,   baud, state);
-    SmartKnob            knob  (knob_port,   baud, state);
+    LoRaRadio            lora    (lora_port,     baud, state);
+    SmartKnob            knob    (knob_port,     baud, state);
+    WirelessController   wireless(wireless_port, baud);
 
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
     protoface_ctrl.start();   // connects async; no-op if socket absent
@@ -2612,6 +2621,38 @@ int main(int argc, char* argv[]) {
     cameras.set_qr_scanner(&qr_scanner);
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
     if (!knob.start())   std::cerr << "[main] SmartKnob not available on " << knob_port << "\n";
+    if (wireless_enabled) {
+        wireless.on_menu([&menu]{
+            if (menu.is_open()) menu.close(); else menu.open();
+        });
+        wireless.on_select([&menu, &hud, &state]{
+            if      (menu.is_open())          menu.select();
+            else if (hud.toast_has_focused()) hud.toast_select(state);
+        });
+        wireless.on_back([&menu, &hud]{
+            if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+            else if (menu.is_open())          menu.back();
+        });
+        wireless.on_nav_up   ([&menu]{ if (menu.is_open()) menu.navigate(-1); });
+        wireless.on_nav_down ([&menu]{ if (menu.is_open()) menu.navigate(+1); });
+        wireless.on_nav_left ([&menu, &hud]{
+            if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+            else if (menu.is_open())          menu.back();
+        });
+        wireless.on_nav_right([&menu, &hud, &state]{
+            if      (hud.toast_has_focused()) hud.toast_navigate(+1);
+            else if (menu.is_open())          menu.select();
+        });
+        wireless.on_af([&cameras]{
+            if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+            if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+        });
+        wireless.on_capture([&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.capture_request = CaptureRequest::Stereo;
+        });
+        wireless.start();
+    }
 
     // Active face backend: prefer Protoface if its socket already exists at startup.
     IFaceController* active_face = ProtoFaceController::socket_exists()
@@ -2918,6 +2959,10 @@ int main(int argc, char* argv[]) {
         // ── Gamepad poll ──────────────────────────────────────────────────────
         gamepad.poll();
 
+        // ── Wireless controller pip state ─────────────────────────────────────
+        bool wc_pip_left  = wireless_enabled && wireless.pip_left_active();
+        bool wc_pip_right = wireless_enabled && wireless.pip_right_active();
+
         // ── Keyboard button emulation (direct GLFW polling, edge-detected) ──
         // 1/2  = toggle PiP left/right    3 = menu select (when open)
         // 3    = toggle manual focus      4 = autofocus both cameras
@@ -3098,10 +3143,12 @@ int main(int argc, char* argv[]) {
                    sizeof(state.lora_node_colors));
         }
         // Overlay-active flags mirror the exact condition used in draw_pip calls.
-        snap.health.cam_usb1_overlay = pip_cam1_overlay_active || pip_left_active  || kb_pip_left;
-        snap.health.cam_usb2_overlay = pip_cam2_overlay_active || pip_right_active || kb_pip_right;
+        snap.health.cam_usb1_overlay = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
+        snap.health.cam_usb2_overlay = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
         snap.health.cam_usb3_overlay = pip_cam3_overlay_active;
-        snap.health.gamepad_ok       = gamepad.connected();
+        snap.health.gamepad_ok          = gamepad.connected();
+        snap.health.wireless_ok         = wireless_enabled && wireless.connected();
+        snap.health.wireless_battery_pct = wireless_enabled ? wireless.battery_pct() : -1;
 
         // Inject live AF lens position into the snapshot (atomic read, no lock needed)
         if (cameras.owl_left())
@@ -3319,12 +3366,12 @@ int main(int argc, char* argv[]) {
 
         hud.draw_pip(tex_usb1, "Cam 1",
                      xr.eye_width(), xr.eye_height(),
-                     pip_cam1_overlay_active || pip_left_active || kb_pip_left,
+                     pip_cam1_overlay_active || pip_left_active || kb_pip_left || wc_pip_left,
                      pip_overlay_cfg1,
                      snap.focus_left, snap.night_vision.nv_enabled);
         hud.draw_pip(tex_usb2, "Cam 2",
                      xr.eye_width(), xr.eye_height(),
-                     pip_cam2_overlay_active || pip_right_active || kb_pip_right,
+                     pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right,
                      pip_overlay_cfg2,
                      snap.focus_right, snap.night_vision.nv_enabled);
         hud.draw_pip(tex_usb3, "Cam 3",

@@ -146,3 +146,56 @@ struct KnobPositionPayload {
     int32_t  angle_milli;    // absolute angle in millidegrees
 };
 #pragma pack(pop)
+
+// ── Wireless Controller (ESP32-C3 USB-serial bridge + ESP-NOW peer) ───────────
+// Frame format: same as all other serial devices — [0xAA][0x55][CMD][LEN][...][CRC8]
+//
+// Bridge firmware responsibilities:
+//   1. Receive ESP-NOW packets from the in-paw controller.
+//   2. Wrap each packet in the ProtoHUD serial frame and write to USB CDC serial.
+//   3. Receive HAPTIC / LED frames from CM5 and forward via ESP-NOW to controller.
+//
+// Button IDs (WcButton::*) must match the controller firmware exactly.
+
+namespace WcCmd {
+    // Bridge → CM5
+    static constexpr uint8_t BUTTON_EVENT = 0x01;  // WcButtonPayload
+    static constexpr uint8_t BATTERY      = 0x02;  // percent(1), 0–100
+
+    // CM5 → Bridge (forwarded to controller via ESP-NOW)
+    static constexpr uint8_t HAPTIC       = 0x81;  // WcHapticPayload
+    static constexpr uint8_t LED          = 0x82;  // r(1) g(1) b(1)
+}
+
+namespace WcButton {
+    static constexpr uint8_t SELECT    = 0x00;  // A / primary action
+    static constexpr uint8_t BACK      = 0x01;  // B / cancel
+    static constexpr uint8_t PIP_LEFT  = 0x02;  // X / left shoulder tap
+    static constexpr uint8_t PIP_RIGHT = 0x03;  // Y / right shoulder tap
+    static constexpr uint8_t AF        = 0x04;  // LB / L1 — autofocus
+    static constexpr uint8_t CAPTURE   = 0x05;  // RB / R1 — capture stereo
+    static constexpr uint8_t MENU      = 0x06;  // Menu / Start
+    static constexpr uint8_t NAV_UP    = 0x07;
+    static constexpr uint8_t NAV_DOWN  = 0x08;
+    static constexpr uint8_t NAV_LEFT  = 0x09;
+    static constexpr uint8_t NAV_RIGHT = 0x0A;
+}
+
+namespace WcHapticPattern {
+    static constexpr uint8_t CLICK   = 0x00;  // short single tap
+    static constexpr uint8_t DOUBLE  = 0x01;  // two quick taps
+    static constexpr uint8_t ERROR   = 0x02;  // long buzz
+    static constexpr uint8_t SUCCESS = 0x03;  // rising double
+}
+
+#pragma pack(push, 1)
+struct WcButtonPayload {
+    uint8_t button_id;  // WcButton:: constant
+    uint8_t state;      // 0 = released, 1 = pressed
+};
+struct WcHapticPayload {
+    uint8_t  pattern;      // WcHapticPattern:: constant
+    uint16_t duration_ms;  // total vibration duration (little-endian)
+};
+struct WcLedPayload { uint8_t r, g, b; };
+#pragma pack(pop)
