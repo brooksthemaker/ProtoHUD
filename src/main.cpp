@@ -2279,6 +2279,8 @@ int main(int argc, char* argv[]) {
     xr_cfg.frameless        = jval(jdisp, "frameless",         false);
 
     CamConfig owl_left, owl_right;
+    state.cameras_swapped = jcam.value("swapped", false);
+
     if (jcam.contains("owlsight_left")) {
         auto& jl              = jcam["owlsight_left"];
         owl_left.libcamera_id = jl.value("libcamera_id", 0);
@@ -3786,6 +3788,7 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_3"]["flip"]                   = cameras.usb3_cfg().flip;
         cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
         cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
+        cfg["cameras"]["swapped"] = state.cameras_swapped;
 
         cfg["qr"]["scan_main"] = state.qr_scan_main;
         cfg["qr"]["scan_usb"]  = state.qr_scan_usb;
