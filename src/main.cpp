@@ -3968,23 +3968,21 @@ int main(int argc, char* argv[]) {
             xr.composite();
         }
 
-        // ── Phase 1: NanoVG HUD chrome (compass, arms, particles) ───────────
+        // ── Phase 1: NanoVG PiP underlay then HUD chrome ─────────────────────
         // Reset viewport to full framebuffer — timewarp leaves it at right-eye half.
         // Pass full display dimensions so NanoVG covers both eye halves.
         glViewport(0, 0, xr.display_width(), xr.display_height());
-        hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
-        hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
-
-        // ── Phase 1b: NanoVG PiP overlay (all anchors, on top of HUD chrome)
         {
             bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
             bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
             bool p3 = pip_cam3_overlay_active;
-            hud.draw_pip_overlays(tex_usb1, p1, pip_overlay_cfg1,
-                                  tex_usb2, p2, pip_overlay_cfg2,
-                                  tex_usb3, p3, pip_overlay_cfg3,
-                                  xr.eye_width(), xr.eye_height());
+            hud.draw_pip_underlays(tex_usb1, p1, pip_overlay_cfg1,
+                                   tex_usb2, p2, pip_overlay_cfg2,
+                                   tex_usb3, p3, pip_overlay_cfg3,
+                                   xr.eye_width(), xr.eye_height());
         }
+        hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
+        hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
