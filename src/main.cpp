@@ -2128,6 +2128,16 @@ int main(int argc, char* argv[]) {
         owl_right.height       = jr.value("height",  800);
         owl_right.fps          = jr.value("fps",      60);
     }
+    // Override both eyes from the persisted resolution section (set by in-app preset menu)
+    if (cfg.contains("resolution")) {
+        const auto& jres = cfg["resolution"];
+        int w   = jres.value("width",  owl_left.width);
+        int h   = jres.value("height", owl_left.height);
+        int fps = jres.value("fps",    owl_left.fps);
+        owl_left.width   = owl_right.width   = w;
+        owl_left.height  = owl_right.height  = h;
+        owl_left.fps     = owl_right.fps     = fps;
+    }
 
     UsbCamConfig usb1_cfg, usb2_cfg, usb3_cfg;
     if (jcam.contains("usb_cam_1")) {
@@ -2340,6 +2350,12 @@ int main(int argc, char* argv[]) {
         mo.anchor_y            = jm.value("anchor_y",            mo.anchor_y);
         mo.circle_window       = jm.value("circle_window",       mo.circle_window);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
+    }
+
+    // QR scan persistent settings
+    if (cfg.contains("qr")) {
+        state.qr_scan_main = cfg["qr"].value("scan_main", state.qr_scan_main);
+        state.qr_scan_usb  = cfg["qr"].value("scan_usb",  state.qr_scan_usb);
     }
 
     SplashConfig splash_cfg;
@@ -2639,38 +2655,6 @@ int main(int argc, char* argv[]) {
     cameras.set_qr_scanner(&qr_scanner);
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
     if (!knob.start())   std::cerr << "[main] SmartKnob not available on " << knob_port << "\n";
-    if (wireless_enabled) {
-        wireless.on_menu([&menu]{
-            if (menu.is_open()) menu.close(); else menu.open();
-        });
-        wireless.on_select([&menu, &hud, &state]{
-            if      (menu.is_open())          menu.select();
-            else if (hud.toast_has_focused()) hud.toast_select(state);
-        });
-        wireless.on_back([&menu, &hud]{
-            if      (hud.toast_has_focused()) hud.toast_navigate(-1);
-            else if (menu.is_open())          menu.back();
-        });
-        wireless.on_nav_up   ([&menu]{ if (menu.is_open()) menu.navigate(-1); });
-        wireless.on_nav_down ([&menu]{ if (menu.is_open()) menu.navigate(+1); });
-        wireless.on_nav_left ([&menu, &hud]{
-            if      (hud.toast_has_focused()) hud.toast_navigate(-1);
-            else if (menu.is_open())          menu.back();
-        });
-        wireless.on_nav_right([&menu, &hud, &state]{
-            if      (hud.toast_has_focused()) hud.toast_navigate(+1);
-            else if (menu.is_open())          menu.select();
-        });
-        wireless.on_af([&cameras]{
-            if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
-            if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
-        });
-        wireless.on_capture([&state]{
-            std::lock_guard<std::mutex> lk(state.mtx);
-            state.capture_request = CaptureRequest::Stereo;
-        });
-        wireless.start();
-    }
 
     // Active face backend: prefer Protoface if its socket already exists at startup.
     IFaceController* active_face = ProtoFaceController::socket_exists()
@@ -2732,6 +2716,40 @@ int main(int argc, char* argv[]) {
                                &panel_preview_enabled,
                                cfg_map_dir));
     menu_ptr = &menu;
+
+    // Wire wireless controller callbacks now that menu exists
+    if (wireless_enabled) {
+        wireless.on_menu([&menu]{
+            if (menu.is_open()) menu.close(); else menu.open();
+        });
+        wireless.on_select([&menu, &hud, &state]{
+            if      (menu.is_open())          menu.select();
+            else if (hud.toast_has_focused()) hud.toast_select(state);
+        });
+        wireless.on_back([&menu, &hud]{
+            if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+            else if (menu.is_open())          menu.back();
+        });
+        wireless.on_nav_up   ([&menu]{ if (menu.is_open()) menu.navigate(-1); });
+        wireless.on_nav_down ([&menu]{ if (menu.is_open()) menu.navigate(+1); });
+        wireless.on_nav_left ([&menu, &hud]{
+            if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+            else if (menu.is_open())          menu.back();
+        });
+        wireless.on_nav_right([&menu, &hud, &state]{
+            if      (hud.toast_has_focused()) hud.toast_navigate(+1);
+            else if (menu.is_open())          menu.select();
+        });
+        wireless.on_af([&cameras]{
+            if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+            if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+        });
+        wireless.on_capture([&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.capture_request = CaptureRequest::Stereo;
+        });
+        wireless.start();
+    }
 
     // Restore menu style from a previous session.
     if (cfg.contains("menu_style")) {
@@ -3512,6 +3530,13 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_3"]["flip"]                   = cameras.usb3_cfg().flip;
         cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
         cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
+
+        cfg["qr"]["scan_main"] = state.qr_scan_main;
+        cfg["qr"]["scan_usb"]  = state.qr_scan_usb;
+
+        cfg["resolution"]["width"]  = state.camera_resolution.width;
+        cfg["resolution"]["height"] = state.camera_resolution.height;
+        cfg["resolution"]["fps"]    = state.camera_resolution.fps;
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"]     = color_to_json(menu.accent_color());
