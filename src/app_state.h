@@ -372,6 +372,13 @@ struct AppState {
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
 
+    // Which XR-IMU axis drives the compass, and whether to invert the rotation
+    // direction. Configurable from the menu so different IMU orientations work
+    // without recompiling.
+    enum class CompassAxis { Roll = 0, Pitch, Yaw };
+    CompassAxis compass_axis   = CompassAxis::Roll;
+    bool        compass_invert = false;
+
     // Theater mode: render OWLsight cameras at their native aspect ratio with
     // black bars filling the remaining FBO area. Letterbox or pillarbox depending
     // on camera AR vs. display AR. Future: USB cameras fill the black bar regions.
