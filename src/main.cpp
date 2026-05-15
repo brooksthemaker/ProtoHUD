@@ -733,6 +733,35 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── USB camera menus ──────────────────────────────────────────────────────
+    // Scan for available V4L2 capture devices once at menu-build time.
+    // Results are used to populate each slot's "Select Device" submenu.
+    auto usb_devs = cameras ? cameras->list_usb_devices()
+                            : std::vector<CameraManager::UsbDeviceInfo>{};
+
+    // Helper: build a "Select Device" submenu for one USB camera slot.
+    // get_path  — returns the slot's current device path (for the checkmark).
+    // assign_fn — called with the chosen path when the user selects an item.
+    auto make_dev_select = [&](
+        std::function<std::string()>          get_path,
+        std::function<void(const std::string&)> assign_fn)
+    {
+        std::vector<MenuItem> items;
+        items.push_back(leaf_sel("(none)",
+            [assign_fn]{ assign_fn(""); },
+            [get_path]{ return get_path().empty(); }));
+        for (const auto& d : usb_devs) {
+            // Label: "video17 — Logitech C920 HD Pro Webcam"
+            std::string label = std::filesystem::path(d.path).filename().string()
+                                + " \xe2\x80\x94 " + d.name;
+            items.push_back(leaf_sel(std::move(label),
+                [assign_fn, p = d.path]{ assign_fn(p); },
+                [get_path,  p = d.path]{ return get_path() == p; }));
+        }
+        if (usb_devs.empty())
+            items.push_back(leaf("(no devices found)", []{}));
+        return items;
+    };
+
     std::vector<MenuItem> cam1_overlay_menu = {
         toggle("Show Overlay",
             [pip_cam1_overlay]{ return *pip_cam1_overlay; },
@@ -804,6 +833,9 @@ static std::vector<MenuItem> build_menu(
                     *pip_cam1_overlay = false;
                 }
             }),
+        submenu("Select Device", make_dev_select(
+            [cameras]{ return cameras ? cameras->usb1_cfg().device : ""; },
+            [cameras](const std::string& p){ if (cameras) cameras->reassign_usb1(p); })),
         toggle("Flip Upside Down",
             [cameras]{ return cameras && cameras->usb1_cfg().flip; },
             [cameras](bool v){
@@ -908,6 +940,9 @@ static std::vector<MenuItem> build_menu(
                     *pip_cam2_overlay = false;
                 }
             }),
+        submenu("Select Device", make_dev_select(
+            [cameras]{ return cameras ? cameras->usb2_cfg().device : ""; },
+            [cameras](const std::string& p){ if (cameras) cameras->reassign_usb2(p); })),
         toggle("Flip Upside Down",
             [cameras]{ return cameras && cameras->usb2_cfg().flip; },
             [cameras](bool v){
@@ -1012,6 +1047,9 @@ static std::vector<MenuItem> build_menu(
                     *pip_cam3_overlay = false;
                 }
             }),
+        submenu("Select Device", make_dev_select(
+            [cameras]{ return cameras ? cameras->usb3_cfg().device : ""; },
+            [cameras](const std::string& p){ if (cameras) cameras->reassign_usb3(p); })),
         toggle("Flip Upside Down",
             [cameras]{ return cameras && cameras->usb3_cfg().flip; },
             [cameras](bool v){

@@ -100,6 +100,19 @@ public:
     void open_usb3();
     void close_usb3();
 
+    // ── USB device enumeration ────────────────────────────────────────────────
+    // Returns all V4L2 USB capture devices currently visible on the system.
+    // Each entry holds the device path and a human-readable card/driver label.
+    struct UsbDeviceInfo { std::string path; std::string name; };
+    std::vector<UsbDeviceInfo> list_usb_devices() const;
+
+    // Close the slot, point it at a new device path, and reopen it.
+    // Pass an empty string to disconnect the slot without reopening.
+    // Safe to call from the menu/render thread.
+    void reassign_usb1(const std::string& path);
+    void reassign_usb2(const std::string& path);
+    void reassign_usb3(const std::string& path);
+
     // ── USB camera scan ───────────────────────────────────────────────────────
     // Stops the capture thread, probes /dev/video0..N until a device opens,
     // then restarts the thread. Safe to call from the render thread.

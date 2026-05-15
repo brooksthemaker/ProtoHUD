@@ -510,6 +510,45 @@ bool CameraManager::scan_usb1() { return scan_usb(usb_cap1_, usb1_ok_, usb1_cfg_
 bool CameraManager::scan_usb2() { return scan_usb(usb_cap2_, usb2_ok_, usb2_cfg_, {usb1_cfg_.device}); }
 bool CameraManager::scan_usb3() { return scan_usb(usb_cap3_, usb3_ok_, usb3_cfg_, {usb1_cfg_.device, usb2_cfg_.device}); }
 
+std::vector<CameraManager::UsbDeviceInfo> CameraManager::list_usb_devices() const {
+    std::vector<UsbDeviceInfo> result;
+    for (int i = 0; i < 64; ++i) {
+        std::string path = "/dev/video" + std::to_string(i);
+        std::string name;
+        if (is_usb_capture_device(path, &name))
+            result.push_back({std::move(path), std::move(name)});
+    }
+    return result;
+}
+
+// Close the slot, update its device path, and reopen it on a background thread.
+// The capture lambda holds the per-camera mutex during cap.read(); close_usbN()
+// acquires the same mutex, so the swap is safe without stopping the thread.
+void CameraManager::reassign_usb1(const std::string& path) {
+    UsbCamConfig c = usb1_cfg_; c.device = path; update_usb1_cfg(c);
+    close_usb1();  // acquires usb1_cap_mtx_, releases cap, clears reconnect
+    if (!path.empty()) {
+        usb1_reconnect_ = true;
+        std::thread([this]{ open_usb1(); }).detach();
+    }
+}
+void CameraManager::reassign_usb2(const std::string& path) {
+    UsbCamConfig c = usb2_cfg_; c.device = path; update_usb2_cfg(c);
+    close_usb2();
+    if (!path.empty()) {
+        usb2_reconnect_ = true;
+        std::thread([this]{ open_usb2(); }).detach();
+    }
+}
+void CameraManager::reassign_usb3(const std::string& path) {
+    UsbCamConfig c = usb3_cfg_; c.device = path; update_usb3_cfg(c);
+    close_usb3();
+    if (!path.empty()) {
+        usb3_reconnect_ = true;
+        std::thread([this]{ open_usb3(); }).detach();
+    }
+}
+
 static void v4l2_set_ctrl(const std::string& dev, uint32_t id, int32_t val) {
     int fd = open(dev.c_str(), O_RDWR);
     if (fd < 0) return;
