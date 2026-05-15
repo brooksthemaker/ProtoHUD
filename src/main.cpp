@@ -3646,7 +3646,7 @@ int main(int argc, char* argv[]) {
 
         // Smooth compass heading on the render thread so the rate is constant
         // and independent of IMU callback frequency.  Circular lerp (sin/cos)
-        // handles the 0/360 wrap.  tau=0.10 s → ~100 ms time constant.
+        // handles the 0/360 wrap.  tau=0.35 s → ~350 ms time constant.
         {
             static float    s_smooth  = -1.f;
             static uint64_t s_last_us = 0;
@@ -3659,7 +3659,7 @@ int main(int argc, char* argv[]) {
             if (s_smooth < 0.f || dt > 1.f) {
                 s_smooth = raw;
             } else {
-                constexpr float kTau = 0.10f;
+                constexpr float kTau = 0.35f;
                 float alpha = 1.f - std::expf(-dt / kTau);
                 constexpr float kD2R = 3.14159265f / 180.f;
                 float fs = std::sinf(s_smooth * kD2R) + alpha * (std::sinf(raw * kD2R) - std::sinf(s_smooth * kD2R));
@@ -3966,33 +3966,20 @@ int main(int argc, char* argv[]) {
         hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
         hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
 
-        // ── Phase 2: ImGui overlays (pip, menu, popups) ───────────────────
+        // ── Phase 1b: NanoVG PiP overlay (non-corner anchors, on top of HUD chrome)
+        {
+            bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
+            bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
+            bool p3 = pip_cam3_overlay_active;
+            hud.draw_pip_overlays(tex_usb1, p1, pip_overlay_cfg1,
+                                  tex_usb2, p2, pip_overlay_cfg2,
+                                  tex_usb3, p3, pip_overlay_cfg3,
+                                  xr.eye_width(), xr.eye_height());
+        }
+
+        // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
         menu.draw(xr.eye_width(), xr.eye_height());
-
-        // Corner-anchored pips were already drawn in the underlay pass; suppress
-        // them here so they don't overdraw on top of the HUD chrome.
-        auto pip_front_active = [](bool act, const OverlayConfig& cfg) {
-            using A = OverlayConfig::Anchor;
-            bool corner = cfg.anchor == A::TOP_LEFT  || cfg.anchor == A::TOP_RIGHT ||
-                          cfg.anchor == A::BOTTOM_LEFT || cfg.anchor == A::BOTTOM_RIGHT;
-            return act && !corner;
-        };
-        hud.draw_pip(tex_usb1, "Cam 1",
-                     xr.eye_width(), xr.eye_height(),
-                     pip_front_active(pip_cam1_overlay_active || pip_left_active || kb_pip_left || wc_pip_left, pip_overlay_cfg1),
-                     pip_overlay_cfg1,
-                     snap.focus_left, snap.night_vision.nv_enabled);
-        hud.draw_pip(tex_usb2, "Cam 2",
-                     xr.eye_width(), xr.eye_height(),
-                     pip_front_active(pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right, pip_overlay_cfg2),
-                     pip_overlay_cfg2,
-                     snap.focus_right, snap.night_vision.nv_enabled);
-        hud.draw_pip(tex_usb3, "Cam 3",
-                     xr.eye_width(), xr.eye_height(),
-                     pip_front_active(pip_cam3_overlay_active, pip_overlay_cfg3),
-                     pip_overlay_cfg3,
-                     snap.focus_left, snap.night_vision.nv_enabled);
 
         hud.draw_android_overlay(tex_android,
                                   xr.eye_width(), xr.eye_height(),
