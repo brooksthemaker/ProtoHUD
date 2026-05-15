@@ -631,23 +631,9 @@ static std::vector<MenuItem> build_menu(
         submenu("Anchor", std::move(single_cam_anchor_items)),
     };
 
-    std::vector<MenuItem> main_cameras_menu = {
-        toggle("Theater Mode",
-            [&state]{ return state.theater_mode; },
-            [&state](bool v){ state.theater_mode = v; }),
-        submenu("Resolution",  std::move(resolution_presets)),
-        leaf("Capture Left",   [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Left;   }),
-        leaf("Capture Right",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Right;  }),
-        leaf("Capture Stereo", [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Stereo; }),
-        toggle("QR Scan Main Cams", [&state]{ return state.qr_scan_main; },
-                                    [&state](bool v){ state.qr_scan_main = v; }),
-        toggle("QR Scan USB Cams",  [&state]{ return state.qr_scan_usb; },
-                                    [&state](bool v){ state.qr_scan_usb = v; }),
-        submenu("Digital Zoom",  std::move(zoom_menu)),
-        submenu("Mirror Crop",   std::move(mirror_crop_menu)),
-        submenu("Single Camera", std::move(single_cam_menu)),
-        submenu("Focus Mode",  std::move(focus_modes)),
-        slider("Focus Position", 0.f, 1000.f, 50.f, "",
+    std::vector<MenuItem> focus_menu = {
+        submenu("Mode",      std::move(focus_modes)),
+        slider("Position", 0.f, 1000.f, 50.f, "",
             [&state]{ return static_cast<float>(state.focus_left.focus_position); },
             [cameras, &state](float v){
                 int pos = static_cast<int>(v);
@@ -658,9 +644,35 @@ static std::vector<MenuItem> build_menu(
                 state.focus_left.focus_position  = pos;
                 state.focus_right.focus_position = pos;
             }),
-        submenu("Autofocus",    std::move(af_triggers)),
+        submenu("Autofocus", std::move(af_triggers)),
+    };
+
+    std::vector<MenuItem> capture_menu = {
+        leaf("Left Eye",   [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Left;   }),
+        leaf("Right Eye",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Right;  }),
+        leaf("Both Eyes",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Stereo; }),
+    };
+
+    std::vector<MenuItem> qr_menu = {
+        toggle("Main Cameras", [&state]{ return state.qr_scan_main; },
+                               [&state](bool v){ state.qr_scan_main = v; }),
+        toggle("USB Cameras",  [&state]{ return state.qr_scan_usb; },
+                               [&state](bool v){ state.qr_scan_usb = v; }),
+    };
+
+    std::vector<MenuItem> main_cameras_menu = {
+        toggle("Theater Mode",
+            [&state]{ return state.theater_mode; },
+            [&state](bool v){ state.theater_mode = v; }),
+        submenu("Resolution",    std::move(resolution_presets)),
+        submenu("Digital Zoom",  std::move(zoom_menu)),
+        submenu("Mirror Crop",   std::move(mirror_crop_menu)),
+        submenu("Single Camera", std::move(single_cam_menu)),
         submenu("White Balance", std::move(awb_menu)),
-        submenu("Night Vision", std::move(nv_menu)),
+        submenu("Night Vision",  std::move(nv_menu)),
+        submenu("Focus",         std::move(focus_menu)),
+        submenu("Capture Photo", std::move(capture_menu)),
+        submenu("QR Scan",       std::move(qr_menu)),
     };
 
     // ── Headset controls ──────────────────────────────────────────────────────
