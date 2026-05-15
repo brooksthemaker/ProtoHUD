@@ -509,7 +509,16 @@ void HudRenderer::draw_pip_underlays(
 
         const float ov_h = fh * e.cfg->size;
         const float ov_w = ov_h * (16.f / 9.f);
-        const auto  pos  = overlay_origin(*e.cfg, fw, fh, ov_w, ov_h, margin);
+
+        // Portrait rotations swap the window shape so the box itself is portrait-
+        // shaped rather than rotating the content inside a landscape box.
+        using R = OverlayConfig::Rotation;
+        const bool is_portrait = (e.cfg->rotation == R::Portrait ||
+                                   e.cfg->rotation == R::PortraitFlipped);
+        const float disp_w = is_portrait ? ov_h * (9.f / 16.f) : ov_w;
+        const float disp_h = ov_h;
+
+        const auto  pos  = overlay_origin(*e.cfg, fw, fh, disp_w, disp_h, margin);
 
         // Wrap the GL texture as an NVG image (cached; no pixel copy)
         auto it = pip_nvg_cache_.find(e.tex);
@@ -521,8 +530,6 @@ void HudRenderer::draw_pip_underlays(
         const int img = it->second;
         if (img < 0) continue;
 
-        // Rotation: translate to box centre, rotate, draw centred at origin
-        using R = OverlayConfig::Rotation;
         float rot_angle = 0.f;
         switch (e.cfg->rotation) {
             case R::Portrait:         rot_angle =  (float)M_PI * 0.5f;  break;
@@ -530,10 +537,16 @@ void HudRenderer::draw_pip_underlays(
             case R::PortraitFlipped:  rot_angle = -(float)M_PI * 0.5f;  break;
             default: break;
         }
-        const float cx = pos.x + ov_w * 0.5f;
-        const float cy = pos.y + ov_h * 0.5f;
-        const float hw = ov_w * 0.5f;
-        const float hh = ov_h * 0.5f;
+
+        // Rotate canvas around the box centre. In the rotated coordinate system
+        // the drawing rect must be disp_h × disp_w so that after rotation it maps
+        // back to disp_w × disp_h in screen space.
+        const float cx   = pos.x + disp_w * 0.5f;
+        const float cy   = pos.y + disp_h * 0.5f;
+        const float dw   = is_portrait ? disp_h : disp_w;  // drawing-space width
+        const float dh   = is_portrait ? disp_w : disp_h;  // drawing-space height
+        const float hw   = dw * 0.5f;
+        const float hh   = dh * 0.5f;
 
         nvgSave(nvg_);
         nvgTranslate(nvg_, cx, cy);
@@ -541,20 +554,20 @@ void HudRenderer::draw_pip_underlays(
 
         // Background fill
         nvgBeginPath(nvg_);
-        nvgRoundedRect(nvg_, -hw, -hh, ov_w, ov_h, C);
+        nvgRoundedRect(nvg_, -hw, -hh, dw, dh, C);
         nvgFillColor(nvg_, nvgRGBA(10, 15, 20, 200));
         nvgFill(nvg_);
 
         // Camera image
-        NVGpaint paint = nvgImagePattern(nvg_, -hw, -hh, ov_w, ov_h, 0.f, img, 1.0f);
+        NVGpaint paint = nvgImagePattern(nvg_, -hw, -hh, dw, dh, 0.f, img, 1.0f);
         nvgBeginPath(nvg_);
-        nvgRoundedRect(nvg_, -hw, -hh, ov_w, ov_h, C);
+        nvgRoundedRect(nvg_, -hw, -hh, dw, dh, C);
         nvgFillPaint(nvg_, paint);
         nvgFill(nvg_);
 
         // Thin border
         nvgBeginPath(nvg_);
-        nvgRoundedRect(nvg_, -hw, -hh, ov_w, ov_h, C);
+        nvgRoundedRect(nvg_, -hw, -hh, dw, dh, C);
         nvgStrokeColor(nvg_, nvgRGBA(100, 130, 160, 140));
         nvgStrokeWidth(nvg_, 1.5f);
         nvgStroke(nvg_);
@@ -578,8 +591,17 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
     const float sh     = static_cast<float>(h);
     const float ov_h   = sh * cfg.size;
     const float ov_w   = ov_h * (16.f / 9.f);
+
+    // Portrait rotations: the window box itself becomes portrait-shaped (9:16)
+    // so the box rotates rather than just the content inside a landscape box.
+    using R = OverlayConfig::Rotation;
+    const bool is_portrait = (cfg.rotation == R::Portrait ||
+                               cfg.rotation == R::PortraitFlipped);
+    const float disp_w = is_portrait ? ov_h * (9.f / 16.f) : ov_w;
+    const float disp_h = ov_h;
+
     const float margin = static_cast<float>(cfg_.compass_height);
-    const auto  pos    = overlay_origin(cfg, sw, sh, ov_w, ov_h, margin);
+    const auto  pos    = overlay_origin(cfg, sw, sh, disp_w, disp_h, margin);
 
     // Passthrough window so the menu (drawn after) can appear on top via BringToDisplayFront
     char win_id[32]; snprintf(win_id, sizeof(win_id), "##pip_%s", label);
@@ -597,7 +619,7 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
 
     // Build anchor-dependent chamfered polygon
     const float C = cfg_.pip_corner_clip_px;
-    const float x = pos.x, y = pos.y, bw = ov_w, bh = ov_h;
+    const float x = pos.x, y = pos.y, bw = disp_w, bh = disp_h;
     ImVec2 pts[8];
     int    n_pts;
 
@@ -634,7 +656,6 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
 
     // 2. Camera image or "No Signal" placeholder — rounded corners match chamfer shape
     if (tex) {
-        using R = OverlayConfig::Rotation;
         ImVec2 uv0, uv1, uv2, uv3;  // TL, TR, BR, BL of display box
         switch (cfg.rotation) {
             case R::Portrait:         uv0={0,1}; uv1={0,0}; uv2={1,0}; uv3={1,1}; break;
