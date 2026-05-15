@@ -1401,7 +1401,18 @@ static std::vector<MenuItem> build_menu(
         tagged_radio_colors_menu.push_back(submenu(lbl, std::move(node_presets)));
     }
 
+    using CA = AppState::CompassAxis;
+    std::vector<MenuItem> imu_axis_menu = {
+        leaf_sel("Roll",  [&state]{ state.compass_axis = CA::Roll;  }, [&state]{ return state.compass_axis == CA::Roll;  }),
+        leaf_sel("Pitch", [&state]{ state.compass_axis = CA::Pitch; }, [&state]{ return state.compass_axis == CA::Pitch; }),
+        leaf_sel("Yaw",   [&state]{ state.compass_axis = CA::Yaw;   }, [&state]{ return state.compass_axis == CA::Yaw;   }),
+        toggle("Invert Direction",
+            [&state]{ return state.compass_invert; },
+            [&state](bool v){ state.compass_invert = v; }),
+    };
+
     std::vector<MenuItem> compass_menu = {
+        submenu("IMU Axis",            std::move(imu_axis_menu)),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
@@ -2575,6 +2586,16 @@ int main(int argc, char* argv[]) {
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
 
+    // Compass IMU axis selection
+    if (cfg.contains("compass")) {
+        auto& jc = cfg["compass"];
+        std::string axis = jc.value("axis", std::string("roll"));
+        if      (axis == "pitch") state.compass_axis = AppState::CompassAxis::Pitch;
+        else if (axis == "yaw")   state.compass_axis = AppState::CompassAxis::Yaw;
+        else                      state.compass_axis = AppState::CompassAxis::Roll;
+        state.compass_invert = jc.value("invert", false);
+    }
+
     // QR scan persistent settings
     if (cfg.contains("qr")) {
         state.qr_scan_main = cfg["qr"].value("scan_main", state.qr_scan_main);
@@ -2621,8 +2642,12 @@ int main(int argc, char* argv[]) {
     xr.on_imu_pose([&state, &last_xr_imu_us](float roll, float pitch, float yaw) {
         last_xr_imu_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        float bearing = fmod(360.0f - roll, 360.0f);
         std::lock_guard<std::mutex> lk(state.mtx);
+        const float vals[3] = { roll, pitch, yaw };
+        float raw = vals[static_cast<int>(state.compass_axis)];
+        float bearing = state.compass_invert
+            ? fmod(raw + 360.0f, 360.0f)
+            : fmod(360.0f - raw, 360.0f);
         state.compass_heading = bearing;
         state.imu_pose = { roll, pitch, yaw };
     });
@@ -3824,6 +3849,11 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
+        {
+            static const char* kAxes[] = { "roll", "pitch", "yaw" };
+            cfg["compass"]["axis"]   = kAxes[static_cast<int>(state.compass_axis)];
+            cfg["compass"]["invert"] = state.compass_invert;
+        }
         cfg["hud"]["flip_vertical"]             = hud.config().hud_flip_vertical;
         cfg["hud"]["effects"]["type"]           = static_cast<int>(state.effects_cfg.effect);
         cfg["hud"]["effects"]["palette"]        = static_cast<int>(state.effects_cfg.palette);
