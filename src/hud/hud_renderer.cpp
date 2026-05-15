@@ -536,9 +536,9 @@ void HudRenderer::draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
         nvgFill(vg);
     }
 
-    // Border — match HUD chrome orange accent
+    // Border — follow the live theme color (glow_base, same as compass/arms)
     {
-        const ImU32 pc = col_.orange;
+        const ImU32 pc = col_.glow_base;
         nvgBeginPath(vg);
         nvgRoundedRect(vg, -hw, -hh, dw, dh, C);
         nvgStrokeColor(vg, nvgRGBA(pc & 0xFF, (pc >> 8) & 0xFF, (pc >> 16) & 0xFF, 160));
@@ -551,15 +551,6 @@ void HudRenderer::draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
 
 void HudRenderer::draw_pip_underlays(
     unsigned int /*tex1*/, bool /*act1*/, const OverlayConfig& /*c1*/,
-    unsigned int /*tex2*/, bool /*act2*/, const OverlayConfig& /*c2*/,
-    unsigned int /*tex3*/, bool /*act3*/, const OverlayConfig& /*c3*/,
-    int /*ew*/, int /*eh*/)
-{
-    // All pips are now drawn as overlays after HUD chrome via draw_pip_overlays.
-}
-
-void HudRenderer::draw_pip_overlays(
-    unsigned int tex1, bool act1, const OverlayConfig& c1,
     unsigned int tex2, bool act2, const OverlayConfig& c2,
     unsigned int tex3, bool act3, const OverlayConfig& c3,
     int ew, int eh)
@@ -584,6 +575,15 @@ void HudRenderer::draw_pip_overlays(
         if (e.act && e.tex)
             draw_pip_nvg_single(nvg_, e.tex, *e.cfg, fw, fh);
     nvgEndFrame(nvg_);
+}
+
+void HudRenderer::draw_pip_overlays(
+    unsigned int /*tex1*/, bool /*act1*/, const OverlayConfig& /*c1*/,
+    unsigned int /*tex2*/, bool /*act2*/, const OverlayConfig& /*c2*/,
+    unsigned int /*tex3*/, bool /*act3*/, const OverlayConfig& /*c3*/,
+    int /*ew*/, int /*eh*/)
+{
+    // All pips are drawn as underlays before HUD chrome via draw_pip_underlays.
 }
 
 // ── PiP ──────────────────────────────────────────────────────────────────────

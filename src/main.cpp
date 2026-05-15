@@ -3328,9 +3328,9 @@ int main(int argc, char* argv[]) {
 
     KeyRepeat rep_nav_up, rep_nav_down, rep_toast_prev, rep_toast_next;
 
-    // N long-press state: short tap = toggle map; hold 1.5 s = cycle next map
-    double n_press_t    = -1.0;
-    bool   n_long_fired = false;
+    // M long-press state: short tap = toggle map; hold 1.5 s = cycle next map
+    double m_press_t    = -1.0;
+    bool   m_long_fired = false;
 
     double prev_time = glfwGetTime();
 
@@ -3352,7 +3352,7 @@ int main(int argc, char* argv[]) {
             (key_pressed(ImGuiKey_Q) || key_pressed(ImGuiKey_K))) {
             std::exit(0);
         }
-        if (key_pressed(ImGuiKey_M)) {
+        if (key_pressed(ImGuiKey_I)) {
             if (menu.is_open()) menu.close();
             else                menu.open();
         }
@@ -3376,8 +3376,9 @@ int main(int argc, char* argv[]) {
         }
         // Vision-assist hotkeys — work whether or not the menu is open
         if (key_pressed(ImGuiKey_E)) state.pp_cfg.edge_enabled   = !state.pp_cfg.edge_enabled;
-        if (key_pressed(ImGuiKey_D)) state.pp_cfg.desat_enabled  = !state.pp_cfg.desat_enabled;
+        if (key_pressed(ImGuiKey_Q)) state.pp_cfg.desat_enabled  = !state.pp_cfg.desat_enabled;
         if (key_pressed(ImGuiKey_W)) state.pp_cfg.motion_enabled = !state.pp_cfg.motion_enabled;
+        if (key_pressed(ImGuiKey_D)) sys_panel_active            = !sys_panel_active;
         // C — capture stereo screenshot
         if (key_pressed(ImGuiKey_C)) {
             std::lock_guard<std::mutex> lk(state.mtx);
@@ -3385,26 +3386,26 @@ int main(int argc, char* argv[]) {
         }
         // F — toggle FPS overlay
         if (key_pressed(ImGuiKey_F)) fps_overlay_active = !fps_overlay_active;
-        // Shift+N — calibrate north (Set My Direction); edge-only
-        if (ImGui::GetIO().KeyShift && key_pressed(ImGuiKey_N)) {
+        // Shift+M — calibrate north (Set My Direction); edge-only
+        if (ImGui::GetIO().KeyShift && key_pressed(ImGuiKey_M)) {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.map_overlay.map_north_deg = state.compass_heading;
             state.map_overlay.calibrated    = true;
         }
-        // N (no Shift) — short tap: toggle map overlay;
+        // M (no Shift) — short tap: toggle map overlay;
         //               hold 1.5 s: cycle to next map in the maps folder
         {
-            const bool n_held = ImGui::IsKeyDown(ImGuiKey_N) && !ImGui::GetIO().KeyShift;
-            if (n_held && n_press_t < 0.0) {
-                n_press_t    = glfwGetTime();
-                n_long_fired = false;
-            } else if (!n_held && n_press_t >= 0.0) {
-                if (!n_long_fired)
+            const bool m_held = ImGui::IsKeyDown(ImGuiKey_M) && !ImGui::GetIO().KeyShift;
+            if (m_held && m_press_t < 0.0) {
+                m_press_t    = glfwGetTime();
+                m_long_fired = false;
+            } else if (!m_held && m_press_t >= 0.0) {
+                if (!m_long_fired)
                     state.map_overlay.enabled = !state.map_overlay.enabled;
-                n_press_t = -1.0;
+                m_press_t = -1.0;
             }
-            if (n_held && !n_long_fired && n_press_t >= 0.0 &&
-                    glfwGetTime() - n_press_t >= 1.5) {
+            if (m_held && !m_long_fired && m_press_t >= 0.0 &&
+                    glfwGetTime() - m_press_t >= 1.5) {
                 std::vector<std::string> maps;
                 std::error_code ec;
                 for (auto& e : std::filesystem::directory_iterator(cfg_map_dir, ec)) {
@@ -3422,7 +3423,7 @@ int main(int argc, char* argv[]) {
                         state.map_overlay.map_path = *std::next(it);
                     state.map_overlay.enabled = true;
                 }
-                n_long_fired = true;
+                m_long_fired = true;
             }
         }
         // Space — dismiss focused toast or close menu (back)
@@ -3453,9 +3454,9 @@ int main(int argc, char* argv[]) {
         bool wc_pip_right = wireless_enabled && wireless.pip_right_active();
 
         // ── Keyboard button emulation (direct GLFW polling, edge-detected) ──
-        // 1/2  = toggle PiP left/right    3 = menu select (when open)
-        // 3    = toggle manual focus      4 = autofocus both cameras
-        // ,/.  = focus in / focus out (step 20 of 0-1000)
+        // 1/2/3     = toggle USB cam PiP 1/2/3   Shift+1/2/3 = autofocus that cam
+        // 0         = toggle manual/auto focus    4 = autofocus both cameras
+        // - / =     = focus near / far (step 20 of 0-1000)
         {
             GLFWwindow* win = static_cast<GLFWwindow*>(xr.glfw_window());
             auto edge = [&](int n, int glfw_key) -> bool {
@@ -3464,14 +3465,8 @@ int main(int argc, char* argv[]) {
                 prev_key[n] = now;
                 return fired;
             };
-            if (!menu.is_open()) {
-                if (edge(1, GLFW_KEY_1)) kb_pip_left  = !kb_pip_left;
-                if (edge(2, GLFW_KEY_2)) kb_pip_right = !kb_pip_right;
-            }
-            bool key3 = edge(3, GLFW_KEY_3);
-            if (key3 && menu.is_open()) menu.select();
-            // 3: toggle manual/auto focus
-            if (key3 && !menu.is_open()) {
+            // 0: toggle manual/auto focus
+            if (edge(0, GLFW_KEY_0) && !menu.is_open()) {
                 bool go_manual = (state.focus_left.mode != CameraFocusState::Mode::MANUAL);
                 if (go_manual) {
                     if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
@@ -3495,32 +3490,32 @@ int main(int argc, char* argv[]) {
                 state.focus_left.mode  = CameraFocusState::Mode::AUTO;
                 state.focus_right.mode = CameraFocusState::Mode::AUTO;
             }
-            // , / . : manual focus step (near / far)
+            // - / = : manual focus step (near / far)
             constexpr int FOCUS_STEP = 20;
-            if (edge(5, GLFW_KEY_COMMA) && cameras.owl_left()) {
+            if (edge(5, GLFW_KEY_MINUS) && cameras.owl_left()) {
                 int pos = std::max(0, cameras.owl_left()->get_focus_position() - FOCUS_STEP);
                 cameras.owl_left()->set_focus_position(pos);
                 if (cameras.owl_right()) cameras.owl_right()->set_focus_position(pos);
             }
-            if (edge(6, GLFW_KEY_PERIOD) && cameras.owl_left()) {
+            if (edge(6, GLFW_KEY_EQUAL) && cameras.owl_left()) {
                 int pos = std::min(1000, cameras.owl_left()->get_focus_position() + FOCUS_STEP);
                 cameras.owl_left()->set_focus_position(pos);
                 if (cameras.owl_right()) cameras.owl_right()->set_focus_position(pos);
             }
-            // 5/6/7 — toggle USB cam PiP;  Shift+5/6/7 — trigger autofocus on that cam
+            // 1/2/3 — toggle USB cam PiP;  Shift+1/2/3 — trigger autofocus on that cam
             {
                 bool shift = (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                               glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
                 if (!menu.is_open()) {
-                    if (edge(7, GLFW_KEY_5)) {
+                    if (edge(7, GLFW_KEY_1)) {
                         if (shift) cameras.set_usb1_ctrl(V4L2_CID_FOCUS_AUTO, 1);
                         else       pip_cam1_overlay_active = !pip_cam1_overlay_active;
                     }
-                    if (edge(8, GLFW_KEY_6)) {
+                    if (edge(8, GLFW_KEY_2)) {
                         if (shift) cameras.set_usb2_ctrl(V4L2_CID_FOCUS_AUTO, 1);
                         else       pip_cam2_overlay_active = !pip_cam2_overlay_active;
                     }
-                    if (edge(9, GLFW_KEY_7)) {
+                    if (edge(9, GLFW_KEY_3)) {
                         if (shift) cameras.set_usb3_ctrl(V4L2_CID_FOCUS_AUTO, 1);
                         else       pip_cam3_overlay_active = !pip_cam3_overlay_active;
                     }
@@ -3973,23 +3968,21 @@ int main(int argc, char* argv[]) {
             xr.composite();
         }
 
-        // ── Phase 1: NanoVG HUD chrome (compass, arms, particles) ───────────
+        // ── Phase 1: NanoVG PiP underlay then HUD chrome ─────────────────────
         // Reset viewport to full framebuffer — timewarp leaves it at right-eye half.
         // Pass full display dimensions so NanoVG covers both eye halves.
         glViewport(0, 0, xr.display_width(), xr.display_height());
-        hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
-        hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
-
-        // ── Phase 1b: NanoVG PiP overlay (all anchors, on top of HUD chrome)
         {
             bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
             bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
             bool p3 = pip_cam3_overlay_active;
-            hud.draw_pip_overlays(tex_usb1, p1, pip_overlay_cfg1,
-                                  tex_usb2, p2, pip_overlay_cfg2,
-                                  tex_usb3, p3, pip_overlay_cfg3,
-                                  xr.eye_width(), xr.eye_height());
+            hud.draw_pip_underlays(tex_usb1, p1, pip_overlay_cfg1,
+                                   tex_usb2, p2, pip_overlay_cfg2,
+                                   tex_usb3, p3, pip_overlay_cfg3,
+                                   xr.eye_width(), xr.eye_height());
         }
+        hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
+        hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
