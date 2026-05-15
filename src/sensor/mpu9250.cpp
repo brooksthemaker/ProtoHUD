@@ -39,7 +39,7 @@ static constexpr uint8_t AK_MODE_CONT2_16BIT = 0x16; // 100 Hz, 16-bit output
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
 
-Mpu9250::Mpu9250(const Config& cfg) : cfg_(cfg) {}
+Mpu9250::Mpu9250(const Config& cfg) : cfg_(cfg), mount_rotation_(cfg.mount_rotation) {}
 
 Mpu9250::~Mpu9250() { stop(); }
 
@@ -145,6 +145,9 @@ bool Mpu9250::init_ak8963() {
     return true;
 }
 
+void Mpu9250::set_mount_rotation(int r) { mount_rotation_.store(r & 3); }
+int  Mpu9250::get_mount_rotation() const { return mount_rotation_.load(); }
+
 // ── Heading computation ───────────────────────────────────────────────────────
 // Tilt-compensated heading using accelerometer pitch/roll.
 // Axis convention for GY-9250 breakout (chip face up, connector down):
@@ -159,6 +162,14 @@ float Mpu9250::compute_heading(float mx, float my, float mz,
     float ax_f = ax / 16384.0f; // ±2g range → LSB/g = 16384
     float ay_f = ay / 16384.0f;
     float az_f = az / 16384.0f;
+
+    // Rotate mag and accel XY plane to compensate for non-standard chip mounting.
+    // Each step is 90° CCW: (x, y) → (−y, x).  Z is always vertical so unchanged.
+    for (int i = 0, r = mount_rotation_.load() & 3; i < r; ++i) {
+        float t;
+        t = mx; mx = -my; my = t;
+        t = ax_f; ax_f = -ay_f; ay_f = t;
+    }
     float norm  = sqrtf(ax_f*ax_f + ay_f*ay_f + az_f*az_f);
 
     if (norm < 0.1f) {
