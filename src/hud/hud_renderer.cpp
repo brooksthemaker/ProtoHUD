@@ -854,9 +854,10 @@ void HudRenderer::draw_health_side(NVGcontext* vg, const SystemHealth& h,
         if (f.af_active) return " SCAN";
         return " AUTO";
     };
-    char lcam_lbl[24], rcam_lbl[24];
-    snprintf(lcam_lbl, sizeof(lcam_lbl), "L.Cam%s", focus_suffix(focus_left));
-    snprintf(rcam_lbl, sizeof(rcam_lbl), "R.Cam%s", focus_suffix(focus_right));
+    char lcam_lbl[32], rcam_lbl[32];
+    const char* nv_tag = nv_enabled ? " NV" : "";
+    snprintf(lcam_lbl, sizeof(lcam_lbl), "L.Cam%s%s", focus_suffix(focus_left),  nv_tag);
+    snprintf(rcam_lbl, sizeof(rcam_lbl), "R.Cam%s%s", focus_suffix(focus_right), nv_tag);
 
     struct Ind { const char* label; bool ok; bool inactive = false; };
     const Ind left_items[]  = {{"Proot",     h.teensy_ok},
@@ -906,13 +907,6 @@ void HudRenderer::draw_health_side(NVGcontext* vg, const SystemHealth& h,
     nvg_glow_line(vg, anchor_x, anchor_y, diag_ex, diag_ey, cm, g1, g2);
     const float h_end_x = anchor_x + (right_side ? H_LEN : -H_LEN);
     nvg_glow_line(vg, anchor_x, anchor_y, h_end_x, anchor_y, cm, g1, g2);
-
-    if (nv_enabled) {
-        nvg_set_font_mono();
-        const float nv_tw = nvgTextBounds(vg, 0, 0, "NV", nullptr, nullptr);
-        const float nv_x  = right_side ? h_end_x + 6.f : h_end_x - nv_tw - 6.f;
-        nvg_glow_text(vg, nv_x, anchor_y - 7.f, "NV", true, col_.glow_base, col_.text_fill);
-    }
 
     nvg_set_font_mono();
     for (int i = 0; i < n_items; ++i) {
