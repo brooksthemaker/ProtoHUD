@@ -38,6 +38,7 @@ public:
         // Mounting orientation: 0=default, 1=90°CCW, 2=180°, 3=270°CCW (in XY plane).
         // Use when the chip is physically rotated relative to the expected axis convention.
         int         mount_rotation   = 0;
+        int         heading_axes     = 0;  // 0=XY(default) 1=ZY 2=XZ 3=ZX 4=YX 5=YZ
         // Hard-iron calibration offsets — persisted to config
         float       mag_bias_x       = 0.0f;
         float       mag_bias_y       = 0.0f;
@@ -70,6 +71,11 @@ public:
     void set_mount_rotation(int r);
     int  get_mount_rotation() const;
 
+    // Heading axis preset for 3-D mounting orientations (see mpu9250.cpp for values).
+    // Use when mount_rotation doesn't help, i.e. chip is not face-up.
+    void set_heading_axes(int a);
+    int  get_heading_axes() const;
+
     // Direct bias access (set on load from config; get to persist on exit).
     void get_mag_bias(float& x, float& y, float& z) const;
     void set_mag_bias(float  x, float  y, float  z);
@@ -98,6 +104,7 @@ private:
     std::atomic<bool>  running_       { false };
     std::atomic<bool>  calibrating_   { false };
     std::atomic<int>   mount_rotation_{ 0 };
+    std::atomic<int>   heading_axes_  { 0 };
 
     // Hard-iron calibration accumulators
     float cal_min_x_, cal_max_x_;
