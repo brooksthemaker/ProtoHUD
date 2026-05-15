@@ -3439,6 +3439,33 @@ int main(int argc, char* argv[]) {
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
         }
+
+        // Smooth compass heading on the render thread so the rate is constant
+        // and independent of IMU callback frequency.  Circular lerp (sin/cos)
+        // handles the 0/360 wrap.  tau=0.10 s → ~100 ms time constant.
+        {
+            static float    s_smooth  = -1.f;
+            static uint64_t s_last_us = 0;
+            auto now_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            float dt = s_last_us ? (now_us - s_last_us) * 1e-6f : 0.f;
+            s_last_us = now_us;
+            float raw = snap.compass_heading;
+            if (s_smooth < 0.f || dt > 1.f) {
+                s_smooth = raw;
+            } else {
+                constexpr float kTau = 0.10f;
+                float alpha = 1.f - std::expf(-dt / kTau);
+                constexpr float kD2R = 3.14159265f / 180.f;
+                float fs = std::sinf(s_smooth * kD2R) + alpha * (std::sinf(raw * kD2R) - std::sinf(s_smooth * kD2R));
+                float fc = std::cosf(s_smooth * kD2R) + alpha * (std::cosf(raw * kD2R) - std::cosf(s_smooth * kD2R));
+                s_smooth = std::atan2f(fs, fc) / kD2R;
+                if (s_smooth < 0.f) s_smooth += 360.f;
+            }
+            snap.compass_heading = s_smooth;
+        }
+
         // Overlay-active flags mirror the exact condition used in draw_pip calls.
         snap.health.cam_usb1_overlay = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
         snap.health.cam_usb2_overlay = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
