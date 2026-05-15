@@ -20,6 +20,7 @@
 #include <nanovg.h>
 #include <string>
 #include <deque>
+#include <unordered_map>
 #include <vector>
 
 struct HudColors {
@@ -105,7 +106,17 @@ public:
     // Start an ImGui frame for menu + debug overlays.
     void begin_menu_frame();
 
+    // NanoVG underlay: draw corner-anchored PiP cameras BEFORE HUD chrome.
+    // The anchor check is done internally; pass the full active state.
+    // Call this before draw_hud_frame, after composite.
+    void draw_pip_underlays(
+        unsigned int tex1, bool act1, const OverlayConfig& c1,
+        unsigned int tex2, bool act2, const OverlayConfig& c2,
+        unsigned int tex3, bool act3, const OverlayConfig& c3,
+        int ew, int eh);
+
     // Build PiP draw commands for a USB camera overlay (ImGui pass).
+    // For corner-anchored pips drawn by draw_pip_underlays, pass active=false.
     void draw_pip(unsigned int tex, const char* label,
                   int w, int h, bool active, const OverlayConfig& cfg,
                   const CameraFocusState& focus = {},
@@ -222,6 +233,10 @@ private:
     int         map_img_w_    = 0;
     int         map_img_h_    = 0;
     std::string map_img_path_;
+
+    // NVG image cache for PiP underlays: GL tex ID → NVG image handle.
+    // Created via nvglCreateImageFromHandleGLES2 on first use; freed in unload().
+    std::unordered_map<unsigned int, int> pip_nvg_cache_;
 
     HudConfig     cfg_;
     HudColors     col_;

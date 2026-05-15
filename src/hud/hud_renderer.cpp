@@ -222,6 +222,11 @@ void HudRenderer::load(void* glfw_window) {
 void HudRenderer::unload() {
     if (!ctx_) return;
     if (nvg_ && map_img_ >= 0) { nvgDeleteImage(nvg_, map_img_); map_img_ = -1; }
+    if (nvg_) {
+        for (auto& [tex, img] : pip_nvg_cache_)
+            if (img >= 0) nvgDeleteImage(nvg_, img);
+        pip_nvg_cache_.clear();
+    }
     if (nvg_) { nvgDeleteGLES2(nvg_); nvg_ = nullptr; }
     ImGui::SetCurrentContext(ctx_);
     ImGui_ImplOpenGL3_Shutdown();
@@ -461,6 +466,81 @@ static ImVec2 overlay_origin(const OverlayConfig& cfg,
         case OverlayConfig::Anchor::BOTTOM_RIGHT:  return { sw - ov_w - kEdge,      bottom_y };
     }
     return { kEdge, kEdge }; // unreachable
+}
+
+// ── PiP underlay (NanoVG, drawn before HUD chrome) ───────────────────────────
+
+static bool is_corner_anchor(OverlayConfig::Anchor a) {
+    using A = OverlayConfig::Anchor;
+    return a == A::TOP_LEFT || a == A::TOP_RIGHT ||
+           a == A::BOTTOM_LEFT || a == A::BOTTOM_RIGHT;
+}
+
+void HudRenderer::draw_pip_underlays(
+    unsigned int tex1, bool act1, const OverlayConfig& c1,
+    unsigned int tex2, bool act2, const OverlayConfig& c2,
+    unsigned int tex3, bool act3, const OverlayConfig& c3,
+    int ew, int eh)
+{
+    if (!nvg_) return;
+
+    struct Entry { unsigned int tex; bool act; const OverlayConfig* cfg; };
+    const Entry entries[3] = {
+        { tex1, act1, &c1 }, { tex2, act2, &c2 }, { tex3, act3, &c3 }
+    };
+
+    // Early-out if no corner pip is active
+    bool any = false;
+    for (auto& e : entries)
+        if (e.act && e.tex && is_corner_anchor(e.cfg->anchor)) { any = true; break; }
+    if (!any) return;
+
+    const float fw     = static_cast<float>(ew);
+    const float fh     = static_cast<float>(eh);
+    const float margin = static_cast<float>(cfg_.compass_height);
+    const float C      = cfg_.pip_corner_clip_px;
+
+    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+
+    for (auto& e : entries) {
+        if (!e.act || !e.tex || !is_corner_anchor(e.cfg->anchor)) continue;
+
+        const float ov_h = fh * e.cfg->size;
+        const float ov_w = ov_h * (16.f / 9.f);
+        const auto  pos  = overlay_origin(*e.cfg, fw, fh, ov_w, ov_h, margin);
+
+        // Wrap the GL texture as an NVG image (cached; no pixel copy)
+        auto it = pip_nvg_cache_.find(e.tex);
+        if (it == pip_nvg_cache_.end()) {
+            int img = nvglCreateImageFromHandleGLES2(nvg_, e.tex, 1280, 720, 0);
+            pip_nvg_cache_[e.tex] = img;
+            it = pip_nvg_cache_.find(e.tex);
+        }
+        const int img = it->second;
+        if (img < 0) continue;
+
+        // Background fill
+        nvgBeginPath(nvg_);
+        nvgRoundedRect(nvg_, pos.x, pos.y, ov_w, ov_h, C);
+        nvgFillColor(nvg_, nvgRGBA(10, 15, 20, 200));
+        nvgFill(nvg_);
+
+        // Camera image
+        NVGpaint paint = nvgImagePattern(nvg_, pos.x, pos.y, ov_w, ov_h, 0.f, img, 1.0f);
+        nvgBeginPath(nvg_);
+        nvgRoundedRect(nvg_, pos.x, pos.y, ov_w, ov_h, C);
+        nvgFillPaint(nvg_, paint);
+        nvgFill(nvg_);
+
+        // Thin border
+        nvgBeginPath(nvg_);
+        nvgRoundedRect(nvg_, pos.x, pos.y, ov_w, ov_h, C);
+        nvgStrokeColor(nvg_, nvgRGBA(100, 130, 160, 140));
+        nvgStrokeWidth(nvg_, 1.5f);
+        nvgStroke(nvg_);
+    }
+
+    nvgEndFrame(nvg_);
 }
 
 // ── PiP ──────────────────────────────────────────────────────────────────────

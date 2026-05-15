@@ -3555,6 +3555,20 @@ int main(int argc, char* argv[]) {
             xr.composite();
         }
 
+        // ── Phase 0: PiP underlay — corner-anchored cameras behind HUD chrome ─
+        // Drawn via NanoVG in eye-space (ew × eh) before the HUD chrome so the
+        // compass, arms, and health panel render on top of them.
+        glViewport(0, 0, xr.display_width(), xr.display_height());
+        {
+            bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
+            bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
+            bool p3 = pip_cam3_overlay_active;
+            hud.draw_pip_underlays(tex_usb1, p1, pip_overlay_cfg1,
+                                   tex_usb2, p2, pip_overlay_cfg2,
+                                   tex_usb3, p3, pip_overlay_cfg3,
+                                   xr.eye_width(), xr.eye_height());
+        }
+
         // ── Phase 1: NanoVG HUD chrome (compass, arms, particles) ───────────
         // Reset viewport to full framebuffer — timewarp leaves it at right-eye half.
         // Pass full display dimensions so NanoVG covers both eye halves.
@@ -3566,19 +3580,27 @@ int main(int argc, char* argv[]) {
         menu.set_glow_enabled(hud.config().glow_enabled);
         menu.draw(xr.eye_width(), xr.eye_height());
 
+        // Corner-anchored pips were already drawn in the underlay pass; suppress
+        // them here so they don't overdraw on top of the HUD chrome.
+        auto pip_front_active = [](bool act, const OverlayConfig& cfg) {
+            using A = OverlayConfig::Anchor;
+            bool corner = cfg.anchor == A::TOP_LEFT  || cfg.anchor == A::TOP_RIGHT ||
+                          cfg.anchor == A::BOTTOM_LEFT || cfg.anchor == A::BOTTOM_RIGHT;
+            return act && !corner;
+        };
         hud.draw_pip(tex_usb1, "Cam 1",
                      xr.eye_width(), xr.eye_height(),
-                     pip_cam1_overlay_active || pip_left_active || kb_pip_left || wc_pip_left,
+                     pip_front_active(pip_cam1_overlay_active || pip_left_active || kb_pip_left || wc_pip_left, pip_overlay_cfg1),
                      pip_overlay_cfg1,
                      snap.focus_left, snap.night_vision.nv_enabled);
         hud.draw_pip(tex_usb2, "Cam 2",
                      xr.eye_width(), xr.eye_height(),
-                     pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right,
+                     pip_front_active(pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right, pip_overlay_cfg2),
                      pip_overlay_cfg2,
                      snap.focus_right, snap.night_vision.nv_enabled);
         hud.draw_pip(tex_usb3, "Cam 3",
                      xr.eye_width(), xr.eye_height(),
-                     pip_cam3_overlay_active,
+                     pip_front_active(pip_cam3_overlay_active, pip_overlay_cfg3),
                      pip_overlay_cfg3,
                      snap.focus_left, snap.night_vision.nv_enabled);
 
