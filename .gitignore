@@ -43,3 +43,7 @@ overlays/*.dtbo
 
 # Claude local config
 .claude/
+
+# Runtime config — written by the app on exit with live settings.
+# config/config.example.json is the tracked defaults reference.
+config/config.json
