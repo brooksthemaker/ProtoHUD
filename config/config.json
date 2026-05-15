@@ -251,6 +251,7 @@
     "anchor_x":            0.5,
     "anchor_y":            0.5,
     "circle_window":       false,
+    "zoom":                1.0,
     "_note": "map_path is the full path to the last-used map image. pan_x/y and calibration are reset each session."
   },
   "splash": {

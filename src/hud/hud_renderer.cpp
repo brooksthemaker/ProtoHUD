@@ -377,7 +377,11 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
     if (cfg.rotate_with_heading && cfg.calibrated)
         nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
-    NVGpaint img = nvgImagePattern(vg, -hw, -hh, hw * 2.f, hh * 2.f, 0.f, map_img_, cfg.opacity);
+    // Zoom into map content: scale the image pattern up so only the centre
+    // (1/zoom) fraction of the image is visible through the fixed window.
+    const float z   = std::max(cfg.zoom, 1.0f);
+    NVGpaint img = nvgImagePattern(vg, -hw * z, -hh * z, hw * 2.f * z, hh * 2.f * z,
+                                   0.f, map_img_, cfg.opacity);
     nvgRestore(vg);  // back to screen-aligned at (cx, cy)
 
     // Fill window shape — the path IS the clip; no scissor needed.
