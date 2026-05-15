@@ -188,6 +188,23 @@ static bool key_pressed(ImGuiKey key) {
     return ImGui::IsKeyPressed(key, /*repeat=*/false);
 }
 
+// Fires on initial key-down, then again after kDelay seconds, then every kRate seconds.
+struct KeyRepeat {
+    double press_t = -1.0;
+    double last_t  = -1.0;
+    static constexpr double kDelay = 0.65;
+    static constexpr double kRate  = 0.08;
+
+    bool tick(bool down) {
+        double t = glfwGetTime();
+        if (!down) { press_t = -1.0; return false; }
+        if (press_t < 0.0) { press_t = last_t = t; return true; }
+        if (t - press_t < kDelay) return false;
+        if (t - last_t  >= kRate) { last_t = t;  return true; }
+        return false;
+    }
+};
+
 // ── Menu definition ───────────────────────────────────────────────────────────
 
 static std::vector<MenuItem> build_menu(
@@ -2909,6 +2926,8 @@ int main(int argc, char* argv[]) {
 
     // ── Main render loop ──────────────────────────────────────────────────────
 
+    KeyRepeat rep_nav_up, rep_nav_down, rep_toast_prev, rep_toast_next;
+
     double prev_time = glfwGetTime();
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
@@ -2940,12 +2959,12 @@ int main(int argc, char* argv[]) {
         //     if (key_pressed(ImGuiKey_Enter))      hud.popup_select();
         // } else
         if (hud.toast_has_focused()) {
-            if (key_pressed(ImGuiKey_LeftArrow))  hud.toast_navigate(-1);
-            if (key_pressed(ImGuiKey_RightArrow)) hud.toast_navigate(+1);
+            if (rep_toast_prev.tick(ImGui::IsKeyDown(ImGuiKey_LeftArrow)))  hud.toast_navigate(-1);
+            if (rep_toast_next.tick(ImGui::IsKeyDown(ImGuiKey_RightArrow))) hud.toast_navigate(+1);
             if (key_pressed(ImGuiKey_Enter))      hud.toast_select(state);
         } else if (menu.is_open()) {
-            if (key_pressed(ImGuiKey_UpArrow))    menu.navigate(-1);
-            if (key_pressed(ImGuiKey_DownArrow))  menu.navigate(+1);
+            if (rep_nav_up  .tick(ImGui::IsKeyDown(ImGuiKey_UpArrow)))   menu.navigate(-1);
+            if (rep_nav_down.tick(ImGui::IsKeyDown(ImGuiKey_DownArrow))) menu.navigate(+1);
             if (key_pressed(ImGuiKey_Enter) ||
                 key_pressed(ImGuiKey_RightArrow)) menu.select();
             if (key_pressed(ImGuiKey_Backspace) ||
