@@ -2217,20 +2217,34 @@ int main(int argc, char* argv[]) {
     };
 
     // Config search order (no explicit path argument):
-    //   1. <bin_dir>/../config/config.json  — in-tree dev layout (build/protohud →
-    //                                         ../config/config.json).  Edits here
-    //                                         take effect immediately without rebuild.
-    //   2. <bin_dir>/config.json            — installed/packaged layout fallback.
+    //   1. <bin_dir>/../config/config.json         — user's live config (gitignored,
+    //                                                written on exit with current settings)
+    //   2. <bin_dir>/../config/config.example.json — tracked defaults; used on a fresh
+    //                                                clone before any run has written a
+    //                                                live config. The app writes its
+    //                                                settings to config.json on exit, so
+    //                                                the example is only read once.
+    //   3. <bin_dir>/config.json                   — installed/packaged layout fallback.
     std::string cfg_path;
     if (argc > 1) {
         cfg_path = argv[1];
     } else {
-        std::string dev_cfg = bin_dir + "/../config/config.json";
-        std::string def_cfg = res("config.json");
+        std::string dev_cfg     = bin_dir + "/../config/config.json";
+        std::string example_cfg = bin_dir + "/../config/config.example.json";
+        std::string def_cfg     = res("config.json");
         try {
-            cfg_path = fs::exists(dev_cfg) ? dev_cfg : def_cfg;
+            if (fs::exists(dev_cfg))         cfg_path = dev_cfg;
+            else if (fs::exists(example_cfg)) cfg_path = example_cfg;
+            else                              cfg_path = def_cfg;
         } catch (...) {
             cfg_path = def_cfg;
+        }
+        // Always write back to config.json so user settings are persisted there,
+        // not into the example file.
+        if (cfg_path == example_cfg) {
+            cfg_path = dev_cfg;  // redirect writes; example stays pristine
+            std::cout << "[cfg] first run — loading defaults from config.example.json, "
+                         "will write to config.json\n";
         }
     }
     json cfg = load_config(cfg_path);
@@ -2279,6 +2293,8 @@ int main(int argc, char* argv[]) {
     xr_cfg.frameless        = jval(jdisp, "frameless",         false);
 
     CamConfig owl_left, owl_right;
+    state.cameras_swapped = jcam.value("swapped", false);
+
     if (jcam.contains("owlsight_left")) {
         auto& jl              = jcam["owlsight_left"];
         owl_left.libcamera_id = jl.value("libcamera_id", 0);
@@ -3786,6 +3802,7 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_3"]["flip"]                   = cameras.usb3_cfg().flip;
         cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
         cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
+        cfg["cameras"]["swapped"] = state.cameras_swapped;
 
         cfg["qr"]["scan_main"] = state.qr_scan_main;
         cfg["qr"]["scan_usb"]  = state.qr_scan_usb;
