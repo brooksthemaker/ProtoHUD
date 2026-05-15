@@ -115,8 +115,15 @@ public:
         unsigned int tex3, bool act3, const OverlayConfig& c3,
         int ew, int eh);
 
-    // Build PiP draw commands for a USB camera overlay (ImGui pass).
-    // For corner-anchored pips drawn by draw_pip_underlays, pass active=false.
+    // NanoVG overlay: draw non-corner-anchored PiP cameras AFTER HUD chrome.
+    // Identical visual style to draw_pip_underlays; call after draw_hud_frame.
+    void draw_pip_overlays(
+        unsigned int tex1, bool act1, const OverlayConfig& c1,
+        unsigned int tex2, bool act2, const OverlayConfig& c2,
+        unsigned int tex3, bool act3, const OverlayConfig& c3,
+        int ew, int eh);
+
+    // Legacy ImGui PiP stub — no-op; kept for call-site compatibility.
     void draw_pip(unsigned int tex, const char* label,
                   int w, int h, bool active, const OverlayConfig& cfg,
                   const CameraFocusState& focus = {},
@@ -168,6 +175,9 @@ private:
                             float fw, float fh);
     void draw_fps_nvg      (NVGcontext* vg, const AppState& snap, float fw, float fh);
     void draw_map_overlay  (NVGcontext* vg, const AppState& s, float fw, float fh);
+    // Shared NVG pip drawing (no NVG frame management — caller handles Begin/EndFrame).
+    void draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
+                              const OverlayConfig& cfg, float fw, float fh);
 
     // ── ImGui popup draw methods (stay in ImGui pass) ─────────────────────────
     static const char* cardinal_str(float deg);

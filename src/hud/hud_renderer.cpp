@@ -480,6 +480,85 @@ static bool is_corner_anchor(OverlayConfig::Anchor a) {
            a == A::BOTTOM_LEFT || a == A::BOTTOM_RIGHT;
 }
 
+// ── Shared single-pip NVG renderer ───────────────────────────────────────────
+// Caller must have an active NVG frame. Draws background, image (rotation-
+// aware, always rounded corners), and theme-coloured border. No ImGui.
+
+void HudRenderer::draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
+                                       const OverlayConfig& cfg,
+                                       float fw, float fh)
+{
+    const float margin = static_cast<float>(cfg_.compass_height);
+    const float C      = cfg_.pip_corner_clip_px;
+
+    const float ov_h = fh * cfg.size;
+    const float ov_w = ov_h * (16.f / 9.f);
+
+    using R = OverlayConfig::Rotation;
+    const bool  is_portrait = (cfg.rotation == R::Portrait ||
+                                cfg.rotation == R::PortraitFlipped);
+    const float disp_w = is_portrait ? ov_h * (9.f / 16.f) : ov_w;
+    const float disp_h = ov_h;
+
+    const auto pos = overlay_origin(cfg, fw, fh, disp_w, disp_h, margin);
+
+    // Cache GL tex → NVG image handle
+    auto it = pip_nvg_cache_.find(tex);
+    if (it == pip_nvg_cache_.end()) {
+        int img = nvglCreateImageFromHandleGLES2(vg, tex, 1280, 720, 0);
+        pip_nvg_cache_[tex] = img;
+        it = pip_nvg_cache_.find(tex);
+    }
+    const int img = it->second;
+    if (img < 0) return;
+
+    float rot_angle = 0.f;
+    switch (cfg.rotation) {
+        case R::Portrait:         rot_angle =  (float)M_PI * 0.5f;  break;
+        case R::LandscapeFlipped: rot_angle =  (float)M_PI;          break;
+        case R::PortraitFlipped:  rot_angle = -(float)M_PI * 0.5f;  break;
+        default: break;
+    }
+
+    const float cx = pos.x + disp_w * 0.5f;
+    const float cy = pos.y + disp_h * 0.5f;
+    const float dw = is_portrait ? disp_h : disp_w;
+    const float dh = is_portrait ? disp_w : disp_h;
+    const float hw = dw * 0.5f;
+    const float hh = dh * 0.5f;
+
+    nvgSave(vg);
+    nvgTranslate(vg, cx, cy);
+    if (rot_angle != 0.f) nvgRotate(vg, rot_angle);
+
+    // Background
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, -hw, -hh, dw, dh, C);
+    nvgFillColor(vg, nvgRGBA(10, 15, 20, 200));
+    nvgFill(vg);
+
+    // Camera image — always rounded via nvgScissor+nvgRoundedRect clip
+    {
+        NVGpaint paint = nvgImagePattern(vg, -hw, -hh, dw, dh, 0.f, img, 1.0f);
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, -hw, -hh, dw, dh, C);
+        nvgFillPaint(vg, paint);
+        nvgFill(vg);
+    }
+
+    // Border — theme primary colour, slightly transparent
+    {
+        const ImU32 pc = col_.primary;
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, -hw, -hh, dw, dh, C);
+        nvgStrokeColor(vg, nvgRGBA(pc & 0xFF, (pc >> 8) & 0xFF, (pc >> 16) & 0xFF, 160));
+        nvgStrokeWidth(vg, 1.5f);
+        nvgStroke(vg);
+    }
+
+    nvgRestore(vg);
+}
+
 void HudRenderer::draw_pip_underlays(
     unsigned int tex1, bool act1, const OverlayConfig& c1,
     unsigned int tex2, bool act2, const OverlayConfig& c2,
@@ -493,193 +572,56 @@ void HudRenderer::draw_pip_underlays(
         { tex1, act1, &c1 }, { tex2, act2, &c2 }, { tex3, act3, &c3 }
     };
 
-    // Early-out if no corner pip is active
     bool any = false;
     for (auto& e : entries)
         if (e.act && e.tex && is_corner_anchor(e.cfg->anchor)) { any = true; break; }
     if (!any) return;
 
-    const float fw     = static_cast<float>(ew);
-    const float fh     = static_cast<float>(eh);
-    const float margin = static_cast<float>(cfg_.compass_height);
-    const float C      = cfg_.pip_corner_clip_px;
+    const float fw = static_cast<float>(ew);
+    const float fh = static_cast<float>(eh);
 
     nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    for (auto& e : entries)
+        if (e.act && e.tex && is_corner_anchor(e.cfg->anchor))
+            draw_pip_nvg_single(nvg_, e.tex, *e.cfg, fw, fh);
+    nvgEndFrame(nvg_);
+}
 
-    for (auto& e : entries) {
-        if (!e.act || !e.tex || !is_corner_anchor(e.cfg->anchor)) continue;
+void HudRenderer::draw_pip_overlays(
+    unsigned int tex1, bool act1, const OverlayConfig& c1,
+    unsigned int tex2, bool act2, const OverlayConfig& c2,
+    unsigned int tex3, bool act3, const OverlayConfig& c3,
+    int ew, int eh)
+{
+    if (!nvg_) return;
 
-        const float ov_h = fh * e.cfg->size;
-        const float ov_w = ov_h * (16.f / 9.f);
+    struct Entry { unsigned int tex; bool act; const OverlayConfig* cfg; };
+    const Entry entries[3] = {
+        { tex1, act1, &c1 }, { tex2, act2, &c2 }, { tex3, act3, &c3 }
+    };
 
-        // Portrait rotations swap the window shape so the box itself is portrait-
-        // shaped rather than rotating the content inside a landscape box.
-        using R = OverlayConfig::Rotation;
-        const bool is_portrait = (e.cfg->rotation == R::Portrait ||
-                                   e.cfg->rotation == R::PortraitFlipped);
-        const float disp_w = is_portrait ? ov_h * (9.f / 16.f) : ov_w;
-        const float disp_h = ov_h;
+    bool any = false;
+    for (auto& e : entries)
+        if (e.act && e.tex && !is_corner_anchor(e.cfg->anchor)) { any = true; break; }
+    if (!any) return;
 
-        const auto  pos  = overlay_origin(*e.cfg, fw, fh, disp_w, disp_h, margin);
+    const float fw = static_cast<float>(ew);
+    const float fh = static_cast<float>(eh);
 
-        // Wrap the GL texture as an NVG image (cached; no pixel copy)
-        auto it = pip_nvg_cache_.find(e.tex);
-        if (it == pip_nvg_cache_.end()) {
-            int img = nvglCreateImageFromHandleGLES2(nvg_, e.tex, 1280, 720, 0);
-            pip_nvg_cache_[e.tex] = img;
-            it = pip_nvg_cache_.find(e.tex);
-        }
-        const int img = it->second;
-        if (img < 0) continue;
-
-        float rot_angle = 0.f;
-        switch (e.cfg->rotation) {
-            case R::Portrait:         rot_angle =  (float)M_PI * 0.5f;  break;
-            case R::LandscapeFlipped: rot_angle =  (float)M_PI;          break;
-            case R::PortraitFlipped:  rot_angle = -(float)M_PI * 0.5f;  break;
-            default: break;
-        }
-
-        // Rotate canvas around the box centre. In the rotated coordinate system
-        // the drawing rect must be disp_h × disp_w so that after rotation it maps
-        // back to disp_w × disp_h in screen space.
-        const float cx   = pos.x + disp_w * 0.5f;
-        const float cy   = pos.y + disp_h * 0.5f;
-        const float dw   = is_portrait ? disp_h : disp_w;  // drawing-space width
-        const float dh   = is_portrait ? disp_w : disp_h;  // drawing-space height
-        const float hw   = dw * 0.5f;
-        const float hh   = dh * 0.5f;
-
-        nvgSave(nvg_);
-        nvgTranslate(nvg_, cx, cy);
-        if (rot_angle != 0.f) nvgRotate(nvg_, rot_angle);
-
-        // Background fill
-        nvgBeginPath(nvg_);
-        nvgRoundedRect(nvg_, -hw, -hh, dw, dh, C);
-        nvgFillColor(nvg_, nvgRGBA(10, 15, 20, 200));
-        nvgFill(nvg_);
-
-        // Camera image
-        NVGpaint paint = nvgImagePattern(nvg_, -hw, -hh, dw, dh, 0.f, img, 1.0f);
-        nvgBeginPath(nvg_);
-        nvgRoundedRect(nvg_, -hw, -hh, dw, dh, C);
-        nvgFillPaint(nvg_, paint);
-        nvgFill(nvg_);
-
-        // Thin border
-        nvgBeginPath(nvg_);
-        nvgRoundedRect(nvg_, -hw, -hh, dw, dh, C);
-        nvgStrokeColor(nvg_, nvgRGBA(100, 130, 160, 140));
-        nvgStrokeWidth(nvg_, 1.5f);
-        nvgStroke(nvg_);
-
-        nvgRestore(nvg_);
-    }
-
+    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    for (auto& e : entries)
+        if (e.act && e.tex && !is_corner_anchor(e.cfg->anchor))
+            draw_pip_nvg_single(nvg_, e.tex, *e.cfg, fw, fh);
     nvgEndFrame(nvg_);
 }
 
 // ── PiP ──────────────────────────────────────────────────────────────────────
 
-void HudRenderer::draw_pip(unsigned int tex, const char* label,
-                            int w, int h, bool active, const OverlayConfig& cfg,
-                            const CameraFocusState& focus, bool nv_active) {
-    if (!active) return;
-
-    ImGui::SetCurrentContext(ctx_);
-
-    const float sw     = static_cast<float>(w);
-    const float sh     = static_cast<float>(h);
-    const float ov_h   = sh * cfg.size;
-    const float ov_w   = ov_h * (16.f / 9.f);
-
-    // Portrait rotations: the window box itself becomes portrait-shaped (9:16)
-    // so the box rotates rather than just the content inside a landscape box.
-    using R = OverlayConfig::Rotation;
-    const bool is_portrait = (cfg.rotation == R::Portrait ||
-                               cfg.rotation == R::PortraitFlipped);
-    const float disp_w = is_portrait ? ov_h * (9.f / 16.f) : ov_w;
-    const float disp_h = ov_h;
-
-    const float margin = static_cast<float>(cfg_.compass_height);
-    const auto  pos    = overlay_origin(cfg, sw, sh, disp_w, disp_h, margin);
-
-    // Passthrough window so the menu (drawn after) can appear on top via BringToDisplayFront
-    char win_id[32]; snprintf(win_id, sizeof(win_id), "##pip_%s", label);
-    ImGui::SetNextWindowPos ({0.f, 0.f});
-    ImGui::SetNextWindowSize({sw,  sh });
-    ImGui::SetNextWindowBgAlpha(0.f);
-    ImGui::Begin(win_id, nullptr,
-        ImGuiWindowFlags_NoDecoration         |
-        ImGuiWindowFlags_NoInputs             |
-        ImGuiWindowFlags_NoMove               |
-        ImGuiWindowFlags_NoNav                |
-        ImGuiWindowFlags_NoBringToFrontOnFocus|
-        ImGuiWindowFlags_NoSavedSettings);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    const float C  = cfg_.pip_corner_clip_px;
-    const float x  = pos.x, y = pos.y, bw = disp_w, bh = disp_h;
-
-    // 1. Background fill — uniform rounded rect, matching NVG underlay style
-    dl->AddRectFilled({x, y}, {x + bw, y + bh}, col_.background, C);
-
-    // 2. Camera image or "No Signal" placeholder
-    if (tex) {
-        ImVec2 uv0, uv1, uv2, uv3;  // TL, TR, BR, BL of display box
-        switch (cfg.rotation) {
-            case R::Portrait:         uv0={0,1}; uv1={0,0}; uv2={1,0}; uv3={1,1}; break;
-            case R::LandscapeFlipped: uv0={1,1}; uv1={0,1}; uv2={0,0}; uv3={1,0}; break;
-            case R::PortraitFlipped:  uv0={1,0}; uv1={1,1}; uv2={0,1}; uv3={0,0}; break;
-            default:                  uv0={0,0}; uv1={1,0}; uv2={1,1}; uv3={0,1}; break;
-        }
-        if (cfg.rotation == R::Landscape) {
-            dl->AddImageRounded(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-                                {x, y}, {x + bw, y + bh},
-                                uv0, uv2, IM_COL32_WHITE, C, ImDrawFlags_RoundCornersAll);
-        } else {
-            dl->AddImageQuad(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-                             {x, y}, {x+bw, y}, {x+bw, y+bh}, {x, y+bh},
-                             uv0, uv1, uv2, uv3);
-        }
-    } else {
-        if (font_mono_) ImGui::PushFont(font_mono_);
-        dl->AddText({x + bw * 0.5f - 36.f, y + bh * 0.5f - 7.f},
-                    col_.text_dim, "No Signal");
-        if (font_mono_) ImGui::PopFont();
-    }
-
-    // 3. Label (top-left)
-    if (font_mono_) ImGui::PushFont(font_mono_);
-    dl->AddText({x + 4.f, y + 4.f}, col_.primary, label);
-    if (font_mono_) ImGui::PopFont();
-
-    // 4. Focus mode + NV status strip (bottom-left)
-    {
-        const char* focus_str =
-            (focus.mode == CameraFocusState::Mode::MANUAL) ? "MAN" :
-            (focus.mode == CameraFocusState::Mode::SLAVE)  ? "SLV" :
-            focus.af_locked ? "LOCK" :
-            focus.af_active ? "SCAN" : "AF";
-        const bool  af_on   = (focus.mode == CameraFocusState::Mode::AUTO);
-        if (font_mono_) ImGui::PushFont(font_mono_);
-        const float lh      = ImGui::GetTextLineHeight();
-        const float sy      = y + bh - lh - 5.f;
-        hud_glow_text(dl, {x + 6.f, sy}, focus_str, af_on,
-                      col_.glow_base, col_.text_fill);
-        if (nv_active) {
-            const float off = ImGui::CalcTextSize(focus_str).x + 8.f;
-            hud_glow_text(dl, {x + 6.f + off, sy}, "NV", true,
-                          col_.glow_base, col_.text_fill);
-        }
-        if (font_mono_) ImGui::PopFont();
-    }
-
-    // 5. Thin border — same blue-gray as NVG underlay
-    dl->AddRect({x, y}, {x + bw, y + bh}, IM_COL32(100, 130, 160, 140), C, 0, 1.5f);
-
-    ImGui::End();
+void HudRenderer::draw_pip(unsigned int /*tex*/, const char* /*label*/,
+                            int /*w*/, int /*h*/, bool /*active*/,
+                            const OverlayConfig& /*cfg*/,
+                            const CameraFocusState& /*focus*/, bool /*nv_active*/) {
+    // All pip rendering is now handled by draw_pip_underlays / draw_pip_overlays.
 }
 
 // ── Android mirror overlay ────────────────────────────────────────────────────
