@@ -376,6 +376,16 @@ struct AppState {
     bool  theater_mode    = false;
     bool  cameras_swapped = false; // swap left ↔ right OWLsight draw assignment
 
+    // Theater mode anchor: controls which edge the letterbox/pillarbox bars sit on.
+    // In pillarbox (bars left/right) the H component is used; in letterbox (bars
+    // top/bottom) the V component is used. Center = current default behaviour.
+    enum class TheaterAnchor {
+        TopLeft, Top, TopRight,
+        Left, Center, Right,
+        BottomLeft, Bottom, BottomRight
+    };
+    TheaterAnchor theater_anchor = TheaterAnchor::Center;
+
     // Photo capture: set by menu or GPIO long-press; consumed by the render thread.
     CaptureRequest capture_request = CaptureRequest::None;
 
