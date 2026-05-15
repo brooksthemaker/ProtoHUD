@@ -458,27 +458,17 @@ void HudRenderer::draw_fps_nvg(NVGcontext* vg, const AppState& snap, float fw, f
 static ImVec2 overlay_origin(const OverlayConfig& cfg,
                               float sw, float sh,
                               float ov_w, float ov_h,
-                              float bottom_margin) {
+                              float /*bottom_margin*/) {
     constexpr float kEdge = 20.f;
-    const float bottom_y = sh - ov_h - bottom_margin - kEdge;
-    switch (cfg.anchor) {
-        case OverlayConfig::Anchor::TOP_LEFT:      return { kEdge,                  kEdge    };
-        case OverlayConfig::Anchor::TOP_CENTER:    return { (sw - ov_w) * 0.5f,     kEdge + bottom_margin };
-        case OverlayConfig::Anchor::TOP_RIGHT:     return { sw - ov_w - kEdge,      kEdge    };
-        case OverlayConfig::Anchor::BOTTOM_LEFT:   return { kEdge,                  bottom_y };
-        case OverlayConfig::Anchor::BOTTOM_CENTER: return { (sw - ov_w) * 0.5f,     bottom_y };
-        case OverlayConfig::Anchor::BOTTOM_RIGHT:  return { sw - ov_w - kEdge,      bottom_y };
-    }
-    return { kEdge, kEdge }; // unreachable
+    float cx = sw * cfg.anchor_x + cfg.pan_x;
+    float cy = sh * cfg.anchor_y + cfg.pan_y;
+    // Clamp so the pip stays on screen with a kEdge margin
+    cx = std::clamp(cx, ov_w * 0.5f + kEdge, sw - ov_w * 0.5f - kEdge);
+    cy = std::clamp(cy, ov_h * 0.5f + kEdge, sh - ov_h * 0.5f - kEdge);
+    return { cx - ov_w * 0.5f, cy - ov_h * 0.5f };
 }
 
 // ── PiP underlay (NanoVG, drawn before HUD chrome) ───────────────────────────
-
-static bool is_corner_anchor(OverlayConfig::Anchor a) {
-    using A = OverlayConfig::Anchor;
-    return a == A::TOP_LEFT || a == A::TOP_RIGHT ||
-           a == A::BOTTOM_LEFT || a == A::BOTTOM_RIGHT;
-}
 
 // ── Shared single-pip NVG renderer ───────────────────────────────────────────
 // Caller must have an active NVG frame. Draws background, image (rotation-
@@ -546,9 +536,9 @@ void HudRenderer::draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
         nvgFill(vg);
     }
 
-    // Border — theme primary colour, slightly transparent
+    // Border — match HUD chrome orange accent
     {
-        const ImU32 pc = col_.primary;
+        const ImU32 pc = col_.orange;
         nvgBeginPath(vg);
         nvgRoundedRect(vg, -hw, -hh, dw, dh, C);
         nvgStrokeColor(vg, nvgRGBA(pc & 0xFF, (pc >> 8) & 0xFF, (pc >> 16) & 0xFF, 160));
@@ -560,31 +550,12 @@ void HudRenderer::draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
 }
 
 void HudRenderer::draw_pip_underlays(
-    unsigned int tex1, bool act1, const OverlayConfig& c1,
-    unsigned int tex2, bool act2, const OverlayConfig& c2,
-    unsigned int tex3, bool act3, const OverlayConfig& c3,
-    int ew, int eh)
+    unsigned int /*tex1*/, bool /*act1*/, const OverlayConfig& /*c1*/,
+    unsigned int /*tex2*/, bool /*act2*/, const OverlayConfig& /*c2*/,
+    unsigned int /*tex3*/, bool /*act3*/, const OverlayConfig& /*c3*/,
+    int /*ew*/, int /*eh*/)
 {
-    if (!nvg_) return;
-
-    struct Entry { unsigned int tex; bool act; const OverlayConfig* cfg; };
-    const Entry entries[3] = {
-        { tex1, act1, &c1 }, { tex2, act2, &c2 }, { tex3, act3, &c3 }
-    };
-
-    bool any = false;
-    for (auto& e : entries)
-        if (e.act && e.tex && is_corner_anchor(e.cfg->anchor)) { any = true; break; }
-    if (!any) return;
-
-    const float fw = static_cast<float>(ew);
-    const float fh = static_cast<float>(eh);
-
-    nvgBeginFrame(nvg_, fw, fh, 1.0f);
-    for (auto& e : entries)
-        if (e.act && e.tex && is_corner_anchor(e.cfg->anchor))
-            draw_pip_nvg_single(nvg_, e.tex, *e.cfg, fw, fh);
-    nvgEndFrame(nvg_);
+    // All pips are now drawn as overlays after HUD chrome via draw_pip_overlays.
 }
 
 void HudRenderer::draw_pip_overlays(
@@ -602,7 +573,7 @@ void HudRenderer::draw_pip_overlays(
 
     bool any = false;
     for (auto& e : entries)
-        if (e.act && e.tex && !is_corner_anchor(e.cfg->anchor)) { any = true; break; }
+        if (e.act && e.tex) { any = true; break; }
     if (!any) return;
 
     const float fw = static_cast<float>(ew);
@@ -610,7 +581,7 @@ void HudRenderer::draw_pip_overlays(
 
     nvgBeginFrame(nvg_, fw, fh, 1.0f);
     for (auto& e : entries)
-        if (e.act && e.tex && !is_corner_anchor(e.cfg->anchor))
+        if (e.act && e.tex)
             draw_pip_nvg_single(nvg_, e.tex, *e.cfg, fw, fh);
     nvgEndFrame(nvg_);
 }
