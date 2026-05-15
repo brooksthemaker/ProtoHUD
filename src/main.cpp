@@ -685,12 +685,11 @@ static std::vector<MenuItem> build_menu(
 
     using TA = AppState::TheaterAnchor;
     std::vector<MenuItem> theater_pos_menu = {
-        leaf_sel("Center", [&state]{ state.theater_anchor = TA::Center; }, [&state]{ return state.theater_anchor == TA::Center; }),
-        leaf_sel("Left",   [&state]{ state.theater_anchor = TA::Left;   }, [&state]{ return state.theater_anchor == TA::Left;   }),
-        leaf_sel("Right",  [&state]{ state.theater_anchor = TA::Right;  }, [&state]{ return state.theater_anchor == TA::Right;  }),
-        leaf_sel("Top",    [&state]{ state.theater_anchor = TA::Top;    }, [&state]{ return state.theater_anchor == TA::Top;    }),
-        leaf_sel("Bottom", [&state]{ state.theater_anchor = TA::Bottom; }, [&state]{ return state.theater_anchor == TA::Bottom; }),
-        leaf("Reset",      [&state]{ state.theater_anchor = TA::Center; }),
+        leaf_sel("Center",  [&state]{ state.theater_anchor = TA::Center;  }, [&state]{ return state.theater_anchor == TA::Center;  }),
+        leaf_sel("Outside", [&state]{ state.theater_anchor = TA::Outside; }, [&state]{ return state.theater_anchor == TA::Outside; }),
+        leaf_sel("Top",     [&state]{ state.theater_anchor = TA::Top;     }, [&state]{ return state.theater_anchor == TA::Top;     }),
+        leaf_sel("Bottom",  [&state]{ state.theater_anchor = TA::Bottom;  }, [&state]{ return state.theater_anchor == TA::Bottom;  }),
+        leaf("Reset",       [&state]{ state.theater_anchor = TA::Center;  }),
     };
 
     std::vector<MenuItem> main_cameras_menu = {
@@ -2481,11 +2480,12 @@ int main(int argc, char* argv[]) {
     {
         using TA = AppState::TheaterAnchor;
         static const std::pair<const char*, TA> kAnchors[] = {
-            {"center", TA::Center}, {"left", TA::Left},   {"right",  TA::Right},
-            {"top",    TA::Top},    {"bottom", TA::Bottom},
-            // legacy 9-way values
-            {"top_left", TA::Left}, {"top_right", TA::Right},
-            {"bottom_left", TA::Left}, {"bottom_right", TA::Right},
+            {"center",  TA::Center},  {"outside", TA::Outside},
+            {"top",     TA::Top},     {"bottom",  TA::Bottom},
+            // legacy values → nearest equivalent
+            {"left", TA::Outside}, {"right", TA::Outside},
+            {"top_left", TA::Outside}, {"top_right", TA::Outside},
+            {"bottom_left", TA::Outside}, {"bottom_right", TA::Outside},
         };
         std::string a = jcam.value("theater_anchor", "center");
         for (auto& [k, v] : kAnchors) if (a == k) { state.theater_anchor = v; break; }
@@ -3532,20 +3532,31 @@ int main(int argc, char* argv[]) {
         // rectangular region to fill with the USB feed rather than two thin
         // split bars. vp_x / vp_y below should be set to 0 (or 0, fh-vp_h
         // respectively) instead of the centered offset.
-        auto make_theater_vp = [&snap](int fw, int fh) -> std::array<int,4> {
+        // right_eye: true for the right eye FBO so horizontal placement mirrors left.
+        // Center:  left eye pushes right, right eye pushes left  → cameras touch at seam.
+        // Outside: left eye pushes left,  right eye pushes right → cameras on outer edges.
+        auto make_theater_vp = [&snap](int fw, int fh, bool right_eye) -> std::array<int,4> {
             using TA = AppState::TheaterAnchor;
             float cam_ar  = (float)snap.camera_resolution.width
                           / snap.camera_resolution.height;
             float disp_ar = (float)fw / fh;
             int vp_w, vp_h, vp_x, vp_y;
-            if (cam_ar < disp_ar) {   // pillarbox: black left/right, H anchor used
+            if (cam_ar < disp_ar) {   // pillarbox: black left/right
                 vp_h = fh; vp_w = (int)(fh * cam_ar); vp_y = 0;
                 switch (snap.theater_anchor) {
-                    case TA::Left:   vp_x = 0;               break;
-                    case TA::Right:  vp_x = fw - vp_w;       break;
-                    default:         vp_x = (fw - vp_w) / 2; break;
+                    case TA::Center:
+                        // inner edge: left eye pushes right, right eye pushes left
+                        vp_x = right_eye ? 0 : fw - vp_w;
+                        break;
+                    case TA::Outside:
+                        // outer edge: left eye pushes left, right eye pushes right
+                        vp_x = right_eye ? fw - vp_w : 0;
+                        break;
+                    default:
+                        vp_x = (fw - vp_w) / 2;
+                        break;
                 }
-            } else {                  // letterbox: black top/bottom, V anchor used
+            } else {                  // letterbox: black top/bottom
                 vp_w = fw; vp_h = (int)(fw / cam_ar); vp_x = 0;
                 switch (snap.theater_anchor) {
                     case TA::Top:    vp_y = fh - vp_h;        break;  // GL Y=0 at bottom
@@ -3563,7 +3574,7 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT);
 
             if (snap.theater_mode) {
-                auto vp = make_theater_vp(xr.eye_left().w, xr.eye_left().h);
+                auto vp = make_theater_vp(xr.eye_left().w, xr.eye_left().h, false);
                 glViewport(vp[0], vp[1], vp[2], vp[3]);
             }
 
@@ -3590,7 +3601,7 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT);
 
             if (snap.theater_mode) {
-                auto vp = make_theater_vp(xr.eye_right().w, xr.eye_right().h);
+                auto vp = make_theater_vp(xr.eye_right().w, xr.eye_right().h, true);
                 glViewport(vp[0], vp[1], vp[2], vp[3]);
             }
 
@@ -3851,7 +3862,7 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
         cfg["cameras"]["swapped"] = state.cameras_swapped;
         {
-            static const char* kNames[] = { "center","left","right","top","bottom" };
+            static const char* kNames[] = { "center","outside","top","bottom" };
             cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
         }
 
