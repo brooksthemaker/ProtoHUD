@@ -521,25 +521,45 @@ void HudRenderer::draw_pip_underlays(
         const int img = it->second;
         if (img < 0) continue;
 
+        // Rotation: translate to box centre, rotate, draw centred at origin
+        using R = OverlayConfig::Rotation;
+        float rot_angle = 0.f;
+        switch (e.cfg->rotation) {
+            case R::Portrait:         rot_angle =  (float)M_PI * 0.5f;  break;
+            case R::LandscapeFlipped: rot_angle =  (float)M_PI;          break;
+            case R::PortraitFlipped:  rot_angle = -(float)M_PI * 0.5f;  break;
+            default: break;
+        }
+        const float cx = pos.x + ov_w * 0.5f;
+        const float cy = pos.y + ov_h * 0.5f;
+        const float hw = ov_w * 0.5f;
+        const float hh = ov_h * 0.5f;
+
+        nvgSave(nvg_);
+        nvgTranslate(nvg_, cx, cy);
+        if (rot_angle != 0.f) nvgRotate(nvg_, rot_angle);
+
         // Background fill
         nvgBeginPath(nvg_);
-        nvgRoundedRect(nvg_, pos.x, pos.y, ov_w, ov_h, C);
+        nvgRoundedRect(nvg_, -hw, -hh, ov_w, ov_h, C);
         nvgFillColor(nvg_, nvgRGBA(10, 15, 20, 200));
         nvgFill(nvg_);
 
         // Camera image
-        NVGpaint paint = nvgImagePattern(nvg_, pos.x, pos.y, ov_w, ov_h, 0.f, img, 1.0f);
+        NVGpaint paint = nvgImagePattern(nvg_, -hw, -hh, ov_w, ov_h, 0.f, img, 1.0f);
         nvgBeginPath(nvg_);
-        nvgRoundedRect(nvg_, pos.x, pos.y, ov_w, ov_h, C);
+        nvgRoundedRect(nvg_, -hw, -hh, ov_w, ov_h, C);
         nvgFillPaint(nvg_, paint);
         nvgFill(nvg_);
 
         // Thin border
         nvgBeginPath(nvg_);
-        nvgRoundedRect(nvg_, pos.x, pos.y, ov_w, ov_h, C);
+        nvgRoundedRect(nvg_, -hw, -hh, ov_w, ov_h, C);
         nvgStrokeColor(nvg_, nvgRGBA(100, 130, 160, 140));
         nvgStrokeWidth(nvg_, 1.5f);
         nvgStroke(nvg_);
+
+        nvgRestore(nvg_);
     }
 
     nvgEndFrame(nvg_);
@@ -614,6 +634,14 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
 
     // 2. Camera image or "No Signal" placeholder — rounded corners match chamfer shape
     if (tex) {
+        using R = OverlayConfig::Rotation;
+        ImVec2 uv0, uv1, uv2, uv3;  // TL, TR, BR, BL of display box
+        switch (cfg.rotation) {
+            case R::Portrait:         uv0={0,1}; uv1={0,0}; uv2={1,0}; uv3={1,1}; break;
+            case R::LandscapeFlipped: uv0={1,1}; uv1={0,1}; uv2={0,0}; uv3={1,0}; break;
+            case R::PortraitFlipped:  uv0={1,0}; uv1={1,1}; uv2={0,1}; uv3={0,0}; break;
+            default:                  uv0={0,0}; uv1={1,0}; uv2={1,1}; uv3={0,1}; break;
+        }
         ImDrawFlags corner_flags;
         switch (cfg.anchor) {
             case A::TOP_LEFT:
@@ -628,10 +656,15 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
                 corner_flags = ImDrawFlags_RoundCornersAll;
                 break;
         }
-        dl->AddImageRounded(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-                            {x, y}, {x + bw, y + bh},
-                            {0.f, 0.f}, {1.f, 1.f},
-                            IM_COL32_WHITE, C, corner_flags);
+        if (cfg.rotation == R::Landscape) {
+            dl->AddImageRounded(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
+                                {x, y}, {x + bw, y + bh},
+                                uv0, uv2, IM_COL32_WHITE, C, corner_flags);
+        } else {
+            dl->AddImageQuad(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
+                             {x, y}, {x+bw, y}, {x+bw, y+bh}, {x, y+bh},
+                             uv0, uv1, uv2, uv3);
+        }
     } else {
         if (font_mono_) ImGui::PushFont(font_mono_);
         dl->AddText({x + bw * 0.5f - 36.f, y + bh * 0.5f - 7.f},

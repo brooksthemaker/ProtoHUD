@@ -48,8 +48,10 @@ struct OverlayConfig {
         TOP_LEFT, TOP_CENTER, TOP_RIGHT,
         BOTTOM_LEFT, BOTTOM_CENTER, BOTTOM_RIGHT
     };
-    Anchor anchor = Anchor::TOP_CENTER;
-    float  size   = 0.25f;   // fraction of screen height
+    enum class Rotation { Landscape = 0, Portrait, LandscapeFlipped, PortraitFlipped };
+    Anchor   anchor   = Anchor::TOP_CENTER;
+    float    size     = 0.25f;   // fraction of screen height
+    Rotation rotation = Rotation::Landscape;
 };
 
 // ── Sub-states ────────────────────────────────────────────────────────────────
@@ -379,11 +381,7 @@ struct AppState {
     // Theater mode anchor: controls which edge the letterbox/pillarbox bars sit on.
     // In pillarbox (bars left/right) the H component is used; in letterbox (bars
     // top/bottom) the V component is used. Center = current default behaviour.
-    enum class TheaterAnchor {
-        TopLeft, Top, TopRight,
-        Left, Center, Right,
-        BottomLeft, Bottom, BottomRight
-    };
+    enum class TheaterAnchor { Center = 0, Left, Right, Top, Bottom };
     TheaterAnchor theater_anchor = TheaterAnchor::Center;
 
     // Photo capture: set by menu or GPIO long-press; consumed by the render thread.

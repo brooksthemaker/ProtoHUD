@@ -155,6 +155,22 @@ static const char* anchor_to_str(OverlayConfig::Anchor a) {
     return "top_left";
 }
 
+static OverlayConfig::Rotation parse_rotation(const std::string& s) {
+    if (s == "portrait")          return OverlayConfig::Rotation::Portrait;
+    if (s == "landscape_flipped") return OverlayConfig::Rotation::LandscapeFlipped;
+    if (s == "portrait_flipped")  return OverlayConfig::Rotation::PortraitFlipped;
+    return OverlayConfig::Rotation::Landscape;
+}
+static const char* rotation_to_str(OverlayConfig::Rotation r) {
+    using R = OverlayConfig::Rotation;
+    switch (r) {
+        case R::Portrait:         return "portrait";
+        case R::LandscapeFlipped: return "landscape_flipped";
+        case R::PortraitFlipped:  return "portrait_flipped";
+        default:                  return "landscape";
+    }
+}
+
 // ── Color serialization helpers ───────────────────────────────────────────────
 // ImU32 is ABGR: alpha in high byte, red in low byte.
 
@@ -669,15 +685,12 @@ static std::vector<MenuItem> build_menu(
 
     using TA = AppState::TheaterAnchor;
     std::vector<MenuItem> theater_pos_menu = {
-        leaf_sel("Top Left",    [&state]{ state.theater_anchor = TA::TopLeft;     }, [&state]{ return state.theater_anchor == TA::TopLeft;     }),
-        leaf_sel("Top",         [&state]{ state.theater_anchor = TA::Top;         }, [&state]{ return state.theater_anchor == TA::Top;         }),
-        leaf_sel("Top Right",   [&state]{ state.theater_anchor = TA::TopRight;    }, [&state]{ return state.theater_anchor == TA::TopRight;    }),
-        leaf_sel("Left",        [&state]{ state.theater_anchor = TA::Left;        }, [&state]{ return state.theater_anchor == TA::Left;        }),
-        leaf_sel("Center",      [&state]{ state.theater_anchor = TA::Center;      }, [&state]{ return state.theater_anchor == TA::Center;      }),
-        leaf_sel("Right",       [&state]{ state.theater_anchor = TA::Right;       }, [&state]{ return state.theater_anchor == TA::Right;       }),
-        leaf_sel("Bottom Left", [&state]{ state.theater_anchor = TA::BottomLeft;  }, [&state]{ return state.theater_anchor == TA::BottomLeft;  }),
-        leaf_sel("Bottom",      [&state]{ state.theater_anchor = TA::Bottom;      }, [&state]{ return state.theater_anchor == TA::Bottom;      }),
-        leaf_sel("Bottom Right",[&state]{ state.theater_anchor = TA::BottomRight; }, [&state]{ return state.theater_anchor == TA::BottomRight; }),
+        leaf_sel("Center", [&state]{ state.theater_anchor = TA::Center; }, [&state]{ return state.theater_anchor == TA::Center; }),
+        leaf_sel("Left",   [&state]{ state.theater_anchor = TA::Left;   }, [&state]{ return state.theater_anchor == TA::Left;   }),
+        leaf_sel("Right",  [&state]{ state.theater_anchor = TA::Right;  }, [&state]{ return state.theater_anchor == TA::Right;  }),
+        leaf_sel("Top",    [&state]{ state.theater_anchor = TA::Top;    }, [&state]{ return state.theater_anchor == TA::Top;    }),
+        leaf_sel("Bottom", [&state]{ state.theater_anchor = TA::Bottom; }, [&state]{ return state.theater_anchor == TA::Bottom; }),
+        leaf("Reset",      [&state]{ state.theater_anchor = TA::Center; }),
     };
 
     std::vector<MenuItem> main_cameras_menu = {
@@ -757,6 +770,16 @@ static std::vector<MenuItem> build_menu(
             [cfg](float v){ cfg->size = v / 100.f; });
     };
 
+    auto make_rotation_items = [&leaf_sel](OverlayConfig* cfg) {
+        using R = OverlayConfig::Rotation;
+        return std::vector<MenuItem>{
+            leaf_sel("Landscape",         [cfg]{ cfg->rotation = R::Landscape;        }, [cfg]{ return cfg->rotation == R::Landscape;        }),
+            leaf_sel("Portrait",          [cfg]{ cfg->rotation = R::Portrait;          }, [cfg]{ return cfg->rotation == R::Portrait;          }),
+            leaf_sel("Landscape Flipped", [cfg]{ cfg->rotation = R::LandscapeFlipped; }, [cfg]{ return cfg->rotation == R::LandscapeFlipped; }),
+            leaf_sel("Portrait Flipped",  [cfg]{ cfg->rotation = R::PortraitFlipped;  }, [cfg]{ return cfg->rotation == R::PortraitFlipped;  }),
+        };
+    };
+
     // ── USB camera menus ──────────────────────────────────────────────────────
     // Scan for available V4L2 capture devices once at menu-build time.
     // Results are used to populate each slot's "Select Device" submenu.
@@ -793,6 +816,7 @@ static std::vector<MenuItem> build_menu(
             [pip_cam1_overlay](bool v){ *pip_cam1_overlay = v; }),
         submenu("Position", make_position_items(pip_cfg1)),
         make_size_slider("Size", pip_cfg1),
+        submenu("Rotation", make_rotation_items(pip_cfg1)),
     };
     std::vector<MenuItem> usb1_brightness_menu = {
         leaf_sel("50%",  [cameras]{ if (cameras) cameras->set_usb1_brightness(0.5f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 0.5f; }),
@@ -861,13 +885,6 @@ static std::vector<MenuItem> build_menu(
         submenu("Select Device", make_dev_select(
             [cameras]{ return cameras ? cameras->usb1_cfg().device : ""; },
             [cameras](const std::string& p){ if (cameras) cameras->reassign_usb1(p); })),
-        toggle("Flip Upside Down",
-            [cameras]{ return cameras && cameras->usb1_cfg().flip; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb1_cfg(); c.flip = v;
-                cameras->update_usb1_cfg(c);
-            }),
         toggle("Auto Brightness",
             [cameras]{ return cameras && cameras->usb1_cfg().auto_brightness; },
             [cameras](bool v){
@@ -900,6 +917,7 @@ static std::vector<MenuItem> build_menu(
             [pip_cam2_overlay](bool v){ *pip_cam2_overlay = v; }),
         submenu("Position", make_position_items(pip_cfg2)),
         make_size_slider("Size", pip_cfg2),
+        submenu("Rotation", make_rotation_items(pip_cfg2)),
     };
     std::vector<MenuItem> usb2_brightness_menu = {
         leaf_sel("50%",  [cameras]{ if (cameras) cameras->set_usb2_brightness(0.5f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 0.5f; }),
@@ -968,13 +986,6 @@ static std::vector<MenuItem> build_menu(
         submenu("Select Device", make_dev_select(
             [cameras]{ return cameras ? cameras->usb2_cfg().device : ""; },
             [cameras](const std::string& p){ if (cameras) cameras->reassign_usb2(p); })),
-        toggle("Flip Upside Down",
-            [cameras]{ return cameras && cameras->usb2_cfg().flip; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb2_cfg(); c.flip = v;
-                cameras->update_usb2_cfg(c);
-            }),
         toggle("Auto Brightness",
             [cameras]{ return cameras && cameras->usb2_cfg().auto_brightness; },
             [cameras](bool v){
@@ -1007,6 +1018,7 @@ static std::vector<MenuItem> build_menu(
             [pip_cam3_overlay](bool v){ *pip_cam3_overlay = v; }),
         submenu("Position", make_position_items(pip_cfg3)),
         make_size_slider("Size", pip_cfg3),
+        submenu("Rotation", make_rotation_items(pip_cfg3)),
     };
     std::vector<MenuItem> usb3_brightness_menu = {
         leaf_sel("50%",  [cameras]{ if (cameras) cameras->set_usb3_brightness(0.5f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 0.5f; }),
@@ -1075,13 +1087,6 @@ static std::vector<MenuItem> build_menu(
         submenu("Select Device", make_dev_select(
             [cameras]{ return cameras ? cameras->usb3_cfg().device : ""; },
             [cameras](const std::string& p){ if (cameras) cameras->reassign_usb3(p); })),
-        toggle("Flip Upside Down",
-            [cameras]{ return cameras && cameras->usb3_cfg().flip; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb3_cfg(); c.flip = v;
-                cameras->update_usb3_cfg(c);
-            }),
         toggle("Auto Brightness",
             [cameras]{ return cameras && cameras->usb3_cfg().auto_brightness; },
             [cameras](bool v){
@@ -2429,11 +2434,13 @@ int main(int argc, char* argv[]) {
         auto& jc1 = jpip.contains("cam1") ? jpip["cam1"] : jpip;
         pip_overlay_cfg1.size   = jval(jc1, "size",   def_size);
         pip_overlay_cfg1.anchor = parse_anchor(jc1.value("anchor", def_anch));
+        pip_overlay_cfg1.rotation = parse_rotation(jc1.value("rotation", std::string("landscape")));
 
         std::string def_anch2 = jpip.contains("cam1") ? std::string("top_right") : def_anch;
         auto& jc2 = jpip.contains("cam2") ? jpip["cam2"] : jpip;
         pip_overlay_cfg2.size   = jval(jc2, "size",   def_size);
         pip_overlay_cfg2.anchor = parse_anchor(jc2.value("anchor", def_anch2));
+        pip_overlay_cfg2.rotation = parse_rotation(jc2.value("rotation", std::string("landscape")));
     }
 
     if (cfg.contains("android")) {
@@ -2474,9 +2481,11 @@ int main(int argc, char* argv[]) {
     {
         using TA = AppState::TheaterAnchor;
         static const std::pair<const char*, TA> kAnchors[] = {
-            {"top_left",     TA::TopLeft},    {"top",    TA::Top},    {"top_right",    TA::TopRight},
-            {"left",         TA::Left},       {"center", TA::Center}, {"right",        TA::Right},
-            {"bottom_left",  TA::BottomLeft}, {"bottom", TA::Bottom}, {"bottom_right", TA::BottomRight},
+            {"center", TA::Center}, {"left", TA::Left},   {"right",  TA::Right},
+            {"top",    TA::Top},    {"bottom", TA::Bottom},
+            // legacy 9-way values
+            {"top_left", TA::Left}, {"top_right", TA::Right},
+            {"bottom_left", TA::Left}, {"bottom_right", TA::Right},
         };
         std::string a = jcam.value("theater_anchor", "center");
         for (auto& [k, v] : kAnchors) if (a == k) { state.theater_anchor = v; break; }
@@ -3529,30 +3538,20 @@ int main(int argc, char* argv[]) {
                           / snap.camera_resolution.height;
             float disp_ar = (float)fw / fh;
             int vp_w, vp_h, vp_x, vp_y;
-            // Decompose anchor into H (-1 left, 0 center, +1 right)
-            // and V (-1 bottom, 0 center, +1 top — OpenGL Y origin is bottom).
-            int ah = 0, av = 0;
-            switch (snap.theater_anchor) {
-                case TA::TopLeft:     ah=-1; av=+1; break;
-                case TA::Top:         ah= 0; av=+1; break;
-                case TA::TopRight:    ah=+1; av=+1; break;
-                case TA::Left:        ah=-1; av= 0; break;
-                case TA::Center:      ah= 0; av= 0; break;
-                case TA::Right:       ah=+1; av= 0; break;
-                case TA::BottomLeft:  ah=-1; av=-1; break;
-                case TA::Bottom:      ah= 0; av=-1; break;
-                case TA::BottomRight: ah=+1; av=-1; break;
-            }
-            if (cam_ar < disp_ar) {   // pillarbox: bars left/right, H anchor used
+            if (cam_ar < disp_ar) {   // pillarbox: black left/right, H anchor used
                 vp_h = fh; vp_w = (int)(fh * cam_ar); vp_y = 0;
-                if      (ah < 0) vp_x = 0;
-                else if (ah > 0) vp_x = fw - vp_w;
-                else             vp_x = (fw - vp_w) / 2;
-            } else {                  // letterbox: bars top/bottom, V anchor used
+                switch (snap.theater_anchor) {
+                    case TA::Left:   vp_x = 0;               break;
+                    case TA::Right:  vp_x = fw - vp_w;       break;
+                    default:         vp_x = (fw - vp_w) / 2; break;
+                }
+            } else {                  // letterbox: black top/bottom, V anchor used
                 vp_w = fw; vp_h = (int)(fw / cam_ar); vp_x = 0;
-                if      (av > 0) vp_y = fh - vp_h;   // flush to top
-                else if (av < 0) vp_y = 0;            // flush to bottom
-                else             vp_y = (fh - vp_h) / 2;
+                switch (snap.theater_anchor) {
+                    case TA::Top:    vp_y = fh - vp_h;        break;  // GL Y=0 at bottom
+                    case TA::Bottom: vp_y = 0;                 break;
+                    default:         vp_y = (fh - vp_h) / 2;  break;
+                }
             }
             return { vp_x, vp_y, vp_w, vp_h };
         };
@@ -3794,8 +3793,10 @@ int main(int argc, char* argv[]) {
 
         cfg["pip"]["cam1"]["anchor"] = anchor_to_str(pip_overlay_cfg1.anchor);
         cfg["pip"]["cam1"]["size"]   = pip_overlay_cfg1.size;
+        cfg["pip"]["cam1"]["rotation"] = rotation_to_str(pip_overlay_cfg1.rotation);
         cfg["pip"]["cam2"]["anchor"] = anchor_to_str(pip_overlay_cfg2.anchor);
         cfg["pip"]["cam2"]["size"]   = pip_overlay_cfg2.size;
+        cfg["pip"]["cam2"]["rotation"] = rotation_to_str(pip_overlay_cfg2.rotation);
 
         auto& jpp = cfg["post_process"];
         jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
@@ -3850,10 +3851,7 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
         cfg["cameras"]["swapped"] = state.cameras_swapped;
         {
-            static const char* kNames[] = {
-                "top_left","top","top_right","left","center","right",
-                "bottom_left","bottom","bottom_right"
-            };
+            static const char* kNames[] = { "center","left","right","top","bottom" };
             cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
         }
 
