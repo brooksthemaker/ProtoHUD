@@ -35,6 +35,9 @@ public:
         int         mpu_addr         = 0x68;          // 0x68 (AD0 low) or 0x69 (AD0 high)
         float       declination_deg  = 0.0f;          // local magnetic declination (+E/-W)
         float       heading_offset   = 0.0f;          // mechanical mounting offset (degrees)
+        // Mounting orientation: 0=default, 1=90°CCW, 2=180°, 3=270°CCW (in XY plane).
+        // Use when the chip is physically rotated relative to the expected axis convention.
+        int         mount_rotation   = 0;
         // Hard-iron calibration offsets — persisted to config
         float       mag_bias_x       = 0.0f;
         float       mag_bias_y       = 0.0f;
@@ -62,6 +65,11 @@ public:
     void end_calibration();   // also calls set_mag_bias() internally
     bool is_calibrating() const { return calibrating_.load(); }
 
+    // Runtime mounting orientation (0–3, same units as Config::mount_rotation).
+    // Thread-safe: read from sensor thread, written from menu/render thread.
+    void set_mount_rotation(int r);
+    int  get_mount_rotation() const;
+
     // Direct bias access (set on load from config; get to persist on exit).
     void get_mag_bias(float& x, float& y, float& z) const;
     void set_mag_bias(float  x, float  y, float  z);
@@ -87,8 +95,9 @@ private:
     float adj_x_  = 1.0f, adj_y_ = 1.0f, adj_z_ = 1.0f;
 
     std::thread        thread_;
-    std::atomic<bool>  running_     { false };
-    std::atomic<bool>  calibrating_ { false };
+    std::atomic<bool>  running_       { false };
+    std::atomic<bool>  calibrating_   { false };
+    std::atomic<int>   mount_rotation_{ 0 };
 
     // Hard-iron calibration accumulators
     float cal_min_x_, cal_max_x_;

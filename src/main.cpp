@@ -1331,6 +1331,21 @@ static std::vector<MenuItem> build_menu(
 
     // ── Compass ───────────────────────────────────────────────────────────────
     // Onboard MPU-9250 backup compass (moved from root "Backup Compass")
+    std::vector<MenuItem> mpu_mount_menu = {
+        leaf_sel("0° — Default",
+            [mpu9250]{ if (mpu9250) mpu9250->set_mount_rotation(0); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_mount_rotation() == 0; }),
+        leaf_sel("90° CCW",
+            [mpu9250]{ if (mpu9250) mpu9250->set_mount_rotation(1); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_mount_rotation() == 1; }),
+        leaf_sel("180°",
+            [mpu9250]{ if (mpu9250) mpu9250->set_mount_rotation(2); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_mount_rotation() == 2; }),
+        leaf_sel("270° CCW",
+            [mpu9250]{ if (mpu9250) mpu9250->set_mount_rotation(3); },
+            [mpu9250]{ return mpu9250 && mpu9250->get_mount_rotation() == 3; }),
+    };
+
     std::vector<MenuItem> onboard_compass_menu = {
         toggle("Active",
             [mpu9250]{ return mpu9250 && mpu9250->is_running(); },
@@ -1345,6 +1360,7 @@ static std::vector<MenuItem> build_menu(
                 if (v) mpu9250->begin_calibration();
                 else   mpu9250->end_calibration();
             }),
+        submenu("Mounting Orientation", std::move(mpu_mount_menu)),
     };
 
     std::vector<MenuItem> compass_bg_color_menu = make_color_items({
@@ -2425,6 +2441,7 @@ int main(int argc, char* argv[]) {
         mpu_cfg.mpu_addr        = jval(jm, "mpu_addr",       0x68);
         mpu_cfg.declination_deg = jval(jm, "declination_deg", 0.0f);
         mpu_cfg.heading_offset  = jval(jm, "heading_offset",  0.0f);
+        mpu_cfg.mount_rotation  = jval(jm, "mount_rotation",  0);
         if (jm.contains("mag_bias") && jm["mag_bias"].is_array() &&
             jm["mag_bias"].size() >= 3) {
             mpu_cfg.mag_bias_x = jm["mag_bias"][0].get<float>();
@@ -3995,7 +4012,8 @@ int main(int argc, char* argv[]) {
         if (mpu9250.is_running() || cfg.contains("mpu9250")) {
             float bx, by, bz;
             mpu9250.get_mag_bias(bx, by, bz);
-            cfg["mpu9250"]["mag_bias"] = json::array({ bx, by, bz });
+            cfg["mpu9250"]["mag_bias"]       = json::array({ bx, by, bz });
+            cfg["mpu9250"]["mount_rotation"] = mpu9250.get_mount_rotation();
         }
 
         FILE* f = fopen(cfg_path.c_str(), "w");
