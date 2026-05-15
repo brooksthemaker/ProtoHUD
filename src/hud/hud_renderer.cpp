@@ -619,44 +619,13 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
         ImGuiWindowFlags_NoSavedSettings);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Build anchor-dependent chamfered polygon
-    const float C = cfg_.pip_corner_clip_px;
-    const float x = pos.x, y = pos.y, bw = disp_w, bh = disp_h;
-    ImVec2 pts[8];
-    int    n_pts;
+    const float C  = cfg_.pip_corner_clip_px;
+    const float x  = pos.x, y = pos.y, bw = disp_w, bh = disp_h;
 
-    using A = OverlayConfig::Anchor;
-    switch (cfg.anchor) {
-        case A::TOP_LEFT:
-        case A::BOTTOM_RIGHT:
-            // clip TL + BR
-            pts[0] = {x+C,    y   }; pts[1] = {x+bw,   y   };
-            pts[2] = {x+bw,   y+bh-C}; pts[3] = {x+bw-C, y+bh};
-            pts[4] = {x,      y+bh}; pts[5] = {x,      y+C };
-            n_pts = 6;
-            break;
-        case A::TOP_RIGHT:
-        case A::BOTTOM_LEFT:
-            // clip TR + BL
-            pts[0] = {x,      y   }; pts[1] = {x+bw-C, y   };
-            pts[2] = {x+bw,   y+C }; pts[3] = {x+bw,   y+bh};
-            pts[4] = {x+C,    y+bh}; pts[5] = {x,      y+bh-C};
-            n_pts = 6;
-            break;
-        default:
-            // TOP_CENTER / BOTTOM_CENTER — all 4 corners
-            pts[0] = {x+C,    y     }; pts[1] = {x+bw-C, y     };
-            pts[2] = {x+bw,   y+C   }; pts[3] = {x+bw,   y+bh-C};
-            pts[4] = {x+bw-C, y+bh  }; pts[5] = {x+C,    y+bh  };
-            pts[6] = {x,      y+bh-C}; pts[7] = {x,      y+C   };
-            n_pts = 8;
-            break;
-    }
+    // 1. Background fill — uniform rounded rect, matching NVG underlay style
+    dl->AddRectFilled({x, y}, {x + bw, y + bh}, col_.background, C);
 
-    // 1. Background fill
-    dl->AddConvexPolyFilled(pts, n_pts, col_.background);
-
-    // 2. Camera image or "No Signal" placeholder — rounded corners match chamfer shape
+    // 2. Camera image or "No Signal" placeholder
     if (tex) {
         ImVec2 uv0, uv1, uv2, uv3;  // TL, TR, BR, BL of display box
         switch (cfg.rotation) {
@@ -665,24 +634,10 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
             case R::PortraitFlipped:  uv0={1,0}; uv1={1,1}; uv2={0,1}; uv3={0,0}; break;
             default:                  uv0={0,0}; uv1={1,0}; uv2={1,1}; uv3={0,1}; break;
         }
-        ImDrawFlags corner_flags;
-        switch (cfg.anchor) {
-            case A::TOP_LEFT:
-            case A::BOTTOM_RIGHT:
-                corner_flags = ImDrawFlags_RoundCornersTopLeft | ImDrawFlags_RoundCornersBottomRight;
-                break;
-            case A::TOP_RIGHT:
-            case A::BOTTOM_LEFT:
-                corner_flags = ImDrawFlags_RoundCornersTopRight | ImDrawFlags_RoundCornersBottomLeft;
-                break;
-            default:
-                corner_flags = ImDrawFlags_RoundCornersAll;
-                break;
-        }
         if (cfg.rotation == R::Landscape) {
             dl->AddImageRounded(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
                                 {x, y}, {x + bw, y + bh},
-                                uv0, uv2, IM_COL32_WHITE, C, corner_flags);
+                                uv0, uv2, IM_COL32_WHITE, C, ImDrawFlags_RoundCornersAll);
         } else {
             dl->AddImageQuad(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
                              {x, y}, {x+bw, y}, {x+bw, y+bh}, {x, y+bh},
@@ -700,7 +655,7 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
     dl->AddText({x + 4.f, y + 4.f}, col_.primary, label);
     if (font_mono_) ImGui::PopFont();
 
-    // 5. Focus mode + NV status strip (bottom-left)
+    // 4. Focus mode + NV status strip (bottom-left)
     {
         const char* focus_str =
             (focus.mode == CameraFocusState::Mode::MANUAL) ? "MAN" :
@@ -721,8 +676,8 @@ void HudRenderer::draw_pip(unsigned int tex, const char* label,
         if (font_mono_) ImGui::PopFont();
     }
 
-    // 6. Chamfered border outline on top
-    dl->AddPolyline(pts, n_pts, col_.glow_base, ImDrawFlags_Closed, 2.f);
+    // 5. Thin border — same blue-gray as NVG underlay
+    dl->AddRect({x, y}, {x + bw, y + bh}, IM_COL32(100, 130, 160, 140), C, 0, 1.5f);
 
     ImGui::End();
 }
