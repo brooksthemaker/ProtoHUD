@@ -1693,12 +1693,42 @@ static std::vector<MenuItem> build_menu(
     if (map_select_items.empty())
         map_select_items.push_back(leaf("(no maps in " + map_dir + ")", []{}));
 
-    std::vector<MenuItem> map_pan_menu = {
+    // Anchor presets snap the map anchor point to a screen position and clear
+    // the pan offset so the map lands exactly at the chosen location.
+    struct MapAnchorPreset { const char* label; float ax, ay; };
+    static const MapAnchorPreset MAP_ANCHORS[] = {
+        { "Top Left",      0.12f, 0.12f },
+        { "Top Center",    0.50f, 0.12f },
+        { "Top Right",     0.88f, 0.12f },
+        { "Center",        0.50f, 0.50f },
+        { "Bottom Left",   0.12f, 0.88f },
+        { "Bottom Center", 0.50f, 0.88f },
+        { "Bottom Right",  0.88f, 0.88f },
+    };
+    std::vector<MenuItem> map_snap_items;
+    for (const auto& a : MAP_ANCHORS) {
+        map_snap_items.push_back(leaf_sel(a.label,
+            [&state, ax = a.ax, ay = a.ay]{
+                state.map_overlay.anchor_x = ax;
+                state.map_overlay.anchor_y = ay;
+                state.map_overlay.pan_x    = 0.f;
+                state.map_overlay.pan_y    = 0.f;
+            },
+            [&state, ax = a.ax, ay = a.ay]{
+                return state.map_overlay.anchor_x == ax &&
+                       state.map_overlay.anchor_y == ay;
+            }));
+    }
+    std::vector<MenuItem> map_move_menu = {
+        submenu("Snap To",    std::move(map_snap_items)),
         leaf("Left  -20px",  [&state]{ state.map_overlay.pan_x -= 20.f; }),
         leaf("Right +20px",  [&state]{ state.map_overlay.pan_x += 20.f; }),
         leaf("Up    -20px",  [&state]{ state.map_overlay.pan_y -= 20.f; }),
         leaf("Down  +20px",  [&state]{ state.map_overlay.pan_y += 20.f; }),
-        leaf("Reset Pan",    [&state]{ state.map_overlay.pan_x = 0.f; state.map_overlay.pan_y = 0.f; }),
+        leaf("Reset",        [&state]{
+            state.map_overlay.anchor_x = 0.5f; state.map_overlay.anchor_y = 0.5f;
+            state.map_overlay.pan_x    = 0.f;  state.map_overlay.pan_y    = 0.f;
+        }),
     };
 
     std::vector<MenuItem> map_rotate_menu = {
@@ -1726,8 +1756,12 @@ static std::vector<MenuItem> build_menu(
             [&state]{ return state.map_overlay.enabled; },
             [&state](bool v){ state.map_overlay.enabled = v; }),
         submenu("Select Map",           std::move(map_select_items)),
+        submenu("Move Map",             std::move(map_move_menu)),
         submenu("Rotate Image",         std::move(map_rotate_menu)),
-        submenu("Pan",                  std::move(map_pan_menu)),
+        submenu("Size",                 std::move(map_size_menu)),
+        slider("Map Zoom", 1.f, 4.f, 0.1f, "x",
+            [&state]{ return state.map_overlay.zoom; },
+            [&state](float v){ state.map_overlay.zoom = v; }),
         toggle("Rotate with Heading",
             [&state]{ return state.map_overlay.rotate_with_heading; },
             [&state](bool v){ state.map_overlay.rotate_with_heading = v; }),
@@ -1742,7 +1776,6 @@ static std::vector<MenuItem> build_menu(
         slider("Transparency", 0.f, 1.f, 0.05f, "",
             [&state]{ return state.map_overlay.opacity; },
             [&state](float v){ state.map_overlay.opacity = v; }),
-        submenu("Size",                 std::move(map_size_menu)),
     };
 
     std::vector<MenuItem> hud_menu = {
@@ -2422,6 +2455,7 @@ int main(int argc, char* argv[]) {
         mo.anchor_x            = jm.value("anchor_x",            mo.anchor_x);
         mo.anchor_y            = jm.value("anchor_y",            mo.anchor_y);
         mo.circle_window       = jm.value("circle_window",       mo.circle_window);
+        mo.zoom                = jm.value("zoom",                mo.zoom);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
 
@@ -2984,6 +3018,10 @@ int main(int argc, char* argv[]) {
 
     KeyRepeat rep_nav_up, rep_nav_down, rep_toast_prev, rep_toast_next;
 
+    // N long-press state: short tap = toggle map; hold 1.5 s = cycle next map
+    double n_press_t    = -1.0;
+    bool   n_long_fired = false;
+
     double prev_time = glfwGetTime();
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
@@ -3037,14 +3075,44 @@ int main(int argc, char* argv[]) {
         }
         // F — toggle FPS overlay
         if (key_pressed(ImGuiKey_F)) fps_overlay_active = !fps_overlay_active;
-        // N — map overlay toggle;  Shift+N — calibrate north (Set My Direction)
-        if (key_pressed(ImGuiKey_N)) {
-            if (ImGui::GetIO().KeyShift) {
-                std::lock_guard<std::mutex> lk(state.mtx);
-                state.map_overlay.map_north_deg = state.compass_heading;
-                state.map_overlay.calibrated    = true;
-            } else {
-                state.map_overlay.enabled = !state.map_overlay.enabled;
+        // Shift+N — calibrate north (Set My Direction); edge-only
+        if (ImGui::GetIO().KeyShift && key_pressed(ImGuiKey_N)) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.map_overlay.map_north_deg = state.compass_heading;
+            state.map_overlay.calibrated    = true;
+        }
+        // N (no Shift) — short tap: toggle map overlay;
+        //               hold 1.5 s: cycle to next map in the maps folder
+        {
+            const bool n_held = ImGui::IsKeyDown(ImGuiKey_N) && !ImGui::GetIO().KeyShift;
+            if (n_held && n_press_t < 0.0) {
+                n_press_t    = glfwGetTime();
+                n_long_fired = false;
+            } else if (!n_held && n_press_t >= 0.0) {
+                if (!n_long_fired)
+                    state.map_overlay.enabled = !state.map_overlay.enabled;
+                n_press_t = -1.0;
+            }
+            if (n_held && !n_long_fired && n_press_t >= 0.0 &&
+                    glfwGetTime() - n_press_t >= 1.5) {
+                std::vector<std::string> maps;
+                std::error_code ec;
+                for (auto& e : std::filesystem::directory_iterator(cfg_map_dir, ec)) {
+                    auto ext = e.path().extension().string();
+                    if (ext==".png"||ext==".jpg"||ext==".jpeg"||
+                        ext==".PNG"||ext==".JPG"||ext==".JPEG")
+                        maps.push_back(e.path().string());
+                }
+                std::sort(maps.begin(), maps.end());
+                if (!maps.empty()) {
+                    auto it = std::find(maps.begin(), maps.end(), state.map_overlay.map_path);
+                    if (it == maps.end() || std::next(it) == maps.end())
+                        state.map_overlay.map_path = maps.front();
+                    else
+                        state.map_overlay.map_path = *std::next(it);
+                    state.map_overlay.enabled = true;
+                }
+                n_long_fired = true;
             }
         }
         // Space — dismiss focused toast or close menu (back)
@@ -3631,6 +3699,20 @@ int main(int argc, char* argv[]) {
 
         cfg["qr"]["scan_main"] = state.qr_scan_main;
         cfg["qr"]["scan_usb"]  = state.qr_scan_usb;
+
+        {
+            const auto& mo          = state.map_overlay;
+            cfg["map"]["enabled"]             = mo.enabled;
+            cfg["map"]["map_path"]            = mo.map_path;
+            cfg["map"]["opacity"]             = mo.opacity;
+            cfg["map"]["size_px"]             = mo.size_px;
+            cfg["map"]["rotate_with_heading"] = mo.rotate_with_heading;
+            cfg["map"]["image_rotate_deg"]    = mo.image_rotate_deg;
+            cfg["map"]["anchor_x"]            = mo.anchor_x;
+            cfg["map"]["anchor_y"]            = mo.anchor_y;
+            cfg["map"]["circle_window"]       = mo.circle_window;
+            cfg["map"]["zoom"]                = mo.zoom;
+        }
 
         cfg["resolution"]["width"]  = state.camera_resolution.width;
         cfg["resolution"]["height"] = state.camera_resolution.height;
