@@ -95,6 +95,12 @@
       "baud": 115200,
       "sleep_timeout_s": 30,
       "wake_degrees": 5.0
+    },
+    "wireless_controller": {
+      "port": "/dev/ttyACM3",
+      "baud": 115200,
+      "enabled": false,
+      "_note": "ESP32-C3 USB-serial bridge for ESP-NOW in-paw controller. Set enabled:true and adjust port once the bridge is connected."
     }
   },
   "vitrue": {
@@ -223,6 +229,18 @@
     "crash_dir":  "/tmp",
     "photo_dir":  "",
     "map_dir":    ""
+  },
+  "map": {
+    "enabled":             false,
+    "map_path":            "",
+    "opacity":             0.80,
+    "size_px":             300,
+    "rotate_with_heading": true,
+    "image_rotate_deg":    0.0,
+    "anchor_x":            0.5,
+    "anchor_y":            0.5,
+    "circle_window":       false,
+    "_note": "map_path is the full path to the last-used map image. pan_x/y and calibration are reset each session."
   },
   "splash": {
     "enabled":       true,

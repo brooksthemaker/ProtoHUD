@@ -107,6 +107,8 @@ struct SystemHealth {
     bool knob_ok         = false;
     bool knob_ready      = false;  // Motor calibration complete
     bool gamepad_ok      = false;
+    bool wireless_ok     = false;
+    int  wireless_battery_pct = -1;  // -1 = unknown
     bool cam_owl_left    = false;
     bool cam_owl_right   = false;
     bool cam_usb1        = false;
@@ -194,6 +196,7 @@ struct MapOverlayConfig {
     bool        calibrated          = false;
     bool        rotate_with_heading = true;
     float       image_rotate_deg    = 0.f;    // manual image rotation offset (degrees)
+    bool        circle_window       = false;  // true = circular clip; false = rect hugging image
 };
 
 // ── Particle effects ──────────────────────────────────────────────────────────
