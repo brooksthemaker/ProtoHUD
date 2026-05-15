@@ -1070,13 +1070,13 @@ void HudRenderer::draw_clock_indicator(NVGcontext* vg, const AppState& s,
 
     const float font_size = 14.f * cfg_.text_scale * scale;
     nvg_set_font_mono(font_size);
-    const char* rows[2] = { time_str, date_str };
+    nvgTextAlign(nvg_, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    const float arm_cx    = clock_anchor_x + ARM_EXT * 0.5f;
+    const char* rows[2]   = { time_str, date_str };
     for (int i = 0; i < n_rows; ++i) {
         const float t  = static_cast<float>(i + 1) * eff_row_h;
-        const float ix = clock_anchor_x + dir_x * t;
-        const float iy = anchor_y       + dir_y * t;
-        nvg_glow_text(vg, ix + 6.f, iy - font_size * 0.5f,
-                      rows[i], true, col_.glow_base, col_.text_fill);
+        const float iy = anchor_y + dir_y * t;
+        nvg_glow_text(vg, arm_cx, iy, rows[i], true, col_.glow_base, col_.text_fill);
     }
 }
 
