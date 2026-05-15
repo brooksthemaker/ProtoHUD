@@ -536,9 +536,9 @@ void HudRenderer::draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
         nvgFill(vg);
     }
 
-    // Border — match HUD chrome orange accent
+    // Border — follow the live theme color (glow_base, same as compass/arms)
     {
-        const ImU32 pc = col_.orange;
+        const ImU32 pc = col_.glow_base;
         nvgBeginPath(vg);
         nvgRoundedRect(vg, -hw, -hh, dw, dh, C);
         nvgStrokeColor(vg, nvgRGBA(pc & 0xFF, (pc >> 8) & 0xFF, (pc >> 16) & 0xFF, 160));
