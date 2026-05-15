@@ -1038,7 +1038,7 @@ void HudRenderer::draw_clock_indicator(NVGcontext* vg, const AppState& s,
     const float scale     = std::max(0.5f, s.clock_cfg.font_scale);
     const float eff_row_h = ROW_H * scale;
     const int   n_rows    = s.clock_cfg.show_date ? 2 : 1;
-    const float diag_len  = static_cast<float>(n_rows + 1) * eff_row_h;
+    constexpr float diag_len = 90.f;  // fixed to match face/lora arms: (MAX_ROWS+1)*ROW_H
 
     NVGcolor cm = nvg_col(col_.glow_base);
     NVGcolor g1 = nvg_col_a(col_.glow_base, 70);
