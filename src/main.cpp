@@ -374,33 +374,6 @@ static std::vector<MenuItem> build_menu(
     }
 
     // ── Camera controls ───────────────────────────────────────────────────────
-    std::vector<MenuItem> focus_modes = {
-        leaf_sel("Manual", [cameras, &state]{
-            state.focus_left.mode  = CameraFocusState::Mode::MANUAL;
-            state.focus_right.mode = CameraFocusState::Mode::MANUAL;
-            if (cameras) {
-                if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
-                if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
-            }
-        }, [&state]{ return state.focus_left.mode == CameraFocusState::Mode::MANUAL; }),
-        leaf_sel("Auto", [cameras, &state]{
-            state.focus_left.mode  = CameraFocusState::Mode::AUTO;
-            state.focus_right.mode = CameraFocusState::Mode::AUTO;
-            if (cameras) {
-                if (cameras->owl_left())  cameras->owl_left()->start_autofocus();
-                if (cameras->owl_right()) cameras->owl_right()->start_autofocus();
-            }
-        }, [&state]{ return state.focus_left.mode == CameraFocusState::Mode::AUTO; }),
-        leaf_sel("Slave", [cameras, &state]{
-            state.focus_left.mode  = CameraFocusState::Mode::SLAVE;
-            state.focus_right.mode = CameraFocusState::Mode::SLAVE;
-            if (cameras) {
-                if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
-                if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
-            }
-        }, [&state]{ return state.focus_left.mode == CameraFocusState::Mode::SLAVE; }),
-    };
-
     std::vector<MenuItem> af_triggers = {
         leaf("Left",  [cameras, &state]{
             if (!cameras || !cameras->owl_left()) return;
@@ -500,26 +473,73 @@ static std::vector<MenuItem> build_menu(
         submenu("Shutter Speed", std::move(shutter_speeds)),
     };
 
-    // ── White balance (OWLsight CSI cameras) ─────────────────────────────────
-    std::vector<MenuItem> wb_temp_menu = {
-        leaf_sel("Tungsten (2800K)",  [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(2800); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(2800); } }, []{ return false; }),
-        leaf_sel("Warm WB (3500K)",   [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(3500); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(3500); } }, []{ return false; }),
-        leaf_sel("Neutral (4500K)",   [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(4500); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(4500); } }, []{ return false; }),
-        leaf_sel("Daylight (5600K)",  [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(5600); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(5600); } }, []{ return false; }),
-        leaf_sel("Cool Blue (7000K)", [cameras]{ if (cameras) { if (cameras->owl_left()) cameras->owl_left()->set_colour_temp(7000); if (cameras->owl_right()) cameras->owl_right()->set_colour_temp(7000); } }, []{ return false; }),
+    // ── Per-camera controls (OWLsight CSI cameras) ───────────────────────────
+    // Helper: build focus + WB items for one camera.
+    // cam_ptr  — accessor returning DmaCamera*
+    // focus_st — reference to the per-eye CameraFocusState in AppState
+    // awb_flag — reference to the per-eye AWB bool in NightVisionState
+    struct ColourTemp { const char* label; int k; };
+    static const ColourTemp WB_PRESETS[] = {
+        { "Tungsten (2800K)",  2800 },
+        { "Warm (3500K)",      3500 },
+        { "Neutral (4500K)",   4500 },
+        { "Daylight (5600K)",  5600 },
+        { "Cool Blue (7000K)", 7000 },
     };
 
-    std::vector<MenuItem> awb_menu = {
-        toggle("Auto WB",
-            [&state]{ return state.night_vision.csi_awb_on; },
-            [cameras, &state](bool v){
-                state.night_vision.csi_awb_on = v;
-                if (!cameras) return;
-                if (cameras->owl_left())  cameras->owl_left()->set_awb_enable(v);
-                if (cameras->owl_right()) cameras->owl_right()->set_awb_enable(v);
+    auto make_cam_menu = [&](
+        std::function<DmaCamera*()>     cam_ptr,
+        CameraFocusState&               focus_st,
+        bool&                           awb_flag)
+    {
+        std::vector<MenuItem> fm = {
+            leaf_sel("Manual", [cameras, cam_ptr, &focus_st]{
+                focus_st.mode = CameraFocusState::Mode::MANUAL;
+                if (auto* c = cam_ptr()) c->stop_autofocus();
+            }, [&focus_st]{ return focus_st.mode == CameraFocusState::Mode::MANUAL; }),
+            leaf_sel("Auto", [cam_ptr, &focus_st]{
+                focus_st.mode = CameraFocusState::Mode::AUTO;
+                if (auto* c = cam_ptr()) c->start_autofocus();
+            }, [&focus_st]{ return focus_st.mode == CameraFocusState::Mode::AUTO; }),
+            leaf_sel("Slave", [cam_ptr, &focus_st]{
+                focus_st.mode = CameraFocusState::Mode::SLAVE;
+                if (auto* c = cam_ptr()) c->stop_autofocus();
+            }, [&focus_st]{ return focus_st.mode == CameraFocusState::Mode::SLAVE; }),
+            leaf("Trigger AF", [cam_ptr]{
+                if (auto* c = cam_ptr()) c->start_autofocus();
             }),
-        submenu("Colour Temp", std::move(wb_temp_menu)),
+            slider("Focus Position", 0.f, 1000.f, 25.f, "",
+                [cam_ptr]{ auto* c = cam_ptr(); return c ? (float)c->get_focus_position() : 0.f; },
+                [cam_ptr, &focus_st](float v){
+                    focus_st.focus_position = (int)v;
+                    if (auto* c = cam_ptr()) c->set_focus_position((int)v);
+                }),
+        };
+
+        std::vector<MenuItem> wbm;
+        wbm.push_back(toggle("Auto WB",
+            [&awb_flag]{ return awb_flag; },
+            [cam_ptr, &awb_flag](bool v){
+                awb_flag = v;
+                if (auto* c = cam_ptr()) c->set_awb_enable(v);
+            }));
+        for (const auto& p : WB_PRESETS)
+            wbm.push_back(leaf(p.label, [cam_ptr, k = p.k]{
+                if (auto* c = cam_ptr()) c->set_colour_temp(k);
+            }));
+
+        return std::vector<MenuItem>{
+            submenu("Focus",          std::move(fm)),
+            submenu("White Balance",  std::move(wbm)),
+        };
     };
+
+    auto left_cam_menu  = make_cam_menu(
+        [cameras]{ return cameras ? cameras->owl_left()  : nullptr; },
+        state.focus_left,  state.night_vision.csi_awb_left);
+    auto right_cam_menu = make_cam_menu(
+        [cameras]{ return cameras ? cameras->owl_right() : nullptr; },
+        state.focus_right, state.night_vision.csi_awb_right);
 
     // ── Digital zoom presets (both eyes together) ─────────────────────────────
     struct ZoomPreset { const char* label; float zoom; };
@@ -631,21 +651,8 @@ static std::vector<MenuItem> build_menu(
         submenu("Anchor", std::move(single_cam_anchor_items)),
     };
 
-    std::vector<MenuItem> focus_menu = {
-        submenu("Mode",      std::move(focus_modes)),
-        slider("Position", 0.f, 1000.f, 50.f, "",
-            [&state]{ return static_cast<float>(state.focus_left.focus_position); },
-            [cameras, &state](float v){
-                int pos = static_cast<int>(v);
-                if (cameras) {
-                    if (cameras->owl_left())  cameras->owl_left()->set_focus_position(pos);
-                    if (cameras->owl_right()) cameras->owl_right()->set_focus_position(pos);
-                }
-                state.focus_left.focus_position  = pos;
-                state.focus_right.focus_position = pos;
-            }),
-        submenu("Autofocus", std::move(af_triggers)),
-    };
+    // "Autofocus Both" shortcut kept for convenience — triggers AF on both cameras at once.
+    std::vector<MenuItem> af_both_menu = std::move(af_triggers);
 
     std::vector<MenuItem> capture_menu = {
         leaf("Left Eye",   [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Left;   }),
@@ -664,13 +671,17 @@ static std::vector<MenuItem> build_menu(
         toggle("Theater Mode",
             [&state]{ return state.theater_mode; },
             [&state](bool v){ state.theater_mode = v; }),
+        toggle("Swap Cameras",
+            [&state]{ return state.cameras_swapped; },
+            [&state](bool v){ state.cameras_swapped = v; }),
         submenu("Resolution",    std::move(resolution_presets)),
         submenu("Digital Zoom",  std::move(zoom_menu)),
         submenu("Mirror Crop",   std::move(mirror_crop_menu)),
         submenu("Single Camera", std::move(single_cam_menu)),
-        submenu("White Balance", std::move(awb_menu)),
+        submenu("Left Camera",   std::move(left_cam_menu)),
+        submenu("Right Camera",  std::move(right_cam_menu)),
         submenu("Night Vision",  std::move(nv_menu)),
-        submenu("Focus",         std::move(focus_menu)),
+        submenu("Autofocus Both", std::move(af_both_menu)),
         submenu("Capture Photo", std::move(capture_menu)),
         submenu("QR Scan",       std::move(qr_menu)),
     };
@@ -2425,6 +2436,8 @@ int main(int argc, char* argv[]) {
         state.night_vision.shutter_us             = jnv.value("shutter_us",              33333);
         state.night_vision.auto_nv                = jnv.value("auto_nv",                 false);
         state.night_vision.auto_nv_gain_threshold = jnv.value("auto_nv_gain_threshold",  4.0f);
+        state.night_vision.csi_awb_left           = jnv.value("csi_awb_left",            true);
+        state.night_vision.csi_awb_right          = jnv.value("csi_awb_right",           true);
     }
 
     if (cfg.contains("clock")) {
@@ -3364,6 +3377,7 @@ int main(int argc, char* argv[]) {
             snap.zoom_left          = state.zoom_left;
             snap.zoom_right         = state.zoom_right;
             snap.theater_mode       = state.theater_mode;
+            snap.cameras_swapped    = state.cameras_swapped;
             snap.mirror_crop        = state.mirror_crop;
             snap.cam_single         = state.cam_single;
             snap.capture_request    = state.capture_request;
@@ -3498,8 +3512,9 @@ int main(int argc, char* argv[]) {
                 // For now: TODO: render tex_beast as fullscreen quad
                 drew = false;  // fallback to OWLsight below
             }
-            if (!drew) drew = cameras.draw_owl_left(
-                snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
+            if (!drew) drew = snap.cameras_swapped
+                ? cameras.draw_owl_right(snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y)
+                : cameras.draw_owl_left (snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
 
             if (snap.theater_mode)
                 glViewport(0, 0, xr.eye_left().w, xr.eye_left().h);
@@ -3522,8 +3537,9 @@ int main(int argc, char* argv[]) {
             if (use_beast_cam && tex_beast != 0) {
                 drew = false;  // fallback to OWLsight below
             }
-            if (!drew) drew = cameras.draw_owl_right(
-                snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+            if (!drew) drew = snap.cameras_swapped
+                ? cameras.draw_owl_left (snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y)
+                : cameras.draw_owl_right(snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
 
             if (snap.theater_mode)
                 glViewport(0, 0, xr.eye_right().w, xr.eye_right().h);
@@ -3705,6 +3721,8 @@ int main(int argc, char* argv[]) {
         cfg["night_vision"]["shutter_us"]             = state.night_vision.shutter_us;
         cfg["night_vision"]["auto_nv"]                = state.night_vision.auto_nv;
         cfg["night_vision"]["auto_nv_gain_threshold"] = state.night_vision.auto_nv_gain_threshold;
+        cfg["night_vision"]["csi_awb_left"]           = state.night_vision.csi_awb_left;
+        cfg["night_vision"]["csi_awb_right"]          = state.night_vision.csi_awb_right;
 
         cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
         cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;
