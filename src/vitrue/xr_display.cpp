@@ -187,6 +187,37 @@ void XRDisplay::composite() {
     glUseProgram(0);
 }
 
+// ── composite_single ─────────────────────────────────────────────────────────
+// Blit one texture to an anchor region; clear rest to black.
+
+void XRDisplay::composite_single(GLuint src_tex, CamSingleAnchor anchor) {
+    static const float rects[5][4] = {
+        {-1.f, -1.f,  1.f,  1.f},  // Full
+        {-1.f,  0.f,  1.f,  1.f},  // Top half
+        {-1.f, -1.f,  1.f,  0.f},  // Bottom half
+        {-1.f, -1.f,  0.f,  1.f},  // Left half
+        { 0.f, -1.f,  1.f,  1.f},  // Right half
+    };
+    int i = static_cast<int>(anchor);
+    if (i < 0 || i > 4) i = 0;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, disp_w_, disp_h_);
+    glClearColor(0.f, 0.f, 0.f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(blit_prog_);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(glGetUniformLocation(blit_prog_, "u_tex"), 0);
+    gl::bind_quad(quad_vbo_);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
+    glUniform4f(glGetUniformLocation(blit_prog_, "u_rect"),
+                rects[i][0], rects[i][1], rects[i][2], rects[i][3]);
+    gl::draw_quad();
+    gl::unbind_quad();
+    glUseProgram(0);
+}
+
 // ── present ───────────────────────────────────────────────────────────────────
 // Swap the GLFW window buffer and poll events.
 

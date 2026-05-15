@@ -577,6 +577,60 @@ static std::vector<MenuItem> build_menu(
         }),
     };
 
+    // ── Mirror Crop ────────────────────────────────────────────────────────────
+    // Both eyes zoom to the same level and pan inward (nose-side crop).
+    // Vertical position (top/middle/bottom) is shared. inner_bias controls how
+    // far from center the crop window is placed.
+    std::vector<MenuItem> mirror_crop_zoom_items = {
+        leaf_sel("1.5×", [&state]{ state.mirror_crop.zoom = 1.5f; },
+                         [&state]{ return state.mirror_crop.zoom == 1.5f; }),
+        leaf_sel("2.0×", [&state]{ state.mirror_crop.zoom = 2.0f; },
+                         [&state]{ return state.mirror_crop.zoom == 2.0f; }),
+        leaf_sel("2.5×", [&state]{ state.mirror_crop.zoom = 2.5f; },
+                         [&state]{ return state.mirror_crop.zoom == 2.5f; }),
+        leaf_sel("3.0×", [&state]{ state.mirror_crop.zoom = 3.0f; },
+                         [&state]{ return state.mirror_crop.zoom == 3.0f; }),
+    };
+    std::vector<MenuItem> mirror_crop_vert_items = {
+        leaf_sel("Top",    [&state]{ state.mirror_crop.vertical = CropVertical::Top;    },
+                           [&state]{ return state.mirror_crop.vertical == CropVertical::Top;    }),
+        leaf_sel("Middle", [&state]{ state.mirror_crop.vertical = CropVertical::Middle; },
+                           [&state]{ return state.mirror_crop.vertical == CropVertical::Middle; }),
+        leaf_sel("Bottom", [&state]{ state.mirror_crop.vertical = CropVertical::Bottom; },
+                           [&state]{ return state.mirror_crop.vertical == CropVertical::Bottom; }),
+    };
+    std::vector<MenuItem> mirror_crop_menu = {
+        toggle("Enable", [&state]{ return state.mirror_crop.enabled; },
+                         [&state](bool v){ state.mirror_crop.enabled = v; }),
+        submenu("Zoom",           std::move(mirror_crop_zoom_items)),
+        submenu("Vertical",       std::move(mirror_crop_vert_items)),
+        slider("Inner Bias", 0.f, 0.40f, 0.05f, "",
+            [&state]{ return state.mirror_crop.inner_bias; },
+            [&state](float v){ state.mirror_crop.inner_bias = v; }),
+    };
+
+    // ── Single Camera ──────────────────────────────────────────────────────────
+    // Fill one anchor region of the screen with a single camera feed.
+    std::vector<MenuItem> single_cam_anchor_items = {
+        leaf_sel("Full Screen", [&state]{ state.cam_single.anchor = CamSingleAnchor::Full;   },
+                                [&state]{ return state.cam_single.anchor == CamSingleAnchor::Full;   }),
+        leaf_sel("Top Half",    [&state]{ state.cam_single.anchor = CamSingleAnchor::Top;    },
+                                [&state]{ return state.cam_single.anchor == CamSingleAnchor::Top;    }),
+        leaf_sel("Bottom Half", [&state]{ state.cam_single.anchor = CamSingleAnchor::Bottom; },
+                                [&state]{ return state.cam_single.anchor == CamSingleAnchor::Bottom; }),
+        leaf_sel("Left Half",   [&state]{ state.cam_single.anchor = CamSingleAnchor::Left;   },
+                                [&state]{ return state.cam_single.anchor == CamSingleAnchor::Left;   }),
+        leaf_sel("Right Half",  [&state]{ state.cam_single.anchor = CamSingleAnchor::Right;  },
+                                [&state]{ return state.cam_single.anchor == CamSingleAnchor::Right;  }),
+    };
+    std::vector<MenuItem> single_cam_menu = {
+        toggle("Enable", [&state]{ return state.cam_single.enabled; },
+                         [&state](bool v){ state.cam_single.enabled = v; }),
+        toggle("Use Right Camera", [&state]{ return state.cam_single.use_right; },
+                                   [&state](bool v){ state.cam_single.use_right = v; }),
+        submenu("Anchor", std::move(single_cam_anchor_items)),
+    };
+
     std::vector<MenuItem> main_cameras_menu = {
         toggle("Theater Mode",
             [&state]{ return state.theater_mode; },
@@ -589,7 +643,9 @@ static std::vector<MenuItem> build_menu(
                                     [&state](bool v){ state.qr_scan_main = v; }),
         toggle("QR Scan USB Cams",  [&state]{ return state.qr_scan_usb; },
                                     [&state](bool v){ state.qr_scan_usb = v; }),
-        submenu("Digital Zoom", std::move(zoom_menu)),
+        submenu("Digital Zoom",  std::move(zoom_menu)),
+        submenu("Mirror Crop",   std::move(mirror_crop_menu)),
+        submenu("Single Camera", std::move(single_cam_menu)),
         submenu("Focus Mode",  std::move(focus_modes)),
         slider("Focus Position", 0.f, 1000.f, 50.f, "",
             [&state]{ return static_cast<float>(state.focus_left.focus_position); },
@@ -3190,6 +3246,8 @@ int main(int argc, char* argv[]) {
             snap.zoom_left          = state.zoom_left;
             snap.zoom_right         = state.zoom_right;
             snap.theater_mode       = state.theater_mode;
+            snap.mirror_crop        = state.mirror_crop;
+            snap.cam_single         = state.cam_single;
             snap.capture_request    = state.capture_request;
             snap.qr_scan_main       = state.qr_scan_main;
             snap.qr_scan_usb        = state.qr_scan_usb;
@@ -3259,6 +3317,22 @@ int main(int argc, char* argv[]) {
                 s_last_nv = nv;
                 s_first   = false;
             }
+        }
+
+        // ── Mirror crop override ──────────────────────────────────────────────
+        // When enabled, both eyes zoom to the same level and pan inward (toward
+        // the nose). Left eye pans right (+inner_bias), right eye pans left
+        // (-inner_bias). The vertical position is shared.
+        if (snap.mirror_crop.enabled) {
+            float cy = (snap.mirror_crop.vertical == CropVertical::Top)    ? 0.25f
+                     : (snap.mirror_crop.vertical == CropVertical::Bottom) ? 0.75f
+                     : 0.5f;
+            snap.zoom_left.zoom      = snap.mirror_crop.zoom;
+            snap.zoom_right.zoom     = snap.mirror_crop.zoom;
+            snap.zoom_left.center_x  = 0.5f + snap.mirror_crop.inner_bias;
+            snap.zoom_right.center_x = 0.5f - snap.mirror_crop.inner_bias;
+            snap.zoom_left.center_y  = cy;
+            snap.zoom_right.center_y = cy;
         }
 
         // ── Render cameras into per-eye FBOs ──────────────────────────────────
@@ -3383,7 +3457,12 @@ int main(int argc, char* argv[]) {
         // ── Composite or timewarp ─────────────────────────────────────────────
         ImuPose current_pose = xr.get_latest_imu_pose();
 
-        if (use_timewarp) {
+        if (snap.cam_single.enabled) {
+            // Single-camera fill: draw one eye's (post-processed) feed to an
+            // anchor region of the screen; the rest is cleared to black.
+            GLuint src = snap.cam_single.use_right ? right_src : left_src;
+            xr.composite_single(src, snap.cam_single.anchor);
+        } else if (use_timewarp) {
             // Apply rotational timewarp: warp each eye FBO into its half of the
             // default framebuffer using the latest IMU pose.
             glBindFramebuffer(GL_FRAMEBUFFER, 0);

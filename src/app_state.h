@@ -175,6 +175,25 @@ struct ZoomCropState {
     float center_y = 0.5f;
 };
 
+// Synchronized mirror crop: both eyes zoom to the same level and pan to their
+// inner (nose-side) edges. The left eye pans right (center_x > 0.5) and the
+// right eye pans left (center_x < 0.5) by the same inner_bias offset.
+enum class CropVertical { Top, Middle, Bottom };
+struct MirrorCropState {
+    bool         enabled    = false;
+    float        zoom       = 2.0f;
+    CropVertical vertical   = CropVertical::Middle;
+    float        inner_bias = 0.15f;   // UV offset from center toward nose
+};
+
+// Single-camera full/partial-screen mode: one eye's feed fills an anchor region.
+enum class CamSingleAnchor { Full, Top, Bottom, Left, Right };
+struct CamSingleState {
+    bool           enabled   = false;
+    bool           use_right = false;  // false = left camera, true = right camera
+    CamSingleAnchor anchor   = CamSingleAnchor::Full;
+};
+
 struct ImuPose {
     float roll  = 0.0f;
     float pitch = 0.0f;
@@ -372,6 +391,8 @@ struct AppState {
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;
     ZoomCropState        zoom_left, zoom_right;
+    MirrorCropState      mirror_crop;
+    CamSingleState       cam_single;
 
     // Post-processing (edge highlight + background desaturation)
     PostProcessConfig    pp_cfg;
