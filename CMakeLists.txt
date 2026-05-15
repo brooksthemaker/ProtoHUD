@@ -259,7 +259,7 @@ set_target_properties(protohud PROPERTIES
 
 # ── Assets & Config ────────────────────────────────────────���──────────────────
 
-configure_file(config/config.json ${CMAKE_BINARY_DIR}/config.json COPYONLY)
+configure_file(config/config.example.json ${CMAKE_BINARY_DIR}/config.json COPYONLY)
 
 # Copy shaders to build directory.
 # configure_file() silently skips files when the destination directory doesn't
@@ -288,7 +288,7 @@ add_custom_command(TARGET protohud POST_BUILD
 )
 
 install(TARGETS protohud RUNTIME DESTINATION bin)
-install(FILES config/config.json DESTINATION etc/protohud)
+install(FILES config/config.example.json DESTINATION etc/protohud RENAME config.json)
 install(FILES "${VITURE_LIB_DIR}/libglasses.so"
               "${VITURE_LIB_DIR}/libcarina_vio.so"
         DESTINATION lib)
