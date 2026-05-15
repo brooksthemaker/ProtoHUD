@@ -136,26 +136,16 @@ T jval(const json& j, const std::string& key, T def) {
 
 // ── Overlay anchor parsing ────────────────────────────────────────────────────
 
-static OverlayConfig::Anchor parse_anchor(const std::string& s) {
-    if (s == "top_left")      return OverlayConfig::Anchor::TOP_LEFT;
-    if (s == "top_right")     return OverlayConfig::Anchor::TOP_RIGHT;
-    if (s == "bottom_left")   return OverlayConfig::Anchor::BOTTOM_LEFT;
-    if (s == "bottom_center") return OverlayConfig::Anchor::BOTTOM_CENTER;
-    if (s == "bottom_right")  return OverlayConfig::Anchor::BOTTOM_RIGHT;
-    return OverlayConfig::Anchor::TOP_CENTER;
-}
-
-static const char* anchor_to_str(OverlayConfig::Anchor a) {
-    using A = OverlayConfig::Anchor;
-    switch (a) {
-        case A::TOP_LEFT:      return "top_left";
-        case A::TOP_CENTER:    return "top_center";
-        case A::TOP_RIGHT:     return "top_right";
-        case A::BOTTOM_LEFT:   return "bottom_left";
-        case A::BOTTOM_CENTER: return "bottom_center";
-        case A::BOTTOM_RIGHT:  return "bottom_right";
-    }
-    return "top_left";
+// Convert legacy anchor string → fractional (anchor_x, anchor_y).
+// Used only when reading old config files that lack anchor_x/anchor_y keys.
+static void apply_legacy_anchor(const std::string& s, OverlayConfig& cfg) {
+    if      (s == "top_left")      { cfg.anchor_x = 0.0f; cfg.anchor_y = 0.0f; }
+    else if (s == "top_center")    { cfg.anchor_x = 0.5f; cfg.anchor_y = 0.0f; }
+    else if (s == "top_right")     { cfg.anchor_x = 1.0f; cfg.anchor_y = 0.0f; }
+    else if (s == "bottom_left")   { cfg.anchor_x = 0.0f; cfg.anchor_y = 1.0f; }
+    else if (s == "bottom_center") { cfg.anchor_x = 0.5f; cfg.anchor_y = 1.0f; }
+    else if (s == "bottom_right")  { cfg.anchor_x = 1.0f; cfg.anchor_y = 1.0f; }
+    else                           { cfg.anchor_x = 0.5f; cfg.anchor_y = 0.0f; } // top_center default
 }
 
 static OverlayConfig::Rotation parse_rotation(const std::string& s) {
@@ -821,16 +811,39 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── Overlay position / size helpers ───────────────────────────────────────
-    using A = OverlayConfig::Anchor;
 
-    auto make_position_items = [&leaf, &leaf_sel](OverlayConfig* cfg) {
+    // Snap position presets — sets anchor_x/y and resets any pan offset.
+    auto make_position_items = [&leaf, &leaf_sel, &submenu](OverlayConfig* cfg) {
+        auto snap = [cfg](float ax, float ay){
+            cfg->anchor_x = ax; cfg->anchor_y = ay;
+            cfg->pan_x = 0.f;   cfg->pan_y = 0.f;
+        };
+        auto at   = [cfg](float ax, float ay){
+            return std::abs(cfg->anchor_x - ax) < 0.01f &&
+                   std::abs(cfg->anchor_y - ay) < 0.01f;
+        };
+        std::vector<MenuItem> nudge = {
+            leaf("Left  -10px", [cfg]{ cfg->pan_x -= 10.f; }),
+            leaf("Right +10px", [cfg]{ cfg->pan_x += 10.f; }),
+            leaf("Up    -10px", [cfg]{ cfg->pan_y -= 10.f; }),
+            leaf("Down  +10px", [cfg]{ cfg->pan_y += 10.f; }),
+            leaf("Left  -50px", [cfg]{ cfg->pan_x -= 50.f; }),
+            leaf("Right +50px", [cfg]{ cfg->pan_x += 50.f; }),
+            leaf("Up    -50px", [cfg]{ cfg->pan_y -= 50.f; }),
+            leaf("Down  +50px", [cfg]{ cfg->pan_y += 50.f; }),
+            leaf("Reset Nudge", [cfg]{ cfg->pan_x = 0.f; cfg->pan_y = 0.f; }),
+        };
         return std::vector<MenuItem>{
-            leaf_sel("Top Left",      [cfg]{ cfg->anchor = A::TOP_LEFT;      }, [cfg]{ return cfg->anchor == A::TOP_LEFT;      }),
-            leaf_sel("Top Center",    [cfg]{ cfg->anchor = A::TOP_CENTER;    }, [cfg]{ return cfg->anchor == A::TOP_CENTER;    }),
-            leaf_sel("Top Right",     [cfg]{ cfg->anchor = A::TOP_RIGHT;     }, [cfg]{ return cfg->anchor == A::TOP_RIGHT;     }),
-            leaf_sel("Bottom Left",   [cfg]{ cfg->anchor = A::BOTTOM_LEFT;   }, [cfg]{ return cfg->anchor == A::BOTTOM_LEFT;   }),
-            leaf_sel("Bottom Center", [cfg]{ cfg->anchor = A::BOTTOM_CENTER; }, [cfg]{ return cfg->anchor == A::BOTTOM_CENTER; }),
-            leaf_sel("Bottom Right",  [cfg]{ cfg->anchor = A::BOTTOM_RIGHT;  }, [cfg]{ return cfg->anchor == A::BOTTOM_RIGHT;  }),
+            leaf_sel("Top Left",      [snap]{ snap(0.0f, 0.0f); }, [cfg, at]{ return at(0.0f, 0.0f); }),
+            leaf_sel("Top Center",    [snap]{ snap(0.5f, 0.0f); }, [cfg, at]{ return at(0.5f, 0.0f); }),
+            leaf_sel("Top Right",     [snap]{ snap(1.0f, 0.0f); }, [cfg, at]{ return at(1.0f, 0.0f); }),
+            leaf_sel("Center Left",   [snap]{ snap(0.0f, 0.5f); }, [cfg, at]{ return at(0.0f, 0.5f); }),
+            leaf_sel("Center",        [snap]{ snap(0.5f, 0.5f); }, [cfg, at]{ return at(0.5f, 0.5f); }),
+            leaf_sel("Center Right",  [snap]{ snap(1.0f, 0.5f); }, [cfg, at]{ return at(1.0f, 0.5f); }),
+            leaf_sel("Bottom Left",   [snap]{ snap(0.0f, 1.0f); }, [cfg, at]{ return at(0.0f, 1.0f); }),
+            leaf_sel("Bottom Center", [snap]{ snap(0.5f, 1.0f); }, [cfg, at]{ return at(0.5f, 1.0f); }),
+            leaf_sel("Bottom Right",  [snap]{ snap(1.0f, 1.0f); }, [cfg, at]{ return at(1.0f, 1.0f); }),
+            submenu("Nudge", std::move(nudge)),
         };
     };
 
@@ -2574,20 +2587,28 @@ int main(int argc, char* argv[]) {
 
     if (cfg.contains("pip")) {
         auto& jpip = cfg["pip"];
-        // Per-camera configs; fall back to top-level pip values
         float def_size = jval(jpip, "size", 0.25f);
-        std::string def_anch = jpip.value("anchor", std::string("top_left"));
+
+        auto load_pip_cfg = [&](OverlayConfig& ocfg, const json& jc,
+                                float def_ax, float def_ay) {
+            ocfg.size     = jval(jc, "size", def_size);
+            ocfg.rotation = parse_rotation(jc.value("rotation", std::string("landscape")));
+            if (jc.contains("anchor_x")) {
+                ocfg.anchor_x = jval(jc, "anchor_x", def_ax);
+                ocfg.anchor_y = jval(jc, "anchor_y", def_ay);
+            } else if (jc.contains("anchor")) {
+                apply_legacy_anchor(jc["anchor"].get<std::string>(), ocfg);
+            } else {
+                ocfg.anchor_x = def_ax; ocfg.anchor_y = def_ay;
+            }
+            ocfg.pan_x = jval(jc, "pan_x", 0.f);
+            ocfg.pan_y = jval(jc, "pan_y", 0.f);
+        };
 
         auto& jc1 = jpip.contains("cam1") ? jpip["cam1"] : jpip;
-        pip_overlay_cfg1.size   = jval(jc1, "size",   def_size);
-        pip_overlay_cfg1.anchor = parse_anchor(jc1.value("anchor", def_anch));
-        pip_overlay_cfg1.rotation = parse_rotation(jc1.value("rotation", std::string("landscape")));
-
-        std::string def_anch2 = jpip.contains("cam1") ? std::string("top_right") : def_anch;
+        load_pip_cfg(pip_overlay_cfg1, jc1, 0.0f, 0.0f);   // default: top-left
         auto& jc2 = jpip.contains("cam2") ? jpip["cam2"] : jpip;
-        pip_overlay_cfg2.size   = jval(jc2, "size",   def_size);
-        pip_overlay_cfg2.anchor = parse_anchor(jc2.value("anchor", def_anch2));
-        pip_overlay_cfg2.rotation = parse_rotation(jc2.value("rotation", std::string("landscape")));
+        load_pip_cfg(pip_overlay_cfg2, jc2, 1.0f, 0.0f);   // default: top-right
     }
 
     if (cfg.contains("android")) {
@@ -2597,9 +2618,16 @@ int main(int argc, char* argv[]) {
         and_cfg.adb_serial = jand.value("adb_serial",std::string(""));
         and_cfg.max_size   = jval(jand, "max_size",   1080);
         and_cfg.fps        = jval(jand, "fps",         30);
-        android_overlay_cfg.size   = jval(jand, "overlay_size", 0.40f);
-        android_overlay_cfg.anchor = parse_anchor(
-            jand.value("anchor", std::string("bottom_left")));
+        android_overlay_cfg.size = jval(jand, "overlay_size", 0.40f);
+        if (jand.contains("anchor_x")) {
+            android_overlay_cfg.anchor_x = jval(jand, "anchor_x", 0.0f);
+            android_overlay_cfg.anchor_y = jval(jand, "anchor_y", 1.0f);
+        } else {
+            apply_legacy_anchor(jand.value("anchor", std::string("bottom_left")),
+                                android_overlay_cfg);
+        }
+        android_overlay_cfg.pan_x = jval(jand, "pan_x", 0.f);
+        android_overlay_cfg.pan_y = jval(jand, "pan_y", 0.f);
     }
 
     // ── Shared state ──────────────────────────────────────────────────────────
@@ -3945,20 +3973,6 @@ int main(int argc, char* argv[]) {
             xr.composite();
         }
 
-        // ── Phase 0: PiP underlay — corner-anchored cameras behind HUD chrome ─
-        // Drawn via NanoVG in eye-space (ew × eh) before the HUD chrome so the
-        // compass, arms, and health panel render on top of them.
-        glViewport(0, 0, xr.display_width(), xr.display_height());
-        {
-            bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
-            bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
-            bool p3 = pip_cam3_overlay_active;
-            hud.draw_pip_underlays(tex_usb1, p1, pip_overlay_cfg1,
-                                   tex_usb2, p2, pip_overlay_cfg2,
-                                   tex_usb3, p3, pip_overlay_cfg3,
-                                   xr.eye_width(), xr.eye_height());
-        }
-
         // ── Phase 1: NanoVG HUD chrome (compass, arms, particles) ───────────
         // Reset viewport to full framebuffer — timewarp leaves it at right-eye half.
         // Pass full display dimensions so NanoVG covers both eye halves.
@@ -3966,7 +3980,7 @@ int main(int argc, char* argv[]) {
         hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
         hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
 
-        // ── Phase 1b: NanoVG PiP overlay (non-corner anchors, on top of HUD chrome)
+        // ── Phase 1b: NanoVG PiP overlay (all anchors, on top of HUD chrome)
         {
             bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
             bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
@@ -4046,12 +4060,18 @@ int main(int argc, char* argv[]) {
         cfg["clock"]["font_scale"]      = state.clock_cfg.font_scale;
         cfg["clock"]["manual_offset_s"] = state.clock_cfg.manual_offset_s;
 
-        cfg["pip"]["cam1"]["anchor"] = anchor_to_str(pip_overlay_cfg1.anchor);
-        cfg["pip"]["cam1"]["size"]   = pip_overlay_cfg1.size;
-        cfg["pip"]["cam1"]["rotation"] = rotation_to_str(pip_overlay_cfg1.rotation);
-        cfg["pip"]["cam2"]["anchor"] = anchor_to_str(pip_overlay_cfg2.anchor);
-        cfg["pip"]["cam2"]["size"]   = pip_overlay_cfg2.size;
-        cfg["pip"]["cam2"]["rotation"] = rotation_to_str(pip_overlay_cfg2.rotation);
+        cfg["pip"]["cam1"]["anchor_x"]  = pip_overlay_cfg1.anchor_x;
+        cfg["pip"]["cam1"]["anchor_y"]  = pip_overlay_cfg1.anchor_y;
+        cfg["pip"]["cam1"]["pan_x"]     = pip_overlay_cfg1.pan_x;
+        cfg["pip"]["cam1"]["pan_y"]     = pip_overlay_cfg1.pan_y;
+        cfg["pip"]["cam1"]["size"]      = pip_overlay_cfg1.size;
+        cfg["pip"]["cam1"]["rotation"]  = rotation_to_str(pip_overlay_cfg1.rotation);
+        cfg["pip"]["cam2"]["anchor_x"]  = pip_overlay_cfg2.anchor_x;
+        cfg["pip"]["cam2"]["anchor_y"]  = pip_overlay_cfg2.anchor_y;
+        cfg["pip"]["cam2"]["pan_x"]     = pip_overlay_cfg2.pan_x;
+        cfg["pip"]["cam2"]["pan_y"]     = pip_overlay_cfg2.pan_y;
+        cfg["pip"]["cam2"]["size"]      = pip_overlay_cfg2.size;
+        cfg["pip"]["cam2"]["rotation"]  = rotation_to_str(pip_overlay_cfg2.rotation);
 
         auto& jpp = cfg["post_process"];
         jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;

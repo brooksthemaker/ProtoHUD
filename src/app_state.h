@@ -44,13 +44,12 @@ struct PostProcessConfig {
 // so no mutex is needed.
 
 struct OverlayConfig {
-    enum class Anchor {
-        TOP_LEFT, TOP_CENTER, TOP_RIGHT,
-        BOTTOM_LEFT, BOTTOM_CENTER, BOTTOM_RIGHT
-    };
+    float    anchor_x = 0.0f;   // screen fraction (0=left, 1=right)
+    float    anchor_y = 0.0f;   // screen fraction (0=top,  1=bottom)
+    float    pan_x    = 0.f;    // pixel nudge from anchor point
+    float    pan_y    = 0.f;
+    float    size     = 0.25f;  // fraction of screen height
     enum class Rotation { Landscape = 0, Portrait, LandscapeFlipped, PortraitFlipped };
-    Anchor   anchor   = Anchor::TOP_CENTER;
-    float    size     = 0.25f;   // fraction of screen height
     Rotation rotation = Rotation::Landscape;
 };
 
