@@ -2619,7 +2619,7 @@ int main(int argc, char* argv[]) {
     xr.on_imu_pose([&state, &last_xr_imu_us](float roll, float pitch, float yaw) {
         last_xr_imu_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        float bearing = fmod(360.0f - yaw, 360.0f);
+        float bearing = fmod(360.0f - roll, 360.0f);
         std::lock_guard<std::mutex> lk(state.mtx);
         state.compass_heading = bearing;
         state.imu_pose = { roll, pitch, yaw };
