@@ -263,6 +263,7 @@ struct SysMetrics {
     // Frame-time metrics — updated by render thread each frame
     float    frame_time_ms  = 0.f;    // last frame duration in ms
     float    fps_avg        = 0.f;    // 1000 / frame_time_ms (instantaneous)
+    float    fps_avg_smooth = 0.f;    // EMA-smoothed FPS over fps_avg_interval_s
     float    ft_history[kSysHistLen]  = {};
     int      ft_history_head = 0;
 };
@@ -454,6 +455,19 @@ struct AppState {
     int xr_brightness     = 5;   // 1–7; mirrors last xr->set_brightness() call
     int xr_dimming        = 5;   // 0–9; mirrors last xr->set_dimming() call
     int xr_hud_brightness = 5;   // 1–9; mirrors last xr->set_hud_brightness() call
+
+    // FPS display smoothing: EMA time constant in seconds (1 / 5 / 10).
+    // Written by menu (render thread); read in render loop EMA computation.
+    int fps_avg_interval_s = 1;
+
+    // I2C bus scanner — triggered from menu, results written by background thread.
+    std::vector<uint8_t> i2c_scan_results;
+    bool                 i2c_scan_busy = false;
+    std::string          i2c_scan_bus  = "/dev/i2c-1";
+
+    // GPIO pin monitor — populated at startup from config; values updated ~1 Hz.
+    struct GpioPinState { int pin; int value; };  // value: 0/1, -1=unavailable
+    std::vector<GpioPinState> gpio_states;
 
     // Signals render thread to quit.
     std::atomic<bool> quit { false };
