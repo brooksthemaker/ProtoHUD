@@ -3646,7 +3646,7 @@ int main(int argc, char* argv[]) {
 
         // Smooth compass heading on the render thread so the rate is constant
         // and independent of IMU callback frequency.  Circular lerp (sin/cos)
-        // handles the 0/360 wrap.  tau=0.10 s → ~100 ms time constant.
+        // handles the 0/360 wrap.  tau=0.35 s → ~350 ms time constant.
         {
             static float    s_smooth  = -1.f;
             static uint64_t s_last_us = 0;
@@ -3659,7 +3659,7 @@ int main(int argc, char* argv[]) {
             if (s_smooth < 0.f || dt > 1.f) {
                 s_smooth = raw;
             } else {
-                constexpr float kTau = 0.10f;
+                constexpr float kTau = 0.35f;
                 float alpha = 1.f - std::expf(-dt / kTau);
                 constexpr float kD2R = 3.14159265f / 180.f;
                 float fs = std::sinf(s_smooth * kD2R) + alpha * (std::sinf(raw * kD2R) - std::sinf(s_smooth * kD2R));
