@@ -631,23 +631,9 @@ static std::vector<MenuItem> build_menu(
         submenu("Anchor", std::move(single_cam_anchor_items)),
     };
 
-    std::vector<MenuItem> main_cameras_menu = {
-        toggle("Theater Mode",
-            [&state]{ return state.theater_mode; },
-            [&state](bool v){ state.theater_mode = v; }),
-        submenu("Resolution",  std::move(resolution_presets)),
-        leaf("Capture Left",   [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Left;   }),
-        leaf("Capture Right",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Right;  }),
-        leaf("Capture Stereo", [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Stereo; }),
-        toggle("QR Scan Main Cams", [&state]{ return state.qr_scan_main; },
-                                    [&state](bool v){ state.qr_scan_main = v; }),
-        toggle("QR Scan USB Cams",  [&state]{ return state.qr_scan_usb; },
-                                    [&state](bool v){ state.qr_scan_usb = v; }),
-        submenu("Digital Zoom",  std::move(zoom_menu)),
-        submenu("Mirror Crop",   std::move(mirror_crop_menu)),
-        submenu("Single Camera", std::move(single_cam_menu)),
-        submenu("Focus Mode",  std::move(focus_modes)),
-        slider("Focus Position", 0.f, 1000.f, 50.f, "",
+    std::vector<MenuItem> focus_menu = {
+        submenu("Mode",      std::move(focus_modes)),
+        slider("Position", 0.f, 1000.f, 50.f, "",
             [&state]{ return static_cast<float>(state.focus_left.focus_position); },
             [cameras, &state](float v){
                 int pos = static_cast<int>(v);
@@ -658,9 +644,35 @@ static std::vector<MenuItem> build_menu(
                 state.focus_left.focus_position  = pos;
                 state.focus_right.focus_position = pos;
             }),
-        submenu("Autofocus",    std::move(af_triggers)),
+        submenu("Autofocus", std::move(af_triggers)),
+    };
+
+    std::vector<MenuItem> capture_menu = {
+        leaf("Left Eye",   [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Left;   }),
+        leaf("Right Eye",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Right;  }),
+        leaf("Both Eyes",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Stereo; }),
+    };
+
+    std::vector<MenuItem> qr_menu = {
+        toggle("Main Cameras", [&state]{ return state.qr_scan_main; },
+                               [&state](bool v){ state.qr_scan_main = v; }),
+        toggle("USB Cameras",  [&state]{ return state.qr_scan_usb; },
+                               [&state](bool v){ state.qr_scan_usb = v; }),
+    };
+
+    std::vector<MenuItem> main_cameras_menu = {
+        toggle("Theater Mode",
+            [&state]{ return state.theater_mode; },
+            [&state](bool v){ state.theater_mode = v; }),
+        submenu("Resolution",    std::move(resolution_presets)),
+        submenu("Digital Zoom",  std::move(zoom_menu)),
+        submenu("Mirror Crop",   std::move(mirror_crop_menu)),
+        submenu("Single Camera", std::move(single_cam_menu)),
         submenu("White Balance", std::move(awb_menu)),
-        submenu("Night Vision", std::move(nv_menu)),
+        submenu("Night Vision",  std::move(nv_menu)),
+        submenu("Focus",         std::move(focus_menu)),
+        submenu("Capture Photo", std::move(capture_menu)),
+        submenu("QR Scan",       std::move(qr_menu)),
     };
 
     // ── Headset controls ──────────────────────────────────────────────────────
@@ -721,6 +733,35 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── USB camera menus ──────────────────────────────────────────────────────
+    // Scan for available V4L2 capture devices once at menu-build time.
+    // Results are used to populate each slot's "Select Device" submenu.
+    auto usb_devs = cameras ? cameras->list_usb_devices()
+                            : std::vector<CameraManager::UsbDeviceInfo>{};
+
+    // Helper: build a "Select Device" submenu for one USB camera slot.
+    // get_path  — returns the slot's current device path (for the checkmark).
+    // assign_fn — called with the chosen path when the user selects an item.
+    auto make_dev_select = [&](
+        std::function<std::string()>          get_path,
+        std::function<void(const std::string&)> assign_fn)
+    {
+        std::vector<MenuItem> items;
+        items.push_back(leaf_sel("(none)",
+            [assign_fn]{ assign_fn(""); },
+            [get_path]{ return get_path().empty(); }));
+        for (const auto& d : usb_devs) {
+            // Label: "video17 — Logitech C920 HD Pro Webcam"
+            std::string label = std::filesystem::path(d.path).filename().string()
+                                + " \xe2\x80\x94 " + d.name;
+            items.push_back(leaf_sel(std::move(label),
+                [assign_fn, p = d.path]{ assign_fn(p); },
+                [get_path,  p = d.path]{ return get_path() == p; }));
+        }
+        if (usb_devs.empty())
+            items.push_back(leaf("(no devices found)", []{}));
+        return items;
+    };
+
     std::vector<MenuItem> cam1_overlay_menu = {
         toggle("Show Overlay",
             [pip_cam1_overlay]{ return *pip_cam1_overlay; },
@@ -792,6 +833,9 @@ static std::vector<MenuItem> build_menu(
                     *pip_cam1_overlay = false;
                 }
             }),
+        submenu("Select Device", make_dev_select(
+            [cameras]{ return cameras ? cameras->usb1_cfg().device : ""; },
+            [cameras](const std::string& p){ if (cameras) cameras->reassign_usb1(p); })),
         toggle("Flip Upside Down",
             [cameras]{ return cameras && cameras->usb1_cfg().flip; },
             [cameras](bool v){
@@ -896,6 +940,9 @@ static std::vector<MenuItem> build_menu(
                     *pip_cam2_overlay = false;
                 }
             }),
+        submenu("Select Device", make_dev_select(
+            [cameras]{ return cameras ? cameras->usb2_cfg().device : ""; },
+            [cameras](const std::string& p){ if (cameras) cameras->reassign_usb2(p); })),
         toggle("Flip Upside Down",
             [cameras]{ return cameras && cameras->usb2_cfg().flip; },
             [cameras](bool v){
@@ -1000,6 +1047,9 @@ static std::vector<MenuItem> build_menu(
                     *pip_cam3_overlay = false;
                 }
             }),
+        submenu("Select Device", make_dev_select(
+            [cameras]{ return cameras ? cameras->usb3_cfg().device : ""; },
+            [cameras](const std::string& p){ if (cameras) cameras->reassign_usb3(p); })),
         toggle("Flip Upside Down",
             [cameras]{ return cameras && cameras->usb3_cfg().flip; },
             [cameras](bool v){
@@ -1697,13 +1747,13 @@ static std::vector<MenuItem> build_menu(
     // the pan offset so the map lands exactly at the chosen location.
     struct MapAnchorPreset { const char* label; float ax, ay; };
     static const MapAnchorPreset MAP_ANCHORS[] = {
-        { "Top Left",      0.12f, 0.12f },
-        { "Top Center",    0.50f, 0.12f },
-        { "Top Right",     0.88f, 0.12f },
+        { "Top Left",      0.00f, 0.00f },
+        { "Top Center",    0.50f, 0.00f },
+        { "Top Right",     1.00f, 0.00f },
         { "Center",        0.50f, 0.50f },
-        { "Bottom Left",   0.12f, 0.88f },
-        { "Bottom Center", 0.50f, 0.88f },
-        { "Bottom Right",  0.88f, 0.88f },
+        { "Bottom Left",   0.00f, 1.00f },
+        { "Bottom Center", 0.50f, 1.00f },
+        { "Bottom Right",  1.00f, 1.00f },
     };
     std::vector<MenuItem> map_snap_items;
     for (const auto& a : MAP_ANCHORS) {
