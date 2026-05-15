@@ -80,6 +80,14 @@ else()
     message(STATUS "ZBar not found — QR scanning disabled (sudo apt install libzbar-dev)")
 endif()
 
+# SDL2 (gamepad/controller input) — optional; install with: sudo apt install libsdl2-dev
+pkg_check_modules(SDL2 sdl2)
+if(SDL2_FOUND)
+    message(STATUS "SDL2 found — gamepad input enabled")
+else()
+    message(STATUS "SDL2 not found — gamepad input disabled (sudo apt install libsdl2-dev)")
+endif()
+
 # ── Dear ImGui (vendored source, no external install required) ───────────────
 # Fetched once by CMake; cached in build/_deps after first configure.
 include(FetchContent)
@@ -160,6 +168,7 @@ set(SOURCES
     src/camera/dma_camera.cpp
     src/camera/viture_camera.cpp
     src/input/gpio_buttons.cpp
+    src/input/gamepad_input.cpp
     src/serial/serial_port.cpp
     src/serial/teensy_controller.cpp
     src/serial/protoface_controller.cpp
@@ -202,6 +211,7 @@ target_include_directories(protohud PRIVATE
     ${LIBGPIOD_INCLUDE_DIRS}
     ${ALSA_INCLUDE_DIRS}
     $<$<BOOL:${ZBAR_FOUND}>:${ZBAR_INCLUDE_DIRS}>
+    $<$<BOOL:${SDL2_FOUND}>:${SDL2_INCLUDE_DIRS}>
 )
 
 target_link_libraries(protohud PRIVATE
@@ -218,10 +228,15 @@ target_link_libraries(protohud PRIVATE
     nlohmann_json::nlohmann_json
     Threads::Threads
     $<$<BOOL:${ZBAR_FOUND}>:${ZBAR_LIBRARIES}>
+    $<$<BOOL:${SDL2_FOUND}>:${SDL2_LIBRARIES}>
 )
 
 if(ZBAR_FOUND)
     target_compile_definitions(protohud PRIVATE HAVE_ZBAR)
+endif()
+
+if(SDL2_FOUND)
+    target_compile_definitions(protohud PRIVATE HAVE_SDL2)
 endif()
 
 target_compile_options(protohud PRIVATE
