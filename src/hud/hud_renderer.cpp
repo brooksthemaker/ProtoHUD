@@ -422,7 +422,9 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
 }
 
 void HudRenderer::draw_fps_nvg(NVGcontext* vg, const AppState& snap, float fw, float fh) {
-    const float fps = snap.sys_metrics.fps_avg;
+    const float fps = snap.sys_metrics.fps_avg_smooth > 0.f
+                        ? snap.sys_metrics.fps_avg_smooth
+                        : snap.sys_metrics.fps_avg;
     const float ft  = snap.sys_metrics.frame_time_ms;
     char buf[32];
     if (fps > 0.f)
@@ -2194,7 +2196,7 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
 
     // Panel geometry — top-left, fixed size
     constexpr float PW    = 340.f;
-    constexpr float PH    = 580.f;
+    constexpr float PH    = 750.f;
     constexpr float PAD   = 10.f;
     constexpr float MRG   = 14.f;   // left margin from screen edge
     const float px = MRG;
@@ -2360,21 +2362,30 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     // ── PERFORMANCE ───────────────────────────────────────────────────────────
     section("PERFORMANCE");
 
-    // FPS + frame time sparkline
+    // FPS (smoothed) + frame time sparkline
     {
-        const float fps = snap.sys_metrics.fps_avg;
-        const float ft  = snap.sys_metrics.frame_time_ms;
-        char buf[48];
-        if (fps > 0.f)
-            snprintf(buf, sizeof(buf), "FPS  %4.1f", static_cast<double>(fps));
+        const float fps_s = snap.sys_metrics.fps_avg_smooth;
+        const float fps_r = snap.sys_metrics.fps_avg;
+        const float ft    = snap.sys_metrics.frame_time_ms;
+        char buf[64];
+        const float fps_show = fps_s > 0.f ? fps_s : fps_r;
+        if (fps_show > 0.f)
+            snprintf(buf, sizeof(buf), "FPS  %4.1f", static_cast<double>(fps_show));
         else
             snprintf(buf, sizeof(buf), "FPS  --");
-        hud_glow_text(dl, {px + PAD, cy}, buf, fps > 0.f, col_.glow_base, col_.text_fill);
+        hud_glow_text(dl, {px + PAD, cy}, buf, fps_show > 0.f, col_.glow_base, col_.text_fill);
         const float spw = PW - PAD * 2.f - 80.f;
         // Sparkline: frame time in ms, capped at 50ms (20 FPS floor)
         sparkline(snap.sys_metrics.ft_history, kSysHistLen, snap.sys_metrics.ft_history_head,
                   {px + PAD + 78.f, cy}, spw, lh, 50.f, col_.primary);
         cy += lh + 4.f;
+
+        if (fps_r > 0.f && fps_s > 0.f)
+            snprintf(buf, sizeof(buf), "Inst  %4.1f", static_cast<double>(fps_r));
+        else
+            snprintf(buf, sizeof(buf), "Inst  --");
+        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
+        cy += lh + 2.f;
 
         if (ft > 0.f)
             snprintf(buf, sizeof(buf), "Frame  %.1fms", static_cast<double>(ft));
@@ -2447,6 +2458,54 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         }
         hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, snap.ssh.active,
                       col_.glow_base, col_.text_fill);
+    }
+
+    // ── I2C ───────────────────────────────────────────────────────────────────
+    section("I2C");
+    {
+        char buf[64];
+        if (snap.i2c_scan_busy) {
+            hud_glow_text(dl, {px + PAD, cy}, "Scanning...", true, col_.glow_base, col_.warn);
+            cy += lh + 4.f;
+        } else if (snap.i2c_scan_results.empty()) {
+            snprintf(buf, sizeof(buf), "%s  no scan", snap.i2c_scan_bus.c_str());
+            hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
+            cy += lh + 4.f;
+        } else {
+            snprintf(buf, sizeof(buf), "Bus: %s", snap.i2c_scan_bus.c_str());
+            hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
+            cy += lh + 2.f;
+            constexpr int kCols = 6;
+            int col_idx = 0;
+            const float cell_w = (PW - PAD * 2.f) / kCols;
+            for (uint8_t addr : snap.i2c_scan_results) {
+                snprintf(buf, sizeof(buf), "0x%02X", static_cast<int>(addr));
+                const float ax = px + PAD + col_idx * cell_w;
+                dl->AddRectFilled({ax, cy}, {ax + cell_w - 2.f, cy + lh},
+                                  with_alpha(col_.primary, 30), 2.f);
+                hud_glow_text(dl, {ax + 2.f, cy}, buf, true, col_.glow_base, col_.text_fill);
+                if (++col_idx >= kCols) { col_idx = 0; cy += lh + 3.f; }
+            }
+            if (col_idx > 0) cy += lh + 3.f;
+            cy += 2.f;
+        }
+    }
+
+    // ── GPIO ──────────────────────────────────────────────────────────────────
+    if (!snap.gpio_states.empty()) {
+        section("GPIO");
+        for (const auto& ps : snap.gpio_states) {
+            char buf[32];
+            const bool hi  = (ps.value == 1);
+            const bool na  = (ps.value < 0);
+            const ImU32 vc = na ? col_.ind_inactive : (hi ? col_.ind_good : col_.text_dim);
+            snprintf(buf, sizeof(buf), "  GPIO%-3d  %s", ps.pin,
+                     na ? "N/A" : (hi ? "HI" : "LO"));
+            dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f, vc);
+            hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, !na, col_.glow_base, vc);
+            cy += lh + 3.f;
+        }
+        cy += 2.f;
     }
 
     if (font_mono_) ImGui::PopFont();

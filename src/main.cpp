@@ -47,8 +47,11 @@
 #define GIT_HASH "unknown"
 #endif
 
-#include <fstream>
 #include <unistd.h>
+#include <fcntl.h>
+#include <cerrno>
+#include <sys/ioctl.h>
+#include <linux/i2c-dev.h>
 
 using json = nlohmann::json;
 
@@ -220,6 +223,72 @@ struct KeyRepeat {
         return false;
     }
 };
+
+// ── I2C bus scanner ───────────────────────────────────────────────────────────
+// Runs in a background thread. Opens the bus, probes addresses 0x08–0x77, stores
+// found addresses in state.i2c_scan_results, then clears i2c_scan_busy.
+static void run_i2c_scan(AppState* sp) {
+    std::string bus;
+    { std::lock_guard<std::mutex> lk(sp->mtx); bus = sp->i2c_scan_bus; }
+
+    std::vector<uint8_t> found;
+    int fd = open(bus.c_str(), O_RDWR);
+    if (fd >= 0) {
+        for (int addr = 0x08; addr <= 0x77; ++addr) {
+            if (ioctl(fd, I2C_SLAVE, addr) < 0) continue;
+            uint8_t buf = 0;
+            if (read(fd, &buf, 1) >= 0 || (errno != ENODEV && errno != ENXIO))
+                found.push_back(static_cast<uint8_t>(addr));
+        }
+        close(fd);
+    }
+
+    std::lock_guard<std::mutex> lk(sp->mtx);
+    sp->i2c_scan_results = std::move(found);
+    sp->i2c_scan_busy    = false;
+}
+
+// ── GPIO poll (sysfs) ─────────────────────────────────────────────────────────
+// Called from main loop ~1 Hz. Reads each monitored pin via sysfs export path.
+static void poll_gpio_states(AppState& state) {
+    // Export unexported pins and read values
+    for (auto& ps : state.gpio_states) {
+        // Try export (idempotent — ignore EBUSY)
+        {
+            int efd = open("/sys/class/gpio/export", O_WRONLY);
+            if (efd >= 0) {
+                char buf[16];
+                int n = snprintf(buf, sizeof(buf), "%d", ps.pin);
+                (void)write(efd, buf, n);
+                close(efd);
+            }
+        }
+        // Set direction to "in" (idempotent)
+        {
+            char path[64];
+            snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", ps.pin);
+            int dfd = open(path, O_WRONLY);
+            if (dfd >= 0) {
+                (void)write(dfd, "in", 2);
+                close(dfd);
+            }
+        }
+        // Read value
+        {
+            char path[64];
+            snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", ps.pin);
+            int vfd = open(path, O_RDONLY);
+            if (vfd >= 0) {
+                char val = '?';
+                if (read(vfd, &val, 1) == 1)
+                    ps.value = (val == '1') ? 1 : 0;
+                close(vfd);
+            } else {
+                ps.value = -1;
+            }
+        }
+    }
+}
 
 // ── Menu definition ───────────────────────────────────────────────────────────
 
@@ -2210,6 +2279,30 @@ static std::vector<MenuItem> build_menu(
         }),
     };
 
+    std::vector<MenuItem> fps_interval_menu = {
+        leaf_sel("1 second",  [state_ptr]{ state_ptr->fps_avg_interval_s = 1;  }, [state_ptr]{ return state_ptr->fps_avg_interval_s == 1;  }),
+        leaf_sel("5 seconds", [state_ptr]{ state_ptr->fps_avg_interval_s = 5;  }, [state_ptr]{ return state_ptr->fps_avg_interval_s == 5;  }),
+        leaf_sel("10 seconds",[state_ptr]{ state_ptr->fps_avg_interval_s = 10; }, [state_ptr]{ return state_ptr->fps_avg_interval_s == 10; }),
+    };
+
+    std::vector<MenuItem> i2c_bus_menu = {
+        leaf_sel("/dev/i2c-0", [state_ptr]{ std::lock_guard<std::mutex> lk(state_ptr->mtx); state_ptr->i2c_scan_bus = "/dev/i2c-0"; }, [state_ptr]{ return state_ptr->i2c_scan_bus == "/dev/i2c-0"; }),
+        leaf_sel("/dev/i2c-1", [state_ptr]{ std::lock_guard<std::mutex> lk(state_ptr->mtx); state_ptr->i2c_scan_bus = "/dev/i2c-1"; }, [state_ptr]{ return state_ptr->i2c_scan_bus == "/dev/i2c-1"; }),
+        leaf_sel("/dev/i2c-2", [state_ptr]{ std::lock_guard<std::mutex> lk(state_ptr->mtx); state_ptr->i2c_scan_bus = "/dev/i2c-2"; }, [state_ptr]{ return state_ptr->i2c_scan_bus == "/dev/i2c-2"; }),
+    };
+
+    std::vector<MenuItem> diagnostics_menu = {
+        leaf("Scan I2C Bus", [state_ptr]{
+            bool already;
+            { std::lock_guard<std::mutex> lk(state_ptr->mtx); already = state_ptr->i2c_scan_busy; }
+            if (!already) {
+                { std::lock_guard<std::mutex> lk(state_ptr->mtx); state_ptr->i2c_scan_busy = true; state_ptr->i2c_scan_results.clear(); }
+                std::thread(run_i2c_scan, state_ptr).detach();
+            }
+        }),
+        submenu("I2C Bus",    std::move(i2c_bus_menu)),
+    };
+
     std::vector<MenuItem> system_menu = {
         submenu("Headset",          std::move(headset_menu)),
         submenu("Audio",            std::move(audio_menu)),
@@ -2220,6 +2313,8 @@ static std::vector<MenuItem> build_menu(
         toggle("FPS Overlay",
             [fps_overlay_active]{ return fps_overlay_active && *fps_overlay_active; },
             [fps_overlay_active](bool v){ if (fps_overlay_active) *fps_overlay_active = v; }),
+        submenu("FPS Average",   std::move(fps_interval_menu)),
+        submenu("Diagnostics",   std::move(diagnostics_menu)),
         toggle("SSH Access",
             [state_ptr]{ return state_ptr && state_ptr->ssh.active; },
             [state_ptr](bool v){
@@ -2640,6 +2735,18 @@ int main(int argc, char* argv[]) {
     if (cfg.contains("qr")) {
         state.qr_scan_main = cfg["qr"].value("scan_main", state.qr_scan_main);
         state.qr_scan_usb  = cfg["qr"].value("scan_usb",  state.qr_scan_usb);
+    }
+
+    // FPS average interval
+    state.fps_avg_interval_s = jval(cfg, "fps_avg_interval_s", 1);
+
+    // I2C scanner bus
+    state.i2c_scan_bus = cfg.value("i2c_scan_bus", std::string("/dev/i2c-1"));
+
+    // GPIO monitor pins (array of integers in config)
+    if (cfg.contains("gpio_monitor_pins") && cfg["gpio_monitor_pins"].is_array()) {
+        for (auto& p : cfg["gpio_monitor_pins"])
+            state.gpio_states.push_back({ p.get<int>(), -1 });
     }
 
     SplashConfig splash_cfg;
@@ -3458,6 +3565,17 @@ int main(int argc, char* argv[]) {
                 const int h2    = (m.ft_history_head + 1) % kSysHistLen;
                 m.ft_history[h2]   = m.frame_time_ms;
                 m.ft_history_head  = h2;
+
+                // EMA-smoothed FPS — alpha = exp(-dt / interval)
+                static float fps_ema = 0.f;
+                const float  fps_inst  = m.fps_avg;
+                const float  interval  = static_cast<float>(state.fps_avg_interval_s > 0
+                                             ? state.fps_avg_interval_s : 1);
+                const float  alpha     = (dt > 0.f) ? expf(-dt / interval) : 0.99f;
+                fps_ema = (fps_ema > 0.f)
+                    ? fps_ema * alpha + fps_inst * (1.f - alpha)
+                    : fps_inst;
+                m.fps_avg_smooth = fps_ema;
             }
             // Knob event age (computed on render thread, written here)
             state.serial_metrics.knob_event_age_ms = knob.event_age_ms();
@@ -3497,6 +3615,10 @@ int main(int argc, char* argv[]) {
             snap.qr_scan_main       = state.qr_scan_main;
             snap.qr_scan_usb        = state.qr_scan_usb;
             snap.notifs             = state.notifs;
+            snap.i2c_scan_results   = state.i2c_scan_results;
+            snap.i2c_scan_busy      = state.i2c_scan_busy;
+            snap.i2c_scan_bus       = state.i2c_scan_bus;
+            snap.gpio_states        = state.gpio_states;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
         }
@@ -3546,6 +3668,17 @@ int main(int argc, char* argv[]) {
                 if (s_smooth < 0.f) s_smooth += 360.f;
             }
             snap.compass_heading = s_smooth;
+        }
+
+        // GPIO monitor: poll sysfs ~1 Hz (every ~60 frames at 60 FPS).
+        // gpio_states is render-thread-only; no mutex needed for either access.
+        if (!state.gpio_states.empty()) {
+            static int gpio_frame_ctr = 0;
+            if (++gpio_frame_ctr >= 60) {
+                gpio_frame_ctr = 0;
+                poll_gpio_states(state);
+                snap.gpio_states = state.gpio_states;
+            }
         }
 
         // Overlay-active flags mirror the exact condition used in draw_pip calls.
@@ -3992,6 +4125,9 @@ int main(int argc, char* argv[]) {
 
         cfg["qr"]["scan_main"] = state.qr_scan_main;
         cfg["qr"]["scan_usb"]  = state.qr_scan_usb;
+
+        cfg["fps_avg_interval_s"] = state.fps_avg_interval_s;
+        cfg["i2c_scan_bus"]       = state.i2c_scan_bus;
 
         {
             const auto& mo          = state.map_overlay;
