@@ -550,7 +550,7 @@ void HudRenderer::draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
 }
 
 void HudRenderer::draw_pip_underlays(
-    unsigned int /*tex1*/, bool /*act1*/, const OverlayConfig& /*c1*/,
+    unsigned int tex1, bool act1, const OverlayConfig& c1,
     unsigned int tex2, bool act2, const OverlayConfig& c2,
     unsigned int tex3, bool act3, const OverlayConfig& c3,
     int ew, int eh)
