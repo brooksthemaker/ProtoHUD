@@ -362,13 +362,15 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     }
     if (map_img_ < 0) return;
 
-    const float cx     = fw * cfg.anchor_x + cfg.pan_x;
-    const float cy     = fh * cfg.anchor_y + cfg.pan_y;
     const float half   = cfg.size_px;
     const float aspect = (map_img_h_ > 0 && map_img_w_ > 0)
                          ? (float)map_img_h_ / (float)map_img_w_ : 1.f;
     const float hw     = half;
     const float hh     = half * aspect;
+    // Clamp center so the map window never extends past the screen edge.
+    // anchor 0.0 → left/top edge flush, 0.5 → centered, 1.0 → right/bottom edge flush.
+    const float cx     = std::clamp(fw * cfg.anchor_x + cfg.pan_x, hw, fw - hw);
+    const float cy     = std::clamp(fh * cfg.anchor_y + cfg.pan_y, hh, fh - hh);
 
     nvgSave(vg);
     nvgTranslate(vg, cx, cy);

@@ -1697,13 +1697,13 @@ static std::vector<MenuItem> build_menu(
     // the pan offset so the map lands exactly at the chosen location.
     struct MapAnchorPreset { const char* label; float ax, ay; };
     static const MapAnchorPreset MAP_ANCHORS[] = {
-        { "Top Left",      0.12f, 0.12f },
-        { "Top Center",    0.50f, 0.12f },
-        { "Top Right",     0.88f, 0.12f },
+        { "Top Left",      0.00f, 0.00f },
+        { "Top Center",    0.50f, 0.00f },
+        { "Top Right",     1.00f, 0.00f },
         { "Center",        0.50f, 0.50f },
-        { "Bottom Left",   0.12f, 0.88f },
-        { "Bottom Center", 0.50f, 0.88f },
-        { "Bottom Right",  0.88f, 0.88f },
+        { "Bottom Left",   0.00f, 1.00f },
+        { "Bottom Center", 0.50f, 1.00f },
+        { "Bottom Right",  1.00f, 1.00f },
     };
     std::vector<MenuItem> map_snap_items;
     for (const auto& a : MAP_ANCHORS) {
