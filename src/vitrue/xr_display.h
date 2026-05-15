@@ -50,6 +50,11 @@ public:
     // Does NOT swap — call present() afterwards (after ImGui overlay).
     void composite();
 
+    // Blit a single texture to an anchor region of the default framebuffer.
+    // Clears the screen to black first. anchor controls which NDC sub-rect
+    // the texture fills (Full / Top / Bottom / Left / Right half).
+    void composite_single(GLuint src_tex, CamSingleAnchor anchor);
+
     // Swap the GLFW window buffer and poll events.
     // Call after composite() and after the ImGui overlay is rendered.
     void present();
