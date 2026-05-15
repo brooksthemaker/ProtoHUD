@@ -953,18 +953,7 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> usb_cam1_menu = {
         toggle("Open Stream",
             [cameras]{ return cameras && cameras->usb1_ok(); },
-            [cameras, pip_cam1_overlay](bool v){
-                if (!cameras) return;
-                if (v) {
-                    std::thread([cameras, pip_cam1_overlay]{
-                        cameras->open_usb1();
-                        *pip_cam1_overlay = true;
-                    }).detach();
-                } else {
-                    cameras->close_usb1();
-                    *pip_cam1_overlay = false;
-                }
-            }),
+            [pip_cam1_overlay](bool v){ *pip_cam1_overlay = v; }),
         submenu("Select Device", make_dev_select(
             [cameras]{ return cameras ? cameras->usb1_cfg().device : ""; },
             [cameras](const std::string& p){ if (cameras) cameras->reassign_usb1(p); })),
@@ -1054,18 +1043,7 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> usb_cam2_menu = {
         toggle("Open Stream",
             [cameras]{ return cameras && cameras->usb2_ok(); },
-            [cameras, pip_cam2_overlay](bool v){
-                if (!cameras) return;
-                if (v) {
-                    std::thread([cameras, pip_cam2_overlay]{
-                        cameras->open_usb2();
-                        *pip_cam2_overlay = true;
-                    }).detach();
-                } else {
-                    cameras->close_usb2();
-                    *pip_cam2_overlay = false;
-                }
-            }),
+            [pip_cam2_overlay](bool v){ *pip_cam2_overlay = v; }),
         submenu("Select Device", make_dev_select(
             [cameras]{ return cameras ? cameras->usb2_cfg().device : ""; },
             [cameras](const std::string& p){ if (cameras) cameras->reassign_usb2(p); })),
@@ -1155,18 +1133,7 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> usb_cam3_menu = {
         toggle("Open Stream",
             [cameras]{ return cameras && cameras->usb3_ok(); },
-            [cameras, pip_cam3_overlay](bool v){
-                if (!cameras) return;
-                if (v) {
-                    std::thread([cameras, pip_cam3_overlay]{
-                        cameras->open_usb3();
-                        *pip_cam3_overlay = true;
-                    }).detach();
-                } else {
-                    cameras->close_usb3();
-                    *pip_cam3_overlay = false;
-                }
-            }),
+            [pip_cam3_overlay](bool v){ *pip_cam3_overlay = v; }),
         submenu("Select Device", make_dev_select(
             [cameras]{ return cameras ? cameras->usb3_cfg().device : ""; },
             [cameras](const std::string& p){ if (cameras) cameras->reassign_usb3(p); })),
@@ -3234,6 +3201,9 @@ int main(int argc, char* argv[]) {
     // Edge-detection state for direct GLFW key polling
     bool prev_key[12] = {};  // slots: 1=K1 2=K2 3=K3 4=K4 5=, 6=. 7=K5 8=K6 9=K7
 
+    // USB stream lifecycle: track previous combined pip-active state per slot
+    bool prev_p1 = false, prev_p2 = false, prev_p3 = false;
+
     if (gpio_enabled) {
         if (buttons.init()) {
             buttons.on_af_left([&cameras]() {
@@ -3432,11 +3402,25 @@ int main(int argc, char* argv[]) {
             else if (menu.is_open())     menu.back();
         }
 
+        // ── USB camera stream lifecycle ───────────────────────────────────────
+        // Rising edge  → open stream in background (window appears on first frame).
+        // Falling edge → close stream, clear texture (no stale frame on re-open).
+        bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
+        bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
+        bool p3 = pip_cam3_overlay_active;
+        if (p1 && !prev_p1) { tex_usb1 = 0; std::thread([&cameras]{ cameras.open_usb1(); }).detach(); }
+        if (!p1 && prev_p1) { cameras.close_usb1(); tex_usb1 = 0; }
+        if (p2 && !prev_p2) { tex_usb2 = 0; std::thread([&cameras]{ cameras.open_usb2(); }).detach(); }
+        if (!p2 && prev_p2) { cameras.close_usb2(); tex_usb2 = 0; }
+        if (p3 && !prev_p3) { tex_usb3 = 0; std::thread([&cameras]{ cameras.open_usb3(); }).detach(); }
+        if (!p3 && prev_p3) { cameras.close_usb3(); tex_usb3 = 0; }
+        prev_p1 = p1; prev_p2 = p2; prev_p3 = p3;
+
         // ── Camera texture uploads (CPU paths) ────────────────────────────────
         if (use_beast_cam) beast_cam.get_frame(tex_beast);
-        cameras.get_usb1(tex_usb1);
-        cameras.get_usb2(tex_usb2);
-        cameras.get_usb3(tex_usb3);
+        if (p1) cameras.get_usb1(tex_usb1);
+        if (p2) cameras.get_usb2(tex_usb2);
+        if (p3) cameras.get_usb3(tex_usb3);
         android_mirror.get_frame(tex_android);
 
         // ── GPIO PiP button state ─────────────────────────────────────────────
@@ -3705,9 +3689,9 @@ int main(int argc, char* argv[]) {
         }
 
         // Overlay-active flags mirror the exact condition used in draw_pip calls.
-        snap.health.cam_usb1_overlay = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
-        snap.health.cam_usb2_overlay = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
-        snap.health.cam_usb3_overlay = pip_cam3_overlay_active;
+        snap.health.cam_usb1_overlay = p1;
+        snap.health.cam_usb2_overlay = p2;
+        snap.health.cam_usb3_overlay = p3;
         snap.health.gamepad_ok          = gamepad.connected();
         snap.health.wireless_ok         = wireless_enabled && wireless.connected();
         snap.health.wireless_battery_pct = wireless_enabled ? wireless.battery_pct() : -1;
@@ -3972,15 +3956,10 @@ int main(int argc, char* argv[]) {
         // Reset viewport to full framebuffer — timewarp leaves it at right-eye half.
         // Pass full display dimensions so NanoVG covers both eye halves.
         glViewport(0, 0, xr.display_width(), xr.display_height());
-        {
-            bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
-            bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
-            bool p3 = pip_cam3_overlay_active;
-            hud.draw_pip_underlays(tex_usb1, p1, pip_overlay_cfg1,
-                                   tex_usb2, p2, pip_overlay_cfg2,
-                                   tex_usb3, p3, pip_overlay_cfg3,
-                                   xr.eye_width(), xr.eye_height());
-        }
+        hud.draw_pip_underlays(tex_usb1, p1, pip_overlay_cfg1,
+                               tex_usb2, p2, pip_overlay_cfg2,
+                               tex_usb3, p3, pip_overlay_cfg3,
+                               xr.eye_width(), xr.eye_height());
         hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
         hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
 
