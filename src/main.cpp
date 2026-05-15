@@ -1,11 +1,13 @@
 #include <iostream>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
 #include <thread>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 
 #include <GLFW/glfw3.h>
 #include <GLES2/gl2.h>
@@ -2563,12 +2565,46 @@ int main(int argc, char* argv[]) {
 
     // QR / barcode scanner — active when either scan toggle is enabled.
     QrScanner qr_scanner;
-    qr_scanner.set_callback([&state](const std::string& text, const std::string& type) {
+    qr_scanner.set_callback([&state, cfg_photo_dir](const std::string& text,
+                                                       const std::string& type) {
+        // Honour mute window (set by "MUTE 1m" action)
+        if (static_cast<int64_t>(time(nullptr)) < state.qr_mute_until_s.load()) return;
+
+        const bool is_url = text.size() > 7 &&
+                            (text.substr(0, 7) == "http://" ||
+                             text.substr(0, 8) == "https://");
+
         Notification n;
-        n.type          = NotifType::App;
-        n.title         = type + " Detected";
-        n.body          = text;
-        n.auto_dismiss_s = 12.f;
+        n.type           = NotifType::App;
+        n.title          = type + " Detected";
+        n.body           = text;
+        n.auto_dismiss_s = 20.f;   // longer so user has time to act
+
+        if (is_url) {
+            n.actions.push_back({"OPEN", [text](AppState&) {
+                // xdg-open in background; single-quote the URL to avoid expansion
+                std::string safe = text;
+                // Replace any single-quotes in the URL with %27 before shell-quoting
+                for (auto& c : safe) if (c == '\'') c = ' ';
+                std::string cmd = "xdg-open '" + safe + "' >/dev/null 2>&1 &";
+                system(cmd.c_str());
+            }});
+        }
+
+        n.actions.push_back({"SAVE", [text, cfg_photo_dir](AppState&) {
+            if (cfg_photo_dir.empty()) return;
+            time_t now = time(nullptr);
+            struct tm tm{}; localtime_r(&now, &tm);
+            char ts[20]; strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm);
+            std::string path = cfg_photo_dir + "/qr_" + ts + ".txt";
+            std::ofstream f(path);
+            if (f) f << text << "\n";
+        }});
+
+        n.actions.push_back({"MUTE 1m", [](AppState& s) {
+            s.qr_mute_until_s.store(static_cast<int64_t>(time(nullptr)) + 60);
+        }});
+
         std::lock_guard lk(state.mtx);
         state.notifs.push(std::move(n));
     });

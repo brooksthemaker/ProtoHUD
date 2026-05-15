@@ -412,6 +412,9 @@ struct AppState {
     // Signals render thread to quit.
     std::atomic<bool> quit { false };
 
+    // QR scan mute: set to future epoch-seconds to suppress notifications temporarily.
+    std::atomic<int64_t> qr_mute_until_s { 0 };
+
     // ── Helpers (call with mutex held) ────────────────────────────────────────
 
     void upsert_lora_node(const LoRaNode& n) {
