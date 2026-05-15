@@ -20,6 +20,7 @@
 #include "camera/camera_manager.h"
 #include "camera/viture_camera.h"
 #include "input/gpio_buttons.h"
+#include "input/gamepad_input.h"
 #include "serial/face_controller.h"
 #include "serial/protoface_controller.h"
 #include "serial/teensy_controller.h"
@@ -2771,6 +2772,41 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
+    GamepadInput gamepad;
+    gamepad.init();
+    gamepad.on_menu([&menu]{
+        if (menu.is_open()) menu.close(); else menu.open();
+    });
+    gamepad.on_select([&menu, &hud, &state]{
+        if      (menu.is_open())          menu.select();
+        else if (hud.toast_has_focused()) hud.toast_select(state);
+    });
+    gamepad.on_back([&menu, &hud]{
+        if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+        else if (menu.is_open())          menu.back();
+    });
+    gamepad.on_nav_up   ([&menu]{ if (menu.is_open()) menu.navigate(-1); });
+    gamepad.on_nav_down ([&menu]{ if (menu.is_open()) menu.navigate(+1); });
+    gamepad.on_nav_left ([&menu, &hud]{
+        if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+        else if (menu.is_open())          menu.back();
+    });
+    gamepad.on_nav_right([&menu, &hud, &state]{
+        if      (hud.toast_has_focused()) hud.toast_navigate(+1);
+        else if (menu.is_open())          menu.select();
+    });
+    gamepad.on_pip_left ([&kb_pip_left] { kb_pip_left  = !kb_pip_left;  });
+    gamepad.on_pip_right([&kb_pip_right]{ kb_pip_right = !kb_pip_right; });
+    gamepad.on_af([&cameras]{
+        if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+        if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+    });
+    gamepad.on_capture([&state]{
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.capture_request = CaptureRequest::Stereo;
+    });
+
     // ── GL texture handles for camera sources ─────────────────────────────────
 
     GLuint tex_usb1  = 0;
@@ -2878,6 +2914,9 @@ int main(int argc, char* argv[]) {
             pip_left_active  = buttons.pip_left_active();
             pip_right_active = buttons.pip_right_active();
         }
+
+        // ── Gamepad poll ──────────────────────────────────────────────────────
+        gamepad.poll();
 
         // ── Keyboard button emulation (direct GLFW polling, edge-detected) ──
         // 1/2  = toggle PiP left/right    3 = menu select (when open)
@@ -3062,6 +3101,7 @@ int main(int argc, char* argv[]) {
         snap.health.cam_usb1_overlay = pip_cam1_overlay_active || pip_left_active  || kb_pip_left;
         snap.health.cam_usb2_overlay = pip_cam2_overlay_active || pip_right_active || kb_pip_right;
         snap.health.cam_usb3_overlay = pip_cam3_overlay_active;
+        snap.health.gamepad_ok       = gamepad.connected();
 
         // Inject live AF lens position into the snapshot (atomic read, no lock needed)
         if (cameras.owl_left())
