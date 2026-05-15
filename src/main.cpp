@@ -2307,17 +2307,6 @@ int main(int argc, char* argv[]) {
     xr_cfg.frameless        = jval(jdisp, "frameless",         false);
 
     CamConfig owl_left, owl_right;
-    state.cameras_swapped = jcam.value("swapped", false);
-    {
-        using TA = AppState::TheaterAnchor;
-        static const std::pair<const char*, TA> kAnchors[] = {
-            {"top_left",     TA::TopLeft},    {"top",    TA::Top},    {"top_right",    TA::TopRight},
-            {"left",         TA::Left},       {"center", TA::Center}, {"right",        TA::Right},
-            {"bottom_left",  TA::BottomLeft}, {"bottom", TA::Bottom}, {"bottom_right", TA::BottomRight},
-        };
-        std::string a = jcam.value("theater_anchor", "center");
-        for (auto& [k, v] : kAnchors) if (a == k) { state.theater_anchor = v; break; }
-    }
 
     if (jcam.contains("owlsight_left")) {
         auto& jl              = jcam["owlsight_left"];
@@ -2478,6 +2467,18 @@ int main(int argc, char* argv[]) {
         state.night_vision.auto_nv_gain_threshold = jnv.value("auto_nv_gain_threshold",  4.0f);
         state.night_vision.csi_awb_left           = jnv.value("csi_awb_left",            true);
         state.night_vision.csi_awb_right          = jnv.value("csi_awb_right",           true);
+    }
+
+    state.cameras_swapped = jcam.value("swapped", false);
+    {
+        using TA = AppState::TheaterAnchor;
+        static const std::pair<const char*, TA> kAnchors[] = {
+            {"top_left",     TA::TopLeft},    {"top",    TA::Top},    {"top_right",    TA::TopRight},
+            {"left",         TA::Left},       {"center", TA::Center}, {"right",        TA::Right},
+            {"bottom_left",  TA::BottomLeft}, {"bottom", TA::Bottom}, {"bottom_right", TA::BottomRight},
+        };
+        std::string a = jcam.value("theater_anchor", "center");
+        for (auto& [k, v] : kAnchors) if (a == k) { state.theater_anchor = v; break; }
     }
 
     if (cfg.contains("clock")) {
