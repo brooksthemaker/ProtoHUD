@@ -196,6 +196,7 @@ struct MapOverlayConfig {
     bool        calibrated          = false;
     bool        rotate_with_heading = true;
     float       image_rotate_deg    = 0.f;    // manual image rotation offset (degrees)
+    bool        circle_window       = false;  // true = circular clip; false = rect hugging image
 };
 
 // ── Particle effects ──────────────────────────────────────────────────────────

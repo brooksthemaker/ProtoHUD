@@ -1663,6 +1663,9 @@ static std::vector<MenuItem> build_menu(
             state.map_overlay.map_north_deg = state.compass_heading;
             state.map_overlay.calibrated    = true;
         }),
+        toggle("Circle Window",
+            [&state]{ return state.map_overlay.circle_window; },
+            [&state](bool v){ state.map_overlay.circle_window = v; }),
         slider("Transparency", 0.f, 1.f, 0.05f, "",
             [&state]{ return state.map_overlay.opacity; },
             [&state](float v){ state.map_overlay.opacity = v; }),
@@ -2323,6 +2326,21 @@ int main(int argc, char* argv[]) {
     // Ensure the maps directory exists
     { std::error_code ec; std::filesystem::create_directories(cfg_map_dir, ec); }
     state.ssh.port = cfg_ssh_port;
+
+    // Map overlay persistent settings
+    if (cfg.contains("map")) {
+        const auto& jm = cfg["map"];
+        auto& mo = state.map_overlay;
+        mo.enabled             = jm.value("enabled",             mo.enabled);
+        mo.opacity             = jm.value("opacity",             mo.opacity);
+        mo.size_px             = jm.value("size_px",             mo.size_px);
+        mo.rotate_with_heading = jm.value("rotate_with_heading", mo.rotate_with_heading);
+        mo.image_rotate_deg    = jm.value("image_rotate_deg",    mo.image_rotate_deg);
+        mo.anchor_x            = jm.value("anchor_x",            mo.anchor_x);
+        mo.anchor_y            = jm.value("anchor_y",            mo.anchor_y);
+        mo.circle_window       = jm.value("circle_window",       mo.circle_window);
+        { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
+    }
 
     SplashConfig splash_cfg;
     if (cfg.contains("splash")) {

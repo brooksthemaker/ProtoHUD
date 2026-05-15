@@ -368,28 +368,33 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     nvgSave(vg);
     nvgTranslate(vg, cx, cy);
 
-    // Manual image rotation (corrects map orientation) applied first
+    // Build the image paint inside the rotated frame so it captures the rotation.
+    // nvgImagePattern bakes the current transform into the paint; after restoring
+    // to screen-aligned coordinates the fill path (circle or rect) samples the
+    // image through that baked transform — giving a fixed window with a rotating map.
+    nvgSave(vg);
     if (cfg.image_rotate_deg != 0.f)
         nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
-
-    // Heading-up rotation: map counter-rotates as wearer turns
     if (cfg.rotate_with_heading && cfg.calibrated)
         nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
-
-    // Clip to square display window to hide rotated corners
-    nvgScissor(vg, -half, -half, half * 2.f, half * 2.f);
-
     NVGpaint img = nvgImagePattern(vg, -hw, -hh, hw * 2.f, hh * 2.f, 0.f, map_img_, cfg.opacity);
+    nvgRestore(vg);  // back to screen-aligned at (cx, cy)
+
+    // Fill window shape — the path IS the clip; no scissor needed.
     nvgBeginPath(vg);
-    nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
+    if (cfg.circle_window)
+        nvgCircle(vg, 0.f, 0.f, half);
+    else
+        nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
     nvgFillPaint(vg, img);
     nvgFill(vg);
 
-    nvgResetScissor(vg);
-
-    // Subtle border around the overlay
+    // Border hugs the window shape exactly
     nvgBeginPath(vg);
-    nvgRect(vg, -half, -half, half * 2.f, half * 2.f);
+    if (cfg.circle_window)
+        nvgCircle(vg, 0.f, 0.f, half);
+    else
+        nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
     nvgStrokeColor(vg, nvgRGBA(100, 130, 160, 160));
     nvgStrokeWidth(vg, 1.5f);
     nvgStroke(vg);
