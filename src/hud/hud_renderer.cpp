@@ -546,9 +546,9 @@ void HudRenderer::draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
         nvgFill(vg);
     }
 
-    // Border — theme primary colour, slightly transparent
+    // Border — match HUD chrome orange accent
     {
-        const ImU32 pc = col_.primary;
+        const ImU32 pc = col_.orange;
         nvgBeginPath(vg);
         nvgRoundedRect(vg, -hw, -hh, dw, dh, C);
         nvgStrokeColor(vg, nvgRGBA(pc & 0xFF, (pc >> 8) & 0xFF, (pc >> 16) & 0xFF, 160));
