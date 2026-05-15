@@ -230,6 +230,17 @@
     "photo_dir":  "",
     "map_dir":    ""
   },
+  "resolution": {
+    "_note": "Persisted OWLsight resolution. Overrides cameras.owlsight_left/right width/height/fps on startup.",
+    "width":  1280,
+    "height":  800,
+    "fps":      60
+  },
+  "qr": {
+    "_note": "Persisted QR scan state. scan_main=OWLsight cameras, scan_usb=USB cameras.",
+    "scan_main": false,
+    "scan_usb":  false
+  },
   "map": {
     "enabled":             false,
     "map_path":            "",
