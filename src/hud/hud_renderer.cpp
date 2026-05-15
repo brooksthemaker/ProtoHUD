@@ -1784,20 +1784,20 @@ void HudRenderer::fx_draw_lines(NVGcontext* vg) const {
 void HudRenderer::fx_draw_nebula_cloud(NVGcontext* vg, float fw, float fh) const {
     // Each layer uses nvgBoxGradient over a fullscreen rect: one draw call covers
     // all four edges and corners simultaneously instead of four separate strips.
-    // The inner box sits `depth` pixels from each screen edge; the feather of
-    // `depth` pixels then carries the gradient outward to the screen boundary.
-    struct CloudLayer { float depth; uint8_t r, g, b, a; };
+    // depth   — inner-box offset from screen edge (half the old values)
+    // feather — gradient width; 1.4× depth gives a softer inner falloff
+    struct CloudLayer { float depth; float feather; uint8_t r, g, b, a; };
     static const CloudLayer layers[] = {
-        {  80.f,  3,  2, 18, 215 },
-        { 130.f,  8,  4, 38, 130 },
-        { 195.f, 20,  8, 65,  55 },
+        {  40.f,  56.f,  3,  2, 18, 215 },
+        {  65.f,  91.f,  8,  4, 38, 130 },
+        {  98.f, 137.f, 20,  8, 65,  55 },
     };
     for (const auto& l : layers) {
-        const float d    = l.depth;
         const NVGcolor clear = nvgRGBA(l.r, l.g, l.b,    0);
         const NVGcolor edge  = nvgRGBA(l.r, l.g, l.b, l.a);
-        NVGpaint p = nvgBoxGradient(vg, d, d, fw - 2.f*d, fh - 2.f*d,
-                                    0.f, d, clear, edge);
+        NVGpaint p = nvgBoxGradient(vg, l.depth, l.depth,
+                                    fw - 2.f*l.depth, fh - 2.f*l.depth,
+                                    0.f, l.feather, clear, edge);
         nvgBeginPath(vg);
         nvgRect(vg, 0, 0, fw, fh);
         nvgFillPaint(vg, p);
@@ -1806,21 +1806,21 @@ void HudRenderer::fx_draw_nebula_cloud(NVGcontext* vg, float fw, float fh) const
 }
 
 void HudRenderer::fx_draw_vignette(NVGcontext* vg, float fw, float fh) const {
-    // Soft outer band: wide, gentle dark falloff from edges
+    // Soft outer band: depth halved, feather 1.4× depth for a gentle inner fade
     {
-        constexpr float d = 200.f;
+        constexpr float d = 100.f, f = 140.f;
         NVGpaint p = nvgBoxGradient(vg, d, d, fw - 2.f*d, fh - 2.f*d,
-                                    0.f, d, nvgRGBA(0,0,0,0), nvgRGBA(0,0,0,160));
+                                    0.f, f, nvgRGBA(0,0,0,0), nvgRGBA(0,0,0,160));
         nvgBeginPath(vg);
         nvgRect(vg, 0, 0, fw, fh);
         nvgFillPaint(vg, p);
         nvgFill(vg);
     }
-    // Hard inner ring: thin strip at the very edge for a clean border line
+    // Hard inner ring: depth halved, feather scaled to match
     {
-        constexpr float d = 55.f;
+        constexpr float d = 28.f, f = 44.f;
         NVGpaint p = nvgBoxGradient(vg, d, d, fw - 2.f*d, fh - 2.f*d,
-                                    0.f, d, nvgRGBA(0,0,0,0), nvgRGBA(0,0,0,220));
+                                    0.f, f, nvgRGBA(0,0,0,0), nvgRGBA(0,0,0,220));
         nvgBeginPath(vg);
         nvgRect(vg, 0, 0, fw, fh);
         nvgFillPaint(vg, p);
