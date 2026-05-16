@@ -277,6 +277,21 @@ void HudRenderer::nvg_set_font_mono(float sz) {
 
 // ── NVG HUD frame ─────────────────────────────────────────────────────────────
 
+void HudRenderer::begin_nvg_overlay(int w, int h) {
+    if (!nvg_ || nvg_frame_active_) return;
+    nvgBeginFrame(nvg_, static_cast<float>(w), static_cast<float>(h), 1.0f);
+    nvg_frame_active_ = true;
+}
+
+void HudRenderer::end_nvg_overlay() {
+    if (!nvg_ || !nvg_frame_active_) return;
+    nvgEndFrame(nvg_);
+    nvg_frame_active_ = false;
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glStencilMask(0xFF);
+}
+
 void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps) {
     if (!nvg_) return;
     const float fw       = static_cast<float>(w);
@@ -285,7 +300,8 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
     const bool  flip     = cfg_.hud_flip_vertical;
 
-    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    const bool own_frame = !nvg_frame_active_;
+    if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
 
     draw_map_overlay(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
@@ -314,23 +330,29 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
         fps_shown_in_hud_ = true;
     }
 
-    nvgEndFrame(nvg_);
-    // Restore GL state NanoVG leaves dirty (stencil test, cull face)
-    glDisable(GL_STENCIL_TEST);
-    glDisable(GL_CULL_FACE);
-    glStencilMask(0xFF);
+    if (own_frame) {
+        nvgEndFrame(nvg_);
+        nvg_frame_active_ = false;
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_CULL_FACE);
+        glStencilMask(0xFF);
+    }
 }
 
 void HudRenderer::draw_toasts(NotificationQueue& live_q, int w, int h) {
     if (!nvg_) return;
     const float fw = static_cast<float>(w);
     const float fh = static_cast<float>(h);
-    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    const bool own_frame = !nvg_frame_active_;
+    if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
     toast_renderer_.draw(nvg_, live_q, fw, fh, frame_dt_, nvg_font_ui_, nvg_font_mono_);
-    nvgEndFrame(nvg_);
-    glDisable(GL_STENCIL_TEST);
-    glDisable(GL_CULL_FACE);
-    glStencilMask(0xFF);
+    if (own_frame) {
+        nvgEndFrame(nvg_);
+        nvg_frame_active_ = false;
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_CULL_FACE);
+        glStencilMask(0xFF);
+    }
 }
 
 void HudRenderer::draw_fps_overlay(const AppState& snap, int w, int h, bool active) {
@@ -570,11 +592,18 @@ void HudRenderer::draw_pip_underlays(
     const float fw = static_cast<float>(ew);
     const float fh = static_cast<float>(eh);
 
-    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    const bool own_frame = !nvg_frame_active_;
+    if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
     for (auto& e : entries)
         if (e.act && e.tex)
             draw_pip_nvg_single(nvg_, e.tex, *e.cfg, fw, fh);
-    nvgEndFrame(nvg_);
+    if (own_frame) {
+        nvgEndFrame(nvg_);
+        nvg_frame_active_ = false;
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_CULL_FACE);
+        glStencilMask(0xFF);
+    }
 }
 
 void HudRenderer::draw_pip_overlays(

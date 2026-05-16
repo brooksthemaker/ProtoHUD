@@ -864,6 +864,33 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── USB camera menus ──────────────────────────────────────────────────────
+    // Helper: build a "Resolution" submenu for one USB camera slot.
+    // If the stream is currently open, close it and reopen with the new dimensions.
+    auto make_resolution_items = [cameras](
+        std::function<UsbCamConfig()>          get_cfg,
+        std::function<void(UsbCamConfig)>      set_cfg,
+        std::function<bool()>                  is_open,
+        std::function<void()>                  close_fn,
+        std::function<void()>                  open_fn)
+    {
+        auto set_res = [=](int w, int h) {
+            if (!cameras) return;
+            UsbCamConfig c = get_cfg(); c.width = w; c.height = h; set_cfg(c);
+            if (is_open()) {
+                close_fn();
+                std::thread([open_fn]{ open_fn(); }).detach();
+            }
+        };
+        return std::vector<MenuItem>{
+            leaf_sel("High  1280x720", [set_res]{ set_res(1280, 720); },
+                [get_cfg]{ return get_cfg().width == 1280 && get_cfg().height == 720; }),
+            leaf_sel("Med    960x540", [set_res]{ set_res( 960, 540); },
+                [get_cfg]{ return get_cfg().width ==  960 && get_cfg().height == 540; }),
+            leaf_sel("Low    640x360", [set_res]{ set_res( 640, 360); },
+                [get_cfg]{ return get_cfg().width ==  640 && get_cfg().height == 360; }),
+        };
+    };
+
     // Scan for available V4L2 capture devices once at menu-build time.
     // Results are used to populate each slot's "Select Device" submenu.
     auto usb_devs = cameras ? cameras->list_usb_devices()
@@ -974,6 +1001,12 @@ static std::vector<MenuItem> build_menu(
         submenu("Overlay",     std::move(cam1_overlay_menu)),
         submenu("Brightness",  std::move(usb1_brightness_menu)),
         submenu("Exposure",    std::move(usb1_exposure_menu)),
+        submenu("Resolution",  make_resolution_items(
+            [cameras]{ return cameras->usb1_cfg(); },
+            [cameras](UsbCamConfig c){ cameras->update_usb1_cfg(c); },
+            [cameras]{ return cameras && cameras->usb1_ok(); },
+            [cameras]{ cameras->close_usb1(); },
+            [cameras]{ cameras->open_usb1(); })),
         leaf("Scan for Camera", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb1();
@@ -1064,6 +1097,12 @@ static std::vector<MenuItem> build_menu(
         submenu("Overlay",    std::move(cam2_overlay_menu)),
         submenu("Brightness", std::move(usb2_brightness_menu)),
         submenu("Exposure",   std::move(usb2_exposure_menu)),
+        submenu("Resolution", make_resolution_items(
+            [cameras]{ return cameras->usb2_cfg(); },
+            [cameras](UsbCamConfig c){ cameras->update_usb2_cfg(c); },
+            [cameras]{ return cameras && cameras->usb2_ok(); },
+            [cameras]{ cameras->close_usb2(); },
+            [cameras]{ cameras->open_usb2(); })),
         leaf("Scan for Camera", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb2();
@@ -1154,6 +1193,12 @@ static std::vector<MenuItem> build_menu(
         submenu("Overlay",     std::move(cam3_overlay_menu)),
         submenu("Brightness",  std::move(usb3_brightness_menu)),
         submenu("Exposure",    std::move(usb3_exposure_menu)),
+        submenu("Resolution",  make_resolution_items(
+            [cameras]{ return cameras->usb3_cfg(); },
+            [cameras](UsbCamConfig c){ cameras->update_usb3_cfg(c); },
+            [cameras]{ return cameras && cameras->usb3_ok(); },
+            [cameras]{ cameras->close_usb3(); },
+            [cameras]{ cameras->open_usb3(); })),
         leaf("Scan for Camera", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb3();
@@ -2470,8 +2515,8 @@ int main(int argc, char* argv[]) {
     if (jcam.contains("usb_cam_1")) {
         auto& j1 = jcam["usb_cam_1"];
         usb1_cfg.device             = j1.value("device",             "/dev/video2");
-        usb1_cfg.width              = j1.value("width",               1280);
-        usb1_cfg.height             = j1.value("height",               720);
+        usb1_cfg.width              = j1.value("width",                640);
+        usb1_cfg.height             = j1.value("height",               360);
         usb1_cfg.fps                = j1.value("fps",                   30);
         usb1_cfg.brightness         = j1.value("brightness",           1.0f);
         usb1_cfg.dynamic_framerate  = j1.value("dynamic_framerate",    false);
@@ -2486,8 +2531,8 @@ int main(int argc, char* argv[]) {
     if (jcam.contains("usb_cam_2")) {
         auto& j2 = jcam["usb_cam_2"];
         usb2_cfg.device             = j2.value("device",             "/dev/video3");
-        usb2_cfg.width              = j2.value("width",               1280);
-        usb2_cfg.height             = j2.value("height",               720);
+        usb2_cfg.width              = j2.value("width",                640);
+        usb2_cfg.height             = j2.value("height",               360);
         usb2_cfg.fps                = j2.value("fps",                   30);
         usb2_cfg.brightness         = j2.value("brightness",           1.0f);
         usb2_cfg.dynamic_framerate  = j2.value("dynamic_framerate",    false);
@@ -2502,8 +2547,8 @@ int main(int argc, char* argv[]) {
     if (jcam.contains("usb_cam_3")) {
         auto& j3 = jcam["usb_cam_3"];
         usb3_cfg.device             = j3.value("device",             "");
-        usb3_cfg.width              = j3.value("width",               1280);
-        usb3_cfg.height             = j3.value("height",               720);
+        usb3_cfg.width              = j3.value("width",                640);
+        usb3_cfg.height             = j3.value("height",               360);
         usb3_cfg.fps                = j3.value("fps",                   30);
         usb3_cfg.brightness         = j3.value("brightness",           1.0f);
         usb3_cfg.dynamic_framerate  = j3.value("dynamic_framerate",    false);
@@ -3956,12 +4001,14 @@ int main(int argc, char* argv[]) {
         // Reset viewport to full framebuffer — timewarp leaves it at right-eye half.
         // Pass full display dimensions so NanoVG covers both eye halves.
         glViewport(0, 0, xr.display_width(), xr.display_height());
+        hud.begin_nvg_overlay(xr.display_width(), xr.display_height());
         hud.draw_pip_underlays(tex_usb1, p1, pip_overlay_cfg1,
                                tex_usb2, p2, pip_overlay_cfg2,
                                tex_usb3, p3, pip_overlay_cfg3,
-                               xr.eye_width(), xr.eye_height());
+                               xr.display_width(), xr.display_height());
         hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
         hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
+        hud.end_nvg_overlay();
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
@@ -4067,6 +4114,8 @@ int main(int argc, char* argv[]) {
         jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
 
         cfg["cameras"]["usb_cam_1"]["device"]            = cameras.usb1_cfg().device;
+        cfg["cameras"]["usb_cam_1"]["width"]             = cameras.usb1_cfg().width;
+        cfg["cameras"]["usb_cam_1"]["height"]            = cameras.usb1_cfg().height;
         cfg["cameras"]["usb_cam_1"]["brightness"]        = cameras.usb1_brightness();
         cfg["cameras"]["usb_cam_1"]["dynamic_framerate"] = cameras.usb1_cfg().dynamic_framerate;
         cfg["cameras"]["usb_cam_1"]["auto_exposure"]     = cameras.usb1_cfg().auto_exposure;
@@ -4077,6 +4126,8 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_1"]["auto_brightness"]        = cameras.usb1_cfg().auto_brightness;
         cfg["cameras"]["usb_cam_1"]["auto_brightness_target"] = cameras.usb1_cfg().auto_brightness_target;
         cfg["cameras"]["usb_cam_2"]["device"]            = cameras.usb2_cfg().device;
+        cfg["cameras"]["usb_cam_2"]["width"]             = cameras.usb2_cfg().width;
+        cfg["cameras"]["usb_cam_2"]["height"]            = cameras.usb2_cfg().height;
         cfg["cameras"]["usb_cam_2"]["brightness"]        = cameras.usb2_brightness();
         cfg["cameras"]["usb_cam_2"]["dynamic_framerate"] = cameras.usb2_cfg().dynamic_framerate;
         cfg["cameras"]["usb_cam_2"]["auto_exposure"]     = cameras.usb2_cfg().auto_exposure;
@@ -4087,6 +4138,8 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_2"]["auto_brightness"]        = cameras.usb2_cfg().auto_brightness;
         cfg["cameras"]["usb_cam_2"]["auto_brightness_target"] = cameras.usb2_cfg().auto_brightness_target;
         cfg["cameras"]["usb_cam_3"]["device"]            = cameras.usb3_cfg().device;
+        cfg["cameras"]["usb_cam_3"]["width"]             = cameras.usb3_cfg().width;
+        cfg["cameras"]["usb_cam_3"]["height"]            = cameras.usb3_cfg().height;
         cfg["cameras"]["usb_cam_3"]["brightness"]        = cameras.usb3_brightness();
         cfg["cameras"]["usb_cam_3"]["dynamic_framerate"] = cameras.usb3_cfg().dynamic_framerate;
         cfg["cameras"]["usb_cam_3"]["auto_exposure"]     = cameras.usb3_cfg().auto_exposure;

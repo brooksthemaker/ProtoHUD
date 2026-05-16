@@ -433,7 +433,8 @@ void CameraManager::close_usb3() {
 // Creates or reallocates the GL texture if dimensions changed, then uploads pixels.
 
 void CameraManager::upload_texture(GLuint& tex, int w, int h,
-                                   const unsigned char* rgba) {
+                                   const unsigned char* rgba,
+                                   int& prev_w, int& prev_h) {
     if (tex == 0) {
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -445,12 +446,14 @@ void CameraManager::upload_texture(GLuint& tex, int w, int h,
         glBindTexture(GL_TEXTURE_2D, tex);
     }
 
-    // glTexImage2D on dimension change, glTexSubImage2D otherwise (faster)
-    // We track tex_w/tex_h in the slot; compare via the caller's tracking.
-    // Since upload_texture doesn't have slot access, we always use TexImage2D
-    // here and let the caller track when realloc is needed via tex_w/tex_h.
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    if (w != prev_w || h != prev_h) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        prev_w = w; prev_h = h;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
+                        GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    }
 
     glBindTexture(GL_TEXTURE_2D, 0);
 }
@@ -563,7 +566,8 @@ void CameraManager::set_usb3_ctrl(uint32_t id, int32_t val) { v4l2_set_ctrl(usb3
 bool CameraManager::get_usb1(GLuint& out) {
     std::lock_guard<std::mutex> lk(usb1_slot_.mtx);
     if (!usb1_slot_.dirty || usb1_slot_.buf.empty()) { out = usb1_slot_.tex; return false; }
-    upload_texture(usb1_slot_.tex, usb1_slot_.w, usb1_slot_.h, usb1_slot_.buf.data());
+    upload_texture(usb1_slot_.tex, usb1_slot_.w, usb1_slot_.h, usb1_slot_.buf.data(),
+                   usb1_slot_.tex_w, usb1_slot_.tex_h);
     usb1_slot_.dirty = false;
     out = usb1_slot_.tex;
     return true;
@@ -572,7 +576,8 @@ bool CameraManager::get_usb1(GLuint& out) {
 bool CameraManager::get_usb2(GLuint& out) {
     std::lock_guard<std::mutex> lk(usb2_slot_.mtx);
     if (!usb2_slot_.dirty || usb2_slot_.buf.empty()) { out = usb2_slot_.tex; return false; }
-    upload_texture(usb2_slot_.tex, usb2_slot_.w, usb2_slot_.h, usb2_slot_.buf.data());
+    upload_texture(usb2_slot_.tex, usb2_slot_.w, usb2_slot_.h, usb2_slot_.buf.data(),
+                   usb2_slot_.tex_w, usb2_slot_.tex_h);
     usb2_slot_.dirty = false;
     out = usb2_slot_.tex;
     return true;
@@ -581,7 +586,8 @@ bool CameraManager::get_usb2(GLuint& out) {
 bool CameraManager::get_usb3(GLuint& out) {
     std::lock_guard<std::mutex> lk(usb3_slot_.mtx);
     if (!usb3_slot_.dirty || usb3_slot_.buf.empty()) { out = usb3_slot_.tex; return false; }
-    upload_texture(usb3_slot_.tex, usb3_slot_.w, usb3_slot_.h, usb3_slot_.buf.data());
+    upload_texture(usb3_slot_.tex, usb3_slot_.w, usb3_slot_.h, usb3_slot_.buf.data(),
+                   usb3_slot_.tex_w, usb3_slot_.tex_h);
     usb3_slot_.dirty = false;
     out = usb3_slot_.tex;
     return true;
