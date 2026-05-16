@@ -3218,6 +3218,17 @@ int main(int argc, char* argv[]) {
         else if (hud.toast_has_focused()) hud.toast_navigate(dir);
     });
 
+    knob.on_button([&menu](uint8_t btn, uint8_t ev) {
+        if (ev == 0) {  // press
+            if (btn == 0 && menu.is_open()) menu.select();  // encoder click = select
+            if (btn == 1 && menu.is_open()) menu.back();    // back button = back
+        } else if (ev == 1) {  // long press
+            if (btn == 0) {                                 // encoder long press = toggle menu
+                if (menu.is_open()) menu.close(); else menu.open();
+            }
+        }
+    });
+
     knob.on_status([&state](uint8_t status, uint8_t param) {
         if      (status == 0x01) {
             std::lock_guard<std::mutex> lk(state.mtx);
