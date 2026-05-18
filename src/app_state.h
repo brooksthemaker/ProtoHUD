@@ -100,6 +100,8 @@ struct KnobState {
     float    velocity_rpm   = 0.0f;
     bool     connected      = false;
     bool     awake          = false;
+    uint8_t  last_button_id    = 0;
+    uint8_t  last_button_event = 0;
 };
 
 struct SystemHealth {

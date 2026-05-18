@@ -115,6 +115,13 @@ void SmartKnob::on_frame(uint8_t cmd, const uint8_t* payload, uint8_t len) {
     } else if (cmd == KnobCmd::BUTTON_EVENT && len >= sizeof(KnobButtonPayload)) {
         KnobButtonPayload p {};
         std::memcpy(&p, payload, sizeof(p));
+
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            state_.knob.last_button_id    = p.button_id;
+            state_.knob.last_button_event = p.event_type;
+        }
+
         if (button_cb_) button_cb_(p.button_id, p.event_type);
 
     } else if (cmd == 0x01) {  // STATUS_READY (len=0, no position payload)
