@@ -7,11 +7,11 @@
 #include <vector>
 
 // Callback fired on knob position change (direction: -1/+1, detent index)
-using KnobMoveCallback  = std::function<void(int8_t direction, int detent_index)>;
-using KnobWakeCallback  = std::function<void()>;
+using KnobMoveCallback   = std::function<void(int8_t direction, int detent_index)>;
+using KnobWakeCallback   = std::function<void()>;
 // Callback fired on status messages from SmartKnob (calibration ready, sleep/wake)
 using KnobStatusCallback = std::function<void(uint8_t status, uint8_t param)>;
-// Callback fired on button press/release from SmartKnob encoder or back button
+// Callback fired on button events: button_id (KnobButton::*), event_type (KnobButtonEvent::*)
 using KnobButtonCallback = std::function<void(uint8_t button_id, uint8_t event_type)>;
 
 class SmartKnob {
@@ -29,8 +29,8 @@ public:
     void set_sleep_timeout(uint16_t seconds);
     void set_haptic(uint8_t amplitude, uint8_t frequency, uint8_t detent_strength);
 
-    void on_move(KnobMoveCallback cb)     { move_cb_   = std::move(cb); }
-    void on_wake(KnobWakeCallback cb)     { wake_cb_   = std::move(cb); }
+    void on_move  (KnobMoveCallback cb)   { move_cb_   = std::move(cb); }
+    void on_wake  (KnobWakeCallback cb)   { wake_cb_   = std::move(cb); }
     void on_status(KnobStatusCallback cb) { status_cb_ = std::move(cb); }
     void on_button(KnobButtonCallback cb) { button_cb_ = std::move(cb); }
 

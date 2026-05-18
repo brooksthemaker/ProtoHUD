@@ -139,16 +139,17 @@ namespace KnobCmd {
     static constexpr uint8_t SET_HAPTIC      = 0x85;  // amplitude(1) frequency(1) detent_strength(1)
 }
 
+// Button IDs (matching firmware BTN_* constants)
 namespace KnobButton {
-    static constexpr uint8_t ENCODER = 0x00;  // rotary encoder press
-    static constexpr uint8_t BACK    = 0x01;  // back/cancel button
-    static constexpr uint8_t EXTRA   = 0x02;  // auxiliary button
+    static constexpr uint8_t ENCODER = 0;  // encoder push-switch
+    static constexpr uint8_t BACK    = 1;  // dedicated back button
+    static constexpr uint8_t EXTRA   = 2;  // optional extra button
 }
-
+// Button event types
 namespace KnobButtonEvent {
-    static constexpr uint8_t PRESS      = 0x00;
-    static constexpr uint8_t LONG_PRESS = 0x01;
-    static constexpr uint8_t RELEASE    = 0x02;
+    static constexpr uint8_t PRESS      = 0;
+    static constexpr uint8_t LONG_PRESS = 1;
+    static constexpr uint8_t RELEASE    = 2;
 }
 
 #pragma pack(push, 1)
@@ -159,8 +160,8 @@ struct KnobPositionPayload {
     int32_t  angle_milli;    // absolute angle in millidegrees
 };
 struct KnobButtonPayload {
-    uint8_t button_id;   // KnobButton::* constant
-    uint8_t event_type;  // KnobButtonEvent::* constant
+    uint8_t button_id;    // KnobButton:: constant
+    uint8_t event_type;   // KnobButtonEvent:: constant
 };
 #pragma pack(pop)
 

@@ -184,7 +184,8 @@ public:
 private:
     void usb_capture_thread();
     // Upload pixel data to a GL texture; creates/reallocates as needed.
-    void upload_texture(GLuint& tex, int w, int h, const unsigned char* rgba);
+    void upload_texture(GLuint& tex, int w, int h, const unsigned char* rgba,
+                        int& prev_w, int& prev_h);
     // Stop the capture thread, probe video devices, restart thread.
     bool scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
                   UsbCamConfig& cfg,
