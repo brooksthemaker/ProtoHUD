@@ -1,4 +1,3 @@
-#include <iostream>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -3238,6 +3237,21 @@ int main(int argc, char* argv[]) {
         }
         else if (status == 0x02) std::cout << "[knob] entering sleep\n";
         else if (status == 0x03) std::cout << "[knob] woke up reason=" << (int)param << "\n";
+    });
+
+    knob.on_button([&menu, &hud, &state](uint8_t btn, uint8_t ev) {
+        if (ev != KnobButtonEvent::PRESS && ev != KnobButtonEvent::LONG_PRESS) return;
+        if (btn == KnobButton::ENCODER) {
+            if (ev == KnobButtonEvent::LONG_PRESS) {
+                if (menu.is_open()) menu.close(); else menu.open();
+            } else {
+                if      (menu.is_open())          menu.select();
+                else if (hud.toast_has_focused()) hud.toast_select(state);
+            }
+        } else if (btn == KnobButton::BACK) {
+            if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+            else if (menu.is_open())          menu.back();
+        }
     });
 
     // ── GPIO button input ─────────────────────────────────────────────────────
