@@ -43,12 +43,16 @@ struct UsbCamConfig {
     float auto_brightness_target = 100.f; // target mean luma 0-255 (default ~39%)
 };
 
+// Which image source feeds a given eye.
+enum class EyeSource { CSI, USB1, USB2, USB3 };
+
 // CameraManager owns:
-//   • Two DmaCamera instances (OWLsight left + right) — zero-copy NV12 path
-//   • Two OpenCV VideoCapture instances (USB cams) — CPU→GPU upload path
+//   • Two DmaCamera instances (CSI cameras, default OWLsight) — zero-copy NV12 path
+//   • Three OpenCV VideoCapture instances (USB cams) — CPU→GPU upload path
 //
-// OWLsight: call draw_owl_left/right() inside an eye FBO (fills current viewport).
-// USB cams: call get_usb1/usb2(GLuint&) to fetch the latest RGBA texture id.
+// CSI cameras: call draw_owl_left/right() inside an eye FBO (fills current viewport).
+// USB cams:    call get_usb1/2/3(GLuint&) to fetch the latest RGBA texture id,
+//              or call draw_tex_fullscreen(tex) to blit a USB frame into an eye FBO.
 //
 // init() MUST be called from the render thread, after the GL context is current.
 
@@ -63,12 +67,17 @@ public:
               const char* nv12_vs_path, const char* nv12_fs_path);
     void shutdown();
 
-    // ── OWLsight (zero-copy DMA) ──────────────────────────────────────────────
+    // ── CSI cameras (zero-copy DMA) ──────────────────────────────────────────
     // Draw directly into the current render target (fills viewport).
     // zoom=1.0 → full frame; zoom>1.0 → digital crop around (cx,cy).
     // Returns false if no frame is ready yet.
     bool draw_owl_left( float zoom = 1.0f, float cx = 0.5f, float cy = 0.5f);
     bool draw_owl_right(float zoom = 1.0f, float cx = 0.5f, float cy = 0.5f);
+
+    // Blit a USB camera RGBA texture as a fullscreen quad into the currently-bound FBO.
+    // Equivalent to the CSI draw path but sourced from a CPU-uploaded GL_TEXTURE_2D.
+    // Returns false if tex == 0. Call from the render thread inside an active FBO.
+    bool draw_tex_fullscreen(GLuint tex) const;
 
     // ── USB cameras (CPU→GPU upload) ──────────────────────────────────────────
     // Upload latest frame; out receives the GL texture id (0 if unavailable).
@@ -190,6 +199,11 @@ private:
     bool scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
                   UsbCamConfig& cfg,
                   const std::vector<std::string>& skip_paths = {});
+
+    // RGBA fullscreen quad (for USB-as-eye-source path)
+    GLuint rgba_prog_     = 0;
+    GLuint rgba_quad_vbo_ = 0;
+    GLint  rgba_tex_loc_  = -1;
 
     // Shared libcamera camera manager (one per process)
     std::unique_ptr<libcamera::CameraManager> lcam_mgr_;

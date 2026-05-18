@@ -301,7 +301,10 @@ static std::vector<MenuItem> build_menu(
         IFaceController*  fp_option       = nullptr,
         // Panel preview toggle (Protoface shm → ProtoHUD ImGui window)
         bool*             panel_preview_pp = nullptr,
-        std::string       map_dir         = "/home/user/Pictures/protohud/maps")
+        std::string       map_dir         = "/home/user/Pictures/protohud/maps",
+        // Eye source selection (render-thread only, no mutex needed)
+        EyeSource* left_eye_src  = nullptr,
+        EyeSource* right_eye_src = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -752,6 +755,26 @@ static std::vector<MenuItem> build_menu(
         leaf("Reset",       [&state]{ state.theater_anchor = TA::Center;  }),
     };
 
+    // ── Eye source selection submenus ─────────────────────────────────────────
+    // Build a 4-item radio list for one eye (CSI / USB 1 / USB 2 / USB 3).
+    auto make_eye_source_menu = [&](EyeSource* src) -> std::vector<MenuItem> {
+        if (!src) return {};
+        return {
+            leaf_sel("CSI Camera",
+                [src]{ *src = EyeSource::CSI;  },
+                [src]{ return *src == EyeSource::CSI;  }),
+            leaf_sel("USB Cam 1",
+                [src]{ *src = EyeSource::USB1; },
+                [src]{ return *src == EyeSource::USB1; }),
+            leaf_sel("USB Cam 2",
+                [src]{ *src = EyeSource::USB2; },
+                [src]{ return *src == EyeSource::USB2; }),
+            leaf_sel("USB Cam 3",
+                [src]{ *src = EyeSource::USB3; },
+                [src]{ return *src == EyeSource::USB3; }),
+        };
+    };
+
     std::vector<MenuItem> main_cameras_menu = {
         toggle("Theater Mode",
             [&state]{ return state.theater_mode; },
@@ -760,7 +783,9 @@ static std::vector<MenuItem> build_menu(
         toggle("Swap Cameras",
             [&state]{ return state.cameras_swapped; },
             [&state](bool v){ state.cameras_swapped = v; }),
-        submenu("Resolution",    std::move(resolution_presets)),
+        submenu("Resolution",       std::move(resolution_presets)),
+        submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
+        submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
         submenu("Digital Zoom",  std::move(zoom_menu)),
         submenu("Mirror Crop",   std::move(mirror_crop_menu)),
         submenu("Single Camera", std::move(single_cam_menu)),
@@ -2561,6 +2586,16 @@ int main(int argc, char* argv[]) {
         usb3_cfg.auto_brightness_target  = j3.value("auto_brightness_target",  100.f);
     }
 
+    // Eye source: which camera feeds each eye (CSI or one of the USB slots).
+    auto parse_eye_src = [](const std::string& s) -> EyeSource {
+        if (s == "usb1") return EyeSource::USB1;
+        if (s == "usb2") return EyeSource::USB2;
+        if (s == "usb3") return EyeSource::USB3;
+        return EyeSource::CSI;
+    };
+    EyeSource left_eye_src  = parse_eye_src(jcam.value("left_eye_source",  std::string("csi")));
+    EyeSource right_eye_src = parse_eye_src(jcam.value("right_eye_source", std::string("csi")));
+
     HudConfig hud_cfg;
     hud_cfg.compass_height        = jval(jhud, "compass_height_px",        60);
     hud_cfg.compass_bottom_margin = jval(jhud, "compass_bottom_margin_px",  20);
@@ -3143,7 +3178,8 @@ int main(int argc, char* argv[]) {
                                static_cast<IFaceController*>(&teensy),
                                static_cast<IFaceController*>(&protoface_ctrl),
                                &panel_preview_enabled,
-                               cfg_map_dir));
+                               cfg_map_dir,
+                               &left_eye_src, &right_eye_src));
     menu_ptr = &menu;
 
     // Wire wireless controller callbacks now that menu exists
@@ -3842,21 +3878,6 @@ int main(int argc, char* argv[]) {
         // ── Render cameras into per-eye FBOs ──────────────────────────────────
         // Theater mode: compute a letterbox/pillarbox sub-viewport that preserves
         // the camera's native aspect ratio. Black bars are filled by glClear().
-        // When theater_mode is false the camera fills the entire FBO (legacy).
-        //
-        // TODO (USB layout): when placing USB camera feeds in the black region,
-        // shift the main feed flush to the opposite edge so all empty space
-        // is a single contiguous rectangle (e.g. pillarbox → main feed flush
-        // left, one wide black column on the right; letterbox → main feed flush
-        // top, one tall black strip at the bottom). That gives a clean
-        // rectangular region to fill with the USB feed rather than two thin
-        // split bars. vp_x / vp_y below should be set to 0 (or 0, fh-vp_h
-        // respectively) instead of the centered offset.
-        // right_eye: true for the right eye FBO so horizontal placement mirrors left.
-        // Center:  left eye pushes right, right eye pushes left  → cameras touch at seam.
-        // Outside: left eye pushes left,  right eye pushes right → cameras on outer edges.
-        // Left:    both feeds on screen-right side, black on screen-left.
-        // Right:   both feeds on screen-left side, black on screen-right.
         auto make_theater_vp = [&snap](int fw, int fh, bool right_eye) -> std::array<int,4> {
             using TA = AppState::TheaterAnchor;
             float cam_ar  = (float)snap.camera_resolution.width
@@ -3867,19 +3888,15 @@ int main(int argc, char* argv[]) {
                 vp_h = fh; vp_w = (int)(fh * cam_ar); vp_y = 0;
                 switch (snap.theater_anchor) {
                     case TA::Center:
-                        // inner edge: left eye pushes right, right eye pushes left
                         vp_x = right_eye ? 0 : fw - vp_w;
                         break;
                     case TA::Outside:
-                        // outer edge: left eye pushes left, right eye pushes right
                         vp_x = right_eye ? fw - vp_w : 0;
                         break;
                     case TA::Left:
-                        // both feeds on screen-right: both FBOs push to their right edge
                         vp_x = fw - vp_w;
                         break;
                     case TA::Right:
-                        // both feeds on screen-left: both FBOs push to their left edge
                         vp_x = 0;
                         break;
                     default:
@@ -3889,12 +3906,20 @@ int main(int argc, char* argv[]) {
             } else {                  // letterbox: black top/bottom
                 vp_w = fw; vp_h = (int)(fw / cam_ar); vp_x = 0;
                 switch (snap.theater_anchor) {
-                    case TA::Top:    vp_y = fh - vp_h;        break;  // GL Y=0 at bottom
+                    case TA::Top:    vp_y = fh - vp_h;        break;
                     case TA::Bottom: vp_y = 0;                 break;
                     default:         vp_y = (fh - vp_h) / 2;  break;
                 }
             }
             return { vp_x, vp_y, vp_w, vp_h };
+        };
+
+        // Returns the USB RGBA texture for the given eye source slot.
+        auto usb_tex_for = [&](EyeSource src) -> GLuint {
+            if (src == EyeSource::USB1) return tex_usb1;
+            if (src == EyeSource::USB2) return tex_usb2;
+            if (src == EyeSource::USB3) return tex_usb3;
+            return 0;
         };
 
         // Left eye
@@ -3910,13 +3935,17 @@ int main(int argc, char* argv[]) {
 
             bool drew = false;
             if (use_beast_cam && tex_beast != 0) {
-                // Beast passthrough — blit via timewarp shader (same NDC quad path)
-                // For now: TODO: render tex_beast as fullscreen quad
-                drew = false;  // fallback to OWLsight below
+                // Beast passthrough — TODO: fullscreen blit once Beast path is ported
+                drew = false;
             }
-            if (!drew) drew = snap.cameras_swapped
-                ? cameras.draw_owl_right(snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y)
-                : cameras.draw_owl_left (snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
+            if (!drew) {
+                if (left_eye_src == EyeSource::CSI)
+                    drew = snap.cameras_swapped
+                        ? cameras.draw_owl_right(snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y)
+                        : cameras.draw_owl_left (snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
+                else
+                    drew = cameras.draw_tex_fullscreen(usb_tex_for(left_eye_src));
+            }
 
             if (snap.theater_mode)
                 glViewport(0, 0, xr.eye_left().w, xr.eye_left().h);
@@ -3937,11 +3966,16 @@ int main(int argc, char* argv[]) {
 
             bool drew = false;
             if (use_beast_cam && tex_beast != 0) {
-                drew = false;  // fallback to OWLsight below
+                drew = false;
             }
-            if (!drew) drew = snap.cameras_swapped
-                ? cameras.draw_owl_left (snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y)
-                : cameras.draw_owl_right(snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+            if (!drew) {
+                if (right_eye_src == EyeSource::CSI)
+                    drew = snap.cameras_swapped
+                        ? cameras.draw_owl_left (snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y)
+                        : cameras.draw_owl_right(snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+                else
+                    drew = cameras.draw_tex_fullscreen(usb_tex_for(right_eye_src));
+            }
 
             if (snap.theater_mode)
                 glViewport(0, 0, xr.eye_right().w, xr.eye_right().h);
@@ -4204,6 +4238,17 @@ int main(int argc, char* argv[]) {
         cfg["resolution"]["width"]  = state.camera_resolution.width;
         cfg["resolution"]["height"] = state.camera_resolution.height;
         cfg["resolution"]["fps"]    = state.camera_resolution.fps;
+
+        auto eye_src_str = [](EyeSource s) -> const char* {
+            switch (s) {
+                case EyeSource::USB1: return "usb1";
+                case EyeSource::USB2: return "usb2";
+                case EyeSource::USB3: return "usb3";
+                default:              return "csi";
+            }
+        };
+        cfg["cameras"]["left_eye_source"]  = eye_src_str(left_eye_src);
+        cfg["cameras"]["right_eye_source"] = eye_src_str(right_eye_src);
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"]     = color_to_json(menu.accent_color());
