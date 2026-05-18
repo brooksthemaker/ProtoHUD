@@ -97,9 +97,9 @@ bool XRDisplay::init() {
     glfwWindowHint(GLFW_DOUBLEBUFFER,          GLFW_TRUE);
     glfwWindowHint(GLFW_STENCIL_BITS,          8);  // required for NanoVG stencil fills
     glfwWindowHint(GLFW_RESIZABLE,  GLFW_FALSE);
+    // do_fullscreen: glasses not found AND fullscreen requested in config
     const bool do_fullscreen = cfg_.fullscreen && !mon;
     glfwWindowHint(GLFW_DECORATED, (cfg_.frameless || do_fullscreen) ? GLFW_FALSE : GLFW_TRUE);
-    glfwWindowHint(GLFW_FLOATING,  do_fullscreen ? GLFW_TRUE : GLFW_FALSE);
 
     window_ = glfwCreateWindow(disp_w_, disp_h_, "ProtoHUD", mon, nullptr);
     if (!window_) {
@@ -109,7 +109,19 @@ bool XRDisplay::init() {
     }
 
     if (do_fullscreen) {
-        glfwSetWindowPos(window_, 0, 0);
+        // GLFW_FLOATING + glfwSetWindowPos can't cover taskbar struts (X11) or
+        // is ignored (Wayland).  glfwSetWindowMonitor with a monitor sends
+        // _NET_WM_STATE_FULLSCREEN on X11 and xdg_toplevel.set_fullscreen on
+        // Wayland — both reliably cover the panel without a display mode change
+        // (we pass the current mode's refresh rate so no mode switch occurs).
+        GLFWmonitor* primary = glfwGetPrimaryMonitor();
+        if (primary) {
+            const GLFWvidmode* mode = glfwGetVideoMode(primary);
+            glfwSetWindowMonitor(window_, primary, 0, 0,
+                                 mode->width, mode->height, mode->refreshRate);
+        } else {
+            glfwSetWindowPos(window_, 0, 0);
+        }
         glfwFocusWindow(window_);
     }
 
@@ -301,8 +313,10 @@ GLFWmonitor* XRDisplay::choose_monitor() const {
         const GLFWvidmode* vm = glfwGetVideoMode(mons[i]);
         if (vm && vm->width >= 3840) return mons[i];
     }
-    // Fallback: non-primary monitor (glasses are usually secondary)
-    return (count > 1) ? mons[1] : nullptr;  // nullptr = windowed on primary
+    // No 3840-wide monitor found — return nullptr so the windowed/fullscreen
+    // desktop path is used.  The old mons[1] fallback could accidentally grab
+    // a second desktop display and bypass the do_fullscreen logic.
+    return nullptr;
 }
 
 // ── Device control ────────────────────────────────────────────────────────────
