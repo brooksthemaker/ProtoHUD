@@ -89,6 +89,12 @@ public:
     // Call this first each frame before any HUD drawing.
     void set_dt(float dt);
 
+    // Open a shared NVG frame that spans pip underlays + HUD chrome + toasts.
+    // Call once before draw_pip_underlays; close with end_nvg_overlay() after
+    // draw_toasts. Each draw_* method is a no-op Begin/End when a frame is active.
+    void begin_nvg_overlay(int w, int h);
+    void end_nvg_overlay();
+
     // NanoVG HUD chrome pass — compass, arms, indicators, particles.
     // show_fps=true also draws the FPS counter inline (avoids a second NVG frame).
     void draw_hud_frame(const AppState& snap, int w, int h, bool show_fps = false);
@@ -259,7 +265,8 @@ private:
     int           nvg_font_mono_ = -1;
 
     float         frame_dt_  = 0.f;
-    bool          fps_shown_in_hud_ = false;  // prevent double draw
+    bool          fps_shown_in_hud_   = false;  // prevent double draw
+    bool          nvg_frame_active_   = false;  // shared overlay frame in progress
 
     // ── Popup state ───────────────────────────────────────────────────────────
     enum class PopupKind   { None, Alarm, Timer };

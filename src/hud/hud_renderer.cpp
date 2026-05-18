@@ -277,6 +277,21 @@ void HudRenderer::nvg_set_font_mono(float sz) {
 
 // ── NVG HUD frame ─────────────────────────────────────────────────────────────
 
+void HudRenderer::begin_nvg_overlay(int w, int h) {
+    if (!nvg_ || nvg_frame_active_) return;
+    nvgBeginFrame(nvg_, static_cast<float>(w), static_cast<float>(h), 1.0f);
+    nvg_frame_active_ = true;
+}
+
+void HudRenderer::end_nvg_overlay() {
+    if (!nvg_ || !nvg_frame_active_) return;
+    nvgEndFrame(nvg_);
+    nvg_frame_active_ = false;
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glStencilMask(0xFF);
+}
+
 void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps) {
     if (!nvg_) return;
     const float fw       = static_cast<float>(w);
@@ -285,7 +300,8 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     const float c_margin = static_cast<float>(cfg_.compass_bottom_margin);
     const bool  flip     = cfg_.hud_flip_vertical;
 
-    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    const bool own_frame = !nvg_frame_active_;
+    if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
 
     draw_map_overlay(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
@@ -314,23 +330,29 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
         fps_shown_in_hud_ = true;
     }
 
-    nvgEndFrame(nvg_);
-    // Restore GL state NanoVG leaves dirty (stencil test, cull face)
-    glDisable(GL_STENCIL_TEST);
-    glDisable(GL_CULL_FACE);
-    glStencilMask(0xFF);
+    if (own_frame) {
+        nvgEndFrame(nvg_);
+        nvg_frame_active_ = false;
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_CULL_FACE);
+        glStencilMask(0xFF);
+    }
 }
 
 void HudRenderer::draw_toasts(NotificationQueue& live_q, int w, int h) {
     if (!nvg_) return;
     const float fw = static_cast<float>(w);
     const float fh = static_cast<float>(h);
-    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    const bool own_frame = !nvg_frame_active_;
+    if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
     toast_renderer_.draw(nvg_, live_q, fw, fh, frame_dt_, nvg_font_ui_, nvg_font_mono_);
-    nvgEndFrame(nvg_);
-    glDisable(GL_STENCIL_TEST);
-    glDisable(GL_CULL_FACE);
-    glStencilMask(0xFF);
+    if (own_frame) {
+        nvgEndFrame(nvg_);
+        nvg_frame_active_ = false;
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_CULL_FACE);
+        glStencilMask(0xFF);
+    }
 }
 
 void HudRenderer::draw_fps_overlay(const AppState& snap, int w, int h, bool active) {
@@ -570,11 +592,18 @@ void HudRenderer::draw_pip_underlays(
     const float fw = static_cast<float>(ew);
     const float fh = static_cast<float>(eh);
 
-    nvgBeginFrame(nvg_, fw, fh, 1.0f);
+    const bool own_frame = !nvg_frame_active_;
+    if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
     for (auto& e : entries)
         if (e.act && e.tex)
             draw_pip_nvg_single(nvg_, e.tex, *e.cfg, fw, fh);
-    nvgEndFrame(nvg_);
+    if (own_frame) {
+        nvgEndFrame(nvg_);
+        nvg_frame_active_ = false;
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_CULL_FACE);
+        glStencilMask(0xFF);
+    }
 }
 
 void HudRenderer::draw_pip_overlays(
@@ -1619,7 +1648,7 @@ void HudRenderer::fx_emit(float x, float y, float vx, float vy,
 
 void HudRenderer::fx_draw(NVGcontext* vg) const {
     if (n_particles_ == 0) return;
-    // Batch by base color (strip alpha) — reduces 256 particles × 2 GL calls to ≤ 8 × 2
+    // Collect unique base colors (strip alpha — we compute alpha per-particle from life)
     ImU32 unique_cols[32]; int n_unique = 0;
     for (int i = 0; i < n_particles_; ++i) {
         ImU32 base = particles_[i].color & 0x00FFFFFFu;
@@ -1627,19 +1656,52 @@ void HudRenderer::fx_draw(NVGcontext* vg) const {
         for (int j = 0; j < n_unique; ++j) if (unique_cols[j] == base) { found = true; break; }
         if (!found && n_unique < 32) unique_cols[n_unique++] = base;
     }
+
     for (int ci = 0; ci < n_unique; ++ci) {
         ImU32 base = unique_cols[ci];
+        const uint8_t r = base & 0xFF, g = (base>>8) & 0xFF, b = (base>>16) & 0xFF;
+
+        // Pass 1 — bright core circles (batched, one nvgFill per color)
         nvgBeginPath(vg);
         uint8_t max_a = 0;
         for (int i = 0; i < n_particles_; ++i) {
             if ((particles_[i].color & 0x00FFFFFFu) != base) continue;
             const Particle& p = particles_[i];
-            uint8_t a = static_cast<uint8_t>((p.life / p.life_total) * 220.f);
+            float frac = p.life / p.life_total;
+            // Twinkle: brief fade-in, full brightness in mid-life, fade-out
+            float af = (frac > 0.85f) ? (1.f - frac) / 0.15f
+                     : (frac < 0.20f) ? frac / 0.20f : 1.f;
+            uint8_t a = static_cast<uint8_t>(af * 230.f);
             if (a > max_a) max_a = a;
-            nvgCircle(vg, p.x, p.y, p.size);
+            nvgCircle(vg, p.x, p.y, p.size * 0.8f);
         }
-        nvgFillColor(vg, nvgRGBA(base & 0xFF, (base>>8) & 0xFF, (base>>16) & 0xFF, max_a));
+        nvgFillColor(vg, nvgRGBA(r, g, b, max_a));
         nvgFill(vg);
+
+        // Pass 2 — 6-pointed star rays (batched, one nvgStroke per color)
+        // Each particle gets 3 axis-aligned line pairs through its center.
+        nvgBeginPath(vg);
+        uint8_t max_ray_a = 0;
+        for (int i = 0; i < n_particles_; ++i) {
+            if ((particles_[i].color & 0x00FFFFFFu) != base) continue;
+            const Particle& p = particles_[i];
+            float frac = p.life / p.life_total;
+            float af = (frac > 0.85f) ? (1.f - frac) / 0.15f
+                     : (frac < 0.20f) ? frac / 0.20f : 1.f;
+            uint8_t a = static_cast<uint8_t>(af * 150.f);
+            if (a > max_ray_a) max_ray_a = a;
+            float arm  = p.size * 2.8f;    // long axis (H/V)
+            float darm = arm   * 0.65f;    // diagonal arms (shorter)
+            // Horizontal + vertical
+            nvgMoveTo(vg, p.x - arm,  p.y);       nvgLineTo(vg, p.x + arm,  p.y);
+            nvgMoveTo(vg, p.x,        p.y - arm);  nvgLineTo(vg, p.x,        p.y + arm);
+            // 45° diagonals
+            nvgMoveTo(vg, p.x - darm, p.y - darm); nvgLineTo(vg, p.x + darm, p.y + darm);
+            nvgMoveTo(vg, p.x - darm, p.y + darm); nvgLineTo(vg, p.x + darm, p.y - darm);
+        }
+        nvgStrokeWidth(vg, 0.75f);
+        nvgStrokeColor(vg, nvgRGBA(r, g, b, max_ray_a));
+        nvgStroke(vg);
     }
 }
 
@@ -1668,39 +1730,47 @@ void HudRenderer::fx_emit_line(float x, float y, float vx, float vy,
     line_particles_[n_line_particles_++] = { x, y, vx, vy, life, life, len, color };
 }
 
-// Draw comets: bright head circle + three-segment tail that fades to transparent.
+// Draw comets: radial-glow head + single linear-gradient tail stroke.
+// 2 NVG paths per particle vs the old 4 — and the gradient fade looks more natural.
+// TODO(perf): batch same-color comet tails into one nvgStrokePaint path
+//             once NanoVG supports per-vertex paint coordinates.
 void HudRenderer::fx_draw_lines(NVGcontext* vg) const {
     for (int i = 0; i < n_line_particles_; ++i) {
         const LineParticle& p = line_particles_[i];
         const float frac = p.life / p.life_total;
-        float af;
-        if      (frac > 0.85f) af = (1.f - frac) / 0.15f;
-        else if (frac < 0.25f) af = frac / 0.25f;
-        else                   af = 1.f;
+        float af = (frac > 0.85f) ? (1.f - frac) / 0.15f
+                 : (frac < 0.25f) ? frac / 0.25f : 1.f;
 
         const float spd = std::sqrt(p.vx * p.vx + p.vy * p.vy);
         float dx = 1.f, dy = 0.f;
         if (spd > 0.01f) { dx = p.vx / spd; dy = p.vy / spd; }
 
-        const float hx   = p.x + dx * 3.f,           hy   = p.y + dy * 3.f;
-        const float q1x  = p.x - dx * p.len * 0.25f, q1y  = p.y - dy * p.len * 0.25f;
-        const float q2x  = p.x - dx * p.len * 0.60f, q2y  = p.y - dy * p.len * 0.60f;
-        const float tx   = p.x - dx * p.len,          ty   = p.y - dy * p.len;
+        const float hx = p.x + dx * 3.f, hy = p.y + dy * 3.f;
+        const float tx = p.x - dx * p.len, ty = p.y - dy * p.len;
 
-        const NVGcolor c0 = nvg_col_a(p.color, static_cast<uint8_t>(af * 230.f));
-        const NVGcolor c1 = nvg_col_a(p.color, static_cast<uint8_t>(af * 110.f));
-        const NVGcolor c2 = nvg_col_a(p.color, static_cast<uint8_t>(af *  38.f));
+        const uint8_t r = p.color & 0xFF;
+        const uint8_t g = (p.color >> 8) & 0xFF;
+        const uint8_t b = (p.color >> 16) & 0xFF;
 
-        // Head
-        nvgBeginPath(vg); nvgCircle(vg, hx, hy, 1.7f);
-        nvgFillColor(vg, c0); nvgFill(vg);
-        // Tail segments
-        nvgBeginPath(vg); nvgMoveTo(vg, hx, hy); nvgLineTo(vg, q1x, q1y);
-        nvgStrokeWidth(vg, 1.5f); nvgStrokeColor(vg, c0); nvgStroke(vg);
-        nvgBeginPath(vg); nvgMoveTo(vg, q1x, q1y); nvgLineTo(vg, q2x, q2y);
-        nvgStrokeWidth(vg, 1.1f); nvgStrokeColor(vg, c1); nvgStroke(vg);
-        nvgBeginPath(vg); nvgMoveTo(vg, q2x, q2y); nvgLineTo(vg, tx, ty);
-        nvgStrokeWidth(vg, 0.8f); nvgStrokeColor(vg, c2); nvgStroke(vg);
+        // Head: radial glow (bright core fading to transparent over 5 px)
+        NVGpaint halo = nvgRadialGradient(vg, hx, hy, 0.6f, 5.f,
+            nvgRGBA(r, g, b, static_cast<uint8_t>(af * 255.f)),
+            nvgRGBA(r, g, b, 0));
+        nvgBeginPath(vg);
+        nvgCircle(vg, hx, hy, 5.f);
+        nvgFillPaint(vg, halo);
+        nvgFill(vg);
+
+        // Tail: single gradient stroke, bright at head, fully transparent at tip
+        NVGpaint tail = nvgLinearGradient(vg, hx, hy, tx, ty,
+            nvgRGBA(r, g, b, static_cast<uint8_t>(af * 200.f)),
+            nvgRGBA(r, g, b, 0));
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, hx, hy);
+        nvgLineTo(vg, tx, ty);
+        nvgStrokeWidth(vg, 1.6f);
+        nvgStrokePaint(vg, tail);
+        nvgStroke(vg);
     }
 }
 

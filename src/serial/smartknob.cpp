@@ -112,7 +112,16 @@ void SmartKnob::on_frame(uint8_t cmd, const uint8_t* payload, uint8_t len) {
             state_.knob.awake = false;
         }
 
-    } else if (cmd == 0x01) {  // STATUS_READY
+    } else if (cmd == KnobCmd::BUTTON_EVENT && len >= sizeof(KnobButtonPayload)) {
+        KnobButtonPayload p {};
+        std::memcpy(&p, payload, sizeof(p));
+        if (button_cb_) button_cb_(p.button_id, p.event_type);
+
+    } else if (cmd == 0x01) {  // STATUS_READY (len=0, no position payload)
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            state_.health.knob_ready = true;
+        }
         if (status_cb_) status_cb_(0x01, 0);
 
     } else if (cmd == 0x02) {  // STATUS_ENTERING_SLEEP

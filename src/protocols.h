@@ -124,6 +124,7 @@ namespace KnobCmd {
     static constexpr uint8_t POSITION_UPDATE = 0x01;  // see KnobPositionPayload
     static constexpr uint8_t WAKE_EVENT      = 0x02;  // no payload
     static constexpr uint8_t SLEEP_EVENT     = 0x03;  // no payload
+    static constexpr uint8_t BUTTON_EVENT    = 0x04;  // see KnobButtonPayload
 
     // ESP32 → CM5 (status messages from binary protocol)
     static constexpr uint8_t STATUS_READY         = 0x01;  // motor calibration complete
@@ -138,12 +139,29 @@ namespace KnobCmd {
     static constexpr uint8_t SET_HAPTIC      = 0x85;  // amplitude(1) frequency(1) detent_strength(1)
 }
 
+// Button IDs (matching firmware BTN_* constants)
+namespace KnobButton {
+    static constexpr uint8_t ENCODER = 0;  // encoder push-switch
+    static constexpr uint8_t BACK    = 1;  // dedicated back button
+    static constexpr uint8_t EXTRA   = 2;  // optional extra button
+}
+// Button event types
+namespace KnobButtonEvent {
+    static constexpr uint8_t PRESS      = 0;
+    static constexpr uint8_t LONG_PRESS = 1;
+    static constexpr uint8_t RELEASE    = 2;
+}
+
 #pragma pack(push, 1)
 struct KnobPositionPayload {
     int8_t   direction;      // -1, 0, +1
     uint16_t velocity_rpm10; // RPM * 10
     int16_t  detent_index;   // current selected detent (-1 if between)
     int32_t  angle_milli;    // absolute angle in millidegrees
+};
+struct KnobButtonPayload {
+    uint8_t button_id;    // KnobButton:: constant
+    uint8_t event_type;   // KnobButtonEvent:: constant
 };
 #pragma pack(pop)
 
