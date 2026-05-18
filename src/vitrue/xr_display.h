@@ -29,6 +29,7 @@ struct XRConfig {
     bool use_beast_camera = true;
     bool enable_imu       = true;
     bool frameless        = false;  // remove OS window decorations (windowed mode only)
+    bool fullscreen       = false;  // borderless always-on-top window covering taskbar (desktop only)
 };
 
 class XRDisplay {

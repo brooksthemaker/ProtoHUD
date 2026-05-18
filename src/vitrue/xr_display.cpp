@@ -97,14 +97,20 @@ bool XRDisplay::init() {
     glfwWindowHint(GLFW_DOUBLEBUFFER,          GLFW_TRUE);
     glfwWindowHint(GLFW_STENCIL_BITS,          8);  // required for NanoVG stencil fills
     glfwWindowHint(GLFW_RESIZABLE,  GLFW_FALSE);
-    glfwWindowHint(GLFW_DECORATED,  cfg_.frameless ? GLFW_FALSE : GLFW_TRUE);
+    const bool do_fullscreen = cfg_.fullscreen && !mon;
+    glfwWindowHint(GLFW_DECORATED, (cfg_.frameless || do_fullscreen) ? GLFW_FALSE : GLFW_TRUE);
+    glfwWindowHint(GLFW_FLOATING,  do_fullscreen ? GLFW_TRUE : GLFW_FALSE);
 
-    mon = choose_monitor();
     window_ = glfwCreateWindow(disp_w_, disp_h_, "ProtoHUD", mon, nullptr);
     if (!window_) {
         std::cerr << "[xr] glfwCreateWindow failed\n";
         glfwTerminate();
         return false;
+    }
+
+    if (do_fullscreen) {
+        glfwSetWindowPos(window_, 0, 0);
+        glfwFocusWindow(window_);
     }
 
     glfwMakeContextCurrent(window_);

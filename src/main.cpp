@@ -2480,6 +2480,7 @@ int main(int argc, char* argv[]) {
     xr_cfg.use_beast_camera = jval(jvtr,  "use_beast_camera", true);
     xr_cfg.enable_imu       = jval(jvtr,  "enable_imu",       true);
     xr_cfg.frameless        = jval(jdisp, "frameless",         false);
+    xr_cfg.fullscreen       = jval(jdisp, "fullscreen",        false);
 
     CamConfig owl_left, owl_right;
 
