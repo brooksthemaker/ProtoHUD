@@ -1,5 +1,6 @@
 #include "camera_manager.h"
 #include "qr_scanner.h"
+#include "../gl_utils.h"
 
 #include <libcamera/libcamera.h>
 #include <opencv2/imgproc.hpp>
@@ -198,6 +199,29 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
         usb_thread_ = std::thread(&CameraManager::usb_capture_thread, this);
     }
 
+    // ── RGBA fullscreen shader (USB-as-eye-source) ────────────────────────────
+    static const char* kRgbaVS = R"glsl(
+        attribute vec2 a_pos;
+        attribute vec2 a_uv;
+        varying vec2 v_uv;
+        void main() {
+            gl_Position = vec4(a_pos, 0.0, 1.0);
+            v_uv = vec2(a_uv.x, 1.0 - a_uv.y);
+        }
+    )glsl";
+    static const char* kRgbaFS = R"glsl(
+        precision mediump float;
+        uniform sampler2D u_tex;
+        varying vec2 v_uv;
+        void main() {
+            gl_FragColor = texture2D(u_tex, v_uv);
+        }
+    )glsl";
+    rgba_prog_ = gl::build_program_from_strings(kRgbaVS, kRgbaFS);
+    if (!rgba_prog_) std::cerr << "[cam] RGBA fullscreen shader failed to compile\n";
+    rgba_tex_loc_  = glGetUniformLocation(rgba_prog_, "u_tex");
+    rgba_quad_vbo_ = gl::make_quad_vbo();
+
     return owl_left_ok() || owl_right_ok() || usb1_ok_ || usb2_ok_ || usb3_ok_;
 }
 
@@ -217,13 +241,30 @@ void CameraManager::shutdown() {
     if (usb2_slot_.tex) { glDeleteTextures(1, &usb2_slot_.tex); usb2_slot_.tex = 0; }
     if (usb3_slot_.tex) { glDeleteTextures(1, &usb3_slot_.tex); usb3_slot_.tex = 0; }
 
+    if (rgba_prog_)     { glDeleteProgram(rgba_prog_);         rgba_prog_     = 0; }
+    if (rgba_quad_vbo_) { glDeleteBuffers(1, &rgba_quad_vbo_); rgba_quad_vbo_ = 0; }
+
     if (lcam_mgr_) { lcam_mgr_->stop(); lcam_mgr_.reset(); }
 }
 
-// ── OWLsight draw (zero-copy, render thread) ──────────────────────────────────
+// ── CSI camera draw (zero-copy, render thread) ────────────────────────────────
 
 bool CameraManager::draw_owl_left( float zoom, float cx, float cy) { return owl_left_  && owl_left_->draw(zoom, cx, cy);  }
 bool CameraManager::draw_owl_right(float zoom, float cx, float cy) { return owl_right_ && owl_right_->draw(zoom, cx, cy); }
+
+bool CameraManager::draw_tex_fullscreen(GLuint tex) const {
+    if (!tex || !rgba_prog_ || !rgba_quad_vbo_) return false;
+    glUseProgram(rgba_prog_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    if (rgba_tex_loc_ >= 0) glUniform1i(rgba_tex_loc_, 0);
+    gl::bind_quad(rgba_quad_vbo_);
+    gl::draw_quad();
+    gl::unbind_quad();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    return true;
+}
 
 // ── Resolution hot-swap ────────────────────────────────────────────────────────
 
