@@ -66,7 +66,10 @@
       "flip": false,
       "auto_brightness": false,
       "auto_brightness_target": 100.0
-    }
+    },
+    "_eye_source_note": "Valid values: csi | usb1 | usb2 | usb3. Routes that camera feed as the fullscreen background for the given eye.",
+    "left_eye_source": "csi",
+    "right_eye_source": "csi"
   },
   "serial": {
     "teensy": {
