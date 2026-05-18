@@ -26,6 +26,7 @@
 #include "serial/teensy_controller.h"
 #include "serial/lora_radio.h"
 #include "serial/smartknob.h"
+#include "protocols.h"
 #include "hud/hud_renderer.h"
 #include "menu/menu_system.h"
 #include "vitrue/xr_display.h"
@@ -890,7 +891,7 @@ static std::vector<MenuItem> build_menu(
     // ── USB camera menus ──────────────────────────────────────────────────────
     // Helper: build a "Resolution" submenu for one USB camera slot.
     // If the stream is currently open, close it and reopen with the new dimensions.
-    auto make_resolution_items = [cameras](
+    auto make_resolution_items = [cameras, &leaf_sel](
         std::function<UsbCamConfig()>          get_cfg,
         std::function<void(UsbCamConfig)>      set_cfg,
         std::function<bool()>                  is_open,
@@ -3509,6 +3510,10 @@ int main(int argc, char* argv[]) {
             else if (menu.is_open())     menu.back();
         }
 
+        // ── Wireless controller pip state ─────────────────────────────────────
+        bool wc_pip_left  = wireless_enabled && wireless.pip_left_active();
+        bool wc_pip_right = wireless_enabled && wireless.pip_right_active();
+
         // ── USB camera stream lifecycle ───────────────────────────────────────
         // Rising edge  → open stream in background (window appears on first frame).
         // Falling edge → close stream, clear texture (no stale frame on re-open).
@@ -3539,10 +3544,6 @@ int main(int argc, char* argv[]) {
 
         // ── Gamepad poll ──────────────────────────────────────────────────────
         gamepad.poll();
-
-        // ── Wireless controller pip state ─────────────────────────────────────
-        bool wc_pip_left  = wireless_enabled && wireless.pip_left_active();
-        bool wc_pip_right = wireless_enabled && wireless.pip_right_active();
 
         // ── Keyboard button emulation (direct GLFW polling, edge-detected) ──
         // 1/2/3     = toggle USB cam PiP 1/2/3   Shift+1/2/3 = autofocus that cam
