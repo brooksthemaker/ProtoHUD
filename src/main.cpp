@@ -3089,6 +3089,8 @@ int main(int argc, char* argv[]) {
         splash_cfg.enabled       = js.value("enabled",       splash_cfg.enabled);
         splash_cfg.animated      = js.value("animated",      splash_cfg.animated);
         splash_cfg.image_path    = js.value("image",         splash_cfg.image_path);
+        splash_cfg.logo_size_px  = js.value("logo_size_px",  splash_cfg.logo_size_px);
+        splash_cfg.show_ring     = js.value("show_ring",     splash_cfg.show_ring);
         splash_cfg.min_display_s = js.value("min_display_s", splash_cfg.min_display_s);
         splash_cfg.title         = js.value("title",         splash_cfg.title);
         splash_cfg.subtitle      = js.value("subtitle",      splash_cfg.subtitle);

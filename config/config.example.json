@@ -260,7 +260,10 @@
   "splash": {
     "enabled":       true,
     "animated":      true,
+    "_image_note":   "PNG (RGBA preferred). Relative paths resolve from the binary directory; absolute paths used as-is. Example: \"assets/branding/logo.png\".",
     "image":         "",
+    "logo_size_px":  104,
+    "show_ring":     true,
     "min_display_s": 2.0,
     "title":         "PROTOHUD",
     "subtitle":      "XR HUD System"
