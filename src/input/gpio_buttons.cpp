@@ -15,10 +15,10 @@
 
 GpioButtons::GpioButtons(int pin_left, int pin_right, int pin_aux,
                          int af_trigger_ms, int pip_trigger_ms,
-                         int capture_trigger_ms)
+                         int capture_trigger_ms, int aux_back_ms)
     : pin_left_(pin_left), pin_right_(pin_right), pin_aux_(pin_aux),
       af_trigger_ms_(af_trigger_ms), pip_trigger_ms_(pip_trigger_ms),
-      capture_trigger_ms_(capture_trigger_ms) {}
+      capture_trigger_ms_(capture_trigger_ms), aux_back_ms_(aux_back_ms) {}
 
 GpioButtons::~GpioButtons() {
     shutdown();
@@ -192,9 +192,19 @@ void GpioButtons::handle_button_event(int pin, int state) {
         }
 
     } else if (pin == pin_aux_) {
-        // Aux/select: fire callback on release
-        if (state == 1) {
-            if (select_cb_) select_cb_();
+        if (state == 0) {
+            // Pressed — record time
+            aux_press_time_ = std::chrono::steady_clock::now();
+        } else {
+            // Released — short press = select/open; long press = back
+            auto hold_ms = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - aux_press_time_).count());
+            if (hold_ms >= aux_back_ms_) {
+                if (back_cb_) back_cb_();
+            } else {
+                if (select_cb_) select_cb_();
+            }
         }
     }
 }

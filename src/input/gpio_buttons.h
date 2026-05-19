@@ -12,7 +12,8 @@ public:
     GpioButtons(int pin_left, int pin_right, int pin_aux,
                 int af_trigger_ms      = 1500,
                 int pip_trigger_ms     = 2000,
-                int capture_trigger_ms = 5000);
+                int capture_trigger_ms = 5000,
+                int aux_back_ms        = 800);
     ~GpioButtons();
 
     bool init();
@@ -23,6 +24,8 @@ public:
     void on_pip_left(ButtonCallback cb)      { pip_left_cb_     = std::move(cb); }
     void on_pip_right(ButtonCallback cb)     { pip_right_cb_    = std::move(cb); }
     void on_select(ButtonCallback cb)        { select_cb_       = std::move(cb); }
+    // Fired on long-press of aux button (≥ aux_back_ms). Use for menu back/close.
+    void on_back(ButtonCallback cb)          { back_cb_         = std::move(cb); }
     void on_capture_left(ButtonCallback cb)  { capture_left_cb_ = std::move(cb); }
     void on_capture_right(ButtonCallback cb) { capture_right_cb_= std::move(cb); }
 
@@ -42,7 +45,7 @@ private:
     void handle_button_event(int pin, int state);
 
     int pin_left_, pin_right_, pin_aux_;
-    int af_trigger_ms_, pip_trigger_ms_, capture_trigger_ms_;
+    int af_trigger_ms_, pip_trigger_ms_, capture_trigger_ms_, aux_back_ms_;
 
     std::atomic<bool> running_ { false };
     std::thread poll_thread_;
@@ -54,6 +57,7 @@ private:
 
     std::chrono::steady_clock::time_point left_press_time_;
     std::chrono::steady_clock::time_point right_press_time_;
+    std::chrono::steady_clock::time_point aux_press_time_;
     bool pip_left_threshold_reached_ { false };
     bool pip_right_threshold_reached_ { false };
 
@@ -62,6 +66,7 @@ private:
     ButtonCallback pip_left_cb_;
     ButtonCallback pip_right_cb_;
     ButtonCallback select_cb_;
+    ButtonCallback back_cb_;
     ButtonCallback capture_left_cb_;
     ButtonCallback capture_right_cb_;
 };
