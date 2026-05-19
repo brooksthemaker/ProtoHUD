@@ -73,6 +73,15 @@ void VitureCamera::on_frame(const void* raw) {
 
     // The Beast camera delivers MJPEG — decode via OpenCV
     if (f->format == XR_CAMERA_FORMAT_MJPEG) {
+        // Validate JPEG framing before decode: libjpeg writes "Corrupt JPEG"
+        // warnings to stderr on truncated frames, which some Wayland compositors
+        // treat as terminal urgency and use to steal focus from our window.
+        // SOI = 0xFF 0xD8, EOI = 0xFF 0xD9.  Drop silently if either is missing.
+        if (f->size < 4
+            || f->data[0] != 0xFF || f->data[1] != 0xD8
+            || f->data[f->size - 2] != 0xFF || f->data[f->size - 1] != 0xD9)
+            return;
+
         std::vector<uint8_t> jpeg(f->data, f->data + f->size);
         cv::Mat decoded = cv::imdecode(jpeg, cv::IMREAD_COLOR);
         if (decoded.empty()) return;
