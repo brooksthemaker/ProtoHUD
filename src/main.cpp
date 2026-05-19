@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <csignal>
 
 #include <GLFW/glfw3.h>
 #include <GLES2/gl2.h>
@@ -3402,6 +3403,41 @@ int main(int argc, char* argv[]) {
             splash_frame("Ready", 1.0f);
     }
 
+    // ── Signal handling: Ctrl+C / SIGTERM → graceful quit + 5s force-kill ──────
+    {
+        static std::atomic<bool>* g_quit = &state.quit;
+        auto handler = [](int) {
+            if (g_quit) g_quit->store(true);
+            // If cleanup stalls, force-exit after 5 seconds.
+            std::thread([] {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                std::cerr << "[signal] cleanup timed out — forcing exit\n";
+                std::_Exit(1);
+            }).detach();
+        };
+        std::signal(SIGINT,  handler);
+        std::signal(SIGTERM, handler);
+    }
+
+    // ── Render-loop watchdog: force-exit if the loop stalls for 8 s ──────────
+    std::atomic<uint64_t> wd_heartbeat { 0 };
+    std::atomic<bool>     wd_stop      { false };
+    std::thread watchdog([&wd_heartbeat, &wd_stop] {
+        uint64_t prev  = 0;
+        int      stall = 0;
+        while (!wd_stop.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (wd_stop.load(std::memory_order_relaxed)) break;
+            uint64_t cur = wd_heartbeat.load(std::memory_order_relaxed);
+            stall = (cur == prev) ? stall + 1 : 0;
+            prev  = cur;
+            if (stall >= 8) {
+                std::cerr << "[watchdog] render loop stalled for 8 s — forcing exit\n";
+                std::_Exit(1);
+            }
+        }
+    });
+
     // ── Main render loop ──────────────────────────────────────────────────────
 
     KeyRepeat rep_nav_up, rep_nav_down, rep_toast_prev, rep_toast_next;
@@ -3413,6 +3449,7 @@ int main(int argc, char* argv[]) {
     double prev_time = glfwGetTime();
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
+        wd_heartbeat.fetch_add(1, std::memory_order_relaxed);
 
         // ── Delta time ────────────────────────────────────────────────────────
         double now = glfwGetTime();
@@ -4294,6 +4331,10 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
+
+    // Stop watchdog before cleanup so it doesn't fire during intentional shutdown.
+    wd_stop.store(true);
+    watchdog.join();
 
     bt_mon.stop();
     ping_mon.stop();
