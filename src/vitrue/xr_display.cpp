@@ -12,6 +12,7 @@
 #include <iostream>
 #include <sstream>
 #include <cstring>
+#include <thread>
 
 // ── Singleton trampoline ──────────────────────────────────────────────────────
 XRDisplay* XRDisplay::s_instance_ = nullptr;
@@ -246,6 +247,11 @@ void XRDisplay::present() {
 
 // ── shutdown ──────────────────────────────────────────────────────────────────
 void XRDisplay::shutdown() {
+    // Null the static instance pointer first so any in-flight SDK callbacks
+    // (IMU, state) see nullptr and return immediately rather than touching
+    // fields we're about to destroy.
+    if (s_instance_ == this) s_instance_ = nullptr;
+
     rt_left_.destroy();
     rt_right_.destroy();
     if (blit_prog_) { glDeleteProgram(blit_prog_); blit_prog_ = 0; }
@@ -260,8 +266,11 @@ void XRDisplay::shutdown() {
         device_ = nullptr;
     }
 
-    if (window_) { glfwDestroyWindow(window_); window_ = nullptr; }
-    glfwTerminate();
+    if (window_) {
+        glfwDestroyWindow(window_);
+        window_ = nullptr;
+        glfwTerminate();  // only called once: when we actually destroy the window
+    }
 }
 
 // ── VITURE SDK init ───────────────────────────────────────────────────────────
@@ -284,6 +293,9 @@ bool XRDisplay::find_and_connect() {
     }
 
     xr_device_provider_register_state_callback(device_, s_state_cb);
+    // Give the glasses ~150 ms to settle after start() before sending display
+    // mode commands — without this the USB transfers time out (-7) on cold plug.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
     set_sbs_display_mode();
     if (cfg_.enable_imu) open_imu();
     return true;
