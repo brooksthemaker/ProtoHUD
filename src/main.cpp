@@ -8,6 +8,8 @@
 #include <cmath>
 #include <ctime>
 #include <csignal>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #include <GLFW/glfw3.h>
 #include <GLES2/gl2.h>
@@ -282,6 +284,26 @@ static void poll_gpio_states(AppState& state) {
 }
 
 // ── Menu definition ───────────────────────────────────────────────────────────
+
+// Fork a terminal emulator as a detached child, trying common candidates.
+static void launch_terminal() {
+    const char* terms[] = {
+        "lxterminal", "xfce4-terminal", "xterm", "gnome-terminal", "konsole", nullptr
+    };
+    for (const char** t = terms; *t; ++t) {
+        std::string probe = std::string("which ") + *t + " >/dev/null 2>&1";
+        if (std::system(probe.c_str()) == 0) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                setsid();          // detach from ProtoHUD's session
+                execlp(*t, *t, nullptr);
+                _exit(1);
+            }
+            return;
+        }
+    }
+    std::cerr << "[menu] no terminal emulator found (tried lxterminal, xfce4-terminal, xterm)\n";
+}
 
 static std::vector<MenuItem> build_menu(
         IFaceController* teensy, XRDisplay* xr, CameraManager* cameras,
@@ -2380,6 +2402,10 @@ static std::vector<MenuItem> build_menu(
         submenu("Software",   std::move(software_menu)),
         submenu("Demo Mode",  std::move(demo_menu)),
         leaf("Request Status", [teensy]{ teensy->request_status(); }),
+        leaf("Open Terminal", [xr] {
+            if (xr) glfwIconifyWindow(xr->glfw_window());
+            launch_terminal();
+        }),
         leaf("Close Program",  [&state]{ state.quit = true; }),
     };
 
