@@ -156,4 +156,7 @@ void PostProcessor::process(GLuint src_tex,
         glUseProgram(0);
         prev_write.unbind();
     }
+
+    // Restore default active texture unit so callers don't inherit our state.
+    glActiveTexture(GL_TEXTURE0);
 }

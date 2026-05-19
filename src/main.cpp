@@ -338,6 +338,17 @@ static std::vector<MenuItem> build_menu(
         return m;
     };
 
+    // Attach a context panel to a SUBMENU item.  Returns the same item so
+    // calls can be chained at the call site:
+    //   with_panel(submenu("Position", ...), "Eye Position Preview",
+    //              [&state]( ImDrawList* dl, ImVec2 o, ImVec2 s){ ... })
+    auto with_panel = [](MenuItem m, std::string title,
+                         MenuContextPanelDraw draw) -> MenuItem {
+        m.context_panel_title = std::move(title);
+        m.context_panel_draw  = std::move(draw);
+        return m;
+    };
+
     auto toggle = [](std::string lbl,
                      std::function<bool()>     get_fn,
                      std::function<void(bool)> set_fn) -> MenuItem {
@@ -532,17 +543,17 @@ static std::vector<MenuItem> build_menu(
     }
 
     std::vector<MenuItem> nv_menu = {
-        toggle("Night Vision",
+        toggle("Enable Low-Light",
             [&state]{ return state.night_vision.nv_enabled; },
             [&state](bool v){
                 state.night_vision.nv_enabled  = v;
                 state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
                 state.night_vision.shutter_us  = v ? 40000 : 16667;
             }),
-        toggle("Auto Night Vision",
+        toggle("Auto Low-Light",
             [&state]{ return state.night_vision.auto_nv; },
             [&state](bool v){ state.night_vision.auto_nv = v; }),
-        slider("Auto NV Gain Threshold", 1.5f, 16.f, 0.5f, "x",
+        slider("Auto Gain Threshold", 1.5f, 16.f, 0.5f, "x",
             [&state]{ return state.night_vision.auto_nv_gain_threshold; },
             [&state](float v){ state.night_vision.auto_nv_gain_threshold = v; }),
         slider("Exposure (EV)", -3.f, 3.f, 0.5f, " EV",
@@ -776,26 +787,227 @@ static std::vector<MenuItem> build_menu(
         };
     };
 
-    std::vector<MenuItem> main_cameras_menu = {
-        toggle("Theater Mode",
+    // ── Context-panel helpers (camera-frame visualisations) ──────────────────
+    // Render a camera frame at `aspect`, fitting into the given rect, with an
+    // accent-coloured outer outline and a lighter-grey inner crop rectangle.
+    // inner_{x0,y0,x1,y1} are 0..1 within the frame.
+    auto draw_frame_with_crop = [](ImDrawList* dl, ImVec2 fit_origin, ImVec2 fit_size,
+                                   float aspect, ImU32 accent,
+                                   float ix0, float iy0, float ix1, float iy1) {
+        // Letterbox the frame inside the fit rect at the requested aspect.
+        float fw = fit_size.x, fh = fit_size.y;
+        if (fw / fh > aspect) fw = fh * aspect; else fh = fw / aspect;
+        ImVec2 fmin{ fit_origin.x + (fit_size.x - fw) * 0.5f,
+                     fit_origin.y + (fit_size.y - fh) * 0.5f };
+        ImVec2 fmax{ fmin.x + fw, fmin.y + fh };
+
+        // Dark fill so the inner crop reads clearly.
+        dl->AddRectFilled(fmin, fmax, IM_COL32(20, 25, 30, 180), 3.f);
+        // Inner crop rectangle (lighter grey fill + white outline).
+        ImVec2 imin{ fmin.x + ix0 * fw, fmin.y + iy0 * fh };
+        ImVec2 imax{ fmin.x + ix1 * fw, fmin.y + iy1 * fh };
+        dl->AddRectFilled(imin, imax, IM_COL32(220, 220, 220, 110), 2.f);
+        dl->AddRect      (imin, imax, IM_COL32(255, 255, 255, 220), 2.f, 0, 1.5f);
+        // Outer outline last so it stays on top of inner fill at the edges.
+        const ImU32 outline = (accent & 0x00FFFFFFu) | (235u << 24);
+        dl->AddRect(fmin, fmax, outline, 3.f, 0, 2.f);
+    };
+
+    // Map a TheaterAnchor enum to the inner-crop rect (normalised) for one eye.
+    // The "Outside" anchor is mirrored per-eye (left cam shows its left, right
+    // cam shows its right).  All others apply identically to both eyes.
+    auto theater_inner_rect = [](AppState::TheaterAnchor a, bool is_right_eye) {
+        using TA = AppState::TheaterAnchor;
+        // Half-frame width (each eye is half-SBS), full height by default.
+        float w = 0.5f, h = 1.0f;
+        float x0 = 0.25f, y0 = 0.f;   // Center
+        switch (a) {
+            case TA::Center:  x0 = 0.25f;                            break;
+            case TA::Outside: x0 = is_right_eye ? 0.5f : 0.f;        break;
+            case TA::Left:    x0 = 0.0f;                             break;
+            case TA::Right:   x0 = 0.5f;                             break;
+            case TA::Top:     y0 = 0.f;    h = 0.6f; x0 = 0.25f;     break;
+            case TA::Bottom:  y0 = 0.4f;   h = 0.6f; x0 = 0.25f;     break;
+        }
+        return std::tuple<float,float,float,float>{ x0, y0, x0 + w, y0 + h };
+    };
+
+    // Raw View groups the camera-passthrough toggle with its placement options.
+    std::vector<MenuItem> raw_view_menu = {
+        toggle("Enable",
             [&state]{ return state.theater_mode; },
             [&state](bool v){ state.theater_mode = v; }),
-        submenu("Theater Position", std::move(theater_pos_menu)),
+        with_panel(
+            submenu("Position", std::move(theater_pos_menu)),
+            "Eye Position Preview",
+            [&state, cameras, menu_sys_pp, draw_frame_with_crop, theater_inner_rect]
+            (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                    ? (*menu_sys_pp)->accent_color()
+                    : IM_COL32(255, 255, 255, 255);
+                const float aspect = (cameras && cameras->current_height() > 0)
+                    ? float(cameras->current_width()) / float(cameras->current_height())
+                    : 4.0f / 3.0f;
+                const bool single = state.cam_single.enabled;
+                const auto a = state.theater_anchor;
+
+                if (single) {
+                    const bool right = state.cam_single.use_right;
+                    auto [x0, y0, x1, y1] = theater_inner_rect(a, right);
+                    draw_frame_with_crop(dl, o, sz, aspect, accent, x0, y0, x1, y1);
+                    const char* lbl = right ? "Right camera" : "Left camera";
+                    dl->AddText({ o.x, o.y + sz.y - 14.f },
+                                IM_COL32(200, 200, 200, 200), lbl);
+                } else {
+                    ImVec2 lsz{ sz.x * 0.5f - 6.f, sz.y - 16.f };
+                    ImVec2 lpos{ o.x, o.y };
+                    ImVec2 rpos{ o.x + sz.x * 0.5f + 6.f, o.y };
+                    auto [lx0, ly0, lx1, ly1] = theater_inner_rect(a, false);
+                    auto [rx0, ry0, rx1, ry1] = theater_inner_rect(a, true);
+                    draw_frame_with_crop(dl, lpos, lsz, aspect, accent, lx0, ly0, lx1, ly1);
+                    draw_frame_with_crop(dl, rpos, lsz, aspect, accent, rx0, ry0, rx1, ry1);
+                    dl->AddText({ lpos.x, o.y + sz.y - 14.f },
+                                IM_COL32(200, 200, 200, 200), "Left");
+                    dl->AddText({ rpos.x, o.y + sz.y - 14.f },
+                                IM_COL32(200, 200, 200, 200), "Right");
+                }
+            }),
+    };
+
+    // Build per-camera submenu labels from the configured model names.  When both
+    // cameras share a model (e.g. default OWLsight pair) disambiguate with #1/#2
+    // plus an eye hint; otherwise show "<Model> (Left/Right)".
+    auto cam_label = [](std::string model, const char* eye, const char* index) {
+        if (model.empty()) model = "Owlsight";
+        std::string out = std::move(model);
+        if (index) { out += " #"; out += index; }
+        out += " (";
+        out += eye;
+        out += ")";
+        return out;
+    };
+    std::string left_model  = cameras ? cameras->owl_left_model()  : std::string();
+    std::string right_model = cameras ? cameras->owl_right_model() : std::string();
+    std::string left_norm   = left_model.empty()  ? "Owlsight" : left_model;
+    std::string right_norm  = right_model.empty() ? "Owlsight" : right_model;
+    const bool same_model   = (left_norm == right_norm);
+    std::string left_label  = cam_label(left_model,  "Left",  same_model ? "1" : nullptr);
+    std::string right_label = cam_label(right_model, "Right", same_model ? "2" : nullptr);
+
+    std::vector<MenuItem> main_cameras_menu = {
+        submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
+        submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
+        submenu("Raw View",         std::move(raw_view_menu)),
         toggle("Swap Cameras",
             [&state]{ return state.cameras_swapped; },
             [&state](bool v){ state.cameras_swapped = v; }),
-        submenu("Resolution",       std::move(resolution_presets)),
-        submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
-        submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
-        submenu("Digital Zoom",  std::move(zoom_menu)),
-        submenu("Mirror Crop",   std::move(mirror_crop_menu)),
-        submenu("Single Camera", std::move(single_cam_menu)),
-        submenu("Left Camera",   std::move(left_cam_menu)),
-        submenu("Right Camera",  std::move(right_cam_menu)),
-        submenu("Night Vision",  std::move(nv_menu)),
-        submenu("Autofocus Both", std::move(af_both_menu)),
-        submenu("Capture Photo", std::move(capture_menu)),
-        submenu("QR Scan",       std::move(qr_menu)),
+        with_panel(
+            submenu("Resolution", std::move(resolution_presets)),
+            "Camera Resolution",
+            [&state, menu_sys_pp]
+            (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                    ? (*menu_sys_pp)->accent_color()
+                    : IM_COL32(255, 255, 255, 255);
+                int w = state.camera_resolution.width;
+                int h = state.camera_resolution.height;
+                if (w <= 0 || h <= 0) { w = 1280; h = 800; }
+                float ar = float(w) / float(h);
+
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%d x %d", w, h);
+                dl->AddText({ o.x, o.y }, IM_COL32(255, 255, 255, 235), buf);
+                snprintf(buf, sizeof(buf), "Aspect: %.2f:1 (~%s)",
+                         ar,
+                         (ar > 1.74f && ar < 1.80f) ? "16:9"
+                         : (ar > 1.30f && ar < 1.36f) ? "4:3"
+                         : (ar > 1.58f && ar < 1.62f) ? "16:10"
+                         : "custom");
+                dl->AddText({ o.x, o.y + 18.f }, IM_COL32(200, 200, 200, 220), buf);
+
+                // Hint list — common Raspberry Pi camera modules grouped by AR.
+                const float lh = 14.f;
+                ImVec2 p{ o.x, o.y + 44.f };
+                dl->AddText(p, (accent & 0x00FFFFFFu) | (200u << 24),
+                            "PI CAMERA NATIVE AR");
+                p.y += lh + 2.f;
+                struct Row { const char* ar; const char* mods; };
+                static const Row rows[] = {
+                    { "4:3",  "IMX219 v2, IMX477 HQ, IMX708 v3 (bin)" },
+                    { "16:9", "IMX477 HQ, IMX708 v3 (native)" },
+                    { "1:1",  "IMX296, IMX290 (crop)" },
+                };
+                for (auto& r : rows) {
+                    char line[96];
+                    snprintf(line, sizeof(line), "%-5s  %s", r.ar, r.mods);
+                    dl->AddText(p, IM_COL32(190, 190, 190, 200), line);
+                    p.y += lh;
+                }
+            }),
+        submenu("Digital Zoom",     std::move(zoom_menu)),
+        with_panel(
+            submenu("Mirror Crop", std::move(mirror_crop_menu)),
+            "Mirror Crop Preview",
+            [&state, cameras, menu_sys_pp, draw_frame_with_crop]
+            (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                    ? (*menu_sys_pp)->accent_color()
+                    : IM_COL32(255, 255, 255, 255);
+                const float aspect = (cameras && cameras->current_height() > 0)
+                    ? float(cameras->current_width()) / float(cameras->current_height())
+                    : 4.0f / 3.0f;
+
+                // Crop window: width and height = 1/zoom of the source frame.
+                const float zoom = std::max(1.0f, state.mirror_crop.zoom);
+                const float crop_w = 1.0f / zoom;
+                const float crop_h = 1.0f / zoom;
+                float crop_y0;
+                switch (state.mirror_crop.vertical) {
+                    case CropVertical::Top:    crop_y0 = 0.0f;                 break;
+                    case CropVertical::Middle: crop_y0 = (1.0f - crop_h) * 0.5f; break;
+                    case CropVertical::Bottom: crop_y0 = 1.0f - crop_h;        break;
+                }
+                const float bias = state.mirror_crop.inner_bias;  // 0.0 – 0.40
+                // Left eye crop biased toward the right (nose); right eye crop
+                // biased toward the left.  bias=0 → centered.
+                auto crop_x0 = [&](bool right) {
+                    float cx = right ? (0.5f - bias) : (0.5f + bias);
+                    return cx - crop_w * 0.5f;
+                };
+
+                const bool single = state.cam_single.enabled;
+                if (single) {
+                    bool right = state.cam_single.use_right;
+                    float x0 = crop_x0(right);
+                    draw_frame_with_crop(dl, o, sz, aspect, accent,
+                                         x0, crop_y0, x0 + crop_w, crop_y0 + crop_h);
+                    dl->AddText({ o.x, o.y + sz.y - 14.f },
+                                IM_COL32(200, 200, 200, 200),
+                                right ? "Right camera" : "Left camera");
+                } else {
+                    ImVec2 lsz{ sz.x * 0.5f - 6.f, sz.y - 16.f };
+                    ImVec2 lpos{ o.x, o.y };
+                    ImVec2 rpos{ o.x + sz.x * 0.5f + 6.f, o.y };
+                    float lx0 = crop_x0(false);
+                    float rx0 = crop_x0(true);
+                    draw_frame_with_crop(dl, lpos, lsz, aspect, accent,
+                                         lx0, crop_y0, lx0 + crop_w, crop_y0 + crop_h);
+                    draw_frame_with_crop(dl, rpos, lsz, aspect, accent,
+                                         rx0, crop_y0, rx0 + crop_w, crop_y0 + crop_h);
+                    dl->AddText({ lpos.x, o.y + sz.y - 14.f },
+                                IM_COL32(200, 200, 200, 200), "Left");
+                    dl->AddText({ rpos.x, o.y + sz.y - 14.f },
+                                IM_COL32(200, 200, 200, 200), "Right");
+                }
+            }),
+        submenu("Single Camera",    std::move(single_cam_menu)),
+        submenu(left_label,         std::move(left_cam_menu)),
+        submenu(right_label,        std::move(right_cam_menu)),
+        submenu("Low-Light Mode",   std::move(nv_menu)),
+        submenu("Autofocus Both",   std::move(af_both_menu)),
+        submenu("Capture Photo",    std::move(capture_menu)),
+        submenu("QR Scan",          std::move(qr_menu)),
     };
 
     // ── Headset controls ──────────────────────────────────────────────────────
@@ -811,6 +1023,12 @@ static std::vector<MenuItem> build_menu(
             [xr, &state](float v){
                 state.xr_hud_brightness = static_cast<int>(v);
                 if (xr) xr->set_hud_brightness(static_cast<int>(v));
+            }),
+        slider("Backlight Brightness", 1.f, 7.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.xr_brightness); },
+            [xr, &state](float v){
+                state.xr_brightness = static_cast<int>(v);
+                if (xr) xr->set_brightness(static_cast<int>(v));
             }),
         leaf("Recenter",  [xr]{ if (xr) xr->recenter_tracking(); }),
         leaf("Gaze Lock", [xr]{ if (xr) xr->toggle_gaze_lock(); }),
@@ -1273,8 +1491,8 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> cameras_menu = {
-        submenu("Main Cameras", std::move(main_cameras_menu)),
-        submenu("USB Cameras",  std::move(usb_cameras_menu)),
+        submenu("CSI Camera Controls", std::move(main_cameras_menu)),
+        submenu("USB Cameras",         std::move(usb_cameras_menu)),
     };
 
     // ── Android mirror ────────────────────────────────────────────────────────
@@ -1292,34 +1510,15 @@ static std::vector<MenuItem> build_menu(
         make_size_slider("Size", android_cfg),
     };
 
-    // ── Face Source (Teensy vs Protoface) ────────────────────────────────────
-    std::vector<MenuItem> face_source_menu;
-    if (active_face_pp && teensy_option && fp_option) {
-        face_source_menu.push_back(leaf_sel("Teensy (ProtoTracer)",
-            [active_face_pp, teensy_option]{ *active_face_pp = teensy_option; },
-            [active_face_pp, teensy_option]{ return *active_face_pp == teensy_option; }
-        ));
-        face_source_menu.push_back(leaf_sel("Protoface",
-            [active_face_pp, fp_option]{ *active_face_pp = fp_option; },
-            [active_face_pp, fp_option]{ return *active_face_pp == fp_option; }
-        ));
-    }
-
-    // ── Prototracer (face controller) submenu ─────────────────────────────────
-    std::vector<MenuItem> prototracer_menu = {
-        submenu("Faces",      std::move(effects)),
-        submenu("Color",          std::move(colors)),
-        submenu("Material Color", std::move(proto_colors)),
-        submenu("Animations",     std::move(gifs)),
+    // ── ProtoTracer (Teensy-driven LED matrix) submenu ────────────────────────
+    std::vector<MenuItem> prototracer_inner_menu = {
+        submenu("Faces",              std::move(effects)),
+        submenu("Color",              std::move(colors)),
+        submenu("ProtoTracer Palette", std::move(proto_colors)),
+        submenu("Animations",         std::move(gifs)),
         slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
-        slider("Lens Brightness", 1.f, 7.f, 1.f, "",
-            [&state]{ return static_cast<float>(state.xr_brightness); },
-            [xr, &state](float v){
-                state.xr_brightness = static_cast<int>(v);
-                if (xr) xr->set_brightness(static_cast<int>(v));
-            }),
         leaf("Release Control", [teensy]{ teensy->release_control(); }),
         face_picker("Face", 10,
             [&state]{ return static_cast<int>(state.face.face_index); },
@@ -1328,7 +1527,7 @@ static std::vector<MenuItem> build_menu(
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.face.face_index = static_cast<uint8_t>(v);
             }),
-        slider("Accent Bright", 0.f, 10.f, 1.f, "",
+        slider("Accent LED Brightness", 0.f, 10.f, 1.f, "",
             [&state]{ return static_cast<float>(state.face.accent_bright); },
             [&state, teensy](float v){
                 uint8_t val = static_cast<uint8_t>(v);
@@ -1352,7 +1551,7 @@ static std::vector<MenuItem> build_menu(
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.face.mic_level = val;
             }),
-        toggle("Boop Sensor",
+        toggle("Touch Sensor",
             [&state]{ return state.face.boop_sensor != 0; },
             [&state, teensy](bool on){
                 uint8_t val = on ? 1 : 0;
@@ -1385,12 +1584,27 @@ static std::vector<MenuItem> build_menu(
                 state.face.fan_speed = val;
             }),
     };
-    if (!face_source_menu.empty())
-        prototracer_menu.push_back(submenu("Face Source", std::move(face_source_menu)));
+
+    // ── Protoface (shm-fed LED panel) submenu ─────────────────────────────────
+    std::vector<MenuItem> protoface_inner_menu;
     if (panel_preview_pp)
-        prototracer_menu.push_back(toggle("Panel Preview",
+        protoface_inner_menu.push_back(toggle("Panel Preview",
             [panel_preview_pp]{ return *panel_preview_pp; },
             [panel_preview_pp](bool v){ *panel_preview_pp = v; }));
+
+    // ── Face Display root: Source picker (radios) + per-backend submenus ─────
+    std::vector<MenuItem> face_display_menu;
+    if (active_face_pp && teensy_option && fp_option) {
+        face_display_menu.push_back(leaf_sel("Source: Teensy (ProtoTracer)",
+            [active_face_pp, teensy_option]{ *active_face_pp = teensy_option; },
+            [active_face_pp, teensy_option]{ return *active_face_pp == teensy_option; }));
+        face_display_menu.push_back(leaf_sel("Source: Protoface",
+            [active_face_pp, fp_option]{ *active_face_pp = fp_option; },
+            [active_face_pp, fp_option]{ return *active_face_pp == fp_option; }));
+    }
+    face_display_menu.push_back(submenu("ProtoTracer", std::move(prototracer_inner_menu)));
+    if (!protoface_inner_menu.empty())
+        face_display_menu.push_back(submenu("Protoface", std::move(protoface_inner_menu)));
 
     // ── HUD settings ──────────────────────────────────────────────────────────
 
@@ -2354,8 +2568,52 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> system_menu = {
-        submenu("Headset",          std::move(headset_menu)),
-        submenu("Audio",            std::move(audio_menu)),
+        submenu("Headset & Tracking", std::move(headset_menu)),
+        with_panel(
+            submenu("Audio", std::move(audio_menu)),
+            "Audio Status",
+            [&state, menu_sys_pp]
+            (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                    ? (*menu_sys_pp)->accent_color()
+                    : IM_COL32(255, 255, 255, 255);
+                const float lh = 18.f;
+                ImVec2 p = o;
+                auto row = [&](const char* k, const char* v, ImU32 vc) {
+                    dl->AddText({ p.x, p.y }, IM_COL32(180, 180, 180, 200), k);
+                    dl->AddText({ p.x + 130.f, p.y }, vc, v);
+                    p.y += lh;
+                };
+
+                bool enabled;
+                int  out_idx;
+                float cpu;
+                int  xruns;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    enabled = state.audio.enabled;
+                    out_idx = state.audio.output;
+                    cpu     = state.audio.cpu_load;
+                    xruns   = state.audio.xrun_count;
+                }
+                const char* out_name =
+                    out_idx == 0 ? "VITURE" :
+                    out_idx == 1 ? "Headphones" :
+                    out_idx == 2 ? "HDMI" : "?";
+
+                row("State",  enabled ? "Enabled" : "Muted",
+                    enabled ? ((accent & 0x00FFFFFFu) | (220u << 24))
+                            : IM_COL32(200, 90, 90, 220));
+                row("Output", out_name, IM_COL32(230, 230, 230, 230));
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%.1f %%", cpu * 100.f);
+                row("CPU load", buf, IM_COL32(230, 230, 230, 230));
+                snprintf(buf, sizeof(buf), "%d", xruns);
+                row("XRuns", buf,
+                    xruns == 0 ? IM_COL32(160, 220, 160, 220)
+                               : IM_COL32(220, 160, 90, 220));
+            }),
         submenu("Timers and Alarm", std::move(timers_alarm_menu)),
         toggle("System Panel",
             [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
@@ -2385,7 +2643,7 @@ static std::vector<MenuItem> build_menu(
     return {
         submenu("Vision",       std::move(cameras_menu)),
         submenu("HUD",          std::move(hud_menu)),
-        submenu("Face Display", std::move(prototracer_menu)),
+        submenu("Face Display", std::move(face_display_menu)),
         submenu("LoRa",         std::move(lora_menu)),
         submenu("System",       std::move(system_menu)),
     };
@@ -3253,17 +3511,6 @@ int main(int argc, char* argv[]) {
         // if (hud.popup_active())    hud.popup_navigate(dir);  // modal popup disabled
         if      (menu.is_open())        menu.navigate(dir);
         else if (hud.toast_has_focused()) hud.toast_navigate(dir);
-    });
-
-    knob.on_button([&menu](uint8_t btn, uint8_t ev) {
-        if (ev == 0) {  // press
-            if (btn == 0 && menu.is_open()) menu.select();  // encoder click = select
-            if (btn == 1 && menu.is_open()) menu.back();    // back button = back
-        } else if (ev == 1) {  // long press
-            if (btn == 0) {                                 // encoder long press = toggle menu
-                if (menu.is_open()) menu.close(); else menu.open();
-            }
-        }
     });
 
     knob.on_status([&state](uint8_t status, uint8_t param) {

@@ -101,6 +101,10 @@ public:
     DmaCamera* owl_left()  { return owl_left_.get();  }
     DmaCamera* owl_right() { return owl_right_.get(); }
 
+    // Configured model name for each CSI camera, or empty if the slot is absent.
+    std::string owl_left_model()  const { return owl_left_  ? owl_left_->model_name()  : std::string(); }
+    std::string owl_right_model() const { return owl_right_ ? owl_right_->model_name() : std::string(); }
+
     // ── USB open / close (safe to call from any thread) ──────────────────────
     void open_usb1();
     void close_usb1();
