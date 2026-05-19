@@ -532,17 +532,17 @@ static std::vector<MenuItem> build_menu(
     }
 
     std::vector<MenuItem> nv_menu = {
-        toggle("Night Vision",
+        toggle("Enable Low-Light",
             [&state]{ return state.night_vision.nv_enabled; },
             [&state](bool v){
                 state.night_vision.nv_enabled  = v;
                 state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
                 state.night_vision.shutter_us  = v ? 40000 : 16667;
             }),
-        toggle("Auto Night Vision",
+        toggle("Auto Low-Light",
             [&state]{ return state.night_vision.auto_nv; },
             [&state](bool v){ state.night_vision.auto_nv = v; }),
-        slider("Auto NV Gain Threshold", 1.5f, 16.f, 0.5f, "x",
+        slider("Auto Gain Threshold", 1.5f, 16.f, 0.5f, "x",
             [&state]{ return state.night_vision.auto_nv_gain_threshold; },
             [&state](float v){ state.night_vision.auto_nv_gain_threshold = v; }),
         slider("Exposure (EV)", -3.f, 3.f, 0.5f, " EV",
@@ -776,26 +776,51 @@ static std::vector<MenuItem> build_menu(
         };
     };
 
-    std::vector<MenuItem> main_cameras_menu = {
-        toggle("Theater Mode",
+    // Raw View groups the camera-passthrough toggle with its placement options.
+    std::vector<MenuItem> raw_view_menu = {
+        toggle("Enable",
             [&state]{ return state.theater_mode; },
             [&state](bool v){ state.theater_mode = v; }),
-        submenu("Theater Position", std::move(theater_pos_menu)),
+        submenu("Position", std::move(theater_pos_menu)),
+    };
+
+    // Build per-camera submenu labels from the configured model names.  When both
+    // cameras share a model (e.g. default OWLsight pair) disambiguate with #1/#2
+    // plus an eye hint; otherwise show "<Model> (Left/Right)".
+    auto cam_label = [](std::string model, const char* eye, const char* index) {
+        if (model.empty()) model = "Owlsight";
+        std::string out = std::move(model);
+        if (index) { out += " #"; out += index; }
+        out += " (";
+        out += eye;
+        out += ")";
+        return out;
+    };
+    std::string left_model  = cameras ? cameras->owl_left_model()  : std::string();
+    std::string right_model = cameras ? cameras->owl_right_model() : std::string();
+    std::string left_norm   = left_model.empty()  ? "Owlsight" : left_model;
+    std::string right_norm  = right_model.empty() ? "Owlsight" : right_model;
+    const bool same_model   = (left_norm == right_norm);
+    std::string left_label  = cam_label(left_model,  "Left",  same_model ? "1" : nullptr);
+    std::string right_label = cam_label(right_model, "Right", same_model ? "2" : nullptr);
+
+    std::vector<MenuItem> main_cameras_menu = {
+        submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
+        submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
+        submenu("Raw View",         std::move(raw_view_menu)),
         toggle("Swap Cameras",
             [&state]{ return state.cameras_swapped; },
             [&state](bool v){ state.cameras_swapped = v; }),
         submenu("Resolution",       std::move(resolution_presets)),
-        submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
-        submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
-        submenu("Digital Zoom",  std::move(zoom_menu)),
-        submenu("Mirror Crop",   std::move(mirror_crop_menu)),
-        submenu("Single Camera", std::move(single_cam_menu)),
-        submenu("Left Camera",   std::move(left_cam_menu)),
-        submenu("Right Camera",  std::move(right_cam_menu)),
-        submenu("Night Vision",  std::move(nv_menu)),
-        submenu("Autofocus Both", std::move(af_both_menu)),
-        submenu("Capture Photo", std::move(capture_menu)),
-        submenu("QR Scan",       std::move(qr_menu)),
+        submenu("Digital Zoom",     std::move(zoom_menu)),
+        submenu("Mirror Crop",      std::move(mirror_crop_menu)),
+        submenu("Single Camera",    std::move(single_cam_menu)),
+        submenu(left_label,         std::move(left_cam_menu)),
+        submenu(right_label,        std::move(right_cam_menu)),
+        submenu("Low-Light Mode",   std::move(nv_menu)),
+        submenu("Autofocus Both",   std::move(af_both_menu)),
+        submenu("Capture Photo",    std::move(capture_menu)),
+        submenu("QR Scan",          std::move(qr_menu)),
     };
 
     // ── Headset controls ──────────────────────────────────────────────────────
@@ -811,6 +836,12 @@ static std::vector<MenuItem> build_menu(
             [xr, &state](float v){
                 state.xr_hud_brightness = static_cast<int>(v);
                 if (xr) xr->set_hud_brightness(static_cast<int>(v));
+            }),
+        slider("Backlight Brightness", 1.f, 7.f, 1.f, "",
+            [&state]{ return static_cast<float>(state.xr_brightness); },
+            [xr, &state](float v){
+                state.xr_brightness = static_cast<int>(v);
+                if (xr) xr->set_brightness(static_cast<int>(v));
             }),
         leaf("Recenter",  [xr]{ if (xr) xr->recenter_tracking(); }),
         leaf("Gaze Lock", [xr]{ if (xr) xr->toggle_gaze_lock(); }),
@@ -1273,8 +1304,8 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> cameras_menu = {
-        submenu("Main Cameras", std::move(main_cameras_menu)),
-        submenu("USB Cameras",  std::move(usb_cameras_menu)),
+        submenu("CSI Camera Controls", std::move(main_cameras_menu)),
+        submenu("USB Cameras",         std::move(usb_cameras_menu)),
     };
 
     // ── Android mirror ────────────────────────────────────────────────────────
@@ -1292,34 +1323,15 @@ static std::vector<MenuItem> build_menu(
         make_size_slider("Size", android_cfg),
     };
 
-    // ── Face Source (Teensy vs Protoface) ────────────────────────────────────
-    std::vector<MenuItem> face_source_menu;
-    if (active_face_pp && teensy_option && fp_option) {
-        face_source_menu.push_back(leaf_sel("Teensy (ProtoTracer)",
-            [active_face_pp, teensy_option]{ *active_face_pp = teensy_option; },
-            [active_face_pp, teensy_option]{ return *active_face_pp == teensy_option; }
-        ));
-        face_source_menu.push_back(leaf_sel("Protoface",
-            [active_face_pp, fp_option]{ *active_face_pp = fp_option; },
-            [active_face_pp, fp_option]{ return *active_face_pp == fp_option; }
-        ));
-    }
-
-    // ── Prototracer (face controller) submenu ─────────────────────────────────
-    std::vector<MenuItem> prototracer_menu = {
-        submenu("Faces",      std::move(effects)),
-        submenu("Color",          std::move(colors)),
-        submenu("Material Color", std::move(proto_colors)),
-        submenu("Animations",     std::move(gifs)),
+    // ── ProtoTracer (Teensy-driven LED matrix) submenu ────────────────────────
+    std::vector<MenuItem> prototracer_inner_menu = {
+        submenu("Faces",              std::move(effects)),
+        submenu("Color",              std::move(colors)),
+        submenu("ProtoTracer Palette", std::move(proto_colors)),
+        submenu("Animations",         std::move(gifs)),
         slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
-        slider("Lens Brightness", 1.f, 7.f, 1.f, "",
-            [&state]{ return static_cast<float>(state.xr_brightness); },
-            [xr, &state](float v){
-                state.xr_brightness = static_cast<int>(v);
-                if (xr) xr->set_brightness(static_cast<int>(v));
-            }),
         leaf("Release Control", [teensy]{ teensy->release_control(); }),
         face_picker("Face", 10,
             [&state]{ return static_cast<int>(state.face.face_index); },
@@ -1328,7 +1340,7 @@ static std::vector<MenuItem> build_menu(
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.face.face_index = static_cast<uint8_t>(v);
             }),
-        slider("Accent Bright", 0.f, 10.f, 1.f, "",
+        slider("Accent LED Brightness", 0.f, 10.f, 1.f, "",
             [&state]{ return static_cast<float>(state.face.accent_bright); },
             [&state, teensy](float v){
                 uint8_t val = static_cast<uint8_t>(v);
@@ -1352,7 +1364,7 @@ static std::vector<MenuItem> build_menu(
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.face.mic_level = val;
             }),
-        toggle("Boop Sensor",
+        toggle("Touch Sensor",
             [&state]{ return state.face.boop_sensor != 0; },
             [&state, teensy](bool on){
                 uint8_t val = on ? 1 : 0;
@@ -1385,12 +1397,27 @@ static std::vector<MenuItem> build_menu(
                 state.face.fan_speed = val;
             }),
     };
-    if (!face_source_menu.empty())
-        prototracer_menu.push_back(submenu("Face Source", std::move(face_source_menu)));
+
+    // ── Protoface (shm-fed LED panel) submenu ─────────────────────────────────
+    std::vector<MenuItem> protoface_inner_menu;
     if (panel_preview_pp)
-        prototracer_menu.push_back(toggle("Panel Preview",
+        protoface_inner_menu.push_back(toggle("Panel Preview",
             [panel_preview_pp]{ return *panel_preview_pp; },
             [panel_preview_pp](bool v){ *panel_preview_pp = v; }));
+
+    // ── Face Display root: Source picker (radios) + per-backend submenus ─────
+    std::vector<MenuItem> face_display_menu;
+    if (active_face_pp && teensy_option && fp_option) {
+        face_display_menu.push_back(leaf_sel("Source: Teensy (ProtoTracer)",
+            [active_face_pp, teensy_option]{ *active_face_pp = teensy_option; },
+            [active_face_pp, teensy_option]{ return *active_face_pp == teensy_option; }));
+        face_display_menu.push_back(leaf_sel("Source: Protoface",
+            [active_face_pp, fp_option]{ *active_face_pp = fp_option; },
+            [active_face_pp, fp_option]{ return *active_face_pp == fp_option; }));
+    }
+    face_display_menu.push_back(submenu("ProtoTracer", std::move(prototracer_inner_menu)));
+    if (!protoface_inner_menu.empty())
+        face_display_menu.push_back(submenu("Protoface", std::move(protoface_inner_menu)));
 
     // ── HUD settings ──────────────────────────────────────────────────────────
 
@@ -2354,7 +2381,7 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> system_menu = {
-        submenu("Headset",          std::move(headset_menu)),
+        submenu("Headset & Tracking", std::move(headset_menu)),
         submenu("Audio",            std::move(audio_menu)),
         submenu("Timers and Alarm", std::move(timers_alarm_menu)),
         toggle("System Panel",
@@ -2385,7 +2412,7 @@ static std::vector<MenuItem> build_menu(
     return {
         submenu("Vision",       std::move(cameras_menu)),
         submenu("HUD",          std::move(hud_menu)),
-        submenu("Face Display", std::move(prototracer_menu)),
+        submenu("Face Display", std::move(face_display_menu)),
         submenu("LoRa",         std::move(lora_menu)),
         submenu("System",       std::move(system_menu)),
     };
