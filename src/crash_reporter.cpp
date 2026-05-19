@@ -137,7 +137,9 @@ void install(const AppState* state,
              const std::string& git_hash) {
     g_state = state;
     strncpy(g_crash_dir, crash_dir.c_str(), sizeof(g_crash_dir) - 1);
+    g_crash_dir[sizeof(g_crash_dir) - 1] = '\0';
     strncpy(g_git_hash,  git_hash.c_str(),  sizeof(g_git_hash)  - 1);
+    g_git_hash[sizeof(g_git_hash) - 1] = '\0';
 
     struct sigaction sa {};
     sa.sa_handler = crash_handler;
