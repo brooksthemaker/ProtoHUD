@@ -73,7 +73,9 @@ static void format_slider_value(char* buf, size_t bufsz,
 MenuSystem::MenuSystem(std::vector<MenuItem> root)
     : root_items_(std::move(root)) {}
 
-void MenuSystem::push_level(const std::vector<MenuItem>& items) {
+void MenuSystem::push_level(const std::vector<MenuItem>& items,
+                             std::string panel_title,
+                             MenuContextPanelDraw panel_draw) {
     if (items.empty()) return;
     std::vector<MenuItem> level = items;
 
@@ -87,7 +89,9 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items) {
 
     if (!stack_.empty())
         stack_.back().cursor = cursor_;  // remember where we were on the parent page
-    stack_.push_back({ level, 0 });
+    stack_.push_back(Level{ std::move(level), 0,
+                            std::move(panel_title),
+                            std::move(panel_draw) });
     cursor_ = 0;
     emit_detents();
 }
@@ -177,7 +181,9 @@ void MenuSystem::select() {
     switch (item.type) {
     case MenuItemType::SUBMENU:
         if (!item.children.empty())
-            push_level(item.children);
+            push_level(item.children,
+                       item.context_panel_title,
+                       item.context_panel_draw);
         break;
 
     case MenuItemType::LEAF:
@@ -767,4 +773,113 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     ImGui::End();
     ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(6);
+
+    // Side-panel: rendered as a separate window mirroring the menu anchor.
+    // Skipped when the current level didn't register one.
+    if (!stack_.empty() && stack_.back().panel_draw)
+        draw_context_panel(stack_.back(), screen_w, screen_h, x, y, width, total_h);
+}
+
+// ── draw_context_panel ────────────────────────────────────────────────────────
+
+void MenuSystem::draw_context_panel(const Level& lvl,
+                                     int screen_w, int screen_h,
+                                     float menu_x, float menu_y,
+                                     float menu_w, float menu_h) {
+    constexpr float kPanelW = 340.f;
+    constexpr float kPanelH = 240.f;
+    constexpr float kGap    = 18.f;
+    constexpr float kPadX   = 12.f;
+    constexpr float kPadY   = 28.f;   // extra top padding for title
+
+    // Place panel on the opposite horizontal side of the menu, aligned to the
+    // menu's top edge.  Clamp inside the screen so it never falls off-edge.
+    float px;
+    switch (anchor_) {
+        default:
+        case MenuAnchor::TopLeft:
+        case MenuAnchor::BottomLeft:
+            px = menu_x + menu_w + kGap;
+            if (px + kPanelW > screen_w - 16.f)
+                px = screen_w - kPanelW - 16.f;
+            break;
+        case MenuAnchor::TopRight:
+        case MenuAnchor::BottomRight:
+            px = menu_x - kPanelW - kGap;
+            if (px < 16.f) px = 16.f;
+            break;
+    }
+    float py = menu_y;
+    if (py + kPanelH > screen_h - 16.f)
+        py = screen_h - kPanelH - 16.f;
+    (void)menu_h;
+
+    ImGui::SetNextWindowPos ({ px, py }, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({ kPanelW, kPanelH }, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.f);
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDecoration     |
+        ImGuiWindowFlags_NoMove           |
+        ImGuiWindowFlags_NoSavedSettings  |
+        ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoInputs;
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.f, 0.f, 0.f, 0.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(0.f, 0.f));
+
+    ImGui::Begin("##menu_panel", nullptr, flags);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 wp = ImGui::GetWindowPos();
+    const ImVec2 ws = ImGui::GetWindowSize();
+
+    // Chamfered background + border, same visual language as the main menu.
+    {
+        constexpr float C   = 8.f;
+        const float GAP     = 3.f + border_thickness_ * 0.5f;
+        const ImVec2 bmin   = { wp.x + GAP,        wp.y + GAP };
+        const ImVec2 bmax   = { wp.x + ws.x - GAP, wp.y + ws.y - GAP };
+        const ImVec2 bg_pts[8] = {
+            {bmin.x + C, bmin.y}, {bmax.x - C, bmin.y},
+            {bmax.x, bmin.y + C}, {bmax.x, bmax.y - C},
+            {bmax.x - C, bmax.y}, {bmin.x + C, bmax.y},
+            {bmin.x, bmax.y - C}, {bmin.x, bmin.y + C},
+        };
+        const ImU32 bg_col = bg_enabled_ ? bg_color_ : IM_COL32(0, 0, 0, 0);
+        dl->AddConvexPolyFilled(bg_pts, 8, bg_col);
+
+        if (border_enabled_) {
+            const ImVec2 emin = { wp.x,        wp.y };
+            const ImVec2 emax = { wp.x + ws.x, wp.y + ws.y };
+            const ImVec2 bdr_pts[8] = {
+                {emin.x + C, emin.y}, {emax.x - C, emin.y},
+                {emax.x, emin.y + C}, {emax.x, emax.y - C},
+                {emax.x - C, emax.y}, {emin.x + C, emax.y},
+                {emin.x, emax.y - C}, {emin.x, emin.y + C},
+            };
+            dl->AddPolyline(bdr_pts, 8,
+                            (border_color_ & 0x00FFFFFFu) | (220u << 24),
+                            ImDrawFlags_Closed, border_thickness_);
+        }
+    }
+
+    // Title bar
+    if (!lvl.panel_title.empty()) {
+        const std::string upper = to_upper(lvl.panel_title);
+        dl->AddText({ wp.x + kPadX, wp.y + 6.f },
+                    IM_COL32(255, 255, 255, 230), upper.c_str());
+        dl->AddLine({ wp.x + kPadX,           wp.y + 22.f },
+                    { wp.x + ws.x - kPadX,    wp.y + 22.f },
+                    (accent_color_ & 0x00FFFFFFu) | (80u << 24), 1.f);
+    }
+
+    // Content area, post-padding.
+    const ImVec2 origin = { wp.x + kPadX, wp.y + kPadY };
+    const ImVec2 size   = { ws.x - 2 * kPadX, ws.y - kPadY - 8.f };
+    if (lvl.panel_draw) lvl.panel_draw(dl, origin, size);
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(1);
 }
