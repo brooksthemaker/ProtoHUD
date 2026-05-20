@@ -3670,11 +3670,15 @@ int main(int argc, char* argv[]) {
         static std::atomic<bool>* g_quit = &state.quit;
         auto handler = [](int) {
             if (g_quit) g_quit->store(true);
-            // If cleanup stalls, force-exit after 5 seconds.
+            // If cleanup stalls, force-exit after 5 seconds.  Exit 0, not 1:
+            // SIGINT/SIGTERM is an explicit quit request (Ctrl+C, `kill`, or the
+            // watchdog forwarding a stop), so report a clean exit — otherwise the
+            // respawn supervisor (scripts/watchdog.sh) treats the non-zero code as
+            // a crash and relaunches the program.
             std::thread([] {
                 std::this_thread::sleep_for(std::chrono::seconds(5));
-                std::cerr << "[signal] cleanup timed out — forcing exit\n";
-                std::_Exit(1);
+                std::cerr << "[signal] cleanup timed out — forcing clean exit\n";
+                std::_Exit(0);
             }).detach();
         };
         std::signal(SIGINT,  handler);
