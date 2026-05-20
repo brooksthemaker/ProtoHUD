@@ -283,7 +283,17 @@ void XRDisplay::shutdown() {
 // ── VITURE SDK init ───────────────────────────────────────────────────────────
 bool XRDisplay::find_and_connect() {
     product_id_ = (cfg_.product_id != 0) ? cfg_.product_id : scan_usb_for_viture();
-    if (product_id_ == 0) return false;
+    if (product_id_ == 0) {
+        std::cerr << "[xr] no VITURE control device found on USB "
+                     "(scan_usb_for_viture matched no valid product id). "
+                     "Glasses controls (brightness, 3D, dimming, recenter) will be "
+                     "inert. Set vitrue.product_id in config to force a PID, and "
+                     "check udev permissions for the Viture USB device.\n";
+        return false;
+    }
+    if (cfg_.product_id != 0)
+        std::cout << "[xr] using configured product_id 0x"
+                  << std::hex << product_id_ << std::dec << "\n";
 
     char market[64] = {}; int mlen = sizeof(market);
     xr_device_provider_get_market_name(product_id_, market, &mlen);
@@ -292,10 +302,18 @@ bool XRDisplay::find_and_connect() {
 
     xr_device_provider_set_log_level(LOG_LEVEL_ERROR);
     device_ = xr_device_provider_create(product_id_);
-    if (!device_) { std::cerr << "[xr] create failed\n"; return false; }
+    if (!device_) { std::cerr << "[xr] xr_device_provider_create failed for PID 0x"
+                              << std::hex << product_id_ << std::dec << "\n"; return false; }
 
-    if (xr_device_provider_initialize(device_, nullptr, nullptr) != VITURE_GLASSES_SUCCESS ||
-        xr_device_provider_start(device_)                        != VITURE_GLASSES_SUCCESS) {
+    int init_rc = xr_device_provider_initialize(device_, nullptr, nullptr);
+    if (init_rc != VITURE_GLASSES_SUCCESS) {
+        std::cerr << "[xr] initialize failed rc=" << init_rc
+                  << " (check USB permissions / udev rules)\n";
+        xr_device_provider_destroy(device_); device_ = nullptr; return false;
+    }
+    int start_rc = xr_device_provider_start(device_);
+    if (start_rc != VITURE_GLASSES_SUCCESS) {
+        std::cerr << "[xr] start failed rc=" << start_rc << "\n";
         xr_device_provider_destroy(device_); device_ = nullptr; return false;
     }
 
