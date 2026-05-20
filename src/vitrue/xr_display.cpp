@@ -105,6 +105,11 @@ bool XRDisplay::init() {
     glfwWindowHint(GLFW_DOUBLEBUFFER,          GLFW_TRUE);
     glfwWindowHint(GLFW_STENCIL_BITS,          8);  // required for NanoVG stencil fills
     glfwWindowHint(GLFW_RESIZABLE,  GLFW_FALSE);
+    // Keep a fullscreen window from minimising itself when it loses input focus.
+    // Without this GLFW auto-iconifies fullscreen windows on focus loss, so on a
+    // desktop WM the window repeatedly drops back to the desktop (and only flashes
+    // when re-focused).  Harmless for windowed mode (hint applies to fullscreen).
+    glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE);
     // do_fullscreen: glasses not found AND fullscreen requested in config
     const bool do_fullscreen = cfg_.fullscreen && !mon;
     glfwWindowHint(GLFW_DECORATED, (cfg_.frameless || do_fullscreen) ? GLFW_FALSE : GLFW_TRUE);
