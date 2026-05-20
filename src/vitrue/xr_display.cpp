@@ -54,12 +54,6 @@ static uint8_t fps_to_display_mode(int fps, int height) {
 // ── SDK callbacks ─────────────────────────────────────────────────────────────
 void XRDisplay::s_state_cb(int id, int val) {
     if (!s_instance_) return;
-    // The glasses changed display mode (often the hardware mode button). Flag a
-    // resync; service_display_mode() restores our SBS mode on the render thread.
-    // We only use this as a trigger — the callback's value is in the
-    // VITURE_DISPLAY_MODE_* namespace, distinct from native_set/get's namespace.
-    if (id == VITURE_CALLBACK_ID_DISPLAY_MODE)
-        s_instance_->mode_resync_pending_.store(true);
     std::lock_guard<std::mutex> lk(s_instance_->cb_mtx_);
     if (s_instance_->state_cb_) s_instance_->state_cb_(id, val);
 }
@@ -254,7 +248,6 @@ void XRDisplay::composite_single(GLuint src_tex, CamSingleAnchor anchor) {
 // Swap the GLFW window buffer and poll events.
 
 void XRDisplay::present() {
-    service_display_mode();
     glfwSwapBuffers(window_);
     glfwPollEvents();
 }
@@ -318,27 +311,7 @@ bool XRDisplay::find_and_connect() {
 void XRDisplay::set_sbs_display_mode() {
     if (!device_) return;
     const int mode = fps_to_display_mode(cfg_.target_fps, cfg_.sbs_height);
-    intended_native_mode_.store(mode);
     xr_device_provider_native_set_display_mode(device_, mode);
-    xr_device_provider_native_switch_dimension(device_, 1);
-}
-
-// Snap the glasses back to our intended SBS mode if they drifted (e.g. the user
-// pressed the Beast's hardware mode button).  Driven by the display-mode
-// callback; the actual USB query/re-assert happens here on the render thread.
-void XRDisplay::service_display_mode() {
-    if (!device_) return;
-    if (!mode_resync_pending_.exchange(false)) return;
-
-    const int want = intended_native_mode_.load();
-    if (want == 0) return;
-    // Compare in the native-mode namespace (same as set), so this never fights
-    // the callback's VITURE_DISPLAY_MODE_* namespace nor loops on itself.
-    const int cur = xr_device_provider_native_get_display_mode(device_);
-    if (cur == want) return;
-    std::cerr << "[xr] display mode drifted (" << cur << " != " << want
-              << ") — restoring SBS\n";
-    xr_device_provider_native_set_display_mode(device_, want);
     xr_device_provider_native_switch_dimension(device_, 1);
 }
 

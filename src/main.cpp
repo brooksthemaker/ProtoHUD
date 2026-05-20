@@ -1707,6 +1707,7 @@ static std::vector<MenuItem> build_menu(
             [mpu9250]{ return mpu9250 && mpu9250->is_running(); },
             [mpu9250](bool v){
                 if (!mpu9250) return;
+                mpu9250->set_enabled(v);   // update gating flag (also persisted on exit)
                 if (v) mpu9250->start(); else mpu9250->stop();
             }),
         toggle("Calibrate",
@@ -4569,10 +4570,12 @@ int main(int argc, char* argv[]) {
             jm["anchor"] = a;
         }
 
-        // Persist MPU-9250 calibration biases so they survive a restart
-        if (mpu9250.is_running() || cfg.contains("mpu9250")) {
+        // Persist MPU-9250 enabled state + calibration biases so the menu's
+        // "Active" toggle and calibration survive a restart.
+        if (mpu9250.is_running() || mpu9250.is_enabled() || cfg.contains("mpu9250")) {
             float bx, by, bz;
             mpu9250.get_mag_bias(bx, by, bz);
+            cfg["mpu9250"]["enabled"]        = mpu9250.is_enabled();
             cfg["mpu9250"]["mag_bias"]       = json::array({ bx, by, bz });
             cfg["mpu9250"]["mount_rotation"] = mpu9250.get_mount_rotation();
             cfg["mpu9250"]["heading_axes"]   = mpu9250.get_heading_axes();

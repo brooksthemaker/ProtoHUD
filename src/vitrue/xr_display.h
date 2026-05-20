@@ -61,12 +61,6 @@ public:
     // Call after composite() and after the ImGui overlay is rendered.
     void present();
 
-    // Re-assert ProtoHUD's intended SBS display mode if the glasses drifted to
-    // a different mode (e.g. the user pressed the Beast's hardware mode button).
-    // Safe to call every frame from the render thread — only does USB work when
-    // a drift has been flagged by the display-mode callback.
-    void service_display_mode();
-
     // Convenience: composite() + present() in one call (no ImGui overlay).
     void submit_frame() { composite(); present(); }
 
@@ -131,10 +125,4 @@ private:
     std::atomic<float>    imu_roll_  { 0.f };
     std::atomic<float>    imu_pitch_ { 0.f };
     std::atomic<float>    imu_yaw_   { 0.f };
-
-    // Display-mode self-healing: the native SBS mode we asked the glasses for,
-    // and a flag the display-mode callback raises when the device reports a
-    // mode change.  service_display_mode() (render thread) snaps it back.
-    std::atomic<int>      intended_native_mode_ { 0 };
-    std::atomic<bool>     mode_resync_pending_  { false };
 };
