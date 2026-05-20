@@ -2770,6 +2770,7 @@ int main(int argc, char* argv[]) {
     xr_cfg.product_id       = jval(jvtr,  "product_id",       0);
     xr_cfg.monitor_index    = jval(jvtr,  "monitor_index",    -1);
     xr_cfg.target_fps       = jval(jdisp, "target_fps",       90);
+    xr_cfg.sbs_height       = jval(jdisp, "sbs_height",       1080);
     xr_cfg.use_beast_camera = jval(jvtr,  "use_beast_camera", true);
     xr_cfg.enable_imu       = jval(jvtr,  "enable_imu",       true);
     xr_cfg.frameless        = jval(jdisp, "frameless",         false);
