@@ -90,6 +90,7 @@ public:
     bool  is_ok()           const { return ok_; }
     int   width()           const { return cfg_.width; }
     int   height()          const { return cfg_.height; }
+    const std::string& model_name() const { return cfg_.model_name; }
     float analogue_gain()   const { return last_analogue_gain_.load(); }
 
 private:

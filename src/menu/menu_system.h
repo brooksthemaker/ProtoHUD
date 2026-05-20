@@ -57,6 +57,18 @@ struct NotifLogConfig {
     NotificationQueue* queue = nullptr;   // pointer into AppState::notifs
 };
 
+// ── Context panel ─────────────────────────────────────────────────────────────
+// A side-panel that opens next to the menu while a particular submenu level is
+// active.  Reusable for visualisations (crop preview, audio meters) or for
+// pure info text.  Renders every frame the level is open — reads live state.
+//
+// Callback contract:
+//   dl     — ImDrawList of the panel window (already opened/sized by MenuSystem).
+//   origin — top-left of the content rect (post-padding).
+//   size   — content rect dimensions.
+using MenuContextPanelDraw =
+    std::function<void(ImDrawList* dl, ImVec2 origin, ImVec2 size)>;
+
 // ── Menu item ─────────────────────────────────────────────────────────────────
 
 struct MenuItem {
@@ -68,6 +80,10 @@ struct MenuItem {
 
     // SUBMENU
     std::vector<MenuItem> children;
+    // Optional context panel that renders next to the menu while this submenu
+    // is the active level.  Only meaningful when type == SUBMENU.
+    std::string           context_panel_title;
+    MenuContextPanelDraw  context_panel_draw;
 
     // TOGGLE
     std::function<bool()>     get_toggle;
@@ -157,10 +173,20 @@ public:
     const std::string& current_label() const;
 
 private:
-    struct Level { std::vector<MenuItem> items; int cursor = 0; };
+    struct Level {
+        std::vector<MenuItem> items;
+        int                   cursor = 0;
+        std::string           panel_title;
+        MenuContextPanelDraw  panel_draw;
+    };
 
-    void push_level(const std::vector<MenuItem>& items);
+    void push_level(const std::vector<MenuItem>& items,
+                    std::string panel_title = std::string(),
+                    MenuContextPanelDraw panel_draw = nullptr);
     void pop_level();
+    void draw_context_panel(const Level& lvl, int screen_w, int screen_h,
+                            float menu_x, float menu_y,
+                            float menu_w, float menu_h);
     void emit_detents();
     void emit_detents_override(int count);
 
