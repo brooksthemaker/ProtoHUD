@@ -30,6 +30,10 @@ public:
     // Persist the current look to the backend's own config (Protoface state.yaml).
     // Default no-op for backends without a save concept (e.g. Teensy/ProtoTracer).
     virtual void save_config() {}
+
+    // Start the backend's program/daemon if it isn't already running.
+    // Default no-op (e.g. the Teensy is always-on hardware).
+    virtual void launch() {}
 };
 
 /**
@@ -58,6 +62,7 @@ public:
     void request_status()                      override { (*active_)->request_status(); }
     void release_control()                     override { (*active_)->release_control(); }
     void save_config()                         override { (*active_)->save_config(); }
+    void launch()                              override { (*active_)->launch(); }
 
     IFaceController* backend() const { return *active_; }
 
