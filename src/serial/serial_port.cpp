@@ -46,8 +46,12 @@ bool SerialPort::open() {
     tty.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
     tty.c_oflag &= ~OPOST;
 
-    tty.c_cc[VMIN]  = 1;
-    tty.c_cc[VTIME] = 1;  // 100ms timeout
+    // VMIN=0, VTIME=1: read() returns after at most 100ms even when no data
+    // arrives, so reader_thread() can observe running_=false and exit promptly
+    // on close().  With VMIN=1, read() blocks until a byte arrives — if the
+    // device goes silent, close()'s thread join() would hang forever.
+    tty.c_cc[VMIN]  = 0;
+    tty.c_cc[VTIME] = 1;  // 100ms read timeout
 
     tcsetattr(fd_, TCSANOW, &tty);
     tcflush(fd_, TCIOFLUSH);
