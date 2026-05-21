@@ -34,6 +34,11 @@ public:
     // Call once per frame on the render (GL) thread, after the eye FBOs are drawn.
     void tick(XRDisplay& xr, AppState& state, const VideoConfig& cfg);
 
+    // Stop the encode worker and finalise any open MP4 writers. Idempotent.
+    // Call during shutdown so teardown is deterministic and happens before the
+    // GL context is destroyed, rather than in the destructor at program exit.
+    void stop();
+
     bool recording() const;
 
 private:
