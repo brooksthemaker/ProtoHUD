@@ -4658,6 +4658,12 @@ int main(int argc, char* argv[]) {
     wd_stop.store(true);
     watchdog.join();
 
+    // Finalise video recording first: stops the encode worker and releases the
+    // OpenCV writers deterministically here, instead of in the recorder's
+    // destructor at return 0 (which runs after the GL context is gone and amid
+    // other destructors — an unordered teardown that crashes on close).
+    video_recorder.stop();
+
     bt_mon.stop();
     ping_mon.stop();
     wifi_mon.stop();

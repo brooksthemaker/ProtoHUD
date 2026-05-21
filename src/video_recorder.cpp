@@ -102,12 +102,17 @@ struct VideoRecorder::Impl {
     Impl() {
         worker = std::thread([this] { worker_loop(); });
     }
-    ~Impl() {
+    ~Impl() { stop(); }
+
+    // Idempotent: stop the encode worker (draining queued frames) and finalise
+    // any open writers. Safe to call more than once and from the dtor.
+    void stop() {
+        bool was_running = false;
         {
             std::lock_guard<std::mutex> lk(qmtx);
-            stop_worker = true;
+            if (!stop_worker) { stop_worker = true; was_running = true; }
         }
-        qcv.notify_all();
+        if (was_running) qcv.notify_all();
         if (worker.joinable()) worker.join();
         close_writers();
     }
@@ -220,6 +225,7 @@ struct VideoRecorder::Impl {
 
 VideoRecorder::VideoRecorder()  : impl_(std::make_unique<Impl>()) {}
 VideoRecorder::~VideoRecorder() = default;
+void VideoRecorder::stop() { if (impl_) impl_->stop(); }
 bool VideoRecorder::recording() const { return impl_->recording; }
 
 void VideoRecorder::tick(XRDisplay& xr, AppState& state, const VideoConfig& cfg) {
