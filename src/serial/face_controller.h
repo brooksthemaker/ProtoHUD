@@ -26,6 +26,10 @@ public:
     virtual void set_menu_item(uint8_t menu_index, uint8_t value) = 0;
     virtual void request_status() = 0;
     virtual void release_control() = 0;
+
+    // Persist the current look to the backend's own config (Protoface state.yaml).
+    // Default no-op for backends without a save concept (e.g. Teensy/ProtoTracer).
+    virtual void save_config() {}
 };
 
 /**
@@ -53,6 +57,7 @@ public:
     void set_menu_item(uint8_t idx, uint8_t v) override { (*active_)->set_menu_item(idx, v); }
     void request_status()                      override { (*active_)->request_status(); }
     void release_control()                     override { (*active_)->release_control(); }
+    void save_config()                         override { (*active_)->save_config(); }
 
     IFaceController* backend() const { return *active_; }
 

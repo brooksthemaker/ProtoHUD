@@ -31,6 +31,7 @@ public:
     void set_menu_item(uint8_t menu_index, uint8_t value) override;
     void request_status()                       override;
     void release_control()                      override;
+    void save_config()                          override;
 
     // Path used to detect whether Protoface is available.
     static bool socket_exists(const std::string& path = "/run/protoface.sock");

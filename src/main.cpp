@@ -1607,7 +1607,75 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── Protoface (shm-fed LED panel) submenu ─────────────────────────────────
-    std::vector<MenuItem> protoface_inner_menu;
+    // Protoface has a different effect_id map and material palette than
+    // ProtoTracer, so it gets a dedicated control set. Commands forward to the
+    // active backend via the FaceProxy — select "Source: Protoface" first.
+    std::vector<MenuItem> pf_effects;
+    {
+        const char* pf_effect_names[] = {
+            "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
+            "Fire","Aurora","Blizzard","Sonar","Plasma","Celebration","Galaxy","Party",
+        };
+        for (uint8_t id = 0; id < 16; id++)
+            pf_effects.push_back(leaf_sel(pf_effect_names[id],
+                [teensy, id, &state]{
+                    teensy->set_effect(id);
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.face.effect_id = id;
+                },
+                [&state, id]{ return state.face.effect_id == id; }));
+    }
+
+    std::vector<MenuItem> pf_colors;
+    pf_colors.push_back(leaf("Teal",   [teensy]{ teensy->set_color(0,220,180);   }));
+    pf_colors.push_back(leaf("Red",    [teensy]{ teensy->set_color(255,0,0);     }));
+    pf_colors.push_back(leaf("Orange", [teensy]{ teensy->set_color(255,110,0);   }));
+    pf_colors.push_back(leaf("Green",  [teensy]{ teensy->set_color(0,255,0);     }));
+    pf_colors.push_back(leaf("Blue",   [teensy]{ teensy->set_color(0,90,255);    }));
+    pf_colors.push_back(leaf("Purple", [teensy]{ teensy->set_color(160,0,255);   }));
+    pf_colors.push_back(leaf("White",  [teensy]{ teensy->set_color(255,255,255); }));
+    pf_colors.push_back(color_picker("Custom Color",
+        [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b); },
+        [&state]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+            return { state.face.r, state.face.g, state.face.b };
+        }));
+
+    std::vector<MenuItem> pf_palette;
+    {
+        struct PFMat { const char* label; uint8_t idx; };
+        const PFMat pf_mats[] = {
+            { "Teal",    0 }, { "Yellow", 1 }, { "Orange", 2 }, { "White", 3 },
+            { "Green",   4 }, { "Purple", 5 }, { "Red",    6 }, { "Blue",  7 },
+            { "Rainbow", 8 }, { "Cool",   9 }, { "Warm",  10 }, { "Black",11 },
+        };
+        for (const auto& m : pf_mats)
+            pf_palette.push_back(leaf_sel(m.label,
+                [teensy, idx = m.idx, &state]{
+                    teensy->set_menu_item(8, idx);
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.face.material_color = idx;
+                },
+                [&state, idx = m.idx]{ return state.face.material_color == idx; }));
+    }
+
+    std::vector<MenuItem> pf_gifs;
+    for (uint8_t i = 0; i < 8; i++) {
+        std::string lbl = (i < gif_names.size() && !gif_names[i].empty())
+                          ? gif_names[i] : "GIF #" + std::to_string(i);
+        pf_gifs.push_back(leaf(lbl, [teensy, i]{ teensy->play_gif(i); }));
+    }
+
+    std::vector<MenuItem> protoface_inner_menu = {
+        submenu("Effects",        std::move(pf_effects)),
+        submenu("Face Color",     std::move(pf_colors)),
+        submenu("Material Color", std::move(pf_palette)),
+        submenu("Animations",     std::move(pf_gifs)),
+        slider("Brightness", 0.f, 255.f, 5.f, "%",
+            [&state]{ return static_cast<float>(state.face.brightness); },
+            [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
+        leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
+        leaf("Release Control",  [teensy]{ teensy->release_control(); }),
+    };
     if (panel_preview_pp)
         protoface_inner_menu.push_back(toggle("Panel Preview",
             [panel_preview_pp]{ return *panel_preview_pp; },
