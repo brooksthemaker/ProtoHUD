@@ -4654,43 +4654,51 @@ int main(int argc, char* argv[]) {
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
+    // Guarantee the process exits even if a teardown step hangs (a thread stuck
+    // in a blocking driver/syscall that .stop()/.join() then waits on forever).
+    // Closing via P/Esc/menu sets state.quit directly with no signal, so unlike
+    // SIGINT/SIGTERM there is otherwise no force-exit and a stuck step freezes
+    // the program.  Exit 0 so the respawn watchdog treats it as a clean stop.
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(8));
+        std::cerr << "[shutdown] cleanup exceeded 8s — forcing clean exit\n";
+        std::_Exit(0);
+    }).detach();
+
+    auto step = [](const char* name) { std::cerr << "[shutdown] " << name << "\n"; };
+
     // Stop watchdog before cleanup so it doesn't fire during intentional shutdown.
-    wd_stop.store(true);
-    watchdog.join();
-
-    // Finalise video recording first: stops the encode worker and releases the
-    // OpenCV writers deterministically here, instead of in the recorder's
-    // destructor at return 0 (which runs after the GL context is gone and amid
-    // other destructors — an unordered teardown that crashes on close).
-    video_recorder.stop();
-
-    bt_mon.stop();
-    ping_mon.stop();
-    wifi_mon.stop();
-    sys_mon.stop();
-    mpu9250.stop();
-    audio.stop();
-    android_mirror.stop();
-    hud.unload();
-    beast_cam.stop();
-    cameras.shutdown();
-    teensy.stop();
-    protoface_ctrl.stop();
-    lora.stop();
-    knob.stop();
-
+    step("watchdog");        wd_stop.store(true); watchdog.join();
+    step("video_recorder");  video_recorder.stop();
+    step("bt_mon");          bt_mon.stop();
+    step("ping_mon");        ping_mon.stop();
+    step("wifi_mon");        wifi_mon.stop();
+    step("sys_mon");         sys_mon.stop();
+    step("mpu9250");         mpu9250.stop();
+    step("audio");           audio.stop();
+    step("android_mirror");  android_mirror.stop();
+    step("hud");             hud.unload();
+    step("beast_cam");       beast_cam.stop();
+    step("cameras");         cameras.shutdown();
+    step("teensy");          teensy.stop();
+    step("protoface");       protoface_ctrl.stop();
+    step("lora");            lora.stop();
+    step("knob");            knob.stop();
+    step("textures");
     if (tex_usb1)    glDeleteTextures(1, &tex_usb1);
     if (tex_usb2)    glDeleteTextures(1, &tex_usb2);
     if (tex_usb3)    glDeleteTextures(1, &tex_usb3);
     if (tex_beast)   glDeleteTextures(1, &tex_beast);
     if (tex_android) glDeleteTextures(1, &tex_android);
 
+    step("post_process");
     pp_fbo_left.destroy();
     pp_fbo_right.destroy();
     pp_prev_left[0].destroy();  pp_prev_left[1].destroy();
     pp_prev_right[0].destroy(); pp_prev_right[1].destroy();
     post_proc.shutdown();
 
-    xr.shutdown();
+    step("xr");              xr.shutdown();
+    step("done");
     return 0;
 }
