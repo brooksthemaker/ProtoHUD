@@ -140,9 +140,13 @@ public:
                               bool active, bool connecting, const OverlayConfig& cfg,
                               float frame_aspect = 9.f / 16.f);
 
-    // Draw floating panel preview (ImGui pass).
+    // Draw floating panel preview (ImGui pass). Positioned like the camera PiPs:
+    // anchor_x/anchor_y are screen fractions (0=left/top .. 1=right/bottom),
+    // pan_x/pan_y a pixel nudge, size_frac the image height as a fraction of the
+    // screen height.
     void draw_panel_preview(unsigned int tex, int screen_w, int screen_h,
-                            float scale = 3.f);
+                            float anchor_x, float anchor_y,
+                            float pan_x, float pan_y, float size_frac);
 
     // Draw system status panel (ImGui pass).
     void draw_sys_panel(const AppState& snap, int w, int h, bool active);

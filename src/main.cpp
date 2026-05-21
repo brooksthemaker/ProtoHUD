@@ -305,6 +305,8 @@ static std::vector<MenuItem> build_menu(
         IFaceController*  fp_option       = nullptr,
         // Panel preview toggle (Protoface shm → ProtoHUD ImGui window)
         bool*             panel_preview_pp = nullptr,
+        // Panel preview placement (anchor/nudge/size, like the camera PiPs)
+        OverlayConfig*    protoface_preview_cfg = nullptr,
         std::string       map_dir         = "/home/user/Pictures/protohud/maps",
         // Eye source selection (render-thread only, no mutex needed)
         EyeSource* left_eye_src  = nullptr,
@@ -1677,10 +1679,23 @@ static std::vector<MenuItem> build_menu(
         leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
         leaf("Release Control",  [teensy]{ teensy->release_control(); }),
     };
+    // "Start Protoface" first: launch the daemon (if not running) and make it the
+    // active source. Targets the Protoface backend directly (not the proxy).
+    if (fp_option)
+        protoface_inner_menu.insert(protoface_inner_menu.begin(),
+            leaf("Start Protoface", [fp_option, active_face_pp]{
+                fp_option->launch();
+                if (active_face_pp) *active_face_pp = fp_option;
+            }));
     if (panel_preview_pp)
         protoface_inner_menu.push_back(toggle("Panel Preview",
             [panel_preview_pp]{ return *panel_preview_pp; },
             [panel_preview_pp](bool v){ *panel_preview_pp = v; }));
+    if (protoface_preview_cfg) {
+        protoface_inner_menu.push_back(submenu("Preview Position",
+            make_position_items(protoface_preview_cfg)));
+        protoface_inner_menu.push_back(make_size_slider("Preview Size", protoface_preview_cfg));
+    }
 
     // ── Face Display root: Source picker (radios) + per-backend submenus ─────
     std::vector<MenuItem> face_display_menu;
@@ -2989,6 +3004,10 @@ int main(int argc, char* argv[]) {
     AndroidMirrorConfig and_cfg;
     OverlayConfig       pip_overlay_cfg1, pip_overlay_cfg2, pip_overlay_cfg3;
     OverlayConfig       android_overlay_cfg;
+    OverlayConfig       protoface_preview_cfg;          // LED preview anchor/nudge/size
+    protoface_preview_cfg.anchor_x = 1.0f;              // default: top-right (prior behaviour)
+    protoface_preview_cfg.anchor_y = 0.0f;
+    protoface_preview_cfg.size     = 0.15f;
 
     if (cfg.contains("pip")) {
         auto& jpip = cfg["pip"];
@@ -3552,6 +3571,7 @@ int main(int argc, char* argv[]) {
                                static_cast<IFaceController*>(&teensy),
                                static_cast<IFaceController*>(&protoface_ctrl),
                                &panel_preview_enabled,
+                               &protoface_preview_cfg,
                                cfg_map_dir,
                                &left_eye_src, &right_eye_src));
     menu_ptr = &menu;
@@ -4512,7 +4532,10 @@ int main(int argc, char* argv[]) {
         if (panel_preview_enabled) {
             GLuint panel_tex = 0;
             protoface_ctrl.get_frame_texture(panel_tex);
-            hud.draw_panel_preview(panel_tex, xr.eye_width(), xr.eye_height());
+            hud.draw_panel_preview(panel_tex, xr.eye_width(), xr.eye_height(),
+                                   protoface_preview_cfg.anchor_x, protoface_preview_cfg.anchor_y,
+                                   protoface_preview_cfg.pan_x,    protoface_preview_cfg.pan_y,
+                                   protoface_preview_cfg.size);
         }
 
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
