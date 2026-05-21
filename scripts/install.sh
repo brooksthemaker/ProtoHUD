@@ -302,6 +302,13 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", \
 # USB cameras — readable by video group
 SUBSYSTEM=="video4linux", MODE="0660", GROUP="video"
 
+# VITURE glasses (Beast/Luma) — control + IMU over USB HID / libusb (VID 0x35ca).
+# The SDK opens the device directly (hidraw and/or libusb), so the hidraw nodes
+# and the raw usb device must be accessible to the running user; without this
+# the glasses are recognized but every control command fails (no access).
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="35ca", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="35ca", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+
 # GPIO — readable by gpio group (libgpiod)
 SUBSYSTEM=="gpio", MODE="0660", GROUP="gpio"
 EOF
