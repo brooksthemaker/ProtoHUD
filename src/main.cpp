@@ -41,6 +41,7 @@
 #include "net/bt_monitor.h"
 #include "crash_reporter.h"
 #include "capture.h"
+#include "video_recorder.h"
 #include "qr_scanner.h"
 #include "splash.h"
 
@@ -751,6 +752,23 @@ static std::vector<MenuItem> build_menu(
         leaf("Both Eyes",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Stereo; }),
     };
 
+    std::vector<MenuItem> video_camera_menu = {
+        leaf_sel("Left",  [&state]{ std::lock_guard lk(state.mtx); state.video_camera = VideoCamera::Left;  },
+                          [&state]{ return state.video_camera == VideoCamera::Left;  }),
+        leaf_sel("Right", [&state]{ std::lock_guard lk(state.mtx); state.video_camera = VideoCamera::Right; },
+                          [&state]{ return state.video_camera == VideoCamera::Right; }),
+        leaf_sel("Both",  [&state]{ std::lock_guard lk(state.mtx); state.video_camera = VideoCamera::Both;  },
+                          [&state]{ return state.video_camera == VideoCamera::Both;  }),
+    };
+
+    std::vector<MenuItem> video_menu = {
+        toggle("Record",
+            [&state]{ return state.video_recording; },
+            [&state](bool v){ std::lock_guard lk(state.mtx);
+                              state.video_request = v ? VideoRequest::Start : VideoRequest::Stop; }),
+        submenu("Camera", std::move(video_camera_menu)),
+    };
+
     std::vector<MenuItem> qr_menu = {
         toggle("Main Cameras", [&state]{ return state.qr_scan_main; },
                                [&state](bool v){ state.qr_scan_main = v; }),
@@ -1009,6 +1027,7 @@ static std::vector<MenuItem> build_menu(
         submenu("Low-Light Mode",   std::move(nv_menu)),
         submenu("Autofocus Both",   std::move(af_both_menu)),
         submenu("Capture Photo",    std::move(capture_menu)),
+        submenu("Record Video",     std::move(video_menu)),
         submenu("QR Scan",          std::move(qr_menu)),
     };
 
@@ -3046,6 +3065,20 @@ int main(int argc, char* argv[]) {
         { auto v = js.value("map_dir",   std::string{}); if (!v.empty()) cfg_map_dir   = v; }
         cfg_ssh_port     = js.value("ssh_port",   cfg_ssh_port);
     }
+
+    // Video recording config (see "video" section of config.json).
+    VideoConfig cfg_video;
+    cfg_video.dir = home_dir + "/Videos/protohud";
+    if (cfg.contains("video")) {
+        auto& jv      = cfg["video"];
+        { auto v = jv.value("dir", std::string{}); if (!v.empty()) cfg_video.dir = v; }
+        cfg_video.fps    = jv.value("fps",    cfg_video.fps);
+        cfg_video.fourcc = jv.value("fourcc", cfg_video.fourcc);
+        std::string camsel = jv.value("camera", std::string("left"));
+        state.video_camera = (camsel == "right") ? VideoCamera::Right
+                           : (camsel == "both")  ? VideoCamera::Both
+                                                 : VideoCamera::Left;
+    }
     // Ensure the maps directory exists
     { std::error_code ec; std::filesystem::create_directories(cfg_map_dir, ec); }
     state.ssh.port = cfg_ssh_port;
@@ -3537,6 +3570,14 @@ int main(int argc, char* argv[]) {
     });
 
     knob.on_button([&menu, &hud, &state](uint8_t btn, uint8_t ev) {
+        if (ev == KnobButtonEvent::DOUBLE_TAP) {
+            // Double-tap BACK = start/stop video recording (Start toggles).
+            if (btn == KnobButton::BACK) {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.video_request = VideoRequest::Start;
+            }
+            return;
+        }
         if (ev != KnobButtonEvent::PRESS && ev != KnobButtonEvent::LONG_PRESS) return;
         if (btn == KnobButton::ENCODER) {
             if (ev == KnobButtonEvent::LONG_PRESS) {
@@ -3712,6 +3753,9 @@ int main(int argc, char* argv[]) {
     double m_press_t    = -1.0;
     bool   m_long_fired = false;
 
+    // Video recorder — driven once per frame from the render thread.
+    VideoRecorder video_recorder;
+
     double prev_time = glfwGetTime();
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
@@ -3764,6 +3808,12 @@ int main(int argc, char* argv[]) {
         if (key_pressed(ImGuiKey_C)) {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.capture_request = CaptureRequest::Stereo;
+        }
+        // V — start/stop video recording (same flow as the assigned button's
+        // double-tap). Start toggles: starts when idle, stops when recording.
+        if (key_pressed(ImGuiKey_V)) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.video_request = VideoRequest::Start;
         }
         // F — toggle FPS overlay
         if (key_pressed(ImGuiKey_F)) fps_overlay_active = !fps_overlay_active;
@@ -4308,6 +4358,10 @@ int main(int argc, char* argv[]) {
         // Reads directly from the camera eye FBOs (no HUD). Async PNG write.
         if (snap.capture_request != CaptureRequest::None)
             do_capture(snap.capture_request, xr, cfg_photo_dir, state);
+
+        // ── Video recording ───────────────────────────────────────────────────
+        // Same clean eye-FBO source as photos; encodes on a worker thread.
+        video_recorder.tick(xr, state, cfg_video);
 
         // ── QR scan — main cameras ────────────────────────────────────────────
         // Periodic glReadPixels from the left eye FBO (rate-limited to 2 Hz by

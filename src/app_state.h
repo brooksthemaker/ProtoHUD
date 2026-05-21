@@ -354,6 +354,12 @@ struct NotificationQueue {
     }
 };
 
+// ── Video recording control ───────────────────────────────────────────────────
+// Requests are posted by input handlers / toast actions (any thread) and consumed
+// by the render thread, which owns the VideoRecorder. Start acts as a toggle.
+enum class VideoRequest : uint8_t { None, Start, Stop, Pause, Resume };
+enum class VideoCamera  : uint8_t { Left, Right, Both };
+
 // ── Master state ──────────────────────────────────────────────────────────────
 // Mutable fields are updated from serial/camera threads and read by the
 // render thread.  Callers must hold the mutex for any multi-field access.
@@ -398,6 +404,14 @@ struct AppState {
 
     // Photo capture: set by menu or GPIO long-press; consumed by the render thread.
     CaptureRequest capture_request = CaptureRequest::None;
+
+    // Video recording: video_request is posted by input/toast handlers and consumed
+    // by the render thread's VideoRecorder; video_recording/paused are status mirrors
+    // written by the recorder for the menu/HUD to read.
+    VideoRequest video_request   = VideoRequest::None;
+    VideoCamera  video_camera    = VideoCamera::Left;
+    bool         video_recording = false;
+    bool         video_paused    = false;
 
     // QR / barcode scanning (requires libzbar-dev).
     // qr_scan_main: periodic glReadPixels from OWLsight FBO → ZBar.
