@@ -307,6 +307,8 @@ static std::vector<MenuItem> build_menu(
         bool*             panel_preview_pp = nullptr,
         // Panel preview placement (anchor/nudge/size, like the camera PiPs)
         OverlayConfig*    protoface_preview_cfg = nullptr,
+        // Panel preview view mode: 0=whole face, 1=left half, 2=right half
+        int*              protoface_preview_view_pp = nullptr,
         std::string       map_dir         = "/home/user/Pictures/protohud/maps",
         // Eye source selection (render-thread only, no mutex needed)
         EyeSource* left_eye_src  = nullptr,
@@ -1696,6 +1698,14 @@ static std::vector<MenuItem> build_menu(
             make_position_items(protoface_preview_cfg)));
         protoface_inner_menu.push_back(make_size_slider("Preview Size", protoface_preview_cfg));
     }
+    if (protoface_preview_view_pp) {
+        int* vp = protoface_preview_view_pp;
+        protoface_inner_menu.push_back(submenu("Preview View", std::vector<MenuItem>{
+            leaf_sel("Whole Face", [vp]{ *vp = 0; }, [vp]{ return *vp == 0; }),
+            leaf_sel("Left Half",  [vp]{ *vp = 1; }, [vp]{ return *vp == 1; }),
+            leaf_sel("Right Half", [vp]{ *vp = 2; }, [vp]{ return *vp == 2; }),
+        }));
+    }
 
     // ── Face Display root: Source picker (radios) + per-backend submenus ─────
     std::vector<MenuItem> face_display_menu;
@@ -3008,6 +3018,7 @@ int main(int argc, char* argv[]) {
     protoface_preview_cfg.anchor_x = 1.0f;              // default: top-right (prior behaviour)
     protoface_preview_cfg.anchor_y = 0.0f;
     protoface_preview_cfg.size     = 0.15f;
+    int protoface_preview_view = 0;                     // 0=whole face, 1=left, 2=right
 
     if (cfg.contains("pip")) {
         auto& jpip = cfg["pip"];
@@ -3572,6 +3583,7 @@ int main(int argc, char* argv[]) {
                                static_cast<IFaceController*>(&protoface_ctrl),
                                &panel_preview_enabled,
                                &protoface_preview_cfg,
+                               &protoface_preview_view,
                                cfg_map_dir,
                                &left_eye_src, &right_eye_src));
     menu_ptr = &menu;
@@ -4532,10 +4544,10 @@ int main(int argc, char* argv[]) {
         if (panel_preview_enabled) {
             GLuint panel_tex = 0;
             protoface_ctrl.get_frame_texture(panel_tex);
-            hud.draw_panel_preview(panel_tex, xr.eye_width(), xr.eye_height(),
+            hud.draw_panel_preview(panel_tex, xr.display_width(), xr.display_height(),
                                    protoface_preview_cfg.anchor_x, protoface_preview_cfg.anchor_y,
                                    protoface_preview_cfg.pan_x,    protoface_preview_cfg.pan_y,
-                                   protoface_preview_cfg.size);
+                                   protoface_preview_cfg.size,     protoface_preview_view);
         }
 
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).

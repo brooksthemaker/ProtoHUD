@@ -684,15 +684,19 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
 
 void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_h,
                                      float anchor_x, float anchor_y,
-                                     float pan_x, float pan_y, float size_frac) {
+                                     float pan_x, float pan_y, float size_frac,
+                                     int view) {
     if (tex == 0) return;
 
     ImGui::SetCurrentContext(ctx_);
 
-    // Image size: height is a fraction of the screen; width keeps the LED canvas
-    // aspect (ShmFrameReader::W / ::H).
-    const float aspect = static_cast<float>(ShmFrameReader::W) /
-                         static_cast<float>(ShmFrameReader::H);
+    // view: 0 = whole canvas, 1 = left half, 2 = right half. A half crops one
+    // panel (one face) via UVs; width and aspect halve to match.
+    const bool   half   = (view == 1 || view == 2);
+    const float  wpx    = static_cast<float>(ShmFrameReader::W) * (half ? 0.5f : 1.0f);
+    const float  aspect = wpx / static_cast<float>(ShmFrameReader::H);
+    const ImVec2 uv0 = (view == 2) ? ImVec2(0.5f, 0.f) : ImVec2(0.f, 0.f);
+    const ImVec2 uv1 = (view == 1) ? ImVec2(0.5f, 1.f) : ImVec2(1.f, 1.f);
     float ph = size_frac * static_cast<float>(screen_h);
     if (ph < 8.f) ph = 8.f;
     const float pw = ph * aspect;
@@ -729,7 +733,7 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_
     const ImVec2 img0 = {p.x + pad, p.y + pad};
     const ImVec2 img1 = {p.x + pad + pw, p.y + pad + ph};
     dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-                 img0, img1);
+                 img0, img1, uv0, uv1);
 
     // Accent border
     dl->AddRect({p.x, p.y}, {p.x + win_w, p.y + win_h},
