@@ -115,15 +115,16 @@ void ProtoFaceController::save_config() {
 }
 
 void ProtoFaceController::launch() {
-    // Best-effort start of the Protoface Python daemon if it isn't already
-    // running. Adjust the path/command for your install: this assumes the
-    // checkout is at ~/protohud/Protoface and python3 + Piomatter are on PATH.
-    // NOTE: if ProtoHUD runs as root, $HOME is /root — change to the absolute
-    // user path (e.g. /home/<user>/protohud/Protoface) in that case.
+    // Don't double-launch: if Protoface is already up, its socket exists.
+    // (Guarding here in C++ instead of a shell `pgrep` — the old pgrep pattern
+    //  matched the very command line running it, so it never launched.)
+    if (socket_exists(socket_path_)) return;
+    // Best-effort start of the Protoface Python daemon. Assumes the checkout is
+    // at ~/protohud/Protoface and python3 has Piomatter. NOTE: if ProtoHUD runs
+    // as root, $HOME is /root — change to the absolute user path then.
     std::system(
-        "pgrep -f 'Protoface/run.py' >/dev/null 2>&1 || "
-        "( cd \"$HOME/protohud/Protoface\" && "
-        "nohup python3 run.py >/tmp/protoface.log 2>&1 & )");
+        "cd \"$HOME/protohud/Protoface\" && "
+        "nohup python3 run.py >/tmp/protoface.log 2>&1 &");
 }
 
 // ── Static helper ─────────────────────────────────────────────────────────────
