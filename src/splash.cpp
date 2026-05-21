@@ -53,36 +53,40 @@ void SplashScreen::draw_eye(ImDrawList* dl,
     constexpr float RING_R = 96.f;
 
     // ── Spinning dots ring ────────────────────────────────────────────────────
-    // Subtle track circle
-    dl->AddCircle({cx, cy}, RING_R, IM_COL32(0, 100, 80, 30), 64, 1.5f);
+    // Skipped entirely when show_ring is disabled (useful when the logo
+    // covers the area the ring would otherwise occupy).
+    if (cfg_.show_ring) {
+        // Subtle track circle
+        dl->AddCircle({cx, cy}, RING_R, IM_COL32(0, 100, 80, 30), 64, 1.5f);
 
-    if (cfg_.animated) {
-        constexpr int   N_DOTS = 8;
-        constexpr float DOT_R  = 5.f;
+        if (cfg_.animated) {
+            constexpr int   N_DOTS = 8;
+            constexpr float DOT_R  = 5.f;
 
-        for (int i = 0; i < N_DOTS; ++i) {
-            float angle = (i * 2.f * kPi / N_DOTS) + t * 1.5f;
-            float dx = cx + RING_R * std::cos(angle);
-            float dy = cy + RING_R * std::sin(angle);
+            for (int i = 0; i < N_DOTS; ++i) {
+                float angle = (i * 2.f * kPi / N_DOTS) + t * 1.5f;
+                float dx = cx + RING_R * std::cos(angle);
+                float dy = cy + RING_R * std::sin(angle);
 
-            // Phase: how close is this dot to being the "lead" (0 = lead, 1 = tail)
-            float norm_i   = static_cast<float>(i) / N_DOTS;
-            float lead_pos = fmod(t * 1.5f / (2.f * kPi), 1.f);
-            float diff     = fmod(norm_i - lead_pos + 1.f, 1.f);
-            float brightness = std::pow(1.f - diff, 3.5f);
+                // Phase: how close is this dot to being the "lead" (0 = lead, 1 = tail)
+                float norm_i   = static_cast<float>(i) / N_DOTS;
+                float lead_pos = fmod(t * 1.5f / (2.f * kPi), 1.f);
+                float diff     = fmod(norm_i - lead_pos + 1.f, 1.f);
+                float brightness = std::pow(1.f - diff, 3.5f);
 
-            uint8_t a  = static_cast<uint8_t>(30.f + brightness * 225.f);
-            float   r  = DOT_R * (0.45f + brightness * 0.8f);
-            dl->AddCircleFilled({dx, dy}, r + 5.f, IM_COL32(0, 220, 180, static_cast<uint8_t>(a / 5)));
-            dl->AddCircleFilled({dx, dy}, r,        IM_COL32(0, 220, 180, a));
+                uint8_t a  = static_cast<uint8_t>(30.f + brightness * 225.f);
+                float   r  = DOT_R * (0.45f + brightness * 0.8f);
+                dl->AddCircleFilled({dx, dy}, r + 5.f, IM_COL32(0, 220, 180, static_cast<uint8_t>(a / 5)));
+                dl->AddCircleFilled({dx, dy}, r,        IM_COL32(0, 220, 180, a));
+            }
+        } else {
+            // Static ring
+            dl->AddCircle({cx, cy}, RING_R, COL_DIM, 64, 1.5f);
         }
-    } else {
-        // Static ring
-        dl->AddCircle({cx, cy}, RING_R, COL_DIM, 64, 1.5f);
     }
 
     // ── Logo or procedural hexagon mark ───────────────────────────────────────
-    constexpr float LOGO_HALF = 52.f;
+    const float LOGO_HALF = std::max(8.f, cfg_.logo_size_px * 0.5f);
     if (logo_tex_) {
         float aspect = logo_w_ > 0 ? static_cast<float>(logo_w_) / static_cast<float>(logo_h_) : 1.f;
         float lw, lh;

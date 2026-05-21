@@ -26,6 +26,7 @@ struct XRConfig {
     int  product_id      = 0;
     int  monitor_index   = -1;   // -1 = auto (prefer 3840-wide monitor)
     int  target_fps      = 90;
+    int  sbs_height      = 1080; // SBS panel height: 1080 or 1200 (Beast native panel)
     bool use_beast_camera = true;
     bool enable_imu       = true;
     bool frameless        = false;  // remove OS window decorations (windowed mode only)

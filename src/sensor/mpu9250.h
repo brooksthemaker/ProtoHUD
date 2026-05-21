@@ -59,6 +59,12 @@ public:
     void stop();
     bool is_running() const { return running_.load(); }
 
+    // Enabled flag (gates start()).  Toggling the menu "Active" item updates
+    // this so the change can be persisted to config on exit, and so start()
+    // works at runtime even when the config loaded with the compass disabled.
+    void set_enabled(bool e) { cfg_.enabled = e; }
+    bool is_enabled() const  { return cfg_.enabled; }
+
     // ── Calibration ──────────────────────────────────────────────────────────
     // Rotate the sensor through 360° on each axis while calibrating.
     // end_calibration() computes bias from the accumulated min/max envelope.

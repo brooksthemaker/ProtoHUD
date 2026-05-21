@@ -36,7 +36,14 @@ static int scan_usb_for_viture() {
     return 0;
 }
 
-static uint8_t fps_to_display_mode(int fps) {
+static uint8_t fps_to_display_mode(int fps, int height) {
+    if (height >= 1200) {
+        switch (fps) {
+            case 60:  return VITURE_NATIVE_DISPLAY_MODE_3D_SBS_3840_1200_60HZ;
+            case 120: return VITURE_NATIVE_DISPLAY_MODE_3D_SBS_3840_1200_120HZ;
+            default:  return VITURE_NATIVE_DISPLAY_MODE_3D_SBS_3840_1200_90HZ;
+        }
+    }
     switch (fps) {
         case 60:  return VITURE_NATIVE_DISPLAY_MODE_3D_SBS_3840_1080_60HZ;
         case 120: return VITURE_NATIVE_DISPLAY_MODE_3D_SBS_3840_1080_120HZ;
@@ -98,6 +105,11 @@ bool XRDisplay::init() {
     glfwWindowHint(GLFW_DOUBLEBUFFER,          GLFW_TRUE);
     glfwWindowHint(GLFW_STENCIL_BITS,          8);  // required for NanoVG stencil fills
     glfwWindowHint(GLFW_RESIZABLE,  GLFW_FALSE);
+    // Keep a fullscreen window from minimising itself when it loses input focus.
+    // Without this GLFW auto-iconifies fullscreen windows on focus loss, so on a
+    // desktop WM the window repeatedly drops back to the desktop (and only flashes
+    // when re-focused).  Harmless for windowed mode (hint applies to fullscreen).
+    glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE);
     // do_fullscreen: glasses not found AND fullscreen requested in config
     const bool do_fullscreen = cfg_.fullscreen && !mon;
     glfwWindowHint(GLFW_DECORATED, (cfg_.frameless || do_fullscreen) ? GLFW_FALSE : GLFW_TRUE);
@@ -276,7 +288,17 @@ void XRDisplay::shutdown() {
 // ── VITURE SDK init ───────────────────────────────────────────────────────────
 bool XRDisplay::find_and_connect() {
     product_id_ = (cfg_.product_id != 0) ? cfg_.product_id : scan_usb_for_viture();
-    if (product_id_ == 0) return false;
+    if (product_id_ == 0) {
+        std::cerr << "[xr] no VITURE control device found on USB "
+                     "(scan_usb_for_viture matched no valid product id). "
+                     "Glasses controls (brightness, 3D, dimming, recenter) will be "
+                     "inert. Set vitrue.product_id in config to force a PID, and "
+                     "check udev permissions for the Viture USB device.\n";
+        return false;
+    }
+    if (cfg_.product_id != 0)
+        std::cout << "[xr] using configured product_id 0x"
+                  << std::hex << product_id_ << std::dec << "\n";
 
     char market[64] = {}; int mlen = sizeof(market);
     xr_device_provider_get_market_name(product_id_, market, &mlen);
@@ -285,10 +307,18 @@ bool XRDisplay::find_and_connect() {
 
     xr_device_provider_set_log_level(LOG_LEVEL_ERROR);
     device_ = xr_device_provider_create(product_id_);
-    if (!device_) { std::cerr << "[xr] create failed\n"; return false; }
+    if (!device_) { std::cerr << "[xr] xr_device_provider_create failed for PID 0x"
+                              << std::hex << product_id_ << std::dec << "\n"; return false; }
 
-    if (xr_device_provider_initialize(device_, nullptr, nullptr) != VITURE_GLASSES_SUCCESS ||
-        xr_device_provider_start(device_)                        != VITURE_GLASSES_SUCCESS) {
+    int init_rc = xr_device_provider_initialize(device_, nullptr, nullptr);
+    if (init_rc != VITURE_GLASSES_SUCCESS) {
+        std::cerr << "[xr] initialize failed rc=" << init_rc
+                  << " (check USB permissions / udev rules)\n";
+        xr_device_provider_destroy(device_); device_ = nullptr; return false;
+    }
+    int start_rc = xr_device_provider_start(device_);
+    if (start_rc != VITURE_GLASSES_SUCCESS) {
+        std::cerr << "[xr] start failed rc=" << start_rc << "\n";
         xr_device_provider_destroy(device_); device_ = nullptr; return false;
     }
 
@@ -303,8 +333,19 @@ bool XRDisplay::find_and_connect() {
 
 void XRDisplay::set_sbs_display_mode() {
     if (!device_) return;
-    xr_device_provider_native_set_display_mode(device_, fps_to_display_mode(cfg_.target_fps));
-    xr_device_provider_native_switch_dimension(device_, 1);
+    // The Beast boots in bypass mode, where native_set_display_mode /
+    // switch_dimension are rejected.  Enter native mode first.  On devices
+    // without native-DOF support this returns an error, which we ignore.
+    int nm_rc = xr_device_provider_native_set_mode(device_, 1);
+    if (nm_rc != VITURE_GLASSES_SUCCESS)
+        std::cerr << "[xr] native_set_mode(1) rc=" << nm_rc
+                  << " (expected on non-native-DOF devices)\n";
+
+    const int mode = fps_to_display_mode(cfg_.target_fps, cfg_.sbs_height);
+    int dm_rc = xr_device_provider_native_set_display_mode(device_, mode);
+    int sd_rc = xr_device_provider_native_switch_dimension(device_, 1);
+    std::cerr << "[xr] native display_mode=0x" << std::hex << mode << std::dec
+              << " set_rc=" << dm_rc << " switch_dim_rc=" << sd_rc << "\n";
 }
 
 void XRDisplay::open_imu() {
