@@ -9,14 +9,14 @@
 
 /**
  * Protoface backend: talks to the Protoface Python daemon via a Unix domain
- * socket at /run/protoface.sock.  Each command is a newline-terminated JSON
+ * socket at /tmp/protoface.sock.  Each command is a newline-terminated JSON
  * object: {"cmd":"set_effect","effect_id":3}
  *
  * Connection is kept alive; auto-reconnects on drop.
  */
 class ProtoFaceController : public IFaceController {
 public:
-    explicit ProtoFaceController(const std::string& socket_path = "/run/protoface.sock");
+    explicit ProtoFaceController(const std::string& socket_path = "/tmp/protoface.sock");
     ~ProtoFaceController() override;
 
     bool start()           override;
@@ -35,7 +35,7 @@ public:
     void launch()                               override;
 
     // Path used to detect whether Protoface is available.
-    static bool socket_exists(const std::string& path = "/run/protoface.sock");
+    static bool socket_exists(const std::string& path = "/tmp/protoface.sock");
 
     // Panel preview — polls shared memory and uploads to GL texture if a new
     // frame is available.  Returns true when the texture was updated.
