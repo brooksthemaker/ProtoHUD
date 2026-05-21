@@ -115,10 +115,22 @@ void ProtoFaceController::save_config() {
 }
 
 void ProtoFaceController::launch() {
-    // Don't double-launch: if Protoface is already up, its socket exists.
-    // (Guarding here in C++ instead of a shell `pgrep` — the old pgrep pattern
-    //  matched the very command line running it, so it never launched.)
-    if (socket_exists(socket_path_)) return;
+    // Don't double-launch — but probe with an ACTUAL connect, not a file check:
+    // a pkill'd Protoface leaves a dead /tmp/protoface.sock behind, and a mere
+    // existence check would see that stale file and wrongly refuse to launch
+    // (which is why "manual works, button doesn't"). connect() only succeeds if
+    // something is really listening.
+    {
+        int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd >= 0) {
+            sockaddr_un addr{};
+            addr.sun_family = AF_UNIX;
+            std::strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);
+            bool alive = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+            ::close(fd);
+            if (alive) return;   // already running
+        }
+    }
     // Best-effort start of the Protoface Python daemon. Assumes the checkout is
     // at ~/protohud/Protoface and python3 has Piomatter. NOTE: if ProtoHUD runs
     // as root, $HOME is /root — change to the absolute user path then.
