@@ -333,9 +333,19 @@ bool XRDisplay::find_and_connect() {
 
 void XRDisplay::set_sbs_display_mode() {
     if (!device_) return;
+    // The Beast boots in bypass mode, where native_set_display_mode /
+    // switch_dimension are rejected.  Enter native mode first.  On devices
+    // without native-DOF support this returns an error, which we ignore.
+    int nm_rc = xr_device_provider_native_set_mode(device_, 1);
+    if (nm_rc != VITURE_GLASSES_SUCCESS)
+        std::cerr << "[xr] native_set_mode(1) rc=" << nm_rc
+                  << " (expected on non-native-DOF devices)\n";
+
     const int mode = fps_to_display_mode(cfg_.target_fps, cfg_.sbs_height);
-    xr_device_provider_native_set_display_mode(device_, mode);
-    xr_device_provider_native_switch_dimension(device_, 1);
+    int dm_rc = xr_device_provider_native_set_display_mode(device_, mode);
+    int sd_rc = xr_device_provider_native_switch_dimension(device_, 1);
+    std::cerr << "[xr] native display_mode=0x" << std::hex << mode << std::dec
+              << " set_rc=" << dm_rc << " switch_dim_rc=" << sd_rc << "\n";
 }
 
 void XRDisplay::open_imu() {
