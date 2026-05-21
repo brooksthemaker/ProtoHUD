@@ -2788,6 +2788,11 @@ static void render_eye_fbo(gl::Fbo& fbo,
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
+    // Writing to a socket/pipe whose peer has gone away (Protoface restarted, a
+    // serial device unplugged, etc.) must not kill the whole HUD — ignore SIGPIPE
+    // and handle the -1/EPIPE return at each call site.
+    std::signal(SIGPIPE, SIG_IGN);
+
     // Resolve resource paths relative to the binary's own directory so the app
     // works from any working directory (e.g. run via symlink from project root).
     namespace fs = std::filesystem;

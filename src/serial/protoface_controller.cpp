@@ -204,7 +204,10 @@ bool ProtoFaceController::send(const std::string& json) {
     if (fd_ < 0) return false;
 
     std::string msg = json + "\n";
-    ssize_t sent = ::write(fd_, msg.c_str(), msg.size());
+    // MSG_NOSIGNAL: writing to a peer that has gone away returns -1/EPIPE
+    // instead of raising SIGPIPE (which would crash the whole HUD). This happens
+    // routinely when Protoface is restarted and our connection goes stale.
+    ssize_t sent = ::send(fd_, msg.c_str(), msg.size(), MSG_NOSIGNAL);
     if (sent < 0) {
         ::close(fd_);
         fd_ = -1;
