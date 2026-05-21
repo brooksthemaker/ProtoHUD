@@ -34,6 +34,10 @@ public:
     // Start the backend's program/daemon if it isn't already running.
     // Default no-op (e.g. the Teensy is always-on hardware).
     virtual void launch() {}
+
+    // Restart the backend's program (stop the running one, then launch fresh).
+    // Default no-op.
+    virtual void restart() {}
 };
 
 /**
@@ -63,6 +67,7 @@ public:
     void release_control()                     override { (*active_)->release_control(); }
     void save_config()                         override { (*active_)->save_config(); }
     void launch()                              override { (*active_)->launch(); }
+    void restart()                             override { (*active_)->restart(); }
 
     IFaceController* backend() const { return *active_; }
 

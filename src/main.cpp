@@ -1681,12 +1681,18 @@ static std::vector<MenuItem> build_menu(
     };
     // "Start Protoface" first: launch the daemon (if not running) and make it the
     // active source. Targets the Protoface backend directly (not the proxy).
-    if (fp_option)
+    if (fp_option) {
         protoface_inner_menu.insert(protoface_inner_menu.begin(),
             leaf("Start Protoface", [fp_option, active_face_pp]{
                 fp_option->launch();
                 if (active_face_pp) *active_face_pp = fp_option;
             }));
+        protoface_inner_menu.insert(protoface_inner_menu.begin() + 1,
+            leaf("Restart Protoface", [fp_option, active_face_pp]{
+                fp_option->restart();
+                if (active_face_pp) *active_face_pp = fp_option;
+            }));
+    }
     if (panel_preview_pp)
         protoface_inner_menu.push_back(toggle("Panel Preview",
             [panel_preview_pp]{ return *panel_preview_pp; },
