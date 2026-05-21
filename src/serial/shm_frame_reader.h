@@ -7,13 +7,16 @@
  * Maps /dev/shm/protoface_frame and polls for new frames written by the
  * Protoface Python process.
  *
- * Shared memory layout (24577 bytes for the default 128×64 canvas):
+ * Shared memory layout (12289 bytes for the current 128×32 canvas):
  *   byte 0           uint8  sequence counter — wraps at 256; reader detects
  *                           new frames by comparing against last seen value
- *   bytes 1-24576    uint8  W×H RGB pixel data, row-major (R G B R G B ...)
+ *   bytes 1-12288    uint8  W×H RGB pixel data, row-major (R G B R G B ...)
  *
- * W and H match the Protoface logical canvas (panel_width × chain_length,
- * panel_height × parallel).  For the 4-panel 2×2 layout that is 128×64.
+ * W and H MUST match the Protoface logical canvas
+ * (panel_width × chain_length, panel_height × parallel). The current
+ * single-mirrored-face layout (2 panels on port 1) is 128×32. If you change
+ * the panel layout in Protoface's config.yaml, update H/W below to match, or
+ * the preview will read the wrong number of bytes and look garbled.
  *
  * Call open() once after Protoface starts.  Call poll() each frame; it
  * returns true and updates the GL texture when a new frame is available.
@@ -22,8 +25,8 @@
 class ShmFrameReader {
 public:
     static constexpr int   W            = 128;
-    static constexpr int   H            = 64;
-    static constexpr int   SHM_SIZE     = 1 + W * H * 3;   // 24577 bytes
+    static constexpr int   H            = 32;
+    static constexpr int   SHM_SIZE     = 1 + W * H * 3;   // 12289 bytes
     static constexpr const char* DEFAULT_PATH = "/dev/shm/protoface_frame";
 
     ShmFrameReader() = default;
