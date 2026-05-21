@@ -109,6 +109,10 @@ void ProtoFaceController::release_control() {
     send(R"({"cmd":"release_control"})");
 }
 
+void ProtoFaceController::save_config() {
+    send(R"({"cmd":"save_config"})");
+}
+
 // ── Static helper ─────────────────────────────────────────────────────────────
 
 bool ProtoFaceController::socket_exists(const std::string& path) {

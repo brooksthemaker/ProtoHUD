@@ -770,6 +770,7 @@ static std::vector<MenuItem> build_menu(
                 if (xr) xr->set_brightness(static_cast<int>(v));
             }),
         leaf("Release Control", [teensy]{ teensy->release_control(); }),
+        leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
         face_picker("Face", 10,
             [&state]{ return static_cast<int>(state.face.face_index); },
             [&state, teensy](int v){
@@ -1924,10 +1925,10 @@ int main(int argc, char* argv[]) {
 
     // Auto-discover serial ports by USB VID:PID when configured paths are absent.
     // Teensy 4.1: VID=0x16C0, PID=0x0483.  LoRa CH340: VID=0x1A86, PID=0x7523.
-    // SmartKnob (ESP32-S3 dev board): scan ttyACM without VID filter (varies by board).
+    // SmartKnob ESP32-S3 DevKitC-1 UART port: CH341 VID=0x1A86, PID=0x7522.
     teensy_port = resolve_serial_port(teensy_port, 0x16C0, 0x0483);
     lora_port   = resolve_serial_port(lora_port,   0x1A86, 0x7523);
-    knob_port   = resolve_serial_port(knob_port);
+    knob_port   = resolve_serial_port(knob_port,   0x1A86, 0x7522);
 
     TeensyController     teensy(teensy_port, baud, state);
     ProtoFaceController  protoface_ctrl;
