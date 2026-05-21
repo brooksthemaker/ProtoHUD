@@ -189,6 +189,7 @@ set(SOURCES
     src/net/bt_monitor.cpp
     src/crash_reporter.cpp
     src/capture.cpp
+    src/video_recorder.cpp
     src/qr_scanner.cpp
     src/splash.cpp
     src/nanovg_gl_impl.cpp

@@ -233,6 +233,13 @@
     "photo_dir":  "",
     "map_dir":    ""
   },
+  "video": {
+    "_note": "Video recording. camera = left|right|both; fourcc is a 4-char OpenCV codec (mp4v widely available, avc1 needs H.264).",
+    "dir":    "",
+    "fps":    30,
+    "fourcc": "mp4v",
+    "camera": "left"
+  },
   "resolution": {
     "_note": "Persisted OWLsight resolution. Overrides cameras.owlsight_left/right width/height/fps on startup.",
     "width":  1280,

@@ -150,6 +150,7 @@ namespace KnobButtonEvent {
     static constexpr uint8_t PRESS      = 0;
     static constexpr uint8_t LONG_PRESS = 1;
     static constexpr uint8_t RELEASE    = 2;
+    static constexpr uint8_t DOUBLE_TAP = 3;
 }
 
 #pragma pack(push, 1)
