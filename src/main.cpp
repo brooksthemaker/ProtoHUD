@@ -4822,7 +4822,7 @@ int main(int argc, char* argv[]) {
     step("beast_cam");       beast_cam.stop();
     step("cameras");         cameras.shutdown();
     step("teensy");          teensy.stop();
-    step("protoface");       protoface_ctrl.stop();
+    step("protoface");       protoface_ctrl.shutdown_daemon(); protoface_ctrl.stop();
     step("lora");            lora.stop();
     step("knob");            knob.stop();
     step("textures");

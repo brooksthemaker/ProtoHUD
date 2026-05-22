@@ -156,6 +156,10 @@ void ProtoFaceController::restart() {
     }).detach();
 }
 
+void ProtoFaceController::shutdown_daemon() {
+    send(R"({"cmd":"shutdown"})");
+}
+
 // ── Static helper ─────────────────────────────────────────────────────────────
 
 bool ProtoFaceController::socket_exists(const std::string& path) {
