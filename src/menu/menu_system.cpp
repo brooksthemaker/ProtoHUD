@@ -1135,10 +1135,25 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
                 if (f == cur) { dl->AddCircleFilled({fx,fy}, 8.f, menu_with_alpha(accent_color_,230)); dl->AddCircleFilled({fx,fy},3.f,IM_COL32(255,255,255,230)); }
                 else dl->AddCircle({fx,fy}, 5.f, menu_with_alpha(accent_color_,120), 0, 1.5f);
             }
-        } else if (sel.type == MenuItemType::SLIDER || sel.type == MenuItemType::COLOR_PICKER ||
-                   sel.type == MenuItemType::FACE_PICKER) {
-            dl->AddText(font, fs, { rx0, ey + 6.f }, menu_with_alpha(accent_color_, 170),
-                        "Press Enter / A to edit");
+        } else {
+            // Not editing: show a live context panel here when available — the
+            // highlighted submenu's own preview (e.g. camera zoom/crop, before
+            // entering), else the current level's panel (while inside it). This
+            // reuses the same MenuContextPanelDraw callbacks as the quick menu.
+            MenuContextPanelDraw panel;
+            if (sel.type == MenuItemType::SUBMENU && sel.context_panel_draw)
+                panel = sel.context_panel_draw;
+            else if (!stack_.empty() && stack_.back().panel_draw)
+                panel = stack_.back().panel_draw;
+
+            if (panel) {
+                panel(dl, { rx0, ey + 6.f }, { rx1 - rx0, cy1 - (ey + 6.f) });
+            } else if (sel.type == MenuItemType::SLIDER ||
+                       sel.type == MenuItemType::COLOR_PICKER ||
+                       sel.type == MenuItemType::FACE_PICKER) {
+                dl->AddText(font, fs, { rx0, ey + 6.f }, menu_with_alpha(accent_color_, 170),
+                            "Press Enter / A to edit");
+            }
         }
     }
 

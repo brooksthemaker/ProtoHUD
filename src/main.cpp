@@ -446,6 +446,13 @@ static std::vector<MenuItem> build_menu(
         return m;
     };
 
+    // Attach a right-pane context description to any item (shown in the deep menu).
+    //   with_desc(slider(...), "What this changes and why.")
+    auto with_desc = [](MenuItem m, std::string desc) -> MenuItem {
+        m.description = std::move(desc);
+        return m;
+    };
+
     auto toggle = [](std::string lbl,
                      std::function<bool()>     get_fn,
                      std::function<void(bool)> set_fn) -> MenuItem {
@@ -1059,9 +1066,13 @@ static std::vector<MenuItem> build_menu(
                     p.y += lh;
                 }
             }),
-        submenu("Digital Zoom",     std::move(zoom_menu)),
+        with_desc(submenu("Digital Zoom", std::move(zoom_menu)),
+                  "Magnify both eyes equally and choose where the crop is centered. "
+                  "Higher zoom shows less of the scene at greater detail. Preview at right."),
         with_panel(
-            submenu("Mirror Crop", std::move(mirror_crop_menu)),
+            with_desc(submenu("Mirror Crop", std::move(mirror_crop_menu)),
+                "Zoom and pan each eye inward (nose-side crop) for a monocular/assistive "
+                "setup. The preview at right shows the crop window live."),
             "Mirror Crop Preview",
             [&state, cameras, menu_sys_pp, draw_frame_with_crop]
             (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
@@ -2863,11 +2874,19 @@ static std::vector<MenuItem> build_menu(
     };
 
     return {
-        submenu("Vision",       std::move(cameras_menu)),
-        submenu("HUD",          std::move(hud_menu)),
-        submenu("Face Display", std::move(face_display_menu)),
-        submenu("LoRa",         std::move(lora_menu)),
-        submenu("System",       std::move(system_menu)),
+        with_desc(submenu("Vision",       std::move(cameras_menu)),
+                  "Camera feeds and vision tools: resolution, digital zoom/crop, focus, "
+                  "night vision and the vision-assist overlays."),
+        with_desc(submenu("HUD",          std::move(hud_menu)),
+                  "Heads-up display: colors/theme, compass, clock, picture-in-picture "
+                  "camera windows, and on-screen effects."),
+        with_desc(submenu("Face Display", std::move(face_display_menu)),
+                  "The LED Protoface: expression, color, material, particle effects, "
+                  "animations and brightness."),
+        with_desc(submenu("LoRa",         std::move(lora_menu)),
+                  "Long-range radio: team nodes, messages and status."),
+        with_desc(submenu("System",       std::move(system_menu)),
+                  "Audio output and volume, timers/alarms, status and power."),
     };
 }
 
