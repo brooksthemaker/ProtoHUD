@@ -453,6 +453,14 @@ static std::vector<MenuItem> build_menu(
         return m;
     };
 
+    // Make an option leaf apply its effect as soon as it's highlighted (live
+    // preview), so tabbing through zoom/crop/position options updates the preview
+    // without a select. Reuses the item's own action.
+    auto live = [](MenuItem m) -> MenuItem {
+        m.on_highlight = m.action;
+        return m;
+    };
+
     auto toggle = [](std::string lbl,
                      std::function<bool()>     get_fn,
                      std::function<void(bool)> set_fn) -> MenuItem {
@@ -746,14 +754,14 @@ static std::vector<MenuItem> build_menu(
 
     std::vector<MenuItem> zoom_level_menu;
     for (const auto& z : ZOOM_PRESETS) {
-        zoom_level_menu.push_back(leaf_sel(
+        zoom_level_menu.push_back(live(leaf_sel(
             z.label,
             [&state, zoom = z.zoom]{
                 state.zoom_left.zoom  = zoom;
                 state.zoom_right.zoom = zoom;
             },
             [&state, zoom = z.zoom]{ return state.zoom_left.zoom == zoom; }
-        ));
+        )));
     }
 
     struct CropPreset { const char* label; float cx, cy; };
@@ -767,7 +775,7 @@ static std::vector<MenuItem> build_menu(
 
     std::vector<MenuItem> crop_center_menu;
     for (const auto& c : CROP_PRESETS) {
-        crop_center_menu.push_back(leaf_sel(
+        crop_center_menu.push_back(live(leaf_sel(
             c.label,
             [&state, cx = c.cx, cy = c.cy]{
                 state.zoom_left.center_x  = cx;
@@ -778,7 +786,7 @@ static std::vector<MenuItem> build_menu(
             [&state, cx = c.cx, cy = c.cy]{
                 return state.zoom_left.center_x == cx && state.zoom_left.center_y == cy;
             }
-        ));
+        )));
     }
 
     std::vector<MenuItem> zoom_menu = {
@@ -812,6 +820,9 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Bottom", [&state]{ state.mirror_crop.vertical = CropVertical::Bottom; },
                            [&state]{ return state.mirror_crop.vertical == CropVertical::Bottom; }),
     };
+    // Preview these options as the user tabs through them (live).
+    for (auto& m : mirror_crop_zoom_items) m.on_highlight = m.action;
+    for (auto& m : mirror_crop_vert_items) m.on_highlight = m.action;
     std::vector<MenuItem> mirror_crop_menu = {
         toggle("Enable", [&state]{ return state.mirror_crop.enabled; },
                          [&state](bool v){ state.mirror_crop.enabled = v; }),
@@ -887,6 +898,9 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Bottom",  [&state]{ state.theater_anchor = TA::Bottom;  }, [&state]{ return state.theater_anchor == TA::Bottom;  }),
         leaf("Reset",       [&state]{ state.theater_anchor = TA::Center;  }),
     };
+    // Preview each eye position as the user tabs through them (live). Only the
+    // selectable options (those with a selected-state), not the Reset leaf.
+    for (auto& m : theater_pos_menu) if (m.get_state) m.on_highlight = m.action;
 
     // ── Eye source selection submenus ─────────────────────────────────────────
     // Build a 4-item radio list for one eye (CSI / USB 1 / USB 2 / USB 3).
@@ -953,14 +967,10 @@ static std::vector<MenuItem> build_menu(
         return std::tuple<float,float,float,float>{ x0, y0, x0 + w, y0 + h };
     };
 
-    // Raw View groups the camera-passthrough toggle with its placement options.
-    std::vector<MenuItem> raw_view_menu = {
-        toggle("Enable",
-            [&state]{ return state.theater_mode; },
-            [&state](bool v){ state.theater_mode = v; }),
-        with_panel(
-            submenu("Position", std::move(theater_pos_menu)),
-            "Eye Position Preview",
+    // Eye position preview — shared by the Raw View submenu (so it shows the
+    // whole time, incl. the Enable toggle) and its Position sub-level (via the
+    // deep menu's walk-up). Crop box only appears when raw view is enabled.
+    MenuContextPanelDraw eye_pos_preview =
             [&state, cameras, menu_sys_pp, draw_frame_with_crop, theater_inner_rect]
             (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
                 const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
@@ -992,7 +1002,31 @@ static std::vector<MenuItem> build_menu(
                     dl->AddText({ rpos.x, o.y + sz.y - 14.f },
                                 IM_COL32(200, 200, 200, 200), "Right");
                 }
-            }),
+            };
+
+    // Digital-zoom preview — single crop window at the chosen zoom + center.
+    MenuContextPanelDraw digital_zoom_preview =
+            [&state, cameras, menu_sys_pp, draw_frame_with_crop]
+            (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                    ? (*menu_sys_pp)->accent_color()
+                    : IM_COL32(255, 255, 255, 255);
+                const float aspect = (cameras && cameras->current_height() > 0)
+                    ? float(cameras->current_width()) / float(cameras->current_height())
+                    : 4.0f / 3.0f;
+                const float zoom = std::max(1.0f, state.zoom_left.zoom);
+                const float cw = 1.0f / zoom, ch = 1.0f / zoom;
+                float x0 = std::clamp(state.zoom_left.center_x - cw * 0.5f, 0.f, 1.f - cw);
+                float y0 = std::clamp(state.zoom_left.center_y - ch * 0.5f, 0.f, 1.f - ch);
+                draw_frame_with_crop(dl, o, sz, aspect, accent, x0, y0, x0 + cw, y0 + ch);
+            };
+
+    // Raw View groups the camera-passthrough toggle with its placement options.
+    std::vector<MenuItem> raw_view_menu = {
+        toggle("Enable",
+            [&state]{ return state.theater_mode; },
+            [&state](bool v){ state.theater_mode = v; }),
+        submenu("Position", std::move(theater_pos_menu)),
     };
 
     // Build per-camera submenu labels from the configured model names.  When both
@@ -1018,7 +1052,11 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> main_cameras_menu = {
         submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
         submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
-        submenu("Raw View",         std::move(raw_view_menu)),
+        with_panel(
+            with_desc(submenu("Raw View", std::move(raw_view_menu)),
+                "Pass the camera feed straight through. Toggle Enable to show it; "
+                "Position places each eye. The preview at right shows it live."),
+            "Raw View Preview", eye_pos_preview),
         toggle("Swap Cameras",
             [&state]{ return state.cameras_swapped; },
             [&state](bool v){ state.cameras_swapped = v; }),
@@ -1066,9 +1104,11 @@ static std::vector<MenuItem> build_menu(
                     p.y += lh;
                 }
             }),
-        with_desc(submenu("Digital Zoom", std::move(zoom_menu)),
+        with_panel(
+            with_desc(submenu("Digital Zoom", std::move(zoom_menu)),
                   "Magnify both eyes equally and choose where the crop is centered. "
                   "Higher zoom shows less of the scene at greater detail. Preview at right."),
+            "Digital Zoom Preview", digital_zoom_preview),
         with_panel(
             with_desc(submenu("Mirror Crop", std::move(mirror_crop_menu)),
                 "Zoom and pan each eye inward (nose-side crop) for a monocular/assistive "

@@ -91,10 +91,17 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items,
 
     if (!stack_.empty())
         stack_.back().cursor = cursor_;  // remember where we were on the parent page
-    stack_.push_back(Level{ std::move(level), 0,
+
+    // Start the cursor on the currently-selected option (so option lists open
+    // highlighting the active choice), else on the first item.
+    int init_cursor = 0;
+    for (int i = 0; i < static_cast<int>(level.size()); ++i)
+        if (level[i].get_state && level[i].get_state()) { init_cursor = i; break; }
+
+    stack_.push_back(Level{ std::move(level), init_cursor,
                             std::move(panel_title),
                             std::move(panel_draw) });
-    cursor_ = 0;
+    cursor_ = init_cursor;
     emit_detents();
 }
 
@@ -224,6 +231,9 @@ void MenuSystem::navigate(int direction) {
         next = ((next + direction) % n + n) % n;
     }
     cursor_ = next;
+
+    // Live preview: apply the newly-highlighted option's effect as the user tabs.
+    if (items[cursor_].on_highlight) items[cursor_].on_highlight();
 }
 
 // ── select ────────────────────────────────────────────────────────────────────
@@ -1074,6 +1084,15 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             auto [r, g, b] = it.color.get_color();
             dl->AddRectFilled({ lx1 - 36.f, ty + 1.f }, { lx1 - 8.f, ty + fs * 0.9f },
                               IM_COL32(r, g, b, 255), 2.f);
+        } else if (it.get_state) {
+            // Theme-matching "currently selected" indicator for option lists.
+            float cyd = ly + row_h * 0.5f;
+            if (it.get_state()) {
+                dl->AddCircleFilled({ lx1 - 14.f, cyd }, 5.f, accent_color_);
+                dl->AddCircleFilled({ lx1 - 14.f, cyd }, 2.f, IM_COL32(255, 255, 255, 220));
+            } else {
+                dl->AddCircle({ lx1 - 14.f, cyd }, 5.f, menu_with_alpha(accent_color_, 90), 0, 1.5f);
+            }
         } else {
             std::string val = value_summary(it);
             if (!val.empty()) {
@@ -1141,10 +1160,14 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             // entering), else the current level's panel (while inside it). This
             // reuses the same MenuContextPanelDraw callbacks as the quick menu.
             MenuContextPanelDraw panel;
-            if (sel.type == MenuItemType::SUBMENU && sel.context_panel_draw)
+            if (sel.type == MenuItemType::SUBMENU && sel.context_panel_draw) {
                 panel = sel.context_panel_draw;
-            else if (!stack_.empty() && stack_.back().panel_draw)
-                panel = stack_.back().panel_draw;
+            } else {
+                // Walk up the stack so the preview stays open the whole time the
+                // user is in the subtree (e.g. inside Position / Crop Center).
+                for (auto lvl = stack_.rbegin(); lvl != stack_.rend(); ++lvl)
+                    if (lvl->panel_draw) { panel = lvl->panel_draw; break; }
+            }
 
             if (panel) {
                 panel(dl, { rx0, ey + 6.f }, { rx1 - rx0, cy1 - (ey + 6.f) });

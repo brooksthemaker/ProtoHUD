@@ -109,6 +109,11 @@ struct MenuItem {
     // Optional visibility predicate — item is hidden when this returns false.
     // When unset, the item is always visible.
     std::function<bool()> visible_fn;
+
+    // Optional "live preview" callback fired when this item becomes highlighted
+    // (cursor lands on it), without selecting. Used so zoom/crop/position option
+    // lists apply their effect as the user tabs through them.
+    std::function<void()> on_highlight;
 };
 
 // ── Menu anchor ───────────────────────────────────────────────────────────────
