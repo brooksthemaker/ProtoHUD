@@ -9,7 +9,15 @@ FaceState::FaceState(const FaceCfg& cfg, std::vector<std::string> expression_nam
     : expressions_(std::move(expression_names)),
       rng_(static_cast<uint32_t>(
           std::chrono::steady_clock::now().time_since_epoch().count())) {
-    expression_      = expressions_.empty() ? "neutral" : expressions_.front();
+    // Default to "neutral" when present (matches the Python daemon). nlohmann
+    // sorts JSON object keys, so the first loaded expression would otherwise be
+    // whatever is alphabetically first (e.g. "angry"), not the resting face.
+    expression_ = "neutral";
+    if (!expressions_.empty()) {
+        auto it = std::find(expressions_.begin(), expressions_.end(), "neutral");
+        if (it != expressions_.end()) { expression_ = "neutral"; expr_idx_ = (int)(it - expressions_.begin()); }
+        else                          { expression_ = expressions_.front(); expr_idx_ = 0; }
+    }
     prev_expression_ = expression_;
     transition_t_    = 1.0;
 
