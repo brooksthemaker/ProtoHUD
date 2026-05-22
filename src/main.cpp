@@ -4211,6 +4211,7 @@ int main(int argc, char* argv[]) {
     // Background comes from the image library; nav via gamepad/knob (callbacks
     // above) + keyboard here. Camera/serial threads keep running underneath.
     while (landing.active && !glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
+        wd_heartbeat.fetch_add(1, std::memory_order_relaxed);  // keep the watchdog from force-exiting
         gamepad.poll();
         int fw = 0, fh = 0;
         glfwGetFramebufferSize(xr.glfw_window(), &fw, &fh);
