@@ -56,6 +56,7 @@
 
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <cerrno>
 #include <sys/ioctl.h>
 #include <linux/i2c-dev.h>
@@ -3609,10 +3610,19 @@ int main(int argc, char* argv[]) {
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
     if (pf_mode == "native") {
         // Stop any stray Protoface daemon first — in native mode it would double-
-        // write the shm (preview flicker) and fight panel_driver.py for /dev/pio0.
-        // shutdown_daemon() uses a one-shot connection, so it works even though
-        // protoface_ctrl isn't started yet; no-op if no daemon is listening.
+        // write the shm (preview flicker / "neutral teal" frames) and fight
+        // panel_driver.py for /dev/pio0. shutdown_daemon() uses a one-shot
+        // connection, so it works even though protoface_ctrl isn't started yet.
         protoface_ctrl.shutdown_daemon();
+        // Then claim Protoface's single-instance lock and hold it for our whole
+        // lifetime, so any daemon that respawns (e.g. a systemd service) hits the
+        // flock in run.py and exits immediately instead of double-writing the shm.
+        {
+            static int pf_lock_fd = ::open("/tmp/protoface.lock", O_RDWR | O_CREAT, 0660);
+            if (pf_lock_fd < 0 || ::flock(pf_lock_fd, LOCK_EX | LOCK_NB) != 0)
+                std::cerr << "[main] warning: could not claim /tmp/protoface.lock — "
+                             "a daemon may still be running and double-writing the panel\n";
+        }
         face::RenderConfig rc = pf_build_render_config(cfg);
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h));
