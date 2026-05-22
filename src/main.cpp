@@ -3627,6 +3627,8 @@ int main(int argc, char* argv[]) {
                              "a daemon may still be running and double-writing the panel\n";
         }
         face::RenderConfig rc = pf_build_render_config(cfg);
+        // Auto-save the live look next to config.json so menu changes persist.
+        rc.state_path = (fs::path(cfg_path).parent_path() / "protoface_state.json").string();
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h));
         native_ctrl->start();
@@ -3774,7 +3776,10 @@ int main(int argc, char* argv[]) {
                                &bt_mon, &sys_panel_active, &fps_overlay_active, &state,
                                &active_face,
                                static_cast<IFaceController*>(&teensy),
-                               static_cast<IFaceController*>(&protoface_ctrl),
+                               // In native mode hide the daemon's Start/Restart +
+                               // source-switch menu items (null fp_option).
+                               native_ctrl ? nullptr
+                                           : static_cast<IFaceController*>(&protoface_ctrl),
                                &panel_preview_enabled,
                                &protoface_preview_cfg,
                                &protoface_preview_view,

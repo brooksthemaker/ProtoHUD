@@ -61,6 +61,7 @@ struct RenderConfig {
     std::string          materials_dir = "materials";
     std::string          gifs_dir      = "gifs";
     double               gif_auto_release = 5.0;   // s after play_gif before reverting (0 = loop forever)
+    std::string          state_path;               // auto-saved live look (empty = disabled)
     std::vector<PanelCfg> panels;
 };
 
