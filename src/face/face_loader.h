@@ -1,0 +1,42 @@
+#pragma once
+// ── face_loader.h ──────────────────────────────────────────────────────────────
+// C++ port of protoface/face.py. Loads a face folder (PNGs + config.json) and
+// composites the current frame each tick: expression crossfade, blink (per-eye
+// region or whole-face), mouth-open swap, and idle wiggle + gyro sub-pixel shift.
+// Output is an (h, w) RGBA cv::Mat (CV_8UC4, channel 0 = R).
+
+#include <map>
+#include <string>
+#include <vector>
+#include <opencv2/core.hpp>
+
+namespace face {
+
+class FaceState;   // fwd
+
+class FaceLoader {
+public:
+    FaceLoader(const std::string& folder, int width, int height);
+
+    cv::Mat get_frame(const FaceState& state);   // CV_8UC4
+    const std::vector<std::string>& expression_names() const { return expr_order_; }
+    bool valid() const { return !expressions_.empty(); }
+
+private:
+    struct Region { int x = 0, y = 0, w = 0, h = 0; bool set = false; };
+
+    void load();
+    cv::Mat blend_region(const cv::Mat& base, const cv::Mat& overlay,
+                         const Region& region, double t) const;
+
+    std::string folder_;
+    int w_, h_;
+
+    std::map<std::string, cv::Mat> expressions_;   // name → RGBA (h,w)
+    std::vector<std::string>       expr_order_;     // stable insertion order
+    cv::Mat  blink_;            // may be empty
+    cv::Mat  mouth_open_;       // may be empty
+    Region   eye_left_, eye_right_, mouth_;
+};
+
+} // namespace face

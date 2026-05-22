@@ -260,6 +260,30 @@ set_target_properties(protohud PROPERTIES
 
 # ── Assets & Config ────────────────────────────────────────���──────────────────
 
+# ── Native face renderer (Protoface C++ port, work in progress) ───────────────
+# Built as a separate static library, EXCLUDE_FROM_ALL so it NEVER affects the
+# default `protohud` build while the port is incomplete and uncompiled-on-CM5.
+# Compile-check it in isolation with:
+#     cmake --build build --target protoface_native
+# A later PR links this into protohud and wires NativeFaceController into main.cpp.
+add_library(protoface_native STATIC EXCLUDE_FROM_ALL
+    src/face/face_state.cpp
+    src/face/materials.cpp
+    src/face/renderer.cpp
+    src/face/face_loader.cpp
+    src/face/shm_pusher_output.cpp
+    src/face/native_face_controller.cpp
+)
+target_include_directories(protoface_native PRIVATE
+    src/
+    ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(protoface_native PRIVATE
+    ${OpenCV_LIBS}
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+
 configure_file(config/config.example.json ${CMAKE_BINARY_DIR}/config.json COPYONLY)
 
 # Copy shaders to build directory.
