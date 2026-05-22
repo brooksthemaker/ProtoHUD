@@ -3634,16 +3634,29 @@ int main(int argc, char* argv[]) {
         std::cout << "[main] Protoface: native in-process renderer\n";
 
         // Push frames to the panels via the Piomatter shim (reads the same shm).
+        // Launch it with fork()+setsid()+execlp() rather than a backgrounded
+        // shell command: the `nohup … &` form via std::system was failing
+        // silently (no process, no log). Here we open the log in C++ so it's
+        // always written, and setsid detaches the driver into its own session.
         if (pf_launch_driver) {
             std::string drv = bin_dir + "/../scripts/panel_driver.py";
-            std::string cmd =
-                "pkill -f panel_driver.py 2>/dev/null; "
-                "nohup python3 \"" + drv +
-                "\" --canvas-w " + std::to_string(rc.canvas_w) +
-                " --canvas-h " + std::to_string(rc.canvas_h) +
-                " >/tmp/panel_driver.log 2>&1 &";
-            std::system(cmd.c_str());
-            std::cout << "[main] launched panel_driver.py (" << drv << ")\n";
+            std::string cw  = std::to_string(rc.canvas_w);
+            std::string chh = std::to_string(rc.canvas_h);
+            std::system("pkill -f panel_driver.py 2>/dev/null");   // clear any old driver
+            pid_t pid = fork();
+            if (pid == 0) {
+                setsid();
+                int lf = ::open("/tmp/panel_driver.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (lf >= 0) { dup2(lf, 1); dup2(lf, 2); ::close(lf); }
+                int nf = ::open("/dev/null", O_RDONLY);
+                if (nf >= 0) { dup2(nf, 0); ::close(nf); }
+                execlp("python3", "python3", "-u", drv.c_str(),
+                       "--canvas-w", cw.c_str(), "--canvas-h", chh.c_str(),
+                       static_cast<char*>(nullptr));
+                _exit(127);   // execlp failed (python3 not found)
+            }
+            std::cout << "[main] launched panel_driver.py pid=" << pid
+                      << " (" << drv << ")\n";
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
