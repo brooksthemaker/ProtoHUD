@@ -177,6 +177,7 @@ set(SOURCES
     src/serial/lora_radio.cpp
     src/serial/smartknob.cpp
     src/hud/hud_renderer.cpp
+    src/hud/background_library.cpp
     src/menu/menu_system.cpp
     src/vitrue/xr_display.cpp
     src/vitrue/timewarp.cpp
