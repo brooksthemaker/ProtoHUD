@@ -75,6 +75,10 @@ struct MenuItem {
     std::string   label;
     MenuItemType  type = MenuItemType::LEAF;
 
+    // Optional help/description shown in the deep menu's right-hand pane.
+    // Falls back to the label when empty.
+    std::string   description;
+
     // LEAF
     std::function<void()> action;
 
@@ -156,17 +160,29 @@ public:
     void select();                  // confirm / toggle / enter edit mode
     void back();                    // pop menu level (or exit edit mode)
 
-    // Render the menu overlay using Dear ImGui windows
+    // Render the compact corner "quick menu" overlay using Dear ImGui windows
     void draw(int screen_w, int screen_h);
 
+    // Render the full-screen, tabbed "deep menu" (game-style settings screen)
+    // over the live feeds. Reuses the same MenuItem tree + nav/edit state.
+    void draw_fullscreen(int screen_w, int screen_h);
+
     bool is_open()    const { return open_; }
-    void open()             { stack_.clear(); open_ = true; push_level(root_items_); }
+    void open()             { deep_open_ = false; stack_.clear(); open_ = true; push_level(root_items_); }
     void close() {
         open_            = false;
+        deep_open_       = false;
         in_edit_mode_    = false;
         in_channel_edit_ = false;
         stack_.clear();
     }
+
+    // ── Deep (full-screen) menu ─────────────────────────────────────────────────
+    bool is_deep_open() const { return deep_open_; }
+    void open_deep();           // build tabs, show full-screen menu
+    void close_deep();          // hide full-screen menu
+    void next_tab();            // switch to the next/prev top-level tab (at tab base only)
+    void prev_tab();
 
     int  current_index() const { return cursor_; }
     int  menu_depth()    const { return static_cast<int>(stack_.size()); }
@@ -198,6 +214,13 @@ private:
     float edit_r_ = 0.f, edit_g_ = 0.f, edit_b_ = 0.f;
     float orig_float_ = 0.f;                              // pre-edit value for SLIDER cancel/restore
     float orig_r_ = 0.f, orig_g_ = 0.f, orig_b_ = 0.f;  // pre-edit RGB for COLOR_PICKER cancel/restore
+
+    // ── deep (full-screen) menu state ───────────────────────────────────────────
+    void build_deep_tabs();     // derive tabs from root_items_
+    void load_tab(int idx);     // reset stack_ to the given tab's items
+    bool deep_open_  = false;
+    int  tab_index_  = 0;
+    std::vector<std::pair<std::string, std::vector<MenuItem>>> deep_tabs_;
 
     std::vector<MenuItem>  root_items_;
     std::vector<Level>     stack_;

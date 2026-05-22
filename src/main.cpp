@@ -3952,7 +3952,10 @@ int main(int argc, char* argv[]) {
     GamepadInput gamepad;
     gamepad.init();
     gamepad.on_menu([&menu]{
-        if (menu.is_open()) menu.close(); else menu.open();
+        // Start opens the full-screen deep menu (closes the quick menu if open).
+        if      (menu.is_deep_open()) menu.close_deep();
+        else if (menu.is_open())      menu.close();
+        else                          menu.open_deep();
     });
     gamepad.on_select([&menu, &hud, &state]{
         if      (menu.is_open())          menu.select();
@@ -3972,8 +3975,13 @@ int main(int argc, char* argv[]) {
         if      (hud.toast_has_focused()) hud.toast_navigate(+1);
         else if (menu.is_open())          menu.select();
     });
-    gamepad.on_pip_left ([&kb_pip_left] { kb_pip_left  = !kb_pip_left;  });
-    gamepad.on_pip_right([&kb_pip_right]{ kb_pip_right = !kb_pip_right; });
+    // LB/RB switch deep-menu tabs while it's open; otherwise toggle the PiPs.
+    gamepad.on_pip_left ([&menu, &kb_pip_left] {
+        if (menu.is_deep_open()) menu.prev_tab(); else kb_pip_left  = !kb_pip_left;
+    });
+    gamepad.on_pip_right([&menu, &kb_pip_right]{
+        if (menu.is_deep_open()) menu.next_tab(); else kb_pip_right = !kb_pip_right;
+    });
     gamepad.on_af([&cameras]{
         if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
         if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
@@ -4081,6 +4089,11 @@ int main(int argc, char* argv[]) {
             if (menu.is_open()) menu.close();
             else                menu.open();
         }
+        // F1 toggles the full-screen "deep menu".
+        if (key_pressed(ImGuiKey_F1)) {
+            if (menu.is_deep_open()) menu.close_deep();
+            else { menu.close(); menu.open_deep(); }
+        }
         // Modal alarm/timer popup disabled — toasts handle notification display.
         // if (hud.popup_active()) {
         //     if (key_pressed(ImGuiKey_LeftArrow))  hud.popup_navigate(-1);
@@ -4098,6 +4111,10 @@ int main(int argc, char* argv[]) {
                 key_pressed(ImGuiKey_RightArrow)) menu.select();
             if (key_pressed(ImGuiKey_Backspace) ||
                 key_pressed(ImGuiKey_LeftArrow))  menu.back();
+            // Deep-menu tab switching (Tab / Shift+Tab).
+            if (menu.is_deep_open() && key_pressed(ImGuiKey_Tab)) {
+                if (ImGui::GetIO().KeyShift) menu.prev_tab(); else menu.next_tab();
+            }
         }
         // Vision-assist hotkeys — work whether or not the menu is open
         if (key_pressed(ImGuiKey_E)) state.pp_cfg.edge_enabled   = !state.pp_cfg.edge_enabled;
@@ -4756,7 +4773,8 @@ int main(int argc, char* argv[]) {
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
-        menu.draw(xr.eye_width(), xr.eye_height());
+        if (menu.is_deep_open()) menu.draw_fullscreen(xr.eye_width(), xr.eye_height());
+        else                     menu.draw(xr.eye_width(), xr.eye_height());
 
         hud.draw_android_overlay(tex_android,
                                   xr.eye_width(), xr.eye_height(),
