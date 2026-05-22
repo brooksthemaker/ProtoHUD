@@ -155,6 +155,19 @@
     "cam2": { "size": 0.25, "anchor": "top_right" },
     "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
   },
+  "protoface": {
+    "_about": "Protoface LED face daemon. autostart launches it on HUD boot (no-op if already running) and makes it the active face source. preview is the on-glasses panel-preview window placement (persisted on exit).",
+    "autostart": true,
+    "preview": {
+      "anchor_x": 1.0,
+      "anchor_y": 0.0,
+      "pan_x": 0.0,
+      "pan_y": 0.0,
+      "size": 0.15,
+      "view": 0,
+      "_view_values": "0 = whole face | 1 = left half | 2 = right half"
+    }
+  },
   "audio": {
     "_note": "Audio capture is handled by the RP2350 helmet audio processor (USB Audio UAC2). The CM5 receives pre-processed stereo and routes it to the chosen output. Run 'arecord -l' to verify the RP2350 card name after connecting via USB.",
     "enabled": true,
