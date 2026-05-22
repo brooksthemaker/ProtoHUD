@@ -76,6 +76,12 @@ void ProtoFaceController::set_effect(uint8_t effect_id, uint8_t p1, uint8_t p2) 
     send(buf);
 }
 
+void ProtoFaceController::set_face(uint8_t face_id) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), R"({"cmd":"set_face","face_id":%u})", face_id);
+    send(buf);
+}
+
 void ProtoFaceController::play_gif(uint8_t gif_id) {
     char buf[64];
     std::snprintf(buf, sizeof(buf), R"({"cmd":"play_gif","gif_id":%u})", gif_id);

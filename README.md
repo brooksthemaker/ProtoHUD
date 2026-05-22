@@ -412,6 +412,8 @@ Keyboard shortcuts while running:
 | `↑` / `↓` | Navigate menu items |
 | `Enter` | Select menu item |
 | `Backspace` | Go back one menu level |
+| `Ctrl+1`…`Ctrl+9`, `Ctrl+0` | Switch face / expression on the active backend (1→first … 0→tenth) |
+| `Alt+1`…`Alt+9`, `Alt+0` | Play GIF on the active backend (auto-releases to the face after 5 s; restarts on each press) |
 | `Esc` | Quit |
 | `Ctrl+Q` / `Ctrl+K` | Force-kill the process immediately |
 

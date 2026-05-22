@@ -54,6 +54,12 @@ void TeensyController::set_effect(uint8_t effect_id, uint8_t p1, uint8_t p2) {
     state_.face.hud_control = true;
 }
 
+void TeensyController::set_face(uint8_t face_id) {
+    // ProtoTracer has no separate face command — expressions are effect slots
+    // (0=Idle, 1=Blink, 2=Angry, …), so a face select is an effect select.
+    set_effect(face_id);
+}
+
 void TeensyController::play_gif(uint8_t gif_id) {
     TeensyGifPayload p { gif_id };
     port_.send(TeensyCmd::PLAY_GIF,
