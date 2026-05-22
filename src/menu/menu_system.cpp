@@ -978,7 +978,9 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     ImGui::Begin("##deepmenu", nullptr, flags);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImFont* font   = ImGui::GetFont();
-    const float fs = ImGui::GetFontSize();
+    // Base font size scaled by the theme's UI scale — everything in this method
+    // derives from fs, so this resizes the whole deep menu (text + spacing).
+    const float fs = ImGui::GetFontSize() * ui_scale_;
 
     // Dim the live feeds (still visible behind ~35%).
     dl->AddRectFilled({0.f, 0.f}, {W, H}, IM_COL32(4, 8, 12, 165));

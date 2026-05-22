@@ -149,6 +149,10 @@ public:
     void set_border_thickness(float t)    { border_thickness_ = t; }
     void set_selection_style(SelectionStyle s) { selection_style_ = s; }
     void set_anchor(MenuAnchor a)              { anchor_          = a; }
+    // Overall UI scale for the full-screen deep menu (and landing page) — lets a
+    // theme change the size/feel. 1.0 = default; ~0.8–1.6 sensible.
+    void  set_ui_scale(float s)                { ui_scale_ = (s > 0.1f) ? s : 1.f; }
+    float ui_scale() const                     { return ui_scale_; }
 
     // Runtime style getters — for persisting user changes to config on exit.
     ImU32          accent_color()     const { return accent_color_;     }
@@ -244,4 +248,5 @@ private:
     float          border_thickness_ = 5.0f;                           // Halo default
     SelectionStyle selection_style_  = SelectionStyle::FILLED_ROW;    // Halo default
     MenuAnchor     anchor_           = MenuAnchor::TopLeft;
+    float          ui_scale_         = 1.0f;   // deep menu / landing page size
 };

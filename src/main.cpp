@@ -45,6 +45,7 @@
 #include "video_recorder.h"
 #include "qr_scanner.h"
 #include "splash.h"
+#include "hud/background_library.h"
 #include "face/face_config.h"
 #include "face/native_face_controller.h"
 #include "face/panel_output.h"
@@ -3931,6 +3932,7 @@ int main(int argc, char* argv[]) {
         menu.set_border_color    (jcolor(jm, "border_color",     menu.border_color()));
         menu.set_border_thickness(jval  (jm, "border_thickness", menu.border_thickness()));
         menu.set_border_enabled  (jval  (jm, "border_enabled",   menu.border_enabled()));
+        menu.set_ui_scale        (jval  (jm, "ui_scale",         menu.ui_scale()));
         {
             std::string ss = jm.value("selection_style", "filled_row");
             menu.set_selection_style(ss == "accent_bar"
@@ -3954,9 +3956,32 @@ int main(int argc, char* argv[]) {
         knob.set_haptic(amp, freq, strength);
     });
 
-    knob.on_move([&menu, &hud](int8_t dir, int) {
+    // ── Startup landing page state (driven by the input callbacks below) ──────
+    BackgroundLibrary bg_lib;
+    {
+        std::vector<std::string> bg_dirs;
+        bg_dirs.push_back(bin_dir + "/../assets/backgrounds");
+        if (const char* home = std::getenv("HOME"))
+            bg_dirs.push_back(std::string(home) + "/protohud/backgrounds");
+        bg_lib.scan(bg_dirs);
+    }
+    struct LandingState { bool active = true; int cursor = 0; int count = 3; };
+    LandingState landing;
+    auto landing_nav = [&landing](int d){
+        landing.cursor = ((landing.cursor + d) % landing.count + landing.count) % landing.count;
+    };
+    auto landing_select = [&landing, &bg_lib, &state]{
+        switch (landing.cursor) {
+            case 0: landing.active = false;                          break;  // Continue
+            case 1: bg_lib.next();                                   break;  // Background
+            case 2: state.quit = true; landing.active = false;       break;  // Quit
+        }
+    };
+
+    knob.on_move([&menu, &hud, &landing, &landing_nav](int8_t dir, int) {
         // if (hud.popup_active())    hud.popup_navigate(dir);  // modal popup disabled
-        if      (menu.is_open())        menu.navigate(dir);
+        if      (landing.active)        landing_nav(dir);
+        else if (menu.is_open())        menu.navigate(dir);
         else if (hud.toast_has_focused()) hud.toast_navigate(dir);
     });
 
@@ -3970,7 +3995,13 @@ int main(int argc, char* argv[]) {
         else if (status == 0x03) std::cout << "[knob] woke up reason=" << (int)param << "\n";
     });
 
-    knob.on_button([&menu, &hud, &state](uint8_t btn, uint8_t ev) {
+    knob.on_button([&menu, &hud, &state, &landing, &landing_select](uint8_t btn, uint8_t ev) {
+        if (landing.active) {
+            if ((ev == KnobButtonEvent::PRESS || ev == KnobButtonEvent::LONG_PRESS)
+                && btn == KnobButton::ENCODER)
+                landing_select();
+            return;
+        }
         if (ev == KnobButtonEvent::DOUBLE_TAP) {
             // Double-tap BACK = start/stop video recording (Start toggles).
             if (btn == KnobButton::BACK) {
@@ -4052,36 +4083,46 @@ int main(int argc, char* argv[]) {
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
     GamepadInput gamepad;
     gamepad.init();
-    gamepad.on_menu([&menu]{
+    gamepad.on_menu([&menu, &landing]{
+        if (landing.active) return;   // Start does nothing on the landing page
         // Start opens the full-screen deep menu (closes the quick menu if open).
         if      (menu.is_deep_open()) menu.close_deep();
         else if (menu.is_open())      menu.close();
         else                          menu.open_deep();
     });
-    gamepad.on_select([&menu, &hud, &state]{
-        if      (menu.is_open())          menu.select();
+    gamepad.on_select([&menu, &hud, &state, &landing, &landing_select]{
+        if      (landing.active)          landing_select();
+        else if (menu.is_open())          menu.select();
         else if (hud.toast_has_focused()) hud.toast_select(state);
     });
-    gamepad.on_back([&menu, &hud]{
-        if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+    gamepad.on_back([&menu, &hud, &landing]{
+        if      (landing.active)          { /* nothing to go back to */ }
+        else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
     });
-    gamepad.on_nav_up   ([&menu]{ if (menu.is_open()) menu.navigate(-1); });
-    gamepad.on_nav_down ([&menu]{ if (menu.is_open()) menu.navigate(+1); });
-    gamepad.on_nav_left ([&menu, &hud]{
-        if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+    gamepad.on_nav_up   ([&menu, &landing, &landing_nav]{ if (landing.active){landing_nav(-1);return;} if (menu.is_open()) menu.navigate(-1); });
+    gamepad.on_nav_down ([&menu, &landing, &landing_nav]{ if (landing.active){landing_nav(+1);return;} if (menu.is_open()) menu.navigate(+1); });
+    gamepad.on_nav_left ([&menu, &hud, &landing, &bg_lib]{
+        if      (landing.active)          bg_lib.prev();
+        else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
     });
-    gamepad.on_nav_right([&menu, &hud, &state]{
-        if      (hud.toast_has_focused()) hud.toast_navigate(+1);
+    gamepad.on_nav_right([&menu, &hud, &state, &landing, &bg_lib]{
+        if      (landing.active)          bg_lib.next();
+        else if (hud.toast_has_focused()) hud.toast_navigate(+1);
         else if (menu.is_open())          menu.select();
     });
-    // LB/RB switch deep-menu tabs while it's open; otherwise toggle the PiPs.
-    gamepad.on_pip_left ([&menu, &kb_pip_left] {
-        if (menu.is_deep_open()) menu.prev_tab(); else kb_pip_left  = !kb_pip_left;
+    // LB/RB cycle the background on the landing page, switch deep-menu tabs while
+    // it's open, otherwise toggle the PiPs.
+    gamepad.on_pip_left ([&menu, &kb_pip_left, &landing, &bg_lib] {
+        if      (landing.active)        bg_lib.prev();
+        else if (menu.is_deep_open())   menu.prev_tab();
+        else                            kb_pip_left  = !kb_pip_left;
     });
-    gamepad.on_pip_right([&menu, &kb_pip_right]{
-        if (menu.is_deep_open()) menu.next_tab(); else kb_pip_right = !kb_pip_right;
+    gamepad.on_pip_right([&menu, &kb_pip_right, &landing, &bg_lib]{
+        if      (landing.active)        bg_lib.next();
+        else if (menu.is_deep_open())   menu.next_tab();
+        else                            kb_pip_right = !kb_pip_right;
     });
     gamepad.on_af([&cameras]{
         if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
@@ -4164,6 +4205,78 @@ int main(int argc, char* argv[]) {
 
     // Video recorder — driven once per frame from the render thread.
     VideoRecorder video_recorder;
+
+    // ── Startup landing page ─────────────────────────────────────────────────
+    // Halo-style screen shown after the splash; gates startup until "Continue".
+    // Background comes from the image library; nav via gamepad/knob (callbacks
+    // above) + keyboard here. Camera/serial threads keep running underneath.
+    while (landing.active && !glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
+        gamepad.poll();
+        int fw = 0, fh = 0;
+        glfwGetFramebufferSize(xr.glfw_window(), &fw, &fh);
+        glViewport(0, 0, fw, fh);
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        hud.set_dt(0.016f);
+        hud.begin_menu_frame();
+
+        // Keyboard nav (dev / desktop).
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    landing_nav(-1);
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  landing_nav(+1);
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  bg_lib.prev();
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) bg_lib.next();
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter))      landing_select();
+
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        const float W = static_cast<float>(fw), H = static_cast<float>(fh);
+
+        // Background image (stretched to fill) + a slight dim, else a gradient.
+        GLuint bgt = bg_lib.texture();
+        if (bgt) {
+            dl->AddImage((ImTextureID)(intptr_t)bgt, {0.f, 0.f}, {W, H});
+            dl->AddRectFilled({0.f, 0.f}, {W, H}, IM_COL32(0, 0, 0, 90));
+        } else {
+            dl->AddRectFilledMultiColor({0.f, 0.f}, {W, H},
+                IM_COL32(14, 20, 28, 255), IM_COL32(14, 20, 28, 255),
+                IM_COL32(4, 7, 11, 255),   IM_COL32(4, 7, 11, 255));
+        }
+
+        ImFont* font   = ImGui::GetFont();
+        const float fs = ImGui::GetFontSize() * menu.ui_scale();
+        const ImU32 accent = menu.accent_color();
+        const float mx = W * 0.06f, my = H * 0.10f;
+
+        dl->AddText(font, fs * 1.4f, {mx, my}, IM_COL32(255, 255, 255, 235), "PROTOHUD");
+
+        const char* items[3] = { "CONTINUE", "BACKGROUND", "QUIT" };
+        const float row_h = fs * 1.3f + 18.f;
+        const float lw    = W * 0.30f;
+        float ly = my + fs * 1.4f + 40.f;
+        for (int i = 0; i < 3; ++i) {
+            bool sel = (i == landing.cursor);
+            ImVec2 rmin{mx, ly}, rmax{mx + lw, ly + row_h};
+            if (sel) dl->AddRectFilled(rmin, rmax, IM_COL32(255, 255, 255, 235));
+            ImU32 tcol = sel ? IM_COL32(10, 12, 14, 255) : IM_COL32(230, 235, 240, 210);
+            float ty = ly + (row_h - fs * 1.2f) * 0.5f;
+            dl->AddText(font, fs * 1.2f, {mx + 14.f, ty}, tcol, items[i]);
+            dl->AddLine({mx, rmax.y}, {mx + lw, rmax.y},
+                        (accent & 0x00FFFFFFu) | (70u << 24), 1.f);
+            if (i == 1 && bg_lib.count() > 0) {  // show current background name
+                std::string nm = bg_lib.name(bg_lib.current());
+                ImVec2 nsz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, nm.c_str());
+                ImU32 nc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (200u << 24));
+                dl->AddText(font, fs * 0.95f, {mx + lw - nsz.x - 12.f, ty}, nc, nm.c_str());
+            }
+            ly += row_h;
+        }
+
+        dl->AddText(font, fs * 0.95f, {mx, H - my * 0.5f},
+                    (accent & 0x00FFFFFFu) | (190u << 24),
+                    "ENTER / A  SELECT     UP/DOWN  MOVE     LEFT/RIGHT / LB-RB  BACKGROUND");
+
+        hud.render_menu_overlay();
+        xr.present();
+    }
 
     double prev_time = glfwGetTime();
 
@@ -5072,6 +5185,7 @@ int main(int argc, char* argv[]) {
         jm["border_color"]     = color_to_json(menu.border_color());
         jm["border_thickness"]  = menu.border_thickness();
         jm["border_enabled"]    = menu.border_enabled();
+        jm["ui_scale"]          = menu.ui_scale();
         jm["selection_style"]   = (menu.selection_style() == SelectionStyle::FILLED_ROW)
                                   ? "filled_row" : "accent_bar";
         {
