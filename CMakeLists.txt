@@ -220,6 +220,7 @@ target_link_libraries(protohud PRIVATE
     imgui
     nanovg
     glasses
+    protoface_native
     ${OpenCV_LIBS}
     ${LIBCAMERA_LIBRARIES}
     ${EGL_LIBRARIES}
@@ -260,12 +261,12 @@ set_target_properties(protohud PROPERTIES
 
 # ── Assets & Config ────────────────────────────────────────���──────────────────
 
-# ── Native face renderer (Protoface C++ port, work in progress) ───────────────
-# Built as a separate static library, EXCLUDE_FROM_ALL so it NEVER affects the
-# default `protohud` build while the port is incomplete and uncompiled-on-CM5.
-# Compile-check it in isolation with:
+# ── Native face renderer (Protoface C++ port) ─────────────────────────────────
+# Static library linked into protohud (NativeFaceController is the in-process
+# face backend, selected via config "protoface.mode": "native"). EXCLUDE_FROM_ALL
+# keeps it out of the default "all" target, but linking it into protohud forces
+# it to build. It can also be compile-checked in isolation:
 #     cmake --build build --target protoface_native
-# A later PR links this into protohud and wires NativeFaceController into main.cpp.
 add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/face_state.cpp
     src/face/materials.cpp

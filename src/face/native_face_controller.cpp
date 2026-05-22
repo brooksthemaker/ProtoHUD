@@ -63,8 +63,7 @@ void NativeFaceController::build_panels() {
             pn.material = load_material(pc.material.active, pc.w, pc.h,
                                         pc.material.scroll_x, pc.material.scroll_y,
                                         cfg_.materials_dir);
-            pn.particles = std::make_unique<ParticleSystem>(
-                pc.w, pc.h, nlohmann::json(pc.particles));
+            pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
         } else {
             pn.is_mirror = true;
         }

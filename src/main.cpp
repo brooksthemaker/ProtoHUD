@@ -8,6 +8,7 @@
 #include <cmath>
 #include <ctime>
 #include <csignal>
+#include <cstdlib>
 
 #include <GLFW/glfw3.h>
 #include <GLES2/gl2.h>
@@ -44,6 +45,10 @@
 #include "video_recorder.h"
 #include "qr_scanner.h"
 #include "splash.h"
+#include "face/face_config.h"
+#include "face/native_face_controller.h"
+#include "face/panel_output.h"
+#include "face/shm_pusher_output.h"
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -134,6 +139,82 @@ template<typename T>
 T jval(const json& j, const std::string& key, T def) {
     try { return j.value(key, def); }
     catch (...) { return def; }
+}
+
+// ── Native face renderer config ───────────────────────────────────────────────
+// Build a face::RenderConfig from config.json's "protoface" section. Falls back
+// to the standard 2-panel mirrored layout (face_left + face_right) and to the
+// Protoface submodule's asset folders under $HOME/protohud/Protoface.
+static face::RenderConfig pf_build_render_config(const json& cfg) {
+    face::RenderConfig rc;
+    const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
+
+    std::string assets = "Protoface";
+    if (const char* home = std::getenv("HOME"))
+        assets = std::string(home) + "/protohud/Protoface";
+    if (jpf && jpf->contains("assets_dir") &&
+        !(*jpf)["assets_dir"].get<std::string>().empty())
+        assets = (*jpf)["assets_dir"].get<std::string>();
+    rc.faces_dir     = assets + "/faces";
+    rc.materials_dir = assets + "/materials";
+    rc.gifs_dir      = assets + "/gifs";
+
+    if (jpf) {
+        rc.canvas_w = jval(*jpf, "canvas_w", rc.canvas_w);
+        rc.canvas_h = jval(*jpf, "canvas_h", rc.canvas_h);
+        rc.fps      = jval(*jpf, "fps",      rc.fps);
+        if (jpf->contains("faces_dir"))     rc.faces_dir     = (*jpf)["faces_dir"].get<std::string>();
+        if (jpf->contains("materials_dir")) rc.materials_dir = (*jpf)["materials_dir"].get<std::string>();
+        if (jpf->contains("gifs_dir"))      rc.gifs_dir      = (*jpf)["gifs_dir"].get<std::string>();
+    }
+
+    auto parse_panel = [](const json& jp) {
+        face::PanelCfg p;
+        p.name = jp.value("name", std::string());
+        if (jp.contains("region") && jp["region"].is_array() && jp["region"].size() == 4) {
+            p.x = jp["region"][0].get<int>(); p.y = jp["region"][1].get<int>();
+            p.w = jp["region"][2].get<int>(); p.h = jp["region"][3].get<int>();
+        }
+        p.mirror_of = jp.value("mirror_of", std::string());
+        if (jp.contains("face")) {
+            const auto& jf = jp["face"];
+            p.face.active            = jf.value("active", p.face.active);
+            p.face.expression_fade   = jval(jf, "expression_fade",   p.face.expression_fade);
+            p.face.mouth_sensitivity = jval(jf, "mouth_sensitivity", p.face.mouth_sensitivity);
+            if (jf.contains("wiggle")) {
+                const auto& jw = jf["wiggle"];
+                p.face.wiggle.speed       = jval(jw, "speed",       p.face.wiggle.speed);
+                p.face.wiggle.amplitude_x = jval(jw, "amplitude_x", p.face.wiggle.amplitude_x);
+                p.face.wiggle.amplitude_y = jval(jw, "amplitude_y", p.face.wiggle.amplitude_y);
+            }
+            if (jf.contains("blink")) {
+                const auto& jb = jf["blink"];
+                p.face.blink.interval_min = jval(jb, "interval_min", p.face.blink.interval_min);
+                p.face.blink.interval_max = jval(jb, "interval_max", p.face.blink.interval_max);
+                p.face.blink.duration     = jval(jb, "duration",     p.face.blink.duration);
+            }
+        }
+        if (jp.contains("material")) {
+            const auto& jm = jp["material"];
+            p.material.active   = jm.value("active", p.material.active);
+            p.material.scroll_x = jval(jm, "scroll_x", p.material.scroll_x);
+            p.material.scroll_y = jval(jm, "scroll_y", p.material.scroll_y);
+        }
+        if (jp.contains("particles")) p.particles = jp["particles"];
+        return p;
+    };
+
+    if (jpf && jpf->contains("panels") && (*jpf)["panels"].is_array() &&
+        !(*jpf)["panels"].empty()) {
+        for (const auto& jp : (*jpf)["panels"]) rc.panels.push_back(parse_panel(jp));
+    } else {
+        face::PanelCfg left;  left.name  = "face_left";  left.x = 0;  left.w = 64; left.h = 32;
+        face::PanelCfg right; right.name = "face_right"; right.x = 64; right.w = 64; right.h = 32;
+        right.mirror_of = "face_left";
+        rc.panels.push_back(left);
+        rc.panels.push_back(right);
+    }
+    return rc;
 }
 
 // ── Overlay anchor parsing ────────────────────────────────────────────────────
@@ -3037,9 +3118,13 @@ int main(int argc, char* argv[]) {
     // Protoface options: auto-start the daemon on boot and a persisted preview
     // window placement (anchor/nudge/size/view) so it survives a restart.
     bool pf_autostart = true;
+    // Face backend: "daemon" = the Protoface Python daemon over socket+shm
+    // (default); "native" = render the face in-process via NativeFaceController.
+    std::string pf_mode = "daemon";
     if (cfg.contains("protoface")) {
         auto& jpf = cfg["protoface"];
         pf_autostart = jval(jpf, "autostart", true);
+        pf_mode      = jpf.value("mode", std::string("daemon"));
         if (jpf.contains("preview")) {
             auto& jpv = jpf["preview"];
             protoface_preview_cfg.anchor_x = jval(jpv, "anchor_x", protoface_preview_cfg.anchor_x);
@@ -3503,11 +3588,25 @@ int main(int argc, char* argv[]) {
     SmartKnob            knob    (knob_port,     baud, state);
     WirelessController   wireless(wireless_port, baud);
 
+    // Native in-process face renderer (only constructed in "native" mode). It
+    // renders the LED face in C++ and writes the same /dev/shm frame the daemon
+    // would, so the existing preview path and panel_driver.py work unchanged.
+    std::unique_ptr<face::NativeFaceController> native_ctrl;
+
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
-    // Auto-start the Protoface daemon on boot (no-op if already running). The
-    // reconnect loop in start() then connects once its socket comes up.
-    if (pf_autostart) protoface_ctrl.launch();
-    protoface_ctrl.start();   // connects async; no-op if socket absent
+    if (pf_mode == "native") {
+        face::RenderConfig rc = pf_build_render_config(cfg);
+        native_ctrl = std::make_unique<face::NativeFaceController>(
+            rc, std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h));
+        native_ctrl->start();
+        protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
+        std::cout << "[main] Protoface: native in-process renderer\n";
+    } else {
+        // Auto-start the Protoface daemon on boot (no-op if already running). The
+        // reconnect loop in start() then connects once its socket comes up.
+        if (pf_autostart) protoface_ctrl.launch();
+        protoface_ctrl.start();   // connects async; no-op if socket absent
+    }
 
     // QR / barcode scanner — active when either scan toggle is enabled.
     QrScanner qr_scanner;
@@ -3558,12 +3657,14 @@ int main(int argc, char* argv[]) {
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
     if (!knob.start())   std::cerr << "[main] SmartKnob not available on " << knob_port << "\n";
 
-    // Active face backend: prefer Protoface if its socket already exists, or if
-    // we just auto-launched it (the socket may not be up yet — the reconnect
-    // loop will connect shortly, and commands no-op until then).
-    IFaceController* active_face = (ProtoFaceController::socket_exists() || pf_autostart)
-        ? static_cast<IFaceController*>(&protoface_ctrl)
-        : static_cast<IFaceController*>(&teensy);
+    // Active face backend: native in-process renderer if enabled; otherwise
+    // prefer the Protoface daemon if its socket exists or we auto-launched it
+    // (commands no-op until the reconnect loop connects), else the Teensy.
+    IFaceController* active_face =
+        native_ctrl ? static_cast<IFaceController*>(native_ctrl.get())
+        : (ProtoFaceController::socket_exists() || pf_autostart)
+            ? static_cast<IFaceController*>(&protoface_ctrl)
+            : static_cast<IFaceController*>(&teensy);
     FaceProxy face_proxy(&active_face);
 
     uint16_t sleep_tmo = 30;
@@ -4855,6 +4956,7 @@ int main(int argc, char* argv[]) {
     step("beast_cam");       beast_cam.stop();
     step("cameras");         cameras.shutdown();
     step("teensy");          teensy.stop();
+    step("native_face");     if (native_ctrl) native_ctrl->stop();   // blanks panels
     step("protoface");       protoface_ctrl.shutdown_daemon(); protoface_ctrl.stop();
     step("lora");            lora.stop();
     step("knob");            knob.stop();

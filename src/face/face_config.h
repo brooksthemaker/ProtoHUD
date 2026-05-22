@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace face {
 
 struct WiggleCfg {
@@ -44,7 +46,9 @@ struct PanelCfg {
     std::string mirror_of;                       // empty = renders its own face
     FaceCfg     face;
     MaterialCfg material;
-    std::string particles = "none";              // effect/preset shorthand (Phase 3)
+    // Particle config in any form ParticleSystem accepts: a string effect name,
+    // {"preset": ...}, {"effect": ...}, or {"layers": [...]}. Defaults to none.
+    nlohmann::json particles = "none";
 };
 
 // Top-level renderer config (mirror of Protoface config.yaml panel/display).
