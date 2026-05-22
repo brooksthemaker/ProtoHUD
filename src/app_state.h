@@ -419,6 +419,15 @@ struct AppState {
     bool qr_scan_main = false;
     bool qr_scan_usb  = false;
 
+    // Profile requests — posted by deep-menu callbacks (any thread; hold mtx) and
+    // consumed by the main loop. Empty string = no request.
+    //   profile_save_name   → write the current config snapshot to that profile.
+    //   profile_load_name   → relaunch ProtoHUD using that profile (restart).
+    //   profile_delete_name → delete that profile file.
+    std::string profile_save_name;
+    std::string profile_load_name;
+    std::string profile_delete_name;
+
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;
 

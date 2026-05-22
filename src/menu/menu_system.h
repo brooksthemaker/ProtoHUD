@@ -75,6 +75,11 @@ struct MenuItem {
     std::string   label;
     MenuItemType  type = MenuItemType::LEAF;
 
+    // Optional dynamic label — when set, its return value is rendered instead of
+    // `label`. Lets a row reflect runtime data (e.g. a saved-profile name) without
+    // rebuilding the menu tree. `label` is still used as a fallback / id.
+    std::function<std::string()> label_fn;
+
     // Optional help/description shown in the deep menu's right-hand pane.
     // Falls back to the label when empty.
     std::string   description;
@@ -183,6 +188,8 @@ public:
         deep_open_       = false;
         in_edit_mode_    = false;
         in_channel_edit_ = false;
+        osk_active_      = false;
+        osk_commit_      = nullptr;
         stack_.clear();
     }
 
@@ -192,6 +199,26 @@ public:
     void close_deep();          // hide full-screen menu
     void next_tab();            // switch to the next/prev top-level tab (at tab base only)
     void prev_tab();
+
+    // ── On-screen keyboard ──────────────────────────────────────────────────────
+    // A full-screen text-entry overlay (drawn by draw_fullscreen while the deep
+    // menu is open). Used to name profiles, etc. On commit it fires the callback
+    // with the entered string. Driven by the same input devices via the osk_*
+    // routing methods below (route to these from your input handlers when
+    // is_keyboard_open() is true, so the knob/gamepad/keyboard all work).
+    using KeyboardCommit = std::function<void(const std::string&)>;
+    void open_keyboard(std::string title, std::string initial, KeyboardCommit on_commit);
+    void close_keyboard();
+    bool is_keyboard_open() const { return osk_active_; }
+    const std::string& keyboard_text() const { return osk_text_; }
+
+    void osk_move(int dx, int dy);   // 2D grid move (gamepad d-pad / arrows)
+    void osk_step(int d);            // linear walk across the grid (knob rotate)
+    void osk_activate();             // press the focused key
+    void osk_backspace();            // delete last char (or cancel if empty)
+    void osk_commit();               // confirm + fire callback
+    void osk_cancel();               // discard + close
+    void osk_input_char(unsigned int c);  // append a physically-typed character
 
     int  current_index() const { return cursor_; }
     int  menu_depth()    const { return static_cast<int>(stack_.size()); }
@@ -230,6 +257,15 @@ private:
     bool deep_open_  = false;
     int  tab_index_  = 0;
     std::vector<std::pair<std::string, std::vector<MenuItem>>> deep_tabs_;
+
+    // ── on-screen keyboard state ────────────────────────────────────────────────
+    void draw_keyboard(ImDrawList* dl, ImFont* font, float fs, float W, float H);
+    bool           osk_active_ = false;
+    std::string    osk_title_;
+    std::string    osk_text_;
+    int            osk_row_ = 0;
+    int            osk_col_ = 0;
+    KeyboardCommit osk_commit_;
 
     std::vector<MenuItem>  root_items_;
     std::vector<Level>     stack_;

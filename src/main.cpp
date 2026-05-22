@@ -6,6 +6,7 @@
 #include <thread>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <ctime>
 #include <csignal>
 #include <cstdlib>
@@ -46,6 +47,7 @@
 #include "qr_scanner.h"
 #include "splash.h"
 #include "hud/background_library.h"
+#include "profile_manager.h"
 #include "face/face_config.h"
 #include "face/native_face_controller.h"
 #include "face/panel_output.h"
@@ -59,6 +61,7 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <cerrno>
+#include <cstring>
 #include <sys/ioctl.h>
 #include <linux/i2c-dev.h>
 
@@ -403,7 +406,9 @@ static std::vector<MenuItem> build_menu(
         std::string       map_dir         = "/home/user/Pictures/protohud/maps",
         // Eye source selection (render-thread only, no mutex needed)
         EyeSource* left_eye_src  = nullptr,
-        EyeSource* right_eye_src = nullptr)
+        EyeSource* right_eye_src = nullptr,
+        // Profile management (Profiles tab: save current / load by restart / delete)
+        ProfileManager* profiles = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -2956,6 +2961,62 @@ static std::vector<MenuItem> build_menu(
         leaf("Close Program",  [&state]{ state.quit = true; }),
     };
 
+    // ── Profiles ────────────────────────────────────────────────────────────────
+    // Save the current setup as a named snapshot, load one (relaunches ProtoHUD),
+    // or delete one. The load/delete lists are dynamic: label_fn/visible_fn read the
+    // ProfileManager live, so newly-saved profiles appear without rebuilding the menu.
+    constexpr int kProfileSlots = 16;
+
+    std::vector<MenuItem> profile_delete_menu;
+    for (int i = 0; i < kProfileSlots; ++i) {
+        MenuItem m;
+        m.type       = MenuItemType::LEAF;
+        m.label      = "profile";
+        m.label_fn   = [profiles, i]{ return profiles ? profiles->name(i) : std::string(); };
+        m.visible_fn = [profiles, i]{ return profiles && i < profiles->count(); };
+        m.description = "Delete this profile permanently.";
+        m.action = [state_ptr, profiles, i]{
+            if (!state_ptr || !profiles) return;
+            std::string nm = profiles->name(i);
+            if (nm.empty()) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->profile_delete_name = nm;
+        };
+        profile_delete_menu.push_back(std::move(m));
+    }
+
+    std::vector<MenuItem> profiles_menu;
+    profiles_menu.push_back(with_desc(
+        leaf("Save Current As...", [menu_sys_pp, state_ptr]{
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+            (*menu_sys_pp)->open_keyboard("Profile Name", std::string(),
+                [state_ptr](const std::string& name){
+                    if (!state_ptr) return;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    state_ptr->profile_save_name = name;
+                });
+        }),
+        "Save every current setting (HUD layout, menu style, camera/vision, "
+        "Protoface look) as a named profile you can switch to later."));
+    for (int i = 0; i < kProfileSlots; ++i) {
+        MenuItem m;
+        m.type        = MenuItemType::LEAF;
+        m.label       = "profile";
+        m.label_fn    = [profiles, i]{ return profiles ? profiles->name(i) : std::string(); };
+        m.visible_fn  = [profiles, i]{ return profiles && i < profiles->count(); };
+        m.description = "Load this profile. ProtoHUD restarts to apply it.";
+        m.action = [state_ptr, profiles, i]{
+            if (!state_ptr || !profiles) return;
+            std::string nm = profiles->name(i);
+            if (nm.empty()) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->profile_load_name = nm;
+        };
+        profiles_menu.push_back(std::move(m));
+    }
+    profiles_menu.push_back(with_desc(submenu("Delete Profile", std::move(profile_delete_menu)),
+        "Remove a saved profile permanently."));
+
     return {
         with_desc(submenu("Vision",       std::move(cameras_menu)),
                   "Camera feeds and vision tools: resolution, digital zoom/crop, focus, "
@@ -2970,6 +3031,9 @@ static std::vector<MenuItem> build_menu(
                   "Long-range radio: team nodes, messages and status."),
         with_desc(submenu("System",       std::move(system_menu)),
                   "Audio output and volume, timers/alarms, status and power."),
+        with_desc(submenu("Profiles",     std::move(profiles_menu)),
+                  "Save, load and manage full-setup profiles. Loading one restarts "
+                  "ProtoHUD with that profile."),
     };
 }
 
@@ -3051,6 +3115,37 @@ int main(int argc, char* argv[]) {
     }
     bool cfg_parse_failed = false;
     json cfg = load_config(cfg_load, &cfg_parse_failed);
+
+    // ── Profiles ──────────────────────────────────────────────────────────────
+    // A profile is a full config snapshot under <config>/profiles/<name>.json.
+    // Applying one = relaunch ProtoHUD with that file as its config (see the
+    // re-exec at shutdown). When we're launched WITH an explicit config path that
+    // lives in the profiles dir, we're "running a profile" — skip the landing page.
+    std::string exe_path;
+    try { exe_path = fs::canonical(argv[0]).string(); }
+    catch (...) { exe_path = argv[0]; }
+
+    ProfileManager profiles;
+    profiles.init(bin_dir + "/../config/profiles");
+
+    std::string active_profile_name;   // "" unless launched from a profile file
+    if (argc > 1) {
+        try {
+            fs::path argp  = fs::weakly_canonical(fs::path(argv[1]));
+            fs::path pdir  = fs::weakly_canonical(fs::path(profiles.dir()));
+            if (argp.parent_path() == pdir && argp.extension() == ".json")
+                active_profile_name = argp.stem().string();
+        } catch (...) {}
+    }
+
+    // Where to send the process when the user picks/loads a profile (re-exec).
+    std::string pending_reexec;
+
+    // Continue-countdown on the landing page (auto-loads the last profile after
+    // this many seconds of no input). 0 disables the countdown.
+    double landing_continue_timeout_s =
+        jval(cfg.contains("landing") ? cfg["landing"] : json::object(),
+             "continue_timeout_s", 10.0);
 
     // ── Config extraction ─────────────────────────────────────────────────────
 
@@ -3886,7 +3981,8 @@ int main(int argc, char* argv[]) {
                                &protoface_preview_cfg,
                                &protoface_preview_view,
                                cfg_map_dir,
-                               &left_eye_src, &right_eye_src));
+                               &left_eye_src, &right_eye_src,
+                               &profiles));
     menu_ptr = &menu;
 
     // Wire wireless controller callbacks now that menu exists
@@ -3965,22 +4061,62 @@ int main(int argc, char* argv[]) {
             bg_dirs.push_back(std::string(home) + "/protohud/backgrounds");
         bg_lib.scan(bg_dirs);
     }
-    struct LandingState { bool active = true; int cursor = 0; int count = 3; };
-    LandingState landing;
-    auto landing_nav = [&landing](int d){
-        landing.cursor = ((landing.cursor + d) % landing.count + landing.count) % landing.count;
+    // page 0 = main (CONTINUE / PROFILES / QUIT); page 1 = profile picker.
+    struct LandingState {
+        bool   active       = true;
+        int    page         = 0;
+        int    cursor       = 0;
+        bool   countdown_on = true;
+        double deadline     = 0.0;   // glfwGetTime() value the auto-continue fires at
     };
-    auto landing_select = [&landing, &bg_lib, &state]{
-        switch (landing.cursor) {
-            case 0: landing.active = false;                          break;  // Continue
-            case 1: bg_lib.next();                                   break;  // Background
-            case 2: state.quit = true; landing.active = false;       break;  // Quit
+    LandingState landing;
+    // Running from a profile file → skip the landing page (avoids a re-exec loop).
+    if (!active_profile_name.empty()) landing.active = false;
+    landing.countdown_on = (landing_continue_timeout_s > 0.0) && landing.active;
+
+    auto landing_count = [&landing, &profiles]() -> int {
+        return (landing.page == 0) ? 3 : (profiles.count() + 1);  // +1 = BACK
+    };
+    auto landing_cancel_countdown = [&landing]{ landing.countdown_on = false; };
+    auto landing_nav = [&landing, &landing_count, &landing_cancel_countdown](int d){
+        landing_cancel_countdown();
+        int n = landing_count();
+        if (n <= 0) { landing.cursor = 0; return; }
+        landing.cursor = ((landing.cursor + d) % n + n) % n;
+    };
+    // Resume = relaunch into the last-loaded profile if there is one, else just
+    // dismiss the landing page and run with the current config.
+    auto landing_resume = [&landing, &profiles, &pending_reexec, &state]{
+        std::string lp = profiles.last_path();
+        if (!lp.empty()) { pending_reexec = lp; state.quit = true; }
+        landing.active = false;
+    };
+    auto landing_load = [&landing, &profiles, &pending_reexec, &state](int idx){
+        if (idx < 0 || idx >= profiles.count()) return;
+        profiles.set_last(profiles.name(idx));
+        pending_reexec = profiles.path(idx);
+        state.quit     = true;
+        landing.active = false;
+    };
+    auto landing_select = [&landing, &state, &profiles, &landing_resume, &landing_load,
+                           &landing_cancel_countdown]{
+        landing_cancel_countdown();
+        if (landing.page == 0) {
+            switch (landing.cursor) {
+                case 0: landing_resume();                              break;  // Continue
+                case 1: landing.page = 1; landing.cursor = 0;         break;  // Profiles
+                case 2: state.quit = true; landing.active = false;   break;  // Quit
+            }
+        } else {
+            if (landing.cursor < profiles.count()) landing_load(landing.cursor);
+            else { landing.page = 0; landing.cursor = 1; }                    // Back
         }
     };
 
     knob.on_move([&menu, &hud, &landing, &landing_nav](int8_t dir, int) {
         // if (hud.popup_active())    hud.popup_navigate(dir);  // modal popup disabled
-        if      (landing.active)        landing_nav(dir);
+        if      (menu.is_keyboard_open()) menu.osk_step(dir);
+        else if (landing.active)        landing_nav(dir);
         else if (menu.is_open())        menu.navigate(dir);
         else if (hud.toast_has_focused()) hud.toast_navigate(dir);
     });
@@ -4096,19 +4232,22 @@ int main(int argc, char* argv[]) {
         else if (hud.toast_has_focused()) hud.toast_select(state);
     });
     gamepad.on_back([&menu, &hud, &landing]{
-        if      (landing.active)          { /* nothing to go back to */ }
+        if      (menu.is_keyboard_open()) menu.osk_backspace();
+        else if (landing.active)          { if (landing.page == 1) { landing.page = 0; landing.cursor = 1; landing.countdown_on = false; } }
         else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
     });
-    gamepad.on_nav_up   ([&menu, &landing, &landing_nav]{ if (landing.active){landing_nav(-1);return;} if (menu.is_open()) menu.navigate(-1); });
-    gamepad.on_nav_down ([&menu, &landing, &landing_nav]{ if (landing.active){landing_nav(+1);return;} if (menu.is_open()) menu.navigate(+1); });
+    gamepad.on_nav_up   ([&menu, &landing, &landing_nav]{ if (menu.is_keyboard_open()){menu.osk_move(0,-1);return;} if (landing.active){landing_nav(-1);return;} if (menu.is_open()) menu.navigate(-1); });
+    gamepad.on_nav_down ([&menu, &landing, &landing_nav]{ if (menu.is_keyboard_open()){menu.osk_move(0,+1);return;} if (landing.active){landing_nav(+1);return;} if (menu.is_open()) menu.navigate(+1); });
     gamepad.on_nav_left ([&menu, &hud, &landing, &bg_lib]{
-        if      (landing.active)          bg_lib.prev();
+        if      (menu.is_keyboard_open()) menu.osk_move(-1, 0);
+        else if (landing.active)          bg_lib.prev();
         else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
     });
     gamepad.on_nav_right([&menu, &hud, &state, &landing, &bg_lib]{
-        if      (landing.active)          bg_lib.next();
+        if      (menu.is_keyboard_open()) menu.osk_move(+1, 0);
+        else if (landing.active)          bg_lib.next();
         else if (hud.toast_has_focused()) hud.toast_navigate(+1);
         else if (menu.is_open())          menu.select();
     });
@@ -4207,9 +4346,11 @@ int main(int argc, char* argv[]) {
     VideoRecorder video_recorder;
 
     // ── Startup landing page ─────────────────────────────────────────────────
-    // Halo-style screen shown after the splash; gates startup until "Continue".
-    // Background comes from the image library; nav via gamepad/knob (callbacks
-    // above) + keyboard here. Camera/serial threads keep running underneath.
+    // Halo-style screen shown after the splash; gates startup until the user picks
+    // Continue (resume last profile), opens the Profiles picker, or quits. If the
+    // Continue countdown runs out, the last-loaded profile auto-loads. Background
+    // comes from the image library; camera/serial threads keep running underneath.
+    landing.deadline = glfwGetTime() + landing_continue_timeout_s;
     while (landing.active && !glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);  // keep the watchdog from force-exiting
         gamepad.poll();
@@ -4224,9 +4365,22 @@ int main(int argc, char* argv[]) {
         // Keyboard nav (dev / desktop).
         if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    landing_nav(-1);
         if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  landing_nav(+1);
-        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  bg_lib.prev();
-        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) bg_lib.next();
+        if (landing.page == 0) {
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  bg_lib.prev();
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) bg_lib.next();
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter))      landing_select();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) && landing.page == 1) {
+            landing.page = 0; landing.cursor = 1; landing_cancel_countdown();
+        }
+        if (!landing.active) break;   // a selection ended the landing page
+
+        // Continue countdown → auto-load the last profile when it expires.
+        double remaining = 0.0;
+        if (landing.countdown_on && landing.page == 0) {
+            remaining = landing.deadline - glfwGetTime();
+            if (remaining <= 0.0) { landing_resume(); break; }
+        }
 
         ImDrawList* dl = ImGui::GetBackgroundDrawList();
         const float W = static_cast<float>(fw), H = static_cast<float>(fh);
@@ -4247,37 +4401,276 @@ int main(int argc, char* argv[]) {
         const ImU32 accent = menu.accent_color();
         const float mx = W * 0.06f, my = H * 0.10f;
 
+        // Title / breadcrumb.
         dl->AddText(font, fs * 1.4f, {mx, my}, IM_COL32(255, 255, 255, 235), "PROTOHUD");
+        if (landing.page == 1) {
+            ImVec2 tsz = font->CalcTextSizeA(fs * 1.4f, 1e9f, 0.f, "PROTOHUD");
+            dl->AddText(font, fs * 1.0f, {mx + tsz.x + 16.f, my + fs * 0.4f},
+                        (accent & 0x00FFFFFFu) | (210u << 24), ">  PROFILES");
+        }
 
-        const char* items[3] = { "CONTINUE", "BACKGROUND", "QUIT" };
+        // Build the current page's rows.
+        std::vector<std::string> rows;
+        if (landing.page == 0) {
+            rows = { "CONTINUE", "PROFILES", "QUIT" };
+        } else {
+            for (int i = 0; i < profiles.count(); ++i) rows.push_back(profiles.name(i));
+            rows.push_back("BACK");
+        }
+
         const float row_h = fs * 1.3f + 18.f;
-        const float lw    = W * 0.30f;
+        const float lw    = W * 0.34f;
         float ly = my + fs * 1.4f + 40.f;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
             bool sel = (i == landing.cursor);
             ImVec2 rmin{mx, ly}, rmax{mx + lw, ly + row_h};
             if (sel) dl->AddRectFilled(rmin, rmax, IM_COL32(255, 255, 255, 235));
             ImU32 tcol = sel ? IM_COL32(10, 12, 14, 255) : IM_COL32(230, 235, 240, 210);
             float ty = ly + (row_h - fs * 1.2f) * 0.5f;
-            dl->AddText(font, fs * 1.2f, {mx + 14.f, ty}, tcol, items[i]);
+            std::string label = rows[i];
+            std::transform(label.begin(), label.end(), label.begin(), ::toupper);
+            dl->AddText(font, fs * 1.2f, {mx + 14.f, ty}, tcol, label.c_str());
             dl->AddLine({mx, rmax.y}, {mx + lw, rmax.y},
                         (accent & 0x00FFFFFFu) | (70u << 24), 1.f);
-            if (i == 1 && bg_lib.count() > 0) {  // show current background name
-                std::string nm = bg_lib.name(bg_lib.current());
-                ImVec2 nsz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, nm.c_str());
-                ImU32 nc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (200u << 24));
-                dl->AddText(font, fs * 0.95f, {mx + lw - nsz.x - 12.f, ty}, nc, nm.c_str());
+            // Countdown badge on CONTINUE.
+            if (landing.page == 0 && i == 0 && landing.countdown_on && remaining > 0.0) {
+                char cd[24]; snprintf(cd, sizeof(cd), "%ds", (int)std::ceil(remaining));
+                ImVec2 csz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, cd);
+                ImU32 cc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (210u << 24));
+                dl->AddText(font, fs * 0.95f, {mx + lw - csz.x - 12.f, ty}, cc, cd);
             }
             ly += row_h;
         }
+        if (landing.page == 1 && profiles.count() == 0) {
+            dl->AddText(font, fs * 0.95f, {mx + 14.f, ly + 6.f},
+                        (accent & 0x00FFFFFFu) | (150u << 24),
+                        "No profiles yet \xC2\xB7 save one in the menu (Profiles tab)");
+        }
 
+        const char* hint = (landing.page == 0)
+            ? "ENTER / A  SELECT     UP/DOWN  MOVE     LEFT/RIGHT / LB-RB  BACKGROUND"
+            : "ENTER / A  LOAD (RESTART)     UP/DOWN  MOVE     ESC / B  BACK";
         dl->AddText(font, fs * 0.95f, {mx, H - my * 0.5f},
-                    (accent & 0x00FFFFFFu) | (190u << 24),
-                    "ENTER / A  SELECT     UP/DOWN  MOVE     LEFT/RIGHT / LB-RB  BACKGROUND");
+                    (accent & 0x00FFFFFFu) | (190u << 24), hint);
 
         hud.render_menu_overlay();
         xr.present();
     }
+
+    // ── Config snapshot writer ────────────────────────────────────────────────
+    // Mutate `cfg` with all current runtime settings (HUD colors/style, vision,
+    // cameras, Protoface, menu, etc.). Factored out so both the exit-save AND the
+    // "save profile" feature write the exact same snapshot. save_config_to() always
+    // writes (used for profile files); the exit path skips writing config.json when
+    // it failed to parse on load (no-clobber, handled by the caller).
+    auto mutate_cfg = [&] {
+        auto& jc = cfg["hud_colors"];
+        jc["glow_base"]        = color_to_json(hud.colors().glow_base);
+        jc["text_fill"]        = color_to_json(hud.colors().text_fill);
+        jc["ind_good"]         = color_to_json(hud.colors().ind_good);
+        jc["ind_inactive"]     = color_to_json(hud.colors().ind_inactive);
+        jc["ind_fail"]         = color_to_json(hud.colors().ind_fail);
+        jc["compass_tick"]     = color_to_json(hud.colors().compass_tick);
+        jc["compass_glow"]     = color_to_json(hud.colors().compass_glow);
+        jc["compass_bg_color"] = color_to_json(hud.colors().compass_bg_color);
+
+        cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
+        cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
+        cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
+        {
+            static const char* kAxes[] = { "roll", "pitch", "yaw" };
+            cfg["compass"]["axis"]   = kAxes[static_cast<int>(state.compass_axis)];
+            cfg["compass"]["invert"] = state.compass_invert;
+        }
+        cfg["hud"]["flip_vertical"]             = hud.config().hud_flip_vertical;
+        cfg["hud"]["effects"]["type"]           = static_cast<int>(state.effects_cfg.effect);
+        cfg["hud"]["effects"]["palette"]        = static_cast<int>(state.effects_cfg.palette);
+
+        cfg["night_vision"]["exposure_ev"]            = state.night_vision.exposure_ev;
+        cfg["night_vision"]["shutter_us"]             = state.night_vision.shutter_us;
+        cfg["night_vision"]["auto_nv"]                = state.night_vision.auto_nv;
+        cfg["night_vision"]["auto_nv_gain_threshold"] = state.night_vision.auto_nv_gain_threshold;
+        cfg["night_vision"]["csi_awb_left"]           = state.night_vision.csi_awb_left;
+        cfg["night_vision"]["csi_awb_right"]          = state.night_vision.csi_awb_right;
+
+        cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
+        cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;
+        cfg["clock"]["show_date"]       = state.clock_cfg.show_date;
+        cfg["clock"]["font_scale"]      = state.clock_cfg.font_scale;
+        cfg["clock"]["manual_offset_s"] = state.clock_cfg.manual_offset_s;
+
+        cfg["pip"]["cam1"]["anchor_x"]  = pip_overlay_cfg1.anchor_x;
+        cfg["pip"]["cam1"]["anchor_y"]  = pip_overlay_cfg1.anchor_y;
+        cfg["pip"]["cam1"]["pan_x"]     = pip_overlay_cfg1.pan_x;
+        cfg["pip"]["cam1"]["pan_y"]     = pip_overlay_cfg1.pan_y;
+        cfg["pip"]["cam1"]["size"]      = pip_overlay_cfg1.size;
+        cfg["pip"]["cam1"]["rotation"]  = rotation_to_str(pip_overlay_cfg1.rotation);
+        cfg["pip"]["cam2"]["anchor_x"]  = pip_overlay_cfg2.anchor_x;
+        cfg["pip"]["cam2"]["anchor_y"]  = pip_overlay_cfg2.anchor_y;
+        cfg["pip"]["cam2"]["pan_x"]     = pip_overlay_cfg2.pan_x;
+        cfg["pip"]["cam2"]["pan_y"]     = pip_overlay_cfg2.pan_y;
+        cfg["pip"]["cam2"]["size"]      = pip_overlay_cfg2.size;
+        cfg["pip"]["cam2"]["rotation"]  = rotation_to_str(pip_overlay_cfg2.rotation);
+
+        cfg["protoface"]["mode"]                = pf_mode;
+        cfg["protoface"]["autostart"]           = pf_autostart;
+        cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
+        cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
+        cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;
+        cfg["protoface"]["preview"]["pan_y"]    = protoface_preview_cfg.pan_y;
+        cfg["protoface"]["preview"]["size"]     = protoface_preview_cfg.size;
+        cfg["protoface"]["preview"]["view"]     = protoface_preview_view;
+
+        auto& jpp = cfg["post_process"];
+        jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
+        jpp["edge_strength"]      = state.pp_cfg.edge_strength;
+        jpp["edge_color"]         = color_to_json(state.pp_cfg.edge_color);
+        jpp["desat_enabled"]      = state.pp_cfg.desat_enabled;
+        jpp["desat_strength"]     = state.pp_cfg.desat_strength;
+        jpp["contrast_threshold"] = state.pp_cfg.contrast_threshold;
+        jpp["edge_scale"]         = state.pp_cfg.edge_scale;
+        jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
+        jpp["focus_str"]          = state.pp_cfg.focus_str;
+        jpp["edge_gate_scale"]    = state.pp_cfg.edge_gate_scale;
+        jpp["color_protect"]      = state.pp_cfg.color_protect;
+        jpp["edge_dilate"]        = state.pp_cfg.edge_dilate;
+        jpp["motion_enabled"]     = state.pp_cfg.motion_enabled;
+        jpp["motion_strength"]    = state.pp_cfg.motion_strength;
+        jpp["motion_thresh"]      = state.pp_cfg.motion_thresh;
+        jpp["motion_radius"]      = state.pp_cfg.motion_radius;
+        jpp["motion_line"]        = state.pp_cfg.motion_line;
+        jpp["motion_update_rate"] = state.pp_cfg.motion_update_rate;
+        jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
+
+        cfg["cameras"]["usb_cam_1"]["device"]            = cameras.usb1_cfg().device;
+        cfg["cameras"]["usb_cam_1"]["width"]             = cameras.usb1_cfg().width;
+        cfg["cameras"]["usb_cam_1"]["height"]            = cameras.usb1_cfg().height;
+        cfg["cameras"]["usb_cam_1"]["brightness"]        = cameras.usb1_brightness();
+        cfg["cameras"]["usb_cam_1"]["dynamic_framerate"] = cameras.usb1_cfg().dynamic_framerate;
+        cfg["cameras"]["usb_cam_1"]["auto_exposure"]     = cameras.usb1_cfg().auto_exposure;
+        cfg["cameras"]["usb_cam_1"]["exposure_time"]     = cameras.usb1_cfg().exposure_time;
+        cfg["cameras"]["usb_cam_1"]["auto_wb"]           = cameras.usb1_cfg().auto_wb;
+        cfg["cameras"]["usb_cam_1"]["wb_temp"]           = cameras.usb1_cfg().wb_temp;
+        cfg["cameras"]["usb_cam_1"]["flip"]                   = cameras.usb1_cfg().flip;
+        cfg["cameras"]["usb_cam_1"]["auto_brightness"]        = cameras.usb1_cfg().auto_brightness;
+        cfg["cameras"]["usb_cam_1"]["auto_brightness_target"] = cameras.usb1_cfg().auto_brightness_target;
+        cfg["cameras"]["usb_cam_2"]["device"]            = cameras.usb2_cfg().device;
+        cfg["cameras"]["usb_cam_2"]["width"]             = cameras.usb2_cfg().width;
+        cfg["cameras"]["usb_cam_2"]["height"]            = cameras.usb2_cfg().height;
+        cfg["cameras"]["usb_cam_2"]["brightness"]        = cameras.usb2_brightness();
+        cfg["cameras"]["usb_cam_2"]["dynamic_framerate"] = cameras.usb2_cfg().dynamic_framerate;
+        cfg["cameras"]["usb_cam_2"]["auto_exposure"]     = cameras.usb2_cfg().auto_exposure;
+        cfg["cameras"]["usb_cam_2"]["exposure_time"]     = cameras.usb2_cfg().exposure_time;
+        cfg["cameras"]["usb_cam_2"]["auto_wb"]           = cameras.usb2_cfg().auto_wb;
+        cfg["cameras"]["usb_cam_2"]["wb_temp"]           = cameras.usb2_cfg().wb_temp;
+        cfg["cameras"]["usb_cam_2"]["flip"]                   = cameras.usb2_cfg().flip;
+        cfg["cameras"]["usb_cam_2"]["auto_brightness"]        = cameras.usb2_cfg().auto_brightness;
+        cfg["cameras"]["usb_cam_2"]["auto_brightness_target"] = cameras.usb2_cfg().auto_brightness_target;
+        cfg["cameras"]["usb_cam_3"]["device"]            = cameras.usb3_cfg().device;
+        cfg["cameras"]["usb_cam_3"]["width"]             = cameras.usb3_cfg().width;
+        cfg["cameras"]["usb_cam_3"]["height"]            = cameras.usb3_cfg().height;
+        cfg["cameras"]["usb_cam_3"]["brightness"]        = cameras.usb3_brightness();
+        cfg["cameras"]["usb_cam_3"]["dynamic_framerate"] = cameras.usb3_cfg().dynamic_framerate;
+        cfg["cameras"]["usb_cam_3"]["auto_exposure"]     = cameras.usb3_cfg().auto_exposure;
+        cfg["cameras"]["usb_cam_3"]["exposure_time"]     = cameras.usb3_cfg().exposure_time;
+        cfg["cameras"]["usb_cam_3"]["auto_wb"]           = cameras.usb3_cfg().auto_wb;
+        cfg["cameras"]["usb_cam_3"]["wb_temp"]           = cameras.usb3_cfg().wb_temp;
+        cfg["cameras"]["usb_cam_3"]["flip"]                   = cameras.usb3_cfg().flip;
+        cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
+        cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
+        cfg["cameras"]["swapped"] = state.cameras_swapped;
+        {
+            static const char* kNames[] = { "center","outside","left","right","top","bottom" };
+            cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
+        }
+
+        cfg["qr"]["scan_main"] = state.qr_scan_main;
+        cfg["qr"]["scan_usb"]  = state.qr_scan_usb;
+
+        cfg["fps_avg_interval_s"] = state.fps_avg_interval_s;
+        cfg["i2c_scan_bus"]       = state.i2c_scan_bus;
+
+        cfg["landing"]["continue_timeout_s"] = landing_continue_timeout_s;
+
+        {
+            const auto& mo          = state.map_overlay;
+            cfg["map"]["enabled"]             = mo.enabled;
+            cfg["map"]["map_path"]            = mo.map_path;
+            cfg["map"]["opacity"]             = mo.opacity;
+            cfg["map"]["size_px"]             = mo.size_px;
+            cfg["map"]["rotate_with_heading"] = mo.rotate_with_heading;
+            cfg["map"]["image_rotate_deg"]    = mo.image_rotate_deg;
+            cfg["map"]["anchor_x"]            = mo.anchor_x;
+            cfg["map"]["anchor_y"]            = mo.anchor_y;
+            cfg["map"]["circle_window"]       = mo.circle_window;
+            cfg["map"]["zoom"]                = mo.zoom;
+        }
+
+        cfg["resolution"]["width"]  = state.camera_resolution.width;
+        cfg["resolution"]["height"] = state.camera_resolution.height;
+        cfg["resolution"]["fps"]    = state.camera_resolution.fps;
+
+        auto eye_src_str = [](EyeSource s) -> const char* {
+            switch (s) {
+                case EyeSource::USB1: return "usb1";
+                case EyeSource::USB2: return "usb2";
+                case EyeSource::USB3: return "usb3";
+                default:              return "csi";
+            }
+        };
+        cfg["cameras"]["left_eye_source"]  = eye_src_str(left_eye_src);
+        cfg["cameras"]["right_eye_source"] = eye_src_str(right_eye_src);
+
+        auto& jm = cfg["menu_style"];
+        jm["accent_color"]     = color_to_json(menu.accent_color());
+        jm["bg_color"]         = color_to_json(menu.bg_color());
+        jm["bg_enabled"]       = menu.bg_enabled();
+        jm["border_color"]     = color_to_json(menu.border_color());
+        jm["border_thickness"]  = menu.border_thickness();
+        jm["border_enabled"]    = menu.border_enabled();
+        jm["ui_scale"]          = menu.ui_scale();
+        jm["selection_style"]   = (menu.selection_style() == SelectionStyle::FILLED_ROW)
+                                  ? "filled_row" : "accent_bar";
+        {
+            const char* a = "top_left";
+            switch (menu.anchor()) {
+                case MenuAnchor::TopRight:    a = "top_right";    break;
+                case MenuAnchor::BottomLeft:  a = "bottom_left";  break;
+                case MenuAnchor::BottomRight: a = "bottom_right"; break;
+                default: break;
+            }
+            jm["anchor"] = a;
+        }
+
+        // Persist MPU-9250 enabled state + calibration biases so the menu's
+        // "Active" toggle and calibration survive a restart.
+        if (mpu9250.is_running() || mpu9250.is_enabled() || cfg.contains("mpu9250")) {
+            float bx, by, bz;
+            mpu9250.get_mag_bias(bx, by, bz);
+            cfg["mpu9250"]["enabled"]        = mpu9250.is_enabled();
+            cfg["mpu9250"]["mag_bias"]       = json::array({ bx, by, bz });
+            cfg["mpu9250"]["mount_rotation"] = mpu9250.get_mount_rotation();
+            cfg["mpu9250"]["heading_axes"]   = mpu9250.get_heading_axes();
+        }
+    };
+
+    // Snapshot current settings into `cfg` and write them to `path`. Always writes
+    // (callers gate config.json on cfg_parse_failed themselves). Returns success.
+    auto save_config_to = [&](const std::string& path) -> bool {
+        try {
+            mutate_cfg();
+            FILE* f = fopen(path.c_str(), "w");
+            if (!f) { std::cerr << "[cfg] cannot write to " << path << "\n"; return false; }
+            std::string s = cfg.dump(2);
+            fwrite(s.c_str(), 1, s.size(), f);
+            fclose(f);
+            std::cout << "[cfg] saved to " << path << "\n";
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "[cfg] save failed: " << e.what() << "\n";
+            return false;
+        }
+    };
 
     double prev_time = glfwGetTime();
 
@@ -4293,7 +4686,60 @@ int main(int argc, char* argv[]) {
         hud.set_dt(dt);
         hud.begin_menu_frame();
 
+        // ── Profile requests (posted by the Profiles menu) ────────────────────
+        // Save = write a snapshot now; Load = relaunch into that profile (restart);
+        // Delete = remove the file. Strings are swapped out under the lock.
+        {
+            std::string save_req, load_req, del_req;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                save_req.swap(state.profile_save_name);
+                load_req.swap(state.profile_load_name);
+                del_req.swap(state.profile_delete_name);
+            }
+            if (!save_req.empty()) {
+                std::string nm = ProfileManager::sanitize(save_req);
+                if (save_config_to(profiles.path_for(nm))) {
+                    profiles.scan();
+                    Notification n; n.type = NotifType::App;
+                    n.title = "Profile saved"; n.body = nm; n.auto_dismiss_s = 4.f;
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.notifs.push(std::move(n));
+                }
+            }
+            if (!del_req.empty()) {
+                bool ok = profiles.remove(del_req);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Profile deleted" : "Delete failed";
+                n.body = del_req; n.auto_dismiss_s = 4.f;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.notifs.push(std::move(n));
+            }
+            if (!load_req.empty() && profiles.exists(load_req)) {
+                // Save the current config, mark the profile as last-loaded, then
+                // request a clean restart into it (re-exec happens at shutdown).
+                profiles.set_last(load_req);
+                pending_reexec = profiles.path_for(load_req);
+                state.quit = true;
+            }
+        }
+        if (state.quit) break;
+
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
+        // While the on-screen keyboard is up it captures ALL keystrokes (so typing
+        // a profile name can't trigger app hotkeys); other handling is skipped.
+        if (menu.is_keyboard_open()) {
+            if (key_pressed(ImGuiKey_UpArrow))    menu.osk_move(0, -1);
+            if (key_pressed(ImGuiKey_DownArrow))  menu.osk_move(0, +1);
+            if (key_pressed(ImGuiKey_LeftArrow))  menu.osk_move(-1, 0);
+            if (key_pressed(ImGuiKey_RightArrow)) menu.osk_move(+1, 0);
+            if (key_pressed(ImGuiKey_Enter))      menu.osk_activate();
+            if (key_pressed(ImGuiKey_Backspace))  menu.osk_backspace();
+            if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_F1)) menu.osk_cancel();
+            for (ImWchar ch : ImGui::GetIO().InputQueueCharacters)
+                menu.osk_input_char(static_cast<unsigned int>(ch));
+        }
+        if (!menu.is_keyboard_open()) {
         if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_P)) { state.quit = true; break; }
         // Ctrl+Q / Ctrl+K — force-kill (immediate exit, skips graceful cleanup)
         if (ImGui::GetIO().KeyCtrl &&
@@ -4411,6 +4857,7 @@ int main(int argc, char* argv[]) {
                 else                        face_proxy.play_gif(static_cast<uint8_t>(i));
             }
         }
+        }  // end if (!menu.is_keyboard_open())
 
         // ── Wireless controller pip state ─────────────────────────────────────
         bool wc_pip_left  = wireless_enabled && wireless.pip_left_active();
@@ -5021,210 +5468,14 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Persist runtime settings ──────────────────────────────────────────────
-    // Capture whatever colors/flags the user set via the HUD menu and write
-    // them back to the config file so they survive a restart.
-    try {
-        auto& jc = cfg["hud_colors"];
-        jc["glow_base"]        = color_to_json(hud.colors().glow_base);
-        jc["text_fill"]        = color_to_json(hud.colors().text_fill);
-        jc["ind_good"]         = color_to_json(hud.colors().ind_good);
-        jc["ind_inactive"]     = color_to_json(hud.colors().ind_inactive);
-        jc["ind_fail"]         = color_to_json(hud.colors().ind_fail);
-        jc["compass_tick"]     = color_to_json(hud.colors().compass_tick);
-        jc["compass_glow"]     = color_to_json(hud.colors().compass_glow);
-        jc["compass_bg_color"] = color_to_json(hud.colors().compass_bg_color);
-
-        cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
-        cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
-        cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
-        {
-            static const char* kAxes[] = { "roll", "pitch", "yaw" };
-            cfg["compass"]["axis"]   = kAxes[static_cast<int>(state.compass_axis)];
-            cfg["compass"]["invert"] = state.compass_invert;
-        }
-        cfg["hud"]["flip_vertical"]             = hud.config().hud_flip_vertical;
-        cfg["hud"]["effects"]["type"]           = static_cast<int>(state.effects_cfg.effect);
-        cfg["hud"]["effects"]["palette"]        = static_cast<int>(state.effects_cfg.palette);
-
-        cfg["night_vision"]["exposure_ev"]            = state.night_vision.exposure_ev;
-        cfg["night_vision"]["shutter_us"]             = state.night_vision.shutter_us;
-        cfg["night_vision"]["auto_nv"]                = state.night_vision.auto_nv;
-        cfg["night_vision"]["auto_nv_gain_threshold"] = state.night_vision.auto_nv_gain_threshold;
-        cfg["night_vision"]["csi_awb_left"]           = state.night_vision.csi_awb_left;
-        cfg["night_vision"]["csi_awb_right"]          = state.night_vision.csi_awb_right;
-
-        cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
-        cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;
-        cfg["clock"]["show_date"]       = state.clock_cfg.show_date;
-        cfg["clock"]["font_scale"]      = state.clock_cfg.font_scale;
-        cfg["clock"]["manual_offset_s"] = state.clock_cfg.manual_offset_s;
-
-        cfg["pip"]["cam1"]["anchor_x"]  = pip_overlay_cfg1.anchor_x;
-        cfg["pip"]["cam1"]["anchor_y"]  = pip_overlay_cfg1.anchor_y;
-        cfg["pip"]["cam1"]["pan_x"]     = pip_overlay_cfg1.pan_x;
-        cfg["pip"]["cam1"]["pan_y"]     = pip_overlay_cfg1.pan_y;
-        cfg["pip"]["cam1"]["size"]      = pip_overlay_cfg1.size;
-        cfg["pip"]["cam1"]["rotation"]  = rotation_to_str(pip_overlay_cfg1.rotation);
-        cfg["pip"]["cam2"]["anchor_x"]  = pip_overlay_cfg2.anchor_x;
-        cfg["pip"]["cam2"]["anchor_y"]  = pip_overlay_cfg2.anchor_y;
-        cfg["pip"]["cam2"]["pan_x"]     = pip_overlay_cfg2.pan_x;
-        cfg["pip"]["cam2"]["pan_y"]     = pip_overlay_cfg2.pan_y;
-        cfg["pip"]["cam2"]["size"]      = pip_overlay_cfg2.size;
-        cfg["pip"]["cam2"]["rotation"]  = rotation_to_str(pip_overlay_cfg2.rotation);
-
-        cfg["protoface"]["mode"]                = pf_mode;
-        cfg["protoface"]["autostart"]           = pf_autostart;
-        cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
-        cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
-        cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;
-        cfg["protoface"]["preview"]["pan_y"]    = protoface_preview_cfg.pan_y;
-        cfg["protoface"]["preview"]["size"]     = protoface_preview_cfg.size;
-        cfg["protoface"]["preview"]["view"]     = protoface_preview_view;
-
-        auto& jpp = cfg["post_process"];
-        jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
-        jpp["edge_strength"]      = state.pp_cfg.edge_strength;
-        jpp["edge_color"]         = color_to_json(state.pp_cfg.edge_color);
-        jpp["desat_enabled"]      = state.pp_cfg.desat_enabled;
-        jpp["desat_strength"]     = state.pp_cfg.desat_strength;
-        jpp["contrast_threshold"] = state.pp_cfg.contrast_threshold;
-        jpp["edge_scale"]         = state.pp_cfg.edge_scale;
-        jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
-        jpp["focus_str"]          = state.pp_cfg.focus_str;
-        jpp["edge_gate_scale"]    = state.pp_cfg.edge_gate_scale;
-        jpp["color_protect"]      = state.pp_cfg.color_protect;
-        jpp["edge_dilate"]        = state.pp_cfg.edge_dilate;
-        jpp["motion_enabled"]     = state.pp_cfg.motion_enabled;
-        jpp["motion_strength"]    = state.pp_cfg.motion_strength;
-        jpp["motion_thresh"]      = state.pp_cfg.motion_thresh;
-        jpp["motion_radius"]      = state.pp_cfg.motion_radius;
-        jpp["motion_line"]        = state.pp_cfg.motion_line;
-        jpp["motion_update_rate"] = state.pp_cfg.motion_update_rate;
-        jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
-
-        cfg["cameras"]["usb_cam_1"]["device"]            = cameras.usb1_cfg().device;
-        cfg["cameras"]["usb_cam_1"]["width"]             = cameras.usb1_cfg().width;
-        cfg["cameras"]["usb_cam_1"]["height"]            = cameras.usb1_cfg().height;
-        cfg["cameras"]["usb_cam_1"]["brightness"]        = cameras.usb1_brightness();
-        cfg["cameras"]["usb_cam_1"]["dynamic_framerate"] = cameras.usb1_cfg().dynamic_framerate;
-        cfg["cameras"]["usb_cam_1"]["auto_exposure"]     = cameras.usb1_cfg().auto_exposure;
-        cfg["cameras"]["usb_cam_1"]["exposure_time"]     = cameras.usb1_cfg().exposure_time;
-        cfg["cameras"]["usb_cam_1"]["auto_wb"]           = cameras.usb1_cfg().auto_wb;
-        cfg["cameras"]["usb_cam_1"]["wb_temp"]           = cameras.usb1_cfg().wb_temp;
-        cfg["cameras"]["usb_cam_1"]["flip"]                   = cameras.usb1_cfg().flip;
-        cfg["cameras"]["usb_cam_1"]["auto_brightness"]        = cameras.usb1_cfg().auto_brightness;
-        cfg["cameras"]["usb_cam_1"]["auto_brightness_target"] = cameras.usb1_cfg().auto_brightness_target;
-        cfg["cameras"]["usb_cam_2"]["device"]            = cameras.usb2_cfg().device;
-        cfg["cameras"]["usb_cam_2"]["width"]             = cameras.usb2_cfg().width;
-        cfg["cameras"]["usb_cam_2"]["height"]            = cameras.usb2_cfg().height;
-        cfg["cameras"]["usb_cam_2"]["brightness"]        = cameras.usb2_brightness();
-        cfg["cameras"]["usb_cam_2"]["dynamic_framerate"] = cameras.usb2_cfg().dynamic_framerate;
-        cfg["cameras"]["usb_cam_2"]["auto_exposure"]     = cameras.usb2_cfg().auto_exposure;
-        cfg["cameras"]["usb_cam_2"]["exposure_time"]     = cameras.usb2_cfg().exposure_time;
-        cfg["cameras"]["usb_cam_2"]["auto_wb"]           = cameras.usb2_cfg().auto_wb;
-        cfg["cameras"]["usb_cam_2"]["wb_temp"]           = cameras.usb2_cfg().wb_temp;
-        cfg["cameras"]["usb_cam_2"]["flip"]                   = cameras.usb2_cfg().flip;
-        cfg["cameras"]["usb_cam_2"]["auto_brightness"]        = cameras.usb2_cfg().auto_brightness;
-        cfg["cameras"]["usb_cam_2"]["auto_brightness_target"] = cameras.usb2_cfg().auto_brightness_target;
-        cfg["cameras"]["usb_cam_3"]["device"]            = cameras.usb3_cfg().device;
-        cfg["cameras"]["usb_cam_3"]["width"]             = cameras.usb3_cfg().width;
-        cfg["cameras"]["usb_cam_3"]["height"]            = cameras.usb3_cfg().height;
-        cfg["cameras"]["usb_cam_3"]["brightness"]        = cameras.usb3_brightness();
-        cfg["cameras"]["usb_cam_3"]["dynamic_framerate"] = cameras.usb3_cfg().dynamic_framerate;
-        cfg["cameras"]["usb_cam_3"]["auto_exposure"]     = cameras.usb3_cfg().auto_exposure;
-        cfg["cameras"]["usb_cam_3"]["exposure_time"]     = cameras.usb3_cfg().exposure_time;
-        cfg["cameras"]["usb_cam_3"]["auto_wb"]           = cameras.usb3_cfg().auto_wb;
-        cfg["cameras"]["usb_cam_3"]["wb_temp"]           = cameras.usb3_cfg().wb_temp;
-        cfg["cameras"]["usb_cam_3"]["flip"]                   = cameras.usb3_cfg().flip;
-        cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
-        cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
-        cfg["cameras"]["swapped"] = state.cameras_swapped;
-        {
-            static const char* kNames[] = { "center","outside","left","right","top","bottom" };
-            cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
-        }
-
-        cfg["qr"]["scan_main"] = state.qr_scan_main;
-        cfg["qr"]["scan_usb"]  = state.qr_scan_usb;
-
-        cfg["fps_avg_interval_s"] = state.fps_avg_interval_s;
-        cfg["i2c_scan_bus"]       = state.i2c_scan_bus;
-
-        {
-            const auto& mo          = state.map_overlay;
-            cfg["map"]["enabled"]             = mo.enabled;
-            cfg["map"]["map_path"]            = mo.map_path;
-            cfg["map"]["opacity"]             = mo.opacity;
-            cfg["map"]["size_px"]             = mo.size_px;
-            cfg["map"]["rotate_with_heading"] = mo.rotate_with_heading;
-            cfg["map"]["image_rotate_deg"]    = mo.image_rotate_deg;
-            cfg["map"]["anchor_x"]            = mo.anchor_x;
-            cfg["map"]["anchor_y"]            = mo.anchor_y;
-            cfg["map"]["circle_window"]       = mo.circle_window;
-            cfg["map"]["zoom"]                = mo.zoom;
-        }
-
-        cfg["resolution"]["width"]  = state.camera_resolution.width;
-        cfg["resolution"]["height"] = state.camera_resolution.height;
-        cfg["resolution"]["fps"]    = state.camera_resolution.fps;
-
-        auto eye_src_str = [](EyeSource s) -> const char* {
-            switch (s) {
-                case EyeSource::USB1: return "usb1";
-                case EyeSource::USB2: return "usb2";
-                case EyeSource::USB3: return "usb3";
-                default:              return "csi";
-            }
-        };
-        cfg["cameras"]["left_eye_source"]  = eye_src_str(left_eye_src);
-        cfg["cameras"]["right_eye_source"] = eye_src_str(right_eye_src);
-
-        auto& jm = cfg["menu_style"];
-        jm["accent_color"]     = color_to_json(menu.accent_color());
-        jm["bg_color"]         = color_to_json(menu.bg_color());
-        jm["bg_enabled"]       = menu.bg_enabled();
-        jm["border_color"]     = color_to_json(menu.border_color());
-        jm["border_thickness"]  = menu.border_thickness();
-        jm["border_enabled"]    = menu.border_enabled();
-        jm["ui_scale"]          = menu.ui_scale();
-        jm["selection_style"]   = (menu.selection_style() == SelectionStyle::FILLED_ROW)
-                                  ? "filled_row" : "accent_bar";
-        {
-            const char* a = "top_left";
-            switch (menu.anchor()) {
-                case MenuAnchor::TopRight:    a = "top_right";    break;
-                case MenuAnchor::BottomLeft:  a = "bottom_left";  break;
-                case MenuAnchor::BottomRight: a = "bottom_right"; break;
-                default: break;
-            }
-            jm["anchor"] = a;
-        }
-
-        // Persist MPU-9250 enabled state + calibration biases so the menu's
-        // "Active" toggle and calibration survive a restart.
-        if (mpu9250.is_running() || mpu9250.is_enabled() || cfg.contains("mpu9250")) {
-            float bx, by, bz;
-            mpu9250.get_mag_bias(bx, by, bz);
-            cfg["mpu9250"]["enabled"]        = mpu9250.is_enabled();
-            cfg["mpu9250"]["mag_bias"]       = json::array({ bx, by, bz });
-            cfg["mpu9250"]["mount_rotation"] = mpu9250.get_mount_rotation();
-            cfg["mpu9250"]["heading_axes"]   = mpu9250.get_heading_axes();
-        }
-
-        FILE* f = cfg_parse_failed ? nullptr : fopen(cfg_path.c_str(), "w");
-        if (cfg_parse_failed) {
-            std::cerr << "[cfg] " << cfg_path << " failed to parse on load — "
-                         "leaving it untouched so your edits aren't lost\n";
-        } else if (f) {
-            std::string s = cfg.dump(2);
-            fwrite(s.c_str(), 1, s.size(), f);
-            fclose(f);
-            std::cout << "[cfg] settings saved to " << cfg_path << "\n";
-        } else {
-            std::cerr << "[cfg] cannot write to " << cfg_path << "\n";
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "[cfg] save failed: " << e.what() << "\n";
+    // Write current settings back to config.json so they survive a restart. Skip
+    // the write if the file failed to parse on load (no-clobber). Uses the same
+    // snapshot writer as the "save profile" feature (mutate_cfg + save_config_to).
+    if (cfg_parse_failed) {
+        std::cerr << "[cfg] " << cfg_path << " failed to parse on load — "
+                     "leaving it untouched so your edits aren't lost\n";
+    } else {
+        save_config_to(cfg_path);
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
@@ -5280,5 +5531,19 @@ int main(int argc, char* argv[]) {
 
     step("xr");              xr.shutdown();
     step("done");
+
+    // ── Profile restart ───────────────────────────────────────────────────────
+    // The user picked/loaded a profile (or the landing countdown auto-resumed the
+    // last one): relaunch ProtoHUD with that profile file as its config path. The
+    // re-launched instance reads + writes that file, so the active profile auto-
+    // saves; launched-with-a-path means it skips the landing page (no re-exec loop).
+    if (!pending_reexec.empty()) {
+        std::cerr << "[profile] restarting into " << pending_reexec << "\n";
+        char* newargv[] = { const_cast<char*>(exe_path.c_str()),
+                            const_cast<char*>(pending_reexec.c_str()),
+                            nullptr };
+        execv(exe_path.c_str(), newargv);
+        std::cerr << "[profile] re-exec failed: " << std::strerror(errno) << "\n";
+    }
     return 0;
 }

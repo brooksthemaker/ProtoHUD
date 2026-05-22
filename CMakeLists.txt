@@ -179,6 +179,7 @@ set(SOURCES
     src/hud/hud_renderer.cpp
     src/hud/background_library.cpp
     src/menu/menu_system.cpp
+    src/profile_manager.cpp
     src/vitrue/xr_display.cpp
     src/vitrue/timewarp.cpp
     src/audio/audio_engine.cpp

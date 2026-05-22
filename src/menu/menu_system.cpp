@@ -19,6 +19,29 @@ static std::string to_upper(const std::string& s) {
     return r;
 }
 
+// Rendered label for an item: dynamic label_fn() if present, else the static
+// label.  Lets profile rows show live names without rebuilding the menu tree.
+static std::string item_label(const MenuItem& it) {
+    if (it.label_fn) {
+        std::string s = it.label_fn();
+        if (!s.empty()) return s;
+    }
+    return it.label;
+}
+
+// On-screen keyboard layout (variable-width rows). Special keys live on the last
+// row. Shared by the input (move/activate) and draw paths so they stay in sync.
+static const std::vector<std::vector<std::string>>& osk_rows() {
+    static const std::vector<std::vector<std::string>> rows = {
+        {"1","2","3","4","5","6","7","8","9","0"},
+        {"Q","W","E","R","T","Y","U","I","O","P"},
+        {"A","S","D","F","G","H","J","K","L"},
+        {"Z","X","C","V","B","N","M"},
+        {"SPACE","DEL","SAVE","CANCEL"},
+    };
+    return rows;
+}
+
 // Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
 static ImU32 menu_with_alpha(ImU32 col, uint8_t a) {
     return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
@@ -156,6 +179,8 @@ void MenuSystem::close_deep() {
     open_            = false;
     in_edit_mode_    = false;
     in_channel_edit_ = false;
+    osk_active_      = false;
+    osk_commit_      = nullptr;
     stack_.clear();
 }
 
@@ -169,6 +194,96 @@ void MenuSystem::next_tab() {
 void MenuSystem::prev_tab() {
     if (!deep_open_) return;
     load_tab(tab_index_ - 1);
+}
+
+// ── On-screen keyboard ──────────────────────────────────────────────────────────
+
+void MenuSystem::open_keyboard(std::string title, std::string initial,
+                               KeyboardCommit on_commit) {
+    osk_title_  = std::move(title);
+    osk_text_   = std::move(initial);
+    osk_commit_ = std::move(on_commit);
+    osk_row_    = 0;
+    osk_col_    = 0;
+    osk_active_ = true;
+}
+
+void MenuSystem::close_keyboard() {
+    osk_active_ = false;
+    osk_commit_ = nullptr;
+    osk_text_.clear();
+}
+
+void MenuSystem::osk_move(int dx, int dy) {
+    if (!osk_active_) return;
+    const auto& rows = osk_rows();
+    int nrows = static_cast<int>(rows.size());
+    if (nrows == 0) return;
+    osk_row_ = std::clamp(osk_row_ + dy, 0, nrows - 1);
+    int ncols = static_cast<int>(rows[osk_row_].size());
+    osk_col_ = std::clamp(osk_col_ + dx, 0, std::max(0, ncols - 1));
+}
+
+void MenuSystem::osk_step(int d) {
+    if (!osk_active_) return;
+    const auto& rows = osk_rows();
+    // Flatten current (row,col) to a linear index, step with wrap, unflatten.
+    int flat = 0, total = 0;
+    for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+        if (r < osk_row_) flat += static_cast<int>(rows[r].size());
+        total += static_cast<int>(rows[r].size());
+    }
+    flat += std::min(osk_col_, static_cast<int>(rows[osk_row_].size()) - 1);
+    if (total == 0) return;
+    flat = ((flat + d) % total + total) % total;
+    for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+        int sz = static_cast<int>(rows[r].size());
+        if (flat < sz) { osk_row_ = r; osk_col_ = flat; return; }
+        flat -= sz;
+    }
+}
+
+void MenuSystem::osk_input_char(unsigned int c) {
+    if (!osk_active_) return;
+    if (c == ' ' || c == '-' || c == '_' || std::isalnum(static_cast<int>(c))) {
+        if (osk_text_.size() < 40) osk_text_ += static_cast<char>(c);
+    }
+}
+
+void MenuSystem::osk_activate() {
+    if (!osk_active_) return;
+    const auto& rows = osk_rows();
+    if (osk_row_ < 0 || osk_row_ >= static_cast<int>(rows.size())) return;
+    const auto& row = rows[osk_row_];
+    if (osk_col_ < 0 || osk_col_ >= static_cast<int>(row.size())) return;
+    const std::string& k = row[osk_col_];
+    if      (k == "SPACE")  { if (osk_text_.size() < 40) osk_text_ += ' '; }
+    else if (k == "DEL")    osk_backspace();
+    else if (k == "SAVE")   osk_commit();
+    else if (k == "CANCEL") osk_cancel();
+    else if (k.size() == 1) { if (osk_text_.size() < 40) osk_text_ += k[0]; }
+}
+
+void MenuSystem::osk_backspace() {
+    if (!osk_active_) return;
+    if (!osk_text_.empty()) osk_text_.pop_back();
+    else                    osk_cancel();   // backspace on empty = cancel out
+}
+
+void MenuSystem::osk_commit() {
+    if (!osk_active_) return;
+    // trim surrounding whitespace
+    std::string t = osk_text_;
+    size_t b = t.find_first_not_of(' ');
+    size_t e = t.find_last_not_of(' ');
+    std::string name = (b == std::string::npos) ? std::string() : t.substr(b, e - b + 1);
+    KeyboardCommit cb = osk_commit_;   // copy before close clears it
+    close_keyboard();
+    if (!name.empty() && cb) cb(name);
+}
+
+void MenuSystem::osk_cancel() {
+    close_keyboard();
 }
 
 void MenuSystem::emit_detents() {
@@ -187,6 +302,7 @@ void MenuSystem::emit_detents_override(int count) {
 // ── navigate ──────────────────────────────────────────────────────────────────
 
 void MenuSystem::navigate(int direction) {
+    if (osk_active_) { osk_step(direction); return; }
     if (!open_ || stack_.empty()) return;
 
     if (in_edit_mode_) {
@@ -241,6 +357,7 @@ void MenuSystem::navigate(int direction) {
 // ── select ────────────────────────────────────────────────────────────────────
 
 void MenuSystem::select() {
+    if (osk_active_) { osk_activate(); return; }
     if (!open_ || stack_.empty()) return;
     auto& items = stack_.back().items;
     if (cursor_ >= static_cast<int>(items.size())) return;
@@ -340,6 +457,7 @@ void MenuSystem::select() {
 // ── back ──────────────────────────────────────────────────────────────────────
 
 void MenuSystem::back() {
+    if (osk_active_) { osk_backspace(); return; }
     if (!stack_.empty() && cursor_ < static_cast<int>(stack_.back().items.size())) {
         auto& item = stack_.back().items[cursor_];
 
@@ -565,7 +683,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         if (item.type == MenuItemType::TOGGLE) {
             bool on = item.get_toggle ? item.get_toggle() : false;
 
-            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
             // Radio-style circle + " ON" / " OFF" text, both using accent_color_.
             const char* state_str = on ? " ON" : " OFF";
@@ -602,7 +720,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             format_slider_value(val_str, sizeof(val_str),
                                 val, item.slider.min, item.slider.max, item.slider.unit);
 
-            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
             const bool inv = (filled_row && selected);
 
@@ -645,7 +763,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                 ? static_cast<int>(edit_float_)
                 : (item.face_picker.get_face ? item.face_picker.get_face() : 0);
 
-            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
             const bool inv = (filled_row && selected);
 
@@ -690,7 +808,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         } else if (item.type == MenuItemType::COLOR_PICKER) {
             bool editing = selected && in_edit_mode_;
 
-            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
             if (!editing) {
                 float sw_x = rmax.x - 36.f;
@@ -759,7 +877,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             // Label row (unread badge)
             NotificationQueue* q = item.notif_log.queue;
             int unread = q ? q->unread_count() : 0;
-            std::string lbl = to_upper(item.label);
+            std::string lbl = to_upper(item_label(item));
             if (unread > 0) { char badge[16]; snprintf(badge, sizeof(badge), " (%d)", unread); lbl += badge; }
             draw_item_text({rmin.x + 4.f, ty}, lbl.c_str(), selected);
 
@@ -813,7 +931,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
         // ── LEAF / SUBMENU ────────────────────────────────────────────────────
         } else {
-            std::string label = to_upper(item.label);
+            std::string label = to_upper(item_label(item));
             if (item.type == MenuItemType::SUBMENU || !item.children.empty())
                 label += "   >";
             draw_item_text({rmin.x + 4.f, ty}, label.c_str(), selected);
@@ -982,6 +1100,15 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     // derives from fs, so this resizes the whole deep menu (text + spacing).
     const float fs = ImGui::GetFontSize() * ui_scale_;
 
+    // On-screen keyboard takes over the whole screen when active.
+    if (osk_active_) {
+        draw_keyboard(dl, font, fs, W, H);
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(1);
+        return;
+    }
+
     // Dim the live feeds (still visible behind ~35%).
     dl->AddRectFilled({0.f, 0.f}, {W, H}, IM_COL32(4, 8, 12, 165));
 
@@ -1082,7 +1209,7 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
         }
         ImU32 tcol = sel ? IM_COL32(255, 255, 255, 255) : IM_COL32(215, 220, 226, 175);
         float ty = ly + (row_h - fs * 1.15f) * 0.5f;
-        dl->AddText(font, fs * 1.15f, { lx0 + 14.f, ty }, tcol, to_upper(it.label).c_str());
+        dl->AddText(font, fs * 1.15f, { lx0 + 14.f, ty }, tcol, to_upper(item_label(it)).c_str());
 
         if (it.type == MenuItemType::COLOR_PICKER && it.color.get_color) {
             auto [r, g, b] = it.color.get_color();
@@ -1114,7 +1241,7 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     if (cursor_ < static_cast<int>(items.size())) {
         const auto& sel = items[cursor_];
         dl->AddText(font, fs * 1.5f, { rx0, cy0 }, IM_COL32(255, 255, 255, 255),
-                    to_upper(sel.label).c_str());
+                    to_upper(item_label(sel)).c_str());
 
         float ey = cy0 + fs * 1.5f + 16.f;
         if (!sel.description.empty()) {
@@ -1203,4 +1330,102 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     ImGui::End();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(1);
+}
+
+// ── draw_keyboard (on-screen text entry) ────────────────────────────────────────
+// Drawn inside draw_fullscreen's window (so it inherits the deep-menu draw list).
+void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
+                               float W, float H) {
+    // Dim everything behind.
+    dl->AddRectFilled({0.f, 0.f}, {W, H}, IM_COL32(4, 8, 12, 205));
+
+    // Centered panel.
+    const float pw = std::min(W * 0.86f, 760.f * ui_scale_);
+    const float ph = std::min(H * 0.80f, 460.f * ui_scale_);
+    const ImVec2 pmin{ (W - pw) * 0.5f, (H - ph) * 0.5f };
+    const ImVec2 pmax{ pmin.x + pw,     pmin.y + ph };
+    dl->AddRectFilled(pmin, pmax, IM_COL32(8, 12, 16, 235));
+    if (border_enabled_)
+        dl->AddRect(pmin, pmax, menu_with_alpha(border_color_, 220), 0.f, 0, 2.f);
+
+    const float pad = 26.f;
+    const float x0  = pmin.x + pad;
+    const float x1  = pmax.x - pad;
+
+    // Title.
+    std::string title = osk_title_.empty() ? std::string("ENTER NAME") : to_upper(osk_title_);
+    dl->AddText(font, fs * 1.4f, { x0, pmin.y + 14.f }, IM_COL32(255, 255, 255, 255), title.c_str());
+
+    // Text field.
+    const float fy = pmin.y + 14.f + fs * 1.4f + 12.f;
+    const float fh = fs * 1.5f + 12.f;
+    dl->AddRectFilled({ x0, fy }, { x1, fy + fh }, IM_COL32(0, 0, 0, 160), 3.f);
+    dl->AddRect({ x0, fy }, { x1, fy + fh }, menu_with_alpha(accent_color_, 200), 3.f, 0, 1.5f);
+    std::string shown = osk_text_;
+    // blinking caret
+    if (static_cast<int>(ImGui::GetTime() * 2.0) & 1) shown += "_";
+    dl->AddText(font, fs * 1.2f, { x0 + 10.f, fy + (fh - fs * 1.2f) * 0.5f },
+                IM_COL32(255, 255, 255, 240), shown.c_str());
+
+    // Key grid.
+    const auto& rows = osk_rows();
+    const float grid_top = fy + fh + 22.f;
+    const float grid_bot = pmax.y - 40.f;
+    const int   nrows    = static_cast<int>(rows.size());
+    const float key_h    = (grid_bot - grid_top) / static_cast<float>(nrows) - 8.f;
+    const float gap      = 8.f;
+
+    for (int r = 0; r < nrows; ++r) {
+        const auto& row = rows[r];
+        int ncols = static_cast<int>(row.size());
+        float ky  = grid_top + r * (key_h + 8.f);
+        // Letter/number rows are evenly divided across the full width; the last
+        // (special-key) row sizes each key by weight.
+        bool special = (r == nrows - 1);
+        if (!special) {
+            float kw = (x1 - x0 - gap * (ncols - 1)) / static_cast<float>(ncols);
+            for (int c = 0; c < ncols; ++c) {
+                float kx = x0 + c * (kw + gap);
+                bool sel = (r == osk_row_ && c == osk_col_);
+                ImVec2 kmin{ kx, ky }, kmax{ kx + kw, ky + key_h };
+                dl->AddRectFilled(kmin, kmax,
+                    sel ? IM_COL32(255, 255, 255, 235) : menu_with_alpha(accent_color_, 40), 3.f);
+                if (sel) dl->AddRect(kmin, kmax, menu_with_alpha(accent_color_, 230), 3.f, 0, 1.5f);
+                ImVec2 tsz = font->CalcTextSizeA(fs * 1.1f, FLT_MAX, 0.f, row[c].c_str());
+                dl->AddText(font, fs * 1.1f,
+                            { kx + (kw - tsz.x) * 0.5f, ky + (key_h - fs * 1.1f) * 0.5f },
+                            sel ? IM_COL32(10, 12, 14, 255) : IM_COL32(230, 235, 240, 220),
+                            row[c].c_str());
+            }
+        } else {
+            // proportional widths for SPACE/DEL/SAVE/CANCEL
+            float total_w = x1 - x0 - gap * (ncols - 1);
+            float weights[8] = { 1,1,1,1,1,1,1,1 };
+            for (int c = 0; c < ncols; ++c) if (row[c] == "SPACE") weights[c] = 2.2f;
+            float wsum = 0.f; for (int c = 0; c < ncols; ++c) wsum += weights[c];
+            float kx = x0;
+            for (int c = 0; c < ncols; ++c) {
+                float kw = total_w * (weights[c] / wsum);
+                bool sel = (r == osk_row_ && c == osk_col_);
+                ImVec2 kmin{ kx, ky }, kmax{ kx + kw, ky + key_h };
+                bool is_save   = (row[c] == "SAVE");
+                bool is_cancel = (row[c] == "CANCEL");
+                ImU32 base = is_save   ? IM_COL32(40, 110, 60, 150)
+                           : is_cancel ? IM_COL32(120, 50, 50, 150)
+                           :             menu_with_alpha(accent_color_, 40);
+                dl->AddRectFilled(kmin, kmax, sel ? IM_COL32(255, 255, 255, 235) : base, 3.f);
+                if (sel) dl->AddRect(kmin, kmax, menu_with_alpha(accent_color_, 230), 3.f, 0, 1.5f);
+                ImVec2 tsz = font->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0.f, row[c].c_str());
+                dl->AddText(font, fs * 1.0f,
+                            { kx + (kw - tsz.x) * 0.5f, ky + (key_h - fs) * 0.5f },
+                            sel ? IM_COL32(10, 12, 14, 255) : IM_COL32(230, 235, 240, 220),
+                            row[c].c_str());
+                kx += kw + gap;
+            }
+        }
+    }
+
+    // Hint bar.
+    dl->AddText(font, fs * 0.9f, { x0, pmax.y - 26.f }, menu_with_alpha(accent_color_, 185),
+                "ARROWS/STICK MOVE   \xC2\xB7   A/ENTER KEY   \xC2\xB7   B/BKSP DELETE   \xC2\xB7   TYPE ON KEYBOARD");
 }
