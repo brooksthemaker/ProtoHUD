@@ -3128,10 +3128,14 @@ int main(int argc, char* argv[]) {
     // Face backend: "daemon" = the Protoface Python daemon over socket+shm
     // (default); "native" = render the face in-process via NativeFaceController.
     std::string pf_mode = "daemon";
+    // In native mode, auto-launch scripts/panel_driver.py to push frames to the
+    // HUB75 panels (set false if you run the driver yourself or only want preview).
+    bool pf_launch_driver = true;
     if (cfg.contains("protoface")) {
         auto& jpf = cfg["protoface"];
-        pf_autostart = jval(jpf, "autostart", true);
-        pf_mode      = jpf.value("mode", std::string("daemon"));
+        pf_autostart     = jval(jpf, "autostart", true);
+        pf_mode          = jpf.value("mode", std::string("daemon"));
+        pf_launch_driver = jval(jpf, "panel_driver", true);
         if (jpf.contains("preview")) {
             auto& jpv = jpf["preview"];
             protoface_preview_cfg.anchor_x = jval(jpv, "anchor_x", protoface_preview_cfg.anchor_x);
@@ -3613,6 +3617,19 @@ int main(int argc, char* argv[]) {
         native_ctrl->start();
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
         std::cout << "[main] Protoface: native in-process renderer\n";
+
+        // Push frames to the panels via the Piomatter shim (reads the same shm).
+        if (pf_launch_driver) {
+            std::string drv = bin_dir + "/../scripts/panel_driver.py";
+            std::string cmd =
+                "pkill -f panel_driver.py 2>/dev/null; "
+                "nohup python3 \"" + drv +
+                "\" --canvas-w " + std::to_string(rc.canvas_w) +
+                " --canvas-h " + std::to_string(rc.canvas_h) +
+                " >/tmp/panel_driver.log 2>&1 &";
+            std::system(cmd.c_str());
+            std::cout << "[main] launched panel_driver.py (" << drv << ")\n";
+        }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
         // reconnect loop in start() then connects once its socket comes up.
@@ -4972,7 +4989,11 @@ int main(int argc, char* argv[]) {
     step("beast_cam");       beast_cam.stop();
     step("cameras");         cameras.shutdown();
     step("teensy");          teensy.stop();
-    step("native_face");     if (native_ctrl) native_ctrl->stop();   // blanks panels
+    step("native_face");
+    if (native_ctrl) {
+        if (pf_launch_driver) std::system("pkill -f panel_driver.py 2>/dev/null");  // blanks panels via its SIGTERM handler
+        native_ctrl->stop();                                                        // blanks the shm too
+    }
     step("protoface");       protoface_ctrl.shutdown_daemon(); protoface_ctrl.stop();
     step("lora");            lora.stop();
     step("knob");            knob.stop();

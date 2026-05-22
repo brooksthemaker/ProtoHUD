@@ -160,6 +160,8 @@
     "mode": "daemon",
     "_mode_values": "daemon | native",
     "autostart": true,
+    "panel_driver": true,
+    "_panel_driver_note": "native mode only: auto-launch scripts/panel_driver.py to drive the HUB75 panels. Set false for preview-only or if you run the driver yourself.",
     "_native_about": "native-mode options: assets_dir points at the Protoface checkout holding faces/materials/gifs (default $HOME/protohud/Protoface); panels overrides the default 2-panel mirrored layout.",
     "assets_dir": "",
     "preview": {
