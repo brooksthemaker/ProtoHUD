@@ -157,7 +157,15 @@ void ProtoFaceController::restart() {
 }
 
 void ProtoFaceController::shutdown_daemon() {
-    send(R"({"cmd":"shutdown"})");
+    // Deliver the shutdown even if our persistent connection has dropped: try
+    // the live socket first, then fall back to a fresh one-shot connection.
+    // Without the fallback, a stale/closed fd_ silently swallows the command and
+    // the LED panels stay lit after the HUD exits (the reported symptom).
+    if (!send(R"({"cmd":"shutdown"})"))
+        send_oneshot(R"({"cmd":"shutdown"})");
+    // Give Protoface a beat to read the line and blank the panels (it clears +
+    // unlinks on SIGINT) before the HUD process tears the connection down.
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
 }
 
 // ── Static helper ─────────────────────────────────────────────────────────────
@@ -236,4 +244,21 @@ bool ProtoFaceController::send(const std::string& json) {
         return false;
     }
     return true;
+}
+
+bool ProtoFaceController::send_oneshot(const std::string& json) {
+    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);
+
+    bool ok = false;
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+        std::string msg = json + "\n";
+        ok = ::send(fd, msg.c_str(), msg.size(), MSG_NOSIGNAL) >= 0;
+    }
+    ::close(fd);
+    return ok;
 }

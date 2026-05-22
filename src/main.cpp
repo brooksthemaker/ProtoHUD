@@ -3031,6 +3031,23 @@ int main(int argc, char* argv[]) {
     protoface_preview_cfg.size     = 0.15f;
     int protoface_preview_view = 0;                     // 0=whole face, 1=left, 2=right
 
+    // Protoface options: auto-start the daemon on boot and a persisted preview
+    // window placement (anchor/nudge/size/view) so it survives a restart.
+    bool pf_autostart = true;
+    if (cfg.contains("protoface")) {
+        auto& jpf = cfg["protoface"];
+        pf_autostart = jval(jpf, "autostart", true);
+        if (jpf.contains("preview")) {
+            auto& jpv = jpf["preview"];
+            protoface_preview_cfg.anchor_x = jval(jpv, "anchor_x", protoface_preview_cfg.anchor_x);
+            protoface_preview_cfg.anchor_y = jval(jpv, "anchor_y", protoface_preview_cfg.anchor_y);
+            protoface_preview_cfg.pan_x    = jval(jpv, "pan_x",    protoface_preview_cfg.pan_x);
+            protoface_preview_cfg.pan_y    = jval(jpv, "pan_y",    protoface_preview_cfg.pan_y);
+            protoface_preview_cfg.size     = jval(jpv, "size",     protoface_preview_cfg.size);
+            protoface_preview_view         = jval(jpv, "view",     protoface_preview_view);
+        }
+    }
+
     if (cfg.contains("pip")) {
         auto& jpip = cfg["pip"];
         float def_size = jval(jpip, "size", 0.25f);
@@ -3484,6 +3501,9 @@ int main(int argc, char* argv[]) {
     WirelessController   wireless(wireless_port, baud);
 
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
+    // Auto-start the Protoface daemon on boot (no-op if already running). The
+    // reconnect loop in start() then connects once its socket comes up.
+    if (pf_autostart) protoface_ctrl.launch();
     protoface_ctrl.start();   // connects async; no-op if socket absent
 
     // QR / barcode scanner — active when either scan toggle is enabled.
@@ -3535,8 +3555,10 @@ int main(int argc, char* argv[]) {
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
     if (!knob.start())   std::cerr << "[main] SmartKnob not available on " << knob_port << "\n";
 
-    // Active face backend: prefer Protoface if its socket already exists at startup.
-    IFaceController* active_face = ProtoFaceController::socket_exists()
+    // Active face backend: prefer Protoface if its socket already exists, or if
+    // we just auto-launched it (the socket may not be up yet — the reconnect
+    // loop will connect shortly, and commands no-op until then).
+    IFaceController* active_face = (ProtoFaceController::socket_exists() || pf_autostart)
         ? static_cast<IFaceController*>(&protoface_ctrl)
         : static_cast<IFaceController*>(&teensy);
     FaceProxy face_proxy(&active_face);
@@ -4650,6 +4672,14 @@ int main(int argc, char* argv[]) {
         cfg["pip"]["cam2"]["pan_y"]     = pip_overlay_cfg2.pan_y;
         cfg["pip"]["cam2"]["size"]      = pip_overlay_cfg2.size;
         cfg["pip"]["cam2"]["rotation"]  = rotation_to_str(pip_overlay_cfg2.rotation);
+
+        cfg["protoface"]["autostart"]           = pf_autostart;
+        cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
+        cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
+        cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;
+        cfg["protoface"]["preview"]["pan_y"]    = protoface_preview_cfg.pan_y;
+        cfg["protoface"]["preview"]["size"]     = protoface_preview_cfg.size;
+        cfg["protoface"]["preview"]["view"]     = protoface_preview_view;
 
         auto& jpp = cfg["post_process"];
         jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;

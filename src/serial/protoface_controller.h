@@ -56,6 +56,10 @@ private:
     void reconnect_loop();
     bool try_connect();
     bool send(const std::string& json);
+    // Open a fresh one-shot connection, send one message, close. Used by
+    // shutdown_daemon() so the command still lands when the persistent
+    // connection has dropped (otherwise the panels stay lit after exit).
+    bool send_oneshot(const std::string& json);
 
     std::string          socket_path_;
     int                  fd_  { -1 };
