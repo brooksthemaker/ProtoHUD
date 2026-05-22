@@ -1,0 +1,91 @@
+#pragma once
+// ── face_state.h ───────────────────────────────────────────────────────────────
+// C++ port of protoface/state.py — the per-panel animation state passed to the
+// face compositor each tick. Owns expression crossfade, the blink state machine,
+// the boop override, and the inputs (audio mouth-open, gyro offset, brightness).
+//
+// Threading: NativeFaceController serializes all access under its own mutex, so
+// FaceState carries no internal locking.
+
+#include <random>
+#include <string>
+#include <vector>
+
+#include "face_config.h"
+
+namespace face {
+
+class FaceState {
+public:
+    FaceState(const FaceCfg& cfg, std::vector<std::string> expression_names);
+
+    // ── Expression control ──────────────────────────────────────────────────
+    void set_expression(const std::string& name);
+    void set_expression_by_index(int idx);   // out-of-range = no-op
+    void next_expression();
+    void prev_expression();
+    void trigger_boop(const std::string& expression, double duration);
+    void trigger_blink();
+
+    // ── Per-frame update ─────────────────────────────────────────────────────
+    void update(double dt);
+
+    // ── Inputs (set by the controller before render) ─────────────────────────
+    void set_audio(double volume, double mouth_open) { audio_volume_ = volume; mouth_open_ = mouth_open; }
+    void set_gyro(double dx, double dy)              { gyro_dx_ = dx; gyro_dy_ = dy; }
+    void set_brightness(int b)                       { brightness_ = b < 0 ? 0 : (b > 255 ? 255 : b); }
+
+    // ── Read accessors for the compositor (mirror face.py's state fields) ─────
+    const std::string& expression()      const { return expression_; }
+    const std::string& prev_expression() const { return prev_expression_; }
+    double transition_t() const { return transition_t_; }
+    double blink_weight() const { return blink_weight_; }
+    double mouth_open()   const { return mouth_open_; }
+    double gyro_dx()      const { return gyro_dx_; }
+    double gyro_dy()      const { return gyro_dy_; }
+    double time()         const { return time_; }
+    int    brightness()   const { return brightness_; }
+    const WiggleCfg& wiggle() const { return wiggle_; }
+    const std::vector<std::string>& expression_names() const { return expressions_; }
+
+private:
+    void update_blink(double dt);
+    double rand_uniform(double lo, double hi);
+
+    std::vector<std::string> expressions_;
+    int    expr_idx_ = 0;
+
+    std::string expression_;
+    std::string prev_expression_;
+    double transition_t_ = 1.0;
+    double fade_speed_   = 1.0 / 0.3;
+
+    // Boop override
+    double      boop_remaining_ = 0.0;
+    std::string boop_prev_      = "neutral";
+
+    // Blink state machine
+    enum class BlinkPhase { Open, Closing, Closed, Opening };
+    BlinkPhase blink_phase_ = BlinkPhase::Open;
+    double blink_weight_   = 0.0;
+    double blink_t_        = 0.0;
+    double blink_duration_ = 0.15;
+    double blink_min_      = 3.0;
+    double blink_max_      = 7.0;
+    double next_blink_     = 3.0;
+
+    WiggleCfg wiggle_;
+
+    // Inputs
+    double audio_volume_ = 0.0;
+    double mouth_open_   = 0.0;
+    double gyro_dx_      = 0.0;
+    double gyro_dy_      = 0.0;
+
+    double time_       = 0.0;
+    int    brightness_ = 255;
+
+    std::mt19937 rng_;
+};
+
+} // namespace face
