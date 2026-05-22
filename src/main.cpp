@@ -655,23 +655,33 @@ static std::vector<MenuItem> build_menu(
     }
 
     std::vector<MenuItem> nv_menu = {
-        toggle("Enable Low-Light",
+        with_desc(toggle("Enable Low-Light",
             [&state]{ return state.night_vision.nv_enabled; },
             [&state](bool v){
                 state.night_vision.nv_enabled  = v;
                 state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
                 state.night_vision.shutter_us  = v ? 40000 : 16667;
             }),
-        toggle("Auto Low-Light",
+            "Brighten dark scenes by raising exposure and lengthening the shutter. "
+            "Makes the view usable in low light, but adds motion blur and image noise."),
+        with_desc(toggle("Auto Low-Light",
             [&state]{ return state.night_vision.auto_nv; },
             [&state](bool v){ state.night_vision.auto_nv = v; }),
-        slider("Auto Gain Threshold", 1.5f, 16.f, 0.5f, "x",
+            "Turn the low-light boost on automatically when the scene gets dark "
+            "(camera gain rises past the threshold below), and off again when it brightens."),
+        with_desc(slider("Auto Gain Threshold", 1.5f, 16.f, 0.5f, "x",
             [&state]{ return state.night_vision.auto_nv_gain_threshold; },
             [&state](float v){ state.night_vision.auto_nv_gain_threshold = v; }),
-        slider("Exposure (EV)", -3.f, 3.f, 0.5f, " EV",
+            "How dark it must get before Auto Low-Light engages. Lower = kicks in sooner "
+            "(dimmer rooms); higher = only in very dark scenes."),
+        with_desc(slider("Exposure (EV)", -3.f, 3.f, 0.5f, " EV",
             [&state]{ return state.night_vision.exposure_ev; },
             [&state](float v){ state.night_vision.exposure_ev = v; }),
-        submenu("Shutter Speed", std::move(shutter_speeds)),
+            "Brightness compensation. Higher EV brightens the image (better in the dark) "
+            "but adds motion blur; lower darkens it for bright scenes."),
+        with_desc(submenu("Shutter Speed", std::move(shutter_speeds)),
+            "How long each frame is exposed. Slower gathers more light (brighter, but "
+            "movement smears); faster is sharper but darker."),
     };
 
     // ── Per-camera controls (OWLsight CSI cameras) ───────────────────────────
@@ -847,6 +857,34 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Right Half",  [&state]{ state.cam_single.anchor = CamSingleAnchor::Right;  },
                                 [&state]{ return state.cam_single.anchor == CamSingleAnchor::Right;  }),
     };
+    // Preview each anchor live as the user tabs through them.
+    for (auto& m : single_cam_anchor_items) if (m.get_state) m.on_highlight = m.action;
+
+    // Single-camera layout preview: which screen region the one feed fills.
+    MenuContextPanelDraw single_cam_preview =
+        [&state, menu_sys_pp](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                ? (*menu_sys_pp)->accent_color() : IM_COL32(255, 255, 255, 255);
+            const float fw = sz.x, fh = sz.y - 16.f;
+            float rx0 = 0.f, ry0 = 0.f, rx1 = 1.f, ry1 = 1.f;
+            switch (state.cam_single.anchor) {
+                case CamSingleAnchor::Top:    ry1 = 0.5f; break;
+                case CamSingleAnchor::Bottom: ry0 = 0.5f; break;
+                case CamSingleAnchor::Left:   rx1 = 0.5f; break;
+                case CamSingleAnchor::Right:  rx0 = 0.5f; break;
+                default: break;  // Full
+            }
+            const ImVec2 a{ o.x + fw * rx0, o.y + fh * ry0 };
+            const ImVec2 b{ o.x + fw * rx1, o.y + fh * ry1 };
+            dl->AddRect(o, { o.x + fw, o.y + fh }, IM_COL32(120, 130, 140, 150), 0.f, 0, 1.5f);
+            dl->AddRectFilled(a, b, (accent & 0x00FFFFFFu) | (70u  << 24));
+            dl->AddRect      (a, b, (accent & 0x00FFFFFFu) | (220u << 24), 0.f, 0, 2.f);
+            const char* cam = state.cam_single.use_right ? "Right camera" : "Left camera";
+            dl->AddText({ o.x, o.y + fh + 2.f }, IM_COL32(200, 200, 200, 200), cam);
+            if (!state.cam_single.enabled)
+                dl->AddText({ o.x + 6.f, o.y + 6.f }, IM_COL32(220, 160, 60, 220), "(disabled)");
+        };
+
     std::vector<MenuItem> single_cam_menu = {
         toggle("Enable", [&state]{ return state.cam_single.enabled; },
                          [&state](bool v){ state.cam_single.enabled = v; }),
@@ -1166,7 +1204,11 @@ static std::vector<MenuItem> build_menu(
                                 IM_COL32(200, 200, 200, 200), "Right");
                 }
             }),
-        submenu("Single Camera",    std::move(single_cam_menu)),
+        with_panel(
+            with_desc(submenu("Single Camera", std::move(single_cam_menu)),
+                "Show ONE camera filling a region of the screen (full, or a half) instead "
+                "of the stereo pair. Choose the camera and anchor; preview at right."),
+            "Single Camera Preview", single_cam_preview),
         submenu(left_label,         std::move(left_cam_menu)),
         submenu(right_label,        std::move(right_cam_menu)),
         submenu("Low-Light Mode",   std::move(nv_menu)),
