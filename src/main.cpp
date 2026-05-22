@@ -1620,8 +1620,11 @@ static std::vector<MenuItem> build_menu(
         const char* pf_effect_names[] = {
             "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
             "Fire","Aurora","Blizzard","Sonar","Plasma","Celebration","Galaxy","Party",
+            "Clouds","Nebula",   // Protoface-only (ids 16,17); no ProtoTracer equivalent
         };
-        for (uint8_t id = 0; id < 16; id++)
+        const uint8_t pf_effect_count =
+            static_cast<uint8_t>(sizeof(pf_effect_names) / sizeof(pf_effect_names[0]));
+        for (uint8_t id = 0; id < pf_effect_count; id++)
             pf_effects.push_back(leaf_sel(pf_effect_names[id],
                 [teensy, id, &state]{
                     teensy->set_effect(id);
