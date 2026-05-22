@@ -11,6 +11,7 @@
 #include "materials.h"
 #include "renderer.h"
 #include "particles.h"
+#include "gif_player.h"
 #include "panel_output.h"
 
 namespace face {
@@ -64,6 +65,7 @@ void NativeFaceController::build_panels() {
                                         pc.material.scroll_x, pc.material.scroll_y,
                                         cfg_.materials_dir);
             pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
+            pn.gif = std::make_unique<GifPlayer>(pc.w, pc.h);
         } else {
             pn.is_mirror = true;
         }
@@ -75,6 +77,9 @@ void NativeFaceController::build_panels() {
         for (size_t i = 0; i < panels_.size(); ++i)
             if (panels_[i].cfg.name == pn.cfg.mirror_of) { pn.src_index = static_cast<int>(i); break; }
     }
+
+    gif_files_   = GifPlayer::scan_folder(cfg_.gifs_dir);
+    gif_release_ = cfg_.gif_auto_release;
 }
 
 bool NativeFaceController::start() {
@@ -117,19 +122,34 @@ void NativeFaceController::render_thread() {
                 pn.state->update(dt);
                 pn.material->update(dt);
                 if (pn.particles) pn.particles->update(dt);
+                if (pn.gif) pn.gif->update(dt);
+
+                // GIF auto-revert: stop the clip N seconds after play_gif.
+                if (pn.gif && pn.gif_release_timer > 0.0) {
+                    pn.gif_release_timer -= dt;
+                    if (pn.gif_release_timer <= 0.0) pn.gif->stop();
+                }
 
                 cv::Mat bg  = solid_layer(cfg_.background[0], cfg_.background[1],
                                           cfg_.background[2], pc.w, pc.h);
-                cv::Mat mat = pn.material->get_frame();
-                cv::Mat face_rgba  = pn.loader->get_frame(*pn.state);
-                cv::Mat face_layer = apply_material(face_rgba, mat);
+
+                // A playing GIF replaces the face (full colour, no material tint);
+                // otherwise composite the material-tinted face.
+                cv::Mat face_layer;
+                cv::Mat gframe = pn.gif ? pn.gif->get_frame() : cv::Mat();
+                if (!gframe.empty()) {
+                    face_layer = gframe;
+                } else {
+                    cv::Mat mat = pn.material->get_frame();
+                    cv::Mat face_rgba = pn.loader->get_frame(*pn.state);
+                    face_layer = apply_material(face_rgba, mat);
+                }
 
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
                 if (pn.particles) {
                     ParticleFrame pf = pn.particles->render();
                     if (pf.has) layers.push_back(Layer{pf.rgba, pf.blend});
                 }
-                // TODO(Phase 3): append GIF layer (overrides face) here.
 
                 cv::Mat frame = composite(bg, layers);
                 frame = scale_brightness(frame, pn.state->brightness());
@@ -198,8 +218,15 @@ void NativeFaceController::set_face(uint8_t face_id) {
         if (pn.state) pn.state->set_expression_by_index(face_id);
 }
 
-void NativeFaceController::play_gif(uint8_t /*gif_id*/) {
-    // TODO(Phase 3): GIF playback (decode + per-panel override).
+void NativeFaceController::play_gif(uint8_t gif_id) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (gif_id >= gif_files_.size()) return;
+    const std::string& path = gif_files_[gif_id];
+    for (auto& pn : panels_)
+        if (pn.gif) {
+            pn.gif->load(path);
+            pn.gif_release_timer = gif_release_;   // 0 = loop forever
+        }
 }
 
 void NativeFaceController::set_brightness(uint8_t value) {
@@ -220,7 +247,9 @@ void NativeFaceController::set_menu_item(uint8_t menu_index, uint8_t value) {
 }
 
 void NativeFaceController::release_control() {
-    // TODO(Phase 3): stop any active GIF and revert to the face.
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.gif) { pn.gif->stop(); pn.gif_release_timer = 0.0; }
 }
 
 void NativeFaceController::apply_material_all(const std::string& name) {

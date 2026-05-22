@@ -28,6 +28,7 @@ class FaceLoader;
 class BaseMaterial;
 class PanelOutput;
 class ParticleSystem;
+class GifPlayer;
 
 class NativeFaceController : public IFaceController {
 public:
@@ -64,6 +65,8 @@ private:
         std::unique_ptr<FaceLoader>    loader;    // null for mirror panels
         std::shared_ptr<BaseMaterial>  material;  // null for mirror panels
         std::unique_ptr<ParticleSystem> particles; // null for mirror panels
+        std::unique_ptr<GifPlayer>     gif;        // null for mirror panels
+        double gif_release_timer = 0.0;            // s left before auto-revert (0 = off)
         bool is_mirror = false;
         int  src_index = -1;
     };
@@ -76,6 +79,8 @@ private:
     RenderConfig                 cfg_;
     std::unique_ptr<PanelOutput> output_;
     std::vector<Panel>           panels_;
+    std::vector<std::string>     gif_files_;   // sorted *.gif paths in gifs_dir
+    double                       gif_release_ = 5.0;   // auto-revert seconds
 
     mutable std::mutex state_mtx_;   // panels_ mutation + render reads
     mutable std::mutex frame_mtx_;   // latest_

@@ -60,6 +60,7 @@ struct RenderConfig {
     std::string          faces_dir     = "faces";
     std::string          materials_dir = "materials";
     std::string          gifs_dir      = "gifs";
+    double               gif_auto_release = 5.0;   // s after play_gif before reverting (0 = loop forever)
     std::vector<PanelCfg> panels;
 };
 

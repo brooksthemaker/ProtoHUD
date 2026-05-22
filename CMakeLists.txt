@@ -273,12 +273,14 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/renderer.cpp
     src/face/face_loader.cpp
     src/face/particles.cpp
+    src/face/gif_player.cpp
     src/face/shm_pusher_output.cpp
     src/face/native_face_controller.cpp
 )
 target_include_directories(protoface_native PRIVATE
     src/
     ${OpenCV_INCLUDE_DIRS}
+    ${stb_SOURCE_DIR}            # stb_image.h for GIF decoding
 )
 target_link_libraries(protoface_native PRIVATE
     ${OpenCV_LIBS}

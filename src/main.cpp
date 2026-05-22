@@ -172,6 +172,8 @@ static face::RenderConfig pf_build_render_config(const json& cfg) {
         if (jpf->contains("faces_dir"))     rc.faces_dir     = (*jpf)["faces_dir"].get<std::string>();
         if (jpf->contains("materials_dir")) rc.materials_dir = (*jpf)["materials_dir"].get<std::string>();
         if (jpf->contains("gifs_dir"))      rc.gifs_dir      = (*jpf)["gifs_dir"].get<std::string>();
+        if (jpf->contains("gif") && (*jpf)["gif"].is_object())
+            rc.gif_auto_release = jval((*jpf)["gif"], "auto_release", rc.gif_auto_release);
     }
 
     auto parse_panel = [](const json& jp) {
