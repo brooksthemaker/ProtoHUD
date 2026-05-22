@@ -3602,6 +3602,11 @@ int main(int argc, char* argv[]) {
 
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
     if (pf_mode == "native") {
+        // Stop any stray Protoface daemon first — in native mode it would double-
+        // write the shm (preview flicker) and fight panel_driver.py for /dev/pio0.
+        // shutdown_daemon() uses a one-shot connection, so it works even though
+        // protoface_ctrl isn't started yet; no-op if no daemon is listening.
+        protoface_ctrl.shutdown_daemon();
         face::RenderConfig rc = pf_build_render_config(cfg);
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h));
