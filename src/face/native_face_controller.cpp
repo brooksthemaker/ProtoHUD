@@ -10,9 +10,37 @@
 #include "face_loader.h"
 #include "materials.h"
 #include "renderer.h"
+#include "particles.h"
 #include "panel_output.h"
 
 namespace face {
+
+namespace {
+// Numeric effect id → particle config, mirroring Protoface ipc.py _EFFECT_MAP.
+nlohmann::json effect_cfg_for_id(int id) {
+    switch (id) {
+        case 0:  return std::string("none");
+        case 1:  return std::string("sparkle");
+        case 2:  return std::string("embers");
+        case 3:  return std::string("rain");
+        case 4:  return std::string("snow");
+        case 5:  return std::string("confetti");
+        case 6:  return std::string("rings");
+        case 7:  return std::string("fireflies");
+        case 8:  return nlohmann::json{{"preset", "fire"}};
+        case 9:  return nlohmann::json{{"preset", "aurora"}};
+        case 10: return nlohmann::json{{"preset", "blizzard"}};
+        case 11: return nlohmann::json{{"preset", "sonar"}};
+        case 12: return nlohmann::json{{"preset", "plasma"}};
+        case 13: return nlohmann::json{{"preset", "celebration"}};
+        case 14: return nlohmann::json{{"preset", "galaxy"}};
+        case 15: return nlohmann::json{{"preset", "party"}};
+        case 16: return std::string("clouds");
+        case 17: return nlohmann::json{{"preset", "nebula"}};
+        default: return std::string("none");
+    }
+}
+} // namespace
 
 NativeFaceController::NativeFaceController(RenderConfig cfg,
                                           std::unique_ptr<PanelOutput> output)
@@ -35,6 +63,8 @@ void NativeFaceController::build_panels() {
             pn.material = load_material(pc.material.active, pc.w, pc.h,
                                         pc.material.scroll_x, pc.material.scroll_y,
                                         cfg_.materials_dir);
+            pn.particles = std::make_unique<ParticleSystem>(
+                pc.w, pc.h, nlohmann::json(pc.particles));
         } else {
             pn.is_mirror = true;
         }
@@ -87,6 +117,7 @@ void NativeFaceController::render_thread() {
 
                 pn.state->update(dt);
                 pn.material->update(dt);
+                if (pn.particles) pn.particles->update(dt);
 
                 cv::Mat bg  = solid_layer(cfg_.background[0], cfg_.background[1],
                                           cfg_.background[2], pc.w, pc.h);
@@ -95,7 +126,11 @@ void NativeFaceController::render_thread() {
                 cv::Mat face_layer = apply_material(face_rgba, mat);
 
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
-                // TODO(Phase 3): append particle + GIF layers here.
+                if (pn.particles) {
+                    ParticleFrame pf = pn.particles->render();
+                    if (pf.has) layers.push_back(Layer{pf.rgba, pf.blend});
+                }
+                // TODO(Phase 3): append GIF layer (overrides face) here.
 
                 cv::Mat frame = composite(bg, layers);
                 frame = scale_brightness(frame, pn.state->brightness());
@@ -151,8 +186,11 @@ void NativeFaceController::set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t) {
             pn.material = std::make_shared<SolidMaterial>(r, g, b, pn.cfg.w, pn.cfg.h);
 }
 
-void NativeFaceController::set_effect(uint8_t /*effect_id*/, uint8_t, uint8_t) {
-    // TODO(Phase 3): map effect_id → ParticleSystem layers per panel.
+void NativeFaceController::set_effect(uint8_t effect_id, uint8_t, uint8_t) {
+    nlohmann::json cfg = effect_cfg_for_id(effect_id);
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.particles) pn.particles->set_effect(cfg);
 }
 
 void NativeFaceController::set_face(uint8_t face_id) {

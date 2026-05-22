@@ -27,6 +27,7 @@ class FaceState;
 class FaceLoader;
 class BaseMaterial;
 class PanelOutput;
+class ParticleSystem;
 
 class NativeFaceController : public IFaceController {
 public:
@@ -59,9 +60,10 @@ public:
 private:
     struct Panel {
         PanelCfg                      cfg;
-        std::unique_ptr<FaceState>    state;     // null for mirror panels
-        std::unique_ptr<FaceLoader>   loader;    // null for mirror panels
-        std::shared_ptr<BaseMaterial> material;  // null for mirror panels
+        std::unique_ptr<FaceState>     state;     // null for mirror panels
+        std::unique_ptr<FaceLoader>    loader;    // null for mirror panels
+        std::shared_ptr<BaseMaterial>  material;  // null for mirror panels
+        std::unique_ptr<ParticleSystem> particles; // null for mirror panels
         bool is_mirror = false;
         int  src_index = -1;
     };

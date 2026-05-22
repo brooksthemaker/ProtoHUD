@@ -271,6 +271,7 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/materials.cpp
     src/face/renderer.cpp
     src/face/face_loader.cpp
+    src/face/particles.cpp
     src/face/shm_pusher_output.cpp
     src/face/native_face_controller.cpp
 )
