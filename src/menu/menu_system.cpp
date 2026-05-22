@@ -1121,14 +1121,38 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
         }
 
         const bool editing = in_edit_mode_;
+
+        // Applicable context preview: the highlighted submenu's own panel, else
+        // walk up the stack so it persists through sub-levels (Position / Crop
+        // Center / Zoom / etc.). Computed once so it's available while editing too.
+        MenuContextPanelDraw panel;
+        if (sel.type == MenuItemType::SUBMENU && sel.context_panel_draw) {
+            panel = sel.context_panel_draw;
+        } else {
+            for (auto lvl = stack_.rbegin(); lvl != stack_.rend(); ++lvl)
+                if (lvl->panel_draw) { panel = lvl->panel_draw; break; }
+        }
+
         if (editing && sel.type == MenuItemType::SLIDER) {
+            // Keep the preview visible while adjusting a slider that affects it
+            // (e.g. Inner Bias): preview on top, a compact slider bar below.
+            float by;
+            if (panel) {
+                const float strip_h = 46.f;
+                panel(dl, { rx0, ey + 6.f }, { rx1 - rx0, (cy1 - strip_h) - (ey + 6.f) });
+                by = cy1 - strip_h + 16.f;
+            } else {
+                by = ey + 8.f;
+            }
             float range = sel.slider.max - sel.slider.min;
             float fill  = (range > 0.f) ? std::clamp((edit_float_ - sel.slider.min) / range, 0.f, 1.f) : 0.f;
-            float bw = rx1 - rx0, bh = 14.f, by = ey + 8.f;
+            float bw = rx1 - rx0, bh = 12.f;
             dl->AddRectFilled({ rx0, by }, { rx0 + bw, by + bh }, menu_with_alpha(accent_color_, 55), 3.f);
             dl->AddRectFilled({ rx0, by }, { rx0 + bw * fill, by + bh }, menu_with_alpha(accent_color_, 230), 3.f);
             char vb[32]; format_slider_value(vb, sizeof(vb), edit_float_, sel.slider.min, sel.slider.max, sel.slider.unit);
-            dl->AddText(font, fs * 1.2f, { rx0, by + bh + 8.f }, IM_COL32(255, 255, 255, 255), vb);
+            ImVec2 vsz = font->CalcTextSizeA(fs * 1.1f, FLT_MAX, 0.f, vb);
+            dl->AddText(font, fs * 1.1f, { rx1 - vsz.x, by - fs * 1.1f - 2.f },
+                        IM_COL32(255, 255, 255, 255), vb);
         } else if (editing && sel.type == MenuItemType::COLOR_PICKER) {
             const float chv[3] = { edit_r_, edit_g_, edit_b_ };
             const char* chn[3] = { "R", "G", "B" };
@@ -1155,20 +1179,8 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
                 else dl->AddCircle({fx,fy}, 5.f, menu_with_alpha(accent_color_,120), 0, 1.5f);
             }
         } else {
-            // Not editing: show a live context panel here when available — the
-            // highlighted submenu's own preview (e.g. camera zoom/crop, before
-            // entering), else the current level's panel (while inside it). This
-            // reuses the same MenuContextPanelDraw callbacks as the quick menu.
-            MenuContextPanelDraw panel;
-            if (sel.type == MenuItemType::SUBMENU && sel.context_panel_draw) {
-                panel = sel.context_panel_draw;
-            } else {
-                // Walk up the stack so the preview stays open the whole time the
-                // user is in the subtree (e.g. inside Position / Crop Center).
-                for (auto lvl = stack_.rbegin(); lvl != stack_.rend(); ++lvl)
-                    if (lvl->panel_draw) { panel = lvl->panel_draw; break; }
-            }
-
+            // Not editing: show the applicable live context panel (computed
+            // above), else a hint for editable items.
             if (panel) {
                 panel(dl, { rx0, ey + 6.f }, { rx1 - rx0, cy1 - (ey + 6.f) });
             } else if (sel.type == MenuItemType::SLIDER ||
