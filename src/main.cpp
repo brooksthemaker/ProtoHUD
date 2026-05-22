@@ -120,7 +120,11 @@ static std::string resolve_serial_port(const std::string& configured,
 
 // ── Config loading ────────────────────────────────────────────────────────────
 
-static json load_config(const std::string& path) {
+// parse_failed (out) is set true ONLY when the file exists but is malformed —
+// so the caller can refuse to overwrite it on exit (a missing file is a normal
+// first run and does not set the flag).
+static json load_config(const std::string& path, bool* parse_failed = nullptr) {
+    if (parse_failed) *parse_failed = false;
     FILE* f = fopen(path.c_str(), "r");
     if (!f) {
         std::cerr << "[cfg] cannot open " << path << " — using defaults\n";
@@ -129,7 +133,9 @@ static json load_config(const std::string& path) {
     json j = json::parse(f, nullptr, false);
     fclose(f);
     if (j.is_discarded()) {
-        std::cerr << "[cfg] parse error in " << path << " — using defaults\n";
+        std::cerr << "[cfg] parse error in " << path
+                  << " — using defaults (will NOT overwrite it; fix the JSON)\n";
+        if (parse_failed) *parse_failed = true;
         return json::object();
     }
     return j;
@@ -2938,7 +2944,8 @@ int main(int argc, char* argv[]) {
             cfg_path = cfg_load = def_cfg;
         }
     }
-    json cfg = load_config(cfg_load);
+    bool cfg_parse_failed = false;
+    json cfg = load_config(cfg_load, &cfg_parse_failed);
 
     // ── Config extraction ─────────────────────────────────────────────────────
 
@@ -4777,6 +4784,7 @@ int main(int argc, char* argv[]) {
         cfg["pip"]["cam2"]["size"]      = pip_overlay_cfg2.size;
         cfg["pip"]["cam2"]["rotation"]  = rotation_to_str(pip_overlay_cfg2.rotation);
 
+        cfg["protoface"]["mode"]                = pf_mode;
         cfg["protoface"]["autostart"]           = pf_autostart;
         cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
         cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
@@ -4914,8 +4922,11 @@ int main(int argc, char* argv[]) {
             cfg["mpu9250"]["heading_axes"]   = mpu9250.get_heading_axes();
         }
 
-        FILE* f = fopen(cfg_path.c_str(), "w");
-        if (f) {
+        FILE* f = cfg_parse_failed ? nullptr : fopen(cfg_path.c_str(), "w");
+        if (cfg_parse_failed) {
+            std::cerr << "[cfg] " << cfg_path << " failed to parse on load — "
+                         "leaving it untouched so your edits aren't lost\n";
+        } else if (f) {
             std::string s = cfg.dump(2);
             fwrite(s.c_str(), 1, s.size(), f);
             fclose(f);
