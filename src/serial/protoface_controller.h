@@ -34,6 +34,7 @@ public:
     void release_control()                      override;
     void save_config()                          override;
     void launch()                               override;
+    void restart()                              override;
 
     // Path used to detect whether Protoface is available.
     static bool socket_exists(const std::string& path = "/tmp/protoface.sock");

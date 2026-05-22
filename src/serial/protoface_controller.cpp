@@ -145,6 +145,17 @@ void ProtoFaceController::launch() {
         "nohup python3 run.py >/tmp/protoface.log 2>&1 &");
 }
 
+void ProtoFaceController::restart() {
+    // Ask the running instance to exit cleanly over the socket (it unlinks the
+    // socket and releases its single-instance lock), then launch a fresh one.
+    // Done on a detached thread so the HUD doesn't freeze during the wait.
+    send(R"({"cmd":"shutdown"})");
+    std::thread([this]{
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        launch();
+    }).detach();
+}
+
 // ── Static helper ─────────────────────────────────────────────────────────────
 
 bool ProtoFaceController::socket_exists(const std::string& path) {
