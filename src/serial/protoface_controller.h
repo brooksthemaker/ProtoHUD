@@ -35,6 +35,10 @@ public:
     void launch()                               override;
     void restart()                              override;
 
+    // Ask the running Protoface to exit cleanly (clears the panels). Called on
+    // ProtoHUD shutdown so closing the HUD also blanks the LED face.
+    void shutdown_daemon();
+
     // Path used to detect whether Protoface is available.
     static bool socket_exists(const std::string& path = "/tmp/protoface.sock");
 
