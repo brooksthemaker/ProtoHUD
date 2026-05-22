@@ -4373,13 +4373,16 @@ int main(int argc, char* argv[]) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape) && landing.page == 1) {
             landing.page = 0; landing.cursor = 1; landing_cancel_countdown();
         }
-        if (!landing.active) break;   // a selection ended the landing page
 
         // Continue countdown → auto-load the last profile when it expires.
+        // NOTE: never break out of this loop mid-frame — begin_menu_frame() has
+        // already started an ImGui frame, so we must finish it (render + present)
+        // or the next NewFrame() asserts. A selection just clears landing.active;
+        // we render one last frame and the while-condition exits cleanly.
         double remaining = 0.0;
-        if (landing.countdown_on && landing.page == 0) {
+        if (landing.active && landing.countdown_on && landing.page == 0) {
             remaining = landing.deadline - glfwGetTime();
-            if (remaining <= 0.0) { landing_resume(); break; }
+            if (remaining <= 0.0) landing_resume();
         }
 
         ImDrawList* dl = ImGui::GetBackgroundDrawList();
