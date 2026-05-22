@@ -25,6 +25,7 @@ public:
 
     void set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t layer = 0) override;
     void set_effect(uint8_t effect_id, uint8_t p1 = 0, uint8_t p2 = 0) override;
+    void set_face(uint8_t face_id)              override;
     void play_gif(uint8_t gif_id)               override;
     void set_brightness(uint8_t value)          override;
     void set_palette(uint8_t palette_id)        override;

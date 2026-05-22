@@ -20,6 +20,8 @@ public:
 
     virtual void set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t layer = 0) = 0;
     virtual void set_effect(uint8_t effect_id, uint8_t p1 = 0, uint8_t p2 = 0) = 0;
+    // Select a face/expression by 0-based index in the backend's face set.
+    virtual void set_face(uint8_t face_id) = 0;
     virtual void play_gif(uint8_t gif_id) = 0;
     virtual void set_brightness(uint8_t value) = 0;
     virtual void set_palette(uint8_t palette_id) = 0;
@@ -55,6 +57,7 @@ public:
     void set_effect(uint8_t effect_id, uint8_t p1 = 0, uint8_t p2 = 0) override {
         (*active_)->set_effect(effect_id, p1, p2);
     }
+    void set_face(uint8_t face_id)             override { (*active_)->set_face(face_id); }
     void play_gif(uint8_t gif_id)              override { (*active_)->play_gif(gif_id); }
     void set_brightness(uint8_t value)         override { (*active_)->set_brightness(value); }
     void set_palette(uint8_t palette_id)       override { (*active_)->set_palette(palette_id); }

@@ -3969,6 +3969,23 @@ int main(int argc, char* argv[]) {
             else if (menu.is_open())     menu.back();
         }
 
+        // Ctrl+1..9/0 — switch face (expression);  Alt+1..9/0 — play a GIF.
+        // Number maps to a 0-based index: 1→0 … 9→8, 0→9. Routed through the
+        // FaceProxy so it follows whichever backend (Protoface/Teensy) is active.
+        // Gated to menu-closed so the bare number keys keep driving the camera
+        // PiPs below; the camera block also ignores keys while Ctrl/Alt is held.
+        if (!menu.is_open() && (ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyAlt)) {
+            static const ImGuiKey kNumKeys[10] = {
+                ImGuiKey_1, ImGuiKey_2, ImGuiKey_3, ImGuiKey_4, ImGuiKey_5,
+                ImGuiKey_6, ImGuiKey_7, ImGuiKey_8, ImGuiKey_9, ImGuiKey_0,
+            };
+            for (int i = 0; i < 10; ++i) {
+                if (!key_pressed(kNumKeys[i])) continue;
+                if (ImGui::GetIO().KeyCtrl) face_proxy.set_face(static_cast<uint8_t>(i));
+                else                        face_proxy.play_gif(static_cast<uint8_t>(i));
+            }
+        }
+
         // ── Wireless controller pip state ─────────────────────────────────────
         bool wc_pip_left  = wireless_enabled && wireless.pip_left_active();
         bool wc_pip_right = wireless_enabled && wireless.pip_right_active();
@@ -4008,6 +4025,7 @@ int main(int argc, char* argv[]) {
         // 1/2/3     = toggle USB cam PiP 1/2/3   Shift+1/2/3 = autofocus that cam
         // 0         = toggle manual/auto focus    4 = autofocus both cameras
         // - / =     = focus near / far (step 20 of 0-1000)
+        // (Ctrl/Alt + number is reserved for face/GIF hotkeys handled above.)
         {
             GLFWwindow* win = static_cast<GLFWwindow*>(xr.glfw_window());
             auto edge = [&](int n, int glfw_key) -> bool {
@@ -4016,8 +4034,16 @@ int main(int argc, char* argv[]) {
                 prev_key[n] = now;
                 return fired;
             };
+            // Ctrl/Alt + number drives the face/GIF hotkeys above, so skip the
+            // camera number handlers while either is held (edge() still runs to
+            // keep prev_key state current and avoid a stale release-edge).
+            const bool face_mod =
+                (glfwGetKey(win, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                 glfwGetKey(win, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS ||
+                 glfwGetKey(win, GLFW_KEY_LEFT_ALT)  == GLFW_PRESS ||
+                 glfwGetKey(win, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
             // 0: toggle manual/auto focus
-            if (edge(0, GLFW_KEY_0) && !menu.is_open()) {
+            if (edge(0, GLFW_KEY_0) && !menu.is_open() && !face_mod) {
                 bool go_manual = (state.focus_left.mode != CameraFocusState::Mode::MANUAL);
                 if (go_manual) {
                     if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
@@ -4034,7 +4060,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             // 4: autofocus both cameras
-            if (edge(4, GLFW_KEY_4)) {
+            if (edge(4, GLFW_KEY_4) && !face_mod) {
                 if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
                 if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
                 std::lock_guard<std::mutex> lk(state.mtx);
@@ -4058,15 +4084,15 @@ int main(int argc, char* argv[]) {
                 bool shift = (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                               glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
                 if (!menu.is_open()) {
-                    if (edge(7, GLFW_KEY_1)) {
+                    if (edge(7, GLFW_KEY_1) && !face_mod) {
                         if (shift) cameras.set_usb1_ctrl(V4L2_CID_FOCUS_AUTO, 1);
                         else       pip_cam1_overlay_active = !pip_cam1_overlay_active;
                     }
-                    if (edge(8, GLFW_KEY_2)) {
+                    if (edge(8, GLFW_KEY_2) && !face_mod) {
                         if (shift) cameras.set_usb2_ctrl(V4L2_CID_FOCUS_AUTO, 1);
                         else       pip_cam2_overlay_active = !pip_cam2_overlay_active;
                     }
-                    if (edge(9, GLFW_KEY_3)) {
+                    if (edge(9, GLFW_KEY_3) && !face_mod) {
                         if (shift) cameras.set_usb3_ctrl(V4L2_CID_FOCUS_AUTO, 1);
                         else       pip_cam3_overlay_active = !pip_cam3_overlay_active;
                     }
