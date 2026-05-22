@@ -160,12 +160,14 @@ void MenuSystem::close_deep() {
 }
 
 void MenuSystem::next_tab() {
-    if (!deep_open_ || stack_.size() != 1 || in_edit_mode_) return;
+    // Switch tabs from anywhere in the deep menu — load_tab() drops back to the
+    // tab's base level and cancels any edit mode.
+    if (!deep_open_) return;
     load_tab(tab_index_ + 1);
 }
 
 void MenuSystem::prev_tab() {
-    if (!deep_open_ || stack_.size() != 1 || in_edit_mode_) return;
+    if (!deep_open_) return;
     load_tab(tab_index_ - 1);
 }
 
