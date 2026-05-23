@@ -1471,7 +1471,10 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
     // Model the wheel on a plane tilted about the horizontal axis through the
     // centre; project with a simple pinhole. Top (oy<0) recedes & shrinks, bottom
     // comes forward — a subtle "inside of a visor" curve. tilt 0 → flat.
-    const float ang_t  = radial_tilt_ * 0.9f;
+    // DISABLED for now: keep the wheel planar + concentric with the minimap.
+    // (radial_tilt_ / the "Menu Tilt" slider stay wired; set this back to
+    //  radial_tilt_ * 0.9f to re-enable.)
+    const float ang_t  = 0.f;
     const float sin_t  = std::sin(ang_t), cos_t = std::cos(ang_t);
     const float r_max  = inner_r + ring_gap + depth * (ring_thick + ring_pad) + ring_thick;
     const float focal  = std::max(220.f, r_max * 2.8f);
