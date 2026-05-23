@@ -4421,6 +4421,9 @@ int main(int argc, char* argv[]) {
             rows.push_back("BACK");
         }
 
+        // Profile that Continue / the countdown will resume (shown on the row).
+        const std::string last_nm = profiles.last_name();
+
         const float row_h = fs * 1.3f + 18.f;
         const float lw    = W * 0.34f;
         float ly = my + fs * 1.4f + 40.f;
@@ -4435,12 +4438,22 @@ int main(int argc, char* argv[]) {
             dl->AddText(font, fs * 1.2f, {mx + 14.f, ty}, tcol, label.c_str());
             dl->AddLine({mx, rmax.y}, {mx + lw, rmax.y},
                         (accent & 0x00FFFFFFu) | (70u << 24), 1.f);
-            // Countdown badge on CONTINUE.
-            if (landing.page == 0 && i == 0 && landing.countdown_on && remaining > 0.0) {
-                char cd[24]; snprintf(cd, sizeof(cd), "%ds", (int)std::ceil(remaining));
-                ImVec2 csz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, cd);
-                ImU32 cc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (210u << 24));
-                dl->AddText(font, fs * 0.95f, {mx + lw - csz.x - 12.f, ty}, cc, cd);
+            // CONTINUE row: show the profile that will resume + countdown badge,
+            // right-aligned (countdown furthest right, profile name to its left).
+            if (landing.page == 0 && i == 0) {
+                float rx = mx + lw - 12.f;
+                if (landing.countdown_on && remaining > 0.0) {
+                    char cd[24]; snprintf(cd, sizeof(cd), "%ds", (int)std::ceil(remaining));
+                    ImVec2 csz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, cd);
+                    ImU32 cc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (210u << 24));
+                    dl->AddText(font, fs * 0.95f, {rx - csz.x, ty}, cc, cd);
+                    rx -= csz.x + 10.f;
+                }
+                std::string resume = last_nm.empty() ? std::string("(current config)") : last_nm;
+                std::transform(resume.begin(), resume.end(), resume.begin(), ::toupper);
+                ImVec2 nsz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, resume.c_str());
+                ImU32 nc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (185u << 24));
+                dl->AddText(font, fs * 0.95f, {rx - nsz.x, ty}, nc, resume.c_str());
             }
             ly += row_h;
         }
