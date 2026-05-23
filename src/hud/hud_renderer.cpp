@@ -58,6 +58,36 @@ static std::string fmt_countdown(time_t end) {
     return buf;
 }
 
+// Angular width (radians) a string would occupy on an arc of radius r, at the
+// currently-set NVG font. Used to centre/lay out curved text.
+static float arc_text_width(NVGcontext* vg, const char* text, float r) {
+    float tot = 0.f;
+    for (const char* p = text; *p; ++p)
+        tot += nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+    return tot / (r < 1.f ? 1.f : r);
+}
+
+// Draw text along an arc (each glyph translated to its arc position and rotated to
+// the tangent), starting at start_angle and laying out clockwise. Caller sets the
+// font + fill first. Returns the end angle so segments can be chained.
+static float nvg_text_arc(NVGcontext* vg, float cx, float cy, float r,
+                          float start_angle, const char* text) {
+    const float rr = (r < 1.f) ? 1.f : r;
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    float ang = start_angle;
+    for (const char* p = text; *p; ++p) {
+        const float adv = nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+        const float th  = ang + (adv * 0.5f) / rr;
+        nvgSave(vg);
+        nvgTranslate(vg, cx + std::cos(th) * rr, cy + std::sin(th) * rr);
+        nvgRotate(vg, th + static_cast<float>(M_PI) * 0.5f);
+        nvgText(vg, 0, 0, p, p + 1);
+        nvgRestore(vg);
+        ang += adv / rr;
+    }
+    return ang;
+}
+
 // Replace the alpha byte of an ImU32 color (format: ABGR, alpha in high byte).
 static ImU32 with_alpha(ImU32 col, uint8_t a) {
     return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
@@ -539,29 +569,43 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             extra_col = IM_COL32(230, 90, 90, 235);
         }
 
-        const float csz = 22.f * std::max(0.6f, s.clock_cfg.font_scale);
-        const float esz = 14.f * std::max(0.6f, s.clock_cfg.font_scale);
+        const float scale = std::max(0.6f, s.clock_cfg.font_scale);
+        const float csz   = 11.f * scale;          // ~half the previous size
+        const float esz   = csz * 0.92f;
+        const float dsz   = csz * 0.82f;
+        const float DEGc  = static_cast<float>(M_PI) / 180.f;
+        const float clock_angle = -118.f * DEGc;   // curve along the map's upper-left
+        const float rc    = ringR + (cfg.compass_ring ? 46.f : 16.f) + csz * 0.5f;
 
-        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        // Clock — curved text on an arc concentric with the map, centred upper-left.
         nvg_set_font_ui(csz);
-        float cb[4]; nvgTextBounds(vg, 0, 0, tbuf, nullptr, cb);
-        const float cw = cb[2] - cb[0];
-        float ew = 0.f;
-        if (!extra.empty()) {
-            nvg_set_font_ui(esz);
-            float eb[4]; nvgTextBounds(vg, 0, 0, extra.c_str(), nullptr, eb);
-            ew = (eb[2] - eb[0]) + 14.f;     // include the gap
+        const float wc    = arc_text_width(vg, tbuf, rc);
+        const float start = clock_angle - wc * 0.5f;
+        if (s_glow && s_glow_intensity > 0.f) {
+            nvgFontBlur(vg, 3.f);
+            nvgFillColor(vg, nvg_col_a(col_.glow_base,
+                         static_cast<uint8_t>(72.f * s_glow_intensity)));
+            nvg_text_arc(vg, cx, cy, rc, start, tbuf);
+            nvgFontBlur(vg, 0.f);
         }
-        const float total = cw + ew;
-        const float topY  = cy - ringR - (cfg.compass_ring ? 44.f : 16.f) - csz;
-        const float x0    = cx - total * 0.5f;
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvg_text_arc(vg, cx, cy, rc, start, tbuf);
 
-        nvg_set_font_ui(csz);
-        nvg_glow_text(vg, x0, topY, tbuf, true, col_.glow_base, col_.text_fill);
+        // Active timer/alarm continues the arc just past the clock.
         if (!extra.empty()) {
             nvg_set_font_ui(esz);
             nvgFillColor(vg, nvg_col(extra_col));
-            nvgText(vg, x0 + cw + 14.f, topY + (csz - esz) * 0.55f, extra.c_str(), nullptr);
+            nvg_text_arc(vg, cx, cy, rc, clock_angle + wc * 0.5f + 7.f / rc, extra.c_str());
+        }
+
+        // Date on an inner concentric arc, under the clock.
+        if (cfg.clock_date) {
+            const std::string ds = fmt_date();
+            const float rd = rc - csz * 0.95f;
+            nvg_set_font_ui(dsz);
+            const float wd = arc_text_width(vg, ds.c_str(), rd);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 175));
+            nvg_text_arc(vg, cx, cy, rd, clock_angle - wd * 0.5f, ds.c_str());
         }
     }
 }

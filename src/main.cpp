@@ -2572,6 +2572,9 @@ static std::vector<MenuItem> build_menu(
         toggle("Clock Above Map",
             [&state]{ return state.map_overlay.clock; },
             [&state](bool v){ state.map_overlay.clock = v; }),
+        toggle("Clock Date",
+            [&state]{ return state.map_overlay.clock_date; },
+            [&state](bool v){ state.map_overlay.clock_date = v; }),
         leaf("Expand Map (Pan/Zoom)", [&state]{
             std::lock_guard<std::mutex> lk(state.mtx);
             state.map_overlay.expanded   = true;
@@ -3784,6 +3787,7 @@ int main(int argc, char* argv[]) {
         mo.battery_arc         = jm.value("battery_arc",         mo.battery_arc);
         mo.system_debug        = jm.value("system_debug",        mo.system_debug);
         mo.clock               = jm.value("clock",               mo.clock);
+        mo.clock_date          = jm.value("clock_date",          mo.clock_date);
         mo.zoom                = jm.value("zoom",                mo.zoom);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
@@ -4918,6 +4922,7 @@ int main(int argc, char* argv[]) {
             cfg["map"]["battery_arc"]         = mo.battery_arc;
             cfg["map"]["system_debug"]        = mo.system_debug;
             cfg["map"]["clock"]               = mo.clock;
+            cfg["map"]["clock_date"]          = mo.clock_date;
             cfg["map"]["zoom"]                = mo.zoom;
         }
 

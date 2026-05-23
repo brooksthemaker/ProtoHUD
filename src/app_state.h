@@ -232,6 +232,7 @@ struct MapOverlayConfig {
     bool        system_debug        = false;
     // Clock above the minimap, with an active timer/alarm shown beside it.
     bool        clock               = true;
+    bool        clock_date          = false;  // show the date under the clock
 
     // Helldivers-style temporary expanded view (pan/zoom) — runtime only.
     bool        expanded            = false;
