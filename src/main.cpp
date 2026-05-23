@@ -5533,6 +5533,7 @@ int main(int argc, char* argv[]) {
             snap.lora_messages   = state.lora_messages;
             snap.compass_heading    = state.compass_heading;
             snap.compass_bg_enabled = state.compass_bg_enabled;
+            snap.compass_tape       = state.compass_tape;
             snap.imu_pose           = state.imu_pose;
             snap.focus_left         = state.focus_left;
             snap.focus_right        = state.focus_right;
