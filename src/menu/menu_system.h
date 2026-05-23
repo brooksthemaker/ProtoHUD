@@ -130,6 +130,12 @@ enum class SelectionStyle {
     FILLED_ROW,  // opaque white row, black text, no glow (Halo theme)
 };
 
+// ── Quick-menu style ────────────────────────────────────────────────────────────
+enum class QuickStyle {
+    List,    // legacy compact corner list
+    Radial,  // ring(s) encircling the round minimap
+};
+
 // ── Menu system ───────────────────────────────────────────────────────────────
 // Stack-based menu driven by SmartKnob detents.
 // The HUD calls navigate() on knob events and draw() each frame.
@@ -177,12 +183,31 @@ public:
     // Render the compact corner "quick menu" overlay using Dear ImGui windows
     void draw(int screen_w, int screen_h);
 
+    // Render the quick menu as a radial wheel encircling the round minimap.
+    // (center_x, center_y, inner_radius) are the minimap's geometry in the SAME
+    // framebuffer pixel space ImGui draws in (display coords). Submenu levels are
+    // drawn as concentric outer rings. When rotate_to_selected is true (minimap
+    // anchored near a screen edge) the wheel spins so the selected item sits at the
+    // top; otherwise the ring is static and the highlight moves.
+    void draw_radial(float center_x, float center_y, float inner_radius,
+                     float focus_angle, bool rotate_to_selected);
+
+    // Quick-menu style (corner list vs. radial-around-minimap).
+    void      set_quick_style(QuickStyle s) { quick_style_ = s; }
+    QuickStyle quick_style() const          { return quick_style_; }
+
     // Render the full-screen, tabbed "deep menu" (game-style settings screen)
     // over the live feeds. Reuses the same MenuItem tree + nav/edit state.
     void draw_fullscreen(int screen_w, int screen_h);
 
+    // The corner "quick menu" shows a separate curated tree (set via
+    // set_quick_items); the full-screen deep menu always uses root_items_. If no
+    // quick tree is set, the quick menu falls back to the full tree.
+    void set_quick_items(std::vector<MenuItem> items) { quick_items_ = std::move(items); }
+
     bool is_open()    const { return open_; }
-    void open()             { deep_open_ = false; stack_.clear(); open_ = true; push_level(root_items_); }
+    void open()             { deep_open_ = false; stack_.clear(); open_ = true;
+                              push_level(quick_items_.empty() ? root_items_ : quick_items_); }
     void close() {
         open_            = false;
         deep_open_       = false;
@@ -268,6 +293,7 @@ private:
     KeyboardCommit osk_commit_;
 
     std::vector<MenuItem>  root_items_;
+    std::vector<MenuItem>  quick_items_;   // curated corner "quick menu" tree
     std::vector<Level>     stack_;
     int                    cursor_ = 0;
     bool                   open_   = false;
@@ -285,4 +311,5 @@ private:
     SelectionStyle selection_style_  = SelectionStyle::FILLED_ROW;    // Halo default
     MenuAnchor     anchor_           = MenuAnchor::TopLeft;
     float          ui_scale_         = 1.0f;   // deep menu / landing page size
+    QuickStyle     quick_style_      = QuickStyle::Radial;  // corner list vs radial
 };

@@ -1429,3 +1429,104 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
     dl->AddText(font, fs * 0.9f, { x0, pmax.y - 26.f }, menu_with_alpha(accent_color_, 185),
                 "ARROWS/STICK MOVE   \xC2\xB7   A/ENTER KEY   \xC2\xB7   B/BKSP DELETE   \xC2\xB7   TYPE ON KEYBOARD");
 }
+
+// ── draw_radial (quick menu around the minimap) ─────────────────────────────────
+// Drawn via the foreground draw list in display pixel coords (the same space the
+// nvg minimap uses), so the wheel locks around the minimap. Each nav-stack level is
+// a concentric ring (inner = root, outer = active). focus_angle is the screen-space
+// direction the "primary" item should point (toward the centre of the view); when
+// rotate_to_selected the wheel spins the selected item to that angle.
+void MenuSystem::draw_radial(float cx, float cy, float inner_r,
+                             float focus_angle, bool rotate_to_selected) {
+    if (!open_ || stack_.empty()) return;
+    s_menu_glow = glow_enabled_;
+
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImFont* font   = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize() * ui_scale_;
+    const ImU32  accent = accent_color_;
+
+    const float ring_gap  = 22.f * ui_scale_;   // minimap edge → first ring
+    const float ring_step = 46.f * ui_scale_;   // spacing between concentric rings
+    const float node_r    = 6.f  * ui_scale_;
+
+    auto value_summary = [](const MenuItem& it) -> std::string {
+        switch (it.type) {
+            case MenuItemType::TOGGLE:
+                return (it.get_toggle && it.get_toggle()) ? "ON" : "OFF";
+            case MenuItemType::SLIDER: {
+                char b[32];
+                float v = it.slider.get_value ? it.slider.get_value() : it.slider.min;
+                format_slider_value(b, sizeof(b), v, it.slider.min, it.slider.max, it.slider.unit);
+                return b;
+            }
+            case MenuItemType::SUBMENU: return ">";
+            default: return std::string();
+        }
+    };
+
+    const int depth = static_cast<int>(stack_.size());
+    for (int L = 0; L < depth; ++L) {
+        const Level& lvl = stack_[L];
+        const bool active = (L == depth - 1);
+        const float R     = inner_r + ring_gap + L * ring_step;
+        const int sel_idx = active ? cursor_ : lvl.cursor;
+
+        // visible items
+        std::vector<int> vis;
+        for (int i = 0; i < static_cast<int>(lvl.items.size()); ++i)
+            if (!lvl.items[i].visible_fn || lvl.items[i].visible_fn()) vis.push_back(i);
+        const int N = static_cast<int>(vis.size());
+        if (N == 0) continue;
+
+        int sel_vis = 0;
+        for (int k = 0; k < N; ++k) if (vis[k] == sel_idx) { sel_vis = k; break; }
+
+        const float step = 2.f * static_cast<float>(M_PI) / static_cast<float>(N);
+
+        // faint ring guide
+        dl->AddCircle({ cx, cy }, R, menu_with_alpha(accent, active ? 60 : 28), 64, 1.0f);
+
+        for (int k = 0; k < N; ++k) {
+            float ang = rotate_to_selected
+                ? focus_angle + (k - sel_vis) * step
+                : focus_angle + k * step;
+            const float ca = std::cos(ang), sa = std::sin(ang);
+            const float px = cx + R * ca, py = cy + R * sa;
+            const MenuItem& it = lvl.items[vis[k]];
+            const bool primary = (vis[k] == sel_idx);
+
+            if (primary && active) {
+                // connector from minimap edge to the selected node
+                dl->AddLine({ cx + inner_r * ca, cy + inner_r * sa }, { px, py },
+                            menu_with_alpha(accent, 150), 1.5f);
+                dl->AddCircleFilled({ px, py }, node_r + 2.f, accent);
+                dl->AddCircleFilled({ px, py }, node_r - 1.f, IM_COL32(255, 255, 255, 235));
+            } else if (primary) {
+                dl->AddCircleFilled({ px, py }, node_r, menu_with_alpha(accent, 170));
+            } else {
+                dl->AddCircleFilled({ px, py }, node_r * 0.7f,
+                                    active ? accent : menu_with_alpha(accent, 110));
+            }
+
+            // Labels: every item on the active ring; only the path item on inner rings.
+            if (active || primary) {
+                std::string label = to_upper(item_label(it));
+                std::string val   = value_summary(it);
+                if (!val.empty() && val != ">") label += "  " + val;
+                const float lsz = (primary && active) ? fs * 1.05f : fs * 0.9f;
+                ImVec2 tsz = font->CalcTextSizeA(lsz, FLT_MAX, 0.f, label.c_str());
+                float tx = px + ca * (node_r + 8.f);
+                float ty = py + sa * (node_r + 8.f);
+                if      (ca < -0.2f) tx -= tsz.x;          // left half → right-align
+                else if (ca <  0.2f) tx -= tsz.x * 0.5f;   // top/bottom → center
+                ty -= tsz.y * 0.5f;
+                ImU32 tcol = (primary && active) ? IM_COL32(255, 255, 255, 255)
+                           : active              ? IM_COL32(220, 225, 230, 205)
+                           :                       menu_with_alpha(accent, 150);
+                dl->AddText(font, lsz, { tx + 1.f, ty + 1.f }, IM_COL32(0, 0, 0, 190), label.c_str());
+                dl->AddText(font, lsz, { tx, ty }, tcol, label.c_str());
+            }
+        }
+    }
+}

@@ -410,7 +410,9 @@ static std::vector<MenuItem> build_menu(
         // Profile management (Profiles tab: save current / load by restart / delete)
         ProfileManager* profiles = nullptr,
         // HUD/menu visual presets (System tab: built-in themes + save/load/delete)
-        ProfileManager* hud_presets = nullptr)
+        ProfileManager* hud_presets = nullptr,
+        // Out: curated corner "quick menu" tree (assigned if non-null)
+        std::vector<MenuItem>* quick_out = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -2956,6 +2958,14 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("HUD / Menu Presets", std::move(hud_presets_menu)),
                   "Visual presets: built-in themes plus your own saved HUD color + "
                   "menu style combinations. Applied live."),
+        with_desc(toggle("Radial Quick Menu",
+            [menu_sys_pp]{ return menu_sys_pp && *menu_sys_pp
+                              && (*menu_sys_pp)->quick_style() == QuickStyle::Radial; },
+            [menu_sys_pp](bool v){ if (menu_sys_pp && *menu_sys_pp)
+                (*menu_sys_pp)->set_quick_style(v ? QuickStyle::Radial : QuickStyle::List); }),
+            "ON: the quick menu is a radial wheel encircling the minimap. OFF: the "
+            "legacy compact corner list. The minimap's position (HUD > Map) sets where "
+            "the wheel sits."),
         with_panel(
             submenu("Audio", std::move(audio_menu)),
             "Audio Status",
@@ -3088,6 +3098,143 @@ static std::vector<MenuItem> build_menu(
     }
     profiles_menu.push_back(with_desc(submenu("Delete Profile", std::move(profile_delete_menu)),
         "Remove a saved profile permanently."));
+
+    // ── Quick (corner / radial) menu ─────────────────────────────────────────────
+    // A short, curated set of mid-use actions — separate from the full settings tree
+    // above. Some items are always present; an optional "catalog" of extras can be
+    // pinned by the user (favorites, persisted in config) and is gated by visible_fn.
+    // Submenus here become outer rings in the radial renderer.
+    if (quick_out) {
+        std::vector<MenuItem> q;
+
+        // Night vision (mirror of the Low-Light "Night Vision" toggle).
+        q.push_back(toggle("Night Vision",
+            [&state]{ return state.night_vision.nv_enabled; },
+            [&state](bool v){
+                state.night_vision.nv_enabled  = v;
+                state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
+                state.night_vision.shutter_us  = v ? 40000 : 16667;
+            }));
+
+        // Digital zoom (both eyes together).
+        q.push_back(slider("Zoom", 1.0f, 4.0f, 0.25f, "x",
+            [&state]{ return state.zoom_left.zoom; },
+            [&state](float v){ state.zoom_left.zoom = v; state.zoom_right.zoom = v; }));
+
+        // Manual focus — only when OWLsight cameras are present.
+        {
+            std::vector<MenuItem> focus = {
+                leaf("Autofocus", [cameras]{
+                    if (cameras && cameras->owl_left())  cameras->owl_left()->start_autofocus();
+                    if (cameras && cameras->owl_right()) cameras->owl_right()->start_autofocus();
+                }),
+                slider("Position", 0.f, 1000.f, 25.f, "",
+                    [cameras]{ return (cameras && cameras->owl_left())
+                                        ? (float)cameras->owl_left()->get_focus_position() : 0.f; },
+                    [cameras](float v){
+                        if (cameras && cameras->owl_left())  cameras->owl_left()->set_focus_position((int)v);
+                        if (cameras && cameras->owl_right()) cameras->owl_right()->set_focus_position((int)v);
+                    }),
+            };
+            MenuItem fsub = submenu("Manual Focus", std::move(focus));
+            fsub.visible_fn = [cameras]{ return cameras && cameras->owl_left(); };
+            q.push_back(std::move(fsub));
+        }
+
+        // Quick photo + record.
+        q.push_back(leaf("Quick Photo", [state_ptr]{
+            if (!state_ptr) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->capture_request = CaptureRequest::Stereo;
+        }));
+        q.push_back(toggle("Record",
+            [&state]{ return state.video_recording; },
+            [&state](bool v){ std::lock_guard<std::mutex> lk(state.mtx);
+                              state.video_request = v ? VideoRequest::Start : VideoRequest::Stop; }));
+
+        // Timers.
+        {
+            auto set_timer = [&state](int secs){
+                state.timer_alarm.timer_active = true;
+                state.timer_alarm.timer_end    = time(nullptr) + secs;
+            };
+            std::vector<MenuItem> timers = {
+                leaf("5 min",  [set_timer]{ set_timer(300);  }),
+                leaf("10 min", [set_timer]{ set_timer(600);  }),
+                leaf("30 min", [set_timer]{ set_timer(1800); }),
+                leaf("60 min", [set_timer]{ set_timer(3600); }),
+                leaf("Cancel", [&state]{ state.timer_alarm.timer_active = false; }),
+            };
+            q.push_back(submenu("Timers", std::move(timers)));
+        }
+
+        // ── Favorites catalog (optional, user-pinned) ────────────────────────────
+        struct QuickFav { std::string key; MenuItem item; };
+        std::vector<QuickFav> catalog;
+        catalog.push_back({ "edge", toggle("Edge Highlight",
+            [&state]{ return state.pp_cfg.edge_enabled; },
+            [&state](bool v){ state.pp_cfg.edge_enabled = v; }) });
+        catalog.push_back({ "desat", toggle("Desaturate BG",
+            [&state]{ return state.pp_cfg.desat_enabled; },
+            [&state](bool v){ state.pp_cfg.desat_enabled = v; }) });
+        catalog.push_back({ "motion", toggle("Motion Highlight",
+            [&state]{ return state.pp_cfg.motion_enabled; },
+            [&state](bool v){ state.pp_cfg.motion_enabled = v; }) });
+        catalog.push_back({ "map", toggle("Map Overlay",
+            [&state]{ return state.map_overlay.enabled; },
+            [&state](bool v){ state.map_overlay.enabled = v; }) });
+        catalog.push_back({ "theater", toggle("Theater Mode",
+            [&state]{ return state.theater_mode; },
+            [&state](bool v){ state.theater_mode = v; }) });
+        catalog.push_back({ "swap", toggle("Swap Cameras",
+            [&state]{ return state.cameras_swapped; },
+            [&state](bool v){ state.cameras_swapped = v; }) });
+        catalog.push_back({ "fps", toggle("FPS Overlay",
+            [fps_overlay_active]{ return fps_overlay_active && *fps_overlay_active; },
+            [fps_overlay_active](bool v){ if (fps_overlay_active) *fps_overlay_active = v; }) });
+        catalog.push_back({ "syspanel", toggle("System Panel",
+            [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
+            [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }) });
+
+        // Pinned catalog items appear in the quick menu, gated on the favorites set.
+        for (auto& f : catalog) {
+            MenuItem it  = f.item;
+            std::string key = f.key;
+            it.visible_fn = [state_ptr, key]{
+                if (!state_ptr) return false;
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                return state_ptr->quick_favorites.count(key) > 0;
+            };
+            q.push_back(std::move(it));
+        }
+
+        // "Customize" — toggles to pin/unpin each catalog item.
+        std::vector<MenuItem> customize;
+        for (auto& f : catalog) {
+            std::string key   = f.key;
+            std::string label = f.item.label;
+            customize.push_back(toggle(label,
+                [state_ptr, key]{
+                    if (!state_ptr) return false;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    return state_ptr->quick_favorites.count(key) > 0;
+                },
+                [state_ptr, key](bool v){
+                    if (!state_ptr) return;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    if (v) state_ptr->quick_favorites.insert(key);
+                    else   state_ptr->quick_favorites.erase(key);
+                }));
+        }
+        q.push_back(submenu("Customize", std::move(customize)));
+
+        // Jump to the full-screen settings.
+        q.push_back(leaf("Full Settings", [menu_sys_pp]{
+            if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->open_deep();
+        }));
+
+        *quick_out = std::move(q);
+    }
 
     return {
         with_desc(submenu("Vision",       std::move(cameras_menu)),
@@ -4039,6 +4186,7 @@ int main(int argc, char* argv[]) {
     // into MenuSystem without a circular dependency at build time.
     bool panel_preview_enabled = false;
     MenuSystem* menu_ptr = nullptr;
+    std::vector<MenuItem> quick_items;   // curated corner/radial quick-menu tree
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -4058,8 +4206,9 @@ int main(int argc, char* argv[]) {
                                &protoface_preview_view,
                                cfg_map_dir,
                                &left_eye_src, &right_eye_src,
-                               &profiles, &hud_presets));
+                               &profiles, &hud_presets, &quick_items));
     menu_ptr = &menu;
+    menu.set_quick_items(std::move(quick_items));
 
     // Wire wireless controller callbacks now that menu exists
     if (wireless_enabled) {
@@ -4116,6 +4265,18 @@ int main(int argc, char* argv[]) {
             else if (a == "bottom_left")  menu.set_anchor(MenuAnchor::BottomLeft);
             else if (a == "bottom_right") menu.set_anchor(MenuAnchor::BottomRight);
             else                          menu.set_anchor(MenuAnchor::TopLeft);
+        }
+    }
+
+    // Quick (corner/radial) menu style + user-pinned favorites.
+    if (cfg.contains("quick_menu")) {
+        auto& jq = cfg["quick_menu"];
+        std::string st = jq.value("style", std::string("radial"));
+        menu.set_quick_style(st == "list" ? QuickStyle::List : QuickStyle::Radial);
+        if (jq.contains("favorites") && jq["favorites"].is_array()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (auto& k : jq["favorites"])
+                if (k.is_string()) state.quick_favorites.insert(k.get<std::string>());
         }
     }
 
@@ -4732,6 +4893,16 @@ int main(int argc, char* argv[]) {
                 default: break;
             }
             jm["anchor"] = a;
+        }
+
+        // Quick (corner/radial) menu style + pinned favorites.
+        cfg["quick_menu"]["style"] =
+            (menu.quick_style() == QuickStyle::Radial) ? "radial" : "list";
+        {
+            json arr = json::array();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (const auto& k : state.quick_favorites) arr.push_back(k);
+            cfg["quick_menu"]["favorites"] = arr;
         }
 
         // Persist MPU-9250 enabled state + calibration biases so the menu's
@@ -5635,8 +5806,32 @@ int main(int argc, char* argv[]) {
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
-        if (menu.is_deep_open()) menu.draw_fullscreen(xr.eye_width(), xr.eye_height());
-        else                     menu.draw(xr.eye_width(), xr.eye_height());
+        if (menu.is_deep_open()) {
+            menu.draw_fullscreen(xr.eye_width(), xr.eye_height());
+        } else if (menu.is_open() && menu.quick_style() == QuickStyle::Radial
+                   && !menu.is_keyboard_open()) {
+            // Radial quick menu encircling the round minimap. Geometry matches
+            // draw_map_overlay() (display coords) so the wheel locks onto it even
+            // when the map image is off.
+            const auto& mo = snap.map_overlay;
+            const float dispW = static_cast<float>(xr.display_width());
+            const float dispH = static_cast<float>(xr.display_height());
+            const float half  = std::max(8.f, static_cast<float>(mo.size_px));
+            const float mcx = std::clamp(dispW * mo.anchor_x + mo.pan_x, half, dispW - half);
+            const float mcy = std::clamp(dispH * mo.anchor_y + mo.pan_y, half, dispH - half);
+            // Point the selected item toward the centre of the minimap's eye-region
+            // (SBS: left/right half) so it reads "into" the view.
+            const bool sbs = xr.eye_width() < xr.display_width();
+            const float region_cx = !sbs ? dispW * 0.5f
+                                  : (mcx < dispW * 0.5f ? dispW * 0.25f : dispW * 0.75f);
+            const float region_cy = dispH * 0.5f;
+            const float focus = std::atan2(region_cy - mcy, region_cx - mcx);
+            const bool rotate = (mo.anchor_x < 0.35f || mo.anchor_x > 0.65f ||
+                                 mo.anchor_y < 0.35f || mo.anchor_y > 0.65f);
+            menu.draw_radial(mcx, mcy, half, focus, rotate);
+        } else {
+            menu.draw(xr.eye_width(), xr.eye_height());
+        }
 
         hud.draw_android_overlay(tex_android,
                                   xr.eye_width(), xr.eye_height(),

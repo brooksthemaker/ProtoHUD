@@ -3,6 +3,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -433,6 +434,11 @@ struct AppState {
     std::string hud_preset_save_name;
     std::string hud_preset_load_name;
     std::string hud_preset_delete_name;
+
+    // Quick (corner) menu user-pinned favorites: keys of optional catalog actions
+    // the user has chosen to show. Read by the menu's visible_fn (render thread),
+    // written by the "Customize Quick Menu" toggles (any thread) — guard with mtx.
+    std::set<std::string> quick_favorites;
 
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;
