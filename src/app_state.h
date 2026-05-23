@@ -402,6 +402,7 @@ struct AppState {
     // Heading used for the HUD compass. Updated by LoRa or IMU.
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
+    bool  compass_tape       = true;   // the top-of-screen compass tape
 
     // Which XR-IMU axis drives the compass, and whether to invert the rotation
     // direction. Configurable from the menu so different IMU orientations work

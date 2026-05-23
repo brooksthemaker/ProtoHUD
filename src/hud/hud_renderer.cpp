@@ -345,7 +345,8 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
 
     const float cw        = fw / 3.f;
     const float compass_y = flip ? c_margin : fh - ch - c_margin;
-    draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
+    if (s.compass_tape)
+        draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
     draw_health_side(nvg_, s.health, fw, fh, false,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
     draw_health_side(nvg_, s.health, fw, fh, true,

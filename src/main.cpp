@@ -2101,6 +2101,9 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> compass_menu = {
+        toggle("Compass Tape",
+            [&state]{ return state.compass_tape; },
+            [&state](bool v){ state.compass_tape = v; }),
         submenu("IMU Axis",            std::move(imu_axis_menu)),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
@@ -3665,6 +3668,7 @@ int main(int argc, char* argv[]) {
     AppState state;
     state.max_messages        = jval(jhud, "lora_message_history", 50);
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
+    state.compass_tape        = jhud.value("compass_tape", true);
 
     if (jhud.contains("effects")) {
         auto& jfx = jhud["effects"];
@@ -4800,6 +4804,7 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
+        cfg["hud"]["compass_tape"]        = state.compass_tape;
         {
             static const char* kAxes[] = { "roll", "pitch", "yaw" };
             cfg["compass"]["axis"]   = kAxes[static_cast<int>(state.compass_axis)];
