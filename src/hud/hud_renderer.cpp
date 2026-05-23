@@ -449,46 +449,68 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     if (cfg.compass_ring)
         draw_compass_ring(vg, s, cx, cy, ringR);
 
-    // Battery arc — a ~quarter ring on the minimap's left, with a gap, colored by
-    // charge (green → amber → red). Driven by the controller battery for now; the
-    // band can be split for multiple cells later. The dark track always shows when
-    // enabled; the coloured fill + % appear once a battery level is known.
+    // System gauge — a ~quarter ring on the minimap's left, OUTSIDE the compass,
+    // with a gap. Normally shows the controller battery; with system_debug on it
+    // shows CPU (inner bar) + GPU/render-load (outer bar, concentric & offset).
     if (cfg.battery_arc) {
-        const int   bpct = s.health.wireless_battery_pct;   // -1 = unknown
-        const float DEG  = (float)M_PI / 180.f;
-        const float r    = ringR + 14.f;          // gap from the minimap edge
-        const float a0   = 145.f * DEG;           // bottom-left
-        const float a1   = 215.f * DEG;           // top-left (sweep up the left side)
-        const float am   = (a0 + a1) * 0.5f;
+        const float DEG = (float)M_PI / 180.f;
+        const float a0  = 145.f * DEG;            // bottom-left
+        const float a1  = 215.f * DEG;            // top-left (sweep up the left side)
 
-        // Background track.
-        nvgLineCap(vg, NVG_ROUND);
-        nvgBeginPath(vg);
-        nvgArc(vg, cx, cy, r, a0, a1, NVG_CW);
-        nvgStrokeColor(vg, nvgRGBA(40, 48, 56, 200));
-        nvgStrokeWidth(vg, 9.f);
-        nvgStroke(vg);
+        // Draw one gauge arc (dark track + coloured fill + a short value label).
+        auto gauge = [&](float r, float ga0, float ga1, float v01,
+                         NVGcolor fill, const char* label, bool known) {
+            nvgLineCap(vg, NVG_ROUND);
+            nvgBeginPath(vg);
+            nvgArc(vg, cx, cy, r, ga0, ga1, NVG_CW);
+            nvgStrokeColor(vg, nvgRGBA(40, 48, 56, 200));
+            nvgStrokeWidth(vg, 8.f);
+            nvgStroke(vg);
+            if (known) {
+                v01 = std::clamp(v01, 0.f, 1.f);
+                nvgBeginPath(vg);
+                nvgArc(vg, cx, cy, r, ga0, ga0 + (ga1 - ga0) * v01, NVG_CW);
+                nvgStrokeColor(vg, fill);
+                nvgStrokeWidth(vg, 8.f);
+                nvgStroke(vg);
+            }
+            nvgLineCap(vg, NVG_BUTT);
+            nvg_set_font_mono(10.f);
+            nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, known ? fill : nvgRGBA(140, 150, 160, 200));
+            nvgText(vg, cx + std::cos(ga0) * (r - 8.f), cy + std::sin(ga0) * (r - 8.f),
+                    label, nullptr);
+        };
 
-        nvg_set_font_mono(11.f);
-        nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-        if (bpct >= 0) {
+        const float r1 = ringR + 56.f;            // bar 1 (outside compass + gap)
+        const float r2 = ringR + 68.f;            // bar 2, concentric
+        const float off = 12.f * DEG;             // angular offset for bar 2
+
+        if (cfg.system_debug) {
+            // Bar 1 = CPU; Bar 2 = GPU/render-load (frame time vs a 60fps budget).
+            const float cpu = std::clamp(s.sys_metrics.cpu_pct / 100.f, 0.f, 1.f);
+            const float ft  = s.sys_metrics.frame_time_ms;
+            const float gpu = std::clamp(ft / (1000.f / 60.f), 0.f, 1.f);
+            auto load_col = [](float v) {
+                return v > 0.8f ? nvgRGBA(230, 70, 60, 235)
+                     : v > 0.5f ? nvgRGBA(235, 180, 50, 230)
+                     :            nvgRGBA(70, 210, 90, 230);
+            };
+            char cb[12]; snprintf(cb, sizeof(cb), "C%2.0f", cpu * 100.f);
+            char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
+            gauge(r1, a0,       a1,       cpu, load_col(cpu), cb, true);
+            gauge(r2, a0 + off, a1 + off, gpu, load_col(gpu), gb, true);
+        } else {
+            const int bpct = s.health.wireless_battery_pct;   // -1 = unknown
             const float pct = std::clamp(bpct / 100.f, 0.f, 1.f);
             NVGcolor bc = pct > 0.5f ? nvgRGBA(70, 210, 90, 230)
                         : pct > 0.2f ? nvgRGBA(235, 180, 50, 230)
                         :              nvgRGBA(230, 70, 60, 235);
-            nvgBeginPath(vg);
-            nvgArc(vg, cx, cy, r, a0, a0 + (a1 - a0) * pct, NVG_CW);
-            nvgStrokeColor(vg, bc);
-            nvgStrokeWidth(vg, 9.f);
-            nvgStroke(vg);
-            char pb[8]; snprintf(pb, sizeof(pb), "%d%%", bpct);
-            nvgFillColor(vg, bc);
-            nvgText(vg, cx + std::cos(am) * (r - 9.f), cy + std::sin(am) * (r - 9.f), pb, nullptr);
-        } else {
-            nvgFillColor(vg, nvgRGBA(140, 150, 160, 200));
-            nvgText(vg, cx + std::cos(am) * (r - 9.f), cy + std::sin(am) * (r - 9.f), "--", nullptr);
+            char pb[8];
+            if (bpct >= 0) snprintf(pb, sizeof(pb), "%d%%", bpct);
+            else           snprintf(pb, sizeof(pb), "--");
+            gauge(r1, a0, a1, pct, bc, pb, bpct >= 0);
         }
-        nvgLineCap(vg, NVG_BUTT);
     }
 }
 
@@ -505,11 +527,11 @@ void HudRenderer::draw_compass_ring(NVGcontext* vg, const AppState& s,
         return -(float)M_PI * 0.5f + rel * DEG;  // forward at top, screen y-down
     };
 
-    // Ring sits outside the battery-arc band (radius+10 .. radius+19).
-    const float r_tick  = radius + 24.f;
-    const float r_card  = radius + 42.f;
-    const float r_mark  = radius + 42.f;
-    const float r_dist  = radius + 58.f;
+    // Compass ring hugs the minimap; the battery/system gauge sits outside it.
+    const float r_tick  = radius + 8.f;
+    const float r_card  = radius + 26.f;
+    const float r_mark  = radius + 26.f;
+    const float r_dist  = radius + 42.f;
 
     const NVGcolor col_major = nvg_col(col_.compass_tick);
     const NVGcolor col_minor = nvg_col_a(col_.compass_tick, 110);

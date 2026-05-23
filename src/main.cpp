@@ -2566,6 +2566,9 @@ static std::vector<MenuItem> build_menu(
         toggle("Battery Arc",
             [&state]{ return state.map_overlay.battery_arc; },
             [&state](bool v){ state.map_overlay.battery_arc = v; }),
+        toggle("Gauge: CPU/GPU (debug)",
+            [&state]{ return state.map_overlay.system_debug; },
+            [&state](bool v){ state.map_overlay.system_debug = v; }),
         leaf("Expand Map (Pan/Zoom)", [&state]{
             std::lock_guard<std::mutex> lk(state.mtx);
             state.map_overlay.expanded   = true;
@@ -3776,6 +3779,7 @@ int main(int argc, char* argv[]) {
         mo.circle_window       = jm.value("circle_window",       mo.circle_window);
         mo.compass_ring        = jm.value("compass_ring",        mo.compass_ring);
         mo.battery_arc         = jm.value("battery_arc",         mo.battery_arc);
+        mo.system_debug        = jm.value("system_debug",        mo.system_debug);
         mo.zoom                = jm.value("zoom",                mo.zoom);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
@@ -4908,6 +4912,7 @@ int main(int argc, char* argv[]) {
             cfg["map"]["circle_window"]       = mo.circle_window;
             cfg["map"]["compass_ring"]        = mo.compass_ring;
             cfg["map"]["battery_arc"]         = mo.battery_arc;
+            cfg["map"]["system_debug"]        = mo.system_debug;
             cfg["map"]["zoom"]                = mo.zoom;
         }
 

@@ -1460,7 +1460,7 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
     const float fs = ImGui::GetFontSize() * ui_scale_;
     const ImU32  accent = accent_color_;
 
-    const float ring_gap   = 50.f * ui_scale_;   // minimap edge → first ring (clears the compass ring)
+    const float ring_gap   = 84.f * ui_scale_;   // minimap edge → first ring (clears the compass + gauge)
     const float ring_thick = 60.f * ui_scale_;   // radial thickness of each wedge band
     const float ring_pad   = 6.f  * ui_scale_;   // gap between concentric rings
     const float wedge_gap  = 0.045f;             // angular gap between wedges (rad)

@@ -225,8 +225,11 @@ struct MapOverlayConfig {
 
     // Compass ring around the minimap (cardinals + ticks + LoRa markers).
     bool        compass_ring        = true;
-    // Battery arc — a partial ring (~quarter) hugging the minimap's left side.
+    // Battery arc — a partial ring (~quarter) hugging the minimap's left side,
+    // sitting OUTSIDE the compass ring. When system_debug is on, the gauge instead
+    // shows CPU (bar 1) + GPU/render load (bar 2, concentric, angularly offset).
     bool        battery_arc         = true;
+    bool        system_debug        = false;
 
     // Helldivers-style temporary expanded view (pan/zoom) — runtime only.
     bool        expanded            = false;
