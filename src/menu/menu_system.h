@@ -196,6 +196,10 @@ public:
     void      set_quick_style(QuickStyle s) { quick_style_ = s; }
     QuickStyle quick_style() const          { return quick_style_; }
 
+    // Radial "helmet tilt": 0 = flat, ~0.35 = subtle inward tilt, up to 0.8.
+    void  set_radial_tilt(float t) { radial_tilt_ = t < 0.f ? 0.f : (t > 0.8f ? 0.8f : t); }
+    float radial_tilt() const      { return radial_tilt_; }
+
     // Render the full-screen, tabbed "deep menu" (game-style settings screen)
     // over the live feeds. Reuses the same MenuItem tree + nav/edit state.
     void draw_fullscreen(int screen_w, int screen_h);
@@ -312,4 +316,5 @@ private:
     MenuAnchor     anchor_           = MenuAnchor::TopLeft;
     float          ui_scale_         = 1.0f;   // deep menu / landing page size
     QuickStyle     quick_style_      = QuickStyle::Radial;  // corner list vs radial
+    float          radial_tilt_      = 0.35f;  // helmet-style inward perspective
 };

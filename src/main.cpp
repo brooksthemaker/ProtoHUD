@@ -2966,6 +2966,11 @@ static std::vector<MenuItem> build_menu(
             "ON: the quick menu is a radial wheel encircling the minimap. OFF: the "
             "legacy compact corner list. The minimap's position (HUD > Map) sets where "
             "the wheel sits."),
+        with_desc(slider("Menu Tilt", 0.f, 0.8f, 0.05f, "",
+            [menu_sys_pp]{ return menu_sys_pp && *menu_sys_pp ? (*menu_sys_pp)->radial_tilt() : 0.f; },
+            [menu_sys_pp](float v){ if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->set_radial_tilt(v); }),
+            "Helmet-style inward perspective tilt for the radial menu. 0 = flat on "
+            "the glass; higher = the wheel curves away at the top like a visor."),
         with_panel(
             submenu("Audio", std::move(audio_menu)),
             "Audio Status",
@@ -4273,6 +4278,7 @@ int main(int argc, char* argv[]) {
         auto& jq = cfg["quick_menu"];
         std::string st = jq.value("style", std::string("radial"));
         menu.set_quick_style(st == "list" ? QuickStyle::List : QuickStyle::Radial);
+        menu.set_radial_tilt(jval(jq, "tilt", menu.radial_tilt()));
         if (jq.contains("favorites") && jq["favorites"].is_array()) {
             std::lock_guard<std::mutex> lk(state.mtx);
             for (auto& k : jq["favorites"])
@@ -4898,6 +4904,7 @@ int main(int argc, char* argv[]) {
         // Quick (corner/radial) menu style + pinned favorites.
         cfg["quick_menu"]["style"] =
             (menu.quick_style() == QuickStyle::Radial) ? "radial" : "list";
+        cfg["quick_menu"]["tilt"] = menu.radial_tilt();
         {
             json arr = json::array();
             std::lock_guard<std::mutex> lk(state.mtx);
