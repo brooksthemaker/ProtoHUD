@@ -1597,163 +1597,161 @@ void HudRenderer::draw_lora_messages(NVGcontext* vg, const AppState& s,
 
 void HudRenderer::draw_compass_tape(NVGcontext* vg, const AppState& s,
                                      float ox, float oy, float tw, float th) {
+    // Deep-Rock-style curved arc compass: ticks/labels laid along a shallow arc
+    // (a large circle whose centre is far off-screen), with radial ticks, cardinal
+    // letters, degree numbers, LoRa bearing markers, and a centre heading readout.
     const float heading  = s.compass_heading;
-    const float ppd      = tw / 120.f;
+    const float ppd      = tw / 120.f;            // 120° visible across the width
     const float center_x = ox + tw / 2.f;
+    const bool  flip     = cfg_.hud_flip_vertical;
+    const float dir      = flip ? -1.f : 1.f;     // +1 = arc dips downward at edges
+
+    // Arc geometry. Apex (peak) sits at the tape's outer edge so the ticks/labels
+    // hang inward (down when bottom-anchored, up when flipped). Centre is R_big away.
+    const float R_big  = tw * 2.6f;               // larger = flatter arc
+    const float apex_y = flip ? (oy + th - 8.f) : (oy + 8.f);
+
+    // Point on the arc at horizontal x, plus the local sin/cos of the subtended angle.
+    auto arc_at = [&](float px, float& yy, float& sp, float& cp) {
+        const float t = std::clamp((px - center_x) / R_big, -1.f, 1.f);
+        const float phi = std::asin(t);
+        sp = std::sin(phi); cp = std::cos(phi);
+        yy = apex_y + dir * R_big * (1.f - cp);
+    };
 
     const ImU32 col_major = col_.compass_tick;
     const ImU32 col_mid   = with_alpha(col_.compass_tick, 180);
     const ImU32 col_minor = with_alpha(col_.compass_tick, 110);
-    const ImU32 col_glow1 = with_alpha(col_.compass_glow, 70);
-    const ImU32 col_glow2 = with_alpha(col_.compass_glow, 28);
-
-    const float fade_w = static_cast<float>(cfg_.compass_bg_side_fade);
-    const bool  flip   = cfg_.hud_flip_vertical;
-
-    if (s.compass_bg_enabled) {
-        const uint8_t a = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
-        constexpr float kIndAngle = 130.f * 3.14159265f / 180.f;
-        const float inset = std::abs(std::cos(kIndAngle)) / std::sin(kIndAngle) * th;
-
-        nvgBeginPath(vg);
-        if (!flip) {
-            nvgMoveTo(vg, ox - fade_w + inset,      oy);
-            nvgLineTo(vg, ox + tw + fade_w - inset, oy);
-            nvgLineTo(vg, ox + tw + fade_w,         oy + th);
-            nvgLineTo(vg, ox - fade_w,              oy + th);
-        } else {
-            nvgMoveTo(vg, ox - fade_w,              oy);
-            nvgLineTo(vg, ox + tw + fade_w,         oy);
-            nvgLineTo(vg, ox + tw + fade_w - inset, oy + th);
-            nvgLineTo(vg, ox - fade_w + inset,      oy + th);
-        }
-        nvgClosePath(vg);
-        nvgFillColor(vg, nvg_col_a(col_.compass_bg_color, a));
-        nvgFill(vg);
-    }
-
-    // Glow line at tape edge that meets the indicator arms
-    {
-        const float lx0    = ox - fade_w, lx1 = ox + tw + fade_w;
-        const float line_y = flip ? oy : oy + th;
-        nvg_glow_line(vg, lx0, line_y, lx1, line_y,
-                      nvg_col(col_.glow_base),
-                      nvg_col_a(col_.glow_base, 70),
-                      nvg_col_a(col_.glow_base, 28));
-    }
+    const bool  tick_glow = cfg_.compass_tick_glow;
 
     const float t_maj = static_cast<float>(cfg_.compass_tick_length);
     const float t_mid = t_maj * (16.f / 24.f);
     const float t_min = t_maj * (10.f / 24.f);
 
-    // Align degree labels with the first dot row of the indicator arms.
-    // arm anchor sits at oy+th; first dot row = anchor - sin(130°)*ROW_H
-    constexpr float kArmAngle = 130.f * 3.14159265f / 180.f;
-    constexpr float kRowH     = 18.f;
-    const float label_y   = flip ? oy + 3.f : (oy + th) - std::sin(kArmAngle) * kRowH;
-    const float tick_base = flip ? oy + 20.f : label_y - 3.f;
-    const float tick_sign = flip ? 1.f : -1.f;
-    const bool  tick_glow = cfg_.compass_tick_glow;
-
-    // Collect tick positions per tier for batched drawing
-    float maj_px[8];  int n_maj = 0;
-    float mid_px[36]; int n_mid = 0;
-    float min_px[24]; int n_min = 0;
-
-    struct LabelEntry { float px; char buf[8]; };
-    LabelEntry labels[44]; int n_labels = 0;
-
-    for (int deg = 0; deg < 360; deg++) {
-        float offset = static_cast<float>(deg) - heading;
-        while (offset >  180.f) offset -= 360.f;
-        while (offset < -180.f) offset += 360.f;
-
-        float px = center_x + offset * ppd;
-        if (px < ox || px > ox + tw) continue;
-
-        if (deg % 45 == 0) {
-            if (n_maj < 8) maj_px[n_maj++] = px;
-            if (n_labels < 44) {
-                labels[n_labels].px = px;
-                strncpy(labels[n_labels].buf, cardinal_str(static_cast<float>(deg)), 7);
-                labels[n_labels].buf[7] = '\0';
-                ++n_labels;
-            }
-        } else if (deg % 10 == 0) {
-            if (n_mid < 36) mid_px[n_mid++] = px;
-            if (n_labels < 44) {
-                labels[n_labels].px = px;
-                snprintf(labels[n_labels].buf, 8, "%d", deg);
-                ++n_labels;
-            }
-        } else if (deg % 5 == 0) {
-            if (n_min < 24) min_px[n_min++] = px;
-        }
-    }
-
-    // Batched glow passes (one path per tier per glow layer)
-    if (tick_glow) {
-        auto draw_tick_batch = [&](float* px_arr, int n, float len, float w, NVGcolor col) {
-            nvgBeginPath(vg);
-            for (int i = 0; i < n; ++i) {
-                nvgMoveTo(vg, px_arr[i], tick_base);
-                nvgLineTo(vg, px_arr[i], tick_base + tick_sign * len);
-            }
-            nvgStrokeWidth(vg, w); nvgStrokeColor(vg, col); nvgStroke(vg);
-        };
-        draw_tick_batch(maj_px, n_maj, t_maj, t_maj * 0.5f,  nvg_col(col_glow2));
-        draw_tick_batch(maj_px, n_maj, t_maj, t_maj * 0.25f, nvg_col(col_glow1));
-        draw_tick_batch(mid_px, n_mid, t_mid, t_mid * 0.375f, nvg_col(col_glow2));
-        draw_tick_batch(min_px, n_min, t_min, t_min * 0.4f,  nvg_col(col_glow2));
-    }
-
-    // Batched solid tick draws
+    // ── Arc baseline (glow polyline) ─────────────────────────────────────────
     {
-        auto draw_solid = [&](float* px_arr, int n, float len, float w, NVGcolor col) {
+        constexpr int N = 48;
+        float xs[N + 1], ys[N + 1], sp, cp;
+        for (int i = 0; i <= N; ++i) {
+            xs[i] = ox + tw * (float)i / N;
+            arc_at(xs[i], ys[i], sp, cp);
+        }
+        auto poly = [&](NVGcolor c, float w) {
             nvgBeginPath(vg);
-            for (int i = 0; i < n; ++i) {
-                nvgMoveTo(vg, px_arr[i], tick_base);
-                nvgLineTo(vg, px_arr[i], tick_base + tick_sign * len);
-            }
-            nvgStrokeWidth(vg, w); nvgStrokeColor(vg, col); nvgStroke(vg);
+            nvgMoveTo(vg, xs[0], ys[0]);
+            for (int i = 1; i <= N; ++i) nvgLineTo(vg, xs[i], ys[i]);
+            nvgStrokeColor(vg, c); nvgStrokeWidth(vg, w); nvgStroke(vg);
         };
-        draw_solid(maj_px, n_maj, t_maj, 3.f, nvg_col(col_major));
-        draw_solid(mid_px, n_mid, t_mid, 2.f, nvg_col(col_mid));
-        draw_solid(min_px, n_min, t_min, 2.f, nvg_col(col_minor));
+        if (tick_glow) {
+            poly(nvg_col_a(col_.glow_base, 28), 7.f);
+            poly(nvg_col_a(col_.glow_base, 70), 4.f);
+        }
+        poly(nvg_col(col_.glow_base), 1.5f);
     }
 
-    // Labels
-    nvg_set_font_mono(0.f);
-    for (int i = 0; i < n_labels; ++i) {
-        float bounds[4];
-        nvgTextBounds(vg, 0, 0, labels[i].buf, nullptr, bounds);
-        float lw = bounds[2] - bounds[0];
-        nvg_glow_text(vg, labels[i].px - lw * 0.5f, label_y, labels[i].buf,
-                      true, col_.glow_base, col_.text_fill);
+    // ── Ticks (radial) batched per tier ──────────────────────────────────────
+    auto tick_batch = [&](int mod, int skip_mod, float len, float w, NVGcolor col) {
+        nvgBeginPath(vg);
+        for (int deg = 0; deg < 360; ++deg) {
+            if (deg % mod != 0) continue;
+            if (skip_mod && deg % skip_mod == 0) continue;   // drawn by a higher tier
+            float off = (float)deg - heading;
+            while (off > 180.f) off -= 360.f;
+            while (off < -180.f) off += 360.f;
+            float px = center_x + off * ppd;
+            if (px < ox || px > ox + tw) continue;
+            float yy, sp, cp; arc_at(px, yy, sp, cp);
+            nvgMoveTo(vg, px, yy);
+            nvgLineTo(vg, px - sp * len, yy + dir * cp * len);   // inward (radial)
+        }
+        nvgStrokeColor(vg, col); nvgStrokeWidth(vg, w); nvgStroke(vg);
+    };
+    if (tick_glow) {
+        tick_batch(45, 0,  t_maj, t_maj * 0.4f, nvg_col_a(col_.compass_glow, 50));
+        tick_batch(10, 45, t_mid, t_mid * 0.4f, nvg_col_a(col_.compass_glow, 32));
+    }
+    tick_batch(5, 10, t_min, 2.f, nvg_col(col_minor));   // minor (5°, not 10°)
+    tick_batch(10, 45, t_mid, 2.f, nvg_col(col_mid));     // mid   (10°, not 45°)
+    tick_batch(45, 0,  t_maj, 3.f, nvg_col(col_major));   // major (45° cardinals)
+
+    // ── Labels: cardinals (large) + degree numbers, below the ticks ──────────
+    for (int deg = 0; deg < 360; ++deg) {
+        const bool card = (deg % 45 == 0);
+        const bool tens = (deg % 10 == 0);
+        if (!card && !tens) continue;
+        float off = (float)deg - heading;
+        while (off > 180.f) off -= 360.f;
+        while (off < -180.f) off += 360.f;
+        float px = center_x + off * ppd;
+        if (px < ox || px > ox + tw) continue;
+        float yy, sp, cp; arc_at(px, yy, sp, cp);
+
+        char buf[8];
+        if (card) { strncpy(buf, cardinal_str((float)deg), 7); buf[7] = '\0'; }
+        else      { snprintf(buf, sizeof(buf), "%d", deg); }
+
+        const float gap = t_maj + (card ? 14.f : 11.f);
+        const float lx  = px - sp * gap;
+        const float ly  = yy + dir * cp * gap;
+        nvg_set_font_mono(card ? 22.f : 0.f);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvg_glow_text(vg, lx, ly, buf, true, col_.glow_base, col_.text_fill);
     }
 
-    // LoRa node bearing markers — triangles on the inner (non-label) side of ticks
+    // ── LoRa node bearing markers (triangles above the arc, pointing at it) ──
     for (const auto& node : s.lora_nodes) {
         if (node.distance_m <= 0.f) continue;
-        float offset = node.heading_deg - heading;
-        while (offset >  180.f) offset -= 360.f;
-        while (offset < -180.f) offset += 360.f;
-        float px = center_x + offset * ppd;
+        float off = node.heading_deg - heading;
+        while (off > 180.f) off -= 360.f;
+        while (off < -180.f) off += 360.f;
+        float px = center_x + off * ppd;
         if (px < ox || px > ox + tw) continue;
-
-        float my = tick_base + tick_sign * t_maj + (flip ? 6.f : -6.f);
-        float tri_tip_dy = flip ? -9.f : 9.f;
-
+        float yy, sp, cp; arc_at(px, yy, sp, cp);
+        const float ux = sp,  uy = -dir * cp;   // outward unit
+        const float txu = cp, tyu = dir * sp;   // tangent unit
+        const float ax = px + ux * 11.f, ay = yy + uy * 11.f;
         nvgBeginPath(vg);
-        nvgMoveTo(vg, px - 5.f, my);
-        nvgLineTo(vg, px + 5.f, my);
-        nvgLineTo(vg, px, my + tri_tip_dy);
+        nvgMoveTo(vg, px, yy);                       // tip on the arc
+        nvgLineTo(vg, ax + txu * 5.f, ay + tyu * 5.f);
+        nvgLineTo(vg, ax - txu * 5.f, ay - tyu * 5.f);
         nvgClosePath(vg);
         nvgFillColor(vg, nvg_col(s.lora_node_colors[node.local_id % 8]));
         nvgFill(vg);
         nvgStrokeColor(vg, nvg_col_a(s.lora_node_colors[node.local_id % 8], 200));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
+    }
+
+    // ── Centre marker: forward chevron + heading readout box ─────────────────
+    {
+        const float ax = center_x, ay = apex_y;
+        // Chevron pointing inward (at the arc) marking forward.
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, ax - 7.f, ay - dir * 9.f);
+        nvgLineTo(vg, ax + 7.f, ay - dir * 9.f);
+        nvgLineTo(vg, ax,       ay);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nvg_col(col_.glow_base));
+        nvgFill(vg);
+
+        // Heading readout box, outward from the arc (above when non-flipped).
+        char hb[8];
+        const int hd = ((int)lroundf(heading) % 360 + 360) % 360;
+        snprintf(hb, sizeof(hb), "%d", hd);
+        nvg_set_font_mono(15.f);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        float b[4]; nvgTextBounds(vg, 0, 0, hb, nullptr, b);
+        const float bw = (b[2] - b[0]) + 16.f, bh = 20.f;
+        const float bx = ax - bw * 0.5f;
+        const float by = (dir > 0) ? (ay - 13.f - bh) : (ay + 13.f);
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, bx, by, bw, bh, 4.f);
+        nvgFillColor(vg, nvg_col_a(col_.compass_bg_color, 210));
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 220));
+        nvgStrokeWidth(vg, 1.2f);
+        nvgStroke(vg);
+        nvg_glow_text(vg, ax, by + bh * 0.5f, hb, true, col_.glow_base, col_.text_fill);
     }
 }
 
