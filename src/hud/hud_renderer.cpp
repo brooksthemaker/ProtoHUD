@@ -516,14 +516,14 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
                     label, nullptr);
         };
 
-        const float r1 = ringR + 56.f;            // bar 1 (outside compass + gap)
-        const float r2 = ringR + 68.f;            // bar 2, concentric
-        const float off = 12.f * DEG;             // angular offset for bar 2
+        const float r1 = ringR + 56.f;            // inner bar
+        const float r2 = ringR + 68.f;            // outer bar, concentric
+        const float off = 10.f * DEG;             // raise the inner bar ~10° at the top
 
         if (cfg.system_debug) {
-            // CPU on the outer (higher) bar; GPU/render-load on the inner bar.
-            // GPU is derived from instantaneous frame time, so smooth it (EMA) to
-            // keep it from jumping frame-to-frame.
+            // CPU = inner bar raised 10° (its top sits higher, at ~135°);
+            // GPU/render-load = outer bar (top at ~145°). GPU comes from
+            // instantaneous frame time, so smooth it (EMA) to stop the jumpiness.
             const float cpu = std::clamp(s.sys_metrics.cpu_pct / 100.f, 0.f, 1.f);
             const float ft  = s.sys_metrics.frame_time_ms;
             const float gpu_inst = std::clamp(ft / (1000.f / 60.f), 0.f, 1.f);
@@ -536,8 +536,8 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             };
             char cb[12]; snprintf(cb, sizeof(cb), "C%2.0f", cpu * 100.f);
             char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
-            gauge(r2, a0 + off, a1 + off, cpu, load_col(cpu), cb, true);  // outer = CPU
-            gauge(r1, a0,       a1,       gpu, load_col(gpu), gb, true);  // inner = GPU
+            gauge(r1, a0 + off, a1 + off, cpu, load_col(cpu), cb, true);  // inner, raised = CPU
+            gauge(r2, a0,       a1,       gpu, load_col(gpu), gb, true);  // outer = GPU
         } else {
             const int bpct = s.health.wireless_battery_pct;   // -1 = unknown
             const float pct = std::clamp(bpct / 100.f, 0.f, 1.f);
