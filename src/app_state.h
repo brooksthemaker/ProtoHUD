@@ -230,6 +230,8 @@ struct MapOverlayConfig {
     // shows CPU (bar 1) + GPU/render load (bar 2, concentric, angularly offset).
     bool        battery_arc         = true;
     bool        system_debug        = false;
+    // Clock above the minimap, with an active timer/alarm shown beside it.
+    bool        clock               = true;
 
     // Helldivers-style temporary expanded view (pan/zoom) — runtime only.
     bool        expanded            = false;

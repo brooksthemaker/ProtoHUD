@@ -321,8 +321,12 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     draw_health_side(nvg_, s.health, fw, fh, true,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
     draw_face_indicator        (nvg_, s.face, fw, fh);
-    draw_clock_indicator       (nvg_, s,      fw, fh);
-    draw_timer_alarm_indicator (nvg_, s,      fw, fh);
+    // The minimap clock (above the map) subsumes the corner clock + timer/alarm
+    // indicator when it's active; otherwise fall back to the corner readouts.
+    if (!(s.map_overlay.enabled && s.map_overlay.clock)) {
+        draw_clock_indicator       (nvg_, s,      fw, fh);
+        draw_timer_alarm_indicator (nvg_, s,      fw, fh);
+    }
     fx_draw_alarm_pulse(nvg_, s, fw, fh);
 
     if (show_fps) {
@@ -510,6 +514,54 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             if (bpct >= 0) snprintf(pb, sizeof(pb), "%d%%", bpct);
             else           snprintf(pb, sizeof(pb), "--");
             gauge(r1, a0, a1, pct, bc, pb, bpct >= 0);
+        }
+    }
+
+    // Clock above the minimap, with an active timer/alarm shown beside it.
+    if (cfg.clock) {
+        time_t now = std::time(nullptr) + static_cast<time_t>(s.clock_cfg.manual_offset_s);
+        struct tm tmv; localtime_r(&now, &tmv);
+        char tbuf[32];
+        const char* tfmt = s.clock_cfg.use_24h
+            ? (s.clock_cfg.show_seconds ? "%H:%M:%S" : "%H:%M")
+            : (s.clock_cfg.show_seconds ? "%I:%M:%S %p" : "%I:%M %p");
+        strftime(tbuf, sizeof(tbuf), tfmt, &tmv);
+
+        // Active timer (countdown) or alarm (fire time) shown next to the clock.
+        std::string extra; ImU32 extra_col = IM_COL32(235, 180, 50, 235);
+        if (s.timer_alarm.timer_active) {
+            extra = "T-" + fmt_countdown(s.timer_alarm.timer_end);
+            extra_col = IM_COL32(235, 180, 50, 235);
+        } else if (s.timer_alarm.alarm_active) {
+            struct tm av; time_t at = s.timer_alarm.alarm_fire_at; localtime_r(&at, &av);
+            char ab[16]; strftime(ab, sizeof(ab), s.clock_cfg.use_24h ? "%H:%M" : "%I:%M%p", &av);
+            extra = std::string("A ") + ab;
+            extra_col = IM_COL32(230, 90, 90, 235);
+        }
+
+        const float csz = 22.f * std::max(0.6f, s.clock_cfg.font_scale);
+        const float esz = 14.f * std::max(0.6f, s.clock_cfg.font_scale);
+
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        nvg_set_font_ui(csz);
+        float cb[4]; nvgTextBounds(vg, 0, 0, tbuf, nullptr, cb);
+        const float cw = cb[2] - cb[0];
+        float ew = 0.f;
+        if (!extra.empty()) {
+            nvg_set_font_ui(esz);
+            float eb[4]; nvgTextBounds(vg, 0, 0, extra.c_str(), nullptr, eb);
+            ew = (eb[2] - eb[0]) + 14.f;     // include the gap
+        }
+        const float total = cw + ew;
+        const float topY  = cy - ringR - (cfg.compass_ring ? 44.f : 16.f) - csz;
+        const float x0    = cx - total * 0.5f;
+
+        nvg_set_font_ui(csz);
+        nvg_glow_text(vg, x0, topY, tbuf, true, col_.glow_base, col_.text_fill);
+        if (!extra.empty()) {
+            nvg_set_font_ui(esz);
+            nvgFillColor(vg, nvg_col(extra_col));
+            nvgText(vg, x0 + cw + 14.f, topY + (csz - esz) * 0.55f, extra.c_str(), nullptr);
         }
     }
 }
