@@ -1069,6 +1069,51 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_
     ImGui::End();
 }
 
+// ── Protoface portrait beside the minimap ───────────────────────────────────────
+// A scaled, one-side preview of the LED face placed to the right of the minimap
+// (American Fugitive-style portrait). Drawn on the ImGui foreground list in display
+// coords, matching the minimap geometry.
+void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_h,
+                                     const AppState& s) {
+    if (tex == 0) return;
+    const auto& cfg = s.map_overlay;
+    if (!cfg.enabled || cfg.expanded) return;   // only alongside the live minimap
+
+    ImGui::SetCurrentContext(ctx_);
+
+    // Minimap geometry (matches draw_map_overlay, display pixel coords).
+    const float fw = static_cast<float>(screen_w);
+    const float fh = static_cast<float>(screen_h);
+    const float half = cfg.size_px;
+    const float am   = (map_img_h_ > 0 && map_img_w_ > 0)
+                       ? (float)map_img_h_ / (float)map_img_w_ : 1.f;
+    const float hh = cfg.circle_window ? half : half * am;
+    const float cx = std::clamp(fw * cfg.anchor_x + cfg.pan_x, half, fw - half);
+    const float cy = std::clamp(fh * cfg.anchor_y + cfg.pan_y, hh, fh - hh);
+    const float ringR = cfg.circle_window ? half : std::max(half, hh);
+
+    // One face half → ~2:1 source crop.
+    const float wpx    = static_cast<float>(ShmFrameReader::W) * 0.5f;
+    const float aspect = wpx / static_cast<float>(ShmFrameReader::H);
+    const ImVec2 uv0 = cfg.portrait_right_half ? ImVec2(0.5f, 0.f) : ImVec2(0.f, 0.f);
+    const ImVec2 uv1 = cfg.portrait_right_half ? ImVec2(1.f,  1.f) : ImVec2(0.5f, 1.f);
+
+    const float ph    = ringR * 0.55f;          // portrait height
+    const float pw    = ph * aspect;            // 2:1 width
+    const float pad   = 6.f;
+    const float win_w = pw + pad * 2.f;
+    const float win_h = ph + pad * 2.f;
+    const float x0    = cx + ringR + 28.f;      // to the right of the map cluster
+    const float y0    = cy - win_h * 0.5f;
+
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled({x0, y0}, {x0 + win_w, y0 + win_h}, IM_COL32(8, 12, 18, 220), 6.f);
+    dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
+                 {x0 + pad, y0 + pad}, {x0 + pad + pw, y0 + pad + ph}, uv0, uv1);
+    dl->AddRect({x0, y0}, {x0 + win_w, y0 + win_h}, col_.accent, 6.f, 0, 1.5f);
+    dl->AddText({x0 + 5.f, y0 + 3.f}, col_.accent, "FACE");
+}
+
 // ── Top bar ───────────────────────────────────────────────────────────────────
 
 void HudRenderer::draw_top_bar(NVGcontext* vg, const AppState& s, float w, float bar_y) {

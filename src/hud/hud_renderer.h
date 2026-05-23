@@ -190,6 +190,9 @@ private:
     void draw_compass_ring (NVGcontext* vg, const AppState& s,
                             float cx, float cy, float radius);
     void draw_map_expanded (NVGcontext* vg, const AppState& s, float fw, float fh);
+    // Protoface "portrait" beside the minimap (ImGui — takes the LED GL texture).
+    void draw_face_portrait(unsigned int tex, int screen_w, int screen_h,
+                            const AppState& s);
     // Shared NVG pip drawing (no NVG frame management — caller handles Begin/EndFrame).
     void draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
                               const OverlayConfig& cfg, float fw, float fh);

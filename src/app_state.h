@@ -234,6 +234,11 @@ struct MapOverlayConfig {
     bool        clock               = true;
     bool        clock_date          = false;  // show the date under the clock
 
+    // Protoface "portrait" — a scaled, one-side preview of the LED face shown
+    // beside the minimap (American Fugitive-style character portrait).
+    bool        portrait            = false;
+    bool        portrait_right_half = false;  // false = left face half, true = right
+
     // Helldivers-style temporary expanded view (pan/zoom) — runtime only.
     bool        expanded            = false;
     float       view_zoom           = 1.0f;   // expanded-view zoom (independent of minimap)

@@ -2575,6 +2575,12 @@ static std::vector<MenuItem> build_menu(
         toggle("Clock Date",
             [&state]{ return state.map_overlay.clock_date; },
             [&state](bool v){ state.map_overlay.clock_date = v; }),
+        toggle("Face Portrait",
+            [&state]{ return state.map_overlay.portrait; },
+            [&state](bool v){ state.map_overlay.portrait = v; }),
+        toggle("Portrait: Right Half",
+            [&state]{ return state.map_overlay.portrait_right_half; },
+            [&state](bool v){ state.map_overlay.portrait_right_half = v; }),
         leaf("Expand Map (Pan/Zoom)", [&state]{
             std::lock_guard<std::mutex> lk(state.mtx);
             state.map_overlay.expanded   = true;
@@ -3788,6 +3794,8 @@ int main(int argc, char* argv[]) {
         mo.system_debug        = jm.value("system_debug",        mo.system_debug);
         mo.clock               = jm.value("clock",               mo.clock);
         mo.clock_date          = jm.value("clock_date",          mo.clock_date);
+        mo.portrait            = jm.value("portrait",            mo.portrait);
+        mo.portrait_right_half = jm.value("portrait_right_half", mo.portrait_right_half);
         mo.zoom                = jm.value("zoom",                mo.zoom);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
@@ -4923,6 +4931,8 @@ int main(int argc, char* argv[]) {
             cfg["map"]["system_debug"]        = mo.system_debug;
             cfg["map"]["clock"]               = mo.clock;
             cfg["map"]["clock_date"]          = mo.clock_date;
+            cfg["map"]["portrait"]            = mo.portrait;
+            cfg["map"]["portrait_right_half"] = mo.portrait_right_half;
             cfg["map"]["zoom"]                = mo.zoom;
         }
 
@@ -5940,6 +5950,13 @@ int main(int argc, char* argv[]) {
                                    protoface_preview_cfg.anchor_x, protoface_preview_cfg.anchor_y,
                                    protoface_preview_cfg.pan_x,    protoface_preview_cfg.pan_y,
                                    protoface_preview_cfg.size,     protoface_preview_view);
+        }
+
+        // Protoface portrait beside the minimap (closed-menu HUD element).
+        if (snap.map_overlay.portrait && !menu.is_open()) {
+            GLuint face_tex = 0;
+            protoface_ctrl.get_frame_texture(face_tex);
+            hud.draw_face_portrait(face_tex, xr.display_width(), xr.display_height(), snap);
         }
 
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
