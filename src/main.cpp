@@ -408,7 +408,9 @@ static std::vector<MenuItem> build_menu(
         EyeSource* left_eye_src  = nullptr,
         EyeSource* right_eye_src = nullptr,
         // Profile management (Profiles tab: save current / load by restart / delete)
-        ProfileManager* profiles = nullptr)
+        ProfileManager* profiles = nullptr,
+        // HUD/menu visual presets (System tab: built-in themes + save/load/delete)
+        ProfileManager* hud_presets = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -2218,40 +2220,46 @@ static std::vector<MenuItem> build_menu(
         }
     };
 
-    std::vector<MenuItem> themes_menu = {
-        leaf("Halo", [apply_theme]{
+    // Built-in coordinated themes — reusable so the same quick-apply list can live
+    // under HUD (with Effects) and under System → HUD/Menu Presets.
+    auto make_builtin_theme_leaves = [apply_theme, leaf]() -> std::vector<MenuItem> {
+        std::vector<MenuItem> v;
+        v.push_back(leaf("Halo", [apply_theme]{
             apply_theme(IM_COL32(255,255,255,255), IM_COL32(255,255,255,255),
                         IM_COL32(255,255,255,255),
                         IM_COL32(255,255,255,255), IM_COL32(255,255,255,180),
                         true, 5.f, SelectionStyle::FILLED_ROW,
                         false, true,
                         IM_COL32(255,255,255,255));
-        }),
-        leaf("Solar", [apply_theme]{
+        }));
+        v.push_back(leaf("Solar", [apply_theme]{
             apply_theme(IM_COL32(255,160, 32,255), IM_COL32(255,160, 32,255),
                         IM_COL32(255,255,255,255),
                         IM_COL32(255,160, 32,255), IM_COL32(255,160, 32,255),
                         true, 1.5f, SelectionStyle::ACCENT_BAR,
                         true, false,
                         IM_COL32(255,160, 32,255));
-        }),
-        leaf("Fallout", [apply_theme]{
+        }));
+        v.push_back(leaf("Fallout", [apply_theme]{
             apply_theme(IM_COL32(  0,200, 50,255), IM_COL32(  0,200, 50,255),
                         IM_COL32(  0,255, 80,255),
                         IM_COL32(  0,200, 50,255), IM_COL32(  0,200, 50,255),
                         true, 1.5f, SelectionStyle::ACCENT_BAR,
                         true, false,
                         IM_COL32(  0,200, 50,255));
-        }),
-        leaf("Space", [apply_theme]{
+        }));
+        v.push_back(leaf("Space", [apply_theme]{
             apply_theme(IM_COL32( 80,100,255,255), IM_COL32( 80,100,255,255),
                         IM_COL32(200,220,255,255),
                         IM_COL32( 80,100,255,255), IM_COL32( 80,100,255,255),
                         true, 1.5f, SelectionStyle::ACCENT_BAR,
                         true, false,
                         IM_COL32( 80,100,255,255));
-        }),
+        }));
+        return v;
     };
+
+    std::vector<MenuItem> themes_menu = make_builtin_theme_leaves();
 
     // Effects — particle overlays with palette options
     std::vector<MenuItem> fx_palette_menu = {
@@ -2881,8 +2889,73 @@ static std::vector<MenuItem> build_menu(
         submenu("I2C Bus",    std::move(i2c_bus_menu)),
     };
 
+    // ── HUD / Menu Presets ───────────────────────────────────────────────────────
+    // Visual-only presets (HUD colors + menu accent/border/selection/scale). Built-in
+    // coordinated themes apply instantly; custom ones are saved/loaded live (no
+    // restart, unlike full Profiles). Load/delete lists are dynamic (label_fn reads
+    // the manager live). kProfileSlots = max dynamic rows shown for save/load lists.
+    constexpr int kProfileSlots = 16;
+    std::vector<MenuItem> hud_preset_delete_menu;
+    for (int i = 0; i < kProfileSlots; ++i) {
+        MenuItem m;
+        m.type        = MenuItemType::LEAF;
+        m.label       = "preset";
+        m.label_fn    = [hud_presets, i]{ return hud_presets ? hud_presets->name(i) : std::string(); };
+        m.visible_fn  = [hud_presets, i]{ return hud_presets && i < hud_presets->count(); };
+        m.description = "Delete this HUD/menu preset permanently.";
+        m.action = [state_ptr, hud_presets, i]{
+            if (!state_ptr || !hud_presets) return;
+            std::string nm = hud_presets->name(i);
+            if (nm.empty()) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->hud_preset_delete_name = nm;
+        };
+        hud_preset_delete_menu.push_back(std::move(m));
+    }
+
+    std::vector<MenuItem> hud_presets_menu;
+    // Built-in coordinated themes (instant apply).
+    for (auto& t : make_builtin_theme_leaves())
+        hud_presets_menu.push_back(with_desc(std::move(t),
+            "Built-in theme: applies a coordinated HUD color + menu style instantly."));
+    // Save current look as a named preset (on-screen keyboard).
+    hud_presets_menu.push_back(with_desc(
+        leaf("Save Current As...", [menu_sys_pp, state_ptr]{
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+            (*menu_sys_pp)->open_keyboard("Preset Name", std::string(),
+                [state_ptr](const std::string& name){
+                    if (!state_ptr) return;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    state_ptr->hud_preset_save_name = name;
+                });
+        }),
+        "Save the current HUD colors + menu style (accent, border, selection, UI "
+        "scale) as a named preset. Applies live when loaded — no restart."));
+    // Dynamic load slots.
+    for (int i = 0; i < kProfileSlots; ++i) {
+        MenuItem m;
+        m.type        = MenuItemType::LEAF;
+        m.label       = "preset";
+        m.label_fn    = [hud_presets, i]{ return hud_presets ? hud_presets->name(i) : std::string(); };
+        m.visible_fn  = [hud_presets, i]{ return hud_presets && i < hud_presets->count(); };
+        m.description = "Apply this HUD/menu preset (live, no restart).";
+        m.action = [state_ptr, hud_presets, i]{
+            if (!state_ptr || !hud_presets) return;
+            std::string nm = hud_presets->name(i);
+            if (nm.empty()) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->hud_preset_load_name = nm;
+        };
+        hud_presets_menu.push_back(std::move(m));
+    }
+    hud_presets_menu.push_back(with_desc(submenu("Delete Preset", std::move(hud_preset_delete_menu)),
+        "Remove a saved HUD/menu preset permanently."));
+
     std::vector<MenuItem> system_menu = {
         submenu("Headset & Tracking", std::move(headset_menu)),
+        with_desc(submenu("HUD / Menu Presets", std::move(hud_presets_menu)),
+                  "Visual presets: built-in themes plus your own saved HUD color + "
+                  "menu style combinations. Applied live."),
         with_panel(
             submenu("Audio", std::move(audio_menu)),
             "Audio Status",
@@ -2965,8 +3038,7 @@ static std::vector<MenuItem> build_menu(
     // Save the current setup as a named snapshot, load one (relaunches ProtoHUD),
     // or delete one. The load/delete lists are dynamic: label_fn/visible_fn read the
     // ProfileManager live, so newly-saved profiles appear without rebuilding the menu.
-    constexpr int kProfileSlots = 16;
-
+    // (kProfileSlots declared above, near the HUD/Menu Presets section.)
     std::vector<MenuItem> profile_delete_menu;
     for (int i = 0; i < kProfileSlots; ++i) {
         MenuItem m;
@@ -3127,6 +3199,10 @@ int main(int argc, char* argv[]) {
 
     ProfileManager profiles;
     profiles.init(bin_dir + "/../config/profiles");
+
+    // HUD/menu visual presets (separate, smaller files; applied live, not via restart).
+    ProfileManager hud_presets;
+    hud_presets.init(bin_dir + "/../config/presets");
 
     std::string active_profile_name;   // "" unless launched from a profile file
     if (argc > 1) {
@@ -3982,7 +4058,7 @@ int main(int argc, char* argv[]) {
                                &protoface_preview_view,
                                cfg_map_dir,
                                &left_eye_src, &right_eye_src,
-                               &profiles));
+                               &profiles, &hud_presets));
     menu_ptr = &menu;
 
     // Wire wireless controller callbacks now that menu exists
@@ -4688,6 +4764,77 @@ int main(int argc, char* argv[]) {
         }
     };
 
+    // ── HUD/menu preset writer + applier ───────────────────────────────────────
+    // A preset is a *small* JSON: just the hud_colors + menu_style (+ a couple hud
+    // fields) — the visual subset of the full config. Saved/loaded live with no
+    // restart. Reuses mutate_cfg() to capture the current look, and the same
+    // setters as startup to apply.
+    auto save_hud_preset = [&](const std::string& path) -> bool {
+        try {
+            mutate_cfg();   // refresh cfg with the current visual state
+            json p;
+            if (cfg.contains("hud_colors")) p["hud_colors"] = cfg["hud_colors"];
+            if (cfg.contains("menu_style")) p["menu_style"] = cfg["menu_style"];
+            if (cfg.contains("hud")) {
+                if (cfg["hud"].contains("glow_intensity"))
+                    p["hud"]["glow_intensity"] = cfg["hud"]["glow_intensity"];
+                if (cfg["hud"].contains("indicator_bg_enabled"))
+                    p["hud"]["indicator_bg_enabled"] = cfg["hud"]["indicator_bg_enabled"];
+            }
+            FILE* f = fopen(path.c_str(), "w");
+            if (!f) { std::cerr << "[preset] cannot write " << path << "\n"; return false; }
+            std::string s = p.dump(2);
+            fwrite(s.c_str(), 1, s.size(), f);
+            fclose(f);
+            std::cout << "[preset] saved " << path << "\n";
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "[preset] save failed: " << e.what() << "\n";
+            return false;
+        }
+    };
+    auto apply_hud_preset = [&](const std::string& path) -> bool {
+        bool pf = false;
+        json p = load_config(path, &pf);
+        if (pf || !p.is_object()) return false;
+        if (p.contains("hud_colors")) {
+            auto& jc = p["hud_colors"];
+            auto& c  = hud.colors();
+            c.glow_base        = jcolor(jc, "glow_base",        c.glow_base);
+            c.text_fill        = jcolor(jc, "text_fill",        c.text_fill);
+            c.ind_good         = jcolor(jc, "ind_good",         c.ind_good);
+            c.ind_inactive     = jcolor(jc, "ind_inactive",     c.ind_inactive);
+            c.ind_fail         = jcolor(jc, "ind_fail",         c.ind_fail);
+            c.compass_tick     = jcolor(jc, "compass_tick",     c.compass_tick);
+            c.compass_glow     = jcolor(jc, "compass_glow",     c.compass_glow);
+            c.compass_bg_color = jcolor(jc, "compass_bg_color", c.compass_bg_color);
+        }
+        if (p.contains("hud")) {
+            auto& jh = p["hud"];
+            hud.config().glow_intensity       = jval(jh, "glow_intensity",       hud.config().glow_intensity);
+            hud.config().indicator_bg_enabled = jval(jh, "indicator_bg_enabled", hud.config().indicator_bg_enabled);
+        }
+        if (p.contains("menu_style")) {
+            auto& jm = p["menu_style"];
+            menu.set_accent_color    (jcolor(jm, "accent_color",     menu.accent_color()));
+            menu.set_bg_color        (jcolor(jm, "bg_color",         menu.bg_color()));
+            menu.set_bg_enabled      (jval  (jm, "bg_enabled",       menu.bg_enabled()));
+            menu.set_border_color    (jcolor(jm, "border_color",     menu.border_color()));
+            menu.set_border_thickness(jval  (jm, "border_thickness", menu.border_thickness()));
+            menu.set_border_enabled  (jval  (jm, "border_enabled",   menu.border_enabled()));
+            menu.set_ui_scale        (jval  (jm, "ui_scale",         menu.ui_scale()));
+            std::string ss = jm.value("selection_style", std::string("filled_row"));
+            menu.set_selection_style(ss == "accent_bar"
+                ? SelectionStyle::ACCENT_BAR : SelectionStyle::FILLED_ROW);
+            std::string a = jm.value("anchor", std::string("top_left"));
+            if      (a == "top_right")    menu.set_anchor(MenuAnchor::TopRight);
+            else if (a == "bottom_left")  menu.set_anchor(MenuAnchor::BottomLeft);
+            else if (a == "bottom_right") menu.set_anchor(MenuAnchor::BottomRight);
+            else                          menu.set_anchor(MenuAnchor::TopLeft);
+        }
+        return true;
+    };
+
     double prev_time = glfwGetTime();
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
@@ -4740,6 +4887,43 @@ int main(int argc, char* argv[]) {
             }
         }
         if (state.quit) break;
+
+        // ── HUD/menu preset requests (visual-only, applied live, no restart) ──
+        {
+            std::string save_req, load_req, del_req;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                save_req.swap(state.hud_preset_save_name);
+                load_req.swap(state.hud_preset_load_name);
+                del_req.swap(state.hud_preset_delete_name);
+            }
+            if (!save_req.empty()) {
+                std::string nm = ProfileManager::sanitize(save_req);
+                bool ok = save_hud_preset(hud_presets.path_for(nm));
+                if (ok) hud_presets.scan();
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Preset saved" : "Save failed";
+                n.body = nm; n.auto_dismiss_s = 4.f;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.notifs.push(std::move(n));
+            }
+            if (!del_req.empty()) {
+                bool ok = hud_presets.remove(del_req);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Preset deleted" : "Delete failed";
+                n.body = del_req; n.auto_dismiss_s = 4.f;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.notifs.push(std::move(n));
+            }
+            if (!load_req.empty() && hud_presets.exists(load_req)) {
+                bool ok = apply_hud_preset(hud_presets.path_for(load_req));
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Preset applied" : "Apply failed";
+                n.body = load_req; n.auto_dismiss_s = 4.f;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.notifs.push(std::move(n));
+            }
+        }
 
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
         // While the on-screen keyboard is up it captures ALL keystrokes (so typing

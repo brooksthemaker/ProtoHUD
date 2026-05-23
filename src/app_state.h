@@ -428,6 +428,12 @@ struct AppState {
     std::string profile_load_name;
     std::string profile_delete_name;
 
+    // HUD/menu preset requests — visual-only (colors + menu style), applied LIVE
+    // (no restart, unlike full profiles). Consumed by the main loop. Empty = none.
+    std::string hud_preset_save_name;
+    std::string hud_preset_load_name;
+    std::string hud_preset_delete_name;
+
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;
 
