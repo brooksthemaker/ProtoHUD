@@ -382,13 +382,15 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             }
         }
     }
-    if (map_img_ < 0) return;
+    // Helldivers-style temporary expanded view takes over; skip the minimap.
+    if (cfg.expanded) { draw_map_expanded(vg, s, fw, fh); return; }
 
+    const bool  has_img = (map_img_ >= 0);
     const float half   = cfg.size_px;
-    const float aspect = (map_img_h_ > 0 && map_img_w_ > 0)
+    const float aspect = (has_img && map_img_h_ > 0 && map_img_w_ > 0)
                          ? (float)map_img_h_ / (float)map_img_w_ : 1.f;
     const float hw     = half;
-    const float hh     = half * aspect;
+    const float hh     = cfg.circle_window ? half : half * aspect;
     // Clamp center so the map window never extends past the screen edge.
     // anchor 0.0 → left/top edge flush, 0.5 → centered, 1.0 → right/bottom edge flush.
     const float cx     = std::clamp(fw * cfg.anchor_x + cfg.pan_x, hw, fw - hw);
@@ -397,42 +399,41 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     nvgSave(vg);
     nvgTranslate(vg, cx, cy);
 
-    // Build the image paint inside the rotated frame so it captures the rotation.
-    // nvgImagePattern bakes the current transform into the paint; after restoring
-    // to screen-aligned coordinates the fill path (circle or rect) samples the
-    // image through that baked transform — giving a fixed window with a rotating map.
-    nvgSave(vg);
-    if (cfg.image_rotate_deg != 0.f)
-        nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
-    if (cfg.rotate_with_heading && cfg.calibrated)
-        nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
-    // Zoom into map content: scale the image pattern up so only the centre
-    // (1/zoom) fraction of the image is visible through the fixed window.
-    const float z   = std::max(cfg.zoom, 1.0f);
-    NVGpaint img = nvgImagePattern(vg, -hw * z, -hh * z, hw * 2.f * z, hh * 2.f * z,
-                                   0.f, map_img_, cfg.opacity);
-    nvgRestore(vg);  // back to screen-aligned at (cx, cy)
+    // Window shape helper (circle or rect).
+    auto path_window = [&]{
+        nvgBeginPath(vg);
+        if (cfg.circle_window) nvgCircle(vg, 0.f, 0.f, half);
+        else                   nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
+    };
 
-    // Fill window shape — the path IS the clip; no scissor needed.
-    nvgBeginPath(vg);
-    if (cfg.circle_window)
-        nvgCircle(vg, 0.f, 0.f, half);
-    else
-        nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
-    nvgFillPaint(vg, img);
-    nvgFill(vg);
+    if (has_img) {
+        // Build the image paint inside the rotated frame so it captures rotation.
+        nvgSave(vg);
+        if (cfg.image_rotate_deg != 0.f)
+            nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
+        if (cfg.rotate_with_heading && cfg.calibrated)
+            nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
+        const float z   = std::max(cfg.zoom, 1.0f);
+        NVGpaint img = nvgImagePattern(vg, -hw * z, -hh * z, hw * 2.f * z, hh * 2.f * z,
+                                       0.f, map_img_, cfg.opacity);
+        nvgRestore(vg);  // back to screen-aligned at (cx, cy)
+        path_window();
+        nvgFillPaint(vg, img);
+        nvgFill(vg);
+    } else {
+        // No image configured — still draw a dark "always-on" base disc.
+        path_window();
+        nvgFillColor(vg, nvgRGBA(10, 16, 22, 180));
+        nvgFill(vg);
+    }
 
-    // Border hugs the window shape exactly
-    nvgBeginPath(vg);
-    if (cfg.circle_window)
-        nvgCircle(vg, 0.f, 0.f, half);
-    else
-        nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
+    // Border hugs the window shape exactly.
+    path_window();
     nvgStrokeColor(vg, nvgRGBA(100, 130, 160, 160));
     nvgStrokeWidth(vg, 1.5f);
     nvgStroke(vg);
 
-    // Red crosshair at centre = wearer's position on the map
+    // Red crosshair at centre = wearer's position on the map.
     nvgBeginPath(vg);
     nvgMoveTo(vg, -9.f, 0.f); nvgLineTo(vg, 9.f, 0.f);
     nvgMoveTo(vg, 0.f, -9.f); nvgLineTo(vg, 0.f, 9.f);
@@ -441,6 +442,160 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     nvgStroke(vg);
 
     nvgRestore(vg);
+
+    // Compass ring + LoRa markers around the minimap (Battlefield-style).
+    if (cfg.compass_ring)
+        draw_compass_ring(vg, s, cx, cy, cfg.circle_window ? half : std::max(hw, hh));
+}
+
+// ── Compass ring around the minimap ─────────────────────────────────────────────
+// Cardinal letters + degree ticks ringing the minimap, rotating with heading so the
+// forward direction is at the top, plus LoRa node bearing markers + distance labels
+// around the outer edge (Battlefield-style).
+void HudRenderer::draw_compass_ring(NVGcontext* vg, const AppState& s,
+                                    float cx, float cy, float radius) {
+    const float heading = s.map_overlay.rotate_with_heading ? s.compass_heading : 0.f;
+    const float DEG = (float)M_PI / 180.f;
+    auto bearing_angle = [&](float beta_deg) -> float {
+        float rel = beta_deg - heading;          // 0 = forward
+        return -(float)M_PI * 0.5f + rel * DEG;  // forward at top, screen y-down
+    };
+
+    const float r_tick  = radius + 4.f;
+    const float r_card  = radius + 22.f;
+    const float r_mark  = radius + 22.f;
+    const float r_dist  = radius + 38.f;
+
+    const NVGcolor col_major = nvg_col(col_.compass_tick);
+    const NVGcolor col_minor = nvg_col_a(col_.compass_tick, 110);
+
+    // Degree ticks every 15°, longer at the 90° cardinals.
+    for (int d = 0; d < 360; d += 15) {
+        const bool card = (d % 90 == 0);
+        const float a = bearing_angle((float)d);
+        const float ca = std::cos(a), sa = std::sin(a);
+        const float t  = card ? 13.f : 6.f;
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx + ca * r_tick,        cy + sa * r_tick);
+        nvgLineTo(vg, cx + ca * (r_tick + t),  cy + sa * (r_tick + t));
+        nvgStrokeColor(vg, card ? col_major : col_minor);
+        nvgStrokeWidth(vg, card ? 2.0f : 1.0f);
+        nvgStroke(vg);
+    }
+
+    // Cardinal letters.
+    static const char* kCard[4] = { "N", "E", "S", "W" };
+    static const int   kDeg [4] = { 0, 90, 180, 270 };
+    nvg_set_font_ui(16.f);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    for (int i = 0; i < 4; ++i) {
+        const float a = bearing_angle((float)kDeg[i]);
+        const float lx = cx + std::cos(a) * r_card;
+        const float ly = cy + std::sin(a) * r_card;
+        nvg_glow_text(vg, lx, ly, kCard[i], i == 0, col_.glow_base, col_.text_fill);
+    }
+
+    // LoRa node bearing markers + distance labels around the outside.
+    nvg_set_font_mono(11.f);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    for (const auto& node : s.lora_nodes) {
+        if (node.distance_m <= 0.f) continue;
+        const float a  = bearing_angle(node.heading_deg);
+        const float ca = std::cos(a), sa = std::sin(a);
+        const float mx = cx + ca * r_mark, my = cy + sa * r_mark;
+        const NVGcolor nc = nvg_col(s.lora_node_colors[node.local_id % 8]);
+
+        // Triangle pointing outward at the node bearing.
+        const float bx = -sa, by = ca;   // tangent
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, mx + ca * 7.f,           my + sa * 7.f);
+        nvgLineTo(vg, mx - ca * 4.f + bx * 5.f, my - sa * 4.f + by * 5.f);
+        nvgLineTo(vg, mx - ca * 4.f - bx * 5.f, my - sa * 4.f - by * 5.f);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nc);
+        nvgFill(vg);
+
+        // Distance label just outside the marker.
+        char db[16];
+        if (node.distance_m >= 1000.f) snprintf(db, sizeof(db), "%.1fk", node.distance_m / 1000.f);
+        else                           snprintf(db, sizeof(db), "%.0fm", node.distance_m);
+        nvgFillColor(vg, nvg_col_a(s.lora_node_colors[node.local_id % 8], 230));
+        nvgText(vg, cx + ca * r_dist, cy + sa * r_dist, db, nullptr);
+    }
+}
+
+// ── Expanded map (Helldivers-style pan/zoom) ────────────────────────────────────
+// A larger, temporary view that grows from the minimap's location. Pan/zoom are
+// driven by input (state.map_overlay.view_pan_*/view_zoom). Stays SBS-safe by
+// growing in place rather than re-centering across the eye seam.
+void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw, float fh) {
+    const auto& cfg = s.map_overlay;
+
+    // Dim the scene behind the expanded map.
+    nvgBeginPath(vg);
+    nvgRect(vg, 0.f, 0.f, fw, fh);
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, 150));
+    nvgFill(vg);
+
+    const float half = std::min(fh, fw) * 0.42f;     // big disc
+    const float cx   = std::clamp(fw * cfg.anchor_x + cfg.pan_x, half, fw - half);
+    const float cy   = std::clamp(fh * cfg.anchor_y + cfg.pan_y, half, fh - half);
+    const bool  circle = cfg.circle_window;
+
+    nvgSave(vg);
+    nvgTranslate(vg, cx, cy);
+
+    auto path_win = [&]{
+        nvgBeginPath(vg);
+        if (circle) nvgCircle(vg, 0.f, 0.f, half);
+        else        nvgRect(vg, -half, -half, half * 2.f, half * 2.f);
+    };
+
+    if (map_img_ >= 0) {
+        const float z = std::max(cfg.zoom, 1.0f) * std::max(cfg.view_zoom, 1.0f);
+        const float panx = cfg.view_pan_x * half * 2.f;
+        const float pany = cfg.view_pan_y * half * 2.f;
+        nvgSave(vg);
+        if (cfg.image_rotate_deg != 0.f)
+            nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
+        if (cfg.rotate_with_heading && cfg.calibrated)
+            nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
+        NVGpaint img = nvgImagePattern(vg, -half * z - panx, -half * z - pany,
+                                       half * 2.f * z, half * 2.f * z, 0.f, map_img_, 1.0f);
+        nvgRestore(vg);
+        path_win();
+        nvgFillPaint(vg, img);
+        nvgFill(vg);
+    } else {
+        path_win();
+        nvgFillColor(vg, nvgRGBA(10, 16, 22, 220));
+        nvgFill(vg);
+    }
+
+    path_win();
+    nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 220));
+    nvgStrokeWidth(vg, 2.0f);
+    nvgStroke(vg);
+
+    // Centre crosshair (wearer).
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, -12.f, 0.f); nvgLineTo(vg, 12.f, 0.f);
+    nvgMoveTo(vg, 0.f, -12.f); nvgLineTo(vg, 0.f, 12.f);
+    nvgStrokeColor(vg, nvgRGBA(255, 70, 70, 230));
+    nvgStrokeWidth(vg, 1.5f);
+    nvgStroke(vg);
+
+    nvgRestore(vg);
+
+    // Hint + zoom readout.
+    char zb[32]; snprintf(zb, sizeof(zb), "%.1fx", std::max(cfg.view_zoom, 1.0f));
+    nvg_set_font_ui(15.f);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+    nvg_glow_text(vg, cx, cy - half - 26.f, "MAP", true, col_.glow_base, col_.text_fill);
+    nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
+    nvgText(vg, cx, cy + half + 8.f, "PAN  \xC2\xB7  ZOOM  \xC2\xB7  CLOSE", nullptr);
+    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+    nvgText(vg, cx + half - 36.f, cy - half + 12.f, zb, nullptr);
 }
 
 void HudRenderer::draw_fps_nvg(NVGcontext* vg, const AppState& snap, float fw, float fh) {

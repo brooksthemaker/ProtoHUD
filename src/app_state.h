@@ -208,7 +208,7 @@ struct ImuPose {
 // ── Map overlay ───────────────────────────────────────────────────────────────
 
 struct MapOverlayConfig {
-    bool        enabled             = false;
+    bool        enabled             = true;   // minimap is a permanent HUD element by default
     std::string map_path;            // full filesystem path to loaded image
     float       anchor_x            = 0.5f;   // screen fraction (centre by default)
     float       anchor_y            = 0.5f;
@@ -220,8 +220,17 @@ struct MapOverlayConfig {
     bool        calibrated          = false;
     bool        rotate_with_heading = true;
     float       image_rotate_deg    = 0.f;    // manual image rotation offset (degrees)
-    bool        circle_window       = false;  // true = circular clip; false = rect hugging image
+    bool        circle_window       = true;   // round minimap by default
     float       zoom                = 1.0f;   // >1 = zoom into map content (shows less of the image)
+
+    // Compass ring around the minimap (cardinals + ticks + LoRa markers).
+    bool        compass_ring        = true;
+
+    // Helldivers-style temporary expanded view (pan/zoom) — runtime only.
+    bool        expanded            = false;
+    float       view_zoom           = 1.0f;   // expanded-view zoom (independent of minimap)
+    float       view_pan_x          = 0.f;    // expanded-view pan, image-space fraction
+    float       view_pan_y          = 0.f;
 };
 
 // ── Particle effects ──────────────────────────────────────────────────────────

@@ -2560,6 +2560,16 @@ static std::vector<MenuItem> build_menu(
         toggle("Circle Window",
             [&state]{ return state.map_overlay.circle_window; },
             [&state](bool v){ state.map_overlay.circle_window = v; }),
+        toggle("Compass Ring",
+            [&state]{ return state.map_overlay.compass_ring; },
+            [&state](bool v){ state.map_overlay.compass_ring = v; }),
+        leaf("Expand Map (Pan/Zoom)", [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.map_overlay.expanded   = true;
+            state.map_overlay.view_zoom  = 1.f;
+            state.map_overlay.view_pan_x = 0.f;
+            state.map_overlay.view_pan_y = 0.f;
+        }),
         slider("Transparency", 0.f, 1.f, 0.05f, "",
             [&state]{ return state.map_overlay.opacity; },
             [&state](float v){ state.map_overlay.opacity = v; }),
@@ -3173,6 +3183,18 @@ static std::vector<MenuItem> build_menu(
             q.push_back(submenu("Timers", std::move(timers)));
         }
 
+        // Expand Map — open the Helldivers-style pan/zoom view (closes the wheel).
+        q.push_back(leaf("Expand Map", [state_ptr, menu_sys_pp]{
+            if (state_ptr) {
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                state_ptr->map_overlay.expanded   = true;
+                state_ptr->map_overlay.view_zoom  = 1.f;
+                state_ptr->map_overlay.view_pan_x = 0.f;
+                state_ptr->map_overlay.view_pan_y = 0.f;
+            }
+            if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->close();
+        }));
+
         // ── Favorites catalog (optional, user-pinned) ────────────────────────────
         struct QuickFav { std::string key; MenuItem item; };
         std::vector<QuickFav> catalog;
@@ -3749,6 +3771,7 @@ int main(int argc, char* argv[]) {
         mo.anchor_x            = jm.value("anchor_x",            mo.anchor_x);
         mo.anchor_y            = jm.value("anchor_y",            mo.anchor_y);
         mo.circle_window       = jm.value("circle_window",       mo.circle_window);
+        mo.compass_ring        = jm.value("compass_ring",        mo.compass_ring);
         mo.zoom                = jm.value("zoom",                mo.zoom);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
@@ -4462,47 +4485,64 @@ int main(int argc, char* argv[]) {
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
     GamepadInput gamepad;
     gamepad.init();
-    gamepad.on_menu([&menu, &landing]{
-        if (landing.active) return;   // Start does nothing on the landing page
-        // Start opens the full-screen deep menu (closes the quick menu if open).
+    // Expanded-map (Helldivers view) pan/zoom helpers — shared by gamepad + keyboard.
+    auto map_pan = [&state](float dx, float dy){
+        auto& mo = state.map_overlay;
+        mo.view_pan_x = std::clamp(mo.view_pan_x + dx, -0.6f, 0.6f);
+        mo.view_pan_y = std::clamp(mo.view_pan_y + dy, -0.6f, 0.6f);
+    };
+    auto map_zoom = [&state](float dz){
+        auto& mo = state.map_overlay;
+        mo.view_zoom = std::clamp(mo.view_zoom + dz, 1.0f, 6.0f);
+    };
+    gamepad.on_menu([&menu, &landing, &state]{
+        if (landing.active) return;             // Start does nothing on the landing page
+        if (state.map_overlay.expanded) { state.map_overlay.expanded = false; return; }
+        // Start opens the radial QUICK menu (the deep menu is reachable from its
+        // "Full Settings" wedge, or via keyboard F1).
         if      (menu.is_deep_open()) menu.close_deep();
         else if (menu.is_open())      menu.close();
-        else                          menu.open_deep();
+        else                          menu.open();
     });
     gamepad.on_select([&menu, &hud, &state, &landing, &landing_select]{
         if      (landing.active)          landing_select();
         else if (menu.is_open())          menu.select();
         else if (hud.toast_has_focused()) hud.toast_select(state);
     });
-    gamepad.on_back([&menu, &hud, &landing]{
-        if      (menu.is_keyboard_open()) menu.osk_backspace();
+    gamepad.on_back([&menu, &hud, &landing, &state]{
+        if      (state.map_overlay.expanded) state.map_overlay.expanded = false;
+        else if (menu.is_keyboard_open()) menu.osk_backspace();
         else if (landing.active)          { if (landing.page == 1) { landing.page = 0; landing.cursor = 1; landing.countdown_on = false; } }
         else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
     });
-    gamepad.on_nav_up   ([&menu, &landing, &landing_nav]{ if (menu.is_keyboard_open()){menu.osk_move(0,-1);return;} if (landing.active){landing_nav(-1);return;} if (menu.is_open()) menu.navigate(-1); });
-    gamepad.on_nav_down ([&menu, &landing, &landing_nav]{ if (menu.is_keyboard_open()){menu.osk_move(0,+1);return;} if (landing.active){landing_nav(+1);return;} if (menu.is_open()) menu.navigate(+1); });
-    gamepad.on_nav_left ([&menu, &hud, &landing, &bg_lib]{
-        if      (menu.is_keyboard_open()) menu.osk_move(-1, 0);
+    gamepad.on_nav_up   ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,+0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,-1);return;} if (landing.active){landing_nav(-1);return;} if (menu.is_open()) menu.navigate(-1); });
+    gamepad.on_nav_down ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,-0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,+1);return;} if (landing.active){landing_nav(+1);return;} if (menu.is_open()) menu.navigate(+1); });
+    gamepad.on_nav_left ([&menu, &hud, &landing, &bg_lib, &state, &map_pan]{
+        if      (state.map_overlay.expanded) map_pan(+0.06f, 0);
+        else if (menu.is_keyboard_open()) menu.osk_move(-1, 0);
         else if (landing.active)          bg_lib.prev();
         else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
     });
-    gamepad.on_nav_right([&menu, &hud, &state, &landing, &bg_lib]{
-        if      (menu.is_keyboard_open()) menu.osk_move(+1, 0);
+    gamepad.on_nav_right([&menu, &hud, &state, &landing, &bg_lib, &map_pan]{
+        if      (state.map_overlay.expanded) map_pan(-0.06f, 0);
+        else if (menu.is_keyboard_open()) menu.osk_move(+1, 0);
         else if (landing.active)          bg_lib.next();
         else if (hud.toast_has_focused()) hud.toast_navigate(+1);
         else if (menu.is_open())          menu.select();
     });
-    // LB/RB cycle the background on the landing page, switch deep-menu tabs while
-    // it's open, otherwise toggle the PiPs.
-    gamepad.on_pip_left ([&menu, &kb_pip_left, &landing, &bg_lib] {
-        if      (landing.active)        bg_lib.prev();
+    // LB/RB: zoom the expanded map, else cycle the landing background, switch
+    // deep-menu tabs while it's open, otherwise toggle the PiPs.
+    gamepad.on_pip_left ([&menu, &kb_pip_left, &landing, &bg_lib, &state, &map_zoom] {
+        if      (state.map_overlay.expanded) map_zoom(-0.4f);
+        else if (landing.active)        bg_lib.prev();
         else if (menu.is_deep_open())   menu.prev_tab();
         else                            kb_pip_left  = !kb_pip_left;
     });
-    gamepad.on_pip_right([&menu, &kb_pip_right, &landing, &bg_lib]{
-        if      (landing.active)        bg_lib.next();
+    gamepad.on_pip_right([&menu, &kb_pip_right, &landing, &bg_lib, &state, &map_zoom]{
+        if      (state.map_overlay.expanded) map_zoom(+0.4f);
+        else if (landing.active)        bg_lib.next();
         else if (menu.is_deep_open())   menu.next_tab();
         else                            kb_pip_right = !kb_pip_right;
     });
@@ -4862,6 +4902,7 @@ int main(int argc, char* argv[]) {
             cfg["map"]["anchor_x"]            = mo.anchor_x;
             cfg["map"]["anchor_y"]            = mo.anchor_y;
             cfg["map"]["circle_window"]       = mo.circle_window;
+            cfg["map"]["compass_ring"]        = mo.compass_ring;
             cfg["map"]["zoom"]                = mo.zoom;
         }
 
@@ -5104,9 +5145,19 @@ int main(int argc, char* argv[]) {
         }
 
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
-        // While the on-screen keyboard is up it captures ALL keystrokes (so typing
-        // a profile name can't trigger app hotkeys); other handling is skipped.
-        if (menu.is_keyboard_open()) {
+        // The expanded map and the on-screen keyboard each capture ALL keystrokes
+        // while up (so pan/zoom or typing can't trigger app hotkeys).
+        if (state.map_overlay.expanded) {
+            auto& mo = state.map_overlay;
+            if (ImGui::IsKeyDown(ImGuiKey_LeftArrow))  map_pan(+0.012f, 0.f);
+            if (ImGui::IsKeyDown(ImGuiKey_RightArrow)) map_pan(-0.012f, 0.f);
+            if (ImGui::IsKeyDown(ImGuiKey_UpArrow))    map_pan(0.f, +0.012f);
+            if (ImGui::IsKeyDown(ImGuiKey_DownArrow))  map_pan(0.f, -0.012f);
+            if (ImGui::IsKeyDown(ImGuiKey_Equal) || ImGui::IsKeyDown(ImGuiKey_KeypadAdd))      map_zoom(+0.04f);
+            if (ImGui::IsKeyDown(ImGuiKey_Minus) || ImGui::IsKeyDown(ImGuiKey_KeypadSubtract)) map_zoom(-0.04f);
+            if (key_pressed(ImGuiKey_N) || key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_M))
+                mo.expanded = false;
+        } else if (menu.is_keyboard_open()) {
             if (key_pressed(ImGuiKey_UpArrow))    menu.osk_move(0, -1);
             if (key_pressed(ImGuiKey_DownArrow))  menu.osk_move(0, +1);
             if (key_pressed(ImGuiKey_LeftArrow))  menu.osk_move(-1, 0);
@@ -5116,8 +5167,7 @@ int main(int argc, char* argv[]) {
             if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_F1)) menu.osk_cancel();
             for (ImWchar ch : ImGui::GetIO().InputQueueCharacters)
                 menu.osk_input_char(static_cast<unsigned int>(ch));
-        }
-        if (!menu.is_keyboard_open()) {
+        } else {
         if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_P)) { state.quit = true; break; }
         // Ctrl+Q / Ctrl+K — force-kill (immediate exit, skips graceful cleanup)
         if (ImGui::GetIO().KeyCtrl &&
@@ -5154,6 +5204,12 @@ int main(int argc, char* argv[]) {
             if (menu.is_deep_open() && key_pressed(ImGuiKey_Tab)) {
                 if (ImGui::GetIO().KeyShift) menu.prev_tab(); else menu.next_tab();
             }
+        }
+        // N — open the expanded (Helldivers-style) map view.
+        if (key_pressed(ImGuiKey_N)) {
+            state.map_overlay.expanded = true;
+            state.map_overlay.view_zoom = 1.0f;
+            state.map_overlay.view_pan_x = state.map_overlay.view_pan_y = 0.f;
         }
         // Vision-assist hotkeys — work whether or not the menu is open
         if (key_pressed(ImGuiKey_E)) state.pp_cfg.edge_enabled   = !state.pp_cfg.edge_enabled;
