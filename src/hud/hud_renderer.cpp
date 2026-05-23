@@ -521,10 +521,14 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         const float off = 12.f * DEG;             // angular offset for bar 2
 
         if (cfg.system_debug) {
-            // Bar 1 = CPU; Bar 2 = GPU/render-load (frame time vs a 60fps budget).
+            // CPU on the outer (higher) bar; GPU/render-load on the inner bar.
+            // GPU is derived from instantaneous frame time, so smooth it (EMA) to
+            // keep it from jumping frame-to-frame.
             const float cpu = std::clamp(s.sys_metrics.cpu_pct / 100.f, 0.f, 1.f);
             const float ft  = s.sys_metrics.frame_time_ms;
-            const float gpu = std::clamp(ft / (1000.f / 60.f), 0.f, 1.f);
+            const float gpu_inst = std::clamp(ft / (1000.f / 60.f), 0.f, 1.f);
+            gpu_load_smooth_ += (gpu_inst - gpu_load_smooth_) * 0.10f;
+            const float gpu = gpu_load_smooth_;
             auto load_col = [](float v) {
                 return v > 0.8f ? nvgRGBA(230, 70, 60, 235)
                      : v > 0.5f ? nvgRGBA(235, 180, 50, 230)
@@ -532,8 +536,8 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             };
             char cb[12]; snprintf(cb, sizeof(cb), "C%2.0f", cpu * 100.f);
             char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
-            gauge(r1, a0,       a1,       cpu, load_col(cpu), cb, true);
-            gauge(r2, a0 + off, a1 + off, gpu, load_col(gpu), gb, true);
+            gauge(r2, a0 + off, a1 + off, cpu, load_col(cpu), cb, true);  // outer = CPU
+            gauge(r1, a0,       a1,       gpu, load_col(gpu), gb, true);  // inner = GPU
         } else {
             const int bpct = s.health.wireless_battery_pct;   // -1 = unknown
             const float pct = std::clamp(bpct / 100.f, 0.f, 1.f);

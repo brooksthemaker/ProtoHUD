@@ -258,6 +258,7 @@ private:
     int         map_img_w_    = 0;
     int         map_img_h_    = 0;
     std::string map_img_path_;
+    float       gpu_load_smooth_ = 0.f;  // EMA of the GPU/render-load gauge
 
     // NVG image cache for PiP underlays: GL tex ID → NVG image handle.
     // Created via nvglCreateImageFromHandleGLES2 on first use; freed in unload().
