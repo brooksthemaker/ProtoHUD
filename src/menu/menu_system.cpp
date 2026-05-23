@@ -503,6 +503,18 @@ const std::string& MenuSystem::current_label() const {
     return empty;
 }
 
+bool MenuSystem::editing_value() const {
+    if (!in_edit_mode_ || stack_.empty()) return false;
+    const auto& items = stack_.back().items;
+    if (cursor_ < 0 || cursor_ >= static_cast<int>(items.size())) return false;
+    switch (items[cursor_].type) {
+        case MenuItemType::SLIDER:       return true;
+        case MenuItemType::FACE_PICKER:  return true;
+        case MenuItemType::COLOR_PICKER: return in_channel_edit_;  // only while a channel is being adjusted
+        default:                         return false;
+    }
+}
+
 // ── draw ──────────────────────────────────────────────────────────────────────
 
 void MenuSystem::draw(int screen_w, int screen_h) {

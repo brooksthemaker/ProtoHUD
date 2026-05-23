@@ -4520,8 +4520,8 @@ int main(int argc, char* argv[]) {
         else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
     });
-    gamepad.on_nav_up   ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,+0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,-1);return;} if (landing.active){landing_nav(-1);return;} if (menu.is_open()) menu.navigate(-1); });
-    gamepad.on_nav_down ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,-0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,+1);return;} if (landing.active){landing_nav(+1);return;} if (menu.is_open()) menu.navigate(+1); });
+    gamepad.on_nav_up   ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,+0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,-1);return;} if (landing.active){landing_nav(-1);return;} if (menu.is_open()) menu.navigate(menu.editing_value() ? +1 : -1); });
+    gamepad.on_nav_down ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,-0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,+1);return;} if (landing.active){landing_nav(+1);return;} if (menu.is_open()) menu.navigate(menu.editing_value() ? -1 : +1); });
     gamepad.on_nav_left ([&menu, &hud, &landing, &bg_lib, &state, &map_pan]{
         if      (state.map_overlay.expanded) map_pan(+0.06f, 0);
         else if (menu.is_keyboard_open()) menu.osk_move(-1, 0);
@@ -5199,8 +5199,11 @@ int main(int argc, char* argv[]) {
             if (rep_toast_next.tick(ImGui::IsKeyDown(ImGuiKey_RightArrow))) hud.toast_navigate(+1);
             if (key_pressed(ImGuiKey_Enter))      hud.toast_select(state);
         } else if (menu.is_open()) {
-            if (rep_nav_up  .tick(ImGui::IsKeyDown(ImGuiKey_UpArrow)))   menu.navigate(-1);
-            if (rep_nav_down.tick(ImGui::IsKeyDown(ImGuiKey_DownArrow))) menu.navigate(+1);
+            // While editing a value, Up increases / Down decreases; otherwise Up =
+            // previous item, Down = next item.
+            const bool ev = menu.editing_value();
+            if (rep_nav_up  .tick(ImGui::IsKeyDown(ImGuiKey_UpArrow)))   menu.navigate(ev ? +1 : -1);
+            if (rep_nav_down.tick(ImGui::IsKeyDown(ImGuiKey_DownArrow))) menu.navigate(ev ? -1 : +1);
             if (key_pressed(ImGuiKey_Enter) ||
                 key_pressed(ImGuiKey_RightArrow)) menu.select();
             if (key_pressed(ImGuiKey_Backspace) ||

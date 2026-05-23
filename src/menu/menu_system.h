@@ -253,6 +253,12 @@ public:
     int  menu_depth()    const { return static_cast<int>(stack_.size()); }
     const std::string& current_label() const;
 
+    // True when navigate() adjusts a numeric value (slider value, face index, or a
+    // color channel being edited) rather than moving a cursor. Input handlers use
+    // this to flip Up/Down so Up always *increases* the value (and Down decreases),
+    // while plain list scrolling keeps Up = previous / Down = next.
+    bool editing_value() const;
+
 private:
     struct Level {
         std::vector<MenuItem> items;
