@@ -35,6 +35,8 @@ public:
 
     bool        connected()       const { return connected_.load(); }
     std::string controller_name() const;
+    // Coarse battery level (0–100), or -1 if unknown / wired / disconnected.
+    int         battery_pct()     const { return battery_pct_.load(); }
 
     void on_select    (Cb cb) { select_cb_    = std::move(cb); }
     void on_back      (Cb cb) { back_cb_      = std::move(cb); }
@@ -52,8 +54,9 @@ private:
     void try_open();
     void close();
 
-    void*              controller_ = nullptr;  // SDL_GameController*
-    std::atomic<bool>  connected_  { false };
+    void*              controller_  = nullptr;  // SDL_GameController*
+    std::atomic<bool>  connected_   { false };
+    std::atomic<int>   battery_pct_ { -1 };
 
     struct BtnState {
         bool a=0,b=0,x=0,y=0;
@@ -78,6 +81,7 @@ public:
     void        poll()            {}
     bool        connected() const { return false; }
     std::string controller_name() const { return {}; }
+    int         battery_pct() const { return -1; }
     void on_select    (Cb) {} void on_back      (Cb) {}
     void on_menu      (Cb) {} void on_pip_left  (Cb) {}
     void on_pip_right (Cb) {} void on_af        (Cb) {}

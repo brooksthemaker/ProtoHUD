@@ -2563,6 +2563,9 @@ static std::vector<MenuItem> build_menu(
         toggle("Compass Ring",
             [&state]{ return state.map_overlay.compass_ring; },
             [&state](bool v){ state.map_overlay.compass_ring = v; }),
+        toggle("Battery Arc",
+            [&state]{ return state.map_overlay.battery_arc; },
+            [&state](bool v){ state.map_overlay.battery_arc = v; }),
         leaf("Expand Map (Pan/Zoom)", [&state]{
             std::lock_guard<std::mutex> lk(state.mtx);
             state.map_overlay.expanded   = true;
@@ -3772,6 +3775,7 @@ int main(int argc, char* argv[]) {
         mo.anchor_y            = jm.value("anchor_y",            mo.anchor_y);
         mo.circle_window       = jm.value("circle_window",       mo.circle_window);
         mo.compass_ring        = jm.value("compass_ring",        mo.compass_ring);
+        mo.battery_arc         = jm.value("battery_arc",         mo.battery_arc);
         mo.zoom                = jm.value("zoom",                mo.zoom);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
@@ -4903,6 +4907,7 @@ int main(int argc, char* argv[]) {
             cfg["map"]["anchor_y"]            = mo.anchor_y;
             cfg["map"]["circle_window"]       = mo.circle_window;
             cfg["map"]["compass_ring"]        = mo.compass_ring;
+            cfg["map"]["battery_arc"]         = mo.battery_arc;
             cfg["map"]["zoom"]                = mo.zoom;
         }
 
@@ -5594,7 +5599,13 @@ int main(int argc, char* argv[]) {
         snap.health.cam_usb3_overlay = p3;
         snap.health.gamepad_ok          = gamepad.connected();
         snap.health.wireless_ok         = wireless_enabled && wireless.connected();
-        snap.health.wireless_battery_pct = wireless_enabled ? wireless.battery_pct() : -1;
+        // Battery level for the minimap arc: prefer the dedicated wireless
+        // controller, else fall back to the SDL gamepad's coarse level.
+        {
+            int bpct = wireless_enabled ? wireless.battery_pct() : -1;
+            if (bpct < 0) bpct = gamepad.battery_pct();
+            snap.health.wireless_battery_pct = bpct;
+        }
 
         // Inject live AF lens position into the snapshot (atomic read, no lock needed)
         if (cameras.owl_left())

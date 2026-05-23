@@ -443,9 +443,53 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
 
     nvgRestore(vg);
 
+    const float ringR = cfg.circle_window ? half : std::max(hw, hh);
+
     // Compass ring + LoRa markers around the minimap (Battlefield-style).
     if (cfg.compass_ring)
-        draw_compass_ring(vg, s, cx, cy, cfg.circle_window ? half : std::max(hw, hh));
+        draw_compass_ring(vg, s, cx, cy, ringR);
+
+    // Battery arc — a ~quarter ring on the minimap's left, with a gap, colored by
+    // charge (green → amber → red). Driven by the controller battery for now; the
+    // band can be split for multiple cells later. The dark track always shows when
+    // enabled; the coloured fill + % appear once a battery level is known.
+    if (cfg.battery_arc) {
+        const int   bpct = s.health.wireless_battery_pct;   // -1 = unknown
+        const float DEG  = (float)M_PI / 180.f;
+        const float r    = ringR + 14.f;          // gap from the minimap edge
+        const float a0   = 145.f * DEG;           // bottom-left
+        const float a1   = 215.f * DEG;           // top-left (sweep up the left side)
+        const float am   = (a0 + a1) * 0.5f;
+
+        // Background track.
+        nvgLineCap(vg, NVG_ROUND);
+        nvgBeginPath(vg);
+        nvgArc(vg, cx, cy, r, a0, a1, NVG_CW);
+        nvgStrokeColor(vg, nvgRGBA(40, 48, 56, 200));
+        nvgStrokeWidth(vg, 9.f);
+        nvgStroke(vg);
+
+        nvg_set_font_mono(11.f);
+        nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+        if (bpct >= 0) {
+            const float pct = std::clamp(bpct / 100.f, 0.f, 1.f);
+            NVGcolor bc = pct > 0.5f ? nvgRGBA(70, 210, 90, 230)
+                        : pct > 0.2f ? nvgRGBA(235, 180, 50, 230)
+                        :              nvgRGBA(230, 70, 60, 235);
+            nvgBeginPath(vg);
+            nvgArc(vg, cx, cy, r, a0, a0 + (a1 - a0) * pct, NVG_CW);
+            nvgStrokeColor(vg, bc);
+            nvgStrokeWidth(vg, 9.f);
+            nvgStroke(vg);
+            char pb[8]; snprintf(pb, sizeof(pb), "%d%%", bpct);
+            nvgFillColor(vg, bc);
+            nvgText(vg, cx + std::cos(am) * (r - 9.f), cy + std::sin(am) * (r - 9.f), pb, nullptr);
+        } else {
+            nvgFillColor(vg, nvgRGBA(140, 150, 160, 200));
+            nvgText(vg, cx + std::cos(am) * (r - 9.f), cy + std::sin(am) * (r - 9.f), "--", nullptr);
+        }
+        nvgLineCap(vg, NVG_BUTT);
+    }
 }
 
 // ── Compass ring around the minimap ─────────────────────────────────────────────
@@ -461,10 +505,11 @@ void HudRenderer::draw_compass_ring(NVGcontext* vg, const AppState& s,
         return -(float)M_PI * 0.5f + rel * DEG;  // forward at top, screen y-down
     };
 
-    const float r_tick  = radius + 4.f;
-    const float r_card  = radius + 22.f;
-    const float r_mark  = radius + 22.f;
-    const float r_dist  = radius + 38.f;
+    // Ring sits outside the battery-arc band (radius+10 .. radius+19).
+    const float r_tick  = radius + 24.f;
+    const float r_card  = radius + 42.f;
+    const float r_mark  = radius + 42.f;
+    const float r_dist  = radius + 58.f;
 
     const NVGcolor col_major = nvg_col(col_.compass_tick);
     const NVGcolor col_minor = nvg_col_a(col_.compass_tick, 110);
