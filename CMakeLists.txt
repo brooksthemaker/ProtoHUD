@@ -186,6 +186,7 @@ set(SOURCES
     src/post_process.cpp
     src/sensor/mpu9250.cpp
     src/sys/system_monitor.cpp
+    src/sys/scheduler_monitor.cpp
     src/net/wifi_monitor.cpp
     src/net/ping_monitor.cpp
     src/net/bt_monitor.cpp
@@ -320,6 +321,12 @@ add_custom_command(TARGET protohud POST_BUILD
 
 install(TARGETS protohud RUNTIME DESTINATION bin)
 install(FILES config/config.example.json DESTINATION etc/protohud RENAME config.json)
+# Companion scheduler daemon (Python; owns the web form + Google Calendar sync).
+# Exclude any real OAuth secrets/tokens so they never get packaged.
+install(DIRECTORY scheduler_daemon DESTINATION share/protohud
+        PATTERN "token.json"          EXCLUDE
+        PATTERN "client_secret*.json" EXCLUDE
+        PATTERN "__pycache__"         EXCLUDE)
 install(FILES "${VITURE_LIB_DIR}/libglasses.so"
               "${VITURE_LIB_DIR}/libcarina_vio.so"
         DESTINATION lib)
