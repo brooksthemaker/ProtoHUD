@@ -289,6 +289,15 @@ struct InfoPanelConfig {
     bool  show[static_cast<int>(InfoWidget::Count)] = { true, true, true, false };
 };
 
+// ── HUD dock layout ─────────────────────────────────────────────────────────────
+// The minimap and info panel are opposite-side twins docked to the top or bottom
+// edge. `bottom` picks the edge; `swap` exchanges which side each occupies. Anchors
+// for both elements are derived from this (see apply_hud_dock in main).
+struct HudDock {
+    bool bottom = false;   // false = top edge, true = bottom edge
+    bool swap   = false;   // false = minimap left / panel right, true = swapped
+};
+
 // ── Particle effects ──────────────────────────────────────────────────────────
 
 enum class EffectType : uint8_t {
@@ -612,6 +621,9 @@ struct AppState {
 
     // Cycling info panel config (render-thread owned; menu writes while holding mtx)
     InfoPanelConfig      info_panel;
+
+    // Top/bottom + swap docking that positions the minimap & info panel as twins.
+    HudDock              hud_dock;
 
     // Per-LoRa-node compass marker colors (indexed by node.local_id % 8)
     ImU32 lora_node_colors[8] = {

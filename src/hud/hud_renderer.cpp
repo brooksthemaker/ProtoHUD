@@ -493,6 +493,12 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
 
     const float ringR = cfg.circle_window ? half : std::max(hw, hh);
 
+    // Which screen quadrant the minimap occupies. The chrome that protrudes past
+    // the disc (clock/date arc, system gauge) faces the screen interior so it
+    // stays visible regardless of the top/bottom + side docking.
+    const bool dock_left = cx < fw * 0.5f;
+    const bool dock_top  = cy < fh * 0.5f;
+
     // Compass ring + LoRa markers around the minimap (Battlefield-style).
     if (cfg.compass_ring)
         draw_compass_ring(vg, s, cx, cy, ringR);
@@ -502,8 +508,10 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     // shows CPU (inner bar) + GPU/render-load (outer bar, concentric & offset).
     if (cfg.battery_arc) {
         const float DEG = (float)M_PI / 180.f;
-        const float a0  = 145.f * DEG;            // bottom-left
-        const float a1  = 215.f * DEG;            // top-left (sweep up the left side)
+        // Gauge sits on the disc's interior side: right side when docked left,
+        // left side when docked right — so it never runs off the screen edge.
+        const float a0  = (dock_left ? -35.f : 145.f) * DEG;
+        const float a1  = (dock_left ?  35.f : 215.f) * DEG;
 
         // Draw one gauge arc (dark track + coloured fill + a short value label).
         auto gauge = [&](float r, float ga0, float ga1, float v01,
@@ -641,7 +649,12 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         const float esz   = csz * 0.92f;
         const float dsz   = csz * 0.82f;
         const float DEGc  = static_cast<float>(M_PI) / 180.f;
-        const float clock_angle = -118.f * DEGc;   // curve along the map's upper-left
+        // Clock/date arc curves along the disc edge facing the screen interior:
+        // above the disc when docked low, below when docked high; leaning toward
+        // the interior horizontally so it never clips at the screen edge.
+        const float clock_deg = dock_top ? (dock_left ?  60.f :  120.f)
+                                         : (dock_left ? -60.f : -120.f);
+        const float clock_angle = clock_deg * DEGc;
         const float rc    = ringR + (cfg.compass_ring ? 46.f : 16.f) + csz * 0.5f;
 
         // Clock — curved text on an arc concentric with the map, centred upper-left.
@@ -716,7 +729,7 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
     if (info_cycle_idx_ >= n) info_cycle_idx_ = 0;
     const int widget = order[info_cycle_idx_];
 
-    const float r  = cfg.size_px;
+    const float r  = s.map_overlay.size_px;   // twin: mirror the minimap's footprint
     const float px = std::clamp(fw * cfg.anchor_x + cfg.pan_x, r, fw - r);
     const float py = std::clamp(fh * cfg.anchor_y + cfg.pan_y, r, fh - r);
     const float TWO_PI = 2.f * static_cast<float>(M_PI);

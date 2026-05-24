@@ -155,6 +155,21 @@ T jval(const json& j, const std::string& key, T def) {
     catch (...) { return def; }
 }
 
+// Position the minimap and info panel as opposite-side twins, docked to the top or
+// bottom edge. `swap` exchanges which side each occupies; the panel mirrors the
+// minimap's footprint. Called at startup and from the dock menu actions.
+static void apply_hud_dock(AppState& s) {
+    constexpr float MX = 0.16f, MY = 0.20f;   // edge margins (screen fraction); tune as needed
+    const bool  map_left = !s.hud_dock.swap;
+    const float ay = s.hud_dock.bottom ? (1.f - MY) : MY;
+    s.map_overlay.anchor_x = map_left ? MX : (1.f - MX);
+    s.map_overlay.anchor_y = ay;
+    s.map_overlay.pan_x = 0.f; s.map_overlay.pan_y = 0.f;
+    s.info_panel.anchor_x = map_left ? (1.f - MX) : MX;
+    s.info_panel.anchor_y = ay;
+    s.info_panel.pan_x = 0.f; s.info_panel.pan_y = 0.f;
+}
+
 // ── Native face renderer config ───────────────────────────────────────────────
 // Build a face::RenderConfig from config.json's "protoface" section. Falls back
 // to the standard 2-panel mirrored layout (face_left + face_right) and to the
@@ -2615,18 +2630,17 @@ static std::vector<MenuItem> build_menu(
         toggle("Enabled",
             [&state]{ return state.info_panel.enabled; },
             [&state](bool v){ state.info_panel.enabled = v; }),
-        leaf_sel("Side: Left",
-            [&state]{ state.info_panel.anchor_x = 0.15f; },
-            [&state]{ return state.info_panel.anchor_x < 0.5f; }),
-        leaf_sel("Side: Right",
-            [&state]{ state.info_panel.anchor_x = 0.85f; },
-            [&state]{ return state.info_panel.anchor_x >= 0.5f; }),
+        leaf_sel("Dock Top",
+            [&state]{ state.hud_dock.bottom = false; apply_hud_dock(state); },
+            [&state]{ return !state.hud_dock.bottom; }),
+        leaf_sel("Dock Bottom",
+            [&state]{ state.hud_dock.bottom = true; apply_hud_dock(state); },
+            [&state]{ return state.hud_dock.bottom; }),
+        leaf("Swap Map/Panel Sides",
+            [&state]{ state.hud_dock.swap = !state.hud_dock.swap; apply_hud_dock(state); }),
         slider("Cycle Seconds", 2.f, 30.f, 1.f, "s",
             [&state]{ return state.info_panel.cycle_sec; },
             [&state](float v){ state.info_panel.cycle_sec = v; }),
-        slider("Size", 80.f, 300.f, 10.f, "px",
-            [&state]{ return state.info_panel.size_px; },
-            [&state](float v){ state.info_panel.size_px = v; }),
         toggle("Show: Clock",
             [&state]{ return state.info_panel.show[static_cast<int>(InfoWidget::Clock)]; },
             [&state](bool v){ state.info_panel.show[static_cast<int>(InfoWidget::Clock)] = v; }),
@@ -3962,6 +3976,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // HUD dock (top/bottom + swap) — positions the minimap & info panel twins.
+    if (cfg.contains("hud_dock")) {
+        const auto& jd = cfg["hud_dock"];
+        state.hud_dock.bottom = jd.value("bottom", state.hud_dock.bottom);
+        state.hud_dock.swap   = jd.value("swap",   state.hud_dock.swap);
+    }
+    apply_hud_dock(state);   // dock is authoritative for both anchors
+
     // Compass IMU axis selection
     if (cfg.contains("compass")) {
         auto& jc = cfg["compass"];
@@ -5166,6 +5188,9 @@ int main(int argc, char* argv[]) {
                 sh.push_back(ip.show[i]);
             cfg["info_panel"]["show"] = sh;
         }
+
+        cfg["hud_dock"]["bottom"] = state.hud_dock.bottom;
+        cfg["hud_dock"]["swap"]   = state.hud_dock.swap;
 
         cfg["resolution"]["width"]  = state.camera_resolution.width;
         cfg["resolution"]["height"] = state.camera_resolution.height;
