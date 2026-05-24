@@ -21,6 +21,8 @@ static constexpr uint8_t MPU_GYRO_CONFIG   = 0x1B;
 static constexpr uint8_t MPU_ACCEL_CONFIG  = 0x1C;
 static constexpr uint8_t MPU_INT_PIN_CFG   = 0x37; // bit1 = BYPASS_EN
 static constexpr uint8_t MPU_ACCEL_XOUT_H  = 0x3B;
+static constexpr uint8_t MPU_TEMP_OUT_H    = 0x41; // 2 bytes
+static constexpr uint8_t MPU_GYRO_XOUT_H   = 0x43; // 6 bytes
 static constexpr uint8_t MPU_PWR_MGMT_1    = 0x6B;
 static constexpr uint8_t MPU_WHO_AM_I      = 0x75; // expect 0x71 or 0x73
 
@@ -259,6 +261,42 @@ void Mpu9250::sensor_thread_fn() {
                     float heading = compute_heading(mx, my, mz, ax, ay, az);
 
                     if (cb_) cb_(heading);
+
+                    // ── Full sample for the debug window ──────────────────────
+                    if (sample_cb_) {
+                        Sample s;
+                        // Accel ±2 g → 16384 LSB/g
+                        s.accel_g[0] = ax / 16384.0f;
+                        s.accel_g[1] = ay / 16384.0f;
+                        s.accel_g[2] = az / 16384.0f;
+
+                        // Gyro ±250 °/s → 131 LSB/(°/s)
+                        uint8_t graw[6] = {};
+                        if (read_regs(i2c_fd_, cfg_.mpu_addr, MPU_GYRO_XOUT_H, graw, 6)) {
+                            int16_t gx = (int16_t)((graw[0] << 8) | graw[1]);
+                            int16_t gy = (int16_t)((graw[2] << 8) | graw[3]);
+                            int16_t gz = (int16_t)((graw[4] << 8) | graw[5]);
+                            s.gyro_dps[0] = gx / 131.0f;
+                            s.gyro_dps[1] = gy / 131.0f;
+                            s.gyro_dps[2] = gz / 131.0f;
+                        }
+
+                        // AK8963 16-bit mode → 0.15 µT/LSB (mx/my/mz are
+                        // sensitivity-adjusted, hard-iron-corrected counts)
+                        s.mag_ut[0] = mx * 0.15f;
+                        s.mag_ut[1] = my * 0.15f;
+                        s.mag_ut[2] = mz * 0.15f;
+
+                        // Die temperature: T(°C) = raw/333.87 + 21.0
+                        uint8_t traw[2] = {};
+                        if (read_regs(i2c_fd_, cfg_.mpu_addr, MPU_TEMP_OUT_H, traw, 2)) {
+                            int16_t t = (int16_t)((traw[0] << 8) | traw[1]);
+                            s.temp_c = t / 333.87f + 21.0f;
+                        }
+
+                        s.heading_deg = heading;
+                        sample_cb_(s);
+                    }
                 }
             }
         }

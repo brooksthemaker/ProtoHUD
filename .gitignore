@@ -47,3 +47,13 @@ overlays/*.dtbo
 # Runtime config — written by the app on exit with live settings.
 # config/config.example.json is the tracked defaults reference.
 config/config.json
+
+# Scheduler daemon — secrets and runtime artifacts (never commit OAuth creds).
+scheduler_daemon/client_secret.json
+scheduler_daemon/token.json
+scheduler_daemon/config.json
+scheduler_daemon/__pycache__/
+scheduler_daemon/*.events.json
+scheduler_daemon/events.json
+scheduler_daemon/scheduler_status.json
+scheduler_daemon/manual_events.json
