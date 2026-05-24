@@ -4188,6 +4188,7 @@ int main(int argc, char* argv[]) {
     }
     HudRenderer hud(hud_cfg, hud_col);
     hud.load(xr.glfw_window());
+    hud.set_icon_dir(res("assets/icons"));
 
     // ── Splash screen ─────────────────────────────────────────────────────────
     // Render a splash frame between heavy init steps so the display isn't black

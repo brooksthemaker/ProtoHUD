@@ -16,6 +16,7 @@
 
 #include "../app_state.h"
 #include "toast_renderer.h"
+#include "icon_cache.h"
 #include <imgui.h>
 #include <nanovg.h>
 #include <string>
@@ -108,6 +109,9 @@ public:
     bool toast_has_focused() const { return toast_renderer_.has_focused_toast(); }
     void toast_navigate(int delta)  { toast_renderer_.navigate(delta); }
     void toast_select(AppState& s)  { toast_renderer_.select(s); }
+
+    // Directory holding notification/widget icon PNGs (<dir>/<name>.png).
+    void set_icon_dir(std::string dir) { icons_.set_dir(std::move(dir)); }
 
     // Start an ImGui frame for menu + debug overlays.
     void begin_menu_frame();
@@ -257,6 +261,7 @@ private:
                     float fw, float fh, float dt);
 
     ToastRenderer toast_renderer_;
+    IconCache     icons_;
 
     // Map overlay image state (render-thread only)
     int         map_img_      = -1;

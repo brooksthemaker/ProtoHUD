@@ -302,6 +302,11 @@ file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/assets/shaders")
 file(COPY "${CMAKE_SOURCE_DIR}/assets/shaders/"
      DESTINATION "${CMAKE_BINARY_DIR}/assets/shaders")
 
+# Copy notification/widget icons (PNG) to the build directory.
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/assets/icons")
+file(COPY "${CMAKE_SOURCE_DIR}/assets/icons/"
+     DESTINATION "${CMAKE_BINARY_DIR}/assets/icons")
+
 # Copy VITURE .so files next to the binary for in-tree runs
 add_custom_command(TARGET protohud POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -317,6 +322,14 @@ add_custom_command(TARGET protohud POST_BUILD
         "${CMAKE_SOURCE_DIR}/assets/shaders"
         "$<TARGET_FILE_DIR:protohud>/assets/shaders"
     COMMENT "Syncing shaders to build directory"
+)
+
+# Keep icons in sync with source on every build (drop PNGs in assets/icons, rebuild)
+add_custom_command(TARGET protohud POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets/icons"
+        "$<TARGET_FILE_DIR:protohud>/assets/icons"
+    COMMENT "Syncing icons to build directory"
 )
 
 install(TARGETS protohud RUNTIME DESTINATION bin)

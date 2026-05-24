@@ -428,6 +428,18 @@ struct SshState {
 
 enum class NotifType : uint8_t { Alarm, Timer, LoRa, App };
 
+// Default icon asset name per notification type (resolves to <icons>/<name>.png).
+// A Notification may override this via its `icon` field.
+inline const char* notif_type_icon(NotifType t) {
+    switch (t) {
+        case NotifType::Alarm: return "alarm";
+        case NotifType::Timer: return "timer";
+        case NotifType::LoRa:  return "message";
+        case NotifType::App:   return "bell";
+    }
+    return "bell";
+}
+
 struct NotifAction {
     std::string label;                              // "DISMISS", "+2 MIN", etc.
     std::function<void(struct AppState&)> fn;
@@ -442,6 +454,7 @@ struct Notification {
     float       auto_dismiss_s = 8.f;  // 0 = manual only
     bool        read         = false;
     bool        dismissed    = false;
+    std::string icon;                  // optional icon asset name; empty → by type
     std::vector<NotifAction> actions;
 };
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "../app_state.h"
+#include "icon_cache.h"
 #include <nanovg.h>
 #include <vector>
 #include <cstdint>
@@ -19,7 +20,7 @@ public:
     // font_ui, font_mono — NVGcontext font handle IDs.
     void draw(NVGcontext* vg, NotificationQueue& q,
               float fw, float fh, float dt,
-              int font_ui, int font_mono);
+              int font_ui, int font_mono, IconCache* icons = nullptr);
 
     // Returns true if any toast with actions is currently focused.
     bool has_focused_toast() const { return focused_id_ != 0; }

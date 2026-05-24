@@ -393,7 +393,7 @@ void HudRenderer::draw_toasts(NotificationQueue& live_q, int w, int h) {
     const float fh = static_cast<float>(h);
     const bool own_frame = !nvg_frame_active_;
     if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
-    toast_renderer_.draw(nvg_, live_q, fw, fh, frame_dt_, nvg_font_ui_, nvg_font_mono_);
+    toast_renderer_.draw(nvg_, live_q, fw, fh, frame_dt_, nvg_font_ui_, nvg_font_mono_, &icons_);
     if (own_frame) {
         nvgEndFrame(nvg_);
         nvg_frame_active_ = false;
@@ -776,14 +776,19 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         nvgText(vg, px, py - r + 24.f, cnt, nullptr);
 
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-        float ty = py - r * 0.32f; const float lh = 16.f; int shown = 0;
+        float ty = py - r * 0.32f; const float lh = 17.f; int shown = 0;
         const float lx = px - r * 0.82f;
         for (const auto& nt : s.notifs.items) {
             if (nt.dismissed) continue;
             if (shown >= 4) break;
+            const std::string& nm = nt.icon.empty()
+                ? std::string(notif_type_icon(nt.type)) : nt.icon;
+            const float a = nt.read ? 0.6f : 1.f;
+            const float tx0 = icons_.draw(vg, nm, lx + 6.f, ty + 7.f, 13.f, a)
+                              ? lx + 17.f : lx;
             nvgFillColor(vg, nt.read ? nvg_col_a(col_.text_fill, 130)
                                      : nvg_col_a(col_.text_fill, 235));
-            nvgText(vg, lx, ty, nt.title.c_str(), nullptr);
+            nvgText(vg, tx0, ty, nt.title.c_str(), nullptr);
             ty += lh; ++shown;
         }
         if (shown == 0) {
