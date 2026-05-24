@@ -381,10 +381,15 @@ void CameraManager::usb_capture_thread() {
                 if (++bad % 30 == 1)
                     std::cerr << "[cam] " << name << ": " << bad
                               << " empty reads (good=" << good << ")\n";
-                // After enough consecutive failures (and we know the camera
-                // worked before), release it so reconnect logic can trigger.
-                if (++consec >= kDisconnectThreshold && good > 0) {
-                    std::cerr << "[cam] " << name << ": disconnected\n";
+                // Release on disconnect. A camera that has *never* delivered a frame
+                // (good == 0 — e.g. a wrong/ISP /dev/video node) is also released,
+                // after a longer grace period, so it can't spin-read forever and
+                // peg a CPU core / starve the render thread.
+                ++consec;
+                const int thresh = (good > 0) ? kDisconnectThreshold : 90;  // ~0.9s grace
+                if (consec >= thresh) {
+                    std::cerr << "[cam] " << name
+                              << (good > 0 ? ": disconnected\n" : ": no frames — releasing\n");
                     ok_flag = false;
                     cap.release();  // isOpened() now returns false
                     consec = 0;
@@ -399,7 +404,9 @@ void CameraManager::usb_capture_thread() {
             std::memcpy(slot.buf.data(), rgba.data, slot.buf.size());
             slot.dirty = true;
         }
-        return got_frame || ok_flag.load();  // keep spinning while open even if no frame
+        // Only a real frame counts as "activity". An open-but-empty camera returns
+        // false so the loop sleeps instead of hot-spinning on a dead device.
+        return got_frame;
     };
 
     while (running_) {
