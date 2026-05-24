@@ -53,6 +53,20 @@ public:
     // Register callback invoked on each new heading estimate (~50 Hz).
     void set_heading_callback(HeadingCallback cb) { cb_ = std::move(cb); }
 
+    // Full 9-axis sample, delivered alongside each heading update for the debug
+    // window. Magnetometer is sensitivity-adjusted and hard-iron corrected.
+    struct Sample {
+        float accel_g[3]  = {0.f, 0.f, 0.f};   // x, y, z (g)
+        float gyro_dps[3] = {0.f, 0.f, 0.f};   // x, y, z (deg/s)
+        float mag_ut[3]   = {0.f, 0.f, 0.f};   // x, y, z (µT)
+        float temp_c      = 0.f;               // die temperature
+        float heading_deg = 0.f;               // fused compass heading
+    };
+    using SampleCallback = std::function<void(const Sample&)>;
+
+    // Register callback invoked with the full raw sample on each update (~50 Hz).
+    void set_sample_callback(SampleCallback cb) { sample_cb_ = std::move(cb); }
+
     // Open I2C, initialise MPU-9250 and AK8963, start background thread.
     // Returns false if the device is not found or initialisation fails.
     bool start();
@@ -101,6 +115,7 @@ private:
 
     Config cfg_;
     HeadingCallback cb_;
+    SampleCallback  sample_cb_;
 
     int  i2c_fd_  = -1;
     // AK8963 factory sensitivity adjustment (read from fuse ROM at init)

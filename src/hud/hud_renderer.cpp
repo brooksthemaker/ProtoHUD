@@ -2138,13 +2138,17 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         ImGuiWindowFlags_NoSavedSettings);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Panel geometry — top-left, fixed size
-    constexpr float PW    = 340.f;
-    constexpr float PH    = 750.f;
+    // Panel geometry — top-left, two columns. The debug readout outgrew a single
+    // column once IMU + per-core CPU/GPU sections were added, so content flows
+    // into a second column when the first fills up.
+    constexpr float COLW  = 330.f;            // per-column content width
+    constexpr float GAP   = 12.f;             // gap between columns
+    constexpr float PW     = COLW * 2.f + GAP; // total panel width
     constexpr float PAD   = 10.f;
-    constexpr float MRG   = 14.f;   // left margin from screen edge
+    constexpr float MRG   = 14.f;             // left/top margin from screen edge
     const float px = MRG;
     const float py = MRG;
+    const float PH = std::min(sh - MRG * 2.f, 1040.f);
 
     // Background + border
     dl->AddRectFilled({px, py}, {px + PW, py + PH}, col_.panel_bg, 6.f);
@@ -2153,13 +2157,23 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     if (font_mono_) ImGui::PushFont(font_mono_);
     const float lh = ImGui::GetTextLineHeight();
 
-    float cy = py + PAD;   // current y cursor
+    float cx = px;          // current column origin x
+    float cy = py + PAD;    // current y cursor
+
+    // Wrap into the second column once the first can't fit `need` more pixels.
+    auto wrap_col = [&](float need) {
+        if (cx <= px + 0.5f && cy + need > py + PH - PAD) {
+            cx = px + COLW + GAP;
+            cy = py + PAD;
+        }
+    };
 
     // Helper: draw a section header + separator
     auto section = [&](const char* title) {
-        hud_glow_text(dl, {px + PAD, cy}, title, true, col_.primary, col_.primary);
+        wrap_col(60.f);
+        hud_glow_text(dl, {cx + PAD, cy}, title, true, col_.primary, col_.primary);
         cy += lh + 2.f;
-        dl->AddLine({px + PAD, cy}, {px + PW - PAD, cy}, with_alpha(col_.primary, 80), 1.f);
+        dl->AddLine({cx + PAD, cy}, {cx + COLW - PAD, cy}, with_alpha(col_.primary, 80), 1.f);
         cy += 5.f;
     };
 
@@ -2194,7 +2208,7 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         const uint32_t mm = static_cast<uint32_t>((s % 3600) / 60);
         char buf[48];
         snprintf(buf, sizeof(buf), "Up: %ud %02uh %02um", d, hh, mm);
-        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
+        hud_glow_text(dl, {cx + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
         cy += lh + 4.f;
     }
 
@@ -2202,10 +2216,10 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     {
         char buf[32];
         snprintf(buf, sizeof(buf), "CPU  %3.0f%%", static_cast<double>(snap.sys_metrics.cpu_pct));
-        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
-        const float spw = PW - PAD * 2.f - 80.f;
+        hud_glow_text(dl, {cx + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
+        const float spw = COLW - PAD * 2.f - 80.f;
         sparkline(snap.sys_metrics.cpu_history, kSysHistLen, snap.sys_metrics.history_head,
-                  {px + PAD + 78.f, cy}, spw, lh,
+                  {cx + PAD + 78.f, cy}, spw, lh,
                   100.f, col_.accent);
         cy += lh + 6.f;
     }
@@ -2217,12 +2231,146 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         char buf[40];
         snprintf(buf, sizeof(buf), "RAM  %.0f/%.0f", static_cast<double>(used),
                                                       static_cast<double>(total));
-        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
-        const float spw = PW - PAD * 2.f - 80.f;
+        hud_glow_text(dl, {cx + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
+        const float spw = COLW - PAD * 2.f - 80.f;
         sparkline(snap.sys_metrics.ram_history, kSysHistLen, snap.sys_metrics.history_head,
-                  {px + PAD + 78.f, cy}, spw, lh,
+                  {cx + PAD + 78.f, cy}, spw, lh,
                   total > 0.f ? total : 4096.f, col_.warn);
         cy += lh + 8.f;
+    }
+
+    // ── CPU CORES ───────────────────────────────────────────────────────────────
+    // Per-logical-core utilisation bar + current frequency.
+    section("CPU CORES");
+    {
+        const auto& m   = snap.sys_metrics;
+        const int   n   = std::clamp(m.cpu_core_count, 0, kMaxCpuCores);
+        if (m.cpu_temp_c > 0.f) {
+            char tb[32];
+            snprintf(tb, sizeof(tb), "Temp  %.1f C", static_cast<double>(m.cpu_temp_c));
+            const bool hot = m.cpu_temp_c >= 75.f;
+            hud_glow_text(dl, {cx + PAD, cy}, tb, hot,
+                          col_.glow_base, hot ? col_.warn : col_.text_fill);
+            cy += lh + 4.f;
+        }
+        const float bx = cx + PAD + 44.f;
+        const float bw = COLW - PAD * 2.f - 44.f - 56.f;  // room for label + MHz
+        for (int i = 0; i < n; ++i) {
+            char cb[16];
+            snprintf(cb, sizeof(cb), "C%-2d", i);
+            hud_glow_text(dl, {cx + PAD, cy}, cb, false, col_.glow_base, col_.text_fill);
+            const float frac = std::clamp(m.cpu_core_pct[i] / 100.f, 0.f, 1.f);
+            const ImU32 barc = (frac > 0.85f) ? col_.warn : col_.accent;
+            dl->AddRect      ({bx, cy + 2.f}, {bx + bw, cy + lh - 2.f},
+                              with_alpha(col_.accent, 60));
+            dl->AddRectFilled({bx, cy + 2.f}, {bx + bw * frac, cy + lh - 2.f}, barc);
+            char vb[24];
+            if (m.cpu_core_mhz[i] > 0.f)
+                snprintf(vb, sizeof(vb), "%3.0f%% %4.0f", static_cast<double>(m.cpu_core_pct[i]),
+                         static_cast<double>(m.cpu_core_mhz[i]));
+            else
+                snprintf(vb, sizeof(vb), "%3.0f%%", static_cast<double>(m.cpu_core_pct[i]));
+            hud_glow_text(dl, {bx + bw + 6.f, cy}, vb, false, col_.glow_base, col_.text_dim);
+            cy += lh + 3.f;
+        }
+        if (n == 0) {
+            hud_glow_text(dl, {cx + PAD, cy}, "--", false, col_.glow_base, col_.text_dim);
+            cy += lh + 4.f;
+        }
+        cy += 4.f;
+    }
+
+    // ── GPU ───────────────────────────────────────────────────────────────────
+    // VideoCore per-domain clock breakdown + temperature (via vcgencmd).
+    section("GPU");
+    {
+        const auto& g = snap.gpu;
+        if (!g.available) {
+            hud_glow_text(dl, {cx + PAD, cy}, "unavailable", false,
+                          col_.glow_base, col_.text_dim);
+            cy += lh + 4.f;
+        } else {
+            char gb[40];
+            if (g.temp_c > 0.f) {
+                const bool hot = g.temp_c >= 75.f;
+                snprintf(gb, sizeof(gb), "Temp  %.1f C", static_cast<double>(g.temp_c));
+                hud_glow_text(dl, {cx + PAD, cy}, gb, hot,
+                              col_.glow_base, hot ? col_.warn : col_.text_fill);
+                cy += lh + 4.f;
+            }
+            const int n = std::clamp(g.clock_count, 0, kMaxGpuClocks);
+            for (int i = 0; i < n; ++i) {
+                snprintf(gb, sizeof(gb), "  %-5s %4.0f MHz",
+                         g.clocks[i].name, static_cast<double>(g.clocks[i].mhz));
+                hud_glow_text(dl, {cx + PAD, cy}, gb, false, col_.glow_base, col_.text_fill);
+                cy += lh + 2.f;
+            }
+            cy += 4.f;
+        }
+    }
+
+    // ── IMU ───────────────────────────────────────────────────────────────────
+    // Every value delivered by both IMUs, for fault-finding.
+    section("IMU");
+    {
+        const auto& d = snap.imu_data;
+        char ib[56];
+
+        // VITURE XR glasses fused pose
+        dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f,
+                            d.xr_active ? col_.ind_good : col_.ind_inactive);
+        snprintf(ib, sizeof(ib), "  XR  %s", d.xr_active ? "live" : "no data");
+        hud_glow_text(dl, {cx + PAD + 4.f, cy}, ib, d.xr_active,
+                      col_.glow_base, col_.text_fill);
+        if (d.xr_active && d.xr_rate_hz > 0.f) {
+            char rb[16];
+            snprintf(rb, sizeof(rb), "%.0f Hz", static_cast<double>(d.xr_rate_hz));
+            hud_glow_text(dl, {cx + COLW - PAD - 52.f, cy}, rb, false,
+                          col_.glow_base, col_.text_dim);
+        }
+        cy += lh + 2.f;
+        snprintf(ib, sizeof(ib), " R%6.1f P%6.1f Y%6.1f",
+                 static_cast<double>(d.xr_roll), static_cast<double>(d.xr_pitch),
+                 static_cast<double>(d.xr_yaw));
+        hud_glow_text(dl, {cx + PAD, cy}, ib, false, col_.glow_base,
+                      d.xr_active ? col_.text_fill : col_.text_dim);
+        cy += lh + 6.f;
+
+        // MPU-9250 raw 9-axis
+        dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f,
+                            d.mpu_ok ? col_.ind_good : col_.ind_fail);
+        snprintf(ib, sizeof(ib), "  MPU-9250  %s", d.mpu_ok ? "ok" : "no data");
+        hud_glow_text(dl, {cx + PAD + 4.f, cy}, ib, d.mpu_ok,
+                      col_.glow_base, col_.text_fill);
+        if (d.mpu_ok && d.mpu_rate_hz > 0.f) {
+            char rb[16];
+            snprintf(rb, sizeof(rb), "%.0f Hz", static_cast<double>(d.mpu_rate_hz));
+            hud_glow_text(dl, {cx + COLW - PAD - 52.f, cy}, rb, false,
+                          col_.glow_base, col_.text_dim);
+        }
+        cy += lh + 2.f;
+        if (d.mpu_ok) {
+            snprintf(ib, sizeof(ib), " Acc %6.2f %6.2f %6.2f g",
+                     static_cast<double>(d.accel_g[0]), static_cast<double>(d.accel_g[1]),
+                     static_cast<double>(d.accel_g[2]));
+            hud_glow_text(dl, {cx + PAD, cy}, ib, false, col_.glow_base, col_.text_fill);
+            cy += lh + 2.f;
+            snprintf(ib, sizeof(ib), " Gyr %6.0f %6.0f %6.0f d/s",
+                     static_cast<double>(d.gyro_dps[0]), static_cast<double>(d.gyro_dps[1]),
+                     static_cast<double>(d.gyro_dps[2]));
+            hud_glow_text(dl, {cx + PAD, cy}, ib, false, col_.glow_base, col_.text_fill);
+            cy += lh + 2.f;
+            snprintf(ib, sizeof(ib), " Mag %6.0f %6.0f %6.0f uT",
+                     static_cast<double>(d.mag_ut[0]), static_cast<double>(d.mag_ut[1]),
+                     static_cast<double>(d.mag_ut[2]));
+            hud_glow_text(dl, {cx + PAD, cy}, ib, false, col_.glow_base, col_.text_fill);
+            cy += lh + 2.f;
+            snprintf(ib, sizeof(ib), " Hdg %5.1f deg    %4.1f C",
+                     static_cast<double>(d.mpu_heading), static_cast<double>(d.temp_c));
+            hud_glow_text(dl, {cx + PAD, cy}, ib, false, col_.glow_base, col_.text_fill);
+            cy += lh + 2.f;
+        }
+        cy += 6.f;
     }
 
     // ── NETWORK ───────────────────────────────────────────────────────────────
@@ -2236,7 +2384,7 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         } else {
             snprintf(buf, sizeof(buf), "WiFi: --");
         }
-        hud_glow_text(dl, {px + PAD, cy}, buf, snap.wifi.connected,
+        hud_glow_text(dl, {cx + PAD, cy}, buf, snap.wifi.connected,
                       col_.glow_base, col_.text_fill);
         cy += lh + 2.f;
 
@@ -2245,9 +2393,9 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
             const int dbm   = snap.wifi.signal_dbm;
             const int bars  = (dbm >= -50) ? 4 : (dbm >= -65) ? 3 : (dbm >= -75) ? 2 : 1;
             snprintf(buf, sizeof(buf), "  %s  %d dBm", snap.wifi.ip.c_str(), dbm);
-            hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
+            hud_glow_text(dl, {cx + PAD, cy}, buf, false, col_.glow_base, col_.text_fill);
             // Draw signal bars (4 rectangles of increasing height)
-            const float bx = px + PW - PAD - 28.f;
+            const float bx = cx + COLW - PAD - 28.f;
             const float by = cy + lh;
             for (int i = 0; i < 4; ++i) {
                 const float bh2  = (i + 1) * 4.f;
@@ -2270,12 +2418,12 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         } else {
             snprintf(buf, sizeof(buf), "Ping  --  %s", snap.ping.host.c_str());
         }
-        hud_glow_text(dl, {px + PAD, cy}, buf, snap.ping.reachable,
+        hud_glow_text(dl, {cx + PAD, cy}, buf, snap.ping.reachable,
                       col_.glow_base, col_.text_fill);
-        const float spw = PW - PAD * 2.f - 80.f;
+        const float spw = COLW - PAD * 2.f - 80.f;
         // Scale: 500 ms max
         sparkline(snap.ping.history, kPingHistLen, snap.ping.history_head,
-                  {px + PAD + 78.f, cy}, spw, lh,
+                  {cx + PAD + 78.f, cy}, spw, lh,
                   500.f, snap.ping.reachable ? col_.primary : with_alpha(col_.primary, 80));
         cy += lh + 8.f;
     }
@@ -2284,7 +2432,7 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     section("BLUETOOTH");
 
     if (snap.bt_devices.empty()) {
-        hud_glow_text(dl, {px + PAD, cy}, "No devices", false, col_.glow_base, col_.text_dim);
+        hud_glow_text(dl, {cx + PAD, cy}, "No devices", false, col_.glow_base, col_.text_dim);
         cy += lh + 4.f;
     } else {
         constexpr int MAX_BT = 4;
@@ -2292,10 +2440,10 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         for (const auto& dev : snap.bt_devices) {
             if (shown >= MAX_BT) break;
             const ImU32 dot_col = dev.connected ? col_.ind_good : col_.ind_inactive;
-            dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f, dot_col);
+            dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f, dot_col);
             char buf[64];
             snprintf(buf, sizeof(buf), "  %s", dev.name.c_str());
-            hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, dev.connected,
+            hud_glow_text(dl, {cx + PAD + 4.f, cy}, buf, dev.connected,
                           col_.glow_base, col_.text_fill);
             cy += lh + 2.f;
             ++shown;
@@ -2317,25 +2465,25 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
             snprintf(buf, sizeof(buf), "FPS  %4.1f", static_cast<double>(fps_show));
         else
             snprintf(buf, sizeof(buf), "FPS  --");
-        hud_glow_text(dl, {px + PAD, cy}, buf, fps_show > 0.f, col_.glow_base, col_.text_fill);
-        const float spw = PW - PAD * 2.f - 80.f;
+        hud_glow_text(dl, {cx + PAD, cy}, buf, fps_show > 0.f, col_.glow_base, col_.text_fill);
+        const float spw = COLW - PAD * 2.f - 80.f;
         // Sparkline: frame time in ms, capped at 50ms (20 FPS floor)
         sparkline(snap.sys_metrics.ft_history, kSysHistLen, snap.sys_metrics.ft_history_head,
-                  {px + PAD + 78.f, cy}, spw, lh, 50.f, col_.primary);
+                  {cx + PAD + 78.f, cy}, spw, lh, 50.f, col_.primary);
         cy += lh + 4.f;
 
         if (fps_r > 0.f && fps_s > 0.f)
             snprintf(buf, sizeof(buf), "Inst  %4.1f", static_cast<double>(fps_r));
         else
             snprintf(buf, sizeof(buf), "Inst  --");
-        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
+        hud_glow_text(dl, {cx + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
         cy += lh + 2.f;
 
         if (ft > 0.f)
             snprintf(buf, sizeof(buf), "Frame  %.1fms", static_cast<double>(ft));
         else
             snprintf(buf, sizeof(buf), "Frame  --");
-        hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
+        hud_glow_text(dl, {cx + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
         cy += lh + 8.f;
     }
 
@@ -2351,9 +2499,9 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
             snprintf(buf, sizeof(buf), "  Teensy   %.0fms", static_cast<double>(rtt));
         else
             snprintf(buf, sizeof(buf), "  Teensy   --");
-        dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f,
+        dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f,
                             ok ? col_.ind_good : col_.ind_fail);
-        hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, ok, col_.glow_base, col_.text_fill);
+        hud_glow_text(dl, {cx + PAD + 4.f, cy}, buf, ok, col_.glow_base, col_.text_fill);
         cy += lh + 4.f;
     }
 
@@ -2366,9 +2514,9 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
             snprintf(buf, sizeof(buf), "  Knob   <%.0fms ago", static_cast<double>(age));
         else
             snprintf(buf, sizeof(buf), "  Knob   --");
-        dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f,
+        dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f,
                             ok ? col_.ind_good : col_.ind_inactive);
-        hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, ok, col_.glow_base, col_.text_fill);
+        hud_glow_text(dl, {cx + PAD + 4.f, cy}, buf, ok, col_.glow_base, col_.text_fill);
         cy += lh + 4.f;
     }
 
@@ -2382,26 +2530,28 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
                      static_cast<double>(snap.serial_metrics.lora_snr));
         else
             snprintf(buf, sizeof(buf), "  LoRa   --");
-        dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f,
+        dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f,
                             ok ? col_.ind_good : col_.ind_inactive);
-        hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, ok, col_.glow_base, col_.text_fill);
+        hud_glow_text(dl, {cx + PAD + 4.f, cy}, buf, ok, col_.glow_base, col_.text_fill);
         cy += lh + 8.f;
     }
 
     // ── SSH ───────────────────────────────────────────────────────────────────
     {
-        dl->AddLine({px + PAD, cy}, {px + PW - PAD, cy}, with_alpha(col_.primary, 80), 1.f);
+        wrap_col(2.f * lh + 10.f);
+        dl->AddLine({cx + PAD, cy}, {cx + COLW - PAD, cy}, with_alpha(col_.primary, 80), 1.f);
         cy += 5.f;
         char buf[32];
         if (snap.ssh.active) {
             snprintf(buf, sizeof(buf), "SSH  Active :%d", snap.ssh.port);
-            dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f, col_.ind_good);
+            dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f, col_.ind_good);
         } else {
             snprintf(buf, sizeof(buf), "SSH  Inactive");
-            dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f, col_.ind_fail);
+            dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f, col_.ind_fail);
         }
-        hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, snap.ssh.active,
+        hud_glow_text(dl, {cx + PAD + 4.f, cy}, buf, snap.ssh.active,
                       col_.glow_base, col_.text_fill);
+        cy += lh + 8.f;
     }
 
     // ── I2C ───────────────────────────────────────────────────────────────────
@@ -2409,22 +2559,22 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     {
         char buf[64];
         if (snap.i2c_scan_busy) {
-            hud_glow_text(dl, {px + PAD, cy}, "Scanning...", true, col_.glow_base, col_.warn);
+            hud_glow_text(dl, {cx + PAD, cy}, "Scanning...", true, col_.glow_base, col_.warn);
             cy += lh + 4.f;
         } else if (snap.i2c_scan_results.empty()) {
             snprintf(buf, sizeof(buf), "%s  no scan", snap.i2c_scan_bus.c_str());
-            hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
+            hud_glow_text(dl, {cx + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
             cy += lh + 4.f;
         } else {
             snprintf(buf, sizeof(buf), "Bus: %s", snap.i2c_scan_bus.c_str());
-            hud_glow_text(dl, {px + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
+            hud_glow_text(dl, {cx + PAD, cy}, buf, false, col_.glow_base, col_.text_dim);
             cy += lh + 2.f;
             constexpr int kCols = 6;
             int col_idx = 0;
-            const float cell_w = (PW - PAD * 2.f) / kCols;
+            const float cell_w = (COLW - PAD * 2.f) / kCols;
             for (uint8_t addr : snap.i2c_scan_results) {
                 snprintf(buf, sizeof(buf), "0x%02X", static_cast<int>(addr));
-                const float ax = px + PAD + col_idx * cell_w;
+                const float ax = cx + PAD + col_idx * cell_w;
                 dl->AddRectFilled({ax, cy}, {ax + cell_w - 2.f, cy + lh},
                                   with_alpha(col_.primary, 30), 2.f);
                 hud_glow_text(dl, {ax + 2.f, cy}, buf, true, col_.glow_base, col_.text_fill);
@@ -2445,8 +2595,8 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
             const ImU32 vc = na ? col_.ind_inactive : (hi ? col_.ind_good : col_.text_dim);
             snprintf(buf, sizeof(buf), "  GPIO%-3d  %s", ps.pin,
                      na ? "N/A" : (hi ? "HI" : "LO"));
-            dl->AddCircleFilled({px + PAD + 5.f, cy + lh * 0.5f}, 4.f, vc);
-            hud_glow_text(dl, {px + PAD + 4.f, cy}, buf, !na, col_.glow_base, vc);
+            dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f, vc);
+            hud_glow_text(dl, {cx + PAD + 4.f, cy}, buf, !na, col_.glow_base, vc);
             cy += lh + 3.f;
         }
         cy += 2.f;

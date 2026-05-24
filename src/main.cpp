@@ -3297,10 +3297,24 @@ int main(int argc, char* argv[]) {
     std::atomic<int64_t> last_xr_imu_us { 0 };
 
     xr.on_imu_pose([&state, &last_xr_imu_us](float roll, float pitch, float yaw) {
-        last_xr_imu_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+        last_xr_imu_us = now_us;
         std::lock_guard<std::mutex> lk(state.mtx);
         state.imu_pose = { roll, pitch, yaw };
+
+        // Mirror into the debug-window IMU readout + estimate the callback rate.
+        auto& d = state.imu_data;
+        d.xr_roll = roll; d.xr_pitch = pitch; d.xr_yaw = yaw;
+        static int64_t prev_us = 0;
+        if (prev_us) {
+            float dms = (now_us - prev_us) / 1000.f;
+            if (dms > 0.f) {
+                float hz = 1000.f / dms;
+                d.xr_rate_hz = (d.xr_rate_hz > 0.f) ? d.xr_rate_hz * 0.98f + hz * 0.02f : hz;
+            }
+        }
+        prev_us = now_us;
     });
 
     xr.on_state_changed([](int id, int val) {
@@ -3331,6 +3345,32 @@ int main(int argc, char* argv[]) {
             if (filtered < 0.f) filtered += 360.f;
             state.compass_heading = filtered;
         }
+    });
+
+    // Full raw 9-axis sample → debug-window IMU readout (separate from the
+    // heading filter above so compass behaviour is unchanged).
+    mpu9250.set_sample_callback([&state](const Mpu9250::Sample& s) {
+        int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::lock_guard<std::mutex> lk(state.mtx);
+        auto& d = state.imu_data;
+        d.mpu_ok = true;
+        for (int i = 0; i < 3; ++i) {
+            d.accel_g[i]  = s.accel_g[i];
+            d.gyro_dps[i] = s.gyro_dps[i];
+            d.mag_ut[i]   = s.mag_ut[i];
+        }
+        d.temp_c      = s.temp_c;
+        d.mpu_heading = s.heading_deg;
+        static int64_t prev_us = 0;
+        if (prev_us) {
+            float dms = (now_us - prev_us) / 1000.f;
+            if (dms > 0.f) {
+                float hz = 1000.f / dms;
+                d.mpu_rate_hz = (d.mpu_rate_hz > 0.f) ? d.mpu_rate_hz * 0.9f + hz * 0.1f : hz;
+            }
+        }
+        prev_us = now_us;
     });
 
     if (!mpu9250.start() && mpu_cfg.enabled)
@@ -4229,6 +4269,8 @@ int main(int argc, char* argv[]) {
             snap.effects_cfg        = state.effects_cfg;
             snap.map_overlay        = state.map_overlay;
             snap.sys_metrics        = state.sys_metrics;
+            snap.gpu                = state.gpu;
+            snap.imu_data           = state.imu_data;
             snap.wifi               = state.wifi;
             snap.ping               = state.ping;
             snap.ssh                = state.ssh;
@@ -4263,6 +4305,7 @@ int main(int argc, char* argv[]) {
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count());
             bool xr_fresh = (now_us - last_xr_imu_us.load()) < 2'000'000ULL;
+            snap.imu_data.xr_active = xr_fresh;
             if (xr_fresh) {
                 const float vals[3] = {
                     snap.imu_pose.roll, snap.imu_pose.pitch, snap.imu_pose.yaw

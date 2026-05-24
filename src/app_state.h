@@ -204,6 +204,30 @@ struct ImuPose {
     float yaw   = 0.0f;
 };
 
+// ── Full IMU debug readout ─────────────────────────────────────────────────────
+// Aggregates every value delivered by the two IMUs so the debug window can show
+// live readings for fault-finding:
+//   • VITURE XR glasses — fused Euler pose (roll/pitch/yaw), ~1 kHz.
+//   • MPU-9250          — raw accel (g), gyro (deg/s), mag (µT), die temp, heading.
+// Written by the IMU callbacks under AppState::mtx; read on the render thread.
+struct ImuData {
+    // VITURE XR glasses fused pose (degrees)
+    bool  xr_active  = false;   // IMU frames arrived within the freshness window
+    float xr_roll    = 0.f;
+    float xr_pitch   = 0.f;
+    float xr_yaw     = 0.f;
+    float xr_rate_hz = 0.f;     // measured callback rate (EMA)
+
+    // MPU-9250 raw 9-axis readout
+    bool  mpu_ok      = false;
+    float accel_g[3]  = {0.f, 0.f, 0.f};   // x, y, z (g)
+    float gyro_dps[3] = {0.f, 0.f, 0.f};   // x, y, z (deg/s)
+    float mag_ut[3]   = {0.f, 0.f, 0.f};   // x, y, z (µT, bias-corrected)
+    float temp_c      = 0.f;               // MPU die temperature
+    float mpu_heading = 0.f;               // fused compass heading (deg)
+    float mpu_rate_hz = 0.f;               // measured sample rate (EMA)
+};
+
 // ── Map overlay ───────────────────────────────────────────────────────────────
 
 struct MapOverlayConfig {
@@ -252,6 +276,7 @@ struct TimerAlarmState {
 // ── System metrics ────────────────────────────────────────────────────────────
 static constexpr int kSysHistLen  = 60;
 static constexpr int kPingHistLen = 30;
+static constexpr int kMaxCpuCores = 16;
 
 struct SysMetrics {
     uint64_t uptime_s     = 0;
@@ -261,12 +286,34 @@ struct SysMetrics {
     float    cpu_history [kSysHistLen]  = {};
     float    ram_history [kSysHistLen]  = {};
     int      history_head = 0;        // shared head for cpu/ram (updated by SystemMonitor)
+    // Per-core CPU breakdown (filled by SystemMonitor)
+    int      cpu_core_count = 0;
+    float    cpu_core_pct[kMaxCpuCores] = {};   // 0–100 per logical core
+    float    cpu_core_mhz[kMaxCpuCores] = {};   // current freq; 0 if unavailable
+    float    cpu_temp_c     = 0.f;              // package temperature (0 if unknown)
     // Frame-time metrics — updated by render thread each frame
     float    frame_time_ms  = 0.f;    // last frame duration in ms
     float    fps_avg        = 0.f;    // 1000 / frame_time_ms (instantaneous)
     float    fps_avg_smooth = 0.f;    // EMA-smoothed FPS over fps_avg_interval_s
     float    ft_history[kSysHistLen]  = {};
     int      ft_history_head = 0;
+};
+
+// ── GPU metrics ─────────────────────────────────────────────────────────────────
+// VideoCore (Raspberry Pi) per-domain clock breakdown + temperature, polled via
+// vcgencmd by SystemMonitor. The clock domains are the GPU's functional cores.
+static constexpr int kMaxGpuClocks = 6;
+
+struct GpuClock {
+    char  name[6] = {};   // "core","v3d","isp","h264","hevc"
+    float mhz     = 0.f;
+};
+
+struct GpuMetrics {
+    bool     available   = false;   // vcgencmd produced usable data
+    float    temp_c      = 0.f;
+    int      clock_count = 0;
+    GpuClock clocks[kMaxGpuClocks] = {};
 };
 
 struct SerialMetrics {
@@ -460,6 +507,8 @@ struct AppState {
 
     // System monitor / network / Bluetooth state
     SysMetrics             sys_metrics;
+    GpuMetrics             gpu;
+    ImuData                imu_data;
     WifiState              wifi;
     PingState              ping;
     SshState               ssh;
