@@ -5632,12 +5632,9 @@ int main(int argc, char* argv[]) {
                    sizeof(state.lora_node_colors));
         }
 
-        // ── Perf diagnostics (TEMPORARY) — split the ~22ms frame into CPU vs GPU ──
-        // Once/second: avg frame time, RSS, fd count, plus the CPU-prep time
-        // (top-of-loop → start of render) and the GPU time (render → after a
-        // glFinish'd present).  cpu+gpu ≈ ft tells us which half to attack.
-        // s_cpu_sum/s_gpu_sum are filled at the end of the loop body (after swap).
-        static double s_cpu_sum = 0.0, s_gpu_sum = 0.0;  // loop-scope: read here, written post-present
+        // ── Perf readout (TEMPORARY) — once/second fps so the post-process win
+        // can be confirmed after toggling Vision Assist off. (F also shows fps in
+        // the HUD.)  Lightweight: no glFinish, no per-phase timing.
         {
             static double s_diag_last = 0.0;
             static int    s_diag_frames = 0;
@@ -5647,29 +5644,11 @@ int main(int argc, char* argv[]) {
             if (now - s_diag_last >= 1.0) {
                 double avg_ms = (s_diag_frames > 0)
                               ? (s_diag_ft_sum / s_diag_frames) * 1000.0 : 0.0;
-                double cpu_ms = (s_diag_frames > 0) ? s_cpu_sum / s_diag_frames : 0.0;
-                double gpu_ms = (s_diag_frames > 0) ? s_gpu_sum / s_diag_frames : 0.0;
-                long rss_mb = 0;
-                if (FILE* f = fopen("/proc/self/statm", "r")) {
-                    long pages = 0, resident = 0;
-                    if (fscanf(f, "%ld %ld", &pages, &resident) == 2)
-                        rss_mb = resident * (sysconf(_SC_PAGESIZE) / 1024) / 1024;
-                    fclose(f);
-                }
-                int fd_count = 0;
-                if (DIR* d = opendir("/proc/self/fd")) {
-                    while (readdir(d)) ++fd_count;
-                    closedir(d);
-                }
-                fprintf(stderr,
-                        "[perf] fps=%.1f ft=%.1fms cpu=%.1f gpu=%.1f rss=%ldMB fds=%d\n",
-                        avg_ms > 0.0 ? 1000.0 / avg_ms : 0.0,
-                        avg_ms, cpu_ms, gpu_ms, rss_mb, fd_count);
+                fprintf(stderr, "[perf] fps=%.1f ft=%.1fms\n",
+                        avg_ms > 0.0 ? 1000.0 / avg_ms : 0.0, avg_ms);
                 s_diag_last   = now;
                 s_diag_frames = 0;
                 s_diag_ft_sum = 0.0;
-                s_cpu_sum = 0.0;
-                s_gpu_sum = 0.0;
             }
         }
 
@@ -5818,24 +5797,6 @@ int main(int argc, char* argv[]) {
         }
 
         // ── Render cameras into per-eye FBOs ──────────────────────────────────
-        // (TEMPORARY) mark the CPU/GPU boundary: everything above this point is
-        // CPU prep (input, snapshot, state); everything below is GL submit.
-        double t_render_start = glfwGetTime();
-
-        // (TEMPORARY) per-phase GPU split. glFinish each mark so we localize the
-        // 54ms GPU within: cam / pp / comp / nvg / imgui / present.
-        static double s_ph_last2 = now;
-        static double s_ph_cam = 0, s_ph_pp = 0, s_ph_comp = 0,
-                      s_ph_nvg = 0, s_ph_imgui = 0, s_ph_present = 0;
-        static int    s_ph_n = 0;
-        double ph_t0 = t_render_start;
-        auto ph_mark = [&ph_t0](double& acc) {
-            glFinish();
-            double t = glfwGetTime();
-            acc += (t - ph_t0) * 1000.0;
-            ph_t0 = t;
-        };
-
         // Theater mode: compute a letterbox/pillarbox sub-viewport that preserves
         // the camera's native aspect ratio. Black bars are filled by glClear().
         auto make_theater_vp = [&snap](int fw, int fh, bool right_eye) -> std::array<int,4> {
@@ -5942,7 +5903,6 @@ int main(int argc, char* argv[]) {
 
             xr.eye_right().unbind();
         }
-        ph_mark(s_ph_cam);   // both eye camera draws
 
         // ── Post-processing (Vision Assist depth cues) ────────────────────────
         GLuint left_src  = xr.eye_left().tex;
@@ -5960,7 +5920,6 @@ int main(int argc, char* argv[]) {
             left_src  = pp_fbo_left.tex;
             right_src = pp_fbo_right.tex;
         }
-        ph_mark(s_ph_pp);   // post-processing (Vision Assist) — 0 if disabled
 
         // ── Photo capture ─────────────────────────────────────────────────────
         // Reads directly from the camera eye FBOs (no HUD). Async PNG write.
@@ -6029,7 +5988,6 @@ int main(int argc, char* argv[]) {
             // Standard composite (no latency correction)
             xr.composite();
         }
-        ph_mark(s_ph_comp);   // photo/video/qr + composite/timewarp to screen
 
         // ── Phase 1: NanoVG PiP underlay then HUD chrome ─────────────────────
         // Reset viewport to full framebuffer — timewarp leaves it at right-eye half.
@@ -6043,7 +6001,6 @@ int main(int argc, char* argv[]) {
         hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
         hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
         hud.end_nvg_overlay();
-        ph_mark(s_ph_nvg);   // NanoVG HUD overlay (PiP underlay + chrome + toasts)
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
@@ -6105,29 +6062,9 @@ int main(int argc, char* argv[]) {
         // hud.draw_popups(state, xr.eye_width(), xr.eye_height());
 
         hud.render_menu_overlay();
-        ph_mark(s_ph_imgui);   // ImGui menu + panel/portrait/android overlays
 
         // ── Swap ──────────────────────────────────────────────────────────────
         xr.present();
-        ph_mark(s_ph_present); // buffer swap
-
-        // (TEMPORARY) CPU/GPU split — t_frame_end already glFinish'd by ph_mark.
-        double t_frame_end = glfwGetTime();
-        s_cpu_sum += (t_render_start - now) * 1000.0;
-        s_gpu_sum += (t_frame_end - t_render_start) * 1000.0;
-
-        // (TEMPORARY) per-phase GPU breakdown, once/second.
-        ++s_ph_n;
-        if (now - s_ph_last2 >= 1.0) {
-            double n = (s_ph_n > 0) ? s_ph_n : 1;
-            fprintf(stderr,
-                    "[perf2] cam=%.1f pp=%.1f comp=%.1f nvg=%.1f imgui=%.1f present=%.1f ms\n",
-                    s_ph_cam / n, s_ph_pp / n, s_ph_comp / n,
-                    s_ph_nvg / n, s_ph_imgui / n, s_ph_present / n);
-            s_ph_last2 = now;
-            s_ph_n = 0;
-            s_ph_cam = s_ph_pp = s_ph_comp = s_ph_nvg = s_ph_imgui = s_ph_present = 0;
-        }
     }
 
     // ── Persist runtime settings ──────────────────────────────────────────────
