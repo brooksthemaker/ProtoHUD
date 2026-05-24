@@ -5632,13 +5632,12 @@ int main(int argc, char* argv[]) {
                    sizeof(state.lora_node_colors));
         }
 
-        // ── Perf diagnostics (TEMPORARY) — classify the progressive fps leak ─────
-        // Once/second: avg frame time over the interval, process RSS, and open-fd
-        // count.  Reading these together tells us the leak class without guessing:
-        //   • RSS climbs        → memory leak (→ swap thrash → fps collapse)
-        //   • fd count climbs   → fd / dmabuf leak
-        //   • both flat, ft up  → GL/EGL driver resource accumulation
-        // Remove once the leak is found.
+        // ── Perf diagnostics (TEMPORARY) — split the ~22ms frame into CPU vs GPU ──
+        // Once/second: avg frame time, RSS, fd count, plus the CPU-prep time
+        // (top-of-loop → start of render) and the GPU time (render → after a
+        // glFinish'd present).  cpu+gpu ≈ ft tells us which half to attack.
+        // s_cpu_sum/s_gpu_sum are filled at the end of the loop body (after swap).
+        static double s_cpu_sum = 0.0, s_gpu_sum = 0.0;  // loop-scope: read here, written post-present
         {
             static double s_diag_last = 0.0;
             static int    s_diag_frames = 0;
@@ -5648,6 +5647,8 @@ int main(int argc, char* argv[]) {
             if (now - s_diag_last >= 1.0) {
                 double avg_ms = (s_diag_frames > 0)
                               ? (s_diag_ft_sum / s_diag_frames) * 1000.0 : 0.0;
+                double cpu_ms = (s_diag_frames > 0) ? s_cpu_sum / s_diag_frames : 0.0;
+                double gpu_ms = (s_diag_frames > 0) ? s_gpu_sum / s_diag_frames : 0.0;
                 long rss_mb = 0;
                 if (FILE* f = fopen("/proc/self/statm", "r")) {
                     long pages = 0, resident = 0;
@@ -5661,12 +5662,14 @@ int main(int argc, char* argv[]) {
                     closedir(d);
                 }
                 fprintf(stderr,
-                        "[perf] fps=%.1f ft=%.1fms rss=%ldMB fds=%d\n",
+                        "[perf] fps=%.1f ft=%.1fms cpu=%.1f gpu=%.1f rss=%ldMB fds=%d\n",
                         avg_ms > 0.0 ? 1000.0 / avg_ms : 0.0,
-                        avg_ms, rss_mb, fd_count);
+                        avg_ms, cpu_ms, gpu_ms, rss_mb, fd_count);
                 s_diag_last   = now;
                 s_diag_frames = 0;
                 s_diag_ft_sum = 0.0;
+                s_cpu_sum = 0.0;
+                s_gpu_sum = 0.0;
             }
         }
 
@@ -5815,6 +5818,10 @@ int main(int argc, char* argv[]) {
         }
 
         // ── Render cameras into per-eye FBOs ──────────────────────────────────
+        // (TEMPORARY) mark the CPU/GPU boundary: everything above this point is
+        // CPU prep (input, snapshot, state); everything below is GL submit.
+        double t_render_start = glfwGetTime();
+
         // Theater mode: compute a letterbox/pillarbox sub-viewport that preserves
         // the camera's native aspect ratio. Black bars are filled by glClear().
         auto make_theater_vp = [&snap](int fw, int fh, bool right_eye) -> std::array<int,4> {
@@ -6083,6 +6090,13 @@ int main(int argc, char* argv[]) {
 
         // ── Swap ──────────────────────────────────────────────────────────────
         xr.present();
+
+        // (TEMPORARY) CPU/GPU split: glFinish drains the GPU so t_frame_end
+        // captures real GPU completion (one glFinish/frame ≈ negligible).
+        glFinish();
+        double t_frame_end = glfwGetTime();
+        s_cpu_sum += (t_render_start - now) * 1000.0;
+        s_gpu_sum += (t_frame_end - t_render_start) * 1000.0;
     }
 
     // ── Persist runtime settings ──────────────────────────────────────────────
