@@ -31,6 +31,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from gcal import GoogleSync
+
 # ── Config resolution ──────────────────────────────────────────────────────────
 
 DEFAULTS = {
@@ -115,10 +117,14 @@ class Store:
     def __init__(self, cfg):
         self.cfg = cfg
         self.lock = threading.Lock()
+        self.gsync = None  # GoogleSync, set after construction (events second source)
         data_dir = os.path.dirname(cfg["events_path"])
         os.makedirs(data_dir, exist_ok=True)
         self.manual_path = os.path.join(data_dir, "manual_events.json")
         self.manual = read_json(self.manual_path, {"events": []}).get("events", [])
+
+    def _google_events(self):
+        return self.gsync.snapshot()[3] if self.gsync else []
 
     # --- manual event mutations (call under self.lock via public methods) ---
     def add_manual(self, ev):
@@ -134,42 +140,34 @@ class Store:
         self.publish()
 
     def list_events(self):
+        gevents = self._google_events()
         with self.lock:
-            return sorted(self._merged(), key=lambda e: e["start_utc"])
+            return sorted(list(self.manual) + gevents, key=lambda e: e["start_utc"])
 
     def _save_manual(self):
         atomic_write_json(self.manual_path, {"events": self.manual})
 
-    def _merged(self):
-        # Manual + Google (Google returns [] until that pass lands).
-        return list(self.manual) + load_google_events(self.cfg)
-
     # --- publish to the HUD-facing files ---
     def publish(self):
+        gstate, gcode, gurl = "disconnected", "", ""
+        gevents = []
+        if self.gsync:
+            gstate, gcode, gurl, gevents = self.gsync.snapshot()
         with self.lock:
-            events = sorted(self._merged(), key=lambda e: e["start_utc"])
+            events = sorted(list(self.manual) + gevents,
+                            key=lambda e: e["start_utc"])
         atomic_write_json(self.cfg["events_path"],
                           {"version": 1,
                            "generated_utc": int(time.time()),
                            "events": events})
         atomic_write_json(self.cfg["status_path"], {
             "web_url": f"http://{detect_ip()}:{self.cfg['web_port']}",
-            "gcal_state": google_state(self.cfg),
-            "gcal_user_code": "",
-            "gcal_verify_url": "",
+            "gcal_state": gstate,
+            "gcal_user_code": gcode,
+            "gcal_verify_url": gurl,
             "last_sync_utc": int(time.time()),
             "event_count": len(events),
         })
-
-
-# ── Google Calendar seam (implemented in a later pass) ───────────────────────────
-
-def google_state(cfg):
-    return "disconnected"
-
-
-def load_google_events(cfg):
-    return []
 
 
 # ── Time helpers ─────────────────────────────────────────────────────────────────
@@ -320,6 +318,13 @@ def heartbeat(store, period_s):
 def main():
     cfg = load_config()
     store = Store(cfg)
+
+    # Google Calendar is the second event source. It runs only when a
+    # client_secret.json is present; otherwise state stays "disconnected".
+    gsync = GoogleSync(cfg, on_change=store.publish)
+    store.gsync = gsync
+    gsync.start()
+
     store.publish()  # write initial events.json + status
 
     threading.Thread(target=heartbeat,

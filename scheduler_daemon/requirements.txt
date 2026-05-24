@@ -1,6 +1,5 @@
-# The web-form daemon uses only the Python 3 standard library — nothing to install.
+# No third-party dependencies — Python 3 standard library only.
 #
-# Google Calendar sync (a later pass) will add:
-#   requests>=2.31
-# (OAuth 2.0 device flow + Calendar v3 REST are simple enough to drive with requests;
-#  swap in google-api-python-client if you prefer the official client.)
+# Both the web form and Google Calendar sync (OAuth 2.0 device flow + Calendar v3)
+# are implemented with urllib, so nothing needs to be pip-installed. Requires
+# system CA certificates (the `ca-certificates` package) for HTTPS to Google.
