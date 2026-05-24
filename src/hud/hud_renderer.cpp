@@ -642,10 +642,12 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
 // forward direction is at the top, plus LoRa node bearing markers + distance labels
 // around the outer edge (Battlefield-style).
 void HudRenderer::draw_compass_ring(NVGcontext* vg, const AppState& s,
-                                    float cx, float cy, float radius) {
+                                    float cx, float cy, float radius, bool bold) {
     // The compass bezel always rotates with heading (that's what a compass does);
     // map.rotate_with_heading separately controls whether the MAP IMAGE turns too.
+    // `bold` (used by the expanded map) thickens ticks + emboldens the cardinals.
     const float heading = s.compass_heading;
+    const float tw_mul  = bold ? 2.0f : 1.0f;
     const float DEG = (float)M_PI / 180.f;
     auto bearing_angle = [&](float beta_deg) -> float {
         float rel = beta_deg - heading;          // 0 = forward
@@ -671,21 +673,26 @@ void HudRenderer::draw_compass_ring(NVGcontext* vg, const AppState& s,
         nvgMoveTo(vg, cx + ca * r_tick,        cy + sa * r_tick);
         nvgLineTo(vg, cx + ca * (r_tick + t),  cy + sa * (r_tick + t));
         nvgStrokeColor(vg, card ? col_major : col_minor);
-        nvgStrokeWidth(vg, card ? 2.0f : 1.0f);
+        nvgStrokeWidth(vg, (card ? 2.0f : 1.0f) * tw_mul);
         nvgStroke(vg);
     }
 
-    // Cardinal letters.
+    // Cardinal letters (bigger + faux-bold in the expanded view).
     static const char* kCard[4] = { "N", "E", "S", "W" };
     static const int   kDeg [4] = { 0, 90, 180, 270 };
-    nvg_set_font_ui(16.f);
+    nvg_set_font_ui(bold ? 24.f : 16.f);
     nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
     for (int i = 0; i < 4; ++i) {
         const float a = bearing_angle((float)kDeg[i]);
         const float lx = cx + std::cos(a) * r_card;
         const float ly = cy + std::sin(a) * r_card;
-        nvg_text_outline(vg, lx, ly, kCard[i]);
+        nvg_text_outline(vg, lx, ly, kCard[i], bold ? 2.2f : 1.6f);
         nvg_glow_text(vg, lx, ly, kCard[i], i == 0, col_.glow_base, col_.text_fill);
+        if (bold) {   // extra offset fill passes = faux bold
+            nvgFillColor(vg, nvg_col(col_.text_fill));
+            nvgText(vg, lx + 0.7f, ly, kCard[i], nullptr);
+            nvgText(vg, lx - 0.7f, ly, kCard[i], nullptr);
+        }
     }
 
     // LoRa node bearing markers + distance labels around the outside.
@@ -781,8 +788,8 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
 
     nvgRestore(vg);
 
-    // Compass bezel around the expanded map (turns as the user turns).
-    draw_compass_ring(vg, s, cx, cy, half);
+    // Compass bezel around the expanded map (turns as the user turns) — bold.
+    draw_compass_ring(vg, s, cx, cy, half, /*bold=*/true);
 
     // Title + zoom readout.
     char zb[32]; snprintf(zb, sizeof(zb), "%.1fx", std::max(cfg.view_zoom, 1.0f));
