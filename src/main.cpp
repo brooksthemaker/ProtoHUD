@@ -3711,6 +3711,7 @@ int main(int argc, char* argv[]) {
     bool        sched_enabled    = true;
     bool        sched_autostart  = false;
     int         sched_poll_s     = 20;
+    int         sched_lead_min   = 10;   // applied to state after it's constructed
     std::string sched_events_path =
         "/home/user/.local/share/protohud-scheduler/events.json";
     std::string sched_status_path =
@@ -3722,7 +3723,7 @@ int main(int argc, char* argv[]) {
         sched_poll_s      = jval(jsc, "poll_interval_s", sched_poll_s);
         sched_events_path = jval(jsc, "events_path",     sched_events_path);
         sched_status_path = jval(jsc, "status_path",     sched_status_path);
-        state.scheduler_lead_min = jval(jsc, "lead_minutes", state.scheduler_lead_min);
+        sched_lead_min    = jval(jsc, "lead_minutes",    sched_lead_min);
     }
 
     if (cfg.contains("pip")) {
@@ -3776,6 +3777,7 @@ int main(int argc, char* argv[]) {
     state.max_messages        = jval(jhud, "lora_message_history", 50);
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
+    state.scheduler_lead_min  = sched_lead_min;   // loaded above, applied now that state exists
 
     if (jhud.contains("effects")) {
         auto& jfx = jhud["effects"];
