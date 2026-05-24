@@ -155,19 +155,20 @@ T jval(const json& j, const std::string& key, T def) {
     catch (...) { return def; }
 }
 
-// Position the minimap and info panel as opposite-side twins, docked to the top or
-// bottom edge. `swap` exchanges which side each occupies; the panel mirrors the
-// minimap's footprint. Called at startup and from the dock menu actions.
+// Position the minimap (always right) and info panel (always left) as opposite-side
+// twins, docked to the top or bottom edge with a fine vertical pixel nudge. The
+// panel mirrors the minimap's footprint. Called at startup and from the Location menu.
 static void apply_hud_dock(AppState& s) {
     constexpr float MX = 0.16f, MY = 0.20f;   // edge margins (screen fraction); tune as needed
-    const bool  map_left = !s.hud_dock.swap;
     const float ay = s.hud_dock.bottom ? (1.f - MY) : MY;
-    s.map_overlay.anchor_x = map_left ? MX : (1.f - MX);
+    const float voff = s.hud_dock.v_offset;
+    s.map_overlay.enabled  = true;            // minimap module is always on
+    s.map_overlay.anchor_x = 1.f - MX;        // minimap: right
     s.map_overlay.anchor_y = ay;
-    s.map_overlay.pan_x = 0.f; s.map_overlay.pan_y = 0.f;
-    s.info_panel.anchor_x = map_left ? (1.f - MX) : MX;
+    s.map_overlay.pan_x = 0.f; s.map_overlay.pan_y = voff;
+    s.info_panel.anchor_x = MX;               // info panel: left
     s.info_panel.anchor_y = ay;
-    s.info_panel.pan_x = 0.f; s.info_panel.pan_y = 0.f;
+    s.info_panel.pan_x = 0.f; s.info_panel.pan_y = voff;
 }
 
 // ── Native face renderer config ───────────────────────────────────────────────
@@ -2205,15 +2206,6 @@ static std::vector<MenuItem> build_menu(
         leaf("Dismiss Alarm", [&state]{ state.timer_alarm.alarm_triggered = false; }),
     };
 
-    // Scheduler — events are entered from a phone (web form served by the
-    // scheduler_daemon) or, later, synced from Google Calendar. On-device the
-    // user can only tune the reminder lead time and view upcoming events.
-    std::vector<MenuItem> scheduler_menu = {
-        slider("Reminder Lead", 0.f, 60.f, 5.f, "min",
-            [&state]{ return static_cast<float>(state.scheduler_lead_min); },
-            [&state](float v){ state.scheduler_lead_min = static_cast<int>(v); }),
-    };
-
     // ── Color Options ─────────────────────────────────────────────────────────
 
     // HUD > Borders & Lines
@@ -2570,25 +2562,11 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Full   (600px)", [&state]{ state.map_overlay.size_px = 600.f; }, [&state]{ return state.map_overlay.size_px == 600.f; }),
     };
 
-    std::vector<MenuItem> map_overlay_menu = {
-        toggle("Enabled",
-            [&state]{ return state.map_overlay.enabled; },
-            [&state](bool v){ state.map_overlay.enabled = v; }),
-        submenu("Select Map",           std::move(map_select_items)),
-        submenu("Move Map",             std::move(map_move_menu)),
-        submenu("Rotate Image",         std::move(map_rotate_menu)),
-        submenu("Size",                 std::move(map_size_menu)),
-        slider("Map Zoom", 1.f, 4.f, 0.1f, "x",
-            [&state]{ return state.map_overlay.zoom; },
-            [&state](float v){ state.map_overlay.zoom = v; }),
-        toggle("Rotate with Heading",
-            [&state]{ return state.map_overlay.rotate_with_heading; },
-            [&state](bool v){ state.map_overlay.rotate_with_heading = v; }),
-        leaf("Set My Direction", [&state]{
-            std::lock_guard<std::mutex> lk(state.mtx);
-            state.map_overlay.map_north_deg = state.compass_heading;
-            state.map_overlay.calibrated    = true;
-        }),
+    // ── Mini-Map Module ───────────────────────────────────────────────────────
+    // Always enabled (apply_hud_dock forces it on). Module Controls toggles the
+    // overlay chrome; Map Options handles the underlying map image.
+    auto ipw = [](InfoWidget w) { return static_cast<int>(w); };
+    std::vector<MenuItem> module_controls_menu = {
         toggle("Circle Window",
             [&state]{ return state.map_overlay.circle_window; },
             [&state](bool v){ state.map_overlay.circle_window = v; }),
@@ -2598,21 +2576,41 @@ static std::vector<MenuItem> build_menu(
         toggle("Battery Arc",
             [&state]{ return state.map_overlay.battery_arc; },
             [&state](bool v){ state.map_overlay.battery_arc = v; }),
-        toggle("Gauge: CPU/GPU (debug)",
+        toggle("Gauge: CPU/GPU",
             [&state]{ return state.map_overlay.system_debug; },
             [&state](bool v){ state.map_overlay.system_debug = v; }),
-        toggle("Clock Above Map",
+        toggle("Clock",
             [&state]{ return state.map_overlay.clock; },
             [&state](bool v){ state.map_overlay.clock = v; }),
-        toggle("Clock Date",
+        toggle("Date",
             [&state]{ return state.map_overlay.clock_date; },
             [&state](bool v){ state.map_overlay.clock_date = v; }),
-        toggle("Face Portrait",
+        toggle("Protoface Preview",
             [&state]{ return state.map_overlay.portrait; },
             [&state](bool v){ state.map_overlay.portrait = v; }),
-        toggle("Portrait: Right Half",
+        toggle("Preview: Right Half",
             [&state]{ return state.map_overlay.portrait_right_half; },
             [&state](bool v){ state.map_overlay.portrait_right_half = v; }),
+    };
+    std::vector<MenuItem> map_options_menu = {
+        submenu("Select Map",   std::move(map_select_items)),
+        submenu("Move Map",     std::move(map_move_menu)),
+        submenu("Rotate Map",   std::move(map_rotate_menu)),
+        submenu("Size",         std::move(map_size_menu)),
+        slider("Zoom", 1.f, 4.f, 0.1f, "x",
+            [&state]{ return state.map_overlay.zoom; },
+            [&state](float v){ state.map_overlay.zoom = v; }),
+        slider("Transparency", 0.f, 1.f, 0.05f, "",
+            [&state]{ return state.map_overlay.opacity; },
+            [&state](float v){ state.map_overlay.opacity = v; }),
+        toggle("Rotate with Heading",
+            [&state]{ return state.map_overlay.rotate_with_heading; },
+            [&state](bool v){ state.map_overlay.rotate_with_heading = v; }),
+        leaf("Set My Direction", [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.map_overlay.map_north_deg = state.compass_heading;
+            state.map_overlay.calibrated    = true;
+        }),
         leaf("Expand Map (Pan/Zoom)", [&state]{
             std::lock_guard<std::mutex> lk(state.mtx);
             state.map_overlay.expanded   = true;
@@ -2620,54 +2618,116 @@ static std::vector<MenuItem> build_menu(
             state.map_overlay.view_pan_x = 0.f;
             state.map_overlay.view_pan_y = 0.f;
         }),
-        slider("Transparency", 0.f, 1.f, 0.05f, "",
-            [&state]{ return state.map_overlay.opacity; },
-            [&state](float v){ state.map_overlay.opacity = v; }),
+    };
+    std::vector<MenuItem> mini_map_menu = {
+        submenu("Module Controls", std::move(module_controls_menu)),
+        submenu("Map Options",     std::move(map_options_menu)),
     };
 
-    // Cycling info panel — sits opposite the minimap and rotates through widgets.
+    // ── Info-Panel Module ─────────────────────────────────────────────────────
+    std::vector<MenuItem> clock_face_menu = {
+        leaf_sel("Ticks",   [&state]{ state.info_panel.clock_face = 0; },
+                            [&state]{ return state.info_panel.clock_face == 0; }),
+        leaf_sel("Numbers", [&state]{ state.info_panel.clock_face = 1; },
+                            [&state]{ return state.info_panel.clock_face == 1; }),
+        leaf_sel("Minimal", [&state]{ state.info_panel.clock_face = 2; },
+                            [&state]{ return state.info_panel.clock_face == 2; }),
+    };
+    std::vector<MenuItem> ip_clock_menu = {
+        toggle("Show Clock",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Clock)]; },
+            [&state, ipw](bool v){ state.info_panel.show[ipw(InfoWidget::Clock)] = v; }),
+        submenu("Clock Face", std::move(clock_face_menu)),
+    };
+    std::vector<MenuItem> ip_notif_menu = {
+        toggle("Show Notifications",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Notifications)]; },
+            [&state, ipw](bool v){ state.info_panel.show[ipw(InfoWidget::Notifications)] = v; }),
+    };
+    std::vector<MenuItem> ip_schedule_menu = {
+        toggle("Show Schedule",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Schedule)]; },
+            [&state, ipw](bool v){ state.info_panel.show[ipw(InfoWidget::Schedule)] = v; }),
+        slider("Reminder Lead", 0.f, 60.f, 5.f, "min",
+            [&state]{ return static_cast<float>(state.scheduler_lead_min); },
+            [&state](float v){ state.scheduler_lead_min = static_cast<int>(v); }),
+    };
+    std::vector<MenuItem> ip_weather_menu = {
+        toggle("Show Weather",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Weather)]; },
+            [&state, ipw](bool v){ state.info_panel.show[ipw(InfoWidget::Weather)] = v; }),
+        leaf("Set Location (coming soon)", []{}),
+        leaf("Auto-Locate via Internet (coming soon)", []{}),
+    };
     std::vector<MenuItem> info_panel_menu = {
         toggle("Enabled",
             [&state]{ return state.info_panel.enabled; },
             [&state](bool v){ state.info_panel.enabled = v; }),
-        leaf_sel("Dock Top",
-            [&state]{ state.hud_dock.bottom = false; apply_hud_dock(state); },
-            [&state]{ return !state.hud_dock.bottom; }),
-        leaf_sel("Dock Bottom",
-            [&state]{ state.hud_dock.bottom = true; apply_hud_dock(state); },
-            [&state]{ return state.hud_dock.bottom; }),
-        leaf("Swap Map/Panel Sides",
-            [&state]{ state.hud_dock.swap = !state.hud_dock.swap; apply_hud_dock(state); }),
         slider("Cycle Seconds", 2.f, 30.f, 1.f, "s",
             [&state]{ return state.info_panel.cycle_sec; },
             [&state](float v){ state.info_panel.cycle_sec = v; }),
-        toggle("Show: Clock",
-            [&state]{ return state.info_panel.show[static_cast<int>(InfoWidget::Clock)]; },
-            [&state](bool v){ state.info_panel.show[static_cast<int>(InfoWidget::Clock)] = v; }),
-        toggle("Show: Notifications",
-            [&state]{ return state.info_panel.show[static_cast<int>(InfoWidget::Notifications)]; },
-            [&state](bool v){ state.info_panel.show[static_cast<int>(InfoWidget::Notifications)] = v; }),
-        toggle("Show: Schedule",
-            [&state]{ return state.info_panel.show[static_cast<int>(InfoWidget::Schedule)]; },
-            [&state](bool v){ state.info_panel.show[static_cast<int>(InfoWidget::Schedule)] = v; }),
-        toggle("Show: Weather",
-            [&state]{ return state.info_panel.show[static_cast<int>(InfoWidget::Weather)]; },
-            [&state](bool v){ state.info_panel.show[static_cast<int>(InfoWidget::Weather)] = v; }),
+        submenu("Clock",         std::move(ip_clock_menu)),
+        submenu("Notifications", std::move(ip_notif_menu)),
+        with_panel(
+            submenu("Schedule", std::move(ip_schedule_menu)),
+            "Schedule",
+            [state_ptr](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                if (!state_ptr) return;
+                const float lh = 18.f;
+                ImVec2 p = o;
+                auto line = [&](const std::string& s, ImU32 c) {
+                    dl->AddText({ p.x, p.y }, c, s.c_str()); p.y += lh;
+                };
+                SchedulerStatus st;
+                { std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                  st = state_ptr->scheduler_status; }
+                const ImU32 dim = IM_COL32(180, 180, 180, 200);
+                const ImU32 ok  = IM_COL32(160, 220, 160, 220);
+                const ImU32 bad = IM_COL32(220, 160,  90, 220);
+                const ImU32 wht = IM_COL32(230, 230, 230, 230);
+                line(std::string("Daemon: ") + (st.daemon_ok ? "online" : "offline"),
+                     st.daemon_ok ? ok : bad);
+                line(std::string("Web: ") +
+                         (st.web_url.empty() ? "(starting...)" : st.web_url),
+                     st.web_url.empty() ? dim : wht);
+                line("Scan/open that URL on your phone", dim);
+                line("(QR code coming soon)", dim);
+                line(std::string("Google: ") + st.gcal_state,
+                     st.gcal_state == "connected" ? ok : dim);
+                if (st.gcal_state == "pending" && !st.gcal_user_code.empty()) {
+                    line(std::string("  code: ") + st.gcal_user_code, wht);
+                    line(std::string("  at: ")   + st.gcal_verify_url, dim);
+                }
+            }),
+        submenu("Weather",       std::move(ip_weather_menu)),
+    };
+
+    // ── Location — shared dock for both the minimap and info panel ─────────────
+    std::vector<MenuItem> location_menu = {
+        leaf_sel("Top",
+            [&state]{ state.hud_dock.bottom = false; apply_hud_dock(state); },
+            [&state]{ return !state.hud_dock.bottom; }),
+        leaf_sel("Bottom",
+            [&state]{ state.hud_dock.bottom = true; apply_hud_dock(state); },
+            [&state]{ return state.hud_dock.bottom; }),
+        leaf("Move Up (+5)",
+            [&state]{ state.hud_dock.v_offset -= 5.f; apply_hud_dock(state); }),
+        leaf("Move Down (-5)",
+            [&state]{ state.hud_dock.v_offset += 5.f; apply_hud_dock(state); }),
     };
 
     std::vector<MenuItem> hud_menu = {
         toggle("Flip to Top",
             [hud_cfg]{ return hud_cfg->hud_flip_vertical; },
             [hud_cfg](bool v){ hud_cfg->hud_flip_vertical = v; }),
-        slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
-            [hud_cfg]{ return hud_cfg->text_scale; },
-            [hud_cfg](float v){ hud_cfg->text_scale = v; }),
-        submenu("Compass",       std::move(compass_menu)),
-        submenu("Clock",         std::move(clock_menu)),
-        submenu("Color",         std::move(color_options_menu)),
-        submenu("Menu Position", std::move(menu_position_menu)),
-        submenu("Map Overlay",   std::move(map_overlay_menu)),
-        submenu("Info Panel",    std::move(info_panel_menu)),
+        submenu("Location",         std::move(location_menu)),
+        submenu("Mini-Map Module",  std::move(mini_map_menu)),
+        submenu("Info-Panel Module",std::move(info_panel_menu)),
+        submenu("Compass",          std::move(compass_menu)),
+        submenu("Clock",            std::move(clock_menu)),
+        submenu("Color",            std::move(color_options_menu)),
+        submenu("Menu Position",    std::move(menu_position_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
@@ -3108,58 +3168,9 @@ static std::vector<MenuItem> build_menu(
                                : IM_COL32(220, 160, 90, 220));
             }),
         submenu("Timers and Alarm", std::move(timers_alarm_menu)),
-        with_panel(
-            submenu("Scheduler", std::move(scheduler_menu)),
-            "Scheduler",
-            [state_ptr](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-                (void)sz;
-                if (!state_ptr) return;
-                const float lh = 18.f;
-                ImVec2 p = o;
-                auto line = [&](const std::string& s, ImU32 c) {
-                    dl->AddText({ p.x, p.y }, c, s.c_str());
-                    p.y += lh;
-                };
-                SchedulerStatus st;
-                std::vector<ScheduledEvent> evs;
-                {
-                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
-                    st  = state_ptr->scheduler_status;
-                    evs = state_ptr->scheduler_events;
-                }
-                const ImU32 dim = IM_COL32(180, 180, 180, 200);
-                const ImU32 ok  = IM_COL32(160, 220, 160, 220);
-                const ImU32 bad = IM_COL32(220, 160,  90, 220);
-                const ImU32 wht = IM_COL32(230, 230, 230, 230);
-
-                line(std::string("Daemon: ") + (st.daemon_ok ? "online" : "offline"),
-                     st.daemon_ok ? ok : bad);
-                line(std::string("Web: ") +
-                         (st.web_url.empty() ? "(starting...)" : st.web_url),
-                     st.web_url.empty() ? dim : wht);
-                line("Open that URL on your phone", dim);
-                line(std::string("Google: ") + st.gcal_state,
-                     st.gcal_state == "connected" ? ok : dim);
-                if (st.gcal_state == "pending" && !st.gcal_user_code.empty()) {
-                    line(std::string("  code: ") + st.gcal_user_code, wht);
-                    line(std::string("  at: ")   + st.gcal_verify_url, dim);
-                }
-                p.y += lh * 0.5f;
-                line("Upcoming:", dim);
-                if (evs.empty()) line("  (none)", dim);
-                int shown = 0;
-                for (const auto& e : evs) {
-                    if (shown >= 6) break;
-                    char when[24] = "--:--";
-                    if (e.start_utc) {
-                        struct tm tm{}; localtime_r(&e.start_utc, &tm);
-                        strftime(when, sizeof(when),
-                                 e.all_day ? "%b %d all-day" : "%b %d %H:%M", &tm);
-                    }
-                    line(std::string("  ") + when + "  " + e.title, wht);
-                    ++shown;
-                }
-            }),
+        slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
+            [hud_cfg]{ return hud_cfg->text_scale; },
+            [hud_cfg](float v){ hud_cfg->text_scale = v; }),
         toggle("System Panel",
             [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
             [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
@@ -3966,8 +3977,9 @@ int main(int argc, char* argv[]) {
         ip.enabled   = jip.value("enabled",   ip.enabled);
         ip.anchor_x  = jip.value("anchor_x",  ip.anchor_x);
         ip.anchor_y  = jip.value("anchor_y",  ip.anchor_y);
-        ip.size_px   = jip.value("size_px",   ip.size_px);
-        ip.cycle_sec = jip.value("cycle_sec", ip.cycle_sec);
+        ip.size_px    = jip.value("size_px",    ip.size_px);
+        ip.cycle_sec  = jip.value("cycle_sec",  ip.cycle_sec);
+        ip.clock_face = jip.value("clock_face", ip.clock_face);
         if (jip.contains("show") && jip["show"].is_array()) {
             const auto& sh = jip["show"];
             for (int i = 0; i < static_cast<int>(InfoWidget::Count) &&
@@ -3979,8 +3991,8 @@ int main(int argc, char* argv[]) {
     // HUD dock (top/bottom + swap) — positions the minimap & info panel twins.
     if (cfg.contains("hud_dock")) {
         const auto& jd = cfg["hud_dock"];
-        state.hud_dock.bottom = jd.value("bottom", state.hud_dock.bottom);
-        state.hud_dock.swap   = jd.value("swap",   state.hud_dock.swap);
+        state.hud_dock.bottom   = jd.value("bottom",   state.hud_dock.bottom);
+        state.hud_dock.v_offset = jd.value("v_offset", state.hud_dock.v_offset);
     }
     apply_hud_dock(state);   // dock is authoritative for both anchors
 
@@ -5181,16 +5193,17 @@ int main(int argc, char* argv[]) {
             cfg["info_panel"]["enabled"]   = ip.enabled;
             cfg["info_panel"]["anchor_x"]  = ip.anchor_x;
             cfg["info_panel"]["anchor_y"]  = ip.anchor_y;
-            cfg["info_panel"]["size_px"]   = ip.size_px;
-            cfg["info_panel"]["cycle_sec"] = ip.cycle_sec;
+            cfg["info_panel"]["size_px"]    = ip.size_px;
+            cfg["info_panel"]["cycle_sec"]  = ip.cycle_sec;
+            cfg["info_panel"]["clock_face"] = ip.clock_face;
             json sh = json::array();
             for (int i = 0; i < static_cast<int>(InfoWidget::Count); ++i)
                 sh.push_back(ip.show[i]);
             cfg["info_panel"]["show"] = sh;
         }
 
-        cfg["hud_dock"]["bottom"] = state.hud_dock.bottom;
-        cfg["hud_dock"]["swap"]   = state.hud_dock.swap;
+        cfg["hud_dock"]["bottom"]   = state.hud_dock.bottom;
+        cfg["hud_dock"]["v_offset"] = state.hud_dock.v_offset;
 
         cfg["resolution"]["width"]  = state.camera_resolution.width;
         cfg["resolution"]["height"] = state.camera_resolution.height;

@@ -740,34 +740,54 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
     nvgBeginPath(vg); nvgCircle(vg, px, py, r);
     nvgStrokeColor(vg, nvgRGBA(100, 130, 160, 160)); nvgStrokeWidth(vg, 1.5f); nvgStroke(vg);
 
-    // Title at the top of the disc.
-    static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE", "WEATHER" };
-    nvg_set_font_ui(13.f);
-    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
-    nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
-    nvgText(vg, px, py - r + 7.f, kNames[widget], nullptr);
+    // Title at the top of the disc. The clock fills the whole disc, so it shows none.
+    if (widget != static_cast<int>(InfoWidget::Clock)) {
+        static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE", "WEATHER" };
+        nvg_set_font_ui(13.f);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
+        nvgText(vg, px, py - r + 7.f, kNames[widget], nullptr);
+    }
 
     // Clip widget bodies to the disc's bounding box so long text never spills out.
     nvgSave(vg);
     nvgScissor(vg, px - r, py - r, r * 2.f, r * 2.f);
 
     if (widget == static_cast<int>(InfoWidget::Clock)) {
-        // Analog clock.
+        // Analog clock — no title, so it fills the disc. Face style is selectable.
         const time_t now = std::time(nullptr) +
                            static_cast<time_t>(s.clock_cfg.manual_offset_s);
         struct tm tmv; localtime_r(&now, &tmv);
-        const float cr = r * 0.60f;
-        for (int i = 0; i < 12; ++i) {
-            const float a  = static_cast<float>(i) / 12.f * TWO_PI - static_cast<float>(M_PI) * 0.5f;
-            const float r0 = cr * 0.86f, r1 = cr * 0.99f;
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, px + std::cos(a) * r0, py + std::sin(a) * r0);
-            nvgLineTo(vg, px + std::cos(a) * r1, py + std::sin(a) * r1);
-            nvgStrokeColor(vg, nvgRGBA(200, 220, 230, 150));
-            nvgStrokeWidth(vg, (i % 3 == 0) ? 2.f : 1.f); nvgStroke(vg);
+        const float cr = r * 0.82f;
+        const int   face = s.info_panel.clock_face;
+        const float HALF_PI = static_cast<float>(M_PI) * 0.5f;
+
+        if (face == 1) {
+            // Numbered face: 1..12.
+            nvg_set_font_ui(cr * 0.20f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
+            for (int h = 1; h <= 12; ++h) {
+                const float a = h / 12.f * TWO_PI - HALF_PI;
+                char nb[4]; snprintf(nb, sizeof(nb), "%d", h);
+                nvgText(vg, px + std::cos(a) * cr * 0.84f,
+                            py + std::sin(a) * cr * 0.84f, nb, nullptr);
+            }
+        } else {
+            // Tick face: all 12 (face 0), or quarters only (face 2 = minimal).
+            const int step = (face == 2) ? 3 : 1;
+            for (int i = 0; i < 12; i += step) {
+                const float a  = static_cast<float>(i) / 12.f * TWO_PI - HALF_PI;
+                const float r0 = cr * 0.86f, r1 = cr * 0.99f;
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, px + std::cos(a) * r0, py + std::sin(a) * r0);
+                nvgLineTo(vg, px + std::cos(a) * r1, py + std::sin(a) * r1);
+                nvgStrokeColor(vg, nvgRGBA(200, 220, 230, 150));
+                nvgStrokeWidth(vg, (i % 3 == 0) ? 2.5f : 1.f); nvgStroke(vg);
+            }
         }
         auto hand = [&](float frac, float len, float w, NVGcolor c) {
-            const float a = frac * TWO_PI - static_cast<float>(M_PI) * 0.5f;
+            const float a = frac * TWO_PI - HALF_PI;
             nvgLineCap(vg, NVG_ROUND);
             nvgBeginPath(vg); nvgMoveTo(vg, px, py);
             nvgLineTo(vg, px + std::cos(a) * len, py + std::sin(a) * len);
@@ -775,10 +795,10 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         };
         const float hh = (tmv.tm_hour % 12) + tmv.tm_min / 60.f;
         const float mm = tmv.tm_min + tmv.tm_sec / 60.f;
-        hand(hh / 12.f, cr * 0.50f, 3.f, nvg_col(col_.text_fill));
-        hand(mm / 60.f, cr * 0.78f, 2.f, nvg_col(col_.text_fill));
-        hand(tmv.tm_sec / 60.f, cr * 0.88f, 1.f, nvgRGBA(235, 80, 70, 235));
-        nvgBeginPath(vg); nvgCircle(vg, px, py, 2.5f);
+        hand(hh / 12.f, cr * 0.52f, 4.f,  nvg_col(col_.text_fill));
+        hand(mm / 60.f, cr * 0.80f, 2.5f, nvg_col(col_.text_fill));
+        hand(tmv.tm_sec / 60.f, cr * 0.90f, 1.f, nvgRGBA(235, 80, 70, 235));
+        nvgBeginPath(vg); nvgCircle(vg, px, py, 3.f);
         nvgFillColor(vg, nvgRGBA(235, 80, 70, 235)); nvgFill(vg);
 
     } else if (widget == static_cast<int>(InfoWidget::Notifications)) {

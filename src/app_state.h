@@ -285,17 +285,19 @@ struct InfoPanelConfig {
     float pan_y     = 0.f;
     float size_px   = 150.f;    // half-extent (radius), matching the minimap footprint
     float cycle_sec = 6.f;      // dwell per widget before advancing
+    int   clock_face = 0;       // analog clock style: 0=ticks, 1=numbers, 2=minimal
     // Which widgets take part in the cycle (indexed by InfoWidget).
     bool  show[static_cast<int>(InfoWidget::Count)] = { true, true, true, false };
 };
 
 // ── HUD dock layout ─────────────────────────────────────────────────────────────
-// The minimap and info panel are opposite-side twins docked to the top or bottom
-// edge. `bottom` picks the edge; `swap` exchanges which side each occupies. Anchors
-// for both elements are derived from this (see apply_hud_dock in main).
+// The minimap and info panel are opposite-side twins: the minimap is always on the
+// RIGHT, the info panel always on the LEFT. `bottom` picks the top vs bottom edge;
+// `v_offset` is a fine vertical nudge in pixels applied to both. Anchors are derived
+// from this (see apply_hud_dock in main).
 struct HudDock {
-    bool bottom = false;   // false = top edge, true = bottom edge
-    bool swap   = false;   // false = minimap left / panel right, true = swapped
+    bool  bottom   = true;    // false = top edge, true = bottom edge (default bottom)
+    float v_offset = 0.f;     // vertical nudge in pixels (Up/Down menu), applied to both
 };
 
 // ── Particle effects ──────────────────────────────────────────────────────────
