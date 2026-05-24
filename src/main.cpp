@@ -36,6 +36,7 @@
 #include "post_process.h"
 #include "sensor/mpu9250.h"
 #include "sys/system_monitor.h"
+#include "sys/scheduler_monitor.h"
 #include "net/wifi_monitor.h"
 #include "net/ping_monitor.h"
 #include "net/bt_monitor.h"
@@ -1991,6 +1992,15 @@ static std::vector<MenuItem> build_menu(
         leaf("Dismiss Alarm", [&state]{ state.timer_alarm.alarm_triggered = false; }),
     };
 
+    // Scheduler — events are entered from a phone (web form served by the
+    // scheduler_daemon) or, later, synced from Google Calendar. On-device the
+    // user can only tune the reminder lead time and view upcoming events.
+    std::vector<MenuItem> scheduler_menu = {
+        slider("Reminder Lead", 0.f, 60.f, 5.f, "min",
+            [&state]{ return static_cast<float>(state.scheduler_lead_min); },
+            [&state](float v){ state.scheduler_lead_min = static_cast<int>(v); }),
+    };
+
     // ── Color Options ─────────────────────────────────────────────────────────
 
     // HUD > Borders & Lines
@@ -2740,6 +2750,58 @@ static std::vector<MenuItem> build_menu(
                                : IM_COL32(220, 160, 90, 220));
             }),
         submenu("Timers and Alarm", std::move(timers_alarm_menu)),
+        with_panel(
+            submenu("Scheduler", std::move(scheduler_menu)),
+            "Scheduler",
+            [state_ptr](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                if (!state_ptr) return;
+                const float lh = 18.f;
+                ImVec2 p = o;
+                auto line = [&](const std::string& s, ImU32 c) {
+                    dl->AddText({ p.x, p.y }, c, s.c_str());
+                    p.y += lh;
+                };
+                SchedulerStatus st;
+                std::vector<ScheduledEvent> evs;
+                {
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    st  = state_ptr->scheduler_status;
+                    evs = state_ptr->scheduler_events;
+                }
+                const ImU32 dim = IM_COL32(180, 180, 180, 200);
+                const ImU32 ok  = IM_COL32(160, 220, 160, 220);
+                const ImU32 bad = IM_COL32(220, 160,  90, 220);
+                const ImU32 wht = IM_COL32(230, 230, 230, 230);
+
+                line(std::string("Daemon: ") + (st.daemon_ok ? "online" : "offline"),
+                     st.daemon_ok ? ok : bad);
+                line(std::string("Web: ") +
+                         (st.web_url.empty() ? "(starting...)" : st.web_url),
+                     st.web_url.empty() ? dim : wht);
+                line("Open that URL on your phone", dim);
+                line(std::string("Google: ") + st.gcal_state,
+                     st.gcal_state == "connected" ? ok : dim);
+                if (st.gcal_state == "pending" && !st.gcal_user_code.empty()) {
+                    line(std::string("  code: ") + st.gcal_user_code, wht);
+                    line(std::string("  at: ")   + st.gcal_verify_url, dim);
+                }
+                p.y += lh * 0.5f;
+                line("Upcoming:", dim);
+                if (evs.empty()) line("  (none)", dim);
+                int shown = 0;
+                for (const auto& e : evs) {
+                    if (shown >= 6) break;
+                    char when[24] = "--:--";
+                    if (e.start_utc) {
+                        struct tm tm{}; localtime_r(&e.start_utc, &tm);
+                        strftime(when, sizeof(when),
+                                 e.all_day ? "%b %d all-day" : "%b %d %H:%M", &tm);
+                    }
+                    line(std::string("  ") + when + "  " + e.title, wht);
+                    ++shown;
+                }
+            }),
         toggle("System Panel",
             [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
             [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
@@ -3049,6 +3111,25 @@ int main(int argc, char* argv[]) {
             protoface_preview_cfg.size     = jval(jpv, "size",     protoface_preview_cfg.size);
             protoface_preview_view         = jval(jpv, "view",     protoface_preview_view);
         }
+    }
+
+    // Scheduler / reminders. Networking lives in the scheduler_daemon companion;
+    // ProtoHUD only reads the merged events.json + scheduler_status.json it writes.
+    bool        sched_enabled    = true;
+    bool        sched_autostart  = false;
+    int         sched_poll_s     = 20;
+    std::string sched_events_path =
+        "/home/user/.local/share/protohud-scheduler/events.json";
+    std::string sched_status_path =
+        "/home/user/.local/share/protohud-scheduler/scheduler_status.json";
+    if (cfg.contains("scheduler")) {
+        auto& jsc = cfg["scheduler"];
+        sched_enabled     = jval(jsc, "enabled",         sched_enabled);
+        sched_autostart   = jval(jsc, "autostart",       sched_autostart);
+        sched_poll_s      = jval(jsc, "poll_interval_s", sched_poll_s);
+        sched_events_path = jval(jsc, "events_path",     sched_events_path);
+        sched_status_path = jval(jsc, "status_path",     sched_status_path);
+        state.scheduler_lead_min = jval(jsc, "lead_minutes", state.scheduler_lead_min);
     }
 
     if (cfg.contains("pip")) {
@@ -3378,15 +3459,25 @@ int main(int argc, char* argv[]) {
 
     // ── Dev/debug monitors ────────────────────────────────────────────────────
 
-    SystemMonitor sys_mon;
-    WifiMonitor   wifi_mon;
-    PingMonitor   ping_mon;
-    BtMonitor     bt_mon;
+    SystemMonitor    sys_mon;
+    WifiMonitor      wifi_mon;
+    PingMonitor      ping_mon;
+    BtMonitor        bt_mon;
+    SchedulerMonitor sched_mon;
 
     sys_mon.start(&state);
     wifi_mon.start(&state, cfg_wifi_iface);
     ping_mon.start(&state, cfg_ping_host);
     bt_mon.start(&state);
+    if (sched_enabled) {
+        if (sched_autostart) {
+            // Best-effort launch of the companion daemon (mirrors protoface autostart).
+            // No-op if already running; file poll means the HUD never blocks on it.
+            std::system("cd \"$HOME/protohud/scheduler_daemon\" && "
+                        "nohup python3 run.py >/tmp/protohud-scheduler.log 2>&1 &");
+        }
+        sched_mon.start(&state, sched_events_path, sched_status_path, sched_poll_s);
+    }
     CrashReporter::install(&state, cfg_crash_dir, GIT_HASH);
 
     // ── Async Timewarp ────────────────────────────────────────────────────────
@@ -4211,6 +4302,67 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ── Scheduler reminders ───────────────────────────────────────────────
+        // Raise a lead-time reminder and an at-start reminder for each event.
+        // Locked because SchedulerMonitor mutates scheduler_events concurrently.
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            const time_t now_t  = time(nullptr);
+            const time_t lead_s = static_cast<time_t>(state.scheduler_lead_min) * 60;
+            auto local_hm = [](time_t t) {
+                struct tm tm{}; localtime_r(&t, &tm);
+                char b[8]; strftime(b, sizeof(b), "%H:%M", &tm);
+                return std::string(b);
+            };
+            auto body_for = [&](const ScheduledEvent& ev) {
+                std::string b = ev.all_day ? "All day" : local_hm(ev.start_utc);
+                if (!ev.location.empty()) b += "  @ " + ev.location;
+                return b;
+            };
+            for (auto& e : state.scheduler_events) {
+                if (e.start_utc == 0) continue;
+
+                // Lead reminder (skipped for all-day; they only fire the at-start path).
+                const time_t lead_at = e.start_utc - lead_s;
+                const bool snoozed_due = e.snooze_until > 0 && now_t >= e.snooze_until
+                                         && now_t < e.start_utc;
+                if (!e.all_day &&
+                    ((!e.fired_lead && now_t >= lead_at && now_t < e.start_utc) || snoozed_due)) {
+                    e.fired_lead   = true;
+                    e.snooze_until = 0;
+                    long mins = static_cast<long>((e.start_utc - now_t + 59) / 60);
+                    if (mins < 0) mins = 0;
+                    Notification n;
+                    n.type           = NotifType::App;
+                    n.title          = "In " + std::to_string(mins) + " min: " + e.title;
+                    n.body           = body_for(e);
+                    n.timestamp      = static_cast<int64_t>(now_t);
+                    n.auto_dismiss_s = 0.f;
+                    const std::string uid = e.uid;
+                    n.actions.push_back({"DISMISS", [](AppState&){}});
+                    n.actions.push_back({"SNOOZE 5", [uid](AppState& s){
+                        std::lock_guard<std::mutex> g(s.mtx);
+                        for (auto& ev : s.scheduler_events)
+                            if (ev.uid == uid) { ev.snooze_until = time(nullptr) + 300; break; }
+                    }});
+                    state.notifs.push(std::move(n));
+                }
+
+                // At-start reminder.
+                if (!e.fired_start && now_t >= e.start_utc) {
+                    e.fired_start = true;
+                    Notification n;
+                    n.type           = NotifType::App;
+                    n.title          = (e.all_day ? "Today: " : "Now: ") + e.title;
+                    n.body           = body_for(e);
+                    n.timestamp      = static_cast<int64_t>(now_t);
+                    n.auto_dismiss_s = 0.f;
+                    n.actions.push_back({"DISMISS", [](AppState&){}});
+                    state.notifs.push(std::move(n));
+                }
+            }
+        }
+
         // ── Update AF / focus state from cameras (atomics, no mutex needed) ─────
         if (cameras.owl_left()) {
             state.focus_left.af_locked = cameras.owl_left()->is_af_locked();
@@ -4266,6 +4418,9 @@ int main(int argc, char* argv[]) {
             snap.clock_cfg          = state.clock_cfg;
             snap.pp_cfg             = state.pp_cfg;
             snap.timer_alarm        = state.timer_alarm;
+            snap.scheduler_events   = state.scheduler_events;
+            snap.scheduler_status   = state.scheduler_status;
+            snap.scheduler_lead_min = state.scheduler_lead_min;
             snap.effects_cfg        = state.effects_cfg;
             snap.map_overlay        = state.map_overlay;
             snap.sys_metrics        = state.sys_metrics;
@@ -4727,6 +4882,8 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["preview"]["size"]     = protoface_preview_cfg.size;
         cfg["protoface"]["preview"]["view"]     = protoface_preview_view;
 
+        cfg["scheduler"]["lead_minutes"]        = state.scheduler_lead_min;
+
         auto& jpp = cfg["post_process"];
         jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
         jpp["edge_strength"]      = state.pp_cfg.edge_strength;
@@ -4890,6 +5047,7 @@ int main(int argc, char* argv[]) {
     step("bt_mon");          bt_mon.stop();
     step("ping_mon");        ping_mon.stop();
     step("wifi_mon");        wifi_mon.stop();
+    step("sched_mon");       sched_mon.stop();
     step("sys_mon");         sys_mon.stop();
     step("mpu9250");         mpu9250.stop();
     step("audio");           audio.stop();

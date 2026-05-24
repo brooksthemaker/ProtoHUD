@@ -273,6 +273,39 @@ struct TimerAlarmState {
     int    custom_timer_sec = 0;      // custom timer seconds (0–59)
 };
 
+// ── Scheduler / reminders ───────────────────────────────────────────────────────
+// Full calendar events fed from a Python companion daemon (scheduler_daemon/) that
+// owns all networking: it serves a phone web form and (later) syncs Google Calendar,
+// merges both, and writes events.json + scheduler_status.json atomically. ProtoHUD
+// reads those files via SchedulerMonitor (file poll) and fires reminders through the
+// existing NotificationQueue. The C++ side never does HTTP/OAuth.
+enum class EventSource : uint8_t { Manual = 0, Google = 1 };
+
+struct ScheduledEvent {
+    std::string uid;                  // stable dedupe key (gcal id, or daemon UUID)
+    std::string title;
+    std::string location;
+    time_t      start_utc = 0;        // epoch UTC; 0 = invalid. Daemon does all tz math.
+    time_t      end_utc   = 0;
+    bool        all_day   = false;
+    EventSource source    = EventSource::Manual;
+    // Render-thread-only fire bookkeeping — NOT serialized; carried across reloads
+    // by SchedulerMonitor's uid merge (reset only when start_utc changes).
+    bool        fired_lead  = false;  // lead-time reminder already raised
+    bool        fired_start = false;  // at-start reminder already raised
+    time_t      snooze_until = 0;     // if >0, re-raise the lead reminder at this time
+};
+
+struct SchedulerStatus {
+    bool        daemon_ok      = false;  // files parsed and fresh (mtime recent)
+    std::string web_url;                 // e.g. "http://192.168.1.42:8770"
+    std::string gcal_state     = "disconnected"; // disconnected|pending|connected|error
+    std::string gcal_user_code;          // device-flow code to type on phone
+    std::string gcal_verify_url;         // device-flow verification URL
+    time_t      last_sync_utc  = 0;
+    int         event_count    = 0;
+};
+
 // ── System metrics ────────────────────────────────────────────────────────────
 static constexpr int kSysHistLen  = 60;
 static constexpr int kPingHistLen = 30;
@@ -483,6 +516,13 @@ struct AppState {
 
     // Timer / alarm state (managed on render thread; no mutex needed for reads)
     TimerAlarmState      timer_alarm;
+
+    // Scheduler / reminders. scheduler_events + scheduler_status are written by the
+    // SchedulerMonitor thread under mtx and read on the render thread; lead_min is
+    // render-thread-only (menu slider + fire loop).
+    std::vector<ScheduledEvent> scheduler_events;   // sorted by start_utc
+    SchedulerStatus             scheduler_status;
+    int                         scheduler_lead_min = 10;  // reminder lead time (minutes)
 
     // Notification queue — render-thread owned; push from main thread while holding mtx
     NotificationQueue    notifs;
