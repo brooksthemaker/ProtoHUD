@@ -4882,6 +4882,8 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["preview"]["size"]     = protoface_preview_cfg.size;
         cfg["protoface"]["preview"]["view"]     = protoface_preview_view;
 
+        cfg["scheduler"]["enabled"]             = sched_enabled;
+        cfg["scheduler"]["autostart"]           = sched_autostart;
         cfg["scheduler"]["lead_minutes"]        = state.scheduler_lead_min;
 
         auto& jpp = cfg["post_process"];
