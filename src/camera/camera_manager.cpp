@@ -111,14 +111,45 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
 
     // ── OWLsight cameras (zero-copy DMA) ─────────────────────────────────────
     if (lcam_mgr_) {
-        DmaCamera::Config lc { left.libcamera_id, left.model_name, left.width, left.height, left.fps };
+        // Resolve both eyes to EXACT, distinct camera ids from a single enumeration.
+        // (Re-querying cameras() per DmaCamera could return a different order once
+        // the first camera is acquired/started, making the second eye resolve to
+        // the already-running camera — "Camera in Running state".)
+        auto cams = lcam_mgr_->cameras();
+        auto resolve = [&](const CamConfig& cc) -> std::string {
+            if (!cc.model_name.empty()) {
+                int m = 0;
+                for (auto& c : cams) {
+                    try {
+                        auto md = c->properties().get(libcamera::properties::Model);
+                        if (md && *md == cc.model_name) {
+                            if (m == cc.libcamera_id) return c->id();
+                            ++m;
+                        }
+                    } catch (...) {}
+                }
+            }
+            if (cc.libcamera_id >= 0 && cc.libcamera_id < static_cast<int>(cams.size()))
+                return cams[cc.libcamera_id]->id();
+            return {};
+        };
+        std::string left_id  = resolve(left);
+        std::string right_id = resolve(right);
+        // Never let both eyes land on the same physical camera.
+        if (!left_id.empty() && left_id == right_id) {
+            right_id.clear();
+            for (auto& c : cams) if (c->id() != left_id) { right_id = c->id(); break; }
+        }
+        std::cout << "[cam] OWL ids: left='" << left_id << "' right='" << right_id << "'\n";
+
+        DmaCamera::Config lc { left.libcamera_id, left.model_name, left_id, left.width, left.height, left.fps };
         owl_left_ = std::make_unique<DmaCamera>();
         if (!owl_left_->init(lcam_mgr_.get(), lc, nv12_vs, nv12_fs)) {
             std::cerr << "[cam] OWLsight left init failed\n";
             owl_left_.reset();
         }
 
-        DmaCamera::Config rc { right.libcamera_id, right.model_name, right.width, right.height, right.fps };
+        DmaCamera::Config rc { right.libcamera_id, right.model_name, right_id, right.width, right.height, right.fps };
         owl_right_ = std::make_unique<DmaCamera>();
         if (!owl_right_->init(lcam_mgr_.get(), rc, nv12_vs, nv12_fs)) {
             std::cerr << "[cam] OWLsight right init failed\n";

@@ -47,6 +47,7 @@ public:
     struct Config {
         int         libcamera_id = 0;
         std::string model_name;   // if non-empty, match camera by model string first
+        std::string camera_id;    // exact libcamera id; if set, takes priority over the above
         int         width        = 1280;
         int         height       = 800;
         int         fps          = 60;
