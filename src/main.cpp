@@ -3179,12 +3179,34 @@ static std::vector<MenuItem> build_menu(
             q.push_back(std::move(fsub));
         }
 
-        // Quick photo + record.
-        q.push_back(leaf("Quick Photo", [state_ptr]{
-            if (!state_ptr) return;
-            std::lock_guard<std::mutex> lk(state_ptr->mtx);
-            state_ptr->capture_request = CaptureRequest::Stereo;
-        }));
+        // Quick photo → opens a sub-ring of capture modes; entering it locks focus
+        // (stops AF + manual) so the whole burst shares one focus. All shoot both eyes.
+        {
+            auto shoot = [state_ptr](int extra) {
+                if (!state_ptr) return;
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                state_ptr->capture_request = CaptureRequest::Stereo;
+                state_ptr->capture_burst   = extra;
+            };
+            std::vector<MenuItem> photo = {
+                leaf("Single",   [shoot]{ shoot(0); }),
+                leaf("Burst x3", [shoot]{ shoot(2); }),
+                leaf("Burst",    [shoot]{ shoot(7); }),
+            };
+            MenuItem pm = submenu("Quick Photo", std::move(photo));
+            pm.action = [cameras, state_ptr] {            // on-enter: lock focus
+                if (cameras) {
+                    if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
+                    if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
+                }
+                if (state_ptr) {
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    state_ptr->focus_left.mode  = CameraFocusState::Mode::MANUAL;
+                    state_ptr->focus_right.mode = CameraFocusState::Mode::MANUAL;
+                }
+            };
+            q.push_back(std::move(pm));
+        }
         q.push_back(toggle("Record",
             [&state]{ return state.video_recording; },
             [&state](bool v){ std::lock_guard<std::mutex> lk(state.mtx);
@@ -4535,7 +4557,9 @@ int main(int argc, char* argv[]) {
         else                          menu.open();
     });
     gamepad.on_select([&menu, &hud, &state, &landing, &landing_select]{
-        if      (landing.active)          landing_select();
+        if      (state.map_overlay.expanded)   // A toggles map rotation lock
+            state.map_overlay.rotate_with_heading = !state.map_overlay.rotate_with_heading;
+        else if (landing.active)          landing_select();
         else if (menu.is_open())          menu.select();
         else if (hud.toast_has_focused()) hud.toast_select(state);
     });
@@ -5192,6 +5216,8 @@ int main(int argc, char* argv[]) {
             if (ImGui::IsKeyDown(ImGuiKey_DownArrow))  map_pan(0.f, -0.012f);
             if (ImGui::IsKeyDown(ImGuiKey_Equal) || ImGui::IsKeyDown(ImGuiKey_KeypadAdd))      map_zoom(+0.04f);
             if (ImGui::IsKeyDown(ImGuiKey_Minus) || ImGui::IsKeyDown(ImGuiKey_KeypadSubtract)) map_zoom(-0.04f);
+            if (key_pressed(ImGuiKey_R))   // lock/unlock map rotation to the compass
+                mo.rotate_with_heading = !mo.rotate_with_heading;
             if (key_pressed(ImGuiKey_N) || key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_M))
                 mo.expanded = false;
         } else if (menu.is_keyboard_open()) {
@@ -5842,8 +5868,15 @@ int main(int argc, char* argv[]) {
 
         // ── Photo capture ─────────────────────────────────────────────────────
         // Reads directly from the camera eye FBOs (no HUD). Async PNG write.
-        if (snap.capture_request != CaptureRequest::None)
-            do_capture(snap.capture_request, xr, cfg_photo_dir, state);
+        if (snap.capture_request != CaptureRequest::None) {
+            do_capture(snap.capture_request, xr, cfg_photo_dir, state);  // resets request
+            // Burst: re-arm another stereo shot next frame until the count runs out.
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (state.capture_burst > 0) {
+                --state.capture_burst;
+                state.capture_request = CaptureRequest::Stereo;
+            }
+        }
 
         // ── Video recording ───────────────────────────────────────────────────
         // Same clean eye-FBO source as photos; encodes on a worker thread.

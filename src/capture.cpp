@@ -12,6 +12,7 @@
 #include <GLES2/gl2.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <mutex>
@@ -38,11 +39,16 @@ static std::vector<uint8_t> read_fbo_pixels(gl::Fbo& fbo) {
 }
 
 static std::string build_path(const std::string& dir, const char* tag) {
-    auto tt = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    auto now = std::chrono::system_clock::now();
+    auto tt  = std::chrono::system_clock::to_time_t(now);
+    auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   now.time_since_epoch()).count() % 1000;
     struct tm tm_buf {};
     localtime_r(&tt, &tm_buf);
-    char ts[32];
-    std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
+    char ts[40];
+    int n = std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
+    // Append milliseconds so rapid burst shots get unique filenames.
+    std::snprintf(ts + n, sizeof(ts) - n, "_%03d", static_cast<int>(ms));
     return dir + "/protohud_" + ts + "_" + tag + ".png";
 }
 

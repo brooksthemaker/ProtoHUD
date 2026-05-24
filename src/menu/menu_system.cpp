@@ -367,10 +367,12 @@ void MenuSystem::select() {
 
     switch (item.type) {
     case MenuItemType::SUBMENU:
-        if (!item.children.empty())
+        if (!item.children.empty()) {
+            if (item.action) item.action();   // optional "on enter" hook (e.g. lock focus)
             push_level(item.children,
                        item.context_panel_title,
                        item.context_panel_draw);
+        }
         break;
 
     case MenuItemType::LEAF:
@@ -1642,6 +1644,59 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
                 ImVec2 vp = PR(ac, r0 + ring_thick * 0.88f);
                 ImU32 vc = primary ? IM_COL32(20, 22, 26, 230) : menu_with_alpha(accent, 200);
                 dl_text_rot(dl, font, fs * 0.78f, vp, vc, val.c_str(), ta);
+            }
+        }
+    }
+
+    // ── Value sub-ring (editing a slider / face value) ──────────────────────────
+    // Selecting Zoom/Focus opens a half-height outer ring: Up/Down adjust the value,
+    // Enter confirms, Left returns. Shown as an arc gauge + the live value.
+    if (in_edit_mode_ && !stack_.empty()) {
+        const auto& items = stack_.back().items;
+        if (cursor_ >= 0 && cursor_ < static_cast<int>(items.size())) {
+            const MenuItem& it = items[cursor_];
+            const bool is_val = (it.type == MenuItemType::SLIDER ||
+                                 it.type == MenuItemType::FACE_PICKER);
+            if (is_val) {
+                const float vrm = inner_r + ring_gap + depth * (ring_thick + ring_pad)
+                                  + ring_thick * 0.25f;        // centre of a half-height band
+                const float vth = ring_thick * 0.5f;
+                float frac = 0.f; char vbuf[32] = {0};
+                if (it.type == MenuItemType::SLIDER) {
+                    const float range = it.slider.max - it.slider.min;
+                    frac = (range > 0.f)
+                        ? std::clamp((edit_float_ - it.slider.min) / range, 0.f, 1.f) : 0.f;
+                    format_slider_value(vbuf, sizeof(vbuf), edit_float_,
+                                        it.slider.min, it.slider.max, it.slider.unit);
+                } else {
+                    const int n = std::max(1, it.face_picker.face_count);
+                    frac = (n > 1) ? static_cast<float>((int)edit_float_) / (n - 1) : 0.f;
+                    std::snprintf(vbuf, sizeof(vbuf), "%d", (int)edit_float_);
+                }
+
+                // Track (faint) + fill (accent), thick arcs.
+                dl->AddCircle({ cx, cy }, vrm, IM_COL32(18, 24, 30, 220), 96, vth);
+                const float a0 = -static_cast<float>(M_PI) * 0.5f;   // fill from the top
+                dl->PathArcTo({ cx, cy }, vrm, a0, a0 + frac * 2.f * static_cast<float>(M_PI), 96);
+                dl->PathStroke(menu_with_alpha(accent, 235), 0, vth);
+
+                // Big live value at the focus position.
+                ImVec2 vp = PR(focus_angle, vrm);
+                const float vsz = fs * 1.35f;
+                ImVec2 ts = font->CalcTextSizeA(vsz, FLT_MAX, 0.f, vbuf);
+                dl->AddText(font, vsz, { vp.x - ts.x*0.5f + 1.f, vp.y - ts.y*0.5f + 1.f },
+                            IM_COL32(0, 0, 0, 210), vbuf);
+                dl->AddText(font, vsz, { vp.x - ts.x*0.5f, vp.y - ts.y*0.5f },
+                            IM_COL32(255, 255, 255, 255), vbuf);
+
+                // Hint at the bottom of the sub-ring.
+                const char* hint = "UP/DN ADJUST   \xC2\xB7   ENTER OK   \xC2\xB7   \xE2\x86\x90 BACK";
+                ImVec2 hp = PR(static_cast<float>(M_PI) * 0.5f, vrm);
+                ImVec2 hs = font->CalcTextSizeA(fs * 0.72f, FLT_MAX, 0.f, hint);
+                dl->AddText(font, fs * 0.72f, { hp.x - hs.x*0.5f + 1.f, hp.y - hs.y*0.5f + 1.f },
+                            IM_COL32(0, 0, 0, 200), hint);
+                dl->AddText(font, fs * 0.72f, { hp.x - hs.x*0.5f, hp.y - hs.y*0.5f },
+                            menu_with_alpha(accent, 210), hint);
             }
         }
     }

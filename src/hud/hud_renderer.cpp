@@ -643,7 +643,9 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
 // around the outer edge (Battlefield-style).
 void HudRenderer::draw_compass_ring(NVGcontext* vg, const AppState& s,
                                     float cx, float cy, float radius) {
-    const float heading = s.map_overlay.rotate_with_heading ? s.compass_heading : 0.f;
+    // The compass bezel always rotates with heading (that's what a compass does);
+    // map.rotate_with_heading separately controls whether the MAP IMAGE turns too.
+    const float heading = s.compass_heading;
     const float DEG = (float)M_PI / 180.f;
     auto bearing_angle = [&](float beta_deg) -> float {
         float rel = beta_deg - heading;          // 0 = forward
@@ -779,15 +781,43 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
 
     nvgRestore(vg);
 
-    // Hint + zoom readout.
+    // Compass bezel around the expanded map (turns as the user turns).
+    draw_compass_ring(vg, s, cx, cy, half);
+
+    // Title + zoom readout.
     char zb[32]; snprintf(zb, sizeof(zb), "%.1fx", std::max(cfg.view_zoom, 1.0f));
     nvg_set_font_ui(15.f);
     nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
-    nvg_glow_text(vg, cx, cy - half - 26.f, "MAP", true, col_.glow_base, col_.text_fill);
+    nvg_glow_text(vg, cx, cy - half - 30.f, "MAP", true, col_.glow_base, col_.text_fill);
     nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
-    nvgText(vg, cx, cy + half + 8.f, "PAN  \xC2\xB7  ZOOM  \xC2\xB7  CLOSE", nullptr);
     nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgText(vg, cx + half - 36.f, cy - half + 12.f, zb, nullptr);
+
+    // ── Controls list (bottom-left) ──────────────────────────────────────────
+    {
+        const bool locked = cfg.rotate_with_heading;
+        struct Row { const char* k; const char* v; };
+        const Row rows[] = {
+            { "MOVE",     "ARROWS / DPAD" },
+            { "ZOOM",     "+ / -   \xC2\xB7   LB / RB" },
+            { "ROTATION", locked ? "LOCKED  (R / A)" : "FREE  (R / A)" },
+            { "CLOSE",    "ESC / B / N" },
+        };
+        const float lh = 22.f;
+        float lx = std::max(16.f, cx - half);
+        float ly = cy + half + 14.f;
+        nvg_set_font_mono(13.f);
+        for (const auto& r : rows) {
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvg_text_outline(vg, lx, ly, r.k, 1.4f);
+            nvgFillColor(vg, nvg_col_a(col_.glow_base, 230));
+            nvgText(vg, lx, ly, r.k, nullptr);
+            nvg_text_outline(vg, lx + 96.f, ly, r.v, 1.4f);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
+            nvgText(vg, lx + 96.f, ly, r.v, nullptr);
+            ly += lh;
+        }
+    }
 }
 
 void HudRenderer::draw_fps_nvg(NVGcontext* vg, const AppState& snap, float fw, float fh) {

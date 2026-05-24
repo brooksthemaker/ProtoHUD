@@ -428,6 +428,7 @@ struct AppState {
 
     // Photo capture: set by menu or GPIO long-press; consumed by the render thread.
     CaptureRequest capture_request = CaptureRequest::None;
+    int            capture_burst   = 0;  // extra stereo shots to take after the current one
 
     // Video recording: video_request is posted by input/toast handlers and consumed
     // by the render thread's VideoRecorder; video_recording/paused are status mirrors
