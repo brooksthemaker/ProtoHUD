@@ -323,4 +323,12 @@ private:
     float          ui_scale_         = 1.0f;   // deep menu / landing page size
     QuickStyle     quick_style_      = QuickStyle::Radial;  // corner list vs radial
     float          radial_tilt_      = 0.35f;  // helmet-style inward perspective
+
+    // Radial-wheel spin animation: the active ring eases its selected wedge to the
+    // focus angle instead of snapping. radial_anim_ is the displayed fractional
+    // index, radial_target_ the (wrap-accumulated) goal, radial_prev_sel_ the last
+    // selected visible index (-1 = reset on a level change).
+    float          radial_anim_      = 0.f;
+    float          radial_target_    = 0.f;
+    int            radial_prev_sel_  = -1;
 };

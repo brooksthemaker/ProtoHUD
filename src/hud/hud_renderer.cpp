@@ -162,6 +162,17 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
     dl->AddText(font, font_size, pos, fill_col, text);
 }
 
+// Crisp black outline for HUD text over bright scenes: draws the string in black
+// at 8 offsets using the CURRENT font + alignment. Caller draws the fill on top.
+static void nvg_text_outline(NVGcontext* vg, float x, float y, const char* t,
+                             float o = 1.6f) {
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, 215));
+    nvgText(vg, x - o, y,     t, nullptr); nvgText(vg, x + o, y,     t, nullptr);
+    nvgText(vg, x,     y - o, t, nullptr); nvgText(vg, x,     y + o, t, nullptr);
+    nvgText(vg, x - o, y - o, t, nullptr); nvgText(vg, x + o, y - o, t, nullptr);
+    nvgText(vg, x - o, y + o, t, nullptr); nvgText(vg, x + o, y + o, t, nullptr);
+}
+
 // NVG glow text — 2-pass (blur+sharp) replaces 9-call ImGui offset pattern
 static void nvg_glow_text(NVGcontext* vg, float x, float y, const char* text,
                            bool selected = true) {
@@ -512,9 +523,11 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             nvgLineCap(vg, NVG_BUTT);
             nvg_set_font_mono(10.f);
             nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+            const float lblx = cx + std::cos(ga0) * (r - 8.f);
+            const float lbly = cy + std::sin(ga0) * (r - 8.f);
+            nvg_text_outline(vg, lblx, lbly, label, 1.4f);
             nvgFillColor(vg, known ? fill : nvgRGBA(140, 150, 160, 200));
-            nvgText(vg, cx + std::cos(ga0) * (r - 8.f), cy + std::sin(ga0) * (r - 8.f),
-                    label, nullptr);
+            nvgText(vg, lblx, lbly, label, nullptr);
         };
 
         const float r1 = ringR + 56.f;            // inner bar
@@ -586,6 +599,15 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         nvg_set_font_ui(csz);
         const float wc    = arc_text_width(vg, tbuf, rc);
         const float start = clock_angle - wc * 0.5f;
+        // Black outline (offset arc copies) for legibility over the feed.
+        {
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 210));
+            const float o = 1.4f;
+            nvg_text_arc(vg, cx - o, cy - o, rc, start, tbuf);
+            nvg_text_arc(vg, cx + o, cy - o, rc, start, tbuf);
+            nvg_text_arc(vg, cx - o, cy + o, rc, start, tbuf);
+            nvg_text_arc(vg, cx + o, cy + o, rc, start, tbuf);
+        }
         if (s_glow && s_glow_intensity > 0.f) {
             nvgFontBlur(vg, 3.f);
             nvgFillColor(vg, nvg_col_a(col_.glow_base,
@@ -660,6 +682,7 @@ void HudRenderer::draw_compass_ring(NVGcontext* vg, const AppState& s,
         const float a = bearing_angle((float)kDeg[i]);
         const float lx = cx + std::cos(a) * r_card;
         const float ly = cy + std::sin(a) * r_card;
+        nvg_text_outline(vg, lx, ly, kCard[i]);
         nvg_glow_text(vg, lx, ly, kCard[i], i == 0, col_.glow_base, col_.text_fill);
     }
 
@@ -687,6 +710,7 @@ void HudRenderer::draw_compass_ring(NVGcontext* vg, const AppState& s,
         char db[16];
         if (node.distance_m >= 1000.f) snprintf(db, sizeof(db), "%.1fk", node.distance_m / 1000.f);
         else                           snprintf(db, sizeof(db), "%.0fm", node.distance_m);
+        nvg_text_outline(vg, cx + ca * r_dist, cy + sa * r_dist, db, 1.4f);
         nvgFillColor(vg, nvg_col_a(s.lora_node_colors[node.local_id % 8], 230));
         nvgText(vg, cx + ca * r_dist, cy + sa * r_dist, db, nullptr);
     }

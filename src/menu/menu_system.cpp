@@ -125,6 +125,7 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items,
                             std::move(panel_title),
                             std::move(panel_draw) });
     cursor_ = init_cursor;
+    radial_prev_sel_ = -1;   // snap the radial spin to the new level
     emit_detents();
 }
 
@@ -132,6 +133,7 @@ void MenuSystem::pop_level() {
     if (stack_.size() > 1) {
         stack_.pop_back();
         cursor_ = stack_.back().cursor;  // restore cursor to where user was on this page
+        radial_prev_sel_ = -1;           // snap the radial spin to the restored level
         emit_detents();
     } else if (deep_open_) {
         close_deep();
@@ -1450,8 +1452,26 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
 // "primary" item points; rotate_to_selected spins the selected wedge to that angle.
 // A helmet-style perspective tilt (radial_tilt_) foreshortens the top so the wheel
 // reads as curving inward like a visor rather than lying flat on glass.
+// Draw text centred at `center`, rotated by `angle` radians about it. ImGui's
+// AddText has no rotation, so we rotate the glyph vertices it just emitted.
+static void dl_text_rot(ImDrawList* dl, ImFont* font, float size, ImVec2 center,
+                        ImU32 col, const char* text, float angle) {
+    const ImVec2 tsz = font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
+    const int v0 = dl->VtxBuffer.Size;
+    dl->AddText(font, size, { center.x - tsz.x * 0.5f, center.y - tsz.y * 0.5f }, col, text);
+    const int v1 = dl->VtxBuffer.Size;
+    const float s = std::sin(angle), c = std::cos(angle);
+    for (int i = v0; i < v1; ++i) {
+        ImDrawVert& v = dl->VtxBuffer[i];
+        const float dx = v.pos.x - center.x, dy = v.pos.y - center.y;
+        v.pos.x = center.x + dx * c - dy * s;
+        v.pos.y = center.y + dx * s + dy * c;
+    }
+}
+
 void MenuSystem::draw_radial(float cx, float cy, float inner_r,
                              float focus_angle, bool rotate_to_selected) {
+    (void)rotate_to_selected;   // the wheel always rotates the selection to focus now
     if (!open_ || stack_.empty()) return;
     s_menu_glow = glow_enabled_;
 
@@ -1559,12 +1579,30 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
 
         const float step = 2.f * static_cast<float>(M_PI) / static_cast<float>(N);
 
+        // Active ring eases its selected wedge to the focus angle (smooth spin);
+        // inner rings snap to their chosen item.
+        float anim_sel = static_cast<float>(sel_vis);
+        if (active) {
+            if (radial_prev_sel_ < 0) {
+                radial_anim_   = static_cast<float>(sel_vis);
+                radial_target_ = static_cast<float>(sel_vis);
+            } else if (sel_vis != radial_prev_sel_) {
+                int d = sel_vis - radial_prev_sel_;       // shortest signed step (ring of N)
+                while (d >  N / 2) d -= N;
+                while (d < -N / 2) d += N;
+                radial_target_ += static_cast<float>(d);
+            }
+            radial_prev_sel_ = sel_vis;
+            float dt = ImGui::GetIO().DeltaTime;
+            if (dt <= 0.f || dt > 0.1f) dt = 0.016f;
+            radial_anim_ += (radial_target_ - radial_anim_) * (1.f - std::exp(-dt * 13.f));
+            anim_sel = radial_anim_;
+        }
+
         for (int k = 0; k < N; ++k) {
             const MenuItem& it = lvl.items[vis[k]];
             const bool primary = (vis[k] == sel_idx);
-            float ac = rotate_to_selected
-                ? focus_angle + (k - sel_vis) * step
-                : focus_angle + k * step;
+            float ac = focus_angle + (static_cast<float>(k) - anim_sel) * step;
             float a0 = ac - step * 0.5f + wedge_gap * 0.5f;
             float a1 = ac + step * 0.5f - wedge_gap * 0.5f;
 
@@ -1586,24 +1624,24 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
                                   : active  ? IM_COL32(230, 235, 240, 220)
                                   :           menu_with_alpha(accent, 170);
 
-            // Icon slot (inner band) + label (outer band).
+            // Icon slot (inner band) — kept upright.
             draw_icon(it, PR(ac, r0 + ring_thick * 0.30f), 16.f * ui_scale_, icon_col);
+
+            // Label + value follow the arc (rotated to the tangent; flipped on the
+            // bottom half so they never read upside-down).
+            float ta = ac + static_cast<float>(M_PI) * 0.5f;
+            if (std::sin(ac) > 0.f) ta += static_cast<float>(M_PI);
 
             std::string label = to_upper(item_label(it));
             std::string val   = value_summary(it);
             const float lsz = primary ? fs * 0.98f : fs * 0.86f;
-            ImVec2 lp = PR(ac, r0 + ring_thick * 0.66f);
-            ImVec2 tsz = font->CalcTextSizeA(lsz, FLT_MAX, 0.f, label.c_str());
-            dl->AddText(font, lsz, { lp.x - tsz.x * 0.5f + 1.f, lp.y - tsz.y * 0.5f + 1.f },
-                        IM_COL32(0, 0, 0, 170), label.c_str());
-            dl->AddText(font, lsz, { lp.x - tsz.x * 0.5f, lp.y - tsz.y * 0.5f },
-                        text_col, label.c_str());
+            ImVec2 lp = PR(ac, r0 + ring_thick * 0.62f);
+            dl_text_rot(dl, font, lsz, { lp.x + 1.f, lp.y + 1.f }, IM_COL32(0, 0, 0, 170), label.c_str(), ta);
+            dl_text_rot(dl, font, lsz, lp, text_col, label.c_str(), ta);
             if (!val.empty()) {
-                ImVec2 vp = PR(ac, r0 + ring_thick * 0.90f);
-                ImVec2 vsz = font->CalcTextSizeA(fs * 0.78f, FLT_MAX, 0.f, val.c_str());
-                dl->AddText(font, fs * 0.78f, { vp.x - vsz.x * 0.5f, vp.y - vsz.y * 0.5f },
-                            primary ? IM_COL32(20, 22, 26, 230) : menu_with_alpha(accent, 200),
-                            val.c_str());
+                ImVec2 vp = PR(ac, r0 + ring_thick * 0.88f);
+                ImU32 vc = primary ? IM_COL32(20, 22, 26, 230) : menu_with_alpha(accent, 200);
+                dl_text_rot(dl, font, fs * 0.78f, vp, vc, val.c_str(), ta);
             }
         }
     }
