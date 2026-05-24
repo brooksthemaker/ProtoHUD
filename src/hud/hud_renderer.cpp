@@ -163,12 +163,13 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
 }
 
 // Crisp black outline for HUD text over bright scenes: draws the string in black
-// at 8 offsets using the CURRENT font + alignment. Caller draws the fill on top.
+// at the 4 diagonal offsets using the CURRENT font + alignment. Caller draws the
+// fill on top. (Was 8 offsets — the 4 diagonals cover horizontal+vertical strokes
+// and halve the text-rasterization cost, which is a meaningful per-frame win when
+// many labels are outlined.)
 static void nvg_text_outline(NVGcontext* vg, float x, float y, const char* t,
                              float o = 1.6f) {
     nvgFillColor(vg, nvgRGBA(0, 0, 0, 215));
-    nvgText(vg, x - o, y,     t, nullptr); nvgText(vg, x + o, y,     t, nullptr);
-    nvgText(vg, x,     y - o, t, nullptr); nvgText(vg, x,     y + o, t, nullptr);
     nvgText(vg, x - o, y - o, t, nullptr); nvgText(vg, x + o, y - o, t, nullptr);
     nvgText(vg, x - o, y + o, t, nullptr); nvgText(vg, x + o, y + o, t, nullptr);
 }
@@ -599,14 +600,14 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         nvg_set_font_ui(csz);
         const float wc    = arc_text_width(vg, tbuf, rc);
         const float start = clock_angle - wc * 0.5f;
-        // Black outline (offset arc copies) for legibility over the feed.
+        // Black outline for legibility over the feed. Arc text is per-glyph
+        // transformed, so a single blurred pass is ~4× cheaper than offset copies
+        // while still reading as a crisp dark halo at this size.
         {
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 210));
-            const float o = 1.4f;
-            nvg_text_arc(vg, cx - o, cy - o, rc, start, tbuf);
-            nvg_text_arc(vg, cx + o, cy - o, rc, start, tbuf);
-            nvg_text_arc(vg, cx - o, cy + o, rc, start, tbuf);
-            nvg_text_arc(vg, cx + o, cy + o, rc, start, tbuf);
+            nvgFontBlur(vg, 2.0f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
+            nvg_text_arc(vg, cx, cy, rc, start, tbuf);
+            nvgFontBlur(vg, 0.f);
         }
         if (s_glow && s_glow_intensity > 0.f) {
             nvgFontBlur(vg, 3.f);
@@ -632,13 +633,11 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             nvg_set_font_ui(dsz);
             const float wd = arc_text_width(vg, ds.c_str(), rd);
             const float ds0 = clock_angle - wd * 0.5f;
-            // Black outline (offset arc copies), matching the clock.
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 210));
-            const float o = 1.3f;
-            nvg_text_arc(vg, cx - o, cy - o, rd, ds0, ds.c_str());
-            nvg_text_arc(vg, cx + o, cy - o, rd, ds0, ds.c_str());
-            nvg_text_arc(vg, cx - o, cy + o, rd, ds0, ds.c_str());
-            nvg_text_arc(vg, cx + o, cy + o, rd, ds0, ds.c_str());
+            // Black outline (single blurred pass), matching the clock.
+            nvgFontBlur(vg, 1.8f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
+            nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
+            nvgFontBlur(vg, 0.f);
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 200));
             nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
         }
