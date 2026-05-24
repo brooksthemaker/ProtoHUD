@@ -5310,6 +5310,9 @@ int main(int argc, char* argv[]) {
         }
         // F — toggle FPS overlay
         if (key_pressed(ImGuiKey_F)) fps_overlay_active = !fps_overlay_active;
+        // Y — toggle vsync (diagnostic: tells a display-refresh cap apart from
+        // real render cost; watch the [perf] fps line jump when off).
+        if (key_pressed(ImGuiKey_Y)) xr.set_vsync(!xr.vsync());
         // Shift+M — calibrate north (Set My Direction); edge-only
         if (ImGui::GetIO().KeyShift && key_pressed(ImGuiKey_M)) {
             std::lock_guard<std::mutex> lk(state.mtx);
@@ -5858,24 +5861,6 @@ int main(int argc, char* argv[]) {
             return 0;
         };
 
-        // ── Per-phase GPU timing (TEMPORARY) ──────────────────────────────────
-        // glFinish() before each mark so we measure real GPU completion time per
-        // phase, not just CPU submit time.  This serializes CPU/GPU so the TOTAL
-        // looks worse than normal, but the BREAKDOWN localizes where the ~33ms
-        // goes (camera draws vs HUD vs composite vs present).  Remove when done.
-        static double s_ph_last = now;
-        static double s_ph_cam = 0, s_ph_comp = 0, s_ph_nvg = 0,
-                      s_ph_imgui = 0, s_ph_present = 0;
-        static int    s_ph_n = 0;
-        glFinish();
-        double ph_t0 = glfwGetTime();
-        auto ph_mark = [&ph_t0](double& acc) {
-            glFinish();
-            double t = glfwGetTime();
-            acc += (t - ph_t0) * 1000.0;
-            ph_t0 = t;
-        };
-
         // Left eye
         {
             xr.eye_left().bind();
@@ -5936,7 +5921,6 @@ int main(int argc, char* argv[]) {
 
             xr.eye_right().unbind();
         }
-        ph_mark(s_ph_cam);   // both eye camera draws
 
         // ── Post-processing (Vision Assist depth cues) ────────────────────────
         GLuint left_src  = xr.eye_left().tex;
@@ -6022,7 +6006,6 @@ int main(int argc, char* argv[]) {
             // Standard composite (no latency correction)
             xr.composite();
         }
-        ph_mark(s_ph_comp);   // post-proc + photo/video/qr + composite/timewarp
 
         // ── Phase 1: NanoVG PiP underlay then HUD chrome ─────────────────────
         // Reset viewport to full framebuffer — timewarp leaves it at right-eye half.
@@ -6036,7 +6019,6 @@ int main(int argc, char* argv[]) {
         hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
         hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
         hud.end_nvg_overlay();
-        ph_mark(s_ph_nvg);   // NanoVG HUD overlay (PiP underlay + chrome + toasts)
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
@@ -6098,24 +6080,9 @@ int main(int argc, char* argv[]) {
         // hud.draw_popups(state, xr.eye_width(), xr.eye_height());
 
         hud.render_menu_overlay();
-        ph_mark(s_ph_imgui);   // ImGui menu + panel/portrait/android overlays
 
         // ── Swap ──────────────────────────────────────────────────────────────
         xr.present();
-        ph_mark(s_ph_present); // buffer swap (vsync wait lands here)
-
-        // Per-second per-phase breakdown (paired with the [perf] line above).
-        ++s_ph_n;
-        if (now - s_ph_last >= 1.0) {
-            double n = (s_ph_n > 0) ? s_ph_n : 1;
-            fprintf(stderr,
-                    "[perf2] cam=%.1f comp=%.1f nvg=%.1f imgui=%.1f present=%.1f ms\n",
-                    s_ph_cam / n, s_ph_comp / n, s_ph_nvg / n,
-                    s_ph_imgui / n, s_ph_present / n);
-            s_ph_last = now;
-            s_ph_n = 0;
-            s_ph_cam = s_ph_comp = s_ph_nvg = s_ph_imgui = s_ph_present = 0;
-        }
     }
 
     // ── Persist runtime settings ──────────────────────────────────────────────

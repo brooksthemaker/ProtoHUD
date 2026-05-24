@@ -61,6 +61,12 @@ public:
     // Call after composite() and after the ImGui overlay is rendered.
     void present();
 
+    // Enable/disable vsync at runtime (glfwSwapInterval). Off (0) uncaps the
+    // frame rate (may tear) so we can tell a vsync/display-refresh cap apart
+    // from real render cost.
+    void set_vsync(bool on);
+    bool vsync() const { return vsync_; }
+
     // Convenience: composite() + present() in one call (no ImGui overlay).
     void submit_frame() { composite(); present(); }
 
@@ -125,4 +131,6 @@ private:
     std::atomic<float>    imu_roll_  { 0.f };
     std::atomic<float>    imu_pitch_ { 0.f };
     std::atomic<float>    imu_yaw_   { 0.f };
+
+    bool vsync_ = true;
 };

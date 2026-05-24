@@ -139,7 +139,7 @@ bool XRDisplay::init() {
     }
 
     glfwMakeContextCurrent(window_);
-    glfwSwapInterval(1);  // vsync
+    glfwSwapInterval(vsync_ ? 1 : 0);  // vsync
 
     // Build blit program and quad VBO (used in submit_frame)
     if (!create_blit_program()) return false;
@@ -255,6 +255,12 @@ void XRDisplay::composite_single(GLuint src_tex, CamSingleAnchor anchor) {
 void XRDisplay::present() {
     glfwSwapBuffers(window_);
     glfwPollEvents();
+}
+
+void XRDisplay::set_vsync(bool on) {
+    vsync_ = on;
+    glfwSwapInterval(on ? 1 : 0);
+    std::cerr << "[xr] vsync " << (on ? "ON" : "OFF") << "\n";
 }
 
 // ── shutdown ──────────────────────────────────────────────────────────────────
