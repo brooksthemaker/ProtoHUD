@@ -631,8 +631,16 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             const float rd = rc - csz * 0.95f;
             nvg_set_font_ui(dsz);
             const float wd = arc_text_width(vg, ds.c_str(), rd);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 175));
-            nvg_text_arc(vg, cx, cy, rd, clock_angle - wd * 0.5f, ds.c_str());
+            const float ds0 = clock_angle - wd * 0.5f;
+            // Black outline (offset arc copies), matching the clock.
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 210));
+            const float o = 1.3f;
+            nvg_text_arc(vg, cx - o, cy - o, rd, ds0, ds.c_str());
+            nvg_text_arc(vg, cx + o, cy - o, rd, ds0, ds.c_str());
+            nvg_text_arc(vg, cx - o, cy + o, rd, ds0, ds.c_str());
+            nvg_text_arc(vg, cx + o, cy + o, rd, ds0, ds.c_str());
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 200));
+            nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
         }
     }
 }

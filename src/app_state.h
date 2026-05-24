@@ -232,7 +232,7 @@ struct MapOverlayConfig {
     bool        system_debug        = false;
     // Clock above the minimap, with an active timer/alarm shown beside it.
     bool        clock               = true;
-    bool        clock_date          = false;  // show the date under the clock
+    bool        clock_date          = true;   // show the date under the clock
 
     // Protoface "portrait" — a scaled, one-side preview of the LED face shown
     // beside the minimap (American Fugitive-style character portrait).
