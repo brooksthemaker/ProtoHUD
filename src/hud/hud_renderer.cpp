@@ -793,7 +793,7 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
     nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgText(vg, cx + half - 36.f, cy - half + 12.f, zb, nullptr);
 
-    // ── Controls list (bottom-left) ──────────────────────────────────────────
+    // ── Controls panel (fixed bottom-left, on-screen regardless of map size) ──
     {
         const bool locked = cfg.rotate_with_heading;
         struct Row { const char* k; const char* v; };
@@ -803,18 +803,25 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
             { "ROTATION", locked ? "LOCKED  (R / A)" : "FREE  (R / A)" },
             { "CLOSE",    "ESC / B / N" },
         };
-        const float lh = 22.f;
-        float lx = std::max(16.f, cx - half);
-        float ly = cy + half + 14.f;
+        const float lh = 22.f, padx = 12.f, pady = 10.f;
+        const float pw = 290.f, ph = lh * 4.f + pady * 2.f;
+        const float px = 22.f, py = fh - ph - 20.f;   // bottom-left of the screen
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, px, py, pw, ph, 6.f);
+        nvgFillColor(vg, nvgRGBA(8, 12, 18, 215));
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 190));
+        nvgStrokeWidth(vg, 1.2f);
+        nvgStroke(vg);
+
         nvg_set_font_mono(13.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        float ly = py + pady;
         for (const auto& r : rows) {
-            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-            nvg_text_outline(vg, lx, ly, r.k, 1.4f);
-            nvgFillColor(vg, nvg_col_a(col_.glow_base, 230));
-            nvgText(vg, lx, ly, r.k, nullptr);
-            nvg_text_outline(vg, lx + 96.f, ly, r.v, 1.4f);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
-            nvgText(vg, lx + 96.f, ly, r.v, nullptr);
+            nvgFillColor(vg, nvg_col_a(col_.glow_base, 235));
+            nvgText(vg, px + padx, ly, r.k, nullptr);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 225));
+            nvgText(vg, px + padx + 96.f, ly, r.v, nullptr);
             ly += lh;
         }
     }
