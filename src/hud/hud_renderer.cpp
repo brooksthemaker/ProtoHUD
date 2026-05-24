@@ -626,6 +626,47 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             nvg_text_arc(vg, cx, cy, rc, clock_angle + wc * 0.5f + 7.f / rc, extra.c_str());
         }
 
+        // Colored warning countdown — a short arc, concentric just outside the
+        // clock, that depletes toward the clock centre as the deadline nears and
+        // ramps yellow→orange→red. Only shows inside the warning window:
+        // alarms = final 5 min, timers = final 1 min. Compared against real time
+        // (deadlines are real epochs, independent of the clock's manual offset).
+        {
+            const time_t now_real = std::time(nullptr);
+            float win = 0.f, rem = 0.f;
+            if (s.timer_alarm.timer_active) {
+                rem = static_cast<float>(s.timer_alarm.timer_end - now_real);
+                win = 60.f;                 // 1-minute timer warning
+            } else if (s.timer_alarm.alarm_active) {
+                rem = static_cast<float>(s.timer_alarm.alarm_fire_at - now_real);
+                win = 300.f;                // 5-minute alarm warning
+            }
+            if (win > 0.f && rem > 0.f && rem <= win) {
+                const float frac    = rem / win;             // 1 → full, 0 → empty
+                const float rcd     = rc + csz * 0.70f;       // just outside the clock text
+                const float maxHalf = 17.f * DEGc;            // half-extent when full
+                const float half    = maxHalf * frac;
+                // Dim full-window track so the depletion is legible.
+                nvgBeginPath(vg);
+                nvgArc(vg, cx, cy, rcd, clock_angle - maxHalf, clock_angle + maxHalf, NVG_CW);
+                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 40));
+                nvgStrokeWidth(vg, 4.f); nvgStroke(vg);
+                // Dark backing for contrast over the camera feed.
+                nvgBeginPath(vg);
+                nvgArc(vg, cx, cy, rcd, clock_angle - half, clock_angle + half, NVG_CW);
+                nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 180));
+                nvgStrokeWidth(vg, 6.f); nvgStroke(vg);
+                // Colored depleting arc.
+                const NVGcolor cdc = frac > 0.5f  ? nvgRGBA(235, 200, 50, 245)   // yellow
+                                   : frac > 0.25f ? nvgRGBA(240, 150, 40, 248)   // orange
+                                   :                nvgRGBA(230, 60, 55, 252);   // red
+                nvgBeginPath(vg);
+                nvgArc(vg, cx, cy, rcd, clock_angle - half, clock_angle + half, NVG_CW);
+                nvgStrokeColor(vg, cdc);
+                nvgStrokeWidth(vg, 3.5f); nvgStroke(vg);
+            }
+        }
+
         // Date on an inner concentric arc, under the clock.
         if (cfg.clock_date) {
             const std::string ds = fmt_date();
