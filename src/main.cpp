@@ -156,20 +156,12 @@ T jval(const json& j, const std::string& key, T def) {
     catch (...) { return def; }
 }
 
-// Position the minimap (always right) and info panel (always left) as opposite-side
-// twins, docked to the top or bottom edge with a fine vertical pixel nudge. The
-// panel mirrors the minimap's footprint. Called at startup and from the Location menu.
+// Mark the minimap module always-on. The actual placement (minimap flush-right,
+// info panel mirrored-left, top/bottom + v_offset) is computed per frame in the
+// render loop, where the live display size and minimap radius are known — that's
+// what lets the compass cardinals sit flush against the screen edges.
 static void apply_hud_dock(AppState& s) {
-    constexpr float MX = 0.16f, MY = 0.20f;   // edge margins (screen fraction); tune as needed
-    const float ay = s.hud_dock.bottom ? (1.f - MY) : MY;
-    const float voff = s.hud_dock.v_offset;
-    s.map_overlay.enabled  = true;            // minimap module is always on
-    s.map_overlay.anchor_x = 1.f - MX;        // minimap: right
-    s.map_overlay.anchor_y = ay;
-    s.map_overlay.pan_x = 0.f; s.map_overlay.pan_y = voff;
-    s.info_panel.anchor_x = MX;               // info panel: left
-    s.info_panel.anchor_y = ay;
-    s.info_panel.pan_x = 0.f; s.info_panel.pan_y = voff;
+    s.map_overlay.enabled = true;
 }
 
 // ── Native face renderer config ───────────────────────────────────────────────
@@ -5888,6 +5880,29 @@ int main(int argc, char* argv[]) {
                 state.focus_right.mode = CameraFocusState::Mode::SLAVE;
                 boot_af_pending = false;
                 std::cout << "[cam] boot autofocus complete → slave focus mode\n";
+            }
+        }
+
+        // ── Dock positioning ──────────────────────────────────────────────────
+        // Place the minimap (right) and info panel (left) so the minimap's compass
+        // cardinals sit flush against the screen edges. Done here, per frame, since
+        // it depends on the live display size + minimap radius (which the fractional
+        // anchors can't know). Both are render-thread-owned fields.
+        {
+            const float dw = static_cast<float>(xr.display_width());
+            const float dh = static_cast<float>(xr.display_height());
+            if (dw > 1.f && dh > 1.f) {
+                const float ringR = state.map_overlay.size_px;
+                // Outward chrome radius: cardinal letters sit at ringR+26 (+glyph).
+                const float cr = ringR + (state.map_overlay.compass_ring ? 34.f : 10.f);
+                const float voff = state.hud_dock.v_offset;
+                const float cyv = (state.hud_dock.bottom ? (dh - cr) : cr) + voff;
+                state.map_overlay.anchor_x = (dw - cr) / dw;   // minimap: right, flush
+                state.map_overlay.anchor_y = cyv / dh;
+                state.map_overlay.pan_x = 0.f; state.map_overlay.pan_y = 0.f;
+                state.info_panel.anchor_x = cr / dw;           // info panel: left, mirrored
+                state.info_panel.anchor_y = cyv / dh;
+                state.info_panel.pan_x = 0.f; state.info_panel.pan_y = 0.f;
             }
         }
 
