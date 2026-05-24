@@ -346,6 +346,7 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
 
     draw_map_overlay(nvg_, s, fw, fh);
+    draw_info_panel(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
 
     if (!s.lora_messages.empty()) {
@@ -687,6 +688,155 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             nvgFontBlur(vg, 0.f);
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 200));
             nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
+        }
+    }
+}
+
+// ── Cycling info panel ──────────────────────────────────────────────────────────
+// A configurable region (mirroring the minimap on the opposite side) that auto-
+// cycles through glanceable widgets: analog clock, notifications, schedule, weather.
+// Drawn once per frame (mono overlay), so the dwell timer ticks here safely.
+void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, float fh) {
+    const InfoPanelConfig& cfg = s.info_panel;
+    if (!cfg.enabled) return;
+
+    // Build the list of enabled widgets in fixed order.
+    constexpr int kCount = static_cast<int>(InfoWidget::Count);
+    int order[kCount]; int n = 0;
+    for (int i = 0; i < kCount; ++i)
+        if (cfg.show[i]) order[n++] = i;
+    if (n == 0) return;
+
+    // Advance the cycle (once per frame).
+    info_cycle_t_ += frame_dt_;
+    if (n > 1 && info_cycle_t_ >= std::max(1.f, cfg.cycle_sec)) {
+        info_cycle_t_   = 0.f;
+        info_cycle_idx_ = (info_cycle_idx_ + 1) % n;
+    }
+    if (info_cycle_idx_ >= n) info_cycle_idx_ = 0;
+    const int widget = order[info_cycle_idx_];
+
+    const float r  = cfg.size_px;
+    const float px = std::clamp(fw * cfg.anchor_x + cfg.pan_x, r, fw - r);
+    const float py = std::clamp(fh * cfg.anchor_y + cfg.pan_y, r, fh - r);
+    const float TWO_PI = 2.f * static_cast<float>(M_PI);
+
+    // Backing disc + border — matches the minimap footprint.
+    nvgBeginPath(vg); nvgCircle(vg, px, py, r);
+    nvgFillColor(vg, nvgRGBA(10, 16, 22, 170)); nvgFill(vg);
+    nvgBeginPath(vg); nvgCircle(vg, px, py, r);
+    nvgStrokeColor(vg, nvgRGBA(100, 130, 160, 160)); nvgStrokeWidth(vg, 1.5f); nvgStroke(vg);
+
+    // Title at the top of the disc.
+    static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE", "WEATHER" };
+    nvg_set_font_ui(13.f);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+    nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
+    nvgText(vg, px, py - r + 7.f, kNames[widget], nullptr);
+
+    // Clip widget bodies to the disc's bounding box so long text never spills out.
+    nvgSave(vg);
+    nvgScissor(vg, px - r, py - r, r * 2.f, r * 2.f);
+
+    if (widget == static_cast<int>(InfoWidget::Clock)) {
+        // Analog clock.
+        const time_t now = std::time(nullptr) +
+                           static_cast<time_t>(s.clock_cfg.manual_offset_s);
+        struct tm tmv; localtime_r(&now, &tmv);
+        const float cr = r * 0.60f;
+        for (int i = 0; i < 12; ++i) {
+            const float a  = static_cast<float>(i) / 12.f * TWO_PI - static_cast<float>(M_PI) * 0.5f;
+            const float r0 = cr * 0.86f, r1 = cr * 0.99f;
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, px + std::cos(a) * r0, py + std::sin(a) * r0);
+            nvgLineTo(vg, px + std::cos(a) * r1, py + std::sin(a) * r1);
+            nvgStrokeColor(vg, nvgRGBA(200, 220, 230, 150));
+            nvgStrokeWidth(vg, (i % 3 == 0) ? 2.f : 1.f); nvgStroke(vg);
+        }
+        auto hand = [&](float frac, float len, float w, NVGcolor c) {
+            const float a = frac * TWO_PI - static_cast<float>(M_PI) * 0.5f;
+            nvgLineCap(vg, NVG_ROUND);
+            nvgBeginPath(vg); nvgMoveTo(vg, px, py);
+            nvgLineTo(vg, px + std::cos(a) * len, py + std::sin(a) * len);
+            nvgStrokeColor(vg, c); nvgStrokeWidth(vg, w); nvgStroke(vg);
+        };
+        const float hh = (tmv.tm_hour % 12) + tmv.tm_min / 60.f;
+        const float mm = tmv.tm_min + tmv.tm_sec / 60.f;
+        hand(hh / 12.f, cr * 0.50f, 3.f, nvg_col(col_.text_fill));
+        hand(mm / 60.f, cr * 0.78f, 2.f, nvg_col(col_.text_fill));
+        hand(tmv.tm_sec / 60.f, cr * 0.88f, 1.f, nvgRGBA(235, 80, 70, 235));
+        nvgBeginPath(vg); nvgCircle(vg, px, py, 2.5f);
+        nvgFillColor(vg, nvgRGBA(235, 80, 70, 235)); nvgFill(vg);
+
+    } else if (widget == static_cast<int>(InfoWidget::Notifications)) {
+        nvg_set_font_ui(12.f);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        char cnt[32]; snprintf(cnt, sizeof(cnt), "%d unread", s.notifs.unread_count());
+        nvgFillColor(vg, nvg_col_a(col_.text_fill, 180));
+        nvgText(vg, px, py - r + 24.f, cnt, nullptr);
+
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        float ty = py - r * 0.32f; const float lh = 16.f; int shown = 0;
+        const float lx = px - r * 0.82f;
+        for (const auto& nt : s.notifs.items) {
+            if (nt.dismissed) continue;
+            if (shown >= 4) break;
+            nvgFillColor(vg, nt.read ? nvg_col_a(col_.text_fill, 130)
+                                     : nvg_col_a(col_.text_fill, 235));
+            nvgText(vg, lx, ty, nt.title.c_str(), nullptr);
+            ty += lh; ++shown;
+        }
+        if (shown == 0) {
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+            nvgText(vg, px, py, "no notifications", nullptr);
+        }
+
+    } else if (widget == static_cast<int>(InfoWidget::Schedule)) {
+        nvg_set_font_ui(12.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        const time_t now = std::time(nullptr);
+        float ty = py - r * 0.45f; const float lh = 16.f; int shown = 0;
+        const float lx = px - r * 0.84f;
+        for (const auto& e : s.scheduler_events) {
+            if (e.start_utc == 0) continue;
+            if (e.end_utc != 0 && e.end_utc < now) continue;   // skip finished
+            if (shown >= 4) break;
+            struct tm tmv; localtime_r(&e.start_utc, &tmv);
+            char hm[16];
+            if (e.all_day) snprintf(hm, sizeof(hm), "all-day");
+            else           strftime(hm, sizeof(hm), "%H:%M", &tmv);
+            char line[80]; snprintf(line, sizeof(line), "%s %s", hm, e.title.c_str());
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
+            nvgText(vg, lx, ty, line, nullptr);
+            ty += lh; ++shown;
+        }
+        if (shown == 0) {
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+            nvgText(vg, px, py, "no events", nullptr);
+        }
+
+    } else {  // Weather — data source lands in a later pass.
+        nvg_set_font_ui(14.f);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+        nvgText(vg, px, py, "no data", nullptr);
+    }
+
+    nvgRestore(vg);  // pop scissor
+
+    // Cycle position dots along the bottom.
+    if (n > 1) {
+        const float dotsY = py + r - 10.f;
+        const float gap   = 10.f;
+        const float x0    = px - gap * (n - 1) * 0.5f;
+        for (int i = 0; i < n; ++i) {
+            nvgBeginPath(vg);
+            nvgCircle(vg, x0 + i * gap, dotsY, 2.2f);
+            nvgFillColor(vg, i == info_cycle_idx_ ? nvg_col_a(col_.text_fill, 235)
+                                                  : nvgRGBA(255, 255, 255, 70));
+            nvgFill(vg);
         }
     }
 }

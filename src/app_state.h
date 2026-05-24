@@ -270,6 +270,25 @@ struct MapOverlayConfig {
     float       view_pan_y          = 0.f;
 };
 
+// ── Info panel (cycling side widgets) ───────────────────────────────────────────
+// A configurable HUD region — typically mirroring the minimap on the opposite
+// side — that auto-cycles through glanceable widgets so a user can take in
+// weather / notifications / schedule / time at a glance. Render-thread owned; the
+// menu writes fields while holding the mutex (like MapOverlayConfig).
+enum class InfoWidget : uint8_t { Clock = 0, Notifications, Schedule, Weather, Count };
+
+struct InfoPanelConfig {
+    bool  enabled   = false;    // off by default; user opts in per side
+    float anchor_x  = 0.85f;    // screen fraction — right side, mirroring a left minimap
+    float anchor_y  = 0.5f;
+    float pan_x     = 0.f;
+    float pan_y     = 0.f;
+    float size_px   = 150.f;    // half-extent (radius), matching the minimap footprint
+    float cycle_sec = 6.f;      // dwell per widget before advancing
+    // Which widgets take part in the cycle (indexed by InfoWidget).
+    bool  show[static_cast<int>(InfoWidget::Count)] = { true, true, true, false };
+};
+
 // ── Particle effects ──────────────────────────────────────────────────────────
 
 enum class EffectType : uint8_t {
@@ -577,6 +596,9 @@ struct AppState {
 
     // Map overlay config (render-thread owned; menu writes while holding mtx)
     MapOverlayConfig     map_overlay;
+
+    // Cycling info panel config (render-thread owned; menu writes while holding mtx)
+    InfoPanelConfig      info_panel;
 
     // Per-LoRa-node compass marker colors (indexed by node.local_id % 8)
     ImU32 lora_node_colors[8] = {

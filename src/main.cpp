@@ -2610,6 +2610,37 @@ static std::vector<MenuItem> build_menu(
             [&state](float v){ state.map_overlay.opacity = v; }),
     };
 
+    // Cycling info panel — sits opposite the minimap and rotates through widgets.
+    std::vector<MenuItem> info_panel_menu = {
+        toggle("Enabled",
+            [&state]{ return state.info_panel.enabled; },
+            [&state](bool v){ state.info_panel.enabled = v; }),
+        leaf_sel("Side: Left",
+            [&state]{ state.info_panel.anchor_x = 0.15f; },
+            [&state]{ return state.info_panel.anchor_x < 0.5f; }),
+        leaf_sel("Side: Right",
+            [&state]{ state.info_panel.anchor_x = 0.85f; },
+            [&state]{ return state.info_panel.anchor_x >= 0.5f; }),
+        slider("Cycle Seconds", 2.f, 30.f, 1.f, "s",
+            [&state]{ return state.info_panel.cycle_sec; },
+            [&state](float v){ state.info_panel.cycle_sec = v; }),
+        slider("Size", 80.f, 300.f, 10.f, "px",
+            [&state]{ return state.info_panel.size_px; },
+            [&state](float v){ state.info_panel.size_px = v; }),
+        toggle("Show: Clock",
+            [&state]{ return state.info_panel.show[static_cast<int>(InfoWidget::Clock)]; },
+            [&state](bool v){ state.info_panel.show[static_cast<int>(InfoWidget::Clock)] = v; }),
+        toggle("Show: Notifications",
+            [&state]{ return state.info_panel.show[static_cast<int>(InfoWidget::Notifications)]; },
+            [&state](bool v){ state.info_panel.show[static_cast<int>(InfoWidget::Notifications)] = v; }),
+        toggle("Show: Schedule",
+            [&state]{ return state.info_panel.show[static_cast<int>(InfoWidget::Schedule)]; },
+            [&state](bool v){ state.info_panel.show[static_cast<int>(InfoWidget::Schedule)] = v; }),
+        toggle("Show: Weather",
+            [&state]{ return state.info_panel.show[static_cast<int>(InfoWidget::Weather)]; },
+            [&state](bool v){ state.info_panel.show[static_cast<int>(InfoWidget::Weather)] = v; }),
+    };
+
     std::vector<MenuItem> hud_menu = {
         toggle("Flip to Top",
             [hud_cfg]{ return hud_cfg->hud_flip_vertical; },
@@ -2622,6 +2653,7 @@ static std::vector<MenuItem> build_menu(
         submenu("Color",         std::move(color_options_menu)),
         submenu("Menu Position", std::move(menu_position_menu)),
         submenu("Map Overlay",   std::move(map_overlay_menu)),
+        submenu("Info Panel",    std::move(info_panel_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
@@ -3913,6 +3945,23 @@ int main(int argc, char* argv[]) {
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
 
+    // Cycling info panel (opposite the minimap).
+    if (cfg.contains("info_panel")) {
+        const auto& jip = cfg["info_panel"];
+        auto& ip = state.info_panel;
+        ip.enabled   = jip.value("enabled",   ip.enabled);
+        ip.anchor_x  = jip.value("anchor_x",  ip.anchor_x);
+        ip.anchor_y  = jip.value("anchor_y",  ip.anchor_y);
+        ip.size_px   = jip.value("size_px",   ip.size_px);
+        ip.cycle_sec = jip.value("cycle_sec", ip.cycle_sec);
+        if (jip.contains("show") && jip["show"].is_array()) {
+            const auto& sh = jip["show"];
+            for (int i = 0; i < static_cast<int>(InfoWidget::Count) &&
+                            i < static_cast<int>(sh.size()); ++i)
+                ip.show[i] = sh[i].get<bool>();
+        }
+    }
+
     // Compass IMU axis selection
     if (cfg.contains("compass")) {
         auto& jc = cfg["compass"];
@@ -5104,6 +5153,19 @@ int main(int argc, char* argv[]) {
             cfg["map"]["zoom"]                = mo.zoom;
         }
 
+        {
+            const auto& ip = state.info_panel;
+            cfg["info_panel"]["enabled"]   = ip.enabled;
+            cfg["info_panel"]["anchor_x"]  = ip.anchor_x;
+            cfg["info_panel"]["anchor_y"]  = ip.anchor_y;
+            cfg["info_panel"]["size_px"]   = ip.size_px;
+            cfg["info_panel"]["cycle_sec"] = ip.cycle_sec;
+            json sh = json::array();
+            for (int i = 0; i < static_cast<int>(InfoWidget::Count); ++i)
+                sh.push_back(ip.show[i]);
+            cfg["info_panel"]["show"] = sh;
+        }
+
         cfg["resolution"]["width"]  = state.camera_resolution.width;
         cfg["resolution"]["height"] = state.camera_resolution.height;
         cfg["resolution"]["fps"]    = state.camera_resolution.fps;
@@ -5805,6 +5867,7 @@ int main(int argc, char* argv[]) {
             snap.scheduler_lead_min = state.scheduler_lead_min;
             snap.effects_cfg        = state.effects_cfg;
             snap.map_overlay        = state.map_overlay;
+            snap.info_panel         = state.info_panel;
             snap.sys_metrics        = state.sys_metrics;
             snap.gpu                = state.gpu;
             snap.imu_data           = state.imu_data;

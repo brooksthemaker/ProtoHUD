@@ -191,6 +191,7 @@ private:
                             float fw, float fh);
     void draw_fps_nvg      (NVGcontext* vg, const AppState& snap, float fw, float fh);
     void draw_map_overlay  (NVGcontext* vg, const AppState& s, float fw, float fh);
+    void draw_info_panel   (NVGcontext* vg, const AppState& s, float fw, float fh);
     void draw_compass_ring (NVGcontext* vg, const AppState& s,
                             float cx, float cy, float radius, bool bold = false);
     void draw_map_expanded (NVGcontext* vg, const AppState& s, float fw, float fh);
@@ -281,6 +282,12 @@ private:
     float         frame_dt_  = 0.f;
     bool          fps_shown_in_hud_   = false;  // prevent double draw
     bool          nvg_frame_active_   = false;  // shared overlay frame in progress
+
+    // Info-panel cycler (render-thread only). info_cycle_idx_ indexes into the
+    // currently-enabled widget list, rebuilt each frame; info_cycle_t_ accumulates
+    // dwell time. Overlay is drawn once per frame, so ticking here is frame-rate-safe.
+    int           info_cycle_idx_ = 0;
+    float         info_cycle_t_   = 0.f;
 
     // ── Popup state ───────────────────────────────────────────────────────────
     enum class PopupKind   { None, Alarm, Timer };
