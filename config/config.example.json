@@ -175,11 +175,9 @@
     }
   },
   "scheduler": {
-    "_about": "On-board scheduler/reminders. Networking (phone web form + Google Calendar) lives in the scheduler_daemon Python companion, which writes events.json + scheduler_status.json. ProtoHUD reads those by file poll and fires reminders via the toast system. The daemon reads this same block for its web_port / paths / all_day_reminder_hour.",
+    "_about": "On-board scheduler/reminders. Networking (phone web form + Google Calendar) lives in the scheduler_daemon Python companion, which writes events.json + scheduler_status.json. ProtoHUD reads those by file poll. Paths default to ~/.local/share/protohud-scheduler/ on both sides (leave events_path/status_path unset unless you need a custom location).",
     "enabled": true,
     "autostart": false,
-    "events_path": "/home/user/.local/share/protohud-scheduler/events.json",
-    "status_path": "/home/user/.local/share/protohud-scheduler/scheduler_status.json",
     "poll_interval_s": 20,
     "lead_minutes": 10,
     "all_day_reminder_hour": 8,

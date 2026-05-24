@@ -3771,10 +3771,14 @@ int main(int argc, char* argv[]) {
     bool        sched_autostart  = false;
     int         sched_poll_s     = 20;
     int         sched_lead_min   = 10;   // applied to state after it's constructed
-    std::string sched_events_path =
-        "/home/user/.local/share/protohud-scheduler/events.json";
-    std::string sched_status_path =
-        "/home/user/.local/share/protohud-scheduler/scheduler_status.json";
+    // Default the data dir under the real $HOME so it matches the daemon (which
+    // uses ~/.local/share). A hardcoded /home/user broke this on other accounts.
+    const std::string sched_home = []{
+        const char* h = std::getenv("HOME");
+        return std::string(h && *h ? h : "/home/user");
+    }();
+    std::string sched_events_path = sched_home + "/.local/share/protohud-scheduler/events.json";
+    std::string sched_status_path = sched_home + "/.local/share/protohud-scheduler/scheduler_status.json";
     if (cfg.contains("scheduler")) {
         auto& jsc = cfg["scheduler"];
         sched_enabled     = jval(jsc, "enabled",         sched_enabled);

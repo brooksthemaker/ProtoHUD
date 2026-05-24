@@ -45,11 +45,14 @@ DEFAULTS = {
 
 
 def find_config():
+    here = os.path.dirname(__file__)
     candidates = [
         os.environ.get("SCHEDULER_CONFIG"),
-        os.path.join(os.path.dirname(__file__), "config.json"),
-        os.path.join(os.path.dirname(__file__), "..", "config", "config.json"),
-        "/home/user/ProtoHUD/config/config.json",
+        os.path.join(here, "config.json"),
+        os.path.join(here, "..", "config", "config.json"),   # repo: ../config/config.json
+        os.path.join(here, "..", "build", "config.json"),    # in-tree build dir
+        os.path.expanduser("~/protohud/config/config.json"),
+        os.path.expanduser("~/protohud/build/config.json"),
         "/etc/protohud/config.json",
     ]
     for p in candidates:
