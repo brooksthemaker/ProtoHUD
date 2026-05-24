@@ -855,11 +855,33 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             nvgText(vg, px, py, "no events", nullptr);
         }
 
-    } else {  // Weather — data source lands in a later pass.
-        nvg_set_font_ui(14.f);
-        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
-        nvgText(vg, px, py, "no data", nullptr);
+    } else {  // Weather (from WeatherMonitor / Open-Meteo).
+        const WeatherState& w = s.weather;
+        if (!w.ok) {
+            nvg_set_font_ui(14.f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+            nvgText(vg, px, py, s.weather_cfg.enabled ? "..." : "off", nullptr);
+        } else {
+            // Condition icon (no-ops until art exists), big temperature, condition,
+            // and location stacked down the disc.
+            icons_.draw(vg, wmo_icon(w.code, w.is_day), px, py - r * 0.30f, r * 0.62f, 1.f);
+            char tb[16];
+            snprintf(tb, sizeof(tb), "%.0f°%s", static_cast<double>(w.temp),
+                     s.weather_cfg.metric ? "C" : "F");
+            nvg_set_font_ui(r * 0.30f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 235));
+            nvgText(vg, px, py + r * 0.18f, tb, nullptr);
+            nvg_set_font_ui(13.f);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 200));
+            nvgText(vg, px, py + r * 0.45f, w.condition.c_str(), nullptr);
+            if (!w.location.empty()) {
+                nvg_set_font_ui(11.f);
+                nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+                nvgText(vg, px, py + r * 0.63f, w.location.c_str(), nullptr);
+            }
+        }
     }
 
     nvgRestore(vg);  // pop scissor

@@ -309,6 +309,16 @@
     "bottom":   true,
     "v_offset": 0
   },
+  "weather": {
+    "_about": "Weather widget (Open-Meteo, no API key; fetched via curl). auto_locate uses IP geolocation; otherwise set lat/lon. metric: true=C/kph, false=F/mph. Needs the device online + curl installed.",
+    "enabled":      false,
+    "auto_locate":  true,
+    "metric":       true,
+    "lat":          0.0,
+    "lon":          0.0,
+    "place":        "",
+    "interval_min": 15
+  },
   "splash": {
     "enabled":       true,
     "animated":      true,

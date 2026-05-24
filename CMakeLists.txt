@@ -190,6 +190,7 @@ set(SOURCES
     src/net/wifi_monitor.cpp
     src/net/ping_monitor.cpp
     src/net/bt_monitor.cpp
+    src/net/weather_monitor.cpp
     src/crash_reporter.cpp
     src/capture.cpp
     src/video_recorder.cpp

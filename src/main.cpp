@@ -39,6 +39,7 @@
 #include "sensor/mpu9250.h"
 #include "sys/system_monitor.h"
 #include "sys/scheduler_monitor.h"
+#include "net/weather_monitor.h"
 #include "net/wifi_monitor.h"
 #include "net/ping_monitor.h"
 #include "net/bt_monitor.h"
@@ -2655,9 +2656,18 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> ip_weather_menu = {
         toggle("Show Weather",
             [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Weather)]; },
-            [&state, ipw](bool v){ state.info_panel.show[ipw(InfoWidget::Weather)] = v; }),
-        leaf("Set Location (coming soon)", []{}),
-        leaf("Auto-Locate via Internet (coming soon)", []{}),
+            [&state, ipw](bool v){
+                state.info_panel.show[ipw(InfoWidget::Weather)] = v;
+                if (v) state.weather_cfg.enabled = true;   // showing it starts the fetcher
+                state.weather_refresh = true;
+            }),
+        toggle("Auto-Locate (IP)",
+            [&state]{ return state.weather_cfg.auto_locate; },
+            [&state](bool v){ state.weather_cfg.auto_locate = v; state.weather_refresh = true; }),
+        toggle("Units: Metric",
+            [&state]{ return state.weather_cfg.metric; },
+            [&state](bool v){ state.weather_cfg.metric = v; state.weather_refresh = true; }),
+        leaf("Refresh Now", [&state]{ state.weather_refresh = true; }),
     };
     std::vector<MenuItem> info_panel_menu = {
         toggle("Enabled",
@@ -3996,6 +4006,19 @@ int main(int argc, char* argv[]) {
     }
     apply_hud_dock(state);   // dock is authoritative for both anchors
 
+    // Weather (Open-Meteo via WeatherMonitor).
+    if (cfg.contains("weather")) {
+        const auto& jw = cfg["weather"];
+        auto& wc = state.weather_cfg;
+        wc.enabled      = jw.value("enabled",      wc.enabled);
+        wc.auto_locate  = jw.value("auto_locate",  wc.auto_locate);
+        wc.metric       = jw.value("metric",       wc.metric);
+        wc.lat          = jw.value("lat",          wc.lat);
+        wc.lon          = jw.value("lon",          wc.lon);
+        wc.place        = jw.value("place",        wc.place);
+        wc.interval_min = jw.value("interval_min", wc.interval_min);
+    }
+
     // Compass IMU axis selection
     if (cfg.contains("compass")) {
         auto& jc = cfg["compass"];
@@ -4150,11 +4173,13 @@ int main(int argc, char* argv[]) {
     PingMonitor      ping_mon;
     BtMonitor        bt_mon;
     SchedulerMonitor sched_mon;
+    WeatherMonitor   weather_mon;
 
     sys_mon.start(&state);
     wifi_mon.start(&state, cfg_wifi_iface);
     ping_mon.start(&state, cfg_ping_host);
     bt_mon.start(&state);
+    weather_mon.start(&state);
     if (sched_enabled) {
         if (sched_autostart) {
             // Best-effort launch of the companion daemon (mirrors protoface autostart).
@@ -5205,6 +5230,17 @@ int main(int argc, char* argv[]) {
         cfg["hud_dock"]["bottom"]   = state.hud_dock.bottom;
         cfg["hud_dock"]["v_offset"] = state.hud_dock.v_offset;
 
+        {
+            const auto& wc = state.weather_cfg;
+            cfg["weather"]["enabled"]      = wc.enabled;
+            cfg["weather"]["auto_locate"]  = wc.auto_locate;
+            cfg["weather"]["metric"]       = wc.metric;
+            cfg["weather"]["lat"]          = wc.lat;
+            cfg["weather"]["lon"]          = wc.lon;
+            cfg["weather"]["place"]        = wc.place;
+            cfg["weather"]["interval_min"] = wc.interval_min;
+        }
+
         cfg["resolution"]["width"]  = state.camera_resolution.width;
         cfg["resolution"]["height"] = state.camera_resolution.height;
         cfg["resolution"]["fps"]    = state.camera_resolution.fps;
@@ -5907,6 +5943,8 @@ int main(int argc, char* argv[]) {
             snap.effects_cfg        = state.effects_cfg;
             snap.map_overlay        = state.map_overlay;
             snap.info_panel         = state.info_panel;
+            snap.weather            = state.weather;
+            snap.weather_cfg        = state.weather_cfg;
             snap.sys_metrics        = state.sys_metrics;
             snap.gpu                = state.gpu;
             snap.imu_data           = state.imu_data;
@@ -6404,6 +6442,7 @@ int main(int argc, char* argv[]) {
     step("ping_mon");        ping_mon.stop();
     step("wifi_mon");        wifi_mon.stop();
     step("sched_mon");       sched_mon.stop();
+    step("weather_mon");     weather_mon.stop();
     step("sys_mon");         sys_mon.stop();
     step("mpu9250");         mpu9250.stop();
     step("audio");           audio.stop();

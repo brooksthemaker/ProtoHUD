@@ -435,6 +435,59 @@ struct SshState {
     int  port   = 22;
 };
 
+// ── Weather ─────────────────────────────────────────────────────────────────────
+// Live weather for the info-panel widget. Fetched off the render thread by
+// WeatherMonitor (Open-Meteo via curl) into `weather`; settings live in
+// `weather_cfg`. WMO weather codes map to short text + an icon asset name.
+struct WeatherState {
+    bool        ok          = false;   // last fetch succeeded
+    float       temp        = 0.f;     // in the configured unit
+    float       feels       = 0.f;
+    float       wind        = 0.f;
+    int         humidity    = -1;      // %
+    int         code        = -1;      // WMO weather code
+    bool        is_day      = true;
+    std::string condition;             // "Clear", "Rain", …
+    std::string location;              // city name
+    time_t      updated_utc = 0;
+};
+
+struct WeatherConfig {
+    bool        enabled      = false;  // run the fetcher
+    bool        auto_locate  = true;   // IP geolocation vs manual lat/lon
+    bool        metric       = true;   // C/kph vs F/mph
+    double      lat          = 0.0;
+    double      lon          = 0.0;
+    std::string place;                 // optional manual label
+    int         interval_min = 15;
+};
+
+// WMO weather code → short label.
+inline const char* wmo_text(int c) {
+    if (c <= 0)               return "Clear";
+    if (c <= 2)               return "Partly Cloudy";
+    if (c == 3)               return "Overcast";
+    if (c == 45 || c == 48)   return "Fog";
+    if (c >= 51 && c <= 57)   return "Drizzle";
+    if ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) return "Rain";
+    if ((c >= 71 && c <= 77) || c == 85 || c == 86)   return "Snow";
+    if (c >= 95)              return "Thunderstorm";
+    return "--";
+}
+
+// WMO weather code → icon asset name (assets/icons/<name>.png; no-ops if absent).
+inline const char* wmo_icon(int c, bool day) {
+    if (c <= 0)               return day ? "wx-clear" : "wx-clear-night";
+    if (c <= 2)               return day ? "wx-partly" : "wx-partly-night";
+    if (c == 3)               return "wx-cloudy";
+    if (c == 45 || c == 48)   return "wx-fog";
+    if (c >= 51 && c <= 57)   return "wx-drizzle";
+    if ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) return "wx-rain";
+    if ((c >= 71 && c <= 77) || c == 85 || c == 86)   return "wx-snow";
+    if (c >= 95)              return "wx-storm";
+    return "wx-cloudy";
+}
+
 // ── Notification system ───────────────────────────────────────────────────────
 
 enum class NotifType : uint8_t { Alarm, Timer, LoRa, App };
@@ -648,6 +701,11 @@ struct AppState {
     SshState               ssh;
     std::vector<BtDevice>  bt_devices;
     SerialMetrics          serial_metrics;
+
+    // Weather (live data written by WeatherMonitor; settings written by menu/config)
+    WeatherState           weather;
+    WeatherConfig          weather_cfg;
+    std::atomic<bool>      weather_refresh { false };  // menu → force an immediate fetch
 
     // Cached XR display control values (no SDK getter; updated when menu writes).
     int xr_brightness     = 5;   // 1–7; mirrors last xr->set_brightness() call
