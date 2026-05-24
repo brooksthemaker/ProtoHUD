@@ -791,11 +791,9 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
     // Compass bezel around the expanded map (turns as the user turns) — bold.
     draw_compass_ring(vg, s, cx, cy, half, /*bold=*/true);
 
-    // Title + zoom readout.
+    // Zoom readout (corner of the map).
     char zb[32]; snprintf(zb, sizeof(zb), "%.1fx", std::max(cfg.view_zoom, 1.0f));
     nvg_set_font_ui(15.f);
-    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
-    nvg_glow_text(vg, cx, cy - half - 30.f, "MAP", true, col_.glow_base, col_.text_fill);
     nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
     nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgText(vg, cx + half - 36.f, cy - half + 12.f, zb, nullptr);

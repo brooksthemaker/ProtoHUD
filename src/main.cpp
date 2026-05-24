@@ -5115,6 +5115,19 @@ int main(int argc, char* argv[]) {
         return true;
     };
 
+    // Kick off a one-shot autofocus on the OWLsight (CSI) cameras at boot; once it
+    // locks (or times out) both settle into SLAVE focus (handled in the loop).
+    bool   boot_af_pending = false;
+    double boot_af_t0      = 0.0;
+    if (cameras.owl_left() || cameras.owl_right()) {
+        if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+        if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+        state.focus_left.mode  = CameraFocusState::Mode::AUTO;
+        state.focus_right.mode = CameraFocusState::Mode::AUTO;
+        boot_af_pending = true;
+        boot_af_t0      = glfwGetTime();
+    }
+
     double prev_time = glfwGetTime();
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
@@ -5521,6 +5534,23 @@ int main(int argc, char* argv[]) {
         if (cameras.owl_right()) {
             state.focus_right.af_locked = cameras.owl_right()->is_af_locked();
             state.focus_right.af_active = cameras.owl_right()->is_af_scanning();
+        }
+
+        // ── Boot autofocus → slave ─────────────────────────────────────────────
+        // Run one AF cycle on the OWLsight (CSI) cameras at startup, then settle
+        // both into SLAVE (hold the locked focus). Falls through after a timeout if
+        // the camera never reports a lock.
+        if (boot_af_pending) {
+            const bool l_done = !cameras.owl_left()  || cameras.owl_left()->is_af_locked();
+            const bool r_done = !cameras.owl_right() || cameras.owl_right()->is_af_locked();
+            if ((l_done && r_done) || (glfwGetTime() - boot_af_t0) > 5.0) {
+                if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
+                if (cameras.owl_right()) cameras.owl_right()->stop_autofocus();
+                state.focus_left.mode  = CameraFocusState::Mode::SLAVE;
+                state.focus_right.mode = CameraFocusState::Mode::SLAVE;
+                boot_af_pending = false;
+                std::cout << "[cam] boot autofocus complete → slave focus mode\n";
+            }
         }
 
         // ── State snapshot ────────────────────────────────────────────────────

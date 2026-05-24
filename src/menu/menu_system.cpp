@@ -1674,13 +1674,17 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
                     std::snprintf(vbuf, sizeof(vbuf), "%d", (int)edit_float_);
                 }
 
-                // Track (faint) + fill (accent), thick arcs.
-                dl->AddCircle({ cx, cy }, vrm, IM_COL32(18, 24, 30, 220), 96, vth);
-                const float a0 = -static_cast<float>(M_PI) * 0.5f;   // fill from the top
-                dl->PathArcTo({ cx, cy }, vrm, a0, a0 + frac * 2.f * static_cast<float>(M_PI), 96);
+                // Partial arc centred on the focus direction (which already points
+                // into the view), so the gauge stays on-screen even when the minimap
+                // is anchored in a corner. Fill grows from the start toward the end.
+                const float SPAN = 2.4f;                       // ~138° gauge
+                const float aS = focus_angle - SPAN * 0.5f;
+                dl->PathArcTo({ cx, cy }, vrm, aS, aS + SPAN, 64);
+                dl->PathStroke(IM_COL32(18, 24, 30, 220), 0, vth);
+                dl->PathArcTo({ cx, cy }, vrm, aS, aS + frac * SPAN, 64);
                 dl->PathStroke(menu_with_alpha(accent, 235), 0, vth);
 
-                // Big live value at the focus position.
+                // Big live value at the focus position (centre of the arc).
                 ImVec2 vp = PR(focus_angle, vrm);
                 const float vsz = fs * 1.35f;
                 ImVec2 ts = font->CalcTextSizeA(vsz, FLT_MAX, 0.f, vbuf);
@@ -1689,9 +1693,10 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
                 dl->AddText(font, vsz, { vp.x - ts.x*0.5f, vp.y - ts.y*0.5f },
                             IM_COL32(255, 255, 255, 255), vbuf);
 
-                // Hint at the bottom of the sub-ring.
+                // Hint, placed further along the focus direction (toward the view
+                // centre → always on-screen).
                 const char* hint = "UP/DN ADJUST   \xC2\xB7   ENTER OK   \xC2\xB7   \xE2\x86\x90 BACK";
-                ImVec2 hp = PR(static_cast<float>(M_PI) * 0.5f, vrm);
+                ImVec2 hp = PR(focus_angle, vrm + vth * 0.5f + 12.f);
                 ImVec2 hs = font->CalcTextSizeA(fs * 0.72f, FLT_MAX, 0.f, hint);
                 dl->AddText(font, fs * 0.72f, { hp.x - hs.x*0.5f + 1.f, hp.y - hs.y*0.5f + 1.f },
                             IM_COL32(0, 0, 0, 200), hint);
