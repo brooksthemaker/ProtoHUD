@@ -3,6 +3,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -207,7 +208,7 @@ struct ImuPose {
 // ── Map overlay ───────────────────────────────────────────────────────────────
 
 struct MapOverlayConfig {
-    bool        enabled             = false;
+    bool        enabled             = true;   // minimap is a permanent HUD element by default
     std::string map_path;            // full filesystem path to loaded image
     float       anchor_x            = 0.5f;   // screen fraction (centre by default)
     float       anchor_y            = 0.5f;
@@ -219,8 +220,30 @@ struct MapOverlayConfig {
     bool        calibrated          = false;
     bool        rotate_with_heading = true;
     float       image_rotate_deg    = 0.f;    // manual image rotation offset (degrees)
-    bool        circle_window       = false;  // true = circular clip; false = rect hugging image
+    bool        circle_window       = true;   // round minimap by default
     float       zoom                = 1.0f;   // >1 = zoom into map content (shows less of the image)
+
+    // Compass ring around the minimap (cardinals + ticks + LoRa markers).
+    bool        compass_ring        = true;
+    // Battery arc — a partial ring (~quarter) hugging the minimap's left side,
+    // sitting OUTSIDE the compass ring. When system_debug is on, the gauge instead
+    // shows CPU (bar 1) + GPU/render load (bar 2, concentric, angularly offset).
+    bool        battery_arc         = true;
+    bool        system_debug        = false;
+    // Clock above the minimap, with an active timer/alarm shown beside it.
+    bool        clock               = true;
+    bool        clock_date          = true;   // show the date under the clock
+
+    // Protoface "portrait" — a scaled, one-side preview of the LED face shown
+    // beside the minimap (American Fugitive-style character portrait).
+    bool        portrait            = false;
+    bool        portrait_right_half = false;  // false = left face half, true = right
+
+    // Helldivers-style temporary expanded view (pan/zoom) — runtime only.
+    bool        expanded            = false;
+    float       view_zoom           = 1.0f;   // expanded-view zoom (independent of minimap)
+    float       view_pan_x          = 0.f;    // expanded-view pan, image-space fraction
+    float       view_pan_y          = 0.f;
 };
 
 // ── Particle effects ──────────────────────────────────────────────────────────
@@ -379,6 +402,7 @@ struct AppState {
     // Heading used for the HUD compass. Updated by LoRa or IMU.
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
+    bool  compass_tape       = true;   // the top-of-screen compass tape
 
     // Which XR-IMU axis drives the compass, and whether to invert the rotation
     // direction. Configurable from the menu so different IMU orientations work
@@ -404,6 +428,7 @@ struct AppState {
 
     // Photo capture: set by menu or GPIO long-press; consumed by the render thread.
     CaptureRequest capture_request = CaptureRequest::None;
+    int            capture_burst   = 0;  // extra stereo shots to take after the current one
 
     // Video recording: video_request is posted by input/toast handlers and consumed
     // by the render thread's VideoRecorder; video_recording/paused are status mirrors
@@ -418,6 +443,26 @@ struct AppState {
     // qr_scan_usb:  scanned in the USB capture thread from the raw BGR frame.
     bool qr_scan_main = false;
     bool qr_scan_usb  = false;
+
+    // Profile requests — posted by deep-menu callbacks (any thread; hold mtx) and
+    // consumed by the main loop. Empty string = no request.
+    //   profile_save_name   → write the current config snapshot to that profile.
+    //   profile_load_name   → relaunch ProtoHUD using that profile (restart).
+    //   profile_delete_name → delete that profile file.
+    std::string profile_save_name;
+    std::string profile_load_name;
+    std::string profile_delete_name;
+
+    // HUD/menu preset requests — visual-only (colors + menu style), applied LIVE
+    // (no restart, unlike full profiles). Consumed by the main loop. Empty = none.
+    std::string hud_preset_save_name;
+    std::string hud_preset_load_name;
+    std::string hud_preset_delete_name;
+
+    // Quick (corner) menu user-pinned favorites: keys of optional catalog actions
+    // the user has chosen to show. Read by the menu's visible_fn (render thread),
+    // written by the "Customize Quick Menu" toggles (any thread) — guard with mtx.
+    std::set<std::string> quick_favorites;
 
     // Latest IMU pose (NWU coordinates). Updated by XRDisplay IMU callback.
     ImuPose imu_pose;

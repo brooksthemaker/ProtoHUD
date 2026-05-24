@@ -3,11 +3,13 @@
 #include <imgui.h>
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <ctime>
 #include <string>
+#include <utility>
 
 static bool s_menu_glow = true;
 
@@ -15,6 +17,29 @@ static std::string to_upper(const std::string& s) {
     std::string r; r.reserve(s.size());
     for (unsigned char c : s) r += static_cast<char>(::toupper(c));
     return r;
+}
+
+// Rendered label for an item: dynamic label_fn() if present, else the static
+// label.  Lets profile rows show live names without rebuilding the menu tree.
+static std::string item_label(const MenuItem& it) {
+    if (it.label_fn) {
+        std::string s = it.label_fn();
+        if (!s.empty()) return s;
+    }
+    return it.label;
+}
+
+// On-screen keyboard layout (variable-width rows). Special keys live on the last
+// row. Shared by the input (move/activate) and draw paths so they stay in sync.
+static const std::vector<std::vector<std::string>>& osk_rows() {
+    static const std::vector<std::vector<std::string>> rows = {
+        {"1","2","3","4","5","6","7","8","9","0"},
+        {"Q","W","E","R","T","Y","U","I","O","P"},
+        {"A","S","D","F","G","H","J","K","L"},
+        {"Z","X","C","V","B","N","M"},
+        {"SPACE","DEL","SAVE","CANCEL"},
+    };
+    return rows;
 }
 
 // Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
@@ -89,10 +114,18 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items,
 
     if (!stack_.empty())
         stack_.back().cursor = cursor_;  // remember where we were on the parent page
-    stack_.push_back(Level{ std::move(level), 0,
+
+    // Start the cursor on the currently-selected option (so option lists open
+    // highlighting the active choice), else on the first item.
+    int init_cursor = 0;
+    for (int i = 0; i < static_cast<int>(level.size()); ++i)
+        if (level[i].get_state && level[i].get_state()) { init_cursor = i; break; }
+
+    stack_.push_back(Level{ std::move(level), init_cursor,
                             std::move(panel_title),
                             std::move(panel_draw) });
-    cursor_ = 0;
+    cursor_ = init_cursor;
+    radial_prev_sel_ = -1;   // snap the radial spin to the new level
     emit_detents();
 }
 
@@ -100,10 +133,159 @@ void MenuSystem::pop_level() {
     if (stack_.size() > 1) {
         stack_.pop_back();
         cursor_ = stack_.back().cursor;  // restore cursor to where user was on this page
+        radial_prev_sel_ = -1;           // snap the radial spin to the restored level
         emit_detents();
+    } else if (deep_open_) {
+        close_deep();
     } else {
         close();
     }
+}
+
+// ── Deep (full-screen) menu management ──────────────────────────────────────────
+
+void MenuSystem::build_deep_tabs() {
+    deep_tabs_.clear();
+    std::vector<MenuItem> general;
+    for (const auto& it : root_items_) {
+        if (it.type == MenuItemType::SUBMENU && !it.children.empty())
+            deep_tabs_.emplace_back(it.label, it.children);
+        else
+            general.push_back(it);
+    }
+    if (!general.empty())
+        deep_tabs_.emplace_back(std::string("General"), std::move(general));
+}
+
+void MenuSystem::load_tab(int idx) {
+    if (deep_tabs_.empty()) return;
+    int n = static_cast<int>(deep_tabs_.size());
+    tab_index_ = ((idx % n) + n) % n;
+    in_edit_mode_    = false;
+    in_channel_edit_ = false;
+    stack_.clear();
+    cursor_ = 0;
+    push_level(deep_tabs_[tab_index_].second);
+}
+
+void MenuSystem::open_deep() {
+    build_deep_tabs();
+    if (deep_tabs_.empty()) return;
+    deep_open_ = true;
+    open_      = true;     // so navigate/select/back operate on the stack
+    load_tab(0);
+}
+
+void MenuSystem::close_deep() {
+    deep_open_       = false;
+    open_            = false;
+    in_edit_mode_    = false;
+    in_channel_edit_ = false;
+    osk_active_      = false;
+    osk_commit_      = nullptr;
+    stack_.clear();
+}
+
+void MenuSystem::next_tab() {
+    // Switch tabs from anywhere in the deep menu — load_tab() drops back to the
+    // tab's base level and cancels any edit mode.
+    if (!deep_open_) return;
+    load_tab(tab_index_ + 1);
+}
+
+void MenuSystem::prev_tab() {
+    if (!deep_open_) return;
+    load_tab(tab_index_ - 1);
+}
+
+// ── On-screen keyboard ──────────────────────────────────────────────────────────
+
+void MenuSystem::open_keyboard(std::string title, std::string initial,
+                               KeyboardCommit on_commit) {
+    osk_title_  = std::move(title);
+    osk_text_   = std::move(initial);
+    osk_commit_ = std::move(on_commit);
+    osk_row_    = 0;
+    osk_col_    = 0;
+    osk_active_ = true;
+}
+
+void MenuSystem::close_keyboard() {
+    osk_active_ = false;
+    osk_commit_ = nullptr;
+    osk_text_.clear();
+}
+
+void MenuSystem::osk_move(int dx, int dy) {
+    if (!osk_active_) return;
+    const auto& rows = osk_rows();
+    int nrows = static_cast<int>(rows.size());
+    if (nrows == 0) return;
+    osk_row_ = std::clamp(osk_row_ + dy, 0, nrows - 1);
+    int ncols = static_cast<int>(rows[osk_row_].size());
+    osk_col_ = std::clamp(osk_col_ + dx, 0, std::max(0, ncols - 1));
+}
+
+void MenuSystem::osk_step(int d) {
+    if (!osk_active_) return;
+    const auto& rows = osk_rows();
+    // Flatten current (row,col) to a linear index, step with wrap, unflatten.
+    int flat = 0, total = 0;
+    for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+        if (r < osk_row_) flat += static_cast<int>(rows[r].size());
+        total += static_cast<int>(rows[r].size());
+    }
+    flat += std::min(osk_col_, static_cast<int>(rows[osk_row_].size()) - 1);
+    if (total == 0) return;
+    flat = ((flat + d) % total + total) % total;
+    for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+        int sz = static_cast<int>(rows[r].size());
+        if (flat < sz) { osk_row_ = r; osk_col_ = flat; return; }
+        flat -= sz;
+    }
+}
+
+void MenuSystem::osk_input_char(unsigned int c) {
+    if (!osk_active_) return;
+    if (c == ' ' || c == '-' || c == '_' || std::isalnum(static_cast<int>(c))) {
+        if (osk_text_.size() < 40) osk_text_ += static_cast<char>(c);
+    }
+}
+
+void MenuSystem::osk_activate() {
+    if (!osk_active_) return;
+    const auto& rows = osk_rows();
+    if (osk_row_ < 0 || osk_row_ >= static_cast<int>(rows.size())) return;
+    const auto& row = rows[osk_row_];
+    if (osk_col_ < 0 || osk_col_ >= static_cast<int>(row.size())) return;
+    const std::string& k = row[osk_col_];
+    if      (k == "SPACE")  { if (osk_text_.size() < 40) osk_text_ += ' '; }
+    else if (k == "DEL")    osk_backspace();
+    else if (k == "SAVE")   osk_commit();
+    else if (k == "CANCEL") osk_cancel();
+    else if (k.size() == 1) { if (osk_text_.size() < 40) osk_text_ += k[0]; }
+}
+
+void MenuSystem::osk_backspace() {
+    if (!osk_active_) return;
+    if (!osk_text_.empty()) osk_text_.pop_back();
+    else                    osk_cancel();   // backspace on empty = cancel out
+}
+
+void MenuSystem::osk_commit() {
+    if (!osk_active_) return;
+    // trim surrounding whitespace
+    std::string t = osk_text_;
+    size_t b = t.find_first_not_of(' ');
+    size_t e = t.find_last_not_of(' ');
+    std::string name = (b == std::string::npos) ? std::string() : t.substr(b, e - b + 1);
+    KeyboardCommit cb = osk_commit_;   // copy before close clears it
+    close_keyboard();
+    if (!name.empty() && cb) cb(name);
+}
+
+void MenuSystem::osk_cancel() {
+    close_keyboard();
 }
 
 void MenuSystem::emit_detents() {
@@ -122,6 +304,7 @@ void MenuSystem::emit_detents_override(int count) {
 // ── navigate ──────────────────────────────────────────────────────────────────
 
 void MenuSystem::navigate(int direction) {
+    if (osk_active_) { osk_step(direction); return; }
     if (!open_ || stack_.empty()) return;
 
     if (in_edit_mode_) {
@@ -168,11 +351,15 @@ void MenuSystem::navigate(int direction) {
         next = ((next + direction) % n + n) % n;
     }
     cursor_ = next;
+
+    // Live preview: apply the newly-highlighted option's effect as the user tabs.
+    if (items[cursor_].on_highlight) items[cursor_].on_highlight();
 }
 
 // ── select ────────────────────────────────────────────────────────────────────
 
 void MenuSystem::select() {
+    if (osk_active_) { osk_activate(); return; }
     if (!open_ || stack_.empty()) return;
     auto& items = stack_.back().items;
     if (cursor_ >= static_cast<int>(items.size())) return;
@@ -180,10 +367,12 @@ void MenuSystem::select() {
 
     switch (item.type) {
     case MenuItemType::SUBMENU:
-        if (!item.children.empty())
+        if (!item.children.empty()) {
+            if (item.action) item.action();   // optional "on enter" hook (e.g. lock focus)
             push_level(item.children,
                        item.context_panel_title,
                        item.context_panel_draw);
+        }
         break;
 
     case MenuItemType::LEAF:
@@ -272,6 +461,7 @@ void MenuSystem::select() {
 // ── back ──────────────────────────────────────────────────────────────────────
 
 void MenuSystem::back() {
+    if (osk_active_) { osk_backspace(); return; }
     if (!stack_.empty() && cursor_ < static_cast<int>(stack_.back().items.size())) {
         auto& item = stack_.back().items[cursor_];
 
@@ -315,6 +505,18 @@ const std::string& MenuSystem::current_label() const {
     if (cursor_ < static_cast<int>(items.size()))
         return items[cursor_].label;
     return empty;
+}
+
+bool MenuSystem::editing_value() const {
+    if (!in_edit_mode_ || stack_.empty()) return false;
+    const auto& items = stack_.back().items;
+    if (cursor_ < 0 || cursor_ >= static_cast<int>(items.size())) return false;
+    switch (items[cursor_].type) {
+        case MenuItemType::SLIDER:       return true;
+        case MenuItemType::FACE_PICKER:  return true;
+        case MenuItemType::COLOR_PICKER: return in_channel_edit_;  // only while a channel is being adjusted
+        default:                         return false;
+    }
 }
 
 // ── draw ──────────────────────────────────────────────────────────────────────
@@ -497,7 +699,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         if (item.type == MenuItemType::TOGGLE) {
             bool on = item.get_toggle ? item.get_toggle() : false;
 
-            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
             // Radio-style circle + " ON" / " OFF" text, both using accent_color_.
             const char* state_str = on ? " ON" : " OFF";
@@ -534,7 +736,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             format_slider_value(val_str, sizeof(val_str),
                                 val, item.slider.min, item.slider.max, item.slider.unit);
 
-            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
             const bool inv = (filled_row && selected);
 
@@ -577,7 +779,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                 ? static_cast<int>(edit_float_)
                 : (item.face_picker.get_face ? item.face_picker.get_face() : 0);
 
-            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
             const bool inv = (filled_row && selected);
 
@@ -622,7 +824,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         } else if (item.type == MenuItemType::COLOR_PICKER) {
             bool editing = selected && in_edit_mode_;
 
-            draw_item_text({rmin.x + 4.f, ty}, to_upper(item.label).c_str(), selected);
+            draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
             if (!editing) {
                 float sw_x = rmax.x - 36.f;
@@ -691,7 +893,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             // Label row (unread badge)
             NotificationQueue* q = item.notif_log.queue;
             int unread = q ? q->unread_count() : 0;
-            std::string lbl = to_upper(item.label);
+            std::string lbl = to_upper(item_label(item));
             if (unread > 0) { char badge[16]; snprintf(badge, sizeof(badge), " (%d)", unread); lbl += badge; }
             draw_item_text({rmin.x + 4.f, ty}, lbl.c_str(), selected);
 
@@ -745,7 +947,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
         // ── LEAF / SUBMENU ────────────────────────────────────────────────────
         } else {
-            std::string label = to_upper(item.label);
+            std::string label = to_upper(item_label(item));
             if (item.type == MenuItemType::SUBMENU || !item.children.empty())
                 label += "   >";
             draw_item_text({rmin.x + 4.f, ty}, label.c_str(), selected);
@@ -882,4 +1084,625 @@ void MenuSystem::draw_context_panel(const Level& lvl,
     ImGui::End();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(1);
+}
+
+// ── draw_fullscreen (deep menu) ─────────────────────────────────────────────────
+
+void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
+    if (!deep_open_ || stack_.empty()) return;
+    s_menu_glow = glow_enabled_;
+
+    const float W = static_cast<float>(screen_w);
+    const float H = static_cast<float>(screen_h);
+
+    ImGui::SetNextWindowPos ({ 0.f, 0.f }, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({ W, H },    ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.f, 0.f, 0.f, 0.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(0.f, 0.f));
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDecoration        |
+        ImGuiWindowFlags_NoMove              |
+        ImGuiWindowFlags_NoSavedSettings     |
+        ImGuiWindowFlags_NoFocusOnAppearing  |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoInputs;
+
+    ImGui::Begin("##deepmenu", nullptr, flags);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImFont* font   = ImGui::GetFont();
+    // Base font size scaled by the theme's UI scale — everything in this method
+    // derives from fs, so this resizes the whole deep menu (text + spacing).
+    const float fs = ImGui::GetFontSize() * ui_scale_;
+
+    // On-screen keyboard takes over the whole screen when active.
+    if (osk_active_) {
+        draw_keyboard(dl, font, fs, W, H);
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(1);
+        return;
+    }
+
+    // Dim the live feeds (still visible behind ~35%).
+    dl->AddRectFilled({0.f, 0.f}, {W, H}, IM_COL32(4, 8, 12, 165));
+
+    // Panel
+    const float mx = W * 0.07f, my = H * 0.09f;
+    const ImVec2 pmin{ mx, my }, pmax{ W - mx, H - my };
+    dl->AddRectFilled(pmin, pmax, IM_COL32(8, 12, 16, 200));
+    if (border_enabled_)
+        dl->AddRect(pmin, pmax, menu_with_alpha(border_color_, 210), 0.f, 0, 2.f);
+
+    const float pad = 30.f;
+    const float cx0 = pmin.x + pad;
+    const float cx1 = pmax.x - pad;
+
+    // Title
+    dl->AddText(font, fs * 1.7f, { cx0, pmin.y + 14.f }, IM_COL32(255, 255, 255, 255), "SETTINGS");
+
+    // Tab bar
+    const float tab_y = pmin.y + 16.f + fs * 1.7f + 10.f;
+    float tx = cx0;
+    for (int t = 0; t < static_cast<int>(deep_tabs_.size()); ++t) {
+        std::string lbl = to_upper(deep_tabs_[t].first);
+        ImVec2 sz = font->CalcTextSizeA(fs * 1.2f, FLT_MAX, 0.f, lbl.c_str());
+        bool active = (t == tab_index_);
+        if (active) {
+            dl->AddRectFilled({ tx - 8.f, tab_y - 5.f }, { tx + sz.x + 8.f, tab_y + sz.y + 5.f },
+                              menu_with_alpha(accent_color_, 45), 3.f);
+            dl->AddRect({ tx - 8.f, tab_y - 5.f }, { tx + sz.x + 8.f, tab_y + sz.y + 5.f },
+                        menu_with_alpha(accent_color_, 210), 3.f, 0, 1.5f);
+        }
+        ImU32 col = active ? IM_COL32(255, 255, 255, 255) : menu_with_alpha(accent_color_, 150);
+        dl->AddText(font, fs * 1.2f, { tx, tab_y }, col, lbl.c_str());
+        tx += sz.x + 30.f;
+    }
+    const float tabs_bottom = tab_y + fs * 1.2f + 14.f;
+    dl->AddLine({ cx0, tabs_bottom }, { cx1, tabs_bottom }, menu_with_alpha(accent_color_, 90), 1.f);
+
+    // Content split
+    const float cy0 = tabs_bottom + 20.f;
+    const float cy1 = pmax.y - 48.f;
+    const float split_x = pmin.x + (pmax.x - pmin.x) * 0.42f;
+    dl->AddLine({ split_x, cy0 }, { split_x, cy1 }, menu_with_alpha(accent_color_, 60), 1.f);
+
+    const auto& items = stack_.back().items;
+
+    // Keep the cursor on a visible item.
+    {
+        int n = static_cast<int>(items.size());
+        if (n > 0 && cursor_ < n) {
+            const auto& cur = items[cursor_];
+            if (cur.visible_fn && !cur.visible_fn()) {
+                for (int tries = 0; tries < n; ++tries) {
+                    cursor_ = (cursor_ + 1) % n;
+                    const auto& t = items[cursor_];
+                    if (!t.visible_fn || t.visible_fn()) break;
+                }
+            }
+        }
+    }
+
+    // ── Left list ────────────────────────────────────────────────────────────
+    auto value_summary = [](const MenuItem& it) -> std::string {
+        switch (it.type) {
+            case MenuItemType::TOGGLE:
+                return (it.get_toggle && it.get_toggle()) ? "ON" : "OFF";
+            case MenuItemType::SLIDER: {
+                char b[32];
+                float v = it.slider.get_value ? it.slider.get_value() : it.slider.min;
+                format_slider_value(b, sizeof(b), v, it.slider.min, it.slider.max, it.slider.unit);
+                return b;
+            }
+            case MenuItemType::FACE_PICKER: {
+                char b[8];
+                std::snprintf(b, sizeof(b), "%d", it.face_picker.get_face ? it.face_picker.get_face() : 0);
+                return b;
+            }
+            case MenuItemType::SUBMENU:
+                return ">";
+            default:
+                return std::string();
+        }
+    };
+
+    const float row_h  = fs * 1.15f + 18.f;
+    const float lx0    = cx0;
+    const float lx1    = split_x - 20.f;
+    float ly = cy0;
+    for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+        const auto& it = items[i];
+        if (it.visible_fn && !it.visible_fn()) continue;
+        if (ly + row_h > cy1) break;   // simple clip (no scrolling yet)
+
+        bool sel = (i == cursor_);
+        ImVec2 rmin{ lx0, ly }, rmax{ lx1, ly + row_h };
+        if (sel) {
+            dl->AddRectFilled(rmin, rmax, menu_with_alpha(accent_color_, 45), 3.f);
+            dl->AddRectFilled({ rmin.x, rmin.y }, { rmin.x + 4.f, rmax.y }, accent_color_);
+        }
+        ImU32 tcol = sel ? IM_COL32(255, 255, 255, 255) : IM_COL32(215, 220, 226, 175);
+        float ty = ly + (row_h - fs * 1.15f) * 0.5f;
+        dl->AddText(font, fs * 1.15f, { lx0 + 14.f, ty }, tcol, to_upper(item_label(it)).c_str());
+
+        if (it.type == MenuItemType::COLOR_PICKER && it.color.get_color) {
+            auto [r, g, b] = it.color.get_color();
+            dl->AddRectFilled({ lx1 - 36.f, ty + 1.f }, { lx1 - 8.f, ty + fs * 0.9f },
+                              IM_COL32(r, g, b, 255), 2.f);
+        } else if (it.get_state) {
+            // Theme-matching "currently selected" indicator for option lists.
+            float cyd = ly + row_h * 0.5f;
+            if (it.get_state()) {
+                dl->AddCircleFilled({ lx1 - 14.f, cyd }, 5.f, accent_color_);
+                dl->AddCircleFilled({ lx1 - 14.f, cyd }, 2.f, IM_COL32(255, 255, 255, 220));
+            } else {
+                dl->AddCircle({ lx1 - 14.f, cyd }, 5.f, menu_with_alpha(accent_color_, 90), 0, 1.5f);
+            }
+        } else {
+            std::string val = value_summary(it);
+            if (!val.empty()) {
+                ImVec2 vsz = font->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0.f, val.c_str());
+                dl->AddText(font, fs * 1.05f, { lx1 - vsz.x - 10.f, ty },
+                            menu_with_alpha(accent_color_, 205), val.c_str());
+            }
+        }
+        ly += row_h;
+    }
+
+    // ── Right pane: description + editor ────────────────────────────────────────
+    const float rx0 = split_x + 24.f;
+    const float rx1 = cx1;
+    if (cursor_ < static_cast<int>(items.size())) {
+        const auto& sel = items[cursor_];
+        dl->AddText(font, fs * 1.5f, { rx0, cy0 }, IM_COL32(255, 255, 255, 255),
+                    to_upper(item_label(sel)).c_str());
+
+        float ey = cy0 + fs * 1.5f + 16.f;
+        if (!sel.description.empty()) {
+            // wrap_width overload: AddText(font, size, pos, col, begin, end, wrap_width)
+            dl->AddText(font, fs * 1.0f, { rx0, ey }, IM_COL32(200, 205, 210, 205),
+                        sel.description.c_str(), nullptr, rx1 - rx0);
+            ey += fs * 1.0f * 3.0f;
+        }
+
+        const bool editing = in_edit_mode_;
+
+        // Applicable context preview: the highlighted submenu's own panel, else
+        // walk up the stack so it persists through sub-levels (Position / Crop
+        // Center / Zoom / etc.). Computed once so it's available while editing too.
+        MenuContextPanelDraw panel;
+        if (sel.type == MenuItemType::SUBMENU && sel.context_panel_draw) {
+            panel = sel.context_panel_draw;
+        } else {
+            for (auto lvl = stack_.rbegin(); lvl != stack_.rend(); ++lvl)
+                if (lvl->panel_draw) { panel = lvl->panel_draw; break; }
+        }
+
+        if (editing && sel.type == MenuItemType::SLIDER) {
+            // Keep the preview visible while adjusting a slider that affects it
+            // (e.g. Inner Bias): preview on top, a compact slider bar below.
+            float by;
+            if (panel) {
+                const float strip_h = 46.f;
+                panel(dl, { rx0, ey + 6.f }, { rx1 - rx0, (cy1 - strip_h) - (ey + 6.f) });
+                by = cy1 - strip_h + 16.f;
+            } else {
+                by = ey + 8.f;
+            }
+            float range = sel.slider.max - sel.slider.min;
+            float fill  = (range > 0.f) ? std::clamp((edit_float_ - sel.slider.min) / range, 0.f, 1.f) : 0.f;
+            float bw = rx1 - rx0, bh = 12.f;
+            dl->AddRectFilled({ rx0, by }, { rx0 + bw, by + bh }, menu_with_alpha(accent_color_, 55), 3.f);
+            dl->AddRectFilled({ rx0, by }, { rx0 + bw * fill, by + bh }, menu_with_alpha(accent_color_, 230), 3.f);
+            char vb[32]; format_slider_value(vb, sizeof(vb), edit_float_, sel.slider.min, sel.slider.max, sel.slider.unit);
+            ImVec2 vsz = font->CalcTextSizeA(fs * 1.1f, FLT_MAX, 0.f, vb);
+            dl->AddText(font, fs * 1.1f, { rx1 - vsz.x, by - fs * 1.1f - 2.f },
+                        IM_COL32(255, 255, 255, 255), vb);
+        } else if (editing && sel.type == MenuItemType::COLOR_PICKER) {
+            const float chv[3] = { edit_r_, edit_g_, edit_b_ };
+            const char* chn[3] = { "R", "G", "B" };
+            const ImU32 chc[3] = { IM_COL32(220,60,60,220), IM_COL32(60,200,60,220), IM_COL32(60,80,220,220) };
+            for (int c = 0; c < 3; ++c) {
+                float by = ey + 6.f + c * 30.f;
+                bool is_sel = (c == edit_channel_);
+                dl->AddText(font, fs, { rx0, by }, is_sel ? IM_COL32(255,255,255,255) : IM_COL32(150,160,170,200), chn[c]);
+                float bx = rx0 + 22.f, bw = (rx1 - bx) - 48.f;
+                dl->AddRectFilled({ bx, by + 2.f }, { bx + bw, by + fs }, menu_with_alpha(accent_color_, 50), 2.f);
+                dl->AddRectFilled({ bx, by + 2.f }, { bx + bw * (chv[c] / 255.f), by + fs }, chc[c], 2.f);
+                if (is_sel) dl->AddRect({ bx - 1.f, by + 1.f }, { bx + bw + 1.f, by + fs + 1.f }, menu_with_alpha(accent_color_, 220), 2.f, 0, 1.5f);
+                char cv[8]; std::snprintf(cv, sizeof(cv), "%.0f", chv[c]);
+                dl->AddText(font, fs, { rx1 - 40.f, by }, IM_COL32(220,225,230,220), cv);
+            }
+        } else if (editing && sel.type == MenuItemType::FACE_PICKER) {
+            int n = sel.face_picker.face_count;
+            int cur = static_cast<int>(edit_float_);
+            float ccx = (rx0 + rx1) * 0.5f, ccy = ey + 70.f, rad = 56.f;
+            for (int f = 0; f < n; ++f) {
+                float a = -static_cast<float>(M_PI) * 0.5f + (2.f * static_cast<float>(M_PI) * f) / n;
+                float fx = ccx + rad * std::cos(a), fy = ccy + rad * std::sin(a);
+                if (f == cur) { dl->AddCircleFilled({fx,fy}, 8.f, menu_with_alpha(accent_color_,230)); dl->AddCircleFilled({fx,fy},3.f,IM_COL32(255,255,255,230)); }
+                else dl->AddCircle({fx,fy}, 5.f, menu_with_alpha(accent_color_,120), 0, 1.5f);
+            }
+        } else {
+            // Not editing: show the applicable live context panel (computed
+            // above), else a hint for editable items.
+            if (panel) {
+                panel(dl, { rx0, ey + 6.f }, { rx1 - rx0, cy1 - (ey + 6.f) });
+            } else if (sel.type == MenuItemType::SLIDER ||
+                       sel.type == MenuItemType::COLOR_PICKER ||
+                       sel.type == MenuItemType::FACE_PICKER) {
+                dl->AddText(font, fs, { rx0, ey + 6.f }, menu_with_alpha(accent_color_, 170),
+                            "Press Enter / A to edit");
+            }
+        }
+    }
+
+    // Bottom hint bar
+    dl->AddText(font, fs * 0.95f, { cx0, pmax.y - 32.f }, menu_with_alpha(accent_color_, 185),
+                "ENTER/A SELECT   \xC2\xB7   BACKSPACE/B BACK   \xC2\xB7   TAB / LB-RB TABS   \xC2\xB7   F1 / START CLOSE");
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(1);
+}
+
+// ── draw_keyboard (on-screen text entry) ────────────────────────────────────────
+// Drawn inside draw_fullscreen's window (so it inherits the deep-menu draw list).
+void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
+                               float W, float H) {
+    // Dim everything behind.
+    dl->AddRectFilled({0.f, 0.f}, {W, H}, IM_COL32(4, 8, 12, 205));
+
+    // Centered panel.
+    const float pw = std::min(W * 0.86f, 760.f * ui_scale_);
+    const float ph = std::min(H * 0.80f, 460.f * ui_scale_);
+    const ImVec2 pmin{ (W - pw) * 0.5f, (H - ph) * 0.5f };
+    const ImVec2 pmax{ pmin.x + pw,     pmin.y + ph };
+    dl->AddRectFilled(pmin, pmax, IM_COL32(8, 12, 16, 235));
+    if (border_enabled_)
+        dl->AddRect(pmin, pmax, menu_with_alpha(border_color_, 220), 0.f, 0, 2.f);
+
+    const float pad = 26.f;
+    const float x0  = pmin.x + pad;
+    const float x1  = pmax.x - pad;
+
+    // Title.
+    std::string title = osk_title_.empty() ? std::string("ENTER NAME") : to_upper(osk_title_);
+    dl->AddText(font, fs * 1.4f, { x0, pmin.y + 14.f }, IM_COL32(255, 255, 255, 255), title.c_str());
+
+    // Text field.
+    const float fy = pmin.y + 14.f + fs * 1.4f + 12.f;
+    const float fh = fs * 1.5f + 12.f;
+    dl->AddRectFilled({ x0, fy }, { x1, fy + fh }, IM_COL32(0, 0, 0, 160), 3.f);
+    dl->AddRect({ x0, fy }, { x1, fy + fh }, menu_with_alpha(accent_color_, 200), 3.f, 0, 1.5f);
+    std::string shown = osk_text_;
+    // blinking caret
+    if (static_cast<int>(ImGui::GetTime() * 2.0) & 1) shown += "_";
+    dl->AddText(font, fs * 1.2f, { x0 + 10.f, fy + (fh - fs * 1.2f) * 0.5f },
+                IM_COL32(255, 255, 255, 240), shown.c_str());
+
+    // Key grid.
+    const auto& rows = osk_rows();
+    const float grid_top = fy + fh + 22.f;
+    const float grid_bot = pmax.y - 40.f;
+    const int   nrows    = static_cast<int>(rows.size());
+    const float key_h    = (grid_bot - grid_top) / static_cast<float>(nrows) - 8.f;
+    const float gap      = 8.f;
+
+    for (int r = 0; r < nrows; ++r) {
+        const auto& row = rows[r];
+        int ncols = static_cast<int>(row.size());
+        float ky  = grid_top + r * (key_h + 8.f);
+        // Letter/number rows are evenly divided across the full width; the last
+        // (special-key) row sizes each key by weight.
+        bool special = (r == nrows - 1);
+        if (!special) {
+            float kw = (x1 - x0 - gap * (ncols - 1)) / static_cast<float>(ncols);
+            for (int c = 0; c < ncols; ++c) {
+                float kx = x0 + c * (kw + gap);
+                bool sel = (r == osk_row_ && c == osk_col_);
+                ImVec2 kmin{ kx, ky }, kmax{ kx + kw, ky + key_h };
+                dl->AddRectFilled(kmin, kmax,
+                    sel ? IM_COL32(255, 255, 255, 235) : menu_with_alpha(accent_color_, 40), 3.f);
+                if (sel) dl->AddRect(kmin, kmax, menu_with_alpha(accent_color_, 230), 3.f, 0, 1.5f);
+                ImVec2 tsz = font->CalcTextSizeA(fs * 1.1f, FLT_MAX, 0.f, row[c].c_str());
+                dl->AddText(font, fs * 1.1f,
+                            { kx + (kw - tsz.x) * 0.5f, ky + (key_h - fs * 1.1f) * 0.5f },
+                            sel ? IM_COL32(10, 12, 14, 255) : IM_COL32(230, 235, 240, 220),
+                            row[c].c_str());
+            }
+        } else {
+            // proportional widths for SPACE/DEL/SAVE/CANCEL
+            float total_w = x1 - x0 - gap * (ncols - 1);
+            float weights[8] = { 1,1,1,1,1,1,1,1 };
+            for (int c = 0; c < ncols; ++c) if (row[c] == "SPACE") weights[c] = 2.2f;
+            float wsum = 0.f; for (int c = 0; c < ncols; ++c) wsum += weights[c];
+            float kx = x0;
+            for (int c = 0; c < ncols; ++c) {
+                float kw = total_w * (weights[c] / wsum);
+                bool sel = (r == osk_row_ && c == osk_col_);
+                ImVec2 kmin{ kx, ky }, kmax{ kx + kw, ky + key_h };
+                bool is_save   = (row[c] == "SAVE");
+                bool is_cancel = (row[c] == "CANCEL");
+                ImU32 base = is_save   ? IM_COL32(40, 110, 60, 150)
+                           : is_cancel ? IM_COL32(120, 50, 50, 150)
+                           :             menu_with_alpha(accent_color_, 40);
+                dl->AddRectFilled(kmin, kmax, sel ? IM_COL32(255, 255, 255, 235) : base, 3.f);
+                if (sel) dl->AddRect(kmin, kmax, menu_with_alpha(accent_color_, 230), 3.f, 0, 1.5f);
+                ImVec2 tsz = font->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0.f, row[c].c_str());
+                dl->AddText(font, fs * 1.0f,
+                            { kx + (kw - tsz.x) * 0.5f, ky + (key_h - fs) * 0.5f },
+                            sel ? IM_COL32(10, 12, 14, 255) : IM_COL32(230, 235, 240, 220),
+                            row[c].c_str());
+                kx += kw + gap;
+            }
+        }
+    }
+
+    // Hint bar.
+    dl->AddText(font, fs * 0.9f, { x0, pmax.y - 26.f }, menu_with_alpha(accent_color_, 185),
+                "ARROWS/STICK MOVE   \xC2\xB7   A/ENTER KEY   \xC2\xB7   B/BKSP DELETE   \xC2\xB7   TYPE ON KEYBOARD");
+}
+
+// ── draw_radial (quick menu around the minimap) ─────────────────────────────────
+// Drawn via the foreground draw list in display pixel coords (the same space the
+// nvg minimap uses) so the wheel locks around the minimap. Each nav-stack level is
+// a concentric ring of annular-sector wedges (inner = root, outer = active submenu),
+// each wedge with an icon slot + label. focus_angle is the screen-space direction the
+// "primary" item points; rotate_to_selected spins the selected wedge to that angle.
+// A helmet-style perspective tilt (radial_tilt_) foreshortens the top so the wheel
+// reads as curving inward like a visor rather than lying flat on glass.
+// Draw text centred at `center`, rotated by `angle` radians about it. ImGui's
+// AddText has no rotation, so we rotate the glyph vertices it just emitted.
+static void dl_text_rot(ImDrawList* dl, ImFont* font, float size, ImVec2 center,
+                        ImU32 col, const char* text, float angle) {
+    const ImVec2 tsz = font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
+    const int v0 = dl->VtxBuffer.Size;
+    dl->AddText(font, size, { center.x - tsz.x * 0.5f, center.y - tsz.y * 0.5f }, col, text);
+    const int v1 = dl->VtxBuffer.Size;
+    const float s = std::sin(angle), c = std::cos(angle);
+    for (int i = v0; i < v1; ++i) {
+        ImDrawVert& v = dl->VtxBuffer[i];
+        const float dx = v.pos.x - center.x, dy = v.pos.y - center.y;
+        v.pos.x = center.x + dx * c - dy * s;
+        v.pos.y = center.y + dx * s + dy * c;
+    }
+}
+
+void MenuSystem::draw_radial(float cx, float cy, float inner_r,
+                             float focus_angle, bool rotate_to_selected) {
+    (void)rotate_to_selected;   // the wheel always rotates the selection to focus now
+    if (!open_ || stack_.empty()) return;
+    s_menu_glow = glow_enabled_;
+
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImFont* font   = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize() * ui_scale_;
+    const ImU32  accent = accent_color_;
+
+    const float ring_gap   = 84.f * ui_scale_;   // minimap edge → first ring (clears the compass + gauge)
+    const float ring_thick = 60.f * ui_scale_;   // radial thickness of each wedge band
+    const float ring_pad   = 6.f  * ui_scale_;   // gap between concentric rings
+    const float wedge_gap  = 0.045f;             // angular gap between wedges (rad)
+
+    const int depth = static_cast<int>(stack_.size());
+
+    // ── Helmet-tilt perspective ────────────────────────────────────────────────
+    // Model the wheel on a plane tilted about the horizontal axis through the
+    // centre; project with a simple pinhole. Top (oy<0) recedes & shrinks, bottom
+    // comes forward — a subtle "inside of a visor" curve. tilt 0 → flat.
+    // DISABLED for now: keep the wheel planar + concentric with the minimap.
+    // (radial_tilt_ / the "Menu Tilt" slider stay wired; set this back to
+    //  radial_tilt_ * 0.9f to re-enable.)
+    const float ang_t  = 0.f;
+    const float sin_t  = std::sin(ang_t), cos_t = std::cos(ang_t);
+    const float r_max  = inner_r + ring_gap + depth * (ring_thick + ring_pad) + ring_thick;
+    const float focal  = std::max(220.f, r_max * 2.8f);
+    auto project = [&](float ox, float oy) -> ImVec2 {
+        float z = oy * sin_t;
+        float s = focal / (focal - z);
+        return ImVec2{ cx + ox * s, cy + oy * cos_t * s };
+    };
+    auto PR = [&](float ang, float r) -> ImVec2 {
+        return project(std::cos(ang) * r, std::sin(ang) * r);
+    };
+
+    auto fill_sector = [&](float r0, float r1, float a0, float a1, ImU32 col) {
+        int seg = std::max(2, static_cast<int>(std::ceil((a1 - a0) / 0.10f)));
+        for (int i = 0; i < seg; ++i) {
+            float t0 = a0 + (a1 - a0) * (float)i / seg;
+            float t1 = a0 + (a1 - a0) * (float)(i + 1) / seg;
+            ImVec2 q[4] = { PR(t0, r0), PR(t0, r1), PR(t1, r1), PR(t1, r0) };
+            dl->AddConvexPolyFilled(q, 4, col);
+        }
+    };
+    auto stroke_sector = [&](float r0, float r1, float a0, float a1, ImU32 col, float th) {
+        int seg = std::max(2, static_cast<int>(std::ceil((a1 - a0) / 0.10f)));
+        std::vector<ImVec2> pts;
+        for (int i = 0; i <= seg; ++i) pts.push_back(PR(a0 + (a1 - a0) * (float)i / seg, r1));
+        for (int i = 0; i <= seg; ++i) pts.push_back(PR(a1 - (a1 - a0) * (float)i / seg, r0));
+        dl->AddPolyline(pts.data(), (int)pts.size(), col, ImDrawFlags_Closed, th);
+    };
+    auto draw_icon = [&](const MenuItem& it, ImVec2 p, float g, ImU32 col) {
+        switch (it.type) {
+            case MenuItemType::TOGGLE: {
+                bool on = it.get_toggle && it.get_toggle();
+                if (on) { dl->AddCircleFilled(p, g * 0.5f, col);
+                          dl->AddCircleFilled(p, g * 0.22f, IM_COL32(20,22,26,255)); }
+                else      dl->AddCircle(p, g * 0.5f, col, 0, 1.6f);
+                break;
+            }
+            case MenuItemType::SLIDER:
+                dl->AddRectFilled({ p.x - g*0.55f, p.y - 1.6f }, { p.x + g*0.55f, p.y + 1.6f }, col, 1.f);
+                dl->AddCircleFilled({ p.x + g*0.18f, p.y }, g*0.26f, col);
+                break;
+            case MenuItemType::SUBMENU:
+                dl->AddTriangleFilled({ p.x - g*0.28f, p.y - g*0.42f },
+                                      { p.x - g*0.28f, p.y + g*0.42f },
+                                      { p.x + g*0.40f, p.y }, col);
+                break;
+            default:
+                dl->AddCircleFilled(p, g * 0.30f, col);
+                break;
+        }
+    };
+
+    auto value_summary = [](const MenuItem& it) -> std::string {
+        switch (it.type) {
+            case MenuItemType::TOGGLE:
+                return (it.get_toggle && it.get_toggle()) ? "ON" : "OFF";
+            case MenuItemType::SLIDER: {
+                char b[32];
+                float v = it.slider.get_value ? it.slider.get_value() : it.slider.min;
+                format_slider_value(b, sizeof(b), v, it.slider.min, it.slider.max, it.slider.unit);
+                return b;
+            }
+            default: return std::string();
+        }
+    };
+
+    for (int L = 0; L < depth; ++L) {
+        const Level& lvl  = stack_[L];
+        const bool  active = (L == depth - 1);
+        const float r0 = inner_r + ring_gap + L * (ring_thick + ring_pad);
+        const float r1 = r0 + ring_thick;
+        const int   sel_idx = active ? cursor_ : lvl.cursor;
+
+        std::vector<int> vis;
+        for (int i = 0; i < static_cast<int>(lvl.items.size()); ++i)
+            if (!lvl.items[i].visible_fn || lvl.items[i].visible_fn()) vis.push_back(i);
+        const int N = static_cast<int>(vis.size());
+        if (N == 0) continue;
+
+        int sel_vis = 0;
+        for (int k = 0; k < N; ++k) if (vis[k] == sel_idx) { sel_vis = k; break; }
+
+        const float step = 2.f * static_cast<float>(M_PI) / static_cast<float>(N);
+
+        // Active ring eases its selected wedge to the focus angle (smooth spin);
+        // inner rings snap to their chosen item.
+        float anim_sel = static_cast<float>(sel_vis);
+        if (active) {
+            if (radial_prev_sel_ < 0) {
+                radial_anim_   = static_cast<float>(sel_vis);
+                radial_target_ = static_cast<float>(sel_vis);
+            } else if (sel_vis != radial_prev_sel_) {
+                int d = sel_vis - radial_prev_sel_;       // shortest signed step (ring of N)
+                while (d >  N / 2) d -= N;
+                while (d < -N / 2) d += N;
+                radial_target_ += static_cast<float>(d);
+            }
+            radial_prev_sel_ = sel_vis;
+            float dt = ImGui::GetIO().DeltaTime;
+            if (dt <= 0.f || dt > 0.1f) dt = 0.016f;
+            radial_anim_ += (radial_target_ - radial_anim_) * (1.f - std::exp(-dt * 13.f));
+            anim_sel = radial_anim_;
+        }
+
+        for (int k = 0; k < N; ++k) {
+            const MenuItem& it = lvl.items[vis[k]];
+            const bool primary = (vis[k] == sel_idx);
+            float ac = focus_angle + (static_cast<float>(k) - anim_sel) * step;
+            float a0 = ac - step * 0.5f + wedge_gap * 0.5f;
+            float a1 = ac + step * 0.5f - wedge_gap * 0.5f;
+
+            // Wedge fill: selected = accent; others = faint dark, dimmer on inner rings.
+            ImU32 fill = primary
+                ? (active ? menu_with_alpha(accent, 210) : menu_with_alpha(accent, 110))
+                : (active ? IM_COL32(18, 24, 30, 180) : IM_COL32(14, 18, 24, 130));
+            fill_sector(r0, r1, a0, a1, fill);
+            stroke_sector(r0, r1, a0, a1,
+                          primary ? menu_with_alpha(accent, 235) : menu_with_alpha(accent, 70),
+                          primary ? 2.0f : 1.0f);
+
+            // Only annotate the active ring and the chosen item on inner rings.
+            if (!active && !primary) continue;
+
+            const ImU32 icon_col = primary ? IM_COL32(20, 22, 26, 255)
+                                           : menu_with_alpha(accent, 220);
+            const ImU32 text_col = primary ? IM_COL32(20, 22, 26, 255)
+                                  : active  ? IM_COL32(230, 235, 240, 220)
+                                  :           menu_with_alpha(accent, 170);
+
+            // Icon slot (inner band) — kept upright.
+            draw_icon(it, PR(ac, r0 + ring_thick * 0.30f), 16.f * ui_scale_, icon_col);
+
+            // Label + value follow the arc (rotated to the tangent; flipped on the
+            // bottom half so they never read upside-down).
+            float ta = ac + static_cast<float>(M_PI) * 0.5f;
+            if (std::sin(ac) > 0.f) ta += static_cast<float>(M_PI);
+
+            std::string label = to_upper(item_label(it));
+            std::string val   = value_summary(it);
+            const float lsz = primary ? fs * 0.98f : fs * 0.86f;
+            ImVec2 lp = PR(ac, r0 + ring_thick * 0.62f);
+            dl_text_rot(dl, font, lsz, { lp.x + 1.f, lp.y + 1.f }, IM_COL32(0, 0, 0, 170), label.c_str(), ta);
+            dl_text_rot(dl, font, lsz, lp, text_col, label.c_str(), ta);
+            if (!val.empty()) {
+                ImVec2 vp = PR(ac, r0 + ring_thick * 0.88f);
+                ImU32 vc = primary ? IM_COL32(20, 22, 26, 230) : menu_with_alpha(accent, 200);
+                dl_text_rot(dl, font, fs * 0.78f, vp, vc, val.c_str(), ta);
+            }
+        }
+    }
+
+    // ── Value sub-ring (editing a slider / face value) ──────────────────────────
+    // Selecting Zoom/Focus opens a half-height outer ring: Up/Down adjust the value,
+    // Enter confirms, Left returns. Shown as an arc gauge + the live value.
+    if (in_edit_mode_ && !stack_.empty()) {
+        const auto& items = stack_.back().items;
+        if (cursor_ >= 0 && cursor_ < static_cast<int>(items.size())) {
+            const MenuItem& it = items[cursor_];
+            const bool is_val = (it.type == MenuItemType::SLIDER ||
+                                 it.type == MenuItemType::FACE_PICKER);
+            if (is_val) {
+                const float vrm = inner_r + ring_gap + depth * (ring_thick + ring_pad)
+                                  + ring_thick * 0.25f;        // centre of a half-height band
+                const float vth = ring_thick * 0.5f;
+                float frac = 0.f; char vbuf[32] = {0};
+                if (it.type == MenuItemType::SLIDER) {
+                    const float range = it.slider.max - it.slider.min;
+                    frac = (range > 0.f)
+                        ? std::clamp((edit_float_ - it.slider.min) / range, 0.f, 1.f) : 0.f;
+                    format_slider_value(vbuf, sizeof(vbuf), edit_float_,
+                                        it.slider.min, it.slider.max, it.slider.unit);
+                } else {
+                    const int n = std::max(1, it.face_picker.face_count);
+                    frac = (n > 1) ? static_cast<float>((int)edit_float_) / (n - 1) : 0.f;
+                    std::snprintf(vbuf, sizeof(vbuf), "%d", (int)edit_float_);
+                }
+
+                // Partial arc centred on the focus direction (which already points
+                // into the view), so the gauge stays on-screen even when the minimap
+                // is anchored in a corner. Fill grows from the start toward the end.
+                const float SPAN = 2.4f;                       // ~138° gauge
+                const float aS = focus_angle - SPAN * 0.5f;
+                dl->PathArcTo({ cx, cy }, vrm, aS, aS + SPAN, 64);
+                dl->PathStroke(IM_COL32(18, 24, 30, 220), 0, vth);
+                dl->PathArcTo({ cx, cy }, vrm, aS, aS + frac * SPAN, 64);
+                dl->PathStroke(menu_with_alpha(accent, 235), 0, vth);
+
+                // Big live value at the focus position (centre of the arc).
+                ImVec2 vp = PR(focus_angle, vrm);
+                const float vsz = fs * 1.35f;
+                ImVec2 ts = font->CalcTextSizeA(vsz, FLT_MAX, 0.f, vbuf);
+                dl->AddText(font, vsz, { vp.x - ts.x*0.5f + 1.f, vp.y - ts.y*0.5f + 1.f },
+                            IM_COL32(0, 0, 0, 210), vbuf);
+                dl->AddText(font, vsz, { vp.x - ts.x*0.5f, vp.y - ts.y*0.5f },
+                            IM_COL32(255, 255, 255, 255), vbuf);
+
+                // Hint, placed further along the focus direction (toward the view
+                // centre → always on-screen).
+                const char* hint = "UP/DN ADJUST   \xC2\xB7   ENTER OK   \xC2\xB7   \xE2\x86\x90 BACK";
+                ImVec2 hp = PR(focus_angle, vrm + vth * 0.5f + 12.f);
+                ImVec2 hs = font->CalcTextSizeA(fs * 0.72f, FLT_MAX, 0.f, hint);
+                dl->AddText(font, fs * 0.72f, { hp.x - hs.x*0.5f + 1.f, hp.y - hs.y*0.5f + 1.f },
+                            IM_COL32(0, 0, 0, 200), hint);
+                dl->AddText(font, fs * 0.72f, { hp.x - hs.x*0.5f, hp.y - hs.y*0.5f },
+                            menu_with_alpha(accent, 210), hint);
+            }
+        }
+    }
 }

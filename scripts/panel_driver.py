@@ -47,6 +47,8 @@ def main():
 
     W, H = args.canvas_w, args.canvas_h
     size = 1 + W * H * 3
+    print(f"[panel_driver] starting: canvas {W}x{H}, panel {args.panel_w}x{args.panel_h}, "
+          f"chain {args.chain}, parallel {args.parallel}, shm {args.shm}", flush=True)
 
     # Piomatter geometry — identical to Protoface's hub75.py.
     n_addr  = addr_lines(args.panel_h)
@@ -61,10 +63,12 @@ def main():
     matrix = piomatter.PioMatter(colorspace=piomatter.Colorspace.RGB888Packed,
                                  pinout=piomatter.Pinout.Active3,
                                  framebuffer=fb, geometry=geometry)
+    print("[panel_driver] piomatter ready", flush=True)
 
     # Wait for ProtoHUD to create the shm segment.
     while not os.path.exists(args.shm):
         time.sleep(0.2)
+    print("[panel_driver] shm opened, driving panels", flush=True)
     fd = os.open(args.shm, os.O_RDONLY)
     mm = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 
@@ -98,4 +102,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise

@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace face {
 
 struct WiggleCfg {
@@ -44,7 +46,9 @@ struct PanelCfg {
     std::string mirror_of;                       // empty = renders its own face
     FaceCfg     face;
     MaterialCfg material;
-    std::string particles = "none";              // effect/preset shorthand (Phase 3)
+    // Particle config in any form ParticleSystem accepts: a string effect name,
+    // {"preset": ...}, {"effect": ...}, or {"layers": [...]}. Defaults to none.
+    nlohmann::json particles = "none";
 };
 
 // Top-level renderer config (mirror of Protoface config.yaml panel/display).
@@ -56,6 +60,8 @@ struct RenderConfig {
     std::string          faces_dir     = "faces";
     std::string          materials_dir = "materials";
     std::string          gifs_dir      = "gifs";
+    double               gif_auto_release = 5.0;   // s after play_gif before reverting (0 = loop forever)
+    std::string          state_path;               // auto-saved live look (empty = disabled)
     std::vector<PanelCfg> panels;
 };
 

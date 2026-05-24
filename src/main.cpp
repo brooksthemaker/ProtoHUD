@@ -6,8 +6,10 @@
 #include <thread>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <ctime>
 #include <csignal>
+#include <cstdlib>
 
 #include <GLFW/glfw3.h>
 #include <GLES2/gl2.h>
@@ -44,6 +46,12 @@
 #include "video_recorder.h"
 #include "qr_scanner.h"
 #include "splash.h"
+#include "hud/background_library.h"
+#include "profile_manager.h"
+#include "face/face_config.h"
+#include "face/native_face_controller.h"
+#include "face/panel_output.h"
+#include "face/shm_pusher_output.h"
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -51,7 +59,11 @@
 
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <cerrno>
+#include <cstring>
+#include <cstdio>
+#include <dirent.h>
 #include <sys/ioctl.h>
 #include <linux/i2c-dev.h>
 
@@ -115,7 +127,11 @@ static std::string resolve_serial_port(const std::string& configured,
 
 // ── Config loading ────────────────────────────────────────────────────────────
 
-static json load_config(const std::string& path) {
+// parse_failed (out) is set true ONLY when the file exists but is malformed —
+// so the caller can refuse to overwrite it on exit (a missing file is a normal
+// first run and does not set the flag).
+static json load_config(const std::string& path, bool* parse_failed = nullptr) {
+    if (parse_failed) *parse_failed = false;
     FILE* f = fopen(path.c_str(), "r");
     if (!f) {
         std::cerr << "[cfg] cannot open " << path << " — using defaults\n";
@@ -124,7 +140,9 @@ static json load_config(const std::string& path) {
     json j = json::parse(f, nullptr, false);
     fclose(f);
     if (j.is_discarded()) {
-        std::cerr << "[cfg] parse error in " << path << " — using defaults\n";
+        std::cerr << "[cfg] parse error in " << path
+                  << " — using defaults (will NOT overwrite it; fix the JSON)\n";
+        if (parse_failed) *parse_failed = true;
         return json::object();
     }
     return j;
@@ -134,6 +152,84 @@ template<typename T>
 T jval(const json& j, const std::string& key, T def) {
     try { return j.value(key, def); }
     catch (...) { return def; }
+}
+
+// ── Native face renderer config ───────────────────────────────────────────────
+// Build a face::RenderConfig from config.json's "protoface" section. Falls back
+// to the standard 2-panel mirrored layout (face_left + face_right) and to the
+// Protoface submodule's asset folders under $HOME/protohud/Protoface.
+static face::RenderConfig pf_build_render_config(const json& cfg) {
+    face::RenderConfig rc;
+    const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
+
+    std::string assets = "Protoface";
+    if (const char* home = std::getenv("HOME"))
+        assets = std::string(home) + "/protohud/Protoface";
+    if (jpf && jpf->contains("assets_dir") &&
+        !(*jpf)["assets_dir"].get<std::string>().empty())
+        assets = (*jpf)["assets_dir"].get<std::string>();
+    rc.faces_dir     = assets + "/faces";
+    rc.materials_dir = assets + "/materials";
+    rc.gifs_dir      = assets + "/gifs";
+
+    if (jpf) {
+        rc.canvas_w = jval(*jpf, "canvas_w", rc.canvas_w);
+        rc.canvas_h = jval(*jpf, "canvas_h", rc.canvas_h);
+        rc.fps      = jval(*jpf, "fps",      rc.fps);
+        if (jpf->contains("faces_dir"))     rc.faces_dir     = (*jpf)["faces_dir"].get<std::string>();
+        if (jpf->contains("materials_dir")) rc.materials_dir = (*jpf)["materials_dir"].get<std::string>();
+        if (jpf->contains("gifs_dir"))      rc.gifs_dir      = (*jpf)["gifs_dir"].get<std::string>();
+        if (jpf->contains("gif") && (*jpf)["gif"].is_object())
+            rc.gif_auto_release = jval((*jpf)["gif"], "auto_release", rc.gif_auto_release);
+    }
+
+    auto parse_panel = [](const json& jp) {
+        face::PanelCfg p;
+        p.name = jp.value("name", std::string());
+        if (jp.contains("region") && jp["region"].is_array() && jp["region"].size() == 4) {
+            p.x = jp["region"][0].get<int>(); p.y = jp["region"][1].get<int>();
+            p.w = jp["region"][2].get<int>(); p.h = jp["region"][3].get<int>();
+        }
+        p.mirror_of = jp.value("mirror_of", std::string());
+        if (jp.contains("face")) {
+            const auto& jf = jp["face"];
+            p.face.active            = jf.value("active", p.face.active);
+            p.face.expression_fade   = jval(jf, "expression_fade",   p.face.expression_fade);
+            p.face.mouth_sensitivity = jval(jf, "mouth_sensitivity", p.face.mouth_sensitivity);
+            if (jf.contains("wiggle")) {
+                const auto& jw = jf["wiggle"];
+                p.face.wiggle.speed       = jval(jw, "speed",       p.face.wiggle.speed);
+                p.face.wiggle.amplitude_x = jval(jw, "amplitude_x", p.face.wiggle.amplitude_x);
+                p.face.wiggle.amplitude_y = jval(jw, "amplitude_y", p.face.wiggle.amplitude_y);
+            }
+            if (jf.contains("blink")) {
+                const auto& jb = jf["blink"];
+                p.face.blink.interval_min = jval(jb, "interval_min", p.face.blink.interval_min);
+                p.face.blink.interval_max = jval(jb, "interval_max", p.face.blink.interval_max);
+                p.face.blink.duration     = jval(jb, "duration",     p.face.blink.duration);
+            }
+        }
+        if (jp.contains("material")) {
+            const auto& jm = jp["material"];
+            p.material.active   = jm.value("active", p.material.active);
+            p.material.scroll_x = jval(jm, "scroll_x", p.material.scroll_x);
+            p.material.scroll_y = jval(jm, "scroll_y", p.material.scroll_y);
+        }
+        if (jp.contains("particles")) p.particles = jp["particles"];
+        return p;
+    };
+
+    if (jpf && jpf->contains("panels") && (*jpf)["panels"].is_array() &&
+        !(*jpf)["panels"].empty()) {
+        for (const auto& jp : (*jpf)["panels"]) rc.panels.push_back(parse_panel(jp));
+    } else {
+        face::PanelCfg left;  left.name  = "face_left";  left.x = 0;  left.w = 64; left.h = 32;
+        face::PanelCfg right; right.name = "face_right"; right.x = 64; right.w = 64; right.h = 32;
+        right.mirror_of = "face_left";
+        rc.panels.push_back(left);
+        rc.panels.push_back(right);
+    }
+    return rc;
 }
 
 // ── Overlay anchor parsing ────────────────────────────────────────────────────
@@ -312,7 +408,13 @@ static std::vector<MenuItem> build_menu(
         std::string       map_dir         = "/home/user/Pictures/protohud/maps",
         // Eye source selection (render-thread only, no mutex needed)
         EyeSource* left_eye_src  = nullptr,
-        EyeSource* right_eye_src = nullptr)
+        EyeSource* right_eye_src = nullptr,
+        // Profile management (Profiles tab: save current / load by restart / delete)
+        ProfileManager* profiles = nullptr,
+        // HUD/menu visual presets (System tab: built-in themes + save/load/delete)
+        ProfileManager* hud_presets = nullptr,
+        // Out: curated corner "quick menu" tree (assigned if non-null)
+        std::vector<MenuItem>* quick_out = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -353,6 +455,21 @@ static std::vector<MenuItem> build_menu(
                          MenuContextPanelDraw draw) -> MenuItem {
         m.context_panel_title = std::move(title);
         m.context_panel_draw  = std::move(draw);
+        return m;
+    };
+
+    // Attach a right-pane context description to any item (shown in the deep menu).
+    //   with_desc(slider(...), "What this changes and why.")
+    auto with_desc = [](MenuItem m, std::string desc) -> MenuItem {
+        m.description = std::move(desc);
+        return m;
+    };
+
+    // Make an option leaf apply its effect as soon as it's highlighted (live
+    // preview), so tabbing through zoom/crop/position options updates the preview
+    // without a select. Reuses the item's own action.
+    auto live = [](MenuItem m) -> MenuItem {
+        m.on_highlight = m.action;
         return m;
     };
 
@@ -550,23 +667,33 @@ static std::vector<MenuItem> build_menu(
     }
 
     std::vector<MenuItem> nv_menu = {
-        toggle("Enable Low-Light",
+        with_desc(toggle("Enable Low-Light",
             [&state]{ return state.night_vision.nv_enabled; },
             [&state](bool v){
                 state.night_vision.nv_enabled  = v;
                 state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
                 state.night_vision.shutter_us  = v ? 40000 : 16667;
             }),
-        toggle("Auto Low-Light",
+            "Brighten dark scenes by raising exposure and lengthening the shutter. "
+            "Makes the view usable in low light, but adds motion blur and image noise."),
+        with_desc(toggle("Auto Low-Light",
             [&state]{ return state.night_vision.auto_nv; },
             [&state](bool v){ state.night_vision.auto_nv = v; }),
-        slider("Auto Gain Threshold", 1.5f, 16.f, 0.5f, "x",
+            "Turn the low-light boost on automatically when the scene gets dark "
+            "(camera gain rises past the threshold below), and off again when it brightens."),
+        with_desc(slider("Auto Gain Threshold", 1.5f, 16.f, 0.5f, "x",
             [&state]{ return state.night_vision.auto_nv_gain_threshold; },
             [&state](float v){ state.night_vision.auto_nv_gain_threshold = v; }),
-        slider("Exposure (EV)", -3.f, 3.f, 0.5f, " EV",
+            "How dark it must get before Auto Low-Light engages. Lower = kicks in sooner "
+            "(dimmer rooms); higher = only in very dark scenes."),
+        with_desc(slider("Exposure (EV)", -3.f, 3.f, 0.5f, " EV",
             [&state]{ return state.night_vision.exposure_ev; },
             [&state](float v){ state.night_vision.exposure_ev = v; }),
-        submenu("Shutter Speed", std::move(shutter_speeds)),
+            "Brightness compensation. Higher EV brightens the image (better in the dark) "
+            "but adds motion blur; lower darkens it for bright scenes."),
+        with_desc(submenu("Shutter Speed", std::move(shutter_speeds)),
+            "How long each frame is exposed. Slower gathers more light (brighter, but "
+            "movement smears); faster is sharper but darker."),
     };
 
     // ── Per-camera controls (OWLsight CSI cameras) ───────────────────────────
@@ -649,14 +776,14 @@ static std::vector<MenuItem> build_menu(
 
     std::vector<MenuItem> zoom_level_menu;
     for (const auto& z : ZOOM_PRESETS) {
-        zoom_level_menu.push_back(leaf_sel(
+        zoom_level_menu.push_back(live(leaf_sel(
             z.label,
             [&state, zoom = z.zoom]{
                 state.zoom_left.zoom  = zoom;
                 state.zoom_right.zoom = zoom;
             },
             [&state, zoom = z.zoom]{ return state.zoom_left.zoom == zoom; }
-        ));
+        )));
     }
 
     struct CropPreset { const char* label; float cx, cy; };
@@ -670,7 +797,7 @@ static std::vector<MenuItem> build_menu(
 
     std::vector<MenuItem> crop_center_menu;
     for (const auto& c : CROP_PRESETS) {
-        crop_center_menu.push_back(leaf_sel(
+        crop_center_menu.push_back(live(leaf_sel(
             c.label,
             [&state, cx = c.cx, cy = c.cy]{
                 state.zoom_left.center_x  = cx;
@@ -681,7 +808,7 @@ static std::vector<MenuItem> build_menu(
             [&state, cx = c.cx, cy = c.cy]{
                 return state.zoom_left.center_x == cx && state.zoom_left.center_y == cy;
             }
-        ));
+        )));
     }
 
     std::vector<MenuItem> zoom_menu = {
@@ -715,6 +842,9 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Bottom", [&state]{ state.mirror_crop.vertical = CropVertical::Bottom; },
                            [&state]{ return state.mirror_crop.vertical == CropVertical::Bottom; }),
     };
+    // Preview these options as the user tabs through them (live).
+    for (auto& m : mirror_crop_zoom_items) m.on_highlight = m.action;
+    for (auto& m : mirror_crop_vert_items) m.on_highlight = m.action;
     std::vector<MenuItem> mirror_crop_menu = {
         toggle("Enable", [&state]{ return state.mirror_crop.enabled; },
                          [&state](bool v){ state.mirror_crop.enabled = v; }),
@@ -739,6 +869,34 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Right Half",  [&state]{ state.cam_single.anchor = CamSingleAnchor::Right;  },
                                 [&state]{ return state.cam_single.anchor == CamSingleAnchor::Right;  }),
     };
+    // Preview each anchor live as the user tabs through them.
+    for (auto& m : single_cam_anchor_items) if (m.get_state) m.on_highlight = m.action;
+
+    // Single-camera layout preview: which screen region the one feed fills.
+    MenuContextPanelDraw single_cam_preview =
+        [&state, menu_sys_pp](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                ? (*menu_sys_pp)->accent_color() : IM_COL32(255, 255, 255, 255);
+            const float fw = sz.x, fh = sz.y - 16.f;
+            float rx0 = 0.f, ry0 = 0.f, rx1 = 1.f, ry1 = 1.f;
+            switch (state.cam_single.anchor) {
+                case CamSingleAnchor::Top:    ry1 = 0.5f; break;
+                case CamSingleAnchor::Bottom: ry0 = 0.5f; break;
+                case CamSingleAnchor::Left:   rx1 = 0.5f; break;
+                case CamSingleAnchor::Right:  rx0 = 0.5f; break;
+                default: break;  // Full
+            }
+            const ImVec2 a{ o.x + fw * rx0, o.y + fh * ry0 };
+            const ImVec2 b{ o.x + fw * rx1, o.y + fh * ry1 };
+            dl->AddRect(o, { o.x + fw, o.y + fh }, IM_COL32(120, 130, 140, 150), 0.f, 0, 1.5f);
+            dl->AddRectFilled(a, b, (accent & 0x00FFFFFFu) | (70u  << 24));
+            dl->AddRect      (a, b, (accent & 0x00FFFFFFu) | (220u << 24), 0.f, 0, 2.f);
+            const char* cam = state.cam_single.use_right ? "Right camera" : "Left camera";
+            dl->AddText({ o.x, o.y + fh + 2.f }, IM_COL32(200, 200, 200, 200), cam);
+            if (!state.cam_single.enabled)
+                dl->AddText({ o.x + 6.f, o.y + 6.f }, IM_COL32(220, 160, 60, 220), "(disabled)");
+        };
+
     std::vector<MenuItem> single_cam_menu = {
         toggle("Enable", [&state]{ return state.cam_single.enabled; },
                          [&state](bool v){ state.cam_single.enabled = v; }),
@@ -790,6 +948,9 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Bottom",  [&state]{ state.theater_anchor = TA::Bottom;  }, [&state]{ return state.theater_anchor == TA::Bottom;  }),
         leaf("Reset",       [&state]{ state.theater_anchor = TA::Center;  }),
     };
+    // Preview each eye position as the user tabs through them (live). Only the
+    // selectable options (those with a selected-state), not the Reset leaf.
+    for (auto& m : theater_pos_menu) if (m.get_state) m.on_highlight = m.action;
 
     // ── Eye source selection submenus ─────────────────────────────────────────
     // Build a 4-item radio list for one eye (CSI / USB 1 / USB 2 / USB 3).
@@ -856,14 +1017,10 @@ static std::vector<MenuItem> build_menu(
         return std::tuple<float,float,float,float>{ x0, y0, x0 + w, y0 + h };
     };
 
-    // Raw View groups the camera-passthrough toggle with its placement options.
-    std::vector<MenuItem> raw_view_menu = {
-        toggle("Enable",
-            [&state]{ return state.theater_mode; },
-            [&state](bool v){ state.theater_mode = v; }),
-        with_panel(
-            submenu("Position", std::move(theater_pos_menu)),
-            "Eye Position Preview",
+    // Eye position preview — shared by the Raw View submenu (so it shows the
+    // whole time, incl. the Enable toggle) and its Position sub-level (via the
+    // deep menu's walk-up). Crop box only appears when raw view is enabled.
+    MenuContextPanelDraw eye_pos_preview =
             [&state, cameras, menu_sys_pp, draw_frame_with_crop, theater_inner_rect]
             (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
                 const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
@@ -895,7 +1052,31 @@ static std::vector<MenuItem> build_menu(
                     dl->AddText({ rpos.x, o.y + sz.y - 14.f },
                                 IM_COL32(200, 200, 200, 200), "Right");
                 }
-            }),
+            };
+
+    // Digital-zoom preview — single crop window at the chosen zoom + center.
+    MenuContextPanelDraw digital_zoom_preview =
+            [&state, cameras, menu_sys_pp, draw_frame_with_crop]
+            (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                    ? (*menu_sys_pp)->accent_color()
+                    : IM_COL32(255, 255, 255, 255);
+                const float aspect = (cameras && cameras->current_height() > 0)
+                    ? float(cameras->current_width()) / float(cameras->current_height())
+                    : 4.0f / 3.0f;
+                const float zoom = std::max(1.0f, state.zoom_left.zoom);
+                const float cw = 1.0f / zoom, ch = 1.0f / zoom;
+                float x0 = std::clamp(state.zoom_left.center_x - cw * 0.5f, 0.f, 1.f - cw);
+                float y0 = std::clamp(state.zoom_left.center_y - ch * 0.5f, 0.f, 1.f - ch);
+                draw_frame_with_crop(dl, o, sz, aspect, accent, x0, y0, x0 + cw, y0 + ch);
+            };
+
+    // Raw View groups the camera-passthrough toggle with its placement options.
+    std::vector<MenuItem> raw_view_menu = {
+        toggle("Enable",
+            [&state]{ return state.theater_mode; },
+            [&state](bool v){ state.theater_mode = v; }),
+        submenu("Position", std::move(theater_pos_menu)),
     };
 
     // Build per-camera submenu labels from the configured model names.  When both
@@ -921,7 +1102,11 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> main_cameras_menu = {
         submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
         submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
-        submenu("Raw View",         std::move(raw_view_menu)),
+        with_panel(
+            with_desc(submenu("Raw View", std::move(raw_view_menu)),
+                "Pass the camera feed straight through. Toggle Enable to show it; "
+                "Position places each eye. The preview at right shows it live."),
+            "Raw View Preview", eye_pos_preview),
         toggle("Swap Cameras",
             [&state]{ return state.cameras_swapped; },
             [&state](bool v){ state.cameras_swapped = v; }),
@@ -969,9 +1154,15 @@ static std::vector<MenuItem> build_menu(
                     p.y += lh;
                 }
             }),
-        submenu("Digital Zoom",     std::move(zoom_menu)),
         with_panel(
-            submenu("Mirror Crop", std::move(mirror_crop_menu)),
+            with_desc(submenu("Digital Zoom", std::move(zoom_menu)),
+                  "Magnify both eyes equally and choose where the crop is centered. "
+                  "Higher zoom shows less of the scene at greater detail. Preview at right."),
+            "Digital Zoom Preview", digital_zoom_preview),
+        with_panel(
+            with_desc(submenu("Mirror Crop", std::move(mirror_crop_menu)),
+                "Zoom and pan each eye inward (nose-side crop) for a monocular/assistive "
+                "setup. The preview at right shows the crop window live."),
             "Mirror Crop Preview",
             [&state, cameras, menu_sys_pp, draw_frame_with_crop]
             (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
@@ -1025,7 +1216,11 @@ static std::vector<MenuItem> build_menu(
                                 IM_COL32(200, 200, 200, 200), "Right");
                 }
             }),
-        submenu("Single Camera",    std::move(single_cam_menu)),
+        with_panel(
+            with_desc(submenu("Single Camera", std::move(single_cam_menu)),
+                "Show ONE camera filling a region of the screen (full, or a half) instead "
+                "of the stereo pair. Choose the camera and anchor; preview at right."),
+            "Single Camera Preview", single_cam_preview),
         submenu(left_label,         std::move(left_cam_menu)),
         submenu(right_label,        std::move(right_cam_menu)),
         submenu("Low-Light Mode",   std::move(nv_menu)),
@@ -1908,6 +2103,9 @@ static std::vector<MenuItem> build_menu(
     };
 
     std::vector<MenuItem> compass_menu = {
+        toggle("Compass Tape",
+            [&state]{ return state.compass_tape; },
+            [&state](bool v){ state.compass_tape = v; }),
         submenu("IMU Axis",            std::move(imu_axis_menu)),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
@@ -2029,40 +2227,46 @@ static std::vector<MenuItem> build_menu(
         }
     };
 
-    std::vector<MenuItem> themes_menu = {
-        leaf("Halo", [apply_theme]{
+    // Built-in coordinated themes — reusable so the same quick-apply list can live
+    // under HUD (with Effects) and under System → HUD/Menu Presets.
+    auto make_builtin_theme_leaves = [apply_theme, leaf]() -> std::vector<MenuItem> {
+        std::vector<MenuItem> v;
+        v.push_back(leaf("Halo", [apply_theme]{
             apply_theme(IM_COL32(255,255,255,255), IM_COL32(255,255,255,255),
                         IM_COL32(255,255,255,255),
                         IM_COL32(255,255,255,255), IM_COL32(255,255,255,180),
                         true, 5.f, SelectionStyle::FILLED_ROW,
                         false, true,
                         IM_COL32(255,255,255,255));
-        }),
-        leaf("Solar", [apply_theme]{
+        }));
+        v.push_back(leaf("Solar", [apply_theme]{
             apply_theme(IM_COL32(255,160, 32,255), IM_COL32(255,160, 32,255),
                         IM_COL32(255,255,255,255),
                         IM_COL32(255,160, 32,255), IM_COL32(255,160, 32,255),
                         true, 1.5f, SelectionStyle::ACCENT_BAR,
                         true, false,
                         IM_COL32(255,160, 32,255));
-        }),
-        leaf("Fallout", [apply_theme]{
+        }));
+        v.push_back(leaf("Fallout", [apply_theme]{
             apply_theme(IM_COL32(  0,200, 50,255), IM_COL32(  0,200, 50,255),
                         IM_COL32(  0,255, 80,255),
                         IM_COL32(  0,200, 50,255), IM_COL32(  0,200, 50,255),
                         true, 1.5f, SelectionStyle::ACCENT_BAR,
                         true, false,
                         IM_COL32(  0,200, 50,255));
-        }),
-        leaf("Space", [apply_theme]{
+        }));
+        v.push_back(leaf("Space", [apply_theme]{
             apply_theme(IM_COL32( 80,100,255,255), IM_COL32( 80,100,255,255),
                         IM_COL32(200,220,255,255),
                         IM_COL32( 80,100,255,255), IM_COL32( 80,100,255,255),
                         true, 1.5f, SelectionStyle::ACCENT_BAR,
                         true, false,
                         IM_COL32( 80,100,255,255));
-        }),
+        }));
+        return v;
     };
+
+    std::vector<MenuItem> themes_menu = make_builtin_theme_leaves();
 
     // Effects — particle overlays with palette options
     std::vector<MenuItem> fx_palette_menu = {
@@ -2333,6 +2537,8 @@ static std::vector<MenuItem> build_menu(
 
 
     std::vector<MenuItem> map_size_menu = {
+        leaf_sel("Tiny   (100px)", [&state]{ state.map_overlay.size_px = 100.f; }, [&state]{ return state.map_overlay.size_px == 100.f; }),
+        leaf_sel("Mini   (150px)", [&state]{ state.map_overlay.size_px = 150.f; }, [&state]{ return state.map_overlay.size_px == 150.f; }),
         leaf_sel("Small  (200px)", [&state]{ state.map_overlay.size_px = 200.f; }, [&state]{ return state.map_overlay.size_px == 200.f; }),
         leaf_sel("Medium (300px)", [&state]{ state.map_overlay.size_px = 300.f; }, [&state]{ return state.map_overlay.size_px == 300.f; }),
         leaf_sel("Large  (450px)", [&state]{ state.map_overlay.size_px = 450.f; }, [&state]{ return state.map_overlay.size_px == 450.f; }),
@@ -2361,6 +2567,34 @@ static std::vector<MenuItem> build_menu(
         toggle("Circle Window",
             [&state]{ return state.map_overlay.circle_window; },
             [&state](bool v){ state.map_overlay.circle_window = v; }),
+        toggle("Compass Ring",
+            [&state]{ return state.map_overlay.compass_ring; },
+            [&state](bool v){ state.map_overlay.compass_ring = v; }),
+        toggle("Battery Arc",
+            [&state]{ return state.map_overlay.battery_arc; },
+            [&state](bool v){ state.map_overlay.battery_arc = v; }),
+        toggle("Gauge: CPU/GPU (debug)",
+            [&state]{ return state.map_overlay.system_debug; },
+            [&state](bool v){ state.map_overlay.system_debug = v; }),
+        toggle("Clock Above Map",
+            [&state]{ return state.map_overlay.clock; },
+            [&state](bool v){ state.map_overlay.clock = v; }),
+        toggle("Clock Date",
+            [&state]{ return state.map_overlay.clock_date; },
+            [&state](bool v){ state.map_overlay.clock_date = v; }),
+        toggle("Face Portrait",
+            [&state]{ return state.map_overlay.portrait; },
+            [&state](bool v){ state.map_overlay.portrait = v; }),
+        toggle("Portrait: Right Half",
+            [&state]{ return state.map_overlay.portrait_right_half; },
+            [&state](bool v){ state.map_overlay.portrait_right_half = v; }),
+        leaf("Expand Map (Pan/Zoom)", [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.map_overlay.expanded   = true;
+            state.map_overlay.view_zoom  = 1.f;
+            state.map_overlay.view_pan_x = 0.f;
+            state.map_overlay.view_pan_y = 0.f;
+        }),
         slider("Transparency", 0.f, 1.f, 0.05f, "",
             [&state]{ return state.map_overlay.opacity; },
             [&state](float v){ state.map_overlay.opacity = v; }),
@@ -2692,8 +2926,86 @@ static std::vector<MenuItem> build_menu(
         submenu("I2C Bus",    std::move(i2c_bus_menu)),
     };
 
+    // ── HUD / Menu Presets ───────────────────────────────────────────────────────
+    // Visual-only presets (HUD colors + menu accent/border/selection/scale). Built-in
+    // coordinated themes apply instantly; custom ones are saved/loaded live (no
+    // restart, unlike full Profiles). Load/delete lists are dynamic (label_fn reads
+    // the manager live). kProfileSlots = max dynamic rows shown for save/load lists.
+    constexpr int kProfileSlots = 16;
+    std::vector<MenuItem> hud_preset_delete_menu;
+    for (int i = 0; i < kProfileSlots; ++i) {
+        MenuItem m;
+        m.type        = MenuItemType::LEAF;
+        m.label       = "preset";
+        m.label_fn    = [hud_presets, i]{ return hud_presets ? hud_presets->name(i) : std::string(); };
+        m.visible_fn  = [hud_presets, i]{ return hud_presets && i < hud_presets->count(); };
+        m.description = "Delete this HUD/menu preset permanently.";
+        m.action = [state_ptr, hud_presets, i]{
+            if (!state_ptr || !hud_presets) return;
+            std::string nm = hud_presets->name(i);
+            if (nm.empty()) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->hud_preset_delete_name = nm;
+        };
+        hud_preset_delete_menu.push_back(std::move(m));
+    }
+
+    std::vector<MenuItem> hud_presets_menu;
+    // Built-in coordinated themes (instant apply).
+    for (auto& t : make_builtin_theme_leaves())
+        hud_presets_menu.push_back(with_desc(std::move(t),
+            "Built-in theme: applies a coordinated HUD color + menu style instantly."));
+    // Save current look as a named preset (on-screen keyboard).
+    hud_presets_menu.push_back(with_desc(
+        leaf("Save Current As...", [menu_sys_pp, state_ptr]{
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+            (*menu_sys_pp)->open_keyboard("Preset Name", std::string(),
+                [state_ptr](const std::string& name){
+                    if (!state_ptr) return;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    state_ptr->hud_preset_save_name = name;
+                });
+        }),
+        "Save the current HUD colors + menu style (accent, border, selection, UI "
+        "scale) as a named preset. Applies live when loaded — no restart."));
+    // Dynamic load slots.
+    for (int i = 0; i < kProfileSlots; ++i) {
+        MenuItem m;
+        m.type        = MenuItemType::LEAF;
+        m.label       = "preset";
+        m.label_fn    = [hud_presets, i]{ return hud_presets ? hud_presets->name(i) : std::string(); };
+        m.visible_fn  = [hud_presets, i]{ return hud_presets && i < hud_presets->count(); };
+        m.description = "Apply this HUD/menu preset (live, no restart).";
+        m.action = [state_ptr, hud_presets, i]{
+            if (!state_ptr || !hud_presets) return;
+            std::string nm = hud_presets->name(i);
+            if (nm.empty()) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->hud_preset_load_name = nm;
+        };
+        hud_presets_menu.push_back(std::move(m));
+    }
+    hud_presets_menu.push_back(with_desc(submenu("Delete Preset", std::move(hud_preset_delete_menu)),
+        "Remove a saved HUD/menu preset permanently."));
+
     std::vector<MenuItem> system_menu = {
         submenu("Headset & Tracking", std::move(headset_menu)),
+        with_desc(submenu("HUD / Menu Presets", std::move(hud_presets_menu)),
+                  "Visual presets: built-in themes plus your own saved HUD color + "
+                  "menu style combinations. Applied live."),
+        with_desc(toggle("Radial Quick Menu",
+            [menu_sys_pp]{ return menu_sys_pp && *menu_sys_pp
+                              && (*menu_sys_pp)->quick_style() == QuickStyle::Radial; },
+            [menu_sys_pp](bool v){ if (menu_sys_pp && *menu_sys_pp)
+                (*menu_sys_pp)->set_quick_style(v ? QuickStyle::Radial : QuickStyle::List); }),
+            "ON: the quick menu is a radial wheel encircling the minimap. OFF: the "
+            "legacy compact corner list. The minimap's position (HUD > Map) sets where "
+            "the wheel sits."),
+        with_desc(slider("Menu Tilt", 0.f, 0.8f, 0.05f, "",
+            [menu_sys_pp]{ return menu_sys_pp && *menu_sys_pp ? (*menu_sys_pp)->radial_tilt() : 0.f; },
+            [menu_sys_pp](float v){ if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->set_radial_tilt(v); }),
+            "Helmet-style inward perspective tilt for the radial menu. 0 = flat on "
+            "the glass; higher = the wheel curves away at the top like a visor."),
         with_panel(
             submenu("Audio", std::move(audio_menu)),
             "Audio Status",
@@ -2772,12 +3084,249 @@ static std::vector<MenuItem> build_menu(
         leaf("Close Program",  [&state]{ state.quit = true; }),
     };
 
+    // ── Profiles ────────────────────────────────────────────────────────────────
+    // Save the current setup as a named snapshot, load one (relaunches ProtoHUD),
+    // or delete one. The load/delete lists are dynamic: label_fn/visible_fn read the
+    // ProfileManager live, so newly-saved profiles appear without rebuilding the menu.
+    // (kProfileSlots declared above, near the HUD/Menu Presets section.)
+    std::vector<MenuItem> profile_delete_menu;
+    for (int i = 0; i < kProfileSlots; ++i) {
+        MenuItem m;
+        m.type       = MenuItemType::LEAF;
+        m.label      = "profile";
+        m.label_fn   = [profiles, i]{ return profiles ? profiles->name(i) : std::string(); };
+        m.visible_fn = [profiles, i]{ return profiles && i < profiles->count(); };
+        m.description = "Delete this profile permanently.";
+        m.action = [state_ptr, profiles, i]{
+            if (!state_ptr || !profiles) return;
+            std::string nm = profiles->name(i);
+            if (nm.empty()) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->profile_delete_name = nm;
+        };
+        profile_delete_menu.push_back(std::move(m));
+    }
+
+    std::vector<MenuItem> profiles_menu;
+    profiles_menu.push_back(with_desc(
+        leaf("Save Current As...", [menu_sys_pp, state_ptr]{
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+            (*menu_sys_pp)->open_keyboard("Profile Name", std::string(),
+                [state_ptr](const std::string& name){
+                    if (!state_ptr) return;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    state_ptr->profile_save_name = name;
+                });
+        }),
+        "Save every current setting (HUD layout, menu style, camera/vision, "
+        "Protoface look) as a named profile you can switch to later."));
+    for (int i = 0; i < kProfileSlots; ++i) {
+        MenuItem m;
+        m.type        = MenuItemType::LEAF;
+        m.label       = "profile";
+        m.label_fn    = [profiles, i]{ return profiles ? profiles->name(i) : std::string(); };
+        m.visible_fn  = [profiles, i]{ return profiles && i < profiles->count(); };
+        m.description = "Load this profile. ProtoHUD restarts to apply it.";
+        m.action = [state_ptr, profiles, i]{
+            if (!state_ptr || !profiles) return;
+            std::string nm = profiles->name(i);
+            if (nm.empty()) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            state_ptr->profile_load_name = nm;
+        };
+        profiles_menu.push_back(std::move(m));
+    }
+    profiles_menu.push_back(with_desc(submenu("Delete Profile", std::move(profile_delete_menu)),
+        "Remove a saved profile permanently."));
+
+    // ── Quick (corner / radial) menu ─────────────────────────────────────────────
+    // A short, curated set of mid-use actions — separate from the full settings tree
+    // above. Some items are always present; an optional "catalog" of extras can be
+    // pinned by the user (favorites, persisted in config) and is gated by visible_fn.
+    // Submenus here become outer rings in the radial renderer.
+    if (quick_out) {
+        std::vector<MenuItem> q;
+
+        // Night vision (mirror of the Low-Light "Night Vision" toggle).
+        q.push_back(toggle("Night Vision",
+            [&state]{ return state.night_vision.nv_enabled; },
+            [&state](bool v){
+                state.night_vision.nv_enabled  = v;
+                state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
+                state.night_vision.shutter_us  = v ? 40000 : 16667;
+            }));
+
+        // Digital zoom (both eyes together).
+        q.push_back(slider("Zoom", 1.0f, 4.0f, 0.25f, "x",
+            [&state]{ return state.zoom_left.zoom; },
+            [&state](float v){ state.zoom_left.zoom = v; state.zoom_right.zoom = v; }));
+
+        // Manual focus — only when OWLsight cameras are present.
+        {
+            std::vector<MenuItem> focus = {
+                leaf("Autofocus", [cameras]{
+                    if (cameras && cameras->owl_left())  cameras->owl_left()->start_autofocus();
+                    if (cameras && cameras->owl_right()) cameras->owl_right()->start_autofocus();
+                }),
+                slider("Position", 0.f, 1000.f, 25.f, "",
+                    [cameras]{ return (cameras && cameras->owl_left())
+                                        ? (float)cameras->owl_left()->get_focus_position() : 0.f; },
+                    [cameras](float v){
+                        if (cameras && cameras->owl_left())  cameras->owl_left()->set_focus_position((int)v);
+                        if (cameras && cameras->owl_right()) cameras->owl_right()->set_focus_position((int)v);
+                    }),
+            };
+            MenuItem fsub = submenu("Manual Focus", std::move(focus));
+            fsub.visible_fn = [cameras]{ return cameras && cameras->owl_left(); };
+            q.push_back(std::move(fsub));
+        }
+
+        // Quick photo → opens a sub-ring of capture modes; entering it locks focus
+        // (stops AF + manual) so the whole burst shares one focus. All shoot both eyes.
+        {
+            auto shoot = [state_ptr](int extra) {
+                if (!state_ptr) return;
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                state_ptr->capture_request = CaptureRequest::Stereo;
+                state_ptr->capture_burst   = extra;
+            };
+            std::vector<MenuItem> photo = {
+                leaf("Single",   [shoot]{ shoot(0); }),
+                leaf("Burst x3", [shoot]{ shoot(2); }),
+                leaf("Burst",    [shoot]{ shoot(7); }),
+            };
+            MenuItem pm = submenu("Quick Photo", std::move(photo));
+            pm.action = [cameras, state_ptr] {            // on-enter: lock focus
+                if (cameras) {
+                    if (cameras->owl_left())  cameras->owl_left()->stop_autofocus();
+                    if (cameras->owl_right()) cameras->owl_right()->stop_autofocus();
+                }
+                if (state_ptr) {
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    state_ptr->focus_left.mode  = CameraFocusState::Mode::MANUAL;
+                    state_ptr->focus_right.mode = CameraFocusState::Mode::MANUAL;
+                }
+            };
+            q.push_back(std::move(pm));
+        }
+        q.push_back(toggle("Record",
+            [&state]{ return state.video_recording; },
+            [&state](bool v){ std::lock_guard<std::mutex> lk(state.mtx);
+                              state.video_request = v ? VideoRequest::Start : VideoRequest::Stop; }));
+
+        // Timers.
+        {
+            auto set_timer = [&state](int secs){
+                state.timer_alarm.timer_active = true;
+                state.timer_alarm.timer_end    = time(nullptr) + secs;
+            };
+            std::vector<MenuItem> timers = {
+                leaf("5 min",  [set_timer]{ set_timer(300);  }),
+                leaf("10 min", [set_timer]{ set_timer(600);  }),
+                leaf("30 min", [set_timer]{ set_timer(1800); }),
+                leaf("60 min", [set_timer]{ set_timer(3600); }),
+                leaf("Cancel", [&state]{ state.timer_alarm.timer_active = false; }),
+            };
+            q.push_back(submenu("Timers", std::move(timers)));
+        }
+
+        // Expand Map — open the Helldivers-style pan/zoom view (closes the wheel).
+        q.push_back(leaf("Expand Map", [state_ptr, menu_sys_pp]{
+            if (state_ptr) {
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                state_ptr->map_overlay.expanded   = true;
+                state_ptr->map_overlay.view_zoom  = 1.f;
+                state_ptr->map_overlay.view_pan_x = 0.f;
+                state_ptr->map_overlay.view_pan_y = 0.f;
+            }
+            if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->close();
+        }));
+
+        // ── Favorites catalog (optional, user-pinned) ────────────────────────────
+        struct QuickFav { std::string key; MenuItem item; };
+        std::vector<QuickFav> catalog;
+        catalog.push_back({ "edge", toggle("Edge Highlight",
+            [&state]{ return state.pp_cfg.edge_enabled; },
+            [&state](bool v){ state.pp_cfg.edge_enabled = v; }) });
+        catalog.push_back({ "desat", toggle("Desaturate BG",
+            [&state]{ return state.pp_cfg.desat_enabled; },
+            [&state](bool v){ state.pp_cfg.desat_enabled = v; }) });
+        catalog.push_back({ "motion", toggle("Motion Highlight",
+            [&state]{ return state.pp_cfg.motion_enabled; },
+            [&state](bool v){ state.pp_cfg.motion_enabled = v; }) });
+        catalog.push_back({ "map", toggle("Map Overlay",
+            [&state]{ return state.map_overlay.enabled; },
+            [&state](bool v){ state.map_overlay.enabled = v; }) });
+        catalog.push_back({ "theater", toggle("Theater Mode",
+            [&state]{ return state.theater_mode; },
+            [&state](bool v){ state.theater_mode = v; }) });
+        catalog.push_back({ "swap", toggle("Swap Cameras",
+            [&state]{ return state.cameras_swapped; },
+            [&state](bool v){ state.cameras_swapped = v; }) });
+        catalog.push_back({ "fps", toggle("FPS Overlay",
+            [fps_overlay_active]{ return fps_overlay_active && *fps_overlay_active; },
+            [fps_overlay_active](bool v){ if (fps_overlay_active) *fps_overlay_active = v; }) });
+        catalog.push_back({ "syspanel", toggle("System Panel",
+            [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
+            [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }) });
+
+        // Pinned catalog items appear in the quick menu, gated on the favorites set.
+        for (auto& f : catalog) {
+            MenuItem it  = f.item;
+            std::string key = f.key;
+            it.visible_fn = [state_ptr, key]{
+                if (!state_ptr) return false;
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                return state_ptr->quick_favorites.count(key) > 0;
+            };
+            q.push_back(std::move(it));
+        }
+
+        // "Customize" — toggles to pin/unpin each catalog item.
+        std::vector<MenuItem> customize;
+        for (auto& f : catalog) {
+            std::string key   = f.key;
+            std::string label = f.item.label;
+            customize.push_back(toggle(label,
+                [state_ptr, key]{
+                    if (!state_ptr) return false;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    return state_ptr->quick_favorites.count(key) > 0;
+                },
+                [state_ptr, key](bool v){
+                    if (!state_ptr) return;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    if (v) state_ptr->quick_favorites.insert(key);
+                    else   state_ptr->quick_favorites.erase(key);
+                }));
+        }
+        q.push_back(submenu("Customize", std::move(customize)));
+
+        // Jump to the full-screen settings.
+        q.push_back(leaf("Full Settings", [menu_sys_pp]{
+            if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->open_deep();
+        }));
+
+        *quick_out = std::move(q);
+    }
+
     return {
-        submenu("Vision",       std::move(cameras_menu)),
-        submenu("HUD",          std::move(hud_menu)),
-        submenu("Face Display", std::move(face_display_menu)),
-        submenu("LoRa",         std::move(lora_menu)),
-        submenu("System",       std::move(system_menu)),
+        with_desc(submenu("Vision",       std::move(cameras_menu)),
+                  "Camera feeds and vision tools: resolution, digital zoom/crop, focus, "
+                  "night vision and the vision-assist overlays."),
+        with_desc(submenu("HUD",          std::move(hud_menu)),
+                  "Heads-up display: colors/theme, compass, clock, picture-in-picture "
+                  "camera windows, and on-screen effects."),
+        with_desc(submenu("Face Display", std::move(face_display_menu)),
+                  "The LED Protoface: expression, color, material, particle effects, "
+                  "animations and brightness."),
+        with_desc(submenu("LoRa",         std::move(lora_menu)),
+                  "Long-range radio: team nodes, messages and status."),
+        with_desc(submenu("System",       std::move(system_menu)),
+                  "Audio output and volume, timers/alarms, status and power."),
+        with_desc(submenu("Profiles",     std::move(profiles_menu)),
+                  "Save, load and manage full-setup profiles. Loading one restarts "
+                  "ProtoHUD with that profile."),
     };
 }
 
@@ -2857,7 +3406,43 @@ int main(int argc, char* argv[]) {
             cfg_path = cfg_load = def_cfg;
         }
     }
-    json cfg = load_config(cfg_load);
+    bool cfg_parse_failed = false;
+    json cfg = load_config(cfg_load, &cfg_parse_failed);
+
+    // ── Profiles ──────────────────────────────────────────────────────────────
+    // A profile is a full config snapshot under <config>/profiles/<name>.json.
+    // Applying one = relaunch ProtoHUD with that file as its config (see the
+    // re-exec at shutdown). When we're launched WITH an explicit config path that
+    // lives in the profiles dir, we're "running a profile" — skip the landing page.
+    std::string exe_path;
+    try { exe_path = fs::canonical(argv[0]).string(); }
+    catch (...) { exe_path = argv[0]; }
+
+    ProfileManager profiles;
+    profiles.init(bin_dir + "/../config/profiles");
+
+    // HUD/menu visual presets (separate, smaller files; applied live, not via restart).
+    ProfileManager hud_presets;
+    hud_presets.init(bin_dir + "/../config/presets");
+
+    std::string active_profile_name;   // "" unless launched from a profile file
+    if (argc > 1) {
+        try {
+            fs::path argp  = fs::weakly_canonical(fs::path(argv[1]));
+            fs::path pdir  = fs::weakly_canonical(fs::path(profiles.dir()));
+            if (argp.parent_path() == pdir && argp.extension() == ".json")
+                active_profile_name = argp.stem().string();
+        } catch (...) {}
+    }
+
+    // Where to send the process when the user picks/loads a profile (re-exec).
+    std::string pending_reexec;
+
+    // Continue-countdown on the landing page (auto-loads the last profile after
+    // this many seconds of no input). 0 disables the countdown.
+    double landing_continue_timeout_s =
+        jval(cfg.contains("landing") ? cfg["landing"] : json::object(),
+             "continue_timeout_s", 10.0);
 
     // ── Config extraction ─────────────────────────────────────────────────────
 
@@ -3037,9 +3622,17 @@ int main(int argc, char* argv[]) {
     // Protoface options: auto-start the daemon on boot and a persisted preview
     // window placement (anchor/nudge/size/view) so it survives a restart.
     bool pf_autostart = true;
+    // Face backend: "daemon" = the Protoface Python daemon over socket+shm
+    // (default); "native" = render the face in-process via NativeFaceController.
+    std::string pf_mode = "daemon";
+    // In native mode, auto-launch scripts/panel_driver.py to push frames to the
+    // HUB75 panels (set false if you run the driver yourself or only want preview).
+    bool pf_launch_driver = true;
     if (cfg.contains("protoface")) {
         auto& jpf = cfg["protoface"];
-        pf_autostart = jval(jpf, "autostart", true);
+        pf_autostart     = jval(jpf, "autostart", true);
+        pf_mode          = jpf.value("mode", std::string("daemon"));
+        pf_launch_driver = jval(jpf, "panel_driver", true);
         if (jpf.contains("preview")) {
             auto& jpv = jpf["preview"];
             protoface_preview_cfg.anchor_x = jval(jpv, "anchor_x", protoface_preview_cfg.anchor_x);
@@ -3101,6 +3694,7 @@ int main(int argc, char* argv[]) {
     AppState state;
     state.max_messages        = jval(jhud, "lora_message_history", 50);
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
+    state.compass_tape        = jhud.value("compass_tape", true);
 
     if (jhud.contains("effects")) {
         auto& jfx = jhud["effects"];
@@ -3225,6 +3819,13 @@ int main(int argc, char* argv[]) {
         mo.anchor_x            = jm.value("anchor_x",            mo.anchor_x);
         mo.anchor_y            = jm.value("anchor_y",            mo.anchor_y);
         mo.circle_window       = jm.value("circle_window",       mo.circle_window);
+        mo.compass_ring        = jm.value("compass_ring",        mo.compass_ring);
+        mo.battery_arc         = jm.value("battery_arc",         mo.battery_arc);
+        mo.system_debug        = jm.value("system_debug",        mo.system_debug);
+        mo.clock               = jm.value("clock",               mo.clock);
+        mo.clock_date          = jm.value("clock_date",          mo.clock_date);
+        mo.portrait            = jm.value("portrait",            mo.portrait);
+        mo.portrait_right_half = jm.value("portrait_right_half", mo.portrait_right_half);
         mo.zoom                = jm.value("zoom",                mo.zoom);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
@@ -3503,11 +4104,70 @@ int main(int argc, char* argv[]) {
     SmartKnob            knob    (knob_port,     baud, state);
     WirelessController   wireless(wireless_port, baud);
 
+    // Native in-process face renderer (only constructed in "native" mode). It
+    // renders the LED face in C++ and writes the same /dev/shm frame the daemon
+    // would, so the existing preview path and panel_driver.py work unchanged.
+    std::unique_ptr<face::NativeFaceController> native_ctrl;
+
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
-    // Auto-start the Protoface daemon on boot (no-op if already running). The
-    // reconnect loop in start() then connects once its socket comes up.
-    if (pf_autostart) protoface_ctrl.launch();
-    protoface_ctrl.start();   // connects async; no-op if socket absent
+    if (pf_mode == "native") {
+        // Ensure NO Protoface daemon co-exists — it would double-write the shm
+        // ("neutral teal" frames / flicker) and fight panel_driver.py for
+        // /dev/pio0. First ask any responsive daemon to exit cleanly (blanks the
+        // panels), then force-kill any wedged/stale one (its IPC may be dead, so
+        // shutdown_daemon can't reach it), then settle before claiming the lock.
+        protoface_ctrl.shutdown_daemon();
+        std::system("pkill -f run.py 2>/dev/null");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        // Claim Protoface's single-instance lock and hold it for our whole
+        // lifetime, so a daemon that respawns later hits the flock in run.py and
+        // exits immediately instead of double-writing the shm.
+        {
+            static int pf_lock_fd = ::open("/tmp/protoface.lock", O_RDWR | O_CREAT, 0660);
+            if (pf_lock_fd < 0 || ::flock(pf_lock_fd, LOCK_EX | LOCK_NB) != 0)
+                std::cerr << "[main] warning: could not claim /tmp/protoface.lock — "
+                             "a daemon may still be running and double-writing the panel\n";
+        }
+        face::RenderConfig rc = pf_build_render_config(cfg);
+        // Auto-save the live look next to config.json so menu changes persist.
+        rc.state_path = (fs::path(cfg_path).parent_path() / "protoface_state.json").string();
+        native_ctrl = std::make_unique<face::NativeFaceController>(
+            rc, std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h));
+        native_ctrl->start();
+        protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
+        std::cout << "[main] Protoface: native in-process renderer\n";
+
+        // Push frames to the panels via the Piomatter shim (reads the same shm).
+        // Launch it with fork()+setsid()+execlp() rather than a backgrounded
+        // shell command: the `nohup … &` form via std::system was failing
+        // silently (no process, no log). Here we open the log in C++ so it's
+        // always written, and setsid detaches the driver into its own session.
+        if (pf_launch_driver) {
+            std::string drv = bin_dir + "/../scripts/panel_driver.py";
+            std::string cw  = std::to_string(rc.canvas_w);
+            std::string chh = std::to_string(rc.canvas_h);
+            std::system("pkill -f panel_driver.py 2>/dev/null");   // clear any old driver
+            pid_t pid = fork();
+            if (pid == 0) {
+                setsid();
+                int lf = ::open("/tmp/panel_driver.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (lf >= 0) { dup2(lf, 1); dup2(lf, 2); ::close(lf); }
+                int nf = ::open("/dev/null", O_RDONLY);
+                if (nf >= 0) { dup2(nf, 0); ::close(nf); }
+                execlp("python3", "python3", "-u", drv.c_str(),
+                       "--canvas-w", cw.c_str(), "--canvas-h", chh.c_str(),
+                       static_cast<char*>(nullptr));
+                _exit(127);   // execlp failed (python3 not found)
+            }
+            std::cout << "[main] launched panel_driver.py pid=" << pid
+                      << " (" << drv << ")\n";
+        }
+    } else {
+        // Auto-start the Protoface daemon on boot (no-op if already running). The
+        // reconnect loop in start() then connects once its socket comes up.
+        if (pf_autostart) protoface_ctrl.launch();
+        protoface_ctrl.start();   // connects async; no-op if socket absent
+    }
 
     // QR / barcode scanner — active when either scan toggle is enabled.
     QrScanner qr_scanner;
@@ -3558,12 +4218,14 @@ int main(int argc, char* argv[]) {
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
     if (!knob.start())   std::cerr << "[main] SmartKnob not available on " << knob_port << "\n";
 
-    // Active face backend: prefer Protoface if its socket already exists, or if
-    // we just auto-launched it (the socket may not be up yet — the reconnect
-    // loop will connect shortly, and commands no-op until then).
-    IFaceController* active_face = (ProtoFaceController::socket_exists() || pf_autostart)
-        ? static_cast<IFaceController*>(&protoface_ctrl)
-        : static_cast<IFaceController*>(&teensy);
+    // Active face backend: native in-process renderer if enabled; otherwise
+    // prefer the Protoface daemon if its socket exists or we auto-launched it
+    // (commands no-op until the reconnect loop connects), else the Teensy.
+    IFaceController* active_face =
+        native_ctrl ? static_cast<IFaceController*>(native_ctrl.get())
+        : (ProtoFaceController::socket_exists() || pf_autostart)
+            ? static_cast<IFaceController*>(&protoface_ctrl)
+            : static_cast<IFaceController*>(&teensy);
     FaceProxy face_proxy(&active_face);
 
     uint16_t sleep_tmo = 30;
@@ -3606,6 +4268,7 @@ int main(int argc, char* argv[]) {
     // into MenuSystem without a circular dependency at build time.
     bool panel_preview_enabled = false;
     MenuSystem* menu_ptr = nullptr;
+    std::vector<MenuItem> quick_items;   // curated corner/radial quick-menu tree
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -3616,13 +4279,18 @@ int main(int argc, char* argv[]) {
                                &bt_mon, &sys_panel_active, &fps_overlay_active, &state,
                                &active_face,
                                static_cast<IFaceController*>(&teensy),
-                               static_cast<IFaceController*>(&protoface_ctrl),
+                               // In native mode hide the daemon's Start/Restart +
+                               // source-switch menu items (null fp_option).
+                               native_ctrl ? nullptr
+                                           : static_cast<IFaceController*>(&protoface_ctrl),
                                &panel_preview_enabled,
                                &protoface_preview_cfg,
                                &protoface_preview_view,
                                cfg_map_dir,
-                               &left_eye_src, &right_eye_src));
+                               &left_eye_src, &right_eye_src,
+                               &profiles, &hud_presets, &quick_items));
     menu_ptr = &menu;
+    menu.set_quick_items(std::move(quick_items));
 
     // Wire wireless controller callbacks now that menu exists
     if (wireless_enabled) {
@@ -3667,6 +4335,7 @@ int main(int argc, char* argv[]) {
         menu.set_border_color    (jcolor(jm, "border_color",     menu.border_color()));
         menu.set_border_thickness(jval  (jm, "border_thickness", menu.border_thickness()));
         menu.set_border_enabled  (jval  (jm, "border_enabled",   menu.border_enabled()));
+        menu.set_ui_scale        (jval  (jm, "ui_scale",         menu.ui_scale()));
         {
             std::string ss = jm.value("selection_style", "filled_row");
             menu.set_selection_style(ss == "accent_bar"
@@ -3681,6 +4350,19 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Quick (corner/radial) menu style + user-pinned favorites.
+    if (cfg.contains("quick_menu")) {
+        auto& jq = cfg["quick_menu"];
+        std::string st = jq.value("style", std::string("radial"));
+        menu.set_quick_style(st == "list" ? QuickStyle::List : QuickStyle::Radial);
+        menu.set_radial_tilt(jval(jq, "tilt", menu.radial_tilt()));
+        if (jq.contains("favorites") && jq["favorites"].is_array()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (auto& k : jq["favorites"])
+                if (k.is_string()) state.quick_favorites.insert(k.get<std::string>());
+        }
+    }
+
     menu.set_detent_callback([&knob, &menu](int count) {
         knob.set_detents(count);
         int depth = menu.menu_depth();
@@ -3690,9 +4372,72 @@ int main(int argc, char* argv[]) {
         knob.set_haptic(amp, freq, strength);
     });
 
-    knob.on_move([&menu, &hud](int8_t dir, int) {
+    // ── Startup landing page state (driven by the input callbacks below) ──────
+    BackgroundLibrary bg_lib;
+    {
+        std::vector<std::string> bg_dirs;
+        bg_dirs.push_back(bin_dir + "/../assets/backgrounds");
+        if (const char* home = std::getenv("HOME"))
+            bg_dirs.push_back(std::string(home) + "/protohud/backgrounds");
+        bg_lib.scan(bg_dirs);
+    }
+    // page 0 = main (CONTINUE / PROFILES / QUIT); page 1 = profile picker.
+    struct LandingState {
+        bool   active       = true;
+        int    page         = 0;
+        int    cursor       = 0;
+        bool   countdown_on = true;
+        double deadline     = 0.0;   // glfwGetTime() value the auto-continue fires at
+    };
+    LandingState landing;
+    // Running from a profile file → skip the landing page (avoids a re-exec loop).
+    if (!active_profile_name.empty()) landing.active = false;
+    landing.countdown_on = (landing_continue_timeout_s > 0.0) && landing.active;
+
+    auto landing_count = [&landing, &profiles]() -> int {
+        return (landing.page == 0) ? 3 : (profiles.count() + 1);  // +1 = BACK
+    };
+    auto landing_cancel_countdown = [&landing]{ landing.countdown_on = false; };
+    auto landing_nav = [&landing, &landing_count, &landing_cancel_countdown](int d){
+        landing_cancel_countdown();
+        int n = landing_count();
+        if (n <= 0) { landing.cursor = 0; return; }
+        landing.cursor = ((landing.cursor + d) % n + n) % n;
+    };
+    // Resume = relaunch into the last-loaded profile if there is one, else just
+    // dismiss the landing page and run with the current config.
+    auto landing_resume = [&landing, &profiles, &pending_reexec, &state]{
+        std::string lp = profiles.last_path();
+        if (!lp.empty()) { pending_reexec = lp; state.quit = true; }
+        landing.active = false;
+    };
+    auto landing_load = [&landing, &profiles, &pending_reexec, &state](int idx){
+        if (idx < 0 || idx >= profiles.count()) return;
+        profiles.set_last(profiles.name(idx));
+        pending_reexec = profiles.path(idx);
+        state.quit     = true;
+        landing.active = false;
+    };
+    auto landing_select = [&landing, &state, &profiles, &landing_resume, &landing_load,
+                           &landing_cancel_countdown]{
+        landing_cancel_countdown();
+        if (landing.page == 0) {
+            switch (landing.cursor) {
+                case 0: landing_resume();                              break;  // Continue
+                case 1: landing.page = 1; landing.cursor = 0;         break;  // Profiles
+                case 2: state.quit = true; landing.active = false;   break;  // Quit
+            }
+        } else {
+            if (landing.cursor < profiles.count()) landing_load(landing.cursor);
+            else { landing.page = 0; landing.cursor = 1; }                    // Back
+        }
+    };
+
+    knob.on_move([&menu, &hud, &landing, &landing_nav](int8_t dir, int) {
         // if (hud.popup_active())    hud.popup_navigate(dir);  // modal popup disabled
-        if      (menu.is_open())        menu.navigate(dir);
+        if      (menu.is_keyboard_open()) menu.osk_step(dir);
+        else if (landing.active)        landing_nav(dir);
+        else if (menu.is_open())        menu.navigate(dir);
         else if (hud.toast_has_focused()) hud.toast_navigate(dir);
     });
 
@@ -3706,7 +4451,13 @@ int main(int argc, char* argv[]) {
         else if (status == 0x03) std::cout << "[knob] woke up reason=" << (int)param << "\n";
     });
 
-    knob.on_button([&menu, &hud, &state](uint8_t btn, uint8_t ev) {
+    knob.on_button([&menu, &hud, &state, &landing, &landing_select](uint8_t btn, uint8_t ev) {
+        if (landing.active) {
+            if ((ev == KnobButtonEvent::PRESS || ev == KnobButtonEvent::LONG_PRESS)
+                && btn == KnobButton::ENCODER)
+                landing_select();
+            return;
+        }
         if (ev == KnobButtonEvent::DOUBLE_TAP) {
             // Double-tap BACK = start/stop video recording (Start toggles).
             if (btn == KnobButton::BACK) {
@@ -3788,29 +4539,69 @@ int main(int argc, char* argv[]) {
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
     GamepadInput gamepad;
     gamepad.init();
-    gamepad.on_menu([&menu]{
-        if (menu.is_open()) menu.close(); else menu.open();
+    // Expanded-map (Helldivers view) pan/zoom helpers — shared by gamepad + keyboard.
+    auto map_pan = [&state](float dx, float dy){
+        auto& mo = state.map_overlay;
+        mo.view_pan_x = std::clamp(mo.view_pan_x + dx, -0.6f, 0.6f);
+        mo.view_pan_y = std::clamp(mo.view_pan_y + dy, -0.6f, 0.6f);
+    };
+    auto map_zoom = [&state](float dz){
+        auto& mo = state.map_overlay;
+        mo.view_zoom = std::clamp(mo.view_zoom + dz, 1.0f, 6.0f);
+    };
+    gamepad.on_menu([&menu, &landing, &state]{
+        if (landing.active) return;             // Start does nothing on the landing page
+        if (state.map_overlay.expanded) { state.map_overlay.expanded = false; return; }
+        // Start opens the radial QUICK menu (the deep menu is reachable from its
+        // "Full Settings" wedge, or via keyboard F1).
+        if      (menu.is_deep_open()) menu.close_deep();
+        else if (menu.is_open())      menu.close();
+        else                          menu.open();
     });
-    gamepad.on_select([&menu, &hud, &state]{
-        if      (menu.is_open())          menu.select();
+    gamepad.on_select([&menu, &hud, &state, &landing, &landing_select]{
+        if      (state.map_overlay.expanded)   // A toggles map rotation lock
+            state.map_overlay.rotate_with_heading = !state.map_overlay.rotate_with_heading;
+        else if (landing.active)          landing_select();
+        else if (menu.is_open())          menu.select();
         else if (hud.toast_has_focused()) hud.toast_select(state);
     });
-    gamepad.on_back([&menu, &hud]{
-        if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+    gamepad.on_back([&menu, &hud, &landing, &state]{
+        if      (state.map_overlay.expanded) state.map_overlay.expanded = false;
+        else if (menu.is_keyboard_open()) menu.osk_backspace();
+        else if (landing.active)          { if (landing.page == 1) { landing.page = 0; landing.cursor = 1; landing.countdown_on = false; } }
+        else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
     });
-    gamepad.on_nav_up   ([&menu]{ if (menu.is_open()) menu.navigate(-1); });
-    gamepad.on_nav_down ([&menu]{ if (menu.is_open()) menu.navigate(+1); });
-    gamepad.on_nav_left ([&menu, &hud]{
-        if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+    gamepad.on_nav_up   ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,+0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,-1);return;} if (landing.active){landing_nav(-1);return;} if (menu.is_open()) menu.navigate(menu.editing_value() ? +1 : -1); });
+    gamepad.on_nav_down ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,-0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,+1);return;} if (landing.active){landing_nav(+1);return;} if (menu.is_open()) menu.navigate(menu.editing_value() ? -1 : +1); });
+    gamepad.on_nav_left ([&menu, &hud, &landing, &bg_lib, &state, &map_pan]{
+        if      (state.map_overlay.expanded) map_pan(+0.06f, 0);
+        else if (menu.is_keyboard_open()) menu.osk_move(-1, 0);
+        else if (landing.active)          bg_lib.prev();
+        else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
     });
-    gamepad.on_nav_right([&menu, &hud, &state]{
-        if      (hud.toast_has_focused()) hud.toast_navigate(+1);
+    gamepad.on_nav_right([&menu, &hud, &state, &landing, &bg_lib, &map_pan]{
+        if      (state.map_overlay.expanded) map_pan(-0.06f, 0);
+        else if (menu.is_keyboard_open()) menu.osk_move(+1, 0);
+        else if (landing.active)          bg_lib.next();
+        else if (hud.toast_has_focused()) hud.toast_navigate(+1);
         else if (menu.is_open())          menu.select();
     });
-    gamepad.on_pip_left ([&kb_pip_left] { kb_pip_left  = !kb_pip_left;  });
-    gamepad.on_pip_right([&kb_pip_right]{ kb_pip_right = !kb_pip_right; });
+    // LB/RB: zoom the expanded map, else cycle the landing background, switch
+    // deep-menu tabs while it's open, otherwise toggle the PiPs.
+    gamepad.on_pip_left ([&menu, &kb_pip_left, &landing, &bg_lib, &state, &map_zoom] {
+        if      (state.map_overlay.expanded) map_zoom(-0.4f);
+        else if (landing.active)        bg_lib.prev();
+        else if (menu.is_deep_open())   menu.prev_tab();
+        else                            kb_pip_left  = !kb_pip_left;
+    });
+    gamepad.on_pip_right([&menu, &kb_pip_right, &landing, &bg_lib, &state, &map_zoom]{
+        if      (state.map_overlay.expanded) map_zoom(+0.4f);
+        else if (landing.active)        bg_lib.next();
+        else if (menu.is_deep_open())   menu.next_tab();
+        else                            kb_pip_right = !kb_pip_right;
+    });
     gamepad.on_af([&cameras]{
         if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
         if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
@@ -3893,6 +4684,452 @@ int main(int argc, char* argv[]) {
     // Video recorder — driven once per frame from the render thread.
     VideoRecorder video_recorder;
 
+    // ── Startup landing page ─────────────────────────────────────────────────
+    // Halo-style screen shown after the splash; gates startup until the user picks
+    // Continue (resume last profile), opens the Profiles picker, or quits. If the
+    // Continue countdown runs out, the last-loaded profile auto-loads. Background
+    // comes from the image library; camera/serial threads keep running underneath.
+    landing.deadline = glfwGetTime() + landing_continue_timeout_s;
+    while (landing.active && !glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
+        wd_heartbeat.fetch_add(1, std::memory_order_relaxed);  // keep the watchdog from force-exiting
+        gamepad.poll();
+        int fw = 0, fh = 0;
+        glfwGetFramebufferSize(xr.glfw_window(), &fw, &fh);
+        glViewport(0, 0, fw, fh);
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        hud.set_dt(0.016f);
+        hud.begin_menu_frame();
+
+        // Keyboard nav (dev / desktop).
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    landing_nav(-1);
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  landing_nav(+1);
+        if (landing.page == 0) {
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  bg_lib.prev();
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) bg_lib.next();
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter))      landing_select();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) && landing.page == 1) {
+            landing.page = 0; landing.cursor = 1; landing_cancel_countdown();
+        }
+
+        // Continue countdown → auto-load the last profile when it expires.
+        // NOTE: never break out of this loop mid-frame — begin_menu_frame() has
+        // already started an ImGui frame, so we must finish it (render + present)
+        // or the next NewFrame() asserts. A selection just clears landing.active;
+        // we render one last frame and the while-condition exits cleanly.
+        double remaining = 0.0;
+        if (landing.active && landing.countdown_on && landing.page == 0) {
+            remaining = landing.deadline - glfwGetTime();
+            if (remaining <= 0.0) landing_resume();
+        }
+
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        const float W = static_cast<float>(fw), H = static_cast<float>(fh);
+
+        // Background image (stretched to fill) + a slight dim, else a gradient.
+        GLuint bgt = bg_lib.texture();
+        if (bgt) {
+            dl->AddImage((ImTextureID)(intptr_t)bgt, {0.f, 0.f}, {W, H});
+            dl->AddRectFilled({0.f, 0.f}, {W, H}, IM_COL32(0, 0, 0, 90));
+        } else {
+            dl->AddRectFilledMultiColor({0.f, 0.f}, {W, H},
+                IM_COL32(14, 20, 28, 255), IM_COL32(14, 20, 28, 255),
+                IM_COL32(4, 7, 11, 255),   IM_COL32(4, 7, 11, 255));
+        }
+
+        ImFont* font   = ImGui::GetFont();
+        const float fs = ImGui::GetFontSize() * menu.ui_scale();
+        const ImU32 accent = menu.accent_color();
+        const float mx = W * 0.06f, my = H * 0.10f;
+
+        // Title / breadcrumb.
+        dl->AddText(font, fs * 1.4f, {mx, my}, IM_COL32(255, 255, 255, 235), "PROTOHUD");
+        if (landing.page == 1) {
+            ImVec2 tsz = font->CalcTextSizeA(fs * 1.4f, 1e9f, 0.f, "PROTOHUD");
+            dl->AddText(font, fs * 1.0f, {mx + tsz.x + 16.f, my + fs * 0.4f},
+                        (accent & 0x00FFFFFFu) | (210u << 24), ">  PROFILES");
+        }
+
+        // Build the current page's rows.
+        std::vector<std::string> rows;
+        if (landing.page == 0) {
+            rows = { "CONTINUE", "PROFILES", "QUIT" };
+        } else {
+            for (int i = 0; i < profiles.count(); ++i) rows.push_back(profiles.name(i));
+            rows.push_back("BACK");
+        }
+
+        // Profile that Continue / the countdown will resume (shown on the row).
+        const std::string last_nm = profiles.last_name();
+
+        const float row_h = fs * 1.3f + 18.f;
+        const float lw    = W * 0.34f;
+        float ly = my + fs * 1.4f + 40.f;
+        for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+            bool sel = (i == landing.cursor);
+            ImVec2 rmin{mx, ly}, rmax{mx + lw, ly + row_h};
+            if (sel) dl->AddRectFilled(rmin, rmax, IM_COL32(255, 255, 255, 235));
+            ImU32 tcol = sel ? IM_COL32(10, 12, 14, 255) : IM_COL32(230, 235, 240, 210);
+            float ty = ly + (row_h - fs * 1.2f) * 0.5f;
+            std::string label = rows[i];
+            std::transform(label.begin(), label.end(), label.begin(), ::toupper);
+            dl->AddText(font, fs * 1.2f, {mx + 14.f, ty}, tcol, label.c_str());
+            dl->AddLine({mx, rmax.y}, {mx + lw, rmax.y},
+                        (accent & 0x00FFFFFFu) | (70u << 24), 1.f);
+            // CONTINUE row: show the profile that will resume + countdown badge,
+            // right-aligned (countdown furthest right, profile name to its left).
+            if (landing.page == 0 && i == 0) {
+                float rx = mx + lw - 12.f;
+                if (landing.countdown_on && remaining > 0.0) {
+                    char cd[24]; snprintf(cd, sizeof(cd), "%ds", (int)std::ceil(remaining));
+                    ImVec2 csz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, cd);
+                    ImU32 cc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (210u << 24));
+                    dl->AddText(font, fs * 0.95f, {rx - csz.x, ty}, cc, cd);
+                    rx -= csz.x + 10.f;
+                }
+                std::string resume = last_nm.empty() ? std::string("(current config)") : last_nm;
+                std::transform(resume.begin(), resume.end(), resume.begin(), ::toupper);
+                ImVec2 nsz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, resume.c_str());
+                ImU32 nc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (185u << 24));
+                dl->AddText(font, fs * 0.95f, {rx - nsz.x, ty}, nc, resume.c_str());
+            }
+            ly += row_h;
+        }
+        if (landing.page == 1 && profiles.count() == 0) {
+            dl->AddText(font, fs * 0.95f, {mx + 14.f, ly + 6.f},
+                        (accent & 0x00FFFFFFu) | (150u << 24),
+                        "No profiles yet \xC2\xB7 save one in the menu (Profiles tab)");
+        }
+
+        const char* hint = (landing.page == 0)
+            ? "ENTER / A  SELECT     UP/DOWN  MOVE     LEFT/RIGHT / LB-RB  BACKGROUND"
+            : "ENTER / A  LOAD (RESTART)     UP/DOWN  MOVE     ESC / B  BACK";
+        dl->AddText(font, fs * 0.95f, {mx, H - my * 0.5f},
+                    (accent & 0x00FFFFFFu) | (190u << 24), hint);
+
+        hud.render_menu_overlay();
+        xr.present();
+    }
+
+    // ── Config snapshot writer ────────────────────────────────────────────────
+    // Mutate `cfg` with all current runtime settings (HUD colors/style, vision,
+    // cameras, Protoface, menu, etc.). Factored out so both the exit-save AND the
+    // "save profile" feature write the exact same snapshot. save_config_to() always
+    // writes (used for profile files); the exit path skips writing config.json when
+    // it failed to parse on load (no-clobber, handled by the caller).
+    auto mutate_cfg = [&] {
+        auto& jc = cfg["hud_colors"];
+        jc["glow_base"]        = color_to_json(hud.colors().glow_base);
+        jc["text_fill"]        = color_to_json(hud.colors().text_fill);
+        jc["ind_good"]         = color_to_json(hud.colors().ind_good);
+        jc["ind_inactive"]     = color_to_json(hud.colors().ind_inactive);
+        jc["ind_fail"]         = color_to_json(hud.colors().ind_fail);
+        jc["compass_tick"]     = color_to_json(hud.colors().compass_tick);
+        jc["compass_glow"]     = color_to_json(hud.colors().compass_glow);
+        jc["compass_bg_color"] = color_to_json(hud.colors().compass_bg_color);
+
+        cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
+        cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
+        cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
+        cfg["hud"]["compass_tape"]        = state.compass_tape;
+        {
+            static const char* kAxes[] = { "roll", "pitch", "yaw" };
+            cfg["compass"]["axis"]   = kAxes[static_cast<int>(state.compass_axis)];
+            cfg["compass"]["invert"] = state.compass_invert;
+        }
+        cfg["hud"]["flip_vertical"]             = hud.config().hud_flip_vertical;
+        cfg["hud"]["effects"]["type"]           = static_cast<int>(state.effects_cfg.effect);
+        cfg["hud"]["effects"]["palette"]        = static_cast<int>(state.effects_cfg.palette);
+
+        cfg["night_vision"]["exposure_ev"]            = state.night_vision.exposure_ev;
+        cfg["night_vision"]["shutter_us"]             = state.night_vision.shutter_us;
+        cfg["night_vision"]["auto_nv"]                = state.night_vision.auto_nv;
+        cfg["night_vision"]["auto_nv_gain_threshold"] = state.night_vision.auto_nv_gain_threshold;
+        cfg["night_vision"]["csi_awb_left"]           = state.night_vision.csi_awb_left;
+        cfg["night_vision"]["csi_awb_right"]          = state.night_vision.csi_awb_right;
+
+        cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
+        cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;
+        cfg["clock"]["show_date"]       = state.clock_cfg.show_date;
+        cfg["clock"]["font_scale"]      = state.clock_cfg.font_scale;
+        cfg["clock"]["manual_offset_s"] = state.clock_cfg.manual_offset_s;
+
+        cfg["pip"]["cam1"]["anchor_x"]  = pip_overlay_cfg1.anchor_x;
+        cfg["pip"]["cam1"]["anchor_y"]  = pip_overlay_cfg1.anchor_y;
+        cfg["pip"]["cam1"]["pan_x"]     = pip_overlay_cfg1.pan_x;
+        cfg["pip"]["cam1"]["pan_y"]     = pip_overlay_cfg1.pan_y;
+        cfg["pip"]["cam1"]["size"]      = pip_overlay_cfg1.size;
+        cfg["pip"]["cam1"]["rotation"]  = rotation_to_str(pip_overlay_cfg1.rotation);
+        cfg["pip"]["cam2"]["anchor_x"]  = pip_overlay_cfg2.anchor_x;
+        cfg["pip"]["cam2"]["anchor_y"]  = pip_overlay_cfg2.anchor_y;
+        cfg["pip"]["cam2"]["pan_x"]     = pip_overlay_cfg2.pan_x;
+        cfg["pip"]["cam2"]["pan_y"]     = pip_overlay_cfg2.pan_y;
+        cfg["pip"]["cam2"]["size"]      = pip_overlay_cfg2.size;
+        cfg["pip"]["cam2"]["rotation"]  = rotation_to_str(pip_overlay_cfg2.rotation);
+
+        cfg["protoface"]["mode"]                = pf_mode;
+        cfg["protoface"]["autostart"]           = pf_autostart;
+        cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
+        cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
+        cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;
+        cfg["protoface"]["preview"]["pan_y"]    = protoface_preview_cfg.pan_y;
+        cfg["protoface"]["preview"]["size"]     = protoface_preview_cfg.size;
+        cfg["protoface"]["preview"]["view"]     = protoface_preview_view;
+
+        auto& jpp = cfg["post_process"];
+        jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
+        jpp["edge_strength"]      = state.pp_cfg.edge_strength;
+        jpp["edge_color"]         = color_to_json(state.pp_cfg.edge_color);
+        jpp["desat_enabled"]      = state.pp_cfg.desat_enabled;
+        jpp["desat_strength"]     = state.pp_cfg.desat_strength;
+        jpp["contrast_threshold"] = state.pp_cfg.contrast_threshold;
+        jpp["edge_scale"]         = state.pp_cfg.edge_scale;
+        jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
+        jpp["focus_str"]          = state.pp_cfg.focus_str;
+        jpp["edge_gate_scale"]    = state.pp_cfg.edge_gate_scale;
+        jpp["color_protect"]      = state.pp_cfg.color_protect;
+        jpp["edge_dilate"]        = state.pp_cfg.edge_dilate;
+        jpp["motion_enabled"]     = state.pp_cfg.motion_enabled;
+        jpp["motion_strength"]    = state.pp_cfg.motion_strength;
+        jpp["motion_thresh"]      = state.pp_cfg.motion_thresh;
+        jpp["motion_radius"]      = state.pp_cfg.motion_radius;
+        jpp["motion_line"]        = state.pp_cfg.motion_line;
+        jpp["motion_update_rate"] = state.pp_cfg.motion_update_rate;
+        jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
+
+        cfg["cameras"]["usb_cam_1"]["device"]            = cameras.usb1_cfg().device;
+        cfg["cameras"]["usb_cam_1"]["width"]             = cameras.usb1_cfg().width;
+        cfg["cameras"]["usb_cam_1"]["height"]            = cameras.usb1_cfg().height;
+        cfg["cameras"]["usb_cam_1"]["brightness"]        = cameras.usb1_brightness();
+        cfg["cameras"]["usb_cam_1"]["dynamic_framerate"] = cameras.usb1_cfg().dynamic_framerate;
+        cfg["cameras"]["usb_cam_1"]["auto_exposure"]     = cameras.usb1_cfg().auto_exposure;
+        cfg["cameras"]["usb_cam_1"]["exposure_time"]     = cameras.usb1_cfg().exposure_time;
+        cfg["cameras"]["usb_cam_1"]["auto_wb"]           = cameras.usb1_cfg().auto_wb;
+        cfg["cameras"]["usb_cam_1"]["wb_temp"]           = cameras.usb1_cfg().wb_temp;
+        cfg["cameras"]["usb_cam_1"]["flip"]                   = cameras.usb1_cfg().flip;
+        cfg["cameras"]["usb_cam_1"]["auto_brightness"]        = cameras.usb1_cfg().auto_brightness;
+        cfg["cameras"]["usb_cam_1"]["auto_brightness_target"] = cameras.usb1_cfg().auto_brightness_target;
+        cfg["cameras"]["usb_cam_2"]["device"]            = cameras.usb2_cfg().device;
+        cfg["cameras"]["usb_cam_2"]["width"]             = cameras.usb2_cfg().width;
+        cfg["cameras"]["usb_cam_2"]["height"]            = cameras.usb2_cfg().height;
+        cfg["cameras"]["usb_cam_2"]["brightness"]        = cameras.usb2_brightness();
+        cfg["cameras"]["usb_cam_2"]["dynamic_framerate"] = cameras.usb2_cfg().dynamic_framerate;
+        cfg["cameras"]["usb_cam_2"]["auto_exposure"]     = cameras.usb2_cfg().auto_exposure;
+        cfg["cameras"]["usb_cam_2"]["exposure_time"]     = cameras.usb2_cfg().exposure_time;
+        cfg["cameras"]["usb_cam_2"]["auto_wb"]           = cameras.usb2_cfg().auto_wb;
+        cfg["cameras"]["usb_cam_2"]["wb_temp"]           = cameras.usb2_cfg().wb_temp;
+        cfg["cameras"]["usb_cam_2"]["flip"]                   = cameras.usb2_cfg().flip;
+        cfg["cameras"]["usb_cam_2"]["auto_brightness"]        = cameras.usb2_cfg().auto_brightness;
+        cfg["cameras"]["usb_cam_2"]["auto_brightness_target"] = cameras.usb2_cfg().auto_brightness_target;
+        cfg["cameras"]["usb_cam_3"]["device"]            = cameras.usb3_cfg().device;
+        cfg["cameras"]["usb_cam_3"]["width"]             = cameras.usb3_cfg().width;
+        cfg["cameras"]["usb_cam_3"]["height"]            = cameras.usb3_cfg().height;
+        cfg["cameras"]["usb_cam_3"]["brightness"]        = cameras.usb3_brightness();
+        cfg["cameras"]["usb_cam_3"]["dynamic_framerate"] = cameras.usb3_cfg().dynamic_framerate;
+        cfg["cameras"]["usb_cam_3"]["auto_exposure"]     = cameras.usb3_cfg().auto_exposure;
+        cfg["cameras"]["usb_cam_3"]["exposure_time"]     = cameras.usb3_cfg().exposure_time;
+        cfg["cameras"]["usb_cam_3"]["auto_wb"]           = cameras.usb3_cfg().auto_wb;
+        cfg["cameras"]["usb_cam_3"]["wb_temp"]           = cameras.usb3_cfg().wb_temp;
+        cfg["cameras"]["usb_cam_3"]["flip"]                   = cameras.usb3_cfg().flip;
+        cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
+        cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
+        cfg["cameras"]["swapped"] = state.cameras_swapped;
+        {
+            static const char* kNames[] = { "center","outside","left","right","top","bottom" };
+            cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
+        }
+
+        cfg["qr"]["scan_main"] = state.qr_scan_main;
+        cfg["qr"]["scan_usb"]  = state.qr_scan_usb;
+
+        cfg["fps_avg_interval_s"] = state.fps_avg_interval_s;
+        cfg["i2c_scan_bus"]       = state.i2c_scan_bus;
+
+        cfg["landing"]["continue_timeout_s"] = landing_continue_timeout_s;
+
+        {
+            const auto& mo          = state.map_overlay;
+            cfg["map"]["enabled"]             = mo.enabled;
+            cfg["map"]["map_path"]            = mo.map_path;
+            cfg["map"]["opacity"]             = mo.opacity;
+            cfg["map"]["size_px"]             = mo.size_px;
+            cfg["map"]["rotate_with_heading"] = mo.rotate_with_heading;
+            cfg["map"]["image_rotate_deg"]    = mo.image_rotate_deg;
+            cfg["map"]["anchor_x"]            = mo.anchor_x;
+            cfg["map"]["anchor_y"]            = mo.anchor_y;
+            cfg["map"]["circle_window"]       = mo.circle_window;
+            cfg["map"]["compass_ring"]        = mo.compass_ring;
+            cfg["map"]["battery_arc"]         = mo.battery_arc;
+            cfg["map"]["system_debug"]        = mo.system_debug;
+            cfg["map"]["clock"]               = mo.clock;
+            cfg["map"]["clock_date"]          = mo.clock_date;
+            cfg["map"]["portrait"]            = mo.portrait;
+            cfg["map"]["portrait_right_half"] = mo.portrait_right_half;
+            cfg["map"]["zoom"]                = mo.zoom;
+        }
+
+        cfg["resolution"]["width"]  = state.camera_resolution.width;
+        cfg["resolution"]["height"] = state.camera_resolution.height;
+        cfg["resolution"]["fps"]    = state.camera_resolution.fps;
+
+        auto eye_src_str = [](EyeSource s) -> const char* {
+            switch (s) {
+                case EyeSource::USB1: return "usb1";
+                case EyeSource::USB2: return "usb2";
+                case EyeSource::USB3: return "usb3";
+                default:              return "csi";
+            }
+        };
+        cfg["cameras"]["left_eye_source"]  = eye_src_str(left_eye_src);
+        cfg["cameras"]["right_eye_source"] = eye_src_str(right_eye_src);
+
+        auto& jm = cfg["menu_style"];
+        jm["accent_color"]     = color_to_json(menu.accent_color());
+        jm["bg_color"]         = color_to_json(menu.bg_color());
+        jm["bg_enabled"]       = menu.bg_enabled();
+        jm["border_color"]     = color_to_json(menu.border_color());
+        jm["border_thickness"]  = menu.border_thickness();
+        jm["border_enabled"]    = menu.border_enabled();
+        jm["ui_scale"]          = menu.ui_scale();
+        jm["selection_style"]   = (menu.selection_style() == SelectionStyle::FILLED_ROW)
+                                  ? "filled_row" : "accent_bar";
+        {
+            const char* a = "top_left";
+            switch (menu.anchor()) {
+                case MenuAnchor::TopRight:    a = "top_right";    break;
+                case MenuAnchor::BottomLeft:  a = "bottom_left";  break;
+                case MenuAnchor::BottomRight: a = "bottom_right"; break;
+                default: break;
+            }
+            jm["anchor"] = a;
+        }
+
+        // Quick (corner/radial) menu style + pinned favorites.
+        cfg["quick_menu"]["style"] =
+            (menu.quick_style() == QuickStyle::Radial) ? "radial" : "list";
+        cfg["quick_menu"]["tilt"] = menu.radial_tilt();
+        {
+            json arr = json::array();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (const auto& k : state.quick_favorites) arr.push_back(k);
+            cfg["quick_menu"]["favorites"] = arr;
+        }
+
+        // Persist MPU-9250 enabled state + calibration biases so the menu's
+        // "Active" toggle and calibration survive a restart.
+        if (mpu9250.is_running() || mpu9250.is_enabled() || cfg.contains("mpu9250")) {
+            float bx, by, bz;
+            mpu9250.get_mag_bias(bx, by, bz);
+            cfg["mpu9250"]["enabled"]        = mpu9250.is_enabled();
+            cfg["mpu9250"]["mag_bias"]       = json::array({ bx, by, bz });
+            cfg["mpu9250"]["mount_rotation"] = mpu9250.get_mount_rotation();
+            cfg["mpu9250"]["heading_axes"]   = mpu9250.get_heading_axes();
+        }
+    };
+
+    // Snapshot current settings into `cfg` and write them to `path`. Always writes
+    // (callers gate config.json on cfg_parse_failed themselves). Returns success.
+    auto save_config_to = [&](const std::string& path) -> bool {
+        try {
+            mutate_cfg();
+            FILE* f = fopen(path.c_str(), "w");
+            if (!f) { std::cerr << "[cfg] cannot write to " << path << "\n"; return false; }
+            std::string s = cfg.dump(2);
+            fwrite(s.c_str(), 1, s.size(), f);
+            fclose(f);
+            std::cout << "[cfg] saved to " << path << "\n";
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "[cfg] save failed: " << e.what() << "\n";
+            return false;
+        }
+    };
+
+    // ── HUD/menu preset writer + applier ───────────────────────────────────────
+    // A preset is a *small* JSON: just the hud_colors + menu_style (+ a couple hud
+    // fields) — the visual subset of the full config. Saved/loaded live with no
+    // restart. Reuses mutate_cfg() to capture the current look, and the same
+    // setters as startup to apply.
+    auto save_hud_preset = [&](const std::string& path) -> bool {
+        try {
+            mutate_cfg();   // refresh cfg with the current visual state
+            json p;
+            if (cfg.contains("hud_colors")) p["hud_colors"] = cfg["hud_colors"];
+            if (cfg.contains("menu_style")) p["menu_style"] = cfg["menu_style"];
+            if (cfg.contains("hud")) {
+                if (cfg["hud"].contains("glow_intensity"))
+                    p["hud"]["glow_intensity"] = cfg["hud"]["glow_intensity"];
+                if (cfg["hud"].contains("indicator_bg_enabled"))
+                    p["hud"]["indicator_bg_enabled"] = cfg["hud"]["indicator_bg_enabled"];
+            }
+            FILE* f = fopen(path.c_str(), "w");
+            if (!f) { std::cerr << "[preset] cannot write " << path << "\n"; return false; }
+            std::string s = p.dump(2);
+            fwrite(s.c_str(), 1, s.size(), f);
+            fclose(f);
+            std::cout << "[preset] saved " << path << "\n";
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "[preset] save failed: " << e.what() << "\n";
+            return false;
+        }
+    };
+    auto apply_hud_preset = [&](const std::string& path) -> bool {
+        bool pf = false;
+        json p = load_config(path, &pf);
+        if (pf || !p.is_object()) return false;
+        if (p.contains("hud_colors")) {
+            auto& jc = p["hud_colors"];
+            auto& c  = hud.colors();
+            c.glow_base        = jcolor(jc, "glow_base",        c.glow_base);
+            c.text_fill        = jcolor(jc, "text_fill",        c.text_fill);
+            c.ind_good         = jcolor(jc, "ind_good",         c.ind_good);
+            c.ind_inactive     = jcolor(jc, "ind_inactive",     c.ind_inactive);
+            c.ind_fail         = jcolor(jc, "ind_fail",         c.ind_fail);
+            c.compass_tick     = jcolor(jc, "compass_tick",     c.compass_tick);
+            c.compass_glow     = jcolor(jc, "compass_glow",     c.compass_glow);
+            c.compass_bg_color = jcolor(jc, "compass_bg_color", c.compass_bg_color);
+        }
+        if (p.contains("hud")) {
+            auto& jh = p["hud"];
+            hud.config().glow_intensity       = jval(jh, "glow_intensity",       hud.config().glow_intensity);
+            hud.config().indicator_bg_enabled = jval(jh, "indicator_bg_enabled", hud.config().indicator_bg_enabled);
+        }
+        if (p.contains("menu_style")) {
+            auto& jm = p["menu_style"];
+            menu.set_accent_color    (jcolor(jm, "accent_color",     menu.accent_color()));
+            menu.set_bg_color        (jcolor(jm, "bg_color",         menu.bg_color()));
+            menu.set_bg_enabled      (jval  (jm, "bg_enabled",       menu.bg_enabled()));
+            menu.set_border_color    (jcolor(jm, "border_color",     menu.border_color()));
+            menu.set_border_thickness(jval  (jm, "border_thickness", menu.border_thickness()));
+            menu.set_border_enabled  (jval  (jm, "border_enabled",   menu.border_enabled()));
+            menu.set_ui_scale        (jval  (jm, "ui_scale",         menu.ui_scale()));
+            std::string ss = jm.value("selection_style", std::string("filled_row"));
+            menu.set_selection_style(ss == "accent_bar"
+                ? SelectionStyle::ACCENT_BAR : SelectionStyle::FILLED_ROW);
+            std::string a = jm.value("anchor", std::string("top_left"));
+            if      (a == "top_right")    menu.set_anchor(MenuAnchor::TopRight);
+            else if (a == "bottom_left")  menu.set_anchor(MenuAnchor::BottomLeft);
+            else if (a == "bottom_right") menu.set_anchor(MenuAnchor::BottomRight);
+            else                          menu.set_anchor(MenuAnchor::TopLeft);
+        }
+        return true;
+    };
+
+    // Kick off a one-shot autofocus on the OWLsight (CSI) cameras at boot; once it
+    // locks (or times out) both settle into SLAVE focus (handled in the loop).
+    bool   boot_af_pending = false;
+    double boot_af_t0      = 0.0;
+    if (cameras.owl_left() || cameras.owl_right()) {
+        if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+        if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+        state.focus_left.mode  = CameraFocusState::Mode::AUTO;
+        state.focus_right.mode = CameraFocusState::Mode::AUTO;
+        boot_af_pending = true;
+        boot_af_t0      = glfwGetTime();
+    }
+
     double prev_time = glfwGetTime();
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
@@ -3907,7 +5144,108 @@ int main(int argc, char* argv[]) {
         hud.set_dt(dt);
         hud.begin_menu_frame();
 
+        // ── Profile requests (posted by the Profiles menu) ────────────────────
+        // Save = write a snapshot now; Load = relaunch into that profile (restart);
+        // Delete = remove the file. Strings are swapped out under the lock.
+        {
+            std::string save_req, load_req, del_req;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                save_req.swap(state.profile_save_name);
+                load_req.swap(state.profile_load_name);
+                del_req.swap(state.profile_delete_name);
+            }
+            if (!save_req.empty()) {
+                std::string nm = ProfileManager::sanitize(save_req);
+                if (save_config_to(profiles.path_for(nm))) {
+                    profiles.scan();
+                    Notification n; n.type = NotifType::App;
+                    n.title = "Profile saved"; n.body = nm; n.auto_dismiss_s = 4.f;
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.notifs.push(std::move(n));
+                }
+            }
+            if (!del_req.empty()) {
+                bool ok = profiles.remove(del_req);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Profile deleted" : "Delete failed";
+                n.body = del_req; n.auto_dismiss_s = 4.f;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.notifs.push(std::move(n));
+            }
+            if (!load_req.empty() && profiles.exists(load_req)) {
+                // Save the current config, mark the profile as last-loaded, then
+                // request a clean restart into it (re-exec happens at shutdown).
+                profiles.set_last(load_req);
+                pending_reexec = profiles.path_for(load_req);
+                state.quit = true;
+            }
+        }
+        if (state.quit) break;
+
+        // ── HUD/menu preset requests (visual-only, applied live, no restart) ──
+        {
+            std::string save_req, load_req, del_req;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                save_req.swap(state.hud_preset_save_name);
+                load_req.swap(state.hud_preset_load_name);
+                del_req.swap(state.hud_preset_delete_name);
+            }
+            if (!save_req.empty()) {
+                std::string nm = ProfileManager::sanitize(save_req);
+                bool ok = save_hud_preset(hud_presets.path_for(nm));
+                if (ok) hud_presets.scan();
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Preset saved" : "Save failed";
+                n.body = nm; n.auto_dismiss_s = 4.f;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.notifs.push(std::move(n));
+            }
+            if (!del_req.empty()) {
+                bool ok = hud_presets.remove(del_req);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Preset deleted" : "Delete failed";
+                n.body = del_req; n.auto_dismiss_s = 4.f;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.notifs.push(std::move(n));
+            }
+            if (!load_req.empty() && hud_presets.exists(load_req)) {
+                bool ok = apply_hud_preset(hud_presets.path_for(load_req));
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Preset applied" : "Apply failed";
+                n.body = load_req; n.auto_dismiss_s = 4.f;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.notifs.push(std::move(n));
+            }
+        }
+
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
+        // The expanded map and the on-screen keyboard each capture ALL keystrokes
+        // while up (so pan/zoom or typing can't trigger app hotkeys).
+        if (state.map_overlay.expanded) {
+            auto& mo = state.map_overlay;
+            if (ImGui::IsKeyDown(ImGuiKey_LeftArrow))  map_pan(+0.012f, 0.f);
+            if (ImGui::IsKeyDown(ImGuiKey_RightArrow)) map_pan(-0.012f, 0.f);
+            if (ImGui::IsKeyDown(ImGuiKey_UpArrow))    map_pan(0.f, +0.012f);
+            if (ImGui::IsKeyDown(ImGuiKey_DownArrow))  map_pan(0.f, -0.012f);
+            if (ImGui::IsKeyDown(ImGuiKey_Equal) || ImGui::IsKeyDown(ImGuiKey_KeypadAdd))      map_zoom(+0.04f);
+            if (ImGui::IsKeyDown(ImGuiKey_Minus) || ImGui::IsKeyDown(ImGuiKey_KeypadSubtract)) map_zoom(-0.04f);
+            if (key_pressed(ImGuiKey_R))   // lock/unlock map rotation to the compass
+                mo.rotate_with_heading = !mo.rotate_with_heading;
+            if (key_pressed(ImGuiKey_N) || key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_M))
+                mo.expanded = false;
+        } else if (menu.is_keyboard_open()) {
+            if (key_pressed(ImGuiKey_UpArrow))    menu.osk_move(0, -1);
+            if (key_pressed(ImGuiKey_DownArrow))  menu.osk_move(0, +1);
+            if (key_pressed(ImGuiKey_LeftArrow))  menu.osk_move(-1, 0);
+            if (key_pressed(ImGuiKey_RightArrow)) menu.osk_move(+1, 0);
+            if (key_pressed(ImGuiKey_Enter))      menu.osk_activate();
+            if (key_pressed(ImGuiKey_Backspace))  menu.osk_backspace();
+            if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_F1)) menu.osk_cancel();
+            for (ImWchar ch : ImGui::GetIO().InputQueueCharacters)
+                menu.osk_input_char(static_cast<unsigned int>(ch));
+        } else {
         if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_P)) { state.quit = true; break; }
         // Ctrl+Q / Ctrl+K — force-kill (immediate exit, skips graceful cleanup)
         if (ImGui::GetIO().KeyCtrl &&
@@ -3917,6 +5255,11 @@ int main(int argc, char* argv[]) {
         if (key_pressed(ImGuiKey_I)) {
             if (menu.is_open()) menu.close();
             else                menu.open();
+        }
+        // F1 toggles the full-screen "deep menu".
+        if (key_pressed(ImGuiKey_F1)) {
+            if (menu.is_deep_open()) menu.close_deep();
+            else { menu.close(); menu.open_deep(); }
         }
         // Modal alarm/timer popup disabled — toasts handle notification display.
         // if (hud.popup_active()) {
@@ -3929,12 +5272,25 @@ int main(int argc, char* argv[]) {
             if (rep_toast_next.tick(ImGui::IsKeyDown(ImGuiKey_RightArrow))) hud.toast_navigate(+1);
             if (key_pressed(ImGuiKey_Enter))      hud.toast_select(state);
         } else if (menu.is_open()) {
-            if (rep_nav_up  .tick(ImGui::IsKeyDown(ImGuiKey_UpArrow)))   menu.navigate(-1);
-            if (rep_nav_down.tick(ImGui::IsKeyDown(ImGuiKey_DownArrow))) menu.navigate(+1);
+            // While editing a value, Up increases / Down decreases; otherwise Up =
+            // previous item, Down = next item.
+            const bool ev = menu.editing_value();
+            if (rep_nav_up  .tick(ImGui::IsKeyDown(ImGuiKey_UpArrow)))   menu.navigate(ev ? +1 : -1);
+            if (rep_nav_down.tick(ImGui::IsKeyDown(ImGuiKey_DownArrow))) menu.navigate(ev ? -1 : +1);
             if (key_pressed(ImGuiKey_Enter) ||
                 key_pressed(ImGuiKey_RightArrow)) menu.select();
             if (key_pressed(ImGuiKey_Backspace) ||
                 key_pressed(ImGuiKey_LeftArrow))  menu.back();
+            // Deep-menu tab switching (Tab / Shift+Tab).
+            if (menu.is_deep_open() && key_pressed(ImGuiKey_Tab)) {
+                if (ImGui::GetIO().KeyShift) menu.prev_tab(); else menu.next_tab();
+            }
+        }
+        // N — open the expanded (Helldivers-style) map view.
+        if (key_pressed(ImGuiKey_N)) {
+            state.map_overlay.expanded = true;
+            state.map_overlay.view_zoom = 1.0f;
+            state.map_overlay.view_pan_x = state.map_overlay.view_pan_y = 0.f;
         }
         // Vision-assist hotkeys — work whether or not the menu is open
         if (key_pressed(ImGuiKey_E)) state.pp_cfg.edge_enabled   = !state.pp_cfg.edge_enabled;
@@ -3954,6 +5310,9 @@ int main(int argc, char* argv[]) {
         }
         // F — toggle FPS overlay
         if (key_pressed(ImGuiKey_F)) fps_overlay_active = !fps_overlay_active;
+        // Y — toggle vsync (diagnostic: tells a display-refresh cap apart from
+        // real render cost; watch the [perf] fps line jump when off).
+        if (key_pressed(ImGuiKey_Y)) xr.set_vsync(!xr.vsync());
         // Shift+M — calibrate north (Set My Direction); edge-only
         if (ImGui::GetIO().KeyShift && key_pressed(ImGuiKey_M)) {
             std::lock_guard<std::mutex> lk(state.mtx);
@@ -4016,6 +5375,7 @@ int main(int argc, char* argv[]) {
                 else                        face_proxy.play_gif(static_cast<uint8_t>(i));
             }
         }
+        }  // end if (!menu.is_keyboard_open())
 
         // ── Wireless controller pip state ─────────────────────────────────────
         bool wc_pip_left  = wireless_enabled && wireless.pip_left_active();
@@ -4181,6 +5541,23 @@ int main(int argc, char* argv[]) {
             state.focus_right.af_active = cameras.owl_right()->is_af_scanning();
         }
 
+        // ── Boot autofocus → slave ─────────────────────────────────────────────
+        // Run one AF cycle on the OWLsight (CSI) cameras at startup, then settle
+        // both into SLAVE (hold the locked focus). Falls through after a timeout if
+        // the camera never reports a lock.
+        if (boot_af_pending) {
+            const bool l_done = !cameras.owl_left()  || cameras.owl_left()->is_af_locked();
+            const bool r_done = !cameras.owl_right() || cameras.owl_right()->is_af_locked();
+            if ((l_done && r_done) || (glfwGetTime() - boot_af_t0) > 5.0) {
+                if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
+                if (cameras.owl_right()) cameras.owl_right()->stop_autofocus();
+                state.focus_left.mode  = CameraFocusState::Mode::SLAVE;
+                state.focus_right.mode = CameraFocusState::Mode::SLAVE;
+                boot_af_pending = false;
+                std::cout << "[cam] boot autofocus complete → slave focus mode\n";
+            }
+        }
+
         // ── State snapshot ────────────────────────────────────────────────────
         // Also update render-thread metrics (frame time, knob event age) here
         // so they're included in the snapshot under a single lock acquisition.
@@ -4219,6 +5596,7 @@ int main(int argc, char* argv[]) {
             snap.lora_messages   = state.lora_messages;
             snap.compass_heading    = state.compass_heading;
             snap.compass_bg_enabled = state.compass_bg_enabled;
+            snap.compass_tape       = state.compass_tape;
             snap.imu_pose           = state.imu_pose;
             snap.focus_left         = state.focus_left;
             snap.focus_right        = state.focus_right;
@@ -4252,6 +5630,26 @@ int main(int argc, char* argv[]) {
             snap.gpio_states        = state.gpio_states;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
+        }
+
+        // ── Perf readout (TEMPORARY) — once/second fps so the post-process win
+        // can be confirmed after toggling Vision Assist off. (F also shows fps in
+        // the HUD.)  Lightweight: no glFinish, no per-phase timing.
+        {
+            static double s_diag_last = 0.0;
+            static int    s_diag_frames = 0;
+            static double s_diag_ft_sum = 0.0;
+            ++s_diag_frames;
+            s_diag_ft_sum += dt;
+            if (now - s_diag_last >= 1.0) {
+                double avg_ms = (s_diag_frames > 0)
+                              ? (s_diag_ft_sum / s_diag_frames) * 1000.0 : 0.0;
+                fprintf(stderr, "[perf] fps=%.1f ft=%.1fms\n",
+                        avg_ms > 0.0 ? 1000.0 / avg_ms : 0.0, avg_ms);
+                s_diag_last   = now;
+                s_diag_frames = 0;
+                s_diag_ft_sum = 0.0;
+            }
         }
 
         // If XR glasses IMU is fresh, recompute compass heading from the selected
@@ -4318,7 +5716,13 @@ int main(int argc, char* argv[]) {
         snap.health.cam_usb3_overlay = p3;
         snap.health.gamepad_ok          = gamepad.connected();
         snap.health.wireless_ok         = wireless_enabled && wireless.connected();
-        snap.health.wireless_battery_pct = wireless_enabled ? wireless.battery_pct() : -1;
+        // Battery level for the minimap arc: prefer the dedicated wireless
+        // controller, else fall back to the SDL gamepad's coarse level.
+        {
+            int bpct = wireless_enabled ? wireless.battery_pct() : -1;
+            if (bpct < 0) bpct = gamepad.battery_pct();
+            snap.health.wireless_battery_pct = bpct;
+        }
 
         // Inject live AF lens position into the snapshot (atomic read, no lock needed)
         if (cameras.owl_left())
@@ -4519,8 +5923,15 @@ int main(int argc, char* argv[]) {
 
         // ── Photo capture ─────────────────────────────────────────────────────
         // Reads directly from the camera eye FBOs (no HUD). Async PNG write.
-        if (snap.capture_request != CaptureRequest::None)
-            do_capture(snap.capture_request, xr, cfg_photo_dir, state);
+        if (snap.capture_request != CaptureRequest::None) {
+            do_capture(snap.capture_request, xr, cfg_photo_dir, state);  // resets request
+            // Burst: re-arm another stereo shot next frame until the count runs out.
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (state.capture_burst > 0) {
+                --state.capture_burst;
+                state.capture_request = CaptureRequest::Stereo;
+            }
+        }
 
         // ── Video recording ───────────────────────────────────────────────────
         // Same clean eye-FBO source as photos; encodes on a worker thread.
@@ -4593,7 +6004,32 @@ int main(int argc, char* argv[]) {
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
-        menu.draw(xr.eye_width(), xr.eye_height());
+        if (menu.is_deep_open()) {
+            menu.draw_fullscreen(xr.eye_width(), xr.eye_height());
+        } else if (menu.is_open() && menu.quick_style() == QuickStyle::Radial
+                   && !menu.is_keyboard_open()) {
+            // Radial quick menu encircling the round minimap. Geometry matches
+            // draw_map_overlay() (display coords) so the wheel locks onto it even
+            // when the map image is off.
+            const auto& mo = snap.map_overlay;
+            const float dispW = static_cast<float>(xr.display_width());
+            const float dispH = static_cast<float>(xr.display_height());
+            const float half  = std::max(8.f, static_cast<float>(mo.size_px));
+            const float mcx = std::clamp(dispW * mo.anchor_x + mo.pan_x, half, dispW - half);
+            const float mcy = std::clamp(dispH * mo.anchor_y + mo.pan_y, half, dispH - half);
+            // Point the selected item toward the centre of the minimap's eye-region
+            // (SBS: left/right half) so it reads "into" the view.
+            const bool sbs = xr.eye_width() < xr.display_width();
+            const float region_cx = !sbs ? dispW * 0.5f
+                                  : (mcx < dispW * 0.5f ? dispW * 0.25f : dispW * 0.75f);
+            const float region_cy = dispH * 0.5f;
+            const float focus = std::atan2(region_cy - mcy, region_cx - mcx);
+            const bool rotate = (mo.anchor_x < 0.35f || mo.anchor_x > 0.65f ||
+                                 mo.anchor_y < 0.35f || mo.anchor_y > 0.65f);
+            menu.draw_radial(mcx, mcy, half, focus, rotate);
+        } else {
+            menu.draw(xr.eye_width(), xr.eye_height());
+        }
 
         hud.draw_android_overlay(tex_android,
                                   xr.eye_width(), xr.eye_height(),
@@ -4612,6 +6048,13 @@ int main(int argc, char* argv[]) {
                                    protoface_preview_cfg.size,     protoface_preview_view);
         }
 
+        // Protoface portrait beside the minimap (closed-menu HUD element).
+        if (snap.map_overlay.portrait && !menu.is_open()) {
+            GLuint face_tex = 0;
+            protoface_ctrl.get_frame_texture(face_tex);
+            hud.draw_face_portrait(face_tex, xr.display_width(), xr.display_height(), snap);
+        }
+
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
         hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), sys_panel_active);
 
@@ -4625,205 +6068,14 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Persist runtime settings ──────────────────────────────────────────────
-    // Capture whatever colors/flags the user set via the HUD menu and write
-    // them back to the config file so they survive a restart.
-    try {
-        auto& jc = cfg["hud_colors"];
-        jc["glow_base"]        = color_to_json(hud.colors().glow_base);
-        jc["text_fill"]        = color_to_json(hud.colors().text_fill);
-        jc["ind_good"]         = color_to_json(hud.colors().ind_good);
-        jc["ind_inactive"]     = color_to_json(hud.colors().ind_inactive);
-        jc["ind_fail"]         = color_to_json(hud.colors().ind_fail);
-        jc["compass_tick"]     = color_to_json(hud.colors().compass_tick);
-        jc["compass_glow"]     = color_to_json(hud.colors().compass_glow);
-        jc["compass_bg_color"] = color_to_json(hud.colors().compass_bg_color);
-
-        cfg["hud"]["indicator_bg_enabled"] = hud.config().indicator_bg_enabled;
-        cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
-        cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
-        {
-            static const char* kAxes[] = { "roll", "pitch", "yaw" };
-            cfg["compass"]["axis"]   = kAxes[static_cast<int>(state.compass_axis)];
-            cfg["compass"]["invert"] = state.compass_invert;
-        }
-        cfg["hud"]["flip_vertical"]             = hud.config().hud_flip_vertical;
-        cfg["hud"]["effects"]["type"]           = static_cast<int>(state.effects_cfg.effect);
-        cfg["hud"]["effects"]["palette"]        = static_cast<int>(state.effects_cfg.palette);
-
-        cfg["night_vision"]["exposure_ev"]            = state.night_vision.exposure_ev;
-        cfg["night_vision"]["shutter_us"]             = state.night_vision.shutter_us;
-        cfg["night_vision"]["auto_nv"]                = state.night_vision.auto_nv;
-        cfg["night_vision"]["auto_nv_gain_threshold"] = state.night_vision.auto_nv_gain_threshold;
-        cfg["night_vision"]["csi_awb_left"]           = state.night_vision.csi_awb_left;
-        cfg["night_vision"]["csi_awb_right"]          = state.night_vision.csi_awb_right;
-
-        cfg["clock"]["use_24h"]         = state.clock_cfg.use_24h;
-        cfg["clock"]["show_seconds"]    = state.clock_cfg.show_seconds;
-        cfg["clock"]["show_date"]       = state.clock_cfg.show_date;
-        cfg["clock"]["font_scale"]      = state.clock_cfg.font_scale;
-        cfg["clock"]["manual_offset_s"] = state.clock_cfg.manual_offset_s;
-
-        cfg["pip"]["cam1"]["anchor_x"]  = pip_overlay_cfg1.anchor_x;
-        cfg["pip"]["cam1"]["anchor_y"]  = pip_overlay_cfg1.anchor_y;
-        cfg["pip"]["cam1"]["pan_x"]     = pip_overlay_cfg1.pan_x;
-        cfg["pip"]["cam1"]["pan_y"]     = pip_overlay_cfg1.pan_y;
-        cfg["pip"]["cam1"]["size"]      = pip_overlay_cfg1.size;
-        cfg["pip"]["cam1"]["rotation"]  = rotation_to_str(pip_overlay_cfg1.rotation);
-        cfg["pip"]["cam2"]["anchor_x"]  = pip_overlay_cfg2.anchor_x;
-        cfg["pip"]["cam2"]["anchor_y"]  = pip_overlay_cfg2.anchor_y;
-        cfg["pip"]["cam2"]["pan_x"]     = pip_overlay_cfg2.pan_x;
-        cfg["pip"]["cam2"]["pan_y"]     = pip_overlay_cfg2.pan_y;
-        cfg["pip"]["cam2"]["size"]      = pip_overlay_cfg2.size;
-        cfg["pip"]["cam2"]["rotation"]  = rotation_to_str(pip_overlay_cfg2.rotation);
-
-        cfg["protoface"]["autostart"]           = pf_autostart;
-        cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
-        cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
-        cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;
-        cfg["protoface"]["preview"]["pan_y"]    = protoface_preview_cfg.pan_y;
-        cfg["protoface"]["preview"]["size"]     = protoface_preview_cfg.size;
-        cfg["protoface"]["preview"]["view"]     = protoface_preview_view;
-
-        auto& jpp = cfg["post_process"];
-        jpp["edge_enabled"]       = state.pp_cfg.edge_enabled;
-        jpp["edge_strength"]      = state.pp_cfg.edge_strength;
-        jpp["edge_color"]         = color_to_json(state.pp_cfg.edge_color);
-        jpp["desat_enabled"]      = state.pp_cfg.desat_enabled;
-        jpp["desat_strength"]     = state.pp_cfg.desat_strength;
-        jpp["contrast_threshold"] = state.pp_cfg.contrast_threshold;
-        jpp["edge_scale"]         = state.pp_cfg.edge_scale;
-        jpp["edge_threshold"]     = state.pp_cfg.edge_threshold;
-        jpp["focus_str"]          = state.pp_cfg.focus_str;
-        jpp["edge_gate_scale"]    = state.pp_cfg.edge_gate_scale;
-        jpp["color_protect"]      = state.pp_cfg.color_protect;
-        jpp["edge_dilate"]        = state.pp_cfg.edge_dilate;
-        jpp["motion_enabled"]     = state.pp_cfg.motion_enabled;
-        jpp["motion_strength"]    = state.pp_cfg.motion_strength;
-        jpp["motion_thresh"]      = state.pp_cfg.motion_thresh;
-        jpp["motion_radius"]      = state.pp_cfg.motion_radius;
-        jpp["motion_line"]        = state.pp_cfg.motion_line;
-        jpp["motion_update_rate"] = state.pp_cfg.motion_update_rate;
-        jpp["motion_color"]       = color_to_json(state.pp_cfg.motion_color);
-
-        cfg["cameras"]["usb_cam_1"]["device"]            = cameras.usb1_cfg().device;
-        cfg["cameras"]["usb_cam_1"]["width"]             = cameras.usb1_cfg().width;
-        cfg["cameras"]["usb_cam_1"]["height"]            = cameras.usb1_cfg().height;
-        cfg["cameras"]["usb_cam_1"]["brightness"]        = cameras.usb1_brightness();
-        cfg["cameras"]["usb_cam_1"]["dynamic_framerate"] = cameras.usb1_cfg().dynamic_framerate;
-        cfg["cameras"]["usb_cam_1"]["auto_exposure"]     = cameras.usb1_cfg().auto_exposure;
-        cfg["cameras"]["usb_cam_1"]["exposure_time"]     = cameras.usb1_cfg().exposure_time;
-        cfg["cameras"]["usb_cam_1"]["auto_wb"]           = cameras.usb1_cfg().auto_wb;
-        cfg["cameras"]["usb_cam_1"]["wb_temp"]           = cameras.usb1_cfg().wb_temp;
-        cfg["cameras"]["usb_cam_1"]["flip"]                   = cameras.usb1_cfg().flip;
-        cfg["cameras"]["usb_cam_1"]["auto_brightness"]        = cameras.usb1_cfg().auto_brightness;
-        cfg["cameras"]["usb_cam_1"]["auto_brightness_target"] = cameras.usb1_cfg().auto_brightness_target;
-        cfg["cameras"]["usb_cam_2"]["device"]            = cameras.usb2_cfg().device;
-        cfg["cameras"]["usb_cam_2"]["width"]             = cameras.usb2_cfg().width;
-        cfg["cameras"]["usb_cam_2"]["height"]            = cameras.usb2_cfg().height;
-        cfg["cameras"]["usb_cam_2"]["brightness"]        = cameras.usb2_brightness();
-        cfg["cameras"]["usb_cam_2"]["dynamic_framerate"] = cameras.usb2_cfg().dynamic_framerate;
-        cfg["cameras"]["usb_cam_2"]["auto_exposure"]     = cameras.usb2_cfg().auto_exposure;
-        cfg["cameras"]["usb_cam_2"]["exposure_time"]     = cameras.usb2_cfg().exposure_time;
-        cfg["cameras"]["usb_cam_2"]["auto_wb"]           = cameras.usb2_cfg().auto_wb;
-        cfg["cameras"]["usb_cam_2"]["wb_temp"]           = cameras.usb2_cfg().wb_temp;
-        cfg["cameras"]["usb_cam_2"]["flip"]                   = cameras.usb2_cfg().flip;
-        cfg["cameras"]["usb_cam_2"]["auto_brightness"]        = cameras.usb2_cfg().auto_brightness;
-        cfg["cameras"]["usb_cam_2"]["auto_brightness_target"] = cameras.usb2_cfg().auto_brightness_target;
-        cfg["cameras"]["usb_cam_3"]["device"]            = cameras.usb3_cfg().device;
-        cfg["cameras"]["usb_cam_3"]["width"]             = cameras.usb3_cfg().width;
-        cfg["cameras"]["usb_cam_3"]["height"]            = cameras.usb3_cfg().height;
-        cfg["cameras"]["usb_cam_3"]["brightness"]        = cameras.usb3_brightness();
-        cfg["cameras"]["usb_cam_3"]["dynamic_framerate"] = cameras.usb3_cfg().dynamic_framerate;
-        cfg["cameras"]["usb_cam_3"]["auto_exposure"]     = cameras.usb3_cfg().auto_exposure;
-        cfg["cameras"]["usb_cam_3"]["exposure_time"]     = cameras.usb3_cfg().exposure_time;
-        cfg["cameras"]["usb_cam_3"]["auto_wb"]           = cameras.usb3_cfg().auto_wb;
-        cfg["cameras"]["usb_cam_3"]["wb_temp"]           = cameras.usb3_cfg().wb_temp;
-        cfg["cameras"]["usb_cam_3"]["flip"]                   = cameras.usb3_cfg().flip;
-        cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
-        cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
-        cfg["cameras"]["swapped"] = state.cameras_swapped;
-        {
-            static const char* kNames[] = { "center","outside","left","right","top","bottom" };
-            cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
-        }
-
-        cfg["qr"]["scan_main"] = state.qr_scan_main;
-        cfg["qr"]["scan_usb"]  = state.qr_scan_usb;
-
-        cfg["fps_avg_interval_s"] = state.fps_avg_interval_s;
-        cfg["i2c_scan_bus"]       = state.i2c_scan_bus;
-
-        {
-            const auto& mo          = state.map_overlay;
-            cfg["map"]["enabled"]             = mo.enabled;
-            cfg["map"]["map_path"]            = mo.map_path;
-            cfg["map"]["opacity"]             = mo.opacity;
-            cfg["map"]["size_px"]             = mo.size_px;
-            cfg["map"]["rotate_with_heading"] = mo.rotate_with_heading;
-            cfg["map"]["image_rotate_deg"]    = mo.image_rotate_deg;
-            cfg["map"]["anchor_x"]            = mo.anchor_x;
-            cfg["map"]["anchor_y"]            = mo.anchor_y;
-            cfg["map"]["circle_window"]       = mo.circle_window;
-            cfg["map"]["zoom"]                = mo.zoom;
-        }
-
-        cfg["resolution"]["width"]  = state.camera_resolution.width;
-        cfg["resolution"]["height"] = state.camera_resolution.height;
-        cfg["resolution"]["fps"]    = state.camera_resolution.fps;
-
-        auto eye_src_str = [](EyeSource s) -> const char* {
-            switch (s) {
-                case EyeSource::USB1: return "usb1";
-                case EyeSource::USB2: return "usb2";
-                case EyeSource::USB3: return "usb3";
-                default:              return "csi";
-            }
-        };
-        cfg["cameras"]["left_eye_source"]  = eye_src_str(left_eye_src);
-        cfg["cameras"]["right_eye_source"] = eye_src_str(right_eye_src);
-
-        auto& jm = cfg["menu_style"];
-        jm["accent_color"]     = color_to_json(menu.accent_color());
-        jm["bg_color"]         = color_to_json(menu.bg_color());
-        jm["bg_enabled"]       = menu.bg_enabled();
-        jm["border_color"]     = color_to_json(menu.border_color());
-        jm["border_thickness"]  = menu.border_thickness();
-        jm["border_enabled"]    = menu.border_enabled();
-        jm["selection_style"]   = (menu.selection_style() == SelectionStyle::FILLED_ROW)
-                                  ? "filled_row" : "accent_bar";
-        {
-            const char* a = "top_left";
-            switch (menu.anchor()) {
-                case MenuAnchor::TopRight:    a = "top_right";    break;
-                case MenuAnchor::BottomLeft:  a = "bottom_left";  break;
-                case MenuAnchor::BottomRight: a = "bottom_right"; break;
-                default: break;
-            }
-            jm["anchor"] = a;
-        }
-
-        // Persist MPU-9250 enabled state + calibration biases so the menu's
-        // "Active" toggle and calibration survive a restart.
-        if (mpu9250.is_running() || mpu9250.is_enabled() || cfg.contains("mpu9250")) {
-            float bx, by, bz;
-            mpu9250.get_mag_bias(bx, by, bz);
-            cfg["mpu9250"]["enabled"]        = mpu9250.is_enabled();
-            cfg["mpu9250"]["mag_bias"]       = json::array({ bx, by, bz });
-            cfg["mpu9250"]["mount_rotation"] = mpu9250.get_mount_rotation();
-            cfg["mpu9250"]["heading_axes"]   = mpu9250.get_heading_axes();
-        }
-
-        FILE* f = fopen(cfg_path.c_str(), "w");
-        if (f) {
-            std::string s = cfg.dump(2);
-            fwrite(s.c_str(), 1, s.size(), f);
-            fclose(f);
-            std::cout << "[cfg] settings saved to " << cfg_path << "\n";
-        } else {
-            std::cerr << "[cfg] cannot write to " << cfg_path << "\n";
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "[cfg] save failed: " << e.what() << "\n";
+    // Write current settings back to config.json so they survive a restart. Skip
+    // the write if the file failed to parse on load (no-clobber). Uses the same
+    // snapshot writer as the "save profile" feature (mutate_cfg + save_config_to).
+    if (cfg_parse_failed) {
+        std::cerr << "[cfg] " << cfg_path << " failed to parse on load — "
+                     "leaving it untouched so your edits aren't lost\n";
+    } else {
+        save_config_to(cfg_path);
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
@@ -4855,6 +6107,11 @@ int main(int argc, char* argv[]) {
     step("beast_cam");       beast_cam.stop();
     step("cameras");         cameras.shutdown();
     step("teensy");          teensy.stop();
+    step("native_face");
+    if (native_ctrl) {
+        if (pf_launch_driver) std::system("pkill -f panel_driver.py 2>/dev/null");  // blanks panels via its SIGTERM handler
+        native_ctrl->stop();                                                        // blanks the shm too
+    }
     step("protoface");       protoface_ctrl.shutdown_daemon(); protoface_ctrl.stop();
     step("lora");            lora.stop();
     step("knob");            knob.stop();
@@ -4874,5 +6131,19 @@ int main(int argc, char* argv[]) {
 
     step("xr");              xr.shutdown();
     step("done");
+
+    // ── Profile restart ───────────────────────────────────────────────────────
+    // The user picked/loaded a profile (or the landing countdown auto-resumed the
+    // last one): relaunch ProtoHUD with that profile file as its config path. The
+    // re-launched instance reads + writes that file, so the active profile auto-
+    // saves; launched-with-a-path means it skips the landing page (no re-exec loop).
+    if (!pending_reexec.empty()) {
+        std::cerr << "[profile] restarting into " << pending_reexec << "\n";
+        char* newargv[] = { const_cast<char*>(exe_path.c_str()),
+                            const_cast<char*>(pending_reexec.c_str()),
+                            nullptr };
+        execv(exe_path.c_str(), newargv);
+        std::cerr << "[profile] re-exec failed: " << std::strerror(errno) << "\n";
+    }
     return 0;
 }

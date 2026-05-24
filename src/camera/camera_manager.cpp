@@ -111,18 +111,65 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
 
     // ── OWLsight cameras (zero-copy DMA) ─────────────────────────────────────
     if (lcam_mgr_) {
-        DmaCamera::Config lc { left.libcamera_id, left.model_name, left.width, left.height, left.fps };
-        owl_left_ = std::make_unique<DmaCamera>();
-        if (!owl_left_->init(lcam_mgr_.get(), lc, nv12_vs, nv12_fs)) {
-            std::cerr << "[cam] OWLsight left init failed\n";
-            owl_left_.reset();
+        // Resolve both eyes to EXACT, distinct camera ids from a single enumeration.
+        // (Re-querying cameras() per DmaCamera could return a different order once
+        // the first camera is acquired/started, making the second eye resolve to
+        // the already-running camera — "Camera in Running state".)
+        auto cams = lcam_mgr_->cameras();
+        auto resolve = [&](const CamConfig& cc) -> std::string {
+            if (!cc.model_name.empty()) {
+                int m = 0;
+                for (auto& c : cams) {
+                    try {
+                        auto md = c->properties().get(libcamera::properties::Model);
+                        if (md && *md == cc.model_name) {
+                            if (m == cc.libcamera_id) return c->id();
+                            ++m;
+                        }
+                    } catch (...) {}
+                }
+            }
+            if (cc.libcamera_id >= 0 && cc.libcamera_id < static_cast<int>(cams.size()))
+                return cams[cc.libcamera_id]->id();
+            return {};
+        };
+        std::string left_id  = resolve(left);
+        std::string right_id = resolve(right);
+        // Never let both eyes land on the same physical camera.
+        if (!left_id.empty() && left_id == right_id) {
+            right_id.clear();
+            for (auto& c : cams) if (c->id() != left_id) { right_id = c->id(); break; }
+        }
+        std::cout << "[cam] OWL ids: left='" << left_id << "' right='" << right_id << "'\n";
+
+        // Only init a camera we actually resolved to a real id. With an empty id
+        // DmaCamera would fall back to the first/only camera — which is the one the
+        // other eye already holds — producing "Camera in Running state" on acquire.
+        // When only one OWLsight enumerates (the other is unplugged or wedged),
+        // skip the missing eye cleanly; the feed just shows mono.
+        if (left_id.empty()) {
+            std::cerr << "[cam] OWLsight left: no camera resolved — skipping "
+                         "(only " << cams.size() << " libcamera device(s) present)\n";
+        } else {
+            DmaCamera::Config lc { left.libcamera_id, left.model_name, left_id, left.width, left.height, left.fps };
+            owl_left_ = std::make_unique<DmaCamera>();
+            if (!owl_left_->init(lcam_mgr_.get(), lc, nv12_vs, nv12_fs)) {
+                std::cerr << "[cam] OWLsight left init failed\n";
+                owl_left_.reset();
+            }
         }
 
-        DmaCamera::Config rc { right.libcamera_id, right.model_name, right.width, right.height, right.fps };
-        owl_right_ = std::make_unique<DmaCamera>();
-        if (!owl_right_->init(lcam_mgr_.get(), rc, nv12_vs, nv12_fs)) {
-            std::cerr << "[cam] OWLsight right init failed\n";
-            owl_right_.reset();
+        if (right_id.empty()) {
+            std::cerr << "[cam] OWLsight right: no second camera resolved — skipping "
+                         "(running mono). If you expect two CSI cameras, a reboot "
+                         "usually clears a wedged sensor — check 'rpicam-hello --list-cameras'.\n";
+        } else {
+            DmaCamera::Config rc { right.libcamera_id, right.model_name, right_id, right.width, right.height, right.fps };
+            owl_right_ = std::make_unique<DmaCamera>();
+            if (!owl_right_->init(lcam_mgr_.get(), rc, nv12_vs, nv12_fs)) {
+                std::cerr << "[cam] OWLsight right init failed\n";
+                owl_right_.reset();
+            }
         }
     }
 
@@ -350,10 +397,15 @@ void CameraManager::usb_capture_thread() {
                 if (++bad % 30 == 1)
                     std::cerr << "[cam] " << name << ": " << bad
                               << " empty reads (good=" << good << ")\n";
-                // After enough consecutive failures (and we know the camera
-                // worked before), release it so reconnect logic can trigger.
-                if (++consec >= kDisconnectThreshold && good > 0) {
-                    std::cerr << "[cam] " << name << ": disconnected\n";
+                // Release on disconnect. A camera that has *never* delivered a frame
+                // (good == 0 — e.g. a wrong/ISP /dev/video node) is also released,
+                // after a longer grace period, so it can't spin-read forever and
+                // peg a CPU core / starve the render thread.
+                ++consec;
+                const int thresh = (good > 0) ? kDisconnectThreshold : 90;  // ~0.9s grace
+                if (consec >= thresh) {
+                    std::cerr << "[cam] " << name
+                              << (good > 0 ? ": disconnected\n" : ": no frames — releasing\n");
                     ok_flag = false;
                     cap.release();  // isOpened() now returns false
                     consec = 0;
@@ -368,7 +420,9 @@ void CameraManager::usb_capture_thread() {
             std::memcpy(slot.buf.data(), rgba.data, slot.buf.size());
             slot.dirty = true;
         }
-        return got_frame || ok_flag.load();  // keep spinning while open even if no frame
+        // Only a real frame counts as "activity". An open-but-empty camera returns
+        // false so the loop sleeps instead of hot-spinning on a dead device.
+        return got_frame;
     };
 
     while (running_) {

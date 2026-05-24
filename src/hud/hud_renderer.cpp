@@ -58,6 +58,36 @@ static std::string fmt_countdown(time_t end) {
     return buf;
 }
 
+// Angular width (radians) a string would occupy on an arc of radius r, at the
+// currently-set NVG font. Used to centre/lay out curved text.
+static float arc_text_width(NVGcontext* vg, const char* text, float r) {
+    float tot = 0.f;
+    for (const char* p = text; *p; ++p)
+        tot += nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+    return tot / (r < 1.f ? 1.f : r);
+}
+
+// Draw text along an arc (each glyph translated to its arc position and rotated to
+// the tangent), starting at start_angle and laying out clockwise. Caller sets the
+// font + fill first. Returns the end angle so segments can be chained.
+static float nvg_text_arc(NVGcontext* vg, float cx, float cy, float r,
+                          float start_angle, const char* text) {
+    const float rr = (r < 1.f) ? 1.f : r;
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    float ang = start_angle;
+    for (const char* p = text; *p; ++p) {
+        const float adv = nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+        const float th  = ang + (adv * 0.5f) / rr;
+        nvgSave(vg);
+        nvgTranslate(vg, cx + std::cos(th) * rr, cy + std::sin(th) * rr);
+        nvgRotate(vg, th + static_cast<float>(M_PI) * 0.5f);
+        nvgText(vg, 0, 0, p, p + 1);
+        nvgRestore(vg);
+        ang += adv / rr;
+    }
+    return ang;
+}
+
 // Replace the alpha byte of an ImU32 color (format: ABGR, alpha in high byte).
 static ImU32 with_alpha(ImU32 col, uint8_t a) {
     return (col & 0x00FFFFFFu) | (static_cast<ImU32>(a) << 24u);
@@ -130,6 +160,18 @@ static void hud_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
             dl->AddText(font, font_size, {pos.x + o[0], pos.y + o[1]}, glow, text);
     }
     dl->AddText(font, font_size, pos, fill_col, text);
+}
+
+// Crisp black outline for HUD text over bright scenes: draws the string in black
+// at the 4 diagonal offsets using the CURRENT font + alignment. Caller draws the
+// fill on top. (Was 8 offsets — the 4 diagonals cover horizontal+vertical strokes
+// and halve the text-rasterization cost, which is a meaningful per-frame win when
+// many labels are outlined.)
+static void nvg_text_outline(NVGcontext* vg, float x, float y, const char* t,
+                             float o = 1.6f) {
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, 215));
+    nvgText(vg, x - o, y - o, t, nullptr); nvgText(vg, x + o, y - o, t, nullptr);
+    nvgText(vg, x - o, y + o, t, nullptr); nvgText(vg, x + o, y + o, t, nullptr);
 }
 
 // NVG glow text — 2-pass (blur+sharp) replaces 9-call ImGui offset pattern
@@ -315,14 +357,19 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
 
     const float cw        = fw / 3.f;
     const float compass_y = flip ? c_margin : fh - ch - c_margin;
-    draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
+    if (s.compass_tape)
+        draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
     draw_health_side(nvg_, s.health, fw, fh, false,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
     draw_health_side(nvg_, s.health, fw, fh, true,
                      s.focus_left, s.focus_right, s.night_vision.nv_enabled);
     draw_face_indicator        (nvg_, s.face, fw, fh);
-    draw_clock_indicator       (nvg_, s,      fw, fh);
-    draw_timer_alarm_indicator (nvg_, s,      fw, fh);
+    // The minimap clock (above the map) subsumes the corner clock + timer/alarm
+    // indicator when it's active; otherwise fall back to the corner readouts.
+    if (!(s.map_overlay.enabled && s.map_overlay.clock)) {
+        draw_clock_indicator       (nvg_, s,      fw, fh);
+        draw_timer_alarm_indicator (nvg_, s,      fw, fh);
+    }
     fx_draw_alarm_pulse(nvg_, s, fw, fh);
 
     if (show_fps) {
@@ -382,13 +429,15 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             }
         }
     }
-    if (map_img_ < 0) return;
+    // Helldivers-style temporary expanded view takes over; skip the minimap.
+    if (cfg.expanded) { draw_map_expanded(vg, s, fw, fh); return; }
 
+    const bool  has_img = (map_img_ >= 0);
     const float half   = cfg.size_px;
-    const float aspect = (map_img_h_ > 0 && map_img_w_ > 0)
+    const float aspect = (has_img && map_img_h_ > 0 && map_img_w_ > 0)
                          ? (float)map_img_h_ / (float)map_img_w_ : 1.f;
     const float hw     = half;
-    const float hh     = half * aspect;
+    const float hh     = cfg.circle_window ? half : half * aspect;
     // Clamp center so the map window never extends past the screen edge.
     // anchor 0.0 → left/top edge flush, 0.5 → centered, 1.0 → right/bottom edge flush.
     const float cx     = std::clamp(fw * cfg.anchor_x + cfg.pan_x, hw, fw - hw);
@@ -397,42 +446,41 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     nvgSave(vg);
     nvgTranslate(vg, cx, cy);
 
-    // Build the image paint inside the rotated frame so it captures the rotation.
-    // nvgImagePattern bakes the current transform into the paint; after restoring
-    // to screen-aligned coordinates the fill path (circle or rect) samples the
-    // image through that baked transform — giving a fixed window with a rotating map.
-    nvgSave(vg);
-    if (cfg.image_rotate_deg != 0.f)
-        nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
-    if (cfg.rotate_with_heading && cfg.calibrated)
-        nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
-    // Zoom into map content: scale the image pattern up so only the centre
-    // (1/zoom) fraction of the image is visible through the fixed window.
-    const float z   = std::max(cfg.zoom, 1.0f);
-    NVGpaint img = nvgImagePattern(vg, -hw * z, -hh * z, hw * 2.f * z, hh * 2.f * z,
-                                   0.f, map_img_, cfg.opacity);
-    nvgRestore(vg);  // back to screen-aligned at (cx, cy)
+    // Window shape helper (circle or rect).
+    auto path_window = [&]{
+        nvgBeginPath(vg);
+        if (cfg.circle_window) nvgCircle(vg, 0.f, 0.f, half);
+        else                   nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
+    };
 
-    // Fill window shape — the path IS the clip; no scissor needed.
-    nvgBeginPath(vg);
-    if (cfg.circle_window)
-        nvgCircle(vg, 0.f, 0.f, half);
-    else
-        nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
-    nvgFillPaint(vg, img);
-    nvgFill(vg);
+    if (has_img) {
+        // Build the image paint inside the rotated frame so it captures rotation.
+        nvgSave(vg);
+        if (cfg.image_rotate_deg != 0.f)
+            nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
+        if (cfg.rotate_with_heading && cfg.calibrated)
+            nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
+        const float z   = std::max(cfg.zoom, 1.0f);
+        NVGpaint img = nvgImagePattern(vg, -hw * z, -hh * z, hw * 2.f * z, hh * 2.f * z,
+                                       0.f, map_img_, cfg.opacity);
+        nvgRestore(vg);  // back to screen-aligned at (cx, cy)
+        path_window();
+        nvgFillPaint(vg, img);
+        nvgFill(vg);
+    } else {
+        // No image configured — still draw a dark "always-on" base disc.
+        path_window();
+        nvgFillColor(vg, nvgRGBA(10, 16, 22, 180));
+        nvgFill(vg);
+    }
 
-    // Border hugs the window shape exactly
-    nvgBeginPath(vg);
-    if (cfg.circle_window)
-        nvgCircle(vg, 0.f, 0.f, half);
-    else
-        nvgRect(vg, -hw, -hh, hw * 2.f, hh * 2.f);
+    // Border hugs the window shape exactly.
+    path_window();
     nvgStrokeColor(vg, nvgRGBA(100, 130, 160, 160));
     nvgStrokeWidth(vg, 1.5f);
     nvgStroke(vg);
 
-    // Red crosshair at centre = wearer's position on the map
+    // Red crosshair at centre = wearer's position on the map.
     nvgBeginPath(vg);
     nvgMoveTo(vg, -9.f, 0.f); nvgLineTo(vg, 9.f, 0.f);
     nvgMoveTo(vg, 0.f, -9.f); nvgLineTo(vg, 0.f, 9.f);
@@ -441,6 +489,354 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     nvgStroke(vg);
 
     nvgRestore(vg);
+
+    const float ringR = cfg.circle_window ? half : std::max(hw, hh);
+
+    // Compass ring + LoRa markers around the minimap (Battlefield-style).
+    if (cfg.compass_ring)
+        draw_compass_ring(vg, s, cx, cy, ringR);
+
+    // System gauge — a ~quarter ring on the minimap's left, OUTSIDE the compass,
+    // with a gap. Normally shows the controller battery; with system_debug on it
+    // shows CPU (inner bar) + GPU/render-load (outer bar, concentric & offset).
+    if (cfg.battery_arc) {
+        const float DEG = (float)M_PI / 180.f;
+        const float a0  = 145.f * DEG;            // bottom-left
+        const float a1  = 215.f * DEG;            // top-left (sweep up the left side)
+
+        // Draw one gauge arc (dark track + coloured fill + a short value label).
+        auto gauge = [&](float r, float ga0, float ga1, float v01,
+                         NVGcolor fill, const char* label, bool known) {
+            nvgLineCap(vg, NVG_ROUND);
+            nvgBeginPath(vg);
+            nvgArc(vg, cx, cy, r, ga0, ga1, NVG_CW);
+            nvgStrokeColor(vg, nvgRGBA(40, 48, 56, 200));
+            nvgStrokeWidth(vg, 8.f);
+            nvgStroke(vg);
+            if (known) {
+                v01 = std::clamp(v01, 0.f, 1.f);
+                nvgBeginPath(vg);
+                nvgArc(vg, cx, cy, r, ga0, ga0 + (ga1 - ga0) * v01, NVG_CW);
+                nvgStrokeColor(vg, fill);
+                nvgStrokeWidth(vg, 8.f);
+                nvgStroke(vg);
+            }
+            nvgLineCap(vg, NVG_BUTT);
+            nvg_set_font_mono(10.f);
+            nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+            const float lblx = cx + std::cos(ga0) * (r - 8.f);
+            const float lbly = cy + std::sin(ga0) * (r - 8.f);
+            nvg_text_outline(vg, lblx, lbly, label, 1.4f);
+            nvgFillColor(vg, known ? fill : nvgRGBA(140, 150, 160, 200));
+            nvgText(vg, lblx, lbly, label, nullptr);
+        };
+
+        const float r1 = ringR + 56.f;            // inner bar
+        const float r2 = ringR + 68.f;            // outer bar, concentric
+        const float off = 10.f * DEG;             // raise the inner bar ~10° at the top
+
+        if (cfg.system_debug) {
+            // CPU = inner bar raised 10° (its top sits higher, at ~135°);
+            // GPU/render-load = outer bar (top at ~145°). GPU comes from
+            // instantaneous frame time, so smooth it (EMA) to stop the jumpiness.
+            const float cpu = std::clamp(s.sys_metrics.cpu_pct / 100.f, 0.f, 1.f);
+            const float ft  = s.sys_metrics.frame_time_ms;
+            const float gpu_inst = std::clamp(ft / (1000.f / 60.f), 0.f, 1.f);
+            gpu_load_smooth_ += (gpu_inst - gpu_load_smooth_) * 0.10f;
+            const float gpu = gpu_load_smooth_;
+            auto load_col = [](float v) {
+                return v > 0.8f ? nvgRGBA(230, 70, 60, 235)
+                     : v > 0.5f ? nvgRGBA(235, 180, 50, 230)
+                     :            nvgRGBA(70, 210, 90, 230);
+            };
+            char cb[12]; snprintf(cb, sizeof(cb), "C%2.0f", cpu * 100.f);
+            char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
+            gauge(r1, a0 + off, a1 + off, cpu, load_col(cpu), cb, true);  // inner, raised = CPU
+            gauge(r2, a0,       a1,       gpu, load_col(gpu), gb, true);  // outer = GPU
+        } else {
+            const int bpct = s.health.wireless_battery_pct;   // -1 = unknown
+            const float pct = std::clamp(bpct / 100.f, 0.f, 1.f);
+            NVGcolor bc = pct > 0.5f ? nvgRGBA(70, 210, 90, 230)
+                        : pct > 0.2f ? nvgRGBA(235, 180, 50, 230)
+                        :              nvgRGBA(230, 70, 60, 235);
+            char pb[8];
+            if (bpct >= 0) snprintf(pb, sizeof(pb), "%d%%", bpct);
+            else           snprintf(pb, sizeof(pb), "--");
+            gauge(r1, a0, a1, pct, bc, pb, bpct >= 0);
+        }
+    }
+
+    // Clock above the minimap, with an active timer/alarm shown beside it.
+    if (cfg.clock) {
+        time_t now = std::time(nullptr) + static_cast<time_t>(s.clock_cfg.manual_offset_s);
+        struct tm tmv; localtime_r(&now, &tmv);
+        char tbuf[32];
+        const char* tfmt = s.clock_cfg.use_24h
+            ? (s.clock_cfg.show_seconds ? "%H:%M:%S" : "%H:%M")
+            : (s.clock_cfg.show_seconds ? "%I:%M:%S %p" : "%I:%M %p");
+        strftime(tbuf, sizeof(tbuf), tfmt, &tmv);
+
+        // Active timer (countdown) or alarm (fire time) shown next to the clock.
+        std::string extra; ImU32 extra_col = IM_COL32(235, 180, 50, 235);
+        if (s.timer_alarm.timer_active) {
+            extra = "T-" + fmt_countdown(s.timer_alarm.timer_end);
+            extra_col = IM_COL32(235, 180, 50, 235);
+        } else if (s.timer_alarm.alarm_active) {
+            struct tm av; time_t at = s.timer_alarm.alarm_fire_at; localtime_r(&at, &av);
+            char ab[16]; strftime(ab, sizeof(ab), s.clock_cfg.use_24h ? "%H:%M" : "%I:%M%p", &av);
+            extra = std::string("A ") + ab;
+            extra_col = IM_COL32(230, 90, 90, 235);
+        }
+
+        const float scale = std::max(0.6f, s.clock_cfg.font_scale);
+        const float csz   = 11.f * scale;          // ~half the previous size
+        const float esz   = csz * 0.92f;
+        const float dsz   = csz * 0.82f;
+        const float DEGc  = static_cast<float>(M_PI) / 180.f;
+        const float clock_angle = -118.f * DEGc;   // curve along the map's upper-left
+        const float rc    = ringR + (cfg.compass_ring ? 46.f : 16.f) + csz * 0.5f;
+
+        // Clock — curved text on an arc concentric with the map, centred upper-left.
+        nvg_set_font_ui(csz);
+        const float wc    = arc_text_width(vg, tbuf, rc);
+        const float start = clock_angle - wc * 0.5f;
+        // Black outline for legibility over the feed. Arc text is per-glyph
+        // transformed, so a single blurred pass is ~4× cheaper than offset copies
+        // while still reading as a crisp dark halo at this size.
+        {
+            nvgFontBlur(vg, 2.0f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
+            nvg_text_arc(vg, cx, cy, rc, start, tbuf);
+            nvgFontBlur(vg, 0.f);
+        }
+        if (s_glow && s_glow_intensity > 0.f) {
+            nvgFontBlur(vg, 3.f);
+            nvgFillColor(vg, nvg_col_a(col_.glow_base,
+                         static_cast<uint8_t>(72.f * s_glow_intensity)));
+            nvg_text_arc(vg, cx, cy, rc, start, tbuf);
+            nvgFontBlur(vg, 0.f);
+        }
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvg_text_arc(vg, cx, cy, rc, start, tbuf);
+
+        // Active timer/alarm continues the arc just past the clock.
+        if (!extra.empty()) {
+            nvg_set_font_ui(esz);
+            nvgFillColor(vg, nvg_col(extra_col));
+            nvg_text_arc(vg, cx, cy, rc, clock_angle + wc * 0.5f + 7.f / rc, extra.c_str());
+        }
+
+        // Date on an inner concentric arc, under the clock.
+        if (cfg.clock_date) {
+            const std::string ds = fmt_date();
+            const float rd = rc - csz * 0.95f;
+            nvg_set_font_ui(dsz);
+            const float wd = arc_text_width(vg, ds.c_str(), rd);
+            const float ds0 = clock_angle - wd * 0.5f;
+            // Black outline (single blurred pass), matching the clock.
+            nvgFontBlur(vg, 1.8f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
+            nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
+            nvgFontBlur(vg, 0.f);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 200));
+            nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
+        }
+    }
+}
+
+// ── Compass ring around the minimap ─────────────────────────────────────────────
+// Cardinal letters + degree ticks ringing the minimap, rotating with heading so the
+// forward direction is at the top, plus LoRa node bearing markers + distance labels
+// around the outer edge (Battlefield-style).
+void HudRenderer::draw_compass_ring(NVGcontext* vg, const AppState& s,
+                                    float cx, float cy, float radius, bool bold) {
+    // The compass bezel always rotates with heading (that's what a compass does);
+    // map.rotate_with_heading separately controls whether the MAP IMAGE turns too.
+    // `bold` (used by the expanded map) thickens ticks + emboldens the cardinals.
+    const float heading = s.compass_heading;
+    const float tw_mul  = bold ? 2.0f : 1.0f;
+    const float DEG = (float)M_PI / 180.f;
+    auto bearing_angle = [&](float beta_deg) -> float {
+        float rel = beta_deg - heading;          // 0 = forward
+        return -(float)M_PI * 0.5f + rel * DEG;  // forward at top, screen y-down
+    };
+
+    // Compass ring hugs the minimap; the battery/system gauge sits outside it.
+    const float r_tick  = radius + 8.f;
+    const float r_card  = radius + 26.f;
+    const float r_mark  = radius + 26.f;
+    const float r_dist  = radius + 42.f;
+
+    const NVGcolor col_major = nvg_col(col_.compass_tick);
+    const NVGcolor col_minor = nvg_col_a(col_.compass_tick, 110);
+
+    // Degree ticks every 15°, longer at the 90° cardinals.
+    for (int d = 0; d < 360; d += 15) {
+        const bool card = (d % 90 == 0);
+        const float a = bearing_angle((float)d);
+        const float ca = std::cos(a), sa = std::sin(a);
+        const float t  = card ? 13.f : 6.f;
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx + ca * r_tick,        cy + sa * r_tick);
+        nvgLineTo(vg, cx + ca * (r_tick + t),  cy + sa * (r_tick + t));
+        nvgStrokeColor(vg, card ? col_major : col_minor);
+        nvgStrokeWidth(vg, (card ? 2.0f : 1.0f) * tw_mul);
+        nvgStroke(vg);
+    }
+
+    // Cardinal letters (bigger + faux-bold in the expanded view).
+    static const char* kCard[4] = { "N", "E", "S", "W" };
+    static const int   kDeg [4] = { 0, 90, 180, 270 };
+    nvg_set_font_ui(bold ? 24.f : 16.f);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    for (int i = 0; i < 4; ++i) {
+        const float a = bearing_angle((float)kDeg[i]);
+        const float lx = cx + std::cos(a) * r_card;
+        const float ly = cy + std::sin(a) * r_card;
+        nvg_text_outline(vg, lx, ly, kCard[i], bold ? 2.2f : 1.6f);
+        nvg_glow_text(vg, lx, ly, kCard[i], i == 0, col_.glow_base, col_.text_fill);
+        if (bold) {   // extra offset fill passes = faux bold
+            nvgFillColor(vg, nvg_col(col_.text_fill));
+            nvgText(vg, lx + 0.7f, ly, kCard[i], nullptr);
+            nvgText(vg, lx - 0.7f, ly, kCard[i], nullptr);
+        }
+    }
+
+    // LoRa node bearing markers + distance labels around the outside.
+    nvg_set_font_mono(11.f);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    for (const auto& node : s.lora_nodes) {
+        if (node.distance_m <= 0.f) continue;
+        const float a  = bearing_angle(node.heading_deg);
+        const float ca = std::cos(a), sa = std::sin(a);
+        const float mx = cx + ca * r_mark, my = cy + sa * r_mark;
+        const NVGcolor nc = nvg_col(s.lora_node_colors[node.local_id % 8]);
+
+        // Triangle pointing outward at the node bearing.
+        const float bx = -sa, by = ca;   // tangent
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, mx + ca * 7.f,           my + sa * 7.f);
+        nvgLineTo(vg, mx - ca * 4.f + bx * 5.f, my - sa * 4.f + by * 5.f);
+        nvgLineTo(vg, mx - ca * 4.f - bx * 5.f, my - sa * 4.f - by * 5.f);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nc);
+        nvgFill(vg);
+
+        // Distance label just outside the marker.
+        char db[16];
+        if (node.distance_m >= 1000.f) snprintf(db, sizeof(db), "%.1fk", node.distance_m / 1000.f);
+        else                           snprintf(db, sizeof(db), "%.0fm", node.distance_m);
+        nvg_text_outline(vg, cx + ca * r_dist, cy + sa * r_dist, db, 1.4f);
+        nvgFillColor(vg, nvg_col_a(s.lora_node_colors[node.local_id % 8], 230));
+        nvgText(vg, cx + ca * r_dist, cy + sa * r_dist, db, nullptr);
+    }
+}
+
+// ── Expanded map (Helldivers-style pan/zoom) ────────────────────────────────────
+// A larger, temporary view that grows from the minimap's location. Pan/zoom are
+// driven by input (state.map_overlay.view_pan_*/view_zoom). Stays SBS-safe by
+// growing in place rather than re-centering across the eye seam.
+void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw, float fh) {
+    const auto& cfg = s.map_overlay;
+
+    // Dim the scene behind the expanded map.
+    nvgBeginPath(vg);
+    nvgRect(vg, 0.f, 0.f, fw, fh);
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, 150));
+    nvgFill(vg);
+
+    const float half = std::min(fh, fw) * 0.42f;     // big disc
+    const float cx   = std::clamp(fw * cfg.anchor_x + cfg.pan_x, half, fw - half);
+    const float cy   = std::clamp(fh * cfg.anchor_y + cfg.pan_y, half, fh - half);
+    const bool  circle = cfg.circle_window;
+
+    nvgSave(vg);
+    nvgTranslate(vg, cx, cy);
+
+    auto path_win = [&]{
+        nvgBeginPath(vg);
+        if (circle) nvgCircle(vg, 0.f, 0.f, half);
+        else        nvgRect(vg, -half, -half, half * 2.f, half * 2.f);
+    };
+
+    if (map_img_ >= 0) {
+        const float z = std::max(cfg.zoom, 1.0f) * std::max(cfg.view_zoom, 1.0f);
+        const float panx = cfg.view_pan_x * half * 2.f;
+        const float pany = cfg.view_pan_y * half * 2.f;
+        nvgSave(vg);
+        if (cfg.image_rotate_deg != 0.f)
+            nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
+        if (cfg.rotate_with_heading && cfg.calibrated)
+            nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
+        NVGpaint img = nvgImagePattern(vg, -half * z - panx, -half * z - pany,
+                                       half * 2.f * z, half * 2.f * z, 0.f, map_img_, 1.0f);
+        nvgRestore(vg);
+        path_win();
+        nvgFillPaint(vg, img);
+        nvgFill(vg);
+    } else {
+        path_win();
+        nvgFillColor(vg, nvgRGBA(10, 16, 22, 220));
+        nvgFill(vg);
+    }
+
+    path_win();
+    nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 220));
+    nvgStrokeWidth(vg, 2.0f);
+    nvgStroke(vg);
+
+    // Centre crosshair (wearer).
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, -12.f, 0.f); nvgLineTo(vg, 12.f, 0.f);
+    nvgMoveTo(vg, 0.f, -12.f); nvgLineTo(vg, 0.f, 12.f);
+    nvgStrokeColor(vg, nvgRGBA(255, 70, 70, 230));
+    nvgStrokeWidth(vg, 1.5f);
+    nvgStroke(vg);
+
+    nvgRestore(vg);
+
+    // Compass bezel around the expanded map (turns as the user turns) — bold.
+    draw_compass_ring(vg, s, cx, cy, half, /*bold=*/true);
+
+    // Zoom readout (corner of the map).
+    char zb[32]; snprintf(zb, sizeof(zb), "%.1fx", std::max(cfg.view_zoom, 1.0f));
+    nvg_set_font_ui(15.f);
+    nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
+    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+    nvgText(vg, cx + half - 36.f, cy - half + 12.f, zb, nullptr);
+
+    // ── Controls panel (fixed bottom-left, on-screen regardless of map size) ──
+    {
+        const bool locked = cfg.rotate_with_heading;
+        struct Row { const char* k; const char* v; };
+        const Row rows[] = {
+            { "MOVE",     "ARROWS / DPAD" },
+            { "ZOOM",     "+ / -   \xC2\xB7   LB / RB" },
+            { "ROTATION", locked ? "LOCKED  (R / A)" : "FREE  (R / A)" },
+            { "CLOSE",    "ESC / B / N" },
+        };
+        const float lh = 22.f, padx = 12.f, pady = 10.f;
+        const float pw = 290.f, ph = lh * 4.f + pady * 2.f;
+        const float px = 22.f, py = fh - ph - 20.f;   // bottom-left of the screen
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, px, py, pw, ph, 6.f);
+        nvgFillColor(vg, nvgRGBA(8, 12, 18, 215));
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 190));
+        nvgStrokeWidth(vg, 1.2f);
+        nvgStroke(vg);
+
+        nvg_set_font_mono(13.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        float ly = py + pady;
+        for (const auto& r : rows) {
+            nvgFillColor(vg, nvg_col_a(col_.glow_base, 235));
+            nvgText(vg, px + padx, ly, r.k, nullptr);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 225));
+            nvgText(vg, px + padx + 96.f, ly, r.v, nullptr);
+            ly += lh;
+        }
+    }
 }
 
 void HudRenderer::draw_fps_nvg(NVGcontext* vg, const AppState& snap, float fw, float fh) {
@@ -745,6 +1141,51 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_
     if (font_mono_) ImGui::PopFont();
 
     ImGui::End();
+}
+
+// ── Protoface portrait beside the minimap ───────────────────────────────────────
+// A scaled, one-side preview of the LED face placed to the right of the minimap
+// (American Fugitive-style portrait). Drawn on the ImGui foreground list in display
+// coords, matching the minimap geometry.
+void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_h,
+                                     const AppState& s) {
+    if (tex == 0) return;
+    const auto& cfg = s.map_overlay;
+    if (!cfg.enabled || cfg.expanded) return;   // only alongside the live minimap
+
+    ImGui::SetCurrentContext(ctx_);
+
+    // Minimap geometry (matches draw_map_overlay, display pixel coords).
+    const float fw = static_cast<float>(screen_w);
+    const float fh = static_cast<float>(screen_h);
+    const float half = cfg.size_px;
+    const float am   = (map_img_h_ > 0 && map_img_w_ > 0)
+                       ? (float)map_img_h_ / (float)map_img_w_ : 1.f;
+    const float hh = cfg.circle_window ? half : half * am;
+    const float cx = std::clamp(fw * cfg.anchor_x + cfg.pan_x, half, fw - half);
+    const float cy = std::clamp(fh * cfg.anchor_y + cfg.pan_y, hh, fh - hh);
+    const float ringR = cfg.circle_window ? half : std::max(half, hh);
+
+    // One face half → ~2:1 source crop.
+    const float wpx    = static_cast<float>(ShmFrameReader::W) * 0.5f;
+    const float aspect = wpx / static_cast<float>(ShmFrameReader::H);
+    const ImVec2 uv0 = cfg.portrait_right_half ? ImVec2(0.5f, 0.f) : ImVec2(0.f, 0.f);
+    const ImVec2 uv1 = cfg.portrait_right_half ? ImVec2(1.f,  1.f) : ImVec2(0.5f, 1.f);
+
+    const float ph    = ringR * 0.55f;          // portrait height
+    const float pw    = ph * aspect;            // 2:1 width
+    const float pad   = 6.f;
+    const float win_w = pw + pad * 2.f;
+    const float win_h = ph + pad * 2.f;
+    const float x0    = cx + ringR + 28.f;      // to the right of the map cluster
+    const float y0    = cy - win_h * 0.5f;
+
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled({x0, y0}, {x0 + win_w, y0 + win_h}, IM_COL32(8, 12, 18, 220), 6.f);
+    dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
+                 {x0 + pad, y0 + pad}, {x0 + pad + pw, y0 + pad + ph}, uv0, uv1);
+    dl->AddRect({x0, y0}, {x0 + win_w, y0 + win_h}, col_.accent, 6.f, 0, 1.5f);
+    dl->AddText({x0 + 5.f, y0 + 3.f}, col_.accent, "FACE");
 }
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
@@ -1229,163 +1670,161 @@ void HudRenderer::draw_lora_messages(NVGcontext* vg, const AppState& s,
 
 void HudRenderer::draw_compass_tape(NVGcontext* vg, const AppState& s,
                                      float ox, float oy, float tw, float th) {
+    // Deep-Rock-style curved arc compass: ticks/labels laid along a shallow arc
+    // (a large circle whose centre is far off-screen), with radial ticks, cardinal
+    // letters, degree numbers, LoRa bearing markers, and a centre heading readout.
     const float heading  = s.compass_heading;
-    const float ppd      = tw / 120.f;
+    const float ppd      = tw / 120.f;            // 120° visible across the width
     const float center_x = ox + tw / 2.f;
+    const bool  flip     = cfg_.hud_flip_vertical;
+    const float dir      = flip ? -1.f : 1.f;     // +1 = arc dips downward at edges
+
+    // Arc geometry. Apex (peak) sits at the tape's outer edge so the ticks/labels
+    // hang inward (down when bottom-anchored, up when flipped). Centre is R_big away.
+    const float R_big  = tw * 2.6f;               // larger = flatter arc
+    const float apex_y = flip ? (oy + th - 8.f) : (oy + 8.f);
+
+    // Point on the arc at horizontal x, plus the local sin/cos of the subtended angle.
+    auto arc_at = [&](float px, float& yy, float& sp, float& cp) {
+        const float t = std::clamp((px - center_x) / R_big, -1.f, 1.f);
+        const float phi = std::asin(t);
+        sp = std::sin(phi); cp = std::cos(phi);
+        yy = apex_y + dir * R_big * (1.f - cp);
+    };
 
     const ImU32 col_major = col_.compass_tick;
     const ImU32 col_mid   = with_alpha(col_.compass_tick, 180);
     const ImU32 col_minor = with_alpha(col_.compass_tick, 110);
-    const ImU32 col_glow1 = with_alpha(col_.compass_glow, 70);
-    const ImU32 col_glow2 = with_alpha(col_.compass_glow, 28);
-
-    const float fade_w = static_cast<float>(cfg_.compass_bg_side_fade);
-    const bool  flip   = cfg_.hud_flip_vertical;
-
-    if (s.compass_bg_enabled) {
-        const uint8_t a = static_cast<uint8_t>(cfg_.compass_bg_opacity * 255.f);
-        constexpr float kIndAngle = 130.f * 3.14159265f / 180.f;
-        const float inset = std::abs(std::cos(kIndAngle)) / std::sin(kIndAngle) * th;
-
-        nvgBeginPath(vg);
-        if (!flip) {
-            nvgMoveTo(vg, ox - fade_w + inset,      oy);
-            nvgLineTo(vg, ox + tw + fade_w - inset, oy);
-            nvgLineTo(vg, ox + tw + fade_w,         oy + th);
-            nvgLineTo(vg, ox - fade_w,              oy + th);
-        } else {
-            nvgMoveTo(vg, ox - fade_w,              oy);
-            nvgLineTo(vg, ox + tw + fade_w,         oy);
-            nvgLineTo(vg, ox + tw + fade_w - inset, oy + th);
-            nvgLineTo(vg, ox - fade_w + inset,      oy + th);
-        }
-        nvgClosePath(vg);
-        nvgFillColor(vg, nvg_col_a(col_.compass_bg_color, a));
-        nvgFill(vg);
-    }
-
-    // Glow line at tape edge that meets the indicator arms
-    {
-        const float lx0    = ox - fade_w, lx1 = ox + tw + fade_w;
-        const float line_y = flip ? oy : oy + th;
-        nvg_glow_line(vg, lx0, line_y, lx1, line_y,
-                      nvg_col(col_.glow_base),
-                      nvg_col_a(col_.glow_base, 70),
-                      nvg_col_a(col_.glow_base, 28));
-    }
+    const bool  tick_glow = cfg_.compass_tick_glow;
 
     const float t_maj = static_cast<float>(cfg_.compass_tick_length);
     const float t_mid = t_maj * (16.f / 24.f);
     const float t_min = t_maj * (10.f / 24.f);
 
-    // Align degree labels with the first dot row of the indicator arms.
-    // arm anchor sits at oy+th; first dot row = anchor - sin(130°)*ROW_H
-    constexpr float kArmAngle = 130.f * 3.14159265f / 180.f;
-    constexpr float kRowH     = 18.f;
-    const float label_y   = flip ? oy + 3.f : (oy + th) - std::sin(kArmAngle) * kRowH;
-    const float tick_base = flip ? oy + 20.f : label_y - 3.f;
-    const float tick_sign = flip ? 1.f : -1.f;
-    const bool  tick_glow = cfg_.compass_tick_glow;
-
-    // Collect tick positions per tier for batched drawing
-    float maj_px[8];  int n_maj = 0;
-    float mid_px[36]; int n_mid = 0;
-    float min_px[24]; int n_min = 0;
-
-    struct LabelEntry { float px; char buf[8]; };
-    LabelEntry labels[44]; int n_labels = 0;
-
-    for (int deg = 0; deg < 360; deg++) {
-        float offset = static_cast<float>(deg) - heading;
-        while (offset >  180.f) offset -= 360.f;
-        while (offset < -180.f) offset += 360.f;
-
-        float px = center_x + offset * ppd;
-        if (px < ox || px > ox + tw) continue;
-
-        if (deg % 45 == 0) {
-            if (n_maj < 8) maj_px[n_maj++] = px;
-            if (n_labels < 44) {
-                labels[n_labels].px = px;
-                strncpy(labels[n_labels].buf, cardinal_str(static_cast<float>(deg)), 7);
-                labels[n_labels].buf[7] = '\0';
-                ++n_labels;
-            }
-        } else if (deg % 10 == 0) {
-            if (n_mid < 36) mid_px[n_mid++] = px;
-            if (n_labels < 44) {
-                labels[n_labels].px = px;
-                snprintf(labels[n_labels].buf, 8, "%d", deg);
-                ++n_labels;
-            }
-        } else if (deg % 5 == 0) {
-            if (n_min < 24) min_px[n_min++] = px;
-        }
-    }
-
-    // Batched glow passes (one path per tier per glow layer)
-    if (tick_glow) {
-        auto draw_tick_batch = [&](float* px_arr, int n, float len, float w, NVGcolor col) {
-            nvgBeginPath(vg);
-            for (int i = 0; i < n; ++i) {
-                nvgMoveTo(vg, px_arr[i], tick_base);
-                nvgLineTo(vg, px_arr[i], tick_base + tick_sign * len);
-            }
-            nvgStrokeWidth(vg, w); nvgStrokeColor(vg, col); nvgStroke(vg);
-        };
-        draw_tick_batch(maj_px, n_maj, t_maj, t_maj * 0.5f,  nvg_col(col_glow2));
-        draw_tick_batch(maj_px, n_maj, t_maj, t_maj * 0.25f, nvg_col(col_glow1));
-        draw_tick_batch(mid_px, n_mid, t_mid, t_mid * 0.375f, nvg_col(col_glow2));
-        draw_tick_batch(min_px, n_min, t_min, t_min * 0.4f,  nvg_col(col_glow2));
-    }
-
-    // Batched solid tick draws
+    // ── Arc baseline (glow polyline) ─────────────────────────────────────────
     {
-        auto draw_solid = [&](float* px_arr, int n, float len, float w, NVGcolor col) {
+        constexpr int N = 48;
+        float xs[N + 1], ys[N + 1], sp, cp;
+        for (int i = 0; i <= N; ++i) {
+            xs[i] = ox + tw * (float)i / N;
+            arc_at(xs[i], ys[i], sp, cp);
+        }
+        auto poly = [&](NVGcolor c, float w) {
             nvgBeginPath(vg);
-            for (int i = 0; i < n; ++i) {
-                nvgMoveTo(vg, px_arr[i], tick_base);
-                nvgLineTo(vg, px_arr[i], tick_base + tick_sign * len);
-            }
-            nvgStrokeWidth(vg, w); nvgStrokeColor(vg, col); nvgStroke(vg);
+            nvgMoveTo(vg, xs[0], ys[0]);
+            for (int i = 1; i <= N; ++i) nvgLineTo(vg, xs[i], ys[i]);
+            nvgStrokeColor(vg, c); nvgStrokeWidth(vg, w); nvgStroke(vg);
         };
-        draw_solid(maj_px, n_maj, t_maj, 3.f, nvg_col(col_major));
-        draw_solid(mid_px, n_mid, t_mid, 2.f, nvg_col(col_mid));
-        draw_solid(min_px, n_min, t_min, 2.f, nvg_col(col_minor));
+        if (tick_glow) {
+            poly(nvg_col_a(col_.glow_base, 28), 7.f);
+            poly(nvg_col_a(col_.glow_base, 70), 4.f);
+        }
+        poly(nvg_col(col_.glow_base), 1.5f);
     }
 
-    // Labels
-    nvg_set_font_mono(0.f);
-    for (int i = 0; i < n_labels; ++i) {
-        float bounds[4];
-        nvgTextBounds(vg, 0, 0, labels[i].buf, nullptr, bounds);
-        float lw = bounds[2] - bounds[0];
-        nvg_glow_text(vg, labels[i].px - lw * 0.5f, label_y, labels[i].buf,
-                      true, col_.glow_base, col_.text_fill);
+    // ── Ticks (radial) batched per tier ──────────────────────────────────────
+    auto tick_batch = [&](int mod, int skip_mod, float len, float w, NVGcolor col) {
+        nvgBeginPath(vg);
+        for (int deg = 0; deg < 360; ++deg) {
+            if (deg % mod != 0) continue;
+            if (skip_mod && deg % skip_mod == 0) continue;   // drawn by a higher tier
+            float off = (float)deg - heading;
+            while (off > 180.f) off -= 360.f;
+            while (off < -180.f) off += 360.f;
+            float px = center_x + off * ppd;
+            if (px < ox || px > ox + tw) continue;
+            float yy, sp, cp; arc_at(px, yy, sp, cp);
+            nvgMoveTo(vg, px, yy);
+            nvgLineTo(vg, px - sp * len, yy + dir * cp * len);   // inward (radial)
+        }
+        nvgStrokeColor(vg, col); nvgStrokeWidth(vg, w); nvgStroke(vg);
+    };
+    if (tick_glow) {
+        tick_batch(45, 0,  t_maj, t_maj * 0.4f, nvg_col_a(col_.compass_glow, 50));
+        tick_batch(10, 45, t_mid, t_mid * 0.4f, nvg_col_a(col_.compass_glow, 32));
+    }
+    tick_batch(5, 10, t_min, 2.f, nvg_col(col_minor));   // minor (5°, not 10°)
+    tick_batch(10, 45, t_mid, 2.f, nvg_col(col_mid));     // mid   (10°, not 45°)
+    tick_batch(45, 0,  t_maj, 3.f, nvg_col(col_major));   // major (45° cardinals)
+
+    // ── Labels: cardinals (large) + degree numbers, below the ticks ──────────
+    for (int deg = 0; deg < 360; ++deg) {
+        const bool card = (deg % 45 == 0);
+        const bool tens = (deg % 10 == 0);
+        if (!card && !tens) continue;
+        float off = (float)deg - heading;
+        while (off > 180.f) off -= 360.f;
+        while (off < -180.f) off += 360.f;
+        float px = center_x + off * ppd;
+        if (px < ox || px > ox + tw) continue;
+        float yy, sp, cp; arc_at(px, yy, sp, cp);
+
+        char buf[8];
+        if (card) { strncpy(buf, cardinal_str((float)deg), 7); buf[7] = '\0'; }
+        else      { snprintf(buf, sizeof(buf), "%d", deg); }
+
+        const float gap = t_maj + (card ? 14.f : 11.f);
+        const float lx  = px - sp * gap;
+        const float ly  = yy + dir * cp * gap;
+        nvg_set_font_mono(card ? 22.f : 0.f);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvg_glow_text(vg, lx, ly, buf, true, col_.glow_base, col_.text_fill);
     }
 
-    // LoRa node bearing markers — triangles on the inner (non-label) side of ticks
+    // ── LoRa node bearing markers (triangles above the arc, pointing at it) ──
     for (const auto& node : s.lora_nodes) {
         if (node.distance_m <= 0.f) continue;
-        float offset = node.heading_deg - heading;
-        while (offset >  180.f) offset -= 360.f;
-        while (offset < -180.f) offset += 360.f;
-        float px = center_x + offset * ppd;
+        float off = node.heading_deg - heading;
+        while (off > 180.f) off -= 360.f;
+        while (off < -180.f) off += 360.f;
+        float px = center_x + off * ppd;
         if (px < ox || px > ox + tw) continue;
-
-        float my = tick_base + tick_sign * t_maj + (flip ? 6.f : -6.f);
-        float tri_tip_dy = flip ? -9.f : 9.f;
-
+        float yy, sp, cp; arc_at(px, yy, sp, cp);
+        const float ux = sp,  uy = -dir * cp;   // outward unit
+        const float txu = cp, tyu = dir * sp;   // tangent unit
+        const float ax = px + ux * 11.f, ay = yy + uy * 11.f;
         nvgBeginPath(vg);
-        nvgMoveTo(vg, px - 5.f, my);
-        nvgLineTo(vg, px + 5.f, my);
-        nvgLineTo(vg, px, my + tri_tip_dy);
+        nvgMoveTo(vg, px, yy);                       // tip on the arc
+        nvgLineTo(vg, ax + txu * 5.f, ay + tyu * 5.f);
+        nvgLineTo(vg, ax - txu * 5.f, ay - tyu * 5.f);
         nvgClosePath(vg);
         nvgFillColor(vg, nvg_col(s.lora_node_colors[node.local_id % 8]));
         nvgFill(vg);
         nvgStrokeColor(vg, nvg_col_a(s.lora_node_colors[node.local_id % 8], 200));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
+    }
+
+    // ── Centre marker: forward chevron + heading readout box ─────────────────
+    {
+        const float ax = center_x, ay = apex_y;
+        // Chevron pointing inward (at the arc) marking forward.
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, ax - 7.f, ay - dir * 9.f);
+        nvgLineTo(vg, ax + 7.f, ay - dir * 9.f);
+        nvgLineTo(vg, ax,       ay);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nvg_col(col_.glow_base));
+        nvgFill(vg);
+
+        // Heading readout box, outward from the arc (above when non-flipped).
+        char hb[8];
+        const int hd = ((int)lroundf(heading) % 360 + 360) % 360;
+        snprintf(hb, sizeof(hb), "%d", hd);
+        nvg_set_font_mono(15.f);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        float b[4]; nvgTextBounds(vg, 0, 0, hb, nullptr, b);
+        const float bw = (b[2] - b[0]) + 16.f, bh = 20.f;
+        const float bx = ax - bw * 0.5f;
+        const float by = (dir > 0) ? (ay - 13.f - bh) : (ay + 13.f);
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, bx, by, bw, bh, 4.f);
+        nvgFillColor(vg, nvg_col_a(col_.compass_bg_color, 210));
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 220));
+        nvgStrokeWidth(vg, 1.2f);
+        nvgStroke(vg);
+        nvg_glow_text(vg, ax, by + bh * 0.5f, hb, true, col_.glow_base, col_.text_fill);
     }
 }
 

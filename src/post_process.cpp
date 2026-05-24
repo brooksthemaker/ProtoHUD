@@ -140,7 +140,11 @@ void PostProcessor::process(GLuint src_tex,
     // prev_write becomes the new reference frame for next frame's motion detection.
     // update_rate=1.0 → hard copy (crisp, 1-frame trail)
     // update_rate<1.0 → exponential moving average → smooth, longer trail
-    if (prev_write.valid() && blit_prog_) {
+    //
+    // Only needed when motion detection is on — it's the sole consumer of the
+    // reference frame.  Skipping it for edge/desat-only saves a full-screen pass
+    // per eye (the second-most-expensive op after the main effect shader).
+    if (cfg.motion_enabled && prev_write.valid() && blit_prog_) {
         prev_write.bind();
         glUseProgram(blit_prog_);
         glActiveTexture(GL_TEXTURE0);

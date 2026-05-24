@@ -72,21 +72,33 @@ bool DmaCamera::load_egl_procs() {
 bool DmaCamera::configure_camera() {
     auto cameras = lcam_mgr_->cameras();
 
-    // ── Select camera: by model string if provided, else by index ────────────
-    if (!cfg_.model_name.empty()) {
+    // ── Select camera ─────────────────────────────────────────────────────────
+    // Preferred: an exact libcamera id string resolved once by CameraManager (so
+    // both eyes get distinct cameras regardless of enumeration order between calls).
+    if (!cfg_.camera_id.empty()) {
+        camera_ = lcam_mgr_->get(cfg_.camera_id);
+        if (!camera_)
+            std::cerr << "[dma] camera id '" << cfg_.camera_id << "' not found\n";
+    }
+    // When several cameras share the model (e.g. two OWLsights = two ov64a40),
+    // pick the libcamera_id-th MATCH, not just the first — otherwise both eyes
+    // resolve to the same physical camera and the second acquire() fails with
+    // "Camera in Running state".
+    if (!camera_ && !cfg_.model_name.empty()) {
+        int match = 0;
         for (auto& desc : cameras) {
             auto c = lcam_mgr_->get(desc->id());
             try {
                 auto m = c->properties().get(properties::Model);
                 if (m && *m == cfg_.model_name) {
-                    camera_ = c;
-                    break;
+                    if (match == cfg_.libcamera_id) { camera_ = c; break; }
+                    ++match;
                 }
             } catch (...) {}
         }
         if (!camera_)
-            std::cerr << "[dma] model '" << cfg_.model_name
-                      << "' not found, falling back to id " << cfg_.libcamera_id << "\n";
+            std::cerr << "[dma] model '" << cfg_.model_name << "' #" << cfg_.libcamera_id
+                      << " not found, falling back to id " << cfg_.libcamera_id << "\n";
     }
     if (!camera_) {
         if (static_cast<int>(cameras.size()) <= cfg_.libcamera_id) {
@@ -97,7 +109,9 @@ bool DmaCamera::configure_camera() {
         camera_ = lcam_mgr_->get(cameras[cfg_.libcamera_id]->id());
     }
     if (!camera_ || camera_->acquire()) {
-        std::cerr << "[dma] failed to acquire camera\n";
+        std::cerr << "[dma] failed to acquire camera id " << cfg_.libcamera_id
+                  << " — already in use? (check for a stray protohud, or reboot if a "
+                     "camera got wedged)\n";
         return false;
     }
 

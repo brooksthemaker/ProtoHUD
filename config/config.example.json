@@ -156,8 +156,14 @@
     "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
   },
   "protoface": {
-    "_about": "Protoface LED face daemon. autostart launches it on HUD boot (no-op if already running) and makes it the active face source. preview is the on-glasses panel-preview window placement (persisted on exit).",
+    "_about": "Protoface LED face. mode 'daemon' (default) talks to the Python daemon over socket+shm; mode 'native' renders the face in-process in ProtoHUD (no daemon) and writes the same /dev/shm frame, so the preview and scripts/panel_driver.py work unchanged. autostart (daemon mode) launches the daemon on boot. preview is the on-glasses panel-preview placement (persisted on exit).",
+    "mode": "daemon",
+    "_mode_values": "daemon | native",
     "autostart": true,
+    "panel_driver": true,
+    "_panel_driver_note": "native mode only: auto-launch scripts/panel_driver.py to drive the HUB75 panels. Set false for preview-only or if you run the driver yourself.",
+    "_native_about": "native-mode options: assets_dir points at the Protoface checkout holding faces/materials/gifs (default $HOME/protohud/Protoface); panels overrides the default 2-panel mirrored layout.",
+    "assets_dir": "",
     "preview": {
       "anchor_x": 1.0,
       "anchor_y": 0.0,

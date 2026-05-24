@@ -150,6 +150,10 @@ public:
                             float pan_x, float pan_y, float size_frac,
                             int view = 0);
 
+    // Protoface "portrait" beside the minimap (ImGui — takes the LED GL texture).
+    void draw_face_portrait(unsigned int tex, int screen_w, int screen_h,
+                            const AppState& s);
+
     // Draw system status panel (ImGui pass).
     void draw_sys_panel(const AppState& snap, int w, int h, bool active);
 
@@ -187,6 +191,9 @@ private:
                             float fw, float fh);
     void draw_fps_nvg      (NVGcontext* vg, const AppState& snap, float fw, float fh);
     void draw_map_overlay  (NVGcontext* vg, const AppState& s, float fw, float fh);
+    void draw_compass_ring (NVGcontext* vg, const AppState& s,
+                            float cx, float cy, float radius, bool bold = false);
+    void draw_map_expanded (NVGcontext* vg, const AppState& s, float fw, float fh);
     // Shared NVG pip drawing (no NVG frame management — caller handles Begin/EndFrame).
     void draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
                               const OverlayConfig& cfg, float fw, float fh);
@@ -255,6 +262,7 @@ private:
     int         map_img_w_    = 0;
     int         map_img_h_    = 0;
     std::string map_img_path_;
+    float       gpu_load_smooth_ = 0.f;  // EMA of the GPU/render-load gauge
 
     // NVG image cache for PiP underlays: GL tex ID → NVG image handle.
     // Created via nvglCreateImageFromHandleGLES2 on first use; freed in unload().

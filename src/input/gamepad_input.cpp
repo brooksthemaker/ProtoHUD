@@ -54,7 +54,8 @@ void GamepadInput::close() {
         SDL_GameControllerClose(static_cast<SDL_GameController*>(controller_));
         controller_ = nullptr;
     }
-    connected_ = false;
+    connected_   = false;
+    battery_pct_ = -1;
 }
 
 void GamepadInput::poll() {
@@ -76,6 +77,18 @@ void GamepadInput::poll() {
     if (!controller_) return;
 
     SDL_GameController* gc = static_cast<SDL_GameController*>(controller_);
+
+    // Coarse battery level (SDL only exposes buckets, not a %). Wired/unknown → -1.
+    if (SDL_Joystick* js = SDL_GameControllerGetJoystick(gc)) {
+        switch (SDL_JoystickCurrentPowerLevel(js)) {
+            case SDL_JOYSTICK_POWER_EMPTY:  battery_pct_ = 5;   break;
+            case SDL_JOYSTICK_POWER_LOW:    battery_pct_ = 20;  break;
+            case SDL_JOYSTICK_POWER_MEDIUM: battery_pct_ = 60;  break;
+            case SDL_JOYSTICK_POWER_FULL:   battery_pct_ = 95;  break;
+            case SDL_JOYSTICK_POWER_MAX:    battery_pct_ = 100; break;
+            default:                        battery_pct_ = -1;  break;  // unknown / wired
+        }
+    }
 
     auto edge = [&](SDL_GameControllerButton btn, bool& prev,
                     const Cb& cb) {

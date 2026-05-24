@@ -29,9 +29,11 @@ cv::Mat apply_material(const cv::Mat& face_rgba, const cv::Mat& material_rgb) {
     m[2].convertTo(mb, CV_32F);
 
     cv::Mat cr, cg, cb;               // colour × luminance, saturate to 0..255
-    mr.mul(lum).convertTo(cr, CV_8U);
-    mg.mul(lum).convertTo(cg, CV_8U);
-    mb.mul(lum).convertTo(cb, CV_8U);
+    // .mul() yields a cv::MatExpr; wrap in cv::Mat(...) to materialise it before
+    // convertTo (MatExpr has no convertTo()).
+    cv::Mat(mr.mul(lum)).convertTo(cr, CV_8U);
+    cv::Mat(mg.mul(lum)).convertTo(cg, CV_8U);
+    cv::Mat(mb.mul(lum)).convertTo(cb, CV_8U);
 
     std::vector<cv::Mat> out{cr, cg, cb, f[3]};
     cv::Mat result;

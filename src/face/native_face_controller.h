@@ -27,6 +27,8 @@ class FaceState;
 class FaceLoader;
 class BaseMaterial;
 class PanelOutput;
+class ParticleSystem;
+class GifPlayer;
 
 class NativeFaceController : public IFaceController {
 public:
@@ -47,7 +49,7 @@ public:
     void set_menu_item(uint8_t menu_index, uint8_t value) override;
     void request_status() override {}
     void release_control() override;
-    void save_config() override {}        // TODO: persist look to ProtoHUD config
+    void save_config() override;          // persist current look now (also auto-saved)
 
     // Copy the latest rendered RGB canvas (CV_8UC3) for the preview. Returns
     // false until the first frame exists. Safe to call from the main/GL thread.
@@ -59,9 +61,14 @@ public:
 private:
     struct Panel {
         PanelCfg                      cfg;
-        std::unique_ptr<FaceState>    state;     // null for mirror panels
-        std::unique_ptr<FaceLoader>   loader;    // null for mirror panels
-        std::shared_ptr<BaseMaterial> material;  // null for mirror panels
+        std::unique_ptr<FaceState>     state;     // null for mirror panels
+        std::unique_ptr<FaceLoader>    loader;    // null for mirror panels
+        std::shared_ptr<BaseMaterial>  material;  // null for mirror panels
+        std::unique_ptr<ParticleSystem> particles; // null for mirror panels
+        std::unique_ptr<GifPlayer>     gif;        // null for mirror panels
+        double gif_release_timer = 0.0;            // s left before auto-revert (0 = off)
+        std::string    material_spec;              // current material spec (for persistence)
+        nlohmann::json particles_spec = "none";    // current particle config (for persistence)
         bool is_mirror = false;
         int  src_index = -1;
     };
@@ -69,11 +76,15 @@ private:
     void build_panels();
     void render_thread();
     void apply_material_all(const std::string& name);   // caller holds state_mtx_
+    void save_state_locked() const;                     // auto-save look; caller holds state_mtx_
+    void load_state();                                  // overlay saved look at startup
     static std::string preset_material(int idx);
 
     RenderConfig                 cfg_;
     std::unique_ptr<PanelOutput> output_;
     std::vector<Panel>           panels_;
+    std::vector<std::string>     gif_files_;   // sorted *.gif paths in gifs_dir
+    double                       gif_release_ = 5.0;   // auto-revert seconds
 
     mutable std::mutex state_mtx_;   // panels_ mutation + render reads
     mutable std::mutex frame_mtx_;   // latest_
