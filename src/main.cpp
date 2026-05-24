@@ -62,6 +62,8 @@
 #include <sys/file.h>
 #include <cerrno>
 #include <cstring>
+#include <cstdio>
+#include <dirent.h>
 #include <sys/ioctl.h>
 #include <linux/i2c-dev.h>
 
@@ -5625,6 +5627,44 @@ int main(int argc, char* argv[]) {
             snap.gpio_states        = state.gpio_states;
             memcpy(snap.lora_node_colors, state.lora_node_colors,
                    sizeof(state.lora_node_colors));
+        }
+
+        // ── Perf diagnostics (TEMPORARY) — classify the progressive fps leak ─────
+        // Once/second: avg frame time over the interval, process RSS, and open-fd
+        // count.  Reading these together tells us the leak class without guessing:
+        //   • RSS climbs        → memory leak (→ swap thrash → fps collapse)
+        //   • fd count climbs   → fd / dmabuf leak
+        //   • both flat, ft up  → GL/EGL driver resource accumulation
+        // Remove once the leak is found.
+        {
+            static double s_diag_last = 0.0;
+            static int    s_diag_frames = 0;
+            static double s_diag_ft_sum = 0.0;
+            ++s_diag_frames;
+            s_diag_ft_sum += dt;
+            if (now - s_diag_last >= 1.0) {
+                double avg_ms = (s_diag_frames > 0)
+                              ? (s_diag_ft_sum / s_diag_frames) * 1000.0 : 0.0;
+                long rss_mb = 0;
+                if (FILE* f = fopen("/proc/self/statm", "r")) {
+                    long pages = 0, resident = 0;
+                    if (fscanf(f, "%ld %ld", &pages, &resident) == 2)
+                        rss_mb = resident * (sysconf(_SC_PAGESIZE) / 1024) / 1024;
+                    fclose(f);
+                }
+                int fd_count = 0;
+                if (DIR* d = opendir("/proc/self/fd")) {
+                    while (readdir(d)) ++fd_count;
+                    closedir(d);
+                }
+                fprintf(stderr,
+                        "[perf] fps=%.1f ft=%.1fms rss=%ldMB fds=%d\n",
+                        avg_ms > 0.0 ? 1000.0 / avg_ms : 0.0,
+                        avg_ms, rss_mb, fd_count);
+                s_diag_last   = now;
+                s_diag_frames = 0;
+                s_diag_ft_sum = 0.0;
+            }
         }
 
         // If XR glasses IMU is fresh, recompute compass heading from the selected
