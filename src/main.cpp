@@ -4231,6 +4231,8 @@ int main(int argc, char* argv[]) {
                 if (nf >= 0) { dup2(nf, 0); ::close(nf); }
                 execlp("python3", "python3", "-u", drv.c_str(),
                        static_cast<char*>(nullptr));
+                const char* msg = "[scheduler] execlp python3 failed — not on PATH?\n";
+                ssize_t wr = ::write(2, msg, strlen(msg)); (void)wr;
                 _exit(127);   // execlp failed (python3 not found)
             }
             std::cout << "[scheduler] launched daemon pid=" << pid
