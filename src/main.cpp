@@ -162,7 +162,9 @@ T jval(const json& j, const std::string& key, T def) {
 // render loop, where the live display size and minimap radius are known — that's
 // what lets the compass cardinals sit flush against the screen edges.
 static void apply_hud_dock(AppState& s) {
+    // Minimap and info panel are both always-on for now.
     s.map_overlay.enabled = true;
+    s.info_panel.enabled  = true;
 }
 
 // ── Native face renderer config ───────────────────────────────────────────────
@@ -2683,9 +2685,7 @@ static std::vector<MenuItem> build_menu(
         leaf("Refresh Now", [&state]{ state.weather_refresh = true; }),
     };
     std::vector<MenuItem> info_panel_menu = {
-        toggle("Enabled",
-            [&state]{ return state.info_panel.enabled; },
-            [&state](bool v){ state.info_panel.enabled = v; }),
+        // (Always visible for now — enable is forced on in apply_hud_dock, like the minimap.)
         slider("Cycle Seconds", 2.f, 30.f, 1.f, "s",
             [&state]{ return state.info_panel.cycle_sec; },
             [&state](float v){ state.info_panel.cycle_sec = v; }),
@@ -5603,6 +5603,53 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ── M key: toggle the expanded map view (tap) / cycle the map (hold) ──
+        // Handled before the input dispatch so the tap/hold state machine stays
+        // continuous across the open↔close transition (no reopen-on-release).
+        // Skipped while typing on the on-screen keyboard. Shift+M (recenter) is
+        // handled in the normal-hotkeys branch below.
+        if (!menu.is_keyboard_open()) {
+            const bool m_held = ImGui::IsKeyDown(ImGuiKey_M) && !ImGui::GetIO().KeyShift;
+            if (m_held && m_press_t < 0.0) {
+                m_press_t    = glfwGetTime();
+                m_long_fired = false;
+            } else if (!m_held && m_press_t >= 0.0) {
+                if (!m_long_fired) {                       // tap → toggle expanded view
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    if (state.map_overlay.expanded) {
+                        state.map_overlay.expanded = false;
+                    } else {
+                        state.map_overlay.expanded   = true;
+                        state.map_overlay.view_zoom  = 1.f;
+                        state.map_overlay.view_pan_x = 0.f;
+                        state.map_overlay.view_pan_y = 0.f;
+                    }
+                }
+                m_press_t = -1.0;
+            }
+            // Hold 1.5 s (while not expanded) → cycle to the next map in the folder.
+            if (m_held && !m_long_fired && m_press_t >= 0.0 &&
+                    glfwGetTime() - m_press_t >= 1.5 && !state.map_overlay.expanded) {
+                std::vector<std::string> maps;
+                std::error_code ec;
+                for (auto& e : std::filesystem::directory_iterator(cfg_map_dir, ec)) {
+                    auto ext = e.path().extension().string();
+                    if (ext==".png"||ext==".jpg"||ext==".jpeg"||
+                        ext==".PNG"||ext==".JPG"||ext==".JPEG")
+                        maps.push_back(e.path().string());
+                }
+                std::sort(maps.begin(), maps.end());
+                if (!maps.empty()) {
+                    auto it = std::find(maps.begin(), maps.end(), state.map_overlay.map_path);
+                    if (it == maps.end() || std::next(it) == maps.end())
+                        state.map_overlay.map_path = maps.front();
+                    else
+                        state.map_overlay.map_path = *std::next(it);
+                }
+                m_long_fired = true;
+            }
+        }
+
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
         // The expanded map and the on-screen keyboard each capture ALL keystrokes
         // while up (so pan/zoom or typing can't trigger app hotkeys).
@@ -5616,8 +5663,8 @@ int main(int argc, char* argv[]) {
             if (ImGui::IsKeyDown(ImGuiKey_Minus) || ImGui::IsKeyDown(ImGuiKey_KeypadSubtract)) map_zoom(-0.04f);
             if (key_pressed(ImGuiKey_R))   // lock/unlock map rotation to the compass
                 mo.rotate_with_heading = !mo.rotate_with_heading;
-            if (key_pressed(ImGuiKey_N) || key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_M))
-                mo.expanded = false;
+            if (key_pressed(ImGuiKey_N) || key_pressed(ImGuiKey_Escape))
+                mo.expanded = false;   // M is handled by the global toggle below
         } else if (menu.is_keyboard_open()) {
             if (key_pressed(ImGuiKey_UpArrow))    menu.osk_move(0, -1);
             if (key_pressed(ImGuiKey_DownArrow))  menu.osk_move(0, +1);
@@ -5701,40 +5748,6 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.map_overlay.map_north_deg = state.compass_heading;
             state.map_overlay.calibrated    = true;
-        }
-        // M (no Shift) — short tap: toggle map overlay;
-        //               hold 1.5 s: cycle to next map in the maps folder
-        {
-            const bool m_held = ImGui::IsKeyDown(ImGuiKey_M) && !ImGui::GetIO().KeyShift;
-            if (m_held && m_press_t < 0.0) {
-                m_press_t    = glfwGetTime();
-                m_long_fired = false;
-            } else if (!m_held && m_press_t >= 0.0) {
-                if (!m_long_fired)
-                    state.map_overlay.enabled = !state.map_overlay.enabled;
-                m_press_t = -1.0;
-            }
-            if (m_held && !m_long_fired && m_press_t >= 0.0 &&
-                    glfwGetTime() - m_press_t >= 1.5) {
-                std::vector<std::string> maps;
-                std::error_code ec;
-                for (auto& e : std::filesystem::directory_iterator(cfg_map_dir, ec)) {
-                    auto ext = e.path().extension().string();
-                    if (ext==".png"||ext==".jpg"||ext==".jpeg"||
-                        ext==".PNG"||ext==".JPG"||ext==".JPEG")
-                        maps.push_back(e.path().string());
-                }
-                std::sort(maps.begin(), maps.end());
-                if (!maps.empty()) {
-                    auto it = std::find(maps.begin(), maps.end(), state.map_overlay.map_path);
-                    if (it == maps.end() || std::next(it) == maps.end())
-                        state.map_overlay.map_path = maps.front();
-                    else
-                        state.map_overlay.map_path = *std::next(it);
-                    state.map_overlay.enabled = true;
-                }
-                m_long_fired = true;
-            }
         }
         // Space — dismiss focused toast or close menu (back)
         if (key_pressed(ImGuiKey_Space)) {
