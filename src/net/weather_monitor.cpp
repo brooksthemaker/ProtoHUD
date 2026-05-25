@@ -81,13 +81,16 @@ void WeatherMonitor::thread_fn() {
                 if (geolocate(a, o, c)) { lat = a; lon = o; if (!c.empty()) city = c; }
             }
 
-            char url[360];
+            char url[480];
             snprintf(url, sizeof(url),
                 "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
                 "&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
-                "is_day,weather_code,wind_speed_10m"
-                "&temperature_unit=%s&wind_speed_unit=%s&timezone=auto",
-                lat, lon, metric ? "celsius" : "fahrenheit", metric ? "kmh" : "mph");
+                "is_day,weather_code,wind_speed_10m,precipitation"
+                "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+                "&forecast_days=1"
+                "&temperature_unit=%s&wind_speed_unit=%s&precipitation_unit=%s&timezone=auto",
+                lat, lon, metric ? "celsius" : "fahrenheit", metric ? "kmh" : "mph",
+                metric ? "mm" : "inch");
 
             const std::string body = http_get(url);
             WeatherState w;   // ok=false unless parse succeeds
@@ -100,10 +103,25 @@ void WeatherMonitor::thread_fn() {
                 w.humidity    = c.value("relative_humidity_2m", -1);
                 w.code        = c.value("weather_code", -1);
                 w.is_day      = c.value("is_day", 1) != 0;
+                w.precip_now  = c.value("precipitation", 0.f);
                 w.condition   = wmo_text(w.code);
                 w.location    = city;
                 w.updated_utc = now;
                 w.ok          = true;
+                // Daily block: today's high/low + max rain probability (arrays of 1).
+                if (j.contains("daily") && j["daily"].is_object()) {
+                    const auto& d = j["daily"];
+                    auto first = [](const json& arr, float def) {
+                        return (arr.is_array() && !arr.empty()) ? arr[0].get<float>() : def;
+                    };
+                    if (d.contains("temperature_2m_max")) w.temp_high = first(d["temperature_2m_max"], w.temp);
+                    if (d.contains("temperature_2m_min")) w.temp_low  = first(d["temperature_2m_min"], w.temp);
+                    if (d.contains("precipitation_probability_max")) {
+                        const auto& pp = d["precipitation_probability_max"];
+                        if (pp.is_array() && !pp.empty() && !pp[0].is_null())
+                            w.rain_prob = pp[0].get<int>();
+                    }
+                }
             }
             {
                 std::lock_guard<std::mutex> lk(state_->mtx);

@@ -742,7 +742,8 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
 
     // Title at the top of the disc. The clock fills the whole disc, so it shows none.
     if (widget != static_cast<int>(InfoWidget::Clock)) {
-        static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE", "WEATHER" };
+        static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE",
+                                              "WEATHER", "PRECIP" };
         nvg_set_font_ui(13.f);
         nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
         nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
@@ -855,7 +856,8 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             nvgText(vg, px, py, "no events", nullptr);
         }
 
-    } else {  // Weather (from WeatherMonitor / Open-Meteo).
+    } else if (widget == static_cast<int>(InfoWidget::Weather)) {
+        // Weather page 1 — current conditions.
         const WeatherState& w = s.weather;
         if (!w.ok) {
             nvg_set_font_ui(14.f);
@@ -863,24 +865,53 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
             nvgText(vg, px, py, s.weather_cfg.enabled ? "..." : "off", nullptr);
         } else {
-            // Condition icon (no-ops until art exists), big temperature, condition,
-            // and location stacked down the disc.
-            icons_.draw(vg, wmo_icon(w.code, w.is_day), px, py - r * 0.30f, r * 0.62f, 1.f);
-            char tb[16];
-            snprintf(tb, sizeof(tb), "%.0f°%s", static_cast<double>(w.temp),
-                     s.weather_cfg.metric ? "C" : "F");
-            nvg_set_font_ui(r * 0.30f);
+            icons_.draw(vg, wmo_icon(w.code, w.is_day), px, py - r * 0.45f, r * 0.40f, 1.f);
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            char b[48];
+            // Actual | feels-like.
+            nvg_set_font_ui(r * 0.17f);
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 235));
-            nvgText(vg, px, py + r * 0.18f, tb, nullptr);
-            nvg_set_font_ui(13.f);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 200));
-            nvgText(vg, px, py + r * 0.45f, w.condition.c_str(), nullptr);
+            snprintf(b, sizeof(b), "%.0f°  feels %.0f°",
+                     static_cast<double>(w.temp), static_cast<double>(w.feels));
+            nvgText(vg, px, py - r * 0.08f, b, nullptr);
+            // High / Low.
+            nvg_set_font_ui(r * 0.13f);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
+            snprintf(b, sizeof(b), "H %.0f°   L %.0f°",
+                     static_cast<double>(w.temp_high), static_cast<double>(w.temp_low));
+            nvgText(vg, px, py + r * 0.14f, b, nullptr);
+            // Humidity.
+            if (w.humidity >= 0) {
+                snprintf(b, sizeof(b), "Humidity %d%%", w.humidity);
+                nvgText(vg, px, py + r * 0.34f, b, nullptr);
+            }
             if (!w.location.empty()) {
                 nvg_set_font_ui(11.f);
                 nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
-                nvgText(vg, px, py + r * 0.63f, w.location.c_str(), nullptr);
+                nvgText(vg, px, py + r * 0.56f, w.location.c_str(), nullptr);
             }
+        }
+    } else {  // WeatherPrecip — page 2: precipitation.
+        const WeatherState& w = s.weather;
+        if (!w.ok) {
+            nvg_set_font_ui(14.f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+            nvgText(vg, px, py, s.weather_cfg.enabled ? "..." : "off", nullptr);
+        } else {
+            // Big condition icon (rain/snow/cloud/sun) + precip amount + rain chance.
+            icons_.draw(vg, wmo_icon(w.code, w.is_day), px, py - r * 0.18f, r * 0.74f, 1.f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            char b[40];
+            nvg_set_font_ui(r * 0.15f);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 225));
+            snprintf(b, sizeof(b), "Precip %.1f %s", static_cast<double>(w.precip_now),
+                     s.weather_cfg.metric ? "mm" : "in");
+            nvgText(vg, px, py + r * 0.34f, b, nullptr);
+            if (w.rain_prob >= 0) snprintf(b, sizeof(b), "Rain %d%%", w.rain_prob);
+            else                  snprintf(b, sizeof(b), "Rain --");
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
+            nvgText(vg, px, py + r * 0.55f, b, nullptr);
         }
     }
 

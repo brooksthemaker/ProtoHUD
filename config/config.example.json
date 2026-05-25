@@ -296,11 +296,11 @@
     "_note": "map_path is the full path to the last-used map image. pan_x/y and calibration are reset each session."
   },
   "info_panel": {
-    "_about": "Cycling info panel — an opposite-side twin of the minimap (same footprint). Position comes from hud_dock; size mirrors the map. 'show' is [clock, notifications, schedule, weather]. clock_face: 0=ticks, 1=numbers, 2=minimal. Weather is off until a data source is added.",
+    "_about": "Cycling info panel — an opposite-side twin of the minimap (same footprint). Position comes from hud_dock; size mirrors the map. 'show' is [clock, notifications, schedule, weather-now, weather-precip]. clock_face: 0=ticks, 1=numbers, 2=minimal.",
     "enabled":    false,
     "cycle_sec":  6,
     "clock_face": 0,
-    "show":       [true, true, true, false]
+    "show":       [true, true, true, false, false]
   },
   "hud_dock": {
     "_about": "Docks the minimap (always right) and info panel (always left). bottom: false=top edge, true=bottom edge. v_offset: fine vertical nudge in pixels (Location menu Up/Down).",

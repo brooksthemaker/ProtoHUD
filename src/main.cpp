@@ -2647,11 +2647,18 @@ static std::vector<MenuItem> build_menu(
             [&state](float v){ state.scheduler_lead_min = static_cast<int>(v); }),
     };
     std::vector<MenuItem> ip_weather_menu = {
-        toggle("Show Weather",
+        toggle("Show Current Page",
             [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Weather)]; },
             [&state, ipw](bool v){
                 state.info_panel.show[ipw(InfoWidget::Weather)] = v;
                 if (v) state.weather_cfg.enabled = true;   // showing it starts the fetcher
+                state.weather_refresh = true;
+            }),
+        toggle("Show Precip Page",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::WeatherPrecip)]; },
+            [&state, ipw](bool v){
+                state.info_panel.show[ipw(InfoWidget::WeatherPrecip)] = v;
+                if (v) state.weather_cfg.enabled = true;
                 state.weather_refresh = true;
             }),
         toggle("Auto-Locate (IP)",

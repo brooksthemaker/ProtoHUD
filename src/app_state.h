@@ -275,7 +275,7 @@ struct MapOverlayConfig {
 // side — that auto-cycles through glanceable widgets so a user can take in
 // weather / notifications / schedule / time at a glance. Render-thread owned; the
 // menu writes fields while holding the mutex (like MapOverlayConfig).
-enum class InfoWidget : uint8_t { Clock = 0, Notifications, Schedule, Weather, Count };
+enum class InfoWidget : uint8_t { Clock = 0, Notifications, Schedule, Weather, WeatherPrecip, Count };
 
 struct InfoPanelConfig {
     bool  enabled   = false;    // off by default; user opts in per side
@@ -286,8 +286,9 @@ struct InfoPanelConfig {
     float size_px   = 150.f;    // half-extent (radius), matching the minimap footprint
     float cycle_sec = 6.f;      // dwell per widget before advancing
     int   clock_face = 0;       // analog clock style: 0=ticks, 1=numbers, 2=minimal
-    // Which widgets take part in the cycle (indexed by InfoWidget).
-    bool  show[static_cast<int>(InfoWidget::Count)] = { true, true, true, false };
+    // Which widgets take part in the cycle (indexed by InfoWidget):
+    // clock, notifications, schedule, weather (now), weather (precip).
+    bool  show[static_cast<int>(InfoWidget::Count)] = { true, true, true, false, false };
 };
 
 // ── HUD dock layout ─────────────────────────────────────────────────────────────
@@ -447,6 +448,10 @@ struct WeatherState {
     int         humidity    = -1;      // %
     int         code        = -1;      // WMO weather code
     bool        is_day      = true;
+    float       temp_high   = 0.f;     // today's high (daily)
+    float       temp_low    = 0.f;     // today's low (daily)
+    float       precip_now  = 0.f;     // current precipitation amount
+    int         rain_prob   = -1;      // today's max precip probability (%)
     std::string condition;             // "Clear", "Rain", …
     std::string location;              // city name
     time_t      updated_utc = 0;
