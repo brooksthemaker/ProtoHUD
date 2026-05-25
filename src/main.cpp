@@ -3805,7 +3805,7 @@ int main(int argc, char* argv[]) {
     // Scheduler / reminders. Networking lives in the scheduler_daemon companion;
     // ProtoHUD only reads the merged events.json + scheduler_status.json it writes.
     bool        sched_enabled    = true;
-    bool        sched_autostart  = false;
+    bool        sched_autostart  = true;   // default: launch the daemon with the HUD
     int         sched_poll_s     = 20;
     int         sched_lead_min   = 10;   // applied to state after it's constructed
     // Default the data dir under the real $HOME so it matches the daemon (which
