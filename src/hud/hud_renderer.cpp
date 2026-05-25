@@ -982,14 +982,8 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
     nvgBeginPath(vg); nvgCircle(vg, px, py, r);
     nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 220)); nvgStrokeWidth(vg, 1.8f); nvgStroke(vg);
 
-    // Title at the top of the disc. The clock fills the whole disc, so it shows none.
-    if (widget != static_cast<int>(InfoWidget::Clock)) {
-        static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE",
-                                              "WEATHER", "PRECIP" };
-        nvg_set_font_ui(13.f);
-        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
-        otext(px, py - r + 7.f, kNames[widget], nvg_col_a(col_.text_fill, 220));
-    }
+    // (Page name is no longer drawn inside the disc — it appears in the label ring
+    //  around the panel; see the two-ring block after the scissor is popped.)
 
     // Clip widget bodies to the disc's bounding box so long text never spills out.
     nvgSave(vg);
@@ -1159,10 +1153,47 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
 
     nvgRestore(vg);  // pop scissor
 
-    // Status indicator ring — small badges hugging the disc on the clockwise
-    // 120°→-60° arc (the top + interior/right side, so nothing clips at the edge).
-    // Each is lit when its subsystem is active, dimmed otherwise.
+    // Two concentric rings on the clockwise 120°→-60° arc (the top + interior/right
+    // side, so nothing clips at the screen edge):
+    //   • inner = page labels, one per enabled widget — the active page is highlighted
+    //     (theme accent + glow) and the others greyed. Replaces the old in-disc title
+    //     and the bottom cycle dots; styled like the radial menu (accent + outline).
+    //   • outer = system status badges (doubled in size), lit when active / dimmed.
     {
+        const float DEG     = static_cast<float>(M_PI) / 180.f;
+        const float deg0    = 120.f, deg1 = -60.f;                // CW arc endpoints
+        const float base_sz = std::clamp(r * 0.15f, 14.f, 26.f);  // prior icon size
+        const float lbl_h   = base_sz;                            // label height ≈ that
+        const float icon_sz = base_sz * 2.f;                      // icons doubled
+
+        // ── Inner ring: page labels ─────────────────────────────────────────────
+        static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE",
+                                              "WEATHER", "PRECIP" };
+        const float lbl_r = r + 8.f + lbl_h * 0.5f;
+        nvg_set_font_ui(lbl_h);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        for (int i = 0; i < n; ++i) {
+            const float deg = (n > 1) ? deg0 + (deg1 - deg0) * (float)i / (n - 1)
+                                      : (deg0 + deg1) * 0.5f;
+            const float a   = deg * DEG;
+            const float lx  = px + std::cos(a) * lbl_r;
+            const float ly  = py - std::sin(a) * lbl_r;
+            const char* nm  = kNames[order[i]];
+            const bool  active = (i == info_cycle_idx_);
+            nvg_text_outline(vg, lx, ly, nm, 1.6f);              // black halo
+            if (active && s_glow && s_glow_intensity > 0.f) {    // accent glow
+                nvgFontBlur(vg, 3.f);
+                nvgFillColor(vg, nvg_col_a(col_.glow_base,
+                             static_cast<uint8_t>(72.f * s_glow_intensity)));
+                nvgText(vg, lx, ly, nm, nullptr);
+                nvgFontBlur(vg, 0.f);
+            }
+            nvgFillColor(vg, active ? nvg_col(col_.glow_base)     // active = accent
+                                    : nvg_col_a(col_.text_fill, 105));  // inactive = greyed
+            nvgText(vg, lx, ly, nm, nullptr);
+        }
+
+        // ── Outer ring: status badges (outside the label ring) ──────────────────
         bool bt_on = false;
         for (const auto& d : s.bt_devices) if (d.connected) { bt_on = true; break; }
         struct { StatusGlyph g; bool on; } items[] = {
@@ -1173,39 +1204,23 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             { StatusGlyph::Ssh,       s.ssh.active || s.health.ssh_active },
             { StatusGlyph::Lora,      s.health.lora_ok },
         };
-        const int   ni  = static_cast<int>(sizeof(items) / sizeof(items[0]));
-        const float sz  = std::clamp(r * 0.15f, 14.f, 26.f);
-        const float ring_r = r + 4.f + sz * 0.62f;
-        const float DEG = static_cast<float>(M_PI) / 180.f;
+        const int   ni     = static_cast<int>(sizeof(items) / sizeof(items[0]));
+        const float icon_r = lbl_r + lbl_h * 0.5f + icon_sz * 0.62f + 6.f;
         for (int i = 0; i < ni; ++i) {
-            const float deg = 120.f - (ni > 1 ? static_cast<float>(i) / (ni - 1) : 0.f) * 180.f;
+            const float deg = deg0 + (ni > 1 ? (deg1 - deg0) * (float)i / (ni - 1) : 0.f);
             const float a   = deg * DEG;
-            const float ix  = px + std::cos(a) * ring_r;
-            const float iy  = py - std::sin(a) * ring_r;   // unit-circle → screen (y down)
+            const float ix  = px + std::cos(a) * icon_r;
+            const float iy  = py - std::sin(a) * icon_r;        // unit-circle → screen (y down)
             const bool  on  = items[i].on;
-            nvgBeginPath(vg); nvgCircle(vg, ix, iy, sz * 0.62f);    // dark badge backing
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, icon_sz * 0.62f);   // dark badge backing
             nvgFillColor(vg, nvgRGBA(10, 16, 22, on ? 175 : 120)); nvgFill(vg);
             nvgStrokeColor(vg, on ? nvg_col_a(col_.glow_base, 205) : nvgRGBA(255, 255, 255, 55));
-            nvgStrokeWidth(vg, 1.2f); nvgStroke(vg);
+            nvgStrokeWidth(vg, 1.4f); nvgStroke(vg);
             const float alpha = on ? 1.f : 0.35f;
             const NVGcolor gc = on ? nvg_col_a(col_.text_fill, 240)
                                    : nvg_col_a(col_.text_fill, 80);
-            if (!icons_.draw(vg, status_png_name(items[i].g), ix, iy, sz * 0.92f, alpha))
-                draw_status_glyph(vg, items[i].g, ix, iy, sz * 0.80f, gc);
-        }
-    }
-
-    // Cycle position dots along the bottom.
-    if (n > 1) {
-        const float dotsY = py + r - 10.f;
-        const float gap   = 10.f;
-        const float x0    = px - gap * (n - 1) * 0.5f;
-        for (int i = 0; i < n; ++i) {
-            nvgBeginPath(vg);
-            nvgCircle(vg, x0 + i * gap, dotsY, 2.2f);
-            nvgFillColor(vg, i == info_cycle_idx_ ? nvg_col_a(col_.text_fill, 235)
-                                                  : nvgRGBA(255, 255, 255, 70));
-            nvgFill(vg);
+            if (!icons_.draw(vg, status_png_name(items[i].g), ix, iy, icon_sz * 0.92f, alpha))
+                draw_status_glyph(vg, items[i].g, ix, iy, icon_sz * 0.80f, gc);
         }
     }
 }
