@@ -4215,12 +4215,23 @@ int main(int argc, char* argv[]) {
     weather_mon.start(&state);
     if (sched_enabled) {
         if (sched_autostart) {
-            // Best-effort launch of the companion daemon (mirrors protoface autostart).
-            // No-op if already running; file poll means the HUD never blocks on it.
-            std::system("cd \"$HOME/protohud/scheduler_daemon\" && "
-                        "nohup python3 run.py >/tmp/protohud-scheduler.log 2>&1 &");
+            // Launch the companion daemon, locating it next to the binary's repo
+            // (<bin>/../scheduler_daemon) rather than a hardcoded $HOME path. Output
+            // goes to /tmp/protohud-scheduler.log. A second instance is harmless
+            // (it just fails to bind the port).
+            const std::string daemon_dir = bin_dir + "/../scheduler_daemon";
+            const std::string cmd =
+                "cd \"" + daemon_dir + "\" && "
+                "nohup python3 run.py >/tmp/protohud-scheduler.log 2>&1 &";
+            std::cout << "[scheduler] autostart -> " << daemon_dir
+                      << " (log: /tmp/protohud-scheduler.log)\n";
+            std::system(cmd.c_str());
+        } else {
+            std::cout << "[scheduler] autostart disabled (scheduler.autostart=false)\n";
         }
         sched_mon.start(&state, sched_events_path, sched_status_path, sched_poll_s);
+    } else {
+        std::cout << "[scheduler] disabled (scheduler.enabled=false)\n";
     }
     CrashReporter::install(&state, cfg_crash_dir, GIT_HASH);
 
