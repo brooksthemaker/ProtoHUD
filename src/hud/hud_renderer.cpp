@@ -931,24 +931,33 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         }
 
     } else if (widget == static_cast<int>(InfoWidget::Schedule)) {
-        nvg_set_font_ui(12.f);
-        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        // Each upcoming event as two centered lines: title, then "location | time".
         const time_t now = std::time(nullptr);
-        float ty = py - r * 0.45f; const float lh = 16.f; int shown = 0;
-        const float lx = px - r * 0.84f;
+        float ty = py - r * 0.30f; int shown = 0;
         for (const auto& e : s.scheduler_events) {
             if (e.start_utc == 0) continue;
             if (e.end_utc != 0 && e.end_utc < now) continue;   // skip finished
-            if (shown >= 4) break;
+            if (shown >= 3) break;
             struct tm tmv; localtime_r(&e.start_utc, &tmv);
-            char hm[16];
-            if (e.all_day) snprintf(hm, sizeof(hm), "all-day");
-            else           strftime(hm, sizeof(hm), "%H:%M", &tmv);
-            char line[80]; snprintf(line, sizeof(line), "%s %s", hm, e.title.c_str());
-            otext(lx, ty, line, nvg_col_a(col_.text_fill, 220));
-            ty += lh; ++shown;
+            char tm[16];
+            if (e.all_day) snprintf(tm, sizeof(tm), "all-day");
+            else           strftime(tm, sizeof(tm), "%H:%M", &tmv);
+            char sub[96];
+            if (!e.location.empty())
+                snprintf(sub, sizeof(sub), "%s  |  %s", e.location.c_str(), tm);
+            else
+                snprintf(sub, sizeof(sub), "%s", tm);
+
+            nvg_set_font_ui(r * 0.12f);                        // title
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            otext(px, ty, e.title.c_str(), nvg_col_a(col_.text_fill, 235));
+            nvg_set_font_ui(r * 0.095f);                       // location | time
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            otext(px, ty + r * 0.13f, sub, nvg_col_a(col_.text_fill, 180));
+            ty += r * 0.32f; ++shown;
         }
         if (shown == 0) {
+            nvg_set_font_ui(14.f);
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             otext(px, py, "no events", nvg_col_a(col_.text_fill, 150));
         }
