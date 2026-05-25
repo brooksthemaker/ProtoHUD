@@ -16,6 +16,7 @@
 #include <linux/videodev2.h>
 #include <imgui.h>
 #include <nlohmann/json.hpp>
+#include <qrcodegen.hpp>
 
 #include "app_state.h"
 #include "android/android_mirror.h"
@@ -39,6 +40,7 @@
 #include "sensor/mpu9250.h"
 #include "sys/system_monitor.h"
 #include "sys/scheduler_monitor.h"
+#include "net/weather_monitor.h"
 #include "net/wifi_monitor.h"
 #include "net/ping_monitor.h"
 #include "net/bt_monitor.h"
@@ -153,6 +155,16 @@ template<typename T>
 T jval(const json& j, const std::string& key, T def) {
     try { return j.value(key, def); }
     catch (...) { return def; }
+}
+
+// Mark the minimap module always-on. The actual placement (minimap flush-right,
+// info panel mirrored-left, top/bottom + v_offset) is computed per frame in the
+// render loop, where the live display size and minimap radius are known — that's
+// what lets the compass cardinals sit flush against the screen edges.
+static void apply_hud_dock(AppState& s) {
+    // Minimap and info panel are both always-on for now.
+    s.map_overlay.enabled = true;
+    s.info_panel.enabled  = true;
 }
 
 // ── Native face renderer config ───────────────────────────────────────────────
@@ -2190,15 +2202,6 @@ static std::vector<MenuItem> build_menu(
         leaf("Dismiss Alarm", [&state]{ state.timer_alarm.alarm_triggered = false; }),
     };
 
-    // Scheduler — events are entered from a phone (web form served by the
-    // scheduler_daemon) or, later, synced from Google Calendar. On-device the
-    // user can only tune the reminder lead time and view upcoming events.
-    std::vector<MenuItem> scheduler_menu = {
-        slider("Reminder Lead", 0.f, 60.f, 5.f, "min",
-            [&state]{ return static_cast<float>(state.scheduler_lead_min); },
-            [&state](float v){ state.scheduler_lead_min = static_cast<int>(v); }),
-    };
-
     // ── Color Options ─────────────────────────────────────────────────────────
 
     // HUD > Borders & Lines
@@ -2555,25 +2558,11 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("Full   (600px)", [&state]{ state.map_overlay.size_px = 600.f; }, [&state]{ return state.map_overlay.size_px == 600.f; }),
     };
 
-    std::vector<MenuItem> map_overlay_menu = {
-        toggle("Enabled",
-            [&state]{ return state.map_overlay.enabled; },
-            [&state](bool v){ state.map_overlay.enabled = v; }),
-        submenu("Select Map",           std::move(map_select_items)),
-        submenu("Move Map",             std::move(map_move_menu)),
-        submenu("Rotate Image",         std::move(map_rotate_menu)),
-        submenu("Size",                 std::move(map_size_menu)),
-        slider("Map Zoom", 1.f, 4.f, 0.1f, "x",
-            [&state]{ return state.map_overlay.zoom; },
-            [&state](float v){ state.map_overlay.zoom = v; }),
-        toggle("Rotate with Heading",
-            [&state]{ return state.map_overlay.rotate_with_heading; },
-            [&state](bool v){ state.map_overlay.rotate_with_heading = v; }),
-        leaf("Set My Direction", [&state]{
-            std::lock_guard<std::mutex> lk(state.mtx);
-            state.map_overlay.map_north_deg = state.compass_heading;
-            state.map_overlay.calibrated    = true;
-        }),
+    // ── Mini-Map Module ───────────────────────────────────────────────────────
+    // Always enabled (apply_hud_dock forces it on). Module Controls toggles the
+    // overlay chrome; Map Options handles the underlying map image.
+    auto ipw = [](InfoWidget w) { return static_cast<int>(w); };
+    std::vector<MenuItem> module_controls_menu = {
         toggle("Circle Window",
             [&state]{ return state.map_overlay.circle_window; },
             [&state](bool v){ state.map_overlay.circle_window = v; }),
@@ -2583,21 +2572,44 @@ static std::vector<MenuItem> build_menu(
         toggle("Battery Arc",
             [&state]{ return state.map_overlay.battery_arc; },
             [&state](bool v){ state.map_overlay.battery_arc = v; }),
-        toggle("Gauge: CPU/GPU (debug)",
+        toggle("Gauge: CPU/GPU",
             [&state]{ return state.map_overlay.system_debug; },
             [&state](bool v){ state.map_overlay.system_debug = v; }),
-        toggle("Clock Above Map",
+        toggle("Clock",
             [&state]{ return state.map_overlay.clock; },
             [&state](bool v){ state.map_overlay.clock = v; }),
-        toggle("Clock Date",
+        toggle("Date",
             [&state]{ return state.map_overlay.clock_date; },
             [&state](bool v){ state.map_overlay.clock_date = v; }),
-        toggle("Face Portrait",
+        toggle("Protoface Preview",
             [&state]{ return state.map_overlay.portrait; },
             [&state](bool v){ state.map_overlay.portrait = v; }),
-        toggle("Portrait: Right Half",
+        toggle("Preview: Right Half",
             [&state]{ return state.map_overlay.portrait_right_half; },
             [&state](bool v){ state.map_overlay.portrait_right_half = v; }),
+        slider("Preview Size", 0.5f, 2.5f, 0.1f, "x",
+            [&state]{ return state.map_overlay.portrait_scale; },
+            [&state](float v){ state.map_overlay.portrait_scale = v; }),
+    };
+    std::vector<MenuItem> map_options_menu = {
+        submenu("Select Map",   std::move(map_select_items)),
+        submenu("Move Map",     std::move(map_move_menu)),
+        submenu("Rotate Map",   std::move(map_rotate_menu)),
+        submenu("Size",         std::move(map_size_menu)),
+        slider("Zoom", 1.f, 4.f, 0.1f, "x",
+            [&state]{ return state.map_overlay.zoom; },
+            [&state](float v){ state.map_overlay.zoom = v; }),
+        slider("Transparency", 0.f, 1.f, 0.05f, "",
+            [&state]{ return state.map_overlay.opacity; },
+            [&state](float v){ state.map_overlay.opacity = v; }),
+        toggle("Rotate with Heading",
+            [&state]{ return state.map_overlay.rotate_with_heading; },
+            [&state](bool v){ state.map_overlay.rotate_with_heading = v; }),
+        leaf("Set My Direction", [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.map_overlay.map_north_deg = state.compass_heading;
+            state.map_overlay.calibrated    = true;
+        }),
         leaf("Expand Map (Pan/Zoom)", [&state]{
             std::lock_guard<std::mutex> lk(state.mtx);
             state.map_overlay.expanded   = true;
@@ -2605,23 +2617,176 @@ static std::vector<MenuItem> build_menu(
             state.map_overlay.view_pan_x = 0.f;
             state.map_overlay.view_pan_y = 0.f;
         }),
-        slider("Transparency", 0.f, 1.f, 0.05f, "",
-            [&state]{ return state.map_overlay.opacity; },
-            [&state](float v){ state.map_overlay.opacity = v; }),
+        with_desc(toggle("Expanded: Debug Window",
+            [&state]{ return state.expanded_show_debug; },
+            [&state](bool v){ state.expanded_show_debug = v; }),
+            "In the expanded map view, also show the debug/system panel, opened to "
+            "the right of the info sidebar."),
+        with_desc(toggle("Expanded: Hide Info Panel",
+            [&state]{ return state.expanded_hide_info; },
+            [&state](bool v){ state.expanded_hide_info = v; }),
+            "Hide the cycling info panel while the map is expanded (its weather / "
+            "schedule / time already appear in the sidebar)."),
+    };
+    std::vector<MenuItem> mini_map_menu = {
+        submenu("Module Controls", std::move(module_controls_menu)),
+        submenu("Map Options",     std::move(map_options_menu)),
+    };
+
+    // ── Info-Panel Module ─────────────────────────────────────────────────────
+    std::vector<MenuItem> clock_face_menu = {
+        leaf_sel("Ticks",   [&state]{ state.info_panel.clock_face = 0; },
+                            [&state]{ return state.info_panel.clock_face == 0; }),
+        leaf_sel("Numbers", [&state]{ state.info_panel.clock_face = 1; },
+                            [&state]{ return state.info_panel.clock_face == 1; }),
+        leaf_sel("Minimal", [&state]{ state.info_panel.clock_face = 2; },
+                            [&state]{ return state.info_panel.clock_face == 2; }),
+    };
+    std::vector<MenuItem> ip_clock_menu = {
+        toggle("Show Clock",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Clock)]; },
+            [&state, ipw](bool v){ state.info_panel.show[ipw(InfoWidget::Clock)] = v; }),
+        submenu("Clock Face", std::move(clock_face_menu)),
+    };
+    std::vector<MenuItem> ip_notif_menu = {
+        toggle("Show Notifications",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Notifications)]; },
+            [&state, ipw](bool v){ state.info_panel.show[ipw(InfoWidget::Notifications)] = v; }),
+    };
+    std::vector<MenuItem> ip_schedule_menu = {
+        toggle("Show Schedule",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Schedule)]; },
+            [&state, ipw](bool v){ state.info_panel.show[ipw(InfoWidget::Schedule)] = v; }),
+        slider("Reminder Lead", 0.f, 60.f, 5.f, "min",
+            [&state]{ return static_cast<float>(state.scheduler_lead_min); },
+            [&state](float v){ state.scheduler_lead_min = static_cast<int>(v); }),
+    };
+    std::vector<MenuItem> ip_weather_menu = {
+        toggle("Show Current Page",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Weather)]; },
+            [&state, ipw](bool v){
+                state.info_panel.show[ipw(InfoWidget::Weather)] = v;
+                if (v) state.weather_cfg.enabled = true;   // showing it starts the fetcher
+                state.weather_refresh = true;
+            }),
+        toggle("Show Precip Page",
+            [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::WeatherPrecip)]; },
+            [&state, ipw](bool v){
+                state.info_panel.show[ipw(InfoWidget::WeatherPrecip)] = v;
+                if (v) state.weather_cfg.enabled = true;
+                state.weather_refresh = true;
+            }),
+        toggle("Auto-Locate (IP)",
+            [&state]{ return state.weather_cfg.auto_locate; },
+            [&state](bool v){ state.weather_cfg.auto_locate = v; state.weather_refresh = true; }),
+        toggle("Units: Metric",
+            [&state]{ return state.weather_cfg.metric; },
+            [&state](bool v){ state.weather_cfg.metric = v; state.weather_refresh = true; }),
+        leaf("Refresh Now", [&state]{ state.weather_refresh = true; }),
+    };
+    std::vector<MenuItem> info_panel_menu = {
+        // (Always visible for now — enable is forced on in apply_hud_dock, like the minimap.)
+        slider("Cycle Seconds", 2.f, 30.f, 1.f, "s",
+            [&state]{ return state.info_panel.cycle_sec; },
+            [&state](float v){ state.info_panel.cycle_sec = v; }),
+        submenu("Clock",         std::move(ip_clock_menu)),
+        submenu("Notifications", std::move(ip_notif_menu)),
+        with_panel(
+            submenu("Schedule", std::move(ip_schedule_menu)),
+            "Schedule",
+            [state_ptr](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                if (!state_ptr) return;
+                const float lh = 18.f;
+                ImVec2 p = o;
+                auto line = [&](const std::string& s, ImU32 c) {
+                    dl->AddText({ p.x, p.y }, c, s.c_str()); p.y += lh;
+                };
+                SchedulerStatus st;
+                { std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                  st = state_ptr->scheduler_status; }
+                const ImU32 dim = IM_COL32(180, 180, 180, 200);
+                const ImU32 ok  = IM_COL32(160, 220, 160, 220);
+                const ImU32 bad = IM_COL32(220, 160,  90, 220);
+                const ImU32 wht = IM_COL32(230, 230, 230, 230);
+                line(std::string("Daemon: ") + (st.daemon_ok ? "online" : "offline"),
+                     st.daemon_ok ? ok : bad);
+                line(std::string("Web: ") +
+                         (st.web_url.empty() ? "(starting...)" : st.web_url),
+                     st.web_url.empty() ? dim : wht);
+                line("Scan this QR on your phone:", dim);
+                line(std::string("Google: ") + st.gcal_state,
+                     st.gcal_state == "connected" ? ok : dim);
+                if (st.gcal_state == "pending" && !st.gcal_user_code.empty()) {
+                    line(std::string("  code: ") + st.gcal_user_code, wht);
+                    line(std::string("  at: ")   + st.gcal_verify_url, dim);
+                }
+
+                // QR code of the web URL — encoded once per URL, drawn as modules.
+                if (!st.web_url.empty()) {
+                    static std::string qr_url;
+                    static std::vector<std::vector<bool>> qr_mods;
+                    if (qr_url != st.web_url) {
+                        qr_url = st.web_url;
+                        qr_mods.clear();
+                        try {
+                            const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(
+                                st.web_url.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
+                            const int qn = qr.getSize();
+                            qr_mods.assign(qn, std::vector<bool>(qn, false));
+                            for (int yy = 0; yy < qn; ++yy)
+                                for (int xx = 0; xx < qn; ++xx)
+                                    qr_mods[yy][xx] = qr.getModule(xx, yy);
+                        } catch (...) { qr_mods.clear(); }
+                    }
+                    if (!qr_mods.empty()) {
+                        const int   qn    = static_cast<int>(qr_mods.size());
+                        const int   quiet = 3;
+                        const float avail = std::min(sz.x, sz.y - (p.y - o.y) - 6.f);
+                        const float box   = std::max(60.f, std::min(190.f, avail));
+                        const float mod   = box / (qn + quiet * 2);
+                        const float qx = o.x, qy = p.y + 4.f;
+                        const float full = mod * (qn + quiet * 2);
+                        dl->AddRectFilled({qx, qy}, {qx + full, qy + full},
+                                          IM_COL32(255, 255, 255, 255));
+                        for (int yy = 0; yy < qn; ++yy)
+                            for (int xx = 0; xx < qn; ++xx)
+                                if (qr_mods[yy][xx]) {
+                                    const float mx = qx + mod * (xx + quiet);
+                                    const float my = qy + mod * (yy + quiet);
+                                    dl->AddRectFilled({mx, my}, {mx + mod, my + mod},
+                                                      IM_COL32(0, 0, 0, 255));
+                                }
+                    }
+                }
+            }),
+        submenu("Weather",       std::move(ip_weather_menu)),
+    };
+
+    // ── Location — shared dock for both the minimap and info panel ─────────────
+    std::vector<MenuItem> location_menu = {
+        leaf_sel("Top",
+            [&state]{ state.hud_dock.bottom = false; apply_hud_dock(state); },
+            [&state]{ return !state.hud_dock.bottom; }),
+        leaf_sel("Bottom",
+            [&state]{ state.hud_dock.bottom = true; apply_hud_dock(state); },
+            [&state]{ return state.hud_dock.bottom; }),
+        leaf("Move Up (+5)",
+            [&state]{ state.hud_dock.v_offset -= 5.f; apply_hud_dock(state); }),
+        leaf("Move Down (-5)",
+            [&state]{ state.hud_dock.v_offset += 5.f; apply_hud_dock(state); }),
     };
 
     std::vector<MenuItem> hud_menu = {
         toggle("Flip to Top",
             [hud_cfg]{ return hud_cfg->hud_flip_vertical; },
             [hud_cfg](bool v){ hud_cfg->hud_flip_vertical = v; }),
-        slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
-            [hud_cfg]{ return hud_cfg->text_scale; },
-            [hud_cfg](float v){ hud_cfg->text_scale = v; }),
-        submenu("Compass",       std::move(compass_menu)),
-        submenu("Clock",         std::move(clock_menu)),
-        submenu("Color",         std::move(color_options_menu)),
-        submenu("Menu Position", std::move(menu_position_menu)),
-        submenu("Map Overlay",   std::move(map_overlay_menu)),
+        submenu("Location",         std::move(location_menu)),
+        submenu("Mini-Map Module",  std::move(mini_map_menu)),
+        submenu("Info-Panel Module",std::move(info_panel_menu)),
+        submenu("Compass",          std::move(compass_menu)),
+        submenu("Clock",            std::move(clock_menu)),
+        submenu("Color",            std::move(color_options_menu)),
+        submenu("Menu Position",    std::move(menu_position_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
@@ -3016,6 +3181,27 @@ static std::vector<MenuItem> build_menu(
             [menu_sys_pp](float v){ if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->set_radial_tilt(v); }),
             "Helmet-style inward perspective tilt for the radial menu. 0 = flat on "
             "the glass; higher = the wheel curves away at the top like a visor."),
+        with_desc(toggle("Fullscreen",
+            [&state]{ return state.win_fullscreen.load(); },
+            [&state](bool v){ state.win_fullscreen.store(v); state.win_mode_dirty.store(true); }),
+            "Borderless fullscreen covering the whole screen. Desktop/dev only — "
+            "ignored while the glasses are connected. Applied live."),
+        with_desc(toggle("Frameless Window",
+            [&state]{ return state.win_frameless.load(); },
+            [&state](bool v){ state.win_frameless.store(v); state.win_mode_dirty.store(true); }),
+            "Remove the OS window title bar and borders (windowed mode). Desktop/dev "
+            "only. Applied live."),
+        with_desc(toggle("Legacy HUD",
+            [&state]{ return state.legacy_hud; },
+            [&state](bool v){ state.legacy_hud = v; }),
+            "ON: show the legacy edge/corner HUD (compass tape, health indicators, "
+            "face indicator, corner clock/timer, LoRa messages). OFF: show only the "
+            "modular HUD — the minimap and info panel."),
+        with_desc(toggle("Skip Startup Screen",
+            [&state]{ return state.skip_landing; },
+            [&state](bool v){ state.skip_landing = v; }),
+            "Bypass the profile/continue landing screen at boot and run the current "
+            "config directly. Takes effect on the next launch."),
         with_panel(
             submenu("Audio", std::move(audio_menu)),
             "Audio Status",
@@ -3062,58 +3248,9 @@ static std::vector<MenuItem> build_menu(
                                : IM_COL32(220, 160, 90, 220));
             }),
         submenu("Timers and Alarm", std::move(timers_alarm_menu)),
-        with_panel(
-            submenu("Scheduler", std::move(scheduler_menu)),
-            "Scheduler",
-            [state_ptr](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-                (void)sz;
-                if (!state_ptr) return;
-                const float lh = 18.f;
-                ImVec2 p = o;
-                auto line = [&](const std::string& s, ImU32 c) {
-                    dl->AddText({ p.x, p.y }, c, s.c_str());
-                    p.y += lh;
-                };
-                SchedulerStatus st;
-                std::vector<ScheduledEvent> evs;
-                {
-                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
-                    st  = state_ptr->scheduler_status;
-                    evs = state_ptr->scheduler_events;
-                }
-                const ImU32 dim = IM_COL32(180, 180, 180, 200);
-                const ImU32 ok  = IM_COL32(160, 220, 160, 220);
-                const ImU32 bad = IM_COL32(220, 160,  90, 220);
-                const ImU32 wht = IM_COL32(230, 230, 230, 230);
-
-                line(std::string("Daemon: ") + (st.daemon_ok ? "online" : "offline"),
-                     st.daemon_ok ? ok : bad);
-                line(std::string("Web: ") +
-                         (st.web_url.empty() ? "(starting...)" : st.web_url),
-                     st.web_url.empty() ? dim : wht);
-                line("Open that URL on your phone", dim);
-                line(std::string("Google: ") + st.gcal_state,
-                     st.gcal_state == "connected" ? ok : dim);
-                if (st.gcal_state == "pending" && !st.gcal_user_code.empty()) {
-                    line(std::string("  code: ") + st.gcal_user_code, wht);
-                    line(std::string("  at: ")   + st.gcal_verify_url, dim);
-                }
-                p.y += lh * 0.5f;
-                line("Upcoming:", dim);
-                if (evs.empty()) line("  (none)", dim);
-                int shown = 0;
-                for (const auto& e : evs) {
-                    if (shown >= 6) break;
-                    char when[24] = "--:--";
-                    if (e.start_utc) {
-                        struct tm tm{}; localtime_r(&e.start_utc, &tm);
-                        strftime(when, sizeof(when),
-                                 e.all_day ? "%b %d all-day" : "%b %d %H:%M", &tm);
-                    }
-                    line(std::string("  ") + when + "  " + e.title, wht);
-                    ++shown;
-                }
-            }),
+        slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
+            [hud_cfg]{ return hud_cfg->text_scale; },
+            [hud_cfg](float v){ hud_cfg->text_scale = v; }),
         toggle("System Panel",
             [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
             [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
@@ -3709,13 +3846,17 @@ int main(int argc, char* argv[]) {
     // Scheduler / reminders. Networking lives in the scheduler_daemon companion;
     // ProtoHUD only reads the merged events.json + scheduler_status.json it writes.
     bool        sched_enabled    = true;
-    bool        sched_autostart  = false;
+    bool        sched_autostart  = true;   // default: launch the daemon with the HUD
     int         sched_poll_s     = 20;
     int         sched_lead_min   = 10;   // applied to state after it's constructed
-    std::string sched_events_path =
-        "/home/user/.local/share/protohud-scheduler/events.json";
-    std::string sched_status_path =
-        "/home/user/.local/share/protohud-scheduler/scheduler_status.json";
+    // Default the data dir under the real $HOME so it matches the daemon (which
+    // uses ~/.local/share). A hardcoded /home/user broke this on other accounts.
+    const std::string sched_home = []{
+        const char* h = std::getenv("HOME");
+        return std::string(h && *h ? h : "/home/user");
+    }();
+    std::string sched_events_path = sched_home + "/.local/share/protohud-scheduler/events.json";
+    std::string sched_status_path = sched_home + "/.local/share/protohud-scheduler/scheduler_status.json";
     if (cfg.contains("scheduler")) {
         auto& jsc = cfg["scheduler"];
         sched_enabled     = jval(jsc, "enabled",         sched_enabled);
@@ -3777,7 +3918,14 @@ int main(int argc, char* argv[]) {
     state.max_messages        = jval(jhud, "lora_message_history", 50);
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
+    state.legacy_hud          = jhud.value("legacy_hud", true);
+    state.skip_landing        = jval(cfg.contains("landing") ? cfg["landing"] : json::object(),
+                                     "skip", false);
+    state.expanded_show_debug = jhud.value("expanded_show_debug", false);
+    state.expanded_hide_info  = jhud.value("expanded_hide_info", false);
     state.scheduler_lead_min  = sched_lead_min;   // loaded above, applied now that state exists
+    state.win_fullscreen.store(xr_cfg.fullscreen);  // mirror display cfg for the Settings toggles
+    state.win_frameless.store(xr_cfg.frameless);
 
     if (jhud.contains("effects")) {
         auto& jfx = jhud["effects"];
@@ -3909,8 +4057,48 @@ int main(int argc, char* argv[]) {
         mo.clock_date          = jm.value("clock_date",          mo.clock_date);
         mo.portrait            = jm.value("portrait",            mo.portrait);
         mo.portrait_right_half = jm.value("portrait_right_half", mo.portrait_right_half);
+        mo.portrait_scale      = jm.value("portrait_scale",      mo.portrait_scale);
         mo.zoom                = jm.value("zoom",                mo.zoom);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
+    }
+
+    // Cycling info panel (opposite the minimap).
+    if (cfg.contains("info_panel")) {
+        const auto& jip = cfg["info_panel"];
+        auto& ip = state.info_panel;
+        ip.enabled   = jip.value("enabled",   ip.enabled);
+        ip.anchor_x  = jip.value("anchor_x",  ip.anchor_x);
+        ip.anchor_y  = jip.value("anchor_y",  ip.anchor_y);
+        ip.size_px    = jip.value("size_px",    ip.size_px);
+        ip.cycle_sec  = jip.value("cycle_sec",  ip.cycle_sec);
+        ip.clock_face = jip.value("clock_face", ip.clock_face);
+        if (jip.contains("show") && jip["show"].is_array()) {
+            const auto& sh = jip["show"];
+            for (int i = 0; i < static_cast<int>(InfoWidget::Count) &&
+                            i < static_cast<int>(sh.size()); ++i)
+                ip.show[i] = sh[i].get<bool>();
+        }
+    }
+
+    // HUD dock (top/bottom + swap) — positions the minimap & info panel twins.
+    if (cfg.contains("hud_dock")) {
+        const auto& jd = cfg["hud_dock"];
+        state.hud_dock.bottom   = jd.value("bottom",   state.hud_dock.bottom);
+        state.hud_dock.v_offset = jd.value("v_offset", state.hud_dock.v_offset);
+    }
+    apply_hud_dock(state);   // dock is authoritative for both anchors
+
+    // Weather (Open-Meteo via WeatherMonitor).
+    if (cfg.contains("weather")) {
+        const auto& jw = cfg["weather"];
+        auto& wc = state.weather_cfg;
+        wc.enabled      = jw.value("enabled",      wc.enabled);
+        wc.auto_locate  = jw.value("auto_locate",  wc.auto_locate);
+        wc.metric       = jw.value("metric",       wc.metric);
+        wc.lat          = jw.value("lat",          wc.lat);
+        wc.lon          = jw.value("lon",          wc.lon);
+        wc.place        = jw.value("place",        wc.place);
+        wc.interval_min = jw.value("interval_min", wc.interval_min);
     }
 
     // Compass IMU axis selection
@@ -4067,19 +4255,46 @@ int main(int argc, char* argv[]) {
     PingMonitor      ping_mon;
     BtMonitor        bt_mon;
     SchedulerMonitor sched_mon;
+    WeatherMonitor   weather_mon;
 
     sys_mon.start(&state);
     wifi_mon.start(&state, cfg_wifi_iface);
     ping_mon.start(&state, cfg_ping_host);
     bt_mon.start(&state);
+    weather_mon.start(&state);
     if (sched_enabled) {
         if (sched_autostart) {
-            // Best-effort launch of the companion daemon (mirrors protoface autostart).
-            // No-op if already running; file poll means the HUD never blocks on it.
-            std::system("cd \"$HOME/protohud/scheduler_daemon\" && "
-                        "nohup python3 run.py >/tmp/protohud-scheduler.log 2>&1 &");
+            // Launch the daemon via fork()+setsid()+execlp(), the same robust path
+            // panel_driver.py uses — a backgrounded std::system("... &") was failing
+            // silently / not surviving on this platform. config is found via the
+            // script's own __file__, so no chdir is needed.
+            // NOTE: the daemon entry is scheduler.py (not run.py) on purpose — the
+            // Protoface setup below runs `pkill -f run.py`, which would otherwise
+            // kill this daemon too.
+            const std::string drv = bin_dir + "/../scheduler_daemon/scheduler.py";
+            std::system("pkill -f scheduler_daemon 2>/dev/null");   // clear any old instance
+            pid_t pid = fork();
+            if (pid == 0) {
+                setsid();
+                int lf = ::open("/tmp/protohud-scheduler.log",
+                                O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (lf >= 0) { dup2(lf, 1); dup2(lf, 2); ::close(lf); }
+                int nf = ::open("/dev/null", O_RDONLY);
+                if (nf >= 0) { dup2(nf, 0); ::close(nf); }
+                execlp("python3", "python3", "-u", drv.c_str(),
+                       static_cast<char*>(nullptr));
+                const char* msg = "[scheduler] execlp python3 failed — not on PATH?\n";
+                ssize_t wr = ::write(2, msg, strlen(msg)); (void)wr;
+                _exit(127);   // execlp failed (python3 not found)
+            }
+            std::cout << "[scheduler] launched daemon pid=" << pid
+                      << " (" << drv << ", log: /tmp/protohud-scheduler.log)\n";
+        } else {
+            std::cout << "[scheduler] autostart disabled (scheduler.autostart=false)\n";
         }
         sched_mon.start(&state, sched_events_path, sched_status_path, sched_poll_s);
+    } else {
+        std::cout << "[scheduler] disabled (scheduler.enabled=false)\n";
     }
     CrashReporter::install(&state, cfg_crash_dir, GIT_HASH);
 
@@ -4139,6 +4354,7 @@ int main(int argc, char* argv[]) {
     }
     HudRenderer hud(hud_cfg, hud_col);
     hud.load(xr.glfw_window());
+    hud.set_icon_dir(res("assets/icons"));
 
     // ── Splash screen ─────────────────────────────────────────────────────────
     // Render a splash frame between heavy init steps so the display isn't black
@@ -4525,6 +4741,8 @@ int main(int argc, char* argv[]) {
     LandingState landing;
     // Running from a profile file → skip the landing page (avoids a re-exec loop).
     if (!active_profile_name.empty()) landing.active = false;
+    // User opted to bypass the landing screen (System > Skip Startup Screen).
+    if (state.skip_landing) landing.active = false;
     landing.countdown_on = (landing_continue_timeout_s > 0.0) && landing.active;
 
     auto landing_count = [&landing, &profiles]() -> int {
@@ -4921,7 +5139,9 @@ int main(int argc, char* argv[]) {
                     dl->AddText(font, fs * 0.95f, {rx - csz.x, ty}, cc, cd);
                     rx -= csz.x + 10.f;
                 }
-                std::string resume = last_nm.empty() ? std::string("(current config)") : last_nm;
+                std::string resume = last_nm.empty()
+                    ? std::filesystem::path(cfg_path).stem().string()
+                    : last_nm;
                 std::transform(resume.begin(), resume.end(), resume.begin(), ::toupper);
                 ImVec2 nsz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, resume.c_str());
                 ImU32 nc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (185u << 24));
@@ -4966,6 +5186,10 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
+        cfg["hud"]["legacy_hud"]          = state.legacy_hud;
+        cfg["landing"]["skip"]            = state.skip_landing;
+        cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
+        cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
         {
             static const char* kAxes[] = { "roll", "pitch", "yaw" };
             cfg["compass"]["axis"]   = kAxes[static_cast<int>(state.compass_axis)];
@@ -4989,6 +5213,9 @@ int main(int argc, char* argv[]) {
         cfg["clock"]["manual_offset_s"] = state.clock_cfg.manual_offset_s;
 
         cfg["scheduler"]["lead_minutes"] = state.scheduler_lead_min;
+
+        cfg["display"]["fullscreen"] = state.win_fullscreen.load();
+        cfg["display"]["frameless"]  = state.win_frameless.load();
 
         cfg["pip"]["cam1"]["anchor_x"]  = pip_overlay_cfg1.anchor_x;
         cfg["pip"]["cam1"]["anchor_y"]  = pip_overlay_cfg1.anchor_y;
@@ -5101,7 +5328,36 @@ int main(int argc, char* argv[]) {
             cfg["map"]["clock_date"]          = mo.clock_date;
             cfg["map"]["portrait"]            = mo.portrait;
             cfg["map"]["portrait_right_half"] = mo.portrait_right_half;
+            cfg["map"]["portrait_scale"]      = mo.portrait_scale;
             cfg["map"]["zoom"]                = mo.zoom;
+        }
+
+        {
+            const auto& ip = state.info_panel;
+            cfg["info_panel"]["enabled"]   = ip.enabled;
+            cfg["info_panel"]["anchor_x"]  = ip.anchor_x;
+            cfg["info_panel"]["anchor_y"]  = ip.anchor_y;
+            cfg["info_panel"]["size_px"]    = ip.size_px;
+            cfg["info_panel"]["cycle_sec"]  = ip.cycle_sec;
+            cfg["info_panel"]["clock_face"] = ip.clock_face;
+            json sh = json::array();
+            for (int i = 0; i < static_cast<int>(InfoWidget::Count); ++i)
+                sh.push_back(ip.show[i]);
+            cfg["info_panel"]["show"] = sh;
+        }
+
+        cfg["hud_dock"]["bottom"]   = state.hud_dock.bottom;
+        cfg["hud_dock"]["v_offset"] = state.hud_dock.v_offset;
+
+        {
+            const auto& wc = state.weather_cfg;
+            cfg["weather"]["enabled"]      = wc.enabled;
+            cfg["weather"]["auto_locate"]  = wc.auto_locate;
+            cfg["weather"]["metric"]       = wc.metric;
+            cfg["weather"]["lat"]          = wc.lat;
+            cfg["weather"]["lon"]          = wc.lon;
+            cfg["weather"]["place"]        = wc.place;
+            cfg["weather"]["interval_min"] = wc.interval_min;
         }
 
         cfg["resolution"]["width"]  = state.camera_resolution.width;
@@ -5270,6 +5526,10 @@ int main(int argc, char* argv[]) {
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);
 
+        // Apply a pending window-mode change (Settings > Fullscreen / Frameless).
+        if (state.win_mode_dirty.exchange(false))
+            xr.apply_window_mode(state.win_fullscreen.load(), state.win_frameless.load());
+
         // ── Delta time ────────────────────────────────────────────────────────
         double now = glfwGetTime();
         float  dt  = static_cast<float>(now - prev_time);
@@ -5355,6 +5615,53 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ── M key: toggle the expanded map view (tap) / cycle the map (hold) ──
+        // Handled before the input dispatch so the tap/hold state machine stays
+        // continuous across the open↔close transition (no reopen-on-release).
+        // Skipped while typing on the on-screen keyboard. Shift+M (recenter) is
+        // handled in the normal-hotkeys branch below.
+        if (!menu.is_keyboard_open()) {
+            const bool m_held = ImGui::IsKeyDown(ImGuiKey_M) && !ImGui::GetIO().KeyShift;
+            if (m_held && m_press_t < 0.0) {
+                m_press_t    = glfwGetTime();
+                m_long_fired = false;
+            } else if (!m_held && m_press_t >= 0.0) {
+                if (!m_long_fired) {                       // tap → toggle expanded view
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    if (state.map_overlay.expanded) {
+                        state.map_overlay.expanded = false;
+                    } else {
+                        state.map_overlay.expanded   = true;
+                        state.map_overlay.view_zoom  = 1.f;
+                        state.map_overlay.view_pan_x = 0.f;
+                        state.map_overlay.view_pan_y = 0.f;
+                    }
+                }
+                m_press_t = -1.0;
+            }
+            // Hold 1.5 s (while not expanded) → cycle to the next map in the folder.
+            if (m_held && !m_long_fired && m_press_t >= 0.0 &&
+                    glfwGetTime() - m_press_t >= 1.5 && !state.map_overlay.expanded) {
+                std::vector<std::string> maps;
+                std::error_code ec;
+                for (auto& e : std::filesystem::directory_iterator(cfg_map_dir, ec)) {
+                    auto ext = e.path().extension().string();
+                    if (ext==".png"||ext==".jpg"||ext==".jpeg"||
+                        ext==".PNG"||ext==".JPG"||ext==".JPEG")
+                        maps.push_back(e.path().string());
+                }
+                std::sort(maps.begin(), maps.end());
+                if (!maps.empty()) {
+                    auto it = std::find(maps.begin(), maps.end(), state.map_overlay.map_path);
+                    if (it == maps.end() || std::next(it) == maps.end())
+                        state.map_overlay.map_path = maps.front();
+                    else
+                        state.map_overlay.map_path = *std::next(it);
+                }
+                m_long_fired = true;
+            }
+        }
+
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
         // The expanded map and the on-screen keyboard each capture ALL keystrokes
         // while up (so pan/zoom or typing can't trigger app hotkeys).
@@ -5368,8 +5675,8 @@ int main(int argc, char* argv[]) {
             if (ImGui::IsKeyDown(ImGuiKey_Minus) || ImGui::IsKeyDown(ImGuiKey_KeypadSubtract)) map_zoom(-0.04f);
             if (key_pressed(ImGuiKey_R))   // lock/unlock map rotation to the compass
                 mo.rotate_with_heading = !mo.rotate_with_heading;
-            if (key_pressed(ImGuiKey_N) || key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_M))
-                mo.expanded = false;
+            if (key_pressed(ImGuiKey_N) || key_pressed(ImGuiKey_Escape))
+                mo.expanded = false;   // M is handled by the global toggle below
         } else if (menu.is_keyboard_open()) {
             if (key_pressed(ImGuiKey_UpArrow))    menu.osk_move(0, -1);
             if (key_pressed(ImGuiKey_DownArrow))  menu.osk_move(0, +1);
@@ -5453,40 +5760,6 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.map_overlay.map_north_deg = state.compass_heading;
             state.map_overlay.calibrated    = true;
-        }
-        // M (no Shift) — short tap: toggle map overlay;
-        //               hold 1.5 s: cycle to next map in the maps folder
-        {
-            const bool m_held = ImGui::IsKeyDown(ImGuiKey_M) && !ImGui::GetIO().KeyShift;
-            if (m_held && m_press_t < 0.0) {
-                m_press_t    = glfwGetTime();
-                m_long_fired = false;
-            } else if (!m_held && m_press_t >= 0.0) {
-                if (!m_long_fired)
-                    state.map_overlay.enabled = !state.map_overlay.enabled;
-                m_press_t = -1.0;
-            }
-            if (m_held && !m_long_fired && m_press_t >= 0.0 &&
-                    glfwGetTime() - m_press_t >= 1.5) {
-                std::vector<std::string> maps;
-                std::error_code ec;
-                for (auto& e : std::filesystem::directory_iterator(cfg_map_dir, ec)) {
-                    auto ext = e.path().extension().string();
-                    if (ext==".png"||ext==".jpg"||ext==".jpeg"||
-                        ext==".PNG"||ext==".JPG"||ext==".JPEG")
-                        maps.push_back(e.path().string());
-                }
-                std::sort(maps.begin(), maps.end());
-                if (!maps.empty()) {
-                    auto it = std::find(maps.begin(), maps.end(), state.map_overlay.map_path);
-                    if (it == maps.end() || std::next(it) == maps.end())
-                        state.map_overlay.map_path = maps.front();
-                    else
-                        state.map_overlay.map_path = *std::next(it);
-                    state.map_overlay.enabled = true;
-                }
-                m_long_fired = true;
-            }
         }
         // Space — dismiss focused toast or close menu (back)
         if (key_pressed(ImGuiKey_Space)) {
@@ -5754,6 +6027,29 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ── Dock positioning ──────────────────────────────────────────────────
+        // Place the minimap (right) and info panel (left) so the minimap's compass
+        // cardinals sit flush against the screen edges. Done here, per frame, since
+        // it depends on the live display size + minimap radius (which the fractional
+        // anchors can't know). Both are render-thread-owned fields.
+        {
+            const float dw = static_cast<float>(xr.display_width());
+            const float dh = static_cast<float>(xr.display_height());
+            if (dw > 1.f && dh > 1.f) {
+                const float ringR = state.map_overlay.size_px;
+                // Outward chrome radius: cardinal letters sit at ringR+26 (+glyph).
+                const float cr = ringR + (state.map_overlay.compass_ring ? 34.f : 10.f);
+                const float voff = state.hud_dock.v_offset;
+                const float cyv = (state.hud_dock.bottom ? (dh - cr) : cr) + voff;
+                state.map_overlay.anchor_x = (dw - cr) / dw;   // minimap: right, flush
+                state.map_overlay.anchor_y = cyv / dh;
+                state.map_overlay.pan_x = 0.f; state.map_overlay.pan_y = 0.f;
+                state.info_panel.anchor_x = cr / dw;           // info panel: left, mirrored
+                state.info_panel.anchor_y = cyv / dh;
+                state.info_panel.pan_x = 0.f; state.info_panel.pan_y = 0.f;
+            }
+        }
+
         // ── State snapshot ────────────────────────────────────────────────────
         // Also update render-thread metrics (frame time, knob event age) here
         // so they're included in the snapshot under a single lock acquisition.
@@ -5793,6 +6089,7 @@ int main(int argc, char* argv[]) {
             snap.compass_heading    = state.compass_heading;
             snap.compass_bg_enabled = state.compass_bg_enabled;
             snap.compass_tape       = state.compass_tape;
+            snap.legacy_hud         = state.legacy_hud;
             snap.imu_pose           = state.imu_pose;
             snap.focus_left         = state.focus_left;
             snap.focus_right        = state.focus_right;
@@ -5805,6 +6102,11 @@ int main(int argc, char* argv[]) {
             snap.scheduler_lead_min = state.scheduler_lead_min;
             snap.effects_cfg        = state.effects_cfg;
             snap.map_overlay        = state.map_overlay;
+            snap.info_panel         = state.info_panel;
+            snap.expanded_show_debug = state.expanded_show_debug;
+            snap.expanded_hide_info  = state.expanded_hide_info;
+            snap.weather            = state.weather;
+            snap.weather_cfg        = state.weather_cfg;
             snap.sys_metrics        = state.sys_metrics;
             snap.gpu                = state.gpu;
             snap.imu_data           = state.imu_data;
@@ -6258,7 +6560,17 @@ int main(int argc, char* argv[]) {
         }
 
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
-        hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), sys_panel_active);
+        // Debug panel: normal toggle, plus an option to show it in the expanded-map
+        // view. When expanded, it opens to the right of the info sidebar (~310px).
+        {
+            const bool expanded_view = snap.map_overlay.expanded;
+            const bool show_dbg = sys_panel_active ||
+                                  (expanded_view && snap.expanded_show_debug);
+            const bool dbg_in_expanded = expanded_view && show_dbg;
+            const float dbg_x = dbg_in_expanded ? 310.f : 0.f;
+            hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), show_dbg,
+                               dbg_x, /*narrow=*/dbg_in_expanded);
+        }
 
         // Alarm / timer-expired popups — disabled, toasts handle these now.
         // hud.draw_popups(state, xr.eye_width(), xr.eye_height());
@@ -6302,6 +6614,7 @@ int main(int argc, char* argv[]) {
     step("ping_mon");        ping_mon.stop();
     step("wifi_mon");        wifi_mon.stop();
     step("sched_mon");       sched_mon.stop();
+    step("weather_mon");     weather_mon.stop();
     step("sys_mon");         sys_mon.stop();
     step("mpu9250");         mpu9250.stop();
     step("audio");           audio.stop();

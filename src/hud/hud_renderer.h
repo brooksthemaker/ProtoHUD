@@ -16,6 +16,7 @@
 
 #include "../app_state.h"
 #include "toast_renderer.h"
+#include "icon_cache.h"
 #include <imgui.h>
 #include <nanovg.h>
 #include <string>
@@ -109,6 +110,9 @@ public:
     void toast_navigate(int delta)  { toast_renderer_.navigate(delta); }
     void toast_select(AppState& s)  { toast_renderer_.select(s); }
 
+    // Directory holding notification/widget icon PNGs (<dir>/<name>.png).
+    void set_icon_dir(std::string dir) { icons_.set_dir(std::move(dir)); }
+
     // Start an ImGui frame for menu + debug overlays.
     void begin_menu_frame();
 
@@ -155,7 +159,8 @@ public:
                             const AppState& s);
 
     // Draw system status panel (ImGui pass).
-    void draw_sys_panel(const AppState& snap, int w, int h, bool active);
+    void draw_sys_panel(const AppState& snap, int w, int h, bool active,
+                        float x_offset = 0.f, bool narrow = false);
 
     // Flush ImGui draw data to current GL framebuffer.
     void render_menu_overlay();
@@ -191,9 +196,11 @@ private:
                             float fw, float fh);
     void draw_fps_nvg      (NVGcontext* vg, const AppState& snap, float fw, float fh);
     void draw_map_overlay  (NVGcontext* vg, const AppState& s, float fw, float fh);
+    void draw_info_panel   (NVGcontext* vg, const AppState& s, float fw, float fh);
     void draw_compass_ring (NVGcontext* vg, const AppState& s,
                             float cx, float cy, float radius, bool bold = false);
     void draw_map_expanded (NVGcontext* vg, const AppState& s, float fw, float fh);
+    void draw_expanded_sidebar(NVGcontext* vg, const AppState& s, float fw, float fh);
     // Shared NVG pip drawing (no NVG frame management — caller handles Begin/EndFrame).
     void draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
                               const OverlayConfig& cfg, float fw, float fh);
@@ -256,6 +263,7 @@ private:
                     float fw, float fh, float dt);
 
     ToastRenderer toast_renderer_;
+    IconCache     icons_;
 
     // Map overlay image state (render-thread only)
     int         map_img_      = -1;
@@ -281,6 +289,12 @@ private:
     float         frame_dt_  = 0.f;
     bool          fps_shown_in_hud_   = false;  // prevent double draw
     bool          nvg_frame_active_   = false;  // shared overlay frame in progress
+
+    // Info-panel cycler (render-thread only). info_cycle_idx_ indexes into the
+    // currently-enabled widget list, rebuilt each frame; info_cycle_t_ accumulates
+    // dwell time. Overlay is drawn once per frame, so ticking here is frame-rate-safe.
+    int           info_cycle_idx_ = 0;
+    float         info_cycle_t_   = 0.f;
 
     // ── Popup state ───────────────────────────────────────────────────────────
     enum class PopupKind   { None, Alarm, Timer };

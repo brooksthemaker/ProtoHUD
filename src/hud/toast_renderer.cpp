@@ -37,7 +37,7 @@ static std::string fmt_toast_time(int64_t ts) {
 
 void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
                           float fw, float fh, float dt,
-                          int font_ui, int font_mono) {
+                          int font_ui, int font_mono, IconCache* icons) {
     // Remove anims for dismissed/old notifications
     anims_.erase(std::remove_if(anims_.begin(), anims_.end(), [&](const ToastAnim& a) {
         for (const auto& n : q.items) if (n.id == a.id && !n.dismissed) return false;
@@ -122,12 +122,22 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
 
+        // Type icon (left). Per-notification override, else by type. When an icon
+        // is drawn, text shifts right to make room; otherwise layout is unchanged.
+        float text_x = tx + 12.f;
+        if (icons) {
+            const std::string& name = n.icon.empty()
+                ? std::string(notif_type_icon(n.type)) : n.icon;
+            if (icons->draw(vg, name, tx + 26.f, ty + kToastH * 0.5f, 28.f, a / 255.f))
+                text_x = tx + 46.f;
+        }
+
         // Title
         nvgFontFaceId(vg, font_ui);
         nvgFontSize(vg, 13.f);
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
         nvgFillColor(vg, nvgRGBA(255, 255, 255, a));
-        nvgText(vg, tx + 12.f, ty + 8.f, n.title.c_str(), nullptr);
+        nvgText(vg, text_x, ty + 8.f, n.title.c_str(), nullptr);
 
         // Timestamp (top-right)
         if (n.timestamp > 0) {
@@ -145,7 +155,7 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
             nvgFontSize(vg, 12.f);
             nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
             nvgFillColor(vg, nvgRGBA(200, 200, 200, a));
-            nvgText(vg, tx + 12.f, ty + 26.f, n.body.c_str(), nullptr);
+            nvgText(vg, text_x, ty + 26.f, n.body.c_str(), nullptr);
         }
 
         // Action buttons (only shown when focused)
@@ -153,7 +163,7 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
             nvgFontFaceId(vg, font_ui);
             nvgFontSize(vg, 11.f);
             nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-            float bx = tx + 12.f;
+            float bx = text_x;
             const float by = ty + kToastH - 20.f;
             for (int i = 0; i < (int)n.actions.size(); ++i) {
                 const char* lbl = n.actions[i].label.c_str();

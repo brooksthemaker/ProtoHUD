@@ -175,11 +175,9 @@
     }
   },
   "scheduler": {
-    "_about": "On-board scheduler/reminders. Networking (phone web form + Google Calendar) lives in the scheduler_daemon Python companion, which writes events.json + scheduler_status.json. ProtoHUD reads those by file poll and fires reminders via the toast system. The daemon reads this same block for its web_port / paths / all_day_reminder_hour.",
+    "_about": "On-board scheduler/reminders. Networking (phone web form + Google Calendar) lives in the scheduler_daemon Python companion, which writes events.json + scheduler_status.json. ProtoHUD reads those by file poll. Paths default to ~/.local/share/protohud-scheduler/ on both sides (leave events_path/status_path unset unless you need a custom location).",
     "enabled": true,
-    "autostart": false,
-    "events_path": "/home/user/.local/share/protohud-scheduler/events.json",
-    "status_path": "/home/user/.local/share/protohud-scheduler/scheduler_status.json",
+    "autostart": true,
     "poll_interval_s": 20,
     "lead_minutes": 10,
     "all_day_reminder_hour": 8,
@@ -284,7 +282,8 @@
     "scan_usb":  false
   },
   "map": {
-    "enabled":             false,
+    "_note2": "The minimap module is always on (forced by hud_dock); 'enabled' is kept for compatibility.",
+    "enabled":             true,
     "map_path":            "",
     "opacity":             0.80,
     "size_px":             300,
@@ -295,6 +294,28 @@
     "circle_window":       false,
     "zoom":                1.0,
     "_note": "map_path is the full path to the last-used map image. pan_x/y and calibration are reset each session."
+  },
+  "info_panel": {
+    "_about": "Cycling info panel — an opposite-side twin of the minimap (same footprint). Position comes from hud_dock; size mirrors the map. 'show' is [clock, notifications, schedule, weather-now, weather-precip]. clock_face: 0=ticks, 1=numbers, 2=minimal.",
+    "enabled":    false,
+    "cycle_sec":  6,
+    "clock_face": 0,
+    "show":       [true, true, true, false, false]
+  },
+  "hud_dock": {
+    "_about": "Docks the minimap (always right) and info panel (always left). bottom: false=top edge, true=bottom edge. v_offset: fine vertical nudge in pixels (Location menu Up/Down).",
+    "bottom":   true,
+    "v_offset": 0
+  },
+  "weather": {
+    "_about": "Weather widget (Open-Meteo, no API key; fetched via curl). auto_locate uses IP geolocation; otherwise set lat/lon. metric: true=C/kph, false=F/mph. Needs the device online + curl installed.",
+    "enabled":      false,
+    "auto_locate":  true,
+    "metric":       true,
+    "lat":          0.0,
+    "lon":          0.0,
+    "place":        "",
+    "interval_min": 15
   },
   "splash": {
     "enabled":       true,

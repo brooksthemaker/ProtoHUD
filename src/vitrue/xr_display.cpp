@@ -263,6 +263,33 @@ void XRDisplay::set_vsync(bool on) {
     std::cerr << "[xr] vsync " << (on ? "ON" : "OFF") << "\n";
 }
 
+void XRDisplay::apply_window_mode(bool fullscreen, bool frameless) {
+    // While the glasses are connected the window is bound to the glasses monitor;
+    // moving it would break the SBS output, so these are desktop/dev only.
+    if (!window_ || glasses_found()) return;
+
+    glfwSetWindowAttrib(window_, GLFW_DECORATED, frameless ? GLFW_FALSE : GLFW_TRUE);
+
+    const bool is_fs = glfwGetWindowMonitor(window_) != nullptr;
+    if (fullscreen && !is_fs) {
+        glfwGetWindowPos (window_, &win_x_, &win_y_);   // remember windowed frame
+        glfwGetWindowSize(window_, &win_w_, &win_h_);
+        GLFWmonitor* m = glfwGetPrimaryMonitor();
+        if (m) {
+            const GLFWvidmode* vm = glfwGetVideoMode(m);
+            glfwSetWindowMonitor(window_, m, 0, 0, vm->width, vm->height, vm->refreshRate);
+        }
+        glfwFocusWindow(window_);
+    } else if (!fullscreen && is_fs) {
+        glfwSetWindowMonitor(window_, nullptr, win_x_, win_y_,
+                             win_w_ > 0 ? win_w_ : 1280, win_h_ > 0 ? win_h_ : 720, 0);
+        // Re-assert decoration: leaving fullscreen can reset the attribute.
+        glfwSetWindowAttrib(window_, GLFW_DECORATED, frameless ? GLFW_FALSE : GLFW_TRUE);
+    }
+    std::cerr << "[xr] window mode: " << (fullscreen ? "fullscreen" : "windowed")
+              << (frameless ? " frameless" : " decorated") << "\n";
+}
+
 // ── shutdown ──────────────────────────────────────────────────────────────────
 void XRDisplay::shutdown() {
     // Null the static instance pointer first so any in-flight SDK callbacks

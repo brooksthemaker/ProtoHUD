@@ -21,6 +21,12 @@ fi
 
 child_pid=""
 
+# Ignore SIGPIPE: if our stdout/stderr pipe closes (an SSH session drops, a log
+# viewer / `tee` exits), a bare `echo` would otherwise take SIGPIPE and kill the
+# supervisor — surfacing as a spurious "Broken pipe" crash. Ignoring it makes the
+# write fail harmlessly and keeps ProtoHUD supervised.
+trap '' PIPE
+
 # Forward SIGTERM/SIGINT to child so it can exit cleanly (exit 0 → no restart).
 _forward_signal() {
     if [ -n "$child_pid" ]; then

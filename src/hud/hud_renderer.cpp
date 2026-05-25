@@ -346,29 +346,36 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
 
     draw_map_overlay(nvg_, s, fw, fh);
+    // The expanded map can optionally hide the info panel (its data is in the sidebar).
+    if (!(s.map_overlay.expanded && s.expanded_hide_info))
+        draw_info_panel(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
 
-    if (!s.lora_messages.empty()) {
-        float pw    = static_cast<float>(cfg_.panel_width);
-        float msg_w = std::min(pw, fw / 3.f);
-        float msg_y = flip ? (c_margin + ch) : 0.f;
-        draw_lora_messages(nvg_, s, 0.f, msg_y, msg_w, fh);
-    }
+    // Legacy HUD chrome (edge/corner indicators). The minimap + info panel above
+    // are the modular HUD and stay on; this block is the togglable legacy layer.
+    if (s.legacy_hud) {
+        if (!s.lora_messages.empty()) {
+            float pw    = static_cast<float>(cfg_.panel_width);
+            float msg_w = std::min(pw, fw / 3.f);
+            float msg_y = flip ? (c_margin + ch) : 0.f;
+            draw_lora_messages(nvg_, s, 0.f, msg_y, msg_w, fh);
+        }
 
-    const float cw        = fw / 3.f;
-    const float compass_y = flip ? c_margin : fh - ch - c_margin;
-    if (s.compass_tape)
-        draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
-    draw_health_side(nvg_, s.health, fw, fh, false,
-                     s.focus_left, s.focus_right, s.night_vision.nv_enabled);
-    draw_health_side(nvg_, s.health, fw, fh, true,
-                     s.focus_left, s.focus_right, s.night_vision.nv_enabled);
-    draw_face_indicator        (nvg_, s.face, fw, fh);
-    // The minimap clock (above the map) subsumes the corner clock + timer/alarm
-    // indicator when it's active; otherwise fall back to the corner readouts.
-    if (!(s.map_overlay.enabled && s.map_overlay.clock)) {
-        draw_clock_indicator       (nvg_, s,      fw, fh);
-        draw_timer_alarm_indicator (nvg_, s,      fw, fh);
+        const float cw        = fw / 3.f;
+        const float compass_y = flip ? c_margin : fh - ch - c_margin;
+        if (s.compass_tape)
+            draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
+        draw_health_side(nvg_, s.health, fw, fh, false,
+                         s.focus_left, s.focus_right, s.night_vision.nv_enabled);
+        draw_health_side(nvg_, s.health, fw, fh, true,
+                         s.focus_left, s.focus_right, s.night_vision.nv_enabled);
+        draw_face_indicator        (nvg_, s.face, fw, fh);
+        // The minimap clock (above the map) subsumes the corner clock + timer/alarm
+        // indicator when it's active; otherwise fall back to the corner readouts.
+        if (!(s.map_overlay.enabled && s.map_overlay.clock)) {
+            draw_clock_indicator       (nvg_, s,      fw, fh);
+            draw_timer_alarm_indicator (nvg_, s,      fw, fh);
+        }
     }
     fx_draw_alarm_pulse(nvg_, s, fw, fh);
 
@@ -392,7 +399,7 @@ void HudRenderer::draw_toasts(NotificationQueue& live_q, int w, int h) {
     const float fh = static_cast<float>(h);
     const bool own_frame = !nvg_frame_active_;
     if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
-    toast_renderer_.draw(nvg_, live_q, fw, fh, frame_dt_, nvg_font_ui_, nvg_font_mono_);
+    toast_renderer_.draw(nvg_, live_q, fw, fh, frame_dt_, nvg_font_ui_, nvg_font_mono_, &icons_);
     if (own_frame) {
         nvgEndFrame(nvg_);
         nvg_frame_active_ = false;
@@ -474,10 +481,10 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         nvgFill(vg);
     }
 
-    // Border hugs the window shape exactly.
+    // Border hugs the window shape exactly — theme-colored (matches the info panel).
     path_window();
-    nvgStrokeColor(vg, nvgRGBA(100, 130, 160, 160));
-    nvgStrokeWidth(vg, 1.5f);
+    nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 220));
+    nvgStrokeWidth(vg, 1.8f);
     nvgStroke(vg);
 
     // Red crosshair at centre = wearer's position on the map.
@@ -492,6 +499,12 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
 
     const float ringR = cfg.circle_window ? half : std::max(hw, hh);
 
+    // Which screen quadrant the minimap occupies. The chrome that protrudes past
+    // the disc (clock/date arc, system gauge) faces the screen interior so it
+    // stays visible regardless of the top/bottom + side docking.
+    const bool dock_left = cx < fw * 0.5f;
+    const bool dock_top  = cy < fh * 0.5f;
+
     // Compass ring + LoRa markers around the minimap (Battlefield-style).
     if (cfg.compass_ring)
         draw_compass_ring(vg, s, cx, cy, ringR);
@@ -501,8 +514,10 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     // shows CPU (inner bar) + GPU/render-load (outer bar, concentric & offset).
     if (cfg.battery_arc) {
         const float DEG = (float)M_PI / 180.f;
-        const float a0  = 145.f * DEG;            // bottom-left
-        const float a1  = 215.f * DEG;            // top-left (sweep up the left side)
+        // Gauge sits on the disc's interior side: right side when docked left,
+        // left side when docked right — so it never runs off the screen edge.
+        const float a0  = (dock_left ? -35.f : 145.f) * DEG;
+        const float a1  = (dock_left ?  35.f : 215.f) * DEG;
 
         // Draw one gauge arc (dark track + coloured fill + a short value label).
         auto gauge = [&](float r, float ga0, float ga1, float v01,
@@ -566,6 +581,53 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         }
     }
 
+    // Warning countdown rings hugging the minimap outline. Each active deadline
+    // inside its warning window (alarm = final 5 min, timer = final 1 min) draws a
+    // ring that empties clockwise from the top and ramps yellow→orange→red as it
+    // nears firing. Multiple active countdowns stack as concentric rings just
+    // inside the map edge. Real time is used (deadlines are real epochs).
+    {
+        const time_t now_real = std::time(nullptr);
+        const float  TWO_PI   = 2.f * static_cast<float>(M_PI);
+        auto cd_color = [](float f) {
+            return f > 0.5f  ? nvgRGBA(235, 200, 50, 245)    // yellow
+                 : f > 0.25f ? nvgRGBA(240, 150, 40, 248)    // orange
+                 :             nvgRGBA(230, 60,  55, 252);   // red
+        };
+        auto draw_cd_ring = [&](float r, float frac, NVGcolor c) {
+            const float a0 = -static_cast<float>(M_PI) * 0.5f;   // start at 12 o'clock
+            float sweep = frac * TWO_PI;
+            if (sweep > TWO_PI - 0.02f) sweep = TWO_PI - 0.02f;
+            nvgLineCap(vg, NVG_ROUND);
+            // Faint full-window track.
+            nvgBeginPath(vg);
+            nvgArc(vg, cx, cy, r, a0, a0 + TWO_PI - 0.02f, NVG_CW);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
+            nvgStrokeWidth(vg, 3.f); nvgStroke(vg);
+            // Dark backing for contrast over the feed.
+            nvgBeginPath(vg);
+            nvgArc(vg, cx, cy, r, a0, a0 + sweep, NVG_CW);
+            nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 170));
+            nvgStrokeWidth(vg, 5.f); nvgStroke(vg);
+            // Colored depleting ring.
+            nvgBeginPath(vg);
+            nvgArc(vg, cx, cy, r, a0, a0 + sweep, NVG_CW);
+            nvgStrokeColor(vg, c);
+            nvgStrokeWidth(vg, 3.f); nvgStroke(vg);
+        };
+        int stack = 0;
+        auto add_cd = [&](float rem, float win) {
+            if (rem <= 0.f || rem > win) return;
+            const float frac = rem / win;
+            draw_cd_ring(ringR - 4.f - stack * 5.f, frac, cd_color(frac));
+            ++stack;
+        };
+        if (s.timer_alarm.timer_active)
+            add_cd(static_cast<float>(s.timer_alarm.timer_end - now_real), 60.f);
+        if (s.timer_alarm.alarm_active)
+            add_cd(static_cast<float>(s.timer_alarm.alarm_fire_at - now_real), 300.f);
+    }
+
     // Clock above the minimap, with an active timer/alarm shown beside it.
     if (cfg.clock) {
         time_t now = std::time(nullptr) + static_cast<time_t>(s.clock_cfg.manual_offset_s);
@@ -593,22 +655,33 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         const float esz   = csz * 0.92f;
         const float dsz   = csz * 0.82f;
         const float DEGc  = static_cast<float>(M_PI) / 180.f;
-        const float clock_angle = -118.f * DEGc;   // curve along the map's upper-left
+        // Clock/date arc curves along the disc edge facing the screen interior:
+        // above the disc when docked low, below when docked high; leaning toward
+        // the interior horizontally so it never clips at the screen edge, plus a
+        // ~10° nudge toward the right so it clears the corner cardinal.
+        const float clock_deg = dock_top ? (dock_left ?  60.f :  120.f)
+                                         : (dock_left ? -60.f : -120.f);
+        const float clock_nudge = (clock_deg < 0.f ? 10.f : -10.f);   // ~10° to the right
+        const float clock_angle = (clock_deg + clock_nudge) * DEGc;
         const float rc    = ringR + (cfg.compass_ring ? 46.f : 16.f) + csz * 0.5f;
 
-        // Clock — curved text on an arc concentric with the map, centred upper-left.
+        // Crisp 4-corner black outline for arc text — a real outline, not a soft blur
+        // (which reads as a drop shadow). Offsetting the arc centre translates the
+        // whole curved string by that pixel amount.
+        auto arc_outline = [&](float rr, float st, const char* t) {
+            const float o = 1.4f;
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 230));
+            nvg_text_arc(vg, cx - o, cy - o, rr, st, t);
+            nvg_text_arc(vg, cx + o, cy - o, rr, st, t);
+            nvg_text_arc(vg, cx - o, cy + o, rr, st, t);
+            nvg_text_arc(vg, cx + o, cy + o, rr, st, t);
+        };
+
+        // Clock — curved text on an arc concentric with the map.
         nvg_set_font_ui(csz);
         const float wc    = arc_text_width(vg, tbuf, rc);
         const float start = clock_angle - wc * 0.5f;
-        // Black outline for legibility over the feed. Arc text is per-glyph
-        // transformed, so a single blurred pass is ~4× cheaper than offset copies
-        // while still reading as a crisp dark halo at this size.
-        {
-            nvgFontBlur(vg, 2.0f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
-            nvg_text_arc(vg, cx, cy, rc, start, tbuf);
-            nvgFontBlur(vg, 0.f);
-        }
+        arc_outline(rc, start, tbuf);
         if (s_glow && s_glow_intensity > 0.f) {
             nvgFontBlur(vg, 3.f);
             nvgFillColor(vg, nvg_col_a(col_.glow_base,
@@ -622,8 +695,10 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         // Active timer/alarm continues the arc just past the clock.
         if (!extra.empty()) {
             nvg_set_font_ui(esz);
+            const float estart = clock_angle + wc * 0.5f + 7.f / rc;
+            arc_outline(rc, estart, extra.c_str());      // crisp outline pass
             nvgFillColor(vg, nvg_col(extra_col));
-            nvg_text_arc(vg, cx, cy, rc, clock_angle + wc * 0.5f + 7.f / rc, extra.c_str());
+            nvg_text_arc(vg, cx, cy, rc, estart, extra.c_str());
         }
 
         // Date on an inner concentric arc, under the clock.
@@ -633,13 +708,551 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             nvg_set_font_ui(dsz);
             const float wd = arc_text_width(vg, ds.c_str(), rd);
             const float ds0 = clock_angle - wd * 0.5f;
-            // Black outline (single blurred pass), matching the clock.
-            nvgFontBlur(vg, 1.8f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
-            nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
-            nvgFontBlur(vg, 0.f);
+            arc_outline(rd, ds0, ds.c_str());            // crisp outline pass
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 200));
             nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
+        }
+    }
+}
+
+// ── Procedural weather glyphs ────────────────────────────────────────────────────
+// Drawn when no wx-*.png icon art is present, so the weather widget always shows a
+// recognizable icon. `sz` is the target box size; centered at (cx, cy).
+static void draw_weather_glyph(NVGcontext* vg, int code, bool day,
+                               float cx, float cy, float sz) {
+    const float s = sz * 0.5f;
+    const NVGcolor sun     = nvgRGBA(255, 200,  60, 255);
+    const NVGcolor moon    = nvgRGBA(225, 230, 245, 255);
+    const NVGcolor cloud   = nvgRGBA(205, 214, 224, 255);
+    const NVGcolor cloud_d = nvgRGBA(150, 162, 176, 255);
+    const NVGcolor rain    = nvgRGBA( 90, 165, 235, 255);
+    const NVGcolor snow    = nvgRGBA(235, 244, 255, 255);
+    const NVGcolor bolt    = nvgRGBA(255, 210,  70, 255);
+    const NVGcolor edge    = nvgRGBA( 12,  18,  26, 235);   // dark outline for contrast
+
+    auto cloud_shape = [&](float ox, float oy, float scale, NVGcolor c) {
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx + ox - s * 0.35f * scale, cy + oy,                s * 0.30f * scale);
+        nvgCircle(vg, cx + ox + s * 0.02f * scale, cy + oy - s * 0.20f * scale, s * 0.38f * scale);
+        nvgCircle(vg, cx + ox + s * 0.40f * scale, cy + oy,                s * 0.28f * scale);
+        nvgRoundedRect(vg, cx + ox - s * 0.62f * scale, cy + oy,
+                       s * 1.18f * scale, s * 0.36f * scale, s * 0.16f * scale);
+        nvgFillColor(vg, c); nvgFill(vg);
+        nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, std::max(2.f, s * 0.07f)); nvgStroke(vg);
+    };
+    auto sun_disc = [&](float ox, float oy, float r) {
+        nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, std::max(2.f, r * 0.30f));
+        for (int i = 0; i < 8; ++i) {                       // dark ray underlay then bright
+            const float a = i / 8.f * 2.f * static_cast<float>(M_PI);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, cx + ox + std::cos(a) * r * 1.30f, cy + oy + std::sin(a) * r * 1.30f);
+            nvgLineTo(vg, cx + ox + std::cos(a) * r * 1.80f, cy + oy + std::sin(a) * r * 1.80f);
+            nvgStroke(vg);
+        }
+        nvgStrokeColor(vg, sun); nvgStrokeWidth(vg, std::max(1.5f, r * 0.18f));
+        for (int i = 0; i < 8; ++i) {
+            const float a = i / 8.f * 2.f * static_cast<float>(M_PI);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, cx + ox + std::cos(a) * r * 1.35f, cy + oy + std::sin(a) * r * 1.35f);
+            nvgLineTo(vg, cx + ox + std::cos(a) * r * 1.75f, cy + oy + std::sin(a) * r * 1.75f);
+            nvgStroke(vg);
+        }
+        nvgBeginPath(vg); nvgCircle(vg, cx + ox, cy + oy, r);
+        nvgFillColor(vg, sun); nvgFill(vg);
+        nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, std::max(2.f, r * 0.12f)); nvgStroke(vg);
+    };
+    auto disc = [&](float ox, float oy, float r, NVGcolor c) {
+        nvgBeginPath(vg); nvgCircle(vg, cx + ox, cy + oy, r);
+        nvgFillColor(vg, c); nvgFill(vg);
+        nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, std::max(2.f, r * 0.14f)); nvgStroke(vg);
+    };
+    auto rain_streaks = [&](NVGcolor c) {
+        nvgStrokeColor(vg, c); nvgStrokeWidth(vg, std::max(2.5f, s * 0.12f));
+        for (int i = -1; i <= 1; ++i) {
+            const float x = cx + i * s * 0.36f;
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, x, cy + s * 0.40f);
+            nvgLineTo(vg, x - s * 0.12f, cy + s * 0.82f);
+            nvgStroke(vg);
+        }
+    };
+    auto snow_dots = [&]() {
+        for (int i = -1; i <= 1; ++i) {
+            nvgBeginPath(vg); nvgCircle(vg, cx + i * s * 0.36f, cy + s * 0.60f, s * 0.10f);
+            nvgFillColor(vg, snow); nvgFill(vg);
+            nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, 1.5f); nvgStroke(vg);
+        }
+    };
+
+    if (code <= 0) {                                   // clear
+        if (day) sun_disc(0.f, 0.f, s * 0.52f);
+        else     disc(0.f, 0.f, s * 0.52f, moon);
+    } else if (code <= 2) {                             // partly cloudy
+        if (day) sun_disc(-s * 0.32f, -s * 0.34f, s * 0.30f);
+        else     disc(-s * 0.32f, -s * 0.30f, s * 0.26f, moon);
+        cloud_shape(s * 0.10f, s * 0.12f, 1.0f, cloud);
+    } else if (code == 3) {                            // overcast
+        cloud_shape(0.f, 0.f, 1.1f, cloud_d);
+    } else if (code == 45 || code == 48) {             // fog
+        cloud_shape(0.f, -s * 0.18f, 1.0f, cloud);
+        nvgStrokeColor(vg, cloud); nvgStrokeWidth(vg, std::max(2.f, s * 0.10f));
+        for (int i = 0; i < 3; ++i) {
+            const float y = cy + s * 0.38f + i * s * 0.22f;
+            nvgBeginPath(vg); nvgMoveTo(vg, cx - s * 0.55f, y); nvgLineTo(vg, cx + s * 0.55f, y); nvgStroke(vg);
+        }
+    } else if (code >= 51 && code <= 57) {             // drizzle
+        cloud_shape(0.f, -s * 0.15f, 1.0f, cloud); snow_dots();
+    } else if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) {  // rain
+        cloud_shape(0.f, -s * 0.15f, 1.0f, cloud); rain_streaks(rain);
+    } else if ((code >= 71 && code <= 77) || code == 85 || code == 86) {    // snow
+        cloud_shape(0.f, -s * 0.15f, 1.0f, cloud); snow_dots();
+    } else if (code >= 95) {                            // thunderstorm
+        cloud_shape(0.f, -s * 0.15f, 1.0f, cloud_d);
+        nvgFillColor(vg, bolt);
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx + s * 0.10f, cy + s * 0.30f);
+        nvgLineTo(vg, cx - s * 0.18f, cy + s * 0.46f);
+        nvgLineTo(vg, cx + s * 0.02f, cy + s * 0.52f);
+        nvgLineTo(vg, cx - s * 0.12f, cy + s * 0.88f);
+        nvgLineTo(vg, cx + s * 0.26f, cy + s * 0.40f);
+        nvgLineTo(vg, cx + s * 0.06f, cy + s * 0.34f);
+        nvgClosePath(vg); nvgFill(vg);
+    } else {
+        cloud_shape(0.f, 0.f, 1.0f, cloud);
+    }
+}
+
+// ── Procedural status glyphs ─────────────────────────────────────────────────────
+// Small line icons for the info-panel status ring (wifi / bluetooth / gamepad /
+// audio / ssh / lora). Drawn when no status-*.png art is present. Stroked in `c`
+// (caller dims it when the status is inactive); centered at (cx, cy); `sz` = box size.
+enum class StatusGlyph { Wifi, Bluetooth, Gamepad, Audio, Ssh, Lora };
+
+static const char* status_png_name(StatusGlyph g) {
+    switch (g) {
+        case StatusGlyph::Wifi:      return "status-wifi";
+        case StatusGlyph::Bluetooth: return "status-bt";
+        case StatusGlyph::Gamepad:   return "status-gamepad";
+        case StatusGlyph::Audio:     return "status-audio";
+        case StatusGlyph::Ssh:       return "status-ssh";
+        case StatusGlyph::Lora:      return "status-lora";
+    }
+    return "status-wifi";
+}
+
+static void draw_status_glyph(NVGcontext* vg, StatusGlyph g,
+                              float cx, float cy, float sz, NVGcolor c) {
+    const float h  = sz * 0.5f;
+    const float lw = std::max(1.5f, sz * 0.10f);
+    const float PI = static_cast<float>(M_PI);
+    nvgLineCap(vg, NVG_ROUND);
+    nvgLineJoin(vg, NVG_ROUND);
+    nvgStrokeColor(vg, c);
+    nvgStrokeWidth(vg, lw);
+
+    switch (g) {
+    case StatusGlyph::Wifi: {
+        const float bx = cx, by = cy + h * 0.55f;
+        for (int i = 1; i <= 3; ++i) {                     // nested top arcs + base dot
+            nvgBeginPath(vg);
+            nvgArc(vg, bx, by, h * 0.32f * i, -2.36f, -0.78f, NVG_CW);
+            nvgStroke(vg);
+        }
+        nvgBeginPath(vg); nvgCircle(vg, bx, by, lw * 0.9f);
+        nvgFillColor(vg, c); nvgFill(vg);
+        break;
+    }
+    case StatusGlyph::Bluetooth: {
+        // Rune: lower-right knee → top → bottom → upper-right knee (diagonals cross
+        // the spine, forming the two right-pointing flags).
+        const float w = h * 0.55f;
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx + w, cy + h * 0.5f);
+        nvgLineTo(vg, cx,     cy - h);
+        nvgLineTo(vg, cx,     cy + h);
+        nvgLineTo(vg, cx + w, cy - h * 0.5f);
+        nvgStroke(vg);
+        break;
+    }
+    case StatusGlyph::Gamepad: {
+        nvgBeginPath(vg);                                  // body
+        nvgRoundedRect(vg, cx - h * 0.85f, cy - h * 0.42f, h * 1.7f, h * 0.84f, h * 0.34f);
+        nvgStroke(vg);
+        const float dx = cx - h * 0.40f;                   // d-pad
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, dx - h * 0.22f, cy); nvgLineTo(vg, dx + h * 0.22f, cy);
+        nvgMoveTo(vg, dx, cy - h * 0.22f); nvgLineTo(vg, dx, cy + h * 0.22f);
+        nvgStroke(vg);
+        nvgBeginPath(vg);                                  // buttons
+        nvgCircle(vg, cx + h * 0.34f, cy - h * 0.12f, lw * 0.85f);
+        nvgCircle(vg, cx + h * 0.58f, cy + h * 0.12f, lw * 0.85f);
+        nvgFillColor(vg, c); nvgFill(vg);
+        break;
+    }
+    case StatusGlyph::Audio: {
+        nvgBeginPath(vg);                                  // speaker box + cone
+        nvgMoveTo(vg, cx - h * 0.70f, cy - h * 0.22f);
+        nvgLineTo(vg, cx - h * 0.40f, cy - h * 0.22f);
+        nvgLineTo(vg, cx - h * 0.05f, cy - h * 0.50f);
+        nvgLineTo(vg, cx - h * 0.05f, cy + h * 0.50f);
+        nvgLineTo(vg, cx - h * 0.40f, cy + h * 0.22f);
+        nvgLineTo(vg, cx - h * 0.70f, cy + h * 0.22f);
+        nvgClosePath(vg);
+        nvgStroke(vg);
+        for (int i = 1; i <= 2; ++i) {                     // sound waves
+            nvgBeginPath(vg);
+            nvgArc(vg, cx - h * 0.05f, cy, h * 0.30f * i, -0.7f, 0.7f, NVG_CW);
+            nvgStroke(vg);
+        }
+        break;
+    }
+    case StatusGlyph::Ssh: {
+        nvgBeginPath(vg);                                  // terminal window
+        nvgRoundedRect(vg, cx - h * 0.8f, cy - h * 0.62f, h * 1.6f, h * 1.24f, h * 0.18f);
+        nvgStroke(vg);
+        nvgBeginPath(vg);                                  // ">" prompt
+        nvgMoveTo(vg, cx - h * 0.42f, cy - h * 0.18f);
+        nvgLineTo(vg, cx - h * 0.16f, cy + h * 0.06f);
+        nvgLineTo(vg, cx - h * 0.42f, cy + h * 0.30f);
+        nvgStroke(vg);
+        nvgBeginPath(vg);                                  // "_" cursor
+        nvgMoveTo(vg, cx + h * 0.04f, cy + h * 0.30f);
+        nvgLineTo(vg, cx + h * 0.42f, cy + h * 0.30f);
+        nvgStroke(vg);
+        break;
+    }
+    case StatusGlyph::Lora: {
+        const float ny = cy - h * 0.18f;                   // node (antenna top)
+        nvgBeginPath(vg);                                  // mast + base
+        nvgMoveTo(vg, cx, ny); nvgLineTo(vg, cx, cy + h * 0.72f);
+        nvgMoveTo(vg, cx - h * 0.30f, cy + h * 0.72f);
+        nvgLineTo(vg, cx + h * 0.30f, cy + h * 0.72f);
+        nvgStroke(vg);
+        nvgBeginPath(vg); nvgCircle(vg, cx, ny, lw * 0.9f);
+        nvgFillColor(vg, c); nvgFill(vg);
+        for (int side = 0; side < 2; ++side) {             // emission waves L/R
+            const float a0 = side ? -0.6f : PI - 0.6f;
+            const float a1 = side ?  0.6f : PI + 0.6f;
+            for (int i = 1; i <= 2; ++i) {
+                nvgBeginPath(vg);
+                nvgArc(vg, cx, ny, h * 0.28f * i, a0, a1, NVG_CW);
+                nvgStroke(vg);
+            }
+        }
+        break;
+    }
+    }
+}
+
+// ── Cycling info panel ──────────────────────────────────────────────────────────
+// A configurable region (mirroring the minimap on the opposite side) that auto-
+// cycles through glanceable widgets: analog clock, notifications, schedule, weather.
+// Drawn once per frame (mono overlay), so the dwell timer ticks here safely.
+void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, float fh) {
+    const InfoPanelConfig& cfg = s.info_panel;
+    if (!cfg.enabled) return;
+
+    // Build the list of enabled widgets in fixed order.
+    constexpr int kCount = static_cast<int>(InfoWidget::Count);
+    int order[kCount]; int n = 0;
+    for (int i = 0; i < kCount; ++i)
+        if (cfg.show[i]) order[n++] = i;
+    if (n == 0) return;
+
+    // Advance the cycle (once per frame).
+    info_cycle_t_ += frame_dt_;
+    if (n > 1 && info_cycle_t_ >= std::max(1.f, cfg.cycle_sec)) {
+        info_cycle_t_   = 0.f;
+        info_cycle_idx_ = (info_cycle_idx_ + 1) % n;
+    }
+    if (info_cycle_idx_ >= n) info_cycle_idx_ = 0;
+    const int widget = order[info_cycle_idx_];
+
+    const float r  = s.map_overlay.size_px;   // twin: mirror the minimap's footprint
+    const float px = std::clamp(fw * cfg.anchor_x + cfg.pan_x, r, fw - r);
+    const float py = std::clamp(fh * cfg.anchor_y + cfg.pan_y, r, fh - r);
+    const float TWO_PI = 2.f * static_cast<float>(M_PI);
+
+    // Text with a black outline for legibility over the camera feed. Font and
+    // alignment must already be set (nvg_text_outline uses the current state).
+    auto otext = [&](float x, float y, const char* str, NVGcolor fill) {
+        nvg_text_outline(vg, x, y, str, 1.4f);
+        nvgFillColor(vg, fill);
+        nvgText(vg, x, y, str, nullptr);
+    };
+
+    // Backing disc + theme-colored border (matches the minimap circle).
+    nvgBeginPath(vg); nvgCircle(vg, px, py, r);
+    nvgFillColor(vg, nvgRGBA(10, 16, 22, 170)); nvgFill(vg);
+    nvgBeginPath(vg); nvgCircle(vg, px, py, r);
+    nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 220)); nvgStrokeWidth(vg, 1.8f); nvgStroke(vg);
+
+    // (Page name is no longer drawn inside the disc — it appears in the label ring
+    //  around the panel; see the two-ring block after the scissor is popped.)
+
+    // Clip widget bodies to the disc's bounding box so long text never spills out.
+    nvgSave(vg);
+    nvgScissor(vg, px - r, py - r, r * 2.f, r * 2.f);
+
+    if (widget == static_cast<int>(InfoWidget::Clock)) {
+        // Analog clock — no title, so it fills the disc. Face style is selectable.
+        const time_t now = std::time(nullptr) +
+                           static_cast<time_t>(s.clock_cfg.manual_offset_s);
+        struct tm tmv; localtime_r(&now, &tmv);
+        const float cr = r * 0.82f;
+        const int   face = s.info_panel.clock_face;
+        const float HALF_PI = static_cast<float>(M_PI) * 0.5f;
+
+        if (face == 1) {
+            // Numbered face: 1..12.
+            nvg_set_font_ui(cr * 0.20f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            for (int h = 1; h <= 12; ++h) {
+                const float a = h / 12.f * TWO_PI - HALF_PI;
+                char nb[4]; snprintf(nb, sizeof(nb), "%d", h);
+                otext(px + std::cos(a) * cr * 0.84f,
+                      py + std::sin(a) * cr * 0.84f, nb, nvg_col_a(col_.text_fill, 220));
+            }
+        } else {
+            // Tick face: all 12 (face 0), or quarters only (face 2 = minimal).
+            const int step = (face == 2) ? 3 : 1;
+            for (int i = 0; i < 12; i += step) {
+                const float a  = static_cast<float>(i) / 12.f * TWO_PI - HALF_PI;
+                const float r0 = cr * 0.86f, r1 = cr * 0.99f;
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, px + std::cos(a) * r0, py + std::sin(a) * r0);
+                nvgLineTo(vg, px + std::cos(a) * r1, py + std::sin(a) * r1);
+                nvgStrokeColor(vg, nvgRGBA(200, 220, 230, 150));
+                nvgStrokeWidth(vg, (i % 3 == 0) ? 2.5f : 1.f); nvgStroke(vg);
+            }
+        }
+        auto hand = [&](float frac, float len, float w, NVGcolor c) {
+            const float a = frac * TWO_PI - HALF_PI;
+            nvgLineCap(vg, NVG_ROUND);
+            nvgBeginPath(vg); nvgMoveTo(vg, px, py);
+            nvgLineTo(vg, px + std::cos(a) * len, py + std::sin(a) * len);
+            nvgStrokeColor(vg, c); nvgStrokeWidth(vg, w); nvgStroke(vg);
+        };
+        const float hh = (tmv.tm_hour % 12) + tmv.tm_min / 60.f;
+        const float mm = tmv.tm_min + tmv.tm_sec / 60.f;
+        hand(hh / 12.f, cr * 0.52f, 4.f,  nvg_col(col_.text_fill));
+        hand(mm / 60.f, cr * 0.80f, 2.5f, nvg_col(col_.text_fill));
+        hand(tmv.tm_sec / 60.f, cr * 0.90f, 1.f, nvgRGBA(235, 80, 70, 235));
+        nvgBeginPath(vg); nvgCircle(vg, px, py, 3.f);
+        nvgFillColor(vg, nvgRGBA(235, 80, 70, 235)); nvgFill(vg);
+
+    } else if (widget == static_cast<int>(InfoWidget::Notifications)) {
+        nvg_set_font_ui(12.f);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        char cnt[32]; snprintf(cnt, sizeof(cnt), "%d unread", s.notifs.unread_count());
+        otext(px, py - r + 24.f, cnt, nvg_col_a(col_.text_fill, 180));
+
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        float ty = py - r * 0.32f; const float lh = 17.f; int shown = 0;
+        const float lx = px - r * 0.82f;
+        for (const auto& nt : s.notifs.items) {
+            if (nt.dismissed) continue;
+            if (shown >= 4) break;
+            const std::string& nm = nt.icon.empty()
+                ? std::string(notif_type_icon(nt.type)) : nt.icon;
+            const float a = nt.read ? 0.6f : 1.f;
+            const float tx0 = icons_.draw(vg, nm, lx + 6.f, ty + 7.f, 13.f, a)
+                              ? lx + 17.f : lx;
+            otext(tx0, ty, nt.title.c_str(),
+                  nt.read ? nvg_col_a(col_.text_fill, 130) : nvg_col_a(col_.text_fill, 235));
+            ty += lh; ++shown;
+        }
+        if (shown == 0) {
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            otext(px, py, "no notifications", nvg_col_a(col_.text_fill, 150));
+        }
+
+    } else if (widget == static_cast<int>(InfoWidget::Schedule)) {
+        // Each upcoming event as two centered lines: title, then "location | time".
+        const time_t now = std::time(nullptr);
+        float ty = py - r * 0.60f; int shown = 0;
+        for (const auto& e : s.scheduler_events) {
+            if (e.start_utc == 0) continue;
+            if (e.end_utc != 0 && e.end_utc < now) continue;   // skip finished
+            if (shown >= 3) break;
+            struct tm tmv; localtime_r(&e.start_utc, &tmv);
+            char tm[16];
+            if (e.all_day) snprintf(tm, sizeof(tm), "all-day");
+            else           strftime(tm, sizeof(tm), "%H:%M", &tmv);
+            char sub[96];
+            if (!e.location.empty())
+                snprintf(sub, sizeof(sub), "%s  |  %s", e.location.c_str(), tm);
+            else
+                snprintf(sub, sizeof(sub), "%s", tm);
+
+            nvg_set_font_ui(r * 0.12f);                        // title
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            otext(px, ty, e.title.c_str(), nvg_col_a(col_.text_fill, 235));
+            nvg_set_font_ui(r * 0.095f);                       // location | time
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            otext(px, ty + r * 0.13f, sub, nvg_col_a(col_.text_fill, 180));
+            ty += r * 0.32f; ++shown;
+        }
+        if (shown == 0) {
+            nvg_set_font_ui(14.f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            otext(px, py, "no events", nvg_col_a(col_.text_fill, 150));
+        }
+
+    } else if (widget == static_cast<int>(InfoWidget::Weather)) {
+        // Weather page 1 — current conditions.
+        const WeatherState& w = s.weather;
+        if (!w.ok) {
+            nvg_set_font_ui(14.f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            otext(px, py, s.weather_cfg.enabled ? "..." : "off", nvg_col_a(col_.text_fill, 150));
+        } else {
+            const float iy = py - r * 0.45f, isz = r * 0.48f;
+            if (!icons_.draw(vg, wmo_icon(w.code, w.is_day), px, iy, isz, 1.f))
+                draw_weather_glyph(vg, w.code, w.is_day, px, iy, isz);
+            char b[48];
+            // NB: nvg_set_font_ui() resets alignment, so re-center after each call.
+            nvg_set_font_ui(r * 0.15f);                       // actual | feels-like
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            snprintf(b, sizeof(b), "%.0f°  feels %.0f°",
+                     static_cast<double>(w.temp), static_cast<double>(w.feels));
+            otext(px, py - r * 0.02f, b, nvg_col_a(col_.text_fill, 235));
+            nvg_set_font_ui(r * 0.12f);                       // High / Low
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            snprintf(b, sizeof(b), "H %.0f°   L %.0f°",
+                     static_cast<double>(w.temp_high), static_cast<double>(w.temp_low));
+            otext(px, py + r * 0.18f, b, nvg_col_a(col_.text_fill, 210));
+            if (w.humidity >= 0) {                            // Humidity
+                snprintf(b, sizeof(b), "Humidity %d%%", w.humidity);
+                otext(px, py + r * 0.36f, b, nvg_col_a(col_.text_fill, 210));
+            }
+            if (!w.location.empty()) {
+                nvg_set_font_ui(r * 0.10f);
+                nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                otext(px, py + r * 0.54f, w.location.c_str(), nvg_col_a(col_.text_fill, 150));
+            }
+        }
+    } else {  // WeatherPrecip — page 2: precipitation.
+        const WeatherState& w = s.weather;
+        if (!w.ok) {
+            nvg_set_font_ui(14.f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            otext(px, py, s.weather_cfg.enabled ? "..." : "off", nvg_col_a(col_.text_fill, 150));
+        } else {
+            // Big condition icon (rain/snow/cloud/sun) + precip amount + rain chance.
+            const float iy = py - r * 0.20f, isz = r * 0.64f;
+            if (!icons_.draw(vg, wmo_icon(w.code, w.is_day), px, iy, isz, 1.f))
+                draw_weather_glyph(vg, w.code, w.is_day, px, iy, isz);
+            char b[40];
+            // nvg_set_font_ui() resets alignment — re-center after it.
+            nvg_set_font_ui(r * 0.13f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            snprintf(b, sizeof(b), "Precip %.1f %s", static_cast<double>(w.precip_now),
+                     s.weather_cfg.metric ? "mm" : "in");
+            otext(px, py + r * 0.36f, b, nvg_col_a(col_.text_fill, 225));
+            if (w.rain_prob >= 0) snprintf(b, sizeof(b), "Rain %d%%", w.rain_prob);
+            else                  snprintf(b, sizeof(b), "Rain --");
+            otext(px, py + r * 0.56f, b, nvg_col_a(col_.text_fill, 210));
+        }
+    }
+
+    nvgRestore(vg);  // pop scissor
+
+    // Page labels + status icons ring the disc, both on the interior 120°→-24° arc:
+    //   • inner = page labels as annular-sector "trapezoids" (curved long edges that
+    //     follow the disc, straight radial short edges), styled like the radial menu.
+    //     Active page = accent box + dark text; inactive = dark box + white text.
+    //   • outer = system status badges (doubled), lit when active / dimmed.
+    {
+        const float DEG     = static_cast<float>(M_PI) / 180.f;
+        const float HALF_PI = static_cast<float>(M_PI) * 0.5f;
+        const float base_sz = std::clamp(r * 0.15f, 14.f, 26.f);
+        const float lbl_h   = base_sz * 0.66f;             // labels ~⅓ smaller
+        const float icon_sz = base_sz * 2.f;               // icons doubled
+        const float arc0    = 120.f, arc1 = -24.f;         // shared label/icon span
+
+        // ── Inner ring: page-label wedges (radial-menu look) ────────────────────
+        static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE",
+                                              "WEATHER", "PRECIP" };
+        const float r0in  = r + 6.f;                       // band inner radius
+        const float bandW = lbl_h + 10.f;
+        const float r1in  = r0in + bandW;                  // band outer radius
+        const float rmid  = (r0in + r1in) * 0.5f;          // text baseline radius
+        const float gapR  = 3.f * DEG;                     // angular gap between wedges
+
+        // Curved label text, flipped on the bottom half so it never reads upside-down.
+        auto arc_label = [&](float center_ang, const char* str, NVGcolor col) {
+            float total = 0.f;
+            for (const char* p = str; *p; ++p) total += nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+            total /= rmid;
+            nvgFillColor(vg, col);
+            const bool flip = std::sin(center_ang) > 0.f;
+            float ang = flip ? center_ang + total * 0.5f : center_ang - total * 0.5f;
+            for (const char* p = str; *p; ++p) {
+                const float adv = nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+                const float th  = flip ? ang - (adv * 0.5f) / rmid : ang + (adv * 0.5f) / rmid;
+                nvgSave(vg);
+                nvgTranslate(vg, px + std::cos(th) * rmid, py + std::sin(th) * rmid);
+                nvgRotate(vg, flip ? th - HALF_PI : th + HALF_PI);
+                nvgText(vg, 0, 0, p, p + 1);
+                nvgRestore(vg);
+                ang += flip ? -adv / rmid : adv / rmid;
+            }
+        };
+
+        nvg_set_font_ui(lbl_h);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        for (int i = 0; i < n; ++i) {
+            const char* nm     = kNames[order[i]];
+            const bool  active = (i == info_cycle_idx_);
+            // Tile the arc into n wedges; screen angle = -(unit angle).
+            const float u0 = arc0 + (arc1 - arc0) * (float)i / n;
+            const float u1 = arc0 + (arc1 - arc0) * (float)(i + 1) / n;
+            const float a0 = -u0 * DEG + gapR * 0.5f;       // screen (a0 < a1)
+            const float a1 = -u1 * DEG - gapR * 0.5f;
+            const float sc = (a0 + a1) * 0.5f;
+            const NVGcolor fill   = active ? nvg_col_a(col_.glow_base, 210)
+                                           : nvgRGBA(18, 24, 30, 185);
+            const NVGcolor border = active ? nvg_col_a(col_.glow_base, 235)
+                                           : nvg_col_a(col_.glow_base, 70);
+            nvgBeginPath(vg);                               // annular sector path
+            nvgArc(vg, px, py, r1in, a0, a1, NVG_CW);       // outer edge (curved)
+            nvgArc(vg, px, py, r0in, a1, a0, NVG_CCW);      // inner edge (curved) back
+            nvgClosePath(vg);                               // straight radial short edges
+            nvgFillColor(vg, fill); nvgFill(vg);
+            nvgStrokeColor(vg, border); nvgStrokeWidth(vg, active ? 2.f : 1.f); nvgStroke(vg);
+            arc_label(sc, nm, active ? nvgRGBA(20, 22, 26, 255)        // dark text on accent
+                                     : nvgRGBA(230, 235, 240, 230));   // white text on dark box
+        }
+
+        // ── Outer ring: status badges (outside the label band) ──────────────────
+        bool bt_on = false;
+        for (const auto& d : s.bt_devices) if (d.connected) { bt_on = true; break; }
+        struct { StatusGlyph g; bool on; } items[] = {
+            { StatusGlyph::Wifi,      s.wifi.connected || s.health.wifi_ok },
+            { StatusGlyph::Bluetooth, bt_on },
+            { StatusGlyph::Gamepad,   s.health.gamepad_ok },
+            { StatusGlyph::Audio,     s.health.audio_ok || s.audio.enabled },
+            { StatusGlyph::Ssh,       s.ssh.active || s.health.ssh_active },
+            { StatusGlyph::Lora,      s.health.lora_ok },
+        };
+        const int   ni     = static_cast<int>(sizeof(items) / sizeof(items[0]));
+        const float icon_r = r1in + icon_sz * 0.62f + 6.f;
+        for (int i = 0; i < ni; ++i) {
+            const float deg = arc0 + (ni > 1 ? (arc1 - arc0) * (float)i / (ni - 1) : 0.f);
+            const float a   = deg * DEG;
+            const float ix  = px + std::cos(a) * icon_r;
+            const float iy  = py - std::sin(a) * icon_r;        // unit-circle → screen (y down)
+            const bool  on  = items[i].on;
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, icon_sz * 0.62f);   // dark badge backing
+            nvgFillColor(vg, nvgRGBA(10, 16, 22, on ? 175 : 120)); nvgFill(vg);
+            nvgStrokeColor(vg, on ? nvg_col_a(col_.glow_base, 205) : nvgRGBA(255, 255, 255, 55));
+            nvgStrokeWidth(vg, 1.4f); nvgStroke(vg);
+            const float alpha = on ? 1.f : 0.35f;
+            const NVGcolor gc = on ? nvg_col_a(col_.text_fill, 240)
+                                   : nvg_col_a(col_.text_fill, 80);
+            if (!icons_.draw(vg, status_png_name(items[i].g), ix, iy, icon_sz * 0.92f, alpha))
+                draw_status_glyph(vg, items[i].g, ix, iy, icon_sz * 0.80f, gc);
         }
     }
 }
@@ -817,7 +1430,8 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
         };
         const float lh = 22.f, padx = 12.f, pady = 10.f;
         const float pw = 290.f, ph = lh * 4.f + pady * 2.f;
-        const float px = 22.f, py = fh - ph - 20.f;   // bottom-left of the screen
+        // Bottom-right of the screen (the left edge now holds the info sidebar).
+        const float px = fw - pw - 22.f, py = fh - ph - 20.f;
         nvgBeginPath(vg);
         nvgRoundedRect(vg, px, py, pw, ph, 6.f);
         nvgFillColor(vg, nvgRGBA(8, 12, 18, 215));
@@ -835,6 +1449,206 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 225));
             nvgText(vg, px + padx + 96.f, ly, r.v, nullptr);
             ly += lh;
+        }
+    }
+
+    // Left info column: system indicators, time/date, weather + forecast, schedule.
+    draw_expanded_sidebar(vg, s, fw, fh);
+}
+
+// ── Expanded-map left sidebar ────────────────────────────────────────────────────
+// A fixed left column shown only over the expanded map: Old-HUD status indicators,
+// the time + date, current weather with a 3-day forecast, and the schedule.
+void HudRenderer::draw_expanded_sidebar(NVGcontext* vg, const AppState& s,
+                                        float fw, float fh) {
+    (void)fw;
+    const float x0   = 20.f;
+    const float top  = 20.f;
+    const float colW = 290.f;
+    const float bottom = fh - 20.f;
+    const float pad  = 14.f;
+    const float x    = x0 + pad;          // content left
+    const float cw   = colW - pad * 2.f;  // content width
+    float y          = top + pad;         // running cursor
+
+    // Panel backing.
+    nvgBeginPath(vg); nvgRoundedRect(vg, x0, top, colW, bottom - top, 8.f);
+    nvgFillColor(vg, nvgRGBA(8, 12, 18, 205)); nvgFill(vg);
+    nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 150)); nvgStrokeWidth(vg, 1.2f); nvgStroke(vg);
+
+    auto header = [&](const char* t) {
+        nvg_set_font_ui(13.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        nvgFillColor(vg, nvg_col_a(col_.glow_base, 235));
+        nvgText(vg, x, y, t, nullptr);
+        y += 16.f;
+        nvgBeginPath(vg); nvgMoveTo(vg, x, y); nvgLineTo(vg, x + cw, y);
+        nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 90)); nvgStrokeWidth(vg, 1.f); nvgStroke(vg);
+        y += 9.f;
+    };
+
+    // ── 1. System indicators (everything from the Old HUD) ──────────────────
+    header("SYSTEM");
+    {
+        const SystemHealth& h = s.health;
+        bool bt_on = false;
+        for (const auto& d : s.bt_devices) if (d.connected) { bt_on = true; break; }
+        struct Ind { const char* label; bool ok; };
+        const Ind inds[] = {
+            { "Proot",     h.teensy_ok },
+            { "LoRa",      h.lora_ok },
+            { "Interface", h.knob_ok },
+            { "WiFi",      s.wifi.connected || h.wifi_ok },
+            { "Bluetooth", bt_on },
+            { "Gamepad",   h.gamepad_ok },
+            { "Audio",     h.audio_ok || s.audio.enabled },
+            { "SSH",       s.ssh.active || h.ssh_active },
+            { "Android",   h.android_mirror },
+            { "MPU",       h.mpu9250_ok },
+            { "L.Cam",     h.cam_owl_left },
+            { "R.Cam",     h.cam_owl_right },
+            { "Cam 1",     h.cam_usb1 },
+            { "Cam 2",     h.cam_usb2 },
+        };
+        const int   N    = static_cast<int>(sizeof(inds) / sizeof(inds[0]));
+        const float rowH = 18.f;
+        const float colX2 = x + cw * 0.5f;
+        nvg_set_font_mono(12.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        for (int i = 0; i < N; ++i) {
+            const float rx = (i % 2 == 0) ? x : colX2;
+            const float ry = y + (i / 2) * rowH + rowH * 0.5f;
+            nvgBeginPath(vg); nvgCircle(vg, rx + 4.f, ry, 4.f);
+            nvgFillColor(vg, inds[i].ok ? nvg_col(col_.ind_good) : nvg_col(col_.ind_fail));
+            nvgFill(vg);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, inds[i].ok ? 230 : 150));
+            nvgText(vg, rx + 14.f, ry, inds[i].label, nullptr);
+        }
+        y += ((N + 1) / 2) * rowH + 12.f;
+    }
+
+    // ── 2. Time & date ──────────────────────────────────────────────────────
+    header("TIME");
+    {
+        const time_t now = std::time(nullptr) + static_cast<time_t>(s.clock_cfg.manual_offset_s);
+        struct tm tmv; localtime_r(&now, &tmv);
+        char tbuf[24], dbuf[40];
+        if (s.clock_cfg.use_24h) {
+            snprintf(tbuf, sizeof(tbuf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+        } else {
+            int h12 = tmv.tm_hour % 12; if (!h12) h12 = 12;
+            snprintf(tbuf, sizeof(tbuf), "%d:%02d %s", h12, tmv.tm_min,
+                     tmv.tm_hour < 12 ? "AM" : "PM");
+        }
+        static const char* kDow[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+        static const char* kMon[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                     "Jul","Aug","Sep","Oct","Nov","Dec"};
+        snprintf(dbuf, sizeof(dbuf), "%s, %s %d", kDow[tmv.tm_wday], kMon[tmv.tm_mon], tmv.tm_mday);
+        nvg_set_font_ui(30.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvgText(vg, x, y, tbuf, nullptr);
+        y += 33.f;
+        nvg_set_font_ui(14.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        nvgFillColor(vg, nvg_col_a(col_.text_fill, 205));
+        nvgText(vg, x, y, dbuf, nullptr);
+        y += 24.f;
+    }
+
+    // ── 3. Weather + 3-day forecast ─────────────────────────────────────────
+    header("WEATHER");
+    {
+        const WeatherState& w = s.weather;
+        if (!w.ok) {
+            nvg_set_font_ui(13.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+            nvgText(vg, x, y, s.weather_cfg.enabled ? "fetching..." : "off", nullptr);
+            y += 22.f;
+        } else {
+            const float isz = 46.f;
+            if (!icons_.draw(vg, wmo_icon(w.code, w.is_day), x + isz * 0.5f, y + isz * 0.5f, isz, 1.f))
+                draw_weather_glyph(vg, w.code, w.is_day, x + isz * 0.5f, y + isz * 0.5f, isz);
+            char b[80];
+            nvg_set_font_ui(26.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col(col_.text_fill));
+            snprintf(b, sizeof(b), "%.0f\xC2\xB0", static_cast<double>(w.temp));
+            nvgText(vg, x + isz + 10.f, y, b, nullptr);
+            nvg_set_font_ui(12.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 205));
+            snprintf(b, sizeof(b), "%s  feels %.0f\xC2\xB0",
+                     w.condition.c_str(), static_cast<double>(w.feels));
+            nvgText(vg, x + isz + 10.f, y + 28.f, b, nullptr);
+            if (!w.location.empty())
+                nvgText(vg, x + isz + 10.f, y + 42.f, w.location.c_str(), nullptr);
+            y += isz + 14.f;
+
+            static const char* kDow[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+            const time_t base = std::time(nullptr);
+            const float rowH = 26.f;
+            for (int i = 0; i < w.forecast_count; ++i) {
+                const WeatherDay& fd = w.forecast[i];
+                const time_t dt = base + static_cast<time_t>(i) * 86400;
+                struct tm dtm; localtime_r(&dt, &dtm);
+                const float ry = y + rowH * 0.5f;
+                nvg_set_font_mono(12.f);
+                nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
+                nvgText(vg, x, ry, i == 0 ? "Today" : kDow[dtm.tm_wday], nullptr);
+                if (!icons_.draw(vg, wmo_icon(fd.code, true), x + 70.f, ry, 20.f, 1.f))
+                    draw_weather_glyph(vg, fd.code, true, x + 70.f, ry, 20.f);
+                char hb[32];
+                snprintf(hb, sizeof(hb), "%.0f / %.0f\xC2\xB0",
+                         static_cast<double>(fd.tmax), static_cast<double>(fd.tmin));
+                nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(vg, nvg_col_a(col_.text_fill, 230));
+                nvgText(vg, x + 92.f, ry, hb, nullptr);
+                if (fd.rain_prob >= 0) {
+                    char rb[16]; snprintf(rb, sizeof(rb), "%d%%", fd.rain_prob);
+                    nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(vg, nvg_col_a(col_.glow_base, 220));
+                    nvgText(vg, x + cw, ry, rb, nullptr);
+                }
+                y += rowH;
+            }
+            y += 10.f;
+        }
+    }
+
+    // ── 4. Schedule ─────────────────────────────────────────────────────────
+    header("SCHEDULE");
+    {
+        const time_t now = std::time(nullptr);
+        int shown = 0;
+        for (const auto& e : s.scheduler_events) {
+            if (e.start_utc == 0) continue;
+            if (e.end_utc != 0 && e.end_utc < now) continue;   // skip finished
+            if (shown >= 6 || y > bottom - 34.f) break;
+            struct tm tmv; localtime_r(&e.start_utc, &tmv);
+            char tb[16];
+            if (e.all_day) snprintf(tb, sizeof(tb), "all-day");
+            else           strftime(tb, sizeof(tb), "%H:%M", &tmv);
+            char sub[112];
+            if (!e.location.empty()) snprintf(sub, sizeof(sub), "%s  %s", tb, e.location.c_str());
+            else                     snprintf(sub, sizeof(sub), "%s", tb);
+            nvg_set_font_ui(13.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 235));
+            nvgText(vg, x, y, e.title.c_str(), nullptr);
+            nvg_set_font_mono(11.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 170));
+            nvgText(vg, x, y + 15.f, sub, nullptr);
+            y += 32.f; ++shown;
+        }
+        if (shown == 0) {
+            nvg_set_font_ui(13.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+            nvgText(vg, x, y, "no events", nullptr);
         }
     }
 }
@@ -1069,9 +1883,7 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     }
 
     // Label (top-left corner of the box, drawn after image so it's always visible)
-    if (font_mono_) ImGui::PushFont(font_mono_);
-    dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.accent, "ANDROID");
-    if (font_mono_) ImGui::PopFont();
+    // (no corner label)
 
     ImGui::End();
 }
@@ -1136,15 +1948,13 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_
                 col_.accent, 4.f, 0, 1.5f);
 
     // Small "LED" label in the corner
-    if (font_mono_) ImGui::PushFont(font_mono_);
-    dl->AddText({p.x + 4.f, p.y + 4.f}, col_.accent, "LED");
-    if (font_mono_) ImGui::PopFont();
+    // (no corner label)
 
     ImGui::End();
 }
 
 // ── Protoface portrait beside the minimap ───────────────────────────────────────
-// A scaled, one-side preview of the LED face placed to the right of the minimap
+// A scaled, one-side preview of the LED face placed to the left of the minimap
 // (American Fugitive-style portrait). Drawn on the ImGui foreground list in display
 // coords, matching the minimap geometry.
 void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_h,
@@ -1172,12 +1982,15 @@ void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_
     const ImVec2 uv0 = cfg.portrait_right_half ? ImVec2(0.5f, 0.f) : ImVec2(0.f, 0.f);
     const ImVec2 uv1 = cfg.portrait_right_half ? ImVec2(1.f,  1.f) : ImVec2(0.5f, 1.f);
 
-    const float ph    = ringR * 0.55f;          // portrait height
+    const float ph    = ringR * 0.55f * std::max(0.5f, cfg.portrait_scale);  // portrait height
     const float pw    = ph * aspect;            // 2:1 width
     const float pad   = 6.f;
     const float win_w = pw + pad * 2.f;
     const float win_h = ph + pad * 2.f;
-    const float x0    = cx + ringR + 28.f;      // to the right of the map cluster
+    // To the left of the map cluster, clearing the compass ring (and the
+    // battery/system gauge when it's shown on that side).
+    const float clear = cfg.battery_arc ? 76.f : 34.f;
+    const float x0    = cx - ringR - clear - win_w;
     const float y0    = cy - win_h * 0.5f;
 
     ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -1185,7 +1998,6 @@ void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_
     dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
                  {x0 + pad, y0 + pad}, {x0 + pad + pw, y0 + pad + ph}, uv0, uv1);
     dl->AddRect({x0, y0}, {x0 + win_w, y0 + win_h}, col_.accent, 6.f, 0, 1.5f);
-    dl->AddText({x0 + 5.f, y0 + 3.f}, col_.accent, "FACE");
 }
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
@@ -2557,7 +3369,8 @@ void HudRenderer::fx_update(NVGcontext* vg, const AppState& s,
 
 // ── System status panel ───────────────────────────────────────────────────────
 
-void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active) {
+void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active,
+                                 float x_offset, bool narrow) {
     if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
@@ -2582,10 +3395,12 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     // into a second column when the first fills up.
     constexpr float COLW  = 330.f;            // per-column content width
     constexpr float GAP   = 12.f;             // gap between columns
-    constexpr float PW     = COLW * 2.f + GAP; // total panel width
+    // Narrow = single column (~half width); the content fits one column on a tall
+    // display, so the second column's space is just empty there.
+    const float PW = narrow ? COLW : (COLW * 2.f + GAP);
     constexpr float PAD   = 10.f;
     constexpr float MRG   = 14.f;             // left/top margin from screen edge
-    const float px = MRG;
+    const float px = MRG + x_offset;          // x_offset opens it right of the map sidebar
     const float py = MRG;
     const float PH = std::min(sh - MRG * 2.f, 1040.f);
 
@@ -2600,8 +3415,9 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     float cy = py + PAD;    // current y cursor
 
     // Wrap into the second column once the first can't fit `need` more pixels.
+    // Narrow mode keeps everything in one column (no second column).
     auto wrap_col = [&](float need) {
-        if (cx <= px + 0.5f && cy + need > py + PH - PAD) {
+        if (!narrow && cx <= px + 0.5f && cy + need > py + PH - PAD) {
             cx = px + COLW + GAP;
             cy = py + PAD;
         }

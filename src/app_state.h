@@ -262,12 +262,44 @@ struct MapOverlayConfig {
     // beside the minimap (American Fugitive-style character portrait).
     bool        portrait            = false;
     bool        portrait_right_half = false;  // false = left face half, true = right
+    float       portrait_scale      = 1.0f;   // size multiplier for the preview window
 
     // Helldivers-style temporary expanded view (pan/zoom) — runtime only.
     bool        expanded            = false;
     float       view_zoom           = 1.0f;   // expanded-view zoom (independent of minimap)
     float       view_pan_x          = 0.f;    // expanded-view pan, image-space fraction
     float       view_pan_y          = 0.f;
+};
+
+// ── Info panel (cycling side widgets) ───────────────────────────────────────────
+// A configurable HUD region — typically mirroring the minimap on the opposite
+// side — that auto-cycles through glanceable widgets so a user can take in
+// weather / notifications / schedule / time at a glance. Render-thread owned; the
+// menu writes fields while holding the mutex (like MapOverlayConfig).
+enum class InfoWidget : uint8_t { Clock = 0, Notifications, Schedule, Weather, WeatherPrecip, Count };
+
+struct InfoPanelConfig {
+    bool  enabled   = false;    // off by default; user opts in per side
+    float anchor_x  = 0.85f;    // screen fraction — right side, mirroring a left minimap
+    float anchor_y  = 0.5f;
+    float pan_x     = 0.f;
+    float pan_y     = 0.f;
+    float size_px   = 150.f;    // half-extent (radius), matching the minimap footprint
+    float cycle_sec = 6.f;      // dwell per widget before advancing
+    int   clock_face = 0;       // analog clock style: 0=ticks, 1=numbers, 2=minimal
+    // Which widgets take part in the cycle (indexed by InfoWidget):
+    // clock, notifications, schedule, weather (now), weather (precip).
+    bool  show[static_cast<int>(InfoWidget::Count)] = { true, true, true, false, false };
+};
+
+// ── HUD dock layout ─────────────────────────────────────────────────────────────
+// The minimap and info panel are opposite-side twins: the minimap is always on the
+// RIGHT, the info panel always on the LEFT. `bottom` picks the top vs bottom edge;
+// `v_offset` is a fine vertical nudge in pixels applied to both. Anchors are derived
+// from this (see apply_hud_dock in main).
+struct HudDock {
+    bool  bottom   = true;    // false = top edge, true = bottom edge (default bottom)
+    float v_offset = 0.f;     // vertical nudge in pixels (Up/Down menu), applied to both
 };
 
 // ── Particle effects ──────────────────────────────────────────────────────────
@@ -405,9 +437,92 @@ struct SshState {
     int  port   = 22;
 };
 
+// ── Weather ─────────────────────────────────────────────────────────────────────
+// Live weather for the info-panel widget. Fetched off the render thread by
+// WeatherMonitor (Open-Meteo via curl) into `weather`; settings live in
+// `weather_cfg`. WMO weather codes map to short text + an icon asset name.
+// One day of the daily forecast (index 0 = today). Day-of-week is derived at draw
+// time from the local clock (today + index), so no date field is needed here.
+struct WeatherDay {
+    int   code      = -1;   // WMO daily weather code
+    float tmax      = 0.f;
+    float tmin      = 0.f;
+    int   rain_prob = -1;   // max precip probability (%)
+};
+
+struct WeatherState {
+    bool        ok          = false;   // last fetch succeeded
+    float       temp        = 0.f;     // in the configured unit
+    float       feels       = 0.f;
+    float       wind        = 0.f;
+    int         humidity    = -1;      // %
+    int         code        = -1;      // WMO weather code
+    bool        is_day      = true;
+    float       temp_high   = 0.f;     // today's high (daily)
+    float       temp_low    = 0.f;     // today's low (daily)
+    float       precip_now  = 0.f;     // current precipitation amount
+    int         rain_prob   = -1;      // today's max precip probability (%)
+    std::string condition;             // "Clear", "Rain", …
+    std::string location;              // city name
+    time_t      updated_utc = 0;
+
+    // Multi-day forecast (for the expanded-map sidebar). forecast[0] == today.
+    static constexpr int kForecastDays = 3;
+    WeatherDay  forecast[kForecastDays];
+    int         forecast_count = 0;
+};
+
+struct WeatherConfig {
+    bool        enabled      = false;  // run the fetcher
+    bool        auto_locate  = true;   // IP geolocation vs manual lat/lon
+    bool        metric       = true;   // C/kph vs F/mph
+    double      lat          = 0.0;
+    double      lon          = 0.0;
+    std::string place;                 // optional manual label
+    int         interval_min = 15;
+};
+
+// WMO weather code → short label.
+inline const char* wmo_text(int c) {
+    if (c <= 0)               return "Clear";
+    if (c <= 2)               return "Partly Cloudy";
+    if (c == 3)               return "Overcast";
+    if (c == 45 || c == 48)   return "Fog";
+    if (c >= 51 && c <= 57)   return "Drizzle";
+    if ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) return "Rain";
+    if ((c >= 71 && c <= 77) || c == 85 || c == 86)   return "Snow";
+    if (c >= 95)              return "Thunderstorm";
+    return "--";
+}
+
+// WMO weather code → icon asset name (assets/icons/<name>.png; no-ops if absent).
+inline const char* wmo_icon(int c, bool day) {
+    if (c <= 0)               return day ? "wx-clear" : "wx-clear-night";
+    if (c <= 2)               return day ? "wx-partly" : "wx-partly-night";
+    if (c == 3)               return "wx-cloudy";
+    if (c == 45 || c == 48)   return "wx-fog";
+    if (c >= 51 && c <= 57)   return "wx-drizzle";
+    if ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) return "wx-rain";
+    if ((c >= 71 && c <= 77) || c == 85 || c == 86)   return "wx-snow";
+    if (c >= 95)              return "wx-storm";
+    return "wx-cloudy";
+}
+
 // ── Notification system ───────────────────────────────────────────────────────
 
 enum class NotifType : uint8_t { Alarm, Timer, LoRa, App };
+
+// Default icon asset name per notification type (resolves to <icons>/<name>.png).
+// A Notification may override this via its `icon` field.
+inline const char* notif_type_icon(NotifType t) {
+    switch (t) {
+        case NotifType::Alarm: return "alarm";
+        case NotifType::Timer: return "timer";
+        case NotifType::LoRa:  return "message";
+        case NotifType::App:   return "bell";
+    }
+    return "bell";
+}
 
 struct NotifAction {
     std::string label;                              // "DISMISS", "+2 MIN", etc.
@@ -423,6 +538,7 @@ struct Notification {
     float       auto_dismiss_s = 8.f;  // 0 = manual only
     bool        read         = false;
     bool        dismissed    = false;
+    std::string icon;                  // optional icon asset name; empty → by type
     std::vector<NotifAction> actions;
 };
 
@@ -483,6 +599,15 @@ struct AppState {
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
     bool  compass_tape       = true;   // the top-of-screen compass tape
+
+    // Legacy HUD chrome (edge/corner indicators: compass tape, health sides, face
+    // indicator, corner clock/timer, LoRa message list). Off = show only the new
+    // modular HUD (minimap + info panel). Render-thread-owned; menu writes under mtx.
+    bool  legacy_hud         = true;
+
+    // Skip the startup landing/profile screen and run the current config directly.
+    // Startup-only behavior; toggled in the System menu, persisted to config.
+    bool  skip_landing       = false;
 
     // Which XR-IMU axis drives the compass, and whether to invert the rotation
     // direction. Configurable from the menu so different IMU orientations work
@@ -578,6 +703,17 @@ struct AppState {
     // Map overlay config (render-thread owned; menu writes while holding mtx)
     MapOverlayConfig     map_overlay;
 
+    // Cycling info panel config (render-thread owned; menu writes while holding mtx)
+    InfoPanelConfig      info_panel;
+
+    // Top/bottom + swap docking that positions the minimap & info panel as twins.
+    HudDock              hud_dock;
+
+    // Expanded-map view options: optionally show the debug panel (opened to the right
+    // of the info sidebar) and/or hide the info panel while the map is expanded.
+    bool expanded_show_debug = false;
+    bool expanded_hide_info  = false;
+
     // Per-LoRa-node compass marker colors (indexed by node.local_id % 8)
     ImU32 lora_node_colors[8] = {
         IM_COL32(255, 160,  32, 255),  // 0 orange
@@ -600,6 +736,11 @@ struct AppState {
     std::vector<BtDevice>  bt_devices;
     SerialMetrics          serial_metrics;
 
+    // Weather (live data written by WeatherMonitor; settings written by menu/config)
+    WeatherState           weather;
+    WeatherConfig          weather_cfg;
+    std::atomic<bool>      weather_refresh { false };  // menu → force an immediate fetch
+
     // Cached XR display control values (no SDK getter; updated when menu writes).
     int xr_brightness     = 5;   // 1–7; mirrors last xr->set_brightness() call
     int xr_dimming        = 5;   // 0–9; mirrors last xr->set_dimming() call
@@ -620,6 +761,13 @@ struct AppState {
 
     // Signals render thread to quit.
     std::atomic<bool> quit { false };
+
+    // Window mode (desktop/dev): menu toggles set these + win_mode_dirty; the render
+    // loop applies them via XRDisplay::apply_window_mode on the main thread. Ignored
+    // while the glasses are connected (the window lives on the glasses monitor).
+    std::atomic<bool> win_fullscreen { false };
+    std::atomic<bool> win_frameless  { false };
+    std::atomic<bool> win_mode_dirty { false };
 
     // QR scan mute: set to future epoch-seconds to suppress notifications temporarily.
     std::atomic<int64_t> qr_mute_until_s { 0 };

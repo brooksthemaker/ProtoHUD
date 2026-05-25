@@ -126,6 +126,19 @@ FetchContent_Declare(stb
 )
 FetchContent_MakeAvailable(stb)
 
+# QR-Code-generator (nayuki, MIT) — encode the scheduler web URL for the menu.
+# The repo has no top-level CMakeLists, so MakeAvailable just fetches the source
+# (like nanovg); we compile the one C++ file ourselves.
+FetchContent_Declare(qrcodegen
+    GIT_REPOSITORY https://github.com/nayuki/QR-Code-generator.git
+    GIT_TAG        v1.8.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(qrcodegen)
+add_library(qrcodegen_cpp STATIC "${qrcodegen_SOURCE_DIR}/cpp/qrcodegen.cpp")
+target_include_directories(qrcodegen_cpp PUBLIC "${qrcodegen_SOURCE_DIR}/cpp")
+
+
 # ImGui has no CMakeLists — build it as a static library here.
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -190,6 +203,7 @@ set(SOURCES
     src/net/wifi_monitor.cpp
     src/net/ping_monitor.cpp
     src/net/bt_monitor.cpp
+    src/net/weather_monitor.cpp
     src/crash_reporter.cpp
     src/capture.cpp
     src/video_recorder.cpp
@@ -222,6 +236,7 @@ target_include_directories(protohud PRIVATE
 target_link_libraries(protohud PRIVATE
     imgui
     nanovg
+    qrcodegen_cpp
     glasses
     protoface_native
     ${OpenCV_LIBS}
@@ -302,6 +317,11 @@ file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/assets/shaders")
 file(COPY "${CMAKE_SOURCE_DIR}/assets/shaders/"
      DESTINATION "${CMAKE_BINARY_DIR}/assets/shaders")
 
+# Copy notification/widget icons (PNG) to the build directory.
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/assets/icons")
+file(COPY "${CMAKE_SOURCE_DIR}/assets/icons/"
+     DESTINATION "${CMAKE_BINARY_DIR}/assets/icons")
+
 # Copy VITURE .so files next to the binary for in-tree runs
 add_custom_command(TARGET protohud POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -317,6 +337,14 @@ add_custom_command(TARGET protohud POST_BUILD
         "${CMAKE_SOURCE_DIR}/assets/shaders"
         "$<TARGET_FILE_DIR:protohud>/assets/shaders"
     COMMENT "Syncing shaders to build directory"
+)
+
+# Keep icons in sync with source on every build (drop PNGs in assets/icons, rebuild)
+add_custom_command(TARGET protohud POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets/icons"
+        "$<TARGET_FILE_DIR:protohud>/assets/icons"
+    COMMENT "Syncing icons to build directory"
 )
 
 install(TARGETS protohud RUNTIME DESTINATION bin)
