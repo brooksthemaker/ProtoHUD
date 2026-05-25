@@ -313,7 +313,13 @@ static std::vector<MenuItem> build_menu(
         std::string       map_dir         = "/home/user/Pictures/protohud/maps",
         // Eye source selection (render-thread only, no mutex needed)
         EyeSource* left_eye_src  = nullptr,
-        EyeSource* right_eye_src = nullptr)
+        EyeSource* right_eye_src = nullptr,
+        // USB camera live-preview wiring: GL texture handles sampled by the camera
+        // image-setting context panels, plus a per-frame "preview request" the
+        // panels set (1/2/3) so the render loop opens the stream, hides the
+        // on-screen PiP, and shows the feed in the context pane while adjusting.
+        GLuint* tex_usb1 = nullptr, GLuint* tex_usb2 = nullptr, GLuint* tex_usb3 = nullptr,
+        int*    usb_preview_req = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -1132,6 +1138,90 @@ static std::vector<MenuItem> build_menu(
         };
     };
 
+    // Schematic preview of where / how big / which orientation the PiP sits on
+    // screen — like the Digital Zoom preview, no live feed (the real on-screen PiP
+    // already updates live as Position/Size/Rotation change).
+    auto make_pip_placement_panel = [menu_sys_pp](OverlayConfig* cfg) -> MenuContextPanelDraw {
+        return [cfg, menu_sys_pp](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                ? (*menu_sys_pp)->accent_color() : IM_COL32(255, 255, 255, 255);
+            // 16:9 screen outline, letterboxed into the content rect (leave a text line).
+            const float availH = sz.y - 16.f;
+            float sw = sz.x, sh = availH;
+            const float screenAR = 16.f / 9.f;
+            if (sw / sh > screenAR) sw = sh * screenAR; else sh = sw / screenAR;
+            const ImVec2 smin{ o.x + (sz.x - sw) * 0.5f, o.y + (availH - sh) * 0.5f };
+            const ImVec2 smax{ smin.x + sw, smin.y + sh };
+            dl->AddRectFilled(smin, smax, IM_COL32(20, 25, 30, 180), 3.f);
+            dl->AddRect(smin, smax, IM_COL32(120, 130, 140, 200), 3.f, 0, 1.5f);
+            // PiP rect: height = size fraction of screen height; aspect by rotation.
+            const bool portrait = (cfg->rotation == OverlayConfig::Rotation::Portrait ||
+                                   cfg->rotation == OverlayConfig::Rotation::PortraitFlipped);
+            const float pratio = portrait ? (9.f / 16.f) : (16.f / 9.f);
+            float ph = sh * std::clamp(cfg->size, 0.05f, 1.0f);
+            float pw = ph * pratio;
+            if (pw > sw) { pw = sw; ph = pw / pratio; }
+            // anchor_x/y are the PiP centre fraction (matches hud_renderer); clamp inside.
+            float cx = smin.x + sw * cfg->anchor_x;
+            float cy = smin.y + sh * cfg->anchor_y;
+            ImVec2 pmin{ cx - pw * 0.5f, cy - ph * 0.5f };
+            pmin.x = std::clamp(pmin.x, smin.x, smax.x - pw);
+            pmin.y = std::clamp(pmin.y, smin.y, smax.y - ph);
+            const ImVec2 pmax{ pmin.x + pw, pmin.y + ph };
+            dl->AddRectFilled(pmin, pmax, (accent & 0x00FFFFFFu) | (60u << 24), 2.f);
+            dl->AddRect(pmin, pmax, (accent & 0x00FFFFFFu) | (235u << 24), 2.f, 0, 2.f);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Size %.0f%%   %s", cfg->size * 100.f,
+                     portrait ? "Portrait" : "Landscape");
+            dl->AddText({ o.x, o.y + sz.y - 14.f }, IM_COL32(200, 200, 200, 200), buf);
+        };
+    };
+
+    // Live-feed preview for the image settings (Brightness / Exposure / White
+    // Balance / Resolution).  Sets *usb_preview_req = cam while visible so the
+    // render loop opens the stream, hides the on-screen PiP, and keeps the texture
+    // uploaded; draws the actual frame plus an info line read from `info`.
+    auto make_usb_live_panel = [cameras, menu_sys_pp, usb_preview_req](
+            int cam, GLuint* tex,
+            std::function<std::string()> info) -> MenuContextPanelDraw {
+        return [cameras, menu_sys_pp, usb_preview_req, cam, tex, info]
+               (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            if (usb_preview_req) *usb_preview_req = cam;
+            const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                ? (*menu_sys_pp)->accent_color() : IM_COL32(255, 255, 255, 255);
+            // Feed area on top, two text lines reserved below.
+            const float textH = 34.f;
+            const ImVec2 fa_o{ o.x, o.y };
+            const ImVec2 fa_s{ sz.x, sz.y - textH };
+            float ar = 16.f / 9.f;
+            if (cameras) {
+                UsbCamConfig c = (cam == 1) ? cameras->usb1_cfg()
+                               : (cam == 2) ? cameras->usb2_cfg()
+                                            : cameras->usb3_cfg();
+                if (c.width > 0 && c.height > 0) ar = float(c.width) / float(c.height);
+            }
+            float fw = fa_s.x, fh = fa_s.y;
+            if (fw / fh > ar) fw = fh * ar; else fh = fw / ar;
+            const ImVec2 fmin{ fa_o.x + (fa_s.x - fw) * 0.5f, fa_o.y + (fa_s.y - fh) * 0.5f };
+            const ImVec2 fmax{ fmin.x + fw, fmin.y + fh };
+            const GLuint t = tex ? *tex : 0u;
+            if (t) {
+                dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(t)),
+                             fmin, fmax);
+            } else {
+                dl->AddRectFilled(fmin, fmax, IM_COL32(20, 25, 30, 180), 3.f);
+                dl->AddText({ fmin.x + 8.f, fmin.y + 8.f },
+                            IM_COL32(200, 200, 200, 200), "Starting preview...");
+            }
+            dl->AddRect(fmin, fmax, (accent & 0x00FFFFFFu) | (235u << 24), 3.f, 0, 2.f);
+            if (info) {
+                const std::string s = info();
+                dl->AddText({ o.x, o.y + sz.y - textH + 2.f },
+                            IM_COL32(210, 210, 210, 220), s.c_str());
+            }
+        };
+    };
+
     // ── USB camera menus ──────────────────────────────────────────────────────
     // Helper: build a "Resolution" submenu for one USB camera slot.
     // If the stream is currently open, close it and reopen with the new dimensions.
@@ -1189,94 +1279,78 @@ static std::vector<MenuItem> build_menu(
         return items;
     };
 
-    std::vector<MenuItem> cam1_overlay_menu = {
-        toggle("Show Overlay",
-            [pip_cam1_overlay]{ return *pip_cam1_overlay; },
-            [pip_cam1_overlay](bool v){ *pip_cam1_overlay = v; }),
-        submenu("Position", make_position_items(pip_cfg1)),
-        make_size_slider("Size", pip_cfg1),
-        submenu("Rotation", make_rotation_items(pip_cfg1)),
+    std::vector<MenuItem> usb1_pip_menu = {
+        with_panel(submenu("Window Position", make_position_items(pip_cfg1)),
+                   "PiP Placement", make_pip_placement_panel(pip_cfg1)),
+        with_panel(submenu("Window Size", std::vector<MenuItem>{ make_size_slider("Size", pip_cfg1) }),
+                   "PiP Placement", make_pip_placement_panel(pip_cfg1)),
+        with_panel(submenu("Window Rotation", make_rotation_items(pip_cfg1)),
+                   "PiP Placement", make_pip_placement_panel(pip_cfg1)),
+        with_panel(submenu("Brightness", std::vector<MenuItem>{
+            toggle("Auto Brightness",
+                [cameras]{ return cameras && cameras->usb1_cfg().auto_brightness; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb1_cfg(); c.auto_brightness = v; cameras->update_usb1_cfg(c); }),
+            slider("Auto Brightness Target", 40.f, 220.f, 5.f, "",
+                [cameras]{ return cameras ? cameras->usb1_cfg().auto_brightness_target : 100.f; },
+                [cameras](float v){ if (!cameras) return; UsbCamConfig c = cameras->usb1_cfg(); c.auto_brightness_target = v; cameras->update_usb1_cfg(c); }),
+            slider("Manual Brightness", 50.f, 300.f, 25.f, " %",
+                [cameras]{ return cameras ? cameras->usb1_brightness() * 100.f : 100.f; },
+                [cameras](float v){ if (cameras) cameras->set_usb1_brightness(v / 100.f); }),
+        }), "Brightness", make_usb_live_panel(1, tex_usb1, [cameras]{
+            if (!cameras) return std::string("Brightness");
+            UsbCamConfig c = cameras->usb1_cfg();
+            char b[96]; snprintf(b, sizeof(b), "Auto %s   Target %.0f\nManual %.0f%%",
+                c.auto_brightness ? "ON" : "OFF", c.auto_brightness_target, cameras->usb1_brightness() * 100.f);
+            return std::string(b);
+        })),
+        with_panel(submenu("Exposure", std::vector<MenuItem>{
+            toggle("Auto Exposure",
+                [cameras]{ return !cameras || cameras->usb1_cfg().auto_exposure; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb1_cfg(); c.auto_exposure = v; cameras->update_usb1_cfg(c); cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_AUTO, v ? 3 : 1); }),
+            slider("Exposure Time", 1.f, 5000.f, 10.f, "",
+                [cameras]{ return cameras ? (float)cameras->usb1_cfg().exposure_time : 157.f; },
+                [cameras](float v){ if (!cameras) return; UsbCamConfig c = cameras->usb1_cfg(); c.exposure_time = (int)v; cameras->update_usb1_cfg(c); cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, (int)v); }),
+        }), "Exposure", make_usb_live_panel(1, tex_usb1, [cameras]{
+            if (!cameras) return std::string("Exposure");
+            UsbCamConfig c = cameras->usb1_cfg();
+            char b[96]; snprintf(b, sizeof(b), "Auto %s\nTime %d", c.auto_exposure ? "ON" : "OFF", c.exposure_time);
+            return std::string(b);
+        })),
+        with_panel(submenu("White Balance", std::vector<MenuItem>{
+            toggle("Auto White Balance",
+                [cameras]{ return !cameras || cameras->usb1_cfg().auto_wb; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb1_cfg(); c.auto_wb = v; cameras->update_usb1_cfg(c); cameras->set_usb1_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, v ? 1 : 0); }),
+            slider("Manual White Balance", 2800.f, 6500.f, 100.f, "K",
+                [cameras]{ return cameras ? (float)cameras->usb1_cfg().wb_temp : 4600.f; },
+                [cameras](float v){ if (!cameras) return; UsbCamConfig c = cameras->usb1_cfg(); c.wb_temp = (int)v; cameras->update_usb1_cfg(c); cameras->set_usb1_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, (int)v); }),
+        }), "White Balance", make_usb_live_panel(1, tex_usb1, [cameras]{
+            if (!cameras) return std::string("White Balance");
+            UsbCamConfig c = cameras->usb1_cfg();
+            char b[96]; snprintf(b, sizeof(b), "Auto %s\nTemp %dK", c.auto_wb ? "ON" : "OFF", c.wb_temp);
+            return std::string(b);
+        })),
+        with_panel(submenu("Resolution and Framerate", std::vector<MenuItem>{
+            submenu("Resolution", make_resolution_items(
+                [cameras]{ return cameras->usb1_cfg(); },
+                [cameras](UsbCamConfig c){ cameras->update_usb1_cfg(c); },
+                [cameras]{ return cameras && cameras->usb1_ok(); },
+                [cameras]{ cameras->close_usb1(); },
+                [cameras]{ cameras->open_usb1(); })),
+            toggle("Dynamic Framerate",
+                [cameras]{ return cameras && cameras->usb1_cfg().dynamic_framerate; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb1_cfg(); c.dynamic_framerate = v; cameras->update_usb1_cfg(c); cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, v ? 1 : 0); }),
+        }), "Resolution", make_usb_live_panel(1, tex_usb1, [cameras]{
+            if (!cameras) return std::string("Resolution");
+            UsbCamConfig c = cameras->usb1_cfg();
+            char b[96]; snprintf(b, sizeof(b), "%dx%d\nDynamic FPS %s", c.width, c.height, c.dynamic_framerate ? "ON" : "OFF");
+            return std::string(b);
+        })),
     };
-    std::vector<MenuItem> usb1_brightness_menu = {
-        leaf_sel("50%",  [cameras]{ if (cameras) cameras->set_usb1_brightness(0.5f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 0.5f; }),
-        leaf_sel("100%", [cameras]{ if (cameras) cameras->set_usb1_brightness(1.0f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 1.0f; }),
-        leaf_sel("150%", [cameras]{ if (cameras) cameras->set_usb1_brightness(1.5f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 1.5f; }),
-        leaf_sel("200%", [cameras]{ if (cameras) cameras->set_usb1_brightness(2.0f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 2.0f; }),
-        leaf_sel("300%", [cameras]{ if (cameras) cameras->set_usb1_brightness(3.0f); }, [cameras]{ return cameras && cameras->usb1_brightness() == 3.0f; }),
-    };
-    std::vector<MenuItem> usb1_exposure_menu = {
-        toggle("Auto Exposure",
-            [cameras]{ return !cameras || cameras->usb1_cfg().auto_exposure; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb1_cfg(); c.auto_exposure = v;
-                cameras->update_usb1_cfg(c);
-                cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_AUTO, v ? 3 : 1);
-            }),
-        slider("Exposure Time", 1.f, 5000.f, 10.f, "",
-            [cameras]{ return cameras ? (float)cameras->usb1_cfg().exposure_time : 157.f; },
-            [cameras](float v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb1_cfg(); c.exposure_time = (int)v;
-                cameras->update_usb1_cfg(c);
-                cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, (int)v);
-            }),
-        toggle("Auto White Balance",
-            [cameras]{ return !cameras || cameras->usb1_cfg().auto_wb; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb1_cfg(); c.auto_wb = v;
-                cameras->update_usb1_cfg(c);
-                cameras->set_usb1_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, v ? 1 : 0);
-            }),
-        slider("WB Temperature", 2800.f, 6500.f, 100.f, "K",
-            [cameras]{ return cameras ? (float)cameras->usb1_cfg().wb_temp : 4600.f; },
-            [cameras](float v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb1_cfg(); c.wb_temp = (int)v;
-                cameras->update_usb1_cfg(c);
-                cameras->set_usb1_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, (int)v);
-            }),
-        toggle("Dynamic Framerate",
-            [cameras]{ return cameras && cameras->usb1_cfg().dynamic_framerate; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb1_cfg(); c.dynamic_framerate = v;
-                cameras->update_usb1_cfg(c);
-                cameras->set_usb1_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, v ? 1 : 0);
-            }),
-    };
-    std::vector<MenuItem> usb_cam1_menu = {
-        toggle("Open Stream",
-            [cameras]{ return cameras && cameras->usb1_ok(); },
-            [pip_cam1_overlay](bool v){ *pip_cam1_overlay = v; }),
-        submenu("Select Device", make_dev_select(
+    std::vector<MenuItem> usb1_device_menu = {
+        submenu("Device Select", make_dev_select(
             [cameras]{ return cameras ? cameras->usb1_cfg().device : ""; },
             [cameras](const std::string& p){ if (cameras) cameras->reassign_usb1(p); })),
-        toggle("Auto Brightness",
-            [cameras]{ return cameras && cameras->usb1_cfg().auto_brightness; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb1_cfg(); c.auto_brightness = v;
-                cameras->update_usb1_cfg(c);
-            }),
-        slider("Brightness Target", 40.f, 220.f, 5.f, "",
-            [cameras]{ return cameras ? cameras->usb1_cfg().auto_brightness_target : 100.f; },
-            [cameras](float v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb1_cfg(); c.auto_brightness_target = v;
-                cameras->update_usb1_cfg(c);
-            }),
-        submenu("Overlay",     std::move(cam1_overlay_menu)),
-        submenu("Brightness",  std::move(usb1_brightness_menu)),
-        submenu("Exposure",    std::move(usb1_exposure_menu)),
-        submenu("Resolution",  make_resolution_items(
-            [cameras]{ return cameras->usb1_cfg(); },
-            [cameras](UsbCamConfig c){ cameras->update_usb1_cfg(c); },
-            [cameras]{ return cameras && cameras->usb1_ok(); },
-            [cameras]{ cameras->close_usb1(); },
-            [cameras]{ cameras->open_usb1(); })),
-        leaf("Scan for Camera", [cameras, &state]{
+        leaf("Scan for Devices", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb1();
                 std::lock_guard<std::mutex> lk(state.mtx);
@@ -1284,95 +1358,86 @@ static std::vector<MenuItem> build_menu(
             }
         }),
     };
+    std::vector<MenuItem> usb_cam1_menu = {
+        toggle("Open Camera",
+            [cameras]{ return cameras && cameras->usb1_ok(); },
+            [pip_cam1_overlay](bool v){ *pip_cam1_overlay = v; }),
+        submenu("PiP Window Settings", std::move(usb1_pip_menu)),
+        submenu("Device Options",      std::move(usb1_device_menu)),
+    };
 
-    std::vector<MenuItem> cam2_overlay_menu = {
-        toggle("Show Overlay",
-            [pip_cam2_overlay]{ return *pip_cam2_overlay; },
-            [pip_cam2_overlay](bool v){ *pip_cam2_overlay = v; }),
-        submenu("Position", make_position_items(pip_cfg2)),
-        make_size_slider("Size", pip_cfg2),
-        submenu("Rotation", make_rotation_items(pip_cfg2)),
+    std::vector<MenuItem> usb2_pip_menu = {
+        with_panel(submenu("Window Position", make_position_items(pip_cfg2)),
+                   "PiP Placement", make_pip_placement_panel(pip_cfg2)),
+        with_panel(submenu("Window Size", std::vector<MenuItem>{ make_size_slider("Size", pip_cfg2) }),
+                   "PiP Placement", make_pip_placement_panel(pip_cfg2)),
+        with_panel(submenu("Window Rotation", make_rotation_items(pip_cfg2)),
+                   "PiP Placement", make_pip_placement_panel(pip_cfg2)),
+        with_panel(submenu("Brightness", std::vector<MenuItem>{
+            toggle("Auto Brightness",
+                [cameras]{ return cameras && cameras->usb2_cfg().auto_brightness; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb2_cfg(); c.auto_brightness = v; cameras->update_usb2_cfg(c); }),
+            slider("Auto Brightness Target", 40.f, 220.f, 5.f, "",
+                [cameras]{ return cameras ? cameras->usb2_cfg().auto_brightness_target : 100.f; },
+                [cameras](float v){ if (!cameras) return; UsbCamConfig c = cameras->usb2_cfg(); c.auto_brightness_target = v; cameras->update_usb2_cfg(c); }),
+            slider("Manual Brightness", 50.f, 300.f, 25.f, " %",
+                [cameras]{ return cameras ? cameras->usb2_brightness() * 100.f : 100.f; },
+                [cameras](float v){ if (cameras) cameras->set_usb2_brightness(v / 100.f); }),
+        }), "Brightness", make_usb_live_panel(2, tex_usb2, [cameras]{
+            if (!cameras) return std::string("Brightness");
+            UsbCamConfig c = cameras->usb2_cfg();
+            char b[96]; snprintf(b, sizeof(b), "Auto %s   Target %.0f\nManual %.0f%%",
+                c.auto_brightness ? "ON" : "OFF", c.auto_brightness_target, cameras->usb2_brightness() * 100.f);
+            return std::string(b);
+        })),
+        with_panel(submenu("Exposure", std::vector<MenuItem>{
+            toggle("Auto Exposure",
+                [cameras]{ return !cameras || cameras->usb2_cfg().auto_exposure; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb2_cfg(); c.auto_exposure = v; cameras->update_usb2_cfg(c); cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_AUTO, v ? 3 : 1); }),
+            slider("Exposure Time", 1.f, 5000.f, 10.f, "",
+                [cameras]{ return cameras ? (float)cameras->usb2_cfg().exposure_time : 157.f; },
+                [cameras](float v){ if (!cameras) return; UsbCamConfig c = cameras->usb2_cfg(); c.exposure_time = (int)v; cameras->update_usb2_cfg(c); cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, (int)v); }),
+        }), "Exposure", make_usb_live_panel(2, tex_usb2, [cameras]{
+            if (!cameras) return std::string("Exposure");
+            UsbCamConfig c = cameras->usb2_cfg();
+            char b[96]; snprintf(b, sizeof(b), "Auto %s\nTime %d", c.auto_exposure ? "ON" : "OFF", c.exposure_time);
+            return std::string(b);
+        })),
+        with_panel(submenu("White Balance", std::vector<MenuItem>{
+            toggle("Auto White Balance",
+                [cameras]{ return !cameras || cameras->usb2_cfg().auto_wb; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb2_cfg(); c.auto_wb = v; cameras->update_usb2_cfg(c); cameras->set_usb2_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, v ? 1 : 0); }),
+            slider("Manual White Balance", 2800.f, 6500.f, 100.f, "K",
+                [cameras]{ return cameras ? (float)cameras->usb2_cfg().wb_temp : 4600.f; },
+                [cameras](float v){ if (!cameras) return; UsbCamConfig c = cameras->usb2_cfg(); c.wb_temp = (int)v; cameras->update_usb2_cfg(c); cameras->set_usb2_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, (int)v); }),
+        }), "White Balance", make_usb_live_panel(2, tex_usb2, [cameras]{
+            if (!cameras) return std::string("White Balance");
+            UsbCamConfig c = cameras->usb2_cfg();
+            char b[96]; snprintf(b, sizeof(b), "Auto %s\nTemp %dK", c.auto_wb ? "ON" : "OFF", c.wb_temp);
+            return std::string(b);
+        })),
+        with_panel(submenu("Resolution and Framerate", std::vector<MenuItem>{
+            submenu("Resolution", make_resolution_items(
+                [cameras]{ return cameras->usb2_cfg(); },
+                [cameras](UsbCamConfig c){ cameras->update_usb2_cfg(c); },
+                [cameras]{ return cameras && cameras->usb2_ok(); },
+                [cameras]{ cameras->close_usb2(); },
+                [cameras]{ cameras->open_usb2(); })),
+            toggle("Dynamic Framerate",
+                [cameras]{ return cameras && cameras->usb2_cfg().dynamic_framerate; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb2_cfg(); c.dynamic_framerate = v; cameras->update_usb2_cfg(c); cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, v ? 1 : 0); }),
+        }), "Resolution", make_usb_live_panel(2, tex_usb2, [cameras]{
+            if (!cameras) return std::string("Resolution");
+            UsbCamConfig c = cameras->usb2_cfg();
+            char b[96]; snprintf(b, sizeof(b), "%dx%d\nDynamic FPS %s", c.width, c.height, c.dynamic_framerate ? "ON" : "OFF");
+            return std::string(b);
+        })),
     };
-    std::vector<MenuItem> usb2_brightness_menu = {
-        leaf_sel("50%",  [cameras]{ if (cameras) cameras->set_usb2_brightness(0.5f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 0.5f; }),
-        leaf_sel("100%", [cameras]{ if (cameras) cameras->set_usb2_brightness(1.0f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 1.0f; }),
-        leaf_sel("150%", [cameras]{ if (cameras) cameras->set_usb2_brightness(1.5f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 1.5f; }),
-        leaf_sel("200%", [cameras]{ if (cameras) cameras->set_usb2_brightness(2.0f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 2.0f; }),
-        leaf_sel("300%", [cameras]{ if (cameras) cameras->set_usb2_brightness(3.0f); }, [cameras]{ return cameras && cameras->usb2_brightness() == 3.0f; }),
-    };
-    std::vector<MenuItem> usb2_exposure_menu = {
-        toggle("Auto Exposure",
-            [cameras]{ return !cameras || cameras->usb2_cfg().auto_exposure; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb2_cfg(); c.auto_exposure = v;
-                cameras->update_usb2_cfg(c);
-                cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_AUTO, v ? 3 : 1);
-            }),
-        slider("Exposure Time", 1.f, 5000.f, 10.f, "",
-            [cameras]{ return cameras ? (float)cameras->usb2_cfg().exposure_time : 157.f; },
-            [cameras](float v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb2_cfg(); c.exposure_time = (int)v;
-                cameras->update_usb2_cfg(c);
-                cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, (int)v);
-            }),
-        toggle("Auto White Balance",
-            [cameras]{ return !cameras || cameras->usb2_cfg().auto_wb; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb2_cfg(); c.auto_wb = v;
-                cameras->update_usb2_cfg(c);
-                cameras->set_usb2_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, v ? 1 : 0);
-            }),
-        slider("WB Temperature", 2800.f, 6500.f, 100.f, "K",
-            [cameras]{ return cameras ? (float)cameras->usb2_cfg().wb_temp : 4600.f; },
-            [cameras](float v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb2_cfg(); c.wb_temp = (int)v;
-                cameras->update_usb2_cfg(c);
-                cameras->set_usb2_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, (int)v);
-            }),
-        toggle("Dynamic Framerate",
-            [cameras]{ return cameras && cameras->usb2_cfg().dynamic_framerate; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb2_cfg(); c.dynamic_framerate = v;
-                cameras->update_usb2_cfg(c);
-                cameras->set_usb2_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, v ? 1 : 0);
-            }),
-    };
-    std::vector<MenuItem> usb_cam2_menu = {
-        toggle("Open Stream",
-            [cameras]{ return cameras && cameras->usb2_ok(); },
-            [pip_cam2_overlay](bool v){ *pip_cam2_overlay = v; }),
-        submenu("Select Device", make_dev_select(
+    std::vector<MenuItem> usb2_device_menu = {
+        submenu("Device Select", make_dev_select(
             [cameras]{ return cameras ? cameras->usb2_cfg().device : ""; },
             [cameras](const std::string& p){ if (cameras) cameras->reassign_usb2(p); })),
-        toggle("Auto Brightness",
-            [cameras]{ return cameras && cameras->usb2_cfg().auto_brightness; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb2_cfg(); c.auto_brightness = v;
-                cameras->update_usb2_cfg(c);
-            }),
-        slider("Brightness Target", 40.f, 220.f, 5.f, "",
-            [cameras]{ return cameras ? cameras->usb2_cfg().auto_brightness_target : 100.f; },
-            [cameras](float v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb2_cfg(); c.auto_brightness_target = v;
-                cameras->update_usb2_cfg(c);
-            }),
-        submenu("Overlay",    std::move(cam2_overlay_menu)),
-        submenu("Brightness", std::move(usb2_brightness_menu)),
-        submenu("Exposure",   std::move(usb2_exposure_menu)),
-        submenu("Resolution", make_resolution_items(
-            [cameras]{ return cameras->usb2_cfg(); },
-            [cameras](UsbCamConfig c){ cameras->update_usb2_cfg(c); },
-            [cameras]{ return cameras && cameras->usb2_ok(); },
-            [cameras]{ cameras->close_usb2(); },
-            [cameras]{ cameras->open_usb2(); })),
-        leaf("Scan for Camera", [cameras, &state]{
+        leaf("Scan for Devices", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb2();
                 std::lock_guard<std::mutex> lk(state.mtx);
@@ -1380,101 +1445,99 @@ static std::vector<MenuItem> build_menu(
             }
         }),
     };
+    std::vector<MenuItem> usb_cam2_menu = {
+        toggle("Open Camera",
+            [cameras]{ return cameras && cameras->usb2_ok(); },
+            [pip_cam2_overlay](bool v){ *pip_cam2_overlay = v; }),
+        submenu("PiP Window Settings", std::move(usb2_pip_menu)),
+        submenu("Device Options",      std::move(usb2_device_menu)),
+    };
 
-    std::vector<MenuItem> cam3_overlay_menu = {
-        toggle("Show Overlay",
-            [pip_cam3_overlay]{ return *pip_cam3_overlay; },
-            [pip_cam3_overlay](bool v){ *pip_cam3_overlay = v; }),
-        submenu("Position", make_position_items(pip_cfg3)),
-        make_size_slider("Size", pip_cfg3),
-        submenu("Rotation", make_rotation_items(pip_cfg3)),
+    std::vector<MenuItem> usb3_pip_menu = {
+        with_panel(submenu("Window Position", make_position_items(pip_cfg3)),
+                   "PiP Placement", make_pip_placement_panel(pip_cfg3)),
+        with_panel(submenu("Window Size", std::vector<MenuItem>{ make_size_slider("Size", pip_cfg3) }),
+                   "PiP Placement", make_pip_placement_panel(pip_cfg3)),
+        with_panel(submenu("Window Rotation", make_rotation_items(pip_cfg3)),
+                   "PiP Placement", make_pip_placement_panel(pip_cfg3)),
+        with_panel(submenu("Brightness", std::vector<MenuItem>{
+            toggle("Auto Brightness",
+                [cameras]{ return cameras && cameras->usb3_cfg().auto_brightness; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb3_cfg(); c.auto_brightness = v; cameras->update_usb3_cfg(c); }),
+            slider("Auto Brightness Target", 40.f, 220.f, 5.f, "",
+                [cameras]{ return cameras ? cameras->usb3_cfg().auto_brightness_target : 100.f; },
+                [cameras](float v){ if (!cameras) return; UsbCamConfig c = cameras->usb3_cfg(); c.auto_brightness_target = v; cameras->update_usb3_cfg(c); }),
+            slider("Manual Brightness", 50.f, 300.f, 25.f, " %",
+                [cameras]{ return cameras ? cameras->usb3_brightness() * 100.f : 100.f; },
+                [cameras](float v){ if (cameras) cameras->set_usb3_brightness(v / 100.f); }),
+        }), "Brightness", make_usb_live_panel(3, tex_usb3, [cameras]{
+            if (!cameras) return std::string("Brightness");
+            UsbCamConfig c = cameras->usb3_cfg();
+            char b[96]; snprintf(b, sizeof(b), "Auto %s   Target %.0f\nManual %.0f%%",
+                c.auto_brightness ? "ON" : "OFF", c.auto_brightness_target, cameras->usb3_brightness() * 100.f);
+            return std::string(b);
+        })),
+        with_panel(submenu("Exposure", std::vector<MenuItem>{
+            toggle("Auto Exposure",
+                [cameras]{ return !cameras || cameras->usb3_cfg().auto_exposure; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb3_cfg(); c.auto_exposure = v; cameras->update_usb3_cfg(c); cameras->set_usb3_ctrl(V4L2_CID_EXPOSURE_AUTO, v ? 3 : 1); }),
+            slider("Exposure Time", 1.f, 5000.f, 10.f, "",
+                [cameras]{ return cameras ? (float)cameras->usb3_cfg().exposure_time : 157.f; },
+                [cameras](float v){ if (!cameras) return; UsbCamConfig c = cameras->usb3_cfg(); c.exposure_time = (int)v; cameras->update_usb3_cfg(c); cameras->set_usb3_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, (int)v); }),
+        }), "Exposure", make_usb_live_panel(3, tex_usb3, [cameras]{
+            if (!cameras) return std::string("Exposure");
+            UsbCamConfig c = cameras->usb3_cfg();
+            char b[96]; snprintf(b, sizeof(b), "Auto %s\nTime %d", c.auto_exposure ? "ON" : "OFF", c.exposure_time);
+            return std::string(b);
+        })),
+        with_panel(submenu("White Balance", std::vector<MenuItem>{
+            toggle("Auto White Balance",
+                [cameras]{ return !cameras || cameras->usb3_cfg().auto_wb; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb3_cfg(); c.auto_wb = v; cameras->update_usb3_cfg(c); cameras->set_usb3_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, v ? 1 : 0); }),
+            slider("Manual White Balance", 2800.f, 6500.f, 100.f, "K",
+                [cameras]{ return cameras ? (float)cameras->usb3_cfg().wb_temp : 4600.f; },
+                [cameras](float v){ if (!cameras) return; UsbCamConfig c = cameras->usb3_cfg(); c.wb_temp = (int)v; cameras->update_usb3_cfg(c); cameras->set_usb3_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, (int)v); }),
+        }), "White Balance", make_usb_live_panel(3, tex_usb3, [cameras]{
+            if (!cameras) return std::string("White Balance");
+            UsbCamConfig c = cameras->usb3_cfg();
+            char b[96]; snprintf(b, sizeof(b), "Auto %s\nTemp %dK", c.auto_wb ? "ON" : "OFF", c.wb_temp);
+            return std::string(b);
+        })),
+        with_panel(submenu("Resolution and Framerate", std::vector<MenuItem>{
+            submenu("Resolution", make_resolution_items(
+                [cameras]{ return cameras->usb3_cfg(); },
+                [cameras](UsbCamConfig c){ cameras->update_usb3_cfg(c); },
+                [cameras]{ return cameras && cameras->usb3_ok(); },
+                [cameras]{ cameras->close_usb3(); },
+                [cameras]{ cameras->open_usb3(); })),
+            toggle("Dynamic Framerate",
+                [cameras]{ return cameras && cameras->usb3_cfg().dynamic_framerate; },
+                [cameras](bool v){ if (!cameras) return; UsbCamConfig c = cameras->usb3_cfg(); c.dynamic_framerate = v; cameras->update_usb3_cfg(c); cameras->set_usb3_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, v ? 1 : 0); }),
+        }), "Resolution", make_usb_live_panel(3, tex_usb3, [cameras]{
+            if (!cameras) return std::string("Resolution");
+            UsbCamConfig c = cameras->usb3_cfg();
+            char b[96]; snprintf(b, sizeof(b), "%dx%d\nDynamic FPS %s", c.width, c.height, c.dynamic_framerate ? "ON" : "OFF");
+            return std::string(b);
+        })),
     };
-    std::vector<MenuItem> usb3_brightness_menu = {
-        leaf_sel("50%",  [cameras]{ if (cameras) cameras->set_usb3_brightness(0.5f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 0.5f; }),
-        leaf_sel("100%", [cameras]{ if (cameras) cameras->set_usb3_brightness(1.0f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 1.0f; }),
-        leaf_sel("150%", [cameras]{ if (cameras) cameras->set_usb3_brightness(1.5f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 1.5f; }),
-        leaf_sel("200%", [cameras]{ if (cameras) cameras->set_usb3_brightness(2.0f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 2.0f; }),
-        leaf_sel("300%", [cameras]{ if (cameras) cameras->set_usb3_brightness(3.0f); }, [cameras]{ return cameras && cameras->usb3_brightness() == 3.0f; }),
-    };
-    std::vector<MenuItem> usb3_exposure_menu = {
-        toggle("Auto Exposure",
-            [cameras]{ return !cameras || cameras->usb3_cfg().auto_exposure; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb3_cfg(); c.auto_exposure = v;
-                cameras->update_usb3_cfg(c);
-                cameras->set_usb3_ctrl(V4L2_CID_EXPOSURE_AUTO, v ? 3 : 1);
-            }),
-        slider("Exposure Time", 1.f, 5000.f, 10.f, "",
-            [cameras]{ return cameras ? (float)cameras->usb3_cfg().exposure_time : 157.f; },
-            [cameras](float v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb3_cfg(); c.exposure_time = (int)v;
-                cameras->update_usb3_cfg(c);
-                cameras->set_usb3_ctrl(V4L2_CID_EXPOSURE_ABSOLUTE, (int)v);
-            }),
-        toggle("Auto White Balance",
-            [cameras]{ return !cameras || cameras->usb3_cfg().auto_wb; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb3_cfg(); c.auto_wb = v;
-                cameras->update_usb3_cfg(c);
-                cameras->set_usb3_ctrl(V4L2_CID_AUTO_WHITE_BALANCE, v ? 1 : 0);
-            }),
-        slider("WB Temperature", 2800.f, 6500.f, 100.f, "K",
-            [cameras]{ return cameras ? (float)cameras->usb3_cfg().wb_temp : 4600.f; },
-            [cameras](float v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb3_cfg(); c.wb_temp = (int)v;
-                cameras->update_usb3_cfg(c);
-                cameras->set_usb3_ctrl(V4L2_CID_WHITE_BALANCE_TEMPERATURE, (int)v);
-            }),
-        toggle("Dynamic Framerate",
-            [cameras]{ return cameras && cameras->usb3_cfg().dynamic_framerate; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb3_cfg(); c.dynamic_framerate = v;
-                cameras->update_usb3_cfg(c);
-                cameras->set_usb3_ctrl(V4L2_CID_EXPOSURE_AUTO_PRIORITY, v ? 1 : 0);
-            }),
-    };
-    std::vector<MenuItem> usb_cam3_menu = {
-        toggle("Open Stream",
-            [cameras]{ return cameras && cameras->usb3_ok(); },
-            [pip_cam3_overlay](bool v){ *pip_cam3_overlay = v; }),
-        submenu("Select Device", make_dev_select(
+    std::vector<MenuItem> usb3_device_menu = {
+        submenu("Device Select", make_dev_select(
             [cameras]{ return cameras ? cameras->usb3_cfg().device : ""; },
             [cameras](const std::string& p){ if (cameras) cameras->reassign_usb3(p); })),
-        toggle("Auto Brightness",
-            [cameras]{ return cameras && cameras->usb3_cfg().auto_brightness; },
-            [cameras](bool v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb3_cfg(); c.auto_brightness = v;
-                cameras->update_usb3_cfg(c);
-            }),
-        slider("Brightness Target", 40.f, 220.f, 5.f, "",
-            [cameras]{ return cameras ? cameras->usb3_cfg().auto_brightness_target : 100.f; },
-            [cameras](float v){
-                if (!cameras) return;
-                UsbCamConfig c = cameras->usb3_cfg(); c.auto_brightness_target = v;
-                cameras->update_usb3_cfg(c);
-            }),
-        submenu("Overlay",     std::move(cam3_overlay_menu)),
-        submenu("Brightness",  std::move(usb3_brightness_menu)),
-        submenu("Exposure",    std::move(usb3_exposure_menu)),
-        submenu("Resolution",  make_resolution_items(
-            [cameras]{ return cameras->usb3_cfg(); },
-            [cameras](UsbCamConfig c){ cameras->update_usb3_cfg(c); },
-            [cameras]{ return cameras && cameras->usb3_ok(); },
-            [cameras]{ cameras->close_usb3(); },
-            [cameras]{ cameras->open_usb3(); })),
-        leaf("Scan for Camera", [cameras, &state]{
+        leaf("Scan for Devices", [cameras, &state]{
             if (cameras) {
                 bool ok = cameras->scan_usb3();
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.health.cam_usb3 = ok;
             }
         }),
+    };
+    std::vector<MenuItem> usb_cam3_menu = {
+        toggle("Open Camera",
+            [cameras]{ return cameras && cameras->usb3_ok(); },
+            [pip_cam3_overlay](bool v){ *pip_cam3_overlay = v; }),
+        submenu("PiP Window Settings", std::move(usb3_pip_menu)),
+        submenu("Device Options",      std::move(usb3_device_menu)),
     };
 
     // Build USB cam submenu items with visibility predicates so slots without a
@@ -1504,16 +1567,6 @@ static std::vector<MenuItem> build_menu(
                 cameras->set_usb2_reconnect(v);
                 cameras->set_usb3_reconnect(v);
             }),
-        leaf("Scan for Cameras", [cameras, &state]{
-            if (!cameras) return;
-            bool ok1 = cameras->scan_usb1();
-            bool ok2 = cameras->scan_usb2();
-            bool ok3 = cameras->scan_usb3();
-            std::lock_guard<std::mutex> lk(state.mtx);
-            state.health.cam_usb1 = ok1;
-            state.health.cam_usb2 = ok2;
-            state.health.cam_usb3 = ok3;
-        }),
     };
 
     std::vector<MenuItem> cameras_menu = {
@@ -3739,6 +3792,11 @@ int main(int argc, char* argv[]) {
     // into MenuSystem without a circular dependency at build time.
     bool panel_preview_enabled = false;
     MenuSystem* menu_ptr = nullptr;
+    // GL texture handles for USB camera sources — declared before build_menu so the
+    // camera image-setting context panels can sample the live feed.  usb_preview_req
+    // is set by those panels (1/2/3) and consumed by the render loop below.
+    GLuint tex_usb1 = 0, tex_usb2 = 0, tex_usb3 = 0;
+    int    usb_preview_req = 0;
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -3754,7 +3812,8 @@ int main(int argc, char* argv[]) {
                                &protoface_preview_cfg,
                                &protoface_preview_view,
                                cfg_map_dir,
-                               &left_eye_src, &right_eye_src));
+                               &left_eye_src, &right_eye_src,
+                               &tex_usb1, &tex_usb2, &tex_usb3, &usb_preview_req));
     menu_ptr = &menu;
 
     // Wire wireless controller callbacks now that menu exists
@@ -3954,10 +4013,8 @@ int main(int argc, char* argv[]) {
     });
 
     // ── GL texture handles for camera sources ─────────────────────────────────
+    // tex_usb1/2/3 and usb_preview_req are declared above (before build_menu).
 
-    GLuint tex_usb1  = 0;
-    GLuint tex_usb2  = 0;
-    GLuint tex_usb3  = 0;
     GLuint tex_beast = 0;
 
     teensy.request_status();
@@ -4157,22 +4214,32 @@ int main(int argc, char* argv[]) {
         // ── USB camera stream lifecycle ───────────────────────────────────────
         // Rising edge  → open stream in background (window appears on first frame).
         // Falling edge → close stream, clear texture (no stale frame on re-open).
+        // A camera image-setting panel (Brightness/Exposure/WB/Resolution) sets
+        // usb_preview_req to its slot while visible; that forces the stream open and
+        // keeps the texture uploaded (want_n), and hides the on-screen PiP for that
+        // slot so the feed shows only in the context pane.  On exit the request
+        // clears, restoring the PiP if it was on or closing a temp-opened stream.
+        int preview = usb_preview_req;   // set during last frame's menu draw
+        usb_preview_req = 0;             // re-set this frame if a panel is still up
         bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
         bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
         bool p3 = pip_cam3_overlay_active;
-        if (p1 && !prev_p1) { tex_usb1 = 0; std::thread([&cameras]{ cameras.open_usb1(); }).detach(); }
-        if (!p1 && prev_p1) { cameras.close_usb1(); tex_usb1 = 0; }
-        if (p2 && !prev_p2) { tex_usb2 = 0; std::thread([&cameras]{ cameras.open_usb2(); }).detach(); }
-        if (!p2 && prev_p2) { cameras.close_usb2(); tex_usb2 = 0; }
-        if (p3 && !prev_p3) { tex_usb3 = 0; std::thread([&cameras]{ cameras.open_usb3(); }).detach(); }
-        if (!p3 && prev_p3) { cameras.close_usb3(); tex_usb3 = 0; }
-        prev_p1 = p1; prev_p2 = p2; prev_p3 = p3;
+        bool want1 = p1 || preview == 1;
+        bool want2 = p2 || preview == 2;
+        bool want3 = p3 || preview == 3;
+        if (want1 && !prev_p1) { tex_usb1 = 0; std::thread([&cameras]{ cameras.open_usb1(); }).detach(); }
+        if (!want1 && prev_p1) { cameras.close_usb1(); tex_usb1 = 0; }
+        if (want2 && !prev_p2) { tex_usb2 = 0; std::thread([&cameras]{ cameras.open_usb2(); }).detach(); }
+        if (!want2 && prev_p2) { cameras.close_usb2(); tex_usb2 = 0; }
+        if (want3 && !prev_p3) { tex_usb3 = 0; std::thread([&cameras]{ cameras.open_usb3(); }).detach(); }
+        if (!want3 && prev_p3) { cameras.close_usb3(); tex_usb3 = 0; }
+        prev_p1 = want1; prev_p2 = want2; prev_p3 = want3;
 
         // ── Camera texture uploads (CPU paths) ────────────────────────────────
         if (use_beast_cam) beast_cam.get_frame(tex_beast);
-        if (p1) cameras.get_usb1(tex_usb1);
-        if (p2) cameras.get_usb2(tex_usb2);
-        if (p3) cameras.get_usb3(tex_usb3);
+        if (want1) cameras.get_usb1(tex_usb1);
+        if (want2) cameras.get_usb2(tex_usb2);
+        if (want3) cameras.get_usb3(tex_usb3);
         android_mirror.get_frame(tex_android);
 
         // ── GPIO PiP button state ─────────────────────────────────────────────
@@ -4783,9 +4850,11 @@ int main(int argc, char* argv[]) {
         // Pass full display dimensions so NanoVG covers both eye halves.
         glViewport(0, 0, xr.display_width(), xr.display_height());
         hud.begin_nvg_overlay(xr.display_width(), xr.display_height());
-        hud.draw_pip_underlays(tex_usb1, p1, pip_overlay_cfg1,
-                               tex_usb2, p2, pip_overlay_cfg2,
-                               tex_usb3, p3, pip_overlay_cfg3,
+        // Hide the on-screen PiP for a slot whose live-preview panel is up — its
+        // feed is shown in the context pane instead (preview set above this frame).
+        hud.draw_pip_underlays(tex_usb1, p1 && preview != 1, pip_overlay_cfg1,
+                               tex_usb2, p2 && preview != 2, pip_overlay_cfg2,
+                               tex_usb3, p3 && preview != 3, pip_overlay_cfg3,
                                xr.display_width(), xr.display_height());
         hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
         hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
