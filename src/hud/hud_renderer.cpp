@@ -705,6 +705,97 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     }
 }
 
+// ── Procedural weather glyphs ────────────────────────────────────────────────────
+// Drawn when no wx-*.png icon art is present, so the weather widget always shows a
+// recognizable icon. `sz` is the target box size; centered at (cx, cy).
+static void draw_weather_glyph(NVGcontext* vg, int code, bool day,
+                               float cx, float cy, float sz) {
+    const float s = sz * 0.5f;
+    const NVGcolor sun     = nvgRGBA(255, 200,  60, 255);
+    const NVGcolor moon    = nvgRGBA(225, 230, 245, 255);
+    const NVGcolor cloud   = nvgRGBA(205, 214, 224, 255);
+    const NVGcolor cloud_d = nvgRGBA(150, 162, 176, 255);
+    const NVGcolor rain    = nvgRGBA( 90, 165, 235, 255);
+    const NVGcolor snow    = nvgRGBA(235, 244, 255, 255);
+    const NVGcolor bolt    = nvgRGBA(255, 210,  70, 255);
+
+    auto cloud_shape = [&](float ox, float oy, float scale, NVGcolor c) {
+        nvgFillColor(vg, c);
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx + ox - s * 0.35f * scale, cy + oy,                s * 0.30f * scale);
+        nvgCircle(vg, cx + ox + s * 0.02f * scale, cy + oy - s * 0.20f * scale, s * 0.38f * scale);
+        nvgCircle(vg, cx + ox + s * 0.40f * scale, cy + oy,                s * 0.28f * scale);
+        nvgRoundedRect(vg, cx + ox - s * 0.62f * scale, cy + oy,
+                       s * 1.18f * scale, s * 0.36f * scale, s * 0.16f * scale);
+        nvgFill(vg);
+    };
+    auto sun_disc = [&](float ox, float oy, float r) {
+        nvgFillColor(vg, sun);
+        nvgBeginPath(vg); nvgCircle(vg, cx + ox, cy + oy, r); nvgFill(vg);
+        nvgStrokeColor(vg, sun); nvgStrokeWidth(vg, std::max(2.f, r * 0.22f));
+        for (int i = 0; i < 8; ++i) {
+            const float a = i / 8.f * 2.f * static_cast<float>(M_PI);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, cx + ox + std::cos(a) * r * 1.35f, cy + oy + std::sin(a) * r * 1.35f);
+            nvgLineTo(vg, cx + ox + std::cos(a) * r * 1.75f, cy + oy + std::sin(a) * r * 1.75f);
+            nvgStroke(vg);
+        }
+    };
+    auto rain_streaks = [&](NVGcolor c) {
+        nvgStrokeColor(vg, c); nvgStrokeWidth(vg, std::max(2.f, s * 0.10f));
+        for (int i = -1; i <= 1; ++i) {
+            const float x = cx + i * s * 0.36f;
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, x, cy + s * 0.40f);
+            nvgLineTo(vg, x - s * 0.12f, cy + s * 0.82f);
+            nvgStroke(vg);
+        }
+    };
+    auto snow_dots = [&]() {
+        nvgFillColor(vg, snow);
+        for (int i = -1; i <= 1; ++i) {
+            nvgBeginPath(vg); nvgCircle(vg, cx + i * s * 0.36f, cy + s * 0.60f, s * 0.09f); nvgFill(vg);
+        }
+    };
+
+    if (code <= 0) {                                   // clear
+        if (day) sun_disc(0.f, 0.f, s * 0.52f);
+        else { nvgFillColor(vg, moon); nvgBeginPath(vg); nvgCircle(vg, cx, cy, s * 0.52f); nvgFill(vg); }
+    } else if (code <= 2) {                             // partly cloudy
+        if (day) sun_disc(-s * 0.32f, -s * 0.34f, s * 0.30f);
+        else { nvgFillColor(vg, moon); nvgBeginPath(vg); nvgCircle(vg, cx - s*0.32f, cy - s*0.30f, s*0.26f); nvgFill(vg); }
+        cloud_shape(s * 0.10f, s * 0.12f, 1.0f, cloud);
+    } else if (code == 3) {                            // overcast
+        cloud_shape(0.f, 0.f, 1.1f, cloud_d);
+    } else if (code == 45 || code == 48) {             // fog
+        cloud_shape(0.f, -s * 0.18f, 1.0f, cloud);
+        nvgStrokeColor(vg, cloud); nvgStrokeWidth(vg, std::max(2.f, s * 0.10f));
+        for (int i = 0; i < 3; ++i) {
+            const float y = cy + s * 0.38f + i * s * 0.22f;
+            nvgBeginPath(vg); nvgMoveTo(vg, cx - s * 0.55f, y); nvgLineTo(vg, cx + s * 0.55f, y); nvgStroke(vg);
+        }
+    } else if (code >= 51 && code <= 57) {             // drizzle
+        cloud_shape(0.f, -s * 0.15f, 1.0f, cloud); snow_dots();
+    } else if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) {  // rain
+        cloud_shape(0.f, -s * 0.15f, 1.0f, cloud); rain_streaks(rain);
+    } else if ((code >= 71 && code <= 77) || code == 85 || code == 86) {    // snow
+        cloud_shape(0.f, -s * 0.15f, 1.0f, cloud); snow_dots();
+    } else if (code >= 95) {                            // thunderstorm
+        cloud_shape(0.f, -s * 0.15f, 1.0f, cloud_d);
+        nvgFillColor(vg, bolt);
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx + s * 0.10f, cy + s * 0.30f);
+        nvgLineTo(vg, cx - s * 0.18f, cy + s * 0.46f);
+        nvgLineTo(vg, cx + s * 0.02f, cy + s * 0.52f);
+        nvgLineTo(vg, cx - s * 0.12f, cy + s * 0.88f);
+        nvgLineTo(vg, cx + s * 0.26f, cy + s * 0.40f);
+        nvgLineTo(vg, cx + s * 0.06f, cy + s * 0.34f);
+        nvgClosePath(vg); nvgFill(vg);
+    } else {
+        cloud_shape(0.f, 0.f, 1.0f, cloud);
+    }
+}
+
 // ── Cycling info panel ──────────────────────────────────────────────────────────
 // A configurable region (mirroring the minimap on the opposite side) that auto-
 // cycles through glanceable widgets: analog clock, notifications, schedule, weather.
@@ -865,30 +956,29 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
             nvgText(vg, px, py, s.weather_cfg.enabled ? "..." : "off", nullptr);
         } else {
-            icons_.draw(vg, wmo_icon(w.code, w.is_day), px, py - r * 0.45f, r * 0.40f, 1.f);
+            const float iy = py - r * 0.45f, isz = r * 0.48f;
+            if (!icons_.draw(vg, wmo_icon(w.code, w.is_day), px, iy, isz, 1.f))
+                draw_weather_glyph(vg, w.code, w.is_day, px, iy, isz);
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             char b[48];
-            // Actual | feels-like.
-            nvg_set_font_ui(r * 0.17f);
+            nvg_set_font_ui(r * 0.15f);                       // actual | feels-like
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 235));
             snprintf(b, sizeof(b), "%.0f°  feels %.0f°",
                      static_cast<double>(w.temp), static_cast<double>(w.feels));
-            nvgText(vg, px, py - r * 0.08f, b, nullptr);
-            // High / Low.
-            nvg_set_font_ui(r * 0.13f);
+            nvgText(vg, px, py - r * 0.02f, b, nullptr);
+            nvg_set_font_ui(r * 0.12f);                       // High / Low
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
             snprintf(b, sizeof(b), "H %.0f°   L %.0f°",
                      static_cast<double>(w.temp_high), static_cast<double>(w.temp_low));
-            nvgText(vg, px, py + r * 0.14f, b, nullptr);
-            // Humidity.
-            if (w.humidity >= 0) {
+            nvgText(vg, px, py + r * 0.18f, b, nullptr);
+            if (w.humidity >= 0) {                            // Humidity
                 snprintf(b, sizeof(b), "Humidity %d%%", w.humidity);
-                nvgText(vg, px, py + r * 0.34f, b, nullptr);
+                nvgText(vg, px, py + r * 0.36f, b, nullptr);
             }
             if (!w.location.empty()) {
-                nvg_set_font_ui(11.f);
+                nvg_set_font_ui(r * 0.10f);
                 nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
-                nvgText(vg, px, py + r * 0.56f, w.location.c_str(), nullptr);
+                nvgText(vg, px, py + r * 0.54f, w.location.c_str(), nullptr);
             }
         }
     } else {  // WeatherPrecip — page 2: precipitation.
@@ -900,18 +990,20 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             nvgText(vg, px, py, s.weather_cfg.enabled ? "..." : "off", nullptr);
         } else {
             // Big condition icon (rain/snow/cloud/sun) + precip amount + rain chance.
-            icons_.draw(vg, wmo_icon(w.code, w.is_day), px, py - r * 0.18f, r * 0.74f, 1.f);
+            const float iy = py - r * 0.20f, isz = r * 0.64f;
+            if (!icons_.draw(vg, wmo_icon(w.code, w.is_day), px, iy, isz, 1.f))
+                draw_weather_glyph(vg, w.code, w.is_day, px, iy, isz);
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             char b[40];
-            nvg_set_font_ui(r * 0.15f);
+            nvg_set_font_ui(r * 0.13f);
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 225));
             snprintf(b, sizeof(b), "Precip %.1f %s", static_cast<double>(w.precip_now),
                      s.weather_cfg.metric ? "mm" : "in");
-            nvgText(vg, px, py + r * 0.34f, b, nullptr);
+            nvgText(vg, px, py + r * 0.36f, b, nullptr);
             if (w.rain_prob >= 0) snprintf(b, sizeof(b), "Rain %d%%", w.rain_prob);
             else                  snprintf(b, sizeof(b), "Rain --");
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
-            nvgText(vg, px, py + r * 0.55f, b, nullptr);
+            nvgText(vg, px, py + r * 0.56f, b, nullptr);
         }
     }
 
