@@ -126,6 +126,19 @@ FetchContent_Declare(stb
 )
 FetchContent_MakeAvailable(stb)
 
+# QR-Code-generator (nayuki, MIT) — encode the scheduler web URL for the menu.
+# The repo has no top-level CMakeLists, so MakeAvailable just fetches the source
+# (like nanovg); we compile the one C++ file ourselves.
+FetchContent_Declare(qrcodegen
+    GIT_REPOSITORY https://github.com/nayuki/QR-Code-generator.git
+    GIT_TAG        v1.8.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(qrcodegen)
+add_library(qrcodegen_cpp STATIC "${qrcodegen_SOURCE_DIR}/cpp/qrcodegen.cpp")
+target_include_directories(qrcodegen_cpp PUBLIC "${qrcodegen_SOURCE_DIR}/cpp")
+
+
 # ImGui has no CMakeLists — build it as a static library here.
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -223,6 +236,7 @@ target_include_directories(protohud PRIVATE
 target_link_libraries(protohud PRIVATE
     imgui
     nanovg
+    qrcodegen_cpp
     glasses
     protoface_native
     ${OpenCV_LIBS}

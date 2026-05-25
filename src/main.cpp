@@ -16,6 +16,7 @@
 #include <linux/videodev2.h>
 #include <imgui.h>
 #include <nlohmann/json.hpp>
+#include <qrcodegen.hpp>
 
 #include "app_state.h"
 #include "android/android_mirror.h"
@@ -2674,7 +2675,6 @@ static std::vector<MenuItem> build_menu(
             submenu("Schedule", std::move(ip_schedule_menu)),
             "Schedule",
             [state_ptr](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-                (void)sz;
                 if (!state_ptr) return;
                 const float lh = 18.f;
                 ImVec2 p = o;
@@ -2693,13 +2693,50 @@ static std::vector<MenuItem> build_menu(
                 line(std::string("Web: ") +
                          (st.web_url.empty() ? "(starting...)" : st.web_url),
                      st.web_url.empty() ? dim : wht);
-                line("Scan/open that URL on your phone", dim);
-                line("(QR code coming soon)", dim);
+                line("Scan this QR on your phone:", dim);
                 line(std::string("Google: ") + st.gcal_state,
                      st.gcal_state == "connected" ? ok : dim);
                 if (st.gcal_state == "pending" && !st.gcal_user_code.empty()) {
                     line(std::string("  code: ") + st.gcal_user_code, wht);
                     line(std::string("  at: ")   + st.gcal_verify_url, dim);
+                }
+
+                // QR code of the web URL — encoded once per URL, drawn as modules.
+                if (!st.web_url.empty()) {
+                    static std::string qr_url;
+                    static std::vector<std::vector<bool>> qr_mods;
+                    if (qr_url != st.web_url) {
+                        qr_url = st.web_url;
+                        qr_mods.clear();
+                        try {
+                            const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(
+                                st.web_url.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
+                            const int qn = qr.getSize();
+                            qr_mods.assign(qn, std::vector<bool>(qn, false));
+                            for (int yy = 0; yy < qn; ++yy)
+                                for (int xx = 0; xx < qn; ++xx)
+                                    qr_mods[yy][xx] = qr.getModule(xx, yy);
+                        } catch (...) { qr_mods.clear(); }
+                    }
+                    if (!qr_mods.empty()) {
+                        const int   qn    = static_cast<int>(qr_mods.size());
+                        const int   quiet = 3;
+                        const float avail = std::min(sz.x, sz.y - (p.y - o.y) - 6.f);
+                        const float box   = std::max(60.f, std::min(190.f, avail));
+                        const float mod   = box / (qn + quiet * 2);
+                        const float qx = o.x, qy = p.y + 4.f;
+                        const float full = mod * (qn + quiet * 2);
+                        dl->AddRectFilled({qx, qy}, {qx + full, qy + full},
+                                          IM_COL32(255, 255, 255, 255));
+                        for (int yy = 0; yy < qn; ++yy)
+                            for (int xx = 0; xx < qn; ++xx)
+                                if (qr_mods[yy][xx]) {
+                                    const float mx = qx + mod * (xx + quiet);
+                                    const float my = qy + mod * (yy + quiet);
+                                    dl->AddRectFilled({mx, my}, {mx + mod, my + mod},
+                                                      IM_COL32(0, 0, 0, 255));
+                                }
+                    }
                 }
             }),
         submenu("Weather",       std::move(ip_weather_menu)),
