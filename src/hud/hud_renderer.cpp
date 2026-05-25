@@ -817,6 +817,128 @@ static void draw_weather_glyph(NVGcontext* vg, int code, bool day,
     }
 }
 
+// ── Procedural status glyphs ─────────────────────────────────────────────────────
+// Small line icons for the info-panel status ring (wifi / bluetooth / gamepad /
+// audio / ssh / lora). Drawn when no status-*.png art is present. Stroked in `c`
+// (caller dims it when the status is inactive); centered at (cx, cy); `sz` = box size.
+enum class StatusGlyph { Wifi, Bluetooth, Gamepad, Audio, Ssh, Lora };
+
+static const char* status_png_name(StatusGlyph g) {
+    switch (g) {
+        case StatusGlyph::Wifi:      return "status-wifi";
+        case StatusGlyph::Bluetooth: return "status-bt";
+        case StatusGlyph::Gamepad:   return "status-gamepad";
+        case StatusGlyph::Audio:     return "status-audio";
+        case StatusGlyph::Ssh:       return "status-ssh";
+        case StatusGlyph::Lora:      return "status-lora";
+    }
+    return "status-wifi";
+}
+
+static void draw_status_glyph(NVGcontext* vg, StatusGlyph g,
+                              float cx, float cy, float sz, NVGcolor c) {
+    const float h  = sz * 0.5f;
+    const float lw = std::max(1.5f, sz * 0.10f);
+    const float PI = static_cast<float>(M_PI);
+    nvgLineCap(vg, NVG_ROUND);
+    nvgLineJoin(vg, NVG_ROUND);
+    nvgStrokeColor(vg, c);
+    nvgStrokeWidth(vg, lw);
+
+    switch (g) {
+    case StatusGlyph::Wifi: {
+        const float bx = cx, by = cy + h * 0.55f;
+        for (int i = 1; i <= 3; ++i) {                     // nested top arcs + base dot
+            nvgBeginPath(vg);
+            nvgArc(vg, bx, by, h * 0.32f * i, -2.36f, -0.78f, NVG_CW);
+            nvgStroke(vg);
+        }
+        nvgBeginPath(vg); nvgCircle(vg, bx, by, lw * 0.9f);
+        nvgFillColor(vg, c); nvgFill(vg);
+        break;
+    }
+    case StatusGlyph::Bluetooth: {
+        // Rune: lower-right knee → top → bottom → upper-right knee (diagonals cross
+        // the spine, forming the two right-pointing flags).
+        const float w = h * 0.55f;
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx + w, cy + h * 0.5f);
+        nvgLineTo(vg, cx,     cy - h);
+        nvgLineTo(vg, cx,     cy + h);
+        nvgLineTo(vg, cx + w, cy - h * 0.5f);
+        nvgStroke(vg);
+        break;
+    }
+    case StatusGlyph::Gamepad: {
+        nvgBeginPath(vg);                                  // body
+        nvgRoundedRect(vg, cx - h * 0.85f, cy - h * 0.42f, h * 1.7f, h * 0.84f, h * 0.34f);
+        nvgStroke(vg);
+        const float dx = cx - h * 0.40f;                   // d-pad
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, dx - h * 0.22f, cy); nvgLineTo(vg, dx + h * 0.22f, cy);
+        nvgMoveTo(vg, dx, cy - h * 0.22f); nvgLineTo(vg, dx, cy + h * 0.22f);
+        nvgStroke(vg);
+        nvgBeginPath(vg);                                  // buttons
+        nvgCircle(vg, cx + h * 0.34f, cy - h * 0.12f, lw * 0.85f);
+        nvgCircle(vg, cx + h * 0.58f, cy + h * 0.12f, lw * 0.85f);
+        nvgFillColor(vg, c); nvgFill(vg);
+        break;
+    }
+    case StatusGlyph::Audio: {
+        nvgBeginPath(vg);                                  // speaker box + cone
+        nvgMoveTo(vg, cx - h * 0.70f, cy - h * 0.22f);
+        nvgLineTo(vg, cx - h * 0.40f, cy - h * 0.22f);
+        nvgLineTo(vg, cx - h * 0.05f, cy - h * 0.50f);
+        nvgLineTo(vg, cx - h * 0.05f, cy + h * 0.50f);
+        nvgLineTo(vg, cx - h * 0.40f, cy + h * 0.22f);
+        nvgLineTo(vg, cx - h * 0.70f, cy + h * 0.22f);
+        nvgClosePath(vg);
+        nvgStroke(vg);
+        for (int i = 1; i <= 2; ++i) {                     // sound waves
+            nvgBeginPath(vg);
+            nvgArc(vg, cx - h * 0.05f, cy, h * 0.30f * i, -0.7f, 0.7f, NVG_CW);
+            nvgStroke(vg);
+        }
+        break;
+    }
+    case StatusGlyph::Ssh: {
+        nvgBeginPath(vg);                                  // terminal window
+        nvgRoundedRect(vg, cx - h * 0.8f, cy - h * 0.62f, h * 1.6f, h * 1.24f, h * 0.18f);
+        nvgStroke(vg);
+        nvgBeginPath(vg);                                  // ">" prompt
+        nvgMoveTo(vg, cx - h * 0.42f, cy - h * 0.18f);
+        nvgLineTo(vg, cx - h * 0.16f, cy + h * 0.06f);
+        nvgLineTo(vg, cx - h * 0.42f, cy + h * 0.30f);
+        nvgStroke(vg);
+        nvgBeginPath(vg);                                  // "_" cursor
+        nvgMoveTo(vg, cx + h * 0.04f, cy + h * 0.30f);
+        nvgLineTo(vg, cx + h * 0.42f, cy + h * 0.30f);
+        nvgStroke(vg);
+        break;
+    }
+    case StatusGlyph::Lora: {
+        const float ny = cy - h * 0.18f;                   // node (antenna top)
+        nvgBeginPath(vg);                                  // mast + base
+        nvgMoveTo(vg, cx, ny); nvgLineTo(vg, cx, cy + h * 0.72f);
+        nvgMoveTo(vg, cx - h * 0.30f, cy + h * 0.72f);
+        nvgLineTo(vg, cx + h * 0.30f, cy + h * 0.72f);
+        nvgStroke(vg);
+        nvgBeginPath(vg); nvgCircle(vg, cx, ny, lw * 0.9f);
+        nvgFillColor(vg, c); nvgFill(vg);
+        for (int side = 0; side < 2; ++side) {             // emission waves L/R
+            const float a0 = side ? -0.6f : PI - 0.6f;
+            const float a1 = side ?  0.6f : PI + 0.6f;
+            for (int i = 1; i <= 2; ++i) {
+                nvgBeginPath(vg);
+                nvgArc(vg, cx, ny, h * 0.28f * i, a0, a1, NVG_CW);
+                nvgStroke(vg);
+            }
+        }
+        break;
+    }
+    }
+}
+
 // ── Cycling info panel ──────────────────────────────────────────────────────────
 // A configurable region (mirroring the minimap on the opposite side) that auto-
 // cycles through glanceable widgets: analog clock, notifications, schedule, weather.
@@ -1036,6 +1158,42 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
     }
 
     nvgRestore(vg);  // pop scissor
+
+    // Status indicator ring — small badges hugging the disc on the clockwise
+    // 120°→-60° arc (the top + interior/right side, so nothing clips at the edge).
+    // Each is lit when its subsystem is active, dimmed otherwise.
+    {
+        bool bt_on = false;
+        for (const auto& d : s.bt_devices) if (d.connected) { bt_on = true; break; }
+        struct { StatusGlyph g; bool on; } items[] = {
+            { StatusGlyph::Wifi,      s.wifi.connected || s.health.wifi_ok },
+            { StatusGlyph::Bluetooth, bt_on },
+            { StatusGlyph::Gamepad,   s.health.gamepad_ok },
+            { StatusGlyph::Audio,     s.health.audio_ok || s.audio.enabled },
+            { StatusGlyph::Ssh,       s.ssh.active || s.health.ssh_active },
+            { StatusGlyph::Lora,      s.health.lora_ok },
+        };
+        const int   ni  = static_cast<int>(sizeof(items) / sizeof(items[0]));
+        const float sz  = std::clamp(r * 0.15f, 14.f, 26.f);
+        const float ring_r = r + 4.f + sz * 0.62f;
+        const float DEG = static_cast<float>(M_PI) / 180.f;
+        for (int i = 0; i < ni; ++i) {
+            const float deg = 120.f - (ni > 1 ? static_cast<float>(i) / (ni - 1) : 0.f) * 180.f;
+            const float a   = deg * DEG;
+            const float ix  = px + std::cos(a) * ring_r;
+            const float iy  = py - std::sin(a) * ring_r;   // unit-circle → screen (y down)
+            const bool  on  = items[i].on;
+            nvgBeginPath(vg); nvgCircle(vg, ix, iy, sz * 0.62f);    // dark badge backing
+            nvgFillColor(vg, nvgRGBA(10, 16, 22, on ? 175 : 120)); nvgFill(vg);
+            nvgStrokeColor(vg, on ? nvg_col_a(col_.glow_base, 205) : nvgRGBA(255, 255, 255, 55));
+            nvgStrokeWidth(vg, 1.2f); nvgStroke(vg);
+            const float alpha = on ? 1.f : 0.35f;
+            const NVGcolor gc = on ? nvg_col_a(col_.text_fill, 240)
+                                   : nvg_col_a(col_.text_fill, 80);
+            if (!icons_.draw(vg, status_png_name(items[i].g), ix, iy, sz * 0.92f, alpha))
+                draw_status_glyph(vg, items[i].g, ix, iy, sz * 0.80f, gc);
+        }
+    }
 
     // Cycle position dots along the bottom.
     if (n > 1) {
