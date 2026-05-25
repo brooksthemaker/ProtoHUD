@@ -3181,6 +3181,12 @@ static std::vector<MenuItem> build_menu(
             [&state](bool v){ state.win_frameless.store(v); state.win_mode_dirty.store(true); }),
             "Remove the OS window title bar and borders (windowed mode). Desktop/dev "
             "only. Applied live."),
+        with_desc(toggle("Legacy HUD",
+            [&state]{ return state.legacy_hud; },
+            [&state](bool v){ state.legacy_hud = v; }),
+            "ON: show the legacy edge/corner HUD (compass tape, health indicators, "
+            "face indicator, corner clock/timer, LoRa messages). OFF: show only the "
+            "modular HUD — the minimap and info panel."),
         with_panel(
             submenu("Audio", std::move(audio_menu)),
             "Audio Status",
@@ -3897,6 +3903,7 @@ int main(int argc, char* argv[]) {
     state.max_messages        = jval(jhud, "lora_message_history", 50);
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
+    state.legacy_hud          = jhud.value("legacy_hud", true);
     state.scheduler_lead_min  = sched_lead_min;   // loaded above, applied now that state exists
     state.win_fullscreen.store(xr_cfg.fullscreen);  // mirror display cfg for the Settings toggles
     state.win_frameless.store(xr_cfg.frameless);
@@ -5156,6 +5163,7 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
+        cfg["hud"]["legacy_hud"]          = state.legacy_hud;
         {
             static const char* kAxes[] = { "roll", "pitch", "yaw" };
             cfg["compass"]["axis"]   = kAxes[static_cast<int>(state.compass_axis)];
@@ -6042,6 +6050,7 @@ int main(int argc, char* argv[]) {
             snap.compass_heading    = state.compass_heading;
             snap.compass_bg_enabled = state.compass_bg_enabled;
             snap.compass_tape       = state.compass_tape;
+            snap.legacy_hud         = state.legacy_hud;
             snap.imu_pose           = state.imu_pose;
             snap.focus_left         = state.focus_left;
             snap.focus_right        = state.focus_right;

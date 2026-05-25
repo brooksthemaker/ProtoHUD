@@ -349,27 +349,31 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     draw_info_panel(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
 
-    if (!s.lora_messages.empty()) {
-        float pw    = static_cast<float>(cfg_.panel_width);
-        float msg_w = std::min(pw, fw / 3.f);
-        float msg_y = flip ? (c_margin + ch) : 0.f;
-        draw_lora_messages(nvg_, s, 0.f, msg_y, msg_w, fh);
-    }
+    // Legacy HUD chrome (edge/corner indicators). The minimap + info panel above
+    // are the modular HUD and stay on; this block is the togglable legacy layer.
+    if (s.legacy_hud) {
+        if (!s.lora_messages.empty()) {
+            float pw    = static_cast<float>(cfg_.panel_width);
+            float msg_w = std::min(pw, fw / 3.f);
+            float msg_y = flip ? (c_margin + ch) : 0.f;
+            draw_lora_messages(nvg_, s, 0.f, msg_y, msg_w, fh);
+        }
 
-    const float cw        = fw / 3.f;
-    const float compass_y = flip ? c_margin : fh - ch - c_margin;
-    if (s.compass_tape)
-        draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
-    draw_health_side(nvg_, s.health, fw, fh, false,
-                     s.focus_left, s.focus_right, s.night_vision.nv_enabled);
-    draw_health_side(nvg_, s.health, fw, fh, true,
-                     s.focus_left, s.focus_right, s.night_vision.nv_enabled);
-    draw_face_indicator        (nvg_, s.face, fw, fh);
-    // The minimap clock (above the map) subsumes the corner clock + timer/alarm
-    // indicator when it's active; otherwise fall back to the corner readouts.
-    if (!(s.map_overlay.enabled && s.map_overlay.clock)) {
-        draw_clock_indicator       (nvg_, s,      fw, fh);
-        draw_timer_alarm_indicator (nvg_, s,      fw, fh);
+        const float cw        = fw / 3.f;
+        const float compass_y = flip ? c_margin : fh - ch - c_margin;
+        if (s.compass_tape)
+            draw_compass_tape(nvg_, s, fw / 2.f - cw / 2.f, compass_y, cw, ch);
+        draw_health_side(nvg_, s.health, fw, fh, false,
+                         s.focus_left, s.focus_right, s.night_vision.nv_enabled);
+        draw_health_side(nvg_, s.health, fw, fh, true,
+                         s.focus_left, s.focus_right, s.night_vision.nv_enabled);
+        draw_face_indicator        (nvg_, s.face, fw, fh);
+        // The minimap clock (above the map) subsumes the corner clock + timer/alarm
+        // indicator when it's active; otherwise fall back to the corner readouts.
+        if (!(s.map_overlay.enabled && s.map_overlay.clock)) {
+            draw_clock_indicator       (nvg_, s,      fw, fh);
+            draw_timer_alarm_indicator (nvg_, s,      fw, fh);
+        }
     }
     fx_draw_alarm_pulse(nvg_, s, fw, fh);
 

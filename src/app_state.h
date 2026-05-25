@@ -586,6 +586,11 @@ struct AppState {
     bool  compass_bg_enabled = true;
     bool  compass_tape       = true;   // the top-of-screen compass tape
 
+    // Legacy HUD chrome (edge/corner indicators: compass tape, health sides, face
+    // indicator, corner clock/timer, LoRa message list). Off = show only the new
+    // modular HUD (minimap + info panel). Render-thread-owned; menu writes under mtx.
+    bool  legacy_hud         = true;
+
     // Which XR-IMU axis drives the compass, and whether to invert the rotation
     // direction. Configurable from the menu so different IMU orientations work
     // without recompiling.
