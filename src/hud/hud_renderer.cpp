@@ -1432,7 +1432,7 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_
 }
 
 // ── Protoface portrait beside the minimap ───────────────────────────────────────
-// A scaled, one-side preview of the LED face placed to the right of the minimap
+// A scaled, one-side preview of the LED face placed to the left of the minimap
 // (American Fugitive-style portrait). Drawn on the ImGui foreground list in display
 // coords, matching the minimap geometry.
 void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_h,
@@ -1465,7 +1465,10 @@ void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_
     const float pad   = 6.f;
     const float win_w = pw + pad * 2.f;
     const float win_h = ph + pad * 2.f;
-    const float x0    = cx + ringR + 28.f;      // to the right of the map cluster
+    // To the left of the map cluster, clearing the compass ring (and the
+    // battery/system gauge when it's shown on that side).
+    const float clear = cfg.battery_arc ? 76.f : 34.f;
+    const float x0    = cx - ringR - clear - win_w;
     const float y0    = cy - win_h * 0.5f;
 
     ImDrawList* dl = ImGui::GetForegroundDrawList();
