@@ -67,6 +67,11 @@ public:
     void set_vsync(bool on);
     bool vsync() const { return vsync_; }
 
+    // Switch the window between borderless-fullscreen and windowed, and toggle OS
+    // decorations, at runtime (main thread only). No-op while the glasses are
+    // connected (the window is bound to the glasses monitor). Desktop/dev use.
+    void apply_window_mode(bool fullscreen, bool frameless);
+
     // Convenience: composite() + present() in one call (no ImGui overlay).
     void submit_frame() { composite(); present(); }
 
@@ -133,4 +138,7 @@ private:
     std::atomic<float>    imu_yaw_   { 0.f };
 
     bool vsync_ = true;
+
+    // Saved windowed geometry, so leaving fullscreen restores the prior frame.
+    int  win_x_ = 60, win_y_ = 60, win_w_ = 1280, win_h_ = 720;
 };

@@ -3171,6 +3171,16 @@ static std::vector<MenuItem> build_menu(
             [menu_sys_pp](float v){ if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->set_radial_tilt(v); }),
             "Helmet-style inward perspective tilt for the radial menu. 0 = flat on "
             "the glass; higher = the wheel curves away at the top like a visor."),
+        with_desc(toggle("Fullscreen",
+            [&state]{ return state.win_fullscreen.load(); },
+            [&state](bool v){ state.win_fullscreen.store(v); state.win_mode_dirty.store(true); }),
+            "Borderless fullscreen covering the whole screen. Desktop/dev only — "
+            "ignored while the glasses are connected. Applied live."),
+        with_desc(toggle("Frameless Window",
+            [&state]{ return state.win_frameless.load(); },
+            [&state](bool v){ state.win_frameless.store(v); state.win_mode_dirty.store(true); }),
+            "Remove the OS window title bar and borders (windowed mode). Desktop/dev "
+            "only. Applied live."),
         with_panel(
             submenu("Audio", std::move(audio_menu)),
             "Audio Status",
@@ -3888,6 +3898,8 @@ int main(int argc, char* argv[]) {
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
     state.scheduler_lead_min  = sched_lead_min;   // loaded above, applied now that state exists
+    state.win_fullscreen.store(xr_cfg.fullscreen);  // mirror display cfg for the Settings toggles
+    state.win_frameless.store(xr_cfg.frameless);
 
     if (jhud.contains("effects")) {
         auto& jfx = jhud["effects"];
@@ -5168,6 +5180,9 @@ int main(int argc, char* argv[]) {
 
         cfg["scheduler"]["lead_minutes"] = state.scheduler_lead_min;
 
+        cfg["display"]["fullscreen"] = state.win_fullscreen.load();
+        cfg["display"]["frameless"]  = state.win_frameless.load();
+
         cfg["pip"]["cam1"]["anchor_x"]  = pip_overlay_cfg1.anchor_x;
         cfg["pip"]["cam1"]["anchor_y"]  = pip_overlay_cfg1.anchor_y;
         cfg["pip"]["cam1"]["pan_x"]     = pip_overlay_cfg1.pan_x;
@@ -5476,6 +5491,10 @@ int main(int argc, char* argv[]) {
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);
+
+        // Apply a pending window-mode change (Settings > Fullscreen / Frameless).
+        if (state.win_mode_dirty.exchange(false))
+            xr.apply_window_mode(state.win_fullscreen.load(), state.win_frameless.load());
 
         // ── Delta time ────────────────────────────────────────────────────────
         double now = glfwGetTime();

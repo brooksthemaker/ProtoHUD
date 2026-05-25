@@ -734,6 +734,13 @@ struct AppState {
     // Signals render thread to quit.
     std::atomic<bool> quit { false };
 
+    // Window mode (desktop/dev): menu toggles set these + win_mode_dirty; the render
+    // loop applies them via XRDisplay::apply_window_mode on the main thread. Ignored
+    // while the glasses are connected (the window lives on the glasses monitor).
+    std::atomic<bool> win_fullscreen { false };
+    std::atomic<bool> win_frameless  { false };
+    std::atomic<bool> win_mode_dirty { false };
+
     // QR scan mute: set to future epoch-seconds to suppress notifications temporarily.
     std::atomic<int64_t> qr_mute_until_s { 0 };
 

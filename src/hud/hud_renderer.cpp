@@ -1153,57 +1153,74 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
 
     nvgRestore(vg);  // pop scissor
 
-    // Page labels + status icons ring the disc:
-    //   • inner = page labels as rounded-trapezoid wedges wrapping the full circle,
-    //     styled like the radial menu. Active page = accent box + dark text; inactive
-    //     pages = dark box + white text. They don't move — the highlight does.
-    //   • outer = system status badges (doubled in size), lit when active / dimmed,
-    //     on the interior 120°→-60° arc just outside the label ring.
+    // Page labels + status icons ring the disc, both on the interior 120°→-24° arc:
+    //   • inner = page labels as annular-sector "trapezoids" (curved long edges that
+    //     follow the disc, straight radial short edges), styled like the radial menu.
+    //     Active page = accent box + dark text; inactive = dark box + white text.
+    //   • outer = system status badges (doubled), lit when active / dimmed.
     {
         const float DEG     = static_cast<float>(M_PI) / 180.f;
         const float HALF_PI = static_cast<float>(M_PI) * 0.5f;
-        const float TWO_PI  = 2.f * static_cast<float>(M_PI);
         const float base_sz = std::clamp(r * 0.15f, 14.f, 26.f);
-        const float lbl_h   = base_sz;
-        const float icon_sz = base_sz * 2.f;
+        const float lbl_h   = base_sz * 0.66f;             // labels ~⅓ smaller
+        const float icon_sz = base_sz * 2.f;               // icons doubled
+        const float arc0    = 120.f, arc1 = -24.f;         // shared label/icon span
 
         // ── Inner ring: page-label wedges (radial-menu look) ────────────────────
         static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE",
                                               "WEATHER", "PRECIP" };
-        const float bandW = lbl_h + 12.f;                  // radial thickness of a wedge
-        const float rmid  = r + 6.f + bandW * 0.5f;        // band centre radius
-        const float capR  = (bandW * 0.5f) / rmid;         // round-cap angular overhang
-        const float hw    = std::max(0.05f, HALF_PI * 2.f / n - capR - 0.02f);  // half wedge
+        const float r0in  = r + 6.f;                       // band inner radius
+        const float bandW = lbl_h + 10.f;
+        const float r1in  = r0in + bandW;                  // band outer radius
+        const float rmid  = (r0in + r1in) * 0.5f;          // text baseline radius
+        const float gapR  = 3.f * DEG;                     // angular gap between wedges
+
+        // Curved label text, flipped on the bottom half so it never reads upside-down.
+        auto arc_label = [&](float center_ang, const char* str, NVGcolor col) {
+            float total = 0.f;
+            for (const char* p = str; *p; ++p) total += nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+            total /= rmid;
+            nvgFillColor(vg, col);
+            const bool flip = std::sin(center_ang) > 0.f;
+            float ang = flip ? center_ang + total * 0.5f : center_ang - total * 0.5f;
+            for (const char* p = str; *p; ++p) {
+                const float adv = nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+                const float th  = flip ? ang - (adv * 0.5f) / rmid : ang + (adv * 0.5f) / rmid;
+                nvgSave(vg);
+                nvgTranslate(vg, px + std::cos(th) * rmid, py + std::sin(th) * rmid);
+                nvgRotate(vg, flip ? th - HALF_PI : th + HALF_PI);
+                nvgText(vg, 0, 0, p, p + 1);
+                nvgRestore(vg);
+                ang += flip ? -adv / rmid : adv / rmid;
+            }
+        };
+
         nvg_set_font_ui(lbl_h);
         nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nvgLineCap(vg, NVG_ROUND);
         for (int i = 0; i < n; ++i) {
             const char* nm     = kNames[order[i]];
             const bool  active = (i == info_cycle_idx_);
-            const float sc     = -HALF_PI + i * (TWO_PI / n);     // screen centre angle (CW)
+            // Tile the arc into n wedges; screen angle = -(unit angle).
+            const float u0 = arc0 + (arc1 - arc0) * (float)i / n;
+            const float u1 = arc0 + (arc1 - arc0) * (float)(i + 1) / n;
+            const float a0 = -u0 * DEG + gapR * 0.5f;       // screen (a0 < a1)
+            const float a1 = -u1 * DEG - gapR * 0.5f;
+            const float sc = (a0 + a1) * 0.5f;
             const NVGcolor fill   = active ? nvg_col_a(col_.glow_base, 210)
                                            : nvgRGBA(18, 24, 30, 185);
             const NVGcolor border = active ? nvg_col_a(col_.glow_base, 235)
                                            : nvg_col_a(col_.glow_base, 70);
-            nvgBeginPath(vg); nvgArc(vg, px, py, rmid, sc - hw, sc + hw, NVG_CW);
-            nvgStrokeColor(vg, border); nvgStrokeWidth(vg, bandW + (active ? 4.f : 2.f)); nvgStroke(vg);
-            nvgBeginPath(vg); nvgArc(vg, px, py, rmid, sc - hw, sc + hw, NVG_CW);
-            nvgStrokeColor(vg, fill);   nvgStrokeWidth(vg, bandW); nvgStroke(vg);
-
-            // Label: a straight string rotated to the tangent, flipped on the bottom
-            // half so it never reads upside-down (matches draw_radial).
-            float ta = sc + HALF_PI;
-            if (std::sin(sc) > 0.f) ta += static_cast<float>(M_PI);
-            nvgSave(vg);
-            nvgTranslate(vg, px + std::cos(sc) * rmid, py + std::sin(sc) * rmid);
-            nvgRotate(vg, ta);
-            nvgFillColor(vg, active ? nvgRGBA(20, 22, 26, 255)        // dark text on accent
-                                    : nvgRGBA(230, 235, 240, 230));   // white text on dark box
-            nvgText(vg, 0, 0, nm, nullptr);
-            nvgRestore(vg);
+            nvgBeginPath(vg);                               // annular sector path
+            nvgArc(vg, px, py, r1in, a0, a1, NVG_CW);       // outer edge (curved)
+            nvgArc(vg, px, py, r0in, a1, a0, NVG_CCW);      // inner edge (curved) back
+            nvgClosePath(vg);                               // straight radial short edges
+            nvgFillColor(vg, fill); nvgFill(vg);
+            nvgStrokeColor(vg, border); nvgStrokeWidth(vg, active ? 2.f : 1.f); nvgStroke(vg);
+            arc_label(sc, nm, active ? nvgRGBA(20, 22, 26, 255)        // dark text on accent
+                                     : nvgRGBA(230, 235, 240, 230));   // white text on dark box
         }
 
-        // ── Outer ring: status badges (outside the label band, interior arc) ────
+        // ── Outer ring: status badges (outside the label band) ──────────────────
         bool bt_on = false;
         for (const auto& d : s.bt_devices) if (d.connected) { bt_on = true; break; }
         struct { StatusGlyph g; bool on; } items[] = {
@@ -1215,10 +1232,9 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             { StatusGlyph::Lora,      s.health.lora_ok },
         };
         const int   ni     = static_cast<int>(sizeof(items) / sizeof(items[0]));
-        const float deg0   = 120.f, deg1 = -60.f;
-        const float icon_r = rmid + bandW * 0.5f + icon_sz * 0.62f + 6.f;
+        const float icon_r = r1in + icon_sz * 0.62f + 6.f;
         for (int i = 0; i < ni; ++i) {
-            const float deg = deg0 + (ni > 1 ? (deg1 - deg0) * (float)i / (ni - 1) : 0.f);
+            const float deg = arc0 + (ni > 1 ? (arc1 - arc0) * (float)i / (ni - 1) : 0.f);
             const float a   = deg * DEG;
             const float ix  = px + std::cos(a) * icon_r;
             const float iy  = py - std::sin(a) * icon_r;        // unit-circle → screen (y down)
