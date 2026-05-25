@@ -4219,7 +4219,10 @@ int main(int argc, char* argv[]) {
             // panel_driver.py uses — a backgrounded std::system("... &") was failing
             // silently / not surviving on this platform. config is found via the
             // script's own __file__, so no chdir is needed.
-            const std::string drv = bin_dir + "/../scheduler_daemon/run.py";
+            // NOTE: the daemon entry is scheduler.py (not run.py) on purpose — the
+            // Protoface setup below runs `pkill -f run.py`, which would otherwise
+            // kill this daemon too.
+            const std::string drv = bin_dir + "/../scheduler_daemon/scheduler.py";
             std::system("pkill -f scheduler_daemon 2>/dev/null");   // clear any old instance
             pid_t pid = fork();
             if (pid == 0) {

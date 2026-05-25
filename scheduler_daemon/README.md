@@ -26,7 +26,7 @@ empty/"disconnected") and lands in a later pass; `requests` will be added then.
 
 ```bash
 cd scheduler_daemon
-python3 run.py
+python3 scheduler.py
 ```
 
 No dependencies (Python 3 standard library only). Config is read from the shared
