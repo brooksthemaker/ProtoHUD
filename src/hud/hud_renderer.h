@@ -159,7 +159,8 @@ public:
                             const AppState& s);
 
     // Draw system status panel (ImGui pass).
-    void draw_sys_panel(const AppState& snap, int w, int h, bool active);
+    void draw_sys_panel(const AppState& snap, int w, int h, bool active,
+                        float x_offset = 0.f);
 
     // Flush ImGui draw data to current GL framebuffer.
     void render_menu_overlay();

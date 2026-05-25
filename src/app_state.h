@@ -705,6 +705,11 @@ struct AppState {
     // Top/bottom + swap docking that positions the minimap & info panel as twins.
     HudDock              hud_dock;
 
+    // Expanded-map view options: optionally show the debug panel (opened to the right
+    // of the info sidebar) and/or hide the info panel while the map is expanded.
+    bool expanded_show_debug = false;
+    bool expanded_hide_info  = false;
+
     // Per-LoRa-node compass marker colors (indexed by node.local_id % 8)
     ImU32 lora_node_colors[8] = {
         IM_COL32(255, 160,  32, 255),  // 0 orange

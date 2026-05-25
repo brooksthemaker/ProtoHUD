@@ -2615,6 +2615,16 @@ static std::vector<MenuItem> build_menu(
             state.map_overlay.view_pan_x = 0.f;
             state.map_overlay.view_pan_y = 0.f;
         }),
+        with_desc(toggle("Expanded: Debug Window",
+            [&state]{ return state.expanded_show_debug; },
+            [&state](bool v){ state.expanded_show_debug = v; }),
+            "In the expanded map view, also show the debug/system panel, opened to "
+            "the right of the info sidebar."),
+        with_desc(toggle("Expanded: Hide Info Panel",
+            [&state]{ return state.expanded_hide_info; },
+            [&state](bool v){ state.expanded_hide_info = v; }),
+            "Hide the cycling info panel while the map is expanded (its weather / "
+            "schedule / time already appear in the sidebar)."),
     };
     std::vector<MenuItem> mini_map_menu = {
         submenu("Module Controls", std::move(module_controls_menu)),
@@ -3904,6 +3914,8 @@ int main(int argc, char* argv[]) {
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
     state.legacy_hud          = jhud.value("legacy_hud", true);
+    state.expanded_show_debug = jhud.value("expanded_show_debug", false);
+    state.expanded_hide_info  = jhud.value("expanded_hide_info", false);
     state.scheduler_lead_min  = sched_lead_min;   // loaded above, applied now that state exists
     state.win_fullscreen.store(xr_cfg.fullscreen);  // mirror display cfg for the Settings toggles
     state.win_frameless.store(xr_cfg.frameless);
@@ -5164,6 +5176,8 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
         cfg["hud"]["legacy_hud"]          = state.legacy_hud;
+        cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
+        cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
         {
             static const char* kAxes[] = { "roll", "pitch", "yaw" };
             cfg["compass"]["axis"]   = kAxes[static_cast<int>(state.compass_axis)];
@@ -6064,6 +6078,8 @@ int main(int argc, char* argv[]) {
             snap.effects_cfg        = state.effects_cfg;
             snap.map_overlay        = state.map_overlay;
             snap.info_panel         = state.info_panel;
+            snap.expanded_show_debug = state.expanded_show_debug;
+            snap.expanded_hide_info  = state.expanded_hide_info;
             snap.weather            = state.weather;
             snap.weather_cfg        = state.weather_cfg;
             snap.sys_metrics        = state.sys_metrics;
@@ -6519,7 +6535,15 @@ int main(int argc, char* argv[]) {
         }
 
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
-        hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), sys_panel_active);
+        // Debug panel: normal toggle, plus an option to show it in the expanded-map
+        // view. When expanded, it opens to the right of the info sidebar (~310px).
+        {
+            const bool expanded_view = snap.map_overlay.expanded;
+            const bool show_dbg = sys_panel_active ||
+                                  (expanded_view && snap.expanded_show_debug);
+            const float dbg_x = (expanded_view && show_dbg) ? 310.f : 0.f;
+            hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), show_dbg, dbg_x);
+        }
 
         // Alarm / timer-expired popups — disabled, toasts handle these now.
         // hud.draw_popups(state, xr.eye_width(), xr.eye_height());

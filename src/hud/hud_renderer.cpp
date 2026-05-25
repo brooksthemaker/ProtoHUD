@@ -346,7 +346,9 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     if (own_frame) nvgBeginFrame(nvg_, fw, fh, 1.0f);
 
     draw_map_overlay(nvg_, s, fw, fh);
-    draw_info_panel(nvg_, s, fw, fh);
+    // The expanded map can optionally hide the info panel (its data is in the sidebar).
+    if (!(s.map_overlay.expanded && s.expanded_hide_info))
+        draw_info_panel(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
 
     // Legacy HUD chrome (edge/corner indicators). The minimap + info panel above
@@ -3367,7 +3369,8 @@ void HudRenderer::fx_update(NVGcontext* vg, const AppState& s,
 
 // ── System status panel ───────────────────────────────────────────────────────
 
-void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active) {
+void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active,
+                                 float x_offset) {
     if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
@@ -3395,7 +3398,7 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     constexpr float PW     = COLW * 2.f + GAP; // total panel width
     constexpr float PAD   = 10.f;
     constexpr float MRG   = 14.f;             // left/top margin from screen edge
-    const float px = MRG;
+    const float px = MRG + x_offset;          // x_offset opens it right of the map sidebar
     const float py = MRG;
     const float PH = std::min(sh - MRG * 2.f, 1040.f);
 
