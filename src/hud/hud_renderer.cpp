@@ -3370,7 +3370,7 @@ void HudRenderer::fx_update(NVGcontext* vg, const AppState& s,
 // ── System status panel ───────────────────────────────────────────────────────
 
 void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active,
-                                 float x_offset) {
+                                 float x_offset, bool narrow) {
     if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
@@ -3395,7 +3395,9 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     // into a second column when the first fills up.
     constexpr float COLW  = 330.f;            // per-column content width
     constexpr float GAP   = 12.f;             // gap between columns
-    constexpr float PW     = COLW * 2.f + GAP; // total panel width
+    // Narrow = single column (~half width); the content fits one column on a tall
+    // display, so the second column's space is just empty there.
+    const float PW = narrow ? COLW : (COLW * 2.f + GAP);
     constexpr float PAD   = 10.f;
     constexpr float MRG   = 14.f;             // left/top margin from screen edge
     const float px = MRG + x_offset;          // x_offset opens it right of the map sidebar
@@ -3413,8 +3415,9 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
     float cy = py + PAD;    // current y cursor
 
     // Wrap into the second column once the first can't fit `need` more pixels.
+    // Narrow mode keeps everything in one column (no second column).
     auto wrap_col = [&](float need) {
-        if (cx <= px + 0.5f && cy + need > py + PH - PAD) {
+        if (!narrow && cx <= px + 0.5f && cy + need > py + PH - PAD) {
             cx = px + COLW + GAP;
             cy = py + PAD;
         }

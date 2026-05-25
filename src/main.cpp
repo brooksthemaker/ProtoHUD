@@ -6554,8 +6554,10 @@ int main(int argc, char* argv[]) {
             const bool expanded_view = snap.map_overlay.expanded;
             const bool show_dbg = sys_panel_active ||
                                   (expanded_view && snap.expanded_show_debug);
-            const float dbg_x = (expanded_view && show_dbg) ? 310.f : 0.f;
-            hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), show_dbg, dbg_x);
+            const bool dbg_in_expanded = expanded_view && show_dbg;
+            const float dbg_x = dbg_in_expanded ? 310.f : 0.f;
+            hud.draw_sys_panel(snap, xr.eye_width(), xr.eye_height(), show_dbg,
+                               dbg_x, /*narrow=*/dbg_in_expanded);
         }
 
         // Alarm / timer-expired popups — disabled, toasts handle these now.
