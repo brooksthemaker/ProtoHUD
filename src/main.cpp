@@ -4215,18 +4215,26 @@ int main(int argc, char* argv[]) {
     weather_mon.start(&state);
     if (sched_enabled) {
         if (sched_autostart) {
-            // Launch the companion daemon, locating it next to the binary's repo
-            // (<bin>/../scheduler_daemon) rather than a hardcoded $HOME path. Output
-            // goes to /tmp/protohud-scheduler.log. A second instance is harmless
-            // (it just fails to bind the port).
-            const std::string daemon_dir = bin_dir + "/../scheduler_daemon";
-            const std::string cmd =
-                "cd \"" + daemon_dir + "\" && "
-                "setsid python3 -u run.py </dev/null "
-                ">/tmp/protohud-scheduler.log 2>&1 &";
-            std::cout << "[scheduler] autostart -> " << daemon_dir
-                      << " (log: /tmp/protohud-scheduler.log)\n";
-            std::system(cmd.c_str());
+            // Launch the daemon via fork()+setsid()+execlp(), the same robust path
+            // panel_driver.py uses — a backgrounded std::system("... &") was failing
+            // silently / not surviving on this platform. config is found via the
+            // script's own __file__, so no chdir is needed.
+            const std::string drv = bin_dir + "/../scheduler_daemon/run.py";
+            std::system("pkill -f scheduler_daemon 2>/dev/null");   // clear any old instance
+            pid_t pid = fork();
+            if (pid == 0) {
+                setsid();
+                int lf = ::open("/tmp/protohud-scheduler.log",
+                                O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (lf >= 0) { dup2(lf, 1); dup2(lf, 2); ::close(lf); }
+                int nf = ::open("/dev/null", O_RDONLY);
+                if (nf >= 0) { dup2(nf, 0); ::close(nf); }
+                execlp("python3", "python3", "-u", drv.c_str(),
+                       static_cast<char*>(nullptr));
+                _exit(127);   // execlp failed (python3 not found)
+            }
+            std::cout << "[scheduler] launched daemon pid=" << pid
+                      << " (" << drv << ", log: /tmp/protohud-scheduler.log)\n";
         } else {
             std::cout << "[scheduler] autostart disabled (scheduler.autostart=false)\n";
         }
