@@ -605,6 +605,10 @@ struct AppState {
     // modular HUD (minimap + info panel). Render-thread-owned; menu writes under mtx.
     bool  legacy_hud         = true;
 
+    // Skip the startup landing/profile screen and run the current config directly.
+    // Startup-only behavior; toggled in the System menu, persisted to config.
+    bool  skip_landing       = false;
+
     // Which XR-IMU axis drives the compass, and whether to invert the rotation
     // direction. Configurable from the menu so different IMU orientations work
     // without recompiling.

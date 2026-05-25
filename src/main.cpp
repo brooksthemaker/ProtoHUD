@@ -3197,6 +3197,11 @@ static std::vector<MenuItem> build_menu(
             "ON: show the legacy edge/corner HUD (compass tape, health indicators, "
             "face indicator, corner clock/timer, LoRa messages). OFF: show only the "
             "modular HUD — the minimap and info panel."),
+        with_desc(toggle("Skip Startup Screen",
+            [&state]{ return state.skip_landing; },
+            [&state](bool v){ state.skip_landing = v; }),
+            "Bypass the profile/continue landing screen at boot and run the current "
+            "config directly. Takes effect on the next launch."),
         with_panel(
             submenu("Audio", std::move(audio_menu)),
             "Audio Status",
@@ -3914,6 +3919,8 @@ int main(int argc, char* argv[]) {
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
     state.legacy_hud          = jhud.value("legacy_hud", true);
+    state.skip_landing        = jval(cfg.contains("landing") ? cfg["landing"] : json::object(),
+                                     "skip", false);
     state.expanded_show_debug = jhud.value("expanded_show_debug", false);
     state.expanded_hide_info  = jhud.value("expanded_hide_info", false);
     state.scheduler_lead_min  = sched_lead_min;   // loaded above, applied now that state exists
@@ -4734,6 +4741,8 @@ int main(int argc, char* argv[]) {
     LandingState landing;
     // Running from a profile file → skip the landing page (avoids a re-exec loop).
     if (!active_profile_name.empty()) landing.active = false;
+    // User opted to bypass the landing screen (System > Skip Startup Screen).
+    if (state.skip_landing) landing.active = false;
     landing.countdown_on = (landing_continue_timeout_s > 0.0) && landing.active;
 
     auto landing_count = [&landing, &profiles]() -> int {
@@ -5130,7 +5139,9 @@ int main(int argc, char* argv[]) {
                     dl->AddText(font, fs * 0.95f, {rx - csz.x, ty}, cc, cd);
                     rx -= csz.x + 10.f;
                 }
-                std::string resume = last_nm.empty() ? std::string("(current config)") : last_nm;
+                std::string resume = last_nm.empty()
+                    ? std::filesystem::path(cfg_path).stem().string()
+                    : last_nm;
                 std::transform(resume.begin(), resume.end(), resume.begin(), ::toupper);
                 ImVec2 nsz = font->CalcTextSizeA(fs * 0.95f, 1e9f, 0.f, resume.c_str());
                 ImU32 nc = sel ? IM_COL32(10, 12, 14, 255) : ((accent & 0x00FFFFFFu) | (185u << 24));
@@ -5176,6 +5187,7 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
         cfg["hud"]["legacy_hud"]          = state.legacy_hud;
+        cfg["landing"]["skip"]            = state.skip_landing;
         cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
         cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
         {
