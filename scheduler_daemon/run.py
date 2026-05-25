@@ -24,6 +24,7 @@ import html
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -99,15 +100,39 @@ def read_json(path, default):
         return default
 
 
+def _lan_ips():
+    """Non-loopback IPv4 addresses from `hostname -I` (best-effort)."""
+    try:
+        out = subprocess.run(["hostname", "-I"], capture_output=True,
+                             text=True, timeout=3).stdout
+        return [ip for ip in out.split() if "." in ip and not ip.startswith("127.")]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _is_private(ip):
+    return (ip.startswith("192.168.") or ip.startswith("10.")
+            or any(ip.startswith(f"172.{b}.") for b in range(16, 32)))
+
+
 def detect_ip():
+    # Prefer the egress interface toward the internet.
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))   # no packets sent; just picks the egress iface
-        return s.getsockname()[0]
+        ip = s.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            return ip
     except Exception:  # noqa: BLE001
-        return "127.0.0.1"
+        pass
     finally:
         s.close()
+    # Fall back to a LAN address (prefer private ranges) when there's no default route.
+    ips = _lan_ips()
+    for ip in ips:
+        if _is_private(ip):
+            return ip
+    return ips[0] if ips else "127.0.0.1"
 
 
 # ── Scheduler store ──────────────────────────────────────────────────────────────
@@ -333,6 +358,10 @@ def main():
                                 make_handler(store))
     url = f"http://{detect_ip()}:{cfg['web_port']}"
     print(f"[scheduler] web form at {url}")
+    others = _lan_ips()
+    if others:
+        print("[scheduler] reachable on: " +
+              ", ".join(f"http://{ip}:{cfg['web_port']}" for ip in others))
     print(f"[scheduler] events -> {cfg['events_path']}")
     try:
         httpd.serve_forever()
