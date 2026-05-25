@@ -4222,7 +4222,7 @@ int main(int argc, char* argv[]) {
             const std::string daemon_dir = bin_dir + "/../scheduler_daemon";
             const std::string cmd =
                 "cd \"" + daemon_dir + "\" && "
-                "nohup python3 -u run.py </dev/null "
+                "setsid python3 -u run.py </dev/null "
                 ">/tmp/protohud-scheduler.log 2>&1 &";
             std::cout << "[scheduler] autostart -> " << daemon_dir
                       << " (log: /tmp/protohud-scheduler.log)\n";

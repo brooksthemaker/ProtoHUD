@@ -364,8 +364,13 @@ def main():
                      args=(store, int(cfg["heartbeat_s"])),
                      daemon=True).start()
 
-    httpd = ThreadingHTTPServer(("0.0.0.0", int(cfg["web_port"])),
-                                make_handler(store))
+    try:
+        httpd = ThreadingHTTPServer(("0.0.0.0", int(cfg["web_port"])),
+                                    make_handler(store))
+    except OSError as e:
+        print(f"[scheduler] cannot bind port {cfg['web_port']} ({e}); "
+              "another instance is probably already running — exiting.")
+        return 0
     url = f"http://{detect_ip()}:{cfg['web_port']}"
     print(f"[scheduler] web form at {url}")
     others = _lan_ips()
