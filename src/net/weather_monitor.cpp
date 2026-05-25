@@ -86,8 +86,8 @@ void WeatherMonitor::thread_fn() {
                 "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
                 "&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
                 "is_day,weather_code,wind_speed_10m,precipitation"
-                "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-                "&forecast_days=1"
+                "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+                "&forecast_days=3"
                 "&temperature_unit=%s&wind_speed_unit=%s&precipitation_unit=%s&timezone=auto",
                 lat, lon, metric ? "celsius" : "fahrenheit", metric ? "kmh" : "mph",
                 metric ? "mm" : "inch");
@@ -108,18 +108,37 @@ void WeatherMonitor::thread_fn() {
                 w.location    = city;
                 w.updated_utc = now;
                 w.ok          = true;
-                // Daily block: today's high/low + max rain probability (arrays of 1).
+                // Daily block: per-day high/low + code + rain probability (3 days).
+                // forecast[0] is today; its values also fill the top-level summary.
                 if (j.contains("daily") && j["daily"].is_object()) {
                     const auto& d = j["daily"];
-                    auto first = [](const json& arr, float def) {
-                        return (arr.is_array() && !arr.empty()) ? arr[0].get<float>() : def;
+                    auto at_f = [&](const char* k, int i, float def) -> float {
+                        if (!d.contains(k) || !d[k].is_array()) return def;
+                        const auto& a = d[k];
+                        return (i < (int)a.size() && !a[i].is_null()) ? a[i].get<float>() : def;
                     };
-                    if (d.contains("temperature_2m_max")) w.temp_high = first(d["temperature_2m_max"], w.temp);
-                    if (d.contains("temperature_2m_min")) w.temp_low  = first(d["temperature_2m_min"], w.temp);
-                    if (d.contains("precipitation_probability_max")) {
-                        const auto& pp = d["precipitation_probability_max"];
-                        if (pp.is_array() && !pp.empty() && !pp[0].is_null())
-                            w.rain_prob = pp[0].get<int>();
+                    auto at_i = [&](const char* k, int i, int def) -> int {
+                        if (!d.contains(k) || !d[k].is_array()) return def;
+                        const auto& a = d[k];
+                        return (i < (int)a.size() && !a[i].is_null()) ? a[i].get<int>() : def;
+                    };
+                    int days = 0;
+                    for (int i = 0; i < WeatherState::kForecastDays; ++i) {
+                        if (!d.contains("temperature_2m_max") ||
+                            !d["temperature_2m_max"].is_array() ||
+                            i >= (int)d["temperature_2m_max"].size()) break;
+                        WeatherDay& fd = w.forecast[i];
+                        fd.code      = at_i("weather_code", i, -1);
+                        fd.tmax      = at_f("temperature_2m_max", i, w.temp);
+                        fd.tmin      = at_f("temperature_2m_min", i, w.temp);
+                        fd.rain_prob = at_i("precipitation_probability_max", i, -1);
+                        ++days;
+                    }
+                    w.forecast_count = days;
+                    if (days > 0) {                    // today's summary mirrors day 0
+                        w.temp_high = w.forecast[0].tmax;
+                        w.temp_low  = w.forecast[0].tmin;
+                        if (w.forecast[0].rain_prob >= 0) w.rain_prob = w.forecast[0].rain_prob;
                     }
                 }
             }

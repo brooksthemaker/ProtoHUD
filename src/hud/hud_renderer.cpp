@@ -1429,7 +1429,8 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
         };
         const float lh = 22.f, padx = 12.f, pady = 10.f;
         const float pw = 290.f, ph = lh * 4.f + pady * 2.f;
-        const float px = 22.f, py = fh - ph - 20.f;   // bottom-left of the screen
+        // Bottom-right of the screen (the left edge now holds the info sidebar).
+        const float px = fw - pw - 22.f, py = fh - ph - 20.f;
         nvgBeginPath(vg);
         nvgRoundedRect(vg, px, py, pw, ph, 6.f);
         nvgFillColor(vg, nvgRGBA(8, 12, 18, 215));
@@ -1447,6 +1448,206 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 225));
             nvgText(vg, px + padx + 96.f, ly, r.v, nullptr);
             ly += lh;
+        }
+    }
+
+    // Left info column: system indicators, time/date, weather + forecast, schedule.
+    draw_expanded_sidebar(vg, s, fw, fh);
+}
+
+// ── Expanded-map left sidebar ────────────────────────────────────────────────────
+// A fixed left column shown only over the expanded map: Old-HUD status indicators,
+// the time + date, current weather with a 3-day forecast, and the schedule.
+void HudRenderer::draw_expanded_sidebar(NVGcontext* vg, const AppState& s,
+                                        float fw, float fh) {
+    (void)fw;
+    const float x0   = 20.f;
+    const float top  = 20.f;
+    const float colW = 290.f;
+    const float bottom = fh - 20.f;
+    const float pad  = 14.f;
+    const float x    = x0 + pad;          // content left
+    const float cw   = colW - pad * 2.f;  // content width
+    float y          = top + pad;         // running cursor
+
+    // Panel backing.
+    nvgBeginPath(vg); nvgRoundedRect(vg, x0, top, colW, bottom - top, 8.f);
+    nvgFillColor(vg, nvgRGBA(8, 12, 18, 205)); nvgFill(vg);
+    nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 150)); nvgStrokeWidth(vg, 1.2f); nvgStroke(vg);
+
+    auto header = [&](const char* t) {
+        nvg_set_font_ui(13.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        nvgFillColor(vg, nvg_col_a(col_.glow_base, 235));
+        nvgText(vg, x, y, t, nullptr);
+        y += 16.f;
+        nvgBeginPath(vg); nvgMoveTo(vg, x, y); nvgLineTo(vg, x + cw, y);
+        nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 90)); nvgStrokeWidth(vg, 1.f); nvgStroke(vg);
+        y += 9.f;
+    };
+
+    // ── 1. System indicators (everything from the Old HUD) ──────────────────
+    header("SYSTEM");
+    {
+        const SystemHealth& h = s.health;
+        bool bt_on = false;
+        for (const auto& d : s.bt_devices) if (d.connected) { bt_on = true; break; }
+        struct Ind { const char* label; bool ok; };
+        const Ind inds[] = {
+            { "Proot",     h.teensy_ok },
+            { "LoRa",      h.lora_ok },
+            { "Interface", h.knob_ok },
+            { "WiFi",      s.wifi.connected || h.wifi_ok },
+            { "Bluetooth", bt_on },
+            { "Gamepad",   h.gamepad_ok },
+            { "Audio",     h.audio_ok || s.audio.enabled },
+            { "SSH",       s.ssh.active || h.ssh_active },
+            { "Android",   h.android_mirror },
+            { "MPU",       h.mpu9250_ok },
+            { "L.Cam",     h.cam_owl_left },
+            { "R.Cam",     h.cam_owl_right },
+            { "Cam 1",     h.cam_usb1 },
+            { "Cam 2",     h.cam_usb2 },
+        };
+        const int   N    = static_cast<int>(sizeof(inds) / sizeof(inds[0]));
+        const float rowH = 18.f;
+        const float colX2 = x + cw * 0.5f;
+        nvg_set_font_mono(12.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        for (int i = 0; i < N; ++i) {
+            const float rx = (i % 2 == 0) ? x : colX2;
+            const float ry = y + (i / 2) * rowH + rowH * 0.5f;
+            nvgBeginPath(vg); nvgCircle(vg, rx + 4.f, ry, 4.f);
+            nvgFillColor(vg, inds[i].ok ? nvg_col(col_.ind_good) : nvg_col(col_.ind_fail));
+            nvgFill(vg);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, inds[i].ok ? 230 : 150));
+            nvgText(vg, rx + 14.f, ry, inds[i].label, nullptr);
+        }
+        y += ((N + 1) / 2) * rowH + 12.f;
+    }
+
+    // ── 2. Time & date ──────────────────────────────────────────────────────
+    header("TIME");
+    {
+        const time_t now = std::time(nullptr) + static_cast<time_t>(s.clock_cfg.manual_offset_s);
+        struct tm tmv; localtime_r(&now, &tmv);
+        char tbuf[24], dbuf[40];
+        if (s.clock_cfg.use_24h) {
+            snprintf(tbuf, sizeof(tbuf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+        } else {
+            int h12 = tmv.tm_hour % 12; if (!h12) h12 = 12;
+            snprintf(tbuf, sizeof(tbuf), "%d:%02d %s", h12, tmv.tm_min,
+                     tmv.tm_hour < 12 ? "AM" : "PM");
+        }
+        static const char* kDow[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+        static const char* kMon[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                     "Jul","Aug","Sep","Oct","Nov","Dec"};
+        snprintf(dbuf, sizeof(dbuf), "%s, %s %d", kDow[tmv.tm_wday], kMon[tmv.tm_mon], tmv.tm_mday);
+        nvg_set_font_ui(30.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvgText(vg, x, y, tbuf, nullptr);
+        y += 33.f;
+        nvg_set_font_ui(14.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        nvgFillColor(vg, nvg_col_a(col_.text_fill, 205));
+        nvgText(vg, x, y, dbuf, nullptr);
+        y += 24.f;
+    }
+
+    // ── 3. Weather + 3-day forecast ─────────────────────────────────────────
+    header("WEATHER");
+    {
+        const WeatherState& w = s.weather;
+        if (!w.ok) {
+            nvg_set_font_ui(13.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+            nvgText(vg, x, y, s.weather_cfg.enabled ? "fetching..." : "off", nullptr);
+            y += 22.f;
+        } else {
+            const float isz = 46.f;
+            if (!icons_.draw(vg, wmo_icon(w.code, w.is_day), x + isz * 0.5f, y + isz * 0.5f, isz, 1.f))
+                draw_weather_glyph(vg, w.code, w.is_day, x + isz * 0.5f, y + isz * 0.5f, isz);
+            char b[80];
+            nvg_set_font_ui(26.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col(col_.text_fill));
+            snprintf(b, sizeof(b), "%.0f\xC2\xB0", static_cast<double>(w.temp));
+            nvgText(vg, x + isz + 10.f, y, b, nullptr);
+            nvg_set_font_ui(12.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 205));
+            snprintf(b, sizeof(b), "%s  feels %.0f\xC2\xB0",
+                     w.condition.c_str(), static_cast<double>(w.feels));
+            nvgText(vg, x + isz + 10.f, y + 28.f, b, nullptr);
+            if (!w.location.empty())
+                nvgText(vg, x + isz + 10.f, y + 42.f, w.location.c_str(), nullptr);
+            y += isz + 14.f;
+
+            static const char* kDow[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+            const time_t base = std::time(nullptr);
+            const float rowH = 26.f;
+            for (int i = 0; i < w.forecast_count; ++i) {
+                const WeatherDay& fd = w.forecast[i];
+                const time_t dt = base + static_cast<time_t>(i) * 86400;
+                struct tm dtm; localtime_r(&dt, &dtm);
+                const float ry = y + rowH * 0.5f;
+                nvg_set_font_mono(12.f);
+                nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
+                nvgText(vg, x, ry, i == 0 ? "Today" : kDow[dtm.tm_wday], nullptr);
+                if (!icons_.draw(vg, wmo_icon(fd.code, true), x + 70.f, ry, 20.f, 1.f))
+                    draw_weather_glyph(vg, fd.code, true, x + 70.f, ry, 20.f);
+                char hb[32];
+                snprintf(hb, sizeof(hb), "%.0f / %.0f\xC2\xB0",
+                         static_cast<double>(fd.tmax), static_cast<double>(fd.tmin));
+                nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(vg, nvg_col_a(col_.text_fill, 230));
+                nvgText(vg, x + 92.f, ry, hb, nullptr);
+                if (fd.rain_prob >= 0) {
+                    char rb[16]; snprintf(rb, sizeof(rb), "%d%%", fd.rain_prob);
+                    nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(vg, nvg_col_a(col_.glow_base, 220));
+                    nvgText(vg, x + cw, ry, rb, nullptr);
+                }
+                y += rowH;
+            }
+            y += 10.f;
+        }
+    }
+
+    // ── 4. Schedule ─────────────────────────────────────────────────────────
+    header("SCHEDULE");
+    {
+        const time_t now = std::time(nullptr);
+        int shown = 0;
+        for (const auto& e : s.scheduler_events) {
+            if (e.start_utc == 0) continue;
+            if (e.end_utc != 0 && e.end_utc < now) continue;   // skip finished
+            if (shown >= 6 || y > bottom - 34.f) break;
+            struct tm tmv; localtime_r(&e.start_utc, &tmv);
+            char tb[16];
+            if (e.all_day) snprintf(tb, sizeof(tb), "all-day");
+            else           strftime(tb, sizeof(tb), "%H:%M", &tmv);
+            char sub[112];
+            if (!e.location.empty()) snprintf(sub, sizeof(sub), "%s  %s", tb, e.location.c_str());
+            else                     snprintf(sub, sizeof(sub), "%s", tb);
+            nvg_set_font_ui(13.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 235));
+            nvgText(vg, x, y, e.title.c_str(), nullptr);
+            nvg_set_font_mono(11.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 170));
+            nvgText(vg, x, y + 15.f, sub, nullptr);
+            y += 32.f; ++shown;
+        }
+        if (shown == 0) {
+            nvg_set_font_ui(13.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
+            nvgText(vg, x, y, "no events", nullptr);
         }
     }
 }

@@ -199,6 +199,7 @@ private:
     void draw_compass_ring (NVGcontext* vg, const AppState& s,
                             float cx, float cy, float radius, bool bold = false);
     void draw_map_expanded (NVGcontext* vg, const AppState& s, float fw, float fh);
+    void draw_expanded_sidebar(NVGcontext* vg, const AppState& s, float fw, float fh);
     // Shared NVG pip drawing (no NVG frame management — caller handles Begin/EndFrame).
     void draw_pip_nvg_single(NVGcontext* vg, unsigned int tex,
                               const OverlayConfig& cfg, float fw, float fh);

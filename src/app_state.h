@@ -441,6 +441,15 @@ struct SshState {
 // Live weather for the info-panel widget. Fetched off the render thread by
 // WeatherMonitor (Open-Meteo via curl) into `weather`; settings live in
 // `weather_cfg`. WMO weather codes map to short text + an icon asset name.
+// One day of the daily forecast (index 0 = today). Day-of-week is derived at draw
+// time from the local clock (today + index), so no date field is needed here.
+struct WeatherDay {
+    int   code      = -1;   // WMO daily weather code
+    float tmax      = 0.f;
+    float tmin      = 0.f;
+    int   rain_prob = -1;   // max precip probability (%)
+};
+
 struct WeatherState {
     bool        ok          = false;   // last fetch succeeded
     float       temp        = 0.f;     // in the configured unit
@@ -456,6 +465,11 @@ struct WeatherState {
     std::string condition;             // "Clear", "Rain", …
     std::string location;              // city name
     time_t      updated_utc = 0;
+
+    // Multi-day forecast (for the expanded-map sidebar). forecast[0] == today.
+    static constexpr int kForecastDays = 3;
+    WeatherDay  forecast[kForecastDays];
+    int         forecast_count = 0;
 };
 
 struct WeatherConfig {
