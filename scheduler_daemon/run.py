@@ -144,7 +144,17 @@ class Store:
         self.cfg = cfg
         self.lock = threading.Lock()
         data_dir = os.path.dirname(cfg["events_path"])
-        os.makedirs(data_dir, exist_ok=True)
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+        except OSError as e:
+            # A stale/unwritable path (e.g. a hardcoded /home/<other-user>) must not
+            # kill the daemon — fall back to the writable default under $HOME.
+            fallback = os.path.dirname(DEFAULTS["events_path"])
+            print(f"[scheduler] cannot use {data_dir} ({e}); falling back to {fallback}")
+            os.makedirs(fallback, exist_ok=True)
+            cfg["events_path"] = DEFAULTS["events_path"]
+            cfg["status_path"] = DEFAULTS["status_path"]
+            data_dir = fallback
         self.manual_path = os.path.join(data_dir, "manual_events.json")
         self.manual = read_json(self.manual_path, {"events": []}).get("events", [])
 
