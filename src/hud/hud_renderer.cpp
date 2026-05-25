@@ -655,25 +655,31 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         const float DEGc  = static_cast<float>(M_PI) / 180.f;
         // Clock/date arc curves along the disc edge facing the screen interior:
         // above the disc when docked low, below when docked high; leaning toward
-        // the interior horizontally so it never clips at the screen edge.
+        // the interior horizontally so it never clips at the screen edge, plus a
+        // ~10° nudge toward the right so it clears the corner cardinal.
         const float clock_deg = dock_top ? (dock_left ?  60.f :  120.f)
                                          : (dock_left ? -60.f : -120.f);
-        const float clock_angle = clock_deg * DEGc;
+        const float clock_nudge = (clock_deg < 0.f ? 10.f : -10.f);   // ~10° to the right
+        const float clock_angle = (clock_deg + clock_nudge) * DEGc;
         const float rc    = ringR + (cfg.compass_ring ? 46.f : 16.f) + csz * 0.5f;
 
-        // Clock — curved text on an arc concentric with the map, centred upper-left.
+        // Crisp 4-corner black outline for arc text — a real outline, not a soft blur
+        // (which reads as a drop shadow). Offsetting the arc centre translates the
+        // whole curved string by that pixel amount.
+        auto arc_outline = [&](float rr, float st, const char* t) {
+            const float o = 1.4f;
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 230));
+            nvg_text_arc(vg, cx - o, cy - o, rr, st, t);
+            nvg_text_arc(vg, cx + o, cy - o, rr, st, t);
+            nvg_text_arc(vg, cx - o, cy + o, rr, st, t);
+            nvg_text_arc(vg, cx + o, cy + o, rr, st, t);
+        };
+
+        // Clock — curved text on an arc concentric with the map.
         nvg_set_font_ui(csz);
         const float wc    = arc_text_width(vg, tbuf, rc);
         const float start = clock_angle - wc * 0.5f;
-        // Black outline for legibility over the feed. Arc text is per-glyph
-        // transformed, so a single blurred pass is ~4× cheaper than offset copies
-        // while still reading as a crisp dark halo at this size.
-        {
-            nvgFontBlur(vg, 2.0f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
-            nvg_text_arc(vg, cx, cy, rc, start, tbuf);
-            nvgFontBlur(vg, 0.f);
-        }
+        arc_outline(rc, start, tbuf);
         if (s_glow && s_glow_intensity > 0.f) {
             nvgFontBlur(vg, 3.f);
             nvgFillColor(vg, nvg_col_a(col_.glow_base,
@@ -688,10 +694,7 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         if (!extra.empty()) {
             nvg_set_font_ui(esz);
             const float estart = clock_angle + wc * 0.5f + 7.f / rc;
-            nvgFontBlur(vg, 2.0f);                       // black outline pass
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
-            nvg_text_arc(vg, cx, cy, rc, estart, extra.c_str());
-            nvgFontBlur(vg, 0.f);
+            arc_outline(rc, estart, extra.c_str());      // crisp outline pass
             nvgFillColor(vg, nvg_col(extra_col));
             nvg_text_arc(vg, cx, cy, rc, estart, extra.c_str());
         }
@@ -703,11 +706,7 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             nvg_set_font_ui(dsz);
             const float wd = arc_text_width(vg, ds.c_str(), rd);
             const float ds0 = clock_angle - wd * 0.5f;
-            // Black outline (single blurred pass), matching the clock.
-            nvgFontBlur(vg, 1.8f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
-            nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
-            nvgFontBlur(vg, 0.f);
+            arc_outline(rd, ds0, ds.c_str());            // crisp outline pass
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 200));
             nvg_text_arc(vg, cx, cy, rd, ds0, ds.c_str());
         }
