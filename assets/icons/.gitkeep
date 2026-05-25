@@ -1,3 +1,0 @@
-Drop PNG icons here, named <name>.png. The HUD loads them lazily and tints nothing (author them already-colored; white works for a plain glyph).
-Notification types (auto-mapped): alarm.png timer.png message.png bell.png
-Override per-notification via Notification::icon.
