@@ -2585,6 +2585,9 @@ static std::vector<MenuItem> build_menu(
         toggle("Preview: Right Half",
             [&state]{ return state.map_overlay.portrait_right_half; },
             [&state](bool v){ state.map_overlay.portrait_right_half = v; }),
+        slider("Preview Size", 0.5f, 2.5f, 0.1f, "x",
+            [&state]{ return state.map_overlay.portrait_scale; },
+            [&state](float v){ state.map_overlay.portrait_scale = v; }),
     };
     std::vector<MenuItem> map_options_menu = {
         submenu("Select Map",   std::move(map_select_items)),
@@ -4016,6 +4019,7 @@ int main(int argc, char* argv[]) {
         mo.clock_date          = jm.value("clock_date",          mo.clock_date);
         mo.portrait            = jm.value("portrait",            mo.portrait);
         mo.portrait_right_half = jm.value("portrait_right_half", mo.portrait_right_half);
+        mo.portrait_scale      = jm.value("portrait_scale",      mo.portrait_scale);
         mo.zoom                = jm.value("zoom",                mo.zoom);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
     }
@@ -5275,6 +5279,7 @@ int main(int argc, char* argv[]) {
             cfg["map"]["clock_date"]          = mo.clock_date;
             cfg["map"]["portrait"]            = mo.portrait;
             cfg["map"]["portrait_right_half"] = mo.portrait_right_half;
+            cfg["map"]["portrait_scale"]      = mo.portrait_scale;
             cfg["map"]["zoom"]                = mo.zoom;
         }
 

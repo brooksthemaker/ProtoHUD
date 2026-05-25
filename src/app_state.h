@@ -262,6 +262,7 @@ struct MapOverlayConfig {
     // beside the minimap (American Fugitive-style character portrait).
     bool        portrait            = false;
     bool        portrait_right_half = false;  // false = left face half, true = right
+    float       portrait_scale      = 1.0f;   // size multiplier for the preview window
 
     // Helldivers-style temporary expanded view (pan/zoom) — runtime only.
     bool        expanded            = false;

@@ -723,21 +723,28 @@ static void draw_weather_glyph(NVGcontext* vg, int code, bool day,
     const NVGcolor rain    = nvgRGBA( 90, 165, 235, 255);
     const NVGcolor snow    = nvgRGBA(235, 244, 255, 255);
     const NVGcolor bolt    = nvgRGBA(255, 210,  70, 255);
+    const NVGcolor edge    = nvgRGBA( 12,  18,  26, 235);   // dark outline for contrast
 
     auto cloud_shape = [&](float ox, float oy, float scale, NVGcolor c) {
-        nvgFillColor(vg, c);
         nvgBeginPath(vg);
         nvgCircle(vg, cx + ox - s * 0.35f * scale, cy + oy,                s * 0.30f * scale);
         nvgCircle(vg, cx + ox + s * 0.02f * scale, cy + oy - s * 0.20f * scale, s * 0.38f * scale);
         nvgCircle(vg, cx + ox + s * 0.40f * scale, cy + oy,                s * 0.28f * scale);
         nvgRoundedRect(vg, cx + ox - s * 0.62f * scale, cy + oy,
                        s * 1.18f * scale, s * 0.36f * scale, s * 0.16f * scale);
-        nvgFill(vg);
+        nvgFillColor(vg, c); nvgFill(vg);
+        nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, std::max(2.f, s * 0.07f)); nvgStroke(vg);
     };
     auto sun_disc = [&](float ox, float oy, float r) {
-        nvgFillColor(vg, sun);
-        nvgBeginPath(vg); nvgCircle(vg, cx + ox, cy + oy, r); nvgFill(vg);
-        nvgStrokeColor(vg, sun); nvgStrokeWidth(vg, std::max(2.f, r * 0.22f));
+        nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, std::max(2.f, r * 0.30f));
+        for (int i = 0; i < 8; ++i) {                       // dark ray underlay then bright
+            const float a = i / 8.f * 2.f * static_cast<float>(M_PI);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, cx + ox + std::cos(a) * r * 1.30f, cy + oy + std::sin(a) * r * 1.30f);
+            nvgLineTo(vg, cx + ox + std::cos(a) * r * 1.80f, cy + oy + std::sin(a) * r * 1.80f);
+            nvgStroke(vg);
+        }
+        nvgStrokeColor(vg, sun); nvgStrokeWidth(vg, std::max(1.5f, r * 0.18f));
         for (int i = 0; i < 8; ++i) {
             const float a = i / 8.f * 2.f * static_cast<float>(M_PI);
             nvgBeginPath(vg);
@@ -745,9 +752,17 @@ static void draw_weather_glyph(NVGcontext* vg, int code, bool day,
             nvgLineTo(vg, cx + ox + std::cos(a) * r * 1.75f, cy + oy + std::sin(a) * r * 1.75f);
             nvgStroke(vg);
         }
+        nvgBeginPath(vg); nvgCircle(vg, cx + ox, cy + oy, r);
+        nvgFillColor(vg, sun); nvgFill(vg);
+        nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, std::max(2.f, r * 0.12f)); nvgStroke(vg);
+    };
+    auto disc = [&](float ox, float oy, float r, NVGcolor c) {
+        nvgBeginPath(vg); nvgCircle(vg, cx + ox, cy + oy, r);
+        nvgFillColor(vg, c); nvgFill(vg);
+        nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, std::max(2.f, r * 0.14f)); nvgStroke(vg);
     };
     auto rain_streaks = [&](NVGcolor c) {
-        nvgStrokeColor(vg, c); nvgStrokeWidth(vg, std::max(2.f, s * 0.10f));
+        nvgStrokeColor(vg, c); nvgStrokeWidth(vg, std::max(2.5f, s * 0.12f));
         for (int i = -1; i <= 1; ++i) {
             const float x = cx + i * s * 0.36f;
             nvgBeginPath(vg);
@@ -757,18 +772,19 @@ static void draw_weather_glyph(NVGcontext* vg, int code, bool day,
         }
     };
     auto snow_dots = [&]() {
-        nvgFillColor(vg, snow);
         for (int i = -1; i <= 1; ++i) {
-            nvgBeginPath(vg); nvgCircle(vg, cx + i * s * 0.36f, cy + s * 0.60f, s * 0.09f); nvgFill(vg);
+            nvgBeginPath(vg); nvgCircle(vg, cx + i * s * 0.36f, cy + s * 0.60f, s * 0.10f);
+            nvgFillColor(vg, snow); nvgFill(vg);
+            nvgStrokeColor(vg, edge); nvgStrokeWidth(vg, 1.5f); nvgStroke(vg);
         }
     };
 
     if (code <= 0) {                                   // clear
         if (day) sun_disc(0.f, 0.f, s * 0.52f);
-        else { nvgFillColor(vg, moon); nvgBeginPath(vg); nvgCircle(vg, cx, cy, s * 0.52f); nvgFill(vg); }
+        else     disc(0.f, 0.f, s * 0.52f, moon);
     } else if (code <= 2) {                             // partly cloudy
         if (day) sun_disc(-s * 0.32f, -s * 0.34f, s * 0.30f);
-        else { nvgFillColor(vg, moon); nvgBeginPath(vg); nvgCircle(vg, cx - s*0.32f, cy - s*0.30f, s*0.26f); nvgFill(vg); }
+        else     disc(-s * 0.32f, -s * 0.30f, s * 0.26f, moon);
         cloud_shape(s * 0.10f, s * 0.12f, 1.0f, cloud);
     } else if (code == 3) {                            // overcast
         cloud_shape(0.f, 0.f, 1.1f, cloud_d);
@@ -933,7 +949,7 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
     } else if (widget == static_cast<int>(InfoWidget::Schedule)) {
         // Each upcoming event as two centered lines: title, then "location | time".
         const time_t now = std::time(nullptr);
-        float ty = py - r * 0.30f; int shown = 0;
+        float ty = py - r * 0.60f; int shown = 0;
         for (const auto& e : s.scheduler_events) {
             if (e.start_utc == 0) continue;
             if (e.end_utc != 0 && e.end_utc < now) continue;   // skip finished
@@ -1560,7 +1576,7 @@ void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_
     const ImVec2 uv0 = cfg.portrait_right_half ? ImVec2(0.5f, 0.f) : ImVec2(0.f, 0.f);
     const ImVec2 uv1 = cfg.portrait_right_half ? ImVec2(1.f,  1.f) : ImVec2(0.5f, 1.f);
 
-    const float ph    = ringR * 0.55f;          // portrait height
+    const float ph    = ringR * 0.55f * std::max(0.5f, cfg.portrait_scale);  // portrait height
     const float pw    = ph * aspect;            // 2:1 width
     const float pad   = 6.f;
     const float win_w = pw + pad * 2.f;
