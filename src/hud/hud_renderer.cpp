@@ -475,10 +475,10 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         nvgFill(vg);
     }
 
-    // Border hugs the window shape exactly.
+    // Border hugs the window shape exactly — theme-colored (matches the info panel).
     path_window();
-    nvgStrokeColor(vg, nvgRGBA(100, 130, 160, 160));
-    nvgStrokeWidth(vg, 1.5f);
+    nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 220));
+    nvgStrokeWidth(vg, 1.8f);
     nvgStroke(vg);
 
     // Red crosshair at centre = wearer's position on the map.
@@ -683,8 +683,13 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         // Active timer/alarm continues the arc just past the clock.
         if (!extra.empty()) {
             nvg_set_font_ui(esz);
+            const float estart = clock_angle + wc * 0.5f + 7.f / rc;
+            nvgFontBlur(vg, 2.0f);                       // black outline pass
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 235));
+            nvg_text_arc(vg, cx, cy, rc, estart, extra.c_str());
+            nvgFontBlur(vg, 0.f);
             nvgFillColor(vg, nvg_col(extra_col));
-            nvg_text_arc(vg, cx, cy, rc, clock_angle + wc * 0.5f + 7.f / rc, extra.c_str());
+            nvg_text_arc(vg, cx, cy, rc, estart, extra.c_str());
         }
 
         // Date on an inner concentric arc, under the clock.
@@ -825,11 +830,19 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
     const float py = std::clamp(fh * cfg.anchor_y + cfg.pan_y, r, fh - r);
     const float TWO_PI = 2.f * static_cast<float>(M_PI);
 
-    // Backing disc + border — matches the minimap footprint.
+    // Text with a black outline for legibility over the camera feed. Font and
+    // alignment must already be set (nvg_text_outline uses the current state).
+    auto otext = [&](float x, float y, const char* str, NVGcolor fill) {
+        nvg_text_outline(vg, x, y, str, 1.4f);
+        nvgFillColor(vg, fill);
+        nvgText(vg, x, y, str, nullptr);
+    };
+
+    // Backing disc + theme-colored border (matches the minimap circle).
     nvgBeginPath(vg); nvgCircle(vg, px, py, r);
     nvgFillColor(vg, nvgRGBA(10, 16, 22, 170)); nvgFill(vg);
     nvgBeginPath(vg); nvgCircle(vg, px, py, r);
-    nvgStrokeColor(vg, nvgRGBA(100, 130, 160, 160)); nvgStrokeWidth(vg, 1.5f); nvgStroke(vg);
+    nvgStrokeColor(vg, nvg_col_a(col_.glow_base, 220)); nvgStrokeWidth(vg, 1.8f); nvgStroke(vg);
 
     // Title at the top of the disc. The clock fills the whole disc, so it shows none.
     if (widget != static_cast<int>(InfoWidget::Clock)) {
@@ -837,8 +850,7 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
                                               "WEATHER", "PRECIP" };
         nvg_set_font_ui(13.f);
         nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
-        nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
-        nvgText(vg, px, py - r + 7.f, kNames[widget], nullptr);
+        otext(px, py - r + 7.f, kNames[widget], nvg_col_a(col_.text_fill, 220));
     }
 
     // Clip widget bodies to the disc's bounding box so long text never spills out.
@@ -858,12 +870,11 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             // Numbered face: 1..12.
             nvg_set_font_ui(cr * 0.20f);
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
             for (int h = 1; h <= 12; ++h) {
                 const float a = h / 12.f * TWO_PI - HALF_PI;
                 char nb[4]; snprintf(nb, sizeof(nb), "%d", h);
-                nvgText(vg, px + std::cos(a) * cr * 0.84f,
-                            py + std::sin(a) * cr * 0.84f, nb, nullptr);
+                otext(px + std::cos(a) * cr * 0.84f,
+                      py + std::sin(a) * cr * 0.84f, nb, nvg_col_a(col_.text_fill, 220));
             }
         } else {
             // Tick face: all 12 (face 0), or quarters only (face 2 = minimal).
@@ -897,8 +908,7 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         nvg_set_font_ui(12.f);
         nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
         char cnt[32]; snprintf(cnt, sizeof(cnt), "%d unread", s.notifs.unread_count());
-        nvgFillColor(vg, nvg_col_a(col_.text_fill, 180));
-        nvgText(vg, px, py - r + 24.f, cnt, nullptr);
+        otext(px, py - r + 24.f, cnt, nvg_col_a(col_.text_fill, 180));
 
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
         float ty = py - r * 0.32f; const float lh = 17.f; int shown = 0;
@@ -911,15 +921,13 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             const float a = nt.read ? 0.6f : 1.f;
             const float tx0 = icons_.draw(vg, nm, lx + 6.f, ty + 7.f, 13.f, a)
                               ? lx + 17.f : lx;
-            nvgFillColor(vg, nt.read ? nvg_col_a(col_.text_fill, 130)
-                                     : nvg_col_a(col_.text_fill, 235));
-            nvgText(vg, tx0, ty, nt.title.c_str(), nullptr);
+            otext(tx0, ty, nt.title.c_str(),
+                  nt.read ? nvg_col_a(col_.text_fill, 130) : nvg_col_a(col_.text_fill, 235));
             ty += lh; ++shown;
         }
         if (shown == 0) {
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
-            nvgText(vg, px, py, "no notifications", nullptr);
+            otext(px, py, "no notifications", nvg_col_a(col_.text_fill, 150));
         }
 
     } else if (widget == static_cast<int>(InfoWidget::Schedule)) {
@@ -937,14 +945,12 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             if (e.all_day) snprintf(hm, sizeof(hm), "all-day");
             else           strftime(hm, sizeof(hm), "%H:%M", &tmv);
             char line[80]; snprintf(line, sizeof(line), "%s %s", hm, e.title.c_str());
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 220));
-            nvgText(vg, lx, ty, line, nullptr);
+            otext(lx, ty, line, nvg_col_a(col_.text_fill, 220));
             ty += lh; ++shown;
         }
         if (shown == 0) {
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
-            nvgText(vg, px, py, "no events", nullptr);
+            otext(px, py, "no events", nvg_col_a(col_.text_fill, 150));
         }
 
     } else if (widget == static_cast<int>(InfoWidget::Weather)) {
@@ -953,8 +959,7 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         if (!w.ok) {
             nvg_set_font_ui(14.f);
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
-            nvgText(vg, px, py, s.weather_cfg.enabled ? "..." : "off", nullptr);
+            otext(px, py, s.weather_cfg.enabled ? "..." : "off", nvg_col_a(col_.text_fill, 150));
         } else {
             const float iy = py - r * 0.45f, isz = r * 0.48f;
             if (!icons_.draw(vg, wmo_icon(w.code, w.is_day), px, iy, isz, 1.f))
@@ -963,25 +968,22 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             // NB: nvg_set_font_ui() resets alignment, so re-center after each call.
             nvg_set_font_ui(r * 0.15f);                       // actual | feels-like
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 235));
             snprintf(b, sizeof(b), "%.0f°  feels %.0f°",
                      static_cast<double>(w.temp), static_cast<double>(w.feels));
-            nvgText(vg, px, py - r * 0.02f, b, nullptr);
+            otext(px, py - r * 0.02f, b, nvg_col_a(col_.text_fill, 235));
             nvg_set_font_ui(r * 0.12f);                       // High / Low
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
             snprintf(b, sizeof(b), "H %.0f°   L %.0f°",
                      static_cast<double>(w.temp_high), static_cast<double>(w.temp_low));
-            nvgText(vg, px, py + r * 0.18f, b, nullptr);
+            otext(px, py + r * 0.18f, b, nvg_col_a(col_.text_fill, 210));
             if (w.humidity >= 0) {                            // Humidity
                 snprintf(b, sizeof(b), "Humidity %d%%", w.humidity);
-                nvgText(vg, px, py + r * 0.36f, b, nullptr);
+                otext(px, py + r * 0.36f, b, nvg_col_a(col_.text_fill, 210));
             }
             if (!w.location.empty()) {
                 nvg_set_font_ui(r * 0.10f);
                 nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
-                nvgText(vg, px, py + r * 0.54f, w.location.c_str(), nullptr);
+                otext(px, py + r * 0.54f, w.location.c_str(), nvg_col_a(col_.text_fill, 150));
             }
         }
     } else {  // WeatherPrecip — page 2: precipitation.
@@ -989,8 +991,7 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         if (!w.ok) {
             nvg_set_font_ui(14.f);
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
-            nvgText(vg, px, py, s.weather_cfg.enabled ? "..." : "off", nullptr);
+            otext(px, py, s.weather_cfg.enabled ? "..." : "off", nvg_col_a(col_.text_fill, 150));
         } else {
             // Big condition icon (rain/snow/cloud/sun) + precip amount + rain chance.
             const float iy = py - r * 0.20f, isz = r * 0.64f;
@@ -1000,14 +1001,12 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             // nvg_set_font_ui() resets alignment — re-center after it.
             nvg_set_font_ui(r * 0.13f);
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 225));
             snprintf(b, sizeof(b), "Precip %.1f %s", static_cast<double>(w.precip_now),
                      s.weather_cfg.metric ? "mm" : "in");
-            nvgText(vg, px, py + r * 0.36f, b, nullptr);
+            otext(px, py + r * 0.36f, b, nvg_col_a(col_.text_fill, 225));
             if (w.rain_prob >= 0) snprintf(b, sizeof(b), "Rain %d%%", w.rain_prob);
             else                  snprintf(b, sizeof(b), "Rain --");
-            nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
-            nvgText(vg, px, py + r * 0.56f, b, nullptr);
+            otext(px, py + r * 0.56f, b, nvg_col_a(col_.text_fill, 210));
         }
     }
 
@@ -1453,9 +1452,7 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     }
 
     // Label (top-left corner of the box, drawn after image so it's always visible)
-    if (font_mono_) ImGui::PushFont(font_mono_);
-    dl->AddText({ pos.x + 4.f, pos.y + 4.f }, col_.accent, "ANDROID");
-    if (font_mono_) ImGui::PopFont();
+    // (no corner label)
 
     ImGui::End();
 }
@@ -1520,9 +1517,7 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_
                 col_.accent, 4.f, 0, 1.5f);
 
     // Small "LED" label in the corner
-    if (font_mono_) ImGui::PushFont(font_mono_);
-    dl->AddText({p.x + 4.f, p.y + 4.f}, col_.accent, "LED");
-    if (font_mono_) ImGui::PopFont();
+    // (no corner label)
 
     ImGui::End();
 }
@@ -1572,7 +1567,6 @@ void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_
     dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
                  {x0 + pad, y0 + pad}, {x0 + pad + pw, y0 + pad + ph}, uv0, uv1);
     dl->AddRect({x0, y0}, {x0 + win_w, y0 + win_h}, col_.accent, 6.f, 0, 1.5f);
-    dl->AddText({x0 + 5.f, y0 + 3.f}, col_.accent, "FACE");
 }
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
