@@ -115,12 +115,15 @@ void WeatherMonitor::thread_fn() {
                     auto at_f = [&](const char* k, int i, float def) -> float {
                         if (!d.contains(k) || !d[k].is_array()) return def;
                         const auto& a = d[k];
-                        return (i < (int)a.size() && !a[i].is_null()) ? a[i].get<float>() : def;
+                        return (i < (int)a.size() && a[i].is_number()) ? a[i].get<float>() : def;
                     };
+                    // get<int>() throws if the JSON value is a float, so read as double
+                    // and cast — keeps a stray float-typed code/percent from killing the thread.
                     auto at_i = [&](const char* k, int i, int def) -> int {
                         if (!d.contains(k) || !d[k].is_array()) return def;
                         const auto& a = d[k];
-                        return (i < (int)a.size() && !a[i].is_null()) ? a[i].get<int>() : def;
+                        return (i < (int)a.size() && a[i].is_number())
+                            ? static_cast<int>(a[i].get<double>()) : def;
                     };
                     int days = 0;
                     for (int i = 0; i < WeatherState::kForecastDays; ++i) {
@@ -142,6 +145,9 @@ void WeatherMonitor::thread_fn() {
                     }
                 }
             }
+            if (!w.ok)   // diagnostic: surfaces network/location/parse failures in the log
+                std::fprintf(stderr, "[weather] fetch failed (%zu bytes, discarded=%d)\n",
+                             body.size(), static_cast<int>(j.is_discarded()));
             {
                 std::lock_guard<std::mutex> lk(state_->mtx);
                 state_->weather = std::move(w);
