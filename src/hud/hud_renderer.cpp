@@ -1153,47 +1153,57 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
 
     nvgRestore(vg);  // pop scissor
 
-    // Two concentric rings on the clockwise 120°→-60° arc (the top + interior/right
-    // side, so nothing clips at the screen edge):
-    //   • inner = page labels, one per enabled widget — the active page is highlighted
-    //     (theme accent + glow) and the others greyed. Replaces the old in-disc title
-    //     and the bottom cycle dots; styled like the radial menu (accent + outline).
-    //   • outer = system status badges (doubled in size), lit when active / dimmed.
+    // Page labels + status icons ring the disc:
+    //   • inner = page labels as rounded-trapezoid wedges wrapping the full circle,
+    //     styled like the radial menu. Active page = accent box + dark text; inactive
+    //     pages = dark box + white text. They don't move — the highlight does.
+    //   • outer = system status badges (doubled in size), lit when active / dimmed,
+    //     on the interior 120°→-60° arc just outside the label ring.
     {
         const float DEG     = static_cast<float>(M_PI) / 180.f;
-        const float deg0    = 120.f, deg1 = -60.f;                // CW arc endpoints
-        const float base_sz = std::clamp(r * 0.15f, 14.f, 26.f);  // prior icon size
-        const float lbl_h   = base_sz;                            // label height ≈ that
-        const float icon_sz = base_sz * 2.f;                      // icons doubled
+        const float HALF_PI = static_cast<float>(M_PI) * 0.5f;
+        const float TWO_PI  = 2.f * static_cast<float>(M_PI);
+        const float base_sz = std::clamp(r * 0.15f, 14.f, 26.f);
+        const float lbl_h   = base_sz;
+        const float icon_sz = base_sz * 2.f;
 
-        // ── Inner ring: page labels ─────────────────────────────────────────────
+        // ── Inner ring: page-label wedges (radial-menu look) ────────────────────
         static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE",
                                               "WEATHER", "PRECIP" };
-        const float lbl_r = r + 8.f + lbl_h * 0.5f;
+        const float bandW = lbl_h + 12.f;                  // radial thickness of a wedge
+        const float rmid  = r + 6.f + bandW * 0.5f;        // band centre radius
+        const float capR  = (bandW * 0.5f) / rmid;         // round-cap angular overhang
+        const float hw    = std::max(0.05f, HALF_PI * 2.f / n - capR - 0.02f);  // half wedge
         nvg_set_font_ui(lbl_h);
         nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgLineCap(vg, NVG_ROUND);
         for (int i = 0; i < n; ++i) {
-            const float deg = (n > 1) ? deg0 + (deg1 - deg0) * (float)i / (n - 1)
-                                      : (deg0 + deg1) * 0.5f;
-            const float a   = deg * DEG;
-            const float lx  = px + std::cos(a) * lbl_r;
-            const float ly  = py - std::sin(a) * lbl_r;
-            const char* nm  = kNames[order[i]];
+            const char* nm     = kNames[order[i]];
             const bool  active = (i == info_cycle_idx_);
-            nvg_text_outline(vg, lx, ly, nm, 1.6f);              // black halo
-            if (active && s_glow && s_glow_intensity > 0.f) {    // accent glow
-                nvgFontBlur(vg, 3.f);
-                nvgFillColor(vg, nvg_col_a(col_.glow_base,
-                             static_cast<uint8_t>(72.f * s_glow_intensity)));
-                nvgText(vg, lx, ly, nm, nullptr);
-                nvgFontBlur(vg, 0.f);
-            }
-            nvgFillColor(vg, active ? nvg_col(col_.glow_base)     // active = accent
-                                    : nvg_col_a(col_.text_fill, 105));  // inactive = greyed
-            nvgText(vg, lx, ly, nm, nullptr);
+            const float sc     = -HALF_PI + i * (TWO_PI / n);     // screen centre angle (CW)
+            const NVGcolor fill   = active ? nvg_col_a(col_.glow_base, 210)
+                                           : nvgRGBA(18, 24, 30, 185);
+            const NVGcolor border = active ? nvg_col_a(col_.glow_base, 235)
+                                           : nvg_col_a(col_.glow_base, 70);
+            nvgBeginPath(vg); nvgArc(vg, px, py, rmid, sc - hw, sc + hw, NVG_CW);
+            nvgStrokeColor(vg, border); nvgStrokeWidth(vg, bandW + (active ? 4.f : 2.f)); nvgStroke(vg);
+            nvgBeginPath(vg); nvgArc(vg, px, py, rmid, sc - hw, sc + hw, NVG_CW);
+            nvgStrokeColor(vg, fill);   nvgStrokeWidth(vg, bandW); nvgStroke(vg);
+
+            // Label: a straight string rotated to the tangent, flipped on the bottom
+            // half so it never reads upside-down (matches draw_radial).
+            float ta = sc + HALF_PI;
+            if (std::sin(sc) > 0.f) ta += static_cast<float>(M_PI);
+            nvgSave(vg);
+            nvgTranslate(vg, px + std::cos(sc) * rmid, py + std::sin(sc) * rmid);
+            nvgRotate(vg, ta);
+            nvgFillColor(vg, active ? nvgRGBA(20, 22, 26, 255)        // dark text on accent
+                                    : nvgRGBA(230, 235, 240, 230));   // white text on dark box
+            nvgText(vg, 0, 0, nm, nullptr);
+            nvgRestore(vg);
         }
 
-        // ── Outer ring: status badges (outside the label ring) ──────────────────
+        // ── Outer ring: status badges (outside the label band, interior arc) ────
         bool bt_on = false;
         for (const auto& d : s.bt_devices) if (d.connected) { bt_on = true; break; }
         struct { StatusGlyph g; bool on; } items[] = {
@@ -1205,7 +1215,8 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             { StatusGlyph::Lora,      s.health.lora_ok },
         };
         const int   ni     = static_cast<int>(sizeof(items) / sizeof(items[0]));
-        const float icon_r = lbl_r + lbl_h * 0.5f + icon_sz * 0.62f + 6.f;
+        const float deg0   = 120.f, deg1 = -60.f;
+        const float icon_r = rmid + bandW * 0.5f + icon_sz * 0.62f + 6.f;
         for (int i = 0; i < ni; ++i) {
             const float deg = deg0 + (ni > 1 ? (deg1 - deg0) * (float)i / (ni - 1) : 0.f);
             const float a   = deg * DEG;
