@@ -959,14 +959,16 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             const float iy = py - r * 0.45f, isz = r * 0.48f;
             if (!icons_.draw(vg, wmo_icon(w.code, w.is_day), px, iy, isz, 1.f))
                 draw_weather_glyph(vg, w.code, w.is_day, px, iy, isz);
-            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             char b[48];
+            // NB: nvg_set_font_ui() resets alignment, so re-center after each call.
             nvg_set_font_ui(r * 0.15f);                       // actual | feels-like
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 235));
             snprintf(b, sizeof(b), "%.0f°  feels %.0f°",
                      static_cast<double>(w.temp), static_cast<double>(w.feels));
             nvgText(vg, px, py - r * 0.02f, b, nullptr);
             nvg_set_font_ui(r * 0.12f);                       // High / Low
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 210));
             snprintf(b, sizeof(b), "H %.0f°   L %.0f°",
                      static_cast<double>(w.temp_high), static_cast<double>(w.temp_low));
@@ -977,6 +979,7 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             }
             if (!w.location.empty()) {
                 nvg_set_font_ui(r * 0.10f);
+                nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
                 nvgFillColor(vg, nvg_col_a(col_.text_fill, 150));
                 nvgText(vg, px, py + r * 0.54f, w.location.c_str(), nullptr);
             }
@@ -993,9 +996,10 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             const float iy = py - r * 0.20f, isz = r * 0.64f;
             if (!icons_.draw(vg, wmo_icon(w.code, w.is_day), px, iy, isz, 1.f))
                 draw_weather_glyph(vg, w.code, w.is_day, px, iy, isz);
-            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             char b[40];
+            // nvg_set_font_ui() resets alignment — re-center after it.
             nvg_set_font_ui(r * 0.13f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             nvgFillColor(vg, nvg_col_a(col_.text_fill, 225));
             snprintf(b, sizeof(b), "Precip %.1f %s", static_cast<double>(w.precip_now),
                      s.weather_cfg.metric ? "mm" : "in");
