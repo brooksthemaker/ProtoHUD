@@ -67,6 +67,11 @@ public:
     // Useful for the Files > Faces "Play" action where the index of a slot
     // isn't known statically.
     virtual void        set_face_by_name(const std::string& /*expression*/) {}
+
+    // Trigger a temporary expression that auto-reverts after duration_s
+    // seconds. Used by the boop sensor module — no-op on non-native backends
+    // (the Teensy/daemon-Protoface paths run their own boop logic on-device).
+    virtual void        trigger_boop(const std::string& /*expression*/, double /*duration_s*/) {}
 };
 
 /**
@@ -115,6 +120,7 @@ public:
     }
     void clear_face_image(const std::string& e) override { (*active_)->clear_face_image(e); }
     void set_face_by_name(const std::string& e) override { (*active_)->set_face_by_name(e); }
+    void trigger_boop(const std::string& e, double d) override { (*active_)->trigger_boop(e, d); }
 
     IFaceController* backend() const { return *active_; }
 

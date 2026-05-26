@@ -145,6 +145,17 @@ struct CameraFocusState {
     bool af_locked = false;
 };
 
+// One boop-sensor zone's user-visible behaviour. The sensor reports zone
+// touches (no expression knowledge); main.cpp's on_boop callback reads this
+// to call IFaceController::trigger_boop with the per-zone expression. Indexed
+// in lockstep with sensor::BoopSensor::Zone (Snout=0, LeftCheek=1, RightCheek=2).
+struct BoopZoneConfig {
+    bool        enabled    = true;
+    std::string expression = "surprised";   // canonical face PNG name
+    double      duration_s = 0.8;           // how long the expression holds
+    uint8_t     threshold  = 12;            // MPR121 touch threshold (lower = more sensitive)
+};
+
 struct NightVisionState {
     float exposure_ev        = 0.0f;  // -3.0 to +3.0
     int   shutter_us         = 33333; // microseconds (40 to 1000000)
@@ -676,6 +687,14 @@ struct AppState {
     // Camera focus, night vision, resolution, and digital zoom
     CameraFocusState     focus_left, focus_right;
     NightVisionState     night_vision;
+    // Boop zones: [0]=Snout, [1]=LeftCheek, [2]=RightCheek. Sane defaults so
+    // a user with the sensor wired sees something sensible before they ever
+    // open the menu.
+    BoopZoneConfig       boop_zones[3] = {
+        { true, "surprised", 0.8, 12 },
+        { true, "happy",     0.6, 12 },
+        { true, "happy",     0.6, 12 },
+    };
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;
     ZoomCropState        zoom_left, zoom_right;

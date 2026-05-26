@@ -513,4 +513,12 @@ void NativeFaceController::set_face_by_name(const std::string& expression) {
     save_state_locked();
 }
 
+void NativeFaceController::trigger_boop(const std::string& expression, double duration_s) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->trigger_boop(expression, duration_s);
+    // Don't save_state_locked() — boop is transient by design; the auto-revert
+    // in FaceState::update will bring expression back without our help.
+}
+
 } // namespace face

@@ -69,6 +69,7 @@ public:
                                   const std::string& src_path) override;
     void        clear_face_image(const std::string& expression) override;
     void        set_face_by_name(const std::string& expression) override;
+    void        trigger_boop(const std::string& expression, double duration_s) override;
 
     // Copy the latest rendered RGB canvas (CV_8UC3) for the preview. Returns
     // false until the first frame exists. Safe to call from the main/GL thread.

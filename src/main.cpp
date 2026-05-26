@@ -38,6 +38,7 @@
 #include "audio/audio_engine.h"
 #include "post_process.h"
 #include "sensor/mpu9250.h"
+#include "sensor/mpr121_boop_sensor.h"
 #include "sys/system_monitor.h"
 #include "sys/scheduler_monitor.h"
 #include "net/weather_monitor.h"
@@ -4489,6 +4490,38 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ── Boop sensor (MPR121 capacitive over I²C) ─────────────────────────────
+    // Per-zone user-facing config (expression, duration, sensitivity) lives in
+    // state.boop_zones — that's what the menu mutates. Hardware-level config
+    // (bus, address, electrode-to-zone mapping) lives in the sensor's Config
+    // and is loaded once at startup from config.json's "boop" object.
+    sensor::Mpr121BoopSensor::Config boop_cfg;
+    if (cfg.contains("boop")) {
+        auto& jb = cfg["boop"];
+        boop_cfg.enabled  = jval(jb, "enabled",  false);
+        boop_cfg.i2c_bus  = jb.value("i2c_bus",  std::string("/dev/i2c-1"));
+        boop_cfg.i2c_addr = jval(jb, "i2c_addr", 0x5A);
+        if (jb.contains("zones") && jb["zones"].is_array()) {
+            for (size_t i = 0; i < jb["zones"].size() && i < 3; ++i) {
+                const auto& jz = jb["zones"][i];
+                boop_cfg.electrode[i] =
+                    static_cast<int8_t>(jval(jz, "electrode", static_cast<int>(boop_cfg.electrode[i])));
+                state.boop_zones[i].expression =
+                    jz.value("expression", state.boop_zones[i].expression);
+                state.boop_zones[i].duration_s =
+                    jval(jz, "duration_s", state.boop_zones[i].duration_s);
+                state.boop_zones[i].threshold =
+                    static_cast<uint8_t>(jval(jz, "threshold", static_cast<int>(state.boop_zones[i].threshold)));
+                state.boop_zones[i].enabled =
+                    jval(jz, "enabled", state.boop_zones[i].enabled);
+                // Mirror the user-facing threshold into the sensor's hardware
+                // config so the chip is initialised with the right value.
+                boop_cfg.touch_threshold[i]  = state.boop_zones[i].threshold;
+                boop_cfg.zone_enabled[i]     = state.boop_zones[i].enabled;
+            }
+        }
+    }
+
     AndroidMirrorConfig and_cfg;
     OverlayConfig       pip_overlay_cfg1, pip_overlay_cfg2, pip_overlay_cfg3;
     OverlayConfig       android_overlay_cfg;
@@ -4927,6 +4960,23 @@ int main(int argc, char* argv[]) {
 
     if (!mpu9250.start() && mpu_cfg.enabled)
         std::cerr << "[main] MPU-9250 backup compass unavailable\n";
+
+    // ── Boop sensor ──────────────────────────────────────────────────────────
+    // Polls on its own thread; the on_boop callback fires from there and
+    // re-enters face_proxy.trigger_boop, which locks the controller's mutex
+    // before touching panels. Safe to construct unconditionally — start()
+    // returns false (no thread spun up) when cfg.enabled is false or the
+    // chip isn't present on the bus.
+    sensor::Mpr121BoopSensor boop_sensor(boop_cfg);
+    boop_sensor.on_boop([&face_proxy, &state](sensor::BoopSensor::Zone z) {
+        const auto zi = static_cast<size_t>(z);
+        if (zi >= 3) return;
+        const auto& zc = state.boop_zones[zi];
+        if (!zc.enabled || zc.expression.empty()) return;
+        face_proxy.trigger_boop(zc.expression, zc.duration_s);
+    });
+    if (boop_cfg.enabled && !boop_sensor.start())
+        std::cerr << "[main] boop sensor (MPR121) unavailable\n";
 
     // ── Dev/debug monitors ────────────────────────────────────────────────────
 
@@ -7304,6 +7354,7 @@ int main(int argc, char* argv[]) {
     step("weather_mon");     weather_mon.stop();
     step("sys_mon");         sys_mon.stop();
     step("mpu9250");         mpu9250.stop();
+    step("boop_sensor");     boop_sensor.stop();
     step("audio");           audio.stop();
     step("android_mirror");  android_mirror.stop();
     step("hud");             hud.unload();
