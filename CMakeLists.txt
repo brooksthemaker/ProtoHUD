@@ -201,6 +201,8 @@ set(SOURCES
     src/post_process.cpp
     src/sensor/mpu9250.cpp
     src/sensor/mpr121_boop_sensor.cpp
+    src/accessory/led_strip.cpp
+    src/accessory/accessory_leds.cpp
     src/sys/system_monitor.cpp
     src/sys/scheduler_monitor.cpp
     src/net/wifi_monitor.cpp

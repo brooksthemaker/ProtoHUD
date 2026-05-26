@@ -39,6 +39,7 @@
 #include "post_process.h"
 #include "sensor/mpu9250.h"
 #include "sensor/mpr121_boop_sensor.h"
+#include "accessory/accessory_leds.h"
 #include "sys/system_monitor.h"
 #include "sys/scheduler_monitor.h"
 #include "net/weather_monitor.h"
@@ -4851,6 +4852,56 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ── Accessory LEDs (cheekhubs + fins on WS2812 daisy-chain) ──────────────
+    // Single chain driven through Pi 5 SPI MOSI (GPIO 10). Zone slicing is
+    // declarative — config picks {start, count} per zone (LeftCheekhub,
+    // RightCheekhub, LeftFin, RightFin); patterns are per-zone (Off / Solid /
+    // Breathe in v1, audio + event hooks later).
+    accessory::AccessoryLeds::Config led_cfg;
+    led_cfg.zones[0].name = "left_cheekhub";
+    led_cfg.zones[1].name = "right_cheekhub";
+    led_cfg.zones[2].name = "left_fin";
+    led_cfg.zones[3].name = "right_fin";
+    if (cfg.contains("accessory_leds")) {
+        auto& jl = cfg["accessory_leds"];
+        led_cfg.enabled            = jval(jl, "enabled",           false);
+        led_cfg.global_brightness  = static_cast<uint8_t>(
+            jval(jl, "global_brightness", static_cast<int>(led_cfg.global_brightness)));
+        led_cfg.frame_hz           = jval(jl, "frame_hz",          60.0);
+        led_cfg.strip.spi_device   = jl.value("spi_device",        std::string("/dev/spidev0.0"));
+        led_cfg.strip.speed_hz     = jval(jl, "speed_hz",          2'400'000);
+        if (auto co = jl.value("color_order", std::string("GRB")); co == "RGB")
+            led_cfg.strip.color_order = accessory::LedStrip::ColorOrder::RGB;
+        else if (co == "BGR")
+            led_cfg.strip.color_order = accessory::LedStrip::ColorOrder::BGR;
+        else
+            led_cfg.strip.color_order = accessory::LedStrip::ColorOrder::GRB;
+        if (jl.contains("zones") && jl["zones"].is_array()) {
+            for (size_t i = 0; i < jl["zones"].size() && i < accessory::ZoneCount; ++i) {
+                auto& jz = jl["zones"][i];
+                led_cfg.zones[i].start = jval(jz, "start", led_cfg.zones[i].start);
+                led_cfg.zones[i].count = jval(jz, "count", led_cfg.zones[i].count);
+                if (jz.contains("color") && jz["color"].is_array() && jz["color"].size() >= 3) {
+                    led_cfg.zones[i].r = static_cast<uint8_t>(std::clamp(jz["color"][0].get<int>(), 0, 255));
+                    led_cfg.zones[i].g = static_cast<uint8_t>(std::clamp(jz["color"][1].get<int>(), 0, 255));
+                    led_cfg.zones[i].b = static_cast<uint8_t>(std::clamp(jz["color"][2].get<int>(), 0, 255));
+                }
+                const std::string pat = jz.value("pattern", std::string("solid"));
+                if      (pat == "off")     led_cfg.zones[i].pattern = accessory::Pattern::Off;
+                else if (pat == "breathe") led_cfg.zones[i].pattern = accessory::Pattern::Breathe;
+                else                       led_cfg.zones[i].pattern = accessory::Pattern::Solid;
+                led_cfg.zones[i].breathe_hz =
+                    jval(jz, "breathe_hz", led_cfg.zones[i].breathe_hz);
+            }
+        }
+        // Strip length = highest (start + count) across configured zones; lets
+        // users add or trim zones without separately bookkeeping a total.
+        int max_end = 0;
+        for (const auto& z : led_cfg.zones) max_end = std::max(max_end, z.start + z.count);
+        led_cfg.strip.count = max_end;
+    }
+    accessory::AccessoryLeds accessory_leds(led_cfg);
+
     // ── Boop sensor (MPR121 capacitive over I²C) ─────────────────────────────
     // Per-zone user-facing config (expression, duration, sensitivity) lives in
     // state.boop_zones — that's what the menu mutates. Hardware-level config
@@ -5349,6 +5400,9 @@ int main(int argc, char* argv[]) {
     if (boop_cfg.enabled && !boop_sensor.start())
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
     boop_sensor_ptr = &boop_sensor;   // expose for the menu's live tuning
+
+    if (led_cfg.enabled && !accessory_leds.start())
+        std::cerr << "[main] accessory LEDs unavailable — continuing without\n";
 
     // ── Dev/debug monitors ────────────────────────────────────────────────────
 
@@ -7787,6 +7841,7 @@ int main(int argc, char* argv[]) {
     step("sys_mon");         sys_mon.stop();
     step("mpu9250");         mpu9250.stop();
     step("boop_sensor");     boop_sensor.stop();
+    step("accessory_leds");  accessory_leds.stop();
     step("audio");           audio.stop();
     step("android_mirror");  android_mirror.stop();
     step("hud");             hud.unload();
