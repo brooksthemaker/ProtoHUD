@@ -2634,29 +2634,126 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── Info-Panel Module ─────────────────────────────────────────────────────
+    // Live preview of the selected analog clock face for the Clock Face context
+    // pane. Mirrors draw_info_panel's face logic, drawn with ImDrawList.
+    auto draw_clock_preview = [&state, hud_col](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+        const float PI = 3.14159265358979f, TWO_PI = 2.f * PI, HALF_PI = PI * 0.5f;
+        const float cx = o.x + sz.x * 0.5f;
+        const float cy = o.y + sz.y * 0.5f - 6.f;          // leave a line for the name
+        const float cr = std::min(sz.x, sz.y) * 0.40f;
+        const int   face = state.info_panel.clock_face;
+        auto with_a = [](ImU32 c, unsigned a){ return (c & 0x00FFFFFFu) | (a << 24); };
+
+        enum { M_TICKS, M_NUMBERS, M_QUARTERS };
+        int   markers = M_TICKS, signature = 0;
+        ImU32 markCol = IM_COL32(200, 220, 230, 150);
+        ImU32 handCol = hud_col ? hud_col->text_fill : IM_COL32(255, 255, 255, 255);
+        const ImU32 secCol = IM_COL32(235, 80, 70, 235);
+        const char* name = "Ticks";
+        switch (face) {
+            case 1: markers = M_NUMBERS;  markCol = with_a(handCol, 220); name = "Numbers"; break;
+            case 2: markers = M_QUARTERS; name = "Minimal"; break;
+            case 3: markers = M_TICKS;    signature = 1; markCol = IM_COL32(120,205,235,200); handCol = IM_COL32(150,235,255,255); name = "Halo"; break;
+            case 4: markers = M_TICKS;    signature = 2; markCol = IM_COL32(255,160, 32,210); handCol = IM_COL32(255,160, 32,255); name = "Solar"; break;
+            case 5: markers = M_NUMBERS;  signature = 3; markCol = IM_COL32(  0,255, 80,230); handCol = IM_COL32(  0,255, 80,255); name = "Fallout"; break;
+            case 6: markers = M_QUARTERS; signature = 4; markCol = IM_COL32( 80,100,255,210); handCol = IM_COL32(200,220,255,255); name = "Space"; break;
+            case 7: markers = M_TICKS;    markCol = with_a(hud_col ? hud_col->compass_tick : IM_COL32(255,255,255,255), 200);
+                    handCol = hud_col ? hud_col->text_fill : IM_COL32(255,255,255,255); name = "Auto (theme)"; break;
+            default: break;
+        }
+
+        dl->AddCircleFilled({cx, cy}, cr * 1.18f, IM_COL32(10, 16, 22, 180), 48);
+        dl->AddCircle({cx, cy}, cr * 1.18f, with_a(handCol, 150), 48, 1.6f);
+
+        if (markers == M_NUMBERS) {
+            for (int h = 1; h <= 12; ++h) {
+                const float a = h / 12.f * TWO_PI - HALF_PI;
+                char nb[4]; snprintf(nb, sizeof(nb), "%d", h);
+                const ImVec2 ts = ImGui::CalcTextSize(nb);
+                dl->AddText({cx + std::cos(a) * cr * 0.82f - ts.x * 0.5f,
+                             cy + std::sin(a) * cr * 0.82f - ts.y * 0.5f}, markCol, nb);
+            }
+        } else {
+            const int step = (markers == M_QUARTERS) ? 3 : 1;
+            for (int i = 0; i < 12; i += step) {
+                const float a = i / 12.f * TWO_PI - HALF_PI;
+                dl->AddLine({cx + std::cos(a) * cr * 0.86f, cy + std::sin(a) * cr * 0.86f},
+                            {cx + std::cos(a) * cr * 0.99f, cy + std::sin(a) * cr * 0.99f},
+                            markCol, (i % 3 == 0) ? 2.5f : 1.f);
+            }
+        }
+
+        if (signature == 1) {                  // Halo — ring + bright top arc + hub ring
+            dl->AddCircle({cx, cy}, cr * 1.05f, IM_COL32(150,235,255,110), 48, 1.4f);
+            dl->PathArcTo({cx, cy}, cr * 1.05f, -HALF_PI - 1.2f, -HALF_PI + 1.2f, 24);
+            dl->PathStroke(IM_COL32(150,235,255, 80), 0, 6.f);
+            dl->PathArcTo({cx, cy}, cr * 1.05f, -HALF_PI - 1.2f, -HALF_PI + 1.2f, 24);
+            dl->PathStroke(IM_COL32(190,245,255,220), 0, 2.f);
+            dl->AddCircle({cx, cy}, cr * 0.32f, IM_COL32(120,205,235,110), 32, 1.f);
+        } else if (signature == 2) {           // Solar — diagonal rays
+            for (int k = 0; k < 4; ++k) {
+                const float a = (k / 4.f) * TWO_PI + HALF_PI * 0.5f;
+                dl->AddLine({cx + std::cos(a) * cr * 1.02f, cy + std::sin(a) * cr * 1.02f},
+                            {cx + std::cos(a) * cr * 1.16f, cy + std::sin(a) * cr * 1.16f},
+                            IM_COL32(255,160,32,200), 2.f);
+            }
+        } else if (signature == 3) {           // Fallout — indicator triangle at 12
+            const float ty = cy - cr * 0.99f;
+            dl->AddTriangleFilled({cx, ty + cr * 0.10f}, {cx - cr * 0.06f, ty},
+                                  {cx + cr * 0.06f, ty}, IM_COL32(0,255,80,220));
+        } else if (signature == 4) {           // Space — 4-point star at 12
+            const float sx = cx, sy = cy - cr * 0.84f, sr = cr * 0.14f;
+            const ImU32 stc = IM_COL32(200,220,255,230);
+            ImVec2 vd[4] = {{sx, sy - sr}, {sx + sr*0.28f, sy}, {sx, sy + sr}, {sx - sr*0.28f, sy}};
+            ImVec2 hd[4] = {{sx - sr, sy}, {sx, sy - sr*0.28f}, {sx + sr, sy}, {sx, sy + sr*0.28f}};
+            dl->AddConvexPolyFilled(vd, 4, stc);
+            dl->AddConvexPolyFilled(hd, 4, stc);
+        }
+
+        const time_t now = std::time(nullptr) + static_cast<time_t>(state.clock_cfg.manual_offset_s);
+        struct tm tmv; localtime_r(&now, &tmv);
+        auto hand = [&](float frac, float len, float w, ImU32 c) {
+            const float a = frac * TWO_PI - HALF_PI;
+            dl->AddLine({cx, cy}, {cx + std::cos(a) * len, cy + std::sin(a) * len}, c, w);
+        };
+        const float hh = (tmv.tm_hour % 12) + tmv.tm_min / 60.f;
+        const float mm = tmv.tm_min + tmv.tm_sec / 60.f;
+        hand(hh / 12.f, cr * 0.52f, 3.f, handCol);
+        hand(mm / 60.f, cr * 0.80f, 2.f, handCol);
+        hand(tmv.tm_sec / 60.f, cr * 0.90f, 1.f, secCol);
+        dl->AddCircleFilled({cx, cy}, 3.f, secCol, 12);
+
+        const ImVec2 ns = ImGui::CalcTextSize(name);
+        dl->AddText({cx - ns.x * 0.5f, o.y + sz.y - ns.y}, with_a(handCol, 230), name);
+    };
+
     std::vector<MenuItem> clock_face_menu = {
-        leaf_sel("Ticks",        [&state]{ state.info_panel.clock_face = 0; },
-                                 [&state]{ return state.info_panel.clock_face == 0; }),
-        leaf_sel("Numbers",      [&state]{ state.info_panel.clock_face = 1; },
-                                 [&state]{ return state.info_panel.clock_face == 1; }),
-        leaf_sel("Minimal",      [&state]{ state.info_panel.clock_face = 2; },
-                                 [&state]{ return state.info_panel.clock_face == 2; }),
-        leaf_sel("Halo",         [&state]{ state.info_panel.clock_face = 3; },
-                                 [&state]{ return state.info_panel.clock_face == 3; }),
-        leaf_sel("Solar",        [&state]{ state.info_panel.clock_face = 4; },
-                                 [&state]{ return state.info_panel.clock_face == 4; }),
-        leaf_sel("Fallout",      [&state]{ state.info_panel.clock_face = 5; },
-                                 [&state]{ return state.info_panel.clock_face == 5; }),
-        leaf_sel("Space",        [&state]{ state.info_panel.clock_face = 6; },
-                                 [&state]{ return state.info_panel.clock_face == 6; }),
-        leaf_sel("Auto (theme)", [&state]{ state.info_panel.clock_face = 7; },
-                                 [&state]{ return state.info_panel.clock_face == 7; }),
+        live(leaf_sel("Ticks",        [&state]{ state.info_panel.clock_face = 0; },
+                                      [&state]{ return state.info_panel.clock_face == 0; })),
+        live(leaf_sel("Numbers",      [&state]{ state.info_panel.clock_face = 1; },
+                                      [&state]{ return state.info_panel.clock_face == 1; })),
+        live(leaf_sel("Minimal",      [&state]{ state.info_panel.clock_face = 2; },
+                                      [&state]{ return state.info_panel.clock_face == 2; })),
+        live(leaf_sel("Halo",         [&state]{ state.info_panel.clock_face = 3; },
+                                      [&state]{ return state.info_panel.clock_face == 3; })),
+        live(leaf_sel("Solar",        [&state]{ state.info_panel.clock_face = 4; },
+                                      [&state]{ return state.info_panel.clock_face == 4; })),
+        live(leaf_sel("Fallout",      [&state]{ state.info_panel.clock_face = 5; },
+                                      [&state]{ return state.info_panel.clock_face == 5; })),
+        live(leaf_sel("Space",        [&state]{ state.info_panel.clock_face = 6; },
+                                      [&state]{ return state.info_panel.clock_face == 6; })),
+        live(leaf_sel("Auto (theme)", [&state]{ state.info_panel.clock_face = 7; },
+                                      [&state]{ return state.info_panel.clock_face == 7; })),
     };
     std::vector<MenuItem> ip_clock_menu = {
         toggle("Show Clock",
             [&state, ipw]{ return state.info_panel.show[ipw(InfoWidget::Clock)]; },
             [&state, ipw](bool v){ state.info_panel.show[ipw(InfoWidget::Clock)] = v; }),
-        submenu("Clock Face", std::move(clock_face_menu)),
+        with_panel(
+            with_desc(submenu("Clock Face", std::move(clock_face_menu)),
+                      "Pick the analog clock style. The preview at right updates as you "
+                      "scroll, and the panel clock changes live too."),
+            "Clock Preview", draw_clock_preview),
     };
     std::vector<MenuItem> ip_notif_menu = {
         toggle("Show Notifications",
