@@ -300,6 +300,8 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/shm_pusher_output.cpp
     src/face/max7219_chain.cpp
     src/face/max7219_panel_output.cpp
+    src/face/neopixel_matrix_chain.cpp
+    src/face/neopixel_matrix_output.cpp
     src/face/native_face_controller.cpp
 )
 target_include_directories(protoface_native PRIVATE

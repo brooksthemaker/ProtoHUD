@@ -60,6 +60,7 @@
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
+#include "face/neopixel_matrix_output.h"
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -207,6 +208,9 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
 // cfg["protoface"]["backend"]:
 //   "hub75"   (default) → ShmPusherOutput; panel_driver.py shuttles to LEDs.
 //   "max7219"          → Max7219PanelOutput direct-to-spidev, multi-chain.
+//   "rgb_matrix"       → NeoPixelMatrixOutput — WS2812-based 8x8 RGB matrix
+//                        drop-ins replacing the MAX7219 modules. Same chain
+//                        geometry; full RGB per pixel.
 // Pulled out as a free helper so both the startup path and the menu's
 // hot-swap action use the exact same construction logic.
 static std::unique_ptr<face::PanelOutput>
@@ -255,6 +259,41 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc) {
             }
         }
         return std::make_unique<face::Max7219PanelOutput>(std::move(mc));
+    }
+    if (backend == "rgb_matrix") {
+        face::NeoPixelMatrixOutput::Config nc;
+        if (jpf && jpf->contains("rgb_matrix")) {
+            const auto& jm = (*jpf)["rgb_matrix"];
+            if (jm.contains("chains") && jm["chains"].is_array()) {
+                for (const auto& jc : jm["chains"]) {
+                    face::NeoPixelMatrixChain::Config cc;
+                    cc.name       = jc.value("name",       std::string("chain"));
+                    cc.spi_device = jc.value("spi_device", std::string("/dev/spidev0.0"));
+                    cc.speed_hz   = jc.value("speed_hz",   2'400'000);
+                    cc.cols_chips = jc.value("cols_chips", 1);
+                    cc.rows_chips = jc.value("rows_chips", 1);
+                    cc.canvas_x   = jc.value("canvas_x",   0);
+                    cc.canvas_y   = jc.value("canvas_y",   0);
+                    cc.brightness = static_cast<uint8_t>(
+                        std::clamp(jc.value("brightness", 64), 0, 255));
+                    const std::string pl = jc.value("pixel_layout",
+                                                    std::string("adafruit_serpentine"));
+                    cc.pixel_layout = (pl == "row_major" || pl == "row-major")
+                        ? face::NeoPixelMatrixChain::PixelLayout::RowMajor
+                        : face::NeoPixelMatrixChain::PixelLayout::AdafruitSerpentine;
+                    const std::string co = jc.value("chain_order", std::string("serpentine"));
+                    cc.chain_order = (co == "row_major" || co == "row-major")
+                        ? face::NeoPixelMatrixChain::ChainOrder::RowMajor
+                        : face::NeoPixelMatrixChain::ChainOrder::Serpentine;
+                    const std::string ord = jc.value("color_order", std::string("GRB"));
+                    cc.color_order = (ord == "RGB" || ord == "rgb")
+                        ? face::NeoPixelMatrixChain::ColorOrder::RGB
+                        : face::NeoPixelMatrixChain::ColorOrder::GRB;
+                    nc.chains.push_back(std::move(cc));
+                }
+            }
+        }
+        return std::make_unique<face::NeoPixelMatrixOutput>(std::move(nc));
     }
     return std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h);
 }
@@ -2691,6 +2730,9 @@ static std::vector<MenuItem> build_menu(
         leaf_sel("MAX7219 matrices (direct SPI)",
             [swap_backend]{ if (swap_backend) swap_backend("max7219"); },
             [pf_backend_p]{ return pf_backend_p && *pf_backend_p == "max7219"; }),
+        leaf_sel("RGB matrix (WS2812 drop-in for MAX7219)",
+            [swap_backend]{ if (swap_backend) swap_backend("rgb_matrix"); },
+            [pf_backend_p]{ return pf_backend_p && *pf_backend_p == "rgb_matrix"; }),
     };
     std::vector<MenuItem> pf_hardware_menu = {
         with_desc(submenu("Backend", std::move(pf_backend_items)),
@@ -5950,7 +5992,8 @@ int main(int argc, char* argv[]) {
     // doesn't.
     std::vector<std::unique_ptr<face::NativeFaceController>> ctrl_graveyard;
     auto swap_backend = [&](const std::string& new_backend) {
-        if (new_backend != "hub75" && new_backend != "max7219") return;
+        if (new_backend != "hub75" && new_backend != "max7219" &&
+            new_backend != "rgb_matrix") return;
         if (new_backend == pf_backend) return;
         std::cout << "[main] backend hot-swap: " << pf_backend
                   << " -> " << new_backend << "\n";
@@ -5980,9 +6023,11 @@ int main(int argc, char* argv[]) {
         active_face = native_ctrl.get();
         native_ctrl->start();
 
-        // panel_driver.py choreography. Killing on max7219 is safe even if
-        // it wasn't running.
-        if (new_backend == "max7219") {
+        // panel_driver.py choreography. The Python shim is only needed for
+        // HUB75 (it reads /dev/shm frames and pushes them via piomatter);
+        // both MAX7219 and RGB matrix backends drive spidev directly. Kill
+        // on either of those — safe even if it wasn't running.
+        if (new_backend == "max7219" || new_backend == "rgb_matrix") {
             std::system("pkill -f panel_driver.py 2>/dev/null");
         } else if (new_backend == "hub75" && pf_launch_driver) {
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h);
