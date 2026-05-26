@@ -5185,6 +5185,20 @@ int main(int argc, char* argv[]) {
         else                              aud_cfg.active_output = AudioOutput::VITURE;
     }
 
+    // ── Shared state + forward-declared backends ──────────────────────────
+    // AppState lives here so the config-parse blocks below can write into
+    // it. The four pointer-typed slots below get forward-declared as the
+    // canonical sources of truth so callbacks/lambdas constructed during
+    // module wire-up can capture them by reference even though their
+    // final values aren't known yet — the assignment lines further down
+    // (look for `active_face = …`, `menu_ptr = &menu`, etc.) populate them
+    // once their owning objects exist.
+    AppState state;
+    IFaceController* active_face      = nullptr;   // set after native_ctrl/teensy/protoface_ctrl exist
+    FaceProxy        face_proxy(&active_face);     // proxy reads *active_face each call
+    MenuSystem*      menu_ptr         = nullptr;   // set after MenuSystem is constructed
+    sensor::BoopSensor* boop_sensor_ptr = nullptr; // set after boop_sensor is constructed
+
     // Voice → mouth_open analysis (FFT band RMS, envelope follower).
     if (cfg.contains("voice_mouth")) {
         auto& jv = cfg["voice_mouth"];
@@ -5554,9 +5568,8 @@ int main(int argc, char* argv[]) {
         android_overlay_cfg.pan_y = jval(jand, "pan_y", 0.f);
     }
 
-    // ── Shared state ──────────────────────────────────────────────────────────
+    // ── Shared state (AppState declared earlier; here we populate it from cfg) ─
 
-    AppState state;
     state.max_messages        = jval(jhud, "lora_message_history", 50);
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
@@ -6349,12 +6362,15 @@ int main(int argc, char* argv[]) {
     // Active face backend: native in-process renderer if enabled; otherwise
     // prefer the Protoface daemon if its socket exists or we auto-launched it
     // (commands no-op until the reconnect loop connects), else the Teensy.
-    IFaceController* active_face =
+    // active_face + face_proxy are forward-declared near the top of main()
+    // so callbacks constructed earlier can capture them. Here we just point
+    // the proxy at whichever real backend is appropriate for the current
+    // pf_mode now that native_ctrl / protoface_ctrl / teensy all exist.
+    active_face =
         native_ctrl ? static_cast<IFaceController*>(native_ctrl.get())
         : (ProtoFaceController::socket_exists() || pf_autostart)
             ? static_cast<IFaceController*>(&protoface_ctrl)
             : static_cast<IFaceController*>(&teensy);
-    FaceProxy face_proxy(&active_face);
 
     // Hot-swap: when the menu toggles Protoface > Hardware > Backend, we
     // stop the live NativeFaceController, retire it into a graveyard so any
@@ -6506,12 +6522,12 @@ int main(int argc, char* argv[]) {
     }
     gif_names.resize(8);
 
-    // menu_ptr is set to &menu after construction so HUD menu lambdas can call
-    // into MenuSystem without a circular dependency at build time.
+    // menu_ptr / boop_sensor_ptr are forward-declared near the top of main();
+    // they live here as nullptrs and get pointed at the real objects further
+    // down. bg_lib_ptr is local to this block — only the menu hot-swap path
+    // captures it and that's all constructed below here.
     bool panel_preview_enabled = false;
-    MenuSystem* menu_ptr = nullptr;
     BackgroundLibrary* bg_lib_ptr = nullptr;   // set after bg_lib is constructed
-    sensor::BoopSensor* boop_sensor_ptr = nullptr;   // set after boop_sensor is constructed
     std::vector<MenuItem> quick_items;   // curated corner/radial quick-menu tree
     std::string cfg_gifs_dir = pf_build_render_config(cfg).gifs_dir;
     std::string cfg_bg_user_dir;
