@@ -27,6 +27,12 @@ public:
     // default) means "I don't know — the whole canvas may be shown" and
     // the editor stays hidden for that backend.
     virtual std::vector<cv::Rect> covered_regions() const { return {}; }
+
+    // True if this backend has a sensible pixel grid the editor can target.
+    // Decouples editor availability from whether the user has configured
+    // chains yet — Max7219 + RGB-matrix backends always return true; HUB75
+    // (no per-pixel addressable concept at this layer) stays false.
+    virtual bool supports_face_editor() const { return false; }
 };
 
 } // namespace face

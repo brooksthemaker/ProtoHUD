@@ -551,7 +551,11 @@ void NativeFaceController::reload_active_face() {
 
 bool NativeFaceController::has_led_face_editor() const {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    return output_ && !output_->covered_regions().empty();
+    // Capability flag on the active output, not chain count — so the
+    // editor stays available even when MAX7219 / RGB-matrix is selected
+    // but no chains are configured yet (the user can author the PNG and
+    // the renderer will pick it up once chains land in config).
+    return output_ && output_->supports_face_editor();
 }
 
 } // namespace face

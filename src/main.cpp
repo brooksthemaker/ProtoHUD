@@ -2956,6 +2956,16 @@ static std::vector<MenuItem> build_menu(
         submenu("Effects",        std::move(pf_effects)),
         submenu("Face Color",     std::move(pf_colors)),
         submenu("Material Color", std::move(pf_palette)),
+        // Face PNGs (per-expression slots, mouth shapes, boop reactions)
+        // live here under Protoface rather than the generic Files menu —
+        // they're meaningful per-backend, and the editor only makes sense
+        // when the active backend supports it (MAX7219 / RGB matrix).
+        with_desc(with_panel(submenu("Faces", std::move(face_files_menu)),
+                             "Face Preview", draw_face_preview),
+                  "Per-expression face PNGs and the in-HUD pixel editor. "
+                  "Edit... opens whenever the active backend (Hardware > "
+                  "Backend) has an editor capability — today: MAX7219 and "
+                  "RGB matrix; HUB75 stays import-only."),
         with_panel(submenu("Animations", std::move(pf_gifs)),
                    "GIF Preview", draw_gif_preview),
         slider("Brightness", 0.f, 255.f, 5.f, "%",
@@ -5018,14 +5028,13 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("Files",        std::vector<MenuItem>{
                       with_panel(submenu("GIFs",        std::move(gif_files_menu)),
                                  "GIF Preview",        draw_gif_preview),
-                      with_panel(submenu("Faces",       std::move(face_files_menu)),
-                                 "Face Preview",       draw_face_preview),
                       with_panel(submenu("Backgrounds", std::move(bg_files_menu)),
                                  "Background Preview", draw_bg_preview),
                   }),
-                  "Import media into Protoface from disk. GIFs, face "
-                  "expression PNGs, and landing-page backgrounds; bundled "
-                  "defaults stay read-only while user imports can be deleted."),
+                  "Import media into Protoface from disk: GIFs and "
+                  "landing-page backgrounds. Face / mouth / boop PNGs live "
+                  "under Face Display > Protoface > Faces — they're tied to "
+                  "the active face backend (MAX7219 / RGB matrix)."),
         with_desc(submenu("LoRa",         std::move(lora_menu)),
                   "Long-range radio: team nodes, messages and status."),
         with_desc(submenu("System",       std::move(system_menu)),
@@ -6430,9 +6439,16 @@ int main(int argc, char* argv[]) {
     auto edit_face = [&](const std::string& expression) {
         if (!native_ctrl || !menu_ptr) return;
         auto covered = native_ctrl->led_covered_regions();
-        if (covered.empty()) return;
         const int cw = native_ctrl->canvas_width();
         const int ch = native_ctrl->canvas_height();
+        if (covered.empty()) {
+            // No chains configured yet — fall back to the full renderer
+            // canvas so the user can still author the PNG. The Max7219 /
+            // RGB-matrix driver will display nothing until chains are
+            // wired in config, but the editing flow is decoupled from
+            // chain presence.
+            covered.emplace_back(0, 0, cw, ch);
+        }
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
 

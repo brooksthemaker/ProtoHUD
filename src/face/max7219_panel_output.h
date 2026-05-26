@@ -37,6 +37,7 @@ public:
     void show(const cv::Mat& rgb) override;
     void close() override;
     std::vector<cv::Rect> covered_regions() const override;
+    bool supports_face_editor() const override { return true; }
 
 private:
     Config                                       cfg_;
