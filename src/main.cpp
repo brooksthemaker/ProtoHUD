@@ -601,26 +601,43 @@ static std::vector<MenuItem> build_menu(
     struct GifPreview {
         face::GifPlayer          player{160, 160};
         std::vector<std::string> files;
-        bool   scanned = false;
-        int    loaded  = -1;   // file index currently decoded (-1 = none)
-        int    want    = -1;   // highlighted slot (set by on_highlight)
-        GLuint tex     = 0;
+        bool        scanned = false;
+        std::string loaded_path;       // file currently decoded ("" = none)
+        int         want    = -1;      // highlighted slot (set by on_highlight)
+        GLuint      tex     = 0;
     };
     auto gif_preview = std::make_shared<GifPreview>();
 
     MenuContextPanelDraw draw_gif_preview =
-        [gif_preview, gifs_dir, gif_names](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+        [gif_preview, gifs_dir, gif_names, teensy](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
             GifPreview& gp = *gif_preview;
             if (!gp.scanned) {
                 gp.files   = face::GifPlayer::scan_folder(gifs_dir);
                 gp.scanned = true;
                 if (gp.want < 0 && !gp.files.empty()) gp.want = 0;
             }
-            const bool have = gp.want >= 0 && gp.want < static_cast<int>(gp.files.size());
 
-            if (have && gp.want != gp.loaded) {
-                gp.player.load(gp.files[gp.want], true);
-                gp.loaded = gp.want;
+            // Resolve slot → file path: prefer the manifest binding (what
+            // play_gif() will actually play), fall back to sorted scan order.
+            std::string slot_path, slot_label;
+            if (gp.want >= 0) {
+                const std::string bound = teensy->gif_slot(static_cast<uint8_t>(gp.want));
+                if (!bound.empty()) {
+                    slot_path  = gifs_dir + "/" + bound;
+                    slot_label = std::filesystem::path(bound).stem().string();
+                } else if (gp.want < static_cast<int>(gp.files.size())) {
+                    slot_path  = gp.files[gp.want];
+                    slot_label = std::filesystem::path(slot_path).stem().string();
+                }
+            }
+            const bool have = !slot_path.empty();
+
+            if (have && slot_path != gp.loaded_path) {
+                gp.player.load(slot_path, true);
+                gp.loaded_path = slot_path;
+            } else if (!have && !gp.loaded_path.empty()) {
+                gp.player.stop();
+                gp.loaded_path.clear();
             }
             gp.player.update(ImGui::GetIO().DeltaTime);
 
@@ -647,7 +664,7 @@ static std::vector<MenuItem> build_menu(
                 dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(gp.tex)),
                              {px, py}, {px + side, py + side});
             } else {
-                const char* msg = gp.files.empty() ? "No GIFs found" : "Loading...";
+                const char* msg = !have ? "(empty)" : "Decode failed";
                 const ImVec2 ts = ImGui::CalcTextSize(msg);
                 dl->AddText({px + side * 0.5f - ts.x * 0.5f, py + side * 0.5f - ts.y * 0.5f},
                             IM_COL32(180, 190, 200, 200), msg);
@@ -656,7 +673,7 @@ static std::vector<MenuItem> build_menu(
             std::string name = have
                 ? ((gp.want < static_cast<int>(gif_names.size()) && !gif_names[gp.want].empty())
                        ? gif_names[gp.want]
-                       : std::filesystem::path(gp.files[gp.want]).stem().string())
+                       : slot_label)
                 : std::string("(none)");
             const ImVec2 ns = ImGui::CalcTextSize(name.c_str());
             dl->AddText({o.x + sz.x * 0.5f - ns.x * 0.5f, o.y + sz.y - ns.y},

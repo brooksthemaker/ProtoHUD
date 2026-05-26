@@ -51,6 +51,13 @@ public:
     void release_control() override;
     void save_config() override;          // persist current look now (also auto-saved)
 
+    // Slot manifest — see IFaceController. Bindings store basenames inside
+    // gifs_dir; play_gif() prefers the bound file, falling back to the sorted
+    // scan when a slot is unbound or its file has gone missing.
+    std::string gif_slot(uint8_t slot) const override;
+    void        bind_gif_slot(uint8_t slot, const std::string& filename) override;
+    void        clear_gif_slot(uint8_t slot) override;
+
     // Copy the latest rendered RGB canvas (CV_8UC3) for the preview. Returns
     // false until the first frame exists. Safe to call from the main/GL thread.
     bool latest_frame(cv::Mat& out) const;
@@ -84,6 +91,7 @@ private:
     std::unique_ptr<PanelOutput> output_;
     std::vector<Panel>           panels_;
     std::vector<std::string>     gif_files_;   // sorted *.gif paths in gifs_dir
+    std::vector<std::string>     gif_slots_;   // size 8, basename per slot ("" = unbound)
     double                       gif_release_ = 5.0;   // auto-revert seconds
 
     mutable std::mutex state_mtx_;   // panels_ mutation + render reads

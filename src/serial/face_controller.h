@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 /**
  * Abstract interface for face display backends.
@@ -40,6 +41,16 @@ public:
     // Restart the backend's program (stop the running one, then launch fresh).
     // Default no-op.
     virtual void restart() {}
+
+    // Slot manifest — stable mapping from a menu slot index (0..N) to a media
+    // file in the backend's media folder, persisted by the backend. Lets users
+    // import new media into a specific slot without sorted-scan order shifting
+    // every other binding. Default impls are no-ops / empty so backends without
+    // host-side file storage (Teensy/ProtoTracer, daemon-Protoface) behave as
+    // before — only the native in-process Protoface honours bindings.
+    virtual std::string gif_slot(uint8_t /*slot*/) const { return {}; }
+    virtual void        bind_gif_slot(uint8_t /*slot*/, const std::string& /*filename*/) {}
+    virtual void        clear_gif_slot(uint8_t /*slot*/) {}
 };
 
 /**
@@ -71,6 +82,11 @@ public:
     void save_config()                         override { (*active_)->save_config(); }
     void launch()                              override { (*active_)->launch(); }
     void restart()                             override { (*active_)->restart(); }
+    std::string gif_slot(uint8_t s) const      override { return (*active_)->gif_slot(s); }
+    void bind_gif_slot(uint8_t s, const std::string& f) override {
+        (*active_)->bind_gif_slot(s, f);
+    }
+    void clear_gif_slot(uint8_t s)             override { (*active_)->clear_gif_slot(s); }
 
     IFaceController* backend() const { return *active_; }
 

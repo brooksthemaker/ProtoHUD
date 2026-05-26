@@ -84,6 +84,7 @@ void NativeFaceController::build_panels() {
     }
 
     gif_files_   = GifPlayer::scan_folder(cfg_.gifs_dir);
+    gif_slots_.assign(8, "");   // unbound by default; load_state() may fill these
     gif_release_ = cfg_.gif_auto_release;
 
     load_state();   // overlay any auto-saved look on the config defaults
@@ -234,8 +235,20 @@ void NativeFaceController::set_face(uint8_t face_id) {
 
 void NativeFaceController::play_gif(uint8_t gif_id) {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    if (gif_id >= gif_files_.size()) return;
-    const std::string& path = gif_files_[gif_id];
+
+    // Prefer the slot manifest binding; fall back to the sorted scan when the
+    // slot is unbound or its bound file has been removed from gifs_dir.
+    std::string path;
+    if (gif_id < gif_slots_.size() && !gif_slots_[gif_id].empty()) {
+        const std::string p = cfg_.gifs_dir + "/" + gif_slots_[gif_id];
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) path = p;
+    }
+    if (path.empty()) {
+        if (gif_id >= gif_files_.size()) return;
+        path = gif_files_[gif_id];
+    }
+
     for (auto& pn : panels_)
         if (pn.gif) {
             pn.gif->load(path);
@@ -302,6 +315,7 @@ void NativeFaceController::save_state_locked() const {
         jp[pn.cfg.name] = e;
     }
     j["panels"] = jp;
+    j["gif_slots"] = gif_slots_;
 
     const std::string tmp = cfg_.state_path + ".tmp";
     { std::ofstream f(tmp); if (!f) return; f << j.dump(2); }
@@ -319,6 +333,12 @@ void NativeFaceController::load_state() {
     if (j.contains("brightness") && j["brightness"].is_number()) {
         int b = j["brightness"].get<int>();
         for (auto& pn : panels_) if (pn.state) pn.state->set_brightness(b);
+    }
+    if (j.contains("gif_slots") && j["gif_slots"].is_array()) {
+        for (size_t i = 0; i < gif_slots_.size() && i < j["gif_slots"].size(); ++i) {
+            const auto& v = j["gif_slots"][i];
+            if (v.is_string()) gif_slots_[i] = v.get<std::string>();
+        }
     }
     if (!j.contains("panels") || !j["panels"].is_object()) return;
     const auto& jp = j["panels"];
@@ -360,6 +380,29 @@ std::string NativeFaceController::preset_material(int idx) {
         case 11: return "solid:0,0,0";
         default: return "teal";
     }
+}
+
+// ── Slot manifest accessors ───────────────────────────────────────────────────
+
+std::string NativeFaceController::gif_slot(uint8_t slot) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (slot >= gif_slots_.size()) return {};
+    return gif_slots_[slot];
+}
+
+void NativeFaceController::bind_gif_slot(uint8_t slot, const std::string& filename) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (slot >= gif_slots_.size()) return;
+    // Always store a basename so the manifest survives folder relocation.
+    gif_slots_[slot] = std::filesystem::path(filename).filename().string();
+    save_state_locked();
+}
+
+void NativeFaceController::clear_gif_slot(uint8_t slot) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (slot >= gif_slots_.size()) return;
+    gif_slots_[slot].clear();
+    save_state_locked();
 }
 
 } // namespace face
