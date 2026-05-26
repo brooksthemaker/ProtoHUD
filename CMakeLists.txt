@@ -201,6 +201,7 @@ set(SOURCES
     src/audio/voice_analyzer.cpp
     src/post_process.cpp
     src/sensor/mpu9250.cpp
+    src/sensor/bno055.cpp
     src/sensor/mpr121_boop_sensor.cpp
     src/accessory/led_strip.cpp
     src/accessory/accessory_leds.cpp

@@ -38,6 +38,7 @@
 #include "audio/audio_engine.h"
 #include "post_process.h"
 #include "sensor/mpu9250.h"
+#include "sensor/bno055.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
 #include "sys/system_monitor.h"
@@ -177,6 +178,37 @@ static void apply_hud_dock(AppState& s) {
 // Build a face::RenderConfig from config.json's "protoface" section. Falls back
 // to the standard 2-panel mirrored layout (face_left + face_right) and to the
 // Protoface submodule's asset folders under $HOME/protohud/Protoface.
+
+// IMU heading picker — replaces the old "Viture wins, MPU is backup"
+// hardcoded path. Reads state.imu_source plus the per-slot freshness
+// timestamps and picks the heading that should drive the HUD compass
+// this frame. Auto mode prefers BNO055 (on-chip 9-DOF fusion) over
+// MPU9250 (compass-only) over Viture (least-trusted; can drift wildly
+// with the headset off-face). Explicit modes force their source even if
+// stale — caller is responsible for downgrading if that's not desired.
+static float pick_imu_heading(const AppState& s, int64_t now_us) {
+    constexpr int64_t kStaleUs = 2'000'000;   // 2 s
+    auto fresh = [now_us](const AppState::ImuSlot& slot) {
+        return slot.last_us > 0 && (now_us - slot.last_us) < kStaleUs;
+    };
+    switch (s.imu_source) {
+    case AppState::ImuSource::Bno055:  return s.imu_bno.heading_deg;
+    case AppState::ImuSource::Mpu9250: return s.imu_mpu.heading_deg;
+    case AppState::ImuSource::Viture:  return s.imu_viture.heading_deg;
+    case AppState::ImuSource::None:    return s.compass_heading;   // freeze
+    case AppState::ImuSource::Auto:
+    default:
+        // Best fresh source wins. If nothing's fresh, hold the most recent
+        // value rather than snapping to zero.
+        if (fresh(s.imu_bno))                return s.imu_bno   .heading_deg;
+        if (fresh(s.imu_mpu))                return s.imu_mpu   .heading_deg;
+        if (fresh(s.imu_viture))             return s.imu_viture.heading_deg;
+        if (s.imu_bno   .last_us > 0)        return s.imu_bno   .heading_deg;
+        if (s.imu_mpu   .last_us > 0)        return s.imu_mpu   .heading_deg;
+        if (s.imu_viture.last_us > 0)        return s.imu_viture.heading_deg;
+        return s.compass_heading;
+    }
+}
 
 // Launch the panel_driver.py piomatter shim as a detached child. Used at
 // startup AND from the menu's backend hot-swap when switching back to HUB75.
@@ -3446,10 +3478,36 @@ static std::vector<MenuItem> build_menu(
             [&state](bool v){ state.compass_invert = v; }),
     };
 
+    // ── IMU source picker ──────────────────────────────────────────────────
+    // Which sensor drives the HUD compass. Auto walks BNO055 > MPU9250 >
+    // Viture, picking the highest-priority FRESH source per frame. Pinning
+    // to a specific one forces it even if others are also publishing.
+    struct ImuSourceOpt { const char* label; AppState::ImuSource value; };
+    const ImuSourceOpt imu_source_opts[] = {
+        { "Auto (BNO055 > MPU9250 > Viture)", AppState::ImuSource::Auto    },
+        { "BNO055 (Adafruit 9-DOF, on-chip fusion)",
+                                              AppState::ImuSource::Bno055  },
+        { "MPU-9250 (I\xc2\xb2""C compass)",  AppState::ImuSource::Mpu9250 },
+        { "VITURE glasses (built-in IMU)",    AppState::ImuSource::Viture  },
+        { "None (freeze heading)",            AppState::ImuSource::None    },
+    };
+    std::vector<MenuItem> imu_source_menu;
+    for (const auto& opt : imu_source_opts) {
+        const auto v = opt.value;
+        imu_source_menu.push_back(leaf_sel(opt.label,
+            [&state, v]{ std::lock_guard<std::mutex> lk(state.mtx); state.imu_source = v; },
+            [&state, v]{ return state.imu_source == v; }));
+    }
+
     std::vector<MenuItem> compass_menu = {
         toggle("Compass Tape",
             [&state]{ return state.compass_tape; },
             [&state](bool v){ state.compass_tape = v; }),
+        with_desc(submenu("IMU Source", std::move(imu_source_menu)),
+                  "Which sensor drives the HUD compass. Auto walks "
+                  "BNO055 > MPU9250 > Viture and picks the highest-priority "
+                  "fresh source each frame; explicit choices force their "
+                  "source even if stale."),
         submenu("IMU Axis",            std::move(imu_axis_menu)),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
@@ -5274,6 +5332,31 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    Bno055::Config bno_cfg;
+    if (cfg.contains("bno055")) {
+        auto& jb = cfg["bno055"];
+        bno_cfg.enabled         = jval(jb, "enabled",         false);
+        bno_cfg.i2c_bus         = jb.value("i2c_bus",         std::string("/dev/i2c-1"));
+        bno_cfg.i2c_addr        = jval(jb, "i2c_addr",        0x28);
+        bno_cfg.declination_deg = jval(jb, "declination_deg", 0.0f);
+        bno_cfg.heading_offset  = jval(jb, "heading_offset",  0.0f);
+        bno_cfg.heading_axes    = jval(jb, "heading_axes",    0);
+        bno_cfg.poll_hz         = jval(jb, "poll_hz",         50.0f);
+    }
+
+    // IMU source selector — replaces the old "Viture always wins, MPU is
+    // backup" hardcoded priority. "auto" picks the best fresh source per
+    // frame (BNO055 > MPU9250 > Viture); explicit choices force that
+    // source even if others are connected.
+    if (cfg.contains("imu_source")) {
+        const std::string s = cfg.value("imu_source", std::string("auto"));
+        if      (s == "bno055" || s == "bno")     state.imu_source = AppState::ImuSource::Bno055;
+        else if (s == "mpu9250" || s == "mpu")    state.imu_source = AppState::ImuSource::Mpu9250;
+        else if (s == "viture"  || s == "xr")     state.imu_source = AppState::ImuSource::Viture;
+        else if (s == "none"    || s == "off")    state.imu_source = AppState::ImuSource::None;
+        else                                      state.imu_source = AppState::ImuSource::Auto;
+    }
+
     // ── Accessory LEDs (cheekhubs + fins on WS2812 daisy-chain) ──────────────
     // Single chain driven through Pi 5 SPI MOSI (GPIO 10). Zone slicing is
     // declarative — config picks {start, count} per zone (LeftCheekhub,
@@ -5738,6 +5821,16 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.imu_pose = { roll, pitch, yaw };
 
+        // Publish to the IMU bus so the heading picker can consider Viture
+        // alongside the dedicated IMU sensors. Invert applied here so the
+        // picker can stay backend-agnostic.
+        float h = state.compass_invert ? (360.f - yaw) : yaw;
+        h = std::fmod(h, 360.f);
+        if (h < 0.f) h += 360.f;
+        state.imu_viture.heading_deg = h;
+        state.imu_viture.last_us     = now_us;
+        state.imu_viture.calibrated  = true;
+
         // Mirror into the debug-window IMU readout + estimate the callback rate.
         auto& d = state.imu_data;
         d.xr_roll = roll; d.xr_pitch = pitch; d.xr_yaw = yaw;
@@ -5756,30 +5849,31 @@ int main(int argc, char* argv[]) {
         std::cout << "[xr] state change id=" << id << " val=" << val << "\n";
     });
 
-    // ── MPU-9250 backup compass ───────────────────────────────────────────────
-    // Takes over compass_heading when the XR glasses haven't sent an IMU frame
-    // for more than 2 seconds (glasses off, disconnected, or XR disabled).
+    // ── MPU-9250 compass ──────────────────────────────────────────────────────
+    // Publishes into the IMU bus (state.imu_mpu); pick_imu_heading() chooses
+    // which slot drives the HUD compass per frame based on state.imu_source.
 
     Mpu9250 mpu9250(mpu_cfg);
-    mpu9250.set_heading_callback([&state, &last_xr_imu_us](float heading) {
-        auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+    mpu9250.set_heading_callback([&state](float heading) {
+        const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        bool xr_fresh = (now_us - last_xr_imu_us.load()) < 2'000'000LL; // 2 s
-
         std::lock_guard<std::mutex> lk(state.mtx);
         state.health.mpu9250_ok = true;
-        if (!xr_fresh) {
-            // Circular low-pass filter — operate on sin/cos to handle 0/360 wrap.
-            // alpha=0.1 at 50 Hz → ~0.19 s time constant; raise to smooth more.
-            constexpr float kAlpha = 0.1f;
-            constexpr float kDeg2Rad = 3.14159265f / 180.f;
-            float prev = state.compass_heading;
-            float fs = std::sinf(prev * kDeg2Rad) + kAlpha * (std::sinf(heading * kDeg2Rad) - std::sinf(prev * kDeg2Rad));
-            float fc = std::cosf(prev * kDeg2Rad) + kAlpha * (std::cosf(heading * kDeg2Rad) - std::cosf(prev * kDeg2Rad));
-            float filtered = std::atan2f(fs, fc) / kDeg2Rad;
-            if (filtered < 0.f) filtered += 360.f;
-            state.compass_heading = filtered;
-        }
+
+        // Circular low-pass filter on the slot's stored value — operate on
+        // sin/cos to handle 0/360 wrap. alpha=0.1 at 50 Hz → ~0.19 s time
+        // constant. Slot keeps a filtered value so the picker can read it
+        // directly without re-smoothing on every frame.
+        constexpr float kAlpha   = 0.1f;
+        constexpr float kDeg2Rad = 3.14159265f / 180.f;
+        const float prev = state.imu_mpu.heading_deg;
+        const float fs = std::sinf(prev * kDeg2Rad) + kAlpha * (std::sinf(heading * kDeg2Rad) - std::sinf(prev * kDeg2Rad));
+        const float fc = std::cosf(prev * kDeg2Rad) + kAlpha * (std::cosf(heading * kDeg2Rad) - std::cosf(prev * kDeg2Rad));
+        float filtered = std::atan2f(fs, fc) / kDeg2Rad;
+        if (filtered < 0.f) filtered += 360.f;
+        state.imu_mpu.heading_deg = filtered;
+        state.imu_mpu.last_us     = now_us;
+        state.imu_mpu.calibrated  = true;
     });
 
     // Full raw 9-axis sample → debug-window IMU readout (separate from the
@@ -5810,6 +5904,45 @@ int main(int argc, char* argv[]) {
 
     if (!mpu9250.start() && mpu_cfg.enabled)
         std::cerr << "[main] MPU-9250 backup compass unavailable\n";
+
+    // ── BNO055 (Adafruit 9-DOF absolute orientation) ─────────────────────────
+    // On-chip sensor fusion in NDOF mode — reports a calibrated absolute
+    // heading directly. Publishes into state.imu_bno alongside MPU/Viture;
+    // the IMU source picker chooses whichever the user selected (or the
+    // highest-priority fresh slot in Auto mode).
+    Bno055 bno055(bno_cfg);
+    bno055.set_heading_callback([&state](float heading) {
+        const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.imu_bno.heading_deg = heading;
+        state.imu_bno.last_us     = now_us;
+        // calib_sys ≥ 2 is "trustworthy" per the datasheet; below that the
+        // chip is still building its mag model and the heading will drift.
+    });
+    bno055.set_sample_callback([&state, &bno055](const Bno055::Sample& s) {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        // Surface the calibration flag so pick_imu_heading can downgrade
+        // BNO055 to a non-preferred source until the user has rotated the
+        // head enough for the mag model to settle.
+        state.imu_bno.calibrated = (bno055.calib_sys() >= 2);
+        // Mirror raw 9-axis + calibration into the debug IMU readout. Lives
+        // alongside the MPU9250 fields so the debug window can show both.
+        auto& d = state.imu_data;
+        d.bno_ok    = true;
+        d.bno_calib_sys   = s.calib_sys;
+        d.bno_calib_gyro  = s.calib_gyro;
+        d.bno_calib_accel = s.calib_accel;
+        d.bno_calib_mag   = s.calib_mag;
+        for (int i = 0; i < 3; ++i) {
+            d.bno_accel_g[i]  = s.accel_g[i];
+            d.bno_gyro_dps[i] = s.gyro_dps[i];
+            d.bno_mag_ut[i]   = s.mag_ut[i];
+            d.bno_euler[i]    = s.euler_deg[i];
+        }
+    });
+    if (!bno055.start() && bno_cfg.enabled)
+        std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
 
     // ── Boop sensor ──────────────────────────────────────────────────────────
     // Polls on its own thread; the on_boop callback fires from there and
@@ -7244,6 +7377,20 @@ int main(int argc, char* argv[]) {
             cfg["mpu9250"]["mount_rotation"] = mpu9250.get_mount_rotation();
             cfg["mpu9250"]["heading_axes"]   = mpu9250.get_heading_axes();
         }
+
+        // IMU source selector — map enum back to the string config takes.
+        {
+            const char* s = "auto";
+            switch (state.imu_source) {
+            case AppState::ImuSource::Bno055:  s = "bno055";  break;
+            case AppState::ImuSource::Mpu9250: s = "mpu9250"; break;
+            case AppState::ImuSource::Viture:  s = "viture";  break;
+            case AppState::ImuSource::None:    s = "none";    break;
+            case AppState::ImuSource::Auto:
+            default:                           s = "auto";    break;
+            }
+            cfg["imu_source"] = s;
+        }
     };
 
     // Snapshot current settings into `cfg` and write them to `path`. Always writes
@@ -7988,21 +8135,18 @@ int main(int argc, char* argv[]) {
         // render thread so no mutex is needed — avoids the data race that made the
         // menu setting invisible to the SDK IMU callback thread.
         {
-            auto now_us = static_cast<uint64_t>(
+            const int64_t now_us =
                 std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count());
-            bool xr_fresh = (now_us - last_xr_imu_us.load()) < 2'000'000ULL;
-            snap.imu_data.xr_active = xr_fresh;
-            if (xr_fresh) {
-                const float vals[3] = {
-                    snap.imu_pose.roll, snap.imu_pose.pitch, snap.imu_pose.yaw
-                };
-                float raw = vals[static_cast<int>(state.compass_axis)];
-                snap.compass_heading = state.compass_invert
-                    ? fmod(raw + 360.0f, 360.0f)
-                    : fmod(360.0f - raw, 360.0f);
-            }
-            // else: snap.compass_heading already holds the MPU-9250 value from the snapshot
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+            // xr_active flag stays useful for the debug UI even when the
+            // user pinned the source to MPU9250 / BNO055.
+            snap.imu_data.xr_active =
+                (now_us - last_xr_imu_us.load()) < 2'000'000LL;
+            // pick_imu_heading() walks state.imu_source + the per-source
+            // freshness slots and returns the heading the HUD compass
+            // should use this frame. Replaces the old "Viture always wins,
+            // MPU fills in when stale" hardcoded path.
+            snap.compass_heading = pick_imu_heading(state, now_us);
         }
 
         // Smooth compass heading on the render thread so the rate is constant
@@ -8445,6 +8589,7 @@ int main(int argc, char* argv[]) {
     step("weather_mon");     weather_mon.stop();
     step("sys_mon");         sys_mon.stop();
     step("mpu9250");         mpu9250.stop();
+    step("bno055");          bno055.stop();
     step("boop_sensor");     boop_sensor.stop();
     step("accessory_leds");  accessory_leds.stop();
     step("audio");           audio.stop();

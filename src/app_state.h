@@ -259,6 +259,20 @@ struct ImuData {
     float temp_c      = 0.f;               // MPU die temperature
     float mpu_heading = 0.f;               // fused compass heading (deg)
     float mpu_rate_hz = 0.f;               // measured sample rate (EMA)
+
+    // BNO055 9-DOF (on-chip absolute orientation) — populated when the
+    // sensor is wired and enabled. calib_* are 0..3 per axis (3 = fully
+    // calibrated); the heading should be treated as drifting until calib_sys
+    // reaches at least 2.
+    bool  bno_ok          = false;
+    float bno_accel_g[3]  = {0.f, 0.f, 0.f};
+    float bno_gyro_dps[3] = {0.f, 0.f, 0.f};
+    float bno_mag_ut[3]   = {0.f, 0.f, 0.f};
+    float bno_euler[3]    = {0.f, 0.f, 0.f};  // [0]=heading, [1]=roll, [2]=pitch
+    uint8_t bno_calib_sys   = 0;
+    uint8_t bno_calib_gyro  = 0;
+    uint8_t bno_calib_accel = 0;
+    uint8_t bno_calib_mag   = 0;
 };
 
 // ── Map overlay ───────────────────────────────────────────────────────────────
@@ -628,10 +642,35 @@ struct AppState {
     std::deque<LoRaMessage>  lora_messages;
     size_t                   max_messages = 50;
 
-    // Heading used for the HUD compass. Updated by LoRa or IMU.
+    // Heading used for the HUD compass. Updated by LoRa or IMU via the
+    // pick_imu_heading() helper in main.cpp.
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
     bool  compass_tape       = true;   // the top-of-screen compass tape
+
+    // ── IMU source selection ────────────────────────────────────────────────
+    // The HUD has three possible heading sources at runtime: the BNO055
+    // (best — on-chip 9-DOF fusion), the MPU9250 (compass with software
+    // fusion), and the VITURE XR glasses' built-in IMU. Each writes into
+    // its own ImuSlot below; pick_imu_heading(state, now_us) in main.cpp
+    // chooses the active one per frame based on this enum + slot freshness.
+    enum class ImuSource : uint8_t {
+        Auto    = 0,   // best fresh source in priority order: BNO055 > MPU9250 > Viture
+        Bno055  = 1,
+        Mpu9250 = 2,
+        Viture  = 3,
+        None    = 4,   // hold last value, ignore live updates
+    };
+    ImuSource imu_source = ImuSource::Auto;
+
+    struct ImuSlot {
+        int64_t last_us     = 0;     // steady_clock-microsecond timestamp of last update
+        float   heading_deg = 0.f;   // 0..360, normalised + offset/declination applied
+        bool    calibrated  = true;  // BNO055 sets false until cal_sys >= 2
+    };
+    ImuSlot imu_bno;
+    ImuSlot imu_mpu;
+    ImuSlot imu_viture;
 
     // Legacy HUD chrome (edge/corner indicators: compass tape, health sides, face
     // indicator, corner clock/timer, LoRa message list). Off = show only the new
