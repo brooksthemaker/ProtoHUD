@@ -534,4 +534,24 @@ void NativeFaceController::set_mouth_shape(const std::string& shape) {
         if (pn.state) pn.state->set_mouth_shape(shape);
 }
 
+std::vector<cv::Rect> NativeFaceController::led_covered_regions() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (!output_) return {};
+    return output_->covered_regions();
+}
+
+void NativeFaceController::reload_active_face() {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_) {
+        if (pn.is_mirror || !pn.state) continue;
+        pn.loader = std::make_unique<FaceLoader>(
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+    }
+}
+
+bool NativeFaceController::has_led_face_editor() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    return output_ && !output_->covered_regions().empty();
+}
+
 } // namespace face

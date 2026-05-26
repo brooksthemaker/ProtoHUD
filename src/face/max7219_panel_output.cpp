@@ -55,4 +55,14 @@ void Max7219PanelOutput::close() {
     gpio_bus_.close();
 }
 
+std::vector<cv::Rect> Max7219PanelOutput::covered_regions() const {
+    std::vector<cv::Rect> out;
+    out.reserve(cfg_.chains.size());
+    for (const auto& cc : cfg_.chains) {
+        out.emplace_back(cc.canvas_x, cc.canvas_y,
+                         cc.cols_chips * 8, cc.rows_chips * 8);
+    }
+    return out;
+}
+
 } // namespace face

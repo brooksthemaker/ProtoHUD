@@ -306,6 +306,30 @@ void MenuSystem::close_file_picker() {
     file_picker_.cancel();
 }
 
+// ── Face editor ───────────────────────────────────────────────────────────────
+
+void MenuSystem::open_face_editor(std::string title,
+                                  std::string abs_path,
+                                  int canvas_w, int canvas_h,
+                                  std::vector<cv::Rect> covered_regions,
+                                  menu::FaceEditor::Mode mode,
+                                  std::vector<uint32_t> palette,
+                                  menu::FaceEditor::CommitFn on_commit,
+                                  menu::FaceEditor::CancelFn on_cancel) {
+    // Mutually-exclusive overlays — bring others down first.
+    if (osk_active_)              close_keyboard();
+    if (file_picker_.is_open())   file_picker_.cancel();
+    face_editor_.open(std::move(title), std::move(abs_path),
+                      canvas_w, canvas_h,
+                      std::move(covered_regions),
+                      mode, std::move(palette),
+                      std::move(on_commit), std::move(on_cancel));
+}
+
+void MenuSystem::close_face_editor() {
+    face_editor_.back();
+}
+
 void MenuSystem::emit_detents() {
     if (detent_cb_ && !stack_.empty()) {
         int count = 0;
@@ -322,6 +346,7 @@ void MenuSystem::emit_detents_override(int count) {
 // ── navigate ──────────────────────────────────────────────────────────────────
 
 void MenuSystem::navigate(int direction) {
+    if (face_editor_.is_open()) { face_editor_.cursor_step(0, direction); return; }
     if (file_picker_.is_open()) { file_picker_.step(direction); return; }
     if (osk_active_) { osk_step(direction); return; }
     if (!open_ || stack_.empty()) return;
@@ -378,6 +403,7 @@ void MenuSystem::navigate(int direction) {
 // ── select ────────────────────────────────────────────────────────────────────
 
 void MenuSystem::select() {
+    if (face_editor_.is_open()) { face_editor_.primary(); return; }
     if (file_picker_.is_open()) { file_picker_.activate(); return; }
     if (osk_active_) { osk_activate(); return; }
     if (!open_ || stack_.empty()) return;
@@ -481,6 +507,7 @@ void MenuSystem::select() {
 // ── back ──────────────────────────────────────────────────────────────────────
 
 void MenuSystem::back() {
+    if (face_editor_.is_open()) { face_editor_.back(); return; }
     if (file_picker_.is_open()) { file_picker_.back(); return; }
     if (osk_active_) { osk_backspace(); return; }
     if (!stack_.empty() && cursor_ < static_cast<int>(stack_.back().items.size())) {
@@ -1140,6 +1167,38 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     // On-screen keyboard takes over the whole screen when active.
     if (osk_active_) {
         draw_keyboard(dl, font, fs, W, H);
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(1);
+        return;
+    }
+
+    // Face editor overlays the deep menu. Drawn ahead of the picker so a
+    // background "Edit…" doesn't hide while the picker is open (the cases
+    // are mutually exclusive in practice, but the order keeps it
+    // deterministic). Keyboard shortcuts are sampled from ImGui state here
+    // so the editor can react to S / Z / X / Y / [ / ] without separate
+    // input plumbing — same pattern the file picker leans on.
+    if (face_editor_.is_open()) {
+        // Vertical cursor motion already comes in through menu.navigate()
+        // when the deep menu is open (route in MenuSystem::navigate forwards
+        // to face_editor_.cursor_step). Horizontal cursor + tool/palette
+        // shortcuts are editor-only and not in the menu's input set, so we
+        // poll them directly here.
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  face_editor_.cursor_step(-1, 0);
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) face_editor_.cursor_step(+1, 0);
+        if (ImGui::IsKeyPressed(ImGuiKey_Space))      face_editor_.primary();
+        if (ImGui::IsKeyPressed(ImGuiKey_X))          face_editor_.secondary();
+        if (ImGui::IsKeyPressed(ImGuiKey_M))          face_editor_.tertiary();
+        if (ImGui::IsKeyPressed(ImGuiKey_Z))          face_editor_.undo();
+        if (ImGui::IsKeyPressed(ImGuiKey_S))          face_editor_.save();
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))  face_editor_.cycle_palette(-1);
+        if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) face_editor_.cycle_palette(+1);
+        const ImVec2 mp = ImGui::GetMousePos();
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) face_editor_.mouse_down(mp.x, mp.y);
+        else                                            face_editor_.mouse_move(mp.x, mp.y);
+
+        face_editor_.draw(dl, font, fs, W, H, accent_color_);
         ImGui::End();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(1);

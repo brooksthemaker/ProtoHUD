@@ -85,6 +85,12 @@ public:
     // voice analyzer's spectral-centroid-to-viseme classifier when visemes
     // are enabled.
     virtual void        set_mouth_shape(const std::string& /*shape*/) {}
+
+    // True when the backend has addressable LED regions the face editor
+    // can target (today: NativeFaceController with MAX7219 or RGB matrix
+    // output). False for HUB75 + daemon + Teensy. Drives the visibility
+    // of Files > Faces > <slot> > Edit… in the menu.
+    virtual bool        has_led_face_editor() const { return false; }
 };
 
 /**
@@ -136,6 +142,7 @@ public:
     void trigger_boop(const std::string& e, double d) override { (*active_)->trigger_boop(e, d); }
     void set_audio_drive(double v, double m) override { (*active_)->set_audio_drive(v, m); }
     void set_mouth_shape(const std::string& s) override { (*active_)->set_mouth_shape(s); }
+    bool has_led_face_editor() const override { return (*active_)->has_led_face_editor(); }
 
     IFaceController* backend() const { return *active_; }
 

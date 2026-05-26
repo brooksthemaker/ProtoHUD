@@ -8,6 +8,7 @@
 #include <imgui.h>
 #include "../app_state.h"
 #include "file_picker.h"
+#include "face_editor.h"
 
 // ── Item types ────────────────────────────────────────────────────────────────
 
@@ -221,6 +222,7 @@ public:
         osk_active_      = false;
         osk_commit_      = nullptr;
         file_picker_.close();
+        face_editor_.close();
         stack_.clear();
     }
 
@@ -263,6 +265,23 @@ public:
     void close_file_picker();
     bool is_file_picker_open() const { return file_picker_.is_open(); }
     const std::string& file_picker_dir() const { return file_picker_.current_dir(); }
+
+    // ── Face editor ─────────────────────────────────────────────────────────────
+    // Full-screen pixel editor for face PNGs (MAX7219 / RGB matrix backends).
+    // Same overlay + input-routing pattern as the file picker. The on_commit
+    // callback receives the new RGBA canvas + the abs_path to save to; main.cpp
+    // typically writes via cv::imwrite and triggers a face reload.
+    void open_face_editor(std::string title,
+                          std::string abs_path,
+                          int canvas_w, int canvas_h,
+                          std::vector<cv::Rect> covered_regions,
+                          menu::FaceEditor::Mode mode,
+                          std::vector<uint32_t> palette,
+                          menu::FaceEditor::CommitFn on_commit,
+                          menu::FaceEditor::CancelFn on_cancel = {});
+    void close_face_editor();
+    bool is_face_editor_open() const { return face_editor_.is_open(); }
+    menu::FaceEditor& face_editor() { return face_editor_; }
 
     int  current_index() const { return cursor_; }
     int  menu_depth()    const { return static_cast<int>(stack_.size()); }
@@ -319,6 +338,9 @@ private:
 
     // File picker overlay (media import) — same input-routing pattern as OSK.
     menu::FilePicker file_picker_;
+
+    // Face editor overlay (pixel-art authoring) — same overlay pattern.
+    menu::FaceEditor face_editor_;
 
     std::vector<MenuItem>  root_items_;
     std::vector<MenuItem>  quick_items_;   // curated corner "quick menu" tree

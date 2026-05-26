@@ -73,6 +73,16 @@ public:
     void        set_audio_drive(double volume, double mouth_open) override;
     void        set_mouth_shape(const std::string& shape) override;
 
+    // Face editor support: what the active PanelOutput addresses (so the
+    // editor can pick the editable region), and a way to force a face
+    // reload after the editor writes a PNG.
+    std::vector<cv::Rect> led_covered_regions() const;
+    void                  reload_active_face();
+
+    // Surface to IFaceController: true iff the active PanelOutput exposes
+    // sub-region coverage info (MAX7219 / RGB matrix backends).
+    bool has_led_face_editor() const override;
+
     // Copy the latest rendered RGB canvas (CV_8UC3) for the preview. Returns
     // false until the first frame exists. Safe to call from the main/GL thread.
     bool latest_frame(cv::Mat& out) const;

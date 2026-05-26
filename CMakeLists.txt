@@ -193,6 +193,7 @@ set(SOURCES
     src/hud/background_library.cpp
     src/menu/menu_system.cpp
     src/menu/file_picker.cpp
+    src/menu/face_editor.cpp
     src/profile_manager.cpp
     src/vitrue/xr_display.cpp
     src/vitrue/timewarp.cpp

@@ -668,7 +668,12 @@ static std::vector<MenuItem> build_menu(
         // and panel_driver.py for the new backend. pf_backend_p is the live
         // backend name string for the radio's get_state.
         std::function<void(const std::string&)> swap_backend = nullptr,
-        const std::string* pf_backend_p = nullptr)
+        const std::string* pf_backend_p = nullptr,
+        // Edit… callback for Files > Faces > <expr> > Edit. Main wires it
+        // to a routine that polls the native controller for canvas dims +
+        // covered chain regions, opens the face editor, writes the PNG on
+        // commit, and reloads the face.
+        std::function<void(const std::string& expression)> edit_face = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -1095,7 +1100,12 @@ static std::vector<MenuItem> build_menu(
 
     // One management row per canonical expression: dynamic label, Play /
     // Replace / Clear when present on disk, Import otherwise.
-    auto face_slot_row = [&, face_preview](int slot_idx) -> MenuItem {
+    // Edit… visibility — true only when the active backend has addressable
+    // LED regions (today: MAX7219 / RGB matrix). HUB75 + daemon return
+    // false here and the leaf stays hidden.
+    auto have_led_regions = [teensy]{ return teensy->has_led_face_editor(); };
+
+    auto face_slot_row = [&, face_preview, edit_face](int slot_idx) -> MenuItem {
         const std::string expr  = kFaceSlots[slot_idx].expression;
         const std::string label = kFaceSlots[slot_idx].label;
 
@@ -1133,8 +1143,16 @@ static std::vector<MenuItem> build_menu(
             });
         imp.visible_fn = [bound_now]{ return !bound_now(); };
 
-        m.children = { std::move(play), std::move(replace),
-                       std::move(clear), std::move(imp) };
+        // Edit launches the pixel editor on this slot's PNG. Visible only
+        // when the active backend exposes covered LED regions — keeps the
+        // option hidden in HUB75 / daemon modes where the editor would
+        // have nothing meaningful to draw against.
+        MenuItem edit_it = leaf("Edit...",
+            [edit_face, expr]{ if (edit_face) edit_face(expr); });
+        edit_it.visible_fn = have_led_regions;
+
+        m.children = { std::move(play), std::move(edit_it),
+                       std::move(replace), std::move(clear), std::move(imp) };
         return m;
     };
 
@@ -1215,7 +1233,7 @@ static std::vector<MenuItem> build_menu(
             }
         };
 
-    auto mouth_slot_row = [&, mouth_preview](int idx) -> MenuItem {
+    auto mouth_slot_row = [&, mouth_preview, edit_face, have_led_regions](int idx) -> MenuItem {
         const std::string expr  = kMouthShapes[idx].file_stem;
         const std::string label = kMouthShapes[idx].label;
 
@@ -1248,7 +1266,15 @@ static std::vector<MenuItem> build_menu(
             });
         imp.visible_fn = [bound_now]{ return !bound_now(); };
 
-        m.children = { std::move(replace), std::move(clear), std::move(imp) };
+        // Edit the mouth-shape PNG with the pixel editor (mono on MAX7219,
+        // color on RGB matrix). Same visibility gate as the expression
+        // slots — hidden in HUB75 / daemon modes.
+        MenuItem edit_it = leaf("Edit...",
+            [edit_face, expr]{ if (edit_face) edit_face(expr); });
+        edit_it.visible_fn = have_led_regions;
+
+        m.children = { std::move(edit_it), std::move(replace),
+                       std::move(clear), std::move(imp) };
         return m;
     };
 
@@ -6034,6 +6060,54 @@ int main(int argc, char* argv[]) {
         }
     };
 
+    // Edit… launcher used by Files > Faces > <slot> > Edit and Mouth Shapes
+    // > <slot> > Edit. Only meaningful when the active backend has covered
+    // regions (MAX7219 or RGB matrix today) — for HUB75 / daemon mode the
+    // menu's visible_fn hides the leaf so this never runs.
+    auto edit_face = [&](const std::string& expression) {
+        if (!native_ctrl || !menu_ptr) return;
+        auto covered = native_ctrl->led_covered_regions();
+        if (covered.empty()) return;
+        const int cw = native_ctrl->canvas_width();
+        const int ch = native_ctrl->canvas_height();
+        const std::string abs_path = face_proxy.face_image_path(expression);
+        if (abs_path.empty()) return;
+
+        const menu::FaceEditor::Mode mode =
+            (pf_backend == "rgb_matrix") ? menu::FaceEditor::Mode::Color
+                                         : menu::FaceEditor::Mode::Mono;
+
+        char title[96];
+        std::snprintf(title, sizeof(title),
+                      "Edit face: %s  (%s)",
+                      expression.c_str(), pf_backend.c_str());
+        menu_ptr->open_face_editor(
+            title, abs_path, cw, ch, std::move(covered),
+            mode, {} /* default palette */,
+            /* on_commit */ [&face_proxy, &native_ctrl, expression]
+                (const cv::Mat& rgba_canvas, const std::string& target_path) {
+                // Convert RGBA back to BGRA for cv::imwrite (PNG storage
+                // expects native channel order in OpenCV).
+                cv::Mat bgra;
+                cv::cvtColor(rgba_canvas, bgra, cv::COLOR_RGBA2BGRA);
+                std::error_code ec;
+                std::filesystem::create_directories(
+                    std::filesystem::path(target_path).parent_path(), ec);
+                if (!cv::imwrite(target_path, bgra)) {
+                    std::fprintf(stderr, "[editor] save failed: %s\n",
+                                 target_path.c_str());
+                    return;
+                }
+                // Rebuild the face loader so the new PNG shows up immediately
+                // — then pop the saved expression on-face so the user sees
+                // their work without leaving the menu. set_face_by_name
+                // falls back to neutral gracefully when the name isn't an
+                // expression in the loader's set (mouth-shape PNGs).
+                if (native_ctrl) native_ctrl->reload_active_face();
+                face_proxy.set_face_by_name(expression);
+            });
+    };
+
     // Now that face_proxy exists, hook the audio engine's per-period
     // (volume, mouth_open) into it. Also pushes the analyzer's classified
     // viseme shape so the FaceLoader blends the right overlay; when visemes
@@ -6121,7 +6195,8 @@ int main(int argc, char* argv[]) {
                                &boop_sensor_ptr,
                                audio.voice(),
                                &accessory_leds,
-                               swap_backend, &pf_backend));
+                               swap_backend, &pf_backend,
+                               edit_face));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -7151,8 +7226,9 @@ int main(int argc, char* argv[]) {
         // Handled before the input dispatch so the tap/hold state machine stays
         // continuous across the open↔close transition (no reopen-on-release).
         // Skipped while typing on the on-screen keyboard. Shift+M (recenter) is
-        // handled in the normal-hotkeys branch below.
-        if (!menu.is_keyboard_open()) {
+        // handled in the normal-hotkeys branch below. Also skip when the
+        // face editor is on top — it owns the keyboard while open.
+        if (!menu.is_keyboard_open() && !menu.is_face_editor_open()) {
             const bool m_held = ImGui::IsKeyDown(ImGuiKey_M) && !ImGui::GetIO().KeyShift;
             if (m_held && m_press_t < 0.0) {
                 m_press_t    = glfwGetTime();

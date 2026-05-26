@@ -36,6 +36,7 @@ public:
     bool open() override;
     void show(const cv::Mat& rgb) override;
     void close() override;
+    std::vector<cv::Rect> covered_regions() const override;
 
 private:
     Config                                       cfg_;
