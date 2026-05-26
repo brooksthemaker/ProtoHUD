@@ -79,6 +79,12 @@ public:
     // No-op on non-native backends — those run their own audio reactivity
     // on-device, if any.
     virtual void        set_audio_drive(double /*volume*/, double /*mouth_open*/) {}
+
+    // Pick which viseme overlay (mouth_open / mouth_small / mouth_smile /
+    // mouth_round) the FaceLoader blends at the mouth region. Driven by the
+    // voice analyzer's spectral-centroid-to-viseme classifier when visemes
+    // are enabled.
+    virtual void        set_mouth_shape(const std::string& /*shape*/) {}
 };
 
 /**
@@ -129,6 +135,7 @@ public:
     void set_face_by_name(const std::string& e) override { (*active_)->set_face_by_name(e); }
     void trigger_boop(const std::string& e, double d) override { (*active_)->trigger_boop(e, d); }
     void set_audio_drive(double v, double m) override { (*active_)->set_audio_drive(v, m); }
+    void set_mouth_shape(const std::string& s) override { (*active_)->set_mouth_shape(s); }
 
     IFaceController* backend() const { return *active_; }
 

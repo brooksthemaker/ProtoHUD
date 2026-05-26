@@ -157,6 +157,13 @@ struct VoiceMouthConfig {
     float  release_ms  = 120.f;    // envelope follower time when closing
     float  band_lo_hz  = 100.f;
     float  band_hi_hz  = 3500.f;
+
+    // Viseme selection (spectral-centroid classifier picks one of
+    // mouth_open / mouth_small / mouth_smile / mouth_round each audio period).
+    bool   visemes_enabled     = false;
+    float  viseme_round_max_hz = 600.f;
+    float  viseme_open_max_hz  = 1200.f;
+    float  viseme_small_max_hz = 2000.f;
 };
 
 // One boop-sensor zone's user-visible behaviour. The sensor reports zone

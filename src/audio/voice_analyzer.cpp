@@ -24,7 +24,11 @@ VoiceAnalyzer::VoiceAnalyzer(Config cfg)
       attack_ms_  (cfg.attack_ms),
       release_ms_ (cfg.release_ms),
       band_lo_hz_ (cfg.band_lo_hz),
-      band_hi_hz_ (cfg.band_hi_hz)
+      band_hi_hz_ (cfg.band_hi_hz),
+      visemes_enabled_     (cfg.visemes_enabled),
+      viseme_round_max_hz_ (cfg.viseme_round_max_hz),
+      viseme_open_max_hz_  (cfg.viseme_open_max_hz),
+      viseme_small_max_hz_ (cfg.viseme_small_max_hz)
 {
     // Clamp fft_size to a power of 2, hop into [1, fft_size].
     cfg_.fft_size = floor_pow2(std::max(64, cfg_.fft_size));
@@ -44,6 +48,26 @@ void VoiceAnalyzer::set_band(float lo_hz, float hi_hz) {
     if (hi_hz < lo_hz)  hi_hz = lo_hz + 100.f;
     band_lo_hz_.store(lo_hz);
     band_hi_hz_.store(hi_hz);
+}
+
+void VoiceAnalyzer::set_viseme_thresholds(float round_max, float open_max, float small_max) {
+    // Keep the partitions monotonic so the classifier in mouth_shape() can't
+    // alias a band. Floor at 50 Hz to avoid degenerate edges.
+    if (round_max < 50.f)       round_max = 50.f;
+    if (open_max  < round_max)  open_max  = round_max + 1.f;
+    if (small_max < open_max)   small_max = open_max  + 1.f;
+    viseme_round_max_hz_.store(round_max);
+    viseme_open_max_hz_ .store(open_max);
+    viseme_small_max_hz_.store(small_max);
+}
+
+const char* VoiceAnalyzer::mouth_shape() const {
+    const double c = centroid_hz_.load();
+    if (c <= 0.0) return "mouth_open";   // no signal yet → default to AH
+    if (c < viseme_round_max_hz_.load()) return "mouth_round";
+    if (c < viseme_open_max_hz_ .load()) return "mouth_open";
+    if (c < viseme_small_max_hz_.load()) return "mouth_small";
+    return "mouth_smile";
 }
 
 // ── Iterative radix-2 Cooley-Tukey, in-place ─────────────────────────────────

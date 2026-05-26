@@ -35,7 +35,9 @@ private:
     std::map<std::string, cv::Mat> expressions_;   // name → RGBA (h,w)
     std::vector<std::string>       expr_order_;     // stable insertion order
     cv::Mat  blink_;            // may be empty
-    cv::Mat  mouth_open_;       // may be empty
+    // Viseme overlays keyed by stem (mouth_open / mouth_small / mouth_smile /
+    // mouth_round). All optional — missing entries fall back to mouth_open.
+    std::map<std::string, cv::Mat> mouth_shapes_;
     Region   eye_left_, eye_right_, mouth_;
 };
 

@@ -34,6 +34,9 @@ public:
     void set_audio(double volume, double mouth_open) { audio_volume_ = volume; mouth_open_ = mouth_open; }
     void set_gyro(double dx, double dy)              { gyro_dx_ = dx; gyro_dy_ = dy; }
     void set_brightness(int b)                       { brightness_ = b < 0 ? 0 : (b > 255 ? 255 : b); }
+    // Selects which viseme overlay the FaceLoader blends at the mouth region
+    // when mouth_open > 0. Default "mouth_open" matches the pre-viseme path.
+    void set_mouth_shape(const std::string& s)       { if (!s.empty()) mouth_shape_ = s; }
 
     // ── Read accessors for the compositor (mirror face.py's state fields) ─────
     const std::string& expression()      const { return expression_; }
@@ -41,6 +44,7 @@ public:
     double transition_t() const { return transition_t_; }
     double blink_weight() const { return blink_weight_; }
     double mouth_open()   const { return mouth_open_; }
+    const std::string& mouth_shape() const { return mouth_shape_; }
     double gyro_dx()      const { return gyro_dx_; }
     double gyro_dy()      const { return gyro_dy_; }
     double time()         const { return time_; }
@@ -79,6 +83,7 @@ private:
     // Inputs
     double audio_volume_ = 0.0;
     double mouth_open_   = 0.0;
+    std::string mouth_shape_ = "mouth_open";   // viseme overlay name
     double gyro_dx_      = 0.0;
     double gyro_dy_      = 0.0;
 

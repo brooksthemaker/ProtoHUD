@@ -528,4 +528,10 @@ void NativeFaceController::set_audio_drive(double volume, double mouth_open) {
     // Transient — no persistence on every audio frame.
 }
 
+void NativeFaceController::set_mouth_shape(const std::string& shape) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_mouth_shape(shape);
+}
+
 } // namespace face

@@ -2798,7 +2798,48 @@ static std::vector<MenuItem> build_menu(
                 voice_apply_band();
             }),
             "Upper edge. Lower if hiss / sibilants are over-driving the mouth."),
+
+        // ── Visemes (multi-shape mouth) ─────────────────────────────────
+        with_desc(toggle("Visemes Enabled",
+            [&state]{ return state.voice_mouth.visemes_enabled; },
+            [&state, voice_analyzer](bool v){
+                state.voice_mouth.visemes_enabled = v;
+                if (voice_analyzer) voice_analyzer->set_visemes_enabled(v);
+            }),
+            "Switch the mouth overlay between mouth_open/_small/_smile/_round "
+            "based on the analyzer's spectral centroid. Falls back to "
+            "mouth_open when off (matches the pre-viseme behaviour)."),
     };
+
+    // Shared updater for the three viseme thresholds.
+    auto voice_apply_visemes = [voice_analyzer, &state]() {
+        if (voice_analyzer)
+            voice_analyzer->set_viseme_thresholds(
+                state.voice_mouth.viseme_round_max_hz,
+                state.voice_mouth.viseme_open_max_hz,
+                state.voice_mouth.viseme_small_max_hz);
+    };
+    voice_menu.push_back(with_desc(slider("Round → Open", 100.f, 1500.f, 25.f, " Hz",
+        [&state]{ return state.voice_mouth.viseme_round_max_hz; },
+        [&state, voice_apply_visemes](float v){
+            state.voice_mouth.viseme_round_max_hz = v;
+            voice_apply_visemes();
+        }),
+        "Centroid below this is the OOH (round) viseme; above, AH (open)."));
+    voice_menu.push_back(with_desc(slider("Open → Small", 800.f, 2500.f, 25.f, " Hz",
+        [&state]{ return state.voice_mouth.viseme_open_max_hz; },
+        [&state, voice_apply_visemes](float v){
+            state.voice_mouth.viseme_open_max_hz = v;
+            voice_apply_visemes();
+        }),
+        "Centroid below this is AH; above, the M/N small-open shape."));
+    voice_menu.push_back(with_desc(slider("Small → Smile", 1500.f, 4000.f, 25.f, " Hz",
+        [&state]{ return state.voice_mouth.viseme_small_max_hz; },
+        [&state, voice_apply_visemes](float v){
+            state.voice_mouth.viseme_small_max_hz = v;
+            voice_apply_visemes();
+        }),
+        "Centroid below this is the small-open shape; above, EE (smile)."));
     face_display_menu.push_back(
         with_desc(submenu("Voice", std::move(voice_menu)),
                   "Mic-driven mouth_open. FFT-based: speech-band RMS feeds an "
@@ -4673,6 +4714,10 @@ int main(int argc, char* argv[]) {
         state.voice_mouth.release_ms  = jval(jv, "release_ms",  state.voice_mouth.release_ms);
         state.voice_mouth.band_lo_hz  = jval(jv, "band_lo_hz",  state.voice_mouth.band_lo_hz);
         state.voice_mouth.band_hi_hz  = jval(jv, "band_hi_hz",  state.voice_mouth.band_hi_hz);
+        state.voice_mouth.visemes_enabled     = jval(jv, "visemes_enabled",     state.voice_mouth.visemes_enabled);
+        state.voice_mouth.viseme_round_max_hz = jval(jv, "viseme_round_max_hz", state.voice_mouth.viseme_round_max_hz);
+        state.voice_mouth.viseme_open_max_hz  = jval(jv, "viseme_open_max_hz",  state.voice_mouth.viseme_open_max_hz);
+        state.voice_mouth.viseme_small_max_hz = jval(jv, "viseme_small_max_hz", state.voice_mouth.viseme_small_max_hz);
     }
 
     XRConfig xr_cfg;
@@ -5400,6 +5445,10 @@ int main(int argc, char* argv[]) {
         va->set_attack_ms  (state.voice_mouth.attack_ms);
         va->set_release_ms (state.voice_mouth.release_ms);
         va->set_band       (state.voice_mouth.band_lo_hz, state.voice_mouth.band_hi_hz);
+        va->set_viseme_thresholds(state.voice_mouth.viseme_round_max_hz,
+                                  state.voice_mouth.viseme_open_max_hz,
+                                  state.voice_mouth.viseme_small_max_hz);
+        va->set_visemes_enabled(state.voice_mouth.visemes_enabled);
         va->set_enabled    (state.voice_mouth.enabled);
     }
 
@@ -5648,11 +5697,16 @@ int main(int argc, char* argv[]) {
     FaceProxy face_proxy(&active_face);
 
     // Now that face_proxy exists, hook the audio engine's per-period
-    // (volume, mouth_open) into it. The audio thread reads face_drive_cb_
-    // through an atomic store inside std::function — safe to set live.
-    audio.set_face_drive_callback([&face_proxy](double vol, double mouth) {
-        face_proxy.set_audio_drive(vol, mouth);
-    });
+    // (volume, mouth_open) into it. Also pushes the analyzer's classified
+    // viseme shape so the FaceLoader blends the right overlay; when visemes
+    // are disabled we don't push at all and the FaceLoader's "mouth_open"
+    // default stays selected.
+    audio.set_face_drive_callback(
+        [&face_proxy, voice = audio.voice()](double vol, double mouth) {
+            if (voice && voice->visemes_enabled())
+                face_proxy.set_mouth_shape(voice->mouth_shape());
+            face_proxy.set_audio_drive(vol, mouth);
+        });
 
     uint16_t sleep_tmo = 30;
     if (jser.contains("smartknob"))
@@ -6302,13 +6356,17 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        cfg["voice_mouth"]["enabled"]     = state.voice_mouth.enabled;
-        cfg["voice_mouth"]["sensitivity"] = state.voice_mouth.sensitivity;
-        cfg["voice_mouth"]["noise_gate"]  = state.voice_mouth.noise_gate;
-        cfg["voice_mouth"]["attack_ms"]   = state.voice_mouth.attack_ms;
-        cfg["voice_mouth"]["release_ms"]  = state.voice_mouth.release_ms;
-        cfg["voice_mouth"]["band_lo_hz"]  = state.voice_mouth.band_lo_hz;
-        cfg["voice_mouth"]["band_hi_hz"]  = state.voice_mouth.band_hi_hz;
+        cfg["voice_mouth"]["enabled"]             = state.voice_mouth.enabled;
+        cfg["voice_mouth"]["sensitivity"]         = state.voice_mouth.sensitivity;
+        cfg["voice_mouth"]["noise_gate"]          = state.voice_mouth.noise_gate;
+        cfg["voice_mouth"]["attack_ms"]           = state.voice_mouth.attack_ms;
+        cfg["voice_mouth"]["release_ms"]          = state.voice_mouth.release_ms;
+        cfg["voice_mouth"]["band_lo_hz"]          = state.voice_mouth.band_lo_hz;
+        cfg["voice_mouth"]["band_hi_hz"]          = state.voice_mouth.band_hi_hz;
+        cfg["voice_mouth"]["visemes_enabled"]     = state.voice_mouth.visemes_enabled;
+        cfg["voice_mouth"]["viseme_round_max_hz"] = state.voice_mouth.viseme_round_max_hz;
+        cfg["voice_mouth"]["viseme_open_max_hz"]  = state.voice_mouth.viseme_open_max_hz;
+        cfg["voice_mouth"]["viseme_small_max_hz"] = state.voice_mouth.viseme_small_max_hz;
 
         cfg["night_vision"]["exposure_ev"]            = state.night_vision.exposure_ev;
         cfg["night_vision"]["shutter_us"]             = state.night_vision.shutter_us;
