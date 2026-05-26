@@ -394,6 +394,40 @@ static void poll_gpio_states(AppState& state) {
 
 // ── Menu definition ───────────────────────────────────────────────────────────
 
+// Open the GIF import picker for the given slot. On commit, copies the chosen
+// file into gifs_dir, binds the manifest slot via the face controller, and
+// plays it so the face reflects the import immediately. Shared by the inline
+// Animations leaves (when an empty slot is selected) and the Files > GIFs
+// management rows (Import.../Replace... actions).
+static void import_gif_into_slot(MenuSystem* menu,
+                                 IFaceController* teensy,
+                                 std::string gifs_dir,
+                                 uint8_t slot) {
+    if (!menu || !teensy) return;
+    char title[48];
+    std::snprintf(title, sizeof(title),
+                  "Import GIF -> slot %u", static_cast<unsigned>(slot));
+    std::string start = menu->file_picker_dir();
+    menu->open_file_picker(
+        title, std::move(start), {".gif"},
+        [teensy, slot, gifs_dir = std::move(gifs_dir)](const std::string& src) {
+            std::error_code ec;
+            std::filesystem::create_directories(gifs_dir, ec);
+            const std::string fname =
+                std::filesystem::path(src).filename().string();
+            const std::string dst = gifs_dir + "/" + fname;
+            std::filesystem::copy_file(
+                src, dst,
+                std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {
+                std::fprintf(stderr, "[gif] import copy failed %s -> %s: %s\n",
+                             src.c_str(), dst.c_str(), ec.message().c_str());
+                return;
+            }
+            teensy->bind_gif_slot(slot, fname);
+            teensy->play_gif(slot);
+        });
+}
 
 static std::vector<MenuItem> build_menu(
         IFaceController* teensy, XRDisplay* xr, CameraManager* cameras,
@@ -706,34 +740,8 @@ static std::vector<MenuItem> build_menu(
 
         m.action = [teensy, i, menu_sys_pp, gifs_dir]() {
             if (!teensy->gif_slot(i).empty()) { teensy->play_gif(i); return; }
-            if (!menu_sys_pp || !*menu_sys_pp) return;
-
-            char title[48];
-            std::snprintf(title, sizeof(title),
-                          "Import GIF -> slot %u", static_cast<unsigned>(i));
-
-            // Pick up where the user left off last time (per-type "last dir").
-            std::string start = (*menu_sys_pp)->file_picker_dir();
-            (*menu_sys_pp)->open_file_picker(
-                title, std::move(start), {".gif"},
-                /*on_commit=*/[teensy, i, gifs_dir](const std::string& src) {
-                    std::error_code ec;
-                    std::filesystem::create_directories(gifs_dir, ec);
-                    const std::string fname =
-                        std::filesystem::path(src).filename().string();
-                    const std::string dst = gifs_dir + "/" + fname;
-                    std::filesystem::copy_file(
-                        src, dst,
-                        std::filesystem::copy_options::overwrite_existing, ec);
-                    if (ec) {
-                        std::fprintf(stderr,
-                            "[gif] import copy failed %s -> %s: %s\n",
-                            src.c_str(), dst.c_str(), ec.message().c_str());
-                        return;
-                    }
-                    teensy->bind_gif_slot(i, fname);
-                    teensy->play_gif(i);
-                });
+            import_gif_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                 teensy, gifs_dir, i);
         };
 
         m.on_highlight = [gif_preview, i]{ gif_preview->want = static_cast<int>(i); };
@@ -742,6 +750,58 @@ static std::vector<MenuItem> build_menu(
 
     std::vector<MenuItem> gifs;
     for (uint8_t i = 0; i < 8; i++) gifs.push_back(gif_leaf(i));
+
+    // Slot-management row for the Files > GIFs hub. The row itself is a
+    // submenu whose visible children depend on whether the slot is bound:
+    //   bound   → Play / Replace... / Clear
+    //   unbound → Import...
+    // Same dynamic label and preview-highlight behaviour as gif_leaf.
+    auto gif_slot_row = [&, gif_preview](uint8_t i) -> MenuItem {
+        MenuItem m;
+        m.type  = MenuItemType::SUBMENU;
+        m.label = "GIF Slot #" + std::to_string(static_cast<int>(i));
+
+        m.label_fn = [teensy, i, gn = gif_names]() -> std::string {
+            const std::string bound = teensy->gif_slot(i);
+            const bool named = (i < gn.size() && !gn[i].empty());
+            std::string name = !bound.empty()
+                ? (named ? gn[i] : std::filesystem::path(bound).stem().string())
+                : (named ? gn[i] : "GIF #" + std::to_string(static_cast<int>(i)));
+            if (bound.empty()) name += " (empty)";
+            return name;
+        };
+
+        m.on_highlight = [gif_preview, i]{ gif_preview->want = static_cast<int>(i); };
+
+        auto bound_now = [teensy, i]{ return !teensy->gif_slot(i).empty(); };
+
+        MenuItem play = leaf("Play", [teensy, i]{ teensy->play_gif(i); });
+        play.visible_fn = bound_now;
+
+        MenuItem replace = leaf("Replace...",
+            [teensy, i, menu_sys_pp, gifs_dir]() {
+                import_gif_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                     teensy, gifs_dir, i);
+            });
+        replace.visible_fn = bound_now;
+
+        MenuItem clear = leaf("Clear", [teensy, i]{ teensy->clear_gif_slot(i); });
+        clear.visible_fn = bound_now;
+
+        MenuItem imp = leaf("Import...",
+            [teensy, i, menu_sys_pp, gifs_dir]() {
+                import_gif_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                     teensy, gifs_dir, i);
+            });
+        imp.visible_fn = [bound_now]{ return !bound_now(); };
+
+        m.children = { std::move(play), std::move(replace),
+                       std::move(clear), std::move(imp) };
+        return m;
+    };
+
+    std::vector<MenuItem> gif_files_menu;
+    for (uint8_t i = 0; i < 8; i++) gif_files_menu.push_back(gif_slot_row(i));
 
     // ── Camera controls ───────────────────────────────────────────────────────
     std::vector<MenuItem> af_triggers = {
@@ -3768,6 +3828,13 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("Face Display", std::move(face_display_menu)),
                   "The LED Protoface: expression, color, material, particle effects, "
                   "animations and brightness."),
+        with_desc(submenu("Files",        std::vector<MenuItem>{
+                      with_panel(submenu("GIFs", std::move(gif_files_menu)),
+                                 "GIF Preview", draw_gif_preview),
+                  }),
+                  "Import media into Protoface from disk. Each slot can play "
+                  "its bound file, swap to a new one, or clear back to empty. "
+                  "Faces and splash backgrounds will live here too."),
         with_desc(submenu("LoRa",         std::move(lora_menu)),
                   "Long-range radio: team nodes, messages and status."),
         with_desc(submenu("System",       std::move(system_menu)),
