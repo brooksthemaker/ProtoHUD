@@ -52,6 +52,17 @@ void AccessoryLeds::set_zone_color(Zone z, uint8_t r, uint8_t g, uint8_t b) {
     cfg_.zones[zi].b = b;
 }
 
+void AccessoryLeds::trigger_flash(Zone z, double duration_s) {
+    const auto zi = static_cast<int>(z);
+    if (zi < 0 || zi >= ZoneCount) return;
+    if (duration_s <= 0.0) duration_s = 0.001;
+    const us_t now = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const us_t end = now + static_cast<us_t>(duration_s * 1'000'000.0);
+    flash_start_us_[zi].store(now);
+    flash_end_us_  [zi].store(end);
+}
+
 void AccessoryLeds::set_zone_breathe_hz(Zone z, float hz) {
     const auto zi = static_cast<int>(z);
     if (zi < 0 || zi >= ZoneCount) return;
@@ -102,33 +113,53 @@ void AccessoryLeds::render_loop() {
             zones = cfg_.zones;
         }
 
+        // Snapshot once per frame — avoids re-reading the atomic mid-zone.
+        const float vol = std::clamp(audio_volume_.load(), 0.0f, 1.0f);
+        const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            clock::now().time_since_epoch()).count();
+
         // Start from black — anything we don't write stays dark.
         strip_.fill(0, 0, 0);
 
-        for (const auto& z : zones) {
+        for (int zi = 0; zi < ZoneCount; ++zi) {
+            const auto& z = zones[zi];
             if (z.count <= 0) continue;
+
+            // Base envelope: 0..1, multiplies the zone's stored color.
+            double env = 0.0;
             switch (z.pattern) {
             case Pattern::Off:
-                // already cleared by fill()
                 break;
-            case Pattern::Solid: {
-                for (int i = 0; i < z.count; ++i)
-                    strip_.set_pixel(z.start + i, z.r, z.g, z.b);
+            case Pattern::Solid:
+                env = 1.0;
                 break;
-            }
             case Pattern::Breathe: {
-                // (1 - cos) / 2 keeps the envelope in [0, 1], crests bright,
-                // troughs at zero — feels more "breathing" than a sine.
                 const double phase = 2.0 * 3.14159265358979323846 * z.breathe_hz * t;
-                const double env   = 0.5 * (1.0 - std::cos(phase));
-                const uint8_t r = static_cast<uint8_t>(z.r * env);
-                const uint8_t g = static_cast<uint8_t>(z.g * env);
-                const uint8_t b = static_cast<uint8_t>(z.b * env);
-                for (int i = 0; i < z.count; ++i)
-                    strip_.set_pixel(z.start + i, r, g, b);
+                env = 0.5 * (1.0 - std::cos(phase));
                 break;
             }
+            case Pattern::Level:
+                env = static_cast<double>(vol);
+                break;
             }
+
+            // Flash overlay (event-driven white pulse, decays linearly over
+            // its remaining lifetime). Survives whichever base pattern is on.
+            double flash = 0.0;
+            const int64_t fs = flash_start_us_[zi].load();
+            const int64_t fe = flash_end_us_  [zi].load();
+            if (fe > now_us && fe > fs) {
+                flash = static_cast<double>(fe - now_us) /
+                        static_cast<double>(fe - fs);
+                if (flash > 1.0) flash = 1.0;
+            }
+
+            const double inv = 1.0 - flash;
+            const uint8_t r = static_cast<uint8_t>(z.r * env * inv + 255.0 * flash);
+            const uint8_t g = static_cast<uint8_t>(z.g * env * inv + 255.0 * flash);
+            const uint8_t b = static_cast<uint8_t>(z.b * env * inv + 255.0 * flash);
+            for (int i = 0; i < z.count; ++i)
+                strip_.set_pixel(z.start + i, r, g, b);
         }
 
         strip_.show();

@@ -36,6 +36,7 @@ enum class Pattern : uint8_t {
     Off     = 0,   // zone stays dark regardless of color
     Solid   = 1,   // fill with (r, g, b)
     Breathe = 2,   // (r, g, b) × half-cosine envelope at breathe_hz
+    Level   = 3,   // (r, g, b) × current audio volume (mic-reactive bar)
 };
 
 struct ZoneConfig {
@@ -74,6 +75,16 @@ public:
     void set_zone_breathe_hz(Zone, float hz);
     void set_global_brightness(uint8_t b);
 
+    // Live audio volume in [0, 1] — drives Pattern::Level brightness. Audio
+    // thread writes; render thread reads. Atomic, no lock.
+    void set_audio_volume(float v) { audio_volume_.store(v); }
+
+    // Fire a brief white flash on a zone (event overlay; survives the
+    // current Pattern). duration_s controls the fade-out time. Boop events
+    // call this from the sensor thread in main.cpp; the menu may also have
+    // a "Test Flash" leaf later.
+    void trigger_flash(Zone z, double duration_s);
+
     // Read-only snapshot for the menu.
     ZoneConfig zone(Zone z) const;
     uint8_t    global_brightness() const;
@@ -92,6 +103,14 @@ private:
     std::mutex        cfg_mtx_;       // guards cfg_.zones + global_brightness
     std::atomic<bool> running_ { false };
     std::thread       thread_;
+
+    std::atomic<float> audio_volume_ { 0.0f };
+
+    // Flash overlay state — paired (start, end) microseconds since steady
+    // clock epoch. atomic<int64_t> keeps trigger_flash lock-free.
+    using us_t = int64_t;
+    std::atomic<us_t> flash_start_us_[ZoneCount]{};
+    std::atomic<us_t> flash_end_us_  [ZoneCount]{};
 };
 
 } // namespace accessory

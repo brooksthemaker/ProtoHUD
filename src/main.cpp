@@ -536,7 +536,10 @@ static std::vector<MenuItem> build_menu(
         sensor::BoopSensor** boop_sensor_pp = nullptr,
         // Voice analyzer (owned by AudioEngine; main passes its address). Menu
         // sliders write through it so the next FFT cycle uses the new params.
-        audio::VoiceAnalyzer* voice_analyzer = nullptr)
+        audio::VoiceAnalyzer* voice_analyzer = nullptr,
+        // Accessory LED chain (cheekhubs + fins). Menu toggles/sliders push
+        // through its zone setters so the next render tick uses them.
+        accessory::AccessoryLeds* leds = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -2846,6 +2849,73 @@ static std::vector<MenuItem> build_menu(
                   "Mic-driven mouth_open. FFT-based: speech-band RMS feeds an "
                   "envelope follower whose output drives face::set_audio() each "
                   "audio period (~5 ms)."));
+
+    // ── Accessory LEDs (cheekhubs + fins) ────────────────────────────────────
+    // Per-zone pattern / color / breathe rate live in the AccessoryLeds
+    // manager's atomic-snapshotted config; the menu's setters write through
+    // so the next render tick uses the new values. Brightness is global to
+    // the whole chain. Pattern picker exposes Off / Solid / Breathe / Level
+    // — Flash is reserved for event-driven overlays (boop hooks) only.
+    auto led_zone_menu = [&, leds](accessory::Zone z, std::string label) -> MenuItem {
+        // Pattern picker — radio-style leaf_sel set, one per pattern.
+        struct PatOpt { const char* label; accessory::Pattern pat; };
+        const PatOpt opts[] = {
+            { "Off",     accessory::Pattern::Off     },
+            { "Solid",   accessory::Pattern::Solid   },
+            { "Breathe", accessory::Pattern::Breathe },
+            { "Level",   accessory::Pattern::Level   },
+        };
+        std::vector<MenuItem> pat_items;
+        for (const auto& o : opts) {
+            const accessory::Pattern p = o.pat;
+            pat_items.push_back(leaf_sel(o.label,
+                [leds, z, p]{ if (leds) leds->set_zone_pattern(z, p); },
+                [leds, z, p]{
+                    return leds && leds->zone(z).pattern == p;
+                }));
+        }
+
+        std::vector<MenuItem> items = {
+            with_desc(submenu("Pattern", std::move(pat_items)),
+                      "What the zone does each tick. Level uses the mic "
+                      "volume; Breathe pulses at its own rate; Solid is a "
+                      "steady colour. Boop events flash on top regardless."),
+            color_picker("Color",
+                [leds, z](uint8_t r, uint8_t g, uint8_t b) {
+                    if (leds) leds->set_zone_color(z, r, g, b);
+                },
+                [leds, z]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
+                    if (!leds) return {0, 0, 0};
+                    auto zc = leds->zone(z);
+                    return {zc.r, zc.g, zc.b};
+                }),
+            with_desc(slider("Breathe Rate", 0.05f, 5.f, 0.05f, " Hz",
+                [leds, z]{ return leds ? leds->zone(z).breathe_hz : 0.5f; },
+                [leds, z](float v){ if (leds) leds->set_zone_breathe_hz(z, v); }),
+                "How fast the Breathe pattern oscillates. Only meaningful "
+                "when Pattern is Breathe."),
+            leaf("Test Flash", [leds, z]{ if (leds) leds->trigger_flash(z, 0.35); }),
+        };
+        return submenu(std::move(label), std::move(items));
+    };
+
+    std::vector<MenuItem> led_menu = {
+        with_desc(slider("Brightness", 0.f, 255.f, 1.f, "",
+            [leds]{ return leds ? static_cast<float>(leds->global_brightness()) : 0.f; },
+            [leds](float v){ if (leds) leds->set_global_brightness(static_cast<uint8_t>(v)); }),
+            "Master brightness applied to the whole accessory chain at SPI "
+            "encode time. WS2812s draw a lot of current at full white — "
+            "keep this low (~64) unless you have power injection."),
+        led_zone_menu(accessory::Zone::LeftCheekhub,  "Left Cheekhub"),
+        led_zone_menu(accessory::Zone::RightCheekhub, "Right Cheekhub"),
+        led_zone_menu(accessory::Zone::LeftFin,       "Left Fin"),
+        led_zone_menu(accessory::Zone::RightFin,      "Right Fin"),
+    };
+    face_display_menu.push_back(
+        with_desc(submenu("LEDs", std::move(led_menu)),
+                  "Accessory WS2812 strip (cheekhubs + fins). Driven via "
+                  "SPI MOSI; boops flash the matching zone, mic volume "
+                  "drives Level zones."));
 
     // ── HUD settings ──────────────────────────────────────────────────────────
 
@@ -5380,7 +5450,7 @@ int main(int argc, char* argv[]) {
     // returns false (no thread spun up) when cfg.enabled is false or the
     // chip isn't present on the bus.
     sensor::Mpr121BoopSensor boop_sensor(boop_cfg);
-    boop_sensor.on_boop([&face_proxy, &state](sensor::BoopSensor::Zone z) {
+    boop_sensor.on_boop([&face_proxy, &state, &accessory_leds](sensor::BoopSensor::Zone z) {
         const auto zi = static_cast<size_t>(z);
         if (zi >= 3) return;
         // Snapshot under the state lock so a menu edit mid-boop can't tear
@@ -5396,6 +5466,23 @@ int main(int argc, char* argv[]) {
         }
         if (!enabled || expression.empty()) return;
         face_proxy.trigger_boop(expression, duration_s);
+
+        // Accessory LED flash overlay — snout boop flashes both fins,
+        // cheek boops flash the matching cheekhub. Cheap visual feedback
+        // tied to the trigger; runs even if zone.pattern is Off.
+        using LZ = accessory::Zone;
+        switch (z) {
+        case sensor::BoopSensor::Zone::Snout:
+            accessory_leds.trigger_flash(LZ::LeftFin,       0.35);
+            accessory_leds.trigger_flash(LZ::RightFin,      0.35);
+            break;
+        case sensor::BoopSensor::Zone::LeftCheek:
+            accessory_leds.trigger_flash(LZ::LeftCheekhub,  0.35);
+            break;
+        case sensor::BoopSensor::Zone::RightCheek:
+            accessory_leds.trigger_flash(LZ::RightCheekhub, 0.35);
+            break;
+        }
     });
     if (boop_cfg.enabled && !boop_sensor.start())
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
@@ -5756,7 +5843,10 @@ int main(int argc, char* argv[]) {
     // are disabled we don't push at all and the FaceLoader's "mouth_open"
     // default stays selected.
     audio.set_face_drive_callback(
-        [&face_proxy, voice = audio.voice()](double vol, double mouth) {
+        [&face_proxy, &accessory_leds, voice = audio.voice()](double vol, double mouth) {
+            // Accessory LEDs use the analyzer's broadband volume for any zone
+            // running Pattern::Level — even if mouth-open is disabled.
+            accessory_leds.set_audio_volume(static_cast<float>(vol));
             if (voice && voice->visemes_enabled())
                 face_proxy.set_mouth_shape(voice->mouth_shape());
             face_proxy.set_audio_drive(vol, mouth);
@@ -5832,7 +5922,8 @@ int main(int argc, char* argv[]) {
                                cfg_gifs_dir,
                                &bg_lib_ptr, cfg_bg_user_dir,
                                &boop_sensor_ptr,
-                               audio.voice()));
+                               audio.voice(),
+                               &accessory_leds));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -6417,6 +6508,25 @@ int main(int argc, char* argv[]) {
         cfg["voice_mouth"]["release_ms"]          = state.voice_mouth.release_ms;
         cfg["voice_mouth"]["band_lo_hz"]          = state.voice_mouth.band_lo_hz;
         cfg["voice_mouth"]["band_hi_hz"]          = state.voice_mouth.band_hi_hz;
+        // Accessory LEDs — pull from the manager's live snapshot so anything
+        // the menu changed persists across launches. Hardware-level fields
+        // (spi_device / speed_hz / color_order / zone start+count) stay
+        // untouched: those are wiring concerns owned by the user's config.
+        {
+            auto& jl = cfg["accessory_leds"];
+            jl["global_brightness"] = static_cast<int>(accessory_leds.global_brightness());
+            auto& jzones = jl["zones"];
+            if (!jzones.is_array() || jzones.size() < accessory::ZoneCount)
+                jzones = json::array({json{}, json{}, json{}, json{}});
+            static const char* pat_name[] = { "off", "solid", "breathe", "level" };
+            for (int i = 0; i < accessory::ZoneCount; ++i) {
+                auto zc = accessory_leds.zone(static_cast<accessory::Zone>(i));
+                jzones[i]["pattern"]    = pat_name[static_cast<int>(zc.pattern)];
+                jzones[i]["color"]      = json::array({ zc.r, zc.g, zc.b });
+                jzones[i]["breathe_hz"] = zc.breathe_hz;
+            }
+        }
+
         cfg["voice_mouth"]["visemes_enabled"]     = state.voice_mouth.visemes_enabled;
         cfg["voice_mouth"]["viseme_round_max_hz"] = state.voice_mouth.viseme_round_max_hz;
         cfg["voice_mouth"]["viseme_open_max_hz"]  = state.voice_mouth.viseme_open_max_hz;
