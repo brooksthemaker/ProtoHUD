@@ -286,7 +286,8 @@ struct InfoPanelConfig {
     float pan_y     = 0.f;
     float size_px   = 150.f;    // half-extent (radius), matching the minimap footprint
     float cycle_sec = 6.f;      // dwell per widget before advancing
-    int   clock_face = 0;       // analog clock style: 0=ticks, 1=numbers, 2=minimal
+    int   clock_face = 0;       // clock style: 0=ticks 1=numbers 2=minimal
+                               // 3=Halo 4=Solar 5=Fallout 6=Space 7=Auto(theme)
     // Which widgets take part in the cycle (indexed by InfoWidget):
     // clock, notifications, schedule, weather (now), weather (precip).
     bool  show[static_cast<int>(InfoWidget::Count)] = { true, true, true, false, false };

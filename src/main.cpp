@@ -2635,12 +2635,22 @@ static std::vector<MenuItem> build_menu(
 
     // ── Info-Panel Module ─────────────────────────────────────────────────────
     std::vector<MenuItem> clock_face_menu = {
-        leaf_sel("Ticks",   [&state]{ state.info_panel.clock_face = 0; },
-                            [&state]{ return state.info_panel.clock_face == 0; }),
-        leaf_sel("Numbers", [&state]{ state.info_panel.clock_face = 1; },
-                            [&state]{ return state.info_panel.clock_face == 1; }),
-        leaf_sel("Minimal", [&state]{ state.info_panel.clock_face = 2; },
-                            [&state]{ return state.info_panel.clock_face == 2; }),
+        leaf_sel("Ticks",        [&state]{ state.info_panel.clock_face = 0; },
+                                 [&state]{ return state.info_panel.clock_face == 0; }),
+        leaf_sel("Numbers",      [&state]{ state.info_panel.clock_face = 1; },
+                                 [&state]{ return state.info_panel.clock_face == 1; }),
+        leaf_sel("Minimal",      [&state]{ state.info_panel.clock_face = 2; },
+                                 [&state]{ return state.info_panel.clock_face == 2; }),
+        leaf_sel("Halo",         [&state]{ state.info_panel.clock_face = 3; },
+                                 [&state]{ return state.info_panel.clock_face == 3; }),
+        leaf_sel("Solar",        [&state]{ state.info_panel.clock_face = 4; },
+                                 [&state]{ return state.info_panel.clock_face == 4; }),
+        leaf_sel("Fallout",      [&state]{ state.info_panel.clock_face = 5; },
+                                 [&state]{ return state.info_panel.clock_face == 5; }),
+        leaf_sel("Space",        [&state]{ state.info_panel.clock_face = 6; },
+                                 [&state]{ return state.info_panel.clock_face == 6; }),
+        leaf_sel("Auto (theme)", [&state]{ state.info_panel.clock_face = 7; },
+                                 [&state]{ return state.info_panel.clock_face == 7; }),
     };
     std::vector<MenuItem> ip_clock_menu = {
         toggle("Show Clock",
