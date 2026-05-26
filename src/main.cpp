@@ -177,6 +177,32 @@ static void apply_hud_dock(AppState& s) {
 // to the standard 2-panel mirrored layout (face_left + face_right) and to the
 // Protoface submodule's asset folders under $HOME/protohud/Protoface.
 
+// Launch the panel_driver.py piomatter shim as a detached child. Used at
+// startup AND from the menu's backend hot-swap when switching back to HUB75.
+// fork()+setsid() (instead of `system("... &")`) so SIGINT to the parent
+// doesn't take the driver down with it.
+static void pf_launch_panel_driver(const std::string& bin_dir,
+                                   int canvas_w, int canvas_h) {
+    std::string drv = bin_dir + "/../scripts/panel_driver.py";
+    std::string cw  = std::to_string(canvas_w);
+    std::string chh = std::to_string(canvas_h);
+    std::system("pkill -f panel_driver.py 2>/dev/null");
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        int lf = ::open("/tmp/panel_driver.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (lf >= 0) { dup2(lf, 1); dup2(lf, 2); ::close(lf); }
+        int nf = ::open("/dev/null", O_RDONLY);
+        if (nf >= 0) { dup2(nf, 0); ::close(nf); }
+        execlp("python3", "python3", "-u", drv.c_str(),
+               "--canvas-w", cw.c_str(), "--canvas-h", chh.c_str(),
+               static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    std::cout << "[main] launched panel_driver.py pid=" << pid
+              << " (" << drv << ")\n";
+}
+
 // Build the PanelOutput that NativeFaceController writes into. Reads
 // cfg["protoface"]["backend"]:
 //   "hub75"   (default) → ShmPusherOutput; panel_driver.py shuttles to LEDs.
@@ -587,7 +613,13 @@ static std::vector<MenuItem> build_menu(
         audio::VoiceAnalyzer* voice_analyzer = nullptr,
         // Accessory LED chain (cheekhubs + fins). Menu toggles/sliders push
         // through its zone setters so the next render tick uses them.
-        accessory::AccessoryLeds* leds = nullptr)
+        accessory::AccessoryLeds* leds = nullptr,
+        // Hot-swap callback for Protoface > Hardware > Backend; main wires it
+        // to the tear-down-and-rebuild routine that swaps NativeFaceController
+        // and panel_driver.py for the new backend. pf_backend_p is the live
+        // backend name string for the radio's get_state.
+        std::function<void(const std::string&)> swap_backend = nullptr,
+        const std::string* pf_backend_p = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -2637,6 +2669,27 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> pf_gifs;
     for (uint8_t i = 0; i < 8; i++) pf_gifs.push_back(gif_leaf(i));
 
+    // ── Protoface > Hardware > Backend ────────────────────────────────────
+    // Switches NativeFaceController between HUB75 panels (via piomatter
+    // + panel_driver.py) and direct-to-spidev MAX7219 matrices. The toggle
+    // fires a hot-swap callback main.cpp owns; HUD keeps rendering through
+    // the transition.
+    std::vector<MenuItem> pf_backend_items = {
+        leaf_sel("HUB75 panels (piomatter)",
+            [swap_backend]{ if (swap_backend) swap_backend("hub75"); },
+            [pf_backend_p]{ return pf_backend_p && *pf_backend_p == "hub75"; }),
+        leaf_sel("MAX7219 matrices (direct SPI)",
+            [swap_backend]{ if (swap_backend) swap_backend("max7219"); },
+            [pf_backend_p]{ return pf_backend_p && *pf_backend_p == "max7219"; }),
+    };
+    std::vector<MenuItem> pf_hardware_menu = {
+        with_desc(submenu("Backend", std::move(pf_backend_items)),
+                  "What LED hardware Protoface paints. Switching tears down "
+                  "the running renderer and brings up a new one with the new "
+                  "backend; the HUD keeps running through the transition. "
+                  "Persists to config.json so the next launch starts here."),
+    };
+
     std::vector<MenuItem> protoface_inner_menu = {
         submenu("Effects",        std::move(pf_effects)),
         submenu("Face Color",     std::move(pf_colors)),
@@ -2646,6 +2699,7 @@ static std::vector<MenuItem> build_menu(
         slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
+        submenu("Hardware",       std::move(pf_hardware_menu)),
         leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
         leaf("Release Control",  [teensy]{ teensy->release_control(); }),
     };
@@ -5809,24 +5863,7 @@ int main(int argc, char* argv[]) {
         // when the renderer writes into a /dev/shm frame. MAX7219 writes
         // directly to spidev and needs no Python helper.
         if (pf_launch_driver && pf_backend == "hub75") {
-            std::string drv = bin_dir + "/../scripts/panel_driver.py";
-            std::string cw  = std::to_string(rc.canvas_w);
-            std::string chh = std::to_string(rc.canvas_h);
-            std::system("pkill -f panel_driver.py 2>/dev/null");   // clear any old driver
-            pid_t pid = fork();
-            if (pid == 0) {
-                setsid();
-                int lf = ::open("/tmp/panel_driver.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (lf >= 0) { dup2(lf, 1); dup2(lf, 2); ::close(lf); }
-                int nf = ::open("/dev/null", O_RDONLY);
-                if (nf >= 0) { dup2(nf, 0); ::close(nf); }
-                execlp("python3", "python3", "-u", drv.c_str(),
-                       "--canvas-w", cw.c_str(), "--canvas-h", chh.c_str(),
-                       static_cast<char*>(nullptr));
-                _exit(127);   // execlp failed (python3 not found)
-            }
-            std::cout << "[main] launched panel_driver.py pid=" << pid
-                      << " (" << drv << ")\n";
+            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -5893,6 +5930,54 @@ int main(int argc, char* argv[]) {
             ? static_cast<IFaceController*>(&protoface_ctrl)
             : static_cast<IFaceController*>(&teensy);
     FaceProxy face_proxy(&active_face);
+
+    // Hot-swap: when the menu toggles Protoface > Hardware > Backend, we
+    // stop the live NativeFaceController, retire it into a graveyard so any
+    // mid-call audio/sensor thread doesn't reference a destructed object,
+    // build the new PanelOutput per the updated config, swap the active
+    // face pointer, and start the new controller. panel_driver.py is
+    // started/stopped as part of the same handoff: HUB75 needs it, MAX7219
+    // doesn't.
+    std::vector<std::unique_ptr<face::NativeFaceController>> ctrl_graveyard;
+    auto swap_backend = [&](const std::string& new_backend) {
+        if (new_backend != "hub75" && new_backend != "max7219") return;
+        if (new_backend == pf_backend) return;
+        std::cout << "[main] backend hot-swap: " << pf_backend
+                  << " -> " << new_backend << "\n";
+
+        cfg["protoface"]["backend"] = new_backend;
+        pf_backend = new_backend;
+
+        if (!native_ctrl) {
+            // Daemon mode — no native controller to swap; the menu update
+            // still updates cfg so the choice persists.
+            return;
+        }
+
+        // Stop the running controller, then retain it. Setting active_face
+        // to the new controller is enough to redirect future calls; any
+        // in-flight call on the old pointer keeps working because we don't
+        // destruct it here.
+        native_ctrl->stop();
+        ctrl_graveyard.push_back(std::move(native_ctrl));
+
+        face::RenderConfig rc = pf_build_render_config(cfg);
+        rc.state_path = (fs::path(cfg_path).parent_path() /
+                          "protoface_state.json").string();
+        auto new_output = pf_build_panel_output(cfg, rc);
+        native_ctrl = std::make_unique<face::NativeFaceController>(
+            rc, std::move(new_output));
+        active_face = native_ctrl.get();
+        native_ctrl->start();
+
+        // panel_driver.py choreography. Killing on max7219 is safe even if
+        // it wasn't running.
+        if (new_backend == "max7219") {
+            std::system("pkill -f panel_driver.py 2>/dev/null");
+        } else if (new_backend == "hub75" && pf_launch_driver) {
+            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h);
+        }
+    };
 
     // Now that face_proxy exists, hook the audio engine's per-period
     // (volume, mouth_open) into it. Also pushes the analyzer's classified
@@ -5980,7 +6065,8 @@ int main(int argc, char* argv[]) {
                                &bg_lib_ptr, cfg_bg_user_dir,
                                &boop_sensor_ptr,
                                audio.voice(),
-                               &accessory_leds));
+                               &accessory_leds,
+                               swap_backend, &pf_backend));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
