@@ -508,7 +508,13 @@ static std::vector<MenuItem> build_menu(
         // Out: curated corner "quick menu" tree (assigned if non-null)
         std::vector<MenuItem>* quick_out = nullptr,
         // GIF folder for the Animations preview (scan order matches play_gif index)
-        std::string gifs_dir = {})
+        std::string gifs_dir = {},
+        // Landing-page background library (set after construction; pointer-to-pointer
+        // so the menu can capture it before bg_lib exists, same pattern as menu_sys_pp)
+        BackgroundLibrary** bg_lib_pp = nullptr,
+        // User-writable backgrounds folder ($HOME/protohud/backgrounds). Imports
+        // land here; bundled defaults under assets/backgrounds are read-only.
+        std::string bg_user_dir = {})
 {
     (void)lora; (void)knob;
 
@@ -972,6 +978,181 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> face_files_menu;
     for (int i = 0; i < kFaceSlotCount; ++i)
         face_files_menu.push_back(face_slot_row(i));
+
+    // ── Backgrounds ──────────────────────────────────────────────────────────
+    // Landing-page background library. Unlike GIFs/Faces this isn't slot-based:
+    // the library is a flat sorted list (defaults under assets/backgrounds win
+    // over duplicates under $HOME/protohud/backgrounds). v1 surfaces Import +
+    // per-entry Delete (only for user-owned files); cycling between them on
+    // the landing page is unchanged.
+    struct BgPreview {
+        std::string                     loaded_path;
+        std::filesystem::file_time_type loaded_mtime{};
+        cv::Mat     image;
+        int         want = -1;        // highlighted entry index
+        GLuint      tex  = 0;
+    };
+    auto bg_preview = std::make_shared<BgPreview>();
+
+    auto bg_get_lib = [bg_lib_pp]() -> BackgroundLibrary* {
+        return bg_lib_pp ? *bg_lib_pp : nullptr;
+    };
+
+    MenuContextPanelDraw draw_bg_preview =
+        [bg_preview, bg_get_lib](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            BgPreview& bp = *bg_preview;
+            auto* lib = bg_get_lib();
+            std::string path, label;
+            if (lib && bp.want >= 0 && bp.want < lib->count()) {
+                path  = lib->path(bp.want);
+                label = lib->name(bp.want);
+            }
+            const bool have = !path.empty();
+
+            std::filesystem::file_time_type mt{};
+            if (have) {
+                std::error_code ec;
+                mt = std::filesystem::last_write_time(path, ec);
+            }
+            if (have && (path != bp.loaded_path || mt != bp.loaded_mtime)) {
+                bp.image        = face::load_png_rgba(path, 256, 160);
+                bp.loaded_path  = path;
+                bp.loaded_mtime = mt;
+            } else if (!have && !bp.loaded_path.empty()) {
+                bp.image = cv::Mat();
+                bp.loaded_path.clear();
+                bp.loaded_mtime = {};
+            }
+
+            // 16:10 thumbnail, centred, name beneath.
+            const float w = std::min(sz.x * 0.9f, sz.y * 0.85f * 1.6f);
+            const float h = w / 1.6f;
+            const float px = o.x + (sz.x - w) * 0.5f;
+            const float py = o.y + (sz.y - h) * 0.5f - 6.f;
+            dl->AddRectFilled({px, py}, {px + w, py + h}, IM_COL32(10, 16, 22, 190));
+
+            if (have && !bp.image.empty() && bp.image.isContinuous()) {
+                if (bp.tex == 0) {
+                    glGenTextures(1, &bp.tex);
+                    glBindTexture(GL_TEXTURE_2D, bp.tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                glBindTexture(GL_TEXTURE_2D, bp.tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bp.image.cols, bp.image.rows, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, bp.image.data);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(bp.tex)),
+                             {px, py}, {px + w, py + h});
+            } else {
+                const char* msg = have ? "Decode failed" : "(no backgrounds)";
+                const ImVec2 ts = ImGui::CalcTextSize(msg);
+                dl->AddText({px + w * 0.5f - ts.x * 0.5f, py + h * 0.5f - ts.y * 0.5f},
+                            IM_COL32(180, 190, 200, 200), msg);
+            }
+
+            if (!label.empty()) {
+                const ImVec2 ns = ImGui::CalcTextSize(label.c_str());
+                dl->AddText({o.x + sz.x * 0.5f - ns.x * 0.5f, o.y + sz.y - ns.y},
+                            IM_COL32(220, 230, 235, 230), label.c_str());
+            }
+        };
+
+    // Import leaf: opens picker with image filters; on commit copies the file
+    // into the user bg dir and refreshes the library.
+    MenuItem bg_import = leaf("Import...",
+        [bg_lib_pp, bg_user_dir, menu_sys_pp]() {
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+            std::string start = (*menu_sys_pp)->file_picker_dir();
+            (*menu_sys_pp)->open_file_picker(
+                "Import background", std::move(start),
+                {".png", ".jpg", ".jpeg", ".bmp"},
+                [bg_lib_pp, bg_user_dir](const std::string& src) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(bg_user_dir, ec);
+                    const std::string fname =
+                        std::filesystem::path(src).filename().string();
+                    const std::string dst = bg_user_dir + "/" + fname;
+                    std::filesystem::copy_file(
+                        src, dst,
+                        std::filesystem::copy_options::overwrite_existing, ec);
+                    if (ec) {
+                        std::fprintf(stderr,
+                            "[bg] import copy failed %s -> %s: %s\n",
+                            src.c_str(), dst.c_str(), ec.message().c_str());
+                        return;
+                    }
+                    if (auto* lib = bg_lib_pp ? *bg_lib_pp : nullptr) {
+                        lib->refresh();
+                        // Select the just-imported background so it's visible
+                        // immediately on the next landing-page open.
+                        lib->set_current_by_name(
+                            std::filesystem::path(fname).stem().string());
+                    }
+                });
+        });
+
+    // One leaf per library entry — highlight-only, so the preview pane animates
+    // as the user scrolls. visible_fn tied to the live count, so adds / deletes
+    // show up without rebuilding the menu tree. Caps at 16 entries; bump if
+    // needed. A read-only suffix on bundled defaults makes it obvious which
+    // entries can be deleted.
+    constexpr int kBgRowCap = 16;
+    auto bg_is_user_at = [bg_get_lib, bg_user_dir](int idx) -> bool {
+        auto* lib = bg_get_lib();
+        if (!lib || idx < 0 || idx >= lib->count()) return false;
+        const std::string& p = lib->path(idx);
+        return !bg_user_dir.empty() && p.rfind(bg_user_dir, 0) == 0;
+    };
+
+    auto bg_row = [&, bg_preview](int idx) -> MenuItem {
+        MenuItem m;
+        m.type  = MenuItemType::LEAF;
+        m.label = "Background #" + std::to_string(idx);
+
+        m.label_fn = [bg_get_lib, bg_is_user_at, idx]() -> std::string {
+            auto* lib = bg_get_lib();
+            if (!lib || idx >= lib->count()) return {};
+            std::string n = lib->name(idx);
+            if (!bg_is_user_at(idx)) n += "  (read-only)";
+            return n;
+        };
+        m.visible_fn = [bg_get_lib, idx]{
+            auto* lib = bg_get_lib();
+            return lib && idx < lib->count();
+        };
+        m.on_highlight = [bg_preview, idx]{ bg_preview->want = idx; };
+        m.action = []{};   // highlighting drives the preview; selecting is a no-op
+        return m;
+    };
+
+    // Single Delete entry that targets the currently-highlighted background,
+    // visible only when that selection is a user import (bundled defaults
+    // stay read-only).
+    MenuItem bg_delete = leaf("Delete Highlighted",
+        [bg_preview, bg_get_lib, bg_user_dir]() {
+            auto* lib = bg_get_lib();
+            if (!lib) return;
+            const int i = bg_preview->want;
+            if (i < 0 || i >= lib->count()) return;
+            const std::string p = lib->path(i);
+            if (bg_user_dir.empty() || p.rfind(bg_user_dir, 0) != 0) return;
+            std::error_code ec;
+            std::filesystem::remove(p, ec);
+            lib->refresh();
+            // refresh() may shuffle indices; just clamp so want stays valid.
+            if (bg_preview->want >= lib->count()) bg_preview->want = lib->count() - 1;
+        });
+    bg_delete.visible_fn = [bg_preview, bg_is_user_at]{
+        return bg_is_user_at(bg_preview->want);
+    };
+
+    std::vector<MenuItem> bg_files_menu;
+    bg_files_menu.push_back(std::move(bg_import));
+    for (int i = 0; i < kBgRowCap; ++i) bg_files_menu.push_back(bg_row(i));
+    bg_files_menu.push_back(std::move(bg_delete));
 
     // ── Camera controls ───────────────────────────────────────────────────────
     std::vector<MenuItem> af_triggers = {
@@ -3999,14 +4180,16 @@ static std::vector<MenuItem> build_menu(
                   "The LED Protoface: expression, color, material, particle effects, "
                   "animations and brightness."),
         with_desc(submenu("Files",        std::vector<MenuItem>{
-                      with_panel(submenu("GIFs",  std::move(gif_files_menu)),
-                                 "GIF Preview",  draw_gif_preview),
-                      with_panel(submenu("Faces", std::move(face_files_menu)),
-                                 "Face Preview", draw_face_preview),
+                      with_panel(submenu("GIFs",        std::move(gif_files_menu)),
+                                 "GIF Preview",        draw_gif_preview),
+                      with_panel(submenu("Faces",       std::move(face_files_menu)),
+                                 "Face Preview",       draw_face_preview),
+                      with_panel(submenu("Backgrounds", std::move(bg_files_menu)),
+                                 "Background Preview", draw_bg_preview),
                   }),
-                  "Import media into Protoface from disk. Each slot can play "
-                  "its bound file, swap to a new one, or clear back to empty. "
-                  "Splash backgrounds will live here next."),
+                  "Import media into Protoface from disk. GIFs, face "
+                  "expression PNGs, and landing-page backgrounds; bundled "
+                  "defaults stay read-only while user imports can be deleted."),
         with_desc(submenu("LoRa",         std::move(lora_menu)),
                   "Long-range radio: team nodes, messages and status."),
         with_desc(submenu("System",       std::move(system_menu)),
@@ -5105,8 +5288,12 @@ int main(int argc, char* argv[]) {
     // into MenuSystem without a circular dependency at build time.
     bool panel_preview_enabled = false;
     MenuSystem* menu_ptr = nullptr;
+    BackgroundLibrary* bg_lib_ptr = nullptr;   // set after bg_lib is constructed
     std::vector<MenuItem> quick_items;   // curated corner/radial quick-menu tree
     std::string cfg_gifs_dir = pf_build_render_config(cfg).gifs_dir;
+    std::string cfg_bg_user_dir;
+    if (const char* home = std::getenv("HOME"))
+        cfg_bg_user_dir = std::string(home) + "/protohud/backgrounds";
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -5127,7 +5314,8 @@ int main(int argc, char* argv[]) {
                                cfg_map_dir,
                                &left_eye_src, &right_eye_src,
                                &profiles, &hud_presets, &quick_items,
-                               cfg_gifs_dir));
+                               cfg_gifs_dir,
+                               &bg_lib_ptr, cfg_bg_user_dir));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -5216,10 +5404,10 @@ int main(int argc, char* argv[]) {
     {
         std::vector<std::string> bg_dirs;
         bg_dirs.push_back(bin_dir + "/../assets/backgrounds");
-        if (const char* home = std::getenv("HOME"))
-            bg_dirs.push_back(std::string(home) + "/protohud/backgrounds");
+        if (!cfg_bg_user_dir.empty()) bg_dirs.push_back(cfg_bg_user_dir);
         bg_lib.scan(bg_dirs);
     }
+    bg_lib_ptr = &bg_lib;   // expose the library to the Files > Backgrounds menu
     // page 0 = main (CONTINUE / PROFILES / QUIT); page 1 = profile picker.
     struct LandingState {
         bool   active       = true;
