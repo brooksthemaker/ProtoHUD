@@ -105,6 +105,9 @@ void FaceEditor::open(std::string title,
     cursor_x_ = bbox_.x + bbox_.width  / 2;
     cursor_y_ = bbox_.y + bbox_.height / 2;
     undo_stack_.clear();
+    anchor_set_ = false;
+    brush_size_ = 0;
+    tool_       = Tool::Pencil;
 
     open_ = true;
 }
@@ -197,6 +200,35 @@ void FaceEditor::flood_fill(int sx, int sy) {
     }
 }
 
+// Brush-aware Bresenham. Walks the line one cell at a time and stamps the
+// current brush so wider sizes give thicker lines, matching the pencil's
+// behaviour. Same eraser/colour resolution as paint_pixel.
+void FaceEditor::draw_line(int x0, int y0, int x1, int y1) {
+    int dx =  std::abs(x1 - x0);
+    int dy = -std::abs(y1 - y0);
+    int sx = (x0 < x1) ? 1 : -1;
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        paint_brush(x0, y0);
+        if (x0 == x1 && y0 == y1) break;
+        const int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+// Filled rectangle (inclusive of both corners). Brush size doesn't widen
+// the result here — the rect is itself the shape; instead we fill every
+// cell in the bounding box of (x0,y0)-(x1,y1).
+void FaceEditor::draw_rect_filled(int x0, int y0, int x1, int y1) {
+    if (x0 > x1) std::swap(x0, x1);
+    if (y0 > y1) std::swap(y0, y1);
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x)
+            paint_pixel(x, y);
+}
+
 void FaceEditor::eyedrop_at(int x, int y) {
     if (mode_ != Mode::Color || palette_.empty()) return;
     if (!inside_covered(x, y)) return;
@@ -226,6 +258,33 @@ void FaceEditor::apply_at_cursor() {
         eyedrop_at(cursor_x_, cursor_y_);
         return;
     }
+
+    // Line / Rect are two-step: first primary() sets the anchor, second
+    // primary() commits the shape from anchor to cursor. Same behaviour
+    // every standard pixel editor has.
+    if (tool_ == Tool::Line || tool_ == Tool::Rect) {
+        if (!anchor_set_) {
+            anchor_set_ = true;
+            anchor_x_   = cursor_x_;
+            anchor_y_   = cursor_y_;
+            return;
+        }
+        push_undo();
+        const int mx_anchor = bbox_.x + (bbox_.x + bbox_.width - 1) - anchor_x_;
+        const int mx_cursor = bbox_.x + (bbox_.x + bbox_.width - 1) - cursor_x_;
+        const bool do_mirror = mirror_ &&
+            (mx_anchor != anchor_x_ || mx_cursor != cursor_x_);
+        if (tool_ == Tool::Line) {
+            draw_line(anchor_x_, anchor_y_, cursor_x_, cursor_y_);
+            if (do_mirror) draw_line(mx_anchor, anchor_y_, mx_cursor, cursor_y_);
+        } else {
+            draw_rect_filled(anchor_x_, anchor_y_, cursor_x_, cursor_y_);
+            if (do_mirror) draw_rect_filled(mx_anchor, anchor_y_, mx_cursor, cursor_y_);
+        }
+        anchor_set_ = false;
+        return;
+    }
+
     push_undo();
     const int mirror_x = bbox_.x + (bbox_.x + bbox_.width - 1) - cursor_x_;
     const bool do_mirror = mirror_ && mirror_x != cursor_x_;
@@ -248,8 +307,9 @@ void FaceEditor::primary()   { if (open_) apply_at_cursor(); }
 
 void FaceEditor::secondary() {
     if (!open_) return;
-    // Cycle Pencil → Eraser → Bucket → Eyedrop → Pencil…
+    // Cycle Pencil → Eraser → Bucket → Eyedrop → Line → Rect → Pencil…
     tool_ = static_cast<Tool>((static_cast<int>(tool_) + 1) % kToolCount);
+    anchor_set_ = false;
 }
 
 void FaceEditor::tertiary()  { if (open_) mirror_ = !mirror_; }
@@ -257,6 +317,7 @@ void FaceEditor::tertiary()  { if (open_) mirror_ = !mirror_; }
 void FaceEditor::set_tool(Tool t) {
     if (!open_) return;
     tool_ = t;
+    anchor_set_ = false;
 }
 
 void FaceEditor::set_brush_size(int radius) {
@@ -268,6 +329,12 @@ void FaceEditor::set_brush_size(int radius) {
 
 void FaceEditor::back() {
     if (!open_) return;
+    // A pending line/rect anchor consumes one back press without closing
+    // the editor — same UX as cancelling a shape in Aseprite / Krita.
+    if (anchor_set_) {
+        anchor_set_ = false;
+        return;
+    }
     auto cb = std::move(on_cancel_);
     close();
     if (cb) cb();
@@ -289,7 +356,11 @@ void FaceEditor::cycle_palette(int dir) {
 }
 
 void FaceEditor::undo() {
-    if (!open_ || undo_stack_.empty()) return;
+    if (!open_) return;
+    // Z while a shape anchor is set just cancels it (no canvas change to
+    // roll back). Otherwise pop the most recent undo snapshot.
+    if (anchor_set_) { anchor_set_ = false; return; }
+    if (undo_stack_.empty()) return;
     canvas_ = std::move(undo_stack_.back());
     undo_stack_.pop_back();
 }
@@ -338,6 +409,8 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     case Tool::Eraser:  tool_str = "Eraser";  break;
     case Tool::Bucket:  tool_str = "Bucket";  break;
     case Tool::Eyedrop: tool_str = "Eyedrop"; break;
+    case Tool::Line:    tool_str = anchor_set_ ? "Line (anchor set)"   : "Line";    break;
+    case Tool::Rect:    tool_str = anchor_set_ ? "Rect (anchor set)"   : "Rect";    break;
     }
     const int brush_side = 1 + brush_size_ * 2;
     std::snprintf(sub, sizeof(sub),
@@ -415,6 +488,50 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                         grid_col, 1.f);
         }
 
+        // Live anchor preview for Line / Rect tools (shape that would be
+        // committed by the next primary()). Translucent so the underlying
+        // canvas pixels still read through.
+        if (anchor_set_ && (tool_ == Tool::Line || tool_ == Tool::Rect)) {
+            const ImU32 preview_col = (accent & 0x00FFFFFFu) | (110u << 24);
+            auto stamp_cell = [&](int gx, int gy) {
+                if (gx < bbox_.x || gx >= bbox_.x + bbox_.width)  return;
+                if (gy < bbox_.y || gy >= bbox_.y + bbox_.height) return;
+                const float rx = grid_origin_x_ + (gx - bbox_.x) * cell_size_;
+                const float ry = grid_origin_y_ + (gy - bbox_.y) * cell_size_;
+                dl->AddRectFilled({rx, ry}, {rx + cell_size_, ry + cell_size_},
+                                  preview_col);
+            };
+            if (tool_ == Tool::Line) {
+                int x0 = anchor_x_, y0 = anchor_y_;
+                int x1 = cursor_x_, y1 = cursor_y_;
+                int dx =  std::abs(x1 - x0);
+                int dy = -std::abs(y1 - y0);
+                int sx = (x0 < x1) ? 1 : -1;
+                int sy = (y0 < y1) ? 1 : -1;
+                int err = dx + dy;
+                for (;;) {
+                    stamp_cell(x0, y0);
+                    if (x0 == x1 && y0 == y1) break;
+                    const int e2 = 2 * err;
+                    if (e2 >= dy) { err += dy; x0 += sx; }
+                    if (e2 <= dx) { err += dx; y0 += sy; }
+                }
+            } else {
+                int x0 = std::min(anchor_x_, cursor_x_);
+                int y0 = std::min(anchor_y_, cursor_y_);
+                int x1 = std::max(anchor_x_, cursor_x_);
+                int y1 = std::max(anchor_y_, cursor_y_);
+                for (int gy = y0; gy <= y1; ++gy)
+                    for (int gx = x0; gx <= x1; ++gx)
+                        stamp_cell(gx, gy);
+            }
+            // Anchor marker: solid outline on the anchor cell.
+            const float ax = grid_origin_x_ + (anchor_x_ - bbox_.x) * cell_size_;
+            const float ay = grid_origin_y_ + (anchor_y_ - bbox_.y) * cell_size_;
+            dl->AddRect({ax, ay}, {ax + cell_size_, ay + cell_size_},
+                        accent, 0.f, 0, 1.5f);
+        }
+
         // Cursor: filled outline at the cell.
         const float ccx = grid_origin_x_ + (cursor_x_ - bbox_.x) * cell_size_;
         const float ccy = grid_origin_y_ + (cursor_y_ - bbox_.y) * cell_size_;
@@ -453,8 +570,8 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     // editor is the active overlay. Color mode adds the palette controls.
     const char* hints =
         (mode_ == Mode::Color)
-        ? "Select: paint    X: cycle tool    P/E/B/I: tool    -/+: brush    Y/M: mirror    [/]: color    Z: undo    S: save    Back: cancel"
-        : "Select: paint    X: cycle tool    P/E/B/I: tool    -/+: brush    Y/M: mirror    Z: undo    S: save    Back: cancel";
+        ? "Select: paint    X: cycle tool    P/E/B/I/L/R: tool    -/+: brush    Y/M: mirror    [/]: color    Z: undo    S: save    Back: cancel"
+        : "Select: paint    X: cycle tool    P/E/B/I/L/R: tool    -/+: brush    Y/M: mirror    Z: undo    S: save    Back: cancel";
     dl->AddText(font, fs * 0.9f, {cx0, pmax.y - footer_h + 6.f},
                 IM_COL32(170, 185, 200, 220), hints);
 }

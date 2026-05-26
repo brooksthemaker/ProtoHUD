@@ -1193,11 +1193,14 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             ImGui::IsKeyPressed(ImGuiKey_M))          face_editor_.tertiary();
         if (ImGui::IsKeyPressed(ImGuiKey_Z))          face_editor_.undo();
         if (ImGui::IsKeyPressed(ImGuiKey_S))          face_editor_.save();
-        // Direct tool selection (matches the footer hints).
+        // Direct tool selection (matches the footer hints). L = Line, R = Rect
+        // join the Pencil/Eraser/Bucket/eyedrop set.
         if (ImGui::IsKeyPressed(ImGuiKey_P))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
         if (ImGui::IsKeyPressed(ImGuiKey_E))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
         if (ImGui::IsKeyPressed(ImGuiKey_B))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);
         if (ImGui::IsKeyPressed(ImGuiKey_I))          face_editor_.set_tool(menu::FaceEditor::Tool::Eyedrop);
+        if (ImGui::IsKeyPressed(ImGuiKey_L))          face_editor_.set_tool(menu::FaceEditor::Tool::Line);
+        if (ImGui::IsKeyPressed(ImGuiKey_R))          face_editor_.set_tool(menu::FaceEditor::Tool::Rect);
         // Brush size — Minus shrinks, Equals/Plus grows. Clamped 0..2 by
         // the setter itself, so we just pass current ± 1.
         if (ImGui::IsKeyPressed(ImGuiKey_Minus) ||

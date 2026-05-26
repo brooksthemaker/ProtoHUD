@@ -28,8 +28,8 @@ namespace menu {
 class FaceEditor {
 public:
     enum class Mode : uint8_t { Mono, Color };
-    enum class Tool : uint8_t { Pencil, Eraser, Bucket, Eyedrop };
-    static constexpr int kToolCount = 4;
+    enum class Tool : uint8_t { Pencil, Eraser, Bucket, Eyedrop, Line, Rect };
+    static constexpr int kToolCount = 6;
 
     using CommitFn = std::function<void(const cv::Mat& rgba_canvas,
                                         const std::string& abs_path)>;
@@ -83,6 +83,8 @@ private:
     void paint_brush(int cx, int cy);        // brush_size_-aware square fill
     void flood_fill(int sx, int sy);         // bucket from (sx, sy)
     void eyedrop_at(int x, int y);
+    void draw_line(int x0, int y0, int x1, int y1);   // brush-aware, Bresenham
+    void draw_rect_filled(int x0, int y0, int x1, int y1);
     bool inside_covered(int x, int y) const;
 
     bool open_ = false;
@@ -90,6 +92,15 @@ private:
     Tool tool_ = Tool::Pencil;
     bool mirror_ = false;
     int  brush_size_ = 0;                    // radius_pixels (0/1/2)
+
+    // Anchor for Line / Rect tools — set by the first primary() at the
+    // cursor position, committed (line / rect drawn from anchor to
+    // cursor) by the second primary(). Tool changes / back / undo all
+    // clear the anchor so it doesn't persist into a different tool's
+    // workflow.
+    bool anchor_set_ = false;
+    int  anchor_x_   = 0;
+    int  anchor_y_   = 0;
 
     std::string title_;
     std::string abs_path_;
