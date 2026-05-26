@@ -288,6 +288,24 @@ void MenuSystem::osk_cancel() {
     close_keyboard();
 }
 
+// ── File picker ───────────────────────────────────────────────────────────────
+
+void MenuSystem::open_file_picker(std::string title,
+                                  std::string start_dir,
+                                  std::vector<std::string> extensions,
+                                  std::function<void(const std::string&)> on_commit,
+                                  std::function<void()> on_cancel) {
+    // Make sure mutually-exclusive overlays don't stack.
+    if (osk_active_) close_keyboard();
+    file_picker_.open(std::move(title), std::move(start_dir),
+                      std::move(extensions),
+                      std::move(on_commit), std::move(on_cancel));
+}
+
+void MenuSystem::close_file_picker() {
+    file_picker_.cancel();
+}
+
 void MenuSystem::emit_detents() {
     if (detent_cb_ && !stack_.empty()) {
         int count = 0;
@@ -304,6 +322,7 @@ void MenuSystem::emit_detents_override(int count) {
 // ── navigate ──────────────────────────────────────────────────────────────────
 
 void MenuSystem::navigate(int direction) {
+    if (file_picker_.is_open()) { file_picker_.step(direction); return; }
     if (osk_active_) { osk_step(direction); return; }
     if (!open_ || stack_.empty()) return;
 
@@ -359,6 +378,7 @@ void MenuSystem::navigate(int direction) {
 // ── select ────────────────────────────────────────────────────────────────────
 
 void MenuSystem::select() {
+    if (file_picker_.is_open()) { file_picker_.activate(); return; }
     if (osk_active_) { osk_activate(); return; }
     if (!open_ || stack_.empty()) return;
     auto& items = stack_.back().items;
@@ -461,6 +481,7 @@ void MenuSystem::select() {
 // ── back ──────────────────────────────────────────────────────────────────────
 
 void MenuSystem::back() {
+    if (file_picker_.is_open()) { file_picker_.back(); return; }
     if (osk_active_) { osk_backspace(); return; }
     if (!stack_.empty() && cursor_ < static_cast<int>(stack_.back().items.size())) {
         auto& item = stack_.back().items[cursor_];
@@ -1119,6 +1140,15 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     // On-screen keyboard takes over the whole screen when active.
     if (osk_active_) {
         draw_keyboard(dl, font, fs, W, H);
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(1);
+        return;
+    }
+
+    // File picker overlays the deep menu, same as OSK.
+    if (file_picker_.is_open()) {
+        file_picker_.draw(dl, font, fs, W, H, accent_color_);
         ImGui::End();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(1);

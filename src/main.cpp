@@ -680,13 +680,62 @@ static std::vector<MenuItem> build_menu(
                         IM_COL32(220, 230, 235, 230), name.c_str());
         };
 
-    // Build a GIF leaf: select plays it on the face; highlight only updates the
-    // preview (no device command), so scrolling the list animates the thumbnail.
-    auto gif_leaf = [&](uint8_t i) -> MenuItem {
-        std::string lbl = (i < gif_names.size() && !gif_names[i].empty())
-                          ? gif_names[i]
-                          : "GIF #" + std::to_string(i);
-        MenuItem m = leaf(lbl, [teensy, i]{ teensy->play_gif(i); });
+    // Build a GIF leaf:
+    //   - Label is dynamic so the menu reflects manifest changes without a
+    //     rebuild: shows the slot's configured name (gif_names[i]) or the bound
+    //     filename's stem, with a "(empty)" suffix when the slot is unbound.
+    //   - Highlight updates the preview only (no device command), so scrolling
+    //     the list animates the thumbnail.
+    //   - Select plays the bound GIF, or opens the file picker rooted at the
+    //     last visited dir for an unbound slot — the import callback copies the
+    //     chosen file into gifs_dir, binds the manifest slot, and plays it.
+    auto gif_leaf = [&, gif_preview](uint8_t i) -> MenuItem {
+        MenuItem m;
+        m.type  = MenuItemType::LEAF;
+        m.label = "GIF #" + std::to_string(static_cast<int>(i));   // static id fallback
+
+        m.label_fn = [teensy, i, gn = gif_names]() -> std::string {
+            const std::string bound = teensy->gif_slot(i);
+            const bool named = (i < gn.size() && !gn[i].empty());
+            if (!bound.empty())
+                return named ? gn[i] : std::filesystem::path(bound).stem().string();
+            std::string base = named ? gn[i]
+                                     : "GIF #" + std::to_string(static_cast<int>(i));
+            return base + " (empty)";
+        };
+
+        m.action = [teensy, i, menu_sys_pp, gifs_dir]() {
+            if (!teensy->gif_slot(i).empty()) { teensy->play_gif(i); return; }
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+
+            char title[48];
+            std::snprintf(title, sizeof(title),
+                          "Import GIF -> slot %u", static_cast<unsigned>(i));
+
+            // Pick up where the user left off last time (per-type "last dir").
+            std::string start = (*menu_sys_pp)->file_picker_dir();
+            (*menu_sys_pp)->open_file_picker(
+                title, std::move(start), {".gif"},
+                /*on_commit=*/[teensy, i, gifs_dir](const std::string& src) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(gifs_dir, ec);
+                    const std::string fname =
+                        std::filesystem::path(src).filename().string();
+                    const std::string dst = gifs_dir + "/" + fname;
+                    std::filesystem::copy_file(
+                        src, dst,
+                        std::filesystem::copy_options::overwrite_existing, ec);
+                    if (ec) {
+                        std::fprintf(stderr,
+                            "[gif] import copy failed %s -> %s: %s\n",
+                            src.c_str(), dst.c_str(), ec.message().c_str());
+                        return;
+                    }
+                    teensy->bind_gif_slot(i, fname);
+                    teensy->play_gif(i);
+                });
+        };
+
         m.on_highlight = [gif_preview, i]{ gif_preview->want = static_cast<int>(i); };
         return m;
     };

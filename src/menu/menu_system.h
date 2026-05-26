@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <imgui.h>
 #include "../app_state.h"
+#include "file_picker.h"
 
 // ── Item types ────────────────────────────────────────────────────────────────
 
@@ -219,6 +220,7 @@ public:
         in_channel_edit_ = false;
         osk_active_      = false;
         osk_commit_      = nullptr;
+        file_picker_.close();
         stack_.clear();
     }
 
@@ -248,6 +250,19 @@ public:
     void osk_commit();               // confirm + fire callback
     void osk_cancel();               // discard + close
     void osk_input_char(unsigned int c);  // append a physically-typed character
+
+    // ── File picker ─────────────────────────────────────────────────────────────
+    // Full-screen overlay for browsing the filesystem (media import). Drawn in
+    // place of the deep menu while is_file_picker_open() is true. Input routing
+    // mirrors OSK: navigate/select/back forward to the picker until it closes.
+    void open_file_picker(std::string title,
+                          std::string start_dir,
+                          std::vector<std::string> extensions,
+                          std::function<void(const std::string&)> on_commit,
+                          std::function<void()> on_cancel = {});
+    void close_file_picker();
+    bool is_file_picker_open() const { return file_picker_.is_open(); }
+    const std::string& file_picker_dir() const { return file_picker_.current_dir(); }
 
     int  current_index() const { return cursor_; }
     int  menu_depth()    const { return static_cast<int>(stack_.size()); }
@@ -301,6 +316,9 @@ private:
     int            osk_row_ = 0;
     int            osk_col_ = 0;
     KeyboardCommit osk_commit_;
+
+    // File picker overlay (media import) — same input-routing pattern as OSK.
+    menu::FilePicker file_picker_;
 
     std::vector<MenuItem>  root_items_;
     std::vector<MenuItem>  quick_items_;   // curated corner "quick menu" tree

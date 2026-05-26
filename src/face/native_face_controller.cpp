@@ -88,6 +88,18 @@ void NativeFaceController::build_panels() {
     gif_release_ = cfg_.gif_auto_release;
 
     load_state();   // overlay any auto-saved look on the config defaults
+
+    // Back-compat: if the user already had GIFs in gifs_dir before the manifest
+    // existed, auto-bind the sorted scan so the menu shows real entries on
+    // first launch instead of an all-"(empty)" list. Skip when any slot is
+    // already bound (state.json was authoritative).
+    const bool any_bound =
+        std::any_of(gif_slots_.begin(), gif_slots_.end(),
+                    [](const std::string& s){ return !s.empty(); });
+    if (!any_bound && !gif_files_.empty()) {
+        for (size_t i = 0; i < gif_slots_.size() && i < gif_files_.size(); ++i)
+            gif_slots_[i] = std::filesystem::path(gif_files_[i]).filename().string();
+    }
 }
 
 bool NativeFaceController::start() {
