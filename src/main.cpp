@@ -4454,6 +4454,18 @@ int main(int argc, char* argv[]) {
         else                              aud_cfg.active_output = AudioOutput::VITURE;
     }
 
+    // Voice → mouth_open analysis (FFT band RMS, envelope follower).
+    if (cfg.contains("voice_mouth")) {
+        auto& jv = cfg["voice_mouth"];
+        state.voice_mouth.enabled     = jval(jv, "enabled",     state.voice_mouth.enabled);
+        state.voice_mouth.sensitivity = jval(jv, "sensitivity", state.voice_mouth.sensitivity);
+        state.voice_mouth.noise_gate  = jval(jv, "noise_gate",  state.voice_mouth.noise_gate);
+        state.voice_mouth.attack_ms   = jval(jv, "attack_ms",   state.voice_mouth.attack_ms);
+        state.voice_mouth.release_ms  = jval(jv, "release_ms",  state.voice_mouth.release_ms);
+        state.voice_mouth.band_lo_hz  = jval(jv, "band_lo_hz",  state.voice_mouth.band_lo_hz);
+        state.voice_mouth.band_hi_hz  = jval(jv, "band_hi_hz",  state.voice_mouth.band_hi_hz);
+    }
+
     XRConfig xr_cfg;
     xr_cfg.product_id       = jval(jvtr,  "product_id",       0);
     xr_cfg.monitor_index    = jval(jvtr,  "monitor_index",    -1);
@@ -5169,6 +5181,19 @@ int main(int argc, char* argv[]) {
 
     // ── Spatial audio ─────────────────────────────────────────────────────────
 
+    // Voice analyzer tuning is set here; the face-drive callback is wired
+    // later, once face_proxy exists. The audio thread starts without a face
+    // callback set — its push_stereo_s16 path is no-op while enabled is false
+    // anyway, so there's no window of dangling reads.
+    if (auto* va = audio.voice()) {
+        va->set_sensitivity(state.voice_mouth.sensitivity);
+        va->set_noise_gate (state.voice_mouth.noise_gate);
+        va->set_attack_ms  (state.voice_mouth.attack_ms);
+        va->set_release_ms (state.voice_mouth.release_ms);
+        va->set_band       (state.voice_mouth.band_lo_hz, state.voice_mouth.band_hi_hz);
+        va->set_enabled    (state.voice_mouth.enabled);
+    }
+
     if (!audio.start())
         std::cerr << "[main] spatial audio unavailable — continuing without audio\n";
 
@@ -5412,6 +5437,13 @@ int main(int argc, char* argv[]) {
             ? static_cast<IFaceController*>(&protoface_ctrl)
             : static_cast<IFaceController*>(&teensy);
     FaceProxy face_proxy(&active_face);
+
+    // Now that face_proxy exists, hook the audio engine's per-period
+    // (volume, mouth_open) into it. The audio thread reads face_drive_cb_
+    // through an atomic store inside std::function — safe to set live.
+    audio.set_face_drive_callback([&face_proxy](double vol, double mouth) {
+        face_proxy.set_audio_drive(vol, mouth);
+    });
 
     uint16_t sleep_tmo = 30;
     if (jser.contains("smartknob"))

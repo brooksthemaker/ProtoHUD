@@ -72,6 +72,13 @@ public:
     // seconds. Used by the boop sensor module — no-op on non-native backends
     // (the Teensy/daemon-Protoface paths run their own boop logic on-device).
     virtual void        trigger_boop(const std::string& /*expression*/, double /*duration_s*/) {}
+
+    // Push mic-driven volume + mouth_open intensity (both in [0, 1]) from the
+    // audio thread's voice analyzer. Native Protoface forwards to each panel's
+    // FaceState::set_audio so the mouth_open.png overlay blends in real time.
+    // No-op on non-native backends — those run their own audio reactivity
+    // on-device, if any.
+    virtual void        set_audio_drive(double /*volume*/, double /*mouth_open*/) {}
 };
 
 /**
@@ -121,6 +128,7 @@ public:
     void clear_face_image(const std::string& e) override { (*active_)->clear_face_image(e); }
     void set_face_by_name(const std::string& e) override { (*active_)->set_face_by_name(e); }
     void trigger_boop(const std::string& e, double d) override { (*active_)->trigger_boop(e, d); }
+    void set_audio_drive(double v, double m) override { (*active_)->set_audio_drive(v, m); }
 
     IFaceController* backend() const { return *active_; }
 

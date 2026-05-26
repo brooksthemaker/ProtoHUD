@@ -521,4 +521,11 @@ void NativeFaceController::trigger_boop(const std::string& expression, double du
     // in FaceState::update will bring expression back without our help.
 }
 
+void NativeFaceController::set_audio_drive(double volume, double mouth_open) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_audio(volume, mouth_open);
+    // Transient — no persistence on every audio frame.
+}
+
 } // namespace face

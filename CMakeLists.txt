@@ -197,6 +197,7 @@ set(SOURCES
     src/vitrue/xr_display.cpp
     src/vitrue/timewarp.cpp
     src/audio/audio_engine.cpp
+    src/audio/voice_analyzer.cpp
     src/post_process.cpp
     src/sensor/mpu9250.cpp
     src/sensor/mpr121_boop_sensor.cpp

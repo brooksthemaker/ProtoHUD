@@ -145,6 +145,20 @@ struct CameraFocusState {
     bool af_locked = false;
 };
 
+// Voice → mouth_open driving for the native face. Tunables read by main.cpp
+// from config.json at startup, written back via mutate_cfg on shutdown, and
+// menu-mutated through the audio_engine.voice() analyzer at runtime so the
+// next FFT cycle picks them up.
+struct VoiceMouthConfig {
+    bool   enabled    = false;
+    float  sensitivity = 1.0f;     // band RMS gain
+    float  noise_gate  = 0.02f;    // below this band RMS → mouth stays closed
+    float  attack_ms   = 30.f;     // envelope follower time when opening
+    float  release_ms  = 120.f;    // envelope follower time when closing
+    float  band_lo_hz  = 100.f;
+    float  band_hi_hz  = 3500.f;
+};
+
 // One boop-sensor zone's user-visible behaviour. The sensor reports zone
 // touches (no expression knowledge); main.cpp's on_boop callback reads this
 // to call IFaceController::trigger_boop with the per-zone expression. Indexed
@@ -695,6 +709,7 @@ struct AppState {
         { true, "happy",     0.6, 12 },
         { true, "happy",     0.6, 12 },
     };
+    VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;
     ZoomCropState        zoom_left, zoom_right;
