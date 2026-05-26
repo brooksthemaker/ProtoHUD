@@ -1016,8 +1016,8 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         switch (face) {
             case 1: markers = M_NUMBERS;  markCol = nvg_col_a(col_.text_fill, 220); break;
             case 2: markers = M_QUARTERS; break;
-            case 3: markers = M_QUARTERS; signature = 1;       // Halo (white)
-                    markCol = nvgRGBA(255, 255, 255, 200); handCol = nvgRGBA(255, 255, 255, 255); break;
+            case 3: markers = M_TICKS;    signature = 1;       // Halo (UNSC holo-cyan)
+                    markCol = nvgRGBA(120, 205, 235, 200); handCol = nvgRGBA(150, 235, 255, 255); break;
             case 4: markers = M_TICKS;    signature = 2;       // Solar (orange)
                     markCol = nvgRGBA(255, 160,  32, 210); handCol = nvgRGBA(255, 160,  32, 255); break;
             case 5: markers = M_NUMBERS;  signature = 3;       // Fallout (green)
@@ -1052,9 +1052,20 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         }
 
         // Per-theme signature flourish.
-        if (signature == 1) {                 // Halo — clean concentric ring
-            nvgBeginPath(vg); nvgCircle(vg, px, py, cr * 1.04f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 90)); nvgStrokeWidth(vg, 1.2f); nvgStroke(vg);
+        if (signature == 1) {                 // Halo — UNSC ring array (holo cyan)
+            // Thin holographic ring just outside the dial.
+            nvgBeginPath(vg); nvgCircle(vg, px, py, cr * 1.05f);
+            nvgStrokeColor(vg, nvgRGBA(150, 235, 255, 110)); nvgStrokeWidth(vg, 1.4f); nvgStroke(vg);
+            // Bright segment across the top — the Halo array arcing overhead.
+            const float topA = static_cast<float>(M_PI) * 1.5f;     // straight up (y-down)
+            nvgLineCap(vg, NVG_ROUND);
+            nvgBeginPath(vg); nvgArc(vg, px, py, cr * 1.05f, topA - 1.2f, topA + 1.2f, NVG_CW);
+            nvgStrokeColor(vg, nvgRGBA(150, 235, 255,  80)); nvgStrokeWidth(vg, 6.f); nvgStroke(vg);
+            nvgBeginPath(vg); nvgArc(vg, px, py, cr * 1.05f, topA - 1.2f, topA + 1.2f, NVG_CW);
+            nvgStrokeColor(vg, nvgRGBA(190, 245, 255, 220)); nvgStrokeWidth(vg, 2.f); nvgStroke(vg);
+            // Inner Forerunner accent ring around the hub.
+            nvgBeginPath(vg); nvgCircle(vg, px, py, cr * 0.32f);
+            nvgStrokeColor(vg, nvgRGBA(120, 205, 235, 110)); nvgStrokeWidth(vg, 1.f); nvgStroke(vg);
         } else if (signature == 2) {          // Solar — diagonal sun rays
             for (int k = 0; k < 4; ++k) {
                 const float a = (k / 4.f) * TWO_PI + HALF_PI * 0.5f;
@@ -1229,11 +1240,13 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         const float base_sz = std::clamp(r * 0.15f, 14.f, 26.f);
         const float lbl_h   = base_sz * 0.66f;             // labels ~⅓ smaller
         const float icon_sz = base_sz * 2.f;               // icons doubled
-        // When the panel is docked at the TOP (not bottom), swing the whole
-        // label/icon ring ~90° clockwise so it fans below the disc instead of off
-        // the top edge of the screen. Glyphs stay upright; only the arc moves.
-        const float arc_rot = s.hud_dock.bottom ? 0.f : -90.f;
-        const float arc0    = 120.f + arc_rot, arc1 = -24.f + arc_rot;  // shared label/icon span
+        // When the disc sits in the top half of the screen, swing the whole
+        // label/icon ring 90° clockwise so it fans below the disc instead of off
+        // the top edge. Position-based (not the dock flag) so it fires however the
+        // panel ended up there. Glyphs stay upright; only the arc position moves.
+        const bool  top_dock = py < fh * 0.5f;
+        const float arc_rot  = top_dock ? -90.f : 0.f;
+        const float arc0     = 120.f + arc_rot, arc1 = -24.f + arc_rot;  // shared label/icon span
 
         // ── Inner ring: page-label wedges (radial-menu look) ────────────────────
         static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE",
