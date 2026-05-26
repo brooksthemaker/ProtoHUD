@@ -438,15 +438,28 @@ static void import_gif_into_slot(MenuSystem* menu,
 namespace {
 struct FaceSlot { const char* expression; const char* label; };
 constexpr FaceSlot kFaceSlots[] = {
-    {"neutral",    "Neutral"},
-    {"happy",      "Happy"},
-    {"angry",      "Angry"},
-    {"sad",        "Sad"},
-    {"surprised",  "Surprised"},
-    {"blink",      "Blink"},
-    {"mouth_open", "Mouth Open"},
+    {"neutral",   "Neutral"},
+    {"happy",     "Happy"},
+    {"angry",     "Angry"},
+    {"sad",       "Sad"},
+    {"surprised", "Surprised"},
+    {"blink",     "Blink"},
 };
 constexpr int kFaceSlotCount = sizeof(kFaceSlots) / sizeof(kFaceSlots[0]);
+
+// Mouth-shape overlays (visemes). Not expressions in their own right — they
+// blend on top of whichever expression is active when the voice analyzer
+// drives mouth_open > 0 and (later) viseme selection picks one of these
+// shapes based on spectral centroid. file_stem maps to faces/<active>/<stem>.png,
+// canonicalised by face_image_path() inside NativeFaceController.
+struct MouthShape { const char* file_stem; const char* label; };
+constexpr MouthShape kMouthShapes[] = {
+    {"mouth_small", "Small Open"},   // closed-vowel / M-N-D family
+    {"mouth_open",  "Wide Open"},    // AH family (was the single mouth_open)
+    {"mouth_smile", "Smile"},        // EE family
+    {"mouth_round", "Round"},        // OOH family
+};
+constexpr int kMouthShapeCount = sizeof(kMouthShapes) / sizeof(kMouthShapes[0]);
 } // namespace
 
 // Open the face image picker for a given expression. On commit copies the
@@ -995,6 +1008,128 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> face_files_menu;
     for (int i = 0; i < kFaceSlotCount; ++i)
         face_files_menu.push_back(face_slot_row(i));
+
+    // ── Mouth Shapes (viseme overlays) ───────────────────────────────────────
+    // Same import/preview pipeline as the expression slots, minus Play (these
+    // are overlay assets — calling set_face_by_name("mouth_*") would just
+    // fall back to neutral since they aren't entries in the loader's
+    // expressions_ map). The voice analyzer's spectral centroid drives shape
+    // selection at the FaceLoader layer in a later patch; this one only adds
+    // the import slots so users can author the assets ahead of time.
+    auto mouth_preview = std::make_shared<FacePreview>();
+
+    MenuContextPanelDraw draw_mouth_preview =
+        [mouth_preview, teensy](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            FacePreview& fp = *mouth_preview;
+            std::string path, mouth_label;
+            if (fp.want >= 0 && fp.want < kMouthShapeCount) {
+                const auto& s = kMouthShapes[fp.want];
+                mouth_label = s.label;
+                if (teensy->face_image_exists(s.file_stem))
+                    path = teensy->face_image_path(s.file_stem);
+            }
+            const bool have = !path.empty();
+
+            std::filesystem::file_time_type mt{};
+            if (have) {
+                std::error_code ec;
+                mt = std::filesystem::last_write_time(path, ec);
+            }
+            if (have && (path != fp.loaded_path || mt != fp.loaded_mtime)) {
+                fp.image        = face::load_png_rgba(path, 256, 128);
+                fp.loaded_path  = path;
+                fp.loaded_mtime = mt;
+            } else if (!have && !fp.loaded_path.empty()) {
+                fp.image        = cv::Mat();
+                fp.loaded_path.clear();
+                fp.loaded_mtime = {};
+            }
+
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
+            const float ph = pw * 0.5f;
+            const float px = o.x + (sz.x - pw) * 0.5f;
+            const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
+            dl->AddRectFilled({px, py}, {px + pw, py + ph},
+                              IM_COL32(10, 16, 22, 190));
+
+            if (have && !fp.image.empty() && fp.image.isContinuous()) {
+                if (fp.tex == 0) {
+                    glGenTextures(1, &fp.tex);
+                    glBindTexture(GL_TEXTURE_2D, fp.tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                glBindTexture(GL_TEXTURE_2D, fp.tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fp.image.cols, fp.image.rows, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, fp.image.data);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(fp.tex)),
+                             {px, py}, {px + pw, py + ph});
+            } else {
+                const char* msg = have ? "Decode failed" : "(empty)";
+                const ImVec2 ts = ImGui::CalcTextSize(msg);
+                dl->AddText({px + pw * 0.5f - ts.x * 0.5f,
+                             py + ph * 0.5f - ts.y * 0.5f},
+                            IM_COL32(180, 190, 200, 200), msg);
+            }
+
+            if (!mouth_label.empty()) {
+                const ImVec2 ns = ImGui::CalcTextSize(mouth_label.c_str());
+                dl->AddText({o.x + sz.x * 0.5f - ns.x * 0.5f, o.y + sz.y - ns.y},
+                            IM_COL32(220, 230, 235, 230), mouth_label.c_str());
+            }
+        };
+
+    auto mouth_slot_row = [&, mouth_preview](int idx) -> MenuItem {
+        const std::string expr  = kMouthShapes[idx].file_stem;
+        const std::string label = kMouthShapes[idx].label;
+
+        MenuItem m;
+        m.type  = MenuItemType::SUBMENU;
+        m.label = label;
+
+        m.label_fn = [teensy, expr, label]() -> std::string {
+            return teensy->face_image_exists(expr) ? label : (label + " (empty)");
+        };
+        m.on_highlight = [mouth_preview, idx]{ mouth_preview->want = idx; };
+
+        auto bound_now = [teensy, expr]{ return teensy->face_image_exists(expr); };
+
+        MenuItem replace = leaf("Replace...",
+            [teensy, menu_sys_pp, expr, label]() {
+                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                      teensy, expr, label);
+            });
+        replace.visible_fn = bound_now;
+
+        MenuItem clear = leaf("Clear",
+            [teensy, expr]{ teensy->clear_face_image(expr); });
+        clear.visible_fn = bound_now;
+
+        MenuItem imp = leaf("Import...",
+            [teensy, menu_sys_pp, expr, label]() {
+                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                      teensy, expr, label);
+            });
+        imp.visible_fn = [bound_now]{ return !bound_now(); };
+
+        m.children = { std::move(replace), std::move(clear), std::move(imp) };
+        return m;
+    };
+
+    std::vector<MenuItem> face_mouth_menu;
+    for (int i = 0; i < kMouthShapeCount; ++i)
+        face_mouth_menu.push_back(mouth_slot_row(i));
+
+    face_files_menu.push_back(
+        with_desc(with_panel(submenu("Mouth Shapes", std::move(face_mouth_menu)),
+                             "Mouth Preview", draw_mouth_preview),
+                  "Viseme overlays. Bond on top of the active expression when "
+                  "the voice analyzer drives mouth_open > 0. Asset filenames: "
+                  "mouth_small.png, mouth_open.png, mouth_smile.png, "
+                  "mouth_round.png in the active face folder."));
 
     // ── Backgrounds ──────────────────────────────────────────────────────────
     // Landing-page background library. Unlike GIFs/Faces this isn't slot-based:
