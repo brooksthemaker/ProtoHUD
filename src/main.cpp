@@ -683,7 +683,9 @@ static std::vector<MenuItem> build_menu(
     // uploaded to a GL texture each frame. scan_folder() matches the face
     // controller's order, so the slot index equals the play_gif() index.
     struct GifPreview {
-        face::GifPlayer          player{160, 160};
+        // 256×128 matches the typical HUB75 panel-pair canvas (2:1, often 128×64
+        // native) at 2x. Frames are NEAREST-resized to keep the pixel-art look.
+        face::GifPlayer          player{256, 128};
         std::vector<std::string> files;
         bool        scanned = false;
         std::string loaded_path;       // file currently decoded ("" = none)
@@ -725,11 +727,13 @@ static std::vector<MenuItem> build_menu(
             }
             gp.player.update(ImGui::GetIO().DeltaTime);
 
-            // Square thumbnail, centred, leaving a line for the name.
-            const float side = std::min(sz.x, sz.y) * 0.82f;
-            const float px = o.x + (sz.x - side) * 0.5f;
-            const float py = o.y + (sz.y - side) * 0.5f - 6.f;
-            dl->AddRectFilled({px, py}, {px + side, py + side}, IM_COL32(10, 16, 22, 190));
+            // 2:1 thumbnail (matches the HUB75 panel-pair canvas aspect),
+            // centred, leaving a line for the name beneath.
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
+            const float ph = pw * 0.5f;
+            const float px = o.x + (sz.x - pw) * 0.5f;
+            const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
+            dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10, 16, 22, 190));
 
             cv::Mat fr = gp.player.get_frame();   // CV_8UC4 RGBA; empty when idle
             if (!fr.empty() && fr.isContinuous()) {
@@ -746,11 +750,11 @@ static std::vector<MenuItem> build_menu(
                              GL_RGBA, GL_UNSIGNED_BYTE, fr.data);
                 glBindTexture(GL_TEXTURE_2D, 0);
                 dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(gp.tex)),
-                             {px, py}, {px + side, py + side});
+                             {px, py}, {px + pw, py + ph});
             } else {
                 const char* msg = !have ? "(empty)" : "Decode failed";
                 const ImVec2 ts = ImGui::CalcTextSize(msg);
-                dl->AddText({px + side * 0.5f - ts.x * 0.5f, py + side * 0.5f - ts.y * 0.5f},
+                dl->AddText({px + pw * 0.5f - ts.x * 0.5f, py + ph * 0.5f - ts.y * 0.5f},
                             IM_COL32(180, 190, 200, 200), msg);
             }
 
@@ -885,7 +889,9 @@ static std::vector<MenuItem> build_menu(
                 mt = std::filesystem::last_write_time(path, ec);
             }
             if (have && (path != fp.loaded_path || mt != fp.loaded_mtime)) {
-                fp.image        = face::load_png_rgba(path, 192, 192);
+                // 256×128 = 2:1 (HUB75 panel-pair aspect), NEAREST resize
+                // preserves the pixel-art look.
+                fp.image        = face::load_png_rgba(path, 256, 128);
                 fp.loaded_path  = path;
                 fp.loaded_mtime = mt;
             } else if (!have && !fp.loaded_path.empty()) {
@@ -894,10 +900,13 @@ static std::vector<MenuItem> build_menu(
                 fp.loaded_mtime = {};
             }
 
-            const float side = std::min(sz.x, sz.y) * 0.82f;
-            const float px = o.x + (sz.x - side) * 0.5f;
-            const float py = o.y + (sz.y - side) * 0.5f - 6.f;
-            dl->AddRectFilled({px, py}, {px + side, py + side},
+            // 2:1 thumbnail (matches HUB75 panel-pair canvas), centred, leaving
+            // a line for the expression label beneath.
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
+            const float ph = pw * 0.5f;
+            const float px = o.x + (sz.x - pw) * 0.5f;
+            const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
+            dl->AddRectFilled({px, py}, {px + pw, py + ph},
                               IM_COL32(10, 16, 22, 190));
 
             if (have && !fp.image.empty() && fp.image.isContinuous()) {
@@ -914,12 +923,12 @@ static std::vector<MenuItem> build_menu(
                              GL_RGBA, GL_UNSIGNED_BYTE, fp.image.data);
                 glBindTexture(GL_TEXTURE_2D, 0);
                 dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(fp.tex)),
-                             {px, py}, {px + side, py + side});
+                             {px, py}, {px + pw, py + ph});
             } else {
                 const char* msg = have ? "Decode failed" : "(empty)";
                 const ImVec2 ts = ImGui::CalcTextSize(msg);
-                dl->AddText({px + side * 0.5f - ts.x * 0.5f,
-                             py + side * 0.5f - ts.y * 0.5f},
+                dl->AddText({px + pw * 0.5f - ts.x * 0.5f,
+                             py + ph * 0.5f - ts.y * 0.5f},
                             IM_COL32(180, 190, 200, 200), msg);
             }
 
