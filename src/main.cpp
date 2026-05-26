@@ -5700,6 +5700,10 @@ int main(int argc, char* argv[]) {
         splash_cfg.title         = js.value("title",         splash_cfg.title);
         splash_cfg.subtitle      = js.value("subtitle",      splash_cfg.subtitle);
     }
+    // ── Splash + landing temporarily disabled (re-enable by removing the
+    // two assignments below). Keeps all the SplashScreen / LandingState
+    // code in place; just forces both paths to short-circuit.
+    splash_cfg.enabled = false;
     // Resolve relative image path against the binary directory.
     if (!splash_cfg.image_path.empty() && splash_cfg.image_path[0] != '/')
         splash_cfg.image_path = res(splash_cfg.image_path);
@@ -6512,6 +6516,10 @@ int main(int argc, char* argv[]) {
     if (!active_profile_name.empty()) landing.active = false;
     // User opted to bypass the landing screen (System > Skip Startup Screen).
     if (state.skip_landing) landing.active = false;
+    // ── Temporarily disabled (landing page + profile picker). Keep the
+    // surrounding render / nav code in place so re-enabling is a one-line
+    // delete. Pairs with the splash_cfg.enabled = false above.
+    landing.active = false;
     landing.countdown_on = (landing_continue_timeout_s > 0.0) && landing.active;
 
     auto landing_count = [&landing, &profiles]() -> int {
