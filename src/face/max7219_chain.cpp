@@ -1,4 +1,5 @@
 #include "max7219_chain.h"
+#include "max7219_gpio_bus.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -35,24 +36,44 @@ Max7219Chain::Max7219Chain(Config cfg) : cfg_(std::move(cfg)) {
 Max7219Chain::~Max7219Chain() { close(); }
 
 bool Max7219Chain::open() {
-    if (fd_ >= 0) return true;
-    fd_ = ::open(cfg_.spi_device.c_str(), O_WRONLY);
-    if (fd_ < 0) {
-        std::fprintf(stderr, "[max7219:%s] cannot open %s: %s\n",
-                     cfg_.name.c_str(), cfg_.spi_device.c_str(),
-                     std::strerror(errno));
-        return false;
-    }
-    uint8_t  mode  = SPI_MODE_0;
-    uint8_t  bits  = 8;
-    uint32_t speed = static_cast<uint32_t>(cfg_.speed_hz);
-    if (ioctl(fd_, SPI_IOC_WR_MODE,          &mode)  < 0 ||
-        ioctl(fd_, SPI_IOC_WR_BITS_PER_WORD, &bits)  < 0 ||
-        ioctl(fd_, SPI_IOC_WR_MAX_SPEED_HZ,  &speed) < 0) {
-        std::fprintf(stderr, "[max7219:%s] spidev ioctl failed: %s\n",
-                     cfg_.name.c_str(), std::strerror(errno));
-        close();
-        return false;
+    if (cfg_.transport == Transport::Spidev) {
+        if (fd_ >= 0) return true;
+        fd_ = ::open(cfg_.spi_device.c_str(), O_WRONLY);
+        if (fd_ < 0) {
+            std::fprintf(stderr, "[max7219:%s] cannot open %s: %s\n",
+                         cfg_.name.c_str(), cfg_.spi_device.c_str(),
+                         std::strerror(errno));
+            return false;
+        }
+        uint8_t  mode  = SPI_MODE_0;
+        uint8_t  bits  = 8;
+        uint32_t speed = static_cast<uint32_t>(cfg_.speed_hz);
+        if (ioctl(fd_, SPI_IOC_WR_MODE,          &mode)  < 0 ||
+            ioctl(fd_, SPI_IOC_WR_BITS_PER_WORD, &bits)  < 0 ||
+            ioctl(fd_, SPI_IOC_WR_MAX_SPEED_HZ,  &speed) < 0) {
+            std::fprintf(stderr, "[max7219:%s] spidev ioctl failed: %s\n",
+                         cfg_.name.c_str(), std::strerror(errno));
+            close();
+            return false;
+        }
+    } else {
+        // GPIO transport — the panel output must have given us a bus + a CS
+        // pin must be configured. Failure to claim CS leaves cs_line_ closed
+        // so is_open() returns false and show()/close() are no-ops.
+        if (!gpio_bus_ || !gpio_bus_->is_open() || cfg_.gpio_cs_pin < 0) {
+            std::fprintf(stderr, "[max7219:%s] gpio transport missing bus/CS\n",
+                         cfg_.name.c_str());
+            return false;
+        }
+        const uint32_t cs_offset = static_cast<uint32_t>(cfg_.gpio_cs_pin);
+        if (!cs_line_.open(cfg_.gpio_chip, &cs_offset, 1, "max7219-cs")) {
+            std::fprintf(stderr, "[max7219:%s] failed to claim CS GPIO %d on %s\n",
+                         cfg_.name.c_str(), cfg_.gpio_cs_pin,
+                         cfg_.gpio_chip.c_str());
+            return false;
+        }
+        // Idle CS high (MAX7219 latches on CS rising edge).
+        cs_line_.set_values(1, 1);
     }
 
     // Initial register sweep — same value to every chip via the chain.
@@ -75,27 +96,41 @@ bool Max7219Chain::open() {
 }
 
 void Max7219Chain::close() {
-    if (fd_ < 0) return;
+    if (!is_open()) return;
     // Best effort: blank, then enter shutdown so the matrix doesn't keep
     // the last frame lit if our process exits unexpectedly.
     std::vector<uint8_t> zero(total_chips_, 0);
     for (uint8_t r = 0; r < 8; ++r) write_chain_register(REG_DIGIT_0 + r, zero.data());
     write_chain_register(REG_SHUTDOWN, zero.data());        // bcast 0 → shutdown
-    ::close(fd_);
-    fd_ = -1;
+    if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
+    cs_line_.close();
 }
 
 bool Max7219Chain::write_chain_register(uint8_t reg, const uint8_t* per_chip) {
-    if (fd_ < 0) return false;
-    // SPI is shifted MSB-first; the last byte written lands in chip 0 (closest
-    // to the master), so iterate per_chip in reverse.
-    uint8_t* dst = tx_buf_.data();
-    for (int i = total_chips_ - 1; i >= 0; --i) {
-        *dst++ = reg;
-        *dst++ = per_chip[i];
+    if (cfg_.transport == Transport::Spidev) {
+        if (fd_ < 0) return false;
+        // SPI is shifted MSB-first; the last byte written lands in chip 0
+        // (closest to the master), so iterate per_chip in reverse.
+        uint8_t* dst = tx_buf_.data();
+        for (int i = total_chips_ - 1; i >= 0; --i) {
+            *dst++ = reg;
+            *dst++ = per_chip[i];
+        }
+        const ssize_t n = ::write(fd_, tx_buf_.data(), tx_buf_.size());
+        return n == static_cast<ssize_t>(tx_buf_.size());
     }
-    const ssize_t n = ::write(fd_, tx_buf_.data(), tx_buf_.size());
-    return n == static_cast<ssize_t>(tx_buf_.size());
+
+    // GPIO bit-bang: CS low for the duration of the write; same MSB-first
+    // shift order as the SPI path so chip 0 (closest to the master) ends up
+    // with the LAST byte pair we send.
+    if (!cs_line_.is_open() || !gpio_bus_ || !gpio_bus_->is_open()) return false;
+    cs_line_.set_values(0, 1);                              // CS low (latch start)
+    for (int i = total_chips_ - 1; i >= 0; --i) {
+        gpio_bus_->shift_byte(reg);
+        gpio_bus_->shift_byte(per_chip[i]);
+    }
+    cs_line_.set_values(1, 1);                              // CS high (latches into chips)
+    return true;
 }
 
 int Max7219Chain::chip_chain_index(int gc, int gr) const {

@@ -218,12 +218,22 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc) {
         face::Max7219PanelOutput::Config mc;
         if (jpf && jpf->contains("max7219")) {
             const auto& jm = (*jpf)["max7219"];
+            // Optional shared GPIO bus for chains whose transport is "gpio".
+            mc.gpio_chip    = jm.value("gpio_chip",    std::string("/dev/gpiochip0"));
+            mc.gpio_din_pin = jm.value("gpio_din_pin", -1);
+            mc.gpio_clk_pin = jm.value("gpio_clk_pin", -1);
             if (jm.contains("chains") && jm["chains"].is_array()) {
                 for (const auto& jc : jm["chains"]) {
                     face::Max7219Chain::Config cc;
                     cc.name        = jc.value("name",        std::string("chain"));
+                    const std::string tr = jc.value("transport", std::string("spidev"));
+                    cc.transport   = (tr == "gpio")
+                        ? face::Max7219Chain::Transport::Gpio
+                        : face::Max7219Chain::Transport::Spidev;
                     cc.spi_device  = jc.value("spi_device",  std::string("/dev/spidev0.1"));
                     cc.speed_hz    = jc.value("speed_hz",    1'000'000);
+                    cc.gpio_chip   = jc.value("gpio_chip",   mc.gpio_chip);
+                    cc.gpio_cs_pin = jc.value("gpio_cs_pin", -1);
                     cc.cols_chips  = jc.value("cols_chips",  1);
                     cc.rows_chips  = jc.value("rows_chips",  1);
                     cc.canvas_x    = jc.value("canvas_x",    0);
