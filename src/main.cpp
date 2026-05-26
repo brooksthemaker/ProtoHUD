@@ -59,6 +59,7 @@
 #include "face/native_face_controller.h"
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
+#include "face/max7219_panel_output.h"
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -175,6 +176,53 @@ static void apply_hud_dock(AppState& s) {
 // Build a face::RenderConfig from config.json's "protoface" section. Falls back
 // to the standard 2-panel mirrored layout (face_left + face_right) and to the
 // Protoface submodule's asset folders under $HOME/protohud/Protoface.
+
+// Build the PanelOutput that NativeFaceController writes into. Reads
+// cfg["protoface"]["backend"]:
+//   "hub75"   (default) → ShmPusherOutput; panel_driver.py shuttles to LEDs.
+//   "max7219"          → Max7219PanelOutput direct-to-spidev, multi-chain.
+// Pulled out as a free helper so both the startup path and the menu's
+// hot-swap action use the exact same construction logic.
+static std::unique_ptr<face::PanelOutput>
+pf_build_panel_output(const json& cfg, const face::RenderConfig& rc) {
+    const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
+    const std::string backend = jpf ? jpf->value("backend", std::string("hub75"))
+                                    : std::string("hub75");
+    if (backend == "max7219") {
+        face::Max7219PanelOutput::Config mc;
+        if (jpf && jpf->contains("max7219")) {
+            const auto& jm = (*jpf)["max7219"];
+            if (jm.contains("chains") && jm["chains"].is_array()) {
+                for (const auto& jc : jm["chains"]) {
+                    face::Max7219Chain::Config cc;
+                    cc.name        = jc.value("name",        std::string("chain"));
+                    cc.spi_device  = jc.value("spi_device",  std::string("/dev/spidev0.1"));
+                    cc.speed_hz    = jc.value("speed_hz",    1'000'000);
+                    cc.cols_chips  = jc.value("cols_chips",  1);
+                    cc.rows_chips  = jc.value("rows_chips",  1);
+                    cc.canvas_x    = jc.value("canvas_x",    0);
+                    cc.canvas_y    = jc.value("canvas_y",    0);
+                    cc.intensity   = static_cast<uint8_t>(
+                        std::clamp(jc.value("intensity", 4),   0,   15));
+                    cc.threshold   = static_cast<uint8_t>(
+                        std::clamp(jc.value("threshold", 80),  0,  255));
+                    const std::string mt = jc.value("module_type", std::string("fc16"));
+                    cc.module_type = (mt == "generic1088" || mt == "generic")
+                        ? face::Max7219Chain::ModuleType::Generic1088
+                        : face::Max7219Chain::ModuleType::FC16;
+                    const std::string co = jc.value("chain_order", std::string("serpentine"));
+                    cc.chain_order = (co == "row_major" || co == "row-major")
+                        ? face::Max7219Chain::ChainOrder::RowMajor
+                        : face::Max7219Chain::ChainOrder::Serpentine;
+                    mc.chains.push_back(std::move(cc));
+                }
+            }
+        }
+        return std::make_unique<face::Max7219PanelOutput>(std::move(mc));
+    }
+    return std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h);
+}
+
 static face::RenderConfig pf_build_render_config(const json& cfg) {
     face::RenderConfig rc;
     const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
@@ -5022,11 +5070,17 @@ int main(int argc, char* argv[]) {
     // In native mode, auto-launch scripts/panel_driver.py to push frames to the
     // HUB75 panels (set false if you run the driver yourself or only want preview).
     bool pf_launch_driver = true;
+    // Backend selects which LED hardware NativeFaceController writes into:
+    //   "hub75"   — HUB75 panels via the Python piomatter shim (default)
+    //   "max7219" — direct SPI to one or more MAX7219 daisy-chains; the
+    //               Python driver isn't needed and we don't launch it.
+    std::string pf_backend = "hub75";
     if (cfg.contains("protoface")) {
         auto& jpf = cfg["protoface"];
         pf_autostart     = jval(jpf, "autostart", true);
         pf_mode          = jpf.value("mode", std::string("daemon"));
         pf_launch_driver = jval(jpf, "panel_driver", true);
+        pf_backend       = jpf.value("backend", std::string("hub75"));
         if (jpf.contains("preview")) {
             auto& jpv = jpf["preview"];
             protoface_preview_cfg.anchor_x = jval(jpv, "anchor_x", protoface_preview_cfg.anchor_x);
@@ -5741,7 +5795,7 @@ int main(int argc, char* argv[]) {
         // Auto-save the live look next to config.json so menu changes persist.
         rc.state_path = (fs::path(cfg_path).parent_path() / "protoface_state.json").string();
         native_ctrl = std::make_unique<face::NativeFaceController>(
-            rc, std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h));
+            rc, pf_build_panel_output(cfg, rc));
         native_ctrl->start();
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
         std::cout << "[main] Protoface: native in-process renderer\n";
@@ -5751,7 +5805,10 @@ int main(int argc, char* argv[]) {
         // shell command: the `nohup … &` form via std::system was failing
         // silently (no process, no log). Here we open the log in C++ so it's
         // always written, and setsid detaches the driver into its own session.
-        if (pf_launch_driver) {
+        // panel_driver.py is the HUB75-via-piomatter shim — only relevant
+        // when the renderer writes into a /dev/shm frame. MAX7219 writes
+        // directly to spidev and needs no Python helper.
+        if (pf_launch_driver && pf_backend == "hub75") {
             std::string drv = bin_dir + "/../scripts/panel_driver.py";
             std::string cw  = std::to_string(rc.canvas_w);
             std::string chh = std::to_string(rc.canvas_h);
@@ -6564,6 +6621,7 @@ int main(int argc, char* argv[]) {
         cfg["pip"]["cam2"]["rotation"]  = rotation_to_str(pip_overlay_cfg2.rotation);
 
         cfg["protoface"]["mode"]                = pf_mode;
+        cfg["protoface"]["backend"]             = pf_backend;
         cfg["protoface"]["autostart"]           = pf_autostart;
         cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
         cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;

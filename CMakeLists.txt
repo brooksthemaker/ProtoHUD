@@ -298,6 +298,8 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/particles.cpp
     src/face/gif_player.cpp
     src/face/shm_pusher_output.cpp
+    src/face/max7219_chain.cpp
+    src/face/max7219_panel_output.cpp
     src/face/native_face_controller.cpp
 )
 target_include_directories(protoface_native PRIVATE
