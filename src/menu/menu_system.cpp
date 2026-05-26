@@ -1189,9 +1189,23 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
         if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) face_editor_.cursor_step(+1, 0);
         if (ImGui::IsKeyPressed(ImGuiKey_Space))      face_editor_.primary();
         if (ImGui::IsKeyPressed(ImGuiKey_X))          face_editor_.secondary();
-        if (ImGui::IsKeyPressed(ImGuiKey_M))          face_editor_.tertiary();
+        if (ImGui::IsKeyPressed(ImGuiKey_Y) ||
+            ImGui::IsKeyPressed(ImGuiKey_M))          face_editor_.tertiary();
         if (ImGui::IsKeyPressed(ImGuiKey_Z))          face_editor_.undo();
         if (ImGui::IsKeyPressed(ImGuiKey_S))          face_editor_.save();
+        // Direct tool selection (matches the footer hints).
+        if (ImGui::IsKeyPressed(ImGuiKey_P))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
+        if (ImGui::IsKeyPressed(ImGuiKey_E))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
+        if (ImGui::IsKeyPressed(ImGuiKey_B))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);
+        if (ImGui::IsKeyPressed(ImGuiKey_I))          face_editor_.set_tool(menu::FaceEditor::Tool::Eyedrop);
+        // Brush size — Minus shrinks, Equals/Plus grows. Clamped 0..2 by
+        // the setter itself, so we just pass current ± 1.
+        if (ImGui::IsKeyPressed(ImGuiKey_Minus) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract))
+            face_editor_.set_brush_size(face_editor_.brush_size() - 1);
+        if (ImGui::IsKeyPressed(ImGuiKey_Equal) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadAdd))
+            face_editor_.set_brush_size(face_editor_.brush_size() + 1);
         if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))  face_editor_.cycle_palette(-1);
         if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) face_editor_.cycle_palette(+1);
         const ImVec2 mp = ImGui::GetMousePos();

@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <limits>
+#include <utility>
+#include <vector>
 
 #include <opencv2/imgcodecs.hpp>
 
@@ -149,14 +152,90 @@ void FaceEditor::paint_pixel(int x, int y) {
     }
 }
 
-void FaceEditor::apply_at_cursor() {
-    push_undo();
-    paint_pixel(cursor_x_, cursor_y_);
-    if (mirror_) {
-        // Mirror across the vertical centre of the bbox.
-        const int mirror_x = bbox_.x + (bbox_.x + bbox_.width - 1) - cursor_x_;
-        if (mirror_x != cursor_x_) paint_pixel(mirror_x, cursor_y_);
+void FaceEditor::paint_brush(int cx, int cy) {
+    // brush_size_ is a radius in pixels (0 = single, 1 = 3x3, 2 = 5x5).
+    // Each cell of the square fires paint_pixel which is bbox/covered safe.
+    const int r = brush_size_;
+    for (int dy = -r; dy <= r; ++dy)
+        for (int dx = -r; dx <= r; ++dx)
+            paint_pixel(cx + dx, cy + dy);
+}
+
+void FaceEditor::flood_fill(int sx, int sy) {
+    if (!inside_covered(sx, sy)) return;
+    const cv::Vec4b seed = canvas_.at<cv::Vec4b>(sy, sx);
+    // Pick the target colour the bucket will write, then bail if it's the
+    // same as the seed (nothing to do — saves a noisy undo entry).
+    cv::Vec4b target;
+    if (tool_ == Tool::Eraser) {
+        target = cv::Vec4b(0, 0, 0, 0);
+    } else if (mode_ == Mode::Mono) {
+        target = cv::Vec4b(255, 255, 255, 255);
+    } else {
+        const uint32_t hex = palette_.empty() ? 0xffffff
+                              : palette_[palette_idx_ % palette_.size()];
+        target = cv::Vec4b(static_cast<uint8_t>((hex >> 16) & 0xFF),
+                           static_cast<uint8_t>((hex >>  8) & 0xFF),
+                           static_cast<uint8_t>( hex        & 0xFF), 255);
     }
+    if (seed == target) return;
+
+    // Iterative scanline-ish 4-connected flood fill. Bounded by the bbox.
+    std::vector<std::pair<int, int>> stack;
+    stack.reserve(64);
+    stack.emplace_back(sx, sy);
+    while (!stack.empty()) {
+        const auto [x, y] = stack.back();
+        stack.pop_back();
+        if (!inside_covered(x, y)) continue;
+        if (canvas_.at<cv::Vec4b>(y, x) != seed) continue;
+        canvas_.at<cv::Vec4b>(y, x) = target;
+        stack.emplace_back(x + 1, y);
+        stack.emplace_back(x - 1, y);
+        stack.emplace_back(x, y + 1);
+        stack.emplace_back(x, y - 1);
+    }
+}
+
+void FaceEditor::eyedrop_at(int x, int y) {
+    if (mode_ != Mode::Color || palette_.empty()) return;
+    if (!inside_covered(x, y)) return;
+    const cv::Vec4b pix = canvas_.at<cv::Vec4b>(y, x);
+    if (pix[3] == 0) return;   // transparent — nothing to pick
+    // Choose the palette entry closest to the sampled pixel (sum of squared
+    // channel differences). Keeps the picker self-contained — no "custom
+    // colour" slot needed yet.
+    int best = 0;
+    int best_d = std::numeric_limits<int>::max();
+    for (size_t i = 0; i < palette_.size(); ++i) {
+        const int pr = (palette_[i] >> 16) & 0xFF;
+        const int pg = (palette_[i] >>  8) & 0xFF;
+        const int pb =  palette_[i]        & 0xFF;
+        const int dr = pr - pix[0];
+        const int dg = pg - pix[1];
+        const int db = pb - pix[2];
+        const int d  = dr * dr + dg * dg + db * db;
+        if (d < best_d) { best_d = d; best = static_cast<int>(i); }
+    }
+    palette_idx_ = best;
+}
+
+void FaceEditor::apply_at_cursor() {
+    if (tool_ == Tool::Eyedrop) {
+        // Sampling doesn't mutate the canvas — no undo push, no mirror.
+        eyedrop_at(cursor_x_, cursor_y_);
+        return;
+    }
+    push_undo();
+    const int mirror_x = bbox_.x + (bbox_.x + bbox_.width - 1) - cursor_x_;
+    const bool do_mirror = mirror_ && mirror_x != cursor_x_;
+    if (tool_ == Tool::Bucket) {
+        flood_fill(cursor_x_, cursor_y_);
+        if (do_mirror) flood_fill(mirror_x, cursor_y_);
+        return;
+    }
+    paint_brush(cursor_x_, cursor_y_);
+    if (do_mirror) paint_brush(mirror_x, cursor_y_);
 }
 
 void FaceEditor::cursor_step(int dx, int dy) {
@@ -166,8 +245,26 @@ void FaceEditor::cursor_step(int dx, int dy) {
 }
 
 void FaceEditor::primary()   { if (open_) apply_at_cursor(); }
-void FaceEditor::secondary() { if (open_) tool_ = (tool_ == Tool::Pencil) ? Tool::Eraser : Tool::Pencil; }
+
+void FaceEditor::secondary() {
+    if (!open_) return;
+    // Cycle Pencil → Eraser → Bucket → Eyedrop → Pencil…
+    tool_ = static_cast<Tool>((static_cast<int>(tool_) + 1) % kToolCount);
+}
+
 void FaceEditor::tertiary()  { if (open_) mirror_ = !mirror_; }
+
+void FaceEditor::set_tool(Tool t) {
+    if (!open_) return;
+    tool_ = t;
+}
+
+void FaceEditor::set_brush_size(int radius) {
+    if (!open_) return;
+    if (radius < 0) radius = 0;
+    if (radius > 2) radius = 2;
+    brush_size_ = radius;
+}
 
 void FaceEditor::back() {
     if (!open_) return;
@@ -233,14 +330,22 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                 title_.c_str());
     cy += fs * 1.6f + 6.f;
 
-    // Subtitle: dims + cursor + tool + mirror + palette idx.
-    char sub[160];
-    const char* tool_str = (tool_ == Tool::Pencil) ? "Pencil" : "Eraser";
+    // Subtitle: dims + cursor + tool + brush + mirror + mode.
+    char sub[192];
+    const char* tool_str = "Pencil";
+    switch (tool_) {
+    case Tool::Pencil:  tool_str = "Pencil";  break;
+    case Tool::Eraser:  tool_str = "Eraser";  break;
+    case Tool::Bucket:  tool_str = "Bucket";  break;
+    case Tool::Eyedrop: tool_str = "Eyedrop"; break;
+    }
+    const int brush_side = 1 + brush_size_ * 2;
     std::snprintf(sub, sizeof(sub),
-        "%dx%d  cursor (%d,%d)  %s%s%s",
+        "%dx%d  cursor (%d,%d)  %s  brush %dx%d%s%s",
         bbox_.width, bbox_.height,
         cursor_x_, cursor_y_,
-        tool_str, mirror_ ? "  Mirror" : "",
+        tool_str, brush_side, brush_side,
+        mirror_ ? "  Mirror" : "",
         mode_ == Mode::Color ? "  Color" : "  Mono");
     dl->AddText(font, fs * 0.9f, {cx0, cy}, IM_COL32(170, 180, 190, 230), sub);
     cy += fs * 0.9f + 10.f;
@@ -344,11 +449,12 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         }
     }
 
-    // Footer hints.
+    // Footer hints — keys here mirror what menu_system.cpp polls when the
+    // editor is the active overlay. Color mode adds the palette controls.
     const char* hints =
         (mode_ == Mode::Color)
-        ? "Select: paint    X: tool    Y: mirror    LB/RB: color    Z: undo    S: save    Back: cancel"
-        : "Select: paint    X: tool    Y: mirror    Z: undo    S: save    Back: cancel";
+        ? "Select: paint    X: cycle tool    P/E/B/I: tool    -/+: brush    Y/M: mirror    [/]: color    Z: undo    S: save    Back: cancel"
+        : "Select: paint    X: cycle tool    P/E/B/I: tool    -/+: brush    Y/M: mirror    Z: undo    S: save    Back: cancel";
     dl->AddText(font, fs * 0.9f, {cx0, pmax.y - footer_h + 6.f},
                 IM_COL32(170, 185, 200, 220), hints);
 }

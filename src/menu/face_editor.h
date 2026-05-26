@@ -28,7 +28,8 @@ namespace menu {
 class FaceEditor {
 public:
     enum class Mode : uint8_t { Mono, Color };
-    enum class Tool : uint8_t { Pencil, Eraser };
+    enum class Tool : uint8_t { Pencil, Eraser, Bucket, Eyedrop };
+    static constexpr int kToolCount = 4;
 
     using CommitFn = std::function<void(const cv::Mat& rgba_canvas,
                                         const std::string& abs_path)>;
@@ -58,6 +59,10 @@ public:
     void save();                         // Apply + close
 
     void cycle_palette(int dir);         // shoulder buttons / wheel scroll
+    void set_tool(Tool t);               // P/E/B/I keys
+    Tool tool()         const { return tool_; }
+    void set_brush_size(int radius);     // 0 = 1px, 1 = 3x3, 2 = 5x5
+    int  brush_size()   const { return brush_size_; }
     void undo();
 
     // Full-screen overlay drawn in place of the deep menu while open.
@@ -74,13 +79,17 @@ public:
 private:
     void apply_at_cursor();
     void push_undo();
-    void paint_pixel(int x, int y);
+    void paint_pixel(int x, int y);          // raw 1-pixel paint (no brush size)
+    void paint_brush(int cx, int cy);        // brush_size_-aware square fill
+    void flood_fill(int sx, int sy);         // bucket from (sx, sy)
+    void eyedrop_at(int x, int y);
     bool inside_covered(int x, int y) const;
 
     bool open_ = false;
     Mode mode_ = Mode::Mono;
     Tool tool_ = Tool::Pencil;
     bool mirror_ = false;
+    int  brush_size_ = 0;                    // radius_pixels (0/1/2)
 
     std::string title_;
     std::string abs_path_;
