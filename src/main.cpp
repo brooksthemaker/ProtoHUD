@@ -52,6 +52,7 @@
 #include "hud/background_library.h"
 #include "profile_manager.h"
 #include "face/face_config.h"
+#include "face/gif_player.h"
 #include "face/native_face_controller.h"
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
@@ -427,7 +428,9 @@ static std::vector<MenuItem> build_menu(
         // HUD/menu visual presets (System tab: built-in themes + save/load/delete)
         ProfileManager* hud_presets = nullptr,
         // Out: curated corner "quick menu" tree (assigned if non-null)
-        std::vector<MenuItem>* quick_out = nullptr)
+        std::vector<MenuItem>* quick_out = nullptr,
+        // GIF folder for the Animations preview (scan order matches play_gif index)
+        std::string gifs_dir = {})
 {
     (void)lora; (void)knob;
 
@@ -591,13 +594,88 @@ static std::vector<MenuItem> build_menu(
     }
 
     // ── GIFs ─────────────────────────────────────────────────────────────────
-    std::vector<MenuItem> gifs;
-    for (uint8_t i = 0; i < 8; i++) {
+    // Animated preview shared by both "Animations" submenus (ProtoTracer +
+    // Protoface). The highlighted slot's GIF is decoded on the render thread and
+    // uploaded to a GL texture each frame. scan_folder() matches the face
+    // controller's order, so the slot index equals the play_gif() index.
+    struct GifPreview {
+        face::GifPlayer          player{160, 160};
+        std::vector<std::string> files;
+        bool   scanned = false;
+        int    loaded  = -1;   // file index currently decoded (-1 = none)
+        int    want    = -1;   // highlighted slot (set by on_highlight)
+        GLuint tex     = 0;
+    };
+    auto gif_preview = std::make_shared<GifPreview>();
+
+    MenuContextPanelDraw draw_gif_preview =
+        [gif_preview, gifs_dir, gif_names](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            GifPreview& gp = *gif_preview;
+            if (!gp.scanned) {
+                gp.files   = face::GifPlayer::scan_folder(gifs_dir);
+                gp.scanned = true;
+                if (gp.want < 0 && !gp.files.empty()) gp.want = 0;
+            }
+            const bool have = gp.want >= 0 && gp.want < static_cast<int>(gp.files.size());
+
+            if (have && gp.want != gp.loaded) {
+                gp.player.load(gp.files[gp.want], true);
+                gp.loaded = gp.want;
+            }
+            gp.player.update(ImGui::GetIO().DeltaTime);
+
+            // Square thumbnail, centred, leaving a line for the name.
+            const float side = std::min(sz.x, sz.y) * 0.82f;
+            const float px = o.x + (sz.x - side) * 0.5f;
+            const float py = o.y + (sz.y - side) * 0.5f - 6.f;
+            dl->AddRectFilled({px, py}, {px + side, py + side}, IM_COL32(10, 16, 22, 190));
+
+            cv::Mat fr = gp.player.get_frame();   // CV_8UC4 RGBA; empty when idle
+            if (!fr.empty() && fr.isContinuous()) {
+                if (gp.tex == 0) {
+                    glGenTextures(1, &gp.tex);
+                    glBindTexture(GL_TEXTURE_2D, gp.tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                glBindTexture(GL_TEXTURE_2D, gp.tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fr.cols, fr.rows, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, fr.data);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(gp.tex)),
+                             {px, py}, {px + side, py + side});
+            } else {
+                const char* msg = gp.files.empty() ? "No GIFs found" : "Loading...";
+                const ImVec2 ts = ImGui::CalcTextSize(msg);
+                dl->AddText({px + side * 0.5f - ts.x * 0.5f, py + side * 0.5f - ts.y * 0.5f},
+                            IM_COL32(180, 190, 200, 200), msg);
+            }
+
+            std::string name = have
+                ? ((gp.want < static_cast<int>(gif_names.size()) && !gif_names[gp.want].empty())
+                       ? gif_names[gp.want]
+                       : std::filesystem::path(gp.files[gp.want]).stem().string())
+                : std::string("(none)");
+            const ImVec2 ns = ImGui::CalcTextSize(name.c_str());
+            dl->AddText({o.x + sz.x * 0.5f - ns.x * 0.5f, o.y + sz.y - ns.y},
+                        IM_COL32(220, 230, 235, 230), name.c_str());
+        };
+
+    // Build a GIF leaf: select plays it on the face; highlight only updates the
+    // preview (no device command), so scrolling the list animates the thumbnail.
+    auto gif_leaf = [&](uint8_t i) -> MenuItem {
         std::string lbl = (i < gif_names.size() && !gif_names[i].empty())
                           ? gif_names[i]
                           : "GIF #" + std::to_string(i);
-        gifs.push_back(leaf(lbl, [teensy, i]{ teensy->play_gif(i); }));
-    }
+        MenuItem m = leaf(lbl, [teensy, i]{ teensy->play_gif(i); });
+        m.on_highlight = [gif_preview, i]{ gif_preview->want = static_cast<int>(i); };
+        return m;
+    };
+
+    std::vector<MenuItem> gifs;
+    for (uint8_t i = 0; i < 8; i++) gifs.push_back(gif_leaf(i));
 
     // ── Camera controls ───────────────────────────────────────────────────────
     std::vector<MenuItem> af_triggers = {
@@ -1748,7 +1826,8 @@ static std::vector<MenuItem> build_menu(
         submenu("Faces",              std::move(effects)),
         submenu("Color",              std::move(colors)),
         submenu("ProtoTracer Palette", std::move(proto_colors)),
-        submenu("Animations",         std::move(gifs)),
+        with_panel(submenu("Animations", std::move(gifs)),
+                   "GIF Preview", draw_gif_preview),
         slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
@@ -1875,17 +1954,14 @@ static std::vector<MenuItem> build_menu(
     }
 
     std::vector<MenuItem> pf_gifs;
-    for (uint8_t i = 0; i < 8; i++) {
-        std::string lbl = (i < gif_names.size() && !gif_names[i].empty())
-                          ? gif_names[i] : "GIF #" + std::to_string(i);
-        pf_gifs.push_back(leaf(lbl, [teensy, i]{ teensy->play_gif(i); }));
-    }
+    for (uint8_t i = 0; i < 8; i++) pf_gifs.push_back(gif_leaf(i));
 
     std::vector<MenuItem> protoface_inner_menu = {
         submenu("Effects",        std::move(pf_effects)),
         submenu("Face Color",     std::move(pf_colors)),
         submenu("Material Color", std::move(pf_palette)),
-        submenu("Animations",     std::move(pf_gifs)),
+        with_panel(submenu("Animations", std::move(pf_gifs)),
+                   "GIF Preview", draw_gif_preview),
         slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
@@ -4725,6 +4801,7 @@ int main(int argc, char* argv[]) {
     bool panel_preview_enabled = false;
     MenuSystem* menu_ptr = nullptr;
     std::vector<MenuItem> quick_items;   // curated corner/radial quick-menu tree
+    std::string cfg_gifs_dir = pf_build_render_config(cfg).gifs_dir;
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -4744,7 +4821,8 @@ int main(int argc, char* argv[]) {
                                &protoface_preview_view,
                                cfg_map_dir,
                                &left_eye_src, &right_eye_src,
-                               &profiles, &hud_presets, &quick_items));
+                               &profiles, &hud_presets, &quick_items,
+                               cfg_gifs_dir));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
