@@ -52,6 +52,7 @@
 #include "hud/background_library.h"
 #include "profile_manager.h"
 #include "face/face_config.h"
+#include "face/face_image.h"
 #include "face/gif_player.h"
 #include "face/native_face_controller.h"
 #include "face/panel_output.h"
@@ -429,6 +430,49 @@ static void import_gif_into_slot(MenuSystem* menu,
         });
 }
 
+// Canonical expression slot list for the Files > Faces hub. Matches the
+// standard whole-face layout shipped in the Protoface repo (faces/main +
+// faces/example_fox config.json): neutral + happy/angry/sad/surprised, plus
+// the blink eyelid overlay and the optional mouth-open speech state.
+namespace {
+struct FaceSlot { const char* expression; const char* label; };
+constexpr FaceSlot kFaceSlots[] = {
+    {"neutral",    "Neutral"},
+    {"happy",      "Happy"},
+    {"angry",      "Angry"},
+    {"sad",        "Sad"},
+    {"surprised",  "Surprised"},
+    {"blink",      "Blink"},
+    {"mouth_open", "Mouth Open"},
+};
+constexpr int kFaceSlotCount = sizeof(kFaceSlots) / sizeof(kFaceSlots[0]);
+} // namespace
+
+// Open the face image picker for a given expression. On commit copies the
+// chosen PNG into the active face folder (canonical filename, e.g. happy.png),
+// rebuilds the loader so the face reflects the new image, and switches the
+// live expression so the user sees the import immediately.
+static void import_face_into_slot(MenuSystem* menu,
+                                  IFaceController* teensy,
+                                  std::string expression,
+                                  std::string label) {
+    if (!menu || !teensy) return;
+    char title[64];
+    std::snprintf(title, sizeof(title), "Import %s face PNG", label.c_str());
+    std::string start = menu->file_picker_dir();
+    menu->open_file_picker(
+        title, std::move(start), {".png"},
+        [teensy, expression = std::move(expression)](const std::string& src) {
+            if (!teensy->import_face_image(expression, src)) {
+                std::fprintf(stderr,
+                             "[face] import failed for '%s' from '%s'\n",
+                             expression.c_str(), src.c_str());
+                return;
+            }
+            teensy->set_face_by_name(expression);
+        });
+}
+
 static std::vector<MenuItem> build_menu(
         IFaceController* teensy, XRDisplay* xr, CameraManager* cameras,
         LoRaRadio* lora, SmartKnob* knob, AudioEngine* audio, AppState& state,
@@ -802,6 +846,132 @@ static std::vector<MenuItem> build_menu(
 
     std::vector<MenuItem> gif_files_menu;
     for (uint8_t i = 0; i < 8; i++) gif_files_menu.push_back(gif_slot_row(i));
+
+    // ── Faces ────────────────────────────────────────────────────────────────
+    // Static-PNG preview shared by the Files > Faces hub. Mirrors the GIF
+    // preview: the highlighted slot's image is decoded once on the render
+    // thread (via face::load_png_rgba) and cached in a GL texture until the
+    // path changes.
+    struct FacePreview {
+        std::string                     loaded_path;    // ("" = no image cached)
+        std::filesystem::file_time_type loaded_mtime{}; // detects in-place replace
+        cv::Mat     image;         // CV_8UC4 RGBA, panel-sized
+        int         want = -1;     // highlighted slot index
+        GLuint      tex  = 0;
+    };
+    auto face_preview = std::make_shared<FacePreview>();
+
+    MenuContextPanelDraw draw_face_preview =
+        [face_preview, teensy](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            FacePreview& fp = *face_preview;
+            std::string path, expr_label;
+            if (fp.want >= 0 && fp.want < kFaceSlotCount) {
+                const auto& s = kFaceSlots[fp.want];
+                expr_label = s.label;
+                if (teensy->face_image_exists(s.expression))
+                    path = teensy->face_image_path(s.expression);
+            }
+            const bool have = !path.empty();
+
+            std::filesystem::file_time_type mt{};
+            if (have) {
+                std::error_code ec;
+                mt = std::filesystem::last_write_time(path, ec);
+            }
+            if (have && (path != fp.loaded_path || mt != fp.loaded_mtime)) {
+                fp.image        = face::load_png_rgba(path, 192, 192);
+                fp.loaded_path  = path;
+                fp.loaded_mtime = mt;
+            } else if (!have && !fp.loaded_path.empty()) {
+                fp.image        = cv::Mat();
+                fp.loaded_path.clear();
+                fp.loaded_mtime = {};
+            }
+
+            const float side = std::min(sz.x, sz.y) * 0.82f;
+            const float px = o.x + (sz.x - side) * 0.5f;
+            const float py = o.y + (sz.y - side) * 0.5f - 6.f;
+            dl->AddRectFilled({px, py}, {px + side, py + side},
+                              IM_COL32(10, 16, 22, 190));
+
+            if (have && !fp.image.empty() && fp.image.isContinuous()) {
+                if (fp.tex == 0) {
+                    glGenTextures(1, &fp.tex);
+                    glBindTexture(GL_TEXTURE_2D, fp.tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                glBindTexture(GL_TEXTURE_2D, fp.tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fp.image.cols, fp.image.rows, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, fp.image.data);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(fp.tex)),
+                             {px, py}, {px + side, py + side});
+            } else {
+                const char* msg = have ? "Decode failed" : "(empty)";
+                const ImVec2 ts = ImGui::CalcTextSize(msg);
+                dl->AddText({px + side * 0.5f - ts.x * 0.5f,
+                             py + side * 0.5f - ts.y * 0.5f},
+                            IM_COL32(180, 190, 200, 200), msg);
+            }
+
+            if (!expr_label.empty()) {
+                const ImVec2 ns = ImGui::CalcTextSize(expr_label.c_str());
+                dl->AddText({o.x + sz.x * 0.5f - ns.x * 0.5f, o.y + sz.y - ns.y},
+                            IM_COL32(220, 230, 235, 230), expr_label.c_str());
+            }
+        };
+
+    // One management row per canonical expression: dynamic label, Play /
+    // Replace / Clear when present on disk, Import otherwise.
+    auto face_slot_row = [&, face_preview](int slot_idx) -> MenuItem {
+        const std::string expr  = kFaceSlots[slot_idx].expression;
+        const std::string label = kFaceSlots[slot_idx].label;
+
+        MenuItem m;
+        m.type  = MenuItemType::SUBMENU;
+        m.label = label;
+
+        m.label_fn = [teensy, expr, label]() -> std::string {
+            return teensy->face_image_exists(expr) ? label : (label + " (empty)");
+        };
+
+        m.on_highlight = [face_preview, slot_idx]{ face_preview->want = slot_idx; };
+
+        auto bound_now = [teensy, expr]{ return teensy->face_image_exists(expr); };
+
+        MenuItem play = leaf("Play",
+            [teensy, expr]{ teensy->set_face_by_name(expr); });
+        play.visible_fn = bound_now;
+
+        MenuItem replace = leaf("Replace...",
+            [teensy, menu_sys_pp, expr, label]() {
+                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                      teensy, expr, label);
+            });
+        replace.visible_fn = bound_now;
+
+        MenuItem clear = leaf("Clear",
+            [teensy, expr]{ teensy->clear_face_image(expr); });
+        clear.visible_fn = bound_now;
+
+        MenuItem imp = leaf("Import...",
+            [teensy, menu_sys_pp, expr, label]() {
+                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                      teensy, expr, label);
+            });
+        imp.visible_fn = [bound_now]{ return !bound_now(); };
+
+        m.children = { std::move(play), std::move(replace),
+                       std::move(clear), std::move(imp) };
+        return m;
+    };
+
+    std::vector<MenuItem> face_files_menu;
+    for (int i = 0; i < kFaceSlotCount; ++i)
+        face_files_menu.push_back(face_slot_row(i));
 
     // ── Camera controls ───────────────────────────────────────────────────────
     std::vector<MenuItem> af_triggers = {
@@ -3829,12 +3999,14 @@ static std::vector<MenuItem> build_menu(
                   "The LED Protoface: expression, color, material, particle effects, "
                   "animations and brightness."),
         with_desc(submenu("Files",        std::vector<MenuItem>{
-                      with_panel(submenu("GIFs", std::move(gif_files_menu)),
-                                 "GIF Preview", draw_gif_preview),
+                      with_panel(submenu("GIFs",  std::move(gif_files_menu)),
+                                 "GIF Preview",  draw_gif_preview),
+                      with_panel(submenu("Faces", std::move(face_files_menu)),
+                                 "Face Preview", draw_face_preview),
                   }),
                   "Import media into Protoface from disk. Each slot can play "
                   "its bound file, swap to a new one, or clear back to empty. "
-                  "Faces and splash backgrounds will live here too."),
+                  "Splash backgrounds will live here next."),
         with_desc(submenu("LoRa",         std::move(lora_menu)),
                   "Long-range radio: team nodes, messages and status."),
         with_desc(submenu("System",       std::move(system_menu)),

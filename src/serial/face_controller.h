@@ -51,6 +51,22 @@ public:
     virtual std::string gif_slot(uint8_t /*slot*/) const { return {}; }
     virtual void        bind_gif_slot(uint8_t /*slot*/, const std::string& /*filename*/) {}
     virtual void        clear_gif_slot(uint8_t /*slot*/) {}
+
+    // Face expression image management (native Protoface only). Each
+    // "expression" (neutral/happy/angry/...) corresponds to a canonical PNG in
+    // the active face folder. The Files > Faces menu uses these to import,
+    // preview, switch and clear expression PNGs on disk; non-native backends
+    // (Teensy/ProtoTracer, daemon-Protoface) return empty/false and ignore
+    // mutating calls.
+    virtual std::string face_image_path(const std::string& /*expression*/) const { return {}; }
+    virtual bool        face_image_exists(const std::string& /*expression*/) const { return false; }
+    virtual bool        import_face_image(const std::string& /*expression*/,
+                                          const std::string& /*src_path*/) { return false; }
+    virtual void        clear_face_image(const std::string& /*expression*/) {}
+    // Set the active expression by name (mirror of set_face but by string).
+    // Useful for the Files > Faces "Play" action where the index of a slot
+    // isn't known statically.
+    virtual void        set_face_by_name(const std::string& /*expression*/) {}
 };
 
 /**
@@ -87,6 +103,18 @@ public:
         (*active_)->bind_gif_slot(s, f);
     }
     void clear_gif_slot(uint8_t s)             override { (*active_)->clear_gif_slot(s); }
+
+    std::string face_image_path(const std::string& e) const override {
+        return (*active_)->face_image_path(e);
+    }
+    bool face_image_exists(const std::string& e) const override {
+        return (*active_)->face_image_exists(e);
+    }
+    bool import_face_image(const std::string& e, const std::string& s) override {
+        return (*active_)->import_face_image(e, s);
+    }
+    void clear_face_image(const std::string& e) override { (*active_)->clear_face_image(e); }
+    void set_face_by_name(const std::string& e) override { (*active_)->set_face_by_name(e); }
 
     IFaceController* backend() const { return *active_; }
 

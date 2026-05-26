@@ -417,4 +417,100 @@ void NativeFaceController::clear_gif_slot(uint8_t slot) {
     save_state_locked();
 }
 
+// ── Face image management ─────────────────────────────────────────────────────
+// All paths are derived from the first non-mirror panel's active face folder
+// (typically faces/main on the standard 2-panel mirrored setup). Imports
+// rewrite the canonical filename and reload affected loaders.
+
+namespace {
+std::string canonical_face_filename(const std::string& expression) {
+    // Lower-case + ".png". The face loader keys expressions by lowercase name
+    // (see face_loader.cpp PNG-scan branch), so this lines up regardless of how
+    // the expression appears in config.json.
+    std::string s = expression;
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    return s + ".png";
+}
+} // namespace
+
+std::string NativeFaceController::face_image_path(const std::string& expression) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_) {
+        if (pn.is_mirror || !pn.loader) continue;
+        return cfg_.faces_dir + "/" + pn.cfg.face.active + "/" +
+               canonical_face_filename(expression);
+    }
+    return {};
+}
+
+bool NativeFaceController::face_image_exists(const std::string& expression) const {
+    const std::string p = face_image_path(expression);
+    if (p.empty()) return false;
+    std::error_code ec;
+    return std::filesystem::exists(p, ec);
+}
+
+bool NativeFaceController::import_face_image(const std::string& expression,
+                                             const std::string& src_path) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+
+    // Find the first non-mirror panel's active face folder.
+    const Panel* anchor = nullptr;
+    for (const auto& pn : panels_) {
+        if (!pn.is_mirror && pn.loader) { anchor = &pn; break; }
+    }
+    if (!anchor) return false;
+
+    const std::string folder = cfg_.faces_dir + "/" + anchor->cfg.face.active;
+    const std::string dst    = folder + "/" + canonical_face_filename(expression);
+
+    std::error_code ec;
+    std::filesystem::create_directories(folder, ec);
+    std::filesystem::copy_file(
+        src_path, dst,
+        std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+        std::fprintf(stderr, "[face] import copy failed %s -> %s: %s\n",
+                     src_path.c_str(), dst.c_str(), ec.message().c_str());
+        return false;
+    }
+
+    // Rebuild every non-mirror panel's loader so the new PNG takes effect on
+    // the next render tick. (Cheap — just re-decodes the folder's images.)
+    for (auto& pn : panels_) {
+        if (pn.is_mirror || !pn.state) continue;
+        pn.loader = std::make_unique<FaceLoader>(
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+    }
+    return true;
+}
+
+void NativeFaceController::clear_face_image(const std::string& expression) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+
+    const Panel* anchor = nullptr;
+    for (const auto& pn : panels_) {
+        if (!pn.is_mirror && pn.loader) { anchor = &pn; break; }
+    }
+    if (!anchor) return;
+
+    const std::string p = cfg_.faces_dir + "/" + anchor->cfg.face.active + "/" +
+                          canonical_face_filename(expression);
+    std::error_code ec;
+    std::filesystem::remove(p, ec);
+    for (auto& pn : panels_) {
+        if (pn.is_mirror || !pn.state) continue;
+        pn.loader = std::make_unique<FaceLoader>(
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+    }
+}
+
+void NativeFaceController::set_face_by_name(const std::string& expression) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_expression(expression);
+    save_state_locked();
+}
+
 } // namespace face

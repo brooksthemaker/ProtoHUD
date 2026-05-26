@@ -58,6 +58,18 @@ public:
     void        bind_gif_slot(uint8_t slot, const std::string& filename) override;
     void        clear_gif_slot(uint8_t slot) override;
 
+    // Face expression image management (see IFaceController). Operates on the
+    // active face folder of the first non-mirror panel (the "main" face in the
+    // standard 2-panel mirrored layout). Imports copy the source PNG to the
+    // canonical expression filename and rebuild the affected panels' loaders
+    // so the change takes effect on the next frame.
+    std::string face_image_path(const std::string& expression) const override;
+    bool        face_image_exists(const std::string& expression) const override;
+    bool        import_face_image(const std::string& expression,
+                                  const std::string& src_path) override;
+    void        clear_face_image(const std::string& expression) override;
+    void        set_face_by_name(const std::string& expression) override;
+
     // Copy the latest rendered RGB canvas (CV_8UC3) for the preview. Returns
     // false until the first frame exists. Safe to call from the main/GL thread.
     bool latest_frame(cv::Mat& out) const;
