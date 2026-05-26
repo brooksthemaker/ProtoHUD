@@ -519,7 +519,10 @@ static std::vector<MenuItem> build_menu(
         // Boop sensor (set after construction; same pointer-to-pointer pattern).
         // Menu toggles/sliders forward live changes via the BoopSensor interface
         // so the next poll cycle picks up the new threshold / enable state.
-        sensor::BoopSensor** boop_sensor_pp = nullptr)
+        sensor::BoopSensor** boop_sensor_pp = nullptr,
+        // Voice analyzer (owned by AudioEngine; main passes its address). Menu
+        // sliders write through it so the next FFT cycle uses the new params.
+        audio::VoiceAnalyzer* voice_analyzer = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -2595,6 +2598,77 @@ static std::vector<MenuItem> build_menu(
                   "Per-zone capacitive-touch reactions. Drives "
                   "Protoface's trigger_boop() — fires the chosen expression "
                   "when the snout or a cheek pad is touched."));
+
+    // ── Voice → mouth_open driver ────────────────────────────────────────────
+    // Sliders write through to the live analyzer so the next FFT cycle picks
+    // up new values; state.voice_mouth mirrors them so mutate_cfg can persist
+    // to config.json on exit. Disabled by default — flip Enabled to start
+    // analysing (or set "voice_mouth.enabled":true in config.json).
+    auto voice_apply_band = [voice_analyzer, &state]() {
+        if (voice_analyzer)
+            voice_analyzer->set_band(state.voice_mouth.band_lo_hz,
+                                     state.voice_mouth.band_hi_hz);
+    };
+    std::vector<MenuItem> voice_menu = {
+        toggle("Enabled",
+            [&state]{ return state.voice_mouth.enabled; },
+            [&state, voice_analyzer](bool v){
+                state.voice_mouth.enabled = v;
+                if (voice_analyzer) voice_analyzer->set_enabled(v);
+            }),
+        with_desc(slider("Sensitivity", 0.25f, 6.f, 0.05f, "x",
+            [&state]{ return state.voice_mouth.sensitivity; },
+            [&state, voice_analyzer](float v){
+                state.voice_mouth.sensitivity = v;
+                if (voice_analyzer) voice_analyzer->set_sensitivity(v);
+            }),
+            "Multiplies the speech-band RMS before the gate / clip to 1.0. "
+            "Raise if the mouth barely opens during normal speech."),
+        with_desc(slider("Noise Gate", 0.f, 0.2f, 0.005f, "",
+            [&state]{ return state.voice_mouth.noise_gate; },
+            [&state, voice_analyzer](float v){
+                state.voice_mouth.noise_gate = v;
+                if (voice_analyzer) voice_analyzer->set_noise_gate(v);
+            }),
+            "Band RMS below this floor reads as silence. Raise to ignore "
+            "fan / motor / background noise."),
+        with_desc(slider("Attack", 5.f, 150.f, 5.f, " ms",
+            [&state]{ return state.voice_mouth.attack_ms; },
+            [&state, voice_analyzer](float v){
+                state.voice_mouth.attack_ms = v;
+                if (voice_analyzer) voice_analyzer->set_attack_ms(v);
+            }),
+            "Time constant for opening the mouth. Lower feels snappier; "
+            "higher smooths over transients."),
+        with_desc(slider("Release", 30.f, 600.f, 10.f, " ms",
+            [&state]{ return state.voice_mouth.release_ms; },
+            [&state, voice_analyzer](float v){
+                state.voice_mouth.release_ms = v;
+                if (voice_analyzer) voice_analyzer->set_release_ms(v);
+            }),
+            "Time constant for closing. Higher = mouth lingers open between "
+            "syllables (less stuttery)."),
+        with_desc(slider("Band Low", 40.f, 1200.f, 10.f, " Hz",
+            [&state]{ return state.voice_mouth.band_lo_hz; },
+            [&state, voice_apply_band](float v){
+                state.voice_mouth.band_lo_hz = v;
+                voice_apply_band();
+            }),
+            "Lower edge of the analysis band. Raise to cut low-frequency "
+            "rumble; lower if your voice's fundamentals are getting clipped."),
+        with_desc(slider("Band High", 1000.f, 8000.f, 100.f, " Hz",
+            [&state]{ return state.voice_mouth.band_hi_hz; },
+            [&state, voice_apply_band](float v){
+                state.voice_mouth.band_hi_hz = v;
+                voice_apply_band();
+            }),
+            "Upper edge. Lower if hiss / sibilants are over-driving the mouth."),
+    };
+    face_display_menu.push_back(
+        with_desc(submenu("Voice", std::move(voice_menu)),
+                  "Mic-driven mouth_open. FFT-based: speech-band RMS feeds an "
+                  "envelope follower whose output drives face::set_audio() each "
+                  "audio period (~5 ms)."));
 
     // ── HUD settings ──────────────────────────────────────────────────────────
 
@@ -5514,7 +5588,8 @@ int main(int argc, char* argv[]) {
                                &profiles, &hud_presets, &quick_items,
                                cfg_gifs_dir,
                                &bg_lib_ptr, cfg_bg_user_dir,
-                               &boop_sensor_ptr));
+                               &boop_sensor_ptr,
+                               audio.voice()));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -6091,6 +6166,14 @@ int main(int argc, char* argv[]) {
                 jzones[i]["threshold"]  = state.boop_zones[i].threshold;
             }
         }
+
+        cfg["voice_mouth"]["enabled"]     = state.voice_mouth.enabled;
+        cfg["voice_mouth"]["sensitivity"] = state.voice_mouth.sensitivity;
+        cfg["voice_mouth"]["noise_gate"]  = state.voice_mouth.noise_gate;
+        cfg["voice_mouth"]["attack_ms"]   = state.voice_mouth.attack_ms;
+        cfg["voice_mouth"]["release_ms"]  = state.voice_mouth.release_ms;
+        cfg["voice_mouth"]["band_lo_hz"]  = state.voice_mouth.band_lo_hz;
+        cfg["voice_mouth"]["band_hi_hz"]  = state.voice_mouth.band_hi_hz;
 
         cfg["night_vision"]["exposure_ev"]            = state.night_vision.exposure_ev;
         cfg["night_vision"]["shutter_us"]             = state.night_vision.shutter_us;
