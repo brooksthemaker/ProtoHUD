@@ -155,6 +155,13 @@ void Mpr121BoopSensor::set_zone_enabled(Zone z, bool enabled) {
     cfg_.zone_enabled[zi] = enabled;
 }
 
+void Mpr121BoopSensor::set_coalesce_window_s(double seconds) {
+    if (seconds < 0.0) seconds = 0.0;
+    if (seconds > 1.0) seconds = 1.0;
+    std::lock_guard<std::mutex> lk(bus_mtx_);
+    cfg_.coalesce_window_s = seconds;
+}
+
 void Mpr121BoopSensor::set_zone_threshold(Zone z, uint8_t touch) {
     const auto zi = static_cast<uint8_t>(z);
     if (zi >= ZoneCount) return;
@@ -183,10 +190,29 @@ void Mpr121BoopSensor::poll_loop() {
                           (static_cast<uint16_t>(st[1] & 0x1F) << 8);
         }
 
+        // Snapshot live coalesce window + Both enable once per tick.
+        double coalesce_s = 0.0;
+        bool   both_enabled = false;
+        {
+            std::lock_guard<std::mutex> lk(bus_mtx_);
+            coalesce_s   = cfg_.coalesce_window_s;
+            both_enabled = cfg_.zone_enabled[static_cast<size_t>(Zone::BothCheeks)];
+        }
+
         const auto now = std::chrono::steady_clock::now();
-        for (uint8_t zi = 0; zi < ZoneCount; ++zi) {
-            // Snapshot zone config under the lock — cheap, avoids torn reads
-            // when the menu updates thresholds mid-loop.
+
+        // Helper: fire a zone event, respecting its own refractory window.
+        auto fire = [&](Zone z) {
+            const auto zi = static_cast<uint8_t>(z);
+            const double dt_s = std::chrono::duration<double>(now - last_boop_t_[zi]).count();
+            if (dt_s < cfg_.refractory_s) return;
+            last_boop_t_[zi] = now;
+            if (on_boop_) on_boop_(z);
+        };
+
+        // Walk the directly-measured zones (Snout, LeftCheek, RightCheek).
+        // BothCheeks is derived — it only fires from the coalescer below.
+        for (uint8_t zi = 0; zi < static_cast<uint8_t>(Zone::BothCheeks); ++zi) {
             bool   enabled;
             int8_t electrode;
             {
@@ -205,12 +231,43 @@ void Mpr121BoopSensor::poll_loop() {
 
             if (!rising) continue;
 
-            // Refractory: ignore retriggers inside the cooldown window.
-            const double dt_s = std::chrono::duration<double>(now - last_boop_t_[zi]).count();
-            if (dt_s < cfg_.refractory_s) continue;
-            last_boop_t_[zi] = now;
+            // Snout is never coalesced. Fire immediately.
+            if (zi == static_cast<uint8_t>(Zone::Snout)) {
+                fire(Zone::Snout);
+                continue;
+            }
 
-            if (on_boop_) on_boop_(static_cast<Zone>(zi));
+            // Cheek event. With coalescing off (window == 0), just fire.
+            if (coalesce_s <= 0.0) {
+                fire(static_cast<Zone>(zi));
+                continue;
+            }
+
+            // Cheek with coalescing: if the OTHER cheek is currently
+            // pending, drop both pendings and fire BothCheeks. Otherwise
+            // hold this cheek pending for the configured window.
+            const int self_idx  = (zi == static_cast<uint8_t>(Zone::LeftCheek)) ? 0 : 1;
+            const int other_idx = 1 - self_idx;
+            if (cheek_pending_[other_idx].active) {
+                cheek_pending_[0].active = false;
+                cheek_pending_[1].active = false;
+                if (both_enabled) fire(Zone::BothCheeks);
+                // Don't fire the single-side event — by construction the
+                // user intended a Both.
+            } else {
+                cheek_pending_[self_idx].active = true;
+                cheek_pending_[self_idx].expires_at =
+                    now + std::chrono::microseconds(
+                        static_cast<int64_t>(coalesce_s * 1e6));
+            }
+        }
+
+        // Release any pending cheek events whose window has expired.
+        for (int i = 0; i < 2; ++i) {
+            if (!cheek_pending_[i].active) continue;
+            if (now < cheek_pending_[i].expires_at) continue;
+            cheek_pending_[i].active = false;
+            fire(i == 0 ? Zone::LeftCheek : Zone::RightCheek);
         }
 
         std::this_thread::sleep_until(next_t);

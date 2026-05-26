@@ -584,6 +584,21 @@ constexpr MouthShape kMouthShapes[] = {
     {"mouth_round", "Round"},        // OOH family
 };
 constexpr int kMouthShapeCount = sizeof(kMouthShapes) / sizeof(kMouthShapes[0]);
+
+// Boop reaction faces. The boop sensor's on_boop callback prefers these
+// PNG names per zone when present in the active face folder; otherwise
+// falls back to the user-configured expression in state.boop_zones.
+// Files > Faces > Boop Reactions surfaces them as standard slot rows
+// (Play / Edit / Replace / Clear / Import) so users can author them
+// just like any other expression slot.
+struct BoopFaceSlot { const char* file_stem; const char* label; };
+constexpr BoopFaceSlot kBoopFaceSlots[] = {
+    {"boop_snout", "Snout"},
+    {"boop_left",  "Left Cheek"},
+    {"boop_right", "Right Cheek"},
+    {"boop_both",  "Both Cheeks"},
+};
+constexpr int kBoopFaceSlotCount = sizeof(kBoopFaceSlots) / sizeof(kBoopFaceSlots[0]);
 } // namespace
 
 // Open the face image picker for a given expression. On commit copies the
@@ -1289,6 +1304,143 @@ static std::vector<MenuItem> build_menu(
                   "the voice analyzer drives mouth_open > 0. Asset filenames: "
                   "mouth_small.png, mouth_open.png, mouth_smile.png, "
                   "mouth_round.png in the active face folder."));
+
+    // ── Boop Reactions ───────────────────────────────────────────────────────
+    // Authoring slots for the per-zone boop reaction faces. When a PNG
+    // exists at faces/<active>/boop_<zone>.png, the on_boop callback above
+    // triggers that face instead of the user's configured fallback
+    // expression. Filenames: boop_snout / boop_left / boop_right / boop_both.
+    auto boop_face_preview = std::make_shared<FacePreview>();
+    MenuContextPanelDraw draw_boop_face_preview =
+        [boop_face_preview, teensy](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            FacePreview& fp = *boop_face_preview;
+            std::string path, lbl;
+            if (fp.want >= 0 && fp.want < kBoopFaceSlotCount) {
+                const auto& s = kBoopFaceSlots[fp.want];
+                lbl = s.label;
+                if (teensy->face_image_exists(s.file_stem))
+                    path = teensy->face_image_path(s.file_stem);
+            }
+            const bool have = !path.empty();
+
+            std::filesystem::file_time_type mt{};
+            if (have) {
+                std::error_code ec;
+                mt = std::filesystem::last_write_time(path, ec);
+            }
+            if (have && (path != fp.loaded_path || mt != fp.loaded_mtime)) {
+                fp.image        = face::load_png_rgba(path, 256, 128);
+                fp.loaded_path  = path;
+                fp.loaded_mtime = mt;
+            } else if (!have && !fp.loaded_path.empty()) {
+                fp.image        = cv::Mat();
+                fp.loaded_path.clear();
+                fp.loaded_mtime = {};
+            }
+
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
+            const float ph = pw * 0.5f;
+            const float px = o.x + (sz.x - pw) * 0.5f;
+            const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
+            dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10, 16, 22, 190));
+
+            if (have && !fp.image.empty() && fp.image.isContinuous()) {
+                if (fp.tex == 0) {
+                    glGenTextures(1, &fp.tex);
+                    glBindTexture(GL_TEXTURE_2D, fp.tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                glBindTexture(GL_TEXTURE_2D, fp.tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fp.image.cols, fp.image.rows, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, fp.image.data);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(fp.tex)),
+                             {px, py}, {px + pw, py + ph});
+            } else {
+                const char* msg = have ? "Decode failed" : "(empty)";
+                const ImVec2 ts = ImGui::CalcTextSize(msg);
+                dl->AddText({px + pw * 0.5f - ts.x * 0.5f,
+                             py + ph * 0.5f - ts.y * 0.5f},
+                            IM_COL32(180, 190, 200, 200), msg);
+            }
+
+            if (!lbl.empty()) {
+                const ImVec2 ns = ImGui::CalcTextSize(lbl.c_str());
+                dl->AddText({o.x + sz.x * 0.5f - ns.x * 0.5f, o.y + sz.y - ns.y},
+                            IM_COL32(220, 230, 235, 230), lbl.c_str());
+            }
+        };
+
+    // Boop slot row: Play pops the dedicated boop face via trigger_boop
+    // (so it auto-reverts after the slot's duration). Edit / Replace /
+    // Clear / Import behave the same as the expression slot rows.
+    auto boop_face_row = [&, boop_face_preview, edit_face, have_led_regions](int idx) -> MenuItem {
+        const std::string expr  = kBoopFaceSlots[idx].file_stem;
+        const std::string label = kBoopFaceSlots[idx].label;
+
+        MenuItem m;
+        m.type  = MenuItemType::SUBMENU;
+        m.label = label;
+
+        m.label_fn = [teensy, expr, label]() -> std::string {
+            return teensy->face_image_exists(expr) ? label : (label + " (empty)");
+        };
+        m.on_highlight = [boop_face_preview, idx]{ boop_face_preview->want = idx; };
+
+        auto bound_now = [teensy, expr]{ return teensy->face_image_exists(expr); };
+
+        MenuItem play = leaf("Play",
+            [teensy, expr, idx, &state]() {
+                double dur = 0.8;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    if (idx >= 0 && idx < 4) dur = state.boop_zones[idx].duration_s;
+                }
+                teensy->trigger_boop(expr, dur);
+            });
+        play.visible_fn = bound_now;
+
+        MenuItem edit_it = leaf("Edit...",
+            [edit_face, expr]{ if (edit_face) edit_face(expr); });
+        edit_it.visible_fn = have_led_regions;
+
+        MenuItem replace = leaf("Replace...",
+            [teensy, menu_sys_pp, expr, label]() {
+                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                      teensy, expr, label);
+            });
+        replace.visible_fn = bound_now;
+
+        MenuItem clear = leaf("Clear",
+            [teensy, expr]{ teensy->clear_face_image(expr); });
+        clear.visible_fn = bound_now;
+
+        MenuItem imp = leaf("Import...",
+            [teensy, menu_sys_pp, expr, label]() {
+                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                      teensy, expr, label);
+            });
+        imp.visible_fn = [bound_now]{ return !bound_now(); };
+
+        m.children = { std::move(play), std::move(edit_it),
+                       std::move(replace), std::move(clear), std::move(imp) };
+        return m;
+    };
+
+    std::vector<MenuItem> face_boop_menu;
+    for (int i = 0; i < kBoopFaceSlotCount; ++i)
+        face_boop_menu.push_back(boop_face_row(i));
+
+    face_files_menu.push_back(
+        with_desc(with_panel(submenu("Boop Reactions", std::move(face_boop_menu)),
+                             "Boop Reaction Preview", draw_boop_face_preview),
+                  "Dedicated face per boop zone. When a slot's PNG exists, "
+                  "the boop sensor triggers that face instead of the zone's "
+                  "fallback expression. Filenames: boop_snout, boop_left, "
+                  "boop_right, boop_both — all in the active face folder."));
 
     // ── Backgrounds ──────────────────────────────────────────────────────────
     // Landing-page background library. Unlike GIFs/Faces this isn't slot-based:
@@ -2876,22 +3028,29 @@ static std::vector<MenuItem> build_menu(
                     std::lock_guard<std::mutex> lk(state.mtx);
                     state.boop_zones[idx].duration_s = static_cast<double>(v);
                 }),
-            with_desc(slider("Touch Threshold", 4.f, 30.f, 1.f, "",
-                [&state, idx]{
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    return static_cast<float>(state.boop_zones[idx].threshold);
-                },
-                [&state, idx, boop_sensor_pp, zone_enum](float v){
-                    const auto t = static_cast<uint8_t>(v);
-                    {
+            // Touch threshold is meaningless for the BothCheeks zone — it's
+            // derived from the left/right cheek events via the coalescer.
+            // Hide the slider there so the menu stays tidy.
+            [&]{
+                MenuItem m = with_desc(slider("Touch Threshold", 4.f, 30.f, 1.f, "",
+                    [&state, idx]{
                         std::lock_guard<std::mutex> lk(state.mtx);
-                        state.boop_zones[idx].threshold = t;
-                    }
-                    if (auto* s = boop_sensor_pp ? *boop_sensor_pp : nullptr)
-                        s->set_zone_threshold(zone_enum, t);
-                }),
-                "MPR121 touch threshold. Lower numbers are more sensitive; "
-                "raise if you see false triggers."),
+                        return static_cast<float>(state.boop_zones[idx].threshold);
+                    },
+                    [&state, idx, boop_sensor_pp, zone_enum](float v){
+                        const auto t = static_cast<uint8_t>(v);
+                        {
+                            std::lock_guard<std::mutex> lk(state.mtx);
+                            state.boop_zones[idx].threshold = t;
+                        }
+                        if (auto* s = boop_sensor_pp ? *boop_sensor_pp : nullptr)
+                            s->set_zone_threshold(zone_enum, t);
+                    }),
+                    "MPR121 touch threshold. Lower numbers are more sensitive; "
+                    "raise if you see false triggers.");
+                m.visible_fn = [idx]{ return idx != static_cast<int>(sensor::BoopSensor::Zone::BothCheeks); };
+                return m;
+            }(),
             leaf("Test Boop",
                 [teensy, &state, idx]{
                     std::string expr;
@@ -2911,12 +3070,25 @@ static std::vector<MenuItem> build_menu(
         boop_zone_menu(0, "Snout"),
         boop_zone_menu(1, "Left Cheek"),
         boop_zone_menu(2, "Right Cheek"),
+        boop_zone_menu(3, "Both Cheeks"),
+        with_desc(slider("Coalesce Window", 0.f, 0.30f, 0.01f, " s",
+            [&state]{ return state.boop_coalesce_window_s; },
+            [&state, boop_sensor_pp](float v){
+                state.boop_coalesce_window_s = v;
+                if (auto* s = boop_sensor_pp ? *boop_sensor_pp : nullptr)
+                    s->set_coalesce_window_s(static_cast<double>(v));
+            }),
+            "When left and right cheeks both land touch events within this "
+            "window, both single-cheek events are suppressed and a Both "
+            "Cheeks event fires instead. Set to 0 to disable coalescing "
+            "(single-side events fire immediately)."),
     };
     face_display_menu.push_back(
         with_desc(submenu("Boop", std::move(boop_menu)),
                   "Per-zone capacitive-touch reactions. Drives "
                   "Protoface's trigger_boop() — fires the chosen expression "
-                  "when the snout or a cheek pad is touched."));
+                  "when the snout, a cheek pad, or both cheeks together are "
+                  "touched."));
 
     // ── Voice → mouth_open driver ────────────────────────────────────────────
     // Sliders write through to the live analyzer so the next FFT cycle picks
@@ -5160,11 +5332,16 @@ int main(int argc, char* argv[]) {
     sensor::Mpr121BoopSensor::Config boop_cfg;
     if (cfg.contains("boop")) {
         auto& jb = cfg["boop"];
-        boop_cfg.enabled  = jval(jb, "enabled",  false);
-        boop_cfg.i2c_bus  = jb.value("i2c_bus",  std::string("/dev/i2c-1"));
-        boop_cfg.i2c_addr = jval(jb, "i2c_addr", 0x5A);
+        boop_cfg.enabled          = jval(jb, "enabled",          false);
+        boop_cfg.i2c_bus          = jb.value("i2c_bus",          std::string("/dev/i2c-1"));
+        boop_cfg.i2c_addr         = jval(jb, "i2c_addr",         0x5A);
+        boop_cfg.coalesce_window_s = jval(jb, "coalesce_window_s", boop_cfg.coalesce_window_s);
+        state.boop_coalesce_window_s = static_cast<float>(boop_cfg.coalesce_window_s);
         if (jb.contains("zones") && jb["zones"].is_array()) {
-            for (size_t i = 0; i < jb["zones"].size() && i < 3; ++i) {
+            // Up to 4 zones now: [0]=Snout, [1]=LeftCheek, [2]=RightCheek,
+            // [3]=BothCheeks. BothCheeks is derived (no electrode probe),
+            // so its electrode field stays at -1 even if config sets it.
+            for (size_t i = 0; i < jb["zones"].size() && i < 4; ++i) {
                 const auto& jz = jb["zones"][i];
                 boop_cfg.electrode[i] =
                     static_cast<int8_t>(jval(jz, "electrode", static_cast<int>(boop_cfg.electrode[i])));
@@ -5176,11 +5353,12 @@ int main(int argc, char* argv[]) {
                     static_cast<uint8_t>(jval(jz, "threshold", static_cast<int>(state.boop_zones[i].threshold)));
                 state.boop_zones[i].enabled =
                     jval(jz, "enabled", state.boop_zones[i].enabled);
-                // Mirror the user-facing threshold into the sensor's hardware
-                // config so the chip is initialised with the right value.
-                boop_cfg.touch_threshold[i]  = state.boop_zones[i].threshold;
-                boop_cfg.zone_enabled[i]     = state.boop_zones[i].enabled;
+                boop_cfg.touch_threshold[i] = state.boop_zones[i].threshold;
+                boop_cfg.zone_enabled[i]    = state.boop_zones[i].enabled;
             }
+            // Lock the BothCheeks electrode at -1 regardless of what the
+            // config tried to set — it's derived, never a direct probe.
+            boop_cfg.electrode[static_cast<size_t>(sensor::BoopSensor::Zone::BothCheeks)] = -1;
         }
     }
 
@@ -5636,26 +5814,52 @@ int main(int argc, char* argv[]) {
     // returns false (no thread spun up) when cfg.enabled is false or the
     // chip isn't present on the bus.
     sensor::Mpr121BoopSensor boop_sensor(boop_cfg);
-    boop_sensor.on_boop([&face_proxy, &state, &accessory_leds](sensor::BoopSensor::Zone z) {
+    // Canonical boop reaction PNG name per zone. When face_image_exists()
+    // confirms a dedicated boop_<zone>.png is authored, we trigger that
+    // expression by filename instead of the user's configured fallback —
+    // gives users distinct "snout boop" / "left wink" / "right wink" /
+    // "surprise" reactions on top of the generic expression cycle.
+    auto boop_face_stem = [](sensor::BoopSensor::Zone z) -> const char* {
+        switch (z) {
+        case sensor::BoopSensor::Zone::Snout:      return "boop_snout";
+        case sensor::BoopSensor::Zone::LeftCheek:  return "boop_left";
+        case sensor::BoopSensor::Zone::RightCheek: return "boop_right";
+        case sensor::BoopSensor::Zone::BothCheeks: return "boop_both";
+        }
+        return "";
+    };
+
+    boop_sensor.on_boop([&face_proxy, &state, &accessory_leds, boop_face_stem]
+                        (sensor::BoopSensor::Zone z) {
         const auto zi = static_cast<size_t>(z);
-        if (zi >= 3) return;
+        if (zi >= 4) return;
         // Snapshot under the state lock so a menu edit mid-boop can't tear
         // the std::string read.
         bool        enabled;
-        std::string expression;
+        std::string fallback_expr;
         double      duration_s;
         {
             std::lock_guard<std::mutex> lk(state.mtx);
-            enabled    = state.boop_zones[zi].enabled;
-            expression = state.boop_zones[zi].expression;
-            duration_s = state.boop_zones[zi].duration_s;
+            enabled       = state.boop_zones[zi].enabled;
+            fallback_expr = state.boop_zones[zi].expression;
+            duration_s    = state.boop_zones[zi].duration_s;
         }
-        if (!enabled || expression.empty()) return;
+        if (!enabled) return;
+        // Prefer the dedicated boop_<zone> face when present on disk.
+        // face_image_exists() is the canonical "is this PNG in the active
+        // face folder" check the editor/import path uses too.
+        std::string expression;
+        const std::string stem = boop_face_stem(z);
+        if (!stem.empty() && face_proxy.face_image_exists(stem))
+            expression = stem;
+        else
+            expression = fallback_expr;
+        if (expression.empty()) return;
         face_proxy.trigger_boop(expression, duration_s);
 
-        // Accessory LED flash overlay — snout boop flashes both fins,
-        // cheek boops flash the matching cheekhub. Cheap visual feedback
-        // tied to the trigger; runs even if zone.pattern is Off.
+        // Accessory LED flash overlay. Snout = both fins, single cheek =
+        // matching cheekhub, both cheeks = all four zones flash together
+        // (matches the "surprise" reaction's broader visual feedback).
         using LZ = accessory::Zone;
         switch (z) {
         case sensor::BoopSensor::Zone::Snout:
@@ -5667,6 +5871,12 @@ int main(int argc, char* argv[]) {
             break;
         case sensor::BoopSensor::Zone::RightCheek:
             accessory_leds.trigger_flash(LZ::RightCheekhub, 0.35);
+            break;
+        case sensor::BoopSensor::Zone::BothCheeks:
+            accessory_leds.trigger_flash(LZ::LeftCheekhub,  0.45);
+            accessory_leds.trigger_flash(LZ::RightCheekhub, 0.45);
+            accessory_leds.trigger_flash(LZ::LeftFin,       0.45);
+            accessory_leds.trigger_flash(LZ::RightFin,      0.45);
             break;
         }
     });
@@ -6763,10 +6973,12 @@ int main(int argc, char* argv[]) {
         // bits the menu owns.
         {
             auto& jb = cfg["boop"];
+            jb["coalesce_window_s"] = state.boop_coalesce_window_s;
             auto& jzones = jb["zones"];
-            if (!jzones.is_array() || jzones.size() < 3) jzones = json::array({json{}, json{}, json{}});
+            if (!jzones.is_array() || jzones.size() < 4)
+                jzones = json::array({ json{}, json{}, json{}, json{} });
             std::lock_guard<std::mutex> lk(state.mtx);
-            for (int i = 0; i < 3; ++i) {
+            for (int i = 0; i < 4; ++i) {
                 jzones[i]["enabled"]    = state.boop_zones[i].enabled;
                 jzones[i]["expression"] = state.boop_zones[i].expression;
                 jzones[i]["duration_s"] = state.boop_zones[i].duration_s;

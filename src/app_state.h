@@ -711,11 +711,19 @@ struct AppState {
     // Boop zones: [0]=Snout, [1]=LeftCheek, [2]=RightCheek. Sane defaults so
     // a user with the sensor wired sees something sensible before they ever
     // open the menu.
-    BoopZoneConfig       boop_zones[3] = {
+    // [0]=Snout, [1]=LeftCheek, [2]=RightCheek, [3]=BothCheeks (derived).
+    // Threshold on the BothCheeks slot is unused (it doesn't probe an
+    // electrode directly) but kept in the schema for index parity.
+    BoopZoneConfig       boop_zones[4] = {
         { true, "surprised", 0.8, 12 },
         { true, "happy",     0.6, 12 },
         { true, "happy",     0.6, 12 },
+        { true, "surprised", 1.0, 12 },
     };
+    // Coalesce window (seconds) for combining near-simultaneous left + right
+    // cheek touches into a single BothCheeks event. Mirror of the sensor's
+    // cfg field; the menu writes both this and the sensor's live value.
+    float                boop_coalesce_window_s = 0.10f;
     VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;

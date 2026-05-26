@@ -20,11 +20,14 @@ namespace sensor {
 class BoopSensor {
 public:
     enum class Zone : uint8_t {
-        Snout      = 0,
-        LeftCheek  = 1,
-        RightCheek = 2,
+        Snout       = 0,
+        LeftCheek   = 1,
+        RightCheek  = 2,
+        // Derived (not directly measured): fires when both cheek electrodes
+        // land touch events within the configured coalesce window.
+        BothCheeks  = 3,
     };
-    static constexpr uint8_t ZoneCount = 3;
+    static constexpr uint8_t ZoneCount = 4;
 
     using BoopCallback = std::function<void(Zone)>;
 
@@ -41,6 +44,10 @@ public:
     // sensitive); ToF backends are free to remap.
     virtual void set_zone_enabled  (Zone, bool)    = 0;
     virtual void set_zone_threshold(Zone, uint8_t) = 0;
+
+    // Coalesce window for combining near-simultaneous left + right cheek
+    // touches into a BothCheeks event. Set to 0 to disable.
+    virtual void set_coalesce_window_s(double /*seconds*/) {}
 
     // Fires once per touch-detected transition (not on release). Invoked from
     // the poll thread — callbacks must be thread-safe with whatever state
