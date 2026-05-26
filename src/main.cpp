@@ -515,7 +515,11 @@ static std::vector<MenuItem> build_menu(
         BackgroundLibrary** bg_lib_pp = nullptr,
         // User-writable backgrounds folder ($HOME/protohud/backgrounds). Imports
         // land here; bundled defaults under assets/backgrounds are read-only.
-        std::string bg_user_dir = {})
+        std::string bg_user_dir = {},
+        // Boop sensor (set after construction; same pointer-to-pointer pattern).
+        // Menu toggles/sliders forward live changes via the BoopSensor interface
+        // so the next poll cycle picks up the new threshold / enable state.
+        sensor::BoopSensor** boop_sensor_pp = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -2500,6 +2504,97 @@ static std::vector<MenuItem> build_menu(
     face_display_menu.push_back(submenu("ProtoTracer", std::move(prototracer_inner_menu)));
     if (!protoface_inner_menu.empty())
         face_display_menu.push_back(submenu("Protoface", std::move(protoface_inner_menu)));
+
+    // ── Boop sensor (Protoface-side reactive behaviour) ──────────────────────
+    // One submenu per zone, each with Enabled / Expression / Hold Duration /
+    // Touch Threshold (lower = more sensitive) / Test. Tunable changes mirror
+    // into the sensor immediately so the next poll cycle uses them; the
+    // values persist to config.json via mutate_cfg on shutdown.
+    auto boop_zone_menu = [&, teensy, boop_sensor_pp](int idx, std::string label) -> MenuItem {
+        const auto zone_enum = static_cast<sensor::BoopSensor::Zone>(idx);
+
+        std::vector<MenuItem> expr_items;
+        for (int ei = 0; ei < kFaceSlotCount; ++ei) {
+            const std::string expr     = kFaceSlots[ei].expression;
+            const std::string ex_label = kFaceSlots[ei].label;
+            expr_items.push_back(leaf_sel(ex_label,
+                [&state, idx, expr]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.boop_zones[idx].expression = expr;
+                },
+                [&state, idx, expr]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    return state.boop_zones[idx].expression == expr;
+                }));
+        }
+
+        std::vector<MenuItem> items = {
+            toggle("Enabled",
+                [&state, idx]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    return state.boop_zones[idx].enabled;
+                },
+                [&state, idx, boop_sensor_pp, zone_enum](bool v){
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        state.boop_zones[idx].enabled = v;
+                    }
+                    if (auto* s = boop_sensor_pp ? *boop_sensor_pp : nullptr)
+                        s->set_zone_enabled(zone_enum, v);
+                }),
+            with_desc(submenu("Expression", std::move(expr_items)),
+                      "Which face the boop triggers. Auto-reverts when the "
+                      "hold duration elapses."),
+            slider("Hold Duration", 0.2f, 3.0f, 0.1f, " s",
+                [&state, idx]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    return static_cast<float>(state.boop_zones[idx].duration_s);
+                },
+                [&state, idx](float v){
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.boop_zones[idx].duration_s = static_cast<double>(v);
+                }),
+            with_desc(slider("Touch Threshold", 4.f, 30.f, 1.f, "",
+                [&state, idx]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    return static_cast<float>(state.boop_zones[idx].threshold);
+                },
+                [&state, idx, boop_sensor_pp, zone_enum](float v){
+                    const auto t = static_cast<uint8_t>(v);
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        state.boop_zones[idx].threshold = t;
+                    }
+                    if (auto* s = boop_sensor_pp ? *boop_sensor_pp : nullptr)
+                        s->set_zone_threshold(zone_enum, t);
+                }),
+                "MPR121 touch threshold. Lower numbers are more sensitive; "
+                "raise if you see false triggers."),
+            leaf("Test Boop",
+                [teensy, &state, idx]{
+                    std::string expr;
+                    double dur = 0.0;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        expr = state.boop_zones[idx].expression;
+                        dur  = state.boop_zones[idx].duration_s;
+                    }
+                    if (!expr.empty()) teensy->trigger_boop(expr, dur);
+                }),
+        };
+        return submenu(std::move(label), std::move(items));
+    };
+
+    std::vector<MenuItem> boop_menu = {
+        boop_zone_menu(0, "Snout"),
+        boop_zone_menu(1, "Left Cheek"),
+        boop_zone_menu(2, "Right Cheek"),
+    };
+    face_display_menu.push_back(
+        with_desc(submenu("Boop", std::move(boop_menu)),
+                  "Per-zone capacitive-touch reactions. Drives "
+                  "Protoface's trigger_boop() — fires the chosen expression "
+                  "when the snout or a cheek pad is touched."));
 
     // ── HUD settings ──────────────────────────────────────────────────────────
 
@@ -4971,12 +5066,23 @@ int main(int argc, char* argv[]) {
     boop_sensor.on_boop([&face_proxy, &state](sensor::BoopSensor::Zone z) {
         const auto zi = static_cast<size_t>(z);
         if (zi >= 3) return;
-        const auto& zc = state.boop_zones[zi];
-        if (!zc.enabled || zc.expression.empty()) return;
-        face_proxy.trigger_boop(zc.expression, zc.duration_s);
+        // Snapshot under the state lock so a menu edit mid-boop can't tear
+        // the std::string read.
+        bool        enabled;
+        std::string expression;
+        double      duration_s;
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            enabled    = state.boop_zones[zi].enabled;
+            expression = state.boop_zones[zi].expression;
+            duration_s = state.boop_zones[zi].duration_s;
+        }
+        if (!enabled || expression.empty()) return;
+        face_proxy.trigger_boop(expression, duration_s);
     });
     if (boop_cfg.enabled && !boop_sensor.start())
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
+    boop_sensor_ptr = &boop_sensor;   // expose for the menu's live tuning
 
     // ── Dev/debug monitors ────────────────────────────────────────────────────
 
@@ -5348,6 +5454,7 @@ int main(int argc, char* argv[]) {
     bool panel_preview_enabled = false;
     MenuSystem* menu_ptr = nullptr;
     BackgroundLibrary* bg_lib_ptr = nullptr;   // set after bg_lib is constructed
+    sensor::BoopSensor* boop_sensor_ptr = nullptr;   // set after boop_sensor is constructed
     std::vector<MenuItem> quick_items;   // curated corner/radial quick-menu tree
     std::string cfg_gifs_dir = pf_build_render_config(cfg).gifs_dir;
     std::string cfg_bg_user_dir;
@@ -5374,7 +5481,8 @@ int main(int argc, char* argv[]) {
                                &left_eye_src, &right_eye_src,
                                &profiles, &hud_presets, &quick_items,
                                cfg_gifs_dir,
-                               &bg_lib_ptr, cfg_bg_user_dir));
+                               &bg_lib_ptr, cfg_bg_user_dir,
+                               &boop_sensor_ptr));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -5935,6 +6043,22 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["flip_vertical"]             = hud.config().hud_flip_vertical;
         cfg["hud"]["effects"]["type"]           = static_cast<int>(state.effects_cfg.effect);
         cfg["hud"]["effects"]["palette"]        = static_cast<int>(state.effects_cfg.palette);
+
+        // Boop sensor zones — preserve the hardware-level fields (enabled,
+        // i2c_bus, i2c_addr, electrode mapping) and rewrite the user-tunable
+        // bits the menu owns.
+        {
+            auto& jb = cfg["boop"];
+            auto& jzones = jb["zones"];
+            if (!jzones.is_array() || jzones.size() < 3) jzones = json::array({json{}, json{}, json{}});
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (int i = 0; i < 3; ++i) {
+                jzones[i]["enabled"]    = state.boop_zones[i].enabled;
+                jzones[i]["expression"] = state.boop_zones[i].expression;
+                jzones[i]["duration_s"] = state.boop_zones[i].duration_s;
+                jzones[i]["threshold"]  = state.boop_zones[i].threshold;
+            }
+        }
 
         cfg["night_vision"]["exposure_ev"]            = state.night_vision.exposure_ev;
         cfg["night_vision"]["shutter_us"]             = state.night_vision.shutter_us;
