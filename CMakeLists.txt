@@ -203,6 +203,7 @@ set(SOURCES
     src/sensor/mpu9250.cpp
     src/sensor/bno055.cpp
     src/sensor/mpr121_boop_sensor.cpp
+    src/sensor/light_sensor.cpp
     src/accessory/led_strip.cpp
     src/accessory/accessory_leds.cpp
     src/sys/system_monitor.cpp

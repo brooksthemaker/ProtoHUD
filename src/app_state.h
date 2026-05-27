@@ -177,6 +177,21 @@ struct BoopZoneConfig {
     uint8_t     threshold  = 12;            // MPR121 touch threshold (lower = more sensitive)
 };
 
+// ── Light-sensor squint trigger ──────────────────────────────────────────────
+// Edge-detects the wearer stepping from a dim area into a bright one and
+// fires a transient expression (default "squint") for a few seconds before
+// reverting. The driver lives in sensor::LightSensor; main hosts the edge
+// detector and the menu mutates this struct.
+struct LightSquintConfig {
+    bool        enabled              = false;
+    float       dark_threshold_lux   = 100.f;   // below = "dark"
+    float       bright_threshold_lux = 800.f;   // above = "bright"
+    float       transition_window_s  = 2.0f;    // dark→bright must happen within this many seconds
+    std::string expression           = "squint";
+    double      duration_s           = 1.5;     // hold time before reverting
+    float       cooldown_s           = 3.0f;    // min time between consecutive squints
+};
+
 struct NightVisionState {
     float exposure_ev        = 0.0f;  // -3.0 to +3.0
     int   shutter_us         = 33333; // microseconds (40 to 1000000)
@@ -763,6 +778,7 @@ struct AppState {
     // cheek touches into a single BothCheeks event. Mirror of the sensor's
     // cfg field; the menu writes both this and the sensor's live value.
     float                boop_coalesce_window_s = 0.10f;
+    LightSquintConfig    light_squint;
     VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;

@@ -39,6 +39,7 @@
 #include "post_process.h"
 #include "sensor/mpu9250.h"
 #include "sensor/bno055.h"
+#include "sensor/light_sensor.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
 #include "sys/system_monitor.h"
@@ -679,6 +680,7 @@ constexpr FaceSlot kFaceSlots[] = {
     {"angry",     "Angry"},
     {"sad",       "Sad"},
     {"surprised", "Surprised"},
+    {"squint",    "Squint"},
     {"blink",     "Blink"},
 };
 constexpr int kFaceSlotCount = sizeof(kFaceSlots) / sizeof(kFaceSlots[0]);
@@ -3464,6 +3466,62 @@ static std::vector<MenuItem> build_menu(
                   "Protoface's trigger_boop() — fires the chosen expression "
                   "when the snout, a cheek pad, or both cheeks together are "
                   "touched."));
+
+    // ── Light Sensor (BH1750) → squint reaction ────────────────────────────
+    // Edge-detects dark→bright transitions (helmet stepping into sunlight)
+    // and fires the configured expression for the chosen duration. The
+    // expression name lines up with a Files > Faces slot so the user can
+    // author it in the editor.
+    std::vector<MenuItem> light_menu = {
+        toggle("Enabled",
+            [&state]{ return state.light_squint.enabled; },
+            [&state](bool v){
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.light_squint.enabled = v;
+            }),
+        slider("Dark Threshold", 1.f, 1000.f, 5.f, " lx",
+            [&state]{ return state.light_squint.dark_threshold_lux; },
+            [&state](float v){
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.light_squint.dark_threshold_lux = v;
+                if (state.light_squint.bright_threshold_lux <= v)
+                    state.light_squint.bright_threshold_lux = v + 10.f;
+            }),
+        slider("Bright Threshold", 50.f, 20000.f, 50.f, " lx",
+            [&state]{ return state.light_squint.bright_threshold_lux; },
+            [&state](float v){
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.light_squint.bright_threshold_lux = v;
+                if (state.light_squint.dark_threshold_lux >= v)
+                    state.light_squint.dark_threshold_lux = std::max(1.f, v - 10.f);
+            }),
+        slider("Transition Window", 0.2f, 10.f, 0.1f, " s",
+            [&state]{ return state.light_squint.transition_window_s; },
+            [&state](float v){
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.light_squint.transition_window_s = v;
+            }),
+        slider("Hold Duration", 0.2f, 5.f, 0.1f, " s",
+            [&state]{ return static_cast<float>(state.light_squint.duration_s); },
+            [&state](float v){
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.light_squint.duration_s = v;
+            }),
+        slider("Cooldown", 0.5f, 30.f, 0.5f, " s",
+            [&state]{ return state.light_squint.cooldown_s; },
+            [&state](float v){
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.light_squint.cooldown_s = v;
+            }),
+    };
+    face_display_menu.push_back(
+        with_desc(submenu("Light Sensor", std::move(light_menu)),
+                  "Triggers a face reaction when the wearer steps from a dim "
+                  "area into a bright one. Reads a BH1750 over I²C "
+                  "(/dev/i2c-1, addr 0x23). The expression name (default "
+                  "\"squint\") maps to a Files > Faces slot — author the PNG "
+                  "there. Cooldown gates back-to-back triggers under "
+                  "flickering light."));
 
     // ── Voice → mouth_open driver ────────────────────────────────────────────
     // Sliders write through to the live analyzer so the next FFT cycle picks
@@ -6409,6 +6467,62 @@ int main(int argc, char* argv[]) {
     if (led_cfg.enabled && !accessory_leds.start())
         std::cerr << "[main] accessory LEDs unavailable — continuing without\n";
 
+    // ── Light sensor (BH1750 ambient lux → squint reaction) ──────────────────
+    // Hardware-level config (bus, address, sensor type) comes from cfg["light_sensor"];
+    // the trigger thresholds + reaction live in state.light_squint so the menu can
+    // mutate them at runtime and mutate_cfg persists them on save.
+    sensor::LightSensor::Config light_cfg;
+    if (cfg.contains("light_sensor")) {
+        auto& jl = cfg["light_sensor"];
+        light_cfg.enabled  = jval(jl, "enabled",  light_cfg.enabled);
+        light_cfg.i2c_bus  = jl.value("i2c_bus",  light_cfg.i2c_bus);
+        light_cfg.i2c_addr = jval(jl, "i2c_addr", light_cfg.i2c_addr);
+        light_cfg.poll_hz  = jval(jl, "poll_hz",  light_cfg.poll_hz);
+        state.light_squint.enabled              = jval(jl, "enabled",              state.light_squint.enabled);
+        state.light_squint.dark_threshold_lux   = jval(jl, "dark_threshold_lux",   state.light_squint.dark_threshold_lux);
+        state.light_squint.bright_threshold_lux = jval(jl, "bright_threshold_lux", state.light_squint.bright_threshold_lux);
+        state.light_squint.transition_window_s  = jval(jl, "transition_window_s",  state.light_squint.transition_window_s);
+        state.light_squint.expression           = jl.value("expression",            state.light_squint.expression);
+        state.light_squint.duration_s           = jval(jl, "duration_s",           state.light_squint.duration_s);
+        state.light_squint.cooldown_s           = jval(jl, "cooldown_s",           state.light_squint.cooldown_s);
+    }
+    sensor::LightSensor light_sensor(light_cfg);
+    // Edge detector: remember when we last saw "dark"; if we cross into
+    // "bright" within transition_window_s, fire the squint reaction. Cooldown
+    // gates back-to-back squints (e.g. flickering lights).
+    struct LightEdgeState {
+        double last_dark_t   = -1.0;
+        double last_squint_t = -1.0e9;
+    };
+    auto light_edge = std::make_shared<LightEdgeState>();
+    light_sensor.set_lux_callback([light_edge, &state, &face_proxy](float lux) {
+        const double now = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        // Snapshot the config so a mid-callback menu edit can't tear strings.
+        LightSquintConfig c;
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            c = state.light_squint;
+        }
+        if (!c.enabled) return;
+        if (lux < c.dark_threshold_lux) {
+            light_edge->last_dark_t = now;
+            return;
+        }
+        if (lux <= c.bright_threshold_lux) return;
+        // Bright. Did we come from dark recently?
+        if (light_edge->last_dark_t < 0.0) return;
+        if (now - light_edge->last_dark_t > c.transition_window_s) return;
+        // Cooldown gate.
+        if (now - light_edge->last_squint_t < c.cooldown_s) return;
+        light_edge->last_squint_t = now;
+        light_edge->last_dark_t   = -1.0;   // consume the edge
+        if (!c.expression.empty())
+            face_proxy.trigger_boop(c.expression, c.duration_s);
+    });
+    if (light_cfg.enabled && !light_sensor.start())
+        std::cerr << "[main] light sensor unavailable\n";
+
     // ── Dev/debug monitors ────────────────────────────────────────────────────
 
     SystemMonitor    sys_mon;
@@ -7679,6 +7793,17 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            auto& jls = cfg["light_sensor"];
+            jls["enabled"]              = state.light_squint.enabled;
+            jls["dark_threshold_lux"]   = state.light_squint.dark_threshold_lux;
+            jls["bright_threshold_lux"] = state.light_squint.bright_threshold_lux;
+            jls["transition_window_s"]  = state.light_squint.transition_window_s;
+            jls["expression"]           = state.light_squint.expression;
+            jls["duration_s"]           = state.light_squint.duration_s;
+            jls["cooldown_s"]           = state.light_squint.cooldown_s;
+        }
         cfg["voice_mouth"]["enabled"]             = state.voice_mouth.enabled;
         cfg["voice_mouth"]["sensitivity"]         = state.voice_mouth.sensitivity;
         cfg["voice_mouth"]["noise_gate"]          = state.voice_mouth.noise_gate;
@@ -9226,6 +9351,7 @@ int main(int argc, char* argv[]) {
     step("mpu9250");         mpu9250.stop();
     step("bno055");          bno055.stop();
     step("boop_sensor");     boop_sensor.stop();
+    step("light_sensor");    light_sensor.stop();
     step("accessory_leds");  accessory_leds.stop();
     step("audio");           audio.stop();
     step("android_mirror");  android_mirror.stop();
