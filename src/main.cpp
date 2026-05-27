@@ -330,6 +330,50 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc) {
     return std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h);
 }
 
+// ── Chain layout → named zone rects ───────────────────────────────────────────
+// Translates the eye/mouth/nose layout pickers into the rectangles the face
+// editor highlights. Coordinates per the project spec; the right eye is the
+// left eye mirrored around canvas_w/2. Nose can be omitted ("none"). Used by
+// the editor regardless of whether config has chains[] wired up — the picker
+// is the source of truth for "what each panel covers."
+static std::vector<face::NamedRegion> pf_compute_face_zones(
+        const std::string& eye_layout,
+        const std::string& mouth_layout,
+        const std::string& nose_layout,
+        int canvas_w)
+{
+    std::vector<face::NamedRegion> zones;
+
+    // Eye geometry: WxH = (cols*8) x (rows*8); anchor at (0, 0).
+    int eye_cols = 2, eye_rows = 1;
+    if      (eye_layout == "1x3") { eye_cols = 3; eye_rows = 1; }
+    else if (eye_layout == "2x2") { eye_cols = 2; eye_rows = 2; }
+    else if (eye_layout == "2x3") { eye_cols = 3; eye_rows = 2; }
+    const int eye_w = eye_cols * 8;
+    const int eye_h = eye_rows * 8;
+    zones.push_back({"eye_l", cv::Rect(0,                  0, eye_w, eye_h)});
+    zones.push_back({"eye_r", cv::Rect(canvas_w - eye_w,   0, eye_w, eye_h)});
+
+    // Mouth: anchor (4, 25); WxH from layout.
+    int mouth_cols = 3, mouth_rows = 1;
+    if      (mouth_layout == "1x4") { mouth_cols = 4; mouth_rows = 1; }
+    else if (mouth_layout == "2x3") { mouth_cols = 3; mouth_rows = 2; }
+    else if (mouth_layout == "2x4") { mouth_cols = 4; mouth_rows = 2; }
+    zones.push_back({"mouth", cv::Rect(4, 25,
+                                       mouth_cols * 8, mouth_rows * 8)});
+
+    // Nose: row 0, centred per spec (1x1 anchor 37, 1x2/1x3 anchor 33).
+    if (nose_layout == "1x1") {
+        zones.push_back({"nose", cv::Rect(37, 0, 8, 8)});
+    } else if (nose_layout == "1x2") {
+        zones.push_back({"nose", cv::Rect(33, 0, 16, 8)});
+    } else if (nose_layout == "1x3") {
+        zones.push_back({"nose", cv::Rect(33, 0, 24, 8)});
+    } // "none" → omit
+
+    return zones;
+}
+
 static face::RenderConfig pf_build_render_config(const json& cfg) {
     face::RenderConfig rc;
     const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
@@ -720,7 +764,13 @@ static std::vector<MenuItem> build_menu(
         // to a routine that polls the native controller for canvas dims +
         // covered chain regions, opens the face editor, writes the PNG on
         // commit, and reloads the face.
-        std::function<void(const std::string& expression)> edit_face = nullptr)
+        std::function<void(const std::string& expression)> edit_face = nullptr,
+        // Chain layout pickers — pointers so the radios can read the live
+        // value and mutate it in place. Used by the MAX7219 / RGB matrix
+        // editor to draw labelled eye / nose / mouth zones.
+        std::string* pf_eye_layout_p   = nullptr,
+        std::string* pf_mouth_layout_p = nullptr,
+        std::string* pf_nose_layout_p  = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -2944,12 +2994,65 @@ static std::vector<MenuItem> build_menu(
             [swap_backend]{ if (swap_backend) swap_backend("rgb_matrix"); },
             [pf_backend_p]{ return pf_backend_p && *pf_backend_p == "rgb_matrix"; }),
     };
+    // Chain Layout pickers — drive the editor's eye/nose/mouth bounding
+    // boxes. Each radio mutates the live string the editor reads when it
+    // opens, so the next "Edit…" shows the updated zones. Only shown for
+    // pixel-grid backends (MAX7219 / RGB matrix); HUB75 has no per-zone
+    // chain concept.
+    auto layout_pick = [&leaf_sel](const char* lbl, std::string* slot,
+                                   const char* value) -> MenuItem {
+        return leaf_sel(lbl,
+            [slot, value]{ if (slot) *slot = value; },
+            [slot, value]{ return slot && *slot == value; });
+    };
+    auto visible_for_native = [pf_backend_p] {
+        return pf_backend_p &&
+               (*pf_backend_p == "max7219" || *pf_backend_p == "rgb_matrix");
+    };
+    std::vector<MenuItem> eye_items = {
+        layout_pick("1x2  (16x8)",  pf_eye_layout_p, "1x2"),
+        layout_pick("1x3  (24x8)",  pf_eye_layout_p, "1x3"),
+        layout_pick("2x2  (16x16)", pf_eye_layout_p, "2x2"),
+        layout_pick("2x3  (24x16)", pf_eye_layout_p, "2x3"),
+    };
+    std::vector<MenuItem> mouth_items = {
+        layout_pick("1x3  (24x8)",  pf_mouth_layout_p, "1x3"),
+        layout_pick("1x4  (32x8)",  pf_mouth_layout_p, "1x4"),
+        layout_pick("2x3  (24x16)", pf_mouth_layout_p, "2x3"),
+        layout_pick("2x4  (32x16)", pf_mouth_layout_p, "2x4"),
+    };
+    std::vector<MenuItem> nose_items = {
+        layout_pick("None",         pf_nose_layout_p, "none"),
+        layout_pick("1x1  (8x8)",   pf_nose_layout_p, "1x1"),
+        layout_pick("1x2  (16x8)",  pf_nose_layout_p, "1x2"),
+        layout_pick("1x3  (24x8)",  pf_nose_layout_p, "1x3"),
+    };
+    std::vector<MenuItem> pf_chain_layout_items = {
+        with_desc(submenu("Eyes",  std::move(eye_items)),
+                  "Panels per eye. The right eye is mirrored on the same row "
+                  "so both eyes match. Used by the face editor to outline "
+                  "Left Eye / Right Eye zones."),
+        with_desc(submenu("Mouth", std::move(mouth_items)),
+                  "Mouth panels (anchor 4,25). Used by the face editor to "
+                  "outline the Mouth zone."),
+        with_desc(submenu("Nose",  std::move(nose_items)),
+                  "Nose panels (single row, centred). \"None\" omits the "
+                  "nose zone entirely."),
+    };
+    MenuItem pf_chain_layout_item = with_desc(
+        submenu("Chain Layout", std::move(pf_chain_layout_items)),
+        "Pick panels per zone — drives the bounding boxes the face editor "
+        "highlights so you can see which canvas pixels each panel will "
+        "display. Persisted to config.json.");
+    pf_chain_layout_item.visible_fn = visible_for_native;
+
     std::vector<MenuItem> pf_hardware_menu = {
         with_desc(submenu("Backend", std::move(pf_backend_items)),
                   "What LED hardware Protoface paints. Switching tears down "
                   "the running renderer and brings up a new one with the new "
                   "backend; the HUD keeps running through the transition. "
                   "Persists to config.json so the next launch starts here."),
+        std::move(pf_chain_layout_item),
     };
 
     // Visibility predicates — Effects / Face Color / Material Color /
@@ -5519,12 +5622,27 @@ int main(int argc, char* argv[]) {
     //   "max7219" — direct SPI to one or more MAX7219 daisy-chains; the
     //               Python driver isn't needed and we don't launch it.
     std::string pf_backend = "hub75";
+    // Chain layout pickers — drive both the editor's per-zone bounding
+    // boxes (Left/Right Eye, Nose, Mouth) and the chain rects passed to
+    // the panel output. Strings (not enums) for cfg round-trip simplicity:
+    //   eye:   "1x2" | "1x3" | "2x2" | "2x3"
+    //   mouth: "1x3" | "1x4" | "2x3" | "2x4"
+    //   nose:  "none" | "1x1" | "1x2" | "1x3"
+    std::string pf_eye_layout   = "1x2";
+    std::string pf_mouth_layout = "1x3";
+    std::string pf_nose_layout  = "1x1";
     if (cfg.contains("protoface")) {
         auto& jpf = cfg["protoface"];
         pf_autostart     = jval(jpf, "autostart", true);
         pf_mode          = jpf.value("mode", std::string("daemon"));
         pf_launch_driver = jval(jpf, "panel_driver", true);
         pf_backend       = jpf.value("backend", std::string("hub75"));
+        if (jpf.contains("layout") && jpf["layout"].is_object()) {
+            auto& jl = jpf["layout"];
+            pf_eye_layout   = jl.value("eye",   pf_eye_layout);
+            pf_mouth_layout = jl.value("mouth", pf_mouth_layout);
+            pf_nose_layout  = jl.value("nose",  pf_nose_layout);
+        }
         if (jpf.contains("preview")) {
             auto& jpv = jpf["preview"];
             protoface_preview_cfg.anchor_x = jval(jpv, "anchor_x", protoface_preview_cfg.anchor_x);
@@ -6497,23 +6615,26 @@ int main(int argc, char* argv[]) {
     // menu's visible_fn hides the leaf so this never runs.
     auto edit_face = [&](const std::string& expression) {
         if (!native_ctrl || !menu_ptr) return;
-        auto named   = native_ctrl->led_named_regions();
-        auto covered = native_ctrl->led_covered_regions();
         const int cw = native_ctrl->canvas_width();
         const int ch = native_ctrl->canvas_height();
+        // The Chain Layout pickers are the source of truth for the
+        // editor's per-zone bounding boxes (Left/Right Eye, Nose, Mouth).
+        // We derive them from the live pickers so the editor reflects
+        // the user's current selection, regardless of whether config has
+        // chains[] wired up.
+        auto named = pf_compute_face_zones(pf_eye_layout,
+                                           pf_mouth_layout,
+                                           pf_nose_layout,
+                                           cw);
+        std::vector<cv::Rect> covered;
+        covered.reserve(named.size());
+        for (const auto& nr : named) covered.push_back(nr.rect);
         if (covered.empty()) {
-            // No chains configured yet — fall back to the full renderer
-            // canvas so the user can still author the PNG. The Max7219 /
-            // RGB-matrix driver will display nothing until chains are
-            // wired in config, but the editing flow is decoupled from
-            // chain presence.
             covered.emplace_back(0, 0, cw, ch);
             named.push_back({"face", cv::Rect(0, 0, cw, ch)});
         }
-        // Friendlier labels for the chain names users see in the editor
-        // (the underlying chain.name is a short id like "eye_l"). Anything
-        // unknown passes through unchanged so custom chain names still
-        // surface.
+        // Friendlier labels (chain.name → display string). Custom names
+        // pass through unchanged so user-defined zones still surface.
         auto pretty_label = [](const std::string& name) -> std::string {
             if (name == "eye_l") return "Left Eye";
             if (name == "eye_r") return "Right Eye";
@@ -6523,11 +6644,8 @@ int main(int argc, char* argv[]) {
             return name;
         };
         std::vector<std::string> labels;
-        labels.reserve(covered.size());
-        for (size_t i = 0; i < covered.size(); ++i) {
-            labels.push_back(i < named.size() ? pretty_label(named[i].name)
-                                              : std::string());
-        }
+        labels.reserve(named.size());
+        for (const auto& nr : named) labels.push_back(pretty_label(nr.name));
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
 
@@ -6654,7 +6772,8 @@ int main(int argc, char* argv[]) {
                                audio.voice(),
                                &accessory_leds,
                                swap_backend, &pf_backend,
-                               edit_face));
+                               edit_face,
+                               &pf_eye_layout, &pf_mouth_layout, &pf_nose_layout));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -7303,6 +7422,9 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["mode"]                = pf_mode;
         cfg["protoface"]["backend"]             = pf_backend;
         cfg["protoface"]["autostart"]           = pf_autostart;
+        cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
+        cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
+        cfg["protoface"]["layout"]["nose"]      = pf_nose_layout;
         cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
         cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
         cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;
