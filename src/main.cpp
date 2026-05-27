@@ -2952,10 +2952,48 @@ static std::vector<MenuItem> build_menu(
                   "Persists to config.json so the next launch starts here."),
     };
 
+    // Visibility predicates — Effects / Face Color / Material Color /
+    // Animations / Save Face Config / Release Control are concepts from
+    // the existing HUB75 + Protoface-daemon path; the native MAX7219 /
+    // RGB-matrix renderer doesn't speak them. Hide on those backends so
+    // the menu shows only what the active hardware actually responds to.
+    auto visible_for_hub75 = [pf_backend_p] {
+        // Default to "shown" if no backend pointer is plumbed — keeps
+        // older callers (and the Protoface-daemon mode where pf_backend
+        // isn't relevant) working.
+        return !pf_backend_p || *pf_backend_p == "hub75";
+    };
+    auto gated = [](MenuItem m, std::function<bool()> vis) -> MenuItem {
+        m.visible_fn = std::move(vis);
+        return m;
+    };
+
+    // Panel preview controls — toggle + position + size + view — all wrap
+    // into one "Panel Preview" submenu so the parent stays tidy when
+    // visibility-gating filters cut the menu down to the essentials.
+    std::vector<MenuItem> pf_preview_menu;
+    if (panel_preview_pp)
+        pf_preview_menu.push_back(toggle("Enabled",
+            [panel_preview_pp]{ return *panel_preview_pp; },
+            [panel_preview_pp](bool v){ *panel_preview_pp = v; }));
+    if (protoface_preview_cfg) {
+        pf_preview_menu.push_back(submenu("Position",
+            make_position_items(protoface_preview_cfg)));
+        pf_preview_menu.push_back(make_size_slider("Size", protoface_preview_cfg));
+    }
+    if (protoface_preview_view_pp) {
+        int* vp = protoface_preview_view_pp;
+        pf_preview_menu.push_back(submenu("View", std::vector<MenuItem>{
+            leaf_sel("Whole Face", [vp]{ *vp = 0; }, [vp]{ return *vp == 0; }),
+            leaf_sel("Left Half",  [vp]{ *vp = 1; }, [vp]{ return *vp == 1; }),
+            leaf_sel("Right Half", [vp]{ *vp = 2; }, [vp]{ return *vp == 2; }),
+        }));
+    }
+
     std::vector<MenuItem> protoface_inner_menu = {
-        submenu("Effects",        std::move(pf_effects)),
-        submenu("Face Color",     std::move(pf_colors)),
-        submenu("Material Color", std::move(pf_palette)),
+        gated(submenu("Effects",        std::move(pf_effects)),  visible_for_hub75),
+        gated(submenu("Face Color",     std::move(pf_colors)),   visible_for_hub75),
+        gated(submenu("Material Color", std::move(pf_palette)),  visible_for_hub75),
         // Face PNGs (per-expression slots, mouth shapes, boop reactions)
         // live here under Protoface rather than the generic Files menu —
         // they're meaningful per-backend, and the editor only makes sense
@@ -2965,47 +3003,37 @@ static std::vector<MenuItem> build_menu(
                   "Per-expression face PNGs and the in-HUD pixel editor. "
                   "Edit... opens whenever the active backend (Hardware > "
                   "Backend) has an editor capability — today: MAX7219 and "
-                  "RGB matrix; HUB75 stays import-only."),
-        with_panel(submenu("Animations", std::move(pf_gifs)),
-                   "GIF Preview", draw_gif_preview),
+                  "RGB matrix; HUB75 stays import-only. Files are stored "
+                  "in faces/<active>[_<backend>]/ so each panel technology "
+                  "keeps its own art."),
+        gated(with_panel(submenu("Animations", std::move(pf_gifs)),
+                         "GIF Preview", draw_gif_preview), visible_for_hub75),
         slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
         submenu("Hardware",       std::move(pf_hardware_menu)),
-        leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
-        leaf("Release Control",  [teensy]{ teensy->release_control(); }),
+        gated(leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
+              visible_for_hub75),
+        gated(leaf("Release Control",  [teensy]{ teensy->release_control(); }),
+              visible_for_hub75),
     };
     // "Start Protoface" first: launch the daemon (if not running) and make it the
     // active source. Targets the Protoface backend directly (not the proxy).
     if (fp_option) {
         protoface_inner_menu.insert(protoface_inner_menu.begin(),
-            leaf("Start Protoface", [fp_option, active_face_pp]{
+            gated(leaf("Start Protoface", [fp_option, active_face_pp]{
                 fp_option->launch();
                 if (active_face_pp) *active_face_pp = fp_option;
-            }));
+            }), visible_for_hub75));
         protoface_inner_menu.insert(protoface_inner_menu.begin() + 1,
-            leaf("Restart Protoface", [fp_option, active_face_pp]{
+            gated(leaf("Restart Protoface", [fp_option, active_face_pp]{
                 fp_option->restart();
                 if (active_face_pp) *active_face_pp = fp_option;
-            }));
+            }), visible_for_hub75));
     }
-    if (panel_preview_pp)
-        protoface_inner_menu.push_back(toggle("Panel Preview",
-            [panel_preview_pp]{ return *panel_preview_pp; },
-            [panel_preview_pp](bool v){ *panel_preview_pp = v; }));
-    if (protoface_preview_cfg) {
-        protoface_inner_menu.push_back(submenu("Preview Position",
-            make_position_items(protoface_preview_cfg)));
-        protoface_inner_menu.push_back(make_size_slider("Preview Size", protoface_preview_cfg));
-    }
-    if (protoface_preview_view_pp) {
-        int* vp = protoface_preview_view_pp;
-        protoface_inner_menu.push_back(submenu("Preview View", std::vector<MenuItem>{
-            leaf_sel("Whole Face", [vp]{ *vp = 0; }, [vp]{ return *vp == 0; }),
-            leaf_sel("Left Half",  [vp]{ *vp = 1; }, [vp]{ return *vp == 1; }),
-            leaf_sel("Right Half", [vp]{ *vp = 2; }, [vp]{ return *vp == 2; }),
-        }));
-    }
+    if (!pf_preview_menu.empty())
+        protoface_inner_menu.push_back(submenu("Panel Preview",
+                                               std::move(pf_preview_menu)));
 
     // ── Face Display root: Source picker (radios) + per-backend submenus ─────
     std::vector<MenuItem> face_display_menu;
@@ -6293,6 +6321,15 @@ int main(int argc, char* argv[]) {
                              "a daemon may still be running and double-writing the panel\n";
         }
         face::RenderConfig rc = pf_build_render_config(cfg);
+        // Per-backend face folder — HUB75 keeps the legacy "main" folder
+        // for back-compat; MAX7219 / RGB-matrix get their own "main_max7219"
+        // / "main_rgb_matrix" subfolders so users can author distinct art
+        // for the different panel technologies without files colliding.
+        if (pf_backend != "hub75") {
+            const std::string suffix = "_" + pf_backend;
+            for (auto& pn : rc.panels)
+                if (!pn.face.active.empty()) pn.face.active += suffix;
+        }
         // Auto-save the live look next to config.json so menu changes persist.
         rc.state_path = (fs::path(cfg_path).parent_path() / "protoface_state.json").string();
         native_ctrl = std::make_unique<face::NativeFaceController>(
@@ -6413,6 +6450,12 @@ int main(int argc, char* argv[]) {
         ctrl_graveyard.push_back(std::move(native_ctrl));
 
         face::RenderConfig rc = pf_build_render_config(cfg);
+        // Per-backend face folder (see startup-path comment above).
+        if (pf_backend != "hub75") {
+            const std::string suffix = "_" + pf_backend;
+            for (auto& pn : rc.panels)
+                if (!pn.face.active.empty()) pn.face.active += suffix;
+        }
         rc.state_path = (fs::path(cfg_path).parent_path() /
                           "protoface_state.json").string();
         auto new_output = pf_build_panel_output(cfg, rc);
