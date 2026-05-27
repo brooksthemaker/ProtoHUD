@@ -1276,6 +1276,35 @@ static std::vector<MenuItem> build_menu(
             });
         imp.visible_fn = [bound_now]{ return !bound_now(); };
 
+        // Copy from another face slot — useful as a starting point ("clone
+        // 'happy' into 'wink' then tweak the eye"). Listed slots are gated
+        // per-row to hide empties and self; the submenu itself hides when
+        // there's nothing copyable. native_ctrl reload + on-screen set so
+        // the new art shows immediately, matching the editor's commit path.
+        std::vector<MenuItem> copy_children;
+        for (int src_idx = 0; src_idx < kFaceSlotCount; ++src_idx) {
+            if (src_idx == slot_idx) continue;
+            const std::string src_expr  = kFaceSlots[src_idx].expression;
+            const std::string src_label = kFaceSlots[src_idx].label;
+            MenuItem ci = leaf(src_label,
+                [teensy, src_expr, expr]{
+                    const std::string src = teensy->face_image_path(src_expr);
+                    if (!src.empty()) teensy->import_face_image(expr, src);
+                });
+            ci.visible_fn = [teensy, src_expr]{ return teensy->face_image_exists(src_expr); };
+            copy_children.push_back(std::move(ci));
+        }
+        MenuItem copy_from = submenu("Copy from...", std::move(copy_children));
+        copy_from.description = "Copy another face's PNG into this slot as a "
+                                "starting point. The source slot keeps its art.";
+        copy_from.visible_fn = [teensy, expr]{
+            for (int j = 0; j < kFaceSlotCount; ++j) {
+                if (kFaceSlots[j].expression == expr) continue;
+                if (teensy->face_image_exists(kFaceSlots[j].expression)) return true;
+            }
+            return false;
+        };
+
         // Edit launches the pixel editor on this slot's PNG. Visible only
         // when the active backend exposes covered LED regions — keeps the
         // option hidden in HUB75 / daemon modes where the editor would
@@ -1285,7 +1314,8 @@ static std::vector<MenuItem> build_menu(
         edit_it.visible_fn = have_led_regions;
 
         m.children = { std::move(play), std::move(edit_it),
-                       std::move(replace), std::move(clear), std::move(imp) };
+                       std::move(replace), std::move(copy_from),
+                       std::move(clear), std::move(imp) };
         return m;
     };
 
