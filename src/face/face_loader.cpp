@@ -36,7 +36,8 @@ void FaceLoader::load() {
             expr_map.emplace_back(name, fn.get<std::string>());
     } else {
         std::vector<std::string> pngs;
-        for (auto& e : fs::directory_iterator(folder_))
+        std::error_code ec;
+        for (auto& e : fs::directory_iterator(folder_, ec))
             if (e.path().extension() == ".png") pngs.push_back(e.path().filename().string());
         std::sort(pngs.begin(), pngs.end());
         for (auto& p : pngs) {

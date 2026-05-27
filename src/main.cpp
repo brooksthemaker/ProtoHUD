@@ -6330,6 +6330,15 @@ int main(int argc, char* argv[]) {
             for (auto& pn : rc.panels)
                 if (!pn.face.active.empty()) pn.face.active += suffix;
         }
+        // Ensure the per-backend face folder(s) exist on disk — otherwise the
+        // FaceLoader's directory scan returns empty and the in-HUD editor has
+        // nowhere to write new PNGs. create_directories is a no-op if present.
+        {
+            std::error_code mkec;
+            for (const auto& pn : rc.panels)
+                if (!pn.face.active.empty())
+                    fs::create_directories(fs::path(rc.faces_dir) / pn.face.active, mkec);
+        }
         // Auto-save the live look next to config.json so menu changes persist.
         rc.state_path = (fs::path(cfg_path).parent_path() / "protoface_state.json").string();
         native_ctrl = std::make_unique<face::NativeFaceController>(
@@ -6455,6 +6464,13 @@ int main(int argc, char* argv[]) {
             const std::string suffix = "_" + pf_backend;
             for (auto& pn : rc.panels)
                 if (!pn.face.active.empty()) pn.face.active += suffix;
+        }
+        // Ensure the per-backend face folder(s) exist (see startup-path note).
+        {
+            std::error_code mkec;
+            for (const auto& pn : rc.panels)
+                if (!pn.face.active.empty())
+                    fs::create_directories(fs::path(rc.faces_dir) / pn.face.active, mkec);
         }
         rc.state_path = (fs::path(cfg_path).parent_path() /
                           "protoface_state.json").string();
