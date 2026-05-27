@@ -6474,6 +6474,14 @@ int main(int argc, char* argv[]) {
             const std::string suffix = "_" + pf_backend;
             for (auto& pn : rc.panels)
                 if (!pn.face.active.empty()) pn.face.active += suffix;
+            // MAX7219 / RGB-matrix panels are discrete 8x8 LED grids: a
+            // sub-pixel wiggle that reads as gentle motion on HUB75 just
+            // smears pixels on these backends and looks wrong both on the
+            // panels and in the preview. Zero the wiggle on every panel.
+            for (auto& pn : rc.panels) {
+                pn.face.wiggle.amplitude_x = 0.0;
+                pn.face.wiggle.amplitude_y = 0.0;
+            }
         }
         // Ensure the per-backend face folder(s) exist on disk — otherwise the
         // FaceLoader's directory scan returns empty and the in-HUD editor has
@@ -6609,6 +6617,14 @@ int main(int argc, char* argv[]) {
             const std::string suffix = "_" + pf_backend;
             for (auto& pn : rc.panels)
                 if (!pn.face.active.empty()) pn.face.active += suffix;
+            // MAX7219 / RGB-matrix panels are discrete 8x8 LED grids: a
+            // sub-pixel wiggle that reads as gentle motion on HUB75 just
+            // smears pixels on these backends and looks wrong both on the
+            // panels and in the preview. Zero the wiggle on every panel.
+            for (auto& pn : rc.panels) {
+                pn.face.wiggle.amplitude_x = 0.0;
+                pn.face.wiggle.amplitude_y = 0.0;
+            }
         }
         // Ensure the per-backend face folder(s) exist (see startup-path note).
         {
