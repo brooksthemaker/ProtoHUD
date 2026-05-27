@@ -8781,10 +8781,57 @@ int main(int argc, char* argv[]) {
                                   android_overlay_cfg,
                                   android_mirror.frame_aspect());
 
-        // Protoface LED preview (top-right corner, above popups).
+        // Protoface LED preview (top-right corner, above popups). Source
+        // depends on backend: HUB75 + daemon mode go through the shm reader
+        // (panel_driver.py writes frames into /dev/shm); native MAX7219 /
+        // RGB-matrix backends never touch shm, so we copy from the in-process
+        // controller and upload here directly. Lambda is reused below for the
+        // face portrait beside the minimap so both surfaces stay in sync.
+        auto pick_face_tex = [&]() -> GLuint {
+            const bool native = (pf_backend == "max7219" || pf_backend == "rgb_matrix")
+                                 && native_ctrl;
+            if (!native) {
+                GLuint t = 0;
+                protoface_ctrl.get_frame_texture(t);
+                return t;
+            }
+            static GLuint native_tex = 0;
+            static int    native_w   = 0;
+            static int    native_h   = 0;
+            cv::Mat rgb;
+            if (native_ctrl->latest_frame(rgb) && !rgb.empty()) {
+                // CV_8UC3 RGB → RGBA upload; GL_NEAREST keeps pixel-art
+                // crisp at any zoom — same trade-off the shm path makes.
+                cv::Mat rgba;
+                cv::cvtColor(rgb, rgba, cv::COLOR_RGB2RGBA);
+                if (native_tex == 0) {
+                    glGenTextures(1, &native_tex);
+                    glBindTexture(GL_TEXTURE_2D, native_tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                } else {
+                    glBindTexture(GL_TEXTURE_2D, native_tex);
+                }
+                if (rgba.cols != native_w || rgba.rows != native_h) {
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                                 rgba.cols, rgba.rows, 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, rgba.data);
+                    native_w = rgba.cols;
+                    native_h = rgba.rows;
+                } else {
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                                    rgba.cols, rgba.rows,
+                                    GL_RGBA, GL_UNSIGNED_BYTE, rgba.data);
+                }
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            return native_tex;
+        };
+
         if (panel_preview_enabled) {
-            GLuint panel_tex = 0;
-            protoface_ctrl.get_frame_texture(panel_tex);
+            const GLuint panel_tex = pick_face_tex();
             hud.draw_panel_preview(panel_tex, xr.display_width(), xr.display_height(),
                                    protoface_preview_cfg.anchor_x, protoface_preview_cfg.anchor_y,
                                    protoface_preview_cfg.pan_x,    protoface_preview_cfg.pan_y,
@@ -8793,8 +8840,7 @@ int main(int argc, char* argv[]) {
 
         // Protoface portrait beside the minimap (closed-menu HUD element).
         if (snap.map_overlay.portrait && !menu.is_open()) {
-            GLuint face_tex = 0;
-            protoface_ctrl.get_frame_texture(face_tex);
+            const GLuint face_tex = pick_face_tex();
             hud.draw_face_portrait(face_tex, xr.display_width(), xr.display_height(), snap);
         }
 
