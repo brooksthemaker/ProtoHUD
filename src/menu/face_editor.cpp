@@ -489,6 +489,20 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                         grid_col, 1.f);
         }
 
+        // Per-zone bounding boxes — outline each chain rect in the accent
+        // colour so the user can see at a glance which pixels each panel
+        // (eye_l / eye_r / nose / mouth) will display on hardware. Drawn
+        // after the grid so the outline sits on top.
+        const ImU32 bbox_col = (accent & 0x00FFFFFFu) | (200u << 24);
+        for (const auto& r : covered_) {
+            const float rx = grid_origin_x_ + (r.x - bbox_.x) * cell_size_;
+            const float ry = grid_origin_y_ + (r.y - bbox_.y) * cell_size_;
+            dl->AddRect({rx, ry},
+                        {rx + r.width  * cell_size_,
+                         ry + r.height * cell_size_},
+                        bbox_col, 0.f, 0, 2.f);
+        }
+
         // Live anchor preview for Line / Rect tools (shape that would be
         // committed by the next primary()). Translucent so the underlying
         // canvas pixels still read through.
