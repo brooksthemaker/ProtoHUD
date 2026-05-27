@@ -276,6 +276,7 @@ public:
                           int canvas_w, int canvas_h,
                           std::vector<cv::Rect> covered_regions,
                           std::vector<std::string> covered_labels,
+                          int mirror_axis_x,
                           menu::FaceEditor::Mode mode,
                           std::vector<uint32_t> palette,
                           menu::FaceEditor::CommitFn on_commit,

@@ -332,46 +332,73 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc) {
 
 // ── Chain layout → named zone rects ───────────────────────────────────────────
 // Translates the eye/mouth/nose layout pickers into the rectangles the face
-// editor highlights. Coordinates per the project spec; the right eye is the
-// left eye mirrored around canvas_w/2. Nose can be omitted ("none"). Used by
-// the editor regardless of whether config has chains[] wired up — the picker
-// is the source of truth for "what each panel covers."
-static std::vector<face::NamedRegion> pf_compute_face_zones(
+// editor highlights. Coordinates per the project spec; the mirror axis is the
+// nose's horizontal centre (fence between cols), so the right eye and right
+// mouth land symmetrically around it. Nose can be omitted ("none"), in which
+// case the mirror axis falls back to canvas_w/2. Mouth is anchored by its
+// bottom-left corner (flush with the canvas bottom) so taller layouts don't
+// run off the canvas.
+struct PfFaceZones {
+    std::vector<face::NamedRegion> regions;
+    int                            mirror_x = 0;   // canvas col index used as the mirror "fence"
+};
+
+static PfFaceZones pf_compute_face_zones(
         const std::string& eye_layout,
         const std::string& mouth_layout,
         const std::string& nose_layout,
-        int canvas_w)
+        int canvas_w,
+        int canvas_h)
 {
-    std::vector<face::NamedRegion> zones;
+    PfFaceZones out;
+    auto& zones = out.regions;
 
-    // Eye geometry: WxH = (cols*8) x (rows*8); anchor at (0, 0).
+    // Eye geometry: WxH = (cols*8) x (rows*8); left eye anchored at (0, 0).
     int eye_cols = 2, eye_rows = 1;
     if      (eye_layout == "1x3") { eye_cols = 3; eye_rows = 1; }
     else if (eye_layout == "2x2") { eye_cols = 2; eye_rows = 2; }
     else if (eye_layout == "2x3") { eye_cols = 3; eye_rows = 2; }
     const int eye_w = eye_cols * 8;
     const int eye_h = eye_rows * 8;
-    zones.push_back({"eye_l", cv::Rect(0,                  0, eye_w, eye_h)});
-    zones.push_back({"eye_r", cv::Rect(canvas_w - eye_w,   0, eye_w, eye_h)});
+    zones.push_back({"eye_l", cv::Rect(0, 0, eye_w, eye_h)});
 
-    // Mouth: anchor (4, 25); WxH from layout.
+    // Nose rect — drives the mirror axis. "none" → no nose region; mirror
+    // axis falls back to canvas_w/2.
+    cv::Rect nose_rect;
+    bool has_nose = true;
+    if      (nose_layout == "1x1") nose_rect = cv::Rect(37, 0,  8, 8);
+    else if (nose_layout == "1x2") nose_rect = cv::Rect(33, 0, 16, 8);
+    else if (nose_layout == "1x3") nose_rect = cv::Rect(33, 0, 24, 8);
+    else                            has_nose = false;
+    if (has_nose) zones.push_back({"nose", nose_rect});
+
+    // Mirror "fence" — the column index x s.t. col k mirrors to col 2*x - 1 - k.
+    // We treat it as the nose's horizontal centre: x = nose.x + nose.w/2.
+    // When there's no nose, default to canvas_w/2.
+    out.mirror_x = has_nose ? (nose_rect.x + nose_rect.width / 2)
+                            : (canvas_w / 2);
+
+    // Right eye — mirror of left eye around mirror_x.
+    const int rey_x = 2 * out.mirror_x - eye_w;
+    zones.push_back({"eye_r", cv::Rect(rey_x, 0, eye_w, eye_h)});
+
+    // Mouth geometry: WxH from layout; bottom-left anchored at (4, canvas_h)
+    // so the mouth always sits flush with the canvas bottom regardless of
+    // how tall the layout is.
     int mouth_cols = 3, mouth_rows = 1;
     if      (mouth_layout == "1x4") { mouth_cols = 4; mouth_rows = 1; }
     else if (mouth_layout == "2x3") { mouth_cols = 3; mouth_rows = 2; }
     else if (mouth_layout == "2x4") { mouth_cols = 4; mouth_rows = 2; }
-    zones.push_back({"mouth", cv::Rect(4, 25,
-                                       mouth_cols * 8, mouth_rows * 8)});
+    const int mouth_w = mouth_cols * 8;
+    const int mouth_h = mouth_rows * 8;
+    const int mouth_y = std::max(0, canvas_h - mouth_h);
+    zones.push_back({"mouth_l", cv::Rect(4, mouth_y, mouth_w, mouth_h)});
+    // Right mouth — mirror around mirror_x. left mouth spans [4, 4+mouth_w);
+    // mirrored rect starts at 2*mirror_x - (4 + mouth_w).
+    const int rmo_x = 2 * out.mirror_x - (4 + mouth_w);
+    zones.push_back({"mouth_r", cv::Rect(rmo_x, mouth_y, mouth_w, mouth_h)});
 
-    // Nose: row 0, centred per spec (1x1 anchor 37, 1x2/1x3 anchor 33).
-    if (nose_layout == "1x1") {
-        zones.push_back({"nose", cv::Rect(37, 0, 8, 8)});
-    } else if (nose_layout == "1x2") {
-        zones.push_back({"nose", cv::Rect(33, 0, 16, 8)});
-    } else if (nose_layout == "1x3") {
-        zones.push_back({"nose", cv::Rect(33, 0, 24, 8)});
-    } // "none" → omit
-
-    return zones;
+    return out;
 }
 
 static face::RenderConfig pf_build_render_config(const json& cfg) {
@@ -6618,34 +6645,36 @@ int main(int argc, char* argv[]) {
         const int cw = native_ctrl->canvas_width();
         const int ch = native_ctrl->canvas_height();
         // The Chain Layout pickers are the source of truth for the
-        // editor's per-zone bounding boxes (Left/Right Eye, Nose, Mouth).
-        // We derive them from the live pickers so the editor reflects
-        // the user's current selection, regardless of whether config has
-        // chains[] wired up.
-        auto named = pf_compute_face_zones(pf_eye_layout,
+        // editor's per-zone bounding boxes (Left/Right Eye, Nose, Mouth
+        // halves). The helper also returns the canvas mirror axis (nose
+        // centre, or canvas_w/2 when there's no nose) so the editor's
+        // mirror brush respects the face's actual symmetry line.
+        auto zones = pf_compute_face_zones(pf_eye_layout,
                                            pf_mouth_layout,
                                            pf_nose_layout,
-                                           cw);
+                                           cw, ch);
         std::vector<cv::Rect> covered;
-        covered.reserve(named.size());
-        for (const auto& nr : named) covered.push_back(nr.rect);
+        covered.reserve(zones.regions.size());
+        for (const auto& nr : zones.regions) covered.push_back(nr.rect);
         if (covered.empty()) {
             covered.emplace_back(0, 0, cw, ch);
-            named.push_back({"face", cv::Rect(0, 0, cw, ch)});
+            zones.regions.push_back({"face", cv::Rect(0, 0, cw, ch)});
         }
         // Friendlier labels (chain.name → display string). Custom names
         // pass through unchanged so user-defined zones still surface.
         auto pretty_label = [](const std::string& name) -> std::string {
-            if (name == "eye_l") return "Left Eye";
-            if (name == "eye_r") return "Right Eye";
-            if (name == "nose")  return "Nose";
-            if (name == "mouth") return "Mouth";
-            if (name == "face")  return "Face";
+            if (name == "eye_l")   return "Left Eye";
+            if (name == "eye_r")   return "Right Eye";
+            if (name == "nose")    return "Nose";
+            if (name == "mouth")   return "Mouth";
+            if (name == "mouth_l") return "Left Mouth";
+            if (name == "mouth_r") return "Right Mouth";
+            if (name == "face")    return "Face";
             return name;
         };
         std::vector<std::string> labels;
-        labels.reserve(named.size());
-        for (const auto& nr : named) labels.push_back(pretty_label(nr.name));
+        labels.reserve(zones.regions.size());
+        for (const auto& nr : zones.regions) labels.push_back(pretty_label(nr.name));
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
 
@@ -6659,6 +6688,7 @@ int main(int argc, char* argv[]) {
                       expression.c_str(), pf_backend.c_str());
         menu_ptr->open_face_editor(
             title, abs_path, cw, ch, std::move(covered), std::move(labels),
+            zones.mirror_x,
             mode, {} /* default palette */,
             /* on_commit */ [&face_proxy, &native_ctrl, expression]
                 (const cv::Mat& rgba_canvas, const std::string& target_path) {

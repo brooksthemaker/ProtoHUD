@@ -37,6 +37,7 @@ void FaceEditor::open(std::string title,
                      int canvas_w, int canvas_h,
                      std::vector<cv::Rect> covered_regions,
                      std::vector<std::string> covered_labels,
+                     int mirror_axis_x,
                      Mode mode,
                      std::vector<uint32_t> palette,
                      CommitFn on_commit,
@@ -50,6 +51,7 @@ void FaceEditor::open(std::string title,
     covered_         = std::move(covered_regions);
     covered_labels_  = std::move(covered_labels);
     if (covered_labels_.size() != covered_.size()) covered_labels_.assign(covered_.size(), "");
+    mirror_axis_x_   = mirror_axis_x;
     mode_      = mode;
     tool_      = Tool::Pencil;
     mirror_    = false;
@@ -276,8 +278,14 @@ void FaceEditor::apply_at_cursor() {
             return;
         }
         push_undo();
-        const int mx_anchor = bbox_.x + (bbox_.x + bbox_.width - 1) - anchor_x_;
-        const int mx_cursor = bbox_.x + (bbox_.x + bbox_.width - 1) - cursor_x_;
+        // Mirror axis: if the caller passed a nose-centre fence
+        // (mirror_axis_x_ >= 0) use that; otherwise fall back to the
+        // bbox horizontal centre. fence formula: mirrored = 2*axis - 1 - x.
+        const int axis = (mirror_axis_x_ >= 0)
+            ? (2 * mirror_axis_x_ - 1)
+            : (2 * bbox_.x + bbox_.width - 1);
+        const int mx_anchor = axis - anchor_x_;
+        const int mx_cursor = axis - cursor_x_;
         const bool do_mirror = mirror_ &&
             (mx_anchor != anchor_x_ || mx_cursor != cursor_x_);
         if (tool_ == Tool::Line) {
@@ -292,7 +300,10 @@ void FaceEditor::apply_at_cursor() {
     }
 
     push_undo();
-    const int mirror_x = bbox_.x + (bbox_.x + bbox_.width - 1) - cursor_x_;
+    const int axis = (mirror_axis_x_ >= 0)
+        ? (2 * mirror_axis_x_ - 1)
+        : (2 * bbox_.x + bbox_.width - 1);
+    const int mirror_x = axis - cursor_x_;
     const bool do_mirror = mirror_ && mirror_x != cursor_x_;
     if (tool_ == Tool::Bucket) {
         flood_fill(cursor_x_, cursor_y_);
@@ -579,8 +590,13 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                     accent, 0.f, 0, 2.f);
         // Mirror cursor preview.
         if (mirror_) {
-            const int mirror_canvas_x = bbox_.x + (bbox_.x + bbox_.width - 1) - cursor_x_;
-            if (mirror_canvas_x != cursor_x_) {
+            const int axis_pix = (mirror_axis_x_ >= 0)
+                ? (2 * mirror_axis_x_ - 1)
+                : (2 * bbox_.x + bbox_.width - 1);
+            const int mirror_canvas_x = axis_pix - cursor_x_;
+            if (mirror_canvas_x != cursor_x_ &&
+                mirror_canvas_x >= bbox_.x &&
+                mirror_canvas_x <  bbox_.x + bbox_.width) {
                 const float mcx = grid_origin_x_ + (mirror_canvas_x - bbox_.x) * cell_size_;
                 dl->AddRect({mcx, ccy}, {mcx + cell_size_, ccy + cell_size_},
                             (accent & 0x00FFFFFFu) | (140u << 24), 0.f, 0, 2.f);

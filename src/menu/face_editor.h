@@ -44,6 +44,7 @@ public:
               int canvas_w, int canvas_h,
               std::vector<cv::Rect> covered_regions,
               std::vector<std::string> covered_labels,   // parallel to covered_regions; "" = unlabelled
+              int mirror_axis_x,                          // canvas col index used by mirror brush; <0 → bbox centre
               Mode mode,
               std::vector<uint32_t> palette,    // 0xRRGGBB
               CommitFn on_commit,
@@ -112,6 +113,7 @@ private:
     cv::Rect                  bbox_;             // editable bounding box (union of covered)
     std::vector<cv::Rect>     covered_;          // for the grayed-out display
     std::vector<std::string>  covered_labels_;   // parallel to covered_ (may be empty)
+    int                       mirror_axis_x_ = -1; // canvas col fence used by mirror brush; <0 → bbox centre
 
     // Current cursor in CANVAS coordinates (not bbox-local).
     int                    cursor_x_ = 0, cursor_y_ = 0;
