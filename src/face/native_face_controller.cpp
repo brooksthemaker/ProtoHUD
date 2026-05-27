@@ -67,10 +67,12 @@ void NativeFaceController::build_panels() {
             pn.material = load_material(pc.material.active, pc.w, pc.h,
                                         pc.material.scroll_x, pc.material.scroll_y,
                                         cfg_.materials_dir);
-            pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
+            if (cfg_.effects_enabled) {
+                pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
+                pn.particles_spec = pc.particles;
+            }
             pn.gif = std::make_unique<GifPlayer>(pc.w, pc.h);
             pn.material_spec  = pc.material.active;
-            pn.particles_spec = pc.particles;
         } else {
             pn.is_mirror = true;
         }
@@ -231,6 +233,7 @@ void NativeFaceController::set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t) {
 }
 
 void NativeFaceController::set_effect(uint8_t effect_id, uint8_t, uint8_t) {
+    if (!cfg_.effects_enabled) return;       // gated by RenderConfig (see face_config.h)
     nlohmann::json cfg = effect_cfg_for_id(effect_id);
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)

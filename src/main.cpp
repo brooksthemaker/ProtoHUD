@@ -6495,12 +6495,39 @@ int main(int argc, char* argv[]) {
             // smears pixels on these backends and looks wrong both on the
             // panels and in the preview. Zero the wiggle on every panel.
             // Particle effects (sparkle / rain / etc.) likewise don't read
-            // on a handful of 8x8 modules — clear them so the panels show
-            // a clean face.
+            // on a handful of 8x8 modules — disable them entirely via the
+            // RenderConfig flag (also stops set_effect from re-installing
+            // them after start-up).
             for (auto& pn : rc.panels) {
                 pn.face.wiggle.amplitude_x = 0.0;
                 pn.face.wiggle.amplitude_y = 0.0;
                 pn.particles = "none";
+            }
+            rc.effects_enabled = false;
+            // The legacy HUB75 layout uses face_left (0,0,64,32) +
+            // face_right (64,0,64,32) where face_right is mirror_of
+            // face_left, so the canvas ends up holding the face twice
+            // (one copy + a horizontal flip). On MAX7219 / RGB matrix
+            // each chain reads a specific slice of the canvas (eye_l,
+            // eye_r, nose, mouth — positioned around the nose centre),
+            // so the right "mirror copy" panel just doubles what the
+            // preview shows and never matches the actual chain layout.
+            // Replace the pair with one panel covering the face area
+            // (cols 0..2*mirror_x), inheriting the first existing
+            // panel's face / material so the user's existing art still
+            // applies.
+            if (!rc.panels.empty()) {
+                const int mx = pf_mirror_x(pf_nose_layout, rc.canvas_w);
+                const int face_w = std::min(rc.canvas_w, std::max(8, 2 * mx));
+                face::PanelCfg solo = rc.panels.front();
+                solo.name      = "face";
+                solo.x         = 0;
+                solo.y         = 0;
+                solo.w         = face_w;
+                solo.h         = rc.canvas_h;
+                solo.mirror_of.clear();
+                rc.panels.clear();
+                rc.panels.push_back(std::move(solo));
             }
         }
         // Ensure the per-backend face folder(s) exist on disk — otherwise the
@@ -6642,12 +6669,39 @@ int main(int argc, char* argv[]) {
             // smears pixels on these backends and looks wrong both on the
             // panels and in the preview. Zero the wiggle on every panel.
             // Particle effects (sparkle / rain / etc.) likewise don't read
-            // on a handful of 8x8 modules — clear them so the panels show
-            // a clean face.
+            // on a handful of 8x8 modules — disable them entirely via the
+            // RenderConfig flag (also stops set_effect from re-installing
+            // them after start-up).
             for (auto& pn : rc.panels) {
                 pn.face.wiggle.amplitude_x = 0.0;
                 pn.face.wiggle.amplitude_y = 0.0;
                 pn.particles = "none";
+            }
+            rc.effects_enabled = false;
+            // The legacy HUB75 layout uses face_left (0,0,64,32) +
+            // face_right (64,0,64,32) where face_right is mirror_of
+            // face_left, so the canvas ends up holding the face twice
+            // (one copy + a horizontal flip). On MAX7219 / RGB matrix
+            // each chain reads a specific slice of the canvas (eye_l,
+            // eye_r, nose, mouth — positioned around the nose centre),
+            // so the right "mirror copy" panel just doubles what the
+            // preview shows and never matches the actual chain layout.
+            // Replace the pair with one panel covering the face area
+            // (cols 0..2*mirror_x), inheriting the first existing
+            // panel's face / material so the user's existing art still
+            // applies.
+            if (!rc.panels.empty()) {
+                const int mx = pf_mirror_x(pf_nose_layout, rc.canvas_w);
+                const int face_w = std::min(rc.canvas_w, std::max(8, 2 * mx));
+                face::PanelCfg solo = rc.panels.front();
+                solo.name      = "face";
+                solo.x         = 0;
+                solo.y         = 0;
+                solo.w         = face_w;
+                solo.h         = rc.canvas_h;
+                solo.mirror_of.clear();
+                rc.panels.clear();
+                rc.panels.push_back(std::move(solo));
             }
         }
         // Ensure the per-backend face folder(s) exist (see startup-path note).
