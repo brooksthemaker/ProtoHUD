@@ -8057,10 +8057,17 @@ int main(int argc, char* argv[]) {
             const bool ev = menu.editing_value();
             if (rep_nav_up  .tick(ImGui::IsKeyDown(ImGuiKey_UpArrow)))   menu.navigate(ev ? +1 : -1);
             if (rep_nav_down.tick(ImGui::IsKeyDown(ImGuiKey_DownArrow))) menu.navigate(ev ? -1 : +1);
+            // Left/Right arrows route to menu.back / menu.select — and those
+            // forward to face_editor_.back / .primary when the editor is up,
+            // which would cancel or paint on every arrow press. The editor
+            // polls Left/Right directly for cursor_step, so skip the menu
+            // forwarding while the editor owns the keyboard. Enter / Backspace
+            // still work (paint / cancel).
+            const bool editor_up = menu.is_face_editor_open();
             if (key_pressed(ImGuiKey_Enter) ||
-                key_pressed(ImGuiKey_RightArrow)) menu.select();
+                (!editor_up && key_pressed(ImGuiKey_RightArrow))) menu.select();
             if (key_pressed(ImGuiKey_Backspace) ||
-                key_pressed(ImGuiKey_LeftArrow))  menu.back();
+                (!editor_up && key_pressed(ImGuiKey_LeftArrow)))  menu.back();
             // Deep-menu tab switching (Tab / Shift+Tab).
             if (menu.is_deep_open() && key_pressed(ImGuiKey_Tab)) {
                 if (ImGui::GetIO().KeyShift) menu.prev_tab(); else menu.next_tab();
