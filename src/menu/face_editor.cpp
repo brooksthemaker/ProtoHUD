@@ -442,8 +442,11 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     dl->AddLine({cx0, cy}, {cx1, cy}, IM_COL32(255, 255, 255, 60), 1.f);
     cy += 10.f;
 
-    // Footer reservation.
-    const float footer_h = fs * 1.0f + 14.f;
+    // Footer reservation — each control hint sits on its own line for
+    // readability. Lines are listed below; the height tracks the count.
+    const float footer_line_h = fs * 0.95f + 2.f;
+    const int   footer_lines  = (mode_ == Mode::Color) ? 9 : 8;
+    const float footer_h      = footer_line_h * footer_lines + 12.f;
     // Palette strip (color mode) above the footer.
     const float palette_h = (mode_ == Mode::Color) ? (fs * 1.4f + 14.f) : 0.f;
     const float grid_bot  = pmax.y - footer_h - palette_h - 8.f;
@@ -583,12 +586,22 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                         accent, 0.f, 0, 1.5f);
         }
 
-        // Cursor: filled outline at the cell.
-        const float ccx = grid_origin_x_ + (cursor_x_ - bbox_.x) * cell_size_;
-        const float ccy = grid_origin_y_ + (cursor_y_ - bbox_.y) * cell_size_;
-        dl->AddRect({ccx, ccy}, {ccx + cell_size_, ccy + cell_size_},
+        // Cursor — sized to the active brush footprint so the user sees
+        // how wide a stroke will land. Brush sizing only applies to the
+        // pixel-painting tools (Pencil / Eraser / Line / Rect); Bucket
+        // and Eyedrop are single-cell point operations regardless of
+        // brush, so their cursor stays 1 cell.
+        const bool brush_sized_tool =
+            tool_ == Tool::Pencil || tool_ == Tool::Eraser ||
+            tool_ == Tool::Line   || tool_ == Tool::Rect;
+        const int cur_radius = brush_sized_tool ? brush_size_ : 0;
+        const int cur_side   = 1 + cur_radius * 2;
+        const float ccx = grid_origin_x_ + (cursor_x_ - bbox_.x - cur_radius) * cell_size_;
+        const float ccy = grid_origin_y_ + (cursor_y_ - bbox_.y - cur_radius) * cell_size_;
+        const float ccs = cell_size_ * static_cast<float>(cur_side);
+        dl->AddRect({ccx, ccy}, {ccx + ccs, ccy + ccs},
                     accent, 0.f, 0, 2.f);
-        // Mirror cursor preview.
+        // Mirror cursor preview — same brush footprint, mirrored around axis.
         if (mirror_) {
             const int axis_pix = (mirror_axis_x_ >= 0)
                 ? (2 * mirror_axis_x_ - 1)
@@ -597,8 +610,8 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
             if (mirror_canvas_x != cursor_x_ &&
                 mirror_canvas_x >= bbox_.x &&
                 mirror_canvas_x <  bbox_.x + bbox_.width) {
-                const float mcx = grid_origin_x_ + (mirror_canvas_x - bbox_.x) * cell_size_;
-                dl->AddRect({mcx, ccy}, {mcx + cell_size_, ccy + cell_size_},
+                const float mcx = grid_origin_x_ + (mirror_canvas_x - bbox_.x - cur_radius) * cell_size_;
+                dl->AddRect({mcx, ccy}, {mcx + ccs, ccy + ccs},
                             (accent & 0x00FFFFFFu) | (140u << 24), 0.f, 0, 2.f);
             }
         }
@@ -622,14 +635,28 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         }
     }
 
-    // Footer hints — keys here mirror what menu_system.cpp polls when the
-    // editor is the active overlay. Color mode adds the palette controls.
-    const char* hints =
-        (mode_ == Mode::Color)
-        ? "Select: paint    X: cycle tool    1-6: tool (P/E/B/I/L/R)    -/+: brush    Y/M: mirror    [/]: color    Z: undo    S: save    Back: cancel"
-        : "Select: paint    X: cycle tool    1-6: tool (P/E/B/I/L/R)    -/+: brush    Y/M: mirror    Z: undo    S: save    Back: cancel";
-    dl->AddText(font, fs * 0.9f, {cx0, pmax.y - footer_h + 6.f},
-                IM_COL32(170, 185, 200, 220), hints);
+    // Footer hints — one key↔action per line so each is easy to read.
+    // Matches what menu_system.cpp polls when the editor is the active
+    // overlay. Color mode adds the palette-cycle line.
+    const char* lines[] = {
+        "Select       paint",
+        "X            cycle tool",
+        "1-6 (P/E/B/I/L/R)  tool",
+        "-/+          brush size",
+        "Y / M        mirror",
+        "[ / ]        palette colour",   // skipped in mono mode
+        "Z            undo",
+        "S            save",
+        "Back         cancel",
+    };
+    const ImU32 hint_col = IM_COL32(170, 185, 200, 220);
+    float ly = pmax.y - footer_h + 6.f;
+    for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i) {
+        // Hide the palette-cycle line in mono mode (no palette to cycle).
+        if (mode_ != Mode::Color && lines[i][0] == '[') continue;
+        dl->AddText(font, footer_line_h - 2.f, {cx0, ly}, hint_col, lines[i]);
+        ly += footer_line_h;
+    }
 }
 
 } // namespace menu
