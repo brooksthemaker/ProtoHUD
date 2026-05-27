@@ -806,7 +806,16 @@ static std::vector<MenuItem> build_menu(
         // editor to draw labelled eye / nose / mouth zones.
         std::string* pf_eye_layout_p   = nullptr,
         std::string* pf_mouth_layout_p = nullptr,
-        std::string* pf_nose_layout_p  = nullptr)
+        std::string* pf_nose_layout_p  = nullptr,
+        // Face animation tunables — pointers + a "push live" callback that
+        // forwards the current values into native_ctrl after a slider/toggle
+        // change. Caller owns the slots and the persistence to config.json.
+        bool*   pf_blink_enabled_p = nullptr,
+        double* pf_blink_min_p     = nullptr,
+        double* pf_blink_max_p     = nullptr,
+        double* pf_blink_dur_p     = nullptr,
+        double* pf_expr_fade_p     = nullptr,
+        std::function<void()> pf_anim_push = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -1429,6 +1438,33 @@ static std::vector<MenuItem> build_menu(
             });
         imp.visible_fn = [bound_now]{ return !bound_now(); };
 
+        // Copy from another mouth-shape slot — useful when one viseme is
+        // a small tweak on another (e.g. small → smile). Same pattern as
+        // the expression Copy from... above.
+        std::vector<MenuItem> copy_children;
+        for (int src_idx = 0; src_idx < kMouthShapeCount; ++src_idx) {
+            if (src_idx == idx) continue;
+            const std::string src_expr  = kMouthShapes[src_idx].file_stem;
+            const std::string src_label = kMouthShapes[src_idx].label;
+            MenuItem ci = leaf(src_label,
+                [teensy, src_expr, expr]{
+                    const std::string src = teensy->face_image_path(src_expr);
+                    if (!src.empty()) teensy->import_face_image(expr, src);
+                });
+            ci.visible_fn = [teensy, src_expr]{ return teensy->face_image_exists(src_expr); };
+            copy_children.push_back(std::move(ci));
+        }
+        MenuItem copy_from = submenu("Copy from...", std::move(copy_children));
+        copy_from.description = "Copy another viseme's PNG into this slot as a "
+                                "starting point. The source slot keeps its art.";
+        copy_from.visible_fn = [teensy, expr]{
+            for (int j = 0; j < kMouthShapeCount; ++j) {
+                if (kMouthShapes[j].file_stem == expr) continue;
+                if (teensy->face_image_exists(kMouthShapes[j].file_stem)) return true;
+            }
+            return false;
+        };
+
         // Edit the mouth-shape PNG with the pixel editor (mono on MAX7219,
         // color on RGB matrix). Same visibility gate as the expression
         // slots — hidden in HUB75 / daemon modes.
@@ -1437,7 +1473,7 @@ static std::vector<MenuItem> build_menu(
         edit_it.visible_fn = have_led_regions;
 
         m.children = { std::move(edit_it), std::move(replace),
-                       std::move(clear), std::move(imp) };
+                       std::move(copy_from), std::move(clear), std::move(imp) };
         return m;
     };
 
@@ -1573,8 +1609,36 @@ static std::vector<MenuItem> build_menu(
             });
         imp.visible_fn = [bound_now]{ return !bound_now(); };
 
+        // Copy from another boop reaction slot — same pattern as the
+        // expression / mouth slot rows.
+        std::vector<MenuItem> copy_children;
+        for (int src_idx = 0; src_idx < kBoopFaceSlotCount; ++src_idx) {
+            if (src_idx == idx) continue;
+            const std::string src_expr  = kBoopFaceSlots[src_idx].file_stem;
+            const std::string src_label = kBoopFaceSlots[src_idx].label;
+            MenuItem ci = leaf(src_label,
+                [teensy, src_expr, expr]{
+                    const std::string src = teensy->face_image_path(src_expr);
+                    if (!src.empty()) teensy->import_face_image(expr, src);
+                });
+            ci.visible_fn = [teensy, src_expr]{ return teensy->face_image_exists(src_expr); };
+            copy_children.push_back(std::move(ci));
+        }
+        MenuItem copy_from = submenu("Copy from...", std::move(copy_children));
+        copy_from.description = "Copy another boop reaction's PNG into this "
+                                "slot as a starting point. The source slot "
+                                "keeps its art.";
+        copy_from.visible_fn = [teensy, expr]{
+            for (int j = 0; j < kBoopFaceSlotCount; ++j) {
+                if (kBoopFaceSlots[j].file_stem == expr) continue;
+                if (teensy->face_image_exists(kBoopFaceSlots[j].file_stem)) return true;
+            }
+            return false;
+        };
+
         m.children = { std::move(play), std::move(edit_it),
-                       std::move(replace), std::move(clear), std::move(imp) };
+                       std::move(replace), std::move(copy_from),
+                       std::move(clear), std::move(imp) };
         return m;
     };
 
@@ -3182,7 +3246,72 @@ static std::vector<MenuItem> build_menu(
                   "RGB matrix; HUB75 stays import-only. Files are stored "
                   "in faces/<active>[_<backend>]/ so each panel technology "
                   "keeps its own art."),
-        gated(with_panel(submenu("Animations", std::move(pf_gifs)),
+        // Face Animations — blink timing + expression fade. Mutates the live
+        // FaceState on every panel via the pf_anim_push callback wired by
+        // main; persists to cfg["protoface"]["animation"].
+        ([&]() -> MenuItem {
+            std::vector<MenuItem> blink_items;
+            if (pf_blink_enabled_p) {
+                blink_items.push_back(toggle("Enable Blinking",
+                    [pf_blink_enabled_p]{ return *pf_blink_enabled_p; },
+                    [pf_blink_enabled_p, pf_anim_push](bool v){
+                        *pf_blink_enabled_p = v;
+                        if (pf_anim_push) pf_anim_push();
+                    }));
+            }
+            if (pf_blink_min_p) {
+                blink_items.push_back(slider("Min Interval", 1.0f, 15.0f, 0.5f, "s",
+                    [pf_blink_min_p]{ return static_cast<float>(*pf_blink_min_p); },
+                    [pf_blink_min_p, pf_blink_max_p, pf_anim_push](float v){
+                        *pf_blink_min_p = v;
+                        if (pf_blink_max_p && *pf_blink_max_p < v) *pf_blink_max_p = v;
+                        if (pf_anim_push) pf_anim_push();
+                    }));
+            }
+            if (pf_blink_max_p) {
+                blink_items.push_back(slider("Max Interval", 1.0f, 30.0f, 0.5f, "s",
+                    [pf_blink_max_p]{ return static_cast<float>(*pf_blink_max_p); },
+                    [pf_blink_min_p, pf_blink_max_p, pf_anim_push](float v){
+                        *pf_blink_max_p = v;
+                        if (pf_blink_min_p && *pf_blink_min_p > v) *pf_blink_min_p = v;
+                        if (pf_anim_push) pf_anim_push();
+                    }));
+            }
+            if (pf_blink_dur_p) {
+                blink_items.push_back(slider("Duration", 0.05f, 0.5f, 0.01f, "s",
+                    [pf_blink_dur_p]{ return static_cast<float>(*pf_blink_dur_p); },
+                    [pf_blink_dur_p, pf_anim_push](float v){
+                        *pf_blink_dur_p = v;
+                        if (pf_anim_push) pf_anim_push();
+                    }));
+            }
+            std::vector<MenuItem> anim_items;
+            if (!blink_items.empty()) {
+                anim_items.push_back(with_desc(
+                    submenu("Blink", std::move(blink_items)),
+                    "Eyes-closed overlay timing. Min/Max set the random "
+                    "interval between blinks; Duration is the full "
+                    "close→open arc. Disable to hold eyes open."));
+            }
+            if (pf_expr_fade_p) {
+                anim_items.push_back(slider("Expression Fade", 0.0f, 2.0f, 0.05f, "s",
+                    [pf_expr_fade_p]{ return static_cast<float>(*pf_expr_fade_p); },
+                    [pf_expr_fade_p, pf_anim_push](float v){
+                        *pf_expr_fade_p = v;
+                        if (pf_anim_push) pf_anim_push();
+                    }));
+            }
+            if (anim_items.empty()) {
+                MenuItem empty;
+                empty.visible_fn = []{ return false; };
+                return empty;
+            }
+            return with_desc(submenu("Animations", std::move(anim_items)),
+                "Idle-face animation tuning: blink cadence, blink duration, "
+                "and the crossfade time between expressions. Applies to the "
+                "native (MAX7219 / RGB matrix) renderer.");
+        })(),
+        gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),
         slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
@@ -5704,6 +5833,13 @@ int main(int argc, char* argv[]) {
     std::string pf_eye_layout   = "1x2";
     std::string pf_mouth_layout = "1x3";
     std::string pf_nose_layout  = "1x1";
+    // Face animation tunables — forwarded to every panel's FaceState live
+    // and persisted to cfg["protoface"]["animation"] on save.
+    bool   pf_blink_enabled   = true;
+    double pf_blink_min       = 3.0;
+    double pf_blink_max       = 7.0;
+    double pf_blink_duration  = 0.15;
+    double pf_expr_fade       = 0.3;
     if (cfg.contains("protoface")) {
         auto& jpf = cfg["protoface"];
         pf_autostart     = jval(jpf, "autostart", true);
@@ -5715,6 +5851,14 @@ int main(int argc, char* argv[]) {
             pf_eye_layout   = jl.value("eye",   pf_eye_layout);
             pf_mouth_layout = jl.value("mouth", pf_mouth_layout);
             pf_nose_layout  = jl.value("nose",  pf_nose_layout);
+        }
+        if (jpf.contains("animation") && jpf["animation"].is_object()) {
+            auto& ja = jpf["animation"];
+            pf_blink_enabled  = jval(ja, "blink_enabled",  pf_blink_enabled);
+            pf_blink_min      = jval(ja, "blink_min",      pf_blink_min);
+            pf_blink_max      = jval(ja, "blink_max",      pf_blink_max);
+            pf_blink_duration = jval(ja, "blink_duration", pf_blink_duration);
+            pf_expr_fade      = jval(ja, "expression_fade", pf_expr_fade);
         }
         if (jpf.contains("preview")) {
             auto& jpv = jpf["preview"];
@@ -6577,6 +6721,11 @@ int main(int argc, char* argv[]) {
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, pf_build_panel_output(cfg, rc));
         native_ctrl->start();
+        // Push the user's saved animation tunables into every panel's
+        // FaceState. The defaults in FaceState/FaceCfg apply otherwise.
+        native_ctrl->set_blink_enabled(pf_blink_enabled);
+        native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
+        native_ctrl->set_expression_fade(pf_expr_fade);
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
         std::cout << "[main] Protoface: native in-process renderer\n";
 
@@ -6754,6 +6903,9 @@ int main(int argc, char* argv[]) {
             rc, std::move(new_output));
         active_face = native_ctrl.get();
         native_ctrl->start();
+        native_ctrl->set_blink_enabled(pf_blink_enabled);
+        native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
+        native_ctrl->set_expression_fade(pf_expr_fade);
 
         // panel_driver.py choreography. The Python shim is only needed for
         // HUB75 (it reads /dev/shm frames and pushes them via piomatter);
@@ -6933,7 +7085,17 @@ int main(int argc, char* argv[]) {
                                &accessory_leds,
                                swap_backend, &pf_backend,
                                edit_face,
-                               &pf_eye_layout, &pf_mouth_layout, &pf_nose_layout));
+                               &pf_eye_layout, &pf_mouth_layout, &pf_nose_layout,
+                               &pf_blink_enabled, &pf_blink_min, &pf_blink_max,
+                               &pf_blink_duration, &pf_expr_fade,
+                               /* pf_anim_push */ [&]{
+                                   if (!native_ctrl) return;
+                                   native_ctrl->set_blink_enabled(pf_blink_enabled);
+                                   native_ctrl->set_blink_timing(pf_blink_min,
+                                                                 pf_blink_max,
+                                                                 pf_blink_duration);
+                                   native_ctrl->set_expression_fade(pf_expr_fade);
+                               }));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -7585,6 +7747,11 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
         cfg["protoface"]["layout"]["nose"]      = pf_nose_layout;
+        cfg["protoface"]["animation"]["blink_enabled"]   = pf_blink_enabled;
+        cfg["protoface"]["animation"]["blink_min"]       = pf_blink_min;
+        cfg["protoface"]["animation"]["blink_max"]       = pf_blink_max;
+        cfg["protoface"]["animation"]["blink_duration"]  = pf_blink_duration;
+        cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
         cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
         cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
         cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;

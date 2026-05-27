@@ -95,6 +95,13 @@ void FaceState::update(double dt) {
 }
 
 void FaceState::update_blink(double dt) {
+    // Disabled — hold the eyes open and freeze the countdown so re-enabling
+    // resumes from a known state rather than triggering an immediate blink.
+    if (!blink_enabled_) {
+        blink_phase_  = BlinkPhase::Open;
+        blink_weight_ = 0.0;
+        return;
+    }
     const double half = blink_duration_ / 2.0;
 
     switch (blink_phase_) {

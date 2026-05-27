@@ -529,6 +529,35 @@ void NativeFaceController::trigger_boop(const std::string& expression, double du
     // in FaceState::update will bring expression back without our help.
 }
 
+// ── Animation tuning ─────────────────────────────────────────────────────────
+// These mutate the per-panel FaceState directly; the renderer thread reads them
+// in the next update tick. No state-file save here — these are session-scoped
+// live tweaks; main.cpp persists the values to config.json on shutdown / save.
+
+void NativeFaceController::set_blink_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_blink_enabled(enabled);
+}
+
+void NativeFaceController::set_blink_timing(double min_s, double max_s, double duration_s) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_blink_timing(min_s, max_s, duration_s);
+}
+
+void NativeFaceController::set_expression_fade(double seconds) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_expression_fade(seconds);
+}
+
+void NativeFaceController::set_wiggle(const WiggleCfg& w) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_wiggle(w);
+}
+
 void NativeFaceController::set_audio_drive(double volume, double mouth_open) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)

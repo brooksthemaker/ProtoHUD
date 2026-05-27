@@ -91,6 +91,14 @@ public:
     int canvas_width()  const { return cfg_.canvas_w; }
     int canvas_height() const { return cfg_.canvas_h; }
 
+    // Animation tuning — forwarded to every panel's FaceState so the
+    // changes take effect on the next update tick. The menu pushes these
+    // when the user adjusts the corresponding slider/toggle.
+    void set_blink_enabled(bool enabled);
+    void set_blink_timing(double min_s, double max_s, double duration_s);
+    void set_expression_fade(double seconds);
+    void set_wiggle(const WiggleCfg& w);
+
 private:
     struct Panel {
         PanelCfg                      cfg;
