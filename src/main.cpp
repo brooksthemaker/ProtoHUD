@@ -344,69 +344,95 @@ struct PfFaceZones {
     int                            mirror_x = 0;   // canvas col index used as the mirror "fence"
 };
 
-// Mirror axis (the fence column the face mirrors around): the nose's
-// horizontal centre, or canvas_w/2 when there's no nose. Used by both the
-// editor and the preview crop. Cheap enough to call per frame.
-static int pf_mirror_x(const std::string& nose_layout, int canvas_w) {
-    if (nose_layout == "1x1") return 37 + 8 / 2;       // = 41
-    if (nose_layout == "1x2") return 33 + 16 / 2;      // = 41
-    if (nose_layout == "1x3") return 33 + 24 / 2;      // = 45
-    return canvas_w / 2;
+// Per-layout dimensions (pixels). Each pick string is "RxC" where R = rows
+// of 8x8 modules and C = cols. Pixel size = (C*8) x (R*8).
+static int pf_eye_w  (const std::string& l) { return (l == "1x3" || l == "2x3") ? 24 : 16; }
+static int pf_eye_h  (const std::string& l) { return (l == "2x2" || l == "2x3") ? 16 :  8; }
+static int pf_mouth_w(const std::string& l) { return (l == "1x4" || l == "2x4") ? 32 : 24; }
+static int pf_mouth_h(const std::string& l) { return (l == "2x3" || l == "2x4") ? 16 :  8; }
+static int pf_nose_w (const std::string& l) {
+    if (l == "1x1") return  8;
+    if (l == "1x2") return 16;
+    if (l == "1x3") return 24;
+    return 0;
+}
+
+// Spacing rules — keep zones from overlapping and centre everything around
+// the nose, regardless of which picker the user changes:
+//
+//   eye_l   sits flush with col 0
+//   nose    is centred on mirror_x (the canvas's symmetry axis)
+//   eye_r   is the left eye mirrored around mirror_x
+//   mouth_l has its inner (right) edge 8 px in from the centre
+//   mouth_r is mouth_l mirrored
+//
+// mirror_x is sized to satisfy two constraints at once:
+//   eye + gap + half-nose ≤ mirror_x    (8 px gap between eye and nose,
+//                                        or between the two eyes if no nose)
+//   mouth_w + 8           ≤ mirror_x    (8 px clearance from centre)
+//
+// Take the max so growing any chain just stretches the canvas; nothing
+// ever overlaps.
+static int pf_mirror_x(const std::string& eye_layout,
+                       const std::string& mouth_layout,
+                       const std::string& nose_layout)
+{
+    constexpr int GAP_EYE_NOSE   = 8;   // min gap between eye and nose (or between two eyes when nose=none)
+    constexpr int MOUTH_INSET    = 8;   // mouth inner edge offset from canvas centre
+    const int eye_w   = pf_eye_w(eye_layout);
+    const int nose_w  = pf_nose_w(nose_layout);
+    const int mouth_w = pf_mouth_w(mouth_layout);
+    const int eyes_side  = eye_w + GAP_EYE_NOSE + nose_w / 2;
+    const int mouth_side = mouth_w + MOUTH_INSET;
+    return std::max(eyes_side, mouth_side);
+}
+
+// Canvas width for a given chain-layout set: just twice the mirror axis
+// because every zone mirrors around it.
+static int pf_canvas_w_for_layout(const std::string& eye_layout,
+                                  const std::string& mouth_layout,
+                                  const std::string& nose_layout)
+{
+    return 2 * pf_mirror_x(eye_layout, mouth_layout, nose_layout);
 }
 
 static PfFaceZones pf_compute_face_zones(
         const std::string& eye_layout,
         const std::string& mouth_layout,
         const std::string& nose_layout,
-        int canvas_w,
+        int /*canvas_w*/,            // legacy; layouts now own the geometry
         int canvas_h)
 {
     PfFaceZones out;
     auto& zones = out.regions;
 
-    // Eye geometry: WxH = (cols*8) x (rows*8); left eye anchored at (0, 0).
-    int eye_cols = 2, eye_rows = 1;
-    if      (eye_layout == "1x3") { eye_cols = 3; eye_rows = 1; }
-    else if (eye_layout == "2x2") { eye_cols = 2; eye_rows = 2; }
-    else if (eye_layout == "2x3") { eye_cols = 3; eye_rows = 2; }
-    const int eye_w = eye_cols * 8;
-    const int eye_h = eye_rows * 8;
-    zones.push_back({"eye_l", cv::Rect(0, 0, eye_w, eye_h)});
+    const int eye_w   = pf_eye_w(eye_layout);
+    const int eye_h   = pf_eye_h(eye_layout);
+    const int nose_w  = pf_nose_w(nose_layout);
+    const int nose_h  = 8;
+    const int mouth_w = pf_mouth_w(mouth_layout);
+    const int mouth_h = pf_mouth_h(mouth_layout);
 
-    // Nose rect — drives the mirror axis. "none" → no nose region; mirror
-    // axis falls back to canvas_w/2.
-    cv::Rect nose_rect;
-    bool has_nose = true;
-    if      (nose_layout == "1x1") nose_rect = cv::Rect(37, 0,  8, 8);
-    else if (nose_layout == "1x2") nose_rect = cv::Rect(33, 0, 16, 8);
-    else if (nose_layout == "1x3") nose_rect = cv::Rect(33, 0, 24, 8);
-    else                            has_nose = false;
-    if (has_nose) zones.push_back({"nose", nose_rect});
+    out.mirror_x = pf_mirror_x(eye_layout, mouth_layout, nose_layout);
+    const int mx = out.mirror_x;
 
-    // Mirror "fence" — the column index x s.t. col k mirrors to col 2*x - 1 - k.
-    // Always derived from nose_layout (or canvas_w/2 when "none") so the
-    // editor, the preview crop, and any other caller stay in sync.
-    out.mirror_x = pf_mirror_x(nose_layout, canvas_w);
+    // Eyes — left at col 0, right mirrored around mx.
+    zones.push_back({"eye_l", cv::Rect(0,            0, eye_w, eye_h)});
+    zones.push_back({"eye_r", cv::Rect(2 * mx - eye_w, 0, eye_w, eye_h)});
 
-    // Right eye — mirror of left eye around mirror_x.
-    const int rey_x = 2 * out.mirror_x - eye_w;
-    zones.push_back({"eye_r", cv::Rect(rey_x, 0, eye_w, eye_h)});
+    // Nose — centred on mx. Omitted when picker is "none".
+    if (nose_w > 0) {
+        zones.push_back({"nose", cv::Rect(mx - nose_w / 2, 0, nose_w, nose_h)});
+    }
 
-    // Mouth geometry: WxH from layout; bottom-left anchored at (4, canvas_h)
-    // so the mouth always sits flush with the canvas bottom regardless of
-    // how tall the layout is.
-    int mouth_cols = 3, mouth_rows = 1;
-    if      (mouth_layout == "1x4") { mouth_cols = 4; mouth_rows = 1; }
-    else if (mouth_layout == "2x3") { mouth_cols = 3; mouth_rows = 2; }
-    else if (mouth_layout == "2x4") { mouth_cols = 4; mouth_rows = 2; }
-    const int mouth_w = mouth_cols * 8;
-    const int mouth_h = mouth_rows * 8;
+    // Mouth — split into two halves with their inner edges 8 px from the
+    // centre, bottom-aligned to the canvas so taller layouts don't run off.
     const int mouth_y = std::max(0, canvas_h - mouth_h);
-    zones.push_back({"mouth_l", cv::Rect(4, mouth_y, mouth_w, mouth_h)});
-    // Right mouth — mirror around mirror_x. left mouth spans [4, 4+mouth_w);
-    // mirrored rect starts at 2*mirror_x - (4 + mouth_w).
-    const int rmo_x = 2 * out.mirror_x - (4 + mouth_w);
-    zones.push_back({"mouth_r", cv::Rect(rmo_x, mouth_y, mouth_w, mouth_h)});
+    constexpr int MOUTH_INSET = 8;
+    const int ml_x = mx - MOUTH_INSET - mouth_w;
+    const int mr_x = mx + MOUTH_INSET;
+    zones.push_back({"mouth_l", cv::Rect(ml_x, mouth_y, mouth_w, mouth_h)});
+    zones.push_back({"mouth_r", cv::Rect(mr_x, mouth_y, mouth_w, mouth_h)});
 
     return out;
 }
@@ -6901,8 +6927,13 @@ int main(int argc, char* argv[]) {
             // otherwise cv::resize squishes the user's art when the
             // panel is narrower than the editor canvas.
             if (!rc.panels.empty()) {
-                const int mx = pf_mirror_x(pf_nose_layout, rc.canvas_w);
-                const int face_w = std::min(rc.canvas_w, std::max(8, 2 * mx));
+                // Width is fully determined by the chain layouts now —
+                // every zone mirrors around the same axis, so the canvas
+                // is just 2 * mirror_x. Grows when the user picks bigger
+                // panels; shrinks when they pick smaller ones.
+                const int face_w = pf_canvas_w_for_layout(pf_eye_layout,
+                                                          pf_mouth_layout,
+                                                          pf_nose_layout);
                 rc.canvas_w = face_w;
                 face::PanelCfg solo = rc.panels.front();
                 solo.name      = "face";
@@ -7083,8 +7114,13 @@ int main(int argc, char* argv[]) {
             // otherwise cv::resize squishes the user's art when the
             // panel is narrower than the editor canvas.
             if (!rc.panels.empty()) {
-                const int mx = pf_mirror_x(pf_nose_layout, rc.canvas_w);
-                const int face_w = std::min(rc.canvas_w, std::max(8, 2 * mx));
+                // Width is fully determined by the chain layouts now —
+                // every zone mirrors around the same axis, so the canvas
+                // is just 2 * mirror_x. Grows when the user picks bigger
+                // panels; shrinks when they pick smaller ones.
+                const int face_w = pf_canvas_w_for_layout(pf_eye_layout,
+                                                          pf_mouth_layout,
+                                                          pf_nose_layout);
                 rc.canvas_w = face_w;
                 face::PanelCfg solo = rc.panels.front();
                 solo.name      = "face";
@@ -7132,7 +7168,16 @@ int main(int argc, char* argv[]) {
     // menu's visible_fn hides the leaf so this never runs.
     auto edit_face = [&](const std::string& expression) {
         if (!native_ctrl || !menu_ptr) return;
-        const int cw = native_ctrl->canvas_width();
+        // Editor canvas width tracks the live chain layouts (so changing
+        // a picker takes effect on the next "Edit…" without a backend
+        // rebuild). Height stays at the renderer's current canvas height.
+        // If the new layouts require a wider canvas than the renderer is
+        // currently using, we still author the PNG at the layout-width;
+        // it round-trips correctly once the backend is rebuilt.
+        const int cw = std::max(native_ctrl->canvas_width(),
+            pf_canvas_w_for_layout(pf_eye_layout,
+                                   pf_mouth_layout,
+                                   pf_nose_layout));
         const int ch = native_ctrl->canvas_height();
         // The Chain Layout pickers are the source of truth for the
         // editor's per-zone bounding boxes (Left/Right Eye, Nose, Mouth
@@ -9327,13 +9372,14 @@ int main(int argc, char* argv[]) {
             cv::Mat rgb;
             if (native_ctrl->latest_frame(rgb) && !rgb.empty()) {
                 // Crop the renderer canvas to the actual face area so the
-                // preview shows a centred face instead of dead space (the
-                // canvas is configured wider than the content for HUB75
-                // compatibility). Face content runs col 0 to col 2*mirror_x
-                // because every zone mirrors around mirror_x; mirror_x
-                // matches the editor's mirror axis.
-                const int mx     = pf_mirror_x(pf_nose_layout, rgb.cols);
-                const int face_w = std::min(rgb.cols, std::max(8, 2 * mx));
+                // preview shows a centred face instead of dead space.
+                // The canvas was sized to 2*mirror_x at backend startup,
+                // so the same formula here yields a no-op crop when nothing
+                // has changed and a tight crop right after a layout edit.
+                const int face_w = std::min(rgb.cols,
+                    std::max(8, pf_canvas_w_for_layout(pf_eye_layout,
+                                                       pf_mouth_layout,
+                                                       pf_nose_layout)));
                 cv::Mat face_rgb = rgb(cv::Rect(0, 0, face_w, rgb.rows));
                 // CV_8UC3 RGB → RGBA upload; GL_NEAREST keeps pixel-art
                 // crisp at any zoom — same trade-off the shm path makes.
