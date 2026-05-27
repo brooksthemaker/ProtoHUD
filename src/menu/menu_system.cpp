@@ -1193,8 +1193,17 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             ImGui::IsKeyPressed(ImGuiKey_M))          face_editor_.tertiary();
         if (ImGui::IsKeyPressed(ImGuiKey_Z))          face_editor_.undo();
         if (ImGui::IsKeyPressed(ImGuiKey_S))          face_editor_.save();
-        // Direct tool selection (matches the footer hints). L = Line, R = Rect
-        // join the Pencil/Eraser/Bucket/eyedrop set.
+        // Direct tool selection. Number keys 1-6 map to the six tools in
+        // declaration order (Pencil/Eraser/Bucket/Eyedrop/Line/Rect); the
+        // letter shortcuts (P/E/B/I/L/R) are kept as mnemonics. The deep
+        // menu's number-key handlers and main's camera-PiP toggles are
+        // both gated by is_face_editor_open(), so 1-6 are exclusive here.
+        if (ImGui::IsKeyPressed(ImGuiKey_1))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
+        if (ImGui::IsKeyPressed(ImGuiKey_2))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
+        if (ImGui::IsKeyPressed(ImGuiKey_3))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);
+        if (ImGui::IsKeyPressed(ImGuiKey_4))          face_editor_.set_tool(menu::FaceEditor::Tool::Eyedrop);
+        if (ImGui::IsKeyPressed(ImGuiKey_5))          face_editor_.set_tool(menu::FaceEditor::Tool::Line);
+        if (ImGui::IsKeyPressed(ImGuiKey_6))          face_editor_.set_tool(menu::FaceEditor::Tool::Rect);
         if (ImGui::IsKeyPressed(ImGuiKey_P))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
         if (ImGui::IsKeyPressed(ImGuiKey_E))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
         if (ImGui::IsKeyPressed(ImGuiKey_B))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);

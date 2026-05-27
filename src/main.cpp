@@ -7891,11 +7891,15 @@ int main(int argc, char* argv[]) {
         // 0         = toggle manual/auto focus    4 = autofocus both cameras
         // - / =     = focus near / far (step 20 of 0-1000)
         // (Ctrl/Alt + number is reserved for face/GIF hotkeys handled above.)
+        // Skipped while the face editor owns the keyboard (1-6 → tool select,
+        // - / = → brush size); we still run edge() to keep prev_key fresh so
+        // releases after the editor closes don't fire stale events.
         {
             GLFWwindow* win = static_cast<GLFWwindow*>(xr.glfw_window());
+            const bool editor_owns_kb = menu.is_face_editor_open();
             auto edge = [&](int n, int glfw_key) -> bool {
                 bool now = (glfwGetKey(win, glfw_key) == GLFW_PRESS);
-                bool fired = now && !prev_key[n];
+                bool fired = now && !prev_key[n] && !editor_owns_kb;
                 prev_key[n] = now;
                 return fired;
             };

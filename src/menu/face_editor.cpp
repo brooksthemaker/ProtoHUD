@@ -489,18 +489,20 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                         grid_col, 1.f);
         }
 
-        // Per-zone bounding boxes — outline each chain rect in the accent
-        // colour so the user can see at a glance which pixels each panel
-        // (eye_l / eye_r / nose / mouth) will display on hardware. Drawn
-        // after the grid so the outline sits on top.
-        const ImU32 bbox_col = (accent & 0x00FFFFFFu) | (200u << 24);
+        // Per-zone bounding boxes — outline each chain rect in a bright
+        // contrast colour (full-alpha yellow) so the user can see at a
+        // glance which pixels each panel (eye_l / eye_r / nose / mouth)
+        // will display on hardware. Inset by 1px so it's still visible
+        // when a rect sits flush against the grid edge (the fallback
+        // single-rect case where covered == full canvas).
+        const ImU32 bbox_col = IM_COL32(255, 220, 60, 255);
         for (const auto& r : covered_) {
-            const float rx = grid_origin_x_ + (r.x - bbox_.x) * cell_size_;
-            const float ry = grid_origin_y_ + (r.y - bbox_.y) * cell_size_;
+            const float rx = grid_origin_x_ + (r.x - bbox_.x) * cell_size_ + 1.f;
+            const float ry = grid_origin_y_ + (r.y - bbox_.y) * cell_size_ + 1.f;
             dl->AddRect({rx, ry},
-                        {rx + r.width  * cell_size_,
-                         ry + r.height * cell_size_},
-                        bbox_col, 0.f, 0, 2.f);
+                        {rx + r.width  * cell_size_ - 2.f,
+                         ry + r.height * cell_size_ - 2.f},
+                        bbox_col, 0.f, 0, 3.f);
         }
 
         // Live anchor preview for Line / Rect tools (shape that would be
@@ -585,8 +587,8 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     // editor is the active overlay. Color mode adds the palette controls.
     const char* hints =
         (mode_ == Mode::Color)
-        ? "Select: paint    X: cycle tool    P/E/B/I/L/R: tool    -/+: brush    Y/M: mirror    [/]: color    Z: undo    S: save    Back: cancel"
-        : "Select: paint    X: cycle tool    P/E/B/I/L/R: tool    -/+: brush    Y/M: mirror    Z: undo    S: save    Back: cancel";
+        ? "Select: paint    X: cycle tool    1-6: tool (P/E/B/I/L/R)    -/+: brush    Y/M: mirror    [/]: color    Z: undo    S: save    Back: cancel"
+        : "Select: paint    X: cycle tool    1-6: tool (P/E/B/I/L/R)    -/+: brush    Y/M: mirror    Z: undo    S: save    Back: cancel";
     dl->AddText(font, fs * 0.9f, {cx0, pmax.y - footer_h + 6.f},
                 IM_COL32(170, 185, 200, 220), hints);
 }
