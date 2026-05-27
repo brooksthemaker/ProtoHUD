@@ -1967,19 +1967,23 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
 
 // ── Panel preview (FacePanel HUB75 live feed) ─────────────────────────────────
 
-void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_h,
+void HudRenderer::draw_panel_preview(unsigned int tex, int tex_w, int tex_h,
+                                     int screen_w, int screen_h,
                                      float anchor_x, float anchor_y,
                                      float pan_x, float pan_y, float size_frac,
                                      int view) {
     if (tex == 0) return;
+    if (tex_w <= 0 || tex_h <= 0) { tex_w = ShmFrameReader::W; tex_h = ShmFrameReader::H; }
 
     ImGui::SetCurrentContext(ctx_);
 
     // view: 0 = whole canvas, 1 = left half, 2 = right half. A half crops one
-    // panel (one face) via UVs; width and aspect halve to match.
+    // panel (one face) via UVs; width and aspect halve to match. Native
+    // backends already crop to the face in pick_face_tex, so the caller
+    // forces view=0 for those.
     const bool   half   = (view == 1 || view == 2);
-    const float  wpx    = static_cast<float>(ShmFrameReader::W) * (half ? 0.5f : 1.0f);
-    const float  aspect = wpx / static_cast<float>(ShmFrameReader::H);
+    const float  wpx    = static_cast<float>(tex_w) * (half ? 0.5f : 1.0f);
+    const float  aspect = wpx / static_cast<float>(tex_h);
     const ImVec2 uv0 = (view == 2) ? ImVec2(0.5f, 0.f) : ImVec2(0.f, 0.f);
     const ImVec2 uv1 = (view == 1) ? ImVec2(0.5f, 1.f) : ImVec2(1.f, 1.f);
     float ph = size_frac * static_cast<float>(screen_h);
@@ -2034,11 +2038,14 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_
 // A scaled, one-side preview of the LED face placed to the left of the minimap
 // (American Fugitive-style portrait). Drawn on the ImGui foreground list in display
 // coords, matching the minimap geometry.
-void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_h,
+void HudRenderer::draw_face_portrait(unsigned int tex, int tex_w, int tex_h,
+                                     bool tex_is_centred_face,
+                                     int screen_w, int screen_h,
                                      const AppState& s) {
     if (tex == 0) return;
     const auto& cfg = s.map_overlay;
     if (!cfg.enabled || cfg.expanded) return;   // only alongside the live minimap
+    if (tex_w <= 0 || tex_h <= 0) { tex_w = ShmFrameReader::W; tex_h = ShmFrameReader::H; }
 
     ImGui::SetCurrentContext(ctx_);
 
@@ -2053,11 +2060,15 @@ void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_
     const float cy = std::clamp(fh * cfg.anchor_y + cfg.pan_y, hh, fh - hh);
     const float ringR = cfg.circle_window ? half : std::max(half, hh);
 
-    // One face half → ~2:1 source crop.
-    const float wpx    = static_cast<float>(ShmFrameReader::W) * 0.5f;
-    const float aspect = wpx / static_cast<float>(ShmFrameReader::H);
-    const ImVec2 uv0 = cfg.portrait_right_half ? ImVec2(0.5f, 0.f) : ImVec2(0.f, 0.f);
-    const ImVec2 uv1 = cfg.portrait_right_half ? ImVec2(1.f,  1.f) : ImVec2(0.5f, 1.f);
+    // Source crop: HUB75 canvas is a mirrored-pair so we sample one half;
+    // native backends arrive already cropped to the single face, so we
+    // sample the whole texture and ignore the left/right portrait pick.
+    const float u_lo   = tex_is_centred_face ? 0.f  : (cfg.portrait_right_half ? 0.5f : 0.f);
+    const float u_hi   = tex_is_centred_face ? 1.f  : (cfg.portrait_right_half ? 1.f  : 0.5f);
+    const float wpx    = static_cast<float>(tex_w) * (u_hi - u_lo);
+    const float aspect = wpx / static_cast<float>(tex_h);
+    const ImVec2 uv0   = {u_lo, 0.f};
+    const ImVec2 uv1   = {u_hi, 1.f};
 
     const float ph    = ringR * 0.55f * std::max(0.5f, cfg.portrait_scale);  // portrait height
     const float pw    = ph * aspect;            // 2:1 width

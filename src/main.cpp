@@ -343,6 +343,16 @@ struct PfFaceZones {
     int                            mirror_x = 0;   // canvas col index used as the mirror "fence"
 };
 
+// Mirror axis (the fence column the face mirrors around): the nose's
+// horizontal centre, or canvas_w/2 when there's no nose. Used by both the
+// editor and the preview crop. Cheap enough to call per frame.
+static int pf_mirror_x(const std::string& nose_layout, int canvas_w) {
+    if (nose_layout == "1x1") return 37 + 8 / 2;       // = 41
+    if (nose_layout == "1x2") return 33 + 16 / 2;      // = 41
+    if (nose_layout == "1x3") return 33 + 24 / 2;      // = 45
+    return canvas_w / 2;
+}
+
 static PfFaceZones pf_compute_face_zones(
         const std::string& eye_layout,
         const std::string& mouth_layout,
@@ -373,10 +383,9 @@ static PfFaceZones pf_compute_face_zones(
     if (has_nose) zones.push_back({"nose", nose_rect});
 
     // Mirror "fence" — the column index x s.t. col k mirrors to col 2*x - 1 - k.
-    // We treat it as the nose's horizontal centre: x = nose.x + nose.w/2.
-    // When there's no nose, default to canvas_w/2.
-    out.mirror_x = has_nose ? (nose_rect.x + nose_rect.width / 2)
-                            : (canvas_w / 2);
+    // Always derived from nose_layout (or canvas_w/2 when "none") so the
+    // editor, the preview crop, and any other caller stay in sync.
+    out.mirror_x = pf_mirror_x(nose_layout, canvas_w);
 
     // Right eye — mirror of left eye around mirror_x.
     const int rey_x = 2 * out.mirror_x - eye_w;
@@ -3113,11 +3122,18 @@ static std::vector<MenuItem> build_menu(
     }
     if (protoface_preview_view_pp) {
         int* vp = protoface_preview_view_pp;
-        pf_preview_menu.push_back(submenu("View", std::vector<MenuItem>{
+        // The view picker (Whole Face / Left / Right) only makes sense on
+        // HUB75: that canvas is a mirrored pair (two physical panels, each
+        // holding one face), so the user can choose which half to preview.
+        // MAX7219 / RGB-matrix canvases already get cropped to a single
+        // centred face in pick_face_tex, so this picker is hidden there.
+        MenuItem view_it = submenu("View", std::vector<MenuItem>{
             leaf_sel("Whole Face", [vp]{ *vp = 0; }, [vp]{ return *vp == 0; }),
             leaf_sel("Left Half",  [vp]{ *vp = 1; }, [vp]{ return *vp == 1; }),
             leaf_sel("Right Half", [vp]{ *vp = 2; }, [vp]{ return *vp == 2; }),
-        }));
+        });
+        view_it.visible_fn = visible_for_hub75;
+        pf_preview_menu.push_back(std::move(view_it));
     }
 
     std::vector<MenuItem> protoface_inner_menu = {
@@ -6478,9 +6494,13 @@ int main(int argc, char* argv[]) {
             // sub-pixel wiggle that reads as gentle motion on HUB75 just
             // smears pixels on these backends and looks wrong both on the
             // panels and in the preview. Zero the wiggle on every panel.
+            // Particle effects (sparkle / rain / etc.) likewise don't read
+            // on a handful of 8x8 modules — clear them so the panels show
+            // a clean face.
             for (auto& pn : rc.panels) {
                 pn.face.wiggle.amplitude_x = 0.0;
                 pn.face.wiggle.amplitude_y = 0.0;
+                pn.particles = "none";
             }
         }
         // Ensure the per-backend face folder(s) exist on disk — otherwise the
@@ -6621,9 +6641,13 @@ int main(int argc, char* argv[]) {
             // sub-pixel wiggle that reads as gentle motion on HUB75 just
             // smears pixels on these backends and looks wrong both on the
             // panels and in the preview. Zero the wiggle on every panel.
+            // Particle effects (sparkle / rain / etc.) likewise don't read
+            // on a handful of 8x8 modules — clear them so the panels show
+            // a clean face.
             for (auto& pn : rc.panels) {
                 pn.face.wiggle.amplitude_x = 0.0;
                 pn.face.wiggle.amplitude_y = 0.0;
+                pn.particles = "none";
             }
         }
         // Ensure the per-backend face folder(s) exist (see startup-path note).
@@ -8803,23 +8827,35 @@ int main(int argc, char* argv[]) {
         // RGB-matrix backends never touch shm, so we copy from the in-process
         // controller and upload here directly. Lambda is reused below for the
         // face portrait beside the minimap so both surfaces stay in sync.
-        auto pick_face_tex = [&]() -> GLuint {
+        struct FaceTex { GLuint id = 0; int w = 0; int h = 0; bool native = false; };
+        auto pick_face_tex = [&]() -> FaceTex {
             const bool native = (pf_backend == "max7219" || pf_backend == "rgb_matrix")
                                  && native_ctrl;
             if (!native) {
-                GLuint t = 0;
-                protoface_ctrl.get_frame_texture(t);
-                return t;
+                FaceTex out;
+                protoface_ctrl.get_frame_texture(out.id);
+                out.w = ShmFrameReader::W;
+                out.h = ShmFrameReader::H;
+                return out;
             }
             static GLuint native_tex = 0;
             static int    native_w   = 0;
             static int    native_h   = 0;
             cv::Mat rgb;
             if (native_ctrl->latest_frame(rgb) && !rgb.empty()) {
+                // Crop the renderer canvas to the actual face area so the
+                // preview shows a centred face instead of dead space (the
+                // canvas is configured wider than the content for HUB75
+                // compatibility). Face content runs col 0 to col 2*mirror_x
+                // because every zone mirrors around mirror_x; mirror_x
+                // matches the editor's mirror axis.
+                const int mx     = pf_mirror_x(pf_nose_layout, rgb.cols);
+                const int face_w = std::min(rgb.cols, std::max(8, 2 * mx));
+                cv::Mat face_rgb = rgb(cv::Rect(0, 0, face_w, rgb.rows));
                 // CV_8UC3 RGB → RGBA upload; GL_NEAREST keeps pixel-art
                 // crisp at any zoom — same trade-off the shm path makes.
                 cv::Mat rgba;
-                cv::cvtColor(rgb, rgba, cv::COLOR_RGB2RGBA);
+                cv::cvtColor(face_rgb, rgba, cv::COLOR_RGB2RGBA);
                 if (native_tex == 0) {
                     glGenTextures(1, &native_tex);
                     glBindTexture(GL_TEXTURE_2D, native_tex);
@@ -8843,21 +8879,27 @@ int main(int argc, char* argv[]) {
                 }
                 glBindTexture(GL_TEXTURE_2D, 0);
             }
-            return native_tex;
+            return FaceTex{native_tex, native_w, native_h, true};
         };
 
         if (panel_preview_enabled) {
-            const GLuint panel_tex = pick_face_tex();
-            hud.draw_panel_preview(panel_tex, xr.display_width(), xr.display_height(),
+            const FaceTex ft = pick_face_tex();
+            // On native backends the texture already IS the centred face
+            // (canvas-mirroring is HUB75-only), so left/right/full views
+            // would all show the same content — force "full" so the user
+            // doesn't get a duplicate or half-face.
+            const int view = ft.native ? 0 : protoface_preview_view;
+            hud.draw_panel_preview(ft.id, ft.w, ft.h, xr.display_width(), xr.display_height(),
                                    protoface_preview_cfg.anchor_x, protoface_preview_cfg.anchor_y,
                                    protoface_preview_cfg.pan_x,    protoface_preview_cfg.pan_y,
-                                   protoface_preview_cfg.size,     protoface_preview_view);
+                                   protoface_preview_cfg.size,     view);
         }
 
         // Protoface portrait beside the minimap (closed-menu HUD element).
         if (snap.map_overlay.portrait && !menu.is_open()) {
-            const GLuint face_tex = pick_face_tex();
-            hud.draw_face_portrait(face_tex, xr.display_width(), xr.display_height(), snap);
+            const FaceTex ft = pick_face_tex();
+            hud.draw_face_portrait(ft.id, ft.w, ft.h, ft.native,
+                                   xr.display_width(), xr.display_height(), snap);
         }
 
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
