@@ -8,9 +8,18 @@
 //                        Piomatter C++ core, no Python.
 
 #include <opencv2/core.hpp>
+#include <string>
 #include <vector>
 
 namespace face {
+
+// A covered sub-rectangle of the renderer canvas, carrying the chain's
+// configured name ("eye_l" / "eye_r" / "nose" / "mouth" …) so the editor
+// can label each zone for the user.
+struct NamedRegion {
+    std::string name;
+    cv::Rect    rect;
+};
 
 class PanelOutput {
 public:
@@ -27,6 +36,12 @@ public:
     // default) means "I don't know — the whole canvas may be shown" and
     // the editor stays hidden for that backend.
     virtual std::vector<cv::Rect> covered_regions() const { return {}; }
+
+    // Same rects as covered_regions() but with each chain's configured
+    // name. The editor uses these to label the eye / nose / mouth zones
+    // inside its grid. Default returns empty; override in any backend
+    // that wants editor labels.
+    virtual std::vector<NamedRegion> covered_named_regions() const { return {}; }
 
     // True if this backend has a sensible pixel grid the editor can target.
     // Decouples editor availability from whether the user has configured

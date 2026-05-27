@@ -6497,6 +6497,7 @@ int main(int argc, char* argv[]) {
     // menu's visible_fn hides the leaf so this never runs.
     auto edit_face = [&](const std::string& expression) {
         if (!native_ctrl || !menu_ptr) return;
+        auto named   = native_ctrl->led_named_regions();
         auto covered = native_ctrl->led_covered_regions();
         const int cw = native_ctrl->canvas_width();
         const int ch = native_ctrl->canvas_height();
@@ -6507,6 +6508,25 @@ int main(int argc, char* argv[]) {
             // wired in config, but the editing flow is decoupled from
             // chain presence.
             covered.emplace_back(0, 0, cw, ch);
+            named.push_back({"face", cv::Rect(0, 0, cw, ch)});
+        }
+        // Friendlier labels for the chain names users see in the editor
+        // (the underlying chain.name is a short id like "eye_l"). Anything
+        // unknown passes through unchanged so custom chain names still
+        // surface.
+        auto pretty_label = [](const std::string& name) -> std::string {
+            if (name == "eye_l") return "Left Eye";
+            if (name == "eye_r") return "Right Eye";
+            if (name == "nose")  return "Nose";
+            if (name == "mouth") return "Mouth";
+            if (name == "face")  return "Face";
+            return name;
+        };
+        std::vector<std::string> labels;
+        labels.reserve(covered.size());
+        for (size_t i = 0; i < covered.size(); ++i) {
+            labels.push_back(i < named.size() ? pretty_label(named[i].name)
+                                              : std::string());
         }
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
@@ -6520,7 +6540,7 @@ int main(int argc, char* argv[]) {
                       "Edit face: %s  (%s)",
                       expression.c_str(), pf_backend.c_str());
         menu_ptr->open_face_editor(
-            title, abs_path, cw, ch, std::move(covered),
+            title, abs_path, cw, ch, std::move(covered), std::move(labels),
             mode, {} /* default palette */,
             /* on_commit */ [&face_proxy, &native_ctrl, expression]
                 (const cv::Mat& rgba_canvas, const std::string& target_path) {

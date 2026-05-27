@@ -43,6 +43,7 @@ public:
               std::string abs_path,
               int canvas_w, int canvas_h,
               std::vector<cv::Rect> covered_regions,
+              std::vector<std::string> covered_labels,   // parallel to covered_regions; "" = unlabelled
               Mode mode,
               std::vector<uint32_t> palette,    // 0xRRGGBB
               CommitFn on_commit,
@@ -108,8 +109,9 @@ private:
     // Working canvas (RGBA, sized to canvas_w × canvas_h).
     cv::Mat                canvas_;
     int                    canvas_w_ = 0, canvas_h_ = 0;
-    cv::Rect               bbox_;             // editable bounding box (union of covered)
-    std::vector<cv::Rect>  covered_;          // for the grayed-out display
+    cv::Rect                  bbox_;             // editable bounding box (union of covered)
+    std::vector<cv::Rect>     covered_;          // for the grayed-out display
+    std::vector<std::string>  covered_labels_;   // parallel to covered_ (may be empty)
 
     // Current cursor in CANVAS coordinates (not bbox-local).
     int                    cursor_x_ = 0, cursor_y_ = 0;

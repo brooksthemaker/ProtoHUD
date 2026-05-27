@@ -20,13 +20,13 @@
 
 #include "../serial/face_controller.h"
 #include "face_config.h"
+#include "panel_output.h"   // PanelOutput + NamedRegion
 
 namespace face {
 
 class FaceState;
 class FaceLoader;
 class BaseMaterial;
-class PanelOutput;
 class ParticleSystem;
 class GifPlayer;
 
@@ -76,8 +76,9 @@ public:
     // Face editor support: what the active PanelOutput addresses (so the
     // editor can pick the editable region), and a way to force a face
     // reload after the editor writes a PNG.
-    std::vector<cv::Rect> led_covered_regions() const;
-    void                  reload_active_face();
+    std::vector<cv::Rect>    led_covered_regions() const;
+    std::vector<NamedRegion> led_named_regions()   const;
+    void                     reload_active_face();
 
     // Surface to IFaceController: true iff the active PanelOutput exposes
     // sub-region coverage info (MAX7219 / RGB matrix backends).

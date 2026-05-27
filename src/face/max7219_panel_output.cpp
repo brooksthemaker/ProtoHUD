@@ -65,4 +65,15 @@ std::vector<cv::Rect> Max7219PanelOutput::covered_regions() const {
     return out;
 }
 
+std::vector<NamedRegion> Max7219PanelOutput::covered_named_regions() const {
+    std::vector<NamedRegion> out;
+    out.reserve(cfg_.chains.size());
+    for (const auto& cc : cfg_.chains) {
+        out.push_back({cc.name,
+                       cv::Rect(cc.canvas_x, cc.canvas_y,
+                                cc.cols_chips * 8, cc.rows_chips * 8)});
+    }
+    return out;
+}
+
 } // namespace face

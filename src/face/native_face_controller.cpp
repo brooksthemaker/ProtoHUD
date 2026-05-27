@@ -540,6 +540,12 @@ std::vector<cv::Rect> NativeFaceController::led_covered_regions() const {
     return output_->covered_regions();
 }
 
+std::vector<NamedRegion> NativeFaceController::led_named_regions() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (!output_) return {};
+    return output_->covered_named_regions();
+}
+
 void NativeFaceController::reload_active_face() {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_) {

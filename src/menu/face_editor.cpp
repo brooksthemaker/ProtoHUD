@@ -1,6 +1,7 @@
 #include "face_editor.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cstdio>
 #include <limits>
 #include <utility>
@@ -35,17 +36,20 @@ void FaceEditor::open(std::string title,
                      std::string abs_path,
                      int canvas_w, int canvas_h,
                      std::vector<cv::Rect> covered_regions,
+                     std::vector<std::string> covered_labels,
                      Mode mode,
                      std::vector<uint32_t> palette,
                      CommitFn on_commit,
                      CancelFn on_cancel) {
     if (canvas_w <= 0 || canvas_h <= 0) return;
 
-    title_     = std::move(title);
-    abs_path_  = std::move(abs_path);
-    canvas_w_  = canvas_w;
-    canvas_h_  = canvas_h;
-    covered_   = std::move(covered_regions);
+    title_           = std::move(title);
+    abs_path_        = std::move(abs_path);
+    canvas_w_        = canvas_w;
+    canvas_h_        = canvas_h;
+    covered_         = std::move(covered_regions);
+    covered_labels_  = std::move(covered_labels);
+    if (covered_labels_.size() != covered_.size()) covered_labels_.assign(covered_.size(), "");
     mode_      = mode;
     tool_      = Tool::Pencil;
     mirror_    = false;
@@ -120,6 +124,7 @@ void FaceEditor::close() {
     canvas_    = cv::Mat();
     undo_stack_.clear();
     covered_.clear();
+    covered_labels_.clear();
     palette_.clear();
 }
 
@@ -490,19 +495,37 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         }
 
         // Per-zone bounding boxes — outline each chain rect in a bright
-        // contrast colour (full-alpha yellow) so the user can see at a
-        // glance which pixels each panel (eye_l / eye_r / nose / mouth)
-        // will display on hardware. Inset by 1px so it's still visible
-        // when a rect sits flush against the grid edge (the fallback
-        // single-rect case where covered == full canvas).
-        const ImU32 bbox_col = IM_COL32(255, 220, 60, 255);
-        for (const auto& r : covered_) {
+        // contrast colour (full-alpha yellow) and stamp its name above the
+        // rect (or just inside the top edge if the rect is flush with the
+        // grid top). Inset by 1 px so the outline stays visible when a
+        // rect sits against the grid edge (the fallback single-rect case
+        // where covered == full canvas).
+        const ImU32 bbox_col  = IM_COL32(255, 220, 60, 255);
+        const ImU32 label_col = IM_COL32(255, 240, 130, 255);
+        const ImU32 label_bg  = IM_COL32(0, 0, 0, 170);
+        const float label_fs  = std::max(10.f, fs * 0.65f);
+        for (size_t i = 0; i < covered_.size(); ++i) {
+            const auto& r = covered_[i];
             const float rx = grid_origin_x_ + (r.x - bbox_.x) * cell_size_ + 1.f;
             const float ry = grid_origin_y_ + (r.y - bbox_.y) * cell_size_ + 1.f;
-            dl->AddRect({rx, ry},
-                        {rx + r.width  * cell_size_ - 2.f,
-                         ry + r.height * cell_size_ - 2.f},
-                        bbox_col, 0.f, 0, 3.f);
+            const float rw = r.width  * cell_size_ - 2.f;
+            const float rh = r.height * cell_size_ - 2.f;
+            dl->AddRect({rx, ry}, {rx + rw, ry + rh}, bbox_col, 0.f, 0, 3.f);
+
+            const std::string& lbl = (i < covered_labels_.size()) ? covered_labels_[i]
+                                                                   : std::string();
+            if (lbl.empty()) continue;
+            const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, lbl.c_str());
+            // Prefer just above the rect; if there isn't room above the
+            // grid, drop the label inside the top of the rect.
+            const float above_y = ry - ts.y - 4.f;
+            const bool fits_above = above_y >= grid_origin_y_ + 1.f;
+            const float tx = rx + 4.f;
+            const float ty = fits_above ? above_y : (ry + 3.f);
+            dl->AddRectFilled({tx - 3.f, ty - 1.f},
+                              {tx + ts.x + 3.f, ty + ts.y + 1.f},
+                              label_bg, 2.f);
+            dl->AddText(font, label_fs, {tx, ty}, label_col, lbl.c_str());
         }
 
         // Live anchor preview for Line / Rect tools (shape that would be
