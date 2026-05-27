@@ -443,9 +443,12 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     cy += 10.f;
 
     // Footer reservation — each control hint sits on its own line for
-    // readability. Lines are listed below; the height tracks the count.
+    // readability. Two columns: general controls on the left, the six
+    // numbered tools on the right. Height tracks the taller column.
     const float footer_line_h = fs * 0.95f + 2.f;
-    const int   footer_lines  = (mode_ == Mode::Color) ? 9 : 8;
+    const int   left_lines    = (mode_ == Mode::Color) ? 8 : 7;
+    const int   right_lines   = 6;   // 1..6 tool bindings
+    const int   footer_lines  = std::max(left_lines, right_lines);
     const float footer_h      = footer_line_h * footer_lines + 12.f;
     // Palette strip (color mode) above the footer.
     const float palette_h = (mode_ == Mode::Color) ? (fs * 1.4f + 14.f) : 0.f;
@@ -635,13 +638,13 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         }
     }
 
-    // Footer hints — one key↔action per line so each is easy to read.
-    // Matches what menu_system.cpp polls when the editor is the active
-    // overlay. Color mode adds the palette-cycle line.
-    const char* lines[] = {
+    // Footer hints — two columns, one key↔action per line for easy
+    // scanning. Left column lists general controls; right column lists
+    // the six numbered tool bindings (each spelled out). Matches what
+    // menu_system.cpp polls when the editor is the active overlay.
+    const char* left[] = {
         "Select       paint",
         "X            cycle tool",
-        "1-6 (P/E/B/I/L/R)  tool",
         "-/+          brush size",
         "Y / M        mirror",
         "[ / ]        palette colour",   // skipped in mono mode
@@ -649,12 +652,29 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         "S            save",
         "Back         cancel",
     };
+    const char* right[] = {
+        "1            Pencil",
+        "2            Eraser",
+        "3            Bucket",
+        "4            Eyedrop",
+        "5            Line",
+        "6            Rect",
+    };
     const ImU32 hint_col = IM_COL32(170, 185, 200, 220);
-    float ly = pmax.y - footer_h + 6.f;
-    for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i) {
+    const float text_size = footer_line_h - 2.f;
+    const float left_x  = cx0;
+    const float right_x = cx0 + (cx1 - cx0) * 0.55f;
+    const float ftop    = pmax.y - footer_h + 6.f;
+    float ly = ftop;
+    for (size_t i = 0; i < sizeof(left) / sizeof(left[0]); ++i) {
         // Hide the palette-cycle line in mono mode (no palette to cycle).
-        if (mode_ != Mode::Color && lines[i][0] == '[') continue;
-        dl->AddText(font, footer_line_h - 2.f, {cx0, ly}, hint_col, lines[i]);
+        if (mode_ != Mode::Color && left[i][0] == '[') continue;
+        dl->AddText(font, text_size, {left_x, ly}, hint_col, left[i]);
+        ly += footer_line_h;
+    }
+    ly = ftop;
+    for (size_t i = 0; i < sizeof(right) / sizeof(right[0]); ++i) {
+        dl->AddText(font, text_size, {right_x, ly}, hint_col, right[i]);
         ly += footer_line_h;
     }
 }
