@@ -3137,6 +3137,91 @@ static std::vector<MenuItem> build_menu(
             [slot, value]{ if (slot) *slot = value; },
             [slot, value]{ return slot && *slot == value; });
     };
+
+    // Context-panel preview for a chain-layout submenu (Eyes / Mouth /
+    // Nose). Renders a labelled grid sized to the active layout, with
+    // bold yellow borders drawn between each 8x8 LED module so the user
+    // can see at a glance how many panels they're configuring. The "none"
+    // pick shows a "Disabled" placeholder instead of a grid.
+    auto chain_layout_preview = [](const std::string& zone_name,
+                                   std::string* layout_ptr) -> MenuContextPanelDraw {
+        return [zone_name, layout_ptr](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            // Header: zone name + pixel dimensions for the active layout.
+            const ImU32 head_col = IM_COL32(230, 235, 240, 255);
+            const ImU32 sub_col  = IM_COL32(170, 185, 200, 200);
+            const ImU32 frame_bg = IM_COL32(20, 24, 32, 255);
+            const ImU32 cell_col = IM_COL32(255, 255, 255, 30);
+            const ImU32 mod_col  = IM_COL32(255, 220, 60, 255);
+            ImFont* font = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+
+            const std::string layout = layout_ptr ? *layout_ptr : std::string();
+            int rows = 0, cols = 0;
+            if (layout.size() == 3 && layout[1] == 'x' &&
+                layout[0] >= '0' && layout[0] <= '9' &&
+                layout[2] >= '0' && layout[2] <= '9') {
+                rows = layout[0] - '0';
+                cols = layout[2] - '0';
+            }
+
+            char title[64];
+            std::snprintf(title, sizeof(title), "%s", zone_name.c_str());
+            dl->AddText(font, fs * 1.4f, {o.x, o.y}, head_col, title);
+
+            char sub[96];
+            if (layout == "none" || rows == 0 || cols == 0) {
+                std::snprintf(sub, sizeof(sub), "Disabled");
+            } else {
+                std::snprintf(sub, sizeof(sub),
+                              "%d row × %d col   (%d × %d px)",
+                              rows, cols, cols * 8, rows * 8);
+            }
+            dl->AddText(font, fs * 0.95f, {o.x, o.y + fs * 1.5f}, sub_col, sub);
+
+            if (rows == 0 || cols == 0) return;
+
+            // Fit the schematic into the remaining context-pane space, with
+            // 8px padding on each side and a top margin below the header.
+            const float top = o.y + fs * 3.2f;
+            const float pad = 8.f;
+            const float avail_w = std::max(20.f, sz.x - pad * 2.f);
+            const float avail_h = std::max(20.f, o.y + sz.y - top - pad);
+            const int   px_w    = cols * 8;
+            const int   px_h    = rows * 8;
+            const float cell    = std::max(1.f,
+                std::floor(std::min(avail_w / px_w, avail_h / px_h)));
+            const float grid_w  = cell * px_w;
+            const float grid_h  = cell * px_h;
+            const float gx      = o.x + (sz.x - grid_w) * 0.5f;
+            const float gy      = top + (avail_h - grid_h) * 0.5f;
+
+            // Background fill.
+            dl->AddRectFilled({gx, gy}, {gx + grid_w, gy + grid_h}, frame_bg);
+
+            // Faint per-pixel grid — only when cells are big enough to read.
+            if (cell >= 6.f) {
+                for (int x = 1; x < px_w; ++x) {
+                    const float xx = gx + x * cell;
+                    dl->AddLine({xx, gy}, {xx, gy + grid_h}, cell_col, 1.f);
+                }
+                for (int y = 1; y < px_h; ++y) {
+                    const float yy = gy + y * cell;
+                    dl->AddLine({gx, yy}, {gx + grid_w, yy}, cell_col, 1.f);
+                }
+            }
+
+            // Bold module borders every 8 cells — the visual cue the user
+            // asked for: "borders drawn between each 8x8 matrix."
+            for (int c = 0; c <= cols; ++c) {
+                const float xx = gx + c * 8.f * cell;
+                dl->AddLine({xx, gy}, {xx, gy + grid_h}, mod_col, 2.f);
+            }
+            for (int r = 0; r <= rows; ++r) {
+                const float yy = gy + r * 8.f * cell;
+                dl->AddLine({gx, yy}, {gx + grid_w, yy}, mod_col, 2.f);
+            }
+        };
+    };
     auto visible_for_native = [pf_backend_p] {
         return pf_backend_p &&
                (*pf_backend_p == "max7219" || *pf_backend_p == "rgb_matrix");
@@ -3160,14 +3245,17 @@ static std::vector<MenuItem> build_menu(
         layout_pick("1x3  (24x8)",  pf_nose_layout_p, "1x3"),
     };
     std::vector<MenuItem> pf_chain_layout_items = {
-        with_desc(submenu("Eyes",  std::move(eye_items)),
+        with_desc(with_panel(submenu("Eyes",  std::move(eye_items)),
+                             "Eyes",  chain_layout_preview("Eyes",  pf_eye_layout_p)),
                   "Panels per eye. The right eye is mirrored on the same row "
                   "so both eyes match. Used by the face editor to outline "
                   "Left Eye / Right Eye zones."),
-        with_desc(submenu("Mouth", std::move(mouth_items)),
+        with_desc(with_panel(submenu("Mouth", std::move(mouth_items)),
+                             "Mouth", chain_layout_preview("Mouth", pf_mouth_layout_p)),
                   "Mouth panels (anchor 4,25). Used by the face editor to "
                   "outline the Mouth zone."),
-        with_desc(submenu("Nose",  std::move(nose_items)),
+        with_desc(with_panel(submenu("Nose",  std::move(nose_items)),
+                             "Nose",  chain_layout_preview("Nose",  pf_nose_layout_p)),
                   "Nose panels (single row, centred). \"None\" omits the "
                   "nose zone entirely."),
     };
@@ -3184,8 +3272,12 @@ static std::vector<MenuItem> build_menu(
                   "the running renderer and brings up a new one with the new "
                   "backend; the HUD keeps running through the transition. "
                   "Persists to config.json so the next launch starts here."),
-        std::move(pf_chain_layout_item),
     };
+
+    // The chain layout config used to live under Hardware, but it's really a
+    // face-authoring concern (it shapes the editor's bbox guides), so it now
+    // sits inside Face Options alongside the per-expression slots.
+    face_files_menu.push_back(std::move(pf_chain_layout_item));
 
     // Visibility predicates — Effects / Face Color / Material Color /
     // Animations / Save Face Config / Release Control are concepts from
@@ -3240,13 +3332,15 @@ static std::vector<MenuItem> build_menu(
         // live here under Protoface rather than the generic Files menu —
         // they're meaningful per-backend, and the editor only makes sense
         // when the active backend supports it (MAX7219 / RGB matrix).
-        with_desc(with_panel(submenu("Faces", std::move(face_files_menu)),
+        with_desc(with_panel(submenu("Face Options", std::move(face_files_menu)),
                              "Face Preview", draw_face_preview),
-                  "Per-expression face PNGs and the in-HUD pixel editor. "
-                  "Edit... opens whenever the active backend (Hardware > "
-                  "Backend) has an editor capability — today: MAX7219 and "
-                  "RGB matrix; HUB75 stays import-only. Files are stored "
-                  "in faces/<active>[_<backend>]/ so each panel technology "
+                  "Per-expression face PNGs, mouth/boop slots, the in-HUD "
+                  "pixel editor, and the chain layout pickers that shape "
+                  "its bounding boxes. Edit... opens whenever the active "
+                  "backend (Hardware > Backend) has an editor capability "
+                  "— today: MAX7219 and RGB matrix; HUB75 stays "
+                  "import-only. Files are stored in "
+                  "faces/<active>[_<backend>]/ so each panel technology "
                   "keeps its own art."),
         // Face Animations — blink timing + expression fade. Mutates the live
         // FaceState on every panel via the pf_anim_push callback wired by
