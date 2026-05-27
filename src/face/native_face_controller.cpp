@@ -156,11 +156,16 @@ void NativeFaceController::render_thread() {
                                           cfg_.background[2], pc.w, pc.h);
 
                 // A playing GIF replaces the face (full colour, no material tint);
-                // otherwise composite the material-tinted face.
+                // otherwise composite the material-tinted face. With effects
+                // disabled (MAX7219 / RGB matrix), we also skip the material
+                // and use the face PNG verbatim — the material's luminance-
+                // modulation washes RGB-matrix art to grey/teal otherwise.
                 cv::Mat face_layer;
                 cv::Mat gframe = pn.gif ? pn.gif->get_frame() : cv::Mat();
                 if (!gframe.empty()) {
                     face_layer = gframe;
+                } else if (!cfg_.effects_enabled || !pn.material) {
+                    face_layer = pn.loader->get_frame(*pn.state);
                 } else {
                     cv::Mat mat = pn.material->get_frame();
                     cv::Mat face_rgba = pn.loader->get_frame(*pn.state);

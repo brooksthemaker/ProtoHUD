@@ -6512,13 +6512,16 @@ int main(int argc, char* argv[]) {
             // eye_r, nose, mouth — positioned around the nose centre),
             // so the right "mirror copy" panel just doubles what the
             // preview shows and never matches the actual chain layout.
-            // Replace the pair with one panel covering the face area
-            // (cols 0..2*mirror_x), inheriting the first existing
-            // panel's face / material so the user's existing art still
-            // applies.
+            // Shrink the renderer canvas to the face content width
+            // (2*mirror_x) and replace the panel pair with one panel
+            // covering it. canvas_w == panel_w means the face PNG is
+            // loaded at the same dimensions the editor saves it in —
+            // otherwise cv::resize squishes the user's art when the
+            // panel is narrower than the editor canvas.
             if (!rc.panels.empty()) {
                 const int mx = pf_mirror_x(pf_nose_layout, rc.canvas_w);
                 const int face_w = std::min(rc.canvas_w, std::max(8, 2 * mx));
+                rc.canvas_w = face_w;
                 face::PanelCfg solo = rc.panels.front();
                 solo.name      = "face";
                 solo.x         = 0;
@@ -6686,13 +6689,16 @@ int main(int argc, char* argv[]) {
             // eye_r, nose, mouth — positioned around the nose centre),
             // so the right "mirror copy" panel just doubles what the
             // preview shows and never matches the actual chain layout.
-            // Replace the pair with one panel covering the face area
-            // (cols 0..2*mirror_x), inheriting the first existing
-            // panel's face / material so the user's existing art still
-            // applies.
+            // Shrink the renderer canvas to the face content width
+            // (2*mirror_x) and replace the panel pair with one panel
+            // covering it. canvas_w == panel_w means the face PNG is
+            // loaded at the same dimensions the editor saves it in —
+            // otherwise cv::resize squishes the user's art when the
+            // panel is narrower than the editor canvas.
             if (!rc.panels.empty()) {
                 const int mx = pf_mirror_x(pf_nose_layout, rc.canvas_w);
                 const int face_w = std::min(rc.canvas_w, std::max(8, 2 * mx));
+                rc.canvas_w = face_w;
                 face::PanelCfg solo = rc.panels.front();
                 solo.name      = "face";
                 solo.x         = 0;
