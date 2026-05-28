@@ -460,6 +460,12 @@ static void pf_hub75_panel_dims(const std::string& sz, int& w, int& h) {
 // Returns each panel's (x, y, panel_w, panel_h) with the user's nudge applied
 // and a canonical name ("panel_0" .. "panel_N"). The first panel always
 // anchors at (0, 0) + nudge[0]; subsequent panels lay out per arrangement.
+// 32-px background margin on each side of the panel set. Sized so the
+// per-panel nudge (±32 px) can slide a panel that much past a neighbour's
+// edge without the canvas truncating any pixels. With two 128×... panels
+// in a horizontal chain that puts the canvas at 256 + 64 = 320 px wide.
+static constexpr int kHub75Margin = 32;
+
 static std::vector<face::ShmPusherOutput::Panel>
 pf_hub75_panels(const PfHub75Layout& L) {
     const int n = std::clamp(L.panel_count, 1, 4);
@@ -474,10 +480,15 @@ pf_hub75_panels(const PfHub75Layout& L) {
                                ? L.panel_size : L.panel_size_per[i];
         pf_hub75_panel_dims(s, pw[i], ph[i]);
     }
+    // Base positions place the first panel at (0, 0); push() then offsets
+    // every panel by kHub75Margin so the set is centred inside the
+    // margin-padded canvas, then adds each panel's nudge.
     auto push = [&](int i, int x, int y) {
         face::ShmPusherOutput::Panel p;
         p.name = "panel_" + std::to_string(i);
-        p.rect = cv::Rect(x + L.nudge_dx[i], y + L.nudge_dy[i], pw[i], ph[i]);
+        p.rect = cv::Rect(x + kHub75Margin + L.nudge_dx[i],
+                          y + kHub75Margin + L.nudge_dy[i],
+                          pw[i], ph[i]);
         out.push_back(std::move(p));
     };
     if (L.arrangement == "vertical") {
@@ -505,14 +516,39 @@ pf_hub75_panels(const PfHub75Layout& L) {
     return out;
 }
 
-// Total canvas size needed to fit the laid-out panels (after nudges).
+// Total canvas size = bounding box of the *un-nudged* panel set + a 32-px
+// margin on each side. Canvas size is therefore stable as the user tweaks
+// nudges (so the renderer canvas doesn't resize every slider step), and
+// every panel stays inside the canvas even at maximum nudge.
 static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch) {
-    const auto panels = pf_hub75_panels(L);
-    cw = ch = 0;
-    for (const auto& p : panels) {
-        cw = std::max(cw, p.rect.x + p.rect.width);
-        ch = std::max(ch, p.rect.y + p.rect.height);
+    const int n = std::clamp(L.panel_count, 1, 4);
+    int pw[4] = {0,0,0,0}, ph[4] = {0,0,0,0};
+    for (int i = 0; i < 4; ++i) {
+        const std::string& s = L.panel_size_per[i].empty()
+                               ? L.panel_size : L.panel_size_per[i];
+        pf_hub75_panel_dims(s, pw[i], ph[i]);
     }
+    int bb_w = 0, bb_h = 0;
+    if (L.arrangement == "vertical") {
+        for (int i = 0; i < n; ++i) {
+            bb_w = std::max(bb_w, pw[i]);
+            bb_h += ph[i];
+        }
+    } else if (L.arrangement == "grid2x2") {
+        const int row0_w = pw[0] + (n >= 2 ? pw[1] : 0);
+        const int row1_w = (n >= 3 ? pw[2] : 0) + (n >= 4 ? pw[3] : 0);
+        bb_w = std::max(row0_w, row1_w);
+        const int row0_h = std::max(ph[0], n >= 2 ? ph[1] : 0);
+        const int row1_h = std::max(n >= 3 ? ph[2] : 0, n >= 4 ? ph[3] : 0);
+        bb_h = row0_h + row1_h;
+    } else { // horizontal
+        for (int i = 0; i < n; ++i) {
+            bb_w += pw[i];
+            bb_h = std::max(bb_h, ph[i]);
+        }
+    }
+    cw = bb_w + 2 * kHub75Margin;
+    ch = bb_h + 2 * kHub75Margin;
     if (cw <= 0) cw = 64;
     if (ch <= 0) ch = 32;
 }
