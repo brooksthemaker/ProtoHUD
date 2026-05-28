@@ -3369,19 +3369,75 @@ static std::vector<MenuItem> build_menu(
             slider("Count",      0.f, 100.f,  1.f, "",
                 [L]{ return static_cast<float>(L->count); },
                 [L](float v){ L->count = static_cast<int>(v); }),
-            // Built-in colour picker — shows a live swatch of the current
-            // RGB, and Select enters edit mode where the encoder/D-pad
-            // sweeps each channel 0..255. Select cycles R → G → B → commit;
-            // Back cancels and restores. Replaces the three plain sliders.
-            color_picker("Color",
-                [L](uint8_t r, uint8_t g, uint8_t b){ L->r = r; L->g = g; L->b = b; },
-                [L]{ return std::make_tuple(
-                    static_cast<uint8_t>(L->r),
-                    static_cast<uint8_t>(L->g),
-                    static_cast<uint8_t>(L->b)); }),
-            // Quick-pick presets for the common colours; one click sets all
-            // three channels.
+            // Color — Figma-style picker. The submenu carries Hue / Sat /
+            // Value sliders for encoder navigation and a preset list; the
+            // attached context panel draws a clickable SV square, a hue
+            // strip, the live swatch, and the hex string. Both interactions
+            // share L->r/g/b: each slider edit recomputes RGB from the live
+            // HSV, and each mouse click in the panel does the same.
             ([&]{
+                // HSV ↔ RGB helpers — small and fast, no need for OpenCV here.
+                auto rgb2hsv = [](int ir, int ig, int ib,
+                                  float& h, float& s, float& v) {
+                    const float r = ir / 255.f, g = ig / 255.f, b = ib / 255.f;
+                    const float mx = std::max({r, g, b});
+                    const float mn = std::min({r, g, b});
+                    const float d  = mx - mn;
+                    v = mx;
+                    s = mx > 0.f ? (d / mx) : 0.f;
+                    if (d < 1e-6f)        h = 0.f;
+                    else if (mx == r)     h = 60.f * std::fmod((g - b) / d + 6.f, 6.f);
+                    else if (mx == g)     h = 60.f * ((b - r) / d + 2.f);
+                    else                  h = 60.f * ((r - g) / d + 4.f);
+                };
+                auto hsv2rgb = [](float h, float s, float v,
+                                  int& r, int& g, int& b) {
+                    h = std::fmod(h, 360.f); if (h < 0.f) h += 360.f;
+                    const float c  = v * s;
+                    const float hp = h / 60.f;
+                    const float x  = c * (1.f - std::fabs(std::fmod(hp, 2.f) - 1.f));
+                    float rf = 0, gf = 0, bf = 0;
+                    if      (hp < 1) { rf = c; gf = x; }
+                    else if (hp < 2) { rf = x; gf = c; }
+                    else if (hp < 3) { gf = c; bf = x; }
+                    else if (hp < 4) { gf = x; bf = c; }
+                    else if (hp < 5) { rf = x; bf = c; }
+                    else             { rf = c; bf = x; }
+                    const float m = v - c;
+                    r = std::clamp(static_cast<int>(std::round((rf + m) * 255.f)), 0, 255);
+                    g = std::clamp(static_cast<int>(std::round((gf + m) * 255.f)), 0, 255);
+                    b = std::clamp(static_cast<int>(std::round((bf + m) * 255.f)), 0, 255);
+                };
+
+                // Sliders read/write HSV by round-tripping through L->r/g/b
+                // (single source of truth). Round-trip precision is <1/255
+                // per channel — imperceptible.
+                auto get_h = [L, rgb2hsv]{
+                    float h, s, v; rgb2hsv(L->r, L->g, L->b, h, s, v); return h;
+                };
+                auto get_s = [L, rgb2hsv]{
+                    float h, s, v; rgb2hsv(L->r, L->g, L->b, h, s, v); return s * 100.f;
+                };
+                auto get_v = [L, rgb2hsv]{
+                    float h, s, v; rgb2hsv(L->r, L->g, L->b, h, s, v); return v * 100.f;
+                };
+                auto set_h = [L, rgb2hsv, hsv2rgb](float new_h){
+                    float h, s, v; rgb2hsv(L->r, L->g, L->b, h, s, v);
+                    int nr, ng, nb; hsv2rgb(new_h, s, v, nr, ng, nb);
+                    L->r = nr; L->g = ng; L->b = nb;
+                };
+                auto set_s = [L, rgb2hsv, hsv2rgb](float new_s){
+                    float h, s, v; rgb2hsv(L->r, L->g, L->b, h, s, v);
+                    int nr, ng, nb; hsv2rgb(h, new_s / 100.f, v, nr, ng, nb);
+                    L->r = nr; L->g = ng; L->b = nb;
+                };
+                auto set_v = [L, rgb2hsv, hsv2rgb](float new_v){
+                    float h, s, v; rgb2hsv(L->r, L->g, L->b, h, s, v);
+                    int nr, ng, nb; hsv2rgb(h, s, new_v / 100.f, nr, ng, nb);
+                    L->r = nr; L->g = ng; L->b = nb;
+                };
+
+                // Presets
                 struct Preset { const char* name; int r, g, b; };
                 static constexpr Preset kPresets[] = {
                     {"White",   255, 255, 255}, {"Red",     255,  40,  40},
@@ -3390,13 +3446,135 @@ static std::vector<MenuItem> build_menu(
                     {"Blue",     60, 130, 255}, {"Magenta", 220,  80, 220},
                     {"Pink",    255, 160, 200}, {"Warm",    255, 180,  90},
                 };
-                std::vector<MenuItem> items;
+                std::vector<MenuItem> preset_items;
                 for (const auto& p : kPresets) {
-                    items.push_back(leaf(p.name, [L, p]{
+                    preset_items.push_back(leaf(p.name, [L, p]{
                         L->r = p.r; L->g = p.g; L->b = p.b;
                     }));
                 }
-                return submenu("Color Presets", std::move(items));
+
+                std::vector<MenuItem> color_items = {
+                    slider("Hue",        0.f, 360.f, 1.f, "\xc2\xb0",
+                           get_h, set_h),
+                    slider("Saturation", 0.f, 100.f, 1.f, "%", get_s, set_s),
+                    slider("Value",      0.f, 100.f, 1.f, "%", get_v, set_v),
+                    submenu("Presets", std::move(preset_items)),
+                };
+
+                // Context-panel draw: SV square (clickable), hue strip,
+                // swatch, and hex readout. The square shows white at TL,
+                // pure hue at TR, black at the bottom — same gradient
+                // ImGui's built-in ColorPicker draws.
+                auto picker_draw =
+                    [L, rgb2hsv, hsv2rgb](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                    ImFont* font = ImGui::GetFont();
+                    const float fs = ImGui::GetFontSize();
+
+                    // Title.
+                    dl->AddText(font, fs * 1.0f, {o.x, o.y},
+                                IM_COL32(230, 235, 240, 255), "Color");
+
+                    // Live HSV from the layer's RGB.
+                    float H, S, V;
+                    rgb2hsv(L->r, L->g, L->b, H, S, V);
+
+                    // Layout: SV square + hue strip + swatch + hex below
+                    const float pad = 8.f;
+                    const float top = o.y + fs * 1.4f;
+                    const float strip_h = 14.f;
+                    const float swatch_h = 30.f;
+                    const float sv_h = std::max(80.f,
+                        std::min(sz.x - pad * 2.f,
+                                 sz.y - (top - o.y) - strip_h - swatch_h - fs - pad * 4.f));
+                    const float sv_w = sv_h;
+                    const float sv_x = o.x + pad;
+                    const float sv_y = top;
+
+                    // Pure hue colour for the square's top-right corner.
+                    int hr, hg, hb;
+                    hsv2rgb(H, 1.f, 1.f, hr, hg, hb);
+                    const ImU32 white = IM_COL32(255, 255, 255, 255);
+                    const ImU32 black = IM_COL32(0, 0, 0, 255);
+                    const ImU32 hue_col = IM_COL32(hr, hg, hb, 255);
+
+                    // Saturation × Value square.
+                    dl->AddRectFilledMultiColor(
+                        {sv_x, sv_y}, {sv_x + sv_w, sv_y + sv_h},
+                        white, hue_col, black, black);
+                    dl->AddRect({sv_x, sv_y}, {sv_x + sv_w, sv_y + sv_h},
+                                IM_COL32(80, 90, 100, 255), 0.f, 0, 1.f);
+                    // SV marker — small circle at (S, 1-V) on the square.
+                    const float mx = sv_x + S * sv_w;
+                    const float my = sv_y + (1.f - V) * sv_h;
+                    dl->AddCircle({mx, my}, 5.f, IM_COL32(0, 0, 0, 230), 0, 2.5f);
+                    dl->AddCircle({mx, my}, 5.f, IM_COL32(255, 255, 255, 230), 0, 1.f);
+
+                    // Hue strip — 12 segments of bilinearly-shaded rainbow.
+                    const float hs_x = sv_x;
+                    const float hs_y = sv_y + sv_h + 8.f;
+                    const float hs_w = sv_w;
+                    constexpr int kSegs = 12;
+                    for (int i = 0; i < kSegs; ++i) {
+                        int r0, g0, b0, r1, g1, b1;
+                        hsv2rgb(360.f * i       / kSegs, 1.f, 1.f, r0, g0, b0);
+                        hsv2rgb(360.f * (i + 1) / kSegs, 1.f, 1.f, r1, g1, b1);
+                        const float x0 = hs_x + hs_w * (i)     / kSegs;
+                        const float x1 = hs_x + hs_w * (i + 1) / kSegs;
+                        dl->AddRectFilledMultiColor(
+                            {x0, hs_y}, {x1, hs_y + strip_h},
+                            IM_COL32(r0, g0, b0, 255), IM_COL32(r1, g1, b1, 255),
+                            IM_COL32(r1, g1, b1, 255), IM_COL32(r0, g0, b0, 255));
+                    }
+                    dl->AddRect({hs_x, hs_y}, {hs_x + hs_w, hs_y + strip_h},
+                                IM_COL32(80, 90, 100, 255), 0.f, 0, 1.f);
+                    // Hue marker (vertical line at H / 360).
+                    const float hmx = hs_x + (H / 360.f) * hs_w;
+                    dl->AddLine({hmx, hs_y - 2.f}, {hmx, hs_y + strip_h + 2.f},
+                                IM_COL32(0, 0, 0, 230), 3.f);
+                    dl->AddLine({hmx, hs_y - 2.f}, {hmx, hs_y + strip_h + 2.f},
+                                IM_COL32(255, 255, 255, 230), 1.f);
+
+                    // Swatch + hex below.
+                    const float sw_y = hs_y + strip_h + 8.f;
+                    const float sw_w = sv_w * 0.45f;
+                    dl->AddRectFilled({sv_x, sw_y}, {sv_x + sw_w, sw_y + swatch_h},
+                                      IM_COL32(L->r, L->g, L->b, 255), 4.f);
+                    dl->AddRect({sv_x, sw_y}, {sv_x + sw_w, sw_y + swatch_h},
+                                IM_COL32(80, 90, 100, 255), 4.f, 0, 1.f);
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "#%02X%02X%02X",
+                                  L->r, L->g, L->b);
+                    dl->AddText(font, fs * 1.0f,
+                                {sv_x + sw_w + 12.f, sw_y + (swatch_h - fs) * 0.5f},
+                                IM_COL32(230, 235, 240, 255), buf);
+
+                    // Mouse interaction — clicking inside the SV square
+                    // pins saturation+value; clicking inside the hue strip
+                    // pins hue. Both update L->r/g/b live.
+                    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                        const ImVec2 mp = ImGui::GetMousePos();
+                        if (mp.x >= sv_x && mp.x < sv_x + sv_w &&
+                            mp.y >= sv_y && mp.y < sv_y + sv_h) {
+                            const float new_s = (mp.x - sv_x) / sv_w;
+                            const float new_v = 1.f - (mp.y - sv_y) / sv_h;
+                            int nr, ng, nb;
+                            hsv2rgb(H, std::clamp(new_s, 0.f, 1.f),
+                                      std::clamp(new_v, 0.f, 1.f), nr, ng, nb);
+                            L->r = nr; L->g = ng; L->b = nb;
+                        }
+                        if (mp.x >= hs_x && mp.x < hs_x + hs_w &&
+                            mp.y >= hs_y && mp.y < hs_y + strip_h) {
+                            const float new_h = std::clamp(
+                                (mp.x - hs_x) / hs_w, 0.f, 1.f) * 360.f;
+                            int nr, ng, nb;
+                            hsv2rgb(new_h, S, V, nr, ng, nb);
+                            L->r = nr; L->g = ng; L->b = nb;
+                        }
+                    }
+                };
+
+                return with_panel(submenu("Color", std::move(color_items)),
+                                  "Color Picker", picker_draw);
             })(),
             slider("Speed Min",  0.f, 100.f,  1.f, "",
                 [L]{ return L->speed_min; },
