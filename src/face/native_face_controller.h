@@ -20,13 +20,13 @@
 
 #include "../serial/face_controller.h"
 #include "face_config.h"
+#include "panel_output.h"   // PanelOutput + NamedRegion
 
 namespace face {
 
 class FaceState;
 class FaceLoader;
 class BaseMaterial;
-class PanelOutput;
 class ParticleSystem;
 class GifPlayer;
 
@@ -42,6 +42,11 @@ public:
 
     void set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t layer = 0) override;
     void set_effect(uint8_t effect_id, uint8_t p1 = 0, uint8_t p2 = 0) override;
+    // Push an arbitrary particle-system spec — either a {"layers": [...]} dict
+    // or a single-effect spec — directly to every panel's ParticleSystem.
+    // Used by the Layered Effects builder in the menu so the user isn't
+    // limited to the canned effect_id mapping.
+    void set_effect_json(const nlohmann::json& spec);
     void set_face(uint8_t face_id) override;
     void play_gif(uint8_t gif_id) override;
     void set_brightness(uint8_t value) override;
@@ -51,12 +56,53 @@ public:
     void release_control() override;
     void save_config() override;          // persist current look now (also auto-saved)
 
+    // Slot manifest — see IFaceController. Bindings store basenames inside
+    // gifs_dir; play_gif() prefers the bound file, falling back to the sorted
+    // scan when a slot is unbound or its file has gone missing.
+    std::string gif_slot(uint8_t slot) const override;
+    void        bind_gif_slot(uint8_t slot, const std::string& filename) override;
+    void        clear_gif_slot(uint8_t slot) override;
+
+    // Face expression image management (see IFaceController). Operates on the
+    // active face folder of the first non-mirror panel (the "main" face in the
+    // standard 2-panel mirrored layout). Imports copy the source PNG to the
+    // canonical expression filename and rebuild the affected panels' loaders
+    // so the change takes effect on the next frame.
+    std::string face_image_path(const std::string& expression) const override;
+    bool        face_image_exists(const std::string& expression) const override;
+    bool        import_face_image(const std::string& expression,
+                                  const std::string& src_path) override;
+    void        clear_face_image(const std::string& expression) override;
+    void        set_face_by_name(const std::string& expression) override;
+    void        trigger_boop(const std::string& expression, double duration_s) override;
+    void        set_audio_drive(double volume, double mouth_open) override;
+    void        set_mouth_shape(const std::string& shape) override;
+
+    // Face editor support: what the active PanelOutput addresses (so the
+    // editor can pick the editable region), and a way to force a face
+    // reload after the editor writes a PNG.
+    std::vector<cv::Rect>    led_covered_regions() const;
+    std::vector<NamedRegion> led_named_regions()   const;
+    void                     reload_active_face();
+
+    // Surface to IFaceController: true iff the active PanelOutput exposes
+    // sub-region coverage info (MAX7219 / RGB matrix backends).
+    bool has_led_face_editor() const override;
+
     // Copy the latest rendered RGB canvas (CV_8UC3) for the preview. Returns
     // false until the first frame exists. Safe to call from the main/GL thread.
     bool latest_frame(cv::Mat& out) const;
 
     int canvas_width()  const { return cfg_.canvas_w; }
     int canvas_height() const { return cfg_.canvas_h; }
+
+    // Animation tuning — forwarded to every panel's FaceState so the
+    // changes take effect on the next update tick. The menu pushes these
+    // when the user adjusts the corresponding slider/toggle.
+    void set_blink_enabled(bool enabled);
+    void set_blink_timing(double min_s, double max_s, double duration_s);
+    void set_expression_fade(double seconds);
+    void set_wiggle(const WiggleCfg& w);
 
 private:
     struct Panel {
@@ -84,6 +130,7 @@ private:
     std::unique_ptr<PanelOutput> output_;
     std::vector<Panel>           panels_;
     std::vector<std::string>     gif_files_;   // sorted *.gif paths in gifs_dir
+    std::vector<std::string>     gif_slots_;   // size 8, basename per slot ("" = unbound)
     double                       gif_release_ = 5.0;   // auto-revert seconds
 
     mutable std::mutex state_mtx_;   // panels_ mutation + render reads

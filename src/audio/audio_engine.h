@@ -12,8 +12,12 @@
 //   HDMI        — hw:CARD=vc4hdmi0,DEV=0          (HDMI audio)
 
 #include "../app_state.h"
+#include "voice_analyzer.h"
 
 #include <atomic>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -56,6 +60,18 @@ public:
     void        set_output(AudioOutput out);
     AudioOutput get_output() const;
 
+    // Mic → face mouth_open driver. The audio thread feeds captured samples
+    // through the analyzer each period and invokes the callback (if set)
+    // with the smoothed (volume, mouth_open) pair so the face controller can
+    // forward to its panels' FaceState::set_audio(). Set the callback once at
+    // wire-up; analyzer tuning happens through audio_engine.voice() directly.
+    using FaceDriveCallback = std::function<void(double volume, double mouth_open)>;
+    void set_face_drive_callback(FaceDriveCallback cb) {
+        std::lock_guard<std::mutex> lk(face_drive_cb_mtx_);
+        face_drive_cb_ = std::move(cb);
+    }
+    audio::VoiceAnalyzer*  voice() { return voice_.get(); }
+
 private:
     void  audio_thread_fn();
     bool  open_alsa_capture(void** pcm_out);
@@ -74,4 +90,8 @@ private:
 
     void* pcm_capture_  = nullptr;
     void* pcm_playback_ = nullptr;
+
+    std::unique_ptr<audio::VoiceAnalyzer> voice_;
+    std::mutex                            face_drive_cb_mtx_;   // guards face_drive_cb_
+    FaceDriveCallback                     face_drive_cb_;
 };

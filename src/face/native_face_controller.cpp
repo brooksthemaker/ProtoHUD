@@ -67,10 +67,12 @@ void NativeFaceController::build_panels() {
             pn.material = load_material(pc.material.active, pc.w, pc.h,
                                         pc.material.scroll_x, pc.material.scroll_y,
                                         cfg_.materials_dir);
-            pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
+            if (cfg_.effects_enabled) {
+                pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
+                pn.particles_spec = pc.particles;
+            }
             pn.gif = std::make_unique<GifPlayer>(pc.w, pc.h);
             pn.material_spec  = pc.material.active;
-            pn.particles_spec = pc.particles;
         } else {
             pn.is_mirror = true;
         }
@@ -84,9 +86,22 @@ void NativeFaceController::build_panels() {
     }
 
     gif_files_   = GifPlayer::scan_folder(cfg_.gifs_dir);
+    gif_slots_.assign(8, "");   // unbound by default; load_state() may fill these
     gif_release_ = cfg_.gif_auto_release;
 
     load_state();   // overlay any auto-saved look on the config defaults
+
+    // Back-compat: if the user already had GIFs in gifs_dir before the manifest
+    // existed, auto-bind the sorted scan so the menu shows real entries on
+    // first launch instead of an all-"(empty)" list. Skip when any slot is
+    // already bound (state.json was authoritative).
+    const bool any_bound =
+        std::any_of(gif_slots_.begin(), gif_slots_.end(),
+                    [](const std::string& s){ return !s.empty(); });
+    if (!any_bound && !gif_files_.empty()) {
+        for (size_t i = 0; i < gif_slots_.size() && i < gif_files_.size(); ++i)
+            gif_slots_[i] = std::filesystem::path(gif_files_[i]).filename().string();
+    }
 }
 
 bool NativeFaceController::start() {
@@ -141,11 +156,16 @@ void NativeFaceController::render_thread() {
                                           cfg_.background[2], pc.w, pc.h);
 
                 // A playing GIF replaces the face (full colour, no material tint);
-                // otherwise composite the material-tinted face.
+                // otherwise composite the material-tinted face. With effects
+                // disabled (MAX7219 / RGB matrix), we also skip the material
+                // and use the face PNG verbatim — the material's luminance-
+                // modulation washes RGB-matrix art to grey/teal otherwise.
                 cv::Mat face_layer;
                 cv::Mat gframe = pn.gif ? pn.gif->get_frame() : cv::Mat();
                 if (!gframe.empty()) {
                     face_layer = gframe;
+                } else if (!cfg_.effects_enabled || !pn.material) {
+                    face_layer = pn.loader->get_frame(*pn.state);
                 } else {
                     cv::Mat mat = pn.material->get_frame();
                     cv::Mat face_rgba = pn.loader->get_frame(*pn.state);
@@ -218,10 +238,19 @@ void NativeFaceController::set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t) {
 }
 
 void NativeFaceController::set_effect(uint8_t effect_id, uint8_t, uint8_t) {
+    if (!cfg_.effects_enabled) return;       // gated by RenderConfig (see face_config.h)
     nlohmann::json cfg = effect_cfg_for_id(effect_id);
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.particles) { pn.particles->set_effect(cfg); pn.particles_spec = cfg; }
+    save_state_locked();
+}
+
+void NativeFaceController::set_effect_json(const nlohmann::json& spec) {
+    if (!cfg_.effects_enabled) return;
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.particles) { pn.particles->set_effect(spec); pn.particles_spec = spec; }
     save_state_locked();
 }
 
@@ -234,8 +263,20 @@ void NativeFaceController::set_face(uint8_t face_id) {
 
 void NativeFaceController::play_gif(uint8_t gif_id) {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    if (gif_id >= gif_files_.size()) return;
-    const std::string& path = gif_files_[gif_id];
+
+    // Prefer the slot manifest binding; fall back to the sorted scan when the
+    // slot is unbound or its bound file has been removed from gifs_dir.
+    std::string path;
+    if (gif_id < gif_slots_.size() && !gif_slots_[gif_id].empty()) {
+        const std::string p = cfg_.gifs_dir + "/" + gif_slots_[gif_id];
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) path = p;
+    }
+    if (path.empty()) {
+        if (gif_id >= gif_files_.size()) return;
+        path = gif_files_[gif_id];
+    }
+
     for (auto& pn : panels_)
         if (pn.gif) {
             pn.gif->load(path);
@@ -302,6 +343,7 @@ void NativeFaceController::save_state_locked() const {
         jp[pn.cfg.name] = e;
     }
     j["panels"] = jp;
+    j["gif_slots"] = gif_slots_;
 
     const std::string tmp = cfg_.state_path + ".tmp";
     { std::ofstream f(tmp); if (!f) return; f << j.dump(2); }
@@ -319,6 +361,12 @@ void NativeFaceController::load_state() {
     if (j.contains("brightness") && j["brightness"].is_number()) {
         int b = j["brightness"].get<int>();
         for (auto& pn : panels_) if (pn.state) pn.state->set_brightness(b);
+    }
+    if (j.contains("gif_slots") && j["gif_slots"].is_array()) {
+        for (size_t i = 0; i < gif_slots_.size() && i < j["gif_slots"].size(); ++i) {
+            const auto& v = j["gif_slots"][i];
+            if (v.is_string()) gif_slots_[i] = v.get<std::string>();
+        }
     }
     if (!j.contains("panels") || !j["panels"].is_object()) return;
     const auto& jp = j["panels"];
@@ -360,6 +408,205 @@ std::string NativeFaceController::preset_material(int idx) {
         case 11: return "solid:0,0,0";
         default: return "teal";
     }
+}
+
+// ── Slot manifest accessors ───────────────────────────────────────────────────
+
+std::string NativeFaceController::gif_slot(uint8_t slot) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (slot >= gif_slots_.size()) return {};
+    return gif_slots_[slot];
+}
+
+void NativeFaceController::bind_gif_slot(uint8_t slot, const std::string& filename) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (slot >= gif_slots_.size()) return;
+    // Always store a basename so the manifest survives folder relocation.
+    gif_slots_[slot] = std::filesystem::path(filename).filename().string();
+    save_state_locked();
+}
+
+void NativeFaceController::clear_gif_slot(uint8_t slot) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (slot >= gif_slots_.size()) return;
+    gif_slots_[slot].clear();
+    save_state_locked();
+}
+
+// ── Face image management ─────────────────────────────────────────────────────
+// All paths are derived from the first non-mirror panel's active face folder
+// (typically faces/main on the standard 2-panel mirrored setup). Imports
+// rewrite the canonical filename and reload affected loaders.
+
+namespace {
+std::string canonical_face_filename(const std::string& expression) {
+    // Lower-case + ".png". The face loader keys expressions by lowercase name
+    // (see face_loader.cpp PNG-scan branch), so this lines up regardless of how
+    // the expression appears in config.json.
+    std::string s = expression;
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    return s + ".png";
+}
+} // namespace
+
+std::string NativeFaceController::face_image_path(const std::string& expression) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_) {
+        if (pn.is_mirror || !pn.loader) continue;
+        return cfg_.faces_dir + "/" + pn.cfg.face.active + "/" +
+               canonical_face_filename(expression);
+    }
+    return {};
+}
+
+bool NativeFaceController::face_image_exists(const std::string& expression) const {
+    const std::string p = face_image_path(expression);
+    if (p.empty()) return false;
+    std::error_code ec;
+    return std::filesystem::exists(p, ec);
+}
+
+bool NativeFaceController::import_face_image(const std::string& expression,
+                                             const std::string& src_path) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+
+    // Find the first non-mirror panel's active face folder.
+    const Panel* anchor = nullptr;
+    for (const auto& pn : panels_) {
+        if (!pn.is_mirror && pn.loader) { anchor = &pn; break; }
+    }
+    if (!anchor) return false;
+
+    const std::string folder = cfg_.faces_dir + "/" + anchor->cfg.face.active;
+    const std::string dst    = folder + "/" + canonical_face_filename(expression);
+
+    std::error_code ec;
+    std::filesystem::create_directories(folder, ec);
+    std::filesystem::copy_file(
+        src_path, dst,
+        std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+        std::fprintf(stderr, "[face] import copy failed %s -> %s: %s\n",
+                     src_path.c_str(), dst.c_str(), ec.message().c_str());
+        return false;
+    }
+
+    // Rebuild every non-mirror panel's loader so the new PNG takes effect on
+    // the next render tick. (Cheap — just re-decodes the folder's images.)
+    for (auto& pn : panels_) {
+        if (pn.is_mirror || !pn.state) continue;
+        pn.loader = std::make_unique<FaceLoader>(
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+    }
+    return true;
+}
+
+void NativeFaceController::clear_face_image(const std::string& expression) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+
+    const Panel* anchor = nullptr;
+    for (const auto& pn : panels_) {
+        if (!pn.is_mirror && pn.loader) { anchor = &pn; break; }
+    }
+    if (!anchor) return;
+
+    const std::string p = cfg_.faces_dir + "/" + anchor->cfg.face.active + "/" +
+                          canonical_face_filename(expression);
+    std::error_code ec;
+    std::filesystem::remove(p, ec);
+    for (auto& pn : panels_) {
+        if (pn.is_mirror || !pn.state) continue;
+        pn.loader = std::make_unique<FaceLoader>(
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+    }
+}
+
+void NativeFaceController::set_face_by_name(const std::string& expression) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_expression(expression);
+    save_state_locked();
+}
+
+void NativeFaceController::trigger_boop(const std::string& expression, double duration_s) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->trigger_boop(expression, duration_s);
+    // Don't save_state_locked() — boop is transient by design; the auto-revert
+    // in FaceState::update will bring expression back without our help.
+}
+
+// ── Animation tuning ─────────────────────────────────────────────────────────
+// These mutate the per-panel FaceState directly; the renderer thread reads them
+// in the next update tick. No state-file save here — these are session-scoped
+// live tweaks; main.cpp persists the values to config.json on shutdown / save.
+
+void NativeFaceController::set_blink_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_blink_enabled(enabled);
+}
+
+void NativeFaceController::set_blink_timing(double min_s, double max_s, double duration_s) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_blink_timing(min_s, max_s, duration_s);
+}
+
+void NativeFaceController::set_expression_fade(double seconds) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_expression_fade(seconds);
+}
+
+void NativeFaceController::set_wiggle(const WiggleCfg& w) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_wiggle(w);
+}
+
+void NativeFaceController::set_audio_drive(double volume, double mouth_open) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_audio(volume, mouth_open);
+    // Transient — no persistence on every audio frame.
+}
+
+void NativeFaceController::set_mouth_shape(const std::string& shape) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_mouth_shape(shape);
+}
+
+std::vector<cv::Rect> NativeFaceController::led_covered_regions() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (!output_) return {};
+    return output_->covered_regions();
+}
+
+std::vector<NamedRegion> NativeFaceController::led_named_regions() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (!output_) return {};
+    return output_->covered_named_regions();
+}
+
+void NativeFaceController::reload_active_face() {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_) {
+        if (pn.is_mirror || !pn.state) continue;
+        pn.loader = std::make_unique<FaceLoader>(
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+    }
+}
+
+bool NativeFaceController::has_led_face_editor() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    // Capability flag on the active output, not chain count — so the
+    // editor stays available even when MAX7219 / RGB-matrix is selected
+    // but no chains are configured yet (the user can author the PNG and
+    // the renderer will pick it up once chains land in config).
+    return output_ && output_->supports_face_editor();
 }
 
 } // namespace face

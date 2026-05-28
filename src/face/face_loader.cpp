@@ -36,7 +36,8 @@ void FaceLoader::load() {
             expr_map.emplace_back(name, fn.get<std::string>());
     } else {
         std::vector<std::string> pngs;
-        for (auto& e : fs::directory_iterator(folder_))
+        std::error_code ec;
+        for (auto& e : fs::directory_iterator(folder_, ec))
             if (e.path().extension() == ".png") pngs.push_back(e.path().filename().string());
         std::sort(pngs.begin(), pngs.end());
         for (auto& p : pngs) {
@@ -63,9 +64,17 @@ void FaceLoader::load() {
     std::string blink_file = cfg.value("blink", std::string("blink.png"));
     blink_ = load_png_rgba((fs::path(folder_) / blink_file).string(), w_, h_);
 
-    // Optional mouth-open image.
-    fs::path mo = fs::path(folder_) / "mouth_open.png";
-    if (fs::exists(mo)) mouth_open_ = load_png_rgba(mo.string(), w_, h_);
+    // Viseme overlays — all four are optional. A missing mouth_open simply
+    // disables audio-driven mouth blending; missing visemes fall back to
+    // mouth_open in get_frame's lookup. Stems match the Files > Faces >
+    // Mouth Shapes import slot names.
+    for (const char* shape : {"mouth_open", "mouth_small", "mouth_smile", "mouth_round"}) {
+        fs::path p = fs::path(folder_) / (std::string(shape) + ".png");
+        if (fs::exists(p)) {
+            cv::Mat img = load_png_rgba(p.string(), w_, h_);
+            if (!img.empty()) mouth_shapes_[shape] = std::move(img);
+        }
+    }
 
     // Region scaling: boxes may be authored at draw_size and scaled to panel px.
     double sx = 1.0, sy = 1.0;
@@ -135,8 +144,13 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
 
     // 3. Mouth open.
     double mo = std::clamp(state.mouth_open(), 0.0, 1.0);
-    if (mo > 0.0 && mouth_.set && !mouth_open_.empty())
-        frame = blend_region(frame, mouth_open_, mouth_, mo);
+    if (mo > 0.0 && mouth_.set) {
+        auto it = mouth_shapes_.find(state.mouth_shape());
+        if (it == mouth_shapes_.end())
+            it = mouth_shapes_.find("mouth_open");   // fallback to AH
+        if (it != mouth_shapes_.end() && !it->second.empty())
+            frame = blend_region(frame, it->second, mouth_, mo);
+    }
 
     // 4. Wiggle + gyro sub-pixel shift (edge-clamped, no wrap).
     const WiggleCfg& wc = state.wiggle();

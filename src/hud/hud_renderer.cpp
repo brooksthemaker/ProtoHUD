@@ -995,7 +995,10 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
     nvgScissor(vg, px - r, py - r, r * 2.f, r * 2.f);
 
     if (widget == static_cast<int>(InfoWidget::Clock)) {
-        // Analog clock — no title, so it fills the disc. Face style is selectable.
+        // Analog clock — no title, so it fills the disc. Face is selectable:
+        //   0=Ticks 1=Numbers 2=Minimal  (hands follow the live theme)
+        //   3=Halo 4=Solar 5=Fallout 6=Space  (recolour to that preset + a
+        //   small signature flourish)   7=Auto (track whatever theme is active)
         const time_t now = std::time(nullptr) +
                            static_cast<time_t>(s.clock_cfg.manual_offset_s);
         struct tm tmv; localtime_r(&now, &tmv);
@@ -1003,29 +1006,97 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         const int   face = s.info_panel.clock_face;
         const float HALF_PI = static_cast<float>(M_PI) * 0.5f;
 
-        if (face == 1) {
-            // Numbered face: 1..12.
+        // Resolve marker style, signature, and colours for the selected face.
+        enum { M_TICKS, M_NUMBERS, M_QUARTERS };
+        int      markers   = M_TICKS;
+        int      signature = 0;   // 0=none 1=Halo ring 2=Solar rays 3=Fallout 4=Space
+        NVGcolor markCol   = nvgRGBA(200, 220, 230, 150);     // tick/number colour
+        NVGcolor handCol   = nvg_col(col_.text_fill);         // hour/minute hands
+        const NVGcolor secCol = nvgRGBA(235, 80, 70, 235);    // second hand + hub
+        switch (face) {
+            case 1: markers = M_NUMBERS;  markCol = nvg_col_a(col_.text_fill, 220); break;
+            case 2: markers = M_QUARTERS; break;
+            case 3: markers = M_TICKS;    signature = 1;       // Halo (UNSC holo-cyan)
+                    markCol = nvgRGBA(120, 205, 235, 200); handCol = nvgRGBA(150, 235, 255, 255); break;
+            case 4: markers = M_TICKS;    signature = 2;       // Solar (orange)
+                    markCol = nvgRGBA(255, 160,  32, 210); handCol = nvgRGBA(255, 160,  32, 255); break;
+            case 5: markers = M_NUMBERS;  signature = 3;       // Fallout (green)
+                    markCol = nvgRGBA(  0, 255,  80, 230); handCol = nvgRGBA(  0, 255,  80, 255); break;
+            case 6: markers = M_QUARTERS; signature = 4;       // Space (blue)
+                    markCol = nvgRGBA( 80, 100, 255, 210); handCol = nvgRGBA(200, 220, 255, 255); break;
+            case 7: markers = M_TICKS;                         // Auto (live theme)
+                    markCol = nvg_col_a(col_.compass_tick, 200); handCol = nvg_col(col_.text_fill); break;
+            default: break;                                    // 0 = Ticks (grey)
+        }
+
+        if (markers == M_NUMBERS) {
             nvg_set_font_ui(cr * 0.20f);
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             for (int h = 1; h <= 12; ++h) {
                 const float a = h / 12.f * TWO_PI - HALF_PI;
                 char nb[4]; snprintf(nb, sizeof(nb), "%d", h);
                 otext(px + std::cos(a) * cr * 0.84f,
-                      py + std::sin(a) * cr * 0.84f, nb, nvg_col_a(col_.text_fill, 220));
+                      py + std::sin(a) * cr * 0.84f, nb, markCol);
             }
         } else {
-            // Tick face: all 12 (face 0), or quarters only (face 2 = minimal).
-            const int step = (face == 2) ? 3 : 1;
+            const int step = (markers == M_QUARTERS) ? 3 : 1;
             for (int i = 0; i < 12; i += step) {
                 const float a  = static_cast<float>(i) / 12.f * TWO_PI - HALF_PI;
                 const float r0 = cr * 0.86f, r1 = cr * 0.99f;
                 nvgBeginPath(vg);
                 nvgMoveTo(vg, px + std::cos(a) * r0, py + std::sin(a) * r0);
                 nvgLineTo(vg, px + std::cos(a) * r1, py + std::sin(a) * r1);
-                nvgStrokeColor(vg, nvgRGBA(200, 220, 230, 150));
+                nvgStrokeColor(vg, markCol);
                 nvgStrokeWidth(vg, (i % 3 == 0) ? 2.5f : 1.f); nvgStroke(vg);
             }
         }
+
+        // Per-theme signature flourish.
+        if (signature == 1) {                 // Halo — UNSC ring array (holo cyan)
+            // Thin holographic ring just outside the dial.
+            nvgBeginPath(vg); nvgCircle(vg, px, py, cr * 1.05f);
+            nvgStrokeColor(vg, nvgRGBA(150, 235, 255, 110)); nvgStrokeWidth(vg, 1.4f); nvgStroke(vg);
+            // Bright segment across the top — the Halo array arcing overhead.
+            const float topA = static_cast<float>(M_PI) * 1.5f;     // straight up (y-down)
+            nvgLineCap(vg, NVG_ROUND);
+            nvgBeginPath(vg); nvgArc(vg, px, py, cr * 1.05f, topA - 1.2f, topA + 1.2f, NVG_CW);
+            nvgStrokeColor(vg, nvgRGBA(150, 235, 255,  80)); nvgStrokeWidth(vg, 6.f); nvgStroke(vg);
+            nvgBeginPath(vg); nvgArc(vg, px, py, cr * 1.05f, topA - 1.2f, topA + 1.2f, NVG_CW);
+            nvgStrokeColor(vg, nvgRGBA(190, 245, 255, 220)); nvgStrokeWidth(vg, 2.f); nvgStroke(vg);
+            // Inner Forerunner accent ring around the hub.
+            nvgBeginPath(vg); nvgCircle(vg, px, py, cr * 0.32f);
+            nvgStrokeColor(vg, nvgRGBA(120, 205, 235, 110)); nvgStrokeWidth(vg, 1.f); nvgStroke(vg);
+        } else if (signature == 2) {          // Solar — diagonal sun rays
+            for (int k = 0; k < 4; ++k) {
+                const float a = (k / 4.f) * TWO_PI + HALF_PI * 0.5f;
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, px + std::cos(a) * cr * 1.02f, py + std::sin(a) * cr * 1.02f);
+                nvgLineTo(vg, px + std::cos(a) * cr * 1.14f, py + std::sin(a) * cr * 1.14f);
+                nvgStrokeColor(vg, nvgRGBA(255, 160, 32, 200)); nvgStrokeWidth(vg, 2.f); nvgStroke(vg);
+            }
+        } else if (signature == 3) {          // Fallout — indicator triangle at 12
+            const float ty = py - cr * 0.99f;
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, px, ty + cr * 0.10f);
+            nvgLineTo(vg, px - cr * 0.06f, ty);
+            nvgLineTo(vg, px + cr * 0.06f, ty);
+            nvgClosePath(vg);
+            nvgFillColor(vg, nvgRGBA(0, 255, 80, 220)); nvgFill(vg);
+        } else if (signature == 4) {          // Space — 4-point star at 12
+            const float sx = px, sy = py - cr * 0.84f, sr = cr * 0.12f;
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, sx, sy - sr);
+            nvgLineTo(vg, sx + sr * 0.28f, sy - sr * 0.28f);
+            nvgLineTo(vg, sx + sr, sy);
+            nvgLineTo(vg, sx + sr * 0.28f, sy + sr * 0.28f);
+            nvgLineTo(vg, sx, sy + sr);
+            nvgLineTo(vg, sx - sr * 0.28f, sy + sr * 0.28f);
+            nvgLineTo(vg, sx - sr, sy);
+            nvgLineTo(vg, sx - sr * 0.28f, sy - sr * 0.28f);
+            nvgClosePath(vg);
+            nvgFillColor(vg, nvgRGBA(200, 220, 255, 230)); nvgFill(vg);
+        }
+
         auto hand = [&](float frac, float len, float w, NVGcolor c) {
             const float a = frac * TWO_PI - HALF_PI;
             nvgLineCap(vg, NVG_ROUND);
@@ -1035,11 +1106,11 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         };
         const float hh = (tmv.tm_hour % 12) + tmv.tm_min / 60.f;
         const float mm = tmv.tm_min + tmv.tm_sec / 60.f;
-        hand(hh / 12.f, cr * 0.52f, 4.f,  nvg_col(col_.text_fill));
-        hand(mm / 60.f, cr * 0.80f, 2.5f, nvg_col(col_.text_fill));
-        hand(tmv.tm_sec / 60.f, cr * 0.90f, 1.f, nvgRGBA(235, 80, 70, 235));
+        hand(hh / 12.f, cr * 0.52f, 4.f,  handCol);
+        hand(mm / 60.f, cr * 0.80f, 2.5f, handCol);
+        hand(tmv.tm_sec / 60.f, cr * 0.90f, 1.f, secCol);
         nvgBeginPath(vg); nvgCircle(vg, px, py, 3.f);
-        nvgFillColor(vg, nvgRGBA(235, 80, 70, 235)); nvgFill(vg);
+        nvgFillColor(vg, secCol); nvgFill(vg);
 
     } else if (widget == static_cast<int>(InfoWidget::Notifications)) {
         nvg_set_font_ui(12.f);
@@ -1169,7 +1240,13 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         const float base_sz = std::clamp(r * 0.15f, 14.f, 26.f);
         const float lbl_h   = base_sz * 0.66f;             // labels ~⅓ smaller
         const float icon_sz = base_sz * 2.f;               // icons doubled
-        const float arc0    = 120.f, arc1 = -24.f;         // shared label/icon span
+        // When the disc sits in the top half of the screen, swing the whole
+        // label/icon ring 90° clockwise so it fans below the disc instead of off
+        // the top edge. Position-based (not the dock flag) so it fires however the
+        // panel ended up there. Glyphs stay upright; only the arc position moves.
+        const bool  top_dock = py < fh * 0.5f;
+        const float arc_rot  = top_dock ? -90.f : 0.f;
+        const float arc0     = 120.f + arc_rot, arc1 = -24.f + arc_rot;  // shared label/icon span
 
         // ── Inner ring: page-label wedges (radial-menu look) ────────────────────
         static const char* kNames[kCount] = { "CLOCK", "ALERTS", "SCHEDULE",
@@ -1890,19 +1967,23 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
 
 // ── Panel preview (FacePanel HUB75 live feed) ─────────────────────────────────
 
-void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_h,
+void HudRenderer::draw_panel_preview(unsigned int tex, int tex_w, int tex_h,
+                                     int screen_w, int screen_h,
                                      float anchor_x, float anchor_y,
                                      float pan_x, float pan_y, float size_frac,
                                      int view) {
     if (tex == 0) return;
+    if (tex_w <= 0 || tex_h <= 0) { tex_w = ShmFrameReader::W; tex_h = ShmFrameReader::H; }
 
     ImGui::SetCurrentContext(ctx_);
 
     // view: 0 = whole canvas, 1 = left half, 2 = right half. A half crops one
-    // panel (one face) via UVs; width and aspect halve to match.
+    // panel (one face) via UVs; width and aspect halve to match. Native
+    // backends already crop to the face in pick_face_tex, so the caller
+    // forces view=0 for those.
     const bool   half   = (view == 1 || view == 2);
-    const float  wpx    = static_cast<float>(ShmFrameReader::W) * (half ? 0.5f : 1.0f);
-    const float  aspect = wpx / static_cast<float>(ShmFrameReader::H);
+    const float  wpx    = static_cast<float>(tex_w) * (half ? 0.5f : 1.0f);
+    const float  aspect = wpx / static_cast<float>(tex_h);
     const ImVec2 uv0 = (view == 2) ? ImVec2(0.5f, 0.f) : ImVec2(0.f, 0.f);
     const ImVec2 uv1 = (view == 1) ? ImVec2(0.5f, 1.f) : ImVec2(1.f, 1.f);
     float ph = size_frac * static_cast<float>(screen_h);
@@ -1957,11 +2038,14 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int screen_w, int screen_
 // A scaled, one-side preview of the LED face placed to the left of the minimap
 // (American Fugitive-style portrait). Drawn on the ImGui foreground list in display
 // coords, matching the minimap geometry.
-void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_h,
+void HudRenderer::draw_face_portrait(unsigned int tex, int tex_w, int tex_h,
+                                     bool tex_is_centred_face,
+                                     int screen_w, int screen_h,
                                      const AppState& s) {
     if (tex == 0) return;
     const auto& cfg = s.map_overlay;
     if (!cfg.enabled || cfg.expanded) return;   // only alongside the live minimap
+    if (tex_w <= 0 || tex_h <= 0) { tex_w = ShmFrameReader::W; tex_h = ShmFrameReader::H; }
 
     ImGui::SetCurrentContext(ctx_);
 
@@ -1976,11 +2060,15 @@ void HudRenderer::draw_face_portrait(unsigned int tex, int screen_w, int screen_
     const float cy = std::clamp(fh * cfg.anchor_y + cfg.pan_y, hh, fh - hh);
     const float ringR = cfg.circle_window ? half : std::max(half, hh);
 
-    // One face half → ~2:1 source crop.
-    const float wpx    = static_cast<float>(ShmFrameReader::W) * 0.5f;
-    const float aspect = wpx / static_cast<float>(ShmFrameReader::H);
-    const ImVec2 uv0 = cfg.portrait_right_half ? ImVec2(0.5f, 0.f) : ImVec2(0.f, 0.f);
-    const ImVec2 uv1 = cfg.portrait_right_half ? ImVec2(1.f,  1.f) : ImVec2(0.5f, 1.f);
+    // Source crop: HUB75 canvas is a mirrored-pair so we sample one half;
+    // native backends arrive already cropped to the single face, so we
+    // sample the whole texture and ignore the left/right portrait pick.
+    const float u_lo   = tex_is_centred_face ? 0.f  : (cfg.portrait_right_half ? 0.5f : 0.f);
+    const float u_hi   = tex_is_centred_face ? 1.f  : (cfg.portrait_right_half ? 1.f  : 0.5f);
+    const float wpx    = static_cast<float>(tex_w) * (u_hi - u_lo);
+    const float aspect = wpx / static_cast<float>(tex_h);
+    const ImVec2 uv0   = {u_lo, 0.f};
+    const ImVec2 uv1   = {u_hi, 1.f};
 
     const float ph    = ringR * 0.55f * std::max(0.5f, cfg.portrait_scale);  // portrait height
     const float pw    = ph * aspect;            // 2:1 width

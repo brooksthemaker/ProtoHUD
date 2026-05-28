@@ -142,6 +142,39 @@ protected:
         else                 draw_dot (c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
     }
     cv::Mat blank() const { return cv::Mat::zeros(h_, w_, CV_8UC4); }
+    // Direction unit vector for directional effects (snow / rain / embers /
+    // confetti / clouds). Convention: 0° = right, 90° = down, 180° = left,
+    // 270° = up (screen-space, +Y down). default_deg lets each effect keep
+    // its historical motion direction when no "direction_deg" override is set.
+    void direction_unit(double& dx, double& dy, double default_deg) const {
+        const double deg = jnum(cfg_, "direction_deg", default_deg);
+        const double rad = deg * kPi / 180.0;
+        dx = std::cos(rad);
+        dy = std::sin(rad);
+    }
+    // Spawn a particle at the trailing edge for the layer's direction. With
+    // historical defaults (down for snow/rain/confetti, up for embers) this
+    // yields the original top/bottom spawn lines; for a sideways or diagonal
+    // angle it slides the spawn point onto the leading-edge mirror so the
+    // particle enters the canvas instead of starting mid-frame. `margin`
+    // controls the random distance offscreen along the motion axis (gives
+    // the original snow/rain/confetti staggered entry).
+    void direction_spawn_point(double margin, double default_deg,
+                               double& sx, double& sy) {
+        double dx, dy;
+        direction_unit(dx, dy, default_deg);
+        if (std::fabs(dx) >= std::fabs(dy)) {
+            sx = (dx >= 0) ? frand(rng_, -margin, 0.0)
+                           : frand(rng_, static_cast<double>(w_),
+                                   static_cast<double>(w_) + margin);
+            sy = frand(rng_, 0.0, static_cast<double>(h_ - 1));
+        } else {
+            sy = (dy >= 0) ? frand(rng_, -margin, 0.0)
+                           : frand(rng_, static_cast<double>(h_),
+                                   static_cast<double>(h_) + margin);
+            sx = frand(rng_, 0.0, static_cast<double>(w_ - 1));
+        }
+    }
 
     int w_, h_;
     json cfg_;
@@ -182,19 +215,25 @@ public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
         double drift_x = jnum(cfg_, "drift_x", 1.5);
+        double dx, dy; direction_unit(dx, dy, 90.0);   // default down
         for (auto& p : particles_) {
             double spd = (p.extra == 0) ? pick_speed(cfg_, 6, 12, rng_) : p.extra;
             p.extra = spd;
             p.vx = drift_x * std::sin(p.vx + p.y * 0.3);
-            p.x += p.vx * dt; p.y += spd * dt; p.life -= dt / p.max_life;
+            p.x += (spd * dx + p.vx) * dt;
+            p.y += spd * dy * dt;
+            p.life -= dt / p.max_life;
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [&](const Particle& p){ return !(p.y < h_ && p.life > 0); }), particles_.end());
+            [&](const Particle& p){
+                return !(p.x > -4 && p.x < w_ + 4 && p.y > -4 && p.y < h_ + 4 && p.life > 0);
+            }), particles_.end());
         while ((int)particles_.size() < count(30)) {
             double spd = pick_speed(cfg_, 6, 12, rng_);
             double ml  = pick_life(cfg_, 1.5, 4.0, rng_);
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{200, 220, 255};
-            Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = frand(rng_, -2, 0);
+            Particle p;
+            direction_spawn_point(2.0, 90.0, p.x, p.y);   // 90° = historical down
             p.vx = frand(rng_, 0, kTau); p.max_life = ml; p.life = 1;
             p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 1, rng_); p.extra = spd;
             particles_.push_back(p);
@@ -215,18 +254,25 @@ public:
     void update(double dt) override {
         double spread  = jnum(cfg_, "spread", 0.4);
         double drift_x = jnum(cfg_, "drift_x", 0.0);
+        double dx, dy; direction_unit(dx, dy, 270.0);  // default up
         for (auto& p : particles_) {
             p.extra += dt * 3.0;
             p.vx = spread * std::sin(p.extra + p.y * 0.2) * p.vy + drift_x;
-            p.x += p.vx * dt; p.y -= p.vy * dt; p.life -= dt / p.max_life;
+            p.x += (p.vy * dx + p.vx) * dt;
+            p.y += p.vy * dy * dt;
+            p.life -= dt / p.max_life;
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [&](const Particle& p){ return !(p.y > -1 && p.life > 0); }), particles_.end());
+            [&](const Particle& p){
+                return !(p.x > -4 && p.x < w_ + 4 && p.y > -4 && p.y < h_ + 4 && p.life > 0);
+            }), particles_.end());
         while ((int)particles_.size() < count(25)) {
             double spd = pick_speed(cfg_, 8, 22, rng_);
             double ml  = pick_life(cfg_, 0.8, 2.5, rng_);
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{255, 120, 20};
-            Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = h_; p.vy = spd;
+            Particle p;
+            direction_spawn_point(0.0, 270.0, p.x, p.y);  // 270° = historical up (spawn at bottom)
+            p.vy = spd;
             p.max_life = ml; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b;
             p.size = pick_size(cfg_, 1, 1, rng_); p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
@@ -255,13 +301,18 @@ public:
     void update(double dt) override {
         double spd     = pick_speed(cfg_, 4, 10, rng_);
         double drift_x = jnum(cfg_, "drift_x", 0.0);
+        double dx, dy; direction_unit(dx, dy, 90.0);  // default down
         for (auto& p : particles_) {
             p.vx = std::sin(p.extra) * 2.0 + drift_x;
             p.extra += dt * 4.0;
-            p.x += p.vx * dt; p.y += spd * dt; p.life -= dt / p.max_life;
+            p.x += (spd * dx + p.vx) * dt;
+            p.y += spd * dy * dt;
+            p.life -= dt / p.max_life;
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [&](const Particle& p){ return !(p.y < h_ && p.life > 0); }), particles_.end());
+            [&](const Particle& p){
+                return !(p.x > -4 && p.x < w_ + 4 && p.y > -4 && p.y < h_ + 4 && p.life > 0);
+            }), particles_.end());
         static const int kDef[][3] = {
             {255,50,50},{255,180,30},{50,220,50},{50,150,255},{220,50,220},{255,255,50}};
         while ((int)particles_.size() < count(20)) {
@@ -269,7 +320,8 @@ public:
             Color col;
             if (has_colors(cfg_)) col = pick_color(cfg_, rng_);
             else { const int* d = kDef[irand(rng_, 0, 5)]; col = {d[0], d[1], d[2]}; }
-            Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = frand(rng_, -4, 0);
+            Particle p;
+            direction_spawn_point(4.0, 90.0, p.x, p.y);   // 90° = historical down
             p.max_life = ml; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b;
             p.size = pick_size(cfg_, 1, 1, rng_); p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
@@ -330,14 +382,24 @@ public:
     void update(double dt) override {
         int    length  = jint(cfg_, "length", 4);
         double drift_x = jnum(cfg_, "drift_x", 0.0);
-        for (auto& p : particles_) { p.y += p.vy * dt; p.x += drift_x * dt; p.life -= dt / p.max_life; }
+        double dx, dy; direction_unit(dx, dy, 90.0);  // default down
+        for (auto& p : particles_) {
+            p.x += (p.vy * dx + drift_x) * dt;
+            p.y += p.vy * dy * dt;
+            p.life -= dt / p.max_life;
+        }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [&](const Particle& p){ return !(p.y < h_ + length && p.life > 0); }), particles_.end());
+            [&](const Particle& p){
+                return !(p.x > -length - 2 && p.x < w_ + length + 2 &&
+                         p.y > -length - 2 && p.y < h_ + length + 2 && p.life > 0);
+            }), particles_.end());
         while ((int)particles_.size() < count(15)) {
             double spd = pick_speed(cfg_, 30, 50, rng_);
             double ml  = (h_ + length) / spd;
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{100, 150, 255};
-            Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = frand(rng_, -(length + 2), 0);
+            Particle p;
+            direction_spawn_point(static_cast<double>(length + 2), 90.0,
+                                  p.x, p.y);              // 90° = historical down
             p.vy = spd; p.max_life = ml; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b;
             p.size = pick_size(cfg_, 1, 1, rng_); p.extra = length;
             particles_.push_back(p);
@@ -396,12 +458,41 @@ public:
 
     void update(double dt) override {
         double churn = jnum(cfg_, "churn", 0.4);
+        // When the user has set direction_deg, particles travel along the
+        // (dx, dy) unit vector. Otherwise the historical behaviour is a
+        // random horizontal drift per clump (sign baked into vx by spawn()),
+        // and we leave that intact.
+        const bool has_dir = cfg_.contains("direction_deg");
+        double dx = 0, dy = 0;
+        if (has_dir) direction_unit(dx, dy, 0.0);   // 0° = right (default)
         for (auto& c : clumps_) {
-            c.x += c.vx * dt;
+            if (has_dir) {
+                const double spd = std::abs(c.vx);
+                c.x += spd * dx * dt;
+                c.y += spd * dy * dt;
+            } else {
+                c.x += c.vx * dt;
+            }
             c.phase += dt * churn;
-            double margin = c.size * 2 + 2;
-            if (c.vx >= 0 && c.x - margin > w_) { c.x = -margin; c.y = frand(rng_, 0, h_ - 1); reseed(c); }
-            else if (c.vx < 0 && c.x + margin < 0) { c.x = w_ + margin; c.y = frand(rng_, 0, h_ - 1); reseed(c); }
+            const double margin = c.size * 2 + 2;
+            const bool off_x = c.x - margin > w_ || c.x + margin < 0;
+            const bool off_y = c.y - margin > h_ || c.y + margin < 0;
+            if (off_x || off_y) {
+                if (has_dir) {
+                    // Respawn opposite the direction of travel so the clump
+                    // re-enters the canvas. For axis-aligned cases this
+                    // mimics the old left/right wrap; for diagonals it picks
+                    // a corner along the trailing edges.
+                    c.x = (dx > 0) ? -margin : (dx < 0 ? w_ + margin
+                                               : frand(rng_, 0, w_ - 1));
+                    c.y = (dy > 0) ? -margin : (dy < 0 ? h_ + margin
+                                               : frand(rng_, 0, h_ - 1));
+                } else {
+                    c.x = (c.vx >= 0) ? -margin : w_ + margin;
+                    c.y = frand(rng_, 0, h_ - 1);
+                }
+                reseed(c);
+            }
         }
         while ((int)clumps_.size() < count(6)) clumps_.push_back(spawn(-1));
     }

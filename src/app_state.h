@@ -145,6 +145,53 @@ struct CameraFocusState {
     bool af_locked = false;
 };
 
+// Voice → mouth_open driving for the native face. Tunables read by main.cpp
+// from config.json at startup, written back via mutate_cfg on shutdown, and
+// menu-mutated through the audio_engine.voice() analyzer at runtime so the
+// next FFT cycle picks them up.
+struct VoiceMouthConfig {
+    bool   enabled    = false;
+    float  sensitivity = 1.0f;     // band RMS gain
+    float  noise_gate  = 0.02f;    // below this band RMS → mouth stays closed
+    float  attack_ms   = 30.f;     // envelope follower time when opening
+    float  release_ms  = 120.f;    // envelope follower time when closing
+    float  band_lo_hz  = 100.f;
+    float  band_hi_hz  = 3500.f;
+
+    // Viseme selection (spectral-centroid classifier picks one of
+    // mouth_open / mouth_small / mouth_smile / mouth_round each audio period).
+    bool   visemes_enabled     = false;
+    float  viseme_round_max_hz = 600.f;
+    float  viseme_open_max_hz  = 1200.f;
+    float  viseme_small_max_hz = 2000.f;
+};
+
+// One boop-sensor zone's user-visible behaviour. The sensor reports zone
+// touches (no expression knowledge); main.cpp's on_boop callback reads this
+// to call IFaceController::trigger_boop with the per-zone expression. Indexed
+// in lockstep with sensor::BoopSensor::Zone (Snout=0, LeftCheek=1, RightCheek=2).
+struct BoopZoneConfig {
+    bool        enabled    = true;
+    std::string expression = "surprised";   // canonical face PNG name
+    double      duration_s = 0.8;           // how long the expression holds
+    uint8_t     threshold  = 12;            // MPR121 touch threshold (lower = more sensitive)
+};
+
+// ── Light-sensor squint trigger ──────────────────────────────────────────────
+// Edge-detects the wearer stepping from a dim area into a bright one and
+// fires a transient expression (default "squint") for a few seconds before
+// reverting. The driver lives in sensor::LightSensor; main hosts the edge
+// detector and the menu mutates this struct.
+struct LightSquintConfig {
+    bool        enabled              = false;
+    float       dark_threshold_lux   = 100.f;   // below = "dark"
+    float       bright_threshold_lux = 800.f;   // above = "bright"
+    float       transition_window_s  = 2.0f;    // dark→bright must happen within this many seconds
+    std::string expression           = "squint";
+    double      duration_s           = 1.5;     // hold time before reverting
+    float       cooldown_s           = 3.0f;    // min time between consecutive squints
+};
+
 struct NightVisionState {
     float exposure_ev        = 0.0f;  // -3.0 to +3.0
     int   shutter_us         = 33333; // microseconds (40 to 1000000)
@@ -227,6 +274,20 @@ struct ImuData {
     float temp_c      = 0.f;               // MPU die temperature
     float mpu_heading = 0.f;               // fused compass heading (deg)
     float mpu_rate_hz = 0.f;               // measured sample rate (EMA)
+
+    // BNO055 9-DOF (on-chip absolute orientation) — populated when the
+    // sensor is wired and enabled. calib_* are 0..3 per axis (3 = fully
+    // calibrated); the heading should be treated as drifting until calib_sys
+    // reaches at least 2.
+    bool  bno_ok          = false;
+    float bno_accel_g[3]  = {0.f, 0.f, 0.f};
+    float bno_gyro_dps[3] = {0.f, 0.f, 0.f};
+    float bno_mag_ut[3]   = {0.f, 0.f, 0.f};
+    float bno_euler[3]    = {0.f, 0.f, 0.f};  // [0]=heading, [1]=roll, [2]=pitch
+    uint8_t bno_calib_sys   = 0;
+    uint8_t bno_calib_gyro  = 0;
+    uint8_t bno_calib_accel = 0;
+    uint8_t bno_calib_mag   = 0;
 };
 
 // ── Map overlay ───────────────────────────────────────────────────────────────
@@ -286,7 +347,8 @@ struct InfoPanelConfig {
     float pan_y     = 0.f;
     float size_px   = 150.f;    // half-extent (radius), matching the minimap footprint
     float cycle_sec = 6.f;      // dwell per widget before advancing
-    int   clock_face = 0;       // analog clock style: 0=ticks, 1=numbers, 2=minimal
+    int   clock_face = 0;       // clock style: 0=ticks 1=numbers 2=minimal
+                               // 3=Halo 4=Solar 5=Fallout 6=Space 7=Auto(theme)
     // Which widgets take part in the cycle (indexed by InfoWidget):
     // clock, notifications, schedule, weather (now), weather (precip).
     bool  show[static_cast<int>(InfoWidget::Count)] = { true, true, true, false, false };
@@ -595,10 +657,35 @@ struct AppState {
     std::deque<LoRaMessage>  lora_messages;
     size_t                   max_messages = 50;
 
-    // Heading used for the HUD compass. Updated by LoRa or IMU.
+    // Heading used for the HUD compass. Updated by LoRa or IMU via the
+    // pick_imu_heading() helper in main.cpp.
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
     bool  compass_tape       = true;   // the top-of-screen compass tape
+
+    // ── IMU source selection ────────────────────────────────────────────────
+    // The HUD has three possible heading sources at runtime: the BNO055
+    // (best — on-chip 9-DOF fusion), the MPU9250 (compass with software
+    // fusion), and the VITURE XR glasses' built-in IMU. Each writes into
+    // its own ImuSlot below; pick_imu_heading(state, now_us) in main.cpp
+    // chooses the active one per frame based on this enum + slot freshness.
+    enum class ImuSource : uint8_t {
+        Auto    = 0,   // best fresh source in priority order: BNO055 > MPU9250 > Viture
+        Bno055  = 1,
+        Mpu9250 = 2,
+        Viture  = 3,
+        None    = 4,   // hold last value, ignore live updates
+    };
+    ImuSource imu_source = ImuSource::Auto;
+
+    struct ImuSlot {
+        int64_t last_us     = 0;     // steady_clock-microsecond timestamp of last update
+        float   heading_deg = 0.f;   // 0..360, normalised + offset/declination applied
+        bool    calibrated  = true;  // BNO055 sets false until cal_sys >= 2
+    };
+    ImuSlot imu_bno;
+    ImuSlot imu_mpu;
+    ImuSlot imu_viture;
 
     // Legacy HUD chrome (edge/corner indicators: compass tape, health sides, face
     // indicator, corner clock/timer, LoRa message list). Off = show only the new
@@ -675,6 +762,24 @@ struct AppState {
     // Camera focus, night vision, resolution, and digital zoom
     CameraFocusState     focus_left, focus_right;
     NightVisionState     night_vision;
+    // Boop zones: [0]=Snout, [1]=LeftCheek, [2]=RightCheek. Sane defaults so
+    // a user with the sensor wired sees something sensible before they ever
+    // open the menu.
+    // [0]=Snout, [1]=LeftCheek, [2]=RightCheek, [3]=BothCheeks (derived).
+    // Threshold on the BothCheeks slot is unused (it doesn't probe an
+    // electrode directly) but kept in the schema for index parity.
+    BoopZoneConfig       boop_zones[4] = {
+        { true, "surprised", 0.8, 12 },
+        { true, "happy",     0.6, 12 },
+        { true, "happy",     0.6, 12 },
+        { true, "surprised", 1.0, 12 },
+    };
+    // Coalesce window (seconds) for combining near-simultaneous left + right
+    // cheek touches into a single BothCheeks event. Mirror of the sensor's
+    // cfg field; the menu writes both this and the sensor's live value.
+    float                boop_coalesce_window_s = 0.10f;
+    LightSquintConfig    light_squint;
+    VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;
     ZoomCropState        zoom_left, zoom_right;

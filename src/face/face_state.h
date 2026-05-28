@@ -7,6 +7,7 @@
 // Threading: NativeFaceController serializes all access under its own mutex, so
 // FaceState carries no internal locking.
 
+#include <algorithm>
 #include <random>
 #include <string>
 #include <vector>
@@ -34,6 +35,27 @@ public:
     void set_audio(double volume, double mouth_open) { audio_volume_ = volume; mouth_open_ = mouth_open; }
     void set_gyro(double dx, double dy)              { gyro_dx_ = dx; gyro_dy_ = dy; }
     void set_brightness(int b)                       { brightness_ = b < 0 ? 0 : (b > 255 ? 255 : b); }
+    // Selects which viseme overlay the FaceLoader blends at the mouth region
+    // when mouth_open > 0. Default "mouth_open" matches the pre-viseme path.
+    void set_mouth_shape(const std::string& s)       { if (!s.empty()) mouth_shape_ = s; }
+
+    // ── Animation tuning (live; no rebuild required) ─────────────────────────
+    // Setting blink_enabled = false freezes the blink state-machine open
+    // (no eyes closed). Re-enabling resumes the next-blink countdown from
+    // the next call to update().
+    void set_blink_enabled(bool en)                  { blink_enabled_ = en; if (!en) { blink_phase_ = BlinkPhase::Open; blink_weight_ = 0.0; } }
+    void set_blink_timing(double min_s, double max_s, double duration_s) {
+        blink_min_      = std::max(0.1, min_s);
+        blink_max_      = std::max(blink_min_, max_s);
+        blink_duration_ = std::max(0.02, duration_s);
+    }
+    void set_expression_fade(double seconds)         { fade_speed_ = 1.0 / std::max(0.01, seconds); }
+    void set_wiggle(const WiggleCfg& w)              { wiggle_ = w; }
+    bool blink_enabled()  const { return blink_enabled_; }
+    double blink_min()    const { return blink_min_; }
+    double blink_max()    const { return blink_max_; }
+    double blink_duration() const { return blink_duration_; }
+    double expression_fade_s() const { return fade_speed_ > 0 ? (1.0 / fade_speed_) : 0.3; }
 
     // ── Read accessors for the compositor (mirror face.py's state fields) ─────
     const std::string& expression()      const { return expression_; }
@@ -41,6 +63,7 @@ public:
     double transition_t() const { return transition_t_; }
     double blink_weight() const { return blink_weight_; }
     double mouth_open()   const { return mouth_open_; }
+    const std::string& mouth_shape() const { return mouth_shape_; }
     double gyro_dx()      const { return gyro_dx_; }
     double gyro_dy()      const { return gyro_dy_; }
     double time()         const { return time_; }
@@ -73,12 +96,14 @@ private:
     double blink_min_      = 3.0;
     double blink_max_      = 7.0;
     double next_blink_     = 3.0;
+    bool   blink_enabled_  = true;
 
     WiggleCfg wiggle_;
 
     // Inputs
     double audio_volume_ = 0.0;
     double mouth_open_   = 0.0;
+    std::string mouth_shape_ = "mouth_open";   // viseme overlay name
     double gyro_dx_      = 0.0;
     double gyro_dy_      = 0.0;
 

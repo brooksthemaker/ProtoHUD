@@ -62,6 +62,10 @@ struct RenderConfig {
     std::string          gifs_dir      = "gifs";
     double               gif_auto_release = 5.0;   // s after play_gif before reverting (0 = loop forever)
     std::string          state_path;               // auto-saved live look (empty = disabled)
+    // When false, the controller skips creating per-panel ParticleSystems and
+    // makes set_effect() a no-op. Used by the MAX7219 / RGB-matrix backends
+    // where particle effects don't read on a handful of 8x8 modules.
+    bool                 effects_enabled = true;
     std::vector<PanelCfg> panels;
 };
 

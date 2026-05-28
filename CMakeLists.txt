@@ -192,12 +192,20 @@ set(SOURCES
     src/hud/hud_renderer.cpp
     src/hud/background_library.cpp
     src/menu/menu_system.cpp
+    src/menu/file_picker.cpp
+    src/menu/face_editor.cpp
     src/profile_manager.cpp
     src/vitrue/xr_display.cpp
     src/vitrue/timewarp.cpp
     src/audio/audio_engine.cpp
+    src/audio/voice_analyzer.cpp
     src/post_process.cpp
     src/sensor/mpu9250.cpp
+    src/sensor/bno055.cpp
+    src/sensor/mpr121_boop_sensor.cpp
+    src/sensor/light_sensor.cpp
+    src/accessory/led_strip.cpp
+    src/accessory/accessory_leds.cpp
     src/sys/system_monitor.cpp
     src/sys/scheduler_monitor.cpp
     src/net/wifi_monitor.cpp
@@ -293,6 +301,10 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/particles.cpp
     src/face/gif_player.cpp
     src/face/shm_pusher_output.cpp
+    src/face/max7219_chain.cpp
+    src/face/max7219_panel_output.cpp
+    src/face/neopixel_matrix_chain.cpp
+    src/face/neopixel_matrix_output.cpp
     src/face/native_face_controller.cpp
 )
 target_include_directories(protoface_native PRIVATE

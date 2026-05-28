@@ -23,6 +23,7 @@ static bool is_image_ext(std::string ext) {
 }
 
 void BackgroundLibrary::scan(const std::vector<std::string>& dirs) {
+    last_dirs_ = dirs;
     entries_.clear();
     for (const auto& d : dirs) {
         std::error_code ec;
@@ -42,6 +43,16 @@ void BackgroundLibrary::scan(const std::vector<std::string>& dirs) {
               [](const Entry& a, const Entry& b){ return a.name < b.name; });
     if (current_ >= static_cast<int>(entries_.size())) current_ = 0;
     dirty_ = true;
+}
+
+void BackgroundLibrary::refresh() {
+    // Preserve the currently-selected entry across the rescan if it survives;
+    // otherwise fall back to 0.
+    std::string keep_name = (current_ >= 0 && current_ < static_cast<int>(entries_.size()))
+                            ? entries_[current_].name : std::string{};
+    auto saved_dirs = last_dirs_;   // scan() rewrites last_dirs_
+    scan(saved_dirs);
+    if (!keep_name.empty()) set_current_by_name(keep_name);
 }
 
 const std::string& BackgroundLibrary::name(int i) const {

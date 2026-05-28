@@ -15,6 +15,13 @@ AudioEngine::AudioEngine(const AudioConfig& cfg, AppState& state)
     enabled_.store(cfg.enabled);
     master_gain_.store(cfg.master_gain);
     pending_output_.store(static_cast<int>(cfg.active_output));
+
+    // Voice analyzer — sample rate inherits from the capture config so the
+    // band edges and centroid map to the right Hz at runtime. The analyzer
+    // starts disabled; main.cpp flips it on via state.voice_mouth.enabled.
+    audio::VoiceAnalyzer::Config vc;
+    vc.sample_rate = cfg.sample_rate;
+    voice_ = std::make_unique<audio::VoiceAnalyzer>(vc);
 }
 
 AudioEngine::~AudioEngine() { stop(); }
@@ -224,6 +231,30 @@ void AudioEngine::audio_thread_fn() {
         }
 
         auto t0 = std::chrono::steady_clock::now();
+
+        // ── Voice analysis (mic → face mouth_open) ────────────────────
+        // Feed the clean pre-gain signal so menu changes to master volume
+        // don't double-affect the mouth. push_stereo_s16 / update / the
+        // callback all run on this thread; analyzer is enabled-gated so
+        // the per-sample cost is a no-op when off.
+        if (voice_) {
+            voice_->push_stereo_s16(buf.data(), static_cast<int>(frames));
+            const double dt_s = static_cast<double>(frames) /
+                                std::max(1, cfg_.sample_rate);
+            voice_->update(dt_s);
+            if (voice_->enabled()) {
+                // Snapshot the callback under the lock so a concurrent
+                // set_face_drive_callback can't tear the read. The
+                // invocation itself happens after the unlock — the callback
+                // re-enters face_proxy which has its own mutex.
+                FaceDriveCallback cb;
+                {
+                    std::lock_guard<std::mutex> lk(face_drive_cb_mtx_);
+                    cb = face_drive_cb_;
+                }
+                if (cb) cb(voice_->volume(), voice_->mouth_open());
+            }
+        }
 
         // ── Apply master gain (or mute) ───────────────────────────────
         if (enabled_.load()) {

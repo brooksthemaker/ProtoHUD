@@ -149,13 +149,16 @@ public:
     // pan_x/pan_y a pixel nudge, size_frac the image height as a fraction of the
     // screen height.
     // view: 0 = whole face (both panels), 1 = left half, 2 = right half.
-    void draw_panel_preview(unsigned int tex, int screen_w, int screen_h,
+    void draw_panel_preview(unsigned int tex, int tex_w, int tex_h,
+                            int screen_w, int screen_h,
                             float anchor_x, float anchor_y,
                             float pan_x, float pan_y, float size_frac,
                             int view = 0);
 
     // Protoface "portrait" beside the minimap (ImGui — takes the LED GL texture).
-    void draw_face_portrait(unsigned int tex, int screen_w, int screen_h,
+    void draw_face_portrait(unsigned int tex, int tex_w, int tex_h,
+                            bool tex_is_centred_face,
+                            int screen_w, int screen_h,
                             const AppState& s);
 
     // Draw system status panel (ImGui pass).
