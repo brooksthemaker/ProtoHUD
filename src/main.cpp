@@ -3692,16 +3692,32 @@ static std::vector<MenuItem> build_menu(
     // cfg["protoface"]["custom_effects"][key]; the existing mutate_cfg
     // path persists to disk on shutdown.
 
+    // Ensures cfg[key1][key2]... resolves to an object so subsequent
+    // operator[] writes/reads can't trip type_error.305/306. nlohmann's
+    // operator[] auto-creates an empty object on a null node, but a
+    // hand-edited string or array at any of these paths would throw —
+    // overwrite with an empty object first to keep the menu robust.
+    auto ensure_obj_path = [](json& root,
+                              std::initializer_list<const char*> keys) -> json& {
+        json* cur = &root;
+        for (const char* k : keys) {
+            if (!cur->is_object()) *cur = json::object();
+            if (!cur->contains(k) || !(*cur)[k].is_object()) (*cur)[k] = json::object();
+            cur = &(*cur)[k];
+        }
+        return *cur;
+    };
+
     // "Save As..." opens the OSK to name the preset; commit writes
     // the live builder spec under cfg["protoface"]["custom_effects"][name].
     layered_items.push_back(leaf("Save As...",
-        [cfg_root, menu_sys_pp, build_layered_spec]{
+        [cfg_root, menu_sys_pp, build_layered_spec, ensure_obj_path]{
             if (!menu_sys_pp || !*menu_sys_pp || !cfg_root) return;
             (*menu_sys_pp)->open_keyboard(
                 "Preset Name", std::string(),
-                [cfg_root, build_layered_spec](const std::string& name){
+                [cfg_root, build_layered_spec, ensure_obj_path](const std::string& name){
                     if (!cfg_root || name.empty()) return;
-                    (*cfg_root)["protoface"]["custom_effects"][name] =
+                    ensure_obj_path(*cfg_root, {"protoface", "custom_effects"})[name] =
                         build_layered_spec();
                 });
         }));
@@ -3709,10 +3725,11 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> save_items, load_items;
     for (int s = 1; s <= 3; ++s) {
         char nm[16]; std::snprintf(nm, sizeof(nm), "Slot %d", s);
-        save_items.push_back(leaf(nm, [cfg_root, s, build_layered_spec]{
+        save_items.push_back(leaf(nm, [cfg_root, s, build_layered_spec, ensure_obj_path]{
             if (!cfg_root) return;
             char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
-            (*cfg_root)["protoface"]["custom_effects"][key] = build_layered_spec();
+            ensure_obj_path(*cfg_root, {"protoface", "custom_effects"})[key] =
+                build_layered_spec();
         }));
     }
     layered_items.push_back(submenu("Save to Slot", std::move(save_items)));
@@ -3724,7 +3741,8 @@ static std::vector<MenuItem> build_menu(
     // visible_fn hides empty slots so the user only sees real entries.
     constexpr int kMaxLoadEntries = 16;
     auto preset_name_at = [cfg_root](int idx) -> std::string {
-        if (!cfg_root || !cfg_root->contains("protoface")) return {};
+        if (!cfg_root || !cfg_root->contains("protoface")
+            || !(*cfg_root)["protoface"].is_object()) return {};
         const auto& jpf = (*cfg_root)["protoface"];
         if (!jpf.contains("custom_effects") || !jpf["custom_effects"].is_object())
             return {};
@@ -3743,7 +3761,10 @@ static std::vector<MenuItem> build_menu(
         row.action = [cfg_root, preset_name_at, i, load_layered_spec]{
             const std::string nm = preset_name_at(i);
             if (!cfg_root || nm.empty()) return;
-            const auto& ce = (*cfg_root)["protoface"]["custom_effects"];
+            if (!(*cfg_root)["protoface"].is_object()) return;
+            const auto& jpf = (*cfg_root)["protoface"];
+            if (!jpf.contains("custom_effects") || !jpf["custom_effects"].is_object()) return;
+            const auto& ce = jpf["custom_effects"];
             if (ce.contains(nm)) load_layered_spec(ce[nm]);
         };
         load_items.push_back(std::move(row));
@@ -3762,8 +3783,10 @@ static std::vector<MenuItem> build_menu(
         row.action = [cfg_root, preset_name_at, i]{
             const std::string nm = preset_name_at(i);
             if (!cfg_root || nm.empty()) return;
-            auto& ce = (*cfg_root)["protoface"]["custom_effects"];
-            ce.erase(nm);
+            if (!(*cfg_root)["protoface"].is_object()) return;
+            auto& jpf = (*cfg_root)["protoface"];
+            if (!jpf.contains("custom_effects") || !jpf["custom_effects"].is_object()) return;
+            jpf["custom_effects"].erase(nm);
         };
         delete_items.push_back(std::move(row));
     }
@@ -5930,9 +5953,14 @@ static std::vector<MenuItem> build_menu(
         auto add = [&pc](int bcm, std::string who) {
             if (bcm >= 0) pc.claimants[bcm].push_back(std::move(who));
         };
-        // GPIO buttons (defaults 17/27/22; cfg["gpio"] overrides).
-        const json empty;
-        const json& jg = cfg.contains("gpio") ? cfg["gpio"] : empty;
+        // GPIO buttons (defaults 17/27/22; cfg["gpio"] overrides). A
+        // hand-edited "gpio": null in cfg would let cfg.contains() pass
+        // but make jg null, and .value() throws type_error.306 on null —
+        // gate every dereference on is_object() to keep the visualizer
+        // safe against any cfg shape.
+        const json empty = json::object();
+        const json& jg = (cfg.contains("gpio") && cfg["gpio"].is_object())
+                         ? cfg["gpio"] : empty;
         add(jg.value("button_1_gpio", 17), "Button 1");
         add(jg.value("button_2_gpio", 27), "Button 2");
         add(jg.value("button_3_gpio", 22), "Button 3");
@@ -5957,6 +5985,7 @@ static std::vector<MenuItem> build_menu(
         auto walk_chains = [&](const json& jchains, const char* tag) {
             if (!jchains.is_array()) return;
             for (const auto& jc : jchains) {
+                if (!jc.is_object()) continue;
                 const std::string dev = jc.value("spi_device", std::string());
                 const std::string name = jc.value("name", std::string("chain"));
                 const std::string who  = std::string(tag) + " " + name;
@@ -5976,16 +6005,17 @@ static std::vector<MenuItem> build_menu(
                 add(jc.value("gpio_cs_pin", -1), who + " (GPIO CS)");
             }
         };
-        if (cfg.contains("protoface")) {
+        if (cfg.contains("protoface") && cfg["protoface"].is_object()) {
             const auto& jpf = cfg["protoface"];
-            if (jpf.contains("max7219")) {
+            if (jpf.contains("max7219") && jpf["max7219"].is_object()) {
                 const auto& jm = jpf["max7219"];
                 walk_chains(jm.contains("chains") ? jm["chains"] : json::array(),
                             "MAX7219");
                 add(jm.value("gpio_din_pin", -1), "MAX7219 GPIO bus DIN");
                 add(jm.value("gpio_clk_pin", -1), "MAX7219 GPIO bus CLK");
             }
-            if (jpf.contains("rgb_matrix") && jpf["rgb_matrix"].contains("chains"))
+            if (jpf.contains("rgb_matrix") && jpf["rgb_matrix"].is_object()
+                && jpf["rgb_matrix"].contains("chains"))
                 walk_chains(jpf["rgb_matrix"]["chains"], "RGB matrix");
 
             // HUB75 + piomatter — uses the Adafruit RGB HAT pinout by default
@@ -6004,7 +6034,7 @@ static std::vector<MenuItem> build_menu(
             }
         }
         // Accessory LEDs (WS2812) — single MOSI line on their chosen spidev.
-        if (cfg.contains("accessory_leds")) {
+        if (cfg.contains("accessory_leds") && cfg["accessory_leds"].is_object()) {
             const auto& jal = cfg["accessory_leds"];
             const std::string dev = jal.value("spi_device", std::string());
             const int speed = jal.value("speed_hz", 2'400'000);
@@ -6076,13 +6106,14 @@ static std::vector<MenuItem> build_menu(
             rail5 += total * 20;
         }
         // MAX7219 chains — ~80 mA per module at full brightness.
-        if (cfg.contains("protoface")) {
+        if (cfg.contains("protoface") && cfg["protoface"].is_object()) {
             const auto& jpf = cfg["protoface"];
             const std::string be = jpf.value("backend", std::string("hub75"));
             int max7219_mods = 0;
-            if (be == "max7219" && jpf.contains("max7219")
-                && jpf["max7219"].contains("chains")) {
+            if (be == "max7219" && jpf.contains("max7219") && jpf["max7219"].is_object()
+                && jpf["max7219"].contains("chains") && jpf["max7219"]["chains"].is_array()) {
                 for (const auto& jc : jpf["max7219"]["chains"]) {
+                    if (!jc.is_object()) continue;
                     if (jc.contains("module_positions") && jc["module_positions"].is_array())
                         max7219_mods += static_cast<int>(jc["module_positions"].size());
                     else
