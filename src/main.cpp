@@ -275,12 +275,20 @@ struct PfHub75Layout {
     std::string arrangement     = "horizontal"; // horizontal / vertical / grid2x2
     int         panel_count     = 1;            // 1..4
     std::string panel_size_per[4] = {"", "", "", ""};
+    // Nudge stores each panel's CENTRE as an offset from the canvas centre
+    // (in canvas pixels). Default = auto-placed by apply_defaults() per
+    // arrangement; e.g. for two 64×32 panels in a horizontal chain the
+    // defaults are dx[0] = -32, dx[1] = +32 (P1 left of centre, P2 right).
     int         nudge_dx[4]     = {0, 0, 0, 0};
     int         nudge_dy[4]     = {0, 0, 0, 0};
+    // First-run flag — until apply_defaults has run we treat all-zero
+    // nudges as "uninitialised" and populate them.
+    bool        defaults_applied = false;
 };
 static std::vector<face::ShmPusherOutput::Panel>
 pf_hub75_panels(const PfHub75Layout& L);
 static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch);
+static void pf_hub75_apply_defaults(PfHub75Layout& L);
 
 // hot-swap action use the exact same construction logic.
 static std::unique_ptr<face::PanelOutput>
@@ -466,54 +474,91 @@ static void pf_hub75_panel_dims(const std::string& sz, int& w, int& h) {
 // in a horizontal chain that puts the canvas at 256 + 64 = 320 px wide.
 static constexpr int kHub75Margin = 32;
 
+// Centre = 0 model. nudge_dx[i] / nudge_dy[i] are stored as the offset of
+// panel i's CENTRE from the canvas centre (px). Default values are the
+// "auto-placed" positions — see pf_hub75_apply_defaults below. To convert
+// stored nudges into a panel rect: rect.x = canvas_w/2 + nudge_dx - pw/2.
 static std::vector<face::ShmPusherOutput::Panel>
 pf_hub75_panels(const PfHub75Layout& L) {
     const int n = std::clamp(L.panel_count, 1, 4);
     std::vector<face::ShmPusherOutput::Panel> out;
     out.reserve(static_cast<size_t>(n));
-    // Resolve each slot's effective size — its per-slot override if set,
-    // otherwise the global default. Lets users mix panel sizes in one
-    // build (e.g. two 64x32 + one 64x64).
     int pw[4] = {0,0,0,0}, ph[4] = {0,0,0,0};
     for (int i = 0; i < 4; ++i) {
         const std::string& s = L.panel_size_per[i].empty()
                                ? L.panel_size : L.panel_size_per[i];
         pf_hub75_panel_dims(s, pw[i], ph[i]);
     }
-    // Base positions place the first panel at (0, 0); push() then offsets
-    // every panel by kHub75Margin so the set is centred inside the
-    // margin-padded canvas, then adds each panel's nudge.
-    auto push = [&](int i, int x, int y) {
+    int cw = 0, ch = 0;
+    pf_hub75_canvas(L, cw, ch);
+    const int cx = cw / 2;
+    const int cy = ch / 2;
+    for (int i = 0; i < n; ++i) {
         face::ShmPusherOutput::Panel p;
         p.name = "panel_" + std::to_string(i);
-        p.rect = cv::Rect(x + kHub75Margin + L.nudge_dx[i],
-                          y + kHub75Margin + L.nudge_dy[i],
+        p.rect = cv::Rect(cx + L.nudge_dx[i] - pw[i] / 2,
+                          cy + L.nudge_dy[i] - ph[i] / 2,
                           pw[i], ph[i]);
         out.push_back(std::move(p));
-    };
+    }
+    return out;
+}
+
+// Compute and store the "auto-placed" centre offsets for the current
+// arrangement / count / sizes. Called when the user picks a new size,
+// count or arrangement (and once at startup if cfg didn't load any).
+static void pf_hub75_apply_defaults(PfHub75Layout& L) {
+    const int n = std::clamp(L.panel_count, 1, 4);
+    int pw[4] = {0,0,0,0}, ph[4] = {0,0,0,0};
+    for (int i = 0; i < 4; ++i) {
+        const std::string& s = L.panel_size_per[i].empty()
+                               ? L.panel_size : L.panel_size_per[i];
+        pf_hub75_panel_dims(s, pw[i], ph[i]);
+    }
+    // First compute centred-set absolute positions (with margin), then
+    // convert to centre-offsets from the canvas centre.
+    int x[4] = {0,0,0,0}, y[4] = {0,0,0,0};
     if (L.arrangement == "vertical") {
-        // Stack: each panel's y = sum of preceding panels' heights.
-        int y = 0;
-        for (int i = 0; i < n; ++i) { push(i, 0, y); y += ph[i]; }
+        int yy = kHub75Margin;
+        int max_w = 0;
+        for (int i = 0; i < n; ++i) max_w = std::max(max_w, pw[i]);
+        for (int i = 0; i < n; ++i) {
+            x[i] = kHub75Margin + (max_w - pw[i]) / 2;
+            y[i] = yy; yy += ph[i];
+        }
     } else if (L.arrangement == "grid2x2") {
-        // 2x2 row-major: row 0 holds slots 0-1, row 1 holds slots 2-3.
-        // Each panel's column x is the width of its left sibling; row 1 y
-        // is the taller of the row 0 panels so mixed rows don't overlap.
         const int row0_h = std::max(ph[0], n >= 2 ? ph[1] : 0);
         for (int i = 0; i < n; ++i) {
             const int col = i % 2;
             const int row = i / 2;
-            int x = 0, y = 0;
-            if (col == 1) x = pw[i - 1];
-            if (row == 1) y = row0_h;
-            push(i, x, y);
+            int xx = kHub75Margin;
+            if (col == 1) xx += pw[i - 1];
+            int yy = kHub75Margin;
+            if (row == 1) yy += row0_h;
+            x[i] = xx; y[i] = yy;
         }
-    } else { // horizontal default
-        // Chain: each panel's x = sum of preceding panels' widths.
-        int x = 0;
-        for (int i = 0; i < n; ++i) { push(i, x, 0); x += pw[i]; }
+    } else { // horizontal
+        int xx = kHub75Margin;
+        int max_h = 0;
+        for (int i = 0; i < n; ++i) max_h = std::max(max_h, ph[i]);
+        for (int i = 0; i < n; ++i) {
+            x[i] = xx;
+            y[i] = kHub75Margin + (max_h - ph[i]) / 2;
+            xx += pw[i];
+        }
     }
-    return out;
+    int cw = 0, ch = 0;
+    pf_hub75_canvas(L, cw, ch);
+    const int cx = cw / 2, cy = ch / 2;
+    for (int i = 0; i < n; ++i) {
+        L.nudge_dx[i] = (x[i] + pw[i] / 2) - cx;
+        L.nudge_dy[i] = (y[i] + ph[i] / 2) - cy;
+    }
+    for (int i = n; i < 4; ++i) {
+        L.nudge_dx[i] = 0;
+        L.nudge_dy[i] = 0;
+    }
+    L.defaults_applied = true;
 }
 
 // Total canvas size = bounding box of the *un-nudged* panel set + a 32-px
@@ -4199,14 +4244,18 @@ static std::vector<MenuItem> build_menu(
     MenuItem pf_hub75_layout_item;
     if (pf_hub75_p) {
         auto* H = pf_hub75_p;
-        auto hub_pick_str = [&leaf_sel](const char* lbl, std::string* slot, const char* v) {
+        // String picker that also reapplies the auto-placed centre offsets
+        // when the global Default Panel Size / Arrangement changes — the
+        // canvas resizes around the new geometry, so the existing nudges
+        // would point at the wrong canvas centres.
+        auto hub_pick_str = [&leaf_sel, H](const char* lbl, std::string* slot, const char* v) {
             return leaf_sel(lbl,
-                [slot, v]{ if (slot) *slot = v; },
+                [slot, v, H]{ if (slot) { *slot = v; pf_hub75_apply_defaults(*H); } },
                 [slot, v]{ return slot && *slot == v; });
         };
-        auto hub_pick_int = [&leaf_sel](const char* lbl, int* slot, int v) {
+        auto hub_pick_int = [&leaf_sel, H](const char* lbl, int* slot, int v) {
             return leaf_sel(lbl,
-                [slot, v]{ if (slot) *slot = v; },
+                [slot, v, H]{ if (slot) { *slot = v; pf_hub75_apply_defaults(*H); } },
                 [slot, v]{ return slot && *slot == v; });
         };
         std::vector<MenuItem> size_items = {
@@ -4234,10 +4283,23 @@ static std::vector<MenuItem> build_menu(
         // entries pin this slot to that physical size regardless of the
         // global. Visible only when the panel index is within the active
         // count.
+        // Per-slot Size pickers also reapply defaults — sizing a panel up
+        // can grow the canvas, which shifts what "centre" means.
         auto size_pick = [&leaf_sel, H](const char* lbl, int i, const char* v) {
             return leaf_sel(lbl,
-                [H, i, v]{ H->panel_size_per[i] = v; },
+                [H, i, v]{ H->panel_size_per[i] = v; pf_hub75_apply_defaults(*H); },
                 [H, i, v]{ return H->panel_size_per[i] == v; });
+        };
+        // Slider range: ±canvas/2 so each panel can be moved to either
+        // edge of the canvas (centre-offset model). Capped at ±512 for
+        // very large layouts so the encoder stays usable.
+        auto nudge_x_max = [H]() -> float {
+            int cw = 0, ch = 0; pf_hub75_canvas(*H, cw, ch);
+            return static_cast<float>(std::min(512, std::max(64, cw / 2)));
+        };
+        auto nudge_y_max = [H]() -> float {
+            int cw = 0, ch = 0; pf_hub75_canvas(*H, cw, ch);
+            return static_cast<float>(std::min(512, std::max(64, ch / 2)));
         };
         std::vector<MenuItem> nudge_items;
         for (int i = 0; i < 4; ++i) {
@@ -4250,16 +4312,25 @@ static std::vector<MenuItem> build_menu(
                 size_pick("128x32",      i, "128x32"),
                 size_pick("128x64",      i, "128x64"),
             };
+            const float xmax = nudge_x_max();
+            const float ymax = nudge_y_max();
             std::vector<MenuItem> axis_items = {
                 submenu("Size", std::move(size_items)),
-                slider("Nudge X", -32.f, 32.f, 1.f, " px",
+                slider("Offset X (from centre)", -xmax, xmax, 1.f, " px",
                     [H, i]{ return static_cast<float>(H->nudge_dx[i]); },
                     [H, i](float v){ H->nudge_dx[i] = static_cast<int>(v); }),
-                slider("Nudge Y", -32.f, 32.f, 1.f, " px",
+                slider("Offset Y (from centre)", -ymax, ymax, 1.f, " px",
                     [H, i]{ return static_cast<float>(H->nudge_dy[i]); },
                     [H, i](float v){ H->nudge_dy[i] = static_cast<int>(v); }),
-                leaf("Reset Nudge",
-                     [H, i]{ H->nudge_dx[i] = 0; H->nudge_dy[i] = 0; }),
+                leaf("Reset to Default Position",
+                     [H, i]{
+                         // Reset just this slot by reapplying defaults to a
+                         // scratch copy and copying the slot's values back.
+                         PfHub75Layout tmp = *H;
+                         pf_hub75_apply_defaults(tmp);
+                         H->nudge_dx[i] = tmp.nudge_dx[i];
+                         H->nudge_dy[i] = tmp.nudge_dy[i];
+                     }),
             };
             char nm[32]; std::snprintf(nm, sizeof(nm), "Panel %d", i + 1);
             MenuItem m = submenu(nm, std::move(axis_items));
@@ -4333,6 +4404,11 @@ static std::vector<MenuItem> build_menu(
             submenu("Arrangement", std::move(arr_items)),
         };
         for (auto& it : nudge_items) hub_items.push_back(std::move(it));
+        hub_items.push_back(with_desc(
+            leaf("Reset All Positions",
+                 [H]{ pf_hub75_apply_defaults(*H); }),
+            "Re-seed every panel's Offset X/Y to the auto-placed positions "
+            "for the current size + count + arrangement."));
 
         pf_hub75_layout_item = with_desc(
             with_panel(submenu("HUB75 Layout", std::move(hub_items)),
@@ -7691,6 +7767,7 @@ int main(int argc, char* argv[]) {
             if (jh.contains("nudge_dy") && jh["nudge_dy"].is_array())
                 for (size_t i = 0; i < jh["nudge_dy"].size() && i < 4; ++i)
                     pf_hub75.nudge_dy[i] = jh["nudge_dy"][i].get<int>();
+            pf_hub75.defaults_applied = jval(jh, "defaults_applied", false);
         }
         if (jpf.contains("animation") && jpf["animation"].is_object()) {
             auto& ja = jpf["animation"];
@@ -7710,6 +7787,10 @@ int main(int argc, char* argv[]) {
             protoface_preview_view         = jval(jpv, "view",     protoface_preview_view);
         }
     }
+    // Centre-offset model needs an initial seed when cfg didn't carry one
+    // (first run, or upgrading from the old "delta from base" schema
+    // where all-zero nudges would now stack panels at the centre).
+    if (!pf_hub75.defaults_applied) pf_hub75_apply_defaults(pf_hub75);
 
     // Scheduler / reminders. Networking lives in the scheduler_daemon companion;
     // ProtoHUD only reads the merged events.json + scheduler_status.json it writes.
@@ -9713,6 +9794,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["hub75"]["panel_size_per"] = json::array({
             pf_hub75.panel_size_per[0], pf_hub75.panel_size_per[1],
             pf_hub75.panel_size_per[2], pf_hub75.panel_size_per[3]});
+        cfg["protoface"]["hub75"]["defaults_applied"] = pf_hub75.defaults_applied;
         cfg["protoface"]["hub75"]["nudge_dx"]    =
             json::array({pf_hub75.nudge_dx[0], pf_hub75.nudge_dx[1],
                          pf_hub75.nudge_dx[2], pf_hub75.nudge_dx[3]});
