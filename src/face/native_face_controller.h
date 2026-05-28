@@ -104,6 +104,15 @@ public:
     void set_expression_fade(double seconds);
     void set_wiggle(const WiggleCfg& w);
 
+    // Push a "transient" image for the named expression onto every panel
+    // for duration_s seconds. The current image is stashed and restored
+    // automatically when the timer expires (or on stop()). Used by the
+    // face editor's "Preview to panels" key so the user can see their
+    // unsaved canvas on the physical LEDs for a moment.
+    void push_transient_face(const std::string& expression,
+                             const cv::Mat& rgba_canvas,
+                             double duration_s);
+
 private:
     struct Panel {
         PanelCfg                      cfg;
@@ -137,6 +146,16 @@ private:
     mutable std::mutex frame_mtx_;   // latest_
     cv::Mat            latest_;
     bool               have_frame_ = false;
+    // Transient face overlays — one record per panel a push_transient_face
+    // call has touched. tick_render_locked() restores them as their deadlines
+    // pass. stop() restores any still-active records before tearing down.
+    struct TransientFace {
+        int         panel_idx = -1;
+        std::string expression;
+        cv::Mat     original_image;     // RGBA, sized to (panel.w, panel.h)
+        std::chrono::steady_clock::time_point deadline{};
+    };
+    std::vector<TransientFace> transient_faces_;
 
     std::thread        thread_;
     std::atomic<bool>  running_{false};

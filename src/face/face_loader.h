@@ -22,6 +22,16 @@ public:
     const std::vector<std::string>& expression_names() const { return expr_order_; }
     bool valid() const { return !expressions_.empty(); }
 
+    // Transient-image plumbing for the editor's "Preview to panels" key.
+    // get_expression_image returns a deep copy (caller can stash and
+    // restore); set_expression_image swaps the named expression's image
+    // wholesale (no resize — caller is responsible for sending a Mat sized
+    // to (w, h)). Returns false if the name isn't a known expression.
+    cv::Mat get_expression_image(const std::string& name) const;
+    bool    set_expression_image(const std::string& name, const cv::Mat& rgba);
+    int     panel_width()  const { return w_; }
+    int     panel_height() const { return h_; }
+
 private:
     struct Region { int x = 0, y = 0, w = 0, h = 0; bool set = false; };
 

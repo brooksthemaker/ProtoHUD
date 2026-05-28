@@ -1211,6 +1211,10 @@ static std::vector<MenuItem> build_menu(
         double* pf_blink_max_p     = nullptr,
         double* pf_blink_dur_p     = nullptr,
         double* pf_expr_fade_p     = nullptr,
+        // Editor "V (Preview to panels)" hold time. No live-push callback —
+        // the value is read each time the editor opens, so changes take
+        // effect on the next Edit… launch.
+        double* pf_preview_duration_p = nullptr,
         std::function<void()> pf_anim_push = nullptr,
         // Pushes an arbitrary particle-system spec (a {"layers":[...]} dict
         // or single-effect spec) directly to the native renderer, bypassing
@@ -4555,6 +4559,19 @@ static std::vector<MenuItem> build_menu(
                         if (pf_anim_push) pf_anim_push();
                     }));
             }
+            if (pf_preview_duration_p) {
+                anim_items.push_back(with_desc(
+                    slider("Editor Preview Hold", 5.0f, 60.0f, 1.0f, "s",
+                        [pf_preview_duration_p]{
+                            return static_cast<float>(*pf_preview_duration_p);
+                        },
+                        [pf_preview_duration_p](float v){
+                            *pf_preview_duration_p = v;
+                        }),
+                    "How long the V (Preview to panels) key in the face "
+                    "editor shows the in-progress canvas on the physical "
+                    "panels before auto-restoring the saved face."));
+            }
             if (anim_items.empty()) {
                 MenuItem empty;
                 empty.visible_fn = []{ return false; };
@@ -7739,6 +7756,9 @@ int main(int argc, char* argv[]) {
     double pf_blink_max       = 7.0;
     double pf_blink_duration  = 0.15;
     double pf_expr_fade       = 0.3;
+    // V (Preview) hold time in the face editor — pushes the in-progress canvas
+    // onto the physical panels for this many seconds, then auto-restores.
+    double pf_preview_duration_s = 10.0;
     if (cfg.contains("protoface")) {
         auto& jpf = cfg["protoface"];
         pf_autostart     = jval(jpf, "autostart", true);
@@ -7776,6 +7796,8 @@ int main(int argc, char* argv[]) {
             pf_blink_max      = jval(ja, "blink_max",      pf_blink_max);
             pf_blink_duration = jval(ja, "blink_duration", pf_blink_duration);
             pf_expr_fade      = jval(ja, "expression_fade", pf_expr_fade);
+            pf_preview_duration_s =
+                jval(ja, "preview_duration_s", pf_preview_duration_s);
         }
         if (jpf.contains("preview")) {
             auto& jpv = jpf["preview"];
@@ -9000,7 +9022,21 @@ int main(int argc, char* argv[]) {
                 // expression in the loader's set (mouth-shape PNGs).
                 if (native_ctrl) native_ctrl->reload_active_face();
                 face_proxy.set_face_by_name(expression);
-            });
+            },
+            /* on_cancel */ {},
+            /* on_preview */ [&native_ctrl, expression, &face_proxy]
+                (const cv::Mat& rgba_canvas, double duration_s) {
+                if (!native_ctrl) return;
+                // Pop the expression so the user is looking at it, then push
+                // the in-progress canvas as a transient. The renderer thread
+                // will composite material + effects on top.
+                face_proxy.set_face_by_name(expression);
+                native_ctrl->push_transient_face(expression, rgba_canvas, duration_s);
+            },
+            /* live_frame */ [&native_ctrl](cv::Mat& out) -> bool {
+                return native_ctrl && native_ctrl->latest_frame(out);
+            },
+            /* preview_duration_s */ pf_preview_duration_s);
     };
 
     // Now that face_proxy exists, hook the audio engine's per-period
@@ -9101,6 +9137,7 @@ int main(int argc, char* argv[]) {
                                &pf_hub75,
                                &pf_blink_enabled, &pf_blink_min, &pf_blink_max,
                                &pf_blink_duration, &pf_expr_fade,
+                               &pf_preview_duration_s,
                                /* pf_anim_push */ [&]{
                                    if (!native_ctrl) return;
                                    native_ctrl->set_blink_enabled(pf_blink_enabled);
@@ -9806,6 +9843,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["animation"]["blink_max"]       = pf_blink_max;
         cfg["protoface"]["animation"]["blink_duration"]  = pf_blink_duration;
         cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
+        cfg["protoface"]["animation"]["preview_duration_s"] = pf_preview_duration_s;
         cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
         cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
         cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;

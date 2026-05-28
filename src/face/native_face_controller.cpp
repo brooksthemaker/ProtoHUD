@@ -115,6 +115,19 @@ bool NativeFaceController::start() {
 void NativeFaceController::stop() {
     if (!running_.exchange(false)) return;
     if (thread_.joinable()) thread_.join();
+    // Restore any still-active transient face overlays so the saved
+    // PNG image survives the next start() (loaders cache in-memory).
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        for (const auto& t : transient_faces_) {
+            if (t.panel_idx < 0 || t.panel_idx >= static_cast<int>(panels_.size()))
+                continue;
+            auto& pn = panels_[t.panel_idx];
+            if (pn.loader)
+                pn.loader->set_expression_image(t.expression, t.original_image);
+        }
+        transient_faces_.clear();
+    }
     if (output_) output_->close();   // blank the panels on shutdown
 }
 
@@ -134,6 +147,28 @@ void NativeFaceController::render_thread() {
                                   cfg_.background[2]));
         {
             std::lock_guard<std::mutex> lk(state_mtx_);
+
+            // Expire any transient face overlays whose deadline has passed —
+            // restore the original expression image to the loader and drop
+            // the record. Done before render so this tick uses the restored
+            // image.
+            if (!transient_faces_.empty()) {
+                auto tnow = clock::now();
+                for (auto it = transient_faces_.begin(); it != transient_faces_.end();) {
+                    if (tnow >= it->deadline) {
+                        if (it->panel_idx >= 0 &&
+                            it->panel_idx < static_cast<int>(panels_.size())) {
+                            auto& pn = panels_[it->panel_idx];
+                            if (pn.loader)
+                                pn.loader->set_expression_image(it->expression,
+                                                                it->original_image);
+                        }
+                        it = transient_faces_.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
 
             // Render each self-rendering panel into its region.
             for (auto& pn : panels_) {
@@ -597,6 +632,61 @@ void NativeFaceController::reload_active_face() {
         if (pn.is_mirror || !pn.state) continue;
         pn.loader = std::make_unique<FaceLoader>(
             cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+    }
+}
+
+void NativeFaceController::push_transient_face(const std::string& expression,
+                                                const cv::Mat& rgba_canvas,
+                                                double duration_s) {
+    if (rgba_canvas.empty() || duration_s <= 0.0) return;
+    std::lock_guard<std::mutex> lk(state_mtx_);
+
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(duration_s));
+    const cv::Rect canvas_bounds(0, 0, rgba_canvas.cols, rgba_canvas.rows);
+
+    for (size_t i = 0; i < panels_.size(); ++i) {
+        auto& pn = panels_[i];
+        if (pn.is_mirror || !pn.loader) continue;
+
+        const PanelCfg& pc = pn.cfg;
+        cv::Rect roi = cv::Rect(pc.x, pc.y, pc.w, pc.h) & canvas_bounds;
+        if (roi.area() <= 0) continue;
+
+        cv::Mat crop = rgba_canvas(roi).clone();
+        if (crop.cols != pn.loader->panel_width() ||
+            crop.rows != pn.loader->panel_height()) {
+            cv::Mat resized;
+            cv::resize(crop, resized,
+                       cv::Size(pn.loader->panel_width(), pn.loader->panel_height()),
+                       0, 0, cv::INTER_NEAREST);
+            crop = resized;
+        }
+
+        // Stash the current image so the deadline pass can restore it.
+        // If we already pushed a transient for this panel+expression, keep
+        // the *earlier* original (avoids stacking previews from overwriting
+        // the user's saved image with another preview).
+        bool already = false;
+        for (auto& t : transient_faces_) {
+            if (t.panel_idx == static_cast<int>(i) && t.expression == expression) {
+                t.deadline = deadline;
+                already = true;
+                break;
+            }
+        }
+        if (!already) {
+            TransientFace t;
+            t.panel_idx      = static_cast<int>(i);
+            t.expression     = expression;
+            t.original_image = pn.loader->get_expression_image(expression);
+            t.deadline       = deadline;
+            transient_faces_.push_back(std::move(t));
+        }
+
+        pn.loader->set_expression_image(expression, crop);
     }
 }
 

@@ -34,6 +34,15 @@ public:
     using CommitFn = std::function<void(const cv::Mat& rgba_canvas,
                                         const std::string& abs_path)>;
     using CancelFn = std::function<void()>;
+    // Push the current canvas onto the physical panels as a transient face
+    // for `duration_s` seconds — main.cpp wires this to
+    // NativeFaceController::push_transient_face on the active expression.
+    using PreviewFn = std::function<void(const cv::Mat& rgba_canvas,
+                                          double duration_s)>;
+    // Pull the latest rendered (face + material + effects) canvas from the
+    // controller for the in-editor "Show Live" overlay. Returns false until
+    // the first frame exists.
+    using LiveFrameFn = std::function<bool(cv::Mat& out)>;
 
     // Open the editor for the PNG at abs_path. canvas_w/h are the full
     // renderer canvas dimensions. covered_regions describes the addressable
@@ -48,7 +57,10 @@ public:
               Mode mode,
               std::vector<uint32_t> palette,    // 0xRRGGBB
               CommitFn on_commit,
-              CancelFn on_cancel = {});
+              CancelFn on_cancel = {},
+              PreviewFn on_preview = {},
+              LiveFrameFn live_frame = {},
+              double preview_duration_s = 10.0);
     void close();
     bool is_open() const { return open_; }
 
@@ -66,6 +78,14 @@ public:
     void set_brush_size(int radius);     // 0 = 1px, 1 = 3x3, 2 = 5x5
     int  brush_size()   const { return brush_size_; }
     void undo();
+    // V key — push the current canvas onto the physical panels via on_preview
+    // for the configured duration. No-op if no preview callback was supplied.
+    void preview();
+    // T key — toggle live-effects overlay (renders the controller's latest
+    // composited frame in the editor pane instead of just the painted PNG).
+    // No-op if no live_frame callback was supplied at open().
+    void toggle_live();
+    bool live_mode() const { return live_mode_; }
 
     // Full-screen overlay drawn in place of the deep menu while open.
     void draw(ImDrawList* dl, ImFont* font, float fs,
@@ -131,6 +151,10 @@ private:
 
     CommitFn               on_commit_;
     CancelFn               on_cancel_;
+    PreviewFn              on_preview_;
+    LiveFrameFn            live_frame_;
+    double                 preview_duration_s_ = 10.0;
+    bool                   live_mode_ = false;
 };
 
 } // namespace menu
