@@ -3621,11 +3621,25 @@ static std::vector<MenuItem> build_menu(
             if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
         }));
 
-    // Save / Load — three numbered slots, persisted to
-    // cfg["protoface"]["custom_effects"]["slot_N"]. cfg_root is the live
-    // cfg pointer plumbed in from main(); the slot is written to the
-    // in-memory object and the existing mutate_cfg path persists it to
-    // disk on shutdown. A Load picks up whatever's there next launch.
+    // Save / Load — three numbered quick-save slots PLUS user-named
+    // presets entered via the on-screen keyboard. Everything lands in
+    // cfg["protoface"]["custom_effects"][key]; the existing mutate_cfg
+    // path persists to disk on shutdown.
+
+    // "Save As..." opens the OSK to name the preset; commit writes
+    // the live builder spec under cfg["protoface"]["custom_effects"][name].
+    layered_items.push_back(leaf("Save As...",
+        [cfg_root, menu_sys_pp, build_layered_spec]{
+            if (!menu_sys_pp || !*menu_sys_pp || !cfg_root) return;
+            (*menu_sys_pp)->open_keyboard(
+                "Preset Name", std::string(),
+                [cfg_root, build_layered_spec](const std::string& name){
+                    if (!cfg_root || name.empty()) return;
+                    (*cfg_root)["protoface"]["custom_effects"][name] =
+                        build_layered_spec();
+                });
+        }));
+
     std::vector<MenuItem> save_items, load_items;
     for (int s = 1; s <= 3; ++s) {
         char nm[16]; std::snprintf(nm, sizeof(nm), "Slot %d", s);
@@ -3634,27 +3648,63 @@ static std::vector<MenuItem> build_menu(
             char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
             (*cfg_root)["protoface"]["custom_effects"][key] = build_layered_spec();
         }));
-        MenuItem load = leaf(nm, [cfg_root, s, load_layered_spec]{
-            if (!cfg_root) return;
-            char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
-            if (cfg_root->contains("protoface")
-                && (*cfg_root)["protoface"].contains("custom_effects")
-                && (*cfg_root)["protoface"]["custom_effects"].contains(key)) {
-                load_layered_spec((*cfg_root)["protoface"]["custom_effects"][key]);
-            }
-        });
-        // Show a checkmark when the slot is populated.
-        load.get_state = [cfg_root, s]{
-            if (!cfg_root) return false;
-            char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
-            return cfg_root->contains("protoface")
-                && (*cfg_root)["protoface"].contains("custom_effects")
-                && (*cfg_root)["protoface"]["custom_effects"].contains(key);
-        };
-        load_items.push_back(std::move(load));
     }
     layered_items.push_back(submenu("Save to Slot", std::move(save_items)));
-    layered_items.push_back(submenu("Load from Slot", std::move(load_items)));
+
+    // Load — walks every key under cfg["protoface"]["custom_effects"]
+    // (sorted alphabetically) and exposes up to kMaxLoadEntries dynamic
+    // rows. Each row's label tracks its slot's name via label_fn so a
+    // freshly Saved-As preset shows up immediately on next draw, and a
+    // visible_fn hides empty slots so the user only sees real entries.
+    constexpr int kMaxLoadEntries = 16;
+    auto preset_name_at = [cfg_root](int idx) -> std::string {
+        if (!cfg_root || !cfg_root->contains("protoface")) return {};
+        const auto& jpf = (*cfg_root)["protoface"];
+        if (!jpf.contains("custom_effects") || !jpf["custom_effects"].is_object())
+            return {};
+        std::vector<std::string> keys;
+        for (auto& [k, _] : jpf["custom_effects"].items()) keys.push_back(k);
+        std::sort(keys.begin(), keys.end());
+        return (idx >= 0 && idx < static_cast<int>(keys.size()))
+                ? keys[static_cast<size_t>(idx)] : std::string{};
+    };
+    for (int i = 0; i < kMaxLoadEntries; ++i) {
+        MenuItem row;
+        row.type = MenuItemType::LEAF;
+        row.label = "preset";   // overridden by label_fn each draw
+        row.label_fn   = [preset_name_at, i]{ return preset_name_at(i); };
+        row.visible_fn = [preset_name_at, i]{ return !preset_name_at(i).empty(); };
+        row.action = [cfg_root, preset_name_at, i, load_layered_spec]{
+            const std::string nm = preset_name_at(i);
+            if (!cfg_root || nm.empty()) return;
+            const auto& ce = (*cfg_root)["protoface"]["custom_effects"];
+            if (ce.contains(nm)) load_layered_spec(ce[nm]);
+        };
+        load_items.push_back(std::move(row));
+    }
+    layered_items.push_back(submenu("Load Preset", std::move(load_items)));
+
+    // Delete — same dynamic listing as Load. Removing a preset key drops
+    // it from cfg; the next mutate_cfg writeback won't carry it.
+    std::vector<MenuItem> delete_items;
+    for (int i = 0; i < kMaxLoadEntries; ++i) {
+        MenuItem row;
+        row.type = MenuItemType::LEAF;
+        row.label = "preset";
+        row.label_fn   = [preset_name_at, i]{ return preset_name_at(i); };
+        row.visible_fn = [preset_name_at, i]{ return !preset_name_at(i).empty(); };
+        row.action = [cfg_root, preset_name_at, i]{
+            const std::string nm = preset_name_at(i);
+            if (!cfg_root || nm.empty()) return;
+            auto& ce = (*cfg_root)["protoface"]["custom_effects"];
+            ce.erase(nm);
+        };
+        delete_items.push_back(std::move(row));
+    }
+    layered_items.push_back(with_desc(
+        submenu("Delete Preset", std::move(delete_items)),
+        "Remove a saved preset permanently. The slot disappears from cfg "
+        "on next save."));
 
     // Export the live composition to /tmp/protohud_layered_effect.json so
     // the user can copy it elsewhere or paste it into another cfg.
@@ -3673,10 +3723,15 @@ static std::vector<MenuItem> build_menu(
         submenu("Layered Builder", std::move(layered_items)),
         "Compose up to five particle layers and apply the stack live. Each "
         "layer is independent: pick an effect, tweak count / colour / speed / "
-        "blend, reorder with Move Up / Move Down, clear to disable. Apply "
-        "Now pushes the composition to the renderer; Save to Slot persists it "
-        "to cfg[\"protoface\"][\"custom_effects\"][\"slot_N\"]; Export to File "
-        "writes /tmp/protohud_layered_effect.json.");
+        "blend, reorder with Move Up / Move Down, clear to disable.\n"
+        "  • Apply Now pushes the composition to the renderer.\n"
+        "  • Save As... names the current build and stores it.\n"
+        "  • Save to Slot writes one of three numbered quick-save slots.\n"
+        "  • Load Preset lists every named or slot save (alphabetical).\n"
+        "  • Delete Preset removes a saved entry.\n"
+        "  • Export to File dumps the live spec to "
+        "/tmp/protohud_layered_effect.json.\n"
+        "All presets persist under cfg[\"protoface\"][\"custom_effects\"].");
 
     std::vector<MenuItem> pf_effects;
     pf_effects.push_back(std::move(pf_layered_item));
