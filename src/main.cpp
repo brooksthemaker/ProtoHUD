@@ -6125,29 +6125,47 @@ static std::vector<MenuItem> build_menu(
                 reader_attempted = true;
             }
 
-            // Header: title + power-rail current estimate.
-            dl->AddText(font, fs * 1.1f, {o.x, o.y},
-                        IM_COL32(230, 235, 240, 255), "GPIO Header (Pi 5 / CM5)");
+            // Layout: a dedicated text column on the left (title, rail
+            // estimate, hovered-pin details — whatever used to live in the
+            // floating tooltip) and the 2x20 grid pushed to the right so
+            // the two never overlap. Text column width is a fraction of the
+            // pane that scales sensibly between docked + expanded views.
+            const float label_fs   = std::max(9.f, fs * 0.72f);
+            const float info_w_min = 180.f;
+            const float info_w     = std::clamp(sz.x * 0.34f, info_w_min,
+                                                 sz.x * 0.55f);
+            const float info_x     = o.x;
+            const float grid_pane_x = o.x + info_w + 8.f;
+            const float grid_pane_w = std::max(120.f, sz.x - info_w - 8.f);
+
+            // Left text column: title + rail-current estimate (top), then a
+            // "Pin info" block that follows the hovered pin.
+            dl->AddText(font, fs * 1.05f, {info_x, o.y},
+                        IM_COL32(230, 235, 240, 255), "GPIO Header");
+            dl->AddText(font, fs * 0.7f, {info_x, o.y + fs * 1.05f},
+                        IM_COL32(170, 175, 185, 220), "Pi 5 / CM5 — 40-pin");
             char rail_buf[96];
             std::snprintf(rail_buf, sizeof(rail_buf),
-                          "Est. draw: 3.3V ~%d mA   5V ~%d mA",
-                          ma3, ma5);
+                          "3.3V ~%d mA   5V ~%d mA", ma3, ma5);
             const ImU32 rail_col = (ma5 > 2500 || ma3 > 500)
                 ? IM_COL32(230, 160,  80, 220) : IM_COL32(170, 180, 190, 220);
-            dl->AddText(font, fs * 0.85f, {o.x, o.y + fs * 1.05f},
+            dl->AddText(font, fs * 0.75f, {info_x, o.y + fs * 1.85f},
+                        IM_COL32(150, 160, 170, 200), "Est. rail draw:");
+            dl->AddText(font, fs * 0.85f, {info_x, o.y + fs * 2.65f},
                         rail_col, rail_buf);
 
-            const float top    = o.y + fs * 2.2f;
+            const float info_block_top = o.y + fs * 4.0f;
+
+            const float top    = o.y + fs * 0.2f;   // grid can start higher than the text block
             const float avail_h = std::max(80.f, sz.y - (top - o.y) - 4.f);
             const float row_h   = std::max(14.f, std::min(28.f, avail_h / 21.f));
             const float pin_sz  = row_h * 0.78f;
             const int   label_cols = 3 + (gpvz_draw->show_user_notes ? 1 : 0);
-            const float label_w = std::max(48.f,
-                (sz.x - pin_sz * 2.f - 14.f) / static_cast<float>(label_cols * 2));
-            const float label_fs = std::max(9.f, fs * 0.72f);
+            const float label_w = std::max(40.f,
+                (grid_pane_w - pin_sz * 2.f - 14.f) / static_cast<float>(label_cols * 2));
 
-            const float center_x   = o.x + sz.x * 0.5f;
-            const float pin_left_x = center_x - pin_sz - 3.f;
+            const float center_x    = grid_pane_x + grid_pane_w * 0.5f;
+            const float pin_left_x  = center_x - pin_sz - 3.f;
             const float pin_right_x = center_x + 3.f;
 
             const ImU32 outline_active   = IM_COL32(120, 230, 110, 255);
@@ -6279,20 +6297,41 @@ static std::vector<MenuItem> build_menu(
                 }
             }
 
-            // Hover tooltip — claimants, optional I²C address list, optional
-            // SPI bus speed, optional user note. Built per-frame so any cfg
-            // edit shows up immediately.
-            if (hovered_bcm >= 0 || !hovered_primary.empty()) {
+            // Pin info — used to be a floating tooltip near the cursor;
+            // now lives in the left text column so it never overlaps the
+            // grid and shows even without active hover. Default copy
+            // points the user at the grid.
+            const bool   have_hover = hovered_bcm >= 0 || !hovered_primary.empty();
+            const ImU32  hint_col   = IM_COL32(150, 160, 170, 200);
+            const ImU32  body_col   = IM_COL32(220, 225, 230, 230);
+            const float  info_lh    = label_fs + 2.f;
+            float        info_y     = info_block_top;
+            // Section header — coloured by conflict state when applicable.
+            auto cit = claims.claimants.find(hovered_bcm);
+            const bool conflict = (cit != claims.claimants.end()
+                                   && cit->second.size() > 1);
+            const ImU32 head_col = conflict ? outline_conflict
+                                            : IM_COL32(190, 220, 250, 230);
+            dl->AddText(font, fs * 0.8f, {info_x, info_y},
+                        head_col, have_hover ? "Pin Info" : "Hover");
+            info_y += fs * 1.0f;
+            if (!have_hover) {
+                dl->AddText(font, label_fs, {info_x, info_y},
+                            hint_col, "Hover a pin to see its");
+                info_y += info_lh;
+                dl->AddText(font, label_fs, {info_x, info_y},
+                            hint_col, "claimants, bus speed,");
+                info_y += info_lh;
+                dl->AddText(font, label_fs, {info_x, info_y},
+                            hint_col, "I\xc2\xb2""C peripherals, etc.");
+            } else {
                 std::vector<std::string> lines;
-                lines.push_back(hovered_primary.empty() ? "(unknown)" : hovered_primary);
-                auto cit = claims.claimants.find(hovered_bcm);
+                lines.push_back(hovered_primary.empty() ? std::string("(unknown)")
+                                                       : hovered_primary);
                 if (cit != claims.claimants.end()) {
-                    if (cit->second.size() > 1)
-                        lines.push_back("CONFLICT — multiple claimants:");
-                    else
-                        lines.push_back("Used by:");
-                    for (const auto& w : cit->second)
-                        lines.push_back("  " + w);
+                    lines.push_back(conflict ? "CONFLICT — claimants:"
+                                             : "Used by:");
+                    for (const auto& w : cit->second) lines.push_back("  " + w);
                 } else if (hovered_bcm >= 0) {
                     lines.push_back("(idle)");
                 }
@@ -6305,16 +6344,13 @@ static std::vector<MenuItem> build_menu(
                 }
                 if (hovered_kind == sys::PinKind::I2c) {
                     lines.push_back("");
-                    lines.push_back("I\xc2\xb2""C bus /dev/i2c-1");
-                    if (i2c.empty()) {
-                        lines.push_back("  (no peripherals enabled)");
-                    } else {
-                        for (const auto& [addr, name] : i2c) {
-                            char buf[80];
-                            std::snprintf(buf, sizeof(buf), "  0x%02X  %s",
-                                          addr, name.c_str());
-                            lines.push_back(buf);
-                        }
+                    lines.push_back("I\xc2\xb2""C /dev/i2c-1");
+                    if (i2c.empty()) lines.push_back("  (none enabled)");
+                    else for (const auto& [addr, name] : i2c) {
+                        char buf[80];
+                        std::snprintf(buf, sizeof(buf), "  0x%02X  %s",
+                                      addr, name.c_str());
+                        lines.push_back(buf);
                     }
                 }
                 auto nit = notes.find(hovered_bcm);
@@ -6322,34 +6358,18 @@ static std::vector<MenuItem> build_menu(
                     lines.push_back("");
                     lines.push_back("Note: " + nit->second);
                 }
-                // Box measure + draw.
-                float w = 0, h = 0;
+                // Render top-down, stop if we'd overrun the pane.
+                const float info_max_y = o.y + sz.y - info_lh;
                 for (const auto& l : lines) {
-                    const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, l.c_str());
-                    w = std::max(w, ts.x);
-                    h += label_fs + 2.f;
-                }
-                const float pad = 6.f;
-                ImVec2 tp = {hover_pos.x + 8.f, hover_pos.y + 4.f};
-                tp.x = std::min(tp.x, o.x + sz.x - w - pad * 2.f - 2.f);
-                tp.y = std::min(tp.y, o.y + sz.y - h - pad * 2.f - 2.f);
-                const bool conflict_box =
-                    cit != claims.claimants.end() && cit->second.size() > 1;
-                dl->AddRectFilled({tp.x, tp.y},
-                                  {tp.x + w + pad * 2.f, tp.y + h + pad * 2.f},
-                                  IM_COL32(14, 18, 24, 235), 3.f);
-                dl->AddRect({tp.x, tp.y},
-                            {tp.x + w + pad * 2.f, tp.y + h + pad * 2.f},
-                            conflict_box ? outline_conflict
-                                         : IM_COL32(120, 230, 110, 220),
-                            3.f, 0, 1.f);
-                float tly = tp.y + pad;
-                for (const auto& l : lines) {
-                    dl->AddText(font, label_fs, {tp.x + pad, tly},
-                                IM_COL32(220, 230, 240, 240), l.c_str());
-                    tly += label_fs + 2.f;
+                    if (info_y > info_max_y) break;
+                    dl->AddText(font, label_fs, {info_x, info_y},
+                                body_col, l.c_str());
+                    info_y += info_lh;
                 }
             }
+            // Suppress the now-unused float-tooltip anchor (kept hover_pos
+            // around in case we ever bring back an alt tooltip).
+            (void)hover_pos;
         };
     };
 
