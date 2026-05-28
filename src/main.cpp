@@ -268,11 +268,15 @@ static PfSideChains pf_auto_side_chains(
 // actual helper definitions live further down (next to the MAX7219
 // layout helpers); forward-declare what's needed here.
 struct PfHub75Layout {
-    std::string panel_size  = "64x32";      // 32x16 / 64x32 / 64x64 / 96x48 / 128x32 / 128x64
-    std::string arrangement = "horizontal"; // horizontal / vertical / grid2x2
-    int         panel_count = 1;            // 1..4
-    int         nudge_dx[4] = {0, 0, 0, 0};
-    int         nudge_dy[4] = {0, 0, 0, 0};
+    // Default size applied to every panel slot. Per-slot overrides in
+    // panel_size_per (empty string = "use default") let a build mix
+    // sizes — e.g. two 64x32 eye panels plus a 64x64 mouth.
+    std::string panel_size      = "64x32";
+    std::string arrangement     = "horizontal"; // horizontal / vertical / grid2x2
+    int         panel_count     = 1;            // 1..4
+    std::string panel_size_per[4] = {"", "", "", ""};
+    int         nudge_dx[4]     = {0, 0, 0, 0};
+    int         nudge_dy[4]     = {0, 0, 0, 0};
 };
 static std::vector<face::ShmPusherOutput::Panel>
 pf_hub75_panels(const PfHub75Layout& L);
@@ -458,22 +462,45 @@ static void pf_hub75_panel_dims(const std::string& sz, int& w, int& h) {
 // anchors at (0, 0) + nudge[0]; subsequent panels lay out per arrangement.
 static std::vector<face::ShmPusherOutput::Panel>
 pf_hub75_panels(const PfHub75Layout& L) {
-    int pw, ph; pf_hub75_panel_dims(L.panel_size, pw, ph);
     const int n = std::clamp(L.panel_count, 1, 4);
     std::vector<face::ShmPusherOutput::Panel> out;
     out.reserve(static_cast<size_t>(n));
+    // Resolve each slot's effective size — its per-slot override if set,
+    // otherwise the global default. Lets users mix panel sizes in one
+    // build (e.g. two 64x32 + one 64x64).
+    int pw[4] = {0,0,0,0}, ph[4] = {0,0,0,0};
+    for (int i = 0; i < 4; ++i) {
+        const std::string& s = L.panel_size_per[i].empty()
+                               ? L.panel_size : L.panel_size_per[i];
+        pf_hub75_panel_dims(s, pw[i], ph[i]);
+    }
     auto push = [&](int i, int x, int y) {
         face::ShmPusherOutput::Panel p;
         p.name = "panel_" + std::to_string(i);
-        p.rect = cv::Rect(x + L.nudge_dx[i], y + L.nudge_dy[i], pw, ph);
+        p.rect = cv::Rect(x + L.nudge_dx[i], y + L.nudge_dy[i], pw[i], ph[i]);
         out.push_back(std::move(p));
     };
     if (L.arrangement == "vertical") {
-        for (int i = 0; i < n; ++i) push(i, 0, i * ph);
+        // Stack: each panel's y = sum of preceding panels' heights.
+        int y = 0;
+        for (int i = 0; i < n; ++i) { push(i, 0, y); y += ph[i]; }
     } else if (L.arrangement == "grid2x2") {
-        for (int i = 0; i < n; ++i) push(i, (i % 2) * pw, (i / 2) * ph);
+        // 2x2 row-major: row 0 holds slots 0-1, row 1 holds slots 2-3.
+        // Each panel's column x is the width of its left sibling; row 1 y
+        // is the taller of the row 0 panels so mixed rows don't overlap.
+        const int row0_h = std::max(ph[0], n >= 2 ? ph[1] : 0);
+        for (int i = 0; i < n; ++i) {
+            const int col = i % 2;
+            const int row = i / 2;
+            int x = 0, y = 0;
+            if (col == 1) x = pw[i - 1];
+            if (row == 1) y = row0_h;
+            push(i, x, y);
+        }
     } else { // horizontal default
-        for (int i = 0; i < n; ++i) push(i, i * pw, 0);
+        // Chain: each panel's x = sum of preceding panels' widths.
+        int x = 0;
+        for (int i = 0; i < n; ++i) { push(i, x, 0); x += pw[i]; }
     }
     return out;
 }
@@ -4166,21 +4193,47 @@ static std::vector<MenuItem> build_menu(
             hub_pick_str("2x2 Grid",         &H->arrangement, "grid2x2"),
         };
 
-        // Per-panel nudge submenus (X / Y, ±32 px integer). Visible only when
-        // the panel index is within the active count.
+        // Per-panel submenus carrying that slot's Size override + Nudge.
+        // "Use Default" tracks the global Panel Size picker; the six other
+        // entries pin this slot to that physical size regardless of the
+        // global. Visible only when the panel index is within the active
+        // count.
+        auto size_pick = [&leaf_sel, H](const char* lbl, int i, const char* v) {
+            return leaf_sel(lbl,
+                [H, i, v]{ H->panel_size_per[i] = v; },
+                [H, i, v]{ return H->panel_size_per[i] == v; });
+        };
         std::vector<MenuItem> nudge_items;
         for (int i = 0; i < 4; ++i) {
+            std::vector<MenuItem> size_items = {
+                size_pick("Use Default", i, ""),
+                size_pick("32x16",       i, "32x16"),
+                size_pick("64x32",       i, "64x32"),
+                size_pick("64x64",       i, "64x64"),
+                size_pick("96x48",       i, "96x48"),
+                size_pick("128x32",      i, "128x32"),
+                size_pick("128x64",      i, "128x64"),
+            };
             std::vector<MenuItem> axis_items = {
+                submenu("Size", std::move(size_items)),
                 slider("Nudge X", -32.f, 32.f, 1.f, " px",
                     [H, i]{ return static_cast<float>(H->nudge_dx[i]); },
                     [H, i](float v){ H->nudge_dx[i] = static_cast<int>(v); }),
                 slider("Nudge Y", -32.f, 32.f, 1.f, " px",
                     [H, i]{ return static_cast<float>(H->nudge_dy[i]); },
                     [H, i](float v){ H->nudge_dy[i] = static_cast<int>(v); }),
-                leaf("Reset", [H, i]{ H->nudge_dx[i] = 0; H->nudge_dy[i] = 0; }),
+                leaf("Reset Nudge",
+                     [H, i]{ H->nudge_dx[i] = 0; H->nudge_dy[i] = 0; }),
             };
-            char nm[24]; std::snprintf(nm, sizeof(nm), "Panel %d Nudge", i + 1);
+            char nm[32]; std::snprintf(nm, sizeof(nm), "Panel %d", i + 1);
             MenuItem m = submenu(nm, std::move(axis_items));
+            // Dynamic label so the parent shows each slot's effective size.
+            m.label_fn = [H, i]{
+                const std::string& s = H->panel_size_per[i].empty()
+                                       ? H->panel_size : H->panel_size_per[i];
+                return std::string("Panel ") + std::to_string(i + 1)
+                       + " (" + s + ")";
+            };
             m.visible_fn = [H, i]{ return i < H->panel_count; };
             nudge_items.push_back(std::move(m));
         }
@@ -4236,7 +4289,10 @@ static std::vector<MenuItem> build_menu(
         };
 
         std::vector<MenuItem> hub_items = {
-            submenu("Panel Size",  std::move(size_items)),
+            with_desc(submenu("Default Panel Size", std::move(size_items)),
+                      "Size applied to every panel slot whose Panel N > Size "
+                      "is set to \"Use Default\". Per-slot overrides let a "
+                      "build mix sizes."),
             submenu("Panel Count", std::move(count_items)),
             submenu("Arrangement", std::move(arr_items)),
         };
@@ -7588,6 +7644,11 @@ int main(int argc, char* argv[]) {
             pf_hub75.panel_size  = jh.value("panel_size",  pf_hub75.panel_size);
             pf_hub75.arrangement = jh.value("arrangement", pf_hub75.arrangement);
             pf_hub75.panel_count = jval(jh, "panel_count", pf_hub75.panel_count);
+            if (jh.contains("panel_size_per") && jh["panel_size_per"].is_array())
+                for (size_t i = 0; i < jh["panel_size_per"].size() && i < 4; ++i)
+                    if (jh["panel_size_per"][i].is_string())
+                        pf_hub75.panel_size_per[i] =
+                            jh["panel_size_per"][i].get<std::string>();
             if (jh.contains("nudge_dx") && jh["nudge_dx"].is_array())
                 for (size_t i = 0; i < jh["nudge_dx"].size() && i < 4; ++i)
                     pf_hub75.nudge_dx[i] = jh["nudge_dx"][i].get<int>();
@@ -9597,9 +9658,12 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
         cfg["protoface"]["layout"]["nose"]      = pf_nose_layout;
-        cfg["protoface"]["hub75"]["panel_size"]  = pf_hub75.panel_size;
-        cfg["protoface"]["hub75"]["arrangement"] = pf_hub75.arrangement;
-        cfg["protoface"]["hub75"]["panel_count"] = pf_hub75.panel_count;
+        cfg["protoface"]["hub75"]["panel_size"]     = pf_hub75.panel_size;
+        cfg["protoface"]["hub75"]["arrangement"]    = pf_hub75.arrangement;
+        cfg["protoface"]["hub75"]["panel_count"]    = pf_hub75.panel_count;
+        cfg["protoface"]["hub75"]["panel_size_per"] = json::array({
+            pf_hub75.panel_size_per[0], pf_hub75.panel_size_per[1],
+            pf_hub75.panel_size_per[2], pf_hub75.panel_size_per[3]});
         cfg["protoface"]["hub75"]["nudge_dx"]    =
             json::array({pf_hub75.nudge_dx[0], pf_hub75.nudge_dx[1],
                          pf_hub75.nudge_dx[2], pf_hub75.nudge_dx[3]});
