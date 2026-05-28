@@ -263,6 +263,21 @@ static PfSideChains pf_auto_side_chains(
         const std::string& nose_layout,
         int canvas_h);
 
+// HUB75 panel layout state lives near the top of the file so the early
+// pf_build_panel_output / pf_build_render_config can see the type. The
+// actual helper definitions live further down (next to the MAX7219
+// layout helpers); forward-declare what's needed here.
+struct PfHub75Layout {
+    std::string panel_size  = "64x32";      // 32x16 / 64x32 / 64x64 / 96x48 / 128x32 / 128x64
+    std::string arrangement = "horizontal"; // horizontal / vertical / grid2x2
+    int         panel_count = 1;            // 1..4
+    int         nudge_dx[4] = {0, 0, 0, 0};
+    int         nudge_dy[4] = {0, 0, 0, 0};
+};
+static std::vector<face::ShmPusherOutput::Panel>
+pf_hub75_panels(const PfHub75Layout& L);
+static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch);
+
 // hot-swap action use the exact same construction logic.
 static std::unique_ptr<face::PanelOutput>
 pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
@@ -425,17 +440,9 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
 }
 
 // ── HUB75 panel layout (presets + per-panel nudge) ───────────────────────────
-// User-facing config for the HUB75 face editor: pick a panel size from the
-// presets, how many panels, how they're arranged, then nudge each one ±32 px
-// to compensate for tiny mounting offsets between physical panels. All four
-// nudge slots exist regardless of count; values above count are ignored.
-struct PfHub75Layout {
-    std::string panel_size  = "64x32";      // 32x16 / 64x32 / 64x64 / 96x48 / 128x32 / 128x64
-    std::string arrangement = "horizontal"; // horizontal / vertical / grid2x2
-    int         panel_count = 1;            // 1..4
-    int         nudge_dx[4] = {0, 0, 0, 0};
-    int         nudge_dy[4] = {0, 0, 0, 0};
-};
+// PfHub75Layout is forward-declared above so pf_build_panel_output /
+// pf_build_render_config can see it; the helpers below are the actual
+// implementations.
 
 static void pf_hub75_panel_dims(const std::string& sz, int& w, int& h) {
     if      (sz == "32x16")  { w = 32;  h = 16; }
