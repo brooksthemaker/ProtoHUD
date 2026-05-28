@@ -429,12 +429,41 @@ public:
 
     void update(double dt) override {
         double churn = jnum(cfg_, "churn", 0.4);
+        // When the user has set direction_deg, particles travel along the
+        // (dx, dy) unit vector. Otherwise the historical behaviour is a
+        // random horizontal drift per clump (sign baked into vx by spawn()),
+        // and we leave that intact.
+        const bool has_dir = cfg_.contains("direction_deg");
+        double dx = 0, dy = 0;
+        if (has_dir) direction_unit(dx, dy, 0.0);   // 0° = right (default)
         for (auto& c : clumps_) {
-            c.x += c.vx * dt;
+            if (has_dir) {
+                const double spd = std::abs(c.vx);
+                c.x += spd * dx * dt;
+                c.y += spd * dy * dt;
+            } else {
+                c.x += c.vx * dt;
+            }
             c.phase += dt * churn;
-            double margin = c.size * 2 + 2;
-            if (c.vx >= 0 && c.x - margin > w_) { c.x = -margin; c.y = frand(rng_, 0, h_ - 1); reseed(c); }
-            else if (c.vx < 0 && c.x + margin < 0) { c.x = w_ + margin; c.y = frand(rng_, 0, h_ - 1); reseed(c); }
+            const double margin = c.size * 2 + 2;
+            const bool off_x = c.x - margin > w_ || c.x + margin < 0;
+            const bool off_y = c.y - margin > h_ || c.y + margin < 0;
+            if (off_x || off_y) {
+                if (has_dir) {
+                    // Respawn opposite the direction of travel so the clump
+                    // re-enters the canvas. For axis-aligned cases this
+                    // mimics the old left/right wrap; for diagonals it picks
+                    // a corner along the trailing edges.
+                    c.x = (dx > 0) ? -margin : (dx < 0 ? w_ + margin
+                                               : frand(rng_, 0, w_ - 1));
+                    c.y = (dy > 0) ? -margin : (dy < 0 ? h_ + margin
+                                               : frand(rng_, 0, h_ - 1));
+                } else {
+                    c.x = (c.vx >= 0) ? -margin : w_ + margin;
+                    c.y = frand(rng_, 0, h_ - 1);
+                }
+                reseed(c);
+            }
         }
         while ((int)clumps_.size() < count(6)) clumps_.push_back(spawn(-1));
     }

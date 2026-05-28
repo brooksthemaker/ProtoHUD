@@ -3266,9 +3266,13 @@ static std::vector<MenuItem> build_menu(
     // forbids static-constexpr members on local classes, and we need
     // kMaxLayers to size the layer array.
     // Effects whose motion respects direction_deg — used to hide the
-    // Direction slider for stationary / radial / cloudy effects.
+    // Direction slider for stationary / radial effects (sparkle / rings /
+    // fireflies). Clouds participate too: when direction_deg is set their
+    // clumps travel along the unit vector instead of the random horizontal
+    // drift the effect uses by default.
     auto effect_is_directional = [](const std::string& e) {
-        return e == "snow" || e == "rain" || e == "embers" || e == "confetti";
+        return e == "snow" || e == "rain" || e == "embers"
+            || e == "confetti" || e == "clouds";
     };
     static LayeredEffectState pf_layered;
     LayeredEffectState* pflz = &pf_layered;   // static address — safe to capture
