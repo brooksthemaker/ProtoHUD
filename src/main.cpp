@@ -3240,7 +3240,17 @@ static std::vector<MenuItem> build_menu(
         int   r = 255, g = 255, b = 255;
         float speed_min = 5.f;
         float speed_max = 15.f;
+        // Direction of motion, degrees (0 = right, 90 = down, 180 = left,
+        // 270 = up). Honoured by snow / rain / embers / confetti. Stationary
+        // and radial effects (sparkle / rings / fireflies / clouds) ignore it
+        // and the slider is hidden in their UI. -1 = "use effect default."
+        float direction_deg = -1.f;
         std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
+    };
+    // Effects whose motion respects direction_deg — used to hide the
+    // Direction slider for stationary / radial / cloudy effects.
+    auto effect_is_directional = [](const std::string& e) {
+        return e == "snow" || e == "rain" || e == "embers" || e == "confetti";
     };
     struct LayeredEffectState {
         static constexpr int kMaxLayers = 5;
@@ -3263,6 +3273,11 @@ static std::vector<MenuItem> build_menu(
             layer["speed_min"]= L.speed_min;
             layer["speed_max"]= L.speed_max;
             layer["blend"]    = L.blend;
+            // Only serialise direction when the user has overridden the
+            // effect's default (>= 0). Otherwise omit so the particle
+            // class falls back to its historical default angle.
+            if (L.direction_deg >= 0.f)
+                layer["direction_deg"] = L.direction_deg;
             out["layers"].push_back(layer);
         }
         return out;
@@ -3289,6 +3304,7 @@ static std::vector<MenuItem> build_menu(
             L.speed_min = jl.value("speed_min", 5.f);
             L.speed_max = jl.value("speed_max", 15.f);
             L.blend     = jl.value("blend", std::string("add"));
+            L.direction_deg = jl.value("direction_deg", -1.f);
         }
     };
 
@@ -3354,6 +3370,18 @@ static std::vector<MenuItem> build_menu(
             slider("Speed Max",  0.f, 100.f,  1.f, "",
                 [L]{ return L->speed_max; },
                 [L](float v){ L->speed_max = v; if (L->speed_min > v) L->speed_min = v; }),
+            // Direction (only for effects whose motion respects an angle).
+            // The slider clicks in 10° increments through the full 360°;
+            // visible_fn hides the row when the picked effect ignores it.
+            ([&]{
+                MenuItem dir = slider("Direction", 0.f, 360.f, 10.f, "\xc2\xb0",
+                    [L]{ return L->direction_deg < 0.f ? 90.f : L->direction_deg; },
+                    [L](float v){ L->direction_deg = v; });
+                dir.visible_fn = [L, effect_is_directional]{
+                    return effect_is_directional(L->effect);
+                };
+                return dir;
+            })(),
             submenu("Blend Mode", std::move(blend_items)),
             std::move(move_up),
             std::move(move_dn),

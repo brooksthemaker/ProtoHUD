@@ -142,6 +142,16 @@ protected:
         else                 draw_dot (c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
     }
     cv::Mat blank() const { return cv::Mat::zeros(h_, w_, CV_8UC4); }
+    // Direction unit vector for directional effects (snow / rain / embers /
+    // confetti / clouds). Convention: 0° = right, 90° = down, 180° = left,
+    // 270° = up (screen-space, +Y down). default_deg lets each effect keep
+    // its historical motion direction when no "direction_deg" override is set.
+    void direction_unit(double& dx, double& dy, double default_deg) const {
+        const double deg = jnum(cfg_, "direction_deg", default_deg);
+        const double rad = deg * kPi / 180.0;
+        dx = std::cos(rad);
+        dy = std::sin(rad);
+    }
 
     int w_, h_;
     json cfg_;
@@ -182,14 +192,19 @@ public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
         double drift_x = jnum(cfg_, "drift_x", 1.5);
+        double dx, dy; direction_unit(dx, dy, 90.0);   // default down
         for (auto& p : particles_) {
             double spd = (p.extra == 0) ? pick_speed(cfg_, 6, 12, rng_) : p.extra;
             p.extra = spd;
             p.vx = drift_x * std::sin(p.vx + p.y * 0.3);
-            p.x += p.vx * dt; p.y += spd * dt; p.life -= dt / p.max_life;
+            p.x += (spd * dx + p.vx) * dt;
+            p.y += spd * dy * dt;
+            p.life -= dt / p.max_life;
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [&](const Particle& p){ return !(p.y < h_ && p.life > 0); }), particles_.end());
+            [&](const Particle& p){
+                return !(p.x > -4 && p.x < w_ + 4 && p.y > -4 && p.y < h_ + 4 && p.life > 0);
+            }), particles_.end());
         while ((int)particles_.size() < count(30)) {
             double spd = pick_speed(cfg_, 6, 12, rng_);
             double ml  = pick_life(cfg_, 1.5, 4.0, rng_);
@@ -215,13 +230,18 @@ public:
     void update(double dt) override {
         double spread  = jnum(cfg_, "spread", 0.4);
         double drift_x = jnum(cfg_, "drift_x", 0.0);
+        double dx, dy; direction_unit(dx, dy, 270.0);  // default up
         for (auto& p : particles_) {
             p.extra += dt * 3.0;
             p.vx = spread * std::sin(p.extra + p.y * 0.2) * p.vy + drift_x;
-            p.x += p.vx * dt; p.y -= p.vy * dt; p.life -= dt / p.max_life;
+            p.x += (p.vy * dx + p.vx) * dt;
+            p.y += p.vy * dy * dt;
+            p.life -= dt / p.max_life;
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [&](const Particle& p){ return !(p.y > -1 && p.life > 0); }), particles_.end());
+            [&](const Particle& p){
+                return !(p.x > -4 && p.x < w_ + 4 && p.y > -4 && p.y < h_ + 4 && p.life > 0);
+            }), particles_.end());
         while ((int)particles_.size() < count(25)) {
             double spd = pick_speed(cfg_, 8, 22, rng_);
             double ml  = pick_life(cfg_, 0.8, 2.5, rng_);
@@ -255,13 +275,18 @@ public:
     void update(double dt) override {
         double spd     = pick_speed(cfg_, 4, 10, rng_);
         double drift_x = jnum(cfg_, "drift_x", 0.0);
+        double dx, dy; direction_unit(dx, dy, 90.0);  // default down
         for (auto& p : particles_) {
             p.vx = std::sin(p.extra) * 2.0 + drift_x;
             p.extra += dt * 4.0;
-            p.x += p.vx * dt; p.y += spd * dt; p.life -= dt / p.max_life;
+            p.x += (spd * dx + p.vx) * dt;
+            p.y += spd * dy * dt;
+            p.life -= dt / p.max_life;
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [&](const Particle& p){ return !(p.y < h_ && p.life > 0); }), particles_.end());
+            [&](const Particle& p){
+                return !(p.x > -4 && p.x < w_ + 4 && p.y > -4 && p.y < h_ + 4 && p.life > 0);
+            }), particles_.end());
         static const int kDef[][3] = {
             {255,50,50},{255,180,30},{50,220,50},{50,150,255},{220,50,220},{255,255,50}};
         while ((int)particles_.size() < count(20)) {
@@ -330,9 +355,17 @@ public:
     void update(double dt) override {
         int    length  = jint(cfg_, "length", 4);
         double drift_x = jnum(cfg_, "drift_x", 0.0);
-        for (auto& p : particles_) { p.y += p.vy * dt; p.x += drift_x * dt; p.life -= dt / p.max_life; }
+        double dx, dy; direction_unit(dx, dy, 90.0);  // default down
+        for (auto& p : particles_) {
+            p.x += (p.vy * dx + drift_x) * dt;
+            p.y += p.vy * dy * dt;
+            p.life -= dt / p.max_life;
+        }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [&](const Particle& p){ return !(p.y < h_ + length && p.life > 0); }), particles_.end());
+            [&](const Particle& p){
+                return !(p.x > -length - 2 && p.x < w_ + length + 2 &&
+                         p.y > -length - 2 && p.y < h_ + length + 2 && p.life > 0);
+            }), particles_.end());
         while ((int)particles_.size() < count(15)) {
             double spd = pick_speed(cfg_, 30, 50, rng_);
             double ml  = (h_ + length) / spd;
