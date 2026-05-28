@@ -245,9 +245,25 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
 //                        drop-ins replacing the MAX7219 modules. Same chain
 //                        geometry; full RGB per pixel.
 // Pulled out as a free helper so both the startup path and the menu's
+// Per-side daisy-chain assignment lives below pf_eye_w / pf_mirror_x (those
+// are defined later in the file). Forward-declare what pf_build_panel_output
+// needs so it can call into the helper without reordering everything else.
+struct PfSideChains {
+    std::vector<std::array<int, 2>> left;
+    std::vector<std::array<int, 2>> right;
+};
+static PfSideChains pf_auto_side_chains(
+        const std::string& eye_layout,
+        const std::string& mouth_layout,
+        const std::string& nose_layout,
+        int canvas_h);
+
 // hot-swap action use the exact same construction logic.
 static std::unique_ptr<face::PanelOutput>
-pf_build_panel_output(const json& cfg, const face::RenderConfig& rc) {
+pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
+                      const std::string& pf_eye_layout   = "1x2",
+                      const std::string& pf_mouth_layout = "1x3",
+                      const std::string& pf_nose_layout  = "1x1") {
     const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
     const std::string backend = jpf ? jpf->value("backend", std::string("hub75"))
                                     : std::string("hub75");
@@ -287,8 +303,42 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc) {
                     cc.chain_order = (co == "row_major" || co == "row-major")
                         ? face::Max7219Chain::ChainOrder::RowMajor
                         : face::Max7219Chain::ChainOrder::Serpentine;
+                    // Optional per-module positions for non-rectangular chains.
+                    // Each entry: [canvas_x, canvas_y] of a module's top-left,
+                    // in DIN→DOUT order along the chain.
+                    if (jc.contains("module_positions") && jc["module_positions"].is_array()) {
+                        for (const auto& jp : jc["module_positions"]) {
+                            if (jp.is_array() && jp.size() == 2)
+                                cc.module_positions.push_back(
+                                    {jp[0].get<int>(), jp[1].get<int>()});
+                        }
+                    }
                     mc.chains.push_back(std::move(cc));
                 }
+            }
+        }
+        // Auto-fill chains from the layout pickers when the user hasn't
+        // authored their own — two daisy chains, one per side of the face,
+        // each carrying eye + share-of-nose + mouth-half modules. Defaults
+        // wire left side to spidev0.0 (CE0) and right side to spidev1.0.
+        if (mc.chains.empty()) {
+            PfSideChains auto_s = pf_auto_side_chains(pf_eye_layout,
+                                                      pf_mouth_layout,
+                                                      pf_nose_layout,
+                                                      rc.canvas_h);
+            if (!auto_s.left.empty()) {
+                face::Max7219Chain::Config cl;
+                cl.name = "left";
+                cl.spi_device = "/dev/spidev0.0";
+                cl.module_positions = std::move(auto_s.left);
+                mc.chains.push_back(std::move(cl));
+            }
+            if (!auto_s.right.empty()) {
+                face::Max7219Chain::Config cr;
+                cr.name = "right";
+                cr.spi_device = "/dev/spidev1.0";
+                cr.module_positions = std::move(auto_s.right);
+                mc.chains.push_back(std::move(cr));
             }
         }
         return std::make_unique<face::Max7219PanelOutput>(std::move(mc));
@@ -322,8 +372,38 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc) {
                     cc.color_order = (ord == "RGB" || ord == "rgb")
                         ? face::NeoPixelMatrixChain::ColorOrder::RGB
                         : face::NeoPixelMatrixChain::ColorOrder::GRB;
+                    if (jc.contains("module_positions") && jc["module_positions"].is_array()) {
+                        for (const auto& jp : jc["module_positions"]) {
+                            if (jp.is_array() && jp.size() == 2)
+                                cc.module_positions.push_back(
+                                    {jp[0].get<int>(), jp[1].get<int>()});
+                        }
+                    }
                     nc.chains.push_back(std::move(cc));
                 }
+            }
+        }
+        // Auto-fill chains (per-side daisy) — same logic as the MAX7219
+        // path. RGB matrix shares MOSI semantics with WS2812 strips, so
+        // each side ideally lives on its own SPI bus.
+        if (nc.chains.empty()) {
+            PfSideChains auto_s = pf_auto_side_chains(pf_eye_layout,
+                                                      pf_mouth_layout,
+                                                      pf_nose_layout,
+                                                      rc.canvas_h);
+            if (!auto_s.left.empty()) {
+                face::NeoPixelMatrixChain::Config cl;
+                cl.name = "left";
+                cl.spi_device = "/dev/spidev0.0";
+                cl.module_positions = std::move(auto_s.left);
+                nc.chains.push_back(std::move(cl));
+            }
+            if (!auto_s.right.empty()) {
+                face::NeoPixelMatrixChain::Config cr;
+                cr.name = "right";
+                cr.spi_device = "/dev/spidev1.0";
+                cr.module_positions = std::move(auto_s.right);
+                nc.chains.push_back(std::move(cr));
             }
         }
         return std::make_unique<face::NeoPixelMatrixOutput>(std::move(nc));
@@ -394,6 +474,63 @@ static int pf_canvas_w_for_layout(const std::string& eye_layout,
                                   const std::string& nose_layout)
 {
     return 2 * pf_mirror_x(eye_layout, mouth_layout, nose_layout);
+}
+
+// Per-side module assignment used to auto-populate chains[] when the user
+// hasn't authored their own. Each side becomes one physical daisy chain:
+//   left  = eye_l + left-share-of-nose + mouth_l
+//   right = eye_r + right-share-of-nose + mouth_r
+// Nose split per user spec: 1→L, 2→L+R, 3→L+L+R (extra goes to the left).
+// Modules listed in DIN→DOUT order: eye rows row-major, then nose, then mouth.
+static PfSideChains pf_auto_side_chains(
+        const std::string& eye_layout,
+        const std::string& mouth_layout,
+        const std::string& nose_layout,
+        int canvas_h)
+{
+    PfSideChains s;
+    const int eye_w   = pf_eye_w(eye_layout);
+    const int eye_h   = pf_eye_h(eye_layout);
+    const int nose_w  = pf_nose_w(nose_layout);
+    const int mouth_w = pf_mouth_w(mouth_layout);
+    const int mouth_h = pf_mouth_h(mouth_layout);
+    const int mx      = pf_mirror_x(eye_layout, mouth_layout, nose_layout);
+    const int eye_cols   = eye_w   / 8;
+    const int eye_rows   = eye_h   / 8;
+    const int mouth_cols = mouth_w / 8;
+    const int mouth_rows = mouth_h / 8;
+    const int mouth_y    = std::max(0, canvas_h - mouth_h);
+
+    // Eyes: left at col 0, right mirrored. Row-major walk = top-row first.
+    for (int r = 0; r < eye_rows; ++r)
+        for (int c = 0; c < eye_cols; ++c)
+            s.left.push_back({c * 8, r * 8});
+    const int rey_x = 2 * mx - eye_w;
+    for (int r = 0; r < eye_rows; ++r)
+        for (int c = 0; c < eye_cols; ++c)
+            s.right.push_back({rey_x + c * 8, r * 8});
+
+    // Nose split — first ceil(N/2) modules go to the left chain.
+    const int nose_cols   = nose_w / 8;
+    const int nose_left_n = (nose_cols + 1) / 2;   // 1→1, 2→1, 3→2
+    const int nose_x0     = mx - nose_w / 2;
+    for (int c = 0; c < nose_cols; ++c) {
+        const std::array<int, 2> pos = {nose_x0 + c * 8, 0};
+        if (c < nose_left_n) s.left.push_back(pos);
+        else                 s.right.push_back(pos);
+    }
+
+    // Mouth halves: mouth_l on left, mouth_r on right; row-major.
+    constexpr int MOUTH_INSET = 8;
+    const int ml_x = mx - MOUTH_INSET - mouth_w;
+    const int mr_x = mx + MOUTH_INSET;
+    for (int r = 0; r < mouth_rows; ++r) {
+        for (int c = 0; c < mouth_cols; ++c)
+            s.left.push_back({ml_x + c * 8, mouth_y + r * 8});
+        for (int c = 0; c < mouth_cols; ++c)
+            s.right.push_back({mr_x + c * 8, mouth_y + r * 8});
+    }
+    return s;
 }
 
 static PfFaceZones pf_compute_face_zones(
@@ -6958,7 +7095,8 @@ int main(int argc, char* argv[]) {
         // Auto-save the live look next to config.json so menu changes persist.
         rc.state_path = (fs::path(cfg_path).parent_path() / "protoface_state.json").string();
         native_ctrl = std::make_unique<face::NativeFaceController>(
-            rc, pf_build_panel_output(cfg, rc));
+            rc, pf_build_panel_output(cfg, rc,
+                                      pf_eye_layout, pf_mouth_layout, pf_nose_layout));
         native_ctrl->start();
         // Push the user's saved animation tunables into every panel's
         // FaceState. The defaults in FaceState/FaceCfg apply otherwise.
@@ -7142,7 +7280,10 @@ int main(int argc, char* argv[]) {
         }
         rc.state_path = (fs::path(cfg_path).parent_path() /
                           "protoface_state.json").string();
-        auto new_output = pf_build_panel_output(cfg, rc);
+        auto new_output = pf_build_panel_output(cfg, rc,
+                                                pf_eye_layout,
+                                                pf_mouth_layout,
+                                                pf_nose_layout);
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, std::move(new_output));
         active_face = native_ctrl.get();

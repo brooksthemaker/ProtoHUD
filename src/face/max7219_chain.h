@@ -21,6 +21,7 @@
 #include "panel_output.h"   // for the cv::Mat include + namespace face
 #include "gpio_v2.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -55,10 +56,19 @@ public:
 
         int         cols_chips  = 1;          // chips wide
         int         rows_chips  = 1;          // chips tall
-        // Region of the renderer's RGB canvas this chain mirrors. The chain
-        // covers (cols_chips*8) × (rows_chips*8) pixels starting here.
+        // Rectangular region of the renderer's RGB canvas this chain
+        // mirrors when module_positions is empty: (cols_chips*8) ×
+        // (rows_chips*8) pixels starting at (canvas_x, canvas_y).
         int         canvas_x    = 0;
         int         canvas_y    = 0;
+        // Optional per-module canvas positions in daisy order from DIN
+        // (each entry is the {x, y} top-left of an 8×8 module). When
+        // non-empty this overrides cols_chips / rows_chips / canvas_x /
+        // canvas_y / chain_order — each module can sit anywhere on the
+        // canvas, so a single chain can cover non-rectangular face
+        // regions (e.g. one chain per side carrying eye + nose share +
+        // mouth half).
+        std::vector<std::array<int, 2>> module_positions;
         ModuleType  module_type = ModuleType::FC16;
         ChainOrder  chain_order = ChainOrder::Serpentine;
         uint8_t     intensity   = 4;          // 0..15

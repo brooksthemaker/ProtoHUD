@@ -32,21 +32,34 @@ void NeoPixelMatrixOutput::close() {
 
 std::vector<cv::Rect> NeoPixelMatrixOutput::covered_regions() const {
     std::vector<cv::Rect> out;
-    out.reserve(cfg_.chains.size());
     for (const auto& cc : cfg_.chains) {
-        out.emplace_back(cc.canvas_x, cc.canvas_y,
-                         cc.cols_chips * 8, cc.rows_chips * 8);
+        if (!cc.module_positions.empty()) {
+            for (const auto& m : cc.module_positions)
+                out.emplace_back(m[0], m[1], 8, 8);
+        } else {
+            out.emplace_back(cc.canvas_x, cc.canvas_y,
+                             cc.cols_chips * 8, cc.rows_chips * 8);
+        }
     }
     return out;
 }
 
 std::vector<NamedRegion> NeoPixelMatrixOutput::covered_named_regions() const {
     std::vector<NamedRegion> out;
-    out.reserve(cfg_.chains.size());
     for (const auto& cc : cfg_.chains) {
-        out.push_back({cc.name,
-                       cv::Rect(cc.canvas_x, cc.canvas_y,
-                                cc.cols_chips * 8, cc.rows_chips * 8)});
+        if (!cc.module_positions.empty()) {
+            for (size_t i = 0; i < cc.module_positions.size(); ++i) {
+                char nm[64];
+                std::snprintf(nm, sizeof(nm), "%s#%zu", cc.name.c_str(), i);
+                out.push_back({nm,
+                               cv::Rect(cc.module_positions[i][0],
+                                        cc.module_positions[i][1], 8, 8)});
+            }
+        } else {
+            out.push_back({cc.name,
+                           cv::Rect(cc.canvas_x, cc.canvas_y,
+                                    cc.cols_chips * 8, cc.rows_chips * 8)});
+        }
     }
     return out;
 }

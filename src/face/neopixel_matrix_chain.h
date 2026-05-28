@@ -14,6 +14,7 @@
 
 #include "panel_output.h"   // cv::Mat + namespace face
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -44,6 +45,11 @@ public:
         int         rows_chips  = 1;
         int         canvas_x    = 0;
         int         canvas_y    = 0;
+        // Optional per-module canvas positions (top-left of each 8×8
+        // module in daisy order). When non-empty, overrides cols_chips /
+        // rows_chips / canvas_x / canvas_y / chain_order — same semantics
+        // as Max7219Chain::Config::module_positions.
+        std::vector<std::array<int, 2>> module_positions;
         PixelLayout pixel_layout = PixelLayout::AdafruitSerpentine;
         ChainOrder  chain_order  = ChainOrder::Serpentine;
         ColorOrder  color_order  = ColorOrder::GRB;

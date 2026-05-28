@@ -29,7 +29,11 @@ constexpr uint8_t REG_DISPLAY_TEST = 0x0F;
 Max7219Chain::Max7219Chain(Config cfg) : cfg_(std::move(cfg)) {
     if (cfg_.cols_chips < 1) cfg_.cols_chips = 1;
     if (cfg_.rows_chips < 1) cfg_.rows_chips = 1;
-    total_chips_ = cfg_.cols_chips * cfg_.rows_chips;
+    // module_positions, when populated, fully owns the chip count — each
+    // entry is one daisy-chained MAX7219 placed anywhere on the canvas.
+    total_chips_ = cfg_.module_positions.empty()
+        ? cfg_.cols_chips * cfg_.rows_chips
+        : static_cast<int>(cfg_.module_positions.size());
     tx_buf_.assign(static_cast<size_t>(total_chips_) * 2, 0);
 }
 
@@ -142,61 +146,79 @@ int Max7219Chain::chip_chain_index(int gc, int gr) const {
 void Max7219Chain::show(const cv::Mat& rgb_canvas) {
     if (fd_ < 0 || rgb_canvas.empty() || rgb_canvas.type() != CV_8UC3) return;
 
-    const int region_w = cfg_.cols_chips * 8;
-    const int region_h = cfg_.rows_chips * 8;
-    if (cfg_.canvas_x < 0 || cfg_.canvas_y < 0 ||
-        cfg_.canvas_x + region_w > rgb_canvas.cols ||
-        cfg_.canvas_y + region_h > rgb_canvas.rows) {
-        // Misconfigured region; skip silently rather than risk a SIGSEGV on
-        // unrelated frame writes. Operator can read the log once.
-        static bool logged = false;
-        if (!logged) {
-            std::fprintf(stderr, "[max7219:%s] canvas region (%d,%d)+(%dx%d) "
-                                  "out of bounds for %dx%d canvas\n",
-                         cfg_.name.c_str(), cfg_.canvas_x, cfg_.canvas_y,
-                         region_w, region_h, rgb_canvas.cols, rgb_canvas.rows);
-            logged = true;
+    // Build the per-module canvas-origin list. Rectangular chains derive
+    // it from cols_chips/rows_chips/chain_order; non-rectangular chains
+    // use module_positions verbatim.
+    std::vector<std::array<int, 2>> mods;
+    if (!cfg_.module_positions.empty()) {
+        mods = cfg_.module_positions;
+    } else {
+        mods.reserve(static_cast<size_t>(total_chips_));
+        // Walk the grid in chip_chain_index order so daisy index N lands at
+        // the same canvas spot the legacy serpentine/row-major math used.
+        for (int idx = 0; idx < total_chips_; ++idx) {
+            int gc, gr;
+            if (cfg_.chain_order == ChainOrder::Serpentine) {
+                gr = idx / cfg_.cols_chips;
+                int col = idx % cfg_.cols_chips;
+                gc = (gr & 1) ? (cfg_.cols_chips - 1 - col) : col;
+            } else {
+                gr = idx / cfg_.cols_chips;
+                gc = idx % cfg_.cols_chips;
+            }
+            mods.push_back({cfg_.canvas_x + gc * 8, cfg_.canvas_y + gr * 8});
         }
-        return;
     }
 
-    // Crop + grayscale + threshold once per frame.
-    cv::Mat region = rgb_canvas(cv::Rect(cfg_.canvas_x, cfg_.canvas_y,
-                                         region_w, region_h));
+    // Bounds-check every module; any out-of-range module disables the
+    // frame (better silent skip than SIGSEGV on a stray write). Logged
+    // once so operators can spot a misconfigured layout in the journal.
+    for (const auto& m : mods) {
+        if (m[0] < 0 || m[1] < 0 ||
+            m[0] + 8 > rgb_canvas.cols || m[1] + 8 > rgb_canvas.rows) {
+            static bool logged = false;
+            if (!logged) {
+                std::fprintf(stderr, "[max7219:%s] module (%d,%d) "
+                                      "out of bounds for %dx%d canvas\n",
+                             cfg_.name.c_str(), m[0], m[1],
+                             rgb_canvas.cols, rgb_canvas.rows);
+                logged = true;
+            }
+            return;
+        }
+    }
+
+    // Grayscale + threshold the whole canvas once; we'll sample 8x8
+    // windows per module below. Cheap relative to the SPI shift.
     cv::Mat mono;
-    cv::cvtColor(region, mono, cv::COLOR_RGB2GRAY);
+    cv::cvtColor(rgb_canvas, mono, cv::COLOR_RGB2GRAY);
     cv::threshold(mono, mono, cfg_.threshold, 255, cv::THRESH_BINARY);
 
     // Shift one chip-register-row at a time across the whole chain. Each
-    // row update sends `total_chips * 2` bytes — at 1 MHz SPI that's <32 µs
-    // per row, ~256 µs per frame for a 16-chip face. Easily 60 Hz.
+    // row update sends `total_chips * 2` bytes — at 1 MHz SPI that's
+    // <32 µs per row, ~256 µs per frame for a 16-chip face. Easily 60 Hz.
     std::vector<uint8_t> per_chip(total_chips_, 0);
     for (int chip_row = 0; chip_row < 8; ++chip_row) {
-        for (int gr = 0; gr < cfg_.rows_chips; ++gr) {
-            const int canvas_y = gr * 8 + chip_row;
-            const uint8_t* row_ptr = mono.ptr<uint8_t>(canvas_y);
-            for (int gc = 0; gc < cfg_.cols_chips; ++gc) {
-                uint8_t byte = 0;
-                if (cfg_.module_type == ModuleType::FC16) {
-                    // Direct mapping: bit 7 = leftmost pixel in this chip's
-                    // 8-pixel column slice.
-                    for (int px = 0; px < 8; ++px) {
-                        if (row_ptr[gc * 8 + px]) byte |= (1u << (7 - px));
-                    }
-                } else {
-                    // Generic 1088AS — rows/cols are physically swapped on
-                    // these boards. We need the *column* slice instead of a
-                    // row slice. Slow path: 8 separate lookups.
-                    for (int px = 0; px < 8; ++px) {
-                        const int cx = gc * 8 + chip_row;          // chip-local col
-                        const int cy = gr * 8 + (7 - px);          // chip-local row, flipped
-                        if (cx < region_w && cy < region_h &&
-                            mono.ptr<uint8_t>(cy)[cx])
-                            byte |= (1u << (7 - px));
-                    }
+        for (size_t i = 0; i < mods.size(); ++i) {
+            const int mx = mods[i][0];
+            const int my = mods[i][1];
+            uint8_t byte = 0;
+            if (cfg_.module_type == ModuleType::FC16) {
+                const uint8_t* row_ptr = mono.ptr<uint8_t>(my + chip_row);
+                for (int px = 0; px < 8; ++px) {
+                    if (row_ptr[mx + px]) byte |= (1u << (7 - px));
                 }
-                per_chip[chip_chain_index(gc, gr)] = byte;
+            } else {
+                // Generic 1088AS — rows/cols swapped on the PCB; sample
+                // the column slice instead.
+                for (int px = 0; px < 8; ++px) {
+                    const int cx = mx + chip_row;
+                    const int cy = my + (7 - px);
+                    if (mono.ptr<uint8_t>(cy)[cx])
+                        byte |= (1u << (7 - px));
+                }
             }
+            per_chip[i] = byte;
         }
         write_chain_register(REG_DIGIT_0 + chip_row, per_chip.data());
     }

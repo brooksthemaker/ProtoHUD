@@ -16,7 +16,11 @@ NeoPixelMatrixChain::NeoPixelMatrixChain(Config cfg) : cfg_(std::move(cfg)) {
     if (cfg_.cols_chips  < 1) cfg_.cols_chips  = 1;
     if (cfg_.rows_chips  < 1) cfg_.rows_chips  = 1;
     if (cfg_.reset_bytes < 0) cfg_.reset_bytes = 0;
-    total_chips_  = cfg_.cols_chips * cfg_.rows_chips;
+    // module_positions, when set, owns the chip count — same convention
+    // as Max7219Chain.
+    total_chips_  = cfg_.module_positions.empty()
+        ? cfg_.cols_chips * cfg_.rows_chips
+        : static_cast<int>(cfg_.module_positions.size());
     total_pixels_ = total_chips_ * 64;
     spi_buf_.assign(static_cast<size_t>(total_pixels_) * 9 + cfg_.reset_bytes, 0);
 }
@@ -90,54 +94,71 @@ void NeoPixelMatrixChain::encode_color_byte(uint8_t b, uint8_t* out) const {
 void NeoPixelMatrixChain::show(const cv::Mat& rgb_canvas) {
     if (fd_ < 0 || rgb_canvas.empty() || rgb_canvas.type() != CV_8UC3) return;
 
-    const int region_w = cfg_.cols_chips * 8;
-    const int region_h = cfg_.rows_chips * 8;
-    if (cfg_.canvas_x < 0 || cfg_.canvas_y < 0 ||
-        cfg_.canvas_x + region_w > rgb_canvas.cols ||
-        cfg_.canvas_y + region_h > rgb_canvas.rows) {
-        static bool logged = false;
-        if (!logged) {
-            std::fprintf(stderr, "[neopixel:%s] canvas region (%d,%d)+(%dx%d) "
-                                  "out of bounds for %dx%d canvas\n",
-                         cfg_.name.c_str(), cfg_.canvas_x, cfg_.canvas_y,
-                         region_w, region_h, rgb_canvas.cols, rgb_canvas.rows);
-            logged = true;
+    // Build the per-module canvas-origin list. Rectangular chains derive
+    // it from cols_chips/rows_chips/chain_order; non-rectangular chains
+    // use module_positions verbatim. Same convention as Max7219Chain.
+    std::vector<std::array<int, 2>> mods;
+    if (!cfg_.module_positions.empty()) {
+        mods = cfg_.module_positions;
+    } else {
+        mods.reserve(static_cast<size_t>(total_chips_));
+        for (int idx = 0; idx < total_chips_; ++idx) {
+            int gc, gr;
+            if (cfg_.chain_order == ChainOrder::Serpentine) {
+                gr = idx / cfg_.cols_chips;
+                int col = idx % cfg_.cols_chips;
+                gc = (gr & 1) ? (cfg_.cols_chips - 1 - col) : col;
+            } else {
+                gr = idx / cfg_.cols_chips;
+                gc = idx % cfg_.cols_chips;
+            }
+            mods.push_back({cfg_.canvas_x + gc * 8, cfg_.canvas_y + gr * 8});
         }
-        return;
+    }
+    for (const auto& m : mods) {
+        if (m[0] < 0 || m[1] < 0 ||
+            m[0] + 8 > rgb_canvas.cols || m[1] + 8 > rgb_canvas.rows) {
+            static bool logged = false;
+            if (!logged) {
+                std::fprintf(stderr, "[neopixel:%s] module (%d,%d) "
+                                      "out of bounds for %dx%d canvas\n",
+                             cfg_.name.c_str(), m[0], m[1],
+                             rgb_canvas.cols, rgb_canvas.rows);
+                logged = true;
+            }
+            return;
+        }
     }
 
     const uint16_t br = cfg_.brightness;
 
-    // For each chip in the grid → that chip's chain-index → 64 pixels in the
-    // chip's wired order. The SPI buffer's pixel slots are addressed by
-    // their position along the daisy-chain, which is exactly that index.
-    for (int gr = 0; gr < cfg_.rows_chips; ++gr) {
-        for (int gc = 0; gc < cfg_.cols_chips; ++gc) {
-            const int chip_idx = chip_chain_index(gc, gr);
-            for (int py = 0; py < 8; ++py) {
-                const cv::Vec3b* row = rgb_canvas.ptr<cv::Vec3b>(
-                    cfg_.canvas_y + gr * 8 + py);
-                for (int px = 0; px < 8; ++px) {
-                    const cv::Vec3b& p = row[cfg_.canvas_x + gc * 8 + px];
-                    // Renderer canvas is RGB (channel 0 = R), per
-                    // face_image.h's convention.
-                    const uint8_t r = static_cast<uint8_t>((p[0] * br) / 255);
-                    const uint8_t g = static_cast<uint8_t>((p[1] * br) / 255);
-                    const uint8_t b = static_cast<uint8_t>((p[2] * br) / 255);
+    // For each module along the daisy-chain → 64 pixels in its wired order.
+    for (size_t chip_idx = 0; chip_idx < mods.size(); ++chip_idx) {
+        const int mx = mods[chip_idx][0];
+        const int my = mods[chip_idx][1];
+        for (int py = 0; py < 8; ++py) {
+            const cv::Vec3b* row = rgb_canvas.ptr<cv::Vec3b>(my + py);
+            for (int px = 0; px < 8; ++px) {
+                const cv::Vec3b& p = row[mx + px];
+                // Renderer canvas is RGB (channel 0 = R), per
+                // face_image.h's convention.
+                const uint8_t r = static_cast<uint8_t>((p[0] * br) / 255);
+                const uint8_t g = static_cast<uint8_t>((p[1] * br) / 255);
+                const uint8_t b = static_cast<uint8_t>((p[2] * br) / 255);
 
-                    const int pix_idx = chip_idx * 64 + pixel_in_chip(px, py);
-                    uint8_t* dst = spi_buf_.data() + pix_idx * 9;
+                const int pix_idx = static_cast<int>(chip_idx) * 64
+                                  + pixel_in_chip(px, py);
+                uint8_t* dst = spi_buf_.data() + pix_idx * 9;
 
-                    // Pack in the chain's native byte order.
-                    if (cfg_.color_order == ColorOrder::GRB) {
-                        encode_color_byte(g, dst);
-                        encode_color_byte(r, dst + 3);
-                        encode_color_byte(b, dst + 6);
-                    } else {
-                        encode_color_byte(r, dst);
-                        encode_color_byte(g, dst + 3);
-                        encode_color_byte(b, dst + 6);
-                    }
+                // Pack in the chain's native byte order.
+                if (cfg_.color_order == ColorOrder::GRB) {
+                    encode_color_byte(g, dst);
+                    encode_color_byte(r, dst + 3);
+                    encode_color_byte(b, dst + 6);
+                } else {
+                    encode_color_byte(r, dst);
+                    encode_color_byte(g, dst + 3);
+                    encode_color_byte(b, dst + 6);
                 }
             }
         }
