@@ -268,7 +268,8 @@ static std::unique_ptr<face::PanelOutput>
 pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
                       const std::string& pf_eye_layout   = "1x2",
                       const std::string& pf_mouth_layout = "1x3",
-                      const std::string& pf_nose_layout  = "1x1") {
+                      const std::string& pf_nose_layout  = "1x1",
+                      const PfHub75Layout* hub75         = nullptr) {
     const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
     const std::string backend = jpf ? jpf->value("backend", std::string("hub75"))
                                     : std::string("hub75");
@@ -413,7 +414,73 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
         }
         return std::make_unique<face::NeoPixelMatrixOutput>(std::move(nc));
     }
-    return std::make_unique<face::ShmPusherOutput>(rc.canvas_w, rc.canvas_h);
+    // HUB75 / daemon path — pass the layout-derived panel inventory through
+    // so the in-HUD face editor knows which regions to outline. When the
+    // user hasn't picked a HUB75 layout, panels stays empty and the editor
+    // stays hidden (legacy daemon-mode behaviour preserved).
+    std::vector<face::ShmPusherOutput::Panel> hub75_panels;
+    if (hub75) hub75_panels = pf_hub75_panels(*hub75);
+    return std::make_unique<face::ShmPusherOutput>(
+        rc.canvas_w, rc.canvas_h, std::move(hub75_panels));
+}
+
+// ── HUB75 panel layout (presets + per-panel nudge) ───────────────────────────
+// User-facing config for the HUB75 face editor: pick a panel size from the
+// presets, how many panels, how they're arranged, then nudge each one ±32 px
+// to compensate for tiny mounting offsets between physical panels. All four
+// nudge slots exist regardless of count; values above count are ignored.
+struct PfHub75Layout {
+    std::string panel_size  = "64x32";      // 32x16 / 64x32 / 64x64 / 96x48 / 128x32 / 128x64
+    std::string arrangement = "horizontal"; // horizontal / vertical / grid2x2
+    int         panel_count = 1;            // 1..4
+    int         nudge_dx[4] = {0, 0, 0, 0};
+    int         nudge_dy[4] = {0, 0, 0, 0};
+};
+
+static void pf_hub75_panel_dims(const std::string& sz, int& w, int& h) {
+    if      (sz == "32x16")  { w = 32;  h = 16; }
+    else if (sz == "64x64")  { w = 64;  h = 64; }
+    else if (sz == "96x48")  { w = 96;  h = 48; }
+    else if (sz == "128x32") { w = 128; h = 32; }
+    else if (sz == "128x64") { w = 128; h = 64; }
+    else                     { w = 64;  h = 32; }   // "64x32" default
+}
+
+// Returns each panel's (x, y, panel_w, panel_h) with the user's nudge applied
+// and a canonical name ("panel_0" .. "panel_N"). The first panel always
+// anchors at (0, 0) + nudge[0]; subsequent panels lay out per arrangement.
+static std::vector<face::ShmPusherOutput::Panel>
+pf_hub75_panels(const PfHub75Layout& L) {
+    int pw, ph; pf_hub75_panel_dims(L.panel_size, pw, ph);
+    const int n = std::clamp(L.panel_count, 1, 4);
+    std::vector<face::ShmPusherOutput::Panel> out;
+    out.reserve(static_cast<size_t>(n));
+    auto push = [&](int i, int x, int y) {
+        face::ShmPusherOutput::Panel p;
+        p.name = "panel_" + std::to_string(i);
+        p.rect = cv::Rect(x + L.nudge_dx[i], y + L.nudge_dy[i], pw, ph);
+        out.push_back(std::move(p));
+    };
+    if (L.arrangement == "vertical") {
+        for (int i = 0; i < n; ++i) push(i, 0, i * ph);
+    } else if (L.arrangement == "grid2x2") {
+        for (int i = 0; i < n; ++i) push(i, (i % 2) * pw, (i / 2) * ph);
+    } else { // horizontal default
+        for (int i = 0; i < n; ++i) push(i, i * pw, 0);
+    }
+    return out;
+}
+
+// Total canvas size needed to fit the laid-out panels (after nudges).
+static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch) {
+    const auto panels = pf_hub75_panels(L);
+    cw = ch = 0;
+    for (const auto& p : panels) {
+        cw = std::max(cw, p.rect.x + p.rect.width);
+        ch = std::max(ch, p.rect.y + p.rect.height);
+    }
+    if (cw <= 0) cw = 64;
+    if (ch <= 0) ch = 32;
 }
 
 // ── Chain layout → named zone rects ───────────────────────────────────────────
@@ -601,7 +668,8 @@ static PfFaceZones pf_compute_face_zones(
     return out;
 }
 
-static face::RenderConfig pf_build_render_config(const json& cfg) {
+static face::RenderConfig pf_build_render_config(const json& cfg,
+                                                 const PfHub75Layout* hub75 = nullptr) {
     face::RenderConfig rc;
     const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
 
@@ -665,6 +733,22 @@ static face::RenderConfig pf_build_render_config(const json& cfg) {
     if (jpf && jpf->contains("panels") && (*jpf)["panels"].is_array() &&
         !(*jpf)["panels"].empty()) {
         for (const auto& jp : (*jpf)["panels"]) rc.panels.push_back(parse_panel(jp));
+    } else if (hub75 && hub75->panel_count > 0) {
+        // HUB75 picker mode — one PanelCfg per laid-out physical panel.
+        // Canvas grows to fit the laid-out + nudged set so the renderer
+        // composes onto exactly the same surface the editor paints into.
+        const auto plist = pf_hub75_panels(*hub75);
+        int cw = 0, ch = 0;
+        pf_hub75_canvas(*hub75, cw, ch);
+        rc.canvas_w = cw;
+        rc.canvas_h = ch;
+        for (const auto& p : plist) {
+            face::PanelCfg pc;
+            pc.name = p.name;
+            pc.x = p.rect.x; pc.y = p.rect.y;
+            pc.w = p.rect.width; pc.h = p.rect.height;
+            rc.panels.push_back(std::move(pc));
+        }
     } else {
         face::PanelCfg left;  left.name  = "face_left";  left.x = 0;  left.w = 64; left.h = 32;
         face::PanelCfg right; right.name = "face_right"; right.x = 64; right.w = 64; right.h = 32;
@@ -999,6 +1083,11 @@ static std::vector<MenuItem> build_menu(
         std::string* pf_eye_layout_p   = nullptr,
         std::string* pf_mouth_layout_p = nullptr,
         std::string* pf_nose_layout_p  = nullptr,
+        // HUB75 panel layout (pickers + nudges). Owned by main, mutated by
+        // the menu; main rebuilds the renderer when the user backs out of
+        // the HUB75 Layout submenu (Phase 3) — for now changes take effect
+        // on the next backend hot-swap.
+        PfHub75Layout* pf_hub75_p = nullptr,
         // Face animation tunables — pointers + a "push live" callback that
         // forwards the current values into native_ctrl after a slider/toggle
         // change. Caller owns the slots and the persistence to config.json.
@@ -4033,6 +4122,132 @@ static std::vector<MenuItem> build_menu(
         "display. Persisted to config.json.");
     pf_chain_layout_item.visible_fn = visible_for_native;
 
+    // ── HUB75 Panel Layout (presets + per-panel pixel nudge) ─────────────────
+    // Visible only on the hub75 backend. Picks panel size + count + arrangement
+    // and exposes a per-panel Nudge X/Y so the user can shift any single panel
+    // ±32 px to compensate for tiny mounting offsets between physical panels.
+    MenuItem pf_hub75_layout_item;
+    if (pf_hub75_p) {
+        auto* H = pf_hub75_p;
+        auto hub_pick_str = [&leaf_sel](const char* lbl, std::string* slot, const char* v) {
+            return leaf_sel(lbl,
+                [slot, v]{ if (slot) *slot = v; },
+                [slot, v]{ return slot && *slot == v; });
+        };
+        auto hub_pick_int = [&leaf_sel](const char* lbl, int* slot, int v) {
+            return leaf_sel(lbl,
+                [slot, v]{ if (slot) *slot = v; },
+                [slot, v]{ return slot && *slot == v; });
+        };
+        std::vector<MenuItem> size_items = {
+            hub_pick_str("32x16",  &H->panel_size, "32x16"),
+            hub_pick_str("64x32",  &H->panel_size, "64x32"),
+            hub_pick_str("64x64",  &H->panel_size, "64x64"),
+            hub_pick_str("96x48",  &H->panel_size, "96x48"),
+            hub_pick_str("128x32", &H->panel_size, "128x32"),
+            hub_pick_str("128x64", &H->panel_size, "128x64"),
+        };
+        std::vector<MenuItem> count_items = {
+            hub_pick_int("1 panel",  &H->panel_count, 1),
+            hub_pick_int("2 panels", &H->panel_count, 2),
+            hub_pick_int("3 panels", &H->panel_count, 3),
+            hub_pick_int("4 panels", &H->panel_count, 4),
+        };
+        std::vector<MenuItem> arr_items = {
+            hub_pick_str("Horizontal Chain", &H->arrangement, "horizontal"),
+            hub_pick_str("Vertical Stack",   &H->arrangement, "vertical"),
+            hub_pick_str("2x2 Grid",         &H->arrangement, "grid2x2"),
+        };
+
+        // Per-panel nudge submenus (X / Y, ±32 px integer). Visible only when
+        // the panel index is within the active count.
+        std::vector<MenuItem> nudge_items;
+        for (int i = 0; i < 4; ++i) {
+            std::vector<MenuItem> axis_items = {
+                slider("Nudge X", -32.f, 32.f, 1.f, " px",
+                    [H, i]{ return static_cast<float>(H->nudge_dx[i]); },
+                    [H, i](float v){ H->nudge_dx[i] = static_cast<int>(v); }),
+                slider("Nudge Y", -32.f, 32.f, 1.f, " px",
+                    [H, i]{ return static_cast<float>(H->nudge_dy[i]); },
+                    [H, i](float v){ H->nudge_dy[i] = static_cast<int>(v); }),
+                leaf("Reset", [H, i]{ H->nudge_dx[i] = 0; H->nudge_dy[i] = 0; }),
+            };
+            char nm[24]; std::snprintf(nm, sizeof(nm), "Panel %d Nudge", i + 1);
+            MenuItem m = submenu(nm, std::move(axis_items));
+            m.visible_fn = [H, i]{ return i < H->panel_count; };
+            nudge_items.push_back(std::move(m));
+        }
+
+        // Schematic preview — draws all panels at their canvas positions
+        // (after nudge) so the user sees the whole-set arrangement update
+        // live as they tweak picker rows or nudge sliders.
+        auto hub_preview = [H](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            ImFont* font = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            dl->AddText(font, fs * 1.1f, {o.x, o.y},
+                        IM_COL32(230, 235, 240, 255), "HUB75 Panel Layout");
+            const auto panels = pf_hub75_panels(*H);
+            int cw = 0, ch = 0; pf_hub75_canvas(*H, cw, ch);
+            char sub[96];
+            std::snprintf(sub, sizeof(sub),
+                          "%d × %s   %s   canvas %dx%d",
+                          H->panel_count, H->panel_size.c_str(),
+                          H->arrangement.c_str(), cw, ch);
+            dl->AddText(font, fs * 0.85f, {o.x, o.y + fs * 1.2f},
+                        IM_COL32(170, 180, 190, 220), sub);
+
+            const float top = o.y + fs * 2.6f;
+            const float pad = 8.f;
+            const float avail_w = std::max(40.f, sz.x - pad * 2.f);
+            const float avail_h = std::max(40.f, o.y + sz.y - top - pad);
+            if (cw <= 0 || ch <= 0) return;
+            const float scale = std::min(avail_w / cw, avail_h / ch);
+            const float gw = cw * scale, gh = ch * scale;
+            const float ox = o.x + (sz.x - gw) * 0.5f;
+            const float oy = top + (avail_h - gh) * 0.5f;
+            const ImU32 bg   = IM_COL32(20, 24, 32, 255);
+            const ImU32 pcol = IM_COL32(255, 220, 60, 255);
+            const ImU32 ptxt = IM_COL32(20, 24, 28, 255);
+            dl->AddRectFilled({ox, oy}, {ox + gw, oy + gh}, bg);
+            for (size_t i = 0; i < panels.size(); ++i) {
+                const auto& r = panels[i].rect;
+                const float x0 = ox + r.x * scale;
+                const float y0 = oy + r.y * scale;
+                const float x1 = x0 + r.width  * scale;
+                const float y1 = y0 + r.height * scale;
+                dl->AddRectFilled({x0, y0}, {x1, y1},
+                                  IM_COL32(255, 220, 60, 60));
+                dl->AddRect({x0, y0}, {x1, y1}, pcol, 2.f, 0, 2.f);
+                char lab[16];
+                std::snprintf(lab, sizeof(lab), "P%zu", i + 1);
+                const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, lab);
+                dl->AddText(font, fs,
+                    {x0 + ((x1 - x0) - ts.x) * 0.5f,
+                     y0 + ((y1 - y0) - ts.y) * 0.5f},
+                    ptxt, lab);
+            }
+        };
+
+        std::vector<MenuItem> hub_items = {
+            submenu("Panel Size",  std::move(size_items)),
+            submenu("Panel Count", std::move(count_items)),
+            submenu("Arrangement", std::move(arr_items)),
+        };
+        for (auto& it : nudge_items) hub_items.push_back(std::move(it));
+
+        pf_hub75_layout_item = with_desc(
+            with_panel(submenu("HUB75 Layout", std::move(hub_items)),
+                       "HUB75 Panel Layout", hub_preview),
+            "Panel size + count + arrangement for the HUB75 backend. "
+            "Each panel exposes a Nudge X/Y slider (±32 px integer) so you "
+            "can align the editor canvas to physical mounting offsets. "
+            "Persisted to cfg[\"protoface\"][\"hub75\"]; takes effect on the "
+            "next backend (re)start.");
+        pf_hub75_layout_item.visible_fn = [pf_backend_p]{
+            return pf_backend_p && *pf_backend_p == "hub75";
+        };
+    }
+
     std::vector<MenuItem> pf_hardware_menu = {
         with_desc(submenu("Backend", std::move(pf_backend_items)),
                   "What LED hardware Protoface paints. Switching tears down "
@@ -4045,6 +4260,7 @@ static std::vector<MenuItem> build_menu(
     // face-authoring concern (it shapes the editor's bbox guides), so it now
     // sits inside Face Options alongside the per-expression slots.
     face_files_menu.push_back(std::move(pf_chain_layout_item));
+    if (pf_hub75_p) face_files_menu.push_back(std::move(pf_hub75_layout_item));
 
     // Visibility predicates — Effects / Face Color / Material Color /
     // Animations / Save Face Config / Release Control are concepts from
@@ -7336,6 +7552,11 @@ int main(int argc, char* argv[]) {
     std::string pf_eye_layout   = "1x2";
     std::string pf_mouth_layout = "1x3";
     std::string pf_nose_layout  = "1x1";
+    // HUB75 panel layout — picker state for users on the HUB75 backend.
+    // Empty (count == 0) keeps the legacy face_left/face_right pair so old
+    // configs are unchanged. Once the user picks a layout it persists to
+    // cfg["protoface"]["hub75"].
+    PfHub75Layout pf_hub75;
     // Face animation tunables — forwarded to every panel's FaceState live
     // and persisted to cfg["protoface"]["animation"] on save.
     bool   pf_blink_enabled   = true;
@@ -7354,6 +7575,18 @@ int main(int argc, char* argv[]) {
             pf_eye_layout   = jl.value("eye",   pf_eye_layout);
             pf_mouth_layout = jl.value("mouth", pf_mouth_layout);
             pf_nose_layout  = jl.value("nose",  pf_nose_layout);
+        }
+        if (jpf.contains("hub75") && jpf["hub75"].is_object()) {
+            auto& jh = jpf["hub75"];
+            pf_hub75.panel_size  = jh.value("panel_size",  pf_hub75.panel_size);
+            pf_hub75.arrangement = jh.value("arrangement", pf_hub75.arrangement);
+            pf_hub75.panel_count = jval(jh, "panel_count", pf_hub75.panel_count);
+            if (jh.contains("nudge_dx") && jh["nudge_dx"].is_array())
+                for (size_t i = 0; i < jh["nudge_dx"].size() && i < 4; ++i)
+                    pf_hub75.nudge_dx[i] = jh["nudge_dx"][i].get<int>();
+            if (jh.contains("nudge_dy") && jh["nudge_dy"].is_array())
+                for (size_t i = 0; i < jh["nudge_dy"].size() && i < 4; ++i)
+                    pf_hub75.nudge_dy[i] = jh["nudge_dy"][i].get<int>();
         }
         if (jpf.contains("animation") && jpf["animation"].is_object()) {
             auto& ja = jpf["animation"];
@@ -8214,7 +8447,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "[main] warning: could not claim /tmp/protoface.lock — "
                              "a daemon may still be running and double-writing the panel\n";
         }
-        face::RenderConfig rc = pf_build_render_config(cfg);
+        face::RenderConfig rc = pf_build_render_config(cfg, &pf_hub75);
         // Per-backend face folder — HUB75 keeps the legacy "main" folder
         // for back-compat; MAX7219 / RGB-matrix get their own "main_max7219"
         // / "main_rgb_matrix" subfolders so users can author distinct art
@@ -8284,7 +8517,8 @@ int main(int argc, char* argv[]) {
         rc.state_path = (fs::path(cfg_path).parent_path() / "protoface_state.json").string();
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, pf_build_panel_output(cfg, rc,
-                                      pf_eye_layout, pf_mouth_layout, pf_nose_layout));
+                                      pf_eye_layout, pf_mouth_layout, pf_nose_layout,
+                                      &pf_hub75));
         native_ctrl->start();
         // Push the user's saved animation tunables into every panel's
         // FaceState. The defaults in FaceState/FaceCfg apply otherwise.
@@ -8405,7 +8639,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->stop();
         ctrl_graveyard.push_back(std::move(native_ctrl));
 
-        face::RenderConfig rc = pf_build_render_config(cfg);
+        face::RenderConfig rc = pf_build_render_config(cfg, &pf_hub75);
         // Per-backend face folder (see startup-path comment above).
         if (pf_backend != "hub75") {
             const std::string suffix = "_" + pf_backend;
@@ -8471,7 +8705,8 @@ int main(int argc, char* argv[]) {
         auto new_output = pf_build_panel_output(cfg, rc,
                                                 pf_eye_layout,
                                                 pf_mouth_layout,
-                                                pf_nose_layout);
+                                                pf_nose_layout,
+                                                &pf_hub75);
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, std::move(new_output));
         active_face = native_ctrl.get();
@@ -8497,26 +8732,31 @@ int main(int argc, char* argv[]) {
     // menu's visible_fn hides the leaf so this never runs.
     auto edit_face = [&](const std::string& expression) {
         if (!native_ctrl || !menu_ptr) return;
-        // Editor canvas width tracks the live chain layouts (so changing
-        // a picker takes effect on the next "Edit…" without a backend
-        // rebuild). Height stays at the renderer's current canvas height.
-        // If the new layouts require a wider canvas than the renderer is
-        // currently using, we still author the PNG at the layout-width;
-        // it round-trips correctly once the backend is rebuilt.
-        const int cw = std::max(native_ctrl->canvas_width(),
-            pf_canvas_w_for_layout(pf_eye_layout,
-                                   pf_mouth_layout,
-                                   pf_nose_layout));
-        const int ch = native_ctrl->canvas_height();
-        // The Chain Layout pickers are the source of truth for the
-        // editor's per-zone bounding boxes (Left/Right Eye, Nose, Mouth
-        // halves). The helper also returns the canvas mirror axis (nose
-        // centre, or canvas_w/2 when there's no nose) so the editor's
-        // mirror brush respects the face's actual symmetry line.
-        auto zones = pf_compute_face_zones(pf_eye_layout,
-                                           pf_mouth_layout,
-                                           pf_nose_layout,
-                                           cw, ch);
+        // HUB75 backend: editor uses the picked panel inventory directly.
+        // Native backends (MAX7219 / RGB matrix): use the chain layout
+        // pickers as the source of truth for per-zone bboxes. Picker
+        // changes take effect on the next Edit... without a backend rebuild.
+        int cw, ch;
+        PfFaceZones zones;
+        if (pf_backend == "hub75" && pf_hub75.panel_count > 0) {
+            pf_hub75_canvas(pf_hub75, cw, ch);
+            cw = std::max(native_ctrl->canvas_width(), cw);
+            ch = std::max(native_ctrl->canvas_height(), ch);
+            const auto plist = pf_hub75_panels(pf_hub75);
+            for (const auto& p : plist)
+                zones.regions.push_back({p.name, p.rect});
+            zones.mirror_x = cw / 2;
+        } else {
+            cw = std::max(native_ctrl->canvas_width(),
+                pf_canvas_w_for_layout(pf_eye_layout,
+                                       pf_mouth_layout,
+                                       pf_nose_layout));
+            ch = native_ctrl->canvas_height();
+            zones = pf_compute_face_zones(pf_eye_layout,
+                                          pf_mouth_layout,
+                                          pf_nose_layout,
+                                          cw, ch);
+        }
         std::vector<cv::Rect> covered;
         covered.reserve(zones.regions.size());
         for (const auto& nr : zones.regions) covered.push_back(nr.rect);
@@ -8673,6 +8913,7 @@ int main(int argc, char* argv[]) {
                                swap_backend, &pf_backend,
                                edit_face,
                                &pf_eye_layout, &pf_mouth_layout, &pf_nose_layout,
+                               &pf_hub75,
                                &pf_blink_enabled, &pf_blink_min, &pf_blink_max,
                                &pf_blink_duration, &pf_expr_fade,
                                /* pf_anim_push */ [&]{
@@ -9349,6 +9590,15 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
         cfg["protoface"]["layout"]["nose"]      = pf_nose_layout;
+        cfg["protoface"]["hub75"]["panel_size"]  = pf_hub75.panel_size;
+        cfg["protoface"]["hub75"]["arrangement"] = pf_hub75.arrangement;
+        cfg["protoface"]["hub75"]["panel_count"] = pf_hub75.panel_count;
+        cfg["protoface"]["hub75"]["nudge_dx"]    =
+            json::array({pf_hub75.nudge_dx[0], pf_hub75.nudge_dx[1],
+                         pf_hub75.nudge_dx[2], pf_hub75.nudge_dx[3]});
+        cfg["protoface"]["hub75"]["nudge_dy"]    =
+            json::array({pf_hub75.nudge_dy[0], pf_hub75.nudge_dy[1],
+                         pf_hub75.nudge_dy[2], pf_hub75.nudge_dy[3]});
         cfg["protoface"]["animation"]["blink_enabled"]   = pf_blink_enabled;
         cfg["protoface"]["animation"]["blink_min"]       = pf_blink_min;
         cfg["protoface"]["animation"]["blink_max"]       = pf_blink_max;
