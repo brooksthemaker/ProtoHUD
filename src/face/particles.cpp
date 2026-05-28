@@ -152,6 +152,29 @@ protected:
         dx = std::cos(rad);
         dy = std::sin(rad);
     }
+    // Spawn a particle at the trailing edge for the layer's direction. With
+    // historical defaults (down for snow/rain/confetti, up for embers) this
+    // yields the original top/bottom spawn lines; for a sideways or diagonal
+    // angle it slides the spawn point onto the leading-edge mirror so the
+    // particle enters the canvas instead of starting mid-frame. `margin`
+    // controls the random distance offscreen along the motion axis (gives
+    // the original snow/rain/confetti staggered entry).
+    void direction_spawn_point(double margin, double default_deg,
+                               double& sx, double& sy) {
+        double dx, dy;
+        direction_unit(dx, dy, default_deg);
+        if (std::fabs(dx) >= std::fabs(dy)) {
+            sx = (dx >= 0) ? frand(rng_, -margin, 0.0)
+                           : frand(rng_, static_cast<double>(w_),
+                                   static_cast<double>(w_) + margin);
+            sy = frand(rng_, 0.0, static_cast<double>(h_ - 1));
+        } else {
+            sy = (dy >= 0) ? frand(rng_, -margin, 0.0)
+                           : frand(rng_, static_cast<double>(h_),
+                                   static_cast<double>(h_) + margin);
+            sx = frand(rng_, 0.0, static_cast<double>(w_ - 1));
+        }
+    }
 
     int w_, h_;
     json cfg_;
@@ -209,7 +232,8 @@ public:
             double spd = pick_speed(cfg_, 6, 12, rng_);
             double ml  = pick_life(cfg_, 1.5, 4.0, rng_);
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{200, 220, 255};
-            Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = frand(rng_, -2, 0);
+            Particle p;
+            direction_spawn_point(2.0, 90.0, p.x, p.y);   // 90° = historical down
             p.vx = frand(rng_, 0, kTau); p.max_life = ml; p.life = 1;
             p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 1, rng_); p.extra = spd;
             particles_.push_back(p);
@@ -246,7 +270,9 @@ public:
             double spd = pick_speed(cfg_, 8, 22, rng_);
             double ml  = pick_life(cfg_, 0.8, 2.5, rng_);
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{255, 120, 20};
-            Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = h_; p.vy = spd;
+            Particle p;
+            direction_spawn_point(0.0, 270.0, p.x, p.y);  // 270° = historical up (spawn at bottom)
+            p.vy = spd;
             p.max_life = ml; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b;
             p.size = pick_size(cfg_, 1, 1, rng_); p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
@@ -294,7 +320,8 @@ public:
             Color col;
             if (has_colors(cfg_)) col = pick_color(cfg_, rng_);
             else { const int* d = kDef[irand(rng_, 0, 5)]; col = {d[0], d[1], d[2]}; }
-            Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = frand(rng_, -4, 0);
+            Particle p;
+            direction_spawn_point(4.0, 90.0, p.x, p.y);   // 90° = historical down
             p.max_life = ml; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b;
             p.size = pick_size(cfg_, 1, 1, rng_); p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
@@ -370,7 +397,9 @@ public:
             double spd = pick_speed(cfg_, 30, 50, rng_);
             double ml  = (h_ + length) / spd;
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{100, 150, 255};
-            Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = frand(rng_, -(length + 2), 0);
+            Particle p;
+            direction_spawn_point(static_cast<double>(length + 2), 90.0,
+                                  p.x, p.y);              // 90° = historical down
             p.vy = spd; p.max_life = ml; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b;
             p.size = pick_size(cfg_, 1, 1, rng_); p.extra = length;
             particles_.push_back(p);

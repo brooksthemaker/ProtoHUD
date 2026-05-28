@@ -144,7 +144,9 @@ int Max7219Chain::chip_chain_index(int gc, int gr) const {
 }
 
 void Max7219Chain::show(const cv::Mat& rgb_canvas) {
-    if (fd_ < 0 || rgb_canvas.empty() || rgb_canvas.type() != CV_8UC3) return;
+    // is_open() handles both transports — fd_ is only set under Spidev,
+    // so the original fd_ < 0 guard silently disabled GPIO-bit-bang chains.
+    if (!is_open() || rgb_canvas.empty() || rgb_canvas.type() != CV_8UC3) return;
 
     // Build the per-module canvas-origin list. Rectangular chains derive
     // it from cols_chips/rows_chips/chain_order; non-rectangular chains
