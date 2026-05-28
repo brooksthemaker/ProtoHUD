@@ -985,7 +985,12 @@ static std::vector<MenuItem> build_menu(
         double* pf_blink_max_p     = nullptr,
         double* pf_blink_dur_p     = nullptr,
         double* pf_expr_fade_p     = nullptr,
-        std::function<void()> pf_anim_push = nullptr)
+        std::function<void()> pf_anim_push = nullptr,
+        // Pushes an arbitrary particle-system spec (a {"layers":[...]} dict
+        // or single-effect spec) directly to the native renderer, bypassing
+        // the effect_id mapping. Used by the Layered Effects builder so the
+        // user can compose multi-layer particle configs at runtime.
+        std::function<void(const nlohmann::json&)> pf_set_effect_json = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -3224,7 +3229,212 @@ static std::vector<MenuItem> build_menu(
     // Protoface has a different effect_id map and material palette than
     // ProtoTracer, so it gets a dedicated control set. Commands forward to the
     // active backend via the FaceProxy — select "Source: Protoface" first.
+    //
+    // The Effects submenu hosts both the canned single-effect presets (via
+    // teensy->set_effect(effect_id)) AND a Layered Builder where the user can
+    // compose up to five particle layers, tweak each one's parameters, save
+    // the composition to a slot, and export it to a file.
+    struct LayerCfg {
+        std::string effect = "none";   // "none" disables the slot
+        int   count = 20;              // particle count / density
+        int   r = 255, g = 255, b = 255;
+        float speed_min = 5.f;
+        float speed_max = 15.f;
+        std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
+    };
+    struct LayeredEffectState {
+        static constexpr int kMaxLayers = 5;
+        LayerCfg layers[kMaxLayers];
+    };
+    static LayeredEffectState pf_layered;
+    LayeredEffectState* pflz = &pf_layered;   // static address — safe to capture
+
+    auto build_layered_spec = [pflz]() -> nlohmann::json {
+        nlohmann::json out;
+        out["layers"] = nlohmann::json::array();
+        for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i) {
+            const auto& L = pflz->layers[i];
+            if (L.effect == "none") continue;
+            nlohmann::json layer;
+            layer["effect"]   = L.effect;
+            layer["count"]    = L.count;
+            layer["colors"]   = nlohmann::json::array({
+                nlohmann::json::array({L.r, L.g, L.b})});
+            layer["speed_min"]= L.speed_min;
+            layer["speed_max"]= L.speed_max;
+            layer["blend"]    = L.blend;
+            out["layers"].push_back(layer);
+        }
+        return out;
+    };
+
+    auto load_layered_spec = [pflz](const nlohmann::json& spec) {
+        // Reset all layers, then walk the loaded "layers" array filling slots.
+        for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i)
+            pflz->layers[i] = LayerCfg{};
+        if (!spec.contains("layers") || !spec["layers"].is_array()) return;
+        int i = 0;
+        for (const auto& jl : spec["layers"]) {
+            if (i >= LayeredEffectState::kMaxLayers) break;
+            LayerCfg& L = pflz->layers[i++];
+            L.effect = jl.value("effect", std::string("none"));
+            L.count  = jl.value("count", 20);
+            if (jl.contains("colors") && jl["colors"].is_array()
+                && !jl["colors"].empty() && jl["colors"][0].is_array()
+                && jl["colors"][0].size() == 3) {
+                L.r = jl["colors"][0][0].get<int>();
+                L.g = jl["colors"][0][1].get<int>();
+                L.b = jl["colors"][0][2].get<int>();
+            }
+            L.speed_min = jl.value("speed_min", 5.f);
+            L.speed_max = jl.value("speed_max", 15.f);
+            L.blend     = jl.value("blend", std::string("add"));
+        }
+    };
+
+    // Effects users can pick per layer. "none" is the sentinel for "disable
+    // this slot." The strings line up with the names ParticleSystem's factory
+    // recognises (see particles.cpp::make_effect).
+    static const char* const kLayerEffects[] = {
+        "none", "sparkle", "embers", "rain", "snow",
+        "confetti", "rings", "fireflies", "clouds",
+    };
+    static const char* const kBlendModes[] = {
+        "add", "normal", "multiply", "screen",
+    };
+
+    auto build_layer_menu = [&, pflz](int idx) -> MenuItem {
+        LayerCfg* L = &pflz->layers[idx];
+
+        std::vector<MenuItem> effect_items;
+        for (const char* name : kLayerEffects) {
+            effect_items.push_back(leaf_sel(name,
+                [L, name]{ L->effect = name; },
+                [L, name]{ return L->effect == name; }));
+        }
+
+        std::vector<MenuItem> blend_items;
+        for (const char* name : kBlendModes) {
+            blend_items.push_back(leaf_sel(name,
+                [L, name]{ L->blend = name; },
+                [L, name]{ return L->blend == name; }));
+        }
+
+        // Move Up / Move Down — swap with the neighbouring layer. Hidden at
+        // the ends so the user doesn't shuffle into a no-op.
+        MenuItem move_up = leaf("Move Up", [pflz, idx]{
+            if (idx > 0) std::swap(pflz->layers[idx], pflz->layers[idx - 1]);
+        });
+        move_up.visible_fn = [idx]{ return idx > 0; };
+        MenuItem move_dn = leaf("Move Down", [pflz, idx]{
+            if (idx + 1 < LayeredEffectState::kMaxLayers)
+                std::swap(pflz->layers[idx], pflz->layers[idx + 1]);
+        });
+        move_dn.visible_fn = [idx]{ return idx + 1 < LayeredEffectState::kMaxLayers; };
+
+        MenuItem clear = leaf("Clear Layer", [L]{ *L = LayerCfg{}; });
+
+        std::vector<MenuItem> items = {
+            submenu("Effect",     std::move(effect_items)),
+            slider("Count",      0.f, 100.f,  1.f, "",
+                [L]{ return static_cast<float>(L->count); },
+                [L](float v){ L->count = static_cast<int>(v); }),
+            slider("Color R",    0.f, 255.f,  5.f, "",
+                [L]{ return static_cast<float>(L->r); },
+                [L](float v){ L->r = static_cast<int>(v); }),
+            slider("Color G",    0.f, 255.f,  5.f, "",
+                [L]{ return static_cast<float>(L->g); },
+                [L](float v){ L->g = static_cast<int>(v); }),
+            slider("Color B",    0.f, 255.f,  5.f, "",
+                [L]{ return static_cast<float>(L->b); },
+                [L](float v){ L->b = static_cast<int>(v); }),
+            slider("Speed Min",  0.f, 100.f,  1.f, "",
+                [L]{ return L->speed_min; },
+                [L](float v){ L->speed_min = v; if (L->speed_max < v) L->speed_max = v; }),
+            slider("Speed Max",  0.f, 100.f,  1.f, "",
+                [L]{ return L->speed_max; },
+                [L](float v){ L->speed_max = v; if (L->speed_min > v) L->speed_min = v; }),
+            submenu("Blend Mode", std::move(blend_items)),
+            std::move(move_up),
+            std::move(move_dn),
+            std::move(clear),
+        };
+        char name_buf[32];
+        std::snprintf(name_buf, sizeof(name_buf), "Layer %d", idx + 1);
+        MenuItem m = submenu(name_buf, std::move(items));
+        // Dynamic label so the parent menu shows the active effect at a glance.
+        m.label_fn = [L, idx]{
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "Layer %d: %s", idx + 1,
+                          L->effect.c_str());
+            return std::string(buf);
+        };
+        return m;
+    };
+
+    std::vector<MenuItem> layered_items;
+    for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i)
+        layered_items.push_back(build_layer_menu(i));
+
+    layered_items.push_back(leaf("Apply Now",
+        [build_layered_spec, pf_set_effect_json]{
+            if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
+        }));
+
+    // Save / Load — three numbered slots, persisted to
+    // cfg["protoface"]["custom_effects"]["slot_N"]. The cfg dict is written
+    // to disk on shutdown (mutate_cfg path); a Load picks one up next launch.
+    std::vector<MenuItem> save_items, load_items;
+    for (int s = 1; s <= 3; ++s) {
+        char nm[16]; std::snprintf(nm, sizeof(nm), "Slot %d", s);
+        save_items.push_back(leaf(nm, [&cfg, s, build_layered_spec]{
+            char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
+            cfg["protoface"]["custom_effects"][key] = build_layered_spec();
+        }));
+        MenuItem load = leaf(nm, [&cfg, s, load_layered_spec]{
+            char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
+            if (cfg.contains("protoface")
+                && cfg["protoface"].contains("custom_effects")
+                && cfg["protoface"]["custom_effects"].contains(key)) {
+                load_layered_spec(cfg["protoface"]["custom_effects"][key]);
+            }
+        });
+        // Show a checkmark when the slot is populated.
+        load.get_state = [&cfg, s]{
+            char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
+            return cfg.contains("protoface")
+                && cfg["protoface"].contains("custom_effects")
+                && cfg["protoface"]["custom_effects"].contains(key);
+        };
+        load_items.push_back(std::move(load));
+    }
+    layered_items.push_back(submenu("Save to Slot", std::move(save_items)));
+    layered_items.push_back(submenu("Load from Slot", std::move(load_items)));
+
+    // Export the live composition to /tmp/protohud_layered_effect.json so
+    // the user can copy it elsewhere or paste it into another cfg.
+    layered_items.push_back(leaf("Export to File", [build_layered_spec]{
+        const std::string path = "/tmp/protohud_layered_effect.json";
+        std::ofstream f(path);
+        if (!f) {
+            std::fprintf(stderr, "[effects] cannot open %s\n", path.c_str());
+            return;
+        }
+        f << build_layered_spec().dump(2) << "\n";
+        std::cerr << "[effects] exported layered spec to " << path << "\n";
+    }));
+
+    MenuItem pf_layered_item = with_desc(
+        submenu("Layered Builder", std::move(layered_items)),
+        "Compose up to five particle layers and apply the stack live. Each "
+        "layer is independent: pick an effect, tweak count / colour / speed / "
+        "blend, reorder with Move Up / Move Down, clear to disable. Apply "
+        "Now pushes the composition to the renderer; Save to Slot persists it "
+        "to cfg[\"protoface\"][\"custom_effects\"][\"slot_N\"]; Export to File "
+        "writes /tmp/protohud_layered_effect.json.");
+
     std::vector<MenuItem> pf_effects;
+    pf_effects.push_back(std::move(pf_layered_item));
     {
         const char* pf_effect_names[] = {
             "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
@@ -8062,6 +8272,9 @@ int main(int argc, char* argv[]) {
                                                                  pf_blink_max,
                                                                  pf_blink_duration);
                                    native_ctrl->set_expression_fade(pf_expr_fade);
+                               },
+                               /* pf_set_effect_json */ [&](const nlohmann::json& spec){
+                                   if (native_ctrl) native_ctrl->set_effect_json(spec);
                                }));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));

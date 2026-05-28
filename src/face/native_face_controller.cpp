@@ -246,6 +246,14 @@ void NativeFaceController::set_effect(uint8_t effect_id, uint8_t, uint8_t) {
     save_state_locked();
 }
 
+void NativeFaceController::set_effect_json(const nlohmann::json& spec) {
+    if (!cfg_.effects_enabled) return;
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.particles) { pn.particles->set_effect(spec); pn.particles_spec = spec; }
+    save_state_locked();
+}
+
 void NativeFaceController::set_face(uint8_t face_id) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
