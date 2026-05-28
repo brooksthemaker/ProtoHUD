@@ -3369,15 +3369,35 @@ static std::vector<MenuItem> build_menu(
             slider("Count",      0.f, 100.f,  1.f, "",
                 [L]{ return static_cast<float>(L->count); },
                 [L](float v){ L->count = static_cast<int>(v); }),
-            slider("Color R",    0.f, 255.f,  5.f, "",
-                [L]{ return static_cast<float>(L->r); },
-                [L](float v){ L->r = static_cast<int>(v); }),
-            slider("Color G",    0.f, 255.f,  5.f, "",
-                [L]{ return static_cast<float>(L->g); },
-                [L](float v){ L->g = static_cast<int>(v); }),
-            slider("Color B",    0.f, 255.f,  5.f, "",
-                [L]{ return static_cast<float>(L->b); },
-                [L](float v){ L->b = static_cast<int>(v); }),
+            // Built-in colour picker — shows a live swatch of the current
+            // RGB, and Select enters edit mode where the encoder/D-pad
+            // sweeps each channel 0..255. Select cycles R → G → B → commit;
+            // Back cancels and restores. Replaces the three plain sliders.
+            color_picker("Color",
+                [L](uint8_t r, uint8_t g, uint8_t b){ L->r = r; L->g = g; L->b = b; },
+                [L]{ return std::make_tuple(
+                    static_cast<uint8_t>(L->r),
+                    static_cast<uint8_t>(L->g),
+                    static_cast<uint8_t>(L->b)); }),
+            // Quick-pick presets for the common colours; one click sets all
+            // three channels.
+            ([&]{
+                struct Preset { const char* name; int r, g, b; };
+                static constexpr Preset kPresets[] = {
+                    {"White",   255, 255, 255}, {"Red",     255,  40,  40},
+                    {"Orange",  255, 140,  40}, {"Yellow",  255, 230,  60},
+                    {"Green",    40, 220,  80}, {"Cyan",     60, 220, 220},
+                    {"Blue",     60, 130, 255}, {"Magenta", 220,  80, 220},
+                    {"Pink",    255, 160, 200}, {"Warm",    255, 180,  90},
+                };
+                std::vector<MenuItem> items;
+                for (const auto& p : kPresets) {
+                    items.push_back(leaf(p.name, [L, p]{
+                        L->r = p.r; L->g = p.g; L->b = p.b;
+                    }));
+                }
+                return submenu("Color Presets", std::move(items));
+            })(),
             slider("Speed Min",  0.f, 100.f,  1.f, "",
                 [L]{ return L->speed_min; },
                 [L](float v){ L->speed_min = v; if (L->speed_max < v) L->speed_max = v; }),
