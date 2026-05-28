@@ -538,6 +538,28 @@ static PfSideChains pf_auto_side_chains(
     return s;
 }
 
+// One layer in the Protoface Effects > Layered Builder. State lives in a
+// file-scope struct so kMaxLayers can be a static constexpr (forbidden on a
+// local class). The menu's static LayeredEffectState instance persists for
+// the program's lifetime.
+struct LayerCfg {
+    std::string effect = "none";   // "none" disables the slot
+    int   count = 20;              // particle count / density
+    int   r = 255, g = 255, b = 255;
+    float speed_min = 5.f;
+    float speed_max = 15.f;
+    // Direction of motion, degrees (0 = right, 90 = down, 180 = left,
+    // 270 = up). Honoured by snow / rain / embers / confetti; stationary
+    // and radial effects ignore it and the slider is hidden in their UI.
+    // -1 means "use the effect's historical default."
+    float direction_deg = -1.f;
+    std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
+};
+struct LayeredEffectState {
+    static constexpr int kMaxLayers = 5;
+    LayerCfg layers[kMaxLayers];
+};
+
 static PfFaceZones pf_compute_face_zones(
         const std::string& eye_layout,
         const std::string& mouth_layout,
@@ -990,7 +1012,13 @@ static std::vector<MenuItem> build_menu(
         // or single-effect spec) directly to the native renderer, bypassing
         // the effect_id mapping. Used by the Layered Effects builder so the
         // user can compose multi-layer particle configs at runtime.
-        std::function<void(const nlohmann::json&)> pf_set_effect_json = nullptr)
+        std::function<void(const nlohmann::json&)> pf_set_effect_json = nullptr,
+        // The live cfg JSON object owned by main(). Used by the GPIO
+        // Visualizer (pin-claim scan, I²C peripherals, user notes,
+        // rail-current estimate) and the Layered Effects builder
+        // (Save / Load slots persisted under
+        // cfg["protoface"]["custom_effects"]).
+        nlohmann::json* cfg_root = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -3234,27 +3262,13 @@ static std::vector<MenuItem> build_menu(
     // teensy->set_effect(effect_id)) AND a Layered Builder where the user can
     // compose up to five particle layers, tweak each one's parameters, save
     // the composition to a slot, and export it to a file.
-    struct LayerCfg {
-        std::string effect = "none";   // "none" disables the slot
-        int   count = 20;              // particle count / density
-        int   r = 255, g = 255, b = 255;
-        float speed_min = 5.f;
-        float speed_max = 15.f;
-        // Direction of motion, degrees (0 = right, 90 = down, 180 = left,
-        // 270 = up). Honoured by snow / rain / embers / confetti. Stationary
-        // and radial effects (sparkle / rings / fireflies / clouds) ignore it
-        // and the slider is hidden in their UI. -1 = "use effect default."
-        float direction_deg = -1.f;
-        std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
-    };
+    // LayerCfg / LayeredEffectState are file-scope (above build_menu) — C++
+    // forbids static-constexpr members on local classes, and we need
+    // kMaxLayers to size the layer array.
     // Effects whose motion respects direction_deg — used to hide the
     // Direction slider for stationary / radial / cloudy effects.
     auto effect_is_directional = [](const std::string& e) {
         return e == "snow" || e == "rain" || e == "embers" || e == "confetti";
-    };
-    struct LayeredEffectState {
-        static constexpr int kMaxLayers = 5;
-        LayerCfg layers[kMaxLayers];
     };
     static LayeredEffectState pf_layered;
     LayeredEffectState* pflz = &pf_layered;   // static address — safe to capture
@@ -3410,29 +3424,34 @@ static std::vector<MenuItem> build_menu(
         }));
 
     // Save / Load — three numbered slots, persisted to
-    // cfg["protoface"]["custom_effects"]["slot_N"]. The cfg dict is written
-    // to disk on shutdown (mutate_cfg path); a Load picks one up next launch.
+    // cfg["protoface"]["custom_effects"]["slot_N"]. cfg_root is the live
+    // cfg pointer plumbed in from main(); the slot is written to the
+    // in-memory object and the existing mutate_cfg path persists it to
+    // disk on shutdown. A Load picks up whatever's there next launch.
     std::vector<MenuItem> save_items, load_items;
     for (int s = 1; s <= 3; ++s) {
         char nm[16]; std::snprintf(nm, sizeof(nm), "Slot %d", s);
-        save_items.push_back(leaf(nm, [&cfg, s, build_layered_spec]{
+        save_items.push_back(leaf(nm, [cfg_root, s, build_layered_spec]{
+            if (!cfg_root) return;
             char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
-            cfg["protoface"]["custom_effects"][key] = build_layered_spec();
+            (*cfg_root)["protoface"]["custom_effects"][key] = build_layered_spec();
         }));
-        MenuItem load = leaf(nm, [&cfg, s, load_layered_spec]{
+        MenuItem load = leaf(nm, [cfg_root, s, load_layered_spec]{
+            if (!cfg_root) return;
             char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
-            if (cfg.contains("protoface")
-                && cfg["protoface"].contains("custom_effects")
-                && cfg["protoface"]["custom_effects"].contains(key)) {
-                load_layered_spec(cfg["protoface"]["custom_effects"][key]);
+            if (cfg_root->contains("protoface")
+                && (*cfg_root)["protoface"].contains("custom_effects")
+                && (*cfg_root)["protoface"]["custom_effects"].contains(key)) {
+                load_layered_spec((*cfg_root)["protoface"]["custom_effects"][key]);
             }
         });
         // Show a checkmark when the slot is populated.
-        load.get_state = [&cfg, s]{
+        load.get_state = [cfg_root, s]{
+            if (!cfg_root) return false;
             char key[16]; std::snprintf(key, sizeof(key), "slot_%d", s);
-            return cfg.contains("protoface")
-                && cfg["protoface"].contains("custom_effects")
-                && cfg["protoface"]["custom_effects"].contains(key);
+            return cfg_root->contains("protoface")
+                && (*cfg_root)["protoface"].contains("custom_effects")
+                && (*cfg_root)["protoface"]["custom_effects"].contains(key);
         };
         load_items.push_back(std::move(load));
     }
@@ -5585,8 +5604,10 @@ static std::vector<MenuItem> build_menu(
         std::map<int, std::vector<std::string>> claimants;
         std::map<int, int>                      spi_speed_hz;   // BCM → bus speed (for MOSI lines)
     };
-    auto gpio_pin_claims = [&cfg]() -> PinClaims {
+    auto gpio_pin_claims = [cfg_root]() -> PinClaims {
         PinClaims pc;
+        if (!cfg_root) return pc;
+        const json& cfg = *cfg_root;
         auto add = [&pc](int bcm, std::string who) {
             if (bcm >= 0) pc.claimants[bcm].push_back(std::move(who));
         };
@@ -5675,8 +5696,10 @@ static std::vector<MenuItem> build_menu(
     };
 
     // I²C peripheral list for the SDA/SCL hover tooltip. (addr, label).
-    auto i2c_peripherals = [&cfg]() -> std::vector<std::pair<int, std::string>> {
+    auto i2c_peripherals = [cfg_root]() -> std::vector<std::pair<int, std::string>> {
         std::vector<std::pair<int, std::string>> out;
+        if (!cfg_root) return out;
+        const json& cfg = *cfg_root;
         auto add_if = [&](const char* key, int default_addr, const char* label) {
             if (!cfg.contains(key) || !cfg[key].is_object()) return;
             const auto& jk = cfg[key];
@@ -5695,8 +5718,10 @@ static std::vector<MenuItem> build_menu(
     // User notes — free-form labels per BCM line via cfg["gpio_user_notes"]
     // ("17": "My LED strip"). Returned as a copy so the draw lambda doesn't
     // hold a json& back into main()'s cfg longer than necessary.
-    auto user_notes = [&cfg]() -> std::map<int, std::string> {
+    auto user_notes = [cfg_root]() -> std::map<int, std::string> {
         std::map<int, std::string> out;
+        if (!cfg_root) return out;
+        const json& cfg = *cfg_root;
         if (!cfg.contains("gpio_user_notes") || !cfg["gpio_user_notes"].is_object())
             return out;
         for (const auto& [k, v] : cfg["gpio_user_notes"].items()) {
@@ -5711,8 +5736,10 @@ static std::vector<MenuItem> build_menu(
     // Per-rail current estimate (mA) from known device draws. Anything not
     // in the table doesn't contribute — better silently zero than wildly
     // off-by-orders.
-    auto rail_currents_mA = [&cfg]() -> std::pair<int, int> {   // {3v3, 5v}
+    auto rail_currents_mA = [cfg_root]() -> std::pair<int, int> {   // {3v3, 5v}
         int rail3 = 0, rail5 = 0;
+        if (!cfg_root) return {rail3, rail5};
+        const json& cfg = *cfg_root;
         auto enabled = [&cfg](const char* key) {
             return cfg.contains(key) && cfg[key].is_object()
                 && cfg[key].value("enabled", false);
@@ -8303,7 +8330,8 @@ int main(int argc, char* argv[]) {
                                },
                                /* pf_set_effect_json */ [&](const nlohmann::json& spec){
                                    if (native_ctrl) native_ctrl->set_effect_json(spec);
-                               }));
+                               },
+                               /* cfg_root */ &cfg));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
