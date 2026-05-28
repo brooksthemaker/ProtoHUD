@@ -6473,8 +6473,167 @@ static std::vector<MenuItem> build_menu(
         "  • Power-rail estimate (top of pane) sums known device current draws.\n"
         "  • Filter by Function dims everything not matching the selected family.";
 
-    std::vector<MenuItem> system_menu = {
-        submenu("Headset & Tracking", std::move(headset_menu)),
+    // ── Pi Settings helpers ──────────────────────────────────────────────────
+    // Most of these shell out to systemd/raspi tools. The ones that mutate
+    // system state (hostname, timezone, NTP, apt, power) need sudo; ship
+    // /etc/sudoers.d/protohud (chmod 440) with:
+    //
+    //   <user> ALL=(ALL) NOPASSWD: /usr/bin/hostnamectl, /usr/bin/timedatectl, \
+    //       /usr/bin/apt-get, /usr/sbin/poweroff, /usr/sbin/reboot, \
+    //       /usr/bin/systemctl restart protohud.service
+    //
+    // …so the menu calls succeed without an interactive password prompt.
+    auto run_sh = [push_notif](std::string title, std::string cmd) {
+        std::thread([push_notif, title=std::move(title), cmd=std::move(cmd)]() {
+            const std::string full = cmd + " 2>&1 | logger -t protohud";
+            const int rc = std::system(full.c_str());
+            push_notif(NotifType::App, title,
+                       rc == 0 ? std::string("OK")
+                               : ("Failed (rc " + std::to_string(rc) + ")"),
+                       5.f);
+        }).detach();
+    };
+    // Capture popen output synchronously (small reads only — used for
+    // hostname, current timezone, df output).
+    auto sh_read = [](const char* cmd) -> std::string {
+        std::string out;
+        FILE* f = ::popen(cmd, "r");
+        if (!f) return out;
+        char buf[256];
+        while (std::fgets(buf, sizeof(buf), f)) out += buf;
+        ::pclose(f);
+        // Trim trailing whitespace/newlines.
+        while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' '))
+            out.pop_back();
+        return out;
+    };
+
+    // ── Pi Settings submenu ──────────────────────────────────────────────────
+    std::vector<MenuItem> tz_items;
+    {
+        // A small curated set of common zones plus UTC. The user can add
+        // more by hand-editing /etc/timezone; this list is just menu polish.
+        static const char* kZones[] = {
+            "UTC",
+            "America/Los_Angeles", "America/Denver",
+            "America/Chicago",     "America/New_York",
+            "Europe/London",       "Europe/Berlin",
+            "Europe/Paris",        "Asia/Tokyo",
+            "Asia/Shanghai",       "Australia/Sydney",
+        };
+        for (const char* z : kZones) {
+            tz_items.push_back(leaf_sel(z,
+                [run_sh, z]{
+                    run_sh(std::string("Timezone → ") + z,
+                           std::string("sudo timedatectl set-timezone ") + z);
+                },
+                [sh_read, z]{
+                    return sh_read("timedatectl show -p Timezone --value") == z;
+                }));
+        }
+    }
+    std::vector<MenuItem> pi_settings_items = {
+        with_desc(leaf("Hostname...",
+            [menu_sys_pp, run_sh, sh_read]{
+                if (!menu_sys_pp || !*menu_sys_pp) return;
+                char host[256] = {0};
+                if (::gethostname(host, sizeof(host) - 1) != 0) host[0] = '\0';
+                (*menu_sys_pp)->open_keyboard(
+                    "Hostname", host,
+                    [run_sh](const std::string& nm){
+                        if (nm.empty()) return;
+                        // Crude shell-safe quoting — drop anything that isn't a hostname char.
+                        std::string safe;
+                        for (char c : nm) {
+                            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                                || (c >= '0' && c <= '9') || c == '-' || c == '.')
+                                safe.push_back(c);
+                        }
+                        if (safe.empty()) return;
+                        run_sh("Hostname",
+                               "sudo hostnamectl set-hostname " + safe);
+                    });
+            }),
+            "Set the Pi's hostname (hostnamectl). Takes effect immediately for "
+            "new logins; the prompt updates after the next shell start."),
+        with_desc(submenu("Timezone", std::move(tz_items)),
+                  "System timezone (timedatectl). Affects clock display, "
+                  "log timestamps, and scheduled tasks."),
+        with_desc(toggle("NTP Time Sync",
+            [sh_read]{ return sh_read("timedatectl show -p NTP --value") == "yes"; },
+            [run_sh](bool v){
+                run_sh(v ? "NTP On" : "NTP Off",
+                       std::string("sudo timedatectl set-ntp ") + (v ? "true" : "false"));
+            }),
+            "Automatic time sync via systemd-timesyncd. Turn off to set the "
+            "clock manually."),
+        with_desc(leaf("Update System (apt upgrade)",
+            [run_sh]{
+                run_sh("System Update",
+                       "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive "
+                       "apt-get -y upgrade");
+            }),
+            "Runs apt-get update && apt-get upgrade in the background. Notif "
+            "fires on success or failure (~30 s – several minutes)."),
+        with_panel(
+            // Storage usage context panel — runs df once per draw.
+            submenu("Storage", std::vector<MenuItem>{}),
+            "Disk Usage",
+            [sh_read](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                ImFont* font = ImGui::GetFont();
+                const float fs = ImGui::GetFontSize();
+                dl->AddText(font, fs * 1.0f, {o.x, o.y},
+                            IM_COL32(230, 235, 240, 255), "Disk Usage");
+                const std::string out = sh_read("df -h /");
+                float y = o.y + fs * 1.5f;
+                size_t pos = 0;
+                while (pos < out.size()) {
+                    size_t nl = out.find('\n', pos);
+                    if (nl == std::string::npos) nl = out.size();
+                    const std::string line = out.substr(pos, nl - pos);
+                    dl->AddText(font, fs * 0.85f, {o.x, y},
+                                IM_COL32(200, 210, 220, 220), line.c_str());
+                    y += fs;
+                    pos = nl + 1;
+                }
+            }),
+        with_desc(leaf("Restart ProtoHUD",
+            [run_sh]{
+                run_sh("Restart",
+                       "sudo systemctl restart protohud.service");
+            }),
+            "Restart the protohud systemd service (loses unsaved menu state). "
+            "Useful after editing config.json by hand."),
+        with_desc(leaf("Shutdown System",
+            [run_sh]{
+                run_sh("Shutdown", "sudo poweroff");
+            }),
+            "Power off the Pi cleanly. The HUD will close, then the kernel "
+            "halts and the board powers down."),
+    };
+
+    // ── Power submenu (existing reboot/quit + new shutdown moved here) ──────
+    std::vector<MenuItem> power_menu = {
+        with_desc(toggle("Skip Startup Screen",
+            [&state]{ return state.skip_landing; },
+            [&state](bool v){ state.skip_landing = v; }),
+            "Bypass the profile/continue landing screen at boot and run the current "
+            "config directly. Takes effect on the next launch."),
+        with_desc(leaf("Reboot System", [&state] {
+            state.quit = true;
+            std::thread([] {
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                std::system("reboot");
+            }).detach();
+        }), "Reboot the Pi after a short delay (so the HUD can wind down)."),
+        with_desc(leaf("Close Program",
+            [&state]{ state.quit = true; }),
+            "Exit ProtoHUD without rebooting the system."),
+    };
+
+    // ── Display & HUD submenu (cosmetic / per-window controls) ───────────────
+    std::vector<MenuItem> display_hud_menu = {
         with_desc(submenu("HUD / Menu Presets", std::move(hud_presets_menu)),
                   "Visual presets: built-in themes plus your own saved HUD color + "
                   "menu style combinations. Applied live."),
@@ -6491,6 +6650,10 @@ static std::vector<MenuItem> build_menu(
             [menu_sys_pp](float v){ if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->set_radial_tilt(v); }),
             "Helmet-style inward perspective tilt for the radial menu. 0 = flat on "
             "the glass; higher = the wheel curves away at the top like a visor."),
+        with_desc(slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
+            [hud_cfg]{ return hud_cfg->text_scale; },
+            [hud_cfg](float v){ hud_cfg->text_scale = v; }),
+            "Scale factor applied to all HUD text. Lower = more on-screen at once."),
         with_desc(toggle("Fullscreen",
             [&state]{ return state.win_fullscreen.load(); },
             [&state](bool v){ state.win_fullscreen.store(v); state.win_mode_dirty.store(true); }),
@@ -6507,69 +6670,11 @@ static std::vector<MenuItem> build_menu(
             "ON: show the legacy edge/corner HUD (compass tape, health indicators, "
             "face indicator, corner clock/timer, LoRa messages). OFF: show only the "
             "modular HUD — the minimap and info panel."),
-        with_desc(toggle("Skip Startup Screen",
-            [&state]{ return state.skip_landing; },
-            [&state](bool v){ state.skip_landing = v; }),
-            "Bypass the profile/continue landing screen at boot and run the current "
-            "config directly. Takes effect on the next launch."),
-        with_panel(
-            submenu("Audio", std::move(audio_menu)),
-            "Audio Status",
-            [&state, menu_sys_pp]
-            (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-                (void)sz;
-                const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
-                    ? (*menu_sys_pp)->accent_color()
-                    : IM_COL32(255, 255, 255, 255);
-                const float lh = 18.f;
-                ImVec2 p = o;
-                auto row = [&](const char* k, const char* v, ImU32 vc) {
-                    dl->AddText({ p.x, p.y }, IM_COL32(180, 180, 180, 200), k);
-                    dl->AddText({ p.x + 130.f, p.y }, vc, v);
-                    p.y += lh;
-                };
+    };
 
-                bool enabled;
-                int  out_idx;
-                float cpu;
-                int  xruns;
-                {
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    enabled = state.audio.enabled;
-                    out_idx = state.audio.output;
-                    cpu     = state.audio.cpu_load;
-                    xruns   = state.audio.xrun_count;
-                }
-                const char* out_name =
-                    out_idx == 0 ? "VITURE" :
-                    out_idx == 1 ? "Headphones" :
-                    out_idx == 2 ? "HDMI" : "?";
-
-                row("State",  enabled ? "Enabled" : "Muted",
-                    enabled ? ((accent & 0x00FFFFFFu) | (220u << 24))
-                            : IM_COL32(200, 90, 90, 220));
-                row("Output", out_name, IM_COL32(230, 230, 230, 230));
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%.1f %%", cpu * 100.f);
-                row("CPU load", buf, IM_COL32(230, 230, 230, 230));
-                snprintf(buf, sizeof(buf), "%d", xruns);
-                row("XRuns", buf,
-                    xruns == 0 ? IM_COL32(160, 220, 160, 220)
-                               : IM_COL32(220, 160, 90, 220));
-            }),
-        submenu("Timers and Alarm", std::move(timers_alarm_menu)),
-        slider("Text Size", 0.7f, 2.0f, 0.1f, "x",
-            [hud_cfg]{ return hud_cfg->text_scale; },
-            [hud_cfg](float v){ hud_cfg->text_scale = v; }),
-        toggle("System Panel",
-            [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
-            [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
-        toggle("FPS Overlay",
-            [fps_overlay_active]{ return fps_overlay_active && *fps_overlay_active; },
-            [fps_overlay_active](bool v){ if (fps_overlay_active) *fps_overlay_active = v; }),
-        submenu("FPS Average",   std::move(fps_interval_menu)),
-        submenu("Diagnostics",   std::move(diagnostics_menu)),
-        toggle("SSH Access",
+    // ── Connectivity submenu ─────────────────────────────────────────────────
+    std::vector<MenuItem> connectivity_menu = {
+        with_desc(toggle("SSH Access",
             [state_ptr]{ return state_ptr && state_ptr->ssh.active; },
             [state_ptr](bool v){
                 system(v ? "systemctl start ssh 2>&1 | logger -t protohud &"
@@ -6579,19 +6684,93 @@ static std::vector<MenuItem> build_menu(
                     state_ptr->ssh.active = v;
                 }
             }),
-        leaf("Refresh Bluetooth", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
+            "Toggle the sshd service. ON exposes the Pi to network logins on TCP 22."),
+        with_desc(leaf("Refresh Bluetooth", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
+                  "Re-scan for paired Bluetooth devices and update the indicator."),
+    };
+
+    // ── Diagnostics submenu (probes + overlays + per-tab tools) ──────────────
+    std::vector<MenuItem> diagnostics_group_menu = {
+        with_desc(toggle("System Panel",
+            [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
+            [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
+            "Live system overlay (CPU, RAM, GPU temp, network ping)."),
+        with_desc(toggle("FPS Overlay",
+            [fps_overlay_active]{ return fps_overlay_active && *fps_overlay_active; },
+            [fps_overlay_active](bool v){ if (fps_overlay_active) *fps_overlay_active = v; }),
+            "Show the current frame rate as an overlay."),
+        with_desc(submenu("FPS Average",   std::move(fps_interval_menu)),
+                  "Averaging window for the FPS readout."),
+        with_desc(submenu("Diagnostics",   std::move(diagnostics_menu)),
+                  "Camera / network / Bluetooth / GPIO probes."),
         std::move(gpio_viz_item),
-        submenu("Software",   std::move(software_menu)),
-        submenu("Demo Mode",  std::move(demo_menu)),
-        leaf("Request Status", [teensy]{ teensy->request_status(); }),
-        leaf("Reboot System", [&state] {
-            state.quit = true;
-            std::thread([] {
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                std::system("reboot");
-            }).detach();
-        }),
-        leaf("Close Program",  [&state]{ state.quit = true; }),
+        with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
+                  "Poll the face controller for a fresh status frame."),
+        with_desc(submenu("Demo Mode",  std::move(demo_menu)),
+                  "Cycle prefab scenes for screenshots / video."),
+    };
+
+    // Audio submenu wrapped with its existing live-status context panel.
+    MenuItem audio_item = with_panel(
+        submenu("Audio", std::move(audio_menu)),
+        "Audio Status",
+        [&state, menu_sys_pp]
+        (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            (void)sz;
+            const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
+                ? (*menu_sys_pp)->accent_color()
+                : IM_COL32(255, 255, 255, 255);
+            const float lh = 18.f;
+            ImVec2 p = o;
+            auto row = [&](const char* k, const char* v, ImU32 vc) {
+                dl->AddText({ p.x, p.y }, IM_COL32(180, 180, 180, 200), k);
+                dl->AddText({ p.x + 130.f, p.y }, vc, v);
+                p.y += lh;
+            };
+            bool enabled;  int  out_idx;  float cpu;  int  xruns;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                enabled = state.audio.enabled;
+                out_idx = state.audio.output;
+                cpu     = state.audio.cpu_load;
+                xruns   = state.audio.xrun_count;
+            }
+            const char* out_name =
+                out_idx == 0 ? "VITURE" :
+                out_idx == 1 ? "Headphones" :
+                out_idx == 2 ? "HDMI" : "?";
+            row("State",  enabled ? "Enabled" : "Muted",
+                enabled ? ((accent & 0x00FFFFFFu) | (220u << 24))
+                        : IM_COL32(200, 90, 90, 220));
+            row("Output", out_name, IM_COL32(230, 230, 230, 230));
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.1f %%", cpu * 100.f);
+            row("CPU load", buf, IM_COL32(230, 230, 230, 230));
+            snprintf(buf, sizeof(buf), "%d", xruns);
+            row("XRuns", buf,
+                xruns == 0 ? IM_COL32(160, 220, 160, 220)
+                           : IM_COL32(220, 160, 90, 220));
+        });
+
+    // ── System root: grouped, one screen tall ────────────────────────────────
+    std::vector<MenuItem> system_menu = {
+        with_desc(submenu("Display & HUD", std::move(display_hud_menu)),
+                  "Window mode, text scale, HUD/menu theme + presets."),
+        std::move(audio_item),
+        with_desc(submenu("Connectivity",     std::move(connectivity_menu)),
+                  "SSH, Bluetooth and other network/peripheral toggles."),
+        with_desc(submenu("Pi Settings",      std::move(pi_settings_items)),
+                  "Hostname, timezone, NTP, system updates, storage, shutdown."),
+        with_desc(submenu("Headset & Tracking", std::move(headset_menu)),
+                  "Glasses IMU, focus, recenter — everything specific to the XR display."),
+        with_desc(submenu("Timers and Alarm",   std::move(timers_alarm_menu)),
+                  "Stopwatches, countdowns and one-shot alarms."),
+        with_desc(submenu("Diagnostics",        std::move(diagnostics_group_menu)),
+                  "Probes, overlays and the GPIO visualizer."),
+        with_desc(submenu("Software",           std::move(software_menu)),
+                  "Demo apps, on-board tools."),
+        with_desc(submenu("Power",              std::move(power_menu)),
+                  "Skip Startup, Reboot, Close Program."),
     };
 
     // ── Profiles ────────────────────────────────────────────────────────────────
@@ -6648,6 +6827,13 @@ static std::vector<MenuItem> build_menu(
     }
     profiles_menu.push_back(with_desc(submenu("Delete Profile", std::move(profile_delete_menu)),
         "Remove a saved profile permanently."));
+
+    // Tuck Profiles & Backup inside the System root so the top-level tab list
+    // stays compact.
+    system_menu.push_back(with_desc(submenu("Profiles & Backup",
+                                             std::move(profiles_menu)),
+                                    "Save and load full-setup snapshots. "
+                                    "Loading a profile restarts ProtoHUD with that config."));
 
     // ── Quick (corner / radial) menu ─────────────────────────────────────────────
     // A short, curated set of mid-use actions — separate from the full settings tree
@@ -6843,10 +7029,8 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("LoRa",         std::move(lora_menu)),
                   "Long-range radio: team nodes, messages and status."),
         with_desc(submenu("System",       std::move(system_menu)),
-                  "Audio output and volume, timers/alarms, status and power."),
-        with_desc(submenu("Profiles",     std::move(profiles_menu)),
-                  "Save, load and manage full-setup profiles. Loading one restarts "
-                  "ProtoHUD with that profile."),
+                  "Display, audio, connectivity, Pi settings, timers, "
+                  "diagnostics, profiles & power."),
     };
 }
 
