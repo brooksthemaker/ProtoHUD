@@ -2,9 +2,11 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <chrono>
+#include <cfloat>
 #include <cmath>
 #include <cctype>
 #include <ctime>
@@ -44,6 +46,7 @@
 #include "accessory/accessory_leds.h"
 #include "sys/system_monitor.h"
 #include "sys/scheduler_monitor.h"
+#include "sys/gpio_pinmap.h"
 #include "net/weather_monitor.h"
 #include "net/wifi_monitor.h"
 #include "net/ping_monitor.h"
@@ -5317,6 +5320,283 @@ static std::vector<MenuItem> build_menu(
     hud_presets_menu.push_back(with_desc(submenu("Delete Preset", std::move(hud_preset_delete_menu)),
         "Remove a saved HUD/menu preset permanently."));
 
+    // ── GPIO Visualizer ──────────────────────────────────────────────────────
+    // Renders the Pi 5 / CM5 40-pin header in the context pane as a vertical
+    // 2x20 grid, colour-coded per Pi Foundation pinout. Pin squares get a
+    // green outline when something in cfg is using their BCM line; grey
+    // otherwise. Function labels lay out in columns radiating away from the
+    // pin (primary nearest, secondary one step out, tertiary furthest).
+    // I²C SDA/SCL hover surfaces the bus's known peripherals (BNO055,
+    // MPR121, BH1750, MPU9250) so the user can match an address to a chip.
+    struct GpioVizState {
+        bool show_pin_num   = true;
+        bool show_primary   = true;
+        bool show_secondary = true;
+        bool show_tertiary  = false;
+        bool show_inactive  = true;
+    };
+    static GpioVizState gpio_viz;
+
+    // Compute which BCM lines are currently claimed by something in cfg —
+    // SPI buses in use, configured I²C peripherals, the user's GPIO buttons,
+    // MAX7219 GPIO chains. Recalculated on every draw so a hot-swap is
+    // reflected instantly.
+    auto gpio_active_set = [&cfg]() -> std::set<int> {
+        std::set<int> a;
+        auto add = [&a](int bcm) { if (bcm >= 0) a.insert(bcm); };
+        // GPIO buttons (defaults 17/27/22; can override via cfg["gpio"]).
+        if (cfg.contains("gpio")) {
+            const auto& jg = cfg["gpio"];
+            add(jg.value("button_1_gpio", 17));
+            add(jg.value("button_2_gpio", 27));
+            add(jg.value("button_3_gpio", 22));
+        } else {
+            add(17); add(27); add(22);
+        }
+        // I²C peripherals — any "enabled" sensor on /dev/i2c-1 claims SDA1/SCL1.
+        auto i2c1_used = [&cfg](const char* key) {
+            return cfg.contains(key) && cfg[key].is_object()
+                && cfg[key].value("enabled", false)
+                && cfg[key].value("i2c_bus", std::string("/dev/i2c-1")) == "/dev/i2c-1";
+        };
+        if (i2c1_used("bno055") || i2c1_used("boop") ||
+            i2c1_used("light_sensor") || i2c1_used("mpu9250")) {
+            add(2); add(3);
+        }
+        // SPI: any chain pointing at /dev/spidev0.x lights up SPI0 pins,
+        // /dev/spidev1.x lights up SPI1 pins. Also walk GPIO transport CS pins.
+        auto walk_chains = [&](const json& jchains) {
+            if (!jchains.is_array()) return;
+            for (const auto& jc : jchains) {
+                const std::string dev = jc.value("spi_device", std::string());
+                if (dev.find("/dev/spidev0") == 0) { add(9); add(10); add(11); add(8); add(7); }
+                if (dev.find("/dev/spidev1") == 0) { add(19); add(20); add(21); add(16); add(17); }
+                add(jc.value("gpio_cs_pin", -1));
+                // module_positions doesn't claim pins; only transport does.
+            }
+        };
+        if (cfg.contains("protoface")) {
+            const auto& jpf = cfg["protoface"];
+            if (jpf.contains("max7219")) {
+                const auto& jm = jpf["max7219"];
+                walk_chains(jm.contains("chains") ? jm["chains"] : json::array());
+                add(jm.value("gpio_din_pin", -1));
+                add(jm.value("gpio_clk_pin", -1));
+            }
+            if (jpf.contains("rgb_matrix") && jpf["rgb_matrix"].contains("chains"))
+                walk_chains(jpf["rgb_matrix"]["chains"]);
+        }
+        // Accessory LEDs (WS2812 strip) sit on whatever spidev they're bound to.
+        if (cfg.contains("accessory_leds")) {
+            const std::string dev = cfg["accessory_leds"].value("spi_device", std::string());
+            if (dev.find("/dev/spidev0") == 0) { add(10); }
+            if (dev.find("/dev/spidev1") == 0) { add(20); }
+        }
+        return a;
+    };
+
+    // I²C peripheral list for the SDA/SCL hover tooltip. (addr, label).
+    auto i2c_peripherals = [&cfg]() -> std::vector<std::pair<int, std::string>> {
+        std::vector<std::pair<int, std::string>> out;
+        auto add_if = [&](const char* key, int default_addr, const char* label) {
+            if (!cfg.contains(key) || !cfg[key].is_object()) return;
+            const auto& jk = cfg[key];
+            if (!jk.value("enabled", false)) return;
+            if (jk.value("i2c_bus", std::string("/dev/i2c-1")) != "/dev/i2c-1") return;
+            const int addr = jk.value("i2c_addr", default_addr);
+            out.push_back({addr, label});
+        };
+        add_if("bno055",       0x28, "BNO055 IMU");
+        add_if("mpu9250",      0x68, "MPU9250 IMU");
+        add_if("boop",         0x5A, "MPR121 boop");
+        add_if("light_sensor", 0x23, "BH1750 light");
+        return out;
+    };
+
+    // Capture the two helpers + the static viz-state pointer by value so the
+    // returned MenuContextPanelDraw doesn't hold dangling references to
+    // build_menu's stack locals. The helpers capture cfg by reference, which
+    // is owned by main() and outlives the menu system; gpio_viz has static
+    // storage so its address is stable.
+    GpioVizState* gpvz_draw = &gpio_viz;
+    auto draw_gpio_visualizer = [gpio_active_set, i2c_peripherals, gpvz_draw]() -> MenuContextPanelDraw {
+        return [gpio_active_set, i2c_peripherals, gpvz_draw]
+               (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            const auto active_set = gpio_active_set();
+            const auto i2c        = i2c_peripherals();
+            ImFont* font = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+
+            // Title.
+            dl->AddText(font, fs * 1.1f, {o.x, o.y},
+                        IM_COL32(230, 235, 240, 255), "GPIO Header (Pi 5 / CM5)");
+
+            const float top    = o.y + fs * 1.6f;
+            const float avail_h = std::max(80.f, sz.y - (top - o.y) - 4.f);
+            const float row_h   = std::max(14.f, std::min(28.f, avail_h / 21.f));
+            const float pin_sz  = row_h * 0.78f;
+            const float label_w = std::max(48.f, (sz.x - pin_sz * 2.f - 14.f) / 6.f);
+            const float label_fs = std::max(9.f, fs * 0.72f);
+
+            const float center_x   = o.x + sz.x * 0.5f;
+            const float pin_left_x = center_x - pin_sz - 3.f;
+            const float pin_right_x = center_x + 3.f;
+
+            const ImU32 outline_active   = IM_COL32(120, 230, 110, 255);
+            const ImU32 outline_inactive = IM_COL32(120, 130, 140, 200);
+            const ImU32 label_col        = IM_COL32(220, 225, 230, 230);
+            const ImU32 label_dim        = IM_COL32(160, 170, 180, 220);
+            const ImU32 pin_num_col      = IM_COL32(20, 24, 28, 255);
+
+            // Hover state for the I²C tooltip.
+            const ImVec2 mp = ImGui::GetMousePos();
+            int hovered_bcm = -1;
+            bool hovered_i2c = false;
+            ImVec2 hover_pos{};
+
+            auto draw_label = [&](float x, float y, float w, const char* text,
+                                  bool right_align, ImU32 col) {
+                if (!text || !*text) return;
+                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, text);
+                const float tx = right_align ? (x + w - ts.x) : x;
+                dl->AddText(font, label_fs, {tx, y}, col, text);
+            };
+
+            for (int row = 0; row < 20; ++row) {
+                const sys::GpioPin& pl = sys::kPi40Pins[row * 2];     // odd phys (left col)
+                const sys::GpioPin& pr = sys::kPi40Pins[row * 2 + 1]; // even phys (right col)
+                const float y = top + row * row_h;
+                const float cy = y + (row_h - pin_sz) * 0.5f;
+
+                auto draw_pin = [&](float x, const sys::GpioPin& p, bool right_side) {
+                    const ImU32 fill = sys::pin_kind_color(p.kind);
+                    const bool is_active = p.bcm >= 0 && active_set.count(p.bcm);
+                    const ImU32 outline = is_active ? outline_active
+                                                    : (gpvz_draw->show_inactive
+                                                       ? outline_inactive : 0);
+                    dl->AddRectFilled({x, cy}, {x + pin_sz, cy + pin_sz}, fill, 3.f);
+                    if (outline)
+                        dl->AddRect({x, cy}, {x + pin_sz, cy + pin_sz},
+                                    outline, 3.f, 0, is_active ? 2.5f : 1.5f);
+                    if (gpvz_draw->show_pin_num) {
+                        char buf[6];
+                        std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(p.physical));
+                        const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, buf);
+                        dl->AddText(font, label_fs,
+                                    {x + (pin_sz - ts.x) * 0.5f,
+                                     cy + (pin_sz - ts.y) * 0.5f},
+                                    pin_num_col, buf);
+                    }
+                    // Hover detection (over square OR its labels).
+                    const float hit_l = right_side ? x : (x - label_w * 3.f - 6.f);
+                    const float hit_r = right_side ? (x + pin_sz + label_w * 3.f + 6.f)
+                                                   : (x + pin_sz);
+                    if (mp.x >= hit_l && mp.x < hit_r &&
+                        mp.y >= cy && mp.y < cy + pin_sz) {
+                        hovered_bcm = p.bcm;
+                        hovered_i2c = (p.kind == sys::PinKind::I2c);
+                        hover_pos   = {x + pin_sz * 0.5f, cy + pin_sz};
+                    }
+                };
+                draw_pin(pin_left_x,  pl, false);
+                draw_pin(pin_right_x, pr, true);
+
+                // Label columns radiate away from the centre. For the left
+                // column of pins, labels go leftward (right-aligned); for the
+                // right column, labels go rightward (left-aligned).
+                const float ly = y + (row_h - label_fs) * 0.5f;
+                if (gpvz_draw->show_primary) {
+                    draw_label(pin_left_x - 4.f - label_w, ly, label_w, pl.primary,
+                               /*right_align=*/true, label_col);
+                    draw_label(pin_right_x + pin_sz + 4.f, ly, label_w, pr.primary,
+                               /*right_align=*/false, label_col);
+                }
+                if (gpvz_draw->show_secondary) {
+                    draw_label(pin_left_x - 4.f - label_w * 2.f - 4.f, ly, label_w,
+                               pl.secondary, true, label_dim);
+                    draw_label(pin_right_x + pin_sz + 4.f + label_w + 4.f, ly, label_w,
+                               pr.secondary, false, label_dim);
+                }
+                if (gpvz_draw->show_tertiary) {
+                    draw_label(pin_left_x - 4.f - label_w * 3.f - 8.f, ly, label_w,
+                               pl.tertiary, true, label_dim);
+                    draw_label(pin_right_x + pin_sz + 4.f + label_w * 2.f + 8.f, ly, label_w,
+                               pr.tertiary, false, label_dim);
+                }
+            }
+
+            // I²C tooltip: when hovering an SDA/SCL pin or label, list every
+            // peripheral configured on /dev/i2c-1.
+            if (hovered_i2c) {
+                std::vector<std::string> lines;
+                lines.push_back("I\xc2\xb2""C bus /dev/i2c-1");
+                if (i2c.empty()) {
+                    lines.push_back("  (no peripherals enabled)");
+                } else {
+                    for (const auto& [addr, name] : i2c) {
+                        char buf[80];
+                        std::snprintf(buf, sizeof(buf), "  0x%02X  %s",
+                                      addr, name.c_str());
+                        lines.push_back(buf);
+                    }
+                }
+                // Measure and draw a tooltip box just below the hovered pin.
+                float w = 0, h = 0;
+                for (const auto& l : lines) {
+                    const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, l.c_str());
+                    w = std::max(w, ts.x);
+                    h += label_fs + 2.f;
+                }
+                const float pad = 6.f;
+                ImVec2 tp = {hover_pos.x + 8.f, hover_pos.y + 4.f};
+                // Keep within the pane.
+                tp.x = std::min(tp.x, o.x + sz.x - w - pad * 2.f - 2.f);
+                tp.y = std::min(tp.y, o.y + sz.y - h - pad * 2.f - 2.f);
+                dl->AddRectFilled({tp.x, tp.y},
+                                  {tp.x + w + pad * 2.f, tp.y + h + pad * 2.f},
+                                  IM_COL32(14, 18, 24, 235), 3.f);
+                dl->AddRect({tp.x, tp.y},
+                            {tp.x + w + pad * 2.f, tp.y + h + pad * 2.f},
+                            IM_COL32(120, 230, 110, 220), 3.f, 0, 1.f);
+                float ly = tp.y + pad;
+                for (const auto& l : lines) {
+                    dl->AddText(font, label_fs, {tp.x + pad, ly},
+                                IM_COL32(220, 230, 240, 240), l.c_str());
+                    ly += label_fs + 2.f;
+                }
+            }
+        };
+    };
+
+    GpioVizState* gpvz = &gpio_viz;   // static storage — capture by pointer is safe
+    std::vector<MenuItem> gpio_viz_menu = {
+        toggle("Show Pin Numbers",
+            [gpvz]{ return gpvz->show_pin_num; },
+            [gpvz](bool v){ gpvz->show_pin_num = v; }),
+        toggle("Show Primary Function",
+            [gpvz]{ return gpvz->show_primary; },
+            [gpvz](bool v){ gpvz->show_primary = v; }),
+        toggle("Show Secondary Function",
+            [gpvz]{ return gpvz->show_secondary; },
+            [gpvz](bool v){ gpvz->show_secondary = v; }),
+        toggle("Show Tertiary Function",
+            [gpvz]{ return gpvz->show_tertiary; },
+            [gpvz](bool v){ gpvz->show_tertiary = v; }),
+        toggle("Outline Inactive Pins",
+            [gpvz]{ return gpvz->show_inactive; },
+            [gpvz](bool v){ gpvz->show_inactive = v; }),
+    };
+    MenuItem gpio_viz_item = with_panel(
+        submenu("GPIO Visualizer", std::move(gpio_viz_menu)),
+        "Pi 40-pin Header", draw_gpio_visualizer());
+    gpio_viz_item.description =
+        "Pi Foundation–style 2x20 view of the GPIO header. Pin squares are "
+        "colour-coded by function family (power / GND / GPIO / I\xc2\xb2""C / "
+        "SPI / UART / PWM / PCM / CLK / HAT-ID). Green outlines mark pins "
+        "claimed by something in config.json (SPI buses in use, enabled I\xc2\xb2""C "
+        "peripherals, GPIO buttons, MAX7219 / RGB-matrix chains). Hover an "
+        "I\xc2\xb2""C pin to list the active devices on /dev/i2c-1.";
+
     std::vector<MenuItem> system_menu = {
         submenu("Headset & Tracking", std::move(headset_menu)),
         with_desc(submenu("HUD / Menu Presets", std::move(hud_presets_menu)),
@@ -5424,6 +5704,7 @@ static std::vector<MenuItem> build_menu(
                 }
             }),
         leaf("Refresh Bluetooth", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
+        std::move(gpio_viz_item),
         submenu("Software",   std::move(software_menu)),
         submenu("Demo Mode",  std::move(demo_menu)),
         leaf("Request Status", [teensy]{ teensy->request_status(); }),
