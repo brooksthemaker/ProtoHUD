@@ -9014,13 +9014,20 @@ int main(int argc, char* argv[]) {
             if      (hud.toast_has_focused()) hud.toast_navigate(-1);
             else if (menu.is_open())          menu.back();
         });
+        // Editor lockdown — when the face editor is the active overlay the
+        // wireless cursor must not page through the menu underneath. Up/Down
+        // still route through menu.navigate (which forwards to face_editor_'s
+        // vertical cursor step); Left/Right route through menu.back/select,
+        // which would cancel/paint inside the editor — drop those.
         wireless.on_nav_up   ([&menu]{ if (menu.is_open()) menu.navigate(-1); });
         wireless.on_nav_down ([&menu]{ if (menu.is_open()) menu.navigate(+1); });
         wireless.on_nav_left ([&menu, &hud]{
+            if (menu.is_face_editor_open())   return;
             if      (hud.toast_has_focused()) hud.toast_navigate(-1);
             else if (menu.is_open())          menu.back();
         });
         wireless.on_nav_right([&menu, &hud, &state]{
+            if (menu.is_face_editor_open())   return;
             if      (hud.toast_has_focused()) hud.toast_navigate(+1);
             else if (menu.is_open())          menu.select();
         });
@@ -9290,6 +9297,7 @@ int main(int argc, char* argv[]) {
     gamepad.on_nav_up   ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,+0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,-1);return;} if (landing.active){landing_nav(-1);return;} if (menu.is_open()) menu.navigate(menu.editing_value() ? +1 : -1); });
     gamepad.on_nav_down ([&menu, &landing, &landing_nav, &state, &map_pan]{ if (state.map_overlay.expanded){map_pan(0,-0.06f);return;} if (menu.is_keyboard_open()){menu.osk_move(0,+1);return;} if (landing.active){landing_nav(+1);return;} if (menu.is_open()) menu.navigate(menu.editing_value() ? -1 : +1); });
     gamepad.on_nav_left ([&menu, &hud, &landing, &bg_lib, &state, &map_pan]{
+        if (menu.is_face_editor_open())   return;   // editor owns the d-pad
         if      (state.map_overlay.expanded) map_pan(+0.06f, 0);
         else if (menu.is_keyboard_open()) menu.osk_move(-1, 0);
         else if (landing.active)          bg_lib.prev();
@@ -9297,6 +9305,7 @@ int main(int argc, char* argv[]) {
         else if (menu.is_open())          menu.back();
     });
     gamepad.on_nav_right([&menu, &hud, &state, &landing, &bg_lib, &map_pan]{
+        if (menu.is_face_editor_open())   return;
         if      (state.map_overlay.expanded) map_pan(-0.06f, 0);
         else if (menu.is_keyboard_open()) menu.osk_move(+1, 0);
         else if (landing.active)          bg_lib.next();
@@ -9304,14 +9313,18 @@ int main(int argc, char* argv[]) {
         else if (menu.is_open())          menu.select();
     });
     // LB/RB: zoom the expanded map, else cycle the landing background, switch
-    // deep-menu tabs while it's open, otherwise toggle the PiPs.
+    // deep-menu tabs while it's open, otherwise toggle the PiPs. While the
+    // editor is open the shoulder buttons cycle the palette (via the menu_system
+    // handler) so we must not also tab through the menu underneath.
     gamepad.on_pip_left ([&menu, &kb_pip_left, &landing, &bg_lib, &state, &map_zoom] {
+        if (menu.is_face_editor_open())  return;
         if      (state.map_overlay.expanded) map_zoom(-0.4f);
         else if (landing.active)        bg_lib.prev();
         else if (menu.is_deep_open())   menu.prev_tab();
         else                            kb_pip_left  = !kb_pip_left;
     });
     gamepad.on_pip_right([&menu, &kb_pip_right, &landing, &bg_lib, &state, &map_zoom]{
+        if (menu.is_face_editor_open())  return;
         if      (state.map_overlay.expanded) map_zoom(+0.4f);
         else if (landing.active)        bg_lib.next();
         else if (menu.is_deep_open())   menu.next_tab();
@@ -10145,7 +10158,13 @@ int main(int argc, char* argv[]) {
             if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_F1)) menu.osk_cancel();
             for (ImWchar ch : ImGui::GetIO().InputQueueCharacters)
                 menu.osk_input_char(static_cast<unsigned int>(ch));
-        } else {
+        } else if (!menu.is_face_editor_open()) {
+        // Editor lockdown: skip ALL global ImGui hotkeys (Escape/P quit,
+        // Ctrl+Q/K force-kill, I menu toggle, F1 deep-menu toggle, Tab tab
+        // switch, N expanded map, E/Q/W/D vision-assist, C capture) while
+        // the face editor owns the screen. The editor has its own keyboard
+        // handling in menu_system.cpp; the user can Back out of the editor
+        // first if they need any of these.
         if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_P)) { state.quit = true; break; }
         // Ctrl+Q / Ctrl+K — force-kill (immediate exit, skips graceful cleanup)
         if (ImGui::GetIO().KeyCtrl &&
@@ -10264,12 +10283,20 @@ int main(int argc, char* argv[]) {
         // clears, restoring the PiP if it was on or closing a temp-opened stream.
         int preview = usb_preview_req;   // set during last frame's menu draw
         usb_preview_req = 0;             // re-set this frame if a panel is still up
-        bool p1 = pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left;
-        bool p2 = pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right;
-        bool p3 = pip_cam3_overlay_active;
-        bool want1 = p1 || preview == 1;
-        bool want2 = p2 || preview == 2;
-        bool want3 = p3 || preview == 3;
+        // Editor full-screen mode: while the face editor is open we close
+        // every USB camera stream and hide the on-screen PiPs. The existing
+        // open/close edge logic on want1/2/3 picks the streams back up when
+        // the user closes the editor. CSI eye cameras keep running so the
+        // renderer still has eye textures behind the editor overlay.
+        const bool editor_open = menu.is_face_editor_open();
+        bool p1 = (pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left)
+                  && !editor_open;
+        bool p2 = (pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right)
+                  && !editor_open;
+        bool p3 = pip_cam3_overlay_active && !editor_open;
+        bool want1 = (p1 || preview == 1) && !editor_open;
+        bool want2 = (p2 || preview == 2) && !editor_open;
+        bool want3 = (p3 || preview == 3) && !editor_open;
         if (want1 && !prev_p1) { tex_usb1 = 0; std::thread([&cameras]{ cameras.open_usb1(); }).detach(); }
         if (!want1 && prev_p1) { cameras.close_usb1(); tex_usb1 = 0; }
         if (want2 && !prev_p2) { tex_usb2 = 0; std::thread([&cameras]{ cameras.open_usb2(); }).detach(); }
@@ -10974,14 +11001,21 @@ int main(int argc, char* argv[]) {
         // Pass full display dimensions so NanoVG covers both eye halves.
         glViewport(0, 0, xr.display_width(), xr.display_height());
         hud.begin_nvg_overlay(xr.display_width(), xr.display_height());
-        // Hide the on-screen PiP for a slot whose live-preview panel is up — its
-        // feed is shown in the context pane instead (preview set above this frame).
-        hud.draw_pip_underlays(tex_usb1, p1 && preview != 1, pip_overlay_cfg1,
-                               tex_usb2, p2 && preview != 2, pip_overlay_cfg2,
-                               tex_usb3, p3 && preview != 3, pip_overlay_cfg3,
-                               xr.display_width(), xr.display_height());
-        hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
-        hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
+        // Editor full-screen mode: skip every HUD chrome draw (PiP underlays,
+        // info panel + compass + minimap + clock chrome, toast banners) so
+        // the editor sits cleanly on top of the eye texture with no UI
+        // clutter. Toasts re-appear on close because they're a queue, not a
+        // timed overlay.
+        if (!editor_open) {
+            // Hide the on-screen PiP for a slot whose live-preview panel is up — its
+            // feed is shown in the context pane instead (preview set above this frame).
+            hud.draw_pip_underlays(tex_usb1, p1 && preview != 1, pip_overlay_cfg1,
+                                   tex_usb2, p2 && preview != 2, pip_overlay_cfg2,
+                                   tex_usb3, p3 && preview != 3, pip_overlay_cfg3,
+                                   xr.display_width(), xr.display_height());
+            hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
+            hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
+        }
         hud.end_nvg_overlay();
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
@@ -11082,7 +11116,7 @@ int main(int argc, char* argv[]) {
             return FaceTex{native_tex, native_w, native_h, true};
         };
 
-        if (panel_preview_enabled) {
+        if (panel_preview_enabled && !editor_open) {
             const FaceTex ft = pick_face_tex();
             // On native backends the texture already IS the centred face
             // (canvas-mirroring is HUB75-only), so left/right/full views
@@ -11105,7 +11139,7 @@ int main(int argc, char* argv[]) {
         // System status panel (CPU/RAM/WiFi/ping/BT/SSH/perf/serial).
         // Debug panel: normal toggle, plus an option to show it in the expanded-map
         // view. When expanded, it opens to the right of the info sidebar (~310px).
-        {
+        if (!editor_open) {
             const bool expanded_view = snap.map_overlay.expanded;
             const bool show_dbg = sys_panel_active ||
                                   (expanded_view && snap.expanded_show_debug);
