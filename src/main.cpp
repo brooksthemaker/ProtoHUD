@@ -59,6 +59,7 @@
 #include "qr_scanner.h"
 #include "splash.h"
 #include "integrations/kdeconnect_bridge.h"   // header is dbus-free; .cpp guarded by HAVE_DBUS in CMake
+#include "integrations/phone_inbox.h"
 #include "hud/background_library.h"
 #include "profile_manager.h"
 #include "face/face_config.h"
@@ -8020,6 +8021,19 @@ int main(int argc, char* argv[]) {
         kdc_cfg.app_blocklist  = jk.value("app_blocklist",  kdc_cfg.app_blocklist);
     }
 
+    // Phone Inbox — watches a directory (default ~/Downloads) for files
+    // shared from the phone (via KDE Connect Share or anything else) and
+    // surfaces import-prompt toasts. Doesn't depend on DBus; works even
+    // when the user shares files some other way (sftp, scp, etc.).
+    integrations::PhoneInboxConfig pi_cfg;
+    if (cfg.contains("phone_inbox")) {
+        auto& jp = cfg["phone_inbox"];
+        pi_cfg.enabled        = jval(jp, "enabled",        pi_cfg.enabled);
+        pi_cfg.watch_dir      = jp.value("watch_dir",      pi_cfg.watch_dir);
+        pi_cfg.settle_seconds = jval(jp, "settle_seconds", pi_cfg.settle_seconds);
+        pi_cfg.auto_dismiss_s = jval(jp, "auto_dismiss_s", pi_cfg.auto_dismiss_s);
+    }
+
     if (cfg.contains("pip")) {
         auto& jpip = cfg["pip"];
         float def_size = jval(jpip, "size", 0.25f);
@@ -9299,6 +9313,50 @@ int main(int argc, char* argv[]) {
     BackgroundLibrary* bg_lib_ptr = nullptr;   // set after bg_lib is constructed
     std::vector<MenuItem> quick_items;   // curated corner/radial quick-menu tree
     std::string cfg_gifs_dir = pf_build_render_config(cfg).gifs_dir;
+
+    // Phone Inbox — watches the configured drop directory (default
+    // ~/Downloads) and toasts an Import prompt when a face PNG or GIF
+    // appears. Handlers capture face_proxy + cfg_gifs_dir by reference so
+    // they hit whichever backend is live at the moment the user accepts.
+    const bool pi_enabled = pi_cfg.enabled;
+    integrations::PhoneInbox phone_inbox(
+        state, std::move(pi_cfg),
+        /* import_face */
+        [&face_proxy](const std::string& src_path,
+                      const std::string& expression) -> bool {
+            return face_proxy.import_face_image(expression, src_path);
+        },
+        /* import_gif */
+        [&face_proxy, &cfg_gifs_dir](const std::string& src_path,
+                                     const std::string& filename) -> bool {
+            namespace fs = std::filesystem;
+            if (cfg_gifs_dir.empty()) return false;
+            std::error_code ec;
+            fs::create_directories(cfg_gifs_dir, ec);
+            const fs::path dst = fs::path(cfg_gifs_dir) / filename;
+            fs::copy_file(src_path, dst,
+                          fs::copy_options::overwrite_existing, ec);
+            if (ec) return false;
+            // Bind to the first empty slot so the user can play it
+            // immediately via the GIFs quick menu. If every slot is
+            // bound, fall through and let the user pick one manually
+            // later — the file still lives in gifs_dir.
+            for (uint8_t i = 0; i < 8; ++i) {
+                if (face_proxy.gif_slot(i).empty()) {
+                    face_proxy.bind_gif_slot(i, filename);
+                    break;
+                }
+            }
+            return true;
+        });
+    if (pi_enabled) {
+        if (!phone_inbox.start())
+            std::cout << "[phone-inbox] disabled (failed to open watch dir)\n";
+        else
+            std::cout << "[phone-inbox] watching " << phone_inbox.watch_dir() << "\n";
+    } else {
+        std::cout << "[phone-inbox] disabled (cfg.phone_inbox.enabled=false)\n";
+    }
     std::string cfg_bg_user_dir;
     if (const char* home = std::getenv("HOME"))
         cfg_bg_user_dir = std::string(home) + "/protohud/backgrounds";

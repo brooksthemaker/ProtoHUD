@@ -225,6 +225,7 @@ set(SOURCES
     src/video_recorder.cpp
     src/qr_scanner.cpp
     src/splash.cpp
+    src/integrations/phone_inbox.cpp
     $<$<BOOL:${DBUS_FOUND}>:src/integrations/kdeconnect_bridge.cpp>
     src/nanovg_gl_impl.cpp
     src/hud/toast_renderer.cpp
