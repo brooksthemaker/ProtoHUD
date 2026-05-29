@@ -108,6 +108,13 @@
       "_note": "ESP32-C3 USB-serial bridge for ESP-NOW in-paw controller. Set enabled:true and adjust port once the bridge is connected."
     }
   },
+  "network_control": {
+    "enabled": false,
+    "host": "0.0.0.0",
+    "port": 8780,
+    "token": "",
+    "_note": "REST control server for the ProtoHUD companion app (Flutter). Reach it over the Pi's broadcast Wi-Fi (scripts/setup_companion_ap.sh) or a USB tether (scripts/setup_companion_usb.sh). Set enabled:true. token=\"\" disables auth (fine for the isolated AP/USB link); set a string to require an X-ProtoHUD-Token header. See docs/COMPANION_API.md."
+  },
   "vitrue": {
     "product_id": 0,
     "monitor_index": -1,

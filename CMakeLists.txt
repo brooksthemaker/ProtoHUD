@@ -138,6 +138,16 @@ FetchContent_MakeAvailable(qrcodegen)
 add_library(qrcodegen_cpp STATIC "${qrcodegen_SOURCE_DIR}/cpp/qrcodegen.cpp")
 target_include_directories(qrcodegen_cpp PUBLIC "${qrcodegen_SOURCE_DIR}/cpp")
 
+# cpp-httplib (yhirose, MIT) — single-header HTTP server powering the companion
+# app's REST control API (src/net/remote_control_server.cpp). Header-only, so we
+# only need its include dir; no library to compile.
+FetchContent_Declare(httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG        v0.15.3
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(httplib)
+
 
 # ImGui has no CMakeLists — build it as a static library here.
 add_library(imgui STATIC
@@ -212,6 +222,7 @@ set(SOURCES
     src/net/ping_monitor.cpp
     src/net/bt_monitor.cpp
     src/net/weather_monitor.cpp
+    src/net/remote_control_server.cpp
     src/crash_reporter.cpp
     src/capture.cpp
     src/video_recorder.cpp
@@ -228,6 +239,7 @@ target_include_directories(protohud PRIVATE
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
     ${stb_SOURCE_DIR}
+    ${httplib_SOURCE_DIR}
     ${nanovg_SOURCE_DIR}/src
     ${VITURE_INCLUDE}
     ${OpenCV_INCLUDE_DIRS}

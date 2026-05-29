@@ -619,6 +619,35 @@ Or set `"android"."enabled": true` in `config.json` to auto-start on launch.
 
 ---
 
+## Companion App
+
+A cross-platform **companion app** (Flutter — see the `protohud-companion-` repo)
+controls the helmet from a phone over IP: **face control** (color, brightness, GIF
+slots, palette, effect) and a **remote control pad** (D-pad + select/back/menu,
+autofocus, capture) that mirrors the in-paw wireless controller.
+
+It talks to a small REST server hosted *inside* `protohud` (it must be in-process —
+`protohud` owns the LED serial ports). Enable it in `config/config.json`:
+
+```jsonc
+"network_control": { "enabled": true, "host": "0.0.0.0", "port": 8780, "token": "" }
+```
+
+Reach it two ways (both bind the same socket):
+
+| Transport | Setup | App connects to |
+|-----------|-------|-----------------|
+| **Pi broadcast Wi-Fi (AP)** | `sudo ./scripts/setup_companion_ap.sh` — Pi serves SSID `ProtoHUD` | `192.168.50.1:8780` |
+| **USB tether** | `sudo ./scripts/setup_companion_usb.sh` — USB-ethernet gadget | `192.168.42.1:8780` |
+
+`token: ""` disables auth (fine for the isolated AP/USB link); set a string to
+require an `X-ProtoHUD-Token` header. The full wire contract is in
+[`docs/COMPANION_API.md`](docs/COMPANION_API.md). The pad fires the exact same
+menu/HUD actions as the `WirelessController`, so behaviour is identical across
+serial, ESP-NOW, and the phone.
+
+---
+
 ## Overlay Position & Size
 
 Both the USB camera PiP and the Android mirror overlay use the same anchor system.

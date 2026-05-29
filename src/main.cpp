@@ -28,6 +28,7 @@
 #include "input/gpio_buttons.h"
 #include "input/gamepad_input.h"
 #include "input/wireless_controller.h"
+#include "net/remote_control_server.h"
 #include "serial/face_controller.h"
 #include "serial/protoface_controller.h"
 #include "serial/teensy_controller.h"
@@ -9003,6 +9004,18 @@ int main(int argc, char* argv[]) {
     SmartKnob            knob    (knob_port,     baud, state);
     WirelessController   wireless(wireless_port, baud);
 
+    // Companion-app control server (REST over the Pi's AP / USB-tether link).
+    // Disabled unless config has "network_control": { "enabled": true }.
+    RemoteControlServer::Config remote_cfg;
+    if (cfg.contains("network_control")) {
+        const auto& jnc = cfg["network_control"];
+        remote_cfg.enabled = jnc.value("enabled", false);
+        remote_cfg.host    = jnc.value("host",    remote_cfg.host);
+        remote_cfg.port    = jnc.value("port",    remote_cfg.port);
+        remote_cfg.token   = jnc.value("token",   std::string());
+    }
+    RemoteControlServer  remote(state, &face_proxy, remote_cfg);
+
     // Native in-process face renderer (only constructed in "native" mode). It
     // renders the LED face in C++ and writes the same /dev/shm frame the daemon
     // would, so the existing preview path and panel_driver.py work unchanged.
@@ -9575,6 +9588,44 @@ int main(int argc, char* argv[]) {
         });
         wireless.start();
     }
+
+    // Companion app control server — wire the remote "pad" to the SAME menu/hud
+    // actions as the in-paw wireless controller so both transports behave
+    // identically. Face commands inside the server go straight to face_proxy
+    // (the same path the menu leaf lambdas use). start() is a no-op when the
+    // network_control config block is absent or disabled.
+    remote.on_menu([&menu]{
+        if (menu.is_open()) menu.close(); else menu.open();
+    });
+    remote.on_select([&menu, &hud, &state]{
+        if      (menu.is_open())          menu.select();
+        else if (hud.toast_has_focused()) hud.toast_select(state);
+    });
+    remote.on_back([&menu, &hud]{
+        if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+        else if (menu.is_open())          menu.back();
+    });
+    remote.on_nav_up   ([&menu]{ if (menu.is_open()) menu.navigate(-1); });
+    remote.on_nav_down ([&menu]{ if (menu.is_open()) menu.navigate(+1); });
+    remote.on_nav_left ([&menu, &hud]{
+        if (menu.is_face_editor_open())   return;
+        if      (hud.toast_has_focused()) hud.toast_navigate(-1);
+        else if (menu.is_open())          menu.back();
+    });
+    remote.on_nav_right([&menu, &hud]{
+        if (menu.is_face_editor_open())   return;
+        if      (hud.toast_has_focused()) hud.toast_navigate(+1);
+        else if (menu.is_open())          menu.select();
+    });
+    remote.on_af([&cameras]{
+        if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+        if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+    });
+    remote.on_capture([&state]{
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.capture_request = CaptureRequest::Stereo;
+    });
+    remote.start();
 
     // Restore menu style from a previous session.
     if (cfg.contains("menu_style")) {
@@ -11757,6 +11808,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->stop();                                                        // blanks the shm too
     }
     step("protoface");       protoface_ctrl.shutdown_daemon(); protoface_ctrl.stop();
+    step("remote");          remote.stop();
     step("lora");            lora.stop();
     step("knob");            knob.stop();
     step("textures");
