@@ -115,6 +115,19 @@ bool NativeFaceController::start() {
 void NativeFaceController::stop() {
     if (!running_.exchange(false)) return;
     if (thread_.joinable()) thread_.join();
+    // Restore any still-active transient face overlays so the saved
+    // PNG image survives the next start() (loaders cache in-memory).
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        for (const auto& t : transient_faces_) {
+            if (t.panel_idx < 0 || t.panel_idx >= static_cast<int>(panels_.size()))
+                continue;
+            auto& pn = panels_[t.panel_idx];
+            if (pn.loader)
+                pn.loader->set_expression_image(t.expression, t.original_image);
+        }
+        transient_faces_.clear();
+    }
     if (output_) output_->close();   // blank the panels on shutdown
 }
 
@@ -134,6 +147,28 @@ void NativeFaceController::render_thread() {
                                   cfg_.background[2]));
         {
             std::lock_guard<std::mutex> lk(state_mtx_);
+
+            // Expire any transient face overlays whose deadline has passed —
+            // restore the original expression image to the loader and drop
+            // the record. Done before render so this tick uses the restored
+            // image.
+            if (!transient_faces_.empty()) {
+                auto tnow = clock::now();
+                for (auto it = transient_faces_.begin(); it != transient_faces_.end();) {
+                    if (tnow >= it->deadline) {
+                        if (it->panel_idx >= 0 &&
+                            it->panel_idx < static_cast<int>(panels_.size())) {
+                            auto& pn = panels_[it->panel_idx];
+                            if (pn.loader)
+                                pn.loader->set_expression_image(it->expression,
+                                                                it->original_image);
+                        }
+                        it = transient_faces_.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
 
             // Render each self-rendering panel into its region.
             for (auto& pn : panels_) {
@@ -492,6 +527,27 @@ bool NativeFaceController::import_face_image(const std::string& expression,
         return false;
     }
 
+    // Stamp the face folder with the active layout name on first import so
+    // the menu can flag mismatches when the user switches layouts. Already-
+    // tagged folders are left alone — re-importing into an existing face
+    // shouldn't silently re-bind it to whatever the user picked since.
+    if (!active_layout_name_.empty()) {
+        const std::string cfg_path = folder + "/config.json";
+        nlohmann::json jcfg = nlohmann::json::object();
+        std::ifstream fr(cfg_path);
+        if (fr) { try { fr >> jcfg; } catch (...) { jcfg = nlohmann::json::object(); } }
+        if (!jcfg.is_object()) jcfg = nlohmann::json::object();
+        bool tagged = jcfg.contains("layout") && jcfg["layout"].is_string() &&
+                      !jcfg["layout"].get<std::string>().empty();
+        if (!tagged) {
+            jcfg["layout"] = active_layout_name_;
+            const std::string tmp = cfg_path + ".tmp";
+            { std::ofstream fw(tmp); if (fw) fw << jcfg.dump(2); }
+            std::error_code rec;
+            std::filesystem::rename(tmp, cfg_path, rec);
+        }
+    }
+
     // Rebuild every non-mirror panel's loader so the new PNG takes effect on
     // the next render tick. (Cheap — just re-decodes the folder's images.)
     for (auto& pn : panels_) {
@@ -500,6 +556,39 @@ bool NativeFaceController::import_face_image(const std::string& expression,
             cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
     }
     return true;
+}
+
+void NativeFaceController::set_active_layout_name(const std::string& name) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    active_layout_name_ = name;
+}
+
+std::string NativeFaceController::face_image_layout(const std::string& expression) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    // Layout tags live at face-folder scope (faces/<folder>/config.json),
+    // so all expressions in the same folder share a tag. We look at the
+    // first non-mirror panel's active folder, same as face_image_path.
+    for (const auto& pn : panels_) {
+        if (pn.is_mirror || !pn.loader) continue;
+        const std::string cfg_path =
+            cfg_.faces_dir + "/" + pn.cfg.face.active + "/config.json";
+        // Only return a tag when the actual PNG exists — keeps "(empty)"
+        // slots from picking up a folder-wide tag they don't own.
+        const std::string png =
+            cfg_.faces_dir + "/" + pn.cfg.face.active + "/" +
+            canonical_face_filename(expression);
+        std::error_code ec;
+        if (!std::filesystem::exists(png, ec)) return {};
+        std::ifstream fr(cfg_path);
+        if (!fr) return {};
+        try {
+            nlohmann::json j; fr >> j;
+            if (j.is_object() && j.contains("layout") && j["layout"].is_string())
+                return j["layout"].get<std::string>();
+        } catch (...) {}
+        return {};
+    }
+    return {};
 }
 
 void NativeFaceController::clear_face_image(const std::string& expression) {
@@ -597,6 +686,61 @@ void NativeFaceController::reload_active_face() {
         if (pn.is_mirror || !pn.state) continue;
         pn.loader = std::make_unique<FaceLoader>(
             cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+    }
+}
+
+void NativeFaceController::push_transient_face(const std::string& expression,
+                                                const cv::Mat& rgba_canvas,
+                                                double duration_s) {
+    if (rgba_canvas.empty() || duration_s <= 0.0) return;
+    std::lock_guard<std::mutex> lk(state_mtx_);
+
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(duration_s));
+    const cv::Rect canvas_bounds(0, 0, rgba_canvas.cols, rgba_canvas.rows);
+
+    for (size_t i = 0; i < panels_.size(); ++i) {
+        auto& pn = panels_[i];
+        if (pn.is_mirror || !pn.loader) continue;
+
+        const PanelCfg& pc = pn.cfg;
+        cv::Rect roi = cv::Rect(pc.x, pc.y, pc.w, pc.h) & canvas_bounds;
+        if (roi.area() <= 0) continue;
+
+        cv::Mat crop = rgba_canvas(roi).clone();
+        if (crop.cols != pn.loader->panel_width() ||
+            crop.rows != pn.loader->panel_height()) {
+            cv::Mat resized;
+            cv::resize(crop, resized,
+                       cv::Size(pn.loader->panel_width(), pn.loader->panel_height()),
+                       0, 0, cv::INTER_NEAREST);
+            crop = resized;
+        }
+
+        // Stash the current image so the deadline pass can restore it.
+        // If we already pushed a transient for this panel+expression, keep
+        // the *earlier* original (avoids stacking previews from overwriting
+        // the user's saved image with another preview).
+        bool already = false;
+        for (auto& t : transient_faces_) {
+            if (t.panel_idx == static_cast<int>(i) && t.expression == expression) {
+                t.deadline = deadline;
+                already = true;
+                break;
+            }
+        }
+        if (!already) {
+            TransientFace t;
+            t.panel_idx      = static_cast<int>(i);
+            t.expression     = expression;
+            t.original_image = pn.loader->get_expression_image(expression);
+            t.deadline       = deadline;
+            transient_faces_.push_back(std::move(t));
+        }
+
+        pn.loader->set_expression_image(expression, crop);
     }
 }
 

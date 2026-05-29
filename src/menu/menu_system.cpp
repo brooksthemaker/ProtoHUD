@@ -317,7 +317,10 @@ void MenuSystem::open_face_editor(std::string title,
                                   menu::FaceEditor::Mode mode,
                                   std::vector<uint32_t> palette,
                                   menu::FaceEditor::CommitFn on_commit,
-                                  menu::FaceEditor::CancelFn on_cancel) {
+                                  menu::FaceEditor::CancelFn on_cancel,
+                                  menu::FaceEditor::PreviewFn on_preview,
+                                  menu::FaceEditor::LiveFrameFn live_frame,
+                                  double preview_duration_s) {
     // Mutually-exclusive overlays — bring others down first.
     if (osk_active_)              close_keyboard();
     if (file_picker_.is_open())   file_picker_.cancel();
@@ -327,7 +330,9 @@ void MenuSystem::open_face_editor(std::string title,
                       std::move(covered_labels),
                       mirror_axis_x,
                       mode, std::move(palette),
-                      std::move(on_commit), std::move(on_cancel));
+                      std::move(on_commit), std::move(on_cancel),
+                      std::move(on_preview), std::move(live_frame),
+                      preview_duration_s);
 }
 
 void MenuSystem::close_face_editor() {
@@ -1196,6 +1201,8 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
         if (ImGui::IsKeyPressed(ImGuiKey_Y) ||
             ImGui::IsKeyPressed(ImGuiKey_M))          face_editor_.tertiary();
         if (ImGui::IsKeyPressed(ImGuiKey_Z))          face_editor_.undo();
+        if (ImGui::IsKeyPressed(ImGuiKey_V))          face_editor_.preview();
+        if (ImGui::IsKeyPressed(ImGuiKey_T))          face_editor_.toggle_live();
         if (ImGui::IsKeyPressed(ImGuiKey_S))          face_editor_.save();
         // Direct tool selection. Number keys 1-6 map to the six tools in
         // declaration order (Pencil/Eraser/Bucket/Eyedrop/Line/Rect); the

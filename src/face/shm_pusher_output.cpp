@@ -10,9 +10,24 @@
 
 namespace face {
 
-ShmPusherOutput::ShmPusherOutput(int width, int height, std::string path)
-    : w_(width), h_(height), path_(std::move(path)) {
+ShmPusherOutput::ShmPusherOutput(int width, int height,
+                                 std::vector<Panel> panels, std::string path)
+    : w_(width), h_(height), panels_(std::move(panels)), path_(std::move(path)) {
     size_ = static_cast<size_t>(1) + static_cast<size_t>(w_) * h_ * 3;
+}
+
+std::vector<cv::Rect> ShmPusherOutput::covered_regions() const {
+    std::vector<cv::Rect> out;
+    out.reserve(panels_.size());
+    for (const auto& p : panels_) out.push_back(p.rect);
+    return out;
+}
+
+std::vector<NamedRegion> ShmPusherOutput::covered_named_regions() const {
+    std::vector<NamedRegion> out;
+    out.reserve(panels_.size());
+    for (const auto& p : panels_) out.push_back({p.name, p.rect});
+    return out;
 }
 
 ShmPusherOutput::~ShmPusherOutput() { close(); }

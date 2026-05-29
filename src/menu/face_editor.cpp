@@ -41,7 +41,10 @@ void FaceEditor::open(std::string title,
                      Mode mode,
                      std::vector<uint32_t> palette,
                      CommitFn on_commit,
-                     CancelFn on_cancel) {
+                     CancelFn on_cancel,
+                     PreviewFn on_preview,
+                     LiveFrameFn live_frame,
+                     double preview_duration_s) {
     if (canvas_w <= 0 || canvas_h <= 0) return;
 
     title_           = std::move(title);
@@ -55,8 +58,12 @@ void FaceEditor::open(std::string title,
     mode_      = mode;
     tool_      = Tool::Pencil;
     mirror_    = false;
-    on_commit_ = std::move(on_commit);
-    on_cancel_ = std::move(on_cancel);
+    on_commit_  = std::move(on_commit);
+    on_cancel_  = std::move(on_cancel);
+    on_preview_ = std::move(on_preview);
+    live_frame_ = std::move(live_frame);
+    preview_duration_s_ = (preview_duration_s > 0.0) ? preview_duration_s : 10.0;
+    live_mode_  = false;
 
     // Default palette fallback for color mode.
     palette_.clear();
@@ -120,10 +127,13 @@ void FaceEditor::open(std::string title,
 }
 
 void FaceEditor::close() {
-    open_      = false;
-    on_commit_ = nullptr;
-    on_cancel_ = nullptr;
-    canvas_    = cv::Mat();
+    open_       = false;
+    on_commit_  = nullptr;
+    on_cancel_  = nullptr;
+    on_preview_ = nullptr;
+    live_frame_ = nullptr;
+    live_mode_  = false;
+    canvas_     = cv::Mat();
     undo_stack_.clear();
     covered_.clear();
     covered_labels_.clear();
@@ -372,6 +382,20 @@ void FaceEditor::cycle_palette(int dir) {
     palette_idx_ = ((palette_idx_ + dir) % n + n) % n;
 }
 
+void FaceEditor::preview() {
+    if (!open_ || !on_preview_ || canvas_.empty()) return;
+    on_preview_(canvas_, preview_duration_s_);
+}
+
+void FaceEditor::toggle_live() {
+    if (!open_ || !live_frame_) return;
+    live_mode_ = !live_mode_;
+    // When entering live mode, also push the current canvas so the next
+    // few rendered frames already reflect the user's in-progress work.
+    if (live_mode_ && on_preview_)
+        on_preview_(canvas_, std::max(1.5, preview_duration_s_));
+}
+
 void FaceEditor::undo() {
     if (!open_) return;
     // Z while a shape anchor is set just cancels it (no canvas change to
@@ -431,12 +455,13 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     }
     const int brush_side = 1 + brush_size_ * 2;
     std::snprintf(sub, sizeof(sub),
-        "%dx%d  cursor (%d,%d)  %s  brush %dx%d%s%s",
+        "%dx%d  cursor (%d,%d)  %s  brush %dx%d%s%s%s",
         bbox_.width, bbox_.height,
         cursor_x_, cursor_y_,
         tool_str, brush_side, brush_side,
         mirror_ ? "  Mirror" : "",
-        mode_ == Mode::Color ? "  Color" : "  Mono");
+        mode_ == Mode::Color ? "  Color" : "  Mono",
+        live_mode_ ? "  Live" : "");
     dl->AddText(font, fs * 0.9f, {cx0, cy}, IM_COL32(170, 180, 190, 230), sub);
     cy += fs * 0.9f + 10.f;
     dl->AddLine({cx0, cy}, {cx1, cy}, IM_COL32(255, 255, 255, 60), 1.f);
@@ -446,7 +471,7 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     // readability. Two columns: general controls on the left, the six
     // numbered tools on the right. Height tracks the taller column.
     const float footer_line_h = fs * 0.95f + 2.f;
-    const int   left_lines    = (mode_ == Mode::Color) ? 8 : 7;
+    const int   left_lines    = (mode_ == Mode::Color) ? 10 : 9;
     const int   right_lines   = 6;   // 1..6 tool bindings
     const int   footer_lines  = std::max(left_lines, right_lines);
     const float footer_h      = footer_line_h * footer_lines + 12.f;
@@ -481,17 +506,45 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                               IM_COL32(24, 32, 44, 255));
         }
 
-        // Per-pixel cells.
+        // Live overlay — when enabled, keep pushing the user's in-progress
+        // canvas to the controller as a transient face so its renderer
+        // composites material + effects on top, then pull the rendered
+        // (RGB) frame back for display in place of the per-pixel cells.
+        // Falls through to the painted-canvas path if the controller hasn't
+        // produced a frame yet.
+        cv::Mat live;
+        bool have_live = false;
+        if (live_mode_) {
+            if (on_preview_) on_preview_(canvas_, 1.5);   // refresh deadline
+            if (live_frame_) have_live = live_frame_(live);
+            if (have_live && live.type() != CV_8UC3) {
+                cv::Mat tmp;
+                live.convertTo(tmp, CV_8UC3);
+                live = std::move(tmp);
+            }
+        }
+
+        // Per-pixel cells. In live mode we draw every covered cell from the
+        // rendered (RGB) frame; otherwise we draw the painted RGBA pixels and
+        // skip transparency so the bbox tint shows through.
         for (int py = 0; py < bbox_.height; ++py) {
             for (int px = 0; px < bbox_.width; ++px) {
                 const int cx_canvas = bbox_.x + px;
                 const int cy_canvas = bbox_.y + py;
                 if (!inside_covered(cx_canvas, cy_canvas)) continue;
-                const cv::Vec4b& pix = canvas_.at<cv::Vec4b>(cy_canvas, cx_canvas);
-                if (pix[3] == 0) continue;   // transparent — skip
+                ImU32 col;
+                if (have_live &&
+                    cx_canvas >= 0 && cx_canvas < live.cols &&
+                    cy_canvas >= 0 && cy_canvas < live.rows) {
+                    const cv::Vec3b& p = live.at<cv::Vec3b>(cy_canvas, cx_canvas);
+                    col = IM_COL32(p[0], p[1], p[2], 255);
+                } else {
+                    const cv::Vec4b& pix = canvas_.at<cv::Vec4b>(cy_canvas, cx_canvas);
+                    if (pix[3] == 0) continue;   // transparent — skip
+                    col = IM_COL32(pix[0], pix[1], pix[2], pix[3]);
+                }
                 const float rx = grid_origin_x_ + px * cell_size_;
                 const float ry = grid_origin_y_ + py * cell_size_;
-                const ImU32 col = IM_COL32(pix[0], pix[1], pix[2], pix[3]);
                 dl->AddRectFilled({rx, ry},
                                   {rx + cell_size_, ry + cell_size_}, col);
             }
@@ -649,6 +702,8 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         "Y / M        mirror",
         "[ / ]        palette colour",   // skipped in mono mode
         "Z            undo",
+        "V            preview to panels",
+        "T            show live (effects)",
         "S            save",
         "Back         cancel",
     };

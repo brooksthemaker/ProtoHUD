@@ -170,4 +170,17 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
     return frame;
 }
 
+cv::Mat FaceLoader::get_expression_image(const std::string& name) const {
+    auto it = expressions_.find(name);
+    if (it == expressions_.end()) return cv::Mat();
+    return it->second.clone();
+}
+
+bool FaceLoader::set_expression_image(const std::string& name, const cv::Mat& rgba) {
+    auto it = expressions_.find(name);
+    if (it == expressions_.end() || rgba.empty()) return false;
+    it->second = rgba.clone();
+    return true;
+}
+
 } // namespace face

@@ -89,6 +89,13 @@ public:
     // sub-region coverage info (MAX7219 / RGB matrix backends).
     bool has_led_face_editor() const override;
 
+    // HUB75 named-layout tagging. main pushes the active layout name in here
+    // and import_face_image stamps the face folder's config.json with it
+    // (unless already tagged). face_image_layout reads back the stored tag —
+    // empty string for untagged / legacy folders.
+    void        set_active_layout_name(const std::string& name) override;
+    std::string face_image_layout(const std::string& expression) const override;
+
     // Copy the latest rendered RGB canvas (CV_8UC3) for the preview. Returns
     // false until the first frame exists. Safe to call from the main/GL thread.
     bool latest_frame(cv::Mat& out) const;
@@ -103,6 +110,15 @@ public:
     void set_blink_timing(double min_s, double max_s, double duration_s);
     void set_expression_fade(double seconds);
     void set_wiggle(const WiggleCfg& w);
+
+    // Push a "transient" image for the named expression onto every panel
+    // for duration_s seconds. The current image is stashed and restored
+    // automatically when the timer expires (or on stop()). Used by the
+    // face editor's "Preview to panels" key so the user can see their
+    // unsaved canvas on the physical LEDs for a moment.
+    void push_transient_face(const std::string& expression,
+                             const cv::Mat& rgba_canvas,
+                             double duration_s);
 
 private:
     struct Panel {
@@ -137,9 +153,24 @@ private:
     mutable std::mutex frame_mtx_;   // latest_
     cv::Mat            latest_;
     bool               have_frame_ = false;
+    // Transient face overlays — one record per panel a push_transient_face
+    // call has touched. tick_render_locked() restores them as their deadlines
+    // pass. stop() restores any still-active records before tearing down.
+    struct TransientFace {
+        int         panel_idx = -1;
+        std::string expression;
+        cv::Mat     original_image;     // RGBA, sized to (panel.w, panel.h)
+        std::chrono::steady_clock::time_point deadline{};
+    };
+    std::vector<TransientFace> transient_faces_;
 
     std::thread        thread_;
     std::atomic<bool>  running_{false};
+
+    // Name of the currently-active HUB75 layout (or "" when unset). Used to
+    // stamp face folders on import_face_image and surfaced via
+    // face_image_layout. Lives under state_mtx_.
+    std::string        active_layout_name_;
 };
 
 } // namespace face

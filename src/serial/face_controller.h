@@ -91,6 +91,16 @@ public:
     // output). False for HUB75 + daemon + Teensy. Drives the visibility
     // of Files > Faces > <slot> > Edit… in the menu.
     virtual bool        has_led_face_editor() const { return false; }
+
+    // HUB75 named-layout binding. When the user has saved multiple panel
+    // layouts ("Default", "MyCM5Setup", …), each face PNG is stamped with
+    // the layout that was active when it was created so the menu can flag
+    // mismatches at slot-listing time. set_active_layout_name lets main
+    // tell the backend which name to stamp on import; face_image_layout
+    // reads back the tag for a face folder (empty = untagged / legacy).
+    // No-op on non-native backends.
+    virtual void        set_active_layout_name(const std::string& /*name*/) {}
+    virtual std::string face_image_layout(const std::string& /*expression*/) const { return {}; }
 };
 
 /**
@@ -143,6 +153,12 @@ public:
     void set_audio_drive(double v, double m) override { (*active_)->set_audio_drive(v, m); }
     void set_mouth_shape(const std::string& s) override { (*active_)->set_mouth_shape(s); }
     bool has_led_face_editor() const override { return (*active_)->has_led_face_editor(); }
+    void set_active_layout_name(const std::string& n) override {
+        (*active_)->set_active_layout_name(n);
+    }
+    std::string face_image_layout(const std::string& e) const override {
+        return (*active_)->face_image_layout(e);
+    }
 
     IFaceController* backend() const { return *active_; }
 

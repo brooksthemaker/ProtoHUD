@@ -280,7 +280,10 @@ public:
                           menu::FaceEditor::Mode mode,
                           std::vector<uint32_t> palette,
                           menu::FaceEditor::CommitFn on_commit,
-                          menu::FaceEditor::CancelFn on_cancel = {});
+                          menu::FaceEditor::CancelFn on_cancel = {},
+                          menu::FaceEditor::PreviewFn on_preview = {},
+                          menu::FaceEditor::LiveFrameFn live_frame = {},
+                          double preview_duration_s = 10.0);
     void close_face_editor();
     bool is_face_editor_open() const { return face_editor_.is_open(); }
     menu::FaceEditor& face_editor() { return face_editor_; }
