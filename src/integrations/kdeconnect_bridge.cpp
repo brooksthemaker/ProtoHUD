@@ -385,11 +385,15 @@ void KdeConnectBridge::worker() {
             state_.health.phone_charging    = false;
             return;
         }
-        const std::string dev_path =
-            std::string("/modules/kdeconnect/devices/") + current_dev_id;
-        const int  pct      = call_get_int_prop(conn, dev_path.c_str(),
+        // KDE Connect publishes the battery plugin on a sub-object of the
+        // device, not on the device root — gdbus introspect of
+        // /modules/kdeconnect/devices/<id>/battery shows the charge +
+        // isCharging properties live there.
+        const std::string batt_path =
+            std::string("/modules/kdeconnect/devices/") + current_dev_id + "/battery";
+        const int  pct      = call_get_int_prop(conn, batt_path.c_str(),
                                                 kBatteryIface, "charge", -1);
-        const bool charging = call_get_bool_prop(conn, dev_path.c_str(),
+        const bool charging = call_get_bool_prop(conn, batt_path.c_str(),
                                                  kBatteryIface, "isCharging", false);
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.health.phone_battery_pct = (pct >= 0 && pct <= 100) ? pct : -1;
