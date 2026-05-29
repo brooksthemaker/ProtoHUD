@@ -395,8 +395,13 @@ void KdeConnectBridge::worker() {
                                                 kBatteryIface, "charge", -1);
         const bool charging = call_get_bool_prop(conn, batt_path.c_str(),
                                                  kBatteryIface, "isCharging", false);
+        const int clamped = (pct >= 0 && pct <= 100) ? pct : -1;
+        // One-line diagnostic so the journal shows whether the property
+        // get is succeeding. Print every poll for now; quiet once trusted.
+        std::fprintf(stderr, "[kdeconnect] battery poll %s charge=%d charging=%d\n",
+                     batt_path.c_str(), pct, charging ? 1 : 0);
         std::lock_guard<std::mutex> lk(state_.mtx);
-        state_.health.phone_battery_pct = (pct >= 0 && pct <= 100) ? pct : -1;
+        state_.health.phone_battery_pct = clamped;
         state_.health.phone_charging    = charging;
     };
 
