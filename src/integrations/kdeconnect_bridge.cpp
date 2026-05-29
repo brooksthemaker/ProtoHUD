@@ -22,6 +22,7 @@ constexpr const char* kDaemonInterface      = "org.kde.kdeconnect.daemon";
 constexpr const char* kDeviceInterface      = "org.kde.kdeconnect.device";
 constexpr const char* kNotificationsIface   = "org.kde.kdeconnect.device.notifications";
 constexpr const char* kNotificationIface    = "org.kde.kdeconnect.device.notifications.notification";
+constexpr const char* kBatteryIface         = "org.kde.kdeconnect.device.battery";
 constexpr const char* kPropertiesIface      = "org.freedesktop.DBus.Properties";
 
 // Helper: append a single string argument to a DBus message.
@@ -63,6 +64,72 @@ std::string call_get_str_prop(DBusConnection* conn,
     const char* val = nullptr;
     dbus_message_iter_get_basic(&vit, &val);
     std::string out = val ? std::string(val) : std::string();
+    dbus_message_unref(reply);
+    return out;
+}
+
+// Variant of call_get_str_prop for int / bool properties. Returns the
+// caller's fallback when the property is missing or the wrong type so
+// "not bound yet" cleanly stays the empty state.
+int call_get_int_prop(DBusConnection* conn,
+                      const char* path,
+                      const char* iface_for_prop,
+                      const char* prop, int fallback) {
+    DBusMessage* msg = dbus_message_new_method_call(
+        kKdeService, path, kPropertiesIface, "Get");
+    if (!msg) return fallback;
+    DBusMessageIter it; dbus_message_iter_init_append(msg, &it);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &iface_for_prop);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &prop);
+    DBusError err; dbus_error_init(&err);
+    DBusMessage* reply = dbus_connection_send_with_reply_and_block(conn, msg, 1500, &err);
+    dbus_message_unref(msg);
+    if (dbus_error_is_set(&err)) { dbus_error_free(&err); if (reply) dbus_message_unref(reply); return fallback; }
+    if (!reply) return fallback;
+    DBusMessageIter rit, vit;
+    if (!dbus_message_iter_init(reply, &rit) ||
+        dbus_message_iter_get_arg_type(&rit) != DBUS_TYPE_VARIANT) {
+        dbus_message_unref(reply); return fallback;
+    }
+    dbus_message_iter_recurse(&rit, &vit);
+    const int t = dbus_message_iter_get_arg_type(&vit);
+    int out = fallback;
+    if (t == DBUS_TYPE_INT32 || t == DBUS_TYPE_UINT32) {
+        dbus_uint32_t v = 0;
+        dbus_message_iter_get_basic(&vit, &v);
+        out = static_cast<int>(v);
+    }
+    dbus_message_unref(reply);
+    return out;
+}
+
+bool call_get_bool_prop(DBusConnection* conn,
+                        const char* path,
+                        const char* iface_for_prop,
+                        const char* prop, bool fallback) {
+    DBusMessage* msg = dbus_message_new_method_call(
+        kKdeService, path, kPropertiesIface, "Get");
+    if (!msg) return fallback;
+    DBusMessageIter it; dbus_message_iter_init_append(msg, &it);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &iface_for_prop);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &prop);
+    DBusError err; dbus_error_init(&err);
+    DBusMessage* reply = dbus_connection_send_with_reply_and_block(conn, msg, 1500, &err);
+    dbus_message_unref(msg);
+    if (dbus_error_is_set(&err)) { dbus_error_free(&err); if (reply) dbus_message_unref(reply); return fallback; }
+    if (!reply) return fallback;
+    DBusMessageIter rit, vit;
+    if (!dbus_message_iter_init(reply, &rit) ||
+        dbus_message_iter_get_arg_type(&rit) != DBUS_TYPE_VARIANT) {
+        dbus_message_unref(reply); return fallback;
+    }
+    dbus_message_iter_recurse(&rit, &vit);
+    bool out = fallback;
+    if (dbus_message_iter_get_arg_type(&vit) == DBUS_TYPE_BOOLEAN) {
+        dbus_bool_t v = FALSE;
+        dbus_message_iter_get_basic(&vit, &v);
+        out = (v == TRUE);
+    }
     dbus_message_unref(reply);
     return out;
 }
@@ -190,8 +257,15 @@ void KdeConnectBridge::stop() {
         dbus_connection_unref(c);
         conn_ = nullptr;
     }
-    std::lock_guard<std::mutex> lk(seen_mtx_);
-    seen_.clear();
+    {
+        std::lock_guard<std::mutex> lk(seen_mtx_);
+        seen_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.health.phone_battery_pct = -1;
+        state_.health.phone_charging    = false;
+    }
 }
 
 void KdeConnectBridge::worker() {
@@ -304,11 +378,33 @@ void KdeConnectBridge::worker() {
         state_.notifs.push(std::move(n));
     };
 
+    auto poll_battery = [&]() {
+        if (current_dev_id.empty()) {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            state_.health.phone_battery_pct = -1;
+            state_.health.phone_charging    = false;
+            return;
+        }
+        const std::string dev_path =
+            std::string("/modules/kdeconnect/devices/") + current_dev_id;
+        const int  pct      = call_get_int_prop(conn, dev_path.c_str(),
+                                                kBatteryIface, "charge", -1);
+        const bool charging = call_get_bool_prop(conn, dev_path.c_str(),
+                                                 kBatteryIface, "isCharging", false);
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.health.phone_battery_pct = (pct >= 0 && pct <= 100) ? pct : -1;
+        state_.health.phone_charging    = charging;
+    };
+
     while (running_.load()) {
         const auto now = clock::now();
 
         // Periodic discovery: detect kdeconnectd appearing/disappearing
-        // and re-pick the device if our binding has gone stale.
+        // and re-pick the device if our binding has gone stale. Battery
+        // is polled in the same cycle — KDE Connect doesn't push a
+        // PropertiesChanged signal we can subscribe to from libdbus
+        // without a generated proxy, and a 5 s refresh is plenty for a
+        // chrome indicator.
         if (now >= next_discovery) {
             next_discovery = now + discovery_interval;
             const bool present = service_present(conn);
@@ -319,6 +415,7 @@ void KdeConnectBridge::worker() {
                 const std::string want = pick_device();
                 if (want != current_dev_id) rebind_to(want);
             }
+            poll_battery();
         }
 
         // Dispatch incoming signals. read_write blocks briefly so we

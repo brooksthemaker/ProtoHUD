@@ -113,6 +113,11 @@ struct SystemHealth {
     bool gamepad_ok      = false;
     bool wireless_ok     = false;
     int  wireless_battery_pct = -1;  // -1 = unknown
+    // Paired phone battery (via KDE Connect bridge). -1 when no phone is
+    // bound or the daemon isn't running; charging flag is meaningless in
+    // that case.
+    int  phone_battery_pct    = -1;
+    bool phone_charging       = false;
     bool cam_owl_left    = false;
     bool cam_owl_right   = false;
     bool cam_usb1        = false;
