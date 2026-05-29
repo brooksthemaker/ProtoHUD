@@ -1203,6 +1203,15 @@ static std::vector<MenuItem> build_menu(
         // the HUB75 Layout submenu (Phase 3) — for now changes take effect
         // on the next backend hot-swap.
         PfHub75Layout* pf_hub75_p = nullptr,
+        // Named HUB75 layouts — Save As / Load / Rename / Delete management.
+        // pf_hub75_p above is the *working copy* of the active entry; these
+        // pointers expose the map + selection so the menu can swap which
+        // layout is being edited. pf_layout_changed runs after every
+        // mutation (active swap, save-as, rename, delete) so the controller
+        // can pick up the new active-layout name for face-folder stamping.
+        std::map<std::string, PfHub75Layout>* pf_hub75_layouts_p = nullptr,
+        std::string* pf_hub75_active_p = nullptr,
+        std::function<void()> pf_layout_changed = nullptr,
         // Face animation tunables — pointers + a "push live" callback that
         // forwards the current values into native_ctrl after a slider/toggle
         // change. Caller owns the slots and the persistence to config.json.
@@ -1672,8 +1681,15 @@ static std::vector<MenuItem> build_menu(
         m.type  = MenuItemType::SUBMENU;
         m.label = label;
 
-        m.label_fn = [teensy, expr, label]() -> std::string {
-            return teensy->face_image_exists(expr) ? label : (label + " (empty)");
+        // Slot label: "(empty)" when no PNG; "[Other Layout]" when the
+        // saved PNG was stamped with a layout name that doesn't match the
+        // currently-active one. Untagged (legacy) faces show plain.
+        m.label_fn = [teensy, expr, label, pf_hub75_active_p]() -> std::string {
+            if (!teensy->face_image_exists(expr)) return label + " (empty)";
+            const std::string tag = teensy->face_image_layout(expr);
+            if (tag.empty() || !pf_hub75_active_p || tag == *pf_hub75_active_p)
+                return label;
+            return label + "  [" + tag + "]";
         };
 
         m.on_highlight = [face_preview, slot_idx]{ face_preview->want = slot_idx; };
@@ -1830,8 +1846,15 @@ static std::vector<MenuItem> build_menu(
         m.type  = MenuItemType::SUBMENU;
         m.label = label;
 
-        m.label_fn = [teensy, expr, label]() -> std::string {
-            return teensy->face_image_exists(expr) ? label : (label + " (empty)");
+        // Slot label: "(empty)" when no PNG; "[Other Layout]" when the
+        // saved PNG was stamped with a layout name that doesn't match the
+        // currently-active one. Untagged (legacy) faces show plain.
+        m.label_fn = [teensy, expr, label, pf_hub75_active_p]() -> std::string {
+            if (!teensy->face_image_exists(expr)) return label + " (empty)";
+            const std::string tag = teensy->face_image_layout(expr);
+            if (tag.empty() || !pf_hub75_active_p || tag == *pf_hub75_active_p)
+                return label;
+            return label + "  [" + tag + "]";
         };
         m.on_highlight = [mouth_preview, idx]{ mouth_preview->want = idx; };
 
@@ -1986,8 +2009,15 @@ static std::vector<MenuItem> build_menu(
         m.type  = MenuItemType::SUBMENU;
         m.label = label;
 
-        m.label_fn = [teensy, expr, label]() -> std::string {
-            return teensy->face_image_exists(expr) ? label : (label + " (empty)");
+        // Slot label: "(empty)" when no PNG; "[Other Layout]" when the
+        // saved PNG was stamped with a layout name that doesn't match the
+        // currently-active one. Untagged (legacy) faces show plain.
+        m.label_fn = [teensy, expr, label, pf_hub75_active_p]() -> std::string {
+            if (!teensy->face_image_exists(expr)) return label + " (empty)";
+            const std::string tag = teensy->face_image_layout(expr);
+            if (tag.empty() || !pf_hub75_active_p || tag == *pf_hub75_active_p)
+                return label;
+            return label + "  [" + tag + "]";
         };
         m.on_highlight = [boop_face_preview, idx]{ boop_face_preview->want = idx; };
 
@@ -4399,14 +4429,115 @@ static std::vector<MenuItem> build_menu(
             }
         };
 
-        std::vector<MenuItem> hub_items = {
+        std::vector<MenuItem> hub_items;
+
+        // ── Named-layout management (Save As / Load / Rename / Delete) ───────
+        // Shown only when the host wired through the named-layout pointers.
+        // Operations work on the live `*H` so the user's in-progress edits to
+        // the active layout are preserved when switching.
+        if (pf_hub75_layouts_p && pf_hub75_active_p) {
+            auto* M = pf_hub75_layouts_p;
+            auto* A = pf_hub75_active_p;
+            auto layout_changed = pf_layout_changed;
+            // Helper: ith name in the map's iteration order (stable for std::map).
+            auto nth_name = [M](int i) -> std::string {
+                if (i < 0) return {};
+                int k = 0;
+                for (const auto& [n, _] : *M) { if (k++ == i) return n; }
+                return {};
+            };
+
+            // Save As — copy the current working layout into a new named slot
+            // and switch the working copy onto it.
+            hub_items.push_back(with_desc(
+                leaf("Save As...", [H, M, A, layout_changed, menu_sys_pp]{
+                    if (!menu_sys_pp || !*menu_sys_pp) return;
+                    (*menu_sys_pp)->open_keyboard("Layout Name", *A,
+                        [H, M, A, layout_changed](const std::string& name){
+                            if (name.empty()) return;
+                            (*M)[*A]   = *H;          // checkpoint current edits
+                            (*M)[name] = *H;          // copy into new slot
+                            *A = name;
+                            if (layout_changed) layout_changed();
+                        });
+                }),
+                "Save the panels + nudges you've configured here as a new "
+                "named layout. Subsequent edits go to the new layout; switch "
+                "back via Load Layout."));
+
+            // Load — pre-allocated 16 slot rows; each one's label_fn pulls the
+            // i-th map entry and the action loads it. Hidden when i is past
+            // the current map size. Matches the profile-slots pattern.
+            constexpr int kLayoutSlots = 16;
+            std::vector<MenuItem> load_items;
+            for (int i = 0; i < kLayoutSlots; ++i) {
+                MenuItem li;
+                li.type  = MenuItemType::LEAF;
+                li.label = "layout";
+                li.label_fn = [nth_name, A, i]{
+                    const std::string nm = nth_name(i);
+                    if (nm.empty()) return std::string();
+                    return (*A == nm) ? (nm + "  *") : nm;
+                };
+                li.visible_fn = [M, i]{ return i < static_cast<int>(M->size()); };
+                li.action = [H, M, A, layout_changed, nth_name, i]{
+                    const std::string nm = nth_name(i);
+                    if (nm.empty() || *A == nm) return;
+                    (*M)[*A] = *H;
+                    *A = nm;
+                    *H = (*M)[nm];
+                    if (layout_changed) layout_changed();
+                };
+                load_items.push_back(std::move(li));
+            }
+            MenuItem load_sub = submenu("Load Layout", std::move(load_items));
+            load_sub.label_fn = [A]{ return std::string("Load Layout  (") + *A + ")"; };
+            load_sub.description =
+                "Switch to a different saved layout. The current layout's "
+                "edits are checkpointed first. * marks the active one.";
+            hub_items.push_back(std::move(load_sub));
+
+            // Rename — replace the active layout's key without copying data.
+            hub_items.push_back(with_desc(
+                leaf("Rename Active...", [H, M, A, layout_changed, menu_sys_pp]{
+                    if (!menu_sys_pp || !*menu_sys_pp) return;
+                    const std::string old_name = *A;
+                    (*menu_sys_pp)->open_keyboard("Layout Name", old_name,
+                        [H, M, A, layout_changed, old_name](const std::string& name){
+                            if (name.empty() || name == old_name) return;
+                            (*M)[old_name] = *H;
+                            (*M)[name] = (*M)[old_name];
+                            M->erase(old_name);
+                            *A = name;
+                            if (layout_changed) layout_changed();
+                        });
+                }),
+                "Rename the active layout. Face PNGs stamped with the old "
+                "name will read as a mismatch until you re-import them."));
+
+            // Delete — only when there's at least one other layout to fall back to.
+            MenuItem del = leaf("Delete Active",
+                [H, M, A, layout_changed]{
+                    if (M->size() <= 1) return;
+                    M->erase(*A);
+                    *A = M->begin()->first;
+                    *H = M->begin()->second;
+                    if (layout_changed) layout_changed();
+                });
+            del.label_fn = [A]{ return std::string("Delete \"") + *A + "\""; };
+            del.visible_fn = [M]{ return M->size() > 1; };
+            del.description = "Remove this layout. The first remaining "
+                              "saved layout becomes active.";
+            hub_items.push_back(std::move(del));
+        }
+
+        hub_items.push_back(
             with_desc(submenu("Default Panel Size", std::move(size_items)),
                       "Size applied to every panel slot whose Panel N > Size "
                       "is set to \"Use Default\". Per-slot overrides let a "
-                      "build mix sizes."),
-            submenu("Panel Count", std::move(count_items)),
-            submenu("Arrangement", std::move(arr_items)),
-        };
+                      "build mix sizes."));
+        hub_items.push_back(submenu("Panel Count", std::move(count_items)));
+        hub_items.push_back(submenu("Arrangement", std::move(arr_items)));
         for (auto& it : nudge_items) hub_items.push_back(std::move(it));
         hub_items.push_back(with_desc(
             leaf("Reset All Positions",
@@ -4420,8 +4551,15 @@ static std::vector<MenuItem> build_menu(
             "Panel size + count + arrangement for the HUB75 backend. "
             "Each panel exposes a Nudge X/Y slider (±32 px integer) so you "
             "can align the editor canvas to physical mounting offsets. "
-            "Persisted to cfg[\"protoface\"][\"hub75\"]; takes effect on the "
-            "next backend (re)start.");
+            "Save As / Load lets you keep multiple named layouts (e.g. one "
+            "per helmet build); faces are stamped with the active layout "
+            "name on import. Persisted to cfg[\"protoface\"][\"hub75_layouts\"].");
+        if (pf_hub75_active_p) {
+            auto* A = pf_hub75_active_p;
+            pf_hub75_layout_item.label_fn = [A]{
+                return std::string("HUB75 Layout  (") + *A + ")";
+            };
+        }
         pf_hub75_layout_item.visible_fn = [pf_backend_p]{
             return pf_backend_p && *pf_backend_p == "hub75";
         };
@@ -7749,6 +7887,14 @@ int main(int argc, char* argv[]) {
     // configs are unchanged. Once the user picks a layout it persists to
     // cfg["protoface"]["hub75"].
     PfHub75Layout pf_hub75;
+    // Named HUB75 layouts — users can save multiple panel-arrangement profiles
+    // ("Default", "ConTour", "CM5 Helmet", …) and switch between them. The
+    // working `pf_hub75` is the live edit copy of pf_hub75_layouts[
+    // pf_hub75_active]; save_cfg + every layout-management action sync the
+    // two. Faces created while a given layout is active are stamped with its
+    // name (NativeFaceController::set_active_layout_name + import_face_image).
+    std::map<std::string, PfHub75Layout> pf_hub75_layouts;
+    std::string pf_hub75_active = "Default";
     // Face animation tunables — forwarded to every panel's FaceState live
     // and persisted to cfg["protoface"]["animation"] on save.
     bool   pf_blink_enabled   = true;
@@ -7771,23 +7917,37 @@ int main(int argc, char* argv[]) {
             pf_mouth_layout = jl.value("mouth", pf_mouth_layout);
             pf_nose_layout  = jl.value("nose",  pf_nose_layout);
         }
-        if (jpf.contains("hub75") && jpf["hub75"].is_object()) {
-            auto& jh = jpf["hub75"];
-            pf_hub75.panel_size  = jh.value("panel_size",  pf_hub75.panel_size);
-            pf_hub75.arrangement = jh.value("arrangement", pf_hub75.arrangement);
-            pf_hub75.panel_count = jval(jh, "panel_count", pf_hub75.panel_count);
+        auto parse_hub75_layout = [](const json& jh, PfHub75Layout L) -> PfHub75Layout {
+            if (!jh.is_object()) return L;
+            L.panel_size  = jh.value("panel_size",  L.panel_size);
+            L.arrangement = jh.value("arrangement", L.arrangement);
+            L.panel_count = jval(jh, "panel_count", L.panel_count);
             if (jh.contains("panel_size_per") && jh["panel_size_per"].is_array())
                 for (size_t i = 0; i < jh["panel_size_per"].size() && i < 4; ++i)
                     if (jh["panel_size_per"][i].is_string())
-                        pf_hub75.panel_size_per[i] =
-                            jh["panel_size_per"][i].get<std::string>();
+                        L.panel_size_per[i] = jh["panel_size_per"][i].get<std::string>();
             if (jh.contains("nudge_dx") && jh["nudge_dx"].is_array())
                 for (size_t i = 0; i < jh["nudge_dx"].size() && i < 4; ++i)
-                    pf_hub75.nudge_dx[i] = jh["nudge_dx"][i].get<int>();
+                    L.nudge_dx[i] = jh["nudge_dx"][i].get<int>();
             if (jh.contains("nudge_dy") && jh["nudge_dy"].is_array())
                 for (size_t i = 0; i < jh["nudge_dy"].size() && i < 4; ++i)
-                    pf_hub75.nudge_dy[i] = jh["nudge_dy"][i].get<int>();
-            pf_hub75.defaults_applied = jval(jh, "defaults_applied", false);
+                    L.nudge_dy[i] = jh["nudge_dy"][i].get<int>();
+            L.defaults_applied = jval(jh, "defaults_applied", false);
+            return L;
+        };
+        // Multi-layout schema (preferred): hub75_layouts is a name→layout map,
+        // hub75_active picks the working one. Falls back to the legacy single
+        // hub75 block when those aren't present (one-time migration to
+        // hub75_layouts["Default"] on the next save).
+        if (jpf.contains("hub75_layouts") && jpf["hub75_layouts"].is_object()) {
+            for (auto& [name, jh] : jpf["hub75_layouts"].items())
+                pf_hub75_layouts[name] = parse_hub75_layout(jh, PfHub75Layout{});
+            pf_hub75_active = jpf.value("hub75_active", pf_hub75_active);
+            if (!pf_hub75_layouts.count(pf_hub75_active))
+                pf_hub75_active = pf_hub75_layouts.begin()->first;
+            pf_hub75 = pf_hub75_layouts[pf_hub75_active];
+        } else if (jpf.contains("hub75") && jpf["hub75"].is_object()) {
+            pf_hub75 = parse_hub75_layout(jpf["hub75"], pf_hub75);
         }
         if (jpf.contains("animation") && jpf["animation"].is_object()) {
             auto& ja = jpf["animation"];
@@ -7813,6 +7973,15 @@ int main(int argc, char* argv[]) {
     // (first run, or upgrading from the old "delta from base" schema
     // where all-zero nudges would now stack panels at the centre).
     if (!pf_hub75.defaults_applied) pf_hub75_apply_defaults(pf_hub75);
+    // Seed the named-layouts map on first launch (or after migrating from
+    // the legacy single-block schema) so the menu always has something
+    // selectable. Whichever was loaded into pf_hub75 above becomes the
+    // initial Default.
+    if (pf_hub75_layouts.empty()) {
+        pf_hub75_layouts[pf_hub75_active] = pf_hub75;
+    } else {
+        pf_hub75_layouts[pf_hub75_active] = pf_hub75;   // keep the map in sync
+    }
 
     // Scheduler / reminders. Networking lives in the scheduler_daemon companion;
     // ProtoHUD only reads the merged events.json + scheduler_status.json it writes.
@@ -8732,6 +8901,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
+        native_ctrl->set_active_layout_name(pf_hub75_active);
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
         std::cout << "[main] Protoface: native in-process renderer\n";
 
@@ -8921,6 +9091,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
+        native_ctrl->set_active_layout_name(pf_hub75_active);
 
         // panel_driver.py choreography. The Python shim is only needed for
         // HUB75 (it reads /dev/shm frames and pushes them via piomatter);
@@ -9135,6 +9306,11 @@ int main(int argc, char* argv[]) {
                                edit_face,
                                &pf_eye_layout, &pf_mouth_layout, &pf_nose_layout,
                                &pf_hub75,
+                               &pf_hub75_layouts, &pf_hub75_active,
+                               /* pf_layout_changed */ [&]{
+                                   if (native_ctrl)
+                                       native_ctrl->set_active_layout_name(pf_hub75_active);
+                               },
                                &pf_blink_enabled, &pf_blink_min, &pf_blink_max,
                                &pf_blink_duration, &pf_expr_fade,
                                &pf_preview_duration_s,
@@ -9825,19 +10001,30 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
         cfg["protoface"]["layout"]["nose"]      = pf_nose_layout;
-        cfg["protoface"]["hub75"]["panel_size"]     = pf_hub75.panel_size;
-        cfg["protoface"]["hub75"]["arrangement"]    = pf_hub75.arrangement;
-        cfg["protoface"]["hub75"]["panel_count"]    = pf_hub75.panel_count;
-        cfg["protoface"]["hub75"]["panel_size_per"] = json::array({
-            pf_hub75.panel_size_per[0], pf_hub75.panel_size_per[1],
-            pf_hub75.panel_size_per[2], pf_hub75.panel_size_per[3]});
-        cfg["protoface"]["hub75"]["defaults_applied"] = pf_hub75.defaults_applied;
-        cfg["protoface"]["hub75"]["nudge_dx"]    =
-            json::array({pf_hub75.nudge_dx[0], pf_hub75.nudge_dx[1],
-                         pf_hub75.nudge_dx[2], pf_hub75.nudge_dx[3]});
-        cfg["protoface"]["hub75"]["nudge_dy"]    =
-            json::array({pf_hub75.nudge_dy[0], pf_hub75.nudge_dy[1],
-                         pf_hub75.nudge_dy[2], pf_hub75.nudge_dy[3]});
+        // Sync the working layout into the named-map before serialising so
+        // the in-flight edits the user made to the active layout land on disk.
+        pf_hub75_layouts[pf_hub75_active] = pf_hub75;
+        cfg["protoface"]["hub75_active"] = pf_hub75_active;
+        auto layout_to_json = [](const PfHub75Layout& L) {
+            json jh = json::object();
+            jh["panel_size"]       = L.panel_size;
+            jh["arrangement"]      = L.arrangement;
+            jh["panel_count"]      = L.panel_count;
+            jh["panel_size_per"]   = json::array({L.panel_size_per[0], L.panel_size_per[1],
+                                                  L.panel_size_per[2], L.panel_size_per[3]});
+            jh["defaults_applied"] = L.defaults_applied;
+            jh["nudge_dx"]         = json::array({L.nudge_dx[0], L.nudge_dx[1],
+                                                  L.nudge_dx[2], L.nudge_dx[3]});
+            jh["nudge_dy"]         = json::array({L.nudge_dy[0], L.nudge_dy[1],
+                                                  L.nudge_dy[2], L.nudge_dy[3]});
+            return jh;
+        };
+        json jlayouts = json::object();
+        for (const auto& [name, L] : pf_hub75_layouts) jlayouts[name] = layout_to_json(L);
+        cfg["protoface"]["hub75_layouts"] = std::move(jlayouts);
+        // Drop the legacy single-block key so we don't accumulate stale data
+        // from older versions when the user moves between layouts.
+        cfg["protoface"].erase("hub75");
         cfg["protoface"]["animation"]["blink_enabled"]   = pf_blink_enabled;
         cfg["protoface"]["animation"]["blink_min"]       = pf_blink_min;
         cfg["protoface"]["animation"]["blink_max"]       = pf_blink_max;

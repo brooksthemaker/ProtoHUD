@@ -89,6 +89,13 @@ public:
     // sub-region coverage info (MAX7219 / RGB matrix backends).
     bool has_led_face_editor() const override;
 
+    // HUB75 named-layout tagging. main pushes the active layout name in here
+    // and import_face_image stamps the face folder's config.json with it
+    // (unless already tagged). face_image_layout reads back the stored tag —
+    // empty string for untagged / legacy folders.
+    void        set_active_layout_name(const std::string& name) override;
+    std::string face_image_layout(const std::string& expression) const override;
+
     // Copy the latest rendered RGB canvas (CV_8UC3) for the preview. Returns
     // false until the first frame exists. Safe to call from the main/GL thread.
     bool latest_frame(cv::Mat& out) const;
@@ -159,6 +166,11 @@ private:
 
     std::thread        thread_;
     std::atomic<bool>  running_{false};
+
+    // Name of the currently-active HUB75 layout (or "" when unset). Used to
+    // stamp face folders on import_face_image and surfaced via
+    // face_image_layout. Lives under state_mtx_.
+    std::string        active_layout_name_;
 };
 
 } // namespace face

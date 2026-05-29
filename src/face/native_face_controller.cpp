@@ -527,6 +527,27 @@ bool NativeFaceController::import_face_image(const std::string& expression,
         return false;
     }
 
+    // Stamp the face folder with the active layout name on first import so
+    // the menu can flag mismatches when the user switches layouts. Already-
+    // tagged folders are left alone — re-importing into an existing face
+    // shouldn't silently re-bind it to whatever the user picked since.
+    if (!active_layout_name_.empty()) {
+        const std::string cfg_path = folder + "/config.json";
+        nlohmann::json jcfg = nlohmann::json::object();
+        std::ifstream fr(cfg_path);
+        if (fr) { try { fr >> jcfg; } catch (...) { jcfg = nlohmann::json::object(); } }
+        if (!jcfg.is_object()) jcfg = nlohmann::json::object();
+        bool tagged = jcfg.contains("layout") && jcfg["layout"].is_string() &&
+                      !jcfg["layout"].get<std::string>().empty();
+        if (!tagged) {
+            jcfg["layout"] = active_layout_name_;
+            const std::string tmp = cfg_path + ".tmp";
+            { std::ofstream fw(tmp); if (fw) fw << jcfg.dump(2); }
+            std::error_code rec;
+            std::filesystem::rename(tmp, cfg_path, rec);
+        }
+    }
+
     // Rebuild every non-mirror panel's loader so the new PNG takes effect on
     // the next render tick. (Cheap — just re-decodes the folder's images.)
     for (auto& pn : panels_) {
@@ -535,6 +556,39 @@ bool NativeFaceController::import_face_image(const std::string& expression,
             cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
     }
     return true;
+}
+
+void NativeFaceController::set_active_layout_name(const std::string& name) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    active_layout_name_ = name;
+}
+
+std::string NativeFaceController::face_image_layout(const std::string& expression) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    // Layout tags live at face-folder scope (faces/<folder>/config.json),
+    // so all expressions in the same folder share a tag. We look at the
+    // first non-mirror panel's active folder, same as face_image_path.
+    for (const auto& pn : panels_) {
+        if (pn.is_mirror || !pn.loader) continue;
+        const std::string cfg_path =
+            cfg_.faces_dir + "/" + pn.cfg.face.active + "/config.json";
+        // Only return a tag when the actual PNG exists — keeps "(empty)"
+        // slots from picking up a folder-wide tag they don't own.
+        const std::string png =
+            cfg_.faces_dir + "/" + pn.cfg.face.active + "/" +
+            canonical_face_filename(expression);
+        std::error_code ec;
+        if (!std::filesystem::exists(png, ec)) return {};
+        std::ifstream fr(cfg_path);
+        if (!fr) return {};
+        try {
+            nlohmann::json j; fr >> j;
+            if (j.is_object() && j.contains("layout") && j["layout"].is_string())
+                return j["layout"].get<std::string>();
+        } catch (...) {}
+        return {};
+    }
+    return {};
 }
 
 void NativeFaceController::clear_face_image(const std::string& expression) {
