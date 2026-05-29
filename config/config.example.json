@@ -183,6 +183,14 @@
     "all_day_reminder_hour": 8,
     "web_port": 8770
   },
+  "kdeconnect": {
+    "_about": "Bridges phone notifications from KDE Connect (over LAN or USB tether) into the HUD's notification queue. Requires kdeconnectd running on the Pi and the phone paired via the KDE Connect Android/iOS app. Bridge is gated by libdbus-1-dev being available at build time; on platforms without DBus the section is silently ignored.",
+    "enabled": true,
+    "device_id": "",
+    "_device_id_note": "Empty picks the first paired+reachable device. Set to a specific id (see kdeconnect-cli --list-devices) when multiple phones are paired.",
+    "auto_dismiss_s": 8.0,
+    "app_blocklist": "KDE Connect"
+  },
   "audio": {
     "_note": "Audio capture is handled by the RP2350 helmet audio processor (USB Audio UAC2). The CM5 receives pre-processed stereo and routes it to the chosen output. Run 'arecord -l' to verify the RP2350 card name after connecting via USB.",
     "enabled": true,

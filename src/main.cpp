@@ -58,6 +58,7 @@
 #include "video_recorder.h"
 #include "qr_scanner.h"
 #include "splash.h"
+#include "integrations/kdeconnect_bridge.h"   // header is dbus-free; .cpp guarded by HAVE_DBUS in CMake
 #include "hud/background_library.h"
 #include "profile_manager.h"
 #include "face/face_config.h"
@@ -8007,6 +8008,18 @@ int main(int argc, char* argv[]) {
         sched_lead_min    = jval(jsc, "lead_minutes",    sched_lead_min);
     }
 
+    // KDE Connect bridge — RX phone notifications via DBus session bus.
+    // The bridge owns its own worker thread and no-ops cleanly when
+    // kdeconnectd isn't running, so non-Pi/dev hosts don't fail to start.
+    integrations::KdeConnectConfig kdc_cfg;
+    if (cfg.contains("kdeconnect")) {
+        auto& jk = cfg["kdeconnect"];
+        kdc_cfg.enabled        = jval(jk, "enabled",        kdc_cfg.enabled);
+        kdc_cfg.device_id      = jk.value("device_id",      kdc_cfg.device_id);
+        kdc_cfg.auto_dismiss_s = jval(jk, "auto_dismiss_s", kdc_cfg.auto_dismiss_s);
+        kdc_cfg.app_blocklist  = jk.value("app_blocklist",  kdc_cfg.app_blocklist);
+    }
+
     if (cfg.contains("pip")) {
         auto& jpip = cfg["pip"];
         float def_size = jval(jpip, "size", 0.25f);
@@ -8625,6 +8638,23 @@ int main(int argc, char* argv[]) {
     } else {
         std::cout << "[scheduler] disabled (scheduler.enabled=false)\n";
     }
+
+    // KDE Connect bridge — RX phone notifications, pushed into AppState::notifs.
+    // Optional (gated by HAVE_DBUS at build time + cfg.enabled at runtime); silent
+    // no-op when the daemon isn't running so it doesn't spam logs on dev hosts.
+#ifdef HAVE_DBUS
+    const bool kdc_enabled = kdc_cfg.enabled;
+    integrations::KdeConnectBridge kdc(state, std::move(kdc_cfg));
+    if (kdc_enabled) {
+        if (!kdc.start())
+            std::cout << "[kdeconnect] disabled (failed to attach to session bus)\n";
+        else
+            std::cout << "[kdeconnect] bridge started\n";
+    } else {
+        std::cout << "[kdeconnect] disabled (cfg.kdeconnect.enabled=false)\n";
+    }
+#endif
+
     CrashReporter::install(&state, cfg_crash_dir, GIT_HASH);
 
     // ── Async Timewarp ────────────────────────────────────────────────────────

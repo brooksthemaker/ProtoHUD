@@ -88,6 +88,14 @@ else()
     message(STATUS "SDL2 not found — gamepad input disabled (sudo apt install libsdl2-dev)")
 endif()
 
+# DBus (KDE Connect bridge) — optional; install with: sudo apt install libdbus-1-dev
+pkg_check_modules(DBUS dbus-1)
+if(DBUS_FOUND)
+    message(STATUS "DBus found — KDE Connect bridge enabled")
+else()
+    message(STATUS "DBus not found — KDE Connect bridge disabled (sudo apt install libdbus-1-dev)")
+endif()
+
 # ── Dear ImGui (vendored source, no external install required) ───────────────
 # Fetched once by CMake; cached in build/_deps after first configure.
 include(FetchContent)
@@ -217,6 +225,7 @@ set(SOURCES
     src/video_recorder.cpp
     src/qr_scanner.cpp
     src/splash.cpp
+    $<$<BOOL:${DBUS_FOUND}>:src/integrations/kdeconnect_bridge.cpp>
     src/nanovg_gl_impl.cpp
     src/hud/toast_renderer.cpp
 )
@@ -239,6 +248,7 @@ target_include_directories(protohud PRIVATE
     ${ALSA_INCLUDE_DIRS}
     $<$<BOOL:${ZBAR_FOUND}>:${ZBAR_INCLUDE_DIRS}>
     $<$<BOOL:${SDL2_FOUND}>:${SDL2_INCLUDE_DIRS}>
+    $<$<BOOL:${DBUS_FOUND}>:${DBUS_INCLUDE_DIRS}>
 )
 
 target_link_libraries(protohud PRIVATE
@@ -258,6 +268,7 @@ target_link_libraries(protohud PRIVATE
     Threads::Threads
     $<$<BOOL:${ZBAR_FOUND}>:${ZBAR_LIBRARIES}>
     $<$<BOOL:${SDL2_FOUND}>:${SDL2_LIBRARIES}>
+    $<$<BOOL:${DBUS_FOUND}>:${DBUS_LIBRARIES}>
 )
 
 if(ZBAR_FOUND)
@@ -266,6 +277,10 @@ endif()
 
 if(SDL2_FOUND)
     target_compile_definitions(protohud PRIVATE HAVE_SDL2)
+endif()
+
+if(DBUS_FOUND)
+    target_compile_definitions(protohud PRIVATE HAVE_DBUS)
 endif()
 
 target_compile_options(protohud PRIVATE
