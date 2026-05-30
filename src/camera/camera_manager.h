@@ -195,7 +195,13 @@ public:
     const UsbCamConfig& usb3_cfg() const { return usb3_cfg_; }
 
 private:
-    void usb_capture_thread();
+    // One capture loop per USB camera (cam = 0/1/2 → usb1/2/3). Running each
+    // camera on its own thread means a slow/blocking cap.read() on one device
+    // can't add latency to the others (they used to share a single serial
+    // loop). Started/stopped together via the helpers below.
+    void usb_capture_thread(int cam);
+    void start_usb_threads();   // (re)spawn any camera thread that isn't running
+    void stop_usb_threads();    // clear running_ and join all three
     // Upload pixel data to a GL texture; creates/reallocates as needed.
     void upload_texture(GLuint& tex, int w, int h, const unsigned char* rgba,
                         int& prev_w, int& prev_h);
@@ -257,7 +263,7 @@ private:
     std::atomic<float> usb3_auto_brightness_target_ { 100.f };
 
     std::atomic<bool> running_     { false };
-    std::thread       usb_thread_;
+    std::thread       usb_threads_[3];   // one per usb camera (see usb_capture_thread)
 
     QrScanner*        qr_scanner_  { nullptr };
     std::atomic<bool> qr_scan_usb_ { false };

@@ -12,12 +12,13 @@
     "hud_scale": 1.0
   },
   "cameras": {
+    "_fps_note": "OWLsight fps should match or exceed display.target_fps (90) to minimise camera-to-photon latency — sampling slower than the display wastes up to one frame interval of frame age. fps is a best-effort FrameDurationLimits request; libcamera clamps to the nearest rate the sensor supports at this resolution, so a value the sensor can't hit degrades gracefully rather than failing.",
     "owlsight_left": {
       "libcamera_id": 0,
       "model_name": "",
       "width": 1280,
       "height": 800,
-      "fps": 60,
+      "fps": 90,
       "flip_h": false,
       "flip_v": false
     },
@@ -26,7 +27,7 @@
       "model_name": "",
       "width": 1280,
       "height": 800,
-      "fps": 60,
+      "fps": 90,
       "flip_h": false,
       "flip_v": false
     },
@@ -288,10 +289,10 @@
     "camera": "left"
   },
   "resolution": {
-    "_note": "Persisted OWLsight resolution. Overrides cameras.owlsight_left/right width/height/fps on startup.",
+    "_note": "Persisted OWLsight resolution. Overrides cameras.owlsight_left/right width/height/fps on startup. fps set to match display.target_fps (90) for lowest latency; libcamera clamps to the sensor's achievable rate.",
     "width":  1280,
     "height":  800,
-    "fps":      60
+    "fps":      90
   },
   "qr": {
     "_note": "Persisted QR scan state. scan_main=OWLsight cameras, scan_usb=USB cameras.",
