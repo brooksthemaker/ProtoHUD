@@ -1159,6 +1159,12 @@ static std::vector<MenuItem> build_menu(
         // Eye source selection (render-thread only, no mutex needed)
         EyeSource* left_eye_src  = nullptr,
         EyeSource* right_eye_src = nullptr,
+        // Multi-cam quad layout: both CSI cameras (rotated, side-by-side) on
+        // the top half, two USB cameras side-by-side on the bottom, the same
+        // composite in both eyes. Toggle + which-two-USB pickers.
+        bool*      multicam_layout = nullptr,
+        EyeSource* multicam_usb_a  = nullptr,
+        EyeSource* multicam_usb_b  = nullptr,
         // Profile management (Profiles tab: save current / load by restart / delete)
         ProfileManager* profiles = nullptr,
         // HUD/menu visual presets (System tab: built-in themes + save/load/delete)
@@ -2807,9 +2813,51 @@ static std::vector<MenuItem> build_menu(
     std::string left_label  = cam_label(left_model,  "Left",  same_model ? "1" : nullptr);
     std::string right_label = cam_label(right_model, "Right", same_model ? "2" : nullptr);
 
+    // ── Multi-Cam quad layout ────────────────────────────────────────────────
+    // CSI left/right (rotated, per the Rotation submenu) fill the top half
+    // side-by-side; the two selected USB cameras fill the bottom half. The
+    // same composite is mirrored into both eyes. Build the "which two USB"
+    // pickers as 3-item radio lists; A and B may not be the same camera.
+    auto make_mc_usb_menu = [&](EyeSource* slot, EyeSource* other) -> std::vector<MenuItem> {
+        if (!slot) return {};
+        auto row = [&](const char* label, EyeSource v) {
+            return leaf_sel(label,
+                [slot, other, v]{
+                    *slot = v;
+                    if (other && *other == v) {   // keep the two slots distinct
+                        *other = (v == EyeSource::USB1) ? EyeSource::USB2 : EyeSource::USB1;
+                    }
+                },
+                [slot, v]{ return *slot == v; });
+        };
+        return { row("USB Cam 1", EyeSource::USB1),
+                 row("USB Cam 2", EyeSource::USB2),
+                 row("USB Cam 3", EyeSource::USB3) };
+    };
+
+    std::vector<MenuItem> multicam_menu;
+    if (multicam_layout) {
+        multicam_menu.push_back(toggle("Enable Multi-Cam Layout",
+            [multicam_layout]{ return *multicam_layout; },
+            [multicam_layout](bool v){ *multicam_layout = v; }));
+        if (multicam_usb_a)
+            multicam_menu.push_back(with_desc(
+                submenu("Bottom-Left Camera", make_mc_usb_menu(multicam_usb_a, multicam_usb_b)),
+                "Which USB camera fills the bottom-left quadrant."));
+        if (multicam_usb_b)
+            multicam_menu.push_back(with_desc(
+                submenu("Bottom-Right Camera", make_mc_usb_menu(multicam_usb_b, multicam_usb_a)),
+                "Which USB camera fills the bottom-right quadrant."));
+    }
+
     std::vector<MenuItem> main_cameras_menu = {
         submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
         submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
+        with_desc(submenu("Multi-Cam Layout", std::move(multicam_menu)),
+            "CSI cameras side-by-side on the top half (rotated per each "
+            "camera's Rotation setting), two USB cameras side-by-side on the "
+            "bottom. Same view in both eyes. Set the CSI rotation to 90\xc2\xb0 "
+            "under Left/Right Camera > Rotation for the intended portrait fit."),
         with_panel(
             with_desc(submenu("Raw View", std::move(raw_view_menu)),
                 "Pass the camera feed straight through. Toggle Enable to show it; "
@@ -7929,6 +7977,13 @@ int main(int argc, char* argv[]) {
     EyeSource left_eye_src  = parse_eye_src(jcam.value("left_eye_source",  std::string("csi")));
     EyeSource right_eye_src = parse_eye_src(jcam.value("right_eye_source", std::string("csi")));
 
+    // Multi-cam quad layout: CSI L/R on top, two USB on the bottom, same
+    // composite in both eyes. multicam_usb_{a,b} pick which two USB slots fill
+    // the bottom-left / bottom-right quadrants (kept distinct by the menu).
+    bool      multicam_layout = jcam.value("multicam_layout", false);
+    EyeSource multicam_usb_a  = parse_eye_src(jcam.value("multicam_usb_a", std::string("usb1")));
+    EyeSource multicam_usb_b  = parse_eye_src(jcam.value("multicam_usb_b", std::string("usb2")));
+
     HudConfig hud_cfg;
     hud_cfg.compass_height        = jval(jhud, "compass_height_px",        60);
     hud_cfg.compass_bottom_margin = jval(jhud, "compass_bottom_margin_px",  20);
@@ -9606,6 +9661,7 @@ int main(int argc, char* argv[]) {
                                &protoface_preview_view,
                                cfg_map_dir,
                                &left_eye_src, &right_eye_src,
+                               &multicam_layout, &multicam_usb_a, &multicam_usb_b,
                                &profiles, &hud_presets, &quick_items,
                                cfg_gifs_dir,
                                &bg_lib_ptr, cfg_bg_user_dir,
@@ -10489,6 +10545,9 @@ int main(int argc, char* argv[]) {
         };
         cfg["cameras"]["left_eye_source"]  = eye_src_str(left_eye_src);
         cfg["cameras"]["right_eye_source"] = eye_src_str(right_eye_src);
+        cfg["cameras"]["multicam_layout"]  = multicam_layout;
+        cfg["cameras"]["multicam_usb_a"]   = eye_src_str(multicam_usb_a);
+        cfg["cameras"]["multicam_usb_b"]   = eye_src_str(multicam_usb_b);
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"]     = color_to_json(menu.accent_color());
@@ -10953,9 +11012,15 @@ int main(int argc, char* argv[]) {
         bool p2 = (pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right)
                   && !editor_open;
         bool p3 = pip_cam3_overlay_active && !editor_open;
-        bool want1 = (p1 || preview == 1) && !editor_open;
-        bool want2 = (p2 || preview == 2) && !editor_open;
-        bool want3 = (p3 || preview == 3) && !editor_open;
+        // Multi-cam layout needs its two chosen USB cameras open + uploading
+        // even when no PiP is showing them. Fold that into the want flags so
+        // the stream-lifecycle edge logic opens/closes them automatically.
+        auto mc_needs = [&](EyeSource s){
+            return multicam_layout && (multicam_usb_a == s || multicam_usb_b == s);
+        };
+        bool want1 = (p1 || preview == 1 || mc_needs(EyeSource::USB1)) && !editor_open;
+        bool want2 = (p2 || preview == 2 || mc_needs(EyeSource::USB2)) && !editor_open;
+        bool want3 = (p3 || preview == 3 || mc_needs(EyeSource::USB3)) && !editor_open;
         if (want1 && !prev_p1) { tex_usb1 = 0; std::thread([&cameras]{ cameras.open_usb1(); }).detach(); }
         if (!want1 && prev_p1) { cameras.close_usb1(); tex_usb1 = 0; }
         if (want2 && !prev_p2) { tex_usb2 = 0; std::thread([&cameras]{ cameras.open_usb2(); }).detach(); }
@@ -11509,33 +11574,72 @@ int main(int argc, char* argv[]) {
             return 0;
         };
 
+        // Multi-cam quad composite. Renders the same content into both eyes
+        // (CSI L/R on the top half, two selected USB cams on the bottom),
+        // using sub-viewports inside the bound eye FBO so each feed's
+        // existing draw call fills only its quadrant. The CSI rotation
+        // configured under Cameras > Left/Right Camera > Rotation is
+        // applied by the NV12 shader as usual — so a 90° rotation on the
+        // CSI cameras turns the top half into two upright portrait feeds.
+        auto draw_multicam_into_current_fbo = [&](int fw, int fh) {
+            const int hw  = fw / 2;             // half width
+            const int hh  = fh / 2;             // half height
+            const int top = fh - hh;            // top quadrants start at y = fh/2
+
+            // Top-left: CSI left (or right if swapped).
+            glViewport(0, top, hw, hh);
+            if (snap.cameras_swapped) cameras.draw_owl_right();
+            else                      cameras.draw_owl_left();
+
+            // Top-right: CSI right (or left if swapped).
+            glViewport(hw, top, hw, hh);
+            if (snap.cameras_swapped) cameras.draw_owl_left();
+            else                      cameras.draw_owl_right();
+
+            // Bottom-left / bottom-right: selected USB cameras.
+            glViewport(0, 0, hw, hh);
+            cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_a));
+            glViewport(hw, 0, hw, hh);
+            cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_b));
+
+            // Restore full viewport so any later passes (post-process /
+            // HUD overlays into this FBO) see the whole eye region.
+            glViewport(0, 0, fw, fh);
+        };
+
         // Left eye
         {
             xr.eye_left().bind();
             glClearColor(0.f, 0.f, 0.f, 1.f);
             glClear(GL_COLOR_BUFFER_BIT);
 
-            if (snap.theater_mode) {
-                auto vp = make_theater_vp(xr.eye_left().w, xr.eye_left().h, false);
-                glViewport(vp[0], vp[1], vp[2], vp[3]);
-            }
+            if (multicam_layout) {
+                // Quad layout overrides the per-eye source pickers and
+                // theater mode — it owns the whole eye FBO.
+                draw_multicam_into_current_fbo(xr.eye_left().w, xr.eye_left().h);
+            } else {
+                if (snap.theater_mode) {
+                    auto vp = make_theater_vp(xr.eye_left().w, xr.eye_left().h, false);
+                    glViewport(vp[0], vp[1], vp[2], vp[3]);
+                }
 
-            bool drew = false;
-            if (use_beast_cam && tex_beast != 0) {
-                // Beast passthrough — TODO: fullscreen blit once Beast path is ported
-                drew = false;
-            }
-            if (!drew) {
-                if (left_eye_src == EyeSource::CSI)
-                    drew = snap.cameras_swapped
-                        ? cameras.draw_owl_right(snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y)
-                        : cameras.draw_owl_left (snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
-                else
-                    drew = cameras.draw_tex_fullscreen(usb_tex_for(left_eye_src));
-            }
+                bool drew = false;
+                if (use_beast_cam && tex_beast != 0) {
+                    // Beast passthrough — TODO: fullscreen blit once Beast path is ported
+                    drew = false;
+                }
+                if (!drew) {
+                    if (left_eye_src == EyeSource::CSI)
+                        drew = snap.cameras_swapped
+                            ? cameras.draw_owl_right(snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y)
+                            : cameras.draw_owl_left (snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
+                    else
+                        drew = cameras.draw_tex_fullscreen(usb_tex_for(left_eye_src));
+                }
 
-            if (snap.theater_mode)
-                glViewport(0, 0, xr.eye_left().w, xr.eye_left().h);
+                if (snap.theater_mode)
+                    glViewport(0, 0, xr.eye_left().w, xr.eye_left().h);
+            }
 
             xr.eye_left().unbind();
         }
@@ -11546,26 +11650,30 @@ int main(int argc, char* argv[]) {
             glClearColor(0.f, 0.f, 0.f, 1.f);
             glClear(GL_COLOR_BUFFER_BIT);
 
-            if (snap.theater_mode) {
-                auto vp = make_theater_vp(xr.eye_right().w, xr.eye_right().h, true);
-                glViewport(vp[0], vp[1], vp[2], vp[3]);
-            }
+            if (multicam_layout) {
+                draw_multicam_into_current_fbo(xr.eye_right().w, xr.eye_right().h);
+            } else {
+                if (snap.theater_mode) {
+                    auto vp = make_theater_vp(xr.eye_right().w, xr.eye_right().h, true);
+                    glViewport(vp[0], vp[1], vp[2], vp[3]);
+                }
 
-            bool drew = false;
-            if (use_beast_cam && tex_beast != 0) {
-                drew = false;
-            }
-            if (!drew) {
-                if (right_eye_src == EyeSource::CSI)
-                    drew = snap.cameras_swapped
-                        ? cameras.draw_owl_left (snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y)
-                        : cameras.draw_owl_right(snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
-                else
-                    drew = cameras.draw_tex_fullscreen(usb_tex_for(right_eye_src));
-            }
+                bool drew = false;
+                if (use_beast_cam && tex_beast != 0) {
+                    drew = false;
+                }
+                if (!drew) {
+                    if (right_eye_src == EyeSource::CSI)
+                        drew = snap.cameras_swapped
+                            ? cameras.draw_owl_left (snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y)
+                            : cameras.draw_owl_right(snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+                    else
+                        drew = cameras.draw_tex_fullscreen(usb_tex_for(right_eye_src));
+                }
 
-            if (snap.theater_mode)
-                glViewport(0, 0, xr.eye_right().w, xr.eye_right().h);
+                if (snap.theater_mode)
+                    glViewport(0, 0, xr.eye_right().w, xr.eye_right().h);
+            }
 
             xr.eye_right().unbind();
         }

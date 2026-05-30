@@ -75,7 +75,11 @@
     },
     "_eye_source_note": "Valid values: csi | usb1 | usb2 | usb3. Routes that camera feed as the fullscreen background for the given eye.",
     "left_eye_source": "csi",
-    "right_eye_source": "csi"
+    "right_eye_source": "csi",
+    "_multicam_note": "multicam_layout = true overrides the per-eye source pickers and renders the same quad composite in both eyes: CSI left/right (rotated per Cameras > Left/Right Camera > Rotation) side-by-side on the top half, multicam_usb_a + multicam_usb_b side-by-side on the bottom. Set the CSI rotation to 90° (clockwise) for the intended portrait fit on the top half.",
+    "multicam_layout": false,
+    "multicam_usb_a": "usb1",
+    "multicam_usb_b": "usb2"
   },
   "serial": {
     "teensy": {
