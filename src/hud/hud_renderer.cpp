@@ -569,15 +569,35 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             gauge(r1, a0 + off, a1 + off, cpu, load_col(cpu), cb, true);  // inner, raised = CPU
             gauge(r2, a0,       a1,       gpu, load_col(gpu), gb, true);  // outer = GPU
         } else {
+            // Controller battery — always drawn (inner arc). If a phone
+            // battery is known (KDE Connect bridge bound to a paired
+            // device), draw it on the outer arc using the same colour
+            // ramp so the two read consistently. "P" prefix on the label
+            // disambiguates from the controller's bare percentage.
             const int bpct = s.health.wireless_battery_pct;   // -1 = unknown
             const float pct = std::clamp(bpct / 100.f, 0.f, 1.f);
-            NVGcolor bc = pct > 0.5f ? nvgRGBA(70, 210, 90, 230)
-                        : pct > 0.2f ? nvgRGBA(235, 180, 50, 230)
-                        :              nvgRGBA(230, 70, 60, 235);
+            auto bat_col = [](float v) {
+                return v > 0.5f ? nvgRGBA(70, 210, 90, 230)
+                     : v > 0.2f ? nvgRGBA(235, 180, 50, 230)
+                     :            nvgRGBA(230, 70, 60, 235);
+            };
+            NVGcolor bc = bat_col(pct);
             char pb[8];
             if (bpct >= 0) snprintf(pb, sizeof(pb), "%d%%", bpct);
             else           snprintf(pb, sizeof(pb), "--");
-            gauge(r1, a0, a1, pct, bc, pb, bpct >= 0);
+
+            const int  ppct = s.health.phone_battery_pct;
+            if (ppct >= 0) {
+                const float ppc = std::clamp(ppct / 100.f, 0.f, 1.f);
+                NVGcolor pc = bat_col(ppc);
+                char ppb[10];
+                snprintf(ppb, sizeof(ppb), "%s%d%%",
+                         s.health.phone_charging ? "P+" : "P", ppct);
+                gauge(r1, a0 + off, a1 + off, pct, bc, pb, bpct >= 0);
+                gauge(r2, a0,       a1,       ppc, pc, ppb, true);
+            } else {
+                gauge(r1, a0, a1, pct, bc, pb, bpct >= 0);
+            }
         }
     }
 
