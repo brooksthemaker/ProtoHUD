@@ -378,6 +378,8 @@ void KdeConnectBridge::worker() {
         state_.notifs.push(std::move(n));
     };
 
+    int  last_logged_pct      = -2;   // -2 = never logged
+    bool last_logged_charging = false;
     auto poll_battery = [&]() {
         if (current_dev_id.empty()) {
             std::lock_guard<std::mutex> lk(state_.mtx);
@@ -396,10 +398,14 @@ void KdeConnectBridge::worker() {
         const bool charging = call_get_bool_prop(conn, batt_path.c_str(),
                                                  kBatteryIface, "isCharging", false);
         const int clamped = (pct >= 0 && pct <= 100) ? pct : -1;
-        // One-line diagnostic so the journal shows whether the property
-        // get is succeeding. Print every poll for now; quiet once trusted.
-        std::fprintf(stderr, "[kdeconnect] battery poll %s charge=%d charging=%d\n",
-                     batt_path.c_str(), pct, charging ? 1 : 0);
+        // Log only on first read or when the values change, so the journal
+        // doesn't fill with per-poll noise once the bridge is healthy.
+        if (clamped != last_logged_pct || charging != last_logged_charging) {
+            std::fprintf(stderr, "[kdeconnect] phone battery %d%%%s\n",
+                         clamped, charging ? " (charging)" : "");
+            last_logged_pct      = clamped;
+            last_logged_charging = charging;
+        }
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.health.phone_battery_pct = clamped;
         state_.health.phone_charging    = charging;
