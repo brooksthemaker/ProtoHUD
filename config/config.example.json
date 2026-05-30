@@ -13,12 +13,14 @@
   },
   "cameras": {
     "_fps_note": "OWLsight fps should match or exceed display.target_fps (90) to minimise camera-to-photon latency — sampling slower than the display wastes up to one frame interval of frame age. fps is a best-effort FrameDurationLimits request; libcamera clamps to the nearest rate the sensor supports at this resolution, so a value the sensor can't hit degrades gracefully rather than failing.",
+    "_rotation_note": "rotation_deg snaps to {0, 90, 180, 270}; applied as UV math in the NV12 vertex shader (no readback, ~free). Use when the CSI camera is mounted sideways/upside-down on the helmet. Settable live from Cameras > Left/Right Camera > Rotation.",
     "owlsight_left": {
       "libcamera_id": 0,
       "model_name": "",
       "width": 1280,
       "height": 800,
       "fps": 90,
+      "rotation_deg": 0,
       "flip_h": false,
       "flip_v": false
     },
@@ -28,6 +30,7 @@
       "width": 1280,
       "height": 800,
       "fps": 90,
+      "rotation_deg": 0,
       "flip_h": false,
       "flip_v": false
     },

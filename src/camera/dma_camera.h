@@ -51,6 +51,11 @@ public:
         int         width        = 1280;
         int         height       = 800;
         int         fps          = 60;
+        // Display rotation applied in the NV12 vertex shader (no readback,
+        // ~free). Snaps to one of {0, 90, 180, 270}; other values are
+        // clamped to the nearest multiple at set time. Mounting protogen
+        // CSI cameras sideways on the helmet is the main use case.
+        int         rotation_deg = 0;
     };
 
     DmaCamera();
@@ -93,6 +98,11 @@ public:
     int   height()          const { return cfg_.height; }
     const std::string& model_name() const { return cfg_.model_name; }
     float analogue_gain()   const { return last_analogue_gain_.load(); }
+
+    // Display rotation (0, 90, 180, 270 — snapped). Live-tunable from any
+    // thread; the next draw() picks up the change via an atomic read.
+    void set_rotation(int deg);
+    int  rotation() const { return rotation_deg_.load(); }
 
 private:
     enum class SlotState { IDLE, CAPTURING, READY, RENDERING };
@@ -154,6 +164,11 @@ private:
     GLint  loc_tex_y_  = -1;   // uniform location of "tex" (samplerExternalOES)
     GLint  loc_zoom_   = -1;   // uniform location of "u_zoom"
     GLint  loc_center_ = -1;   // uniform location of "u_center"
+    GLint  loc_rot_    = -1;   // uniform location of "u_rotation_rad"
+
+    // Live-tunable display rotation. Atomic so set_rotation() can be
+    // called from menu / main without coordinating with the render thread.
+    std::atomic<int> rotation_deg_ { 0 };
 
     // Capture thread
     std::atomic<bool> running_ { false };

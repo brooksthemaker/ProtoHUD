@@ -158,7 +158,9 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
             std::cerr << "[cam] OWLsight left: no camera resolved — skipping "
                          "(only " << cams.size() << " libcamera device(s) present)\n";
         } else {
-            DmaCamera::Config lc { left.libcamera_id, left.model_name, left_id, left.width, left.height, left.fps };
+            DmaCamera::Config lc { left.libcamera_id, left.model_name, left_id,
+                                   left.width, left.height, left.fps,
+                                   left.rotation_deg };
             owl_left_ = std::make_unique<DmaCamera>();
             if (!owl_left_->init(lcam_mgr_.get(), lc, nv12_vs, nv12_fs)) {
                 std::cerr << "[cam] OWLsight left init failed\n";
@@ -171,7 +173,9 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
                          "(running mono). If you expect two CSI cameras, a reboot "
                          "usually clears a wedged sensor — check 'rpicam-hello --list-cameras'.\n";
         } else {
-            DmaCamera::Config rc { right.libcamera_id, right.model_name, right_id, right.width, right.height, right.fps };
+            DmaCamera::Config rc { right.libcamera_id, right.model_name, right_id,
+                                   right.width, right.height, right.fps,
+                                   right.rotation_deg };
             owl_right_ = std::make_unique<DmaCamera>();
             if (!owl_right_->init(lcam_mgr_.get(), rc, nv12_vs, nv12_fs)) {
                 std::cerr << "[cam] OWLsight right init failed\n";

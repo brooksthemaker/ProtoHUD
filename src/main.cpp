@@ -2443,9 +2443,25 @@ static std::vector<MenuItem> build_menu(
                 if (auto* c = cam_ptr()) c->set_colour_temp(k);
             }));
 
+        // Rotation — applied as UV math in the NV12 vertex shader (no
+        // readback, ~free). Snaps to multiples of 90°; persists on save.
+        // Mounting a CSI camera sideways on the helmet is the common case.
+        auto rot_item = [&](const char* label, int deg) {
+            return leaf_sel(label,
+                [cam_ptr, deg]{ if (auto* c = cam_ptr()) c->set_rotation(deg); },
+                [cam_ptr, deg]{ auto* c = cam_ptr(); return c && c->rotation() == deg; });
+        };
+        std::vector<MenuItem> rm = {
+            rot_item("0\xc2\xb0   (Normal)",      0),
+            rot_item("90\xc2\xb0  (Clockwise)",   90),
+            rot_item("180\xc2\xb0 (Upside down)", 180),
+            rot_item("270\xc2\xb0 (Counterclockwise)", 270),
+        };
+
         return std::vector<MenuItem>{
             submenu("Focus",          std::move(fm)),
             submenu("White Balance",  std::move(wbm)),
+            submenu("Rotation",       std::move(rm)),
         };
     };
 
@@ -7831,6 +7847,7 @@ int main(int argc, char* argv[]) {
         owl_left.width        = jl.value("width",  1280);
         owl_left.height       = jl.value("height",  800);
         owl_left.fps          = jl.value("fps",      60);
+        owl_left.rotation_deg = jl.value("rotation_deg", 0);
     }
     if (jcam.contains("owlsight_right")) {
         auto& jr               = jcam["owlsight_right"];
@@ -7839,6 +7856,7 @@ int main(int argc, char* argv[]) {
         owl_right.width        = jr.value("width",  1280);
         owl_right.height       = jr.value("height",  800);
         owl_right.fps          = jr.value("fps",      60);
+        owl_right.rotation_deg = jr.value("rotation_deg", 0);
     }
     // Override both eyes from the persisted resolution section (set by in-app preset menu)
     if (cfg.contains("resolution")) {
@@ -10454,6 +10472,12 @@ int main(int argc, char* argv[]) {
         cfg["resolution"]["width"]  = state.camera_resolution.width;
         cfg["resolution"]["height"] = state.camera_resolution.height;
         cfg["resolution"]["fps"]    = state.camera_resolution.fps;
+
+        // Persist CSI display rotation so the in-app setting survives a
+        // restart (rotation_deg lives next to the camera-id/width/height/fps
+        // block where the user already finds the rest of the per-eye config).
+        cfg["cameras"]["owlsight_left"]["rotation_deg"]  = cameras.owl_left_rotation();
+        cfg["cameras"]["owlsight_right"]["rotation_deg"] = cameras.owl_right_rotation();
 
         auto eye_src_str = [](EyeSource s) -> const char* {
             switch (s) {

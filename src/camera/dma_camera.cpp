@@ -294,11 +294,17 @@ bool DmaCamera::create_gl_resources(const char* vs_path, const char* fs_path) {
     loc_tex_y_  = glGetUniformLocation(nv12_prog_, "tex");
     loc_zoom_   = glGetUniformLocation(nv12_prog_, "u_zoom");
     loc_center_ = glGetUniformLocation(nv12_prog_, "u_center");
+    loc_rot_    = glGetUniformLocation(nv12_prog_, "u_rotation_rad");
+
+    // Seed from cfg now so the first frame already shows the configured
+    // orientation; set_rotation snaps the value.
+    set_rotation(cfg_.rotation_deg);
 
     glUseProgram(nv12_prog_);
     if (loc_tex_y_ >= 0) glUniform1i(loc_tex_y_, 0);   // GL_TEXTURE0
     if (loc_zoom_   >= 0) glUniform1f(loc_zoom_,  1.0f);
     if (loc_center_ >= 0) glUniform2f(loc_center_, 0.5f, 0.5f);
+    if (loc_rot_    >= 0) glUniform1f(loc_rot_,   0.0f);
     glUseProgram(0);
 
     // Fullscreen quad VBO (NDC, shared across draws)
@@ -434,6 +440,11 @@ bool DmaCamera::draw(float zoom, float cx, float cy) {
     float safe_zoom = (zoom < 1.0f) ? 1.0f : (zoom > 8.0f ? 8.0f : zoom);
     if (loc_zoom_   >= 0) glUniform1f(loc_zoom_,  safe_zoom);
     if (loc_center_ >= 0) glUniform2f(loc_center_, cx, cy);
+    if (loc_rot_    >= 0) {
+        const float rad = static_cast<float>(rotation_deg_.load()) *
+                          3.14159265358979323846f / 180.0f;
+        glUniform1f(loc_rot_, rad);
+    }
 
     gl::bind_quad(quad_vbo_);
     gl::draw_quad();
@@ -446,6 +457,15 @@ bool DmaCamera::draw(float zoom, float cx, float cy) {
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
 
     return true;
+}
+
+void DmaCamera::set_rotation(int deg) {
+    // Snap to the nearest 90° step and wrap into [0, 360). Anything else
+    // would skew the camera image — there's no rendering reason to allow
+    // arbitrary angles here and it'd confuse the menu UI.
+    int snapped = ((deg + 45) / 90) * 90;
+    snapped = ((snapped % 360) + 360) % 360;
+    rotation_deg_.store(snapped);
 }
 
 // ── shutdown ──────────────────────────────────────────────────────────────────

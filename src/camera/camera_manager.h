@@ -22,6 +22,10 @@ struct CamConfig {
     int         width        = 1280;
     int         height       = 800;
     int         fps          = 60;
+    // Display rotation applied in the NV12 vertex shader (0/90/180/270;
+    // other values are snapped at set time). Seed value at startup; runtime
+    // changes go through CameraManager::set_owl_*_rotation.
+    int         rotation_deg = 0;
 };
 
 struct UsbCamConfig {
@@ -98,6 +102,13 @@ public:
                                         owl_right_ ? owl_right_->height() : 0; }
 
     // ── Direct camera access (focus/exposure control) ─────────────────────────
+    // CSI display rotation (0, 90, 180, 270). Live-tunable; the next draw
+    // picks up the change. Cheap — pure UV math in the NV12 vertex shader.
+    void set_owl_left_rotation(int deg)  { if (owl_left_)  owl_left_->set_rotation(deg);  }
+    void set_owl_right_rotation(int deg) { if (owl_right_) owl_right_->set_rotation(deg); }
+    int  owl_left_rotation()  const { return owl_left_  ? owl_left_->rotation()  : 0; }
+    int  owl_right_rotation() const { return owl_right_ ? owl_right_->rotation() : 0; }
+
     DmaCamera* owl_left()  { return owl_left_.get();  }
     DmaCamera* owl_right() { return owl_right_.get(); }
 
