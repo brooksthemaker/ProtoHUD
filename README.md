@@ -16,17 +16,21 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 6. [Building Manually](#building-manually)
 7. [Camera Resolution](#camera-resolution)
 8. [Camera Focus Control](#camera-focus-control)
-9. [Night Vision (Exposure & Shutter)](#night-vision-exposure--shutter)
-10. [GPIO Buttons](#gpio-buttons)
-11. [USB Camera Picture-in-Picture](#usb-camera-picture-in-picture)
-12. [Android Mirror](#android-mirror)
-13. [Overlay Position & Size](#overlay-position--size)
-14. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
-15. [Audio Routing](#audio-routing)
-16. [HUD Layout](#hud-layout)
-17. [Onboard Compass (MPU-9250 / GY-9250)](#onboard-compass-mpu-9250--gy-9250)
-18. [Configuration Reference](#configuration-reference)
-19. [Troubleshooting](#troubleshooting)
+9. [Camera Rotation & Multi-Cam Layout](#camera-rotation--multi-cam-layout)
+10. [Night Vision (Exposure & Shutter)](#night-vision-exposure--shutter)
+11. [GPIO Buttons](#gpio-buttons)
+12. [USB Camera Picture-in-Picture](#usb-camera-picture-in-picture)
+13. [Android Mirror](#android-mirror)
+14. [Phone Integration (KDE Connect)](#phone-integration-kde-connect)
+15. [Overlay Position & Size](#overlay-position--size)
+16. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
+17. [Audio Routing](#audio-routing)
+18. [HUD Layout](#hud-layout)
+19. [BNO055 (Recommended IMU)](#bno055-recommended-imu)
+20. [Onboard Compass (MPU-9250 / GY-9250)](#onboard-compass-mpu-9250--gy-9250)
+21. [HUB75 Panel Layouts](#hub75-panel-layouts)
+22. [Configuration Reference](#configuration-reference)
+23. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -77,19 +81,58 @@ Optional async timewarp warps each eye FBO using the latest IMU pose before comp
 
 ## Hardware
 
+### Required
+
 | Component | Details |
 |-----------|---------|
 | SBC | Raspberry Pi CM5 (8 GB RAM recommended) |
-| Display | VITURE Beast XR glasses (3840×1080 SBS, 60/90/120 Hz) |
-| Cameras | 2× OWLsight CSI cameras (libcamera NV12 zero-copy path) |
-| USB cameras | 2× USB webcams for PiP overlays (optional) |
-| Face LEDs | Teensy 4.1 running Prototracer firmware **or** Protoface (4× HUB75 P2.5 panels, CM5-native) |
-| Input | SmartKnob (ESP32-S3 haptic knob) + 3 GPIO buttons |
-| Radio | RAK4631 LoRa mesh radio (868/915 MHz) |
-| Audio processor | RP2350 helmet audio board — 6-mic beamforming/NR, USB Audio UAC2 output |
-| Backup compass | HiLetgo GY-9250 / MPU-9250 9-axis IMU — heading fallback when XR glasses are offline (optional) |
-| Android device | Any ADB-capable Android phone (optional, for screen mirror) |
+| Display | VITURE Beast / Luma XR glasses (3840×1080 SBS, 60/90/120 Hz) |
 | OS | Raspberry Pi OS Bookworm · Debian Trixie + RPT packages (64-bit, aarch64) |
+
+### Vision
+
+| Component | Details |
+|-----------|---------|
+| CSI cameras | 2× OWLsight (libcamera NV12 zero-copy, shader-side rotation, up to 90 fps to match the display) |
+| USB cameras | Up to 3× USB webcams — picture-in-picture overlays or eye-fill source (per-cam capture threads, BUFFERSIZE=1 minimum-latency mode) |
+| Multi-cam layout | Same composite mirrored to both eyes: CSI L/R on the top half (rotated per-camera), two USB cams on the bottom. See [Camera Rotation & Multi-Cam Layout](#camera-rotation--multi-cam-layout) |
+
+### Face display (pick one)
+
+| Component | Details |
+|-----------|---------|
+| Teensy 4.1 + ProtoTracer | Original face path — serial to Teensy, board drives the LEDs |
+| Protoface (HUB75) | CM5-native renderer drives HUB75 panels directly via piomatter. Named layouts, mixed panel sizes, per-panel nudge. See [HUB75 Panel Layouts](#hub75-panel-layouts) |
+| Protoface (MAX7219 / RGB matrix) | Same Protoface renderer, low-pixel backends. Pixel editor available in HUD menu |
+
+### Input / control
+
+| Component | Details |
+|-----------|---------|
+| SmartKnob | ESP32-S3 haptic rotary control |
+| GPIO buttons | 3 hardware buttons (see [GPIO Button Wiring](#gpio-button-wiring)) |
+| Wireless controller | ESP32-C3 over USB-serial → ESP-NOW in-paw remote (optional) |
+| Gamepad | Any SDL2-compatible USB / Bluetooth gamepad (optional) |
+| Phone | KDE Connect over LAN or USB tether — notifications, battery, file inbox. See [Phone Integration](#phone-integration-kde-connect) |
+
+### Heading / IMU (any combination, all optional)
+
+| Component | Details | Status |
+|-----------|---------|--------|
+| **BNO055** 9-DOF Adafruit | On-chip absolute-orientation fusion (stable through tilt). I²C @ 0x28. **Preferred** — Auto picks BNO055 first | Recommended |
+| MPU-9250 / GY-9250 | 9-axis IMU with software AHRS. I²C @ 0x68 | Backup |
+| VITURE built-in IMU | Heading from the glasses themselves when worn | Fallback |
+
+The HUD's **IMU Source** menu (HUD → Compass → IMU Source) lets you force a specific sensor or pick **Auto**, which walks BNO055 → MPU9250 → Viture and snaps to the first source returning fresh samples. See [BNO055 (Recommended IMU)](#bno055-recommended-imu) for wiring and config.
+
+### Radio / network / sensors
+
+| Component | Details |
+|-----------|---------|
+| RAK4631 LoRa | 868/915 MHz mesh radio (optional) |
+| RP2350 helmet audio | 6-mic beamforming / NR, USB Audio UAC2 output (optional) |
+| MPR121 boop sensor | I²C @ 0x5A — capacitive snoot touch (optional) |
+| Android device | ADB-capable phone for screen mirror (optional) |
 
 ### GPIO Button Wiring
 
@@ -487,6 +530,63 @@ Hold GPIO 17 (left) or GPIO 27 (right) for 1.5 s to trigger AF on that camera. I
 
 ---
 
+## Camera Rotation & Multi-Cam Layout
+
+### CSI Camera Rotation
+
+Each CSI camera (OWLsight left/right) has an independent display rotation: **0° · 90° · 180° · 270°**. The rotation is applied as UV math in the NV12 vertex shader — effectively zero CPU cost, no dmabuf readback. Common use is sideways-mounting one or both cameras on the helmet shell.
+
+**Menu trail:** `Cameras → Left Camera → Rotation` (or `Right Camera → Rotation`)
+
+**Config:**
+
+```json
+"cameras": {
+  "owlsight_left":  { "rotation_deg": 0,  …},
+  "owlsight_right": { "rotation_deg": 0,  …}
+}
+```
+
+Both are persisted on save and live-tunable from the menu.
+
+### Multi-Cam Quad Layout
+
+A composite mode that fills each eye with four feeds at once:
+
+```
+┌─────────────────┬─────────────────┐
+│  CSI left       │  CSI right      │   top half — both CSI cams (rotated)
+│  (rotated)      │  (rotated)      │
+├─────────────────┼─────────────────┤
+│  USB cam A      │  USB cam B      │   bottom half — chosen USB pair
+│                 │                 │
+└─────────────────┴─────────────────┘
+```
+
+The same composite is mirrored into both eyes, so the Viture's SBS optics see a normal stereo signal. Set both CSI cameras to **90°** (or 270°) under their Rotation submenus for the intended portrait fit on the top half.
+
+**Menu trail:** `Cameras → Multi-Cam Layout`
+
+- **Enable Multi-Cam Layout** — toggle
+- **Bottom-Left Camera** — pick USB 1 / 2 / 3
+- **Bottom-Right Camera** — pick a *different* USB slot (the menu auto-swaps to keep them distinct)
+
+When the layout is on, the two chosen USB cameras open automatically and the per-eye source pickers / theater mode are bypassed.
+
+**Config:**
+
+```json
+"cameras": {
+  "multicam_layout": false,
+  "multicam_usb_a":  "usb1",
+  "multicam_usb_b":  "usb2"
+}
+```
+
+> At 90°/270° the CSI's native 16:10 aspect doesn't perfectly fill the top-half quadrant (which is 4:5 once divided in two on a 16:9 eye). The texture clamps to its edges, so you'll see some edge stretching at the corners. If precise framing matters, capture at a square aspect (e.g. 800×800).
+
+---
+
 ## Night Vision (Exposure & Shutter)
 
 ### Exposure Compensation (EV)
@@ -616,6 +716,84 @@ Or set `"android"."enabled": true` in `config.json` to auto-start on launch.
   "anchor":       "bottom_left"
 }
 ```
+
+---
+
+## Phone Integration (KDE Connect)
+
+ProtoHUD has a built-in **KDE Connect bridge** that pulls phone notifications and battery state straight into the HUD over LAN or USB tether — no cloud, no cellular dependency, no Tasker required. It also includes a **Phone Inbox** watcher that surfaces file drops (face PNGs, GIFs) as import toasts in the HUD.
+
+### What you get
+
+| Feature | Where it shows up |
+|---------|-------------------|
+| Phone notifications | Toast on the HUD + entry in the notification log (same pipeline as scheduler reminders) |
+| Phone battery % | Outer arc on the minimap battery gauge with a `P` / `P+` prefix (P+ = charging) |
+| File drops | Toast: *"Got happy.png — import as 'happy'?"* → Import / Dismiss buttons. PNGs go to faces; GIFs are copied into `gifs_dir` and bound to the first empty slot |
+
+### Setup
+
+**1. Install on the Pi.** Already done if you ran `scripts/install.sh` with default settings. Manual:
+
+```bash
+sudo apt install libdbus-1-dev kdeconnect
+```
+
+**2. Make sure the I²C / USB bus path is available** if you're using USB tether (default on Bookworm with NetworkManager):
+
+```bash
+sudo nmcli device set usb0 managed yes
+sudo nmcli device connect usb0
+```
+
+**3. Pair the phone.** Install the **KDE Connect** app from Play Store / F-Droid, open it, and pair with the Pi. Both ends must accept the pairing prompt.
+
+```bash
+kdeconnect-cli -a                          # list reachable devices
+kdeconnect-cli --pair -d <DEVICE_ID>       # initiate pairing if needed
+```
+
+**4. DBus session bus (system-level service only).** If you run ProtoHUD via the `systemctl` service, the install script writes a drop-in at `/etc/systemd/system/protohud.service.d/10-dbus-session.conf` that points the service at the user's session bus. Without this the bridge starts its own private bus and never sees `kdeconnectd`. The drop-in writes:
+
+```ini
+[Service]
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+```
+
+If you launch ProtoHUD directly from a terminal this step is unnecessary — the shell's existing `DBUS_SESSION_BUS_ADDRESS` is inherited.
+
+### Config
+
+```json
+"kdeconnect": {
+  "enabled": true,
+  "device_id": "",                   // empty → first paired+reachable
+  "auto_dismiss_s": 8.0,
+  "app_blocklist": "KDE Connect"     // CSV, case-insensitive substring match on appName
+},
+"phone_inbox": {
+  "enabled": true,
+  "watch_dir": "",                   // empty → $XDG_DOWNLOAD_DIR / ~/Downloads
+  "settle_seconds": 2,
+  "auto_dismiss_s": 0.0              // 0 keeps the import toast sticky
+}
+```
+
+After import: the file moves to `<watch_dir>/.processed/`. After dismiss: `<watch_dir>/.dismissed/`. No data loss either way.
+
+### Verifying
+
+```bash
+journalctl -u protohud.service -b | grep -iE "kdeconnect|phone-inbox"
+```
+
+Expected boot lines:
+
+- `[kdeconnect] bridge started`
+- `[phone-inbox] watching /home/<user>/Downloads`
+- `[kdeconnect] phone battery 84% (charging)` — once a paired device responds
+
+If the phone battery arc doesn't appear: check `i2cdetect`-style `kdeconnect-cli --list-devices` and ensure your phone shows as paired+reachable. The bridge polls every 5 s; first values surface within a few seconds of boot.
 
 ---
 
@@ -823,6 +1001,72 @@ The HUD is rendered by NanoVG as a single cohesive unit anchored to the screen b
 **Toasts** — slide-in notification cards from the right screen edge. Auto-dismiss after a configurable timeout; action buttons appear when a toast is focused (knob navigates them).
 
 Background opacity of the indicator arms is configurable via `hud.health_panel_opacity` (0.0–1.0).
+
+---
+
+## BNO055 (Recommended IMU)
+
+The **Adafruit BNO055 9-DOF Absolute Orientation Sensor** is the preferred heading source on the helmet. The IC runs sensor fusion **on-chip** — no software AHRS is needed, the heading is stable through tilt, and once calibrated it survives axis remaps without recalibrating. With **Auto** selected as the IMU source, the HUD picks BNO055 first whenever it's reporting fresh samples.
+
+### Wiring (I²C @ 0x28)
+
+| BNO055 pin | CM5 GPIO header | Notes |
+|------------|------------------|-------|
+| VIN | Pin 1 (3.3 V) | 3–5 V tolerant on the regulator input |
+| GND | Pin 6 (GND) | |
+| SDA | Pin 3 (GPIO 2 / SDA) | I²C-1 data |
+| SCL | Pin 5 (GPIO 3 / SCL) | I²C-1 clock |
+| ADR | Floating / GND | Default address `0x28`. Tie ADR to 3.3 V (or close the jumper) for `0x29` |
+| PS0/PS1 | Both GND | I²C mode (Adafruit board ties them low — verify if no response) |
+| nRST | Floating high | Avoid pulling low; chip stays in reset otherwise |
+| INT | Unconnected | Not used by ProtoHUD |
+
+The bus is the same `i2c-1` used by the MPU-9250 and the MPR121 boop sensor — `dtparam=i2c_arm=on` in `/boot/firmware/config.txt` enables it (the install script does this automatically).
+
+### Verifying the chip is alive
+
+```bash
+sudo i2cdetect -y 1
+```
+
+You should see `28` (or `29`) in the grid. **An empty grid means the chip isn't acknowledging** — software won't help. The most common causes when wiring "looks right":
+
+- SDA and SCL swapped at the chip end
+- VIN reading 5 V but the onboard 3 V regulator has died → measure the chip's own **3V3** pin, not VIN
+- PS0 or PS1 floating high — chip boots into UART mode and ignores I²C
+- nRST pulled low by a stray wire / short
+
+### Config
+
+```json
+"bno055": {
+  "enabled": true,
+  "i2c_bus": "/dev/i2c-1",
+  "i2c_addr": 40,
+  "_i2c_addr_note": "40 = 0x28 (Adafruit default; 41 = 0x29 with ADR jumper closed)",
+  "declination_deg": 0.0,
+  "heading_offset": 0.0,
+  "heading_axes": 0,
+  "poll_hz": 50.0
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `declination_deg` | Local magnetic declination. Positive = East. ngdc.noaa.gov/geomag/calculators/magcalc.shtml |
+| `heading_offset` | Mechanical mounting offset — adjust so north reads 0 |
+| `heading_axes` | Axis remap preset for non-default mounting. Chip calibration survives axis changes |
+| `poll_hz` | Sensor read rate. 50 Hz matches the chip's internal fusion rate; higher just resamples the same value |
+
+### Menu trail
+
+```
+HUD → Compass → IMU Source
+```
+
+Options: **Auto (BNO055 > MPU9250 > Viture)** · **BNO055** · **MPU‑9250** · **VITURE glasses** · **None (freeze heading)**.
+
+The chip publishes uncalibrated heading on power-up. Wave the helmet in a figure-8 a few times — calibration status updates per axis and Auto will commit to BNO055 once `calib_sys ≥ 2`. If you want it immediately regardless of calibration, force **BNO055** explicitly.
 
 ---
 
@@ -1148,6 +1392,65 @@ See [Protoface/INTEGRATION.md](Protoface/INTEGRATION.md) for the full GPIO analy
 
 ---
 
+## HUB75 Panel Layouts
+
+When Protoface runs in **native** mode on the HUB75 backend, the CM5 drives the panels directly via the panel-driver shim. The layout configurator lives in the deep menu and supports multi-panel builds, mixed panel sizes, and per-pixel nudges to align cleanly to physical mounting offsets.
+
+**Menu trail:** `Face Display → Hardware → HUB75 Layout`
+
+### Sizes & arrangements
+
+- **Panel sizes:** 32×16 · 64×32 · 64×64 · 96×48 · 128×32 · 128×64 (default and per-panel overrides)
+- **Panel count:** 1 / 2 / 3 / 4
+- **Arrangement:** Horizontal chain · Vertical stack · 2×2 grid
+- **Per-panel size override:** select a different size for a specific slot — useful for mixed-panel builds (e.g. eyes on 64×32, nose on 32×16)
+
+### Centre-of-canvas origin
+
+Panel positions are stored as **offsets from the canvas centre**, not absolute coordinates. So nudging Panel 1's `Offset X` left moves it left; nudging Panel 2's `Offset X` right moves it right. This makes mirrored helmet builds intuitive and survives auto-layout changes (re-running the defaults reflows panels around the same centre).
+
+### Named layouts
+
+Save multiple panel arrangements and switch between them on-the-fly:
+
+- **Save As…** — opens the on-screen keyboard, names the current arrangement
+- **Load Layout** — pick a saved layout from the list (`*` marks the active one)
+- **Rename Active…** / **Delete Active**
+
+Faces (PNGs created via the in-HUD pixel editor) are **stamped** with the active layout name in their `config.json`. When you switch to a different layout, mismatched faces show `[Other Layout]` in their slot label so you can see at a glance which were authored for which build.
+
+### Config
+
+```json
+"protoface": {
+  "hub75_active": "Default",
+  "hub75_layouts": {
+    "Default": {
+      "panel_size": "64x32",
+      "arrangement": "horizontal",
+      "panel_count": 2,
+      "panel_size_per": ["", "", "", ""],
+      "nudge_dx":  [-64, 64, 0, 0],
+      "nudge_dy":  [0, 0, 0, 0],
+      "defaults_applied": true
+    }
+  }
+}
+```
+
+Legacy single-block configs (`cfg["protoface"]["hub75"]`) migrate to `hub75_layouts["Default"]` on first load.
+
+### Pixel editor extras (MAX7219 / RGB matrix)
+
+When a backend with addressable LED regions is active, each face slot exposes an **Edit…** leaf that opens a full-screen pixel editor on the slot's PNG:
+
+- **V** — preview the in-progress canvas on the physical panels for a configurable hold time (default 10 s under `Animations → Editor Preview Hold`)
+- **T** — toggle live-effects view (the editor pane shows the composited render — face + material + effects — instead of just the painted PNG)
+
+Other keys (1–6 for tools, P/E/B/I/L/R, mirror, brush size, undo, save) are listed at the bottom of the editor.
+
+---
+
 ## Troubleshooting
 
 ### Camera shows black / no image
@@ -1261,6 +1564,49 @@ If the symlink is missing, recreate it:
 
 ```bash
 ln -sf build/protohud ~/ProtoHUD/protohud
+```
+
+### BNO055 not detected by ProtoHUD
+
+```bash
+sudo i2cdetect -y 1   # must show 28 (or 29 if ADR jumper closed)
+```
+
+- **Empty grid** → wiring / power / mode problem (see [BNO055 wiring & gotchas](#bno055-recommended-imu)). `i2c_arm=on` in `/boot/firmware/config.txt` must be set (the install script handles this).
+- **`28` present but the HUD doesn't pick it up** → confirm the `"bno055"` block is in your **live** `~/protohud/config/config.json` (not just `config.example.json`). `grep -A6 '"bno055"' ~/protohud/config/config.json` should print the block.
+- **Chip detected and config loaded but heading frozen** → check `HUD → Compass → IMU Source`. If it's set to **Auto** and the chip is still warming up its calibration, force **BNO055** to bypass the freshness gate.
+
+### KDE Connect bridge can't see the phone
+
+```bash
+kdeconnect-cli -a                                          # list reachable devices on the user bus
+ps -ef | grep -E "kdeconnectd|dbus-daemon"                 # confirm kdeconnectd is running
+systemctl status protohud.service | grep -i dbus-launch    # if you see dbus-launch in the cgroup,
+                                                           # the service started its OWN bus instead
+                                                           # of inheriting the user's
+```
+
+If `systemctl status` shows `dbus-launch --autolaunch` and `dbus-daemon … --session` as protohud's children, the DBus session-bus override is missing. The install script writes one to `/etc/systemd/system/protohud.service.d/10-dbus-session.conf`; if you installed manually, drop it in by hand:
+
+```bash
+sudo systemctl edit protohud.service
+# Add:
+#   [Service]
+#   Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+sudo systemctl daemon-reload
+sudo systemctl restart protohud.service
+```
+
+Substitute your `uid` from `echo $UID` (usually `1000`).
+
+### USB tether connected but no IP on `usb0`
+
+On Bookworm `dhclient` is gone — NetworkManager owns DHCP. If `ip addr show usb0` is blank after the phone enables USB tethering:
+
+```bash
+sudo nmcli device set usb0 managed yes
+sudo nmcli device connect usb0
+ip -br addr show usb0      # should now have a 192.168.42.x address
 ```
 
 ---
