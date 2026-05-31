@@ -247,6 +247,21 @@
     "mag_bias": [0.0, 0.0, 0.0],
     "_mag_bias_note": "Hard-iron calibration offsets. Auto-updated by Calibrate Compass in the menu."
   },
+  "bno055": {
+    "_about": "Adafruit BNO055 9-DOF absolute orientation sensor via I2C. On-chip sensor fusion — heading comes from the chip directly (no software AHRS needed) and stays stable through tilt. Preferred over MPU9250 when both are present (Auto IMU source picks BNO055 first). Wired to CM5 40-pin header: SDA=GPIO2(pin3), SCL=GPIO3(pin5), VCC=3.3V(pin1), GND(pin6). ADR pin floating/low = 0x28; ADR tied high = 0x29.",
+    "enabled": true,
+    "i2c_bus": "/dev/i2c-1",
+    "i2c_addr": 40,
+    "_i2c_addr_note": "40 = 0x28 (default). Use 41 (0x29) if the ADR jumper is closed.",
+    "declination_deg": 0.0,
+    "_declination_note": "Local magnetic declination in degrees. Positive = East, negative = West. Find yours at ngdc.noaa.gov/geomag/calculators/magcalc.shtml",
+    "heading_offset": 0.0,
+    "_heading_offset_note": "Mechanical mounting offset in degrees. Adjust so north reads 0 when sensor points north.",
+    "heading_axes": 0,
+    "_heading_axes_note": "Axis remap for non-default mounting. 0 = factory default (X-forward, Y-left, Z-up). The chip's calibration is preserved across axis remaps so re-calibration isn't needed when this changes.",
+    "poll_hz": 50.0,
+    "_poll_hz_note": "Sensor read rate. 50 Hz matches the chip's internal fusion rate; higher just resamples the same fused value."
+  },
   "post_process": {
     "edge_enabled": false,
     "edge_strength": 1.0,
