@@ -12,12 +12,15 @@
     "hud_scale": 1.0
   },
   "cameras": {
+    "_fps_note": "OWLsight fps should match or exceed display.target_fps (90) to minimise camera-to-photon latency — sampling slower than the display wastes up to one frame interval of frame age. fps is a best-effort FrameDurationLimits request; libcamera clamps to the nearest rate the sensor supports at this resolution, so a value the sensor can't hit degrades gracefully rather than failing.",
+    "_rotation_note": "rotation_deg snaps to {0, 90, 180, 270}; applied as UV math in the NV12 vertex shader (no readback, ~free). Use when the CSI camera is mounted sideways/upside-down on the helmet. Settable live from Cameras > Left/Right Camera > Rotation.",
     "owlsight_left": {
       "libcamera_id": 0,
       "model_name": "",
       "width": 1280,
       "height": 800,
-      "fps": 60,
+      "fps": 90,
+      "rotation_deg": 0,
       "flip_h": false,
       "flip_v": false
     },
@@ -26,7 +29,8 @@
       "model_name": "",
       "width": 1280,
       "height": 800,
-      "fps": 60,
+      "fps": 90,
+      "rotation_deg": 0,
       "flip_h": false,
       "flip_v": false
     },
@@ -71,7 +75,11 @@
     },
     "_eye_source_note": "Valid values: csi | usb1 | usb2 | usb3. Routes that camera feed as the fullscreen background for the given eye.",
     "left_eye_source": "csi",
-    "right_eye_source": "csi"
+    "right_eye_source": "csi",
+    "_multicam_note": "multicam_layout = true overrides the per-eye source pickers and renders the same quad composite in both eyes: CSI left/right (rotated per Cameras > Left/Right Camera > Rotation) side-by-side on the top half, multicam_usb_a + multicam_usb_b side-by-side on the bottom. Set the CSI rotation to 90° (clockwise) for the intended portrait fit on the top half.",
+    "multicam_layout": false,
+    "multicam_usb_a": "usb1",
+    "multicam_usb_b": "usb2"
   },
   "serial": {
     "teensy": {
@@ -288,10 +296,10 @@
     "camera": "left"
   },
   "resolution": {
-    "_note": "Persisted OWLsight resolution. Overrides cameras.owlsight_left/right width/height/fps on startup.",
+    "_note": "Persisted OWLsight resolution. Overrides cameras.owlsight_left/right width/height/fps on startup. fps set to match display.target_fps (90) for lowest latency; libcamera clamps to the sensor's achievable rate.",
     "width":  1280,
     "height":  800,
-    "fps":      60
+    "fps":      90
   },
   "qr": {
     "_note": "Persisted QR scan state. scan_main=OWLsight cameras, scan_usb=USB cameras.",
