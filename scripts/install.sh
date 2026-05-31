@@ -114,7 +114,21 @@ PKGS=(
     v4l2loopback-dkms
     adb
     i2c-tools                    # i2cdetect — verify I2C devices (compass, etc.)
+
+    # ── Optional but enabled by default ───────────────────────────────────────
+    # libdbus-1-dev   — enables the KDE Connect phone-notification bridge at
+    #                   build time. Without it the bridge compiles to a no-op
+    #                   and ProtoHUD still builds fine.
+    # kdeconnect      — installs the kdeconnectd daemon + kdeconnect-cli on the
+    #                   Pi so the phone can pair over LAN/USB tether. Pulls a
+    #                   chunk of KDE/Qt deps but doesn't otherwise affect the
+    #                   running ProtoHUD process. Skip with KDECONNECT=0 in env.
+    libdbus-1-dev
 )
+
+if [[ "${KDECONNECT:-1}" != "0" ]]; then
+    PKGS+=(kdeconnect)
+fi
 
 # Only install packages that are not already present
 PKGS_MISSING=()
@@ -256,8 +270,12 @@ boot_append "gpu_mem=256"
 # Enable camera auto-detection (required for CSI cameras on all Pi OS variants)
 boot_append "camera_auto_detect=1"
 
-# I2C-1 bus — required for MPU-9250 backup compass (GPIO 2/3)
-# Safe to enable even without the compass connected.
+# I2C-1 bus — shared by every I2C peripheral on the helmet:
+#   • BNO055 9-DOF Adafruit fusion sensor (preferred IMU, on-chip fusion) — 0x28
+#   • MPU-9250 / GY-9250 backup compass (software AHRS)                   — 0x68
+#   • MPR121 boop sensor                                                  — 0x5A
+# All run on GPIO 2 (SDA, pin 3) and GPIO 3 (SCL, pin 5).
+# Safe to enable even without any I2C peripheral connected.
 boot_append "dtparam=i2c_arm=on"
 
 ok "Boot config updated: ${BOOT_CFG}"
@@ -492,6 +510,45 @@ EOF
     info "Start now with:          sudo systemctl start protohud"
 fi
 
+# ── Systemd drop-in: DBus session bus for the KDE Connect bridge ─────────────
+# system-level units don't inherit DBUS_SESSION_BUS_ADDRESS from a graphical
+# login, which makes the bridge autolaunch its OWN private bus instead of the
+# user's — kdeconnectd lives on the user bus, so the bridge sees nothing.
+# Pointing the service at /run/user/<uid>/bus fixes it. Harmless when kdeconnect
+# isn't installed; the bridge just doesn't find a daemon and goes quiet.
+section_inline "Systemd DBus session bus override (KDE Connect)"
+
+REAL_UID=$(id -u "${REAL_USER}")
+OVERRIDE_DIR="/etc/systemd/system/protohud.service.d"
+OVERRIDE_FILE="${OVERRIDE_DIR}/10-dbus-session.conf"
+
+if [[ -f "${OVERRIDE_FILE}" ]] && grep -q "DBUS_SESSION_BUS_ADDRESS" "${OVERRIDE_FILE}"; then
+    ok "DBus session override already present: ${OVERRIDE_FILE}"
+else
+    sudo mkdir -p "${OVERRIDE_DIR}"
+    sudo tee "${OVERRIDE_FILE}" >/dev/null << EOF
+[Service]
+# Point the service at the user's session bus so the KDE Connect bridge
+# (and any future DBus-using feature) can reach kdeconnectd / system tray.
+# /run/user/<uid>/bus is the standard systemd-user session bus location.
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${REAL_UID}/bus
+EOF
+    sudo systemctl daemon-reload
+    ok "DBus session override written: ${OVERRIDE_FILE} (uid=${REAL_UID})"
+fi
+
+# Lingering keeps the user bus alive without a graphical login so KDE Connect
+# can be reached on the helmet even with no screen attached.
+if command -v loginctl &>/dev/null; then
+    if loginctl show-user "${REAL_USER}" --property=Linger 2>/dev/null | grep -q "Linger=yes"; then
+        info "User-session lingering already enabled for ${REAL_USER}"
+    else
+        sudo loginctl enable-linger "${REAL_USER}" 2>/dev/null \
+            && ok "Enabled user-session lingering for ${REAL_USER}" \
+            || warn "Could not enable user-session lingering (KDE Connect may need a graphical login)"
+    fi
+fi
+
 # ── CPU performance governor ──────────────────────────────────────────────────
 # Apply immediately; also persisted via the service ExecStartPre above.
 if [[ -d /sys/devices/system/cpu/cpu0/cpufreq ]]; then
@@ -524,6 +581,26 @@ echo ""
 echo "  — or via systemd to auto-start on boot —"
 echo "  sudo systemctl enable --now protohud"
 echo "  journalctl -u protohud -f"
+echo ""
+echo -e "${BOLD}Optional hardware — enable in config/config.json:${RESET}"
+echo ""
+echo "  • BNO055 9-DOF IMU (I²C @ 0x28) — preferred over MPU-9250 (on-chip"
+echo "    fusion, more stable through tilt). Auto picks BNO055 > MPU > Viture."
+echo "    Add a \"bno055\" block; menu trail: HUD → Compass → IMU Source."
+echo "    See README → Onboard Compass for wiring + cfg keys."
+echo ""
+echo "  • Phone integration (KDE Connect bridge + Phone Inbox):"
+echo "      sudo apt install kdeconnect            # already done if KDECONNECT!=0"
+echo "      # On the phone: KDE Connect app → pair with this Pi"
+echo "      Menu trail: nothing — notifications/battery surface automatically."
+echo "    LAN or USB tether; cellular not required. See README → Phone Integration."
+echo ""
+echo "  • HUB75 panel layouts (multi-panel, mixed sizes, named profiles):"
+echo "    Menu trail: Face Display → Hardware → HUB75 Layout"
+echo ""
+echo "  • Camera rotation / multi-cam quad layout:"
+echo "    Menu trail: Cameras → Left/Right Camera → Rotation"
+echo "                Cameras → Multi-Cam Layout"
 echo ""
 
 if ${NEEDS_REBOOT}; then

@@ -33,6 +33,13 @@ sudo apt-get install -y libgpiod-dev
 # ALSA (audio routing: capture from RP2350 USB Audio, playback to output device)
 sudo apt-get install -y libasound2-dev
 
+# DBus (KDE Connect phone-notification bridge — optional but the build will
+# enable phone integration automatically when it's available)
+sudo apt-get install -y libdbus-1-dev
+
+# i2c-tools (needed for any of the I2C peripherals: MPU-9250, BNO055, MPR121 boop sensor)
+sudo apt-get install -y i2c-tools
+
 # Dear ImGui is fetched automatically by CMake (FetchContent v1.91.0) —
 # no apt package needed.
 # Audio DSP (beamforming, noise suppression, DOA) is handled by the RP2350 —
