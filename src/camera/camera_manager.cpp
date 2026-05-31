@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <iostream>
 #include <thread>
 #include <unistd.h>
@@ -68,6 +69,12 @@ static bool open_v4l2(cv::VideoCapture& cap, const UsbCamConfig& cfg,
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
     cap.set(cv::CAP_PROP_FPS,          cfg.fps);
     cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 0.75);  // request auto-exposure (driver best-effort)
+    // Minimise the driver-side V4L2 queue so cap.read() returns the freshest
+    // frame instead of the oldest one in a deep ring. Without this OpenCV's
+    // V4L2 backend defaults to a 4-deep queue, adding up to ~3 frame
+    // intervals (~100 ms @30fps) of motion-to-photon latency. Best-effort:
+    // not every backend/driver honours it, so we don't check the return.
+    cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
 
     // Apply UVC controls not exposed by OpenCV via direct V4L2 ioctl.
     {
@@ -151,7 +158,9 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
             std::cerr << "[cam] OWLsight left: no camera resolved — skipping "
                          "(only " << cams.size() << " libcamera device(s) present)\n";
         } else {
-            DmaCamera::Config lc { left.libcamera_id, left.model_name, left_id, left.width, left.height, left.fps };
+            DmaCamera::Config lc { left.libcamera_id, left.model_name, left_id,
+                                   left.width, left.height, left.fps,
+                                   left.rotation_deg };
             owl_left_ = std::make_unique<DmaCamera>();
             if (!owl_left_->init(lcam_mgr_.get(), lc, nv12_vs, nv12_fs)) {
                 std::cerr << "[cam] OWLsight left init failed\n";
@@ -164,7 +173,9 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
                          "(running mono). If you expect two CSI cameras, a reboot "
                          "usually clears a wedged sensor — check 'rpicam-hello --list-cameras'.\n";
         } else {
-            DmaCamera::Config rc { right.libcamera_id, right.model_name, right_id, right.width, right.height, right.fps };
+            DmaCamera::Config rc { right.libcamera_id, right.model_name, right_id,
+                                   right.width, right.height, right.fps,
+                                   right.rotation_deg };
             owl_right_ = std::make_unique<DmaCamera>();
             if (!owl_right_->init(lcam_mgr_.get(), rc, nv12_vs, nv12_fs)) {
                 std::cerr << "[cam] OWLsight right init failed\n";
@@ -242,8 +253,7 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     // Start thread whenever USB devices are configured so open/close can work
     // later even if the cameras were not available at startup.
     if (!usb1.device.empty() || !usb2.device.empty() || !usb3.device.empty()) {
-        running_ = true;
-        usb_thread_ = std::thread(&CameraManager::usb_capture_thread, this);
+        start_usb_threads();
     }
 
     // ── RGBA fullscreen shader (USB-as-eye-source) ────────────────────────────
@@ -273,8 +283,7 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
 }
 
 void CameraManager::shutdown() {
-    running_ = false;
-    if (usb_thread_.joinable()) usb_thread_.join();
+    stop_usb_threads();
 
     owl_left_.reset();
     owl_right_.reset();
@@ -329,12 +338,59 @@ bool CameraManager::set_resolution(int width, int height, int fps) {
 
 // ── USB camera capture thread ─────────────────────────────────────────────────
 
-void CameraManager::usb_capture_thread() {
-    cv::Mat frame, rgba;
-    int frames1 = 0, empty1 = 0, consec1 = 0;
-    int frames2 = 0, empty2 = 0, consec2 = 0;
-    int frames3 = 0, empty3 = 0, consec3 = 0;
-    int luma_tick1 = 0, luma_tick2 = 0, luma_tick3 = 0;
+void CameraManager::start_usb_threads() {
+    running_ = true;
+    for (int cam = 0; cam < 3; ++cam)
+        if (!usb_threads_[cam].joinable())
+            usb_threads_[cam] = std::thread(&CameraManager::usb_capture_thread, this, cam);
+}
+
+void CameraManager::stop_usb_threads() {
+    running_ = false;
+    for (auto& t : usb_threads_)
+        if (t.joinable()) t.join();
+}
+
+void CameraManager::usb_capture_thread(int cam) {
+    // Per-camera member dispatch — each thread owns exactly one camera's
+    // capture device, slot, control atomics, and reconnect bookkeeping.
+    cv::VideoCapture*   cap      = nullptr;
+    std::mutex*         cap_mtx  = nullptr;
+    TexSlot*            slot     = nullptr;
+    std::atomic<bool>*  ok_flag  = nullptr;
+    std::atomic<float>* brightness_ref = nullptr;
+    std::atomic<bool>*  flip_ref = nullptr;
+    std::atomic<bool>*  auto_brightness_ref = nullptr;
+    std::atomic<float>* auto_brightness_target_ref = nullptr;
+    std::atomic<bool>*  reconnect_ref = nullptr;
+    UsbCamConfig*       cfg_ref  = nullptr;
+    std::chrono::steady_clock::time_point* last_retry = nullptr;
+    std::function<void()> reopen;
+    const char* name = "usb?";
+    switch (cam) {
+        case 0: cap=&usb_cap1_; cap_mtx=&usb1_cap_mtx_; slot=&usb1_slot_; ok_flag=&usb1_ok_;
+                brightness_ref=&usb1_brightness_; flip_ref=&usb1_flip_;
+                auto_brightness_ref=&usb1_auto_brightness_;
+                auto_brightness_target_ref=&usb1_auto_brightness_target_;
+                reconnect_ref=&usb1_reconnect_; cfg_ref=&usb1_cfg_;
+                last_retry=&usb1_last_retry_; reopen=[this]{ open_usb1(); }; name="usb1"; break;
+        case 1: cap=&usb_cap2_; cap_mtx=&usb2_cap_mtx_; slot=&usb2_slot_; ok_flag=&usb2_ok_;
+                brightness_ref=&usb2_brightness_; flip_ref=&usb2_flip_;
+                auto_brightness_ref=&usb2_auto_brightness_;
+                auto_brightness_target_ref=&usb2_auto_brightness_target_;
+                reconnect_ref=&usb2_reconnect_; cfg_ref=&usb2_cfg_;
+                last_retry=&usb2_last_retry_; reopen=[this]{ open_usb2(); }; name="usb2"; break;
+        case 2: cap=&usb_cap3_; cap_mtx=&usb3_cap_mtx_; slot=&usb3_slot_; ok_flag=&usb3_ok_;
+                brightness_ref=&usb3_brightness_; flip_ref=&usb3_flip_;
+                auto_brightness_ref=&usb3_auto_brightness_;
+                auto_brightness_target_ref=&usb3_auto_brightness_target_;
+                reconnect_ref=&usb3_reconnect_; cfg_ref=&usb3_cfg_;
+                last_retry=&usb3_last_retry_; reopen=[this]{ open_usb3(); }; name="usb3"; break;
+        default: return;
+    }
+
+    cv::Mat frame, rgba;            // thread-local — no sharing between cameras now
+    int good = 0, bad = 0, consec = 0, luma_tick = 0;
 
     // Consecutive empty reads before declaring a camera disconnected.
     // At ~30fps with near-instant V4L2 failures this triggers in ~1 s.
@@ -342,125 +398,93 @@ void CameraManager::usb_capture_thread() {
     // How often to attempt a reconnect when enabled.
     constexpr auto kReconnectInterval = std::chrono::seconds(5);
 
-    auto capture = [&](cv::VideoCapture& cap, std::mutex& cap_mtx,
-                       TexSlot& slot, std::atomic<bool>& ok_flag,
-                       int& good, int& bad, int& consec,
-                       std::atomic<float>& brightness_ref,
-                       std::atomic<bool>& flip_ref,
-                       std::atomic<bool>&  auto_brightness_ref,
-                       std::atomic<float>& auto_brightness_target_ref,
-                       int& luma_tick,
-                       const char* name) -> bool {
+    while (running_) {
         bool got_frame = false;
         {
-            std::lock_guard<std::mutex> lk(cap_mtx);
-            if (!cap.isOpened()) { ok_flag = false; return false; }
-            cap.read(frame);
-            if (!frame.empty()) {
-                // Adaptive luma compensation: sample every 15 frames (~2/sec at 30fps)
-                if (auto_brightness_ref.load() && ++luma_tick >= 15) {
-                    luma_tick = 0;
-                    cv::Scalar m = cv::mean(frame);  // BGR: [0]=B [1]=G [2]=R
-                    float luma = m[2] * 0.299f + m[1] * 0.587f + m[0] * 0.114f;
-                    if (luma > 1.f) {
-                        float target = auto_brightness_target_ref.load();
-                        float ratio  = target / luma;
-                        float cur    = brightness_ref.load();
-                        float next   = cur + (cur * ratio - cur) * 0.15f;
-                        next = std::clamp(next, 0.25f, 4.0f);
-                        brightness_ref.store(next);
-                    }
-                }
-                float b = brightness_ref.load();
-                if (b != 1.0f)
-                    frame.convertTo(frame, -1, static_cast<double>(b), 0.0);
-                if (flip_ref.load())
-                    cv::flip(frame, frame, -1);  // -1 = 180° rotation (both axes)
-                cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
-                // QR scan: convert BGR frame to grayscale and submit to scanner.
-                // submit_gray() is rate-limited internally; safe to call every frame.
-                if (qr_scanner_ && qr_scan_usb_.load()) {
-                    cv::Mat gray;
-                    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-                    qr_scanner_->submit_gray(
-                        std::vector<uint8_t>(gray.data,
-                                             gray.data + gray.total()),
-                        gray.cols, gray.rows);
-                }
-                got_frame = true;
-                consec = 0;
-                ++good;
-                if (good == 1)
-                    std::cerr << "[cam] " << name << ": first frame received ("
-                              << frame.cols << "x" << frame.rows << ")\n";
+            std::lock_guard<std::mutex> lk(*cap_mtx);
+            if (!cap->isOpened()) {
+                *ok_flag = false;
             } else {
-                if (++bad % 30 == 1)
-                    std::cerr << "[cam] " << name << ": " << bad
-                              << " empty reads (good=" << good << ")\n";
-                // Release on disconnect. A camera that has *never* delivered a frame
-                // (good == 0 — e.g. a wrong/ISP /dev/video node) is also released,
-                // after a longer grace period, so it can't spin-read forever and
-                // peg a CPU core / starve the render thread.
-                ++consec;
-                const int thresh = (good > 0) ? kDisconnectThreshold : 90;  // ~0.9s grace
-                if (consec >= thresh) {
-                    std::cerr << "[cam] " << name
-                              << (good > 0 ? ": disconnected\n" : ": no frames — releasing\n");
-                    ok_flag = false;
-                    cap.release();  // isOpened() now returns false
+                cap->read(frame);
+                if (!frame.empty()) {
+                    // Adaptive luma compensation: sample every 15 frames (~2/sec at 30fps)
+                    if (auto_brightness_ref->load() && ++luma_tick >= 15) {
+                        luma_tick = 0;
+                        cv::Scalar m = cv::mean(frame);  // BGR: [0]=B [1]=G [2]=R
+                        float luma = m[2] * 0.299f + m[1] * 0.587f + m[0] * 0.114f;
+                        if (luma > 1.f) {
+                            float target = auto_brightness_target_ref->load();
+                            float ratio  = target / luma;
+                            float cur    = brightness_ref->load();
+                            float next   = cur + (cur * ratio - cur) * 0.15f;
+                            next = std::clamp(next, 0.25f, 4.0f);
+                            brightness_ref->store(next);
+                        }
+                    }
+                    float b = brightness_ref->load();
+                    if (b != 1.0f)
+                        frame.convertTo(frame, -1, static_cast<double>(b), 0.0);
+                    if (flip_ref->load())
+                        cv::flip(frame, frame, -1);  // -1 = 180° rotation (both axes)
+                    cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
+                    // QR scan: convert BGR frame to grayscale and submit to scanner.
+                    // submit_gray() is rate-limited internally; safe to call every frame.
+                    if (qr_scanner_ && qr_scan_usb_.load()) {
+                        cv::Mat gray;
+                        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+                        qr_scanner_->submit_gray(
+                            std::vector<uint8_t>(gray.data,
+                                                 gray.data + gray.total()),
+                            gray.cols, gray.rows);
+                    }
+                    got_frame = true;
                     consec = 0;
+                    ++good;
+                    if (good == 1)
+                        std::cerr << "[cam] " << name << ": first frame received ("
+                                  << frame.cols << "x" << frame.rows << ")\n";
+                } else {
+                    if (++bad % 30 == 1)
+                        std::cerr << "[cam] " << name << ": " << bad
+                                  << " empty reads (good=" << good << ")\n";
+                    // Release on disconnect. A camera that has *never* delivered a frame
+                    // (good == 0 — e.g. a wrong/ISP /dev/video node) is also released,
+                    // after a longer grace period, so it can't spin-read forever and
+                    // peg a CPU core / starve the render thread.
+                    ++consec;
+                    const int thresh = (good > 0) ? kDisconnectThreshold : 90;  // ~0.9s grace
+                    if (consec >= thresh) {
+                        std::cerr << "[cam] " << name
+                                  << (good > 0 ? ": disconnected\n" : ": no frames — releasing\n");
+                        *ok_flag = false;
+                        cap->release();  // isOpened() now returns false
+                        consec = 0;
+                    }
                 }
             }
         }
         if (got_frame) {
-            std::lock_guard<std::mutex> lk(slot.mtx);
-            slot.w = rgba.cols;
-            slot.h = rgba.rows;
-            slot.buf.resize(static_cast<size_t>(rgba.total()) * 4);
-            std::memcpy(slot.buf.data(), rgba.data, slot.buf.size());
-            slot.dirty = true;
+            std::lock_guard<std::mutex> lk(slot->mtx);
+            slot->w = rgba.cols;
+            slot->h = rgba.rows;
+            slot->buf.resize(static_cast<size_t>(rgba.total()) * 4);
+            std::memcpy(slot->buf.data(), rgba.data, slot->buf.size());
+            slot->dirty = true;
         }
-        // Only a real frame counts as "activity". An open-but-empty camera returns
-        // false so the loop sleeps instead of hot-spinning on a dead device.
-        return got_frame;
-    };
 
-    while (running_) {
-        bool any = capture(usb_cap1_, usb1_cap_mtx_, usb1_slot_, usb1_ok_,
-                           frames1, empty1, consec1, usb1_brightness_, usb1_flip_,
-                           usb1_auto_brightness_, usb1_auto_brightness_target_, luma_tick1, "usb1");
-        any      |= capture(usb_cap2_, usb2_cap_mtx_, usb2_slot_, usb2_ok_,
-                            frames2, empty2, consec2, usb2_brightness_, usb2_flip_,
-                            usb2_auto_brightness_, usb2_auto_brightness_target_, luma_tick2, "usb2");
-        any      |= capture(usb_cap3_, usb3_cap_mtx_, usb3_slot_, usb3_ok_,
-                            frames3, empty3, consec3, usb3_brightness_, usb3_flip_,
-                            usb3_auto_brightness_, usb3_auto_brightness_target_, luma_tick3, "usb3");
-
-        // Auto-reconnect: periodically reopen disconnected cameras when enabled.
+        // Auto-reconnect: periodically reopen this camera when enabled.
         auto now = std::chrono::steady_clock::now();
-        if (usb1_reconnect_ && !usb1_ok_ && !usb1_cfg_.device.empty() &&
-            now - usb1_last_retry_ >= kReconnectInterval) {
-            usb1_last_retry_ = now;
-            consec1 = 0; empty1 = 0;  // reset counters for the new attempt
-            std::cerr << "[cam] usb1: auto-reconnect attempt\n";
-            open_usb1();  // mutex already released by capture lambda
-        }
-        if (usb2_reconnect_ && !usb2_ok_ && !usb2_cfg_.device.empty() &&
-            now - usb2_last_retry_ >= kReconnectInterval) {
-            usb2_last_retry_ = now;
-            consec2 = 0; empty2 = 0;
-            std::cerr << "[cam] usb2: auto-reconnect attempt\n";
-            open_usb2();
-        }
-        if (usb3_reconnect_ && !usb3_ok_ && !usb3_cfg_.device.empty() &&
-            now - usb3_last_retry_ >= kReconnectInterval) {
-            usb3_last_retry_ = now;
-            consec3 = 0; empty3 = 0;
-            std::cerr << "[cam] usb3: auto-reconnect attempt\n";
-            open_usb3();
+        if (reconnect_ref->load() && !ok_flag->load() && !cfg_ref->device.empty() &&
+            now - *last_retry >= kReconnectInterval) {
+            *last_retry = now;
+            consec = 0; bad = 0;  // reset counters for the new attempt
+            std::cerr << "[cam] " << name << ": auto-reconnect attempt\n";
+            reopen();  // cap mutex already released above
         }
 
-        if (!any)
+        // Only a real frame counts as "activity". An open-but-empty camera sleeps
+        // instead of hot-spinning on a dead device.
+        if (!got_frame)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
@@ -562,9 +586,10 @@ bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
                               UsbCamConfig& cfg,
                               const std::vector<std::string>& skip_paths)
 {
-    // Stop the capture thread so nothing else is calling cap.read()
-    running_ = false;
-    if (usb_thread_.joinable()) usb_thread_.join();
+    // Stop all capture threads so nothing else is calling cap.read() while we
+    // probe /dev/video* (the scan opens devices that another camera thread
+    // might otherwise grab mid-iteration).
+    stop_usb_threads();
 
     cap.release();
     ok = false;
@@ -595,10 +620,9 @@ bool CameraManager::scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
                   << "    sudo usermod -aG video $USER  (then log out and back in)\n";
     }
 
-    // Restart the capture thread if any slot is now usable
+    // Restart the capture threads if any slot is now usable
     if (usb1_ok_ || usb2_ok_ || usb3_ok_) {
-        running_ = true;
-        usb_thread_ = std::thread(&CameraManager::usb_capture_thread, this);
+        start_usb_threads();
     }
 
     return ok.load();
