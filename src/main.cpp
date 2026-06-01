@@ -298,6 +298,11 @@ struct PfHub75Layout {
     // defaults are dx[0] = -32, dx[1] = +32 (P1 left of centre, P2 right).
     int         nudge_dx[4]     = {0, 0, 0, 0};
     int         nudge_dy[4]     = {0, 0, 0, 0};
+    // Per-panel orientation flips to match physical mounting/wiring. flip_x
+    // mirrors left-right, flip_y top-bottom (both = 180°). Independent of the
+    // nudge geometry — applied to each panel's composited region.
+    bool        flip_x[4]       = {false, false, false, false};
+    bool        flip_y[4]       = {false, false, false, false};
     // First-run flag — until apply_defaults has run we treat all-zero
     // nudges as "uninitialised" and populate them.
     bool        defaults_applied = false;
@@ -911,11 +916,13 @@ static face::RenderConfig pf_build_render_config(const json& cfg,
         pf_hub75_canvas(*hub75, cw, ch);
         rc.canvas_w = cw;
         rc.canvas_h = ch;
-        for (const auto& p : plist) {
+        for (size_t i = 0; i < plist.size(); ++i) {
+            const auto& p = plist[i];
             face::PanelCfg pc;
             pc.name = p.name;
             pc.x = p.rect.x; pc.y = p.rect.y;
             pc.w = p.rect.width; pc.h = p.rect.height;
+            if (i < 4) { pc.flip_x = hub75->flip_x[i]; pc.flip_y = hub75->flip_y[i]; }
             rc.panels.push_back(std::move(pc));
         }
     } else {
@@ -4474,6 +4481,22 @@ static std::vector<MenuItem> build_menu(
                 slider("Offset Y (from centre)", -ymax, ymax, 1.f, " px",
                     [H, i]{ return static_cast<float>(H->nudge_dy[i]); },
                     [H, i](float v){ H->nudge_dy[i] = static_cast<int>(v); }),
+                // Per-panel orientation. Pushed to the live renderer via
+                // pf_layout_changed so the flip is visible on the panels
+                // immediately (geometry edits above still need a restart/
+                // backend round-trip; flips don't).
+                toggle("Flip Horizontal",
+                    [H, i]{ return H->flip_x[i]; },
+                    [H, i, pf_layout_changed](bool v){
+                        H->flip_x[i] = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
+                toggle("Flip Vertical",
+                    [H, i]{ return H->flip_y[i]; },
+                    [H, i, pf_layout_changed](bool v){
+                        H->flip_y[i] = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
                 leaf("Reset to Default Position",
                      [H, i]{
                          // Reset just this slot by reapplying defaults to a
@@ -4668,7 +4691,9 @@ static std::vector<MenuItem> build_menu(
                        "HUB75 Panel Layout", hub_preview),
             "Panel size + count + arrangement for the HUB75 backend. "
             "Each panel exposes a Nudge X/Y slider (±32 px integer) so you "
-            "can align the editor canvas to physical mounting offsets. "
+            "can align the editor canvas to physical mounting offsets, plus "
+            "Flip Horizontal / Vertical toggles to match how each panel is "
+            "mounted/wired (these apply to the panels live). "
             "Save As / Load lets you keep multiple named layouts (e.g. one "
             "per helmet build); faces are stamped with the active layout "
             "name on import. Persisted to cfg[\"protoface\"][\"hub75_layouts\"].");
@@ -8263,6 +8288,12 @@ int main(int argc, char* argv[]) {
             if (jh.contains("nudge_dy") && jh["nudge_dy"].is_array())
                 for (size_t i = 0; i < jh["nudge_dy"].size() && i < 4; ++i)
                     L.nudge_dy[i] = jh["nudge_dy"][i].get<int>();
+            if (jh.contains("flip_x") && jh["flip_x"].is_array())
+                for (size_t i = 0; i < jh["flip_x"].size() && i < 4; ++i)
+                    L.flip_x[i] = jh["flip_x"][i].get<bool>();
+            if (jh.contains("flip_y") && jh["flip_y"].is_array())
+                for (size_t i = 0; i < jh["flip_y"].size() && i < 4; ++i)
+                    L.flip_y[i] = jh["flip_y"][i].get<bool>();
             L.defaults_applied = jval(jh, "defaults_applied", false);
             return L;
         };
@@ -9732,8 +9763,14 @@ int main(int argc, char* argv[]) {
                                &pf_hub75,
                                &pf_hub75_layouts, &pf_hub75_active,
                                /* pf_layout_changed */ [&]{
-                                   if (native_ctrl)
-                                       native_ctrl->set_active_layout_name(pf_hub75_active);
+                                   if (!native_ctrl) return;
+                                   native_ctrl->set_active_layout_name(pf_hub75_active);
+                                   // Push per-panel flips live so the orientation
+                                   // toggles take effect on the panels immediately.
+                                   std::vector<std::array<bool, 2>> flips;
+                                   for (int i = 0; i < pf_hub75.panel_count && i < 4; ++i)
+                                       flips.push_back({pf_hub75.flip_x[i], pf_hub75.flip_y[i]});
+                                   native_ctrl->set_panel_flips(flips);
                                },
                                &pf_blink_enabled, &pf_blink_min, &pf_blink_max,
                                &pf_blink_duration, &pf_expr_fade,
@@ -10441,6 +10478,10 @@ int main(int argc, char* argv[]) {
                                                   L.nudge_dx[2], L.nudge_dx[3]});
             jh["nudge_dy"]         = json::array({L.nudge_dy[0], L.nudge_dy[1],
                                                   L.nudge_dy[2], L.nudge_dy[3]});
+            jh["flip_x"]           = json::array({L.flip_x[0], L.flip_x[1],
+                                                  L.flip_x[2], L.flip_x[3]});
+            jh["flip_y"]           = json::array({L.flip_y[0], L.flip_y[1],
+                                                  L.flip_y[2], L.flip_y[3]});
             return jh;
         };
         json jlayouts = json::object();

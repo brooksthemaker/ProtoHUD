@@ -44,6 +44,12 @@ struct PanelCfg {
     std::string name;
     int         x = 0, y = 0, w = 64, h = 32;   // region in canvas pixels
     std::string mirror_of;                       // empty = renders its own face
+    // Per-panel orientation: flip the panel's composited region to match how
+    // the physical HUB75 panel is mounted/wired. flip_x mirrors left-right,
+    // flip_y top-bottom; both set = 180° rotation. Applied after compositing
+    // (and after mirror copies) so it works for self-rendered and mirror panels.
+    bool        flip_x = false;
+    bool        flip_y = false;
     FaceCfg     face;
     MaterialCfg material;
     // Particle config in any form ParticleSystem accepts: a string effect name,

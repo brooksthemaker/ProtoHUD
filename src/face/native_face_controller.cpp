@@ -235,6 +235,21 @@ void NativeFaceController::render_thread() {
                 cv::flip(canvas(sroi), flipped, 1);
                 flipped.copyTo(canvas(droi));
             }
+
+            // Per-panel orientation flips (HUB75 layout's Flip X / Flip Y).
+            // Applied last so it covers both self-rendered and mirror panels.
+            // flip code: 1 = horizontal (left-right), 0 = vertical (top-bottom),
+            // -1 = both (180°). Done in place on the panel's canvas region.
+            for (auto& pn : panels_) {
+                const PanelCfg& pc = pn.cfg;
+                if (!pc.flip_x && !pc.flip_y) continue;
+                cv::Rect roi(pc.x, pc.y, pc.w, pc.h);
+                if ((roi & cv::Rect(0, 0, canvas.cols, canvas.rows)) != roi) continue;
+                const int code = (pc.flip_x && pc.flip_y) ? -1 : (pc.flip_x ? 1 : 0);
+                cv::Mat region = canvas(roi), flipped;
+                cv::flip(region, flipped, code);
+                flipped.copyTo(region);
+            }
         }
 
         {
@@ -647,6 +662,14 @@ void NativeFaceController::set_expression_fade(double seconds) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_expression_fade(seconds);
+}
+
+void NativeFaceController::set_panel_flips(const std::vector<std::array<bool, 2>>& flips) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (size_t i = 0; i < panels_.size() && i < flips.size(); ++i) {
+        panels_[i].cfg.flip_x = flips[i][0];
+        panels_[i].cfg.flip_y = flips[i][1];
+    }
 }
 
 void NativeFaceController::set_wiggle(const WiggleCfg& w) {

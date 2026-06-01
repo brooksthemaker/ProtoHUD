@@ -8,6 +8,7 @@
 // Scope note (Phase 1–2): face + materials + compositing are ported. Particles,
 // GIF playback, and the C++ Piomatter output are stubbed/TODO for later phases.
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -110,6 +111,10 @@ public:
     void set_blink_timing(double min_s, double max_s, double duration_s);
     void set_expression_fade(double seconds);
     void set_wiggle(const WiggleCfg& w);
+    // Live per-panel orientation flips (HUB75 layout Flip X / Flip Y). flips[i]
+    // = {flip_x, flip_y} for panel i; extra/missing entries are ignored. Read by
+    // the render thread on the next frame.
+    void set_panel_flips(const std::vector<std::array<bool, 2>>& flips);
 
     // Push a "transient" image for the named expression onto every panel
     // for duration_s seconds. The current image is stashed and restored
