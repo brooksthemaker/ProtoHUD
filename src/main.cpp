@@ -222,11 +222,22 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
 // startup AND from the menu's backend hot-swap when switching back to HUB75.
 // fork()+setsid() (instead of `system("... &")`) so SIGINT to the parent
 // doesn't take the driver down with it.
+// Geometry (panel_w/panel_h/chain/parallel) must match the canvas the renderer
+// pushes into /dev/shm, otherwise panel_driver.py's piomatter framebuffer is a
+// different shape than the frame it reads and the blit throws on the first
+// frame (panels never light). The defaults below mirror panel_driver.py's own
+// argparse defaults so existing callers behave unchanged.
 static void pf_launch_panel_driver(const std::string& bin_dir,
-                                   int canvas_w, int canvas_h) {
+                                   int canvas_w, int canvas_h,
+                                   int panel_w = 64, int panel_h = 32,
+                                   int chain = 2, int parallel = 1) {
     std::string drv = bin_dir + "/../scripts/panel_driver.py";
     std::string cw  = std::to_string(canvas_w);
     std::string chh = std::to_string(canvas_h);
+    std::string pw  = std::to_string(panel_w);
+    std::string ph  = std::to_string(panel_h);
+    std::string ch  = std::to_string(chain);
+    std::string par = std::to_string(parallel);
     std::system("pkill -f panel_driver.py 2>/dev/null");
     pid_t pid = fork();
     if (pid == 0) {
@@ -237,11 +248,15 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
         if (nf >= 0) { dup2(nf, 0); ::close(nf); }
         execlp("python3", "python3", "-u", drv.c_str(),
                "--canvas-w", cw.c_str(), "--canvas-h", chh.c_str(),
+               "--panel-w", pw.c_str(), "--panel-h", ph.c_str(),
+               "--chain", ch.c_str(), "--parallel", par.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }
     std::cout << "[main] launched panel_driver.py pid=" << pid
-              << " (" << drv << ")\n";
+              << " (" << drv << ", canvas " << cw << "x" << chh
+              << ", panel " << pw << "x" << ph
+              << ", chain " << ch << ", parallel " << par << ")\n";
 }
 
 // Build the PanelOutput that NativeFaceController writes into. Reads
@@ -291,6 +306,9 @@ static std::vector<face::ShmPusherOutput::Panel>
 pf_hub75_panels(const PfHub75Layout& L);
 static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch);
 static void pf_hub75_apply_defaults(PfHub75Layout& L);
+static void pf_hub75_driver_geometry(const PfHub75Layout& L,
+                                     int& panel_w, int& panel_h,
+                                     int& chain, int& parallel);
 
 // hot-swap action use the exact same construction logic.
 static std::unique_ptr<face::PanelOutput>
@@ -470,11 +488,16 @@ static void pf_hub75_panel_dims(const std::string& sz, int& w, int& h) {
 // Returns each panel's (x, y, panel_w, panel_h) with the user's nudge applied
 // and a canonical name ("panel_0" .. "panel_N"). The first panel always
 // anchors at (0, 0) + nudge[0]; subsequent panels lay out per arrangement.
-// 32-px background margin on each side of the panel set. Sized so the
-// per-panel nudge (±32 px) can slide a panel that much past a neighbour's
-// edge without the canvas truncating any pixels. With two 128×... panels
-// in a horizontal chain that puts the canvas at 256 + 64 = 320 px wide.
-static constexpr int kHub75Margin = 32;
+//
+// No background margin: the canvas is the *tight* bounding box of the panel
+// set so it maps 1:1 onto the physical HUB75 framebuffer that panel_driver.py
+// builds (a chain/parallel arrangement of panels has no border). A margin
+// would blit as a dark band around the face and shift it off the panels — and
+// since the renderer and the in-HUD editor share this layout, both stay WYSIWYG
+// with what actually lights up. Per-panel nudges still offset a panel within
+// the canvas; an extreme nudge that pushes a panel past the bounding box simply
+// clips, which is unavoidable on fixed-position hardware anyway.
+static constexpr int kHub75Margin = 0;
 
 // Centre = 0 model. nudge_dx[i] / nudge_dy[i] are stored as the offset of
 // panel i's CENTRE from the canvas centre (px). Default values are the
@@ -563,10 +586,10 @@ static void pf_hub75_apply_defaults(PfHub75Layout& L) {
     L.defaults_applied = true;
 }
 
-// Total canvas size = bounding box of the *un-nudged* panel set + a 32-px
-// margin on each side. Canvas size is therefore stable as the user tweaks
-// nudges (so the renderer canvas doesn't resize every slider step), and
-// every panel stays inside the canvas even at maximum nudge.
+// Total canvas size = bounding box of the *un-nudged* panel set (kHub75Margin
+// is 0 — see the note above). Canvas size is therefore stable as the user
+// tweaks nudges (so the renderer canvas doesn't resize every slider step) and
+// equals the physical HUB75 framebuffer the driver pushes into.
 static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch) {
     const int n = std::clamp(L.panel_count, 1, 4);
     int pw[4] = {0,0,0,0}, ph[4] = {0,0,0,0};
@@ -598,6 +621,35 @@ static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch) {
     ch = bb_h + 2 * kHub75Margin;
     if (cw <= 0) cw = 64;
     if (ch <= 0) ch = 32;
+}
+
+// Translate the panel layout into the piomatter geometry panel_driver.py needs
+// so its framebuffer matches the (tight, margin-free) canvas the renderer
+// pushes. The single physical panel size feeds --panel-w/--panel-h; the
+// arrangement maps onto piomatter's chain (panels daisied along the data line)
+// and parallel (independent lanes) counts:
+//   horizontal → chain = N, parallel = 1   (canvas = pw*N × ph)
+//   vertical   → chain = 1, parallel = N   (canvas = pw   × ph*N)
+//   grid2x2    → chain = 2, parallel = 2   (canvas = pw*2 × ph*2)
+// Mixed per-panel sizes can't be expressed as a uniform chain (piomatter
+// assumes identical panels), so we fall back to panel 0's size; the canvas
+// still matches because pf_hub75_canvas sums the real per-panel dims, and the
+// driver derives missing geometry from the canvas as a backstop.
+static void pf_hub75_driver_geometry(const PfHub75Layout& L,
+                                     int& panel_w, int& panel_h,
+                                     int& chain, int& parallel) {
+    const int n = std::clamp(L.panel_count, 1, 4);
+    const std::string& s0 = L.panel_size_per[0].empty()
+                            ? L.panel_size : L.panel_size_per[0];
+    pf_hub75_panel_dims(s0, panel_w, panel_h);
+    if (L.arrangement == "vertical") {
+        chain = 1; parallel = n;
+    } else if (L.arrangement == "grid2x2") {
+        chain = (n >= 2) ? 2 : 1;
+        parallel = (n >= 3) ? 2 : 1;
+    } else { // horizontal
+        chain = n; parallel = 1;
+    }
 }
 
 // ── Chain layout → named zone rects ───────────────────────────────────────────
@@ -9235,7 +9287,10 @@ int main(int argc, char* argv[]) {
         // when the renderer writes into a /dev/shm frame. MAX7219 writes
         // directly to spidev and needs no Python helper.
         if (pf_launch_driver && pf_backend == "hub75") {
-            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h);
+            int gpw = 64, gph = 32, gchain = 2, gpar = 1;
+            pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
+            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
+                                   gpw, gph, gchain, gpar);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -9421,7 +9476,10 @@ int main(int argc, char* argv[]) {
         if (new_backend == "max7219" || new_backend == "rgb_matrix") {
             std::system("pkill -f panel_driver.py 2>/dev/null");
         } else if (new_backend == "hub75" && pf_launch_driver) {
-            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h);
+            int gpw = 64, gph = 32, gchain = 2, gpar = 1;
+            pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
+            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
+                                   gpw, gph, gchain, gpar);
         }
     };
 

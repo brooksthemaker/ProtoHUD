@@ -65,6 +65,18 @@ def main():
                                  framebuffer=fb, geometry=geometry)
     print("[panel_driver] piomatter ready", flush=True)
 
+    # The renderer should hand us a canvas that exactly matches the physical
+    # framebuffer (ProtoHUD derives --panel-*/--chain/--parallel from the same
+    # layout that sizes the canvas). If they ever disagree — e.g. a mixed
+    # per-panel-size layout that can't be a uniform chain — copy the overlapping
+    # region instead of letting the blit raise and kill the driver (which leaves
+    # the panels dark). Warn once so the mismatch is visible in the log.
+    if (H, W) != (height, width):
+        print(f"[panel_driver] WARNING: canvas {W}x{H} != framebuffer "
+              f"{width}x{height}; copying overlap {min(W, width)}x"
+              f"{min(H, height)}", flush=True)
+    copy_h, copy_w = min(H, height), min(W, width)
+
     # Wait for ProtoHUD to create the shm segment.
     while not os.path.exists(args.shm):
         time.sleep(0.2)
@@ -89,7 +101,7 @@ def main():
                 buf = np.frombuffer(mm, dtype=np.uint8, count=W * H * 3, offset=1)
                 frame = buf.reshape((H, W, 3))
                 # Panels display R->G->B rotated; resend as (G,B,R) to correct.
-                fb[:] = frame[:, :, [1, 2, 0]]
+                fb[:copy_h, :copy_w] = frame[:copy_h, :copy_w, [1, 2, 0]]
                 matrix.show()
             time.sleep(period)
     finally:
