@@ -4996,7 +4996,11 @@ static std::vector<MenuItem> build_menu(
                                                std::move(pf_preview_menu)));
 
     // ── Face Display root: Source picker (radios) + per-backend submenus ─────
+    // Protoface first (the primary renderer), then the source radios and the
+    // ProtoTracer submenu.
     std::vector<MenuItem> face_display_menu;
+    if (!protoface_inner_menu.empty())
+        face_display_menu.push_back(submenu("Protoface", std::move(protoface_inner_menu)));
     if (active_face_pp && teensy_option && fp_option) {
         face_display_menu.push_back(leaf_sel("Source: Teensy (ProtoTracer)",
             [active_face_pp, teensy_option]{ *active_face_pp = teensy_option; },
@@ -5006,8 +5010,6 @@ static std::vector<MenuItem> build_menu(
             [active_face_pp, fp_option]{ return *active_face_pp == fp_option; }));
     }
     face_display_menu.push_back(submenu("ProtoTracer", std::move(prototracer_inner_menu)));
-    if (!protoface_inner_menu.empty())
-        face_display_menu.push_back(submenu("Protoface", std::move(protoface_inner_menu)));
 
     // ── Boop sensor (Protoface-side reactive behaviour) ──────────────────────
     // One submenu per zone, each with Enabled / Expression / Hold Duration /
