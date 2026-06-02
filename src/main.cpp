@@ -26,6 +26,8 @@
 #include "camera/camera_manager.h"
 #include "camera/viture_camera.h"
 #include "input/gpio_buttons.h"
+#include "input/gpio_inputs.h"
+#include "input/gpio_function.h"
 #include "input/gamepad_input.h"
 #include "input/wireless_controller.h"
 #include "serial/face_controller.h"
@@ -1353,7 +1355,13 @@ static std::vector<MenuItem> build_menu(
         // working copy lives in main(); pf_set_material pushes the built
         // "gradient:…" spec to the live renderer for instant preview.
         PfGradient* pf_gradient_p = nullptr,
-        std::function<void(const std::string&)> pf_set_material = nullptr)
+        std::function<void(const std::string&)> pf_set_material = nullptr,
+        // Configurable GPIO switch map: array of assignable pin slots + count,
+        // and the master enable flag. Edited in the GPIO Buttons menu; applied
+        // on the next launch (the poller is built from these at startup).
+        input::GpioPinCfg* gpio_pins_p = nullptr,
+        int gpio_slot_count = 0,
+        bool* gpio_inputs_enabled_p = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -5095,6 +5103,24 @@ static std::vector<MenuItem> build_menu(
                 m.visible_fn = [idx]{ return idx != static_cast<int>(sensor::BoopSensor::Zone::BothCheeks); };
                 return m;
             }(),
+            // MPR121 electrode → zone mapping (the I²C cap-touch input). Applies
+            // on the next launch — the sensor reads it at start(). Hidden for
+            // BothCheeks (derived from the two cheek electrodes).
+            [&]{
+                MenuItem m = with_desc(slider("Electrode (MPR121)", -1.f, 11.f, 1.f, "",
+                    [&state, idx]{
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        return static_cast<float>(state.boop_zones[idx].electrode);
+                    },
+                    [&state, idx](float v){
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        state.boop_zones[idx].electrode = static_cast<int>(v);
+                    }),
+                    "Which MPR121 capacitive electrode (0-11) drives this zone; "
+                    "-1 disables it. Takes effect on the next launch.");
+                m.visible_fn = [idx]{ return idx != static_cast<int>(sensor::BoopSensor::Zone::BothCheeks); };
+                return m;
+            }(),
             leaf("Test Boop",
                 [teensy, &state, idx]{
                     std::string expr;
@@ -6831,24 +6857,27 @@ static std::vector<MenuItem> build_menu(
         std::map<int, std::vector<std::string>> claimants;
         std::map<int, int>                      spi_speed_hz;   // BCM → bus speed (for MOSI lines)
     };
-    auto gpio_pin_claims = [cfg_root]() -> PinClaims {
+    auto gpio_pin_claims = [cfg_root, gpio_pins_p, gpio_slot_count]() -> PinClaims {
         PinClaims pc;
         if (!cfg_root) return pc;
         const json& cfg = *cfg_root;
         auto add = [&pc](int bcm, std::string who) {
             if (bcm >= 0) pc.claimants[bcm].push_back(std::move(who));
         };
-        // GPIO buttons (defaults 17/27/22; cfg["gpio"] overrides). A
-        // hand-edited "gpio": null in cfg would let cfg.contains() pass
-        // but make jg null, and .value() throws type_error.306 on null —
-        // gate every dereference on is_object() to keep the visualizer
-        // safe against any cfg shape.
-        const json empty = json::object();
-        const json& jg = (cfg.contains("gpio") && cfg["gpio"].is_object())
-                         ? cfg["gpio"] : empty;
-        add(jg.value("button_1_gpio", 17), "Button 1");
-        add(jg.value("button_2_gpio", 27), "Button 2");
-        add(jg.value("button_3_gpio", 22), "Button 3");
+        // Configurable GPIO switch map — claim each assigned pin, labelled with
+        // its (short-press, else long-press) function. Reads the live slots so
+        // unsaved menu edits show up immediately.
+        if (gpio_pins_p) {
+            for (int i = 0; i < gpio_slot_count; ++i) {
+                const auto& s = gpio_pins_p[i];
+                const bool used = s.short_fn != input::GpioFunc::None ||
+                                  s.long_fn  != input::GpioFunc::None;
+                if (s.gpio >= 0 && used) {
+                    const auto fn = (s.short_fn != input::GpioFunc::None) ? s.short_fn : s.long_fn;
+                    add(s.gpio, std::string("GPIO: ") + input::gpio_func_name(fn));
+                }
+            }
+        }
 
         // I²C peripherals — each enabled sensor on /dev/i2c-1 claims SDA1/SCL1.
         auto add_i2c = [&](const char* key, const char* label) {
@@ -7409,6 +7438,76 @@ static std::vector<MenuItem> build_menu(
         "  • Power-rail estimate (top of pane) sums known device current draws.\n"
         "  • Filter by Function dims everything not matching the selected family.";
 
+    // ── GPIO Buttons (configurable pin → function map) ────────────────────────
+    // One submenu per assignable slot: BCM pin, short/long-press function, pull
+    // bias, polarity, and long-press threshold. Edits the live gpio_pins array;
+    // persisted to cfg["gpio"]["pins"] and applied on the next launch.
+    MenuItem gpio_buttons_item;
+    if (gpio_pins_p) {
+        input::GpioPinCfg* GP = gpio_pins_p;
+        // Build a function-picker submenu (all GpioFunc options) writing *slot.
+        auto fn_picker = [&leaf_sel](input::GpioFunc* slot) {
+            std::vector<MenuItem> items;
+            for (int i = 0; i < input::gpio_func_count(); ++i) {
+                const auto f = static_cast<input::GpioFunc>(i);
+                items.push_back(leaf_sel(input::gpio_func_name(f),
+                    [slot, f]{ *slot = f; },
+                    [slot, f]{ return *slot == f; }));
+            }
+            return items;
+        };
+
+        std::vector<MenuItem> gpio_btn_menu;
+        if (gpio_inputs_enabled_p)
+            gpio_btn_menu.push_back(with_desc(toggle("Enabled",
+                [gpio_inputs_enabled_p]{ return *gpio_inputs_enabled_p; },
+                [gpio_inputs_enabled_p](bool v){ *gpio_inputs_enabled_p = v; }),
+                "Master switch for the GPIO button map."));
+
+        for (int i = 0; i < gpio_slot_count; ++i) {
+            input::GpioPinCfg* p = &GP[i];
+            std::vector<MenuItem> pull_items = {
+                leaf_sel("Pull Up",   [p]{ p->pull = 1; }, [p]{ return p->pull == 1; }),
+                leaf_sel("Pull Down", [p]{ p->pull = 2; }, [p]{ return p->pull == 2; }),
+                leaf_sel("None",      [p]{ p->pull = 0; }, [p]{ return p->pull == 0; }),
+            };
+            std::vector<MenuItem> items = {
+                with_desc(slider("GPIO (BCM)", -1.f, 27.f, 1.f, "",
+                    [p]{ return static_cast<float>(p->gpio); },
+                    [p](float v){ p->gpio = static_cast<int>(v); }),
+                    "BCM pin number for this slot. -1 = unused."),
+                submenu("Short Press", fn_picker(&p->short_fn)),
+                submenu("Long Press",  fn_picker(&p->long_fn)),
+                slider("Long-press Time", 200.f, 2000.f, 50.f, " ms",
+                    [p]{ return static_cast<float>(p->long_ms); },
+                    [p](float v){ p->long_ms = static_cast<int>(v); }),
+                submenu("Pull", std::move(pull_items)),
+                toggle("Active Low",
+                    [p]{ return p->active_low; },
+                    [p](bool v){ p->active_low = v; }),
+            };
+            MenuItem m = submenu(std::string("Slot ") + std::to_string(i + 1), std::move(items));
+            m.label_fn = [p, i]{
+                std::string s = "Slot " + std::to_string(i + 1) + "  ";
+                if (p->gpio < 0) return s + "(unused)";
+                s += "GPIO" + std::to_string(p->gpio) + " \xE2\x86\x92 ";
+                s += input::gpio_func_name(p->short_fn);
+                return s;
+            };
+            gpio_btn_menu.push_back(std::move(m));
+        }
+
+        gpio_buttons_item = with_desc(
+            submenu("GPIO Buttons", std::move(gpio_btn_menu)),
+            "Assign functions to GPIO switches. Each slot picks a BCM pin "
+            "(-1 = unused), a Short-press and optional Long-press function, pull "
+            "bias, and polarity (Active Low = switch wired to GND with a "
+            "pull-up). Saved to cfg[\"gpio\"][\"pins\"]; takes effect on the next "
+            "launch \xE2\x80\x94 use a System: Restart button or scripts/restart.sh.");
+    } else {
+        gpio_buttons_item.visible_fn = []{ return false; };
+    }
+
     // ── Pi Settings helpers ──────────────────────────────────────────────────
     // Most of these shell out to systemd/raspi tools. The ones that mutate
     // system state (hostname, timezone, NTP, apt, power) need sudo; ship
@@ -7640,6 +7739,7 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("Diagnostics",   std::move(diagnostics_menu)),
                   "Camera / network / Bluetooth / GPIO probes."),
         std::move(gpio_viz_item),
+        std::move(gpio_buttons_item),
         with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
                   "Poll the face controller for a fresh status frame."),
         with_desc(submenu("Demo Mode",  std::move(demo_menu)),
@@ -8383,8 +8483,11 @@ int main(int argc, char* argv[]) {
             // so its electrode field stays at -1 even if config sets it.
             for (size_t i = 0; i < jb["zones"].size() && i < 4; ++i) {
                 const auto& jz = jb["zones"][i];
-                boop_cfg.electrode[i] =
-                    static_cast<int8_t>(jval(jz, "electrode", static_cast<int>(boop_cfg.electrode[i])));
+                // Electrode mapping is editable in the menu (state.boop_zones)
+                // and mirrored into the sensor config consumed at start().
+                state.boop_zones[i].electrode =
+                    jval(jz, "electrode", state.boop_zones[i].electrode);
+                boop_cfg.electrode[i] = static_cast<int8_t>(state.boop_zones[i].electrode);
                 state.boop_zones[i].expression =
                     jz.value("expression", state.boop_zones[i].expression);
                 state.boop_zones[i].duration_s =
@@ -9090,6 +9193,9 @@ int main(int argc, char* argv[]) {
     };
     auto eye_last = std::make_shared<std::array<double, 4>>();   // last boop time / zone
     auto eye_run  = std::make_shared<std::array<int, 4>>();      // consecutive run / zone
+    // fire_boop is now callable from BOTH the MPR121 poll thread and the GPIO
+    // input thread, so the rapid-boop counters need a lock.
+    auto eye_mtx  = std::make_shared<std::mutex>();
 
     // Accessory LED flash feedback per boop zone — shared by the normal boop
     // reaction and the animated-eyes path.
@@ -9115,9 +9221,9 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    boop_sensor.on_boop([&face_proxy, &state, boop_face_stem,
-                         eye_now, flash_zone, eye_last, eye_run]
-                        (sensor::BoopSensor::Zone z) {
+    auto fire_boop = [&face_proxy, &state, boop_face_stem,
+                      eye_now, flash_zone, eye_last, eye_run, eye_mtx]
+                     (sensor::BoopSensor::Zone z) {
         const auto zi = static_cast<size_t>(z);
         if (zi >= 4) return;
         // Snapshot under the state lock so a menu edit mid-boop can't tear
@@ -9140,17 +9246,22 @@ int main(int argc, char* argv[]) {
         // animation *instead* of the normal reaction and reset the counter.
         if (eye.enabled && eye.count > 0) {
             const double now = eye_now();
-            if (now - (*eye_last)[zi] <= eye.window_s) (*eye_run)[zi] += 1;
-            else                                       (*eye_run)[zi]  = 1;
-            (*eye_last)[zi] = now;
-            if ((*eye_run)[zi] >= eye.count) {
-                (*eye_run)[zi] = 0;
+            bool fire = false;
+            {
+                std::lock_guard<std::mutex> lk(*eye_mtx);
+                if (now - (*eye_last)[zi] <= eye.window_s) (*eye_run)[zi] += 1;
+                else                                       (*eye_run)[zi]  = 1;
+                (*eye_last)[zi] = now;
+                if ((*eye_run)[zi] >= eye.count) { (*eye_run)[zi] = 0; fire = true; }
+            }
+            if (fire) {
                 face_proxy.play_eye_animation(eye.anim, eye.speed, eye.size,
                                               eye.r, eye.g, eye.b, eye.duration_s);
                 flash_zone(z);
                 return;   // eyes play instead of the normal boop reaction
             }
         } else {
+            std::lock_guard<std::mutex> lk(*eye_mtx);
             (*eye_run)[zi] = 0;
         }
         // Prefer the dedicated boop_<zone> face when present on disk.
@@ -9167,7 +9278,8 @@ int main(int argc, char* argv[]) {
 
         // Accessory LED flash feedback (same per-zone mapping for both paths).
         flash_zone(z);
-    });
+    };
+    boop_sensor.on_boop(fire_boop);
     if (boop_cfg.enabled && !boop_sensor.start())
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
     boop_sensor_ptr = &boop_sensor;   // expose for the menu's live tuning
@@ -9998,6 +10110,42 @@ int main(int argc, char* argv[]) {
     // is set by those panels (1/2/3) and consumed by the render loop below.
     GLuint tex_usb1 = 0, tex_usb2 = 0, tex_usb3 = 0;
     int    usb_preview_req = 0;
+
+    // ── Configurable GPIO switch map ─────────────────────────────────────────
+    // Up to kGpioSlots assignable pins; each has a short-press and optional
+    // long-press function plus pull bias and polarity. Loaded from
+    // cfg["gpio"]["pins"], edited via the GPIO Buttons menu (applies on the next
+    // launch — use the Restart action / scripts/restart.sh), and persisted on
+    // save. The poller (input::GpioInputs) is built from these further down.
+    constexpr int kGpioSlots = 8;
+    std::array<input::GpioPinCfg, kGpioSlots> gpio_pins{};
+    bool gpio_inputs_enabled = false;
+    if (cfg.contains("gpio") && cfg["gpio"].is_object()) {
+        const json& jg = cfg["gpio"];
+        gpio_inputs_enabled = jval(jg, "enabled", false);
+        if (jg.contains("pins") && jg["pins"].is_array()) {
+            const auto& arr = jg["pins"];
+            for (size_t i = 0; i < arr.size() && i < static_cast<size_t>(kGpioSlots); ++i) {
+                if (!arr[i].is_object()) continue;
+                const json& jp = arr[i];
+                auto& s = gpio_pins[i];
+                s.gpio       = jval(jp, "gpio", s.gpio);
+                s.active_low = jval(jp, "active_low", s.active_low);
+                const std::string pull = jp.value("pull", std::string("up"));
+                s.pull       = (pull == "down") ? 2 : (pull == "none" ? 0 : 1);
+                s.short_fn   = input::gpio_func_from_id(jp.value("short", std::string("none")));
+                s.long_fn    = input::gpio_func_from_id(jp.value("long",  std::string("none")));
+                s.long_ms    = std::clamp(jval(jp, "long_ms", s.long_ms), 200, 3000);
+            }
+        } else {
+            // Migrate the legacy fixed 3-button layout so existing configs keep
+            // a working menu Select/Back without manual re-assignment.
+            gpio_pins[0].gpio     = jval(jg, "button_1_gpio", 17);
+            gpio_pins[0].short_fn = input::GpioFunc::MenuSelect;
+            gpio_pins[0].long_fn  = input::GpioFunc::MenuBack;
+        }
+    }
+
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -10059,7 +10207,9 @@ int main(int argc, char* argv[]) {
                                /* pf_gradient */ &pf_gradient,
                                /* pf_set_material */ [&](const std::string& spec){
                                    if (native_ctrl) native_ctrl->set_material_spec(spec);
-                               }));
+                               },
+                               /* gpio_pins */ gpio_pins.data(), kGpioSlots,
+                               &gpio_inputs_enabled));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -10264,19 +10414,8 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    // ── GPIO button input ─────────────────────────────────────────────────────
-
-    bool gpio_enabled   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "enabled",           false);
-    int button_1_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_1_gpio",     17);
-    int button_2_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_2_gpio",     27);
-    int button_3_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_3_gpio",     22);
-    int af_trigger_ms      = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "af_trigger_time_ms",      1500);
-    int pip_trigger_ms     = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "pip_trigger_time_ms",     2000);
-    int capture_trigger_ms = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "capture_trigger_time_ms", 5000);
-
-    GpioButtons buttons(button_1_gpio, button_2_gpio, button_3_gpio,
-                        af_trigger_ms, pip_trigger_ms, capture_trigger_ms);
-    bool pip_left_active  = false, pip_right_active  = false;  // GPIO-driven
+    // ── GPIO switch input (configurable map) ──────────────────────────────────
+    bool pip_left_active  = false, pip_right_active  = false;  // PiP toggle state
     bool kb_pip_left      = false, kb_pip_right      = false;  // keyboard-driven
 
     // Edge-detection state for direct GLFW key polling
@@ -10285,40 +10424,64 @@ int main(int argc, char* argv[]) {
     // USB stream lifecycle: track previous combined pip-active state per slot
     bool prev_p1 = false, prev_p2 = false, prev_p3 = false;
 
-    if (gpio_enabled) {
-        if (buttons.init()) {
-            buttons.on_af_left([&cameras]() {
-                std::cout << "[gpio] AF left\n";
-                if (cameras.owl_left()) cameras.owl_left()->start_autofocus();
-            });
-            buttons.on_af_right([&cameras]() {
-                std::cout << "[gpio] AF right\n";
-                if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
-            });
-            buttons.on_capture_left([&state]() {
-                std::cout << "[gpio] capture left\n";
-                std::lock_guard lk(state.mtx);
-                state.capture_request = CaptureRequest::Left;
-            });
-            buttons.on_capture_right([&state]() {
-                std::cout << "[gpio] capture right\n";
-                std::lock_guard lk(state.mtx);
-                state.capture_request = CaptureRequest::Right;
-            });
-            buttons.on_pip_left ([&pip_left_active] () { pip_left_active  = true; });
-            buttons.on_pip_right([&pip_right_active]() { pip_right_active = true; });
-            buttons.on_select([&menu, &hud, &state]() {
-                if      (menu.is_open())            menu.select();
-                else if (hud.toast_has_focused())   hud.toast_select(state);
-                else                                menu.open();   // short press opens menu when idle
-            });
-            buttons.on_back([&menu]() {
-                if (menu.is_open()) menu.back();
-            });
-        } else {
-            std::cerr << "[main] GPIO button init failed\n";
+    // Resolve scripts/restart.sh relative to the running binary so the System:
+    // Restart GPIO function works regardless of install location.
+    std::string restart_script;
+    {
+        char exe[4096];
+        ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            std::string p(exe);                                       // .../build/protohud
+            auto s = p.find_last_of('/'); if (s != std::string::npos) p.resize(s);  // .../build
+            s = p.find_last_of('/');      if (s != std::string::npos) p.resize(s);  // project root
+            restart_script = p + "/scripts/restart.sh";
         }
     }
+
+    // Map an assigned function to its action. Runs on the GPIO poll thread;
+    // each action hops onto an already-thread-safe path (fire_boop, the menu,
+    // state.mtx) or flips a plain bool the render loop reads.
+    auto gpio_dispatch = [&, restart_script](input::GpioFunc f) {
+        using F = input::GpioFunc;
+        switch (f) {
+        case F::BoopSnout: fire_boop(sensor::BoopSensor::Zone::Snout);      break;
+        case F::BoopLeft:  fire_boop(sensor::BoopSensor::Zone::LeftCheek);  break;
+        case F::BoopRight: fire_boop(sensor::BoopSensor::Zone::RightCheek); break;
+        case F::BoopBoth:  fire_boop(sensor::BoopSensor::Zone::BothCheeks); break;
+        case F::MenuOpen:  if (menu.is_open()) menu.close(); else menu.open(); break;
+        case F::MenuSelect:
+            if      (menu.is_open())          menu.select();
+            else if (hud.toast_has_focused()) hud.toast_select(state);
+            else                              menu.open();
+            break;
+        case F::MenuBack:  if (menu.is_open()) menu.back(); break;
+        case F::SystemRestart:
+            if (!restart_script.empty())
+                std::system(("setsid '" + restart_script +
+                             "' </dev/null >/tmp/protohud-restart.log 2>&1 &").c_str());
+            break;
+        case F::SystemShutdown:
+            std::system("sudo -n poweroff 2>/dev/null || poweroff 2>/dev/null &");
+            break;
+        case F::CamAfLeft:  if (cameras.owl_left())  cameras.owl_left()->start_autofocus();  break;
+        case F::CamAfRight: if (cameras.owl_right()) cameras.owl_right()->start_autofocus(); break;
+        case F::CamPipLeft:  pip_left_active  = !pip_left_active;  break;
+        case F::CamPipRight: pip_right_active = !pip_right_active; break;
+        case F::CamCaptureLeft:
+            { std::lock_guard<std::mutex> lk(state.mtx); state.capture_request = CaptureRequest::Left; }  break;
+        case F::CamCaptureRight:
+            { std::lock_guard<std::mutex> lk(state.mtx); state.capture_request = CaptureRequest::Right; } break;
+        case F::CamSwap:
+            { std::lock_guard<std::mutex> lk(state.mtx); state.cameras_swapped = !state.cameras_swapped; } break;
+        case F::None: default: break;
+        }
+    };
+
+    std::vector<input::GpioPinCfg> gpio_pin_vec(gpio_pins.begin(), gpio_pins.end());
+    input::GpioInputs gpio_inputs(std::move(gpio_pin_vec), gpio_dispatch);
+    if (gpio_inputs_enabled && !gpio_inputs.init())
+        std::cerr << "[main] GPIO input map init failed (no pins assigned or chip busy)\n";
 
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
     GamepadInput gamepad;
@@ -10651,6 +10814,7 @@ int main(int argc, char* argv[]) {
                 jzones[i]["expression"] = state.boop_zones[i].expression;
                 jzones[i]["duration_s"] = state.boop_zones[i].duration_s;
                 jzones[i]["threshold"]  = state.boop_zones[i].threshold;
+                jzones[i]["electrode"]  = state.boop_zones[i].electrode;
                 const auto& et = state.boop_zones[i].eye_trigger;
                 auto& je = jzones[i]["eye_trigger"];
                 je["enabled"]    = et.enabled;
@@ -10855,6 +11019,23 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
         cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
         cfg["cameras"]["swapped"] = state.cameras_swapped;
+        {
+            // Configurable GPIO switch map.
+            cfg["gpio"]["enabled"] = gpio_inputs_enabled;
+            json jpins = json::array();
+            for (int i = 0; i < kGpioSlots; ++i) {
+                const auto& s = gpio_pins[i];
+                json jp;
+                jp["gpio"]       = s.gpio;
+                jp["active_low"] = s.active_low;
+                jp["pull"]       = (s.pull == 2) ? "down" : (s.pull == 0 ? "none" : "up");
+                jp["short"]      = input::gpio_func_id(s.short_fn);
+                jp["long"]       = input::gpio_func_id(s.long_fn);
+                jp["long_ms"]    = s.long_ms;
+                jpins.push_back(std::move(jp));
+            }
+            cfg["gpio"]["pins"] = std::move(jpins);
+        }
         {
             static const char* kNames[] = { "center","outside","left","right","top","bottom" };
             cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
@@ -11429,12 +11610,9 @@ int main(int argc, char* argv[]) {
         if (want3) cameras.get_usb3(tex_usb3);
         android_mirror.get_frame(tex_android);
 
-        // ── GPIO PiP button state ─────────────────────────────────────────────
-        if (gpio_enabled) {
-            buttons.update_pip_state();
-            pip_left_active  = buttons.pip_left_active();
-            pip_right_active = buttons.pip_right_active();
-        }
+        // PiP toggle state (pip_left_active / pip_right_active) is now flipped
+        // directly by the GPIO dispatch (Camera: PiP toggle), so there's no
+        // per-frame button-hold polling here anymore.
 
         // ── Gamepad poll ──────────────────────────────────────────────────────
         gamepad.poll();

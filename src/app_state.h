@@ -196,6 +196,7 @@ struct BoopZoneConfig {
     std::string expression = "surprised";   // canonical face PNG name
     double      duration_s = 0.8;           // how long the expression holds
     uint8_t     threshold  = 12;            // MPR121 touch threshold (lower = more sensitive)
+    int         electrode  = -1;            // MPR121 electrode 0..11 driving this zone (-1 = none/derived)
     EyeTriggerConfig eye_trigger;           // optional rapid-boop animated-eyes reaction
 };
 
@@ -791,10 +792,10 @@ struct AppState {
     // Threshold on the BothCheeks slot is unused (it doesn't probe an
     // electrode directly) but kept in the schema for index parity.
     BoopZoneConfig       boop_zones[4] = {
-        { true, "surprised", 0.8, 12 },
-        { true, "happy",     0.6, 12 },
-        { true, "happy",     0.6, 12 },
-        { true, "surprised", 1.0, 12 },
+        { true, "surprised", 0.8, 12,  0 },   // Snout      → electrode 0
+        { true, "happy",     0.6, 12,  1 },   // LeftCheek  → electrode 1
+        { true, "happy",     0.6, 12,  2 },   // RightCheek → electrode 2
+        { true, "surprised", 1.0, 12, -1 },   // BothCheeks → derived (no electrode)
     };
     // Coalesce window (seconds) for combining near-simultaneous left + right
     // cheek touches into a single BothCheeks event. Mirror of the sensor's

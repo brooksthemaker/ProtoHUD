@@ -140,12 +140,13 @@
     "effects": { "type": 0, "palette": 0 }
   },
   "gpio": {
+    "_about": "Configurable GPIO switch map. Each entry in 'pins' assigns a BCM pin a short-press and optional long-press function, with pull bias ('up'|'down'|'none') and polarity (active_low=true means a momentary switch wired to GND). Edit in-HUD via System > GPIO Buttons; changes apply on the next launch (use a System: Restart button or scripts/restart.sh). Functions: none, boop_snout, boop_left, boop_right, boop_both, menu_open, menu_select, menu_back, system_restart, system_shutdown, cam_af_left, cam_af_right, cam_pip_left, cam_pip_right, cam_capture_left, cam_capture_right, cam_swap.",
     "enabled": true,
-    "button_1_gpio": 17,
-    "button_2_gpio": 27,
-    "button_3_gpio": 22,
-    "af_trigger_time_ms": 1500,
-    "pip_trigger_time_ms": 2000
+    "pins": [
+      { "gpio": 17, "active_low": true, "pull": "up", "short": "menu_select",  "long": "menu_back",      "long_ms": 600  },
+      { "gpio": 27, "active_low": true, "pull": "up", "short": "boop_snout",   "long": "none",           "long_ms": 600  },
+      { "gpio": 22, "active_low": true, "pull": "up", "short": "cam_pip_left", "long": "system_restart", "long_ms": 1200 }
+    ]
   },
   "camera": {
     "autofocus_on_startup": true,
