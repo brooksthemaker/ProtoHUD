@@ -1538,6 +1538,27 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
                 char cv[8]; std::snprintf(cv, sizeof(cv), "%.0f", chv[c]);
                 dl->AddText(font, fs, { rx1 - 40.f, by }, IM_COL32(220,225,230,220), cv);
             }
+            // Text-entry rows: HEX / RGB — select to type a value via the keyboard.
+            char tval[2][24];
+            std::snprintf(tval[0], sizeof(tval[0]), "%02X%02X%02X",
+                          (int)edit_r_, (int)edit_g_, (int)edit_b_);
+            std::snprintf(tval[1], sizeof(tval[1]), "%d,%d,%d",
+                          (int)edit_r_, (int)edit_g_, (int)edit_b_);
+            const char* tnm[2] = { "HEX", "RGB" };
+            for (int t = 0; t < 2; ++t) {
+                float by = ey + 6.f + (3 + t) * 30.f;
+                bool is_sel = (edit_channel_ == 3 + t);
+                ImU32 tc = is_sel ? IM_COL32(255,255,255,255) : IM_COL32(150,160,170,200);
+                dl->AddText(font, fs, { rx0, by }, tc, tnm[t]);
+                dl->AddText(font, fs, { rx0 + 50.f, by }, tc, tval[t]);
+                if (is_sel)
+                    dl->AddRect({ rx0 - 1.f, by - 1.f }, { rx1 - 6.f, by + fs + 1.f },
+                                menu_with_alpha(accent_color_, 220), 2.f, 0, 1.5f);
+            }
+            dl->AddText(font, fs * 0.9f, { rx0, ey + 6.f + 5 * 30.f },
+                        menu_with_alpha(accent_color_, 170),
+                        in_channel_edit_ ? "knob adjusts value"
+                                         : "knob = row  \xC2\xB7  select = edit / type");
         } else if (editing && sel.type == MenuItemType::FACE_PICKER) {
             int n = sel.face_picker.face_count;
             int cur = static_cast<int>(edit_float_);
