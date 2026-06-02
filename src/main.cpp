@@ -1361,7 +1361,11 @@ static std::vector<MenuItem> build_menu(
         // on the next launch (the poller is built from these at startup).
         input::GpioPinCfg* gpio_pins_p = nullptr,
         int gpio_slot_count = 0,
-        bool* gpio_inputs_enabled_p = nullptr)
+        bool* gpio_inputs_enabled_p = nullptr,
+        // Rebuilds the GPIO poller from the live slots so menu edits apply
+        // without a relaunch. Shared so main can install it after the poller
+        // (which the menu is built before) exists.
+        std::shared_ptr<std::function<void()>> gpio_reload = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -7461,8 +7465,17 @@ static std::vector<MenuItem> build_menu(
         if (gpio_inputs_enabled_p)
             gpio_btn_menu.push_back(with_desc(toggle("Enabled",
                 [gpio_inputs_enabled_p]{ return *gpio_inputs_enabled_p; },
-                [gpio_inputs_enabled_p](bool v){ *gpio_inputs_enabled_p = v; }),
-                "Master switch for the GPIO button map."));
+                [gpio_inputs_enabled_p, gpio_reload](bool v){
+                    *gpio_inputs_enabled_p = v;
+                    if (gpio_reload && *gpio_reload) (*gpio_reload)();  // apply now
+                }),
+                "Master switch for the GPIO button map. Applies immediately."));
+        if (gpio_reload)
+            gpio_btn_menu.push_back(with_desc(
+                leaf("Apply Changes Now",
+                     [gpio_reload]{ if (*gpio_reload) (*gpio_reload)(); }),
+                "Rebuild the GPIO poller from the current slots so pin / "
+                "function / pull / polarity edits take effect right away."));
 
         for (int i = 0; i < gpio_slot_count; ++i) {
             input::GpioPinCfg* p = &GP[i];
@@ -7502,8 +7515,9 @@ static std::vector<MenuItem> build_menu(
             "Assign functions to GPIO switches. Each slot picks a BCM pin "
             "(-1 = unused), a Short-press and optional Long-press function, pull "
             "bias, and polarity (Active Low = switch wired to GND with a "
-            "pull-up). Saved to cfg[\"gpio\"][\"pins\"]; takes effect on the next "
-            "launch \xE2\x80\x94 use a System: Restart button or scripts/restart.sh.");
+            "pull-up). Toggling Enabled applies instantly; after editing slots "
+            "choose \"Apply Changes Now\" to reload the poller. Saved to "
+            "cfg[\"gpio\"][\"pins\"].");
     } else {
         gpio_buttons_item.visible_fn = []{ return false; };
     }
@@ -10120,6 +10134,9 @@ int main(int argc, char* argv[]) {
     constexpr int kGpioSlots = 8;
     std::array<input::GpioPinCfg, kGpioSlots> gpio_pins{};
     bool gpio_inputs_enabled = false;
+    // Installed once the poller exists (below); the GPIO Buttons menu calls it
+    // to rebuild the poller live after edits.
+    auto gpio_reload = std::make_shared<std::function<void()>>();
     if (cfg.contains("gpio") && cfg["gpio"].is_object()) {
         const json& jg = cfg["gpio"];
         gpio_inputs_enabled = jval(jg, "enabled", false);
@@ -10209,7 +10226,7 @@ int main(int argc, char* argv[]) {
                                    if (native_ctrl) native_ctrl->set_material_spec(spec);
                                },
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
-                               &gpio_inputs_enabled));
+                               &gpio_inputs_enabled, gpio_reload));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -10478,10 +10495,23 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    std::vector<input::GpioPinCfg> gpio_pin_vec(gpio_pins.begin(), gpio_pins.end());
-    input::GpioInputs gpio_inputs(std::move(gpio_pin_vec), gpio_dispatch);
-    if (gpio_inputs_enabled && !gpio_inputs.init())
+    auto gpio_inputs = std::make_unique<input::GpioInputs>(
+        std::vector<input::GpioPinCfg>(gpio_pins.begin(), gpio_pins.end()), gpio_dispatch);
+    if (gpio_inputs_enabled && !gpio_inputs->init())
         std::cerr << "[main] GPIO input map init failed (no pins assigned or chip busy)\n";
+
+    // Live reload: tear down the poll thread + release the lines, then rebuild
+    // from the current slots. Runs on the main thread (a menu action), so the
+    // old GpioInputs dtor joins its thread before the new one starts.
+    *gpio_reload = [&]{
+        gpio_inputs.reset();
+        gpio_inputs = std::make_unique<input::GpioInputs>(
+            std::vector<input::GpioPinCfg>(gpio_pins.begin(), gpio_pins.end()), gpio_dispatch);
+        if (gpio_inputs_enabled && !gpio_inputs->init())
+            std::cerr << "[main] GPIO reload: init failed (no pins assigned or chip busy)\n";
+        else
+            std::cout << "[gpio] input map reloaded\n";
+    };
 
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
     GamepadInput gamepad;
