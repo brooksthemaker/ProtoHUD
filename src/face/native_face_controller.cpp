@@ -462,6 +462,19 @@ std::string NativeFaceController::preset_material(int idx) {
         case 9:  return "cool";
         case 10: return "warm";
         case 11: return "solid:0,0,0";
+        // Multi-colour gradient presets (rendered via GradientMaterial — no PNG
+        // asset needed). Smooth horizontal blends, static. Kept in sync with the
+        // pf_mats table in main.cpp's Material Color menu.
+        case 12: return "gradient:h:s:0:FF8C00-FF3D7F-8A2BE2";  // Sunset
+        case 13: return "gradient:h:s:0:00E5FF-0077FF-001F7F";  // Ocean
+        case 14: return "gradient:h:s:0:7CFF6B-1E9E3C-0B3D1A";  // Forest
+        case 15: return "gradient:h:s:0:FFE000-FF7A00-E01E1E";  // Fire
+        case 16: return "gradient:h:s:0:00FFA3-00D0FF-B14BFF";  // Aurora
+        case 17: return "gradient:h:s:0:2A0A0A-C81E00-FF8C00";  // Lava
+        case 18: return "gradient:h:s:0:2B0B5E-7A1EB4-FF4FD8";  // Galaxy
+        case 19: return "gradient:h:s:0:FFB3BA-BAE1FF-BAFFC9";  // Pastel
+        case 20: return "gradient:h:s:0:FF4FA3-FFD24F-4FC3FF";  // Candy
+        case 21: return "gradient:h:s:0:AEFF00-00FFB3-00A3FF";  // Toxic
         default: return "teal";
     }
 }

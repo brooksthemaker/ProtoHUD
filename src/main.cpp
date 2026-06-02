@@ -4249,27 +4249,23 @@ static std::vector<MenuItem> build_menu(
                 [&state, id]{ return state.face.effect_id == id; }));
     }
 
-    std::vector<MenuItem> pf_colors;
-    pf_colors.push_back(leaf("Teal",   [teensy]{ teensy->set_color(0,220,180);   }));
-    pf_colors.push_back(leaf("Red",    [teensy]{ teensy->set_color(255,0,0);     }));
-    pf_colors.push_back(leaf("Orange", [teensy]{ teensy->set_color(255,110,0);   }));
-    pf_colors.push_back(leaf("Green",  [teensy]{ teensy->set_color(0,255,0);     }));
-    pf_colors.push_back(leaf("Blue",   [teensy]{ teensy->set_color(0,90,255);    }));
-    pf_colors.push_back(leaf("Purple", [teensy]{ teensy->set_color(160,0,255);   }));
-    pf_colors.push_back(leaf("White",  [teensy]{ teensy->set_color(255,255,255); }));
-    pf_colors.push_back(color_picker("Custom Color",
-        [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b); },
-        [&state]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
-            return { state.face.r, state.face.g, state.face.b };
-        }));
-
+    // Material Color — the single colour/material picker (Face Color was folded
+    // in here). Named solids + multi-colour patterns/gradients, plus a Custom
+    // Color (solid) picker and the Custom Gradient editor below.
     std::vector<MenuItem> pf_palette;
     {
         struct PFMat { const char* label; uint8_t idx; };
         const PFMat pf_mats[] = {
+            // Solids
             { "Teal",    0 }, { "Yellow", 1 }, { "Orange", 2 }, { "White", 3 },
             { "Green",   4 }, { "Purple", 5 }, { "Red",    6 }, { "Blue",  7 },
-            { "Rainbow", 8 }, { "Cool",   9 }, { "Warm",  10 }, { "Black",11 },
+            { "Black",  11 },
+            // Multi-colour patterns / gradients (8-10 are PNG patterns; 12+ are
+            // built-in GradientMaterial presets — see preset_material()).
+            { "Rainbow", 8 }, { "Cool",    9 }, { "Warm",  10 },
+            { "Sunset", 12 }, { "Ocean",  13 }, { "Forest",14 }, { "Fire",  15 },
+            { "Aurora", 16 }, { "Lava",   17 }, { "Galaxy",18 }, { "Pastel",19 },
+            { "Candy",  20 }, { "Toxic",  21 },
         };
         for (const auto& m : pf_mats)
             pf_palette.push_back(leaf_sel(m.label,
@@ -4279,6 +4275,15 @@ static std::vector<MenuItem> build_menu(
                     state.face.material_color = idx;
                 },
                 [&state, idx = m.idx]{ return state.face.material_color == idx; }));
+
+        // Custom solid colour (moved here from the removed Face Color menu) —
+        // an arbitrary flat colour via the RGB/hex picker, applied as a
+        // SolidMaterial like the named solids above.
+        pf_palette.push_back(color_picker("Custom Color",
+            [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b); },
+            [&state]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+                return { state.face.r, state.face.g, state.face.b };
+            }));
     }
 
     // ── Custom Gradient — multi-colour material, optionally scrolling ─────────
@@ -4872,7 +4877,6 @@ static std::vector<MenuItem> build_menu(
 
     std::vector<MenuItem> protoface_inner_menu = {
         gated(submenu("Effects",        std::move(pf_effects)),  visible_for_hub75),
-        gated(submenu("Face Color",     std::move(pf_colors)),   visible_for_hub75),
         gated(submenu("Material Color", std::move(pf_palette)),  visible_for_hub75),
         // Face PNGs (per-expression slots, mouth shapes, boop reactions)
         // live here under Protoface rather than the generic Files menu —
