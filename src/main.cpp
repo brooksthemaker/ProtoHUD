@@ -7117,10 +7117,14 @@ static std::vector<MenuItem> build_menu(
 
             const float info_block_top = o.y + fs * 4.0f;
 
-            const float top    = o.y + fs * 0.2f;   // grid can start higher than the text block
-            const float avail_h = std::max(80.f, sz.y - (top - o.y) - 4.f);
-            const float row_h   = std::max(14.f, std::min(28.f, avail_h / 21.f));
-            const float pin_sz  = row_h * 0.78f;
+            // Vertically centre the 20-row grid with equal top/bottom margin,
+            // zooming the rows up to a shared max so both panels match.
+            const float vmargin = 12.f;
+            const float usable  = std::max(80.f, sz.y - 2.f * vmargin);
+            const float row_h   = std::max(14.f, std::min(34.f, usable / 20.f));
+            const float grid_h  = row_h * 20.f;
+            const float top     = o.y + vmargin + std::max(0.f, (usable - grid_h) * 0.5f);
+            const float pin_sz  = row_h * 0.80f;
             const int   label_cols = 3 + (gpvz_draw->show_user_notes ? 1 : 0);
             const float label_w = std::max(40.f,
                 (grid_pane_w - pin_sz * 2.f - 14.f) / static_cast<float>(label_cols * 2));
@@ -7148,9 +7152,17 @@ static std::vector<MenuItem> build_menu(
             auto draw_label = [&](float x, float y, float w, const char* text,
                                   bool right_align, ImU32 col, bool dim) {
                 if (!text || !*text) return;
+                // Outline coloured labels (claimant / note) so they read on the card.
+                const bool outline = (col != label_col && col != label_dim);
                 if (dim) col = (col & 0x00FFFFFFu) | (90u << 24);
                 const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, text);
                 const float tx = right_align ? (x + w - ts.x) : x;
+                if (outline && !dim) {
+                    const ImU32 blk = IM_COL32(0, 0, 0, 220);
+                    for (int dx = -1; dx <= 1; ++dx)
+                        for (int dy = -1; dy <= 1; ++dy)
+                            if (dx || dy) dl->AddText(font, label_fs, {tx + dx, y + dy}, blk, text);
+                }
                 dl->AddText(font, label_fs, {tx, y}, col, text);
             };
 
@@ -7186,10 +7198,12 @@ static std::vector<MenuItem> build_menu(
                         const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, buf);
                         const float tx = x + (pin_sz - ts.x) * 0.5f;
                         const float ty = cy + (pin_sz - ts.y) * 0.5f;
-                        // Bold white with a soft shadow so it reads on any cell colour.
-                        dl->AddText(font, label_fs, {tx + 0.8f, ty + 0.8f}, IM_COL32(0, 0, 0, 150), buf);
-                        dl->AddText(font, label_fs, {tx + 0.6f, ty}, IM_COL32(255, 255, 255, 255), buf);
-                        dl->AddText(font, label_fs, {tx,        ty}, IM_COL32(255, 255, 255, 255), buf);
+                        // Bold white with an 8-direction black outline.
+                        const ImU32 blk = IM_COL32(0, 0, 0, 235);
+                        for (int dx = -1; dx <= 1; ++dx)
+                            for (int dy = -1; dy <= 1; ++dy)
+                                if (dx || dy) dl->AddText(font, label_fs, {tx + dx, ty + dy}, blk, buf);
+                        dl->AddText(font, label_fs, {tx, ty}, IM_COL32(255, 255, 255, 255), buf);
                     }
                     // Live state badge — small H/L dot inside the square's
                     // corner. Skipped for non-GPIO pins (power / GND / ID).
@@ -7569,10 +7583,14 @@ static std::vector<MenuItem> build_menu(
             const float grid_pane_x = co.x + info_w + 6.f;
             const float grid_pane_w = std::max(120.f, cs.x - info_w - 6.f);
 
-            const float top    = co.y;
-            const float avh    = std::max(80.f, cs.y - 2.f);
-            const float row_h  = std::max(13.f, std::min(26.f, avh / 20.f));
-            const float pin_sz = row_h * 0.82f;
+            // Vertically centre the 20-row grid with equal top/bottom margin,
+            // zooming the rows up to a shared max so both panels match.
+            const float vmargin = 12.f;
+            const float usable  = std::max(80.f, cs.y - 2.f * vmargin);
+            const float row_h   = std::max(13.f, std::min(34.f, usable / 20.f));
+            const float grid_h  = row_h * 20.f;
+            const float top     = co.y + vmargin + std::max(0.f, (usable - grid_h) * 0.5f);
+            const float pin_sz  = row_h * 0.80f;
             const float center_x    = grid_pane_x + grid_pane_w * 0.5f;
             const float pin_left_x  = center_x - pin_sz - 2.f;
             const float pin_right_x = center_x + 2.f;
@@ -7599,19 +7617,27 @@ static std::vector<MenuItem> build_menu(
                 if (otherslot[idx] >= 0) return out_other;
                 return text_dark;
             };
+            // Text with an 8-direction black outline — keeps coloured labels and
+            // the white pin numbers legible on the light card / bright cells.
+            auto otext = [&](float x, float y, ImU32 col, const char* s) {
+                const ImU32 blk = IM_COL32(0, 0, 0, 225);
+                for (int dx = -1; dx <= 1; ++dx)
+                    for (int dy = -1; dy <= 1; ++dy)
+                        if (dx || dy) dl->AddText(font, label_fs, {x + dx, y + dy}, blk, s);
+                dl->AddText(font, label_fs, {x, y}, col, s);
+            };
             auto draw_side_label = [&](float edge, float w, float y, const std::string& t,
                                        bool right, ImU32 col) {
                 if (t.empty() || w < 14.f) return;
                 const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, t.c_str());
-                dl->AddText(font, label_fs, {right ? (edge - ts.x) : edge, y}, col, t.c_str());
+                const float tx = right ? (edge - ts.x) : edge;
+                if (col == text_dark) dl->AddText(font, label_fs, {tx, y}, col, t.c_str());
+                else                  otext(tx, y, col, t.c_str());   // outline coloured labels
             };
-            // Bold white pin number with a soft shadow so it reads on bright cells.
+            // Bold white pin number with a black outline.
             auto draw_pin_num = [&](float bx, float by, const char* s) {
                 const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, s);
-                const float tx = bx - ts.x * 0.5f, ty = by - ts.y * 0.5f;
-                dl->AddText(font, label_fs, {tx + 0.8f, ty + 0.8f}, IM_COL32(0, 0, 0, 150), s);
-                dl->AddText(font, label_fs, {tx + 0.6f, ty}, IM_COL32(255, 255, 255, 255), s);  // bold pass
-                dl->AddText(font, label_fs, {tx,        ty}, IM_COL32(255, 255, 255, 255), s);
+                otext(bx - ts.x * 0.5f, by - ts.y * 0.5f, IM_COL32(255, 255, 255, 255), s);
             };
 
             for (int row = 0; row < 20; ++row) {
