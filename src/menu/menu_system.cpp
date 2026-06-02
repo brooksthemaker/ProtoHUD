@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cfloat>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <ctime>
@@ -33,13 +34,45 @@ static std::string item_label(const MenuItem& it) {
 // row. Shared by the input (move/activate) and draw paths so they stay in sync.
 static const std::vector<std::vector<std::string>>& osk_rows() {
     static const std::vector<std::vector<std::string>> rows = {
-        {"1","2","3","4","5","6","7","8","9","0"},
+        {"1","2","3","4","5","6","7","8","9","0",","},
         {"Q","W","E","R","T","Y","U","I","O","P"},
         {"A","S","D","F","G","H","J","K","L"},
         {"Z","X","C","V","B","N","M"},
         {"SPACE","DEL","SAVE","CANCEL"},
     };
     return rows;
+}
+
+// Parse a hex colour string into 0-255 RGB. Ignores any non-hex characters
+// (so "#FF8000", "ff8000" both work) and expands 3-digit shorthand. Returns
+// false if fewer than 3 hex digits were found.
+static bool cp_parse_hex(const std::string& s, int& r, int& g, int& b) {
+    std::string h;
+    for (char c : s)
+        if (std::isxdigit(static_cast<unsigned char>(c))) h += c;
+    if (h.size() == 3) h = {h[0],h[0], h[1],h[1], h[2],h[2]};
+    if (h.size() < 6) return false;
+    auto hx = [&](size_t i){ return static_cast<int>(
+        std::strtol(h.substr(i, 2).c_str(), nullptr, 16)); };
+    r = hx(0); g = hx(2); b = hx(4);
+    return true;
+}
+
+// Parse "r,g,b" (any non-digit separators — comma or space) into 0-255 RGB.
+// Returns false unless three numbers were found.
+static bool cp_parse_rgb(const std::string& s, int& r, int& g, int& b) {
+    int v[3] = {0,0,0}, n = 0;
+    for (size_t i = 0; i < s.size() && n < 3; ) {
+        if (std::isdigit(static_cast<unsigned char>(s[i]))) {
+            int val = 0;
+            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
+                val = val * 10 + (s[i++] - '0');
+            v[n++] = std::min(255, val);
+        } else ++i;
+    }
+    if (n < 3) return false;
+    r = v[0]; g = v[1]; b = v[2];
+    return true;
 }
 
 // Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
@@ -247,7 +280,8 @@ void MenuSystem::osk_step(int d) {
 
 void MenuSystem::osk_input_char(unsigned int c) {
     if (!osk_active_) return;
-    if (c == ' ' || c == '-' || c == '_' || std::isalnum(static_cast<int>(c))) {
+    if (c == ' ' || c == '-' || c == '_' || c == ',' || c == '#' ||
+        std::isalnum(static_cast<int>(c))) {
         if (osk_text_.size() < 40) osk_text_ += static_cast<char>(c);
     }
 }
@@ -375,7 +409,8 @@ void MenuSystem::navigate(int direction) {
                                          static_cast<uint8_t>(edit_g_),
                                          static_cast<uint8_t>(edit_b_));
             } else {
-                edit_channel_ = ((edit_channel_ + direction) % 3 + 3) % 3;
+                // 0/1/2 = R/G/B dial bars, 3 = Hex text entry, 4 = RGB text entry.
+                edit_channel_ = ((edit_channel_ + direction) % 5 + 5) % 5;
             }
         } else if (item.type == MenuItemType::SLIDER) {
             edit_float_ = std::clamp(
@@ -486,10 +521,51 @@ void MenuSystem::select() {
             edit_channel_    = 0;
             in_channel_edit_ = false;
             in_edit_mode_    = true;
-            emit_detents_override(3);
+            emit_detents_override(5);   // R, G, B, Hex, RGB
         } else if (!in_channel_edit_) {
-            in_channel_edit_ = true;
-            emit_detents_override(256);
+            if (edit_channel_ >= 3) {
+                // Hex / RGB rows → open the on-screen keyboard for text entry.
+                // Capture the set_color callback by value so it survives while
+                // the keyboard is up; the commit parses the typed value, updates
+                // the working channels, and applies the colour live.
+                auto setc = item.color.set_color;
+                // On a valid parse: apply, finalise (so a later "back" doesn't
+                // revert it via the orig snapshot), and leave edit mode. On a
+                // bad parse: keep the picker open so the user can retry.
+                auto commit_typed = [this, setc](int r, int g, int b){
+                    edit_r_ = (float)r; edit_g_ = (float)g; edit_b_ = (float)b;
+                    orig_r_ = edit_r_;  orig_g_ = edit_g_;  orig_b_ = edit_b_;
+                    if (setc) setc((uint8_t)r, (uint8_t)g, (uint8_t)b);
+                    in_channel_edit_ = false;
+                    in_edit_mode_    = false;
+                    emit_detents();
+                };
+                char cur[24];
+                if (edit_channel_ == 3) {
+                    std::snprintf(cur, sizeof(cur), "%02X%02X%02X",
+                                  static_cast<int>(edit_r_),
+                                  static_cast<int>(edit_g_),
+                                  static_cast<int>(edit_b_));
+                    open_keyboard("Hex Color (RRGGBB)", cur,
+                        [commit_typed](const std::string& s){
+                            int r, g, b;
+                            if (cp_parse_hex(s, r, g, b)) commit_typed(r, g, b);
+                        });
+                } else {
+                    std::snprintf(cur, sizeof(cur), "%d,%d,%d",
+                                  static_cast<int>(edit_r_),
+                                  static_cast<int>(edit_g_),
+                                  static_cast<int>(edit_b_));
+                    open_keyboard("Color R,G,B (0-255)", cur,
+                        [commit_typed](const std::string& s){
+                            int r, g, b;
+                            if (cp_parse_rgb(s, r, g, b)) commit_typed(r, g, b);
+                        });
+                }
+            } else {
+                in_channel_edit_ = true;
+                emit_detents_override(256);
+            }
         } else {
             in_channel_edit_ = false;
             edit_channel_    = (edit_channel_ + 1) % 3;
@@ -502,7 +578,7 @@ void MenuSystem::select() {
                 in_edit_mode_ = false;
                 emit_detents();
             } else {
-                emit_detents_override(3);
+                emit_detents_override(5);
             }
         }
         break;
@@ -614,7 +690,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         const auto& sel = items[cursor_];
         if (sel.type == MenuItemType::SLIDER)       extra = 30.f;
         if (sel.type == MenuItemType::FACE_PICKER)  extra = 90.f;
-        if (sel.type == MenuItemType::COLOR_PICKER) extra = 96.f;
+        if (sel.type == MenuItemType::COLOR_PICKER) extra = 152.f;
         if (sel.type == MenuItemType::NOTIF_LOG)    extra = 200.f;
     }
 
@@ -726,7 +802,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         if (selected && in_edit_mode_) {
             if (item.type == MenuItemType::SLIDER)       row_h = item_h + 25.f;
             if (item.type == MenuItemType::FACE_PICKER)  row_h = item_h + 85.f;
-            if (item.type == MenuItemType::COLOR_PICKER) row_h = item_h + 95.f;
+            if (item.type == MenuItemType::COLOR_PICKER) row_h = item_h + 151.f;
             if (item.type == MenuItemType::NOTIF_LOG)    row_h = item_h + 195.f;
         }
 
@@ -930,9 +1006,30 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                     dl->AddText({rmax.x - vsz.x - 6.f, by + 4.f}, text_col, cv);
                 }
 
-                float hint_y = rmin.y + item_h + 3 * 28.f + 2.f;
+                // Text-entry rows: HEX / RGB — select to open the keyboard.
+                char trow_val[2][24];
+                snprintf(trow_val[0], sizeof(trow_val[0]), "%02X%02X%02X",
+                         static_cast<int>(edit_r_), static_cast<int>(edit_g_),
+                         static_cast<int>(edit_b_));
+                snprintf(trow_val[1], sizeof(trow_val[1]), "%d,%d,%d",
+                         static_cast<int>(edit_r_), static_cast<int>(edit_g_),
+                         static_cast<int>(edit_b_));
+                const char* trow_name[2] = { "HEX", "RGB" };
+                for (int t = 0; t < 2; t++) {
+                    float by      = rmin.y + item_h + static_cast<float>(3 + t) * 28.f;
+                    bool  is_sel  = (edit_channel_ == 3 + t);
+                    ImU32 tcol    = is_sel ? IM_COL32(255, 255, 255, 255)
+                                           : IM_COL32(140, 170, 160, 200);
+                    dl->AddText({bx, by + 5.f}, tcol, trow_name[t]);
+                    dl->AddText({bx + 40.f, by + 5.f}, tcol, trow_val[t]);
+                    if (is_sel)
+                        dl->AddRect({bx - 1.f, by + 3.f}, {rmax.x - 6.f, by + 17.f},
+                                    menu_with_alpha(accent_color_, 200), 2.f);
+                }
+
+                float hint_y = rmin.y + item_h + 5 * 28.f + 2.f;
                 const char* hint = !in_channel_edit_
-                    ? "knob=channel  \xC2\xB7  select=edit  \xC2\xB7  back=cancel"
+                    ? "knob=row  \xC2\xB7  select=edit/type  \xC2\xB7  back=cancel"
                     : "knob adjusts  \xC2\xB7  select=next  \xC2\xB7  back=cancel";
                 dl->AddText({bx, hint_y}, menu_with_alpha(accent_color_, 180), hint);
 
