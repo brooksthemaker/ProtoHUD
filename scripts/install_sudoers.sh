@@ -6,9 +6,11 @@
 #         (defaults to the SUDO_USER, or "serin" if invoked directly as root)
 #
 # The granted commands are intentionally narrow — only the system-mutation
-# tools the System > Pi Settings menu actually calls:
+# tools the System > Pi Settings menu and scripts/restart.sh actually call:
 #   hostnamectl, timedatectl, apt-get, poweroff, reboot,
-#   systemctl restart protohud.service
+#   systemctl {start,stop,restart} protohud.service
+# (start/stop let scripts/restart.sh manage the service from a non-root context
+#  such as a GPIO-button handler.)
 #
 # If you don't have a `protohud.service` unit yet, the Restart ProtoHUD menu
 # item will fail with a "Failed" notif — that's expected; create the unit
@@ -30,6 +32,8 @@ ${USER_NAME} ALL=(ALL) NOPASSWD: \
     /usr/bin/apt-get, \
     /usr/sbin/poweroff, \
     /usr/sbin/reboot, \
+    /usr/bin/systemctl start protohud.service, \
+    /usr/bin/systemctl stop protohud.service, \
     /usr/bin/systemctl restart protohud.service
 EOF
 
