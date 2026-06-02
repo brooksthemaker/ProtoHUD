@@ -365,6 +365,12 @@ void NativeFaceController::save_config() {
     save_state_locked();
 }
 
+void NativeFaceController::set_material_spec(const std::string& spec) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    apply_material_all(spec);
+    save_state_locked();
+}
+
 void NativeFaceController::apply_material_all(const std::string& name) {
     for (auto& pn : panels_)
         if (!pn.is_mirror) {

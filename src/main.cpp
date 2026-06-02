@@ -315,6 +315,45 @@ static void pf_hub75_driver_geometry(const PfHub75Layout& L,
                                      int& panel_w, int& panel_h,
                                      int& chain, int& parallel);
 
+// ── Custom multi-colour gradient material ───────────────────────────────────
+// Editor state for Protoface > Material Color > Custom Gradient. Up to 6 colour
+// stops laid out along the face, smoothly blended or hard-banded, optionally
+// scrolling so the colours flow behind the face. Serialised to
+// cfg["protoface"]["gradient"]; rendered via face::GradientMaterial (the
+// "gradient:…" material spec built by pf_gradient_spec below).
+struct PfGradient {
+    int count = 3;                                   // active stops, 2..6
+    std::array<std::array<int, 3>, 6> colors {{
+        {{0, 220, 180}}, {{0, 100, 255}}, {{180, 30, 220}},
+        {{255, 80, 0}},  {{30, 220, 60}}, {{255, 220, 0}},
+    }};
+    bool        smooth    = true;                    // blend vs hard bands
+    std::string direction = "horizontal";            // horizontal | vertical
+    int         speed     = 0;                        // px/s, 0 = static
+};
+
+// Build the "gradient:<dir>:<mode>:<speed>:RRGGBB-…" spec face::load_material
+// parses. Clamped to 2..6 stops.
+static std::string pf_gradient_spec(const PfGradient& g) {
+    std::string s = "gradient:";
+    s += (g.direction == "vertical") ? "v" : "h";
+    s += ':';
+    s += g.smooth ? 's' : 'b';
+    s += ':';
+    s += std::to_string(g.speed);
+    s += ':';
+    const int n = std::clamp(g.count, 2, 6);
+    char buf[8];
+    for (int i = 0; i < n; ++i) {
+        if (i) s += '-';
+        std::snprintf(buf, sizeof(buf), "%02X%02X%02X",
+                      g.colors[i][0] & 0xFF, g.colors[i][1] & 0xFF,
+                      g.colors[i][2] & 0xFF);
+        s += buf;
+    }
+    return s;
+}
+
 // hot-swap action use the exact same construction logic.
 static std::unique_ptr<face::PanelOutput>
 pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
@@ -1308,7 +1347,12 @@ static std::vector<MenuItem> build_menu(
         // panels set (1/2/3) so the render loop opens the stream, hides the
         // on-screen PiP, and shows the feed in the context pane while adjusting.
         GLuint* tex_usb1 = nullptr, GLuint* tex_usb2 = nullptr, GLuint* tex_usb3 = nullptr,
-        int*    usb_preview_req = nullptr)
+        int*    usb_preview_req = nullptr,
+        // Custom Gradient material editor (Protoface > Material Color). The
+        // working copy lives in main(); pf_set_material pushes the built
+        // "gradient:…" spec to the live renderer for instant preview.
+        PfGradient* pf_gradient_p = nullptr,
+        std::function<void(const std::string&)> pf_set_material = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -4235,6 +4279,65 @@ static std::vector<MenuItem> build_menu(
                     state.face.material_color = idx;
                 },
                 [&state, idx = m.idx]{ return state.face.material_color == idx; }));
+    }
+
+    // ── Custom Gradient — multi-colour material, optionally scrolling ─────────
+    // Appended to the Material Color list. Every edit previews live via
+    // pf_set_material (native renderer only); persisted to cfg["protoface"].
+    if (pf_gradient_p) {
+        auto* G = pf_gradient_p;
+        auto apply_grad = [G, pf_set_material]{
+            if (pf_set_material) pf_set_material(pf_gradient_spec(*G));
+        };
+        std::vector<MenuItem> grad_items;
+
+        std::vector<MenuItem> gcount_items;
+        for (int n = 2; n <= 6; ++n)
+            gcount_items.push_back(leaf_sel(std::to_string(n) + " colors",
+                [G, n, apply_grad]{ G->count = n; apply_grad(); },
+                [G, n]{ return G->count == n; }));
+        grad_items.push_back(submenu("Colors", std::move(gcount_items)));
+
+        for (int i = 0; i < 6; ++i) {
+            MenuItem cp = color_picker(std::string("Color ") + std::to_string(i + 1),
+                [G, i, apply_grad](uint8_t r, uint8_t g, uint8_t b){
+                    G->colors[i] = {r, g, b}; apply_grad();
+                },
+                [G, i]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+                    return { static_cast<uint8_t>(G->colors[i][0]),
+                             static_cast<uint8_t>(G->colors[i][1]),
+                             static_cast<uint8_t>(G->colors[i][2]) };
+                });
+            cp.visible_fn = [G, i]{ return i < G->count; };
+            grad_items.push_back(std::move(cp));
+        }
+
+        grad_items.push_back(toggle("Smooth Blend",
+            [G]{ return G->smooth; },
+            [G, apply_grad](bool v){ G->smooth = v; apply_grad(); }));
+
+        std::vector<MenuItem> gdir_items = {
+            leaf_sel("Horizontal",
+                [G, apply_grad]{ G->direction = "horizontal"; apply_grad(); },
+                [G]{ return G->direction != "vertical"; }),
+            leaf_sel("Vertical",
+                [G, apply_grad]{ G->direction = "vertical"; apply_grad(); },
+                [G]{ return G->direction == "vertical"; }),
+        };
+        grad_items.push_back(submenu("Direction", std::move(gdir_items)));
+
+        grad_items.push_back(slider("Speed", -60.f, 60.f, 1.f, " px/s",
+            [G]{ return static_cast<float>(G->speed); },
+            [G, apply_grad](float v){ G->speed = static_cast<int>(v); apply_grad(); }));
+
+        grad_items.push_back(leaf("Use This Gradient", apply_grad));
+
+        pf_palette.push_back(with_desc(
+            submenu("Custom Gradient", std::move(grad_items)),
+            "Multi-colour gradient painted behind the face. Pick 2–6 colours, "
+            "Smooth or banded, a flow Direction and a Speed to scroll them "
+            "behind the mask (0 = static). Previews live; persisted to "
+            "cfg[\"protoface\"][\"gradient\"]."));
     }
 
     std::vector<MenuItem> pf_gifs;
@@ -8251,6 +8354,8 @@ int main(int argc, char* argv[]) {
     // name (NativeFaceController::set_active_layout_name + import_face_image).
     std::map<std::string, PfHub75Layout> pf_hub75_layouts;
     std::string pf_hub75_active = "Default";
+    // Custom Gradient material editor state (Protoface > Material Color).
+    PfGradient pf_gradient;
     // Face animation tunables — forwarded to every panel's FaceState live
     // and persisted to cfg["protoface"]["animation"] on save.
     bool   pf_blink_enabled   = true;
@@ -8320,6 +8425,22 @@ int main(int argc, char* argv[]) {
             pf_expr_fade      = jval(ja, "expression_fade", pf_expr_fade);
             pf_preview_duration_s =
                 jval(ja, "preview_duration_s", pf_preview_duration_s);
+        }
+        if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
+            auto& jg = jpf["gradient"];
+            pf_gradient.count     = std::clamp(jval(jg, "count", pf_gradient.count), 2, 6);
+            pf_gradient.smooth    = jval(jg, "smooth", pf_gradient.smooth);
+            pf_gradient.direction = jg.value("direction", pf_gradient.direction);
+            pf_gradient.speed     = jval(jg, "speed", pf_gradient.speed);
+            if (jg.contains("colors") && jg["colors"].is_array()) {
+                for (size_t i = 0; i < jg["colors"].size() && i < 6; ++i) {
+                    const auto& jc = jg["colors"][i];
+                    if (jc.is_array() && jc.size() == 3)
+                        for (int k = 0; k < 3; ++k)
+                            pf_gradient.colors[i][k] =
+                                std::clamp(jc[k].get<int>(), 0, 255);
+                }
+            }
         }
         if (jpf.contains("preview")) {
             auto& jpv = jpf["preview"];
@@ -9788,7 +9909,11 @@ int main(int argc, char* argv[]) {
                                },
                                /* cfg_root */ &cfg,
                                /* USB camera preview wiring */
-                               &tex_usb1, &tex_usb2, &tex_usb3, &usb_preview_req));
+                               &tex_usb1, &tex_usb2, &tex_usb3, &usb_preview_req,
+                               /* pf_gradient */ &pf_gradient,
+                               /* pf_set_material */ [&](const std::string& spec){
+                                   if (native_ctrl) native_ctrl->set_material_spec(spec);
+                               }));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -10496,6 +10621,19 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["animation"]["blink_duration"]  = pf_blink_duration;
         cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
         cfg["protoface"]["animation"]["preview_duration_s"] = pf_preview_duration_s;
+        {
+            auto& jg = cfg["protoface"]["gradient"];
+            jg["count"]     = std::clamp(pf_gradient.count, 2, 6);
+            jg["smooth"]    = pf_gradient.smooth;
+            jg["direction"] = pf_gradient.direction;
+            jg["speed"]     = pf_gradient.speed;
+            json jcolors = json::array();
+            for (int i = 0; i < 6; ++i)
+                jcolors.push_back(json::array({pf_gradient.colors[i][0],
+                                               pf_gradient.colors[i][1],
+                                               pf_gradient.colors[i][2]}));
+            jg["colors"] = std::move(jcolors);
+        }
         cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
         cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
         cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;

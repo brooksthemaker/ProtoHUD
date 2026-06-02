@@ -115,6 +115,10 @@ public:
     // = {flip_x, flip_y} for panel i; extra/missing entries are ignored. Read by
     // the render thread on the next frame.
     void set_panel_flips(const std::vector<std::array<bool, 2>>& flips);
+    // Apply an arbitrary material spec (e.g. "gradient:h:s:20:00DCB4-0064FF")
+    // to every self-rendered panel and persist it. Used by the Material Color
+    // gradient editor for live preview.
+    void set_material_spec(const std::string& spec);
 
     // Push a "transient" image for the named expression onto every panel
     // for duration_s seconds. The current image is stashed and restored
