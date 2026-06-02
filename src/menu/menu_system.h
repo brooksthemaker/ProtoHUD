@@ -351,6 +351,7 @@ private:
     std::vector<MenuItem>  quick_items_;   // curated corner "quick menu" tree
     std::vector<Level>     stack_;
     int                    cursor_ = 0;
+    int                    list_scroll_ = 0;   // first visible row when a level overflows the screen
     bool                   open_   = false;
     DetentCallback         detent_cb_;
 

@@ -160,6 +160,7 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items,
                             std::move(panel_title),
                             std::move(panel_draw) });
     cursor_ = init_cursor;
+    list_scroll_ = 0;        // start a fresh page at the top
     radial_prev_sel_ = -1;   // snap the radial spin to the new level
     emit_detents();
 }
@@ -168,6 +169,7 @@ void MenuSystem::pop_level() {
     if (stack_.size() > 1) {
         stack_.pop_back();
         cursor_ = stack_.back().cursor;  // restore cursor to where user was on this page
+        list_scroll_ = 0;                // recomputed from the cursor on next draw
         radial_prev_sel_ = -1;           // snap the radial spin to the restored level
         emit_detents();
     } else if (deep_open_) {
@@ -681,10 +683,13 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         }
     }
 
-    // Count only visible items for layout.
-    int visible_count = 0;
-    for (const auto& it : items)
-        if (!it.visible_fn || it.visible_fn()) ++visible_count;
+    // Count only visible items for layout, and locate the cursor among them.
+    int visible_count = 0, vis_cursor = 0;
+    for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+        if (items[i].visible_fn && !items[i].visible_fn()) continue;
+        if (i == cursor_) vis_cursor = visible_count;
+        ++visible_count;
+    }
 
     // Extra height for expanded editing rows
     float extra = 0.f;
@@ -696,10 +701,28 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         if (sel.type == MenuItemType::NOTIF_LOG)    extra = 200.f;
     }
 
+    // ── Vertical scrolling when a level overflows the screen ─────────────────
+    // Fit as many rows as the viewport (screen minus margins + the expanded
+    // editing row's extra height) allows, then window the rows around the
+    // cursor. list_scroll_ is the first visible row (in visible-item space).
+    const float margin  = 48.f;
+    const float avail_h = static_cast<float>(screen_h) - margin * 2.f - pad_y * 2.f;
+    int max_rows = static_cast<int>((avail_h - extra) / item_h);
+    if (max_rows < 1) max_rows = 1;
+    const bool scrolling = visible_count > max_rows;
+    const int  shown     = scrolling ? max_rows : visible_count;
+    if (scrolling) {
+        if (vis_cursor < list_scroll_)             list_scroll_ = vis_cursor;
+        if (vis_cursor >= list_scroll_ + max_rows) list_scroll_ = vis_cursor - max_rows + 1;
+        if (list_scroll_ > visible_count - max_rows) list_scroll_ = visible_count - max_rows;
+        if (list_scroll_ < 0)                      list_scroll_ = 0;
+    } else {
+        list_scroll_ = 0;
+    }
+
     const float total_h = pad_y * 2.f
-                        + item_h * static_cast<float>(visible_count)
+                        + item_h * static_cast<float>(shown)
                         + extra;
-    const float margin = 48.f;
     float x, y;
     switch (anchor_) {
         default:
@@ -793,9 +816,15 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         }
     };
 
+    int vi = -1;        // running index among visible items
+    int drawn = 0;      // rows actually emitted this frame
     for (int i = 0; i < static_cast<int>(items.size()); i++) {
         const auto& item = items[i];
         if (item.visible_fn && !item.visible_fn()) continue;
+        ++vi;
+        if (vi < list_scroll_) continue;   // scrolled above the viewport
+        if (drawn >= shown)    break;      // past the bottom of the viewport
+        ++drawn;
 
         bool selected = (i == cursor_);
 
@@ -1128,6 +1157,23 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                     {rmax.x + pad_x, rmax.y - 1.f}, COL_SEP_EFF, 1.f);
     }
 
+    // ── Scroll chevrons ──────────────────────────────────────────────────────
+    // Drawn in the top / bottom padding bands when more rows exist off-screen.
+    if (scrolling) {
+        const float cx  = wp.x + ws.x * 0.5f;
+        const ImU32 col = menu_with_alpha(accent_color_, 210);
+        if (list_scroll_ > 0) {
+            const float yc = wp.y + pad_y * 0.5f;
+            dl->AddTriangleFilled({cx - 6.f, yc + 3.f}, {cx + 6.f, yc + 3.f},
+                                  {cx, yc - 3.f}, col);
+        }
+        if (list_scroll_ + shown < visible_count) {
+            const float yc = wp.y + ws.y - pad_y * 0.5f;
+            dl->AddTriangleFilled({cx - 6.f, yc - 3.f}, {cx + 6.f, yc - 3.f},
+                                  {cx, yc + 3.f}, col);
+        }
+    }
+
     ImGui::End();
     ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(6);
@@ -1437,10 +1483,33 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     const float lx0    = cx0;
     const float lx1    = split_x - 20.f;
     float ly = cy0;
+
+    // ── Vertical scrolling for the left list when it overflows the column ─────
+    int vcount_fs = 0, vcur_fs = 0;
+    for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+        if (items[i].visible_fn && !items[i].visible_fn()) continue;
+        if (i == cursor_) vcur_fs = vcount_fs;
+        ++vcount_fs;
+    }
+    int max_rows_fs = static_cast<int>((cy1 - cy0) / row_h);
+    if (max_rows_fs < 1) max_rows_fs = 1;
+    const bool scroll_fs = vcount_fs > max_rows_fs;
+    if (scroll_fs) {
+        if (vcur_fs < list_scroll_)                 list_scroll_ = vcur_fs;
+        if (vcur_fs >= list_scroll_ + max_rows_fs)  list_scroll_ = vcur_fs - max_rows_fs + 1;
+        if (list_scroll_ > vcount_fs - max_rows_fs) list_scroll_ = vcount_fs - max_rows_fs;
+        if (list_scroll_ < 0)                       list_scroll_ = 0;
+    } else {
+        list_scroll_ = 0;
+    }
+
+    int vi_fs = -1;
     for (int i = 0; i < static_cast<int>(items.size()); ++i) {
         const auto& it = items[i];
         if (it.visible_fn && !it.visible_fn()) continue;
-        if (ly + row_h > cy1) break;   // simple clip (no scrolling yet)
+        ++vi_fs;
+        if (vi_fs < list_scroll_) continue;   // scrolled above the column
+        if (ly + row_h > cy1) break;          // column full
 
         bool sel = (i == cursor_);
         ImVec2 rmin{ lx0, ly }, rmax{ lx1, ly + row_h };
@@ -1474,6 +1543,18 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             }
         }
         ly += row_h;
+    }
+
+    // Scroll chevrons (centered at the top / bottom of the list column).
+    if (scroll_fs) {
+        const float lcx = (lx0 + lx1) * 0.5f;
+        const ImU32 c   = menu_with_alpha(accent_color_, 210);
+        if (list_scroll_ > 0)
+            dl->AddTriangleFilled({lcx - 7.f, cy0 + 8.f}, {lcx + 7.f, cy0 + 8.f},
+                                  {lcx, cy0 + 1.f}, c);
+        if (list_scroll_ + max_rows_fs < vcount_fs)
+            dl->AddTriangleFilled({lcx - 7.f, cy1 - 8.f}, {lcx + 7.f, cy1 - 8.f},
+                                  {lcx, cy1 - 1.f}, c);
     }
 
     // ── Right pane: description + editor ────────────────────────────────────────
