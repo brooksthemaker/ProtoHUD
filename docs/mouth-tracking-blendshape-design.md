@@ -1,8 +1,17 @@
 # Optical Mouth Tracking → HUB75 Blendshape Mouth Driver
 
-**Status:** Design / not yet implemented
+**Status:** Phases 0–1 implemented (render path + test injector); Phases 2–4 pending
 **Target branch:** `claude/mouth-tracking-hub75-BRRTn`
-**Author context:** design doc requested before any code
+**Author context:** design doc, then incremental implementation
+
+> **Implemented so far (Phases 0–1):** the `set_mouth_blendshapes` seam through
+> `IFaceController`/`FaceProxy`/`NativeFaceController`/`FaceState`, the weighted
+> blendshape **stack** in `FaceLoader` (alpha-over `blend_*` layers with optional
+> per-side `mouth_left`/`mouth_right` regions), the shared contract in
+> `src/face/mouth_blendshapes.h`, and a **Face Display ▸ Mouth Tracker (Test)**
+> menu that drives the stack with no hardware. Authoring guide:
+> `docs/mouth-blendshape-faces.md`. Still pending: the UART `MouthTracker`
+> receiver (Phase 2), the Pi Zero 2 W service (Phase 3), and polish (Phase 4).
 
 ---
 
@@ -386,17 +395,18 @@ weights between tracker updates.
 
 ## 14. Phased implementation plan
 
-**Phase 0 — Plumbing (no behavior change, no hardware)**
-1. Add `set_mouth_blendshapes` to `IFaceController` + `FaceProxy` (no-op default).
-2. Implement forward in `NativeFaceController` → new `FaceState` fields/setter.
-3. Add a dev/test injector (menu "manual blendshape sliders" or a replay file) so
+**Phase 0 — Plumbing (no behavior change, no hardware)** ✅ done
+1. ✅ Add `set_mouth_blendshapes` to `IFaceController` + `FaceProxy` (no-op default).
+2. ✅ Implement forward in `NativeFaceController` → new `FaceState` fields/setter.
+3. ✅ Add a dev/test injector (**Face Display ▸ Mouth Tracker (Test)** sliders) so
    the render path is testable on the CM5 **with no Zero attached**.
 
-**Phase 1 — Render: blendshape stack**
-4. `blend_over_region` helper + stacked compositing in `FaceLoader::get_frame`.
-5. Extend canonical stem list + Files>Faces import for `blend_*` layers.
-6. Author a starter layer set for one face (openness + L/R smile + L/R frown +
-   pucker). Verify asymmetry on panels via the slider injector.
+**Phase 1 — Render: blendshape stack** ✅ done (art pending)
+4. ✅ `blend_over_region` helper + stacked compositing in `FaceLoader::get_frame`.
+5. ✅ Shared contract `mouth_blendshapes.h`; `blend_*` layers loaded + excluded
+   from the scanned expression list; optional per-side regions.
+6. ⏳ Author a starter layer set for one face (openness + L/R smile + L/R frown +
+   pucker) — **owner: user**. Verify asymmetry on panels via the slider injector.
 
 **Phase 2 — Link + receiver**
 7. `MouthTracker` module (`SerialPort` reader, parse, push to `face_proxy`).

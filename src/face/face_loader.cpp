@@ -43,7 +43,12 @@ void FaceLoader::load() {
         for (auto& p : pngs) {
             std::string stem = fs::path(p).stem().string();
             std::transform(stem.begin(), stem.end(), stem.begin(), ::tolower);
-            if (stem != "blink" && stem != "mouth_open") expr_map.emplace_back(stem, p);
+            // Skip non-expression sprites: blink, the audio mouth overlay, and
+            // optical blendshape layers (blend_*) — these are composited
+            // separately, not selectable as expressions.
+            if (stem == "blink" || stem == "mouth_open") continue;
+            if (stem.rfind("blend_", 0) == 0) continue;
+            expr_map.emplace_back(stem, p);
         }
     }
 
@@ -76,6 +81,18 @@ void FaceLoader::load() {
         }
     }
 
+    // Optical mouth blendshape layers — all optional. Each present <stem>.png
+    // becomes a weighted layer in the blendshape stack (see get_frame). Authored
+    // as additive deltas from neutral (only the moving region opaque) so several
+    // can be alpha-stacked at once.
+    for (const auto& def : mouth_blendshapes()) {
+        fs::path p = fs::path(folder_) / (std::string(def.stem) + ".png");
+        if (fs::exists(p)) {
+            cv::Mat img = load_png_rgba(p.string(), w_, h_);
+            if (!img.empty()) blend_layers_[def.stem] = std::move(img);
+        }
+    }
+
     // Region scaling: boxes may be authored at draw_size and scaled to panel px.
     double sx = 1.0, sy = 1.0;
     if (cfg.contains("draw_size") && cfg["draw_size"].is_array() &&
@@ -93,9 +110,45 @@ void FaceLoader::load() {
         r.set = true;
         return r;
     };
-    if (cfg.contains("eye_left"))  eye_left_  = parse_region(cfg["eye_left"]);
-    if (cfg.contains("eye_right")) eye_right_ = parse_region(cfg["eye_right"]);
-    if (cfg.contains("mouth"))     mouth_     = parse_region(cfg["mouth"]);
+    if (cfg.contains("eye_left"))   eye_left_   = parse_region(cfg["eye_left"]);
+    if (cfg.contains("eye_right"))  eye_right_  = parse_region(cfg["eye_right"]);
+    if (cfg.contains("mouth"))      mouth_      = parse_region(cfg["mouth"]);
+    // Optional per-side mouth regions for sharper asymmetry. Left/Right
+    // blendshape layers clip to these when present; otherwise they fall back
+    // to the single mouth region.
+    if (cfg.contains("mouth_left"))  mouth_left_  = parse_region(cfg["mouth_left"]);
+    if (cfg.contains("mouth_right")) mouth_right_ = parse_region(cfg["mouth_right"]);
+}
+
+const FaceLoader::Region& FaceLoader::region_for_side(MouthSide side) const {
+    if (side == MouthSide::Left  && mouth_left_.set)  return mouth_left_;
+    if (side == MouthSide::Right && mouth_right_.set) return mouth_right_;
+    return mouth_;
+}
+
+void FaceLoader::blend_over_region(cv::Mat& base, const cv::Mat& overlay,
+                                   const Region& region, double weight) const {
+    if (overlay.empty() || weight <= 0.0) return;
+    const double wc = std::clamp(weight, 0.0, 1.0);
+    int x  = region.set ? region.x : 0;
+    int y  = region.set ? region.y : 0;
+    int x2 = region.set ? std::min(region.x + region.w, w_) : w_;
+    int y2 = region.set ? std::min(region.y + region.h, h_) : h_;
+    x = std::max(0, x); y = std::max(0, y);
+    if (x2 <= x || y2 <= y) return;
+    for (int j = y; j < y2; ++j) {
+        cv::Vec4b*       brow = base.ptr<cv::Vec4b>(j);
+        const cv::Vec4b* orow = overlay.ptr<cv::Vec4b>(j);
+        for (int i = x; i < x2; ++i) {
+            const double a = (orow[i][3] / 255.0) * wc;
+            if (a <= 0.0) continue;
+            for (int c = 0; c < 3; ++c)
+                brow[i][c] = cv::saturate_cast<uchar>(brow[i][c] * (1.0 - a) +
+                                                      orow[i][c] * a);
+            brow[i][3] = std::max<uchar>(brow[i][3],
+                                         cv::saturate_cast<uchar>(orow[i][3] * wc));
+        }
+    }
 }
 
 cv::Mat FaceLoader::blend_region(const cv::Mat& base, const cv::Mat& overlay,
@@ -142,14 +195,32 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
         }
     }
 
-    // 3. Mouth open.
-    double mo = std::clamp(state.mouth_open(), 0.0, 1.0);
-    if (mo > 0.0 && mouth_.set) {
-        auto it = mouth_shapes_.find(state.mouth_shape());
-        if (it == mouth_shapes_.end())
-            it = mouth_shapes_.find("mouth_open");   // fallback to AH
-        if (it != mouth_shapes_.end() && !it->second.empty())
-            frame = blend_region(frame, it->second, mouth_, mo);
+    // 3. Mouth. Optical blendshape stack takes precedence when the tracker is
+    // confident and the face provides blend_* layers; otherwise fall back to
+    // the legacy audio-driven single-overlay path (unchanged behaviour for
+    // faces without blendshape art).
+    const std::vector<float>& weights = state.mouth_weights();
+    const double conf = std::clamp(state.mouth_conf(), 0.0, 1.0);
+    const bool use_stack = conf > 0.0 && !blend_layers_.empty() && !weights.empty();
+    if (use_stack) {
+        const auto& defs = mouth_blendshapes();
+        const size_t n = std::min(defs.size(), weights.size());
+        for (size_t i = 0; i < n; ++i) {
+            auto it = blend_layers_.find(defs[i].stem);
+            if (it == blend_layers_.end() || it->second.empty()) continue;
+            const double wv = std::clamp(static_cast<double>(weights[i]), 0.0, 1.0) * conf;
+            if (wv <= 0.0) continue;
+            blend_over_region(frame, it->second, region_for_side(defs[i].side), wv);
+        }
+    } else {
+        double mo = std::clamp(state.mouth_open(), 0.0, 1.0);
+        if (mo > 0.0 && mouth_.set) {
+            auto it = mouth_shapes_.find(state.mouth_shape());
+            if (it == mouth_shapes_.end())
+                it = mouth_shapes_.find("mouth_open");   // fallback to AH
+            if (it != mouth_shapes_.end() && !it->second.empty())
+                frame = blend_region(frame, it->second, mouth_, mo);
+        }
     }
 
     // 4. Wiggle + gyro sub-pixel shift (edge-clamped, no wrap).

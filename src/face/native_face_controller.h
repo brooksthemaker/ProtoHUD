@@ -77,6 +77,8 @@ public:
     void        trigger_boop(const std::string& expression, double duration_s) override;
     void        set_audio_drive(double volume, double mouth_open) override;
     void        set_mouth_shape(const std::string& shape) override;
+    void        set_mouth_blendshapes(const std::vector<float>& weights,
+                                      float confidence) override;
 
     // Face editor support: what the active PanelOutput addresses (so the
     // editor can pick the editable region), and a way to force a face
