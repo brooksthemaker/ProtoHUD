@@ -65,8 +65,10 @@ static bool cp_parse_rgb(const std::string& s, int& r, int& g, int& b) {
     for (size_t i = 0; i < s.size() && n < 3; ) {
         if (std::isdigit(static_cast<unsigned char>(s[i]))) {
             int val = 0;
-            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
+            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) {
                 val = val * 10 + (s[i++] - '0');
+                if (val > 9999) val = 9999;   // cap before overflow; clamped to 255 below
+            }
             v[n++] = std::min(255, val);
         } else ++i;
     }

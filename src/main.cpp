@@ -11975,9 +11975,12 @@ int main(int argc, char* argv[]) {
         // applied by the NV12 shader as usual — so a 90° rotation on the
         // CSI cameras turns the top half into two upright portrait feeds.
         auto draw_multicam_into_current_fbo = [&](int fw, int fh) {
-            const int hw  = fw / 2;             // half width
-            const int hh  = fh / 2;             // half height
-            const int top = fh - hh;            // top quadrants start at y = fh/2
+            const int hw  = fw / 2;             // left half width
+            const int rw  = fw - hw;            // right half width (absorbs odd column)
+            const int hh  = fh / 2;             // top half height
+            const int top = fh - hh;            // bottom half height; top starts at y=top
+            // Bottom halves use height `top` and right halves width `rw` so an
+            // odd fw/fh leaves no 1px seam between the quadrants.
 
             // Top-left: CSI left (or right if swapped).
             glViewport(0, top, hw, hh);
@@ -11985,14 +11988,14 @@ int main(int argc, char* argv[]) {
             else                      cameras.draw_owl_left();
 
             // Top-right: CSI right (or left if swapped).
-            glViewport(hw, top, hw, hh);
+            glViewport(hw, top, rw, hh);
             if (snap.cameras_swapped) cameras.draw_owl_left();
             else                      cameras.draw_owl_right();
 
             // Bottom-left / bottom-right: selected USB cameras.
-            glViewport(0, 0, hw, hh);
+            glViewport(0, 0, hw, top);
             cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_a));
-            glViewport(hw, 0, hw, hh);
+            glViewport(hw, 0, rw, top);
             cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_b));
 
             // Restore full viewport so any later passes (post-process /
