@@ -7074,6 +7074,18 @@ static std::vector<MenuItem> build_menu(
                 reader_attempted = true;
             }
 
+            // Light rounded card + white border behind the visualizer, then
+            // inset the working area so content never touches the edges.
+            {
+                const ImU32 card_bg     = IM_COL32(214, 221, 228, 252);
+                const ImU32 card_border = IM_COL32(255, 255, 255, 255);
+                dl->AddRectFilled(o, {o.x + sz.x, o.y + sz.y}, card_bg, 10.f);
+                dl->AddRect(o, {o.x + sz.x, o.y + sz.y}, card_border, 10.f, 0, 2.f);
+            }
+            o.x += 8.f; o.y += 6.f; sz.x -= 16.f; sz.y -= 12.f;
+            const ImU32 text_dark = IM_COL32(22, 26, 32, 255);   // body text on the light card
+            const ImU32 text_dim  = IM_COL32(78, 86, 96, 255);   // secondary text
+
             // Layout: a dedicated text column on the left (title, rail
             // estimate, hovered-pin details — whatever used to live in the
             // floating tooltip) and the 2x20 grid pushed to the right so
@@ -7090,16 +7102,16 @@ static std::vector<MenuItem> build_menu(
             // Left text column: title + rail-current estimate (top), then a
             // "Pin info" block that follows the hovered pin.
             dl->AddText(font, fs * 1.05f, {info_x, o.y},
-                        IM_COL32(230, 235, 240, 255), "GPIO Header");
+                        text_dark, "GPIO Header");
             dl->AddText(font, fs * 0.7f, {info_x, o.y + fs * 1.05f},
-                        IM_COL32(170, 175, 185, 220), "Pi 5 / CM5 — 40-pin");
+                        text_dim, "Pi 5 / CM5 — 40-pin");
             char rail_buf[96];
             std::snprintf(rail_buf, sizeof(rail_buf),
                           "3.3V ~%d mA   5V ~%d mA", ma3, ma5);
             const ImU32 rail_col = (ma5 > 2500 || ma3 > 500)
-                ? IM_COL32(230, 160,  80, 220) : IM_COL32(170, 180, 190, 220);
+                ? IM_COL32(200, 110,  20, 255) : text_dim;
             dl->AddText(font, fs * 0.75f, {info_x, o.y + fs * 1.85f},
-                        IM_COL32(150, 160, 170, 200), "Est. rail draw:");
+                        text_dim, "Est. rail draw:");
             dl->AddText(font, fs * 0.85f, {info_x, o.y + fs * 2.65f},
                         rail_col, rail_buf);
 
@@ -7117,15 +7129,14 @@ static std::vector<MenuItem> build_menu(
             const float pin_left_x  = center_x - pin_sz - 3.f;
             const float pin_right_x = center_x + 3.f;
 
-            const ImU32 outline_active   = IM_COL32(120, 230, 110, 255);
-            const ImU32 outline_conflict = IM_COL32(240,  90,  70, 255);
-            const ImU32 outline_inactive = IM_COL32(120, 130, 140, 200);
-            const ImU32 label_col        = IM_COL32(220, 225, 230, 230);
-            const ImU32 label_dim        = IM_COL32(160, 170, 180, 220);
-            const ImU32 label_note       = IM_COL32(180, 220, 255, 230);
-            const ImU32 pin_num_col      = IM_COL32(20, 24, 28, 255);
-            const ImU32 live_high_col    = IM_COL32(120, 230, 110, 255);
-            const ImU32 live_low_col     = IM_COL32(150, 160, 170, 220);
+            const ImU32 outline_active   = IM_COL32( 40, 170,  60, 255);
+            const ImU32 outline_conflict = IM_COL32(220,  50,  35, 255);
+            const ImU32 outline_inactive = IM_COL32( 95, 105, 115, 220);
+            const ImU32 label_col        = text_dark;
+            const ImU32 label_dim        = text_dim;
+            const ImU32 label_note       = IM_COL32( 40,  95, 165, 255);
+            const ImU32 live_high_col    = IM_COL32( 40, 170,  60, 255);
+            const ImU32 live_low_col     = IM_COL32(110, 120, 130, 230);
 
             // Hover state for the tooltip.
             const ImVec2 mp = ImGui::GetMousePos();
@@ -7173,10 +7184,12 @@ static std::vector<MenuItem> build_menu(
                         char buf[6];
                         std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(p.physical));
                         const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, buf);
-                        dl->AddText(font, label_fs,
-                                    {x + (pin_sz - ts.x) * 0.5f,
-                                     cy + (pin_sz - ts.y) * 0.5f},
-                                    pin_num_col, buf);
+                        const float tx = x + (pin_sz - ts.x) * 0.5f;
+                        const float ty = cy + (pin_sz - ts.y) * 0.5f;
+                        // Bold white with a soft shadow so it reads on any cell colour.
+                        dl->AddText(font, label_fs, {tx + 0.8f, ty + 0.8f}, IM_COL32(0, 0, 0, 150), buf);
+                        dl->AddText(font, label_fs, {tx + 0.6f, ty}, IM_COL32(255, 255, 255, 255), buf);
+                        dl->AddText(font, label_fs, {tx,        ty}, IM_COL32(255, 255, 255, 255), buf);
                     }
                     // Live state badge — small H/L dot inside the square's
                     // corner. Skipped for non-GPIO pins (power / GND / ID).
@@ -7218,10 +7231,36 @@ static std::vector<MenuItem> build_menu(
                 const float ly = y + (row_h - label_fs) * 0.5f;
                 int col_l = 0, col_r = 0;
                 if (gpvz_draw->show_primary) {
-                    draw_label(pin_left_x - 4.f - label_w, ly, label_w, pl.primary,
-                               true, label_col, dim_l);
-                    draw_label(pin_right_x + pin_sz + 4.f, ly, label_w, pr.primary,
-                               false, label_col, dim_r);
+                    // Innermost label is the claimant when the pin is in use
+                    // ("HUB75 R1", "MPR121 boop"…), else its function name.
+                    // Truncated to keep the column tidy; full text is in Pin Info.
+                    auto claim_or = [&](const sys::GpioPin& p) -> std::string {
+                        std::string s = p.primary ? p.primary : "";
+                        if (p.bcm >= 0) {
+                            auto c = claims.claimants.find(p.bcm);
+                            if (c != claims.claimants.end() && !c->second.empty())
+                                s = c->second.front();
+                        }
+                        if (s.size() > 14) s = s.substr(0, 13) + "\xE2\x80\xA6";
+                        return s;
+                    };
+                    auto claim_col = [&](const sys::GpioPin& p) -> ImU32 {
+                        if (p.bcm >= 0) {
+                            auto c = claims.claimants.find(p.bcm);
+                            if (c != claims.claimants.end() && !c->second.empty()) {
+                                const std::string& w = c->second.front();
+                                if (w.rfind("GPIO: ", 0) == 0) return IM_COL32(40, 110, 210, 255);
+                                return IM_COL32(190, 105, 20, 255);   // hardware claimant
+                            }
+                        }
+                        return label_col;
+                    };
+                    const std::string ll = claim_or(pl);
+                    const std::string rl = claim_or(pr);
+                    draw_label(pin_left_x - 4.f - label_w, ly, label_w, ll.c_str(),
+                               true, claim_col(pl), dim_l);
+                    draw_label(pin_right_x + pin_sz + 4.f, ly, label_w, rl.c_str(),
+                               false, claim_col(pr), dim_r);
                     ++col_l; ++col_r;
                 }
                 if (gpvz_draw->show_secondary) {
@@ -7251,8 +7290,8 @@ static std::vector<MenuItem> build_menu(
             // grid and shows even without active hover. Default copy
             // points the user at the grid.
             const bool   have_hover = hovered_bcm >= 0 || !hovered_primary.empty();
-            const ImU32  hint_col   = IM_COL32(150, 160, 170, 200);
-            const ImU32  body_col   = IM_COL32(220, 225, 230, 230);
+            const ImU32  hint_col   = text_dim;
+            const ImU32  body_col   = text_dark;
             const float  info_lh    = label_fs + 2.f;
             float        info_y     = info_block_top;
             // Section header — coloured by conflict state when applicable.
@@ -7260,7 +7299,7 @@ static std::vector<MenuItem> build_menu(
             const bool conflict = (cit != claims.claimants.end()
                                    && cit->second.size() > 1);
             const ImU32 head_col = conflict ? outline_conflict
-                                            : IM_COL32(190, 220, 250, 230);
+                                            : IM_COL32(40, 95, 165, 255);
             dl->AddText(font, fs * 0.8f, {info_x, info_y},
                         head_col, have_hover ? "Pin Info" : "Hover");
             info_y += fs * 1.0f;
