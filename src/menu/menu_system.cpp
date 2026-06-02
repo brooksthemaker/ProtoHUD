@@ -470,7 +470,11 @@ void MenuSystem::select() {
         break;
 
     case MenuItemType::LEAF:
-        if (item.action) { item.action(); }
+        // Copy the callable before invoking: an action may pop its own level
+        // (e.g. the GPIO pin picker calls back() on select), which would destroy
+        // the items vector that owns this std::function mid-call. The local copy
+        // keeps it alive for the duration of the call.
+        if (item.action) { auto act = item.action; act(); }
         // Menu stays open — only "Close Menu" / "< Back" items call close()/back()
         break;
 

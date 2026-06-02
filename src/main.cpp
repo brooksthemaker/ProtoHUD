@@ -7442,6 +7442,85 @@ static std::vector<MenuItem> build_menu(
         "  • Power-rail estimate (top of pane) sums known device current draws.\n"
         "  • Filter by Function dims everything not matching the selected family.";
 
+    // ── GPIO pin picker (visual header page) ──────────────────────────────────
+    // A pin is selectable for a slot when it's a real GPIO line, not claimed by
+    // another active peripheral, and not already used by a different slot. The
+    // current slot's own pin stays selectable so it can be re-confirmed.
+    auto gpio_pin_available = [gpio_pin_claims, gpio_pins_p, gpio_slot_count]
+                              (int bcm, int self_slot) -> bool {
+        if (bcm < 0) return false;
+        if (gpio_pins_p)
+            for (int j = 0; j < gpio_slot_count; ++j) {
+                if (j == self_slot) continue;
+                const auto& s = gpio_pins_p[j];
+                const bool used = s.short_fn != input::GpioFunc::None ||
+                                  s.long_fn  != input::GpioFunc::None;
+                if (used && s.gpio == bcm) return false;   // taken by another slot
+            }
+        PinClaims pc = gpio_pin_claims();
+        auto it = pc.claimants.find(bcm);
+        if (it != pc.claimants.end())
+            for (const auto& who : it->second)
+                if (who.rfind("GPIO: ", 0) != 0)           // claimed by a non-GPIO subsystem
+                    return false;
+        return true;
+    };
+
+    // Context-panel renderer for the picker page: the 40-pin header colour-coded
+    // by function family, focused pin outlined, unavailable pins dimmed. The
+    // detail line shows the focused pin's primary / secondary / tertiary names.
+    auto draw_pin_picker_panel =
+        [gpio_pin_available](std::shared_ptr<int> focus, int self_slot) -> MenuContextPanelDraw {
+        return [focus, self_slot, gpio_pin_available]
+               (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            const float pad      = 6.f;
+            dl->AddText({o.x + pad, o.y}, IM_COL32(235, 240, 245, 255), "SELECT GPIO PIN");
+            const float gy       = o.y + 20.f;
+            const float detail_h = 42.f;
+            const float gw       = sz.x - pad * 2.f;
+            const float gutter   = 8.f;
+            const float col_w    = (gw - gutter) * 0.5f;
+            const float grid_h   = sz.y - (gy - o.y) - detail_h;
+            const float row_h    = grid_h / 20.f;
+            const float line_h   = ImGui::GetTextLineHeight();
+            const int   fbcm     = focus ? *focus : -1;
+
+            for (int idx = 0; idx < 40; ++idx) {
+                const auto& gp  = sys::kPi40Pins[idx];
+                const int   row = idx / 2, col = idx % 2;
+                const float cx0 = o.x + pad + col * (col_w + gutter);
+                const float cy0 = gy + row * row_h;
+                const ImVec2 a{cx0, cy0 + 1.f}, b{cx0 + col_w, cy0 + row_h - 1.f};
+                const bool selectable = gp.bcm >= 0 && gpio_pin_available(gp.bcm, self_slot);
+                const bool focused    = gp.bcm >= 0 && gp.bcm == fbcm;
+                dl->AddRectFilled(a, b, sys::pin_kind_color(gp.kind), 3.f);
+                if (!selectable) dl->AddRectFilled(a, b, IM_COL32(0, 0, 0, 150), 3.f);
+                if (focused)     dl->AddRect(a, b, IM_COL32(255, 255, 255, 255), 3.f, 0, 2.5f);
+                char lbl[12];
+                if (gp.bcm >= 0) std::snprintf(lbl, sizeof(lbl), "%d", gp.bcm);
+                else             std::snprintf(lbl, sizeof(lbl), "%s", sys::pin_kind_short(gp.kind));
+                dl->AddText({a.x + 5.f, cy0 + (row_h - line_h) * 0.5f},
+                            IM_COL32(15, 18, 22, 255), lbl);   // dark for contrast on bright cells
+            }
+
+            // Detail line for the focused pin.
+            const sys::GpioPin* fp = nullptr;
+            for (const auto& gp : sys::kPi40Pins)
+                if (gp.bcm >= 0 && gp.bcm == fbcm) { fp = &gp; break; }
+            const float dy = gy + grid_h + 4.f;
+            if (fp) {
+                std::string fns = fp->primary;
+                if (fp->secondary && fp->secondary[0]) fns += "  \xC2\xB7  " + std::string(fp->secondary);
+                if (fp->tertiary  && fp->tertiary[0])  fns += "  \xC2\xB7  " + std::string(fp->tertiary);
+                dl->AddText({o.x + pad, dy}, IM_COL32(255, 255, 255, 255), fns.c_str());
+                const bool avail = gpio_pin_available(fp->bcm, self_slot);
+                dl->AddText({o.x + pad, dy + line_h + 2.f},
+                            avail ? IM_COL32(120, 230, 120, 255) : IM_COL32(235, 130, 130, 255),
+                            avail ? "Available" : "In use / reserved");
+            }
+        };
+    };
+
     // ── GPIO Buttons (configurable pin → function map) ────────────────────────
     // One submenu per assignable slot: BCM pin, short/long-press function, pull
     // bias, polarity, and long-press threshold. Edits the live gpio_pins array;
@@ -7479,16 +7558,57 @@ static std::vector<MenuItem> build_menu(
 
         for (int i = 0; i < gpio_slot_count; ++i) {
             input::GpioPinCfg* p = &GP[i];
+
+            // Pin picker page for this slot: an "(unused)" entry plus one leaf per
+            // header GPIO line, gated by gpio_pin_available so only free pins show.
+            // Selecting a pin sets it and pops back here to the slot's options.
+            auto picker_focus = std::make_shared<int>(p->gpio);
+            std::vector<MenuItem> picker_items;
+            picker_items.push_back(leaf_sel("(Unused / disable)",
+                [p, menu_sys_pp]{ p->gpio = -1;
+                                  if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back(); },
+                [p]{ return p->gpio < 0; }));
+            for (const auto& gp : sys::kPi40Pins) {
+                if (gp.bcm < 0) continue;   // skip power / ground / ID pins
+                const int bcm = gp.bcm;
+                const std::string alt = (gp.secondary && gp.secondary[0]) ? gp.secondary : "";
+                MenuItem pm;
+                pm.type         = MenuItemType::LEAF;
+                pm.label        = "GPIO " + std::to_string(bcm);
+                pm.label_fn     = [bcm, alt]{
+                    std::string s = "GPIO " + std::to_string(bcm);
+                    if (!alt.empty()) s += "   (" + alt + ")";
+                    return s;
+                };
+                pm.get_state    = [p, bcm]{ return p->gpio == bcm; };
+                pm.on_highlight = [picker_focus, bcm]{ *picker_focus = bcm; };
+                pm.visible_fn   = [bcm, i, gpio_pin_available]{ return gpio_pin_available(bcm, i); };
+                pm.action       = [p, bcm, menu_sys_pp]{
+                    p->gpio = bcm;
+                    if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
+                };
+                picker_items.push_back(std::move(pm));
+            }
+            MenuItem pin_item = with_panel(submenu("Pin", std::move(picker_items)),
+                                           "Select GPIO Pin",
+                                           draw_pin_picker_panel(picker_focus, i));
+            pin_item.action   = [picker_focus, p]{ *picker_focus = p->gpio; };  // sync focus on enter
+            pin_item.label_fn = [p]{
+                return p->gpio < 0 ? std::string("Pin: (unused)")
+                                   : std::string("Pin: GPIO ") + std::to_string(p->gpio);
+            };
+            pin_item.description =
+                "Pick which GPIO pin drives this slot. Only pins free of other "
+                "peripherals and other slots are offered (header view shown "
+                "alongside); selecting one returns here to set its functions.";
+
             std::vector<MenuItem> pull_items = {
                 leaf_sel("Pull Up",   [p]{ p->pull = 1; }, [p]{ return p->pull == 1; }),
                 leaf_sel("Pull Down", [p]{ p->pull = 2; }, [p]{ return p->pull == 2; }),
                 leaf_sel("None",      [p]{ p->pull = 0; }, [p]{ return p->pull == 0; }),
             };
             std::vector<MenuItem> items = {
-                with_desc(slider("GPIO (BCM)", -1.f, 27.f, 1.f, "",
-                    [p]{ return static_cast<float>(p->gpio); },
-                    [p](float v){ p->gpio = static_cast<int>(v); }),
-                    "BCM pin number for this slot. -1 = unused."),
+                pin_item,
                 submenu("Short Press", fn_picker(&p->short_fn)),
                 submenu("Long Press",  fn_picker(&p->long_fn)),
                 slider("Long-press Time", 200.f, 2000.f, 50.f, " ms",
@@ -7512,9 +7632,10 @@ static std::vector<MenuItem> build_menu(
 
         gpio_buttons_item = with_desc(
             submenu("GPIO Buttons", std::move(gpio_btn_menu)),
-            "Assign functions to GPIO switches. Each slot picks a BCM pin "
-            "(-1 = unused), a Short-press and optional Long-press function, pull "
-            "bias, and polarity (Active Low = switch wired to GND with a "
+            "Assign functions to GPIO switches. Each slot's Pin page shows the "
+            "40-pin header and offers only the pins free of other peripherals; "
+            "pick one to set its Short-press and optional Long-press function, "
+            "pull bias, and polarity (Active Low = switch wired to GND with a "
             "pull-up). Toggling Enabled applies instantly; after editing slots "
             "choose \"Apply Changes Now\" to reload the poller. Saved to "
             "cfg[\"gpio\"][\"pins\"].");
