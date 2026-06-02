@@ -7443,81 +7443,199 @@ static std::vector<MenuItem> build_menu(
         "  • Filter by Function dims everything not matching the selected family.";
 
     // ── GPIO pin picker (visual header page) ──────────────────────────────────
-    // A pin is selectable for a slot when it's a real GPIO line, not claimed by
-    // another active peripheral, and not already used by a different slot. The
-    // current slot's own pin stays selectable so it can be re-confirmed.
-    auto gpio_pin_available = [gpio_pin_claims, gpio_pins_p, gpio_slot_count]
-                              (int bcm, int self_slot) -> bool {
-        if (bcm < 0) return false;
-        if (gpio_pins_p)
-            for (int j = 0; j < gpio_slot_count; ++j) {
-                if (j == self_slot) continue;
-                const auto& s = gpio_pins_p[j];
-                const bool used = s.short_fn != input::GpioFunc::None ||
-                                  s.long_fn  != input::GpioFunc::None;
-                if (used && s.gpio == bcm) return false;   // taken by another slot
-            }
+    // Helpers shared by the picker page + the slot list:
+    //   gpio_hw_claimants  — non-GPIO peripherals holding a pin (HUB75/SPI/I²C…).
+    //   gpio_other_slot    — another in-use slot bound to a pin (-1 = none).
+    //   gpio_pin_selectable— a real GPIO line not held by hardware. Pins already
+    //                        used by another *slot* stay selectable (override
+    //                        allowed); the clash is flagged afterwards.
+    //   gpio_slot_conflict — a slot whose pin collides with another slot or with
+    //                        hardware; the slot list paints it red.
+    auto gpio_hw_claimants = [gpio_pin_claims](int bcm) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        if (bcm < 0) return out;
         PinClaims pc = gpio_pin_claims();
         auto it = pc.claimants.find(bcm);
         if (it != pc.claimants.end())
             for (const auto& who : it->second)
-                if (who.rfind("GPIO: ", 0) != 0)           // claimed by a non-GPIO subsystem
-                    return false;
-        return true;
+                if (who.rfind("GPIO: ", 0) != 0) out.push_back(who);   // skip GPIO-map self-claims
+        return out;
+    };
+    auto gpio_other_slot = [gpio_pins_p, gpio_slot_count](int bcm, int self_slot) -> int {
+        if (bcm < 0 || !gpio_pins_p) return -1;
+        for (int j = 0; j < gpio_slot_count; ++j) {
+            if (j == self_slot) continue;
+            const auto& s = gpio_pins_p[j];
+            const bool used = s.short_fn != input::GpioFunc::None ||
+                              s.long_fn  != input::GpioFunc::None;
+            if (used && s.gpio == bcm) return j;
+        }
+        return -1;
+    };
+    auto gpio_pin_selectable = [gpio_hw_claimants](int bcm) -> bool {
+        return bcm >= 0 && gpio_hw_claimants(bcm).empty();
+    };
+    auto gpio_slot_conflict = [gpio_pins_p, gpio_other_slot, gpio_hw_claimants](int i) -> bool {
+        if (!gpio_pins_p) return false;
+        const auto& s = gpio_pins_p[i];
+        const bool used = s.short_fn != input::GpioFunc::None ||
+                          s.long_fn  != input::GpioFunc::None;
+        if (!used || s.gpio < 0) return false;
+        return gpio_other_slot(s.gpio, i) >= 0 || !gpio_hw_claimants(s.gpio).empty();
     };
 
-    // Context-panel renderer for the picker page: the 40-pin header colour-coded
-    // by function family, focused pin outlined, unavailable pins dimmed. The
-    // detail line shows the focused pin's primary / secondary / tertiary names.
+    // Context-panel renderer for the picker page. Mirrors the GPIO Visualizer's
+    // look — a left info column plus a centred 2x20 header grid with physical pin
+    // numbers inside colour-coded squares and primary/secondary functions
+    // radiating outward. Pin marking: green outline = this slot's pin, blue =
+    // another slot, amber = a hardware peripheral (HUB75/SPI/I²C…), white = the
+    // cursor. Hardware-held pins are dimmed (not selectable); the focused pin's
+    // claimants are spelled out in the info column.
     auto draw_pin_picker_panel =
-        [gpio_pin_available](std::shared_ptr<int> focus, int self_slot) -> MenuContextPanelDraw {
-        return [focus, self_slot, gpio_pin_available]
+        [gpio_hw_claimants, gpio_other_slot, gpio_pin_selectable]
+        (std::shared_ptr<int> focus, int self_slot,
+         input::GpioPinCfg* slot_p) -> MenuContextPanelDraw {
+        return [focus, self_slot, slot_p, gpio_hw_claimants, gpio_other_slot, gpio_pin_selectable]
                (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-            const float pad      = 6.f;
-            dl->AddText({o.x + pad, o.y}, IM_COL32(235, 240, 245, 255), "SELECT GPIO PIN");
-            const float gy       = o.y + 20.f;
-            const float detail_h = 42.f;
-            const float gw       = sz.x - pad * 2.f;
-            const float gutter   = 8.f;
-            const float col_w    = (gw - gutter) * 0.5f;
-            const float grid_h   = sz.y - (gy - o.y) - detail_h;
-            const float row_h    = grid_h / 20.f;
-            const float line_h   = ImGui::GetTextLineHeight();
-            const int   fbcm     = focus ? *focus : -1;
+            ImFont* font = ImGui::GetFont();
+            const float fs       = ImGui::GetFontSize();
+            const float label_fs = std::max(9.f, fs * 0.72f);
+            const int   fbcm     = focus  ? *focus      : -1;
+            const int   assigned = slot_p ? slot_p->gpio : -1;
 
+            // Per-pin state, computed once (claims map is rebuilt per call).
+            bool selectable[40]; int otherslot[40]; bool hardware[40];
             for (int idx = 0; idx < 40; ++idx) {
-                const auto& gp  = sys::kPi40Pins[idx];
-                const int   row = idx / 2, col = idx % 2;
-                const float cx0 = o.x + pad + col * (col_w + gutter);
-                const float cy0 = gy + row * row_h;
-                const ImVec2 a{cx0, cy0 + 1.f}, b{cx0 + col_w, cy0 + row_h - 1.f};
-                const bool selectable = gp.bcm >= 0 && gpio_pin_available(gp.bcm, self_slot);
-                const bool focused    = gp.bcm >= 0 && gp.bcm == fbcm;
-                dl->AddRectFilled(a, b, sys::pin_kind_color(gp.kind), 3.f);
-                if (!selectable) dl->AddRectFilled(a, b, IM_COL32(0, 0, 0, 150), 3.f);
-                if (focused)     dl->AddRect(a, b, IM_COL32(255, 255, 255, 255), 3.f, 0, 2.5f);
-                char lbl[12];
-                if (gp.bcm >= 0) std::snprintf(lbl, sizeof(lbl), "%d", gp.bcm);
-                else             std::snprintf(lbl, sizeof(lbl), "%s", sys::pin_kind_short(gp.kind));
-                dl->AddText({a.x + 5.f, cy0 + (row_h - line_h) * 0.5f},
-                            IM_COL32(15, 18, 22, 255), lbl);   // dark for contrast on bright cells
+                const int b = sys::kPi40Pins[idx].bcm;
+                hardware[idx]   = b >= 0 && !gpio_hw_claimants(b).empty();
+                selectable[idx] = b >= 0 && !hardware[idx];
+                otherslot[idx]  = (b >= 0) ? gpio_other_slot(b, self_slot) : -1;
             }
 
-            // Detail line for the focused pin.
-            const sys::GpioPin* fp = nullptr;
-            for (const auto& gp : sys::kPi40Pins)
-                if (gp.bcm >= 0 && gp.bcm == fbcm) { fp = &gp; break; }
-            const float dy = gy + grid_h + 4.f;
-            if (fp) {
-                std::string fns = fp->primary;
-                if (fp->secondary && fp->secondary[0]) fns += "  \xC2\xB7  " + std::string(fp->secondary);
-                if (fp->tertiary  && fp->tertiary[0])  fns += "  \xC2\xB7  " + std::string(fp->tertiary);
-                dl->AddText({o.x + pad, dy}, IM_COL32(255, 255, 255, 255), fns.c_str());
-                const bool avail = gpio_pin_available(fp->bcm, self_slot);
-                dl->AddText({o.x + pad, dy + line_h + 2.f},
-                            avail ? IM_COL32(120, 230, 120, 255) : IM_COL32(235, 130, 130, 255),
-                            avail ? "Available" : "In use / reserved");
+            // Left info column + grid pane (same split as the visualizer).
+            const float info_w      = std::clamp(sz.x * 0.34f, 170.f, sz.x * 0.55f);
+            const float info_x      = o.x;
+            const float grid_pane_x = o.x + info_w + 8.f;
+            const float grid_pane_w = std::max(120.f, sz.x - info_w - 8.f);
+
+            dl->AddText(font, fs * 1.05f, {info_x, o.y},
+                        IM_COL32(230, 235, 240, 255), "Select GPIO Pin");
+            dl->AddText(font, fs * 0.7f, {info_x, o.y + fs * 1.05f},
+                        IM_COL32(170, 175, 185, 220), "Pi 5 / CM5 — 40-pin");
+
+            const float top    = o.y + fs * 0.2f;
+            const float avh    = std::max(80.f, sz.y - (top - o.y) - 4.f);
+            const float row_h  = std::max(14.f, std::min(28.f, avh / 21.f));
+            const float pin_sz = row_h * 0.78f;
+            const float label_w = std::max(40.f, (grid_pane_w - pin_sz * 2.f - 14.f) / 4.f);
+            const float center_x    = grid_pane_x + grid_pane_w * 0.5f;
+            const float pin_left_x  = center_x - pin_sz - 3.f;
+            const float pin_right_x = center_x + 3.f;
+
+            const ImU32 out_focus    = IM_COL32(255, 255, 255, 255);
+            const ImU32 out_assigned = IM_COL32(120, 230, 110, 255);   // this slot
+            const ImU32 out_other    = IM_COL32( 90, 150, 230, 255);   // another slot
+            const ImU32 out_hardware = IM_COL32(240, 160,  70, 255);   // hardware peripheral
+            const ImU32 label_col    = IM_COL32(220, 225, 230, 230);
+            const ImU32 label_dim    = IM_COL32(160, 170, 180, 220);
+            const ImU32 pin_num_col  = IM_COL32(20, 24, 28, 255);
+
+            auto draw_label = [&](float x, float y, float w, const char* t,
+                                  bool right, ImU32 col, bool dim) {
+                if (!t || !*t) return;
+                if (dim) col = (col & 0x00FFFFFFu) | (70u << 24);
+                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, t);
+                dl->AddText(font, label_fs, {right ? (x + w - ts.x) : x, y}, col, t);
+            };
+
+            for (int row = 0; row < 20; ++row) {
+                const float y  = top + row * row_h;
+                const float cy = y + (row_h - pin_sz) * 0.5f;
+                auto draw_pin = [&](float x, int idx) {
+                    const sys::GpioPin& p = sys::kPi40Pins[idx];
+                    ImU32 fill = sys::pin_kind_color(p.kind);
+                    if (p.bcm >= 0 && !selectable[idx]) fill = (fill & 0x00FFFFFFu) | (55u << 24);
+                    dl->AddRectFilled({x, cy}, {x + pin_sz, cy + pin_sz}, fill, 3.f);
+                    // Claim outline (priority: this slot > hardware > other slot).
+                    ImU32 oc = 0; float ow = 2.f;
+                    if      (p.bcm >= 0 && p.bcm == assigned) { oc = out_assigned; ow = 2.5f; }
+                    else if (hardware[idx])                   { oc = out_hardware; }
+                    else if (otherslot[idx] >= 0)             { oc = out_other; }
+                    if (oc) dl->AddRect({x, cy}, {x + pin_sz, cy + pin_sz}, oc, 3.f, 0, ow);
+                    if (p.bcm >= 0 && p.bcm == fbcm)
+                        dl->AddRect({x - 1.5f, cy - 1.5f}, {x + pin_sz + 1.5f, cy + pin_sz + 1.5f},
+                                    out_focus, 3.f, 0, 2.5f);
+                    char buf[6];
+                    std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(p.physical));
+                    const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, buf);
+                    dl->AddText(font, label_fs,
+                                {x + (pin_sz - ts.x) * 0.5f, cy + (pin_sz - ts.y) * 0.5f},
+                                (selectable[idx] || p.bcm < 0) ? pin_num_col : IM_COL32(20, 24, 28, 130),
+                                buf);
+                };
+                const int il = row * 2, ir = row * 2 + 1;
+                const sys::GpioPin& pl = sys::kPi40Pins[il];
+                const sys::GpioPin& pr = sys::kPi40Pins[ir];
+                draw_pin(pin_left_x,  il);
+                draw_pin(pin_right_x, ir);
+
+                const float ly = y + (row_h - label_fs) * 0.5f;
+                const bool dl_un = pl.bcm >= 0 && !selectable[il];
+                const bool dr_un = pr.bcm >= 0 && !selectable[ir];
+                // Primary (inner) + secondary (outer), radiating from the centre.
+                draw_label(pin_left_x - 4.f - label_w, ly, label_w, pl.primary, true, label_col, dl_un);
+                draw_label(pin_right_x + pin_sz + 4.f, ly, label_w, pr.primary, false, label_col, dr_un);
+                draw_label(pin_left_x - 8.f - label_w * 2.f, ly, label_w, pl.secondary, true, label_dim, dl_un);
+                draw_label(pin_right_x + pin_sz + 8.f + label_w, ly, label_w, pr.secondary, false, label_dim, dr_un);
             }
+
+            // Info column: focused-pin details + claim status + legend.
+            int fidx = -1;
+            for (int idx = 0; idx < 40; ++idx)
+                if (sys::kPi40Pins[idx].bcm >= 0 && sys::kPi40Pins[idx].bcm == fbcm) { fidx = idx; break; }
+            float iy = o.y + fs * 2.3f;
+            if (fidx >= 0) {
+                const sys::GpioPin& fp = sys::kPi40Pins[fidx];
+                char hdr[24]; std::snprintf(hdr, sizeof(hdr), "GPIO %d", fp.bcm);
+                dl->AddText(font, fs * 0.95f, {info_x, iy}, IM_COL32(235, 240, 245, 255), hdr);
+                iy += fs * 1.1f;
+                std::string fns = fp.primary;
+                if (fp.secondary && fp.secondary[0]) fns += " / " + std::string(fp.secondary);
+                if (fp.tertiary  && fp.tertiary[0])  fns += " / " + std::string(fp.tertiary);
+                dl->AddText(font, fs * 0.72f, {info_x, iy}, IM_COL32(180, 188, 196, 230), fns.c_str());
+                iy += fs * 1.15f;
+                if (hardware[fidx]) {
+                    dl->AddText(font, fs * 0.78f, {info_x, iy}, out_hardware, "In use (hardware):");
+                    iy += fs * 0.95f;
+                    for (const auto& w : gpio_hw_claimants(fp.bcm)) {
+                        dl->AddText(font, fs * 0.72f, {info_x + 6.f, iy}, IM_COL32(232, 200, 150, 235), w.c_str());
+                        iy += fs * 0.9f;
+                    }
+                } else if (fp.bcm == assigned) {
+                    dl->AddText(font, fs * 0.8f, {info_x, iy}, out_assigned, "This slot's pin");
+                    iy += fs * 1.0f;
+                } else if (otherslot[fidx] >= 0) {
+                    char b[44]; std::snprintf(b, sizeof(b), "Also on Slot %d", otherslot[fidx] + 1);
+                    dl->AddText(font, fs * 0.8f, {info_x, iy}, out_other, b);
+                    iy += fs * 0.95f;
+                    dl->AddText(font, fs * 0.68f, {info_x, iy}, IM_COL32(200, 170, 120, 220),
+                                "override allowed (fix later)");
+                    iy += fs * 1.0f;
+                } else {
+                    dl->AddText(font, fs * 0.8f, {info_x, iy}, IM_COL32(120, 230, 120, 255), "Available");
+                    iy += fs * 1.0f;
+                }
+                iy += fs * 0.4f;
+            }
+            auto legend = [&](ImU32 c, const char* t) {
+                dl->AddRect({info_x, iy + 2.f}, {info_x + 12.f, iy + 14.f}, c, 2.f, 0, 2.f);
+                dl->AddText(font, fs * 0.68f, {info_x + 18.f, iy}, IM_COL32(178, 186, 194, 220), t);
+                iy += fs * 1.0f;
+            };
+            legend(out_assigned, "this slot");
+            legend(out_other,    "other slot");
+            legend(out_hardware, "hardware");
+            legend(out_focus,    "cursor");
         };
     };
 
@@ -7575,14 +7693,19 @@ static std::vector<MenuItem> build_menu(
                 MenuItem pm;
                 pm.type         = MenuItemType::LEAF;
                 pm.label        = "GPIO " + std::to_string(bcm);
-                pm.label_fn     = [bcm, alt]{
+                pm.label_fn     = [bcm, alt, i, gpio_other_slot]{
                     std::string s = "GPIO " + std::to_string(bcm);
                     if (!alt.empty()) s += "   (" + alt + ")";
+                    const int other = gpio_other_slot(bcm, i);
+                    if (other >= 0) s += "   ! Slot " + std::to_string(other + 1);
                     return s;
                 };
                 pm.get_state    = [p, bcm]{ return p->gpio == bcm; };
                 pm.on_highlight = [picker_focus, bcm]{ *picker_focus = bcm; };
-                pm.visible_fn   = [bcm, i, gpio_pin_available]{ return gpio_pin_available(bcm, i); };
+                // List every GPIO line not held by hardware. Pins already on
+                // another slot stay listed (override allowed) and are flagged red.
+                pm.visible_fn   = [bcm, gpio_pin_selectable]{ return gpio_pin_selectable(bcm); };
+                pm.warn_fn      = [bcm, i, gpio_other_slot]{ return gpio_other_slot(bcm, i) >= 0; };
                 pm.action       = [p, bcm, menu_sys_pp]{
                     p->gpio = bcm;
                     if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
@@ -7591,16 +7714,18 @@ static std::vector<MenuItem> build_menu(
             }
             MenuItem pin_item = with_panel(submenu("Pin", std::move(picker_items)),
                                            "Select GPIO Pin",
-                                           draw_pin_picker_panel(picker_focus, i));
+                                           draw_pin_picker_panel(picker_focus, i, p));
             pin_item.action   = [picker_focus, p]{ *picker_focus = p->gpio; };  // sync focus on enter
             pin_item.label_fn = [p]{
                 return p->gpio < 0 ? std::string("Pin: (unused)")
                                    : std::string("Pin: GPIO ") + std::to_string(p->gpio);
             };
             pin_item.description =
-                "Pick which GPIO pin drives this slot. Only pins free of other "
-                "peripherals and other slots are offered (header view shown "
-                "alongside); selecting one returns here to set its functions.";
+                "Pick which GPIO pin drives this slot (header view shown "
+                "alongside). Pins held by hardware (HUB75/SPI/I\xC2\xB2""C…) are "
+                "hidden; a pin already used by another slot stays selectable but "
+                "is flagged \xE2\x80\x94 overriding it marks both slots red until "
+                "you fix the clash. Selecting a pin returns here to set functions.";
 
             std::vector<MenuItem> pull_items = {
                 leaf_sel("Pull Up",   [p]{ p->pull = 1; }, [p]{ return p->pull == 1; }),
@@ -7620,13 +7745,17 @@ static std::vector<MenuItem> build_menu(
                     [p](bool v){ p->active_low = v; }),
             };
             MenuItem m = submenu(std::string("Slot ") + std::to_string(i + 1), std::move(items));
-            m.label_fn = [p, i]{
+            m.label_fn = [p, i, gpio_slot_conflict]{
                 std::string s = "Slot " + std::to_string(i + 1) + "  ";
                 if (p->gpio < 0) return s + "(unused)";
+                if (gpio_slot_conflict(i)) s = "! " + s;   // leading marker + red (warn_fn)
                 s += "GPIO" + std::to_string(p->gpio) + " \xE2\x86\x92 ";
                 s += input::gpio_func_name(p->short_fn);
                 return s;
             };
+            // Paint the row red when this slot's pin collides with another slot
+            // or a hardware peripheral, so the user knows to go back and fix it.
+            m.warn_fn = [i, gpio_slot_conflict]{ return gpio_slot_conflict(i); };
             gpio_btn_menu.push_back(std::move(m));
         }
 

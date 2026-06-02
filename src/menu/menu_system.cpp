@@ -1139,7 +1139,16 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             std::string label = to_upper(item_label(item));
             if (item.type == MenuItemType::SUBMENU || !item.children.empty())
                 label += "   >";
-            draw_item_text({rmin.x + 4.f, ty}, label.c_str(), selected);
+            // Warning rows (e.g. a GPIO slot/pin conflict) render in red instead
+            // of the usual glow/accent text so the problem stands out.
+            if (item.warn_fn && item.warn_fn()) {
+                const ImU32 rc = (filled_row && selected) ? IM_COL32(185, 25, 15, 255)
+                                                          : IM_COL32(240, 95, 80, 255);
+                if (bold_text) dl->AddText({rmin.x + 4.7f, ty}, rc, label.c_str());
+                dl->AddText({rmin.x + 4.f, ty}, rc, label.c_str());
+            } else {
+                draw_item_text({rmin.x + 4.f, ty}, label.c_str(), selected);
+            }
 
             // Legacy radio indicator for items that still carry get_state
             if (item.get_state) {
@@ -1522,6 +1531,8 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             dl->AddRectFilled({ rmin.x, rmin.y }, { rmin.x + 4.f, rmax.y }, accent_color_);
         }
         ImU32 tcol = sel ? IM_COL32(255, 255, 255, 255) : IM_COL32(215, 220, 226, 175);
+        if (it.warn_fn && it.warn_fn())   // flag conflicts (e.g. GPIO pin clash) in red
+            tcol = sel ? IM_COL32(255, 120, 105, 255) : IM_COL32(235, 95, 80, 230);
         float ty = ly + (row_h - fs * 1.15f) * 0.5f;
         dl->AddText(font, fs * 1.15f, { lx0 + 14.f, ty }, tcol, to_upper(item_label(it)).c_str());
 

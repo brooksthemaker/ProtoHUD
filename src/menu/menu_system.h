@@ -121,6 +121,11 @@ struct MenuItem {
     // (cursor lands on it), without selecting. Used so zoom/crop/position option
     // lists apply their effect as the user tabs through them.
     std::function<void()> on_highlight;
+
+    // Optional warning predicate — when it returns true the row is rendered in a
+    // warning colour (red) to flag a problem the user should fix (e.g. a GPIO
+    // slot whose pin collides with another slot or a hardware peripheral).
+    std::function<bool()> warn_fn;
 };
 
 // ── Menu anchor ───────────────────────────────────────────────────────────────
