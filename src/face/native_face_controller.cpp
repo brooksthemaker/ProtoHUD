@@ -208,7 +208,11 @@ void NativeFaceController::render_thread() {
                 }
 
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
-                if (pn.particles) {
+                // Effects are suppressed while a GIF plays — the clip owns the
+                // whole panel — and resume automatically when the GIF ends and
+                // the face animation returns. (The sim keeps running so the
+                // field is already settled when it reappears.)
+                if (pn.particles && gframe.empty()) {
                     ParticleFrame pf = pn.particles->render();
                     if (pf.has) layers.push_back(Layer{pf.rgba, pf.blend});
                 }
