@@ -20,6 +20,7 @@
 #include <opencv2/core.hpp>
 
 #include "../serial/face_controller.h"
+#include "eye_anim.h"
 #include "face_config.h"
 #include "panel_output.h"   // PanelOutput + NamedRegion
 
@@ -76,6 +77,9 @@ public:
     void        clear_face_image(const std::string& expression) override;
     void        set_face_by_name(const std::string& expression) override;
     void        trigger_boop(const std::string& expression, double duration_s) override;
+    void        play_eye_animation(int type, double speed, double size,
+                                   uint8_t r, uint8_t g, uint8_t b,
+                                   double duration_s) override;
     void        set_audio_drive(double volume, double mouth_open) override;
     void        set_mouth_shape(const std::string& shape) override;
 
@@ -172,6 +176,13 @@ private:
         std::chrono::steady_clock::time_point deadline{};
     };
     std::vector<TransientFace> transient_faces_;
+
+    // Procedural "animated eye" reaction (boop rapid-trigger easter egg). While
+    // eye_anim_timer_ > 0 the panels render the animation instead of the face,
+    // and effects are suppressed. Lives under state_mtx_.
+    EyeAnimParams      eye_anim_;
+    double             eye_anim_timer_ = 0.0;   // seconds remaining
+    double             eye_anim_t_     = 0.0;   // elapsed seconds (animation phase)
 
     std::thread        thread_;
     std::atomic<bool>  running_{false};

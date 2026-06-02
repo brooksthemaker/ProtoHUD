@@ -73,6 +73,15 @@ public:
     // (the Teensy/daemon-Protoface paths run their own boop logic on-device).
     virtual void        trigger_boop(const std::string& /*expression*/, double /*duration_s*/) {}
 
+    // Play a procedural "animated eye" reaction that takes over the panels for
+    // duration_s seconds, then reverts to the face. type is a face::EyeAnim
+    // value; speed/size are rate/scale multipliers; r,g,b is the primary
+    // colour. Used by the boop sensor's rapid-trigger easter egg. No-op on
+    // non-native backends (passed as primitives to keep this header light).
+    virtual void        play_eye_animation(int /*type*/, double /*speed*/, double /*size*/,
+                                           uint8_t /*r*/, uint8_t /*g*/, uint8_t /*b*/,
+                                           double /*duration_s*/) {}
+
     // Push mic-driven volume + mouth_open intensity (both in [0, 1]) from the
     // audio thread's voice analyzer. Native Protoface forwards to each panel's
     // FaceState::set_audio so the mouth_open.png overlay blends in real time.
@@ -150,6 +159,10 @@ public:
     void clear_face_image(const std::string& e) override { (*active_)->clear_face_image(e); }
     void set_face_by_name(const std::string& e) override { (*active_)->set_face_by_name(e); }
     void trigger_boop(const std::string& e, double d) override { (*active_)->trigger_boop(e, d); }
+    void play_eye_animation(int type, double speed, double size,
+                            uint8_t r, uint8_t g, uint8_t b, double dur) override {
+        (*active_)->play_eye_animation(type, speed, size, r, g, b, dur);
+    }
     void set_audio_drive(double v, double m) override { (*active_)->set_audio_drive(v, m); }
     void set_mouth_shape(const std::string& s) override { (*active_)->set_mouth_shape(s); }
     bool has_led_face_editor() const override { return (*active_)->has_led_face_editor(); }

@@ -64,6 +64,7 @@
 #include "profile_manager.h"
 #include "face/face_config.h"
 #include "face/face_image.h"
+#include "face/eye_animations.h"
 #include "face/gif_player.h"
 #include "face/native_face_controller.h"
 #include "face/panel_output.h"
@@ -5099,6 +5100,85 @@ static std::vector<MenuItem> build_menu(
                     if (!expr.empty()) teensy->trigger_boop(expr, dur);
                 }),
         };
+
+        // ── Animated Eyes — rapid-boop easter egg ────────────────────────────
+        // After Trigger Count fast boops on this zone, a procedural eye
+        // animation plays instead of the normal reaction. The built-in
+        // animations are re-skinnable (rate / scale / colour / hold time).
+        {
+            auto& bz = state;   // capture helper alias
+            std::vector<MenuItem> anim_items;
+            for (int a = 0; a < face::eye_anim_count(); ++a)
+                anim_items.push_back(leaf_sel(face::eye_anim_name(static_cast<face::EyeAnim>(a)),
+                    [&bz, idx, a]{
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.anim = a;
+                    },
+                    [&bz, idx, a]{
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        return bz.boop_zones[idx].eye_trigger.anim == a;
+                    }));
+
+            std::vector<MenuItem> eye_items = {
+                toggle("Enabled",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return bz.boop_zones[idx].eye_trigger.enabled; },
+                    [&bz, idx](bool v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.enabled = v; }),
+                submenu("Animation", std::move(anim_items)),
+                with_desc(slider("Trigger Count", 2.f, 10.f, 1.f, " boops",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.count); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.count = static_cast<int>(v); }),
+                    "How many fast boops on this zone trigger the eyes."),
+                with_desc(slider("Window", 1.f, 8.f, 0.5f, " s",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.window_s); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.window_s = static_cast<double>(v); }),
+                    "Consecutive boops must land within this window or the "
+                    "counter resets."),
+                slider("Speed", 0.2f, 4.f, 0.1f, "x",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.speed); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.speed = static_cast<double>(v); }),
+                slider("Size", 0.4f, 2.5f, 0.1f, "x",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.size); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.size = static_cast<double>(v); }),
+                slider("Duration", 1.f, 8.f, 0.5f, " s",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.duration_s); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.duration_s = static_cast<double>(v); }),
+                color_picker("Color",
+                    [&bz, idx](uint8_t r, uint8_t g, uint8_t b){
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.r = r;
+                        bz.boop_zones[idx].eye_trigger.g = g;
+                        bz.boop_zones[idx].eye_trigger.b = b; },
+                    [&bz, idx]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        const auto& e = bz.boop_zones[idx].eye_trigger;
+                        return { e.r, e.g, e.b }; }),
+                leaf("Test Eyes",
+                    [teensy, &bz, idx]{
+                        EyeTriggerConfig e;
+                        { std::lock_guard<std::mutex> lk(bz.mtx);
+                          e = bz.boop_zones[idx].eye_trigger; }
+                        teensy->play_eye_animation(e.anim, e.speed, e.size,
+                                                   e.r, e.g, e.b, e.duration_s);
+                    }),
+            };
+            items.push_back(with_desc(submenu("Animated Eyes", std::move(eye_items)),
+                "Boop this zone Trigger-Count times within Window seconds and a "
+                "procedural eye animation plays instead of the normal reaction. "
+                "Tune the built-in animations with Speed / Size / Color."));
+        }
+
         return submenu(std::move(label), std::move(items));
     };
 
@@ -8306,6 +8386,24 @@ int main(int argc, char* argv[]) {
                     static_cast<uint8_t>(jval(jz, "threshold", static_cast<int>(state.boop_zones[i].threshold)));
                 state.boop_zones[i].enabled =
                     jval(jz, "enabled", state.boop_zones[i].enabled);
+                if (jz.contains("eye_trigger") && jz["eye_trigger"].is_object()) {
+                    const auto& je = jz["eye_trigger"];
+                    auto& et = state.boop_zones[i].eye_trigger;
+                    et.enabled    = jval(je, "enabled",    et.enabled);
+                    et.count      = std::clamp(jval(je, "count", et.count), 2, 10);
+                    et.window_s   = jval(je, "window_s",   et.window_s);
+                    et.anim       = std::clamp(jval(je, "anim", et.anim),
+                                               0, face::eye_anim_count() - 1);
+                    et.speed      = jval(je, "speed",      et.speed);
+                    et.size       = jval(je, "size",       et.size);
+                    et.duration_s = jval(je, "duration_s", et.duration_s);
+                    if (je.contains("color") && je["color"].is_array() &&
+                        je["color"].size() >= 3) {
+                        et.r = static_cast<uint8_t>(std::clamp(je["color"][0].get<int>(), 0, 255));
+                        et.g = static_cast<uint8_t>(std::clamp(je["color"][1].get<int>(), 0, 255));
+                        et.b = static_cast<uint8_t>(std::clamp(je["color"][2].get<int>(), 0, 255));
+                    }
+                }
                 boop_cfg.touch_threshold[i] = state.boop_zones[i].threshold;
                 boop_cfg.zone_enabled[i]    = state.boop_zones[i].enabled;
             }
@@ -8977,37 +9075,18 @@ int main(int argc, char* argv[]) {
         return "";
     };
 
-    boop_sensor.on_boop([&face_proxy, &state, &accessory_leds, boop_face_stem]
-                        (sensor::BoopSensor::Zone z) {
-        const auto zi = static_cast<size_t>(z);
-        if (zi >= 4) return;
-        // Snapshot under the state lock so a menu edit mid-boop can't tear
-        // the std::string read.
-        bool        enabled;
-        std::string fallback_expr;
-        double      duration_s;
-        {
-            std::lock_guard<std::mutex> lk(state.mtx);
-            enabled       = state.boop_zones[zi].enabled;
-            fallback_expr = state.boop_zones[zi].expression;
-            duration_s    = state.boop_zones[zi].duration_s;
-        }
-        if (!enabled) return;
-        // Prefer the dedicated boop_<zone> face when present on disk.
-        // face_image_exists() is the canonical "is this PNG in the active
-        // face folder" check the editor/import path uses too.
-        std::string expression;
-        const std::string stem = boop_face_stem(z);
-        if (!stem.empty() && face_proxy.face_image_exists(stem))
-            expression = stem;
-        else
-            expression = fallback_expr;
-        if (expression.empty()) return;
-        face_proxy.trigger_boop(expression, duration_s);
+    // Per-zone rapid-boop tracking for the animated-eyes easter egg. Touched
+    // only from the sensor poll thread, so no extra locking is needed here.
+    auto eye_now = []{
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    auto eye_last = std::make_shared<std::array<double, 4>>();   // last boop time / zone
+    auto eye_run  = std::make_shared<std::array<int, 4>>();      // consecutive run / zone
 
-        // Accessory LED flash overlay. Snout = both fins, single cheek =
-        // matching cheekhub, both cheeks = all four zones flash together
-        // (matches the "surprise" reaction's broader visual feedback).
+    // Accessory LED flash feedback per boop zone — shared by the normal boop
+    // reaction and the animated-eyes path.
+    auto flash_zone = [&accessory_leds](sensor::BoopSensor::Zone z) {
         using LZ = accessory::Zone;
         switch (z) {
         case sensor::BoopSensor::Zone::Snout:
@@ -9027,6 +9106,60 @@ int main(int argc, char* argv[]) {
             accessory_leds.trigger_flash(LZ::RightFin,      0.45);
             break;
         }
+    };
+
+    boop_sensor.on_boop([&face_proxy, &state, boop_face_stem,
+                         eye_now, flash_zone, eye_last, eye_run]
+                        (sensor::BoopSensor::Zone z) {
+        const auto zi = static_cast<size_t>(z);
+        if (zi >= 4) return;
+        // Snapshot under the state lock so a menu edit mid-boop can't tear
+        // the std::string read.
+        bool             enabled;
+        std::string      fallback_expr;
+        double           duration_s;
+        EyeTriggerConfig eye;
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            enabled       = state.boop_zones[zi].enabled;
+            fallback_expr = state.boop_zones[zi].expression;
+            duration_s    = state.boop_zones[zi].duration_s;
+            eye           = state.boop_zones[zi].eye_trigger;
+        }
+        if (!enabled) return;
+
+        // Rapid-boop animated-eyes easter egg: count boops on this zone landing
+        // within window_s of each other; on the Nth, play the procedural eye
+        // animation *instead* of the normal reaction and reset the counter.
+        if (eye.enabled && eye.count > 0) {
+            const double now = eye_now();
+            if (now - (*eye_last)[zi] <= eye.window_s) (*eye_run)[zi] += 1;
+            else                                       (*eye_run)[zi]  = 1;
+            (*eye_last)[zi] = now;
+            if ((*eye_run)[zi] >= eye.count) {
+                (*eye_run)[zi] = 0;
+                face_proxy.play_eye_animation(eye.anim, eye.speed, eye.size,
+                                              eye.r, eye.g, eye.b, eye.duration_s);
+                flash_zone(z);
+                return;   // eyes play instead of the normal boop reaction
+            }
+        } else {
+            (*eye_run)[zi] = 0;
+        }
+        // Prefer the dedicated boop_<zone> face when present on disk.
+        // face_image_exists() is the canonical "is this PNG in the active
+        // face folder" check the editor/import path uses too.
+        std::string expression;
+        const std::string stem = boop_face_stem(z);
+        if (!stem.empty() && face_proxy.face_image_exists(stem))
+            expression = stem;
+        else
+            expression = fallback_expr;
+        if (expression.empty()) return;
+        face_proxy.trigger_boop(expression, duration_s);
+
+        // Accessory LED flash feedback (same per-zone mapping for both paths).
+        flash_zone(z);
     });
     if (boop_cfg.enabled && !boop_sensor.start())
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
@@ -10511,6 +10644,16 @@ int main(int argc, char* argv[]) {
                 jzones[i]["expression"] = state.boop_zones[i].expression;
                 jzones[i]["duration_s"] = state.boop_zones[i].duration_s;
                 jzones[i]["threshold"]  = state.boop_zones[i].threshold;
+                const auto& et = state.boop_zones[i].eye_trigger;
+                auto& je = jzones[i]["eye_trigger"];
+                je["enabled"]    = et.enabled;
+                je["count"]      = et.count;
+                je["window_s"]   = et.window_s;
+                je["anim"]       = et.anim;
+                je["speed"]      = et.speed;
+                je["size"]       = et.size;
+                je["duration_s"] = et.duration_s;
+                je["color"]      = json::array({ et.r, et.g, et.b });
             }
         }
 

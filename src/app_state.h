@@ -175,11 +175,28 @@ struct VoiceMouthConfig {
 // touches (no expression knowledge); main.cpp's on_boop callback reads this
 // to call IFaceController::trigger_boop with the per-zone expression. Indexed
 // in lockstep with sensor::BoopSensor::Zone (Snout=0, LeftCheek=1, RightCheek=2).
+// Rapid-trigger "animated eyes" easter egg for a boop zone: boop the same zone
+// `count` times within `window_s` and a procedural eye animation takes over the
+// panels for `duration_s` (played instead of the normal reaction, then the
+// counter resets). anim is a face::EyeAnim value; the other fields re-skin the
+// built-in animations. Stored as plain types to keep app_state.h dependency-free.
+struct EyeTriggerConfig {
+    bool    enabled    = false;
+    int     count      = 3;       // boops within the window to fire
+    double  window_s   = 4.0;     // consecutive boops must land this close together
+    int     anim       = 0;       // face::EyeAnim value
+    double  speed      = 1.0;
+    double  size       = 1.0;
+    double  duration_s = 2.5;     // how long the animation plays
+    uint8_t r = 0, g = 220, b = 180;   // primary colour
+};
+
 struct BoopZoneConfig {
     bool        enabled    = true;
     std::string expression = "surprised";   // canonical face PNG name
     double      duration_s = 0.8;           // how long the expression holds
     uint8_t     threshold  = 12;            // MPR121 touch threshold (lower = more sensitive)
+    EyeTriggerConfig eye_trigger;           // optional rapid-boop animated-eyes reaction
 };
 
 // ── Light-sensor squint trigger ──────────────────────────────────────────────

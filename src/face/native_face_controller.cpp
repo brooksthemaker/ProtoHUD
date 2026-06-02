@@ -15,6 +15,7 @@
 #include "renderer.h"
 #include "particles.h"
 #include "gif_player.h"
+#include "eye_animations.h"
 #include "panel_output.h"
 
 namespace face {
@@ -148,6 +149,11 @@ void NativeFaceController::render_thread() {
         {
             std::lock_guard<std::mutex> lk(state_mtx_);
 
+            // Advance the procedural eye animation (if one is playing). When the
+            // timer runs out the panels fall back to the normal face render.
+            const bool eye_active = eye_anim_timer_ > 0.0;
+            if (eye_active) { eye_anim_timer_ -= dt; eye_anim_t_ += dt; }
+
             // Expire any transient face overlays whose deadline has passed —
             // restore the original expression image to the loader and drop
             // the record. Done before render so this tick uses the restored
@@ -196,8 +202,11 @@ void NativeFaceController::render_thread() {
                 // and use the face PNG verbatim — the material's luminance-
                 // modulation washes RGB-matrix art to grey/teal otherwise.
                 cv::Mat face_layer;
-                cv::Mat gframe = pn.gif ? pn.gif->get_frame() : cv::Mat();
-                if (!gframe.empty()) {
+                cv::Mat gframe = (!eye_active && pn.gif) ? pn.gif->get_frame() : cv::Mat();
+                if (eye_active) {
+                    // Procedural eye animation owns the whole panel.
+                    face_layer = render_eye_animation(eye_anim_, eye_anim_t_, pc.w, pc.h);
+                } else if (!gframe.empty()) {
                     face_layer = gframe;
                 } else if (!cfg_.effects_enabled || !pn.material) {
                     face_layer = pn.loader->get_frame(*pn.state);
@@ -208,11 +217,11 @@ void NativeFaceController::render_thread() {
                 }
 
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
-                // Effects are suppressed while a GIF plays — the clip owns the
-                // whole panel — and resume automatically when the GIF ends and
-                // the face animation returns. (The sim keeps running so the
-                // field is already settled when it reappears.)
-                if (pn.particles && gframe.empty()) {
+                // Effects are suppressed while a GIF or eye animation plays —
+                // the clip owns the whole panel — and resume automatically when
+                // it ends and the face animation returns. (The sim keeps running
+                // so the field is already settled when it reappears.)
+                if (pn.particles && gframe.empty() && !eye_active) {
                     ParticleFrame pf = pn.particles->render();
                     if (pf.has) layers.push_back(Layer{pf.rgba, pf.blend});
                 }
@@ -662,6 +671,21 @@ void NativeFaceController::trigger_boop(const std::string& expression, double du
         if (pn.state) pn.state->trigger_boop(expression, duration_s);
     // Don't save_state_locked() — boop is transient by design; the auto-revert
     // in FaceState::update will bring expression back without our help.
+}
+
+void NativeFaceController::play_eye_animation(int type, double speed, double size,
+                                              uint8_t r, uint8_t g, uint8_t b,
+                                              double duration_s) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    const int n = std::clamp(type, 0, static_cast<int>(EyeAnim::Count) - 1);
+    eye_anim_.type       = static_cast<EyeAnim>(n);
+    eye_anim_.speed      = (speed > 0.0) ? speed : 1.0;
+    eye_anim_.size       = (size  > 0.0) ? size  : 1.0;
+    eye_anim_.r = r; eye_anim_.g = g; eye_anim_.b = b;
+    eye_anim_.duration_s = duration_s;
+    eye_anim_timer_ = (duration_s > 0.0) ? duration_s : 0.0;
+    eye_anim_t_     = 0.0;
+    // Transient by design — no save_state_locked().
 }
 
 // ── Animation tuning ─────────────────────────────────────────────────────────
