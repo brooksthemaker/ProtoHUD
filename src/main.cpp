@@ -4281,8 +4281,15 @@ static std::vector<MenuItem> build_menu(
         // an arbitrary flat colour via the RGB/hex picker, applied as a
         // SolidMaterial like the named solids above.
         pf_palette.push_back(color_picker("Custom Color",
-            [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b); },
+            [teensy, &state](uint8_t r, uint8_t g, uint8_t b){
+                teensy->set_color(r, g, b);
+                // Remember the choice so the picker re-opens on it (get_color
+                // below reads these back — otherwise it always shows the default).
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.r = r; state.face.g = g; state.face.b = b;
+            },
             [&state]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+                std::lock_guard<std::mutex> lk(state.mtx);
                 return { state.face.r, state.face.g, state.face.b };
             }));
     }
@@ -8976,9 +8983,9 @@ int main(int argc, char* argv[]) {
         constexpr float kAlpha   = 0.1f;
         constexpr float kDeg2Rad = 3.14159265f / 180.f;
         const float prev = state.imu_mpu.heading_deg;
-        const float fs = std::sinf(prev * kDeg2Rad) + kAlpha * (std::sinf(heading * kDeg2Rad) - std::sinf(prev * kDeg2Rad));
-        const float fc = std::cosf(prev * kDeg2Rad) + kAlpha * (std::cosf(heading * kDeg2Rad) - std::cosf(prev * kDeg2Rad));
-        float filtered = std::atan2f(fs, fc) / kDeg2Rad;
+        const float fs = std::sin(prev * kDeg2Rad) + kAlpha * (std::sin(heading * kDeg2Rad) - std::sin(prev * kDeg2Rad));
+        const float fc = std::cos(prev * kDeg2Rad) + kAlpha * (std::cos(heading * kDeg2Rad) - std::cos(prev * kDeg2Rad));
+        float filtered = std::atan2(fs, fc) / kDeg2Rad;
         if (filtered < 0.f) filtered += 360.f;
         state.imu_mpu.heading_deg = filtered;
         state.imu_mpu.last_us     = now_us;
@@ -11806,11 +11813,11 @@ int main(int argc, char* argv[]) {
                 s_smooth = raw;
             } else {
                 constexpr float kTau = 0.35f;
-                float alpha = 1.f - std::expf(-dt / kTau);
+                float alpha = 1.f - std::exp(-dt / kTau);
                 constexpr float kD2R = 3.14159265f / 180.f;
-                float fs = std::sinf(s_smooth * kD2R) + alpha * (std::sinf(raw * kD2R) - std::sinf(s_smooth * kD2R));
-                float fc = std::cosf(s_smooth * kD2R) + alpha * (std::cosf(raw * kD2R) - std::cosf(s_smooth * kD2R));
-                s_smooth = std::atan2f(fs, fc) / kD2R;
+                float fs = std::sin(s_smooth * kD2R) + alpha * (std::sin(raw * kD2R) - std::sin(s_smooth * kD2R));
+                float fc = std::cos(s_smooth * kD2R) + alpha * (std::cos(raw * kD2R) - std::cos(s_smooth * kD2R));
+                s_smooth = std::atan2(fs, fc) / kD2R;
                 if (s_smooth < 0.f) s_smooth += 360.f;
             }
             snap.compass_heading = s_smooth;
