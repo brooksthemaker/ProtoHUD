@@ -7485,12 +7485,11 @@ static std::vector<MenuItem> build_menu(
     };
 
     // Context-panel renderer for the picker page. Mirrors the GPIO Visualizer's
-    // look — a left info column plus a centred 2x20 header grid with physical pin
-    // numbers inside colour-coded squares and primary/secondary functions
-    // radiating outward. Pin marking: green outline = this slot's pin, blue =
-    // another slot, amber = a hardware peripheral (HUB75/SPI/I²C…), white = the
-    // cursor. Hardware-held pins are dimmed (not selectable); the focused pin's
-    // claimants are spelled out in the info column.
+    // look — a left info column plus a centred 2x20 header grid — on a light
+    // rounded card with a white border. Each pin carries an easy-to-read label:
+    // its claimant ("HUB75 R1"), "Slot N" if another slot uses it, else its
+    // GPIO/alt-function name. Marking: green outline = this slot's pin, blue =
+    // another slot, amber = hardware peripheral, dark = the cursor.
     auto draw_pin_picker_panel =
         [gpio_hw_claimants, gpio_other_slot, gpio_pin_selectable]
         (std::shared_ptr<int> focus, int self_slot,
@@ -7503,60 +7502,88 @@ static std::vector<MenuItem> build_menu(
             const int   fbcm     = focus  ? *focus      : -1;
             const int   assigned = slot_p ? slot_p->gpio : -1;
 
-            // Per-pin state, computed once (claims map is rebuilt per call).
+            // Light rounded card + white border behind the picker content.
+            const ImU32 card_bg     = IM_COL32(214, 221, 228, 252);
+            const ImU32 card_border = IM_COL32(255, 255, 255, 255);
+            const ImU32 text_dark   = IM_COL32( 22,  26,  32, 255);
+            const ImU32 text_dim    = IM_COL32( 78,  86,  96, 255);
+            dl->AddRectFilled(o, {o.x + sz.x, o.y + sz.y}, card_bg, 10.f);
+            dl->AddRect(o, {o.x + sz.x, o.y + sz.y}, card_border, 10.f, 0, 2.f);
+            const float cpad = 9.f;
+            const ImVec2 co{o.x + cpad, o.y + cpad};
+            const ImVec2 cs{sz.x - cpad * 2.f, sz.y - cpad * 2.f};
+
+            // Per-pin state + claimant label, computed once.
             bool selectable[40]; int otherslot[40]; bool hardware[40];
+            std::string claim[40];
             for (int idx = 0; idx < 40; ++idx) {
                 const int b = sys::kPi40Pins[idx].bcm;
-                hardware[idx]   = b >= 0 && !gpio_hw_claimants(b).empty();
+                auto hw = (b >= 0) ? gpio_hw_claimants(b) : std::vector<std::string>{};
+                hardware[idx]   = !hw.empty();
                 selectable[idx] = b >= 0 && !hardware[idx];
                 otherslot[idx]  = (b >= 0) ? gpio_other_slot(b, self_slot) : -1;
+                claim[idx]      = hw.empty() ? std::string() : hw.front();
             }
 
-            // Left info column + grid pane (same split as the visualizer).
-            const float info_w      = std::clamp(sz.x * 0.34f, 170.f, sz.x * 0.55f);
-            const float info_x      = o.x;
-            const float grid_pane_x = o.x + info_w + 8.f;
-            const float grid_pane_w = std::max(120.f, sz.x - info_w - 8.f);
+            const float info_w      = std::clamp(cs.x * 0.30f, 110.f, cs.x * 0.5f);
+            const float info_x      = co.x;
+            const float grid_pane_x = co.x + info_w + 6.f;
+            const float grid_pane_w = std::max(120.f, cs.x - info_w - 6.f);
 
-            dl->AddText(font, fs * 1.05f, {info_x, o.y},
-                        IM_COL32(230, 235, 240, 255), "Select GPIO Pin");
-            dl->AddText(font, fs * 0.7f, {info_x, o.y + fs * 1.05f},
-                        IM_COL32(170, 175, 185, 220), "Pi 5 / CM5 — 40-pin");
-
-            const float top    = o.y + fs * 0.2f;
-            const float avh    = std::max(80.f, sz.y - (top - o.y) - 4.f);
-            const float row_h  = std::max(14.f, std::min(28.f, avh / 21.f));
-            const float pin_sz = row_h * 0.78f;
-            const float label_w = std::max(40.f, (grid_pane_w - pin_sz * 2.f - 14.f) / 4.f);
+            const float top    = co.y;
+            const float avh    = std::max(80.f, cs.y - 2.f);
+            const float row_h  = std::max(13.f, std::min(26.f, avh / 20.f));
+            const float pin_sz = row_h * 0.82f;
             const float center_x    = grid_pane_x + grid_pane_w * 0.5f;
-            const float pin_left_x  = center_x - pin_sz - 3.f;
-            const float pin_right_x = center_x + 3.f;
+            const float pin_left_x  = center_x - pin_sz - 2.f;
+            const float pin_right_x = center_x + 2.f;
+            const float side_w_l    = (pin_left_x - 4.f) - grid_pane_x;
+            const float side_w_r    = (grid_pane_x + grid_pane_w) - (pin_right_x + pin_sz + 4.f);
 
-            const ImU32 out_focus    = IM_COL32(255, 255, 255, 255);
-            const ImU32 out_assigned = IM_COL32(120, 230, 110, 255);   // this slot
-            const ImU32 out_other    = IM_COL32( 90, 150, 230, 255);   // another slot
-            const ImU32 out_hardware = IM_COL32(240, 160,  70, 255);   // hardware peripheral
-            const ImU32 label_col    = IM_COL32(220, 225, 230, 230);
-            const ImU32 label_dim    = IM_COL32(160, 170, 180, 220);
-            const ImU32 pin_num_col  = IM_COL32(20, 24, 28, 255);
+            const ImU32 out_focus    = IM_COL32( 15,  18,  24, 255);   // dark = cursor (pops on light)
+            const ImU32 out_assigned = IM_COL32( 40, 170,  60, 255);   // this slot
+            const ImU32 out_other    = IM_COL32( 40, 110, 210, 255);   // another slot
+            const ImU32 out_hardware = IM_COL32(205, 120,  20, 255);   // hardware peripheral
 
-            auto draw_label = [&](float x, float y, float w, const char* t,
-                                  bool right, ImU32 col, bool dim) {
-                if (!t || !*t) return;
-                if (dim) col = (col & 0x00FFFFFFu) | (70u << 24);
-                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, t);
-                dl->AddText(font, label_fs, {right ? (x + w - ts.x) : x, y}, col, t);
+            // Per-pin label string + colour.
+            auto pin_text = [&](int idx) -> std::string {
+                const sys::GpioPin& p = sys::kPi40Pins[idx];
+                if (hardware[idx]) return claim[idx];                 // e.g. "HUB75 R1"
+                if (p.bcm < 0)     return p.primary;                  // 5V / GND / 3.3V
+                std::string s = "GPIO" + std::to_string(p.bcm);
+                if (otherslot[idx] >= 0)               s += "  Slot " + std::to_string(otherslot[idx] + 1);
+                else if (p.secondary && p.secondary[0]) s += "  " + std::string(p.secondary);
+                return s;
+            };
+            auto pin_col = [&](int idx) -> ImU32 {
+                if (hardware[idx])       return out_hardware;
+                if (otherslot[idx] >= 0) return out_other;
+                return text_dark;
+            };
+            auto draw_side_label = [&](float edge, float w, float y, const std::string& t,
+                                       bool right, ImU32 col) {
+                if (t.empty() || w < 14.f) return;
+                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, t.c_str());
+                dl->AddText(font, label_fs, {right ? (edge - ts.x) : edge, y}, col, t.c_str());
+            };
+            // Bold white pin number with a soft shadow so it reads on bright cells.
+            auto draw_pin_num = [&](float bx, float by, const char* s) {
+                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, s);
+                const float tx = bx - ts.x * 0.5f, ty = by - ts.y * 0.5f;
+                dl->AddText(font, label_fs, {tx + 0.8f, ty + 0.8f}, IM_COL32(0, 0, 0, 150), s);
+                dl->AddText(font, label_fs, {tx + 0.6f, ty}, IM_COL32(255, 255, 255, 255), s);  // bold pass
+                dl->AddText(font, label_fs, {tx,        ty}, IM_COL32(255, 255, 255, 255), s);
             };
 
             for (int row = 0; row < 20; ++row) {
+                const int il = row * 2, ir = row * 2 + 1;
                 const float y  = top + row * row_h;
                 const float cy = y + (row_h - pin_sz) * 0.5f;
-                auto draw_pin = [&](float x, int idx) {
+                auto draw_box = [&](float x, int idx) {
                     const sys::GpioPin& p = sys::kPi40Pins[idx];
                     ImU32 fill = sys::pin_kind_color(p.kind);
-                    if (p.bcm >= 0 && !selectable[idx]) fill = (fill & 0x00FFFFFFu) | (55u << 24);
+                    if (p.bcm >= 0 && !selectable[idx]) fill = (fill & 0x00FFFFFFu) | (120u << 24);
                     dl->AddRectFilled({x, cy}, {x + pin_sz, cy + pin_sz}, fill, 3.f);
-                    // Claim outline (priority: this slot > hardware > other slot).
                     ImU32 oc = 0; float ow = 2.f;
                     if      (p.bcm >= 0 && p.bcm == assigned) { oc = out_assigned; ow = 2.5f; }
                     else if (hardware[idx])                   { oc = out_hardware; }
@@ -7564,73 +7591,60 @@ static std::vector<MenuItem> build_menu(
                     if (oc) dl->AddRect({x, cy}, {x + pin_sz, cy + pin_sz}, oc, 3.f, 0, ow);
                     if (p.bcm >= 0 && p.bcm == fbcm)
                         dl->AddRect({x - 1.5f, cy - 1.5f}, {x + pin_sz + 1.5f, cy + pin_sz + 1.5f},
-                                    out_focus, 3.f, 0, 2.5f);
-                    char buf[6];
-                    std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(p.physical));
-                    const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, buf);
-                    dl->AddText(font, label_fs,
-                                {x + (pin_sz - ts.x) * 0.5f, cy + (pin_sz - ts.y) * 0.5f},
-                                (selectable[idx] || p.bcm < 0) ? pin_num_col : IM_COL32(20, 24, 28, 130),
-                                buf);
+                                    out_focus, 3.f, 0, 3.f);
+                    char buf[6]; std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(p.physical));
+                    draw_pin_num(x + pin_sz * 0.5f, cy + pin_sz * 0.5f, buf);
                 };
-                const int il = row * 2, ir = row * 2 + 1;
-                const sys::GpioPin& pl = sys::kPi40Pins[il];
-                const sys::GpioPin& pr = sys::kPi40Pins[ir];
-                draw_pin(pin_left_x,  il);
-                draw_pin(pin_right_x, ir);
+                draw_box(pin_left_x,  il);
+                draw_box(pin_right_x, ir);
 
                 const float ly = y + (row_h - label_fs) * 0.5f;
-                const bool dl_un = pl.bcm >= 0 && !selectable[il];
-                const bool dr_un = pr.bcm >= 0 && !selectable[ir];
-                // Primary (inner) + secondary (outer), radiating from the centre.
-                draw_label(pin_left_x - 4.f - label_w, ly, label_w, pl.primary, true, label_col, dl_un);
-                draw_label(pin_right_x + pin_sz + 4.f, ly, label_w, pr.primary, false, label_col, dr_un);
-                draw_label(pin_left_x - 8.f - label_w * 2.f, ly, label_w, pl.secondary, true, label_dim, dl_un);
-                draw_label(pin_right_x + pin_sz + 8.f + label_w, ly, label_w, pr.secondary, false, label_dim, dr_un);
+                draw_side_label(pin_left_x - 4.f,             side_w_l, ly, pin_text(il), true,  pin_col(il));
+                draw_side_label(pin_right_x + pin_sz + 4.f,   side_w_r, ly, pin_text(ir), false, pin_col(ir));
             }
 
-            // Info column: focused-pin details + claim status + legend.
+            // Info column (dark text on the light card): focused pin + legend.
+            dl->AddText(font, fs * 0.7f, {info_x, co.y}, text_dim, "Pi 5 / CM5 — 40-pin header");
             int fidx = -1;
             for (int idx = 0; idx < 40; ++idx)
                 if (sys::kPi40Pins[idx].bcm >= 0 && sys::kPi40Pins[idx].bcm == fbcm) { fidx = idx; break; }
-            float iy = o.y + fs * 2.3f;
+            float iy = co.y + fs * 1.5f;
             if (fidx >= 0) {
                 const sys::GpioPin& fp = sys::kPi40Pins[fidx];
                 char hdr[24]; std::snprintf(hdr, sizeof(hdr), "GPIO %d", fp.bcm);
-                dl->AddText(font, fs * 0.95f, {info_x, iy}, IM_COL32(235, 240, 245, 255), hdr);
+                dl->AddText(font, fs * 0.95f, {info_x, iy}, text_dark, hdr);
                 iy += fs * 1.1f;
                 std::string fns = fp.primary;
                 if (fp.secondary && fp.secondary[0]) fns += " / " + std::string(fp.secondary);
                 if (fp.tertiary  && fp.tertiary[0])  fns += " / " + std::string(fp.tertiary);
-                dl->AddText(font, fs * 0.72f, {info_x, iy}, IM_COL32(180, 188, 196, 230), fns.c_str());
+                dl->AddText(font, fs * 0.7f, {info_x, iy}, text_dim, fns.c_str());
                 iy += fs * 1.15f;
                 if (hardware[fidx]) {
-                    dl->AddText(font, fs * 0.78f, {info_x, iy}, out_hardware, "In use (hardware):");
-                    iy += fs * 0.95f;
+                    dl->AddText(font, fs * 0.74f, {info_x, iy}, out_hardware, "In use (hardware):");
+                    iy += fs * 0.92f;
                     for (const auto& w : gpio_hw_claimants(fp.bcm)) {
-                        dl->AddText(font, fs * 0.72f, {info_x + 6.f, iy}, IM_COL32(232, 200, 150, 235), w.c_str());
-                        iy += fs * 0.9f;
+                        dl->AddText(font, fs * 0.7f, {info_x + 6.f, iy}, text_dark, w.c_str());
+                        iy += fs * 0.86f;
                     }
                 } else if (fp.bcm == assigned) {
-                    dl->AddText(font, fs * 0.8f, {info_x, iy}, out_assigned, "This slot's pin");
+                    dl->AddText(font, fs * 0.78f, {info_x, iy}, out_assigned, "This slot's pin");
                     iy += fs * 1.0f;
                 } else if (otherslot[fidx] >= 0) {
                     char b[44]; std::snprintf(b, sizeof(b), "Also on Slot %d", otherslot[fidx] + 1);
-                    dl->AddText(font, fs * 0.8f, {info_x, iy}, out_other, b);
-                    iy += fs * 0.95f;
-                    dl->AddText(font, fs * 0.68f, {info_x, iy}, IM_COL32(200, 170, 120, 220),
-                                "override allowed (fix later)");
+                    dl->AddText(font, fs * 0.78f, {info_x, iy}, out_other, b);
+                    iy += fs * 0.9f;
+                    dl->AddText(font, fs * 0.66f, {info_x, iy}, text_dim, "override → fix later");
                     iy += fs * 1.0f;
                 } else {
-                    dl->AddText(font, fs * 0.8f, {info_x, iy}, IM_COL32(120, 230, 120, 255), "Available");
+                    dl->AddText(font, fs * 0.78f, {info_x, iy}, IM_COL32(30, 150, 50, 255), "Available");
                     iy += fs * 1.0f;
                 }
                 iy += fs * 0.4f;
             }
             auto legend = [&](ImU32 c, const char* t) {
-                dl->AddRect({info_x, iy + 2.f}, {info_x + 12.f, iy + 14.f}, c, 2.f, 0, 2.f);
-                dl->AddText(font, fs * 0.68f, {info_x + 18.f, iy}, IM_COL32(178, 186, 194, 220), t);
-                iy += fs * 1.0f;
+                dl->AddRect({info_x, iy + 2.f}, {info_x + 11.f, iy + 13.f}, c, 2.f, 0, 2.f);
+                dl->AddText(font, fs * 0.66f, {info_x + 16.f, iy}, text_dim, t);
+                iy += fs * 0.98f;
             };
             legend(out_assigned, "this slot");
             legend(out_other,    "other slot");
