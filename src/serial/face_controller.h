@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 /**
  * Abstract interface for face display backends.
@@ -117,6 +118,16 @@ public:
     // are enabled.
     virtual void        set_mouth_shape(const std::string& /*shape*/) {}
 
+    // Optical mouth tracker drive. weights are blendshape coefficients in
+    // [0, 1] indexed by face::mouth_blendshapes() (the shared contract), and
+    // confidence ∈ [0, 1] is the tracker's per-frame tracking confidence.
+    // Native Protoface forwards to each panel's FaceState, where FaceLoader
+    // composites a weighted blendshape stack at the mouth region (enabling
+    // asymmetric shapes). When confidence is low the renderer falls back to
+    // the audio-driven mouth_open path. No-op on non-native backends.
+    virtual void        set_mouth_blendshapes(const std::vector<float>& /*weights*/,
+                                              float /*confidence*/) {}
+
     // True when the backend has addressable LED regions the face editor
     // can target (today: NativeFaceController with MAX7219 or RGB matrix
     // output). False for HUB75 + daemon + Teensy. Drives the visibility
@@ -194,6 +205,9 @@ public:
         (*active_)->set_motion(hd, yr, pi, ro, ac);
     }
     void set_mouth_shape(const std::string& s) override { (*active_)->set_mouth_shape(s); }
+    void set_mouth_blendshapes(const std::vector<float>& w, float conf) override {
+        (*active_)->set_mouth_blendshapes(w, conf);
+    }
     bool has_led_face_editor() const override { return (*active_)->has_led_face_editor(); }
     void set_active_layout_name(const std::string& n) override {
         (*active_)->set_active_layout_name(n);

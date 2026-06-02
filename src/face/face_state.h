@@ -38,6 +38,14 @@ public:
     // Selects which viseme overlay the FaceLoader blends at the mouth region
     // when mouth_open > 0. Default "mouth_open" matches the pre-viseme path.
     void set_mouth_shape(const std::string& s)       { if (!s.empty()) mouth_shape_ = s; }
+    // Optical mouth-tracker drive: blendshape weights indexed by
+    // face::mouth_blendshapes() plus a tracking confidence. When confidence
+    // > 0 and the face has blend_* layers, FaceLoader composites the weighted
+    // stack instead of the single audio-driven overlay (see get_frame).
+    void set_mouth_blendshapes(const std::vector<float>& w, double conf) {
+        mouth_weights_ = w;
+        mouth_conf_    = conf < 0.0 ? 0.0 : (conf > 1.0 ? 1.0 : conf);
+    }
 
     // ── Animation tuning (live; no rebuild required) ─────────────────────────
     // Setting blink_enabled = false freezes the blink state-machine open
@@ -64,6 +72,8 @@ public:
     double blink_weight() const { return blink_weight_; }
     double mouth_open()   const { return mouth_open_; }
     const std::string& mouth_shape() const { return mouth_shape_; }
+    const std::vector<float>& mouth_weights() const { return mouth_weights_; }
+    double mouth_conf()   const { return mouth_conf_; }
     double gyro_dx()      const { return gyro_dx_; }
     double gyro_dy()      const { return gyro_dy_; }
     double time()         const { return time_; }
@@ -104,6 +114,8 @@ private:
     double audio_volume_ = 0.0;
     double mouth_open_   = 0.0;
     std::string mouth_shape_ = "mouth_open";   // viseme overlay name
+    std::vector<float> mouth_weights_;          // optical blendshape coeffs
+    double      mouth_conf_  = 0.0;             // optical tracking confidence
     double gyro_dx_      = 0.0;
     double gyro_dy_      = 0.0;
 
