@@ -624,6 +624,7 @@ struct Notification {
     bool        read         = false;
     bool        dismissed    = false;
     bool        big          = false;  // render a larger toast (wrapped body) — chat/DM messages
+    bool        saved        = false;  // pinned by the user: survives Clear and the rolling buffer
     std::string icon;                  // optional icon asset name; empty → by type
     std::vector<NotifAction> actions;
 };
@@ -637,7 +638,28 @@ struct NotificationQueue {
         n.id = next_id++;
         if (n.timestamp == 0) n.timestamp = static_cast<int64_t>(time(nullptr));
         items.push_front(std::move(n));
-        while (static_cast<int>(items.size()) > kMax) items.pop_back();
+        // Evict the oldest *unsaved* entry when over capacity so pinned
+        // messages aren't rolled off the end of the buffer.
+        while (static_cast<int>(items.size()) > kMax) {
+            auto victim = items.end();
+            for (auto it = items.begin(); it != items.end(); ++it)
+                if (!it->saved) victim = it;            // last (oldest) unsaved
+            if (victim == items.end()) break;           // all saved — keep them
+            items.erase(victim);
+        }
+    }
+
+    // Remove notifications matching pred, but never ones the user saved
+    // unless include_saved is set. Returns how many were removed.
+    template <typename Pred>
+    int clear_if(Pred pred, bool include_saved) {
+        int removed = 0;
+        for (auto it = items.begin(); it != items.end(); ) {
+            if ((include_saved || !it->saved) && pred(*it)) {
+                it = items.erase(it); ++removed;
+            } else ++it;
+        }
+        return removed;
     }
 
     int unread_count() const {
@@ -832,6 +854,7 @@ struct AppState {
     std::string          notif_sender_filter;          // legacy substring (unused by the checklist UI)
     std::set<std::string> notif_sender_sel;            // checklist of senders to show (empty = all)
     bool                 notif_persist = true;   // persist the log to disk across reboots
+    std::atomic<bool>    notif_dirty{false};     // a metadata-only edit (e.g. save/pin) wants a flush
 
     // Particle effects config (render-thread only)
     EffectsConfig        effects_cfg;

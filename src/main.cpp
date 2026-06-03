@@ -8503,11 +8503,42 @@ static std::vector<MenuItem> build_menu(
             [&state]{ return state.notif_persist; },
             [&state](bool v){ state.notif_persist = v; }),
             "Save the log to disk so a sudden reboot doesn't lose it."));
-        nlog_menu.push_back(with_desc([&state]{
-            MenuItem c; c.type = MenuItemType::LEAF; c.label = "Clear Log";
-            c.action = [&state]{ std::lock_guard<std::mutex> lk(state.mtx); state.notifs.items.clear(); };
-            return c;
-        }(), "Remove every stored notification."));
+        // Bulk clear — a small confirmation layer with the safe option first.
+        // "Clear Unsaved" keeps anything the user pinned; "Clear All" wipes
+        // everything including saved messages (red).
+        std::vector<MenuItem> clr_menu;
+        clr_menu.push_back(with_desc(leaf("Cancel", [menu_sys_pp]{
+            if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back(); }),
+            "Back out without clearing anything."));
+        clr_menu.push_back(with_desc(leaf("Clear Unsaved", [&state, menu_sys_pp]{
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              state.notifs.clear_if([](const Notification&){ return true; }, /*include_saved=*/false); }
+            if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
+        }), "Remove everything except messages you've saved."));
+        {
+            MenuItem all = leaf("Clear All", [&state, menu_sys_pp]{
+                { std::lock_guard<std::mutex> lk(state.mtx); state.notifs.items.clear(); }
+                if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
+            });
+            all.warn_fn = []{ return true; };   // red — also drops saved messages
+            clr_menu.push_back(with_desc(std::move(all),
+                "Remove every notification, including saved ones."));
+        }
+        MenuItem clr_item = submenu("Clear Log\xE2\x80\xA6", std::move(clr_menu));
+        clr_item.context_panel_title = "Clear";
+        clr_item.context_panel_draw  = [&state](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+            (void)sz; ImFont* f = ImGui::GetFont(); const float fs = ImGui::GetFontSize();
+            int total, saved; { std::lock_guard<std::mutex> lk(state.mtx);
+                total = (int)state.notifs.items.size(); saved = 0;
+                for (const auto& n : state.notifs.items) saved += n.saved ? 1 : 0; }
+            char ln[64]; float y = o.y;
+            snprintf(ln, sizeof(ln), "%d total", total);
+            dl->AddText(f, fs, {o.x,y}, IM_COL32(235,240,245,255), ln); y += fs*1.4f;
+            snprintf(ln, sizeof(ln), "%d saved \xC2\xB7 %d unsaved", saved, total - saved);
+            dl->AddText(f, fs*0.85f, {o.x,y}, IM_COL32(190,196,204,230), ln);
+        };
+        nlog_menu.push_back(with_desc(std::move(clr_item),
+            "Bulk-clear the log: keep saved messages or wipe everything."));
         nlog_menu.push_back(with_desc(std::move(typ_item), "Show only the chosen type."));
         nlog_menu.push_back(with_desc(std::move(snd_item),
             "Tick which senders to show. None ticked = all senders."));
@@ -8544,43 +8575,58 @@ static std::vector<MenuItem> build_menu(
                 dl->AddText(font, fs * 0.85f, {o.x, y}, IM_COL32(210,214,220,235),
                             n.body.c_str(), nullptr, sz.x - 6.f);
         };
-        // Each row IS the quick-delete trigger: selecting it opens a confirmation
-        // (this submenu) with the message shown and Confirm Delete / Cancel.
+        // Selecting a row opens a per-message popup with the full text in the
+        // panel and three actions: Save (pin), Confirm Delete (red), Cancel.
+        // Helper: queue index of the message currently at display slot `i`, or -1.
+        auto qindex = [&state, order, ensure_order](int i) -> int {
+            ensure_order();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i >= (int)order->size()) return -1;
+            const int qi = (*order)[i];
+            return qi < (int)state.notifs.items.size() ? qi : -1;
+        };
         for (int i = 0; i < NotificationQueue::kMax; ++i) {
             MenuItem m; m.type = MenuItemType::SUBMENU; m.label = "msg";
-            m.label_fn = [&state, order, ensure_order, i]{
-                ensure_order();
+            m.label_fn = [&state, qindex, i]{
+                const int qi = qindex(i);
                 std::lock_guard<std::mutex> lk(state.mtx);
-                if (i >= (int)order->size()) return std::string();
-                const int qi = (*order)[i];
-                if (qi >= (int)state.notifs.items.size()) return std::string();
+                if (qi < 0) return std::string();
                 const auto& n = state.notifs.items[qi];
-                std::string s = n.title;
+                std::string s = n.saved ? std::string("\xE2\x98\x85 ") : std::string();  // ★ if saved
+                s += n.title;
                 if (!n.body.empty()) s += "  \xC2\xB7  " + n.body;
                 if (s.size() > 60) s = s.substr(0, 59) + "\xE2\x80\xA6";
                 return s;
             };
             m.visible_fn = [order, ensure_order, i]{ ensure_order(); return i < (int)order->size(); };
+            // Save / pin toggle. qindex() locks internally, so resolve it first,
+            // then re-validate the index after re-acquiring the lock.
+            MenuItem save; save.type = MenuItemType::TOGGLE; save.label = "Save Message";
+            save.get_toggle = [&state, qindex, i]{
+                const int qi = qindex(i); std::lock_guard<std::mutex> lk(state.mtx);
+                return qi >= 0 && qi < (int)state.notifs.items.size() && state.notifs.items[qi].saved; };
+            save.set_toggle = [&state, qindex, i](bool v){
+                const int qi = qindex(i);
+                { std::lock_guard<std::mutex> lk(state.mtx);
+                  if (qi >= 0 && qi < (int)state.notifs.items.size()) state.notifs.items[qi].saved = v; }
+                state.notif_dirty.store(true);   // metadata-only edit → force a flush
+            };
             MenuItem confirm = leaf("Confirm Delete",
-                [&state, order, ensure_order, i, menu_sys_pp]{
-                    ensure_order();
-                    {
-                        std::lock_guard<std::mutex> lk(state.mtx);
-                        if (i < (int)order->size()) {
-                            const int qi = (*order)[i];
-                            if (qi < (int)state.notifs.items.size())
-                                state.notifs.items.erase(state.notifs.items.begin() + qi);
-                        }
-                    }
+                [&state, qindex, i, menu_sys_pp]{
+                    const int qi = qindex(i);
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      if (qi >= 0 && qi < (int)state.notifs.items.size())
+                          state.notifs.items.erase(state.notifs.items.begin() + qi); }
                     if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();   // back to the log
                 });
             confirm.warn_fn = []{ return true; };   // red — destructive
             MenuItem cancel = leaf("Cancel",
                 [menu_sys_pp]{ if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back(); });
-            m.children = { std::move(confirm), std::move(cancel) };
-            m.context_panel_title = "Delete?";
+            m.children = { with_desc(std::move(save), "Pin this message so Clear and the rolling buffer keep it."),
+                           std::move(confirm), std::move(cancel) };
+            m.context_panel_title = "Message";
             m.context_panel_draw  = [draw_one, i](ImDrawList* dl, ImVec2 o, ImVec2 sz){
-                draw_one(dl, o, sz, i, true); };
+                draw_one(dl, o, sz, i, false); };
             nlog_menu.push_back(std::move(m));
         }
         // Context panel: full text of the focused row.
@@ -8614,7 +8660,8 @@ static std::vector<MenuItem> build_menu(
         };
         return with_panel(with_desc(submenu("Notification Log", std::move(nlog_menu)),
             "Browse the log grouped by sender; scroll to a message to read its full "
-            "text on the right. Filter by type and tick senders to narrow it."),
+            "text on the right. Filter by type/sender, save messages to pin them, or "
+            "bulk-clear the rest."),
             "Message", panel);
     }();
     std::vector<MenuItem> communications_menu;
@@ -9159,7 +9206,8 @@ int main(int argc, char* argv[]) {
             for (const auto& n : state.notifs.items)
                 arr.push_back({{"type", static_cast<int>(n.type)}, {"title", n.title},
                                {"body", n.body}, {"ts", n.timestamp},
-                               {"read", n.read}, {"dismissed", n.dismissed}});
+                               {"read", n.read}, {"dismissed", n.dismissed},
+                               {"saved", n.saved}});
         }
         std::ofstream f(notif_path);
         if (f) f << arr.dump();
@@ -9177,6 +9225,7 @@ int main(int argc, char* argv[]) {
                 n.title     = it->value("title", std::string());
                 n.body      = it->value("body",  std::string());
                 n.timestamp = it->value("ts", static_cast<int64_t>(0));
+                n.saved     = it->value("saved", false);
                 n.read      = true;    // loaded entries are history — never re-toast on boot
                 n.dismissed = true;
                 state.notifs.push(std::move(n));
@@ -12344,7 +12393,8 @@ int main(int argc, char* argv[]) {
         if (state.notif_persist && now >= notif_next_save) {
             const size_t sz = [&]{ std::lock_guard<std::mutex> lk(state.mtx);
                                    return state.notifs.items.size(); }();
-            if (state.notifs.next_id != notif_last_saved || sz != notif_last_size) {
+            bool dirty = state.notif_dirty.exchange(false);
+            if (state.notifs.next_id != notif_last_saved || sz != notif_last_size || dirty) {
                 save_notifs();
                 notif_last_saved = state.notifs.next_id;
                 notif_last_size  = sz;
