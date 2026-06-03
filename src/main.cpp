@@ -8296,6 +8296,7 @@ static std::vector<MenuItem> build_menu(
 
             MenuItem log; log.type = MenuItemType::NOTIF_LOG; log.label = "View";
             log.notif_log.queue = &state.notifs;
+            log.notif_log.show_history = true;   // browse dismissed history too
             log.notif_log.filter = [&state](const Notification& n){
                 if (state.notif_type_filter >= 0 &&
                     static_cast<int>(n.type) != state.notif_type_filter) return false;

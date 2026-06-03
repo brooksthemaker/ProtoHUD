@@ -60,6 +60,9 @@ struct NotifLogConfig {
     // Optional filter — when set, only notifications for which it returns true
     // are listed (used by the type/sender notification browser).
     std::function<bool(const Notification&)> filter;
+    // When true, list retained-but-dismissed notifications too (a real history
+    // browser) instead of only the currently-active ones.
+    bool show_history = false;
 };
 
 // ── Context panel ─────────────────────────────────────────────────────────────

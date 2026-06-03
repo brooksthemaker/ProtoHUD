@@ -1102,7 +1102,9 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                 constexpr int kMaxShow = 5;
                 int shown = 0;
                 for (auto& n : q->items) {
-                    if (n.dismissed) continue;
+                    // History browser shows dismissed entries too; otherwise only
+                    // currently-active notifications.
+                    if (!item.notif_log.show_history && n.dismissed) continue;
                     if (item.notif_log.filter && !item.notif_log.filter(n)) continue;
                     if (shown >= kMaxShow) break;
                     if (ly + lh_row > rmin.y + item_h + list_h) break;
@@ -1115,6 +1117,9 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                         case NotifType::LoRa:  tc = IM_COL32(  0,180,255, 255); break;
                         default:               tc = IM_COL32( 80,140,255, 255); break;
                     }
+                    // Dim already-seen (dismissed) rows so new ones stand out.
+                    const int ta = n.dismissed ? 140 : 220;
+                    const int ba = n.dismissed ? 120 : 180;
                     // Row bg
                     dl->AddRectFilled({rmin.x + 2.f, ly}, {rmax.x - 2.f, ly + lh_row - 2.f},
                                       IM_COL32(15, 20, 25, 200), 3.f);
@@ -1123,12 +1128,12 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                     char ts[8]; time_t t = (time_t)n.timestamp;
                     struct tm* tm = localtime(&t);
                     strftime(ts, sizeof(ts), "%H:%M", tm);
-                    dl->AddText({rmin.x + 8.f, ly + 3.f}, IM_COL32(255,255,255,220), n.title.c_str());
+                    dl->AddText({rmin.x + 8.f, ly + 3.f}, IM_COL32(255,255,255,ta), n.title.c_str());
                     ImVec2 tsz = ImGui::CalcTextSize(ts);
                     dl->AddText({rmax.x - tsz.x - 4.f, ly + 3.f}, IM_COL32(160,160,160,180), ts);
                     // Body
                     if (!n.body.empty())
-                        dl->AddText({rmin.x + 8.f, ly + 18.f}, IM_COL32(180,180,180,180), n.body.substr(0,40).c_str());
+                        dl->AddText({rmin.x + 8.f, ly + 18.f}, IM_COL32(180,180,180,ba), n.body.substr(0,40).c_str());
                     ly += lh_row;
                     ++shown;
                     n.read = true;
