@@ -7143,65 +7143,81 @@ static std::vector<MenuItem> build_menu(
             std::string   hovered_primary;
             ImVec2        hover_pos{};
 
-            // Each pin gets one description in a uniform grey box (pin-box height)
-            // extended outward: the claimant when in use ("HUB75 R1"), else its
-            // function name, plus toggled extras. Sized to the widest so the
-            // boxes match.
+            // Three columns per pin, ordered outward from the indicator box:
+            //   [GPIO #]  [primary function]  [user / predefined function]
+            // Each is its own grey box; per-column widths are uniform across pins.
             auto note_for = [&notes](int bcm) -> const char* {
                 if (bcm < 0) return nullptr;
                 auto it = notes.find(bcm);
                 return (it == notes.end()) ? nullptr : it->second.c_str();
             };
-            auto make_desc = [&](const sys::GpioPin& p) -> std::string {
-                if (!gpvz_draw->show_primary) return std::string();
-                std::string s = p.primary ? p.primary : "";
-                if (p.bcm >= 0) {
-                    auto c = claims.claimants.find(p.bcm);
-                    if (c != claims.claimants.end() && !c->second.empty()) s = c->second.front();
-                }
-                if (gpvz_draw->show_secondary && p.secondary && p.secondary[0])
-                    s += " \xC2\xB7 " + std::string(p.secondary);
-                if (gpvz_draw->show_tertiary && p.tertiary && p.tertiary[0])
-                    s += " \xC2\xB7 " + std::string(p.tertiary);
-                if (gpvz_draw->show_user_notes) { const char* n = note_for(p.bcm);
-                    if (n) s += " \xC2\xB7 " + std::string(n); }
-                return s;
-            };
-            auto desc_col = [&](const sys::GpioPin& p) -> ImU32 {
-                if (p.bcm >= 0) {
-                    auto c = claims.claimants.find(p.bcm);
-                    if (c != claims.claimants.end() && !c->second.empty()) {
-                        const std::string& w = c->second.front();
-                        if (w.rfind("GPIO: ", 0) == 0) return IM_COL32(120, 170, 235, 255); // GPIO map
-                        return IM_COL32(235, 180, 90, 255);                                  // hardware
-                    }
-                }
-                return IM_COL32(228, 232, 236, 255);                                          // free
-            };
-            std::string vdesc[40]; float vdesc_w_max = 0.f;
+            std::string c1[40], c2[40], c3[40]; ImU32 c3col[40] = {};
             for (int idx = 0; idx < 40; ++idx) {
-                vdesc[idx] = make_desc(sys::kPi40Pins[idx]);
-                if (!vdesc[idx].empty())
-                    vdesc_w_max = std::max(vdesc_w_max,
-                        font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, vdesc[idx].c_str()).x);
+                const sys::GpioPin& p = sys::kPi40Pins[idx];
+                c1[idx] = (p.bcm >= 0) ? ("GPIO" + std::to_string(p.bcm))
+                                       : std::string(p.primary ? p.primary : "");
+                std::string fn = (p.secondary && p.secondary[0]) ? p.secondary : "";
+                if (p.tertiary && p.tertiary[0]) { if (!fn.empty()) fn += " / "; fn += p.tertiary; }
+                c2[idx] = fn;
+                std::string cl;
+                if (p.bcm >= 0) {
+                    auto c = claims.claimants.find(p.bcm);
+                    if (c != claims.claimants.end() && !c->second.empty()) cl = c->second.front();
+                }
+                const char* note = gpvz_draw->show_user_notes ? note_for(p.bcm) : nullptr;
+                if (!cl.empty()) {
+                    c3[idx]    = cl;
+                    c3col[idx] = (cl.rfind("GPIO: ", 0) == 0) ? IM_COL32(120, 170, 235, 255)  // GPIO map
+                                                              : IM_COL32(235, 180,  90, 255); // hardware
+                } else if (note) {
+                    c3[idx]    = note;
+                    c3col[idx] = IM_COL32(150, 195, 235, 255);                                 // user note
+                }
             }
-            const float box_pad  = 5.f;
+            auto colw = [&](std::string* arr) {
+                float w = 0.f;
+                for (int i = 0; i < 40; ++i)
+                    if (!arr[i].empty())
+                        w = std::max(w, font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, arr[i].c_str()).x);
+                return w;
+            };
+            const float box_pad = 5.f, colgap = 3.f;
             const float side_w_l = (pin_left_x - 4.f) - grid_pane_x;
             const float side_w_r = (grid_pane_x + grid_pane_w) - (pin_right_x + pin_sz + 4.f);
-            const float uni_w    = std::min(vdesc_w_max + box_pad * 2.f,
-                                            std::max(20.f, std::min(side_w_l, side_w_r)));
-            const ImU32 desc_bg  = IM_COL32(56, 62, 70, 240);
-            auto draw_vdesc = [&](int idx, float cy, bool left, bool dim) {
-                if (vdesc[idx].empty()) return;
-                const float bx0 = left ? (pin_left_x - 4.f - uni_w) : (pin_right_x + pin_sz + 4.f);
-                ImU32 bg = desc_bg, tc = desc_col(sys::kPi40Pins[idx]);
-                if (dim) { bg = (bg & 0x00FFFFFFu) | (110u << 24); tc = (tc & 0x00FFFFFFu) | (110u << 24); }
-                dl->AddRectFilled({bx0, cy}, {bx0 + uni_w, cy + pin_sz}, bg, 3.f);
-                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, vdesc[idx].c_str());
-                dl->PushClipRect({bx0, cy}, {bx0 + uni_w, cy + pin_sz}, true);
-                dl->AddText(font, label_fs, {bx0 + box_pad, cy + (pin_sz - ts.y) * 0.5f},
-                            tc, vdesc[idx].c_str());
+            const float r1 = colw(c1), r2 = colw(c2), r3 = colw(c3);
+            float w1 = r1 > 0.f ? r1 + box_pad * 2.f : 0.f;
+            float w2 = r2 > 0.f ? r2 + box_pad * 2.f : 0.f;
+            float w3 = r3 > 0.f ? r3 + box_pad * 2.f : 0.f;
+            {
+                const float avail = std::max(40.f, std::min(side_w_l, side_w_r));
+                const float total = w1 + (w2 > 0.f ? w2 + colgap : 0.f) + (w3 > 0.f ? w3 + colgap : 0.f);
+                if (total > avail && total > 0.f) { const float k = avail / total; w1 *= k; w2 *= k; w3 *= k; }
+            }
+            const ImU32 desc_bg = IM_COL32(56, 62, 70, 240);
+            const ImU32 c1col   = IM_COL32(230, 234, 238, 255);   // GPIO #
+            const ImU32 c2col   = IM_COL32(180, 188, 196, 255);   // primary function
+            auto draw_cell = [&](float bx0, float w, float cy, const std::string& t, ImU32 col, bool dim) {
+                if (t.empty() || w < 6.f) return;
+                ImU32 bg = desc_bg;
+                if (dim) { bg = (bg & 0x00FFFFFFu) | (110u << 24); col = (col & 0x00FFFFFFu) | (110u << 24); }
+                dl->AddRectFilled({bx0, cy}, {bx0 + w, cy + pin_sz}, bg, 3.f);
+                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, t.c_str());
+                dl->PushClipRect({bx0, cy}, {bx0 + w, cy + pin_sz}, true);
+                dl->AddText(font, label_fs, {bx0 + box_pad, cy + (pin_sz - ts.y) * 0.5f}, col, t.c_str());
                 dl->PopClipRect();
+            };
+            auto draw_cols = [&](int idx, float cy, bool left, bool dim) {
+                if (left) {
+                    float x = pin_left_x - 4.f;
+                    draw_cell(x - w1, w1, cy, c1[idx], c1col, dim);                 x -= w1 + colgap;
+                    if (w2 > 0.f) { draw_cell(x - w2, w2, cy, c2[idx], c2col, dim); x -= w2 + colgap; }
+                    if (w3 > 0.f)   draw_cell(x - w3, w3, cy, c3[idx], c3col[idx], dim);
+                } else {
+                    float x = pin_right_x + pin_sz + 4.f;
+                    draw_cell(x, w1, cy, c1[idx], c1col, dim);                       x += w1 + colgap;
+                    if (w2 > 0.f) { draw_cell(x, w2, cy, c2[idx], c2col, dim);       x += w2 + colgap; }
+                    if (w3 > 0.f)   draw_cell(x, w3, cy, c3[idx], c3col[idx], dim);
+                }
             };
 
             for (int row = 0; row < 20; ++row) {
@@ -7252,8 +7268,9 @@ static std::vector<MenuItem> build_menu(
                             dl->AddCircleFilled({x + pin_sz - 4.f, cy + 4.f}, 2.5f, col);
                         }
                     }
-                    // Hover detection (over square OR its description box).
-                    const float side_w = uni_w + 6.f;
+                    // Hover detection (over square OR its description columns).
+                    const float side_w = w1 + (w2 > 0.f ? w2 + colgap : 0.f)
+                                            + (w3 > 0.f ? w3 + colgap : 0.f) + 6.f;
                     const float hit_l = right_side ? x : (x - side_w);
                     const float hit_r = right_side ? (x + pin_sz + side_w)
                                                    : (x + pin_sz);
@@ -7273,9 +7290,9 @@ static std::vector<MenuItem> build_menu(
                 const bool dim_r = gpvz_draw->filter_kind >= 0 &&
                     static_cast<int>(pr.kind) != gpvz_draw->filter_kind;
 
-                // Uniform grey description box on each side.
-                draw_vdesc(row * 2,     cy, true,  dim_l);
-                draw_vdesc(row * 2 + 1, cy, false, dim_r);
+                // Three description columns on each side.
+                draw_cols(row * 2,     cy, true,  dim_l);
+                draw_cols(row * 2 + 1, cy, false, dim_r);
             }
 
             // Pin info — used to be a floating tooltip near the cursor;
@@ -7581,45 +7598,60 @@ static std::vector<MenuItem> build_menu(
             const ImU32 out_other    = IM_COL32( 40, 110, 210, 255);   // another slot
             const ImU32 out_hardware = IM_COL32(205, 120,  20, 255);   // hardware peripheral
 
-            // Per-pin label string + colour.
-            auto pin_text = [&](int idx) -> std::string {
-                const sys::GpioPin& p = sys::kPi40Pins[idx];
-                if (hardware[idx]) return claim[idx];                 // e.g. "HUB75 R1"
-                if (p.bcm < 0)     return p.primary;                  // 5V / GND / 3.3V
-                std::string s = "GPIO" + std::to_string(p.bcm);
-                if (otherslot[idx] >= 0)               s += "  Slot " + std::to_string(otherslot[idx] + 1);
-                else if (p.secondary && p.secondary[0]) s += "  " + std::string(p.secondary);
-                return s;
-            };
-            auto pin_col = [&](int idx) -> ImU32 {
-                if (hardware[idx])       return IM_COL32(235, 180,  90, 255);  // light amber
-                if (otherslot[idx] >= 0) return IM_COL32(120, 170, 235, 255);  // light blue
-                return IM_COL32(228, 232, 236, 255);                           // free
-            };
-
-            // Each pin's description sits in a uniform grey box the same height as
-            // the indicator, extended out from it and sized to the widest
-            // description so every box matches.
-            std::string desc[40]; float desc_w_max = 0.f;
+            // Three columns per pin, ordered outward from the indicator box:
+            //   [GPIO #]  [primary function]  [user / predefined function]
+            // Each is its own grey box; per-column widths are uniform across pins.
+            std::string c1[40], c2[40], c3[40]; ImU32 c3col[40] = {};
             for (int idx = 0; idx < 40; ++idx) {
-                desc[idx] = pin_text(idx);
-                if (!desc[idx].empty())
-                    desc_w_max = std::max(desc_w_max,
-                        font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, desc[idx].c_str()).x);
+                const sys::GpioPin& p = sys::kPi40Pins[idx];
+                c1[idx] = (p.bcm >= 0) ? ("GPIO" + std::to_string(p.bcm))
+                                       : std::string(p.primary ? p.primary : "");
+                c2[idx] = (p.secondary && p.secondary[0]) ? p.secondary : "";
+                if (hardware[idx])            { c3[idx] = claim[idx];
+                                                c3col[idx] = IM_COL32(235, 180, 90, 255); }
+                else if (otherslot[idx] >= 0) { c3[idx] = "Slot " + std::to_string(otherslot[idx] + 1);
+                                                c3col[idx] = IM_COL32(120, 170, 235, 255); }
             }
-            const float box_pad = 5.f;
-            const float uni_w   = std::min(desc_w_max + box_pad * 2.f,
-                                           std::max(20.f, std::min(side_w_l, side_w_r)));
+            auto colw = [&](std::string* arr) {
+                float w = 0.f;
+                for (int i = 0; i < 40; ++i)
+                    if (!arr[i].empty())
+                        w = std::max(w, font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, arr[i].c_str()).x);
+                return w;
+            };
+            const float box_pad = 5.f, colgap = 3.f;
+            const float r1 = colw(c1), r2 = colw(c2), r3 = colw(c3);
+            float w1 = r1 > 0.f ? r1 + box_pad * 2.f : 0.f;
+            float w2 = r2 > 0.f ? r2 + box_pad * 2.f : 0.f;
+            float w3 = r3 > 0.f ? r3 + box_pad * 2.f : 0.f;
+            {   // shrink to fit the side gap if the three columns are too wide
+                const float avail = std::max(40.f, std::min(side_w_l, side_w_r));
+                const float total = w1 + (w2 > 0.f ? w2 + colgap : 0.f) + (w3 > 0.f ? w3 + colgap : 0.f);
+                if (total > avail && total > 0.f) { const float k = avail / total; w1 *= k; w2 *= k; w3 *= k; }
+            }
             const ImU32 desc_bg = IM_COL32(56, 62, 70, 240);
-            auto draw_desc = [&](int idx, float cy, bool left) {
-                if (desc[idx].empty()) return;
-                const float bx0 = left ? (pin_left_x - 4.f - uni_w) : (pin_right_x + pin_sz + 4.f);
-                dl->AddRectFilled({bx0, cy}, {bx0 + uni_w, cy + pin_sz}, desc_bg, 3.f);
-                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, desc[idx].c_str());
-                dl->PushClipRect({bx0, cy}, {bx0 + uni_w, cy + pin_sz}, true);
-                dl->AddText(font, label_fs, {bx0 + box_pad, cy + (pin_sz - ts.y) * 0.5f},
-                            pin_col(idx), desc[idx].c_str());
+            const ImU32 c1col   = IM_COL32(230, 234, 238, 255);   // GPIO #
+            const ImU32 c2col   = IM_COL32(180, 188, 196, 255);   // primary function
+            auto draw_cell = [&](float bx0, float w, float cy, const std::string& t, ImU32 col) {
+                if (t.empty() || w < 6.f) return;
+                dl->AddRectFilled({bx0, cy}, {bx0 + w, cy + pin_sz}, desc_bg, 3.f);
+                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, t.c_str());
+                dl->PushClipRect({bx0, cy}, {bx0 + w, cy + pin_sz}, true);
+                dl->AddText(font, label_fs, {bx0 + box_pad, cy + (pin_sz - ts.y) * 0.5f}, col, t.c_str());
                 dl->PopClipRect();
+            };
+            auto draw_cols = [&](int idx, float cy, bool left) {
+                if (left) {
+                    float x = pin_left_x - 4.f;
+                    draw_cell(x - w1, w1, cy, c1[idx], c1col);                 x -= w1 + colgap;
+                    if (w2 > 0.f) { draw_cell(x - w2, w2, cy, c2[idx], c2col); x -= w2 + colgap; }
+                    if (w3 > 0.f)   draw_cell(x - w3, w3, cy, c3[idx], c3col[idx]);
+                } else {
+                    float x = pin_right_x + pin_sz + 4.f;
+                    draw_cell(x, w1, cy, c1[idx], c1col);                       x += w1 + colgap;
+                    if (w2 > 0.f) { draw_cell(x, w2, cy, c2[idx], c2col);       x += w2 + colgap; }
+                    if (w3 > 0.f)   draw_cell(x, w3, cy, c3[idx], c3col[idx]);
+                }
             };
 
             // 8-direction black outline — kept for the white pin numbers so they
@@ -7659,8 +7691,8 @@ static std::vector<MenuItem> build_menu(
                 draw_box(pin_left_x,  il);
                 draw_box(pin_right_x, ir);
 
-                draw_desc(il, cy, true);
-                draw_desc(ir, cy, false);
+                draw_cols(il, cy, true);
+                draw_cols(ir, cy, false);
             }
 
             // Info column (dark text on the light card): focused pin + legend.
@@ -7703,7 +7735,7 @@ static std::vector<MenuItem> build_menu(
             }
             auto legend = [&](ImU32 c, const char* t) {
                 dl->AddRect({info_x, iy + 2.f}, {info_x + 11.f, iy + 13.f}, c, 2.f, 0, 2.f);
-                dl->AddText(font, fs * 0.66f, {info_x + 16.f, iy}, text_dim, t);
+                dl->AddText(font, fs * 0.66f, {info_x + 16.f, iy}, IM_COL32(20, 24, 30, 255), t);
                 iy += fs * 0.98f;
             };
             legend(out_assigned, "this slot");
