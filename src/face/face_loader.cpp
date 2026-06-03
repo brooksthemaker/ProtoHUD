@@ -16,9 +16,43 @@ using json = nlohmann::json;
 
 namespace face {
 
-FaceLoader::FaceLoader(const std::string& folder, int width, int height)
-    : folder_(folder), w_(width), h_(height) {
+FaceLoader::FaceLoader(const std::string& folder, int width, int height,
+                       int src_w, int src_h, int src_x, int src_y)
+    : folder_(folder), w_(width), h_(height),
+      src_w_(src_w), src_h_(src_h), src_x_(src_x), src_y_(src_y) {
     load();
+}
+
+// Load a face PNG sized to this panel. When the panel is a slice of a wider
+// canvas (src_w_ > w_) and the PNG was authored at (roughly) canvas width, the
+// image is resized to the canvas and this panel's [src_x_,src_y_,w_,h_] rect is
+// cropped — so a face drawn across two panels lands on the right halves instead
+// of being squished onto each. Otherwise (panel-sized art, legacy faces) the
+// whole image is nearest-resized to the panel as before.
+cv::Mat FaceLoader::load_img(const std::string& path) const {
+    cv::Mat raw = cv::imread(path, cv::IMREAD_UNCHANGED);
+    if (raw.empty()) return cv::Mat();
+    cv::Mat rgba;
+    if      (raw.channels() == 4) cv::cvtColor(raw, rgba, cv::COLOR_BGRA2RGBA);
+    else if (raw.channels() == 3) cv::cvtColor(raw, rgba, cv::COLOR_BGR2RGBA);
+    else if (raw.channels() == 1) cv::cvtColor(raw, rgba, cv::COLOR_GRAY2RGBA);
+    else                          return cv::Mat();
+
+    if (src_w_ > w_ && src_h_ > 0 && rgba.cols > w_) {
+        // Canvas-authored multi-panel face → crop our slice.
+        cv::Mat canvas;
+        cv::resize(rgba, canvas, cv::Size(src_w_, src_h_), 0, 0, cv::INTER_NEAREST);
+        cv::Mat out(h_, w_, canvas.type(), cv::Scalar(0, 0, 0, 0));
+        const cv::Rect want(src_x_, src_y_, w_, h_);
+        const cv::Rect inter = want & cv::Rect(0, 0, canvas.cols, canvas.rows);
+        if (inter.width > 0 && inter.height > 0)
+            canvas(inter).copyTo(out(cv::Rect(inter.x - src_x_, inter.y - src_y_,
+                                              inter.width, inter.height)));
+        return out;
+    }
+    cv::Mat out;
+    cv::resize(rgba, out, cv::Size(w_, h_), 0, 0, cv::INTER_NEAREST);
+    return out;
 }
 
 void FaceLoader::load() {
@@ -48,7 +82,7 @@ void FaceLoader::load() {
     }
 
     for (auto& [name, filename] : expr_map) {
-        cv::Mat img = load_png_rgba((fs::path(folder_) / filename).string(), w_, h_);
+        cv::Mat img = load_img((fs::path(folder_) / filename).string());
         if (!img.empty()) {
             expressions_[name] = img;
             expr_order_.push_back(name);
@@ -62,7 +96,7 @@ void FaceLoader::load() {
 
     // Blink image.
     std::string blink_file = cfg.value("blink", std::string("blink.png"));
-    blink_ = load_png_rgba((fs::path(folder_) / blink_file).string(), w_, h_);
+    blink_ = load_img((fs::path(folder_) / blink_file).string());
 
     // Viseme overlays — all four are optional. A missing mouth_open simply
     // disables audio-driven mouth blending; missing visemes fall back to
@@ -71,7 +105,7 @@ void FaceLoader::load() {
     for (const char* shape : {"mouth_open", "mouth_small", "mouth_smile", "mouth_round"}) {
         fs::path p = fs::path(folder_) / (std::string(shape) + ".png");
         if (fs::exists(p)) {
-            cv::Mat img = load_png_rgba(p.string(), w_, h_);
+            cv::Mat img = load_img(p.string());
             if (!img.empty()) mouth_shapes_[shape] = std::move(img);
         }
     }

@@ -62,7 +62,8 @@ void NativeFaceController::build_panels() {
         pn.cfg = pc;
         if (pc.mirror_of.empty()) {
             pn.loader = std::make_unique<FaceLoader>(
-                cfg_.faces_dir + "/" + pc.face.active, pc.w, pc.h);
+                cfg_.faces_dir + "/" + pc.face.active, pc.w, pc.h,
+                cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
             pn.state = std::make_unique<FaceState>(
                 pc.face, pn.loader->expression_names());
             pn.material = load_material(pc.material.active, pc.w, pc.h,
@@ -600,7 +601,8 @@ bool NativeFaceController::import_face_image(const std::string& expression,
     for (auto& pn : panels_) {
         if (pn.is_mirror || !pn.state) continue;
         pn.loader = std::make_unique<FaceLoader>(
-            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h,
+            cfg_.canvas_w, cfg_.canvas_h, pn.cfg.x, pn.cfg.y);
     }
     return true;
 }
@@ -654,7 +656,8 @@ void NativeFaceController::clear_face_image(const std::string& expression) {
     for (auto& pn : panels_) {
         if (pn.is_mirror || !pn.state) continue;
         pn.loader = std::make_unique<FaceLoader>(
-            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h,
+            cfg_.canvas_w, cfg_.canvas_h, pn.cfg.x, pn.cfg.y);
     }
 }
 
@@ -755,7 +758,8 @@ void NativeFaceController::reload_active_face() {
     for (auto& pn : panels_) {
         if (pn.is_mirror || !pn.state) continue;
         pn.loader = std::make_unique<FaceLoader>(
-            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h,
+            cfg_.canvas_w, cfg_.canvas_h, pn.cfg.x, pn.cfg.y);
     }
 }
 

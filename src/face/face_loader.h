@@ -16,7 +16,13 @@ class FaceState;   // fwd
 
 class FaceLoader {
 public:
-    FaceLoader(const std::string& folder, int width, int height);
+    // src_w/src_h describe the full canvas this panel is a slice of (0 = the
+    // panel IS the whole image). src_x/src_y are the panel's offset within that
+    // canvas. When a face PNG is authored at canvas size (a multi-panel HUB75
+    // face drawn across the whole editor canvas), the loader crops this panel's
+    // slice instead of squishing the entire image into one panel.
+    FaceLoader(const std::string& folder, int width, int height,
+               int src_w = 0, int src_h = 0, int src_x = 0, int src_y = 0);
 
     cv::Mat get_frame(const FaceState& state);   // CV_8UC4
     const std::vector<std::string>& expression_names() const { return expr_order_; }
@@ -36,11 +42,15 @@ private:
     struct Region { int x = 0, y = 0, w = 0, h = 0; bool set = false; };
 
     void load();
+    // Load a face PNG sized to this panel: crops our slice when the PNG is
+    // authored at canvas size (multi-panel), else resizes the whole image.
+    cv::Mat load_img(const std::string& path) const;
     cv::Mat blend_region(const cv::Mat& base, const cv::Mat& overlay,
                          const Region& region, double t) const;
 
     std::string folder_;
     int w_, h_;
+    int src_w_ = 0, src_h_ = 0, src_x_ = 0, src_y_ = 0;   // canvas this panel slices
 
     std::map<std::string, cv::Mat> expressions_;   // name → RGBA (h,w)
     std::vector<std::string>       expr_order_;     // stable insertion order
