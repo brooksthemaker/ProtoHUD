@@ -18,6 +18,7 @@ enum class GpioFunc : int {
     CamPipLeft, CamPipRight,
     CamCaptureLeft, CamCaptureRight,
     CamSwap,
+    PhoneRing,
     Count
 };
 
@@ -41,6 +42,7 @@ inline const char* gpio_func_name(GpioFunc f) {
     case GpioFunc::CamCaptureLeft:  return "Camera: Capture Left";
     case GpioFunc::CamCaptureRight: return "Camera: Capture Right";
     case GpioFunc::CamSwap:         return "Camera: Swap L/R";
+    case GpioFunc::PhoneRing:       return "Phone: Ring (find)";
     default:                        return "?";
     }
 }
@@ -65,6 +67,7 @@ inline const char* gpio_func_id(GpioFunc f) {
     case GpioFunc::CamCaptureLeft:  return "cam_capture_left";
     case GpioFunc::CamCaptureRight: return "cam_capture_right";
     case GpioFunc::CamSwap:         return "cam_swap";
+    case GpioFunc::PhoneRing:       return "phone_ring";
     default:                        return "none";
     }
 }

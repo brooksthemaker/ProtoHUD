@@ -8522,6 +8522,17 @@ static std::vector<MenuItem> build_menu(
         catalog.push_back({ "syspanel", toggle("System Panel",
             [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
             [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }) });
+        // Action item (not a toggle): rings the paired phone via KDE Connect.
+        catalog.push_back({ "ring_phone", leaf("Ring Phone", [kdc_p, &state]{
+            const bool ok = kdc_p && kdc_p->ring_phone();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            Notification n; n.type = NotifType::App; n.icon = "message";
+            n.title = ok ? "Ringing phone\xE2\x80\xA6" : "Phone not connected";
+            n.body  = ok ? "KDE Connect \xC2\xB7 findmyphone"
+                         : "Pair a device in the KDE Connect app first";
+            n.auto_dismiss_s = 4.f;
+            state.notifs.push(std::move(n));
+        }) });
 
         // Pinned catalog items appear in the quick menu, gated on the favorites set.
         for (auto& f : catalog) {
@@ -11035,6 +11046,7 @@ int main(int argc, char* argv[]) {
             { std::lock_guard<std::mutex> lk(state.mtx); state.capture_request = CaptureRequest::Right; } break;
         case F::CamSwap:
             { std::lock_guard<std::mutex> lk(state.mtx); state.cameras_swapped = !state.cameras_swapped; } break;
+        case F::PhoneRing: if (kdc_menu_ptr) kdc_menu_ptr->ring_phone(); break;
         case F::None: default: break;
         }
     };
