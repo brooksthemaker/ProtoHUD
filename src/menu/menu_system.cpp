@@ -592,7 +592,15 @@ void MenuSystem::select() {
         break;
 
     case MenuItemType::NOTIF_LOG:
-        if (item.notif_log.queue) item.notif_log.queue->dismiss_all();
+        if (item.notif_log.queue) {
+            if (item.notif_log.filter) {
+                // Filtered browser: clear only the matching notifications.
+                for (auto& n : item.notif_log.queue->items)
+                    if (!n.dismissed && item.notif_log.filter(n)) { n.dismissed = true; n.read = true; }
+            } else {
+                item.notif_log.queue->dismiss_all();
+            }
+        }
         break;
     }
 }
@@ -1095,6 +1103,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                 int shown = 0;
                 for (auto& n : q->items) {
                     if (n.dismissed) continue;
+                    if (item.notif_log.filter && !item.notif_log.filter(n)) continue;
                     if (shown >= kMaxShow) break;
                     if (ly + lh_row > rmin.y + item_h + list_h) break;
 

@@ -1370,7 +1370,8 @@ static std::vector<MenuItem> build_menu(
         // (which the menu is built before) exists.
         std::shared_ptr<std::function<void()>> gpio_reload = nullptr,
         integrations::KdeConnectBridge* kdc_p = nullptr,
-        std::vector<std::string>* kdc_ignore_p = nullptr)
+        std::vector<std::string>* kdc_ignore_p = nullptr,
+        std::vector<std::string>* kdc_msg_p = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -8119,8 +8120,8 @@ static std::vector<MenuItem> build_menu(
                   "Poll the face controller for a fresh status frame."),
         [&]() -> MenuItem {
             // ── Phone (KDE Connect) ───────────────────────────────────────────
-            // Ring the paired phone + edit the notification ignore list (mute
-            // noisy Discord servers / group chats by name) from the HUD.
+            // Ring the phone + edit the ignore list (mute servers/chats) and the
+            // message-apps list (which apps get the big chat toast), from the HUD.
             auto ring_toast = [kdc_p, &state]{
                 const bool ok = kdc_p && kdc_p->ring_phone();
                 std::lock_guard<std::mutex> lk(state.mtx);
@@ -8132,62 +8133,135 @@ static std::vector<MenuItem> build_menu(
                 n.auto_dismiss_s = 4.f;
                 state.notifs.push(std::move(n));
             };
-            auto apply_ignore = [kdc_p, kdc_ignore_p]{
-                if (!kdc_p || !kdc_ignore_p) return;
-                std::string csv;
-                for (size_t i = 0; i < kdc_ignore_p->size(); ++i) {
-                    if (i) csv += ',';
-                    csv += (*kdc_ignore_p)[i];
-                }
-                kdc_p->set_ignore_list(csv);
-            };
-
-            std::vector<MenuItem> ignore_menu;
-            ignore_menu.push_back(with_desc(
-                leaf("Add Server / Chat\xE2\x80\xA6", [&menu_sys_pp, kdc_ignore_p, apply_ignore]{
-                    if (!menu_sys_pp || !*menu_sys_pp || !kdc_ignore_p) return;
-                    (*menu_sys_pp)->open_keyboard("Ignore (matches title/text)", "",
-                        [kdc_ignore_p, apply_ignore](const std::string& s){
-                            // trim surrounding whitespace
-                            size_t b = s.find_first_not_of(" \t");
-                            size_t e = s.find_last_not_of(" \t");
+            // Generic CSV-list editor: an "Add… (keyboard)" row plus up to 16
+            // removable entry rows. apply() pushes the joined CSV to the bridge.
+            // menu_sys_pp is captured by value (it points at main's menu_ptr).
+            auto list_menu = [menu_sys_pp](std::vector<std::string>* vec,
+                                           std::function<void()> apply,
+                                           std::string add_label, std::string osk_title) {
+                std::vector<MenuItem> items;
+                MenuItem add; add.type = MenuItemType::LEAF; add.label = std::move(add_label);
+                add.action = [menu_sys_pp, vec, apply, osk_title]{
+                    if (!menu_sys_pp || !*menu_sys_pp || !vec) return;
+                    (*menu_sys_pp)->open_keyboard(osk_title, "",
+                        [vec, apply](const std::string& s){
+                            const size_t b = s.find_first_not_of(" \t");
+                            const size_t e = s.find_last_not_of(" \t");
                             if (b == std::string::npos) return;
-                            kdc_ignore_p->push_back(s.substr(b, e - b + 1));
-                            apply_ignore();
+                            vec->push_back(s.substr(b, e - b + 1));
+                            apply();
                         });
-                }),
-                "Type a word/name; any phone notification whose title or text "
-                "contains it is muted. Good for noisy Discord servers."));
-            constexpr int kMaxIgnore = 16;
-            for (int i = 0; i < kMaxIgnore; ++i) {
-                MenuItem m;
-                m.type       = MenuItemType::LEAF;
-                m.label      = "ignore";
-                m.label_fn   = [kdc_ignore_p, i]{
-                    return (kdc_ignore_p && i < static_cast<int>(kdc_ignore_p->size()))
-                               ? ("\xE2\x9C\x95  " + (*kdc_ignore_p)[i]) : std::string();
                 };
-                m.visible_fn = [kdc_ignore_p, i]{
-                    return kdc_ignore_p && i < static_cast<int>(kdc_ignore_p->size());
-                };
-                m.action     = [kdc_ignore_p, i, apply_ignore]{
-                    if (kdc_ignore_p && i < static_cast<int>(kdc_ignore_p->size())) {
-                        kdc_ignore_p->erase(kdc_ignore_p->begin() + i);
-                        apply_ignore();
-                    }
-                };
-                ignore_menu.push_back(std::move(m));
-            }
+                items.push_back(std::move(add));
+                for (int i = 0; i < 16; ++i) {
+                    MenuItem m; m.type = MenuItemType::LEAF; m.label = "entry";
+                    m.label_fn   = [vec, i]{
+                        return (vec && i < static_cast<int>(vec->size()))
+                                   ? ("\xE2\x9C\x95  " + (*vec)[i]) : std::string(); };
+                    m.visible_fn = [vec, i]{ return vec && i < static_cast<int>(vec->size()); };
+                    m.action     = [vec, i, apply]{
+                        if (vec && i < static_cast<int>(vec->size())) {
+                            vec->erase(vec->begin() + i); apply(); } };
+                    items.push_back(std::move(m));
+                }
+                return items;
+            };
+            auto join = [](std::vector<std::string>* v){
+                std::string csv;
+                if (v) for (size_t i = 0; i < v->size(); ++i) { if (i) csv += ','; csv += (*v)[i]; }
+                return csv;
+            };
+            auto apply_ignore = [kdc_p, kdc_ignore_p, join]{
+                if (kdc_p) kdc_p->set_ignore_list(join(kdc_ignore_p)); };
+            auto apply_msg = [kdc_p, kdc_msg_p, join]{
+                if (kdc_p) kdc_p->set_message_apps(join(kdc_msg_p)); };
 
             std::vector<MenuItem> phone_menu;
             phone_menu.push_back(with_desc(leaf("Ring My Phone", ring_toast),
                 "Ring the paired phone (KDE Connect findmyphone) so it plays its "
                 "ringtone \xE2\x80\x94 handy for locating it."));
-            phone_menu.push_back(with_desc(submenu("Ignore List", std::move(ignore_menu)),
-                "Mute phone notifications whose title/text contains any listed "
-                "word \xE2\x80\x94 e.g. a Discord server name. Select an entry to remove it."));
+            phone_menu.push_back(with_desc(submenu("Ignore List",
+                list_menu(kdc_ignore_p, apply_ignore, "Add Server / Chat\xE2\x80\xA6",
+                          "Ignore (matches title/text)")),
+                "Mute phone notifications whose title/text contains any listed word "
+                "\xE2\x80\x94 e.g. a Discord server name. Select an entry to remove it."));
+            phone_menu.push_back(with_desc(submenu("Message Apps",
+                list_menu(kdc_msg_p, apply_msg, "Add App\xE2\x80\xA6", "App name (e.g. Discord)")),
+                "Apps whose notifications get the larger chat toast (sender + wrapped "
+                "message, held longer). Select an entry to remove it."));
             return with_desc(submenu("Phone (KDE Connect)", std::move(phone_menu)),
-                "Ring the paired phone and manage the notification ignore list.");
+                "Ring the phone, pick which apps get the big chat toast, and mute servers.");
+        }(),
+        [&]() -> MenuItem {
+            // ── Notification Log browser ──────────────────────────────────────
+            // Look through past notifications, filtered by type and/or sender.
+            auto type_opt = [&leaf_sel, &state](const char* lbl, int t){
+                return leaf_sel(lbl, [&state, t]{ state.notif_type_filter = t; },
+                                     [&state, t]{ return state.notif_type_filter == t; });
+            };
+            std::vector<MenuItem> type_menu = {
+                type_opt("All Types",     -1),
+                type_opt("Alarms",        static_cast<int>(NotifType::Alarm)),
+                type_opt("Timers",        static_cast<int>(NotifType::Timer)),
+                type_opt("LoRa",          static_cast<int>(NotifType::LoRa)),
+                type_opt("Phone / Apps",  static_cast<int>(NotifType::App)),
+            };
+
+            std::vector<MenuItem> nlog_menu;
+            MenuItem type_item = submenu("Filter: Type", std::move(type_menu));
+            type_item.label_fn = [&state]{
+                const char* t = state.notif_type_filter < 0 ? "All"
+                    : state.notif_type_filter == (int)NotifType::Alarm ? "Alarms"
+                    : state.notif_type_filter == (int)NotifType::Timer ? "Timers"
+                    : state.notif_type_filter == (int)NotifType::LoRa  ? "LoRa" : "Phone/Apps";
+                return std::string("Filter: Type  [") + t + "]";
+            };
+            nlog_menu.push_back(with_desc(std::move(type_item),
+                "Show only notifications of the chosen type."));
+
+            MenuItem sender_item; sender_item.type = MenuItemType::LEAF;
+            sender_item.label = "Filter: Sender";
+            sender_item.label_fn = [&state]{
+                return state.notif_sender_filter.empty()
+                    ? std::string("Filter: Sender  [any]")
+                    : std::string("Filter: Sender  [") + state.notif_sender_filter + "]";
+            };
+            sender_item.action = [menu_sys_pp, &state]{
+                if (!menu_sys_pp || !*menu_sys_pp) return;
+                (*menu_sys_pp)->open_keyboard("Sender contains", state.notif_sender_filter,
+                    [&state](const std::string& s){ state.notif_sender_filter = s; });
+            };
+            sender_item.description = "Match a word in the notification's title / sender "
+                                      "(case-insensitive). Leave empty for any.";
+            nlog_menu.push_back(std::move(sender_item));
+
+            nlog_menu.push_back([&state]{
+                MenuItem c; c.type = MenuItemType::LEAF; c.label = "Clear Sender Filter";
+                c.action = [&state]{ state.notif_sender_filter.clear(); };
+                c.visible_fn = [&state]{ return !state.notif_sender_filter.empty(); };
+                return c;
+            }());
+
+            MenuItem log; log.type = MenuItemType::NOTIF_LOG; log.label = "View";
+            log.notif_log.queue = &state.notifs;
+            log.notif_log.filter = [&state](const Notification& n){
+                if (state.notif_type_filter >= 0 &&
+                    static_cast<int>(n.type) != state.notif_type_filter) return false;
+                if (!state.notif_sender_filter.empty()) {
+                    std::string hay = n.title, needle = state.notif_sender_filter;
+                    std::transform(hay.begin(), hay.end(), hay.begin(),
+                                   [](unsigned char c){ return std::tolower(c); });
+                    std::transform(needle.begin(), needle.end(), needle.begin(),
+                                   [](unsigned char c){ return std::tolower(c); });
+                    if (hay.find(needle) == std::string::npos) return false;
+                }
+                return true;
+            };
+            nlog_menu.push_back(with_desc(std::move(log),
+                "Matching notifications (newest first). Select to clear the ones shown."));
+
+            return with_desc(submenu("Notification Log", std::move(nlog_menu)),
+                "Browse past notifications, filtered by type and/or sender.");
         }(),
         with_desc(submenu("Demo Mode",  std::move(demo_menu)),
                   "Cycle prefab scenes for screenshots / video."),
@@ -10602,21 +10676,34 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // KDE Connect notification ignore list — editable in the Phone menu, applied
-    // live to the bridge and persisted to cfg["kdeconnect"]["ignore_list"].
-    std::vector<std::string> kdc_ignore;
-    if (cfg.contains("kdeconnect") && cfg["kdeconnect"].is_object()) {
-        const std::string csv = cfg["kdeconnect"].value("ignore_list", std::string());
+    // KDE Connect lists — editable in the Phone menu, applied live to the bridge
+    // and persisted to cfg["kdeconnect"]. ignore_list mutes servers/chats;
+    // message_apps picks which apps get the big chat toast.
+    auto split_csv_vec = [](const std::string& csv) {
+        std::vector<std::string> out;
         size_t pos = 0;
         while (pos <= csv.size()) {
             const size_t c = csv.find(',', pos);
             std::string tok = csv.substr(pos, c == std::string::npos ? std::string::npos : c - pos);
             const size_t b = tok.find_first_not_of(" \t");
             const size_t e = tok.find_last_not_of(" \t");
-            if (b != std::string::npos) kdc_ignore.push_back(tok.substr(b, e - b + 1));
+            if (b != std::string::npos) out.push_back(tok.substr(b, e - b + 1));
             if (c == std::string::npos) break;
             pos = c + 1;
         }
+        return out;
+    };
+    std::vector<std::string> kdc_ignore, kdc_msgapps;
+    {
+        const std::string def_msg =
+            "Discord,Messages,Messenger,Signal,WhatsApp,Telegram,SMS,Slack";
+        std::string ig, ms = def_msg;
+        if (cfg.contains("kdeconnect") && cfg["kdeconnect"].is_object()) {
+            ig = cfg["kdeconnect"].value("ignore_list",  std::string());
+            ms = cfg["kdeconnect"].value("message_apps", def_msg);
+        }
+        kdc_ignore  = split_csv_vec(ig);
+        kdc_msgapps = split_csv_vec(ms);
     }
 
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
@@ -10682,7 +10769,8 @@ int main(int argc, char* argv[]) {
                                    if (native_ctrl) native_ctrl->set_material_spec(spec);
                                },
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
-                               &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr, &kdc_ignore));
+                               &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr,
+                               &kdc_ignore, &kdc_msgapps));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -11523,13 +11611,14 @@ int main(int argc, char* argv[]) {
             cfg["gpio"]["pins"] = std::move(jpins);
         }
         {
-            // KDE Connect notification ignore list (edited in the Phone menu).
-            std::string csv;
-            for (size_t i = 0; i < kdc_ignore.size(); ++i) {
-                if (i) csv += ',';
-                csv += kdc_ignore[i];
-            }
-            cfg["kdeconnect"]["ignore_list"] = csv;
+            // KDE Connect lists (edited in the Phone menu).
+            auto join_csv = [](const std::vector<std::string>& v){
+                std::string csv;
+                for (size_t i = 0; i < v.size(); ++i) { if (i) csv += ','; csv += v[i]; }
+                return csv;
+            };
+            cfg["kdeconnect"]["ignore_list"]  = join_csv(kdc_ignore);
+            cfg["kdeconnect"]["message_apps"] = join_csv(kdc_msgapps);
         }
         {
             static const char* kNames[] = { "center","outside","left","right","top","bottom" };

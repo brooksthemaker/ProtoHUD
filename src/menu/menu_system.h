@@ -57,6 +57,9 @@ struct ColorPickerConfig {
 
 struct NotifLogConfig {
     NotificationQueue* queue = nullptr;   // pointer into AppState::notifs
+    // Optional filter — when set, only notifications for which it returns true
+    // are listed (used by the type/sender notification browser).
+    std::function<bool(const Notification&)> filter;
 };
 
 // ── Context panel ─────────────────────────────────────────────────────────────

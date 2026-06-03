@@ -795,7 +795,9 @@ ProtoHUD has a built-in **KDE Connect bridge** that pulls phone notifications an
 | Phone notifications | Toast on the HUD + entry in the notification log (same pipeline as scheduler reminders) |
 | Chat / DM messages | Larger toast (sender as the title, full message wrapped below) that stays up ~14 s. Apps treated as messaging are set by `message_apps`; mute servers/chats by name with `ignore_list` |
 | Phone battery % | Outer arc on the minimap battery gauge with a `P` / `P+` prefix (P+ = charging). When the CPU/GPU debug gauges are on, it stacks as a third **light-blue** arc so it stays visible |
-| Ring my phone | **System → Ring My Phone** fires KDE Connect's findmyphone plugin so the phone plays its ringtone — handy for locating it |
+| Ring my phone | **System → Phone (KDE Connect) → Ring My Phone** fires KDE Connect's findmyphone plugin so the phone plays its ringtone — handy for locating it |
+| In-HUD lists | Under **System → Phone (KDE Connect)**: edit the **Ignore List** (mute servers/chats) and **Message Apps** (which apps get the big toast) with the on-screen keyboard — add via keyboard, select an entry to remove. Saved to config |
+| Browse the log | **System → Notification Log** lists past notifications filtered by **type** (All / Alarms / Timers / LoRa / Phone) and/or **sender** (title substring); select to clear the shown set |
 | File drops | Toast: *"Got happy.png — import as 'happy'?"* → Import / Dismiss buttons. PNGs go to faces; GIFs are copied into `gifs_dir` and bound to the first empty slot |
 
 ### Setup

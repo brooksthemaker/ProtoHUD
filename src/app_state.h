@@ -825,6 +825,11 @@ struct AppState {
 
     // Notification queue — render-thread owned; push from main thread while holding mtx
     NotificationQueue    notifs;
+    // Notification-browser filter (menu-driven): type_filter < 0 = all types,
+    // else a NotifType value; sender_filter is a case-insensitive substring on
+    // the title (empty = any sender).
+    int                  notif_type_filter = -1;
+    std::string          notif_sender_filter;
 
     // Particle effects config (render-thread only)
     EffectsConfig        effects_cfg;
