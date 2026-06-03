@@ -1369,7 +1369,8 @@ static std::vector<MenuItem> build_menu(
         // without a relaunch. Shared so main can install it after the poller
         // (which the menu is built before) exists.
         std::shared_ptr<std::function<void()>> gpio_reload = nullptr,
-        integrations::KdeConnectBridge* kdc_p = nullptr)
+        integrations::KdeConnectBridge* kdc_p = nullptr,
+        std::vector<std::string>* kdc_ignore_p = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -8116,19 +8117,78 @@ static std::vector<MenuItem> build_menu(
         std::move(gpio_buttons_item),
         with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
                   "Poll the face controller for a fresh status frame."),
-        with_desc(leaf("Ring My Phone", [kdc_p, &state]{
-                      const bool ok = kdc_p && kdc_p->ring_phone();
-                      std::lock_guard<std::mutex> lk(state.mtx);
-                      Notification n;
-                      n.type = NotifType::App; n.icon = "message";
-                      n.title = ok ? "Ringing phone\xE2\x80\xA6" : "Phone not connected";
-                      n.body  = ok ? "KDE Connect \xC2\xB7 findmyphone"
-                                   : "Pair a device in the KDE Connect app first";
-                      n.auto_dismiss_s = 4.f;
-                      state.notifs.push(std::move(n));
-                  }),
-                  "Ring the paired phone (KDE Connect findmyphone) so it plays its "
-                  "ringtone \xE2\x80\x94 handy for locating it."),
+        [&]() -> MenuItem {
+            // ── Phone (KDE Connect) ───────────────────────────────────────────
+            // Ring the paired phone + edit the notification ignore list (mute
+            // noisy Discord servers / group chats by name) from the HUD.
+            auto ring_toast = [kdc_p, &state]{
+                const bool ok = kdc_p && kdc_p->ring_phone();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n;
+                n.type = NotifType::App; n.icon = "message";
+                n.title = ok ? "Ringing phone\xE2\x80\xA6" : "Phone not connected";
+                n.body  = ok ? "KDE Connect \xC2\xB7 findmyphone"
+                             : "Pair a device in the KDE Connect app first";
+                n.auto_dismiss_s = 4.f;
+                state.notifs.push(std::move(n));
+            };
+            auto apply_ignore = [kdc_p, kdc_ignore_p]{
+                if (!kdc_p || !kdc_ignore_p) return;
+                std::string csv;
+                for (size_t i = 0; i < kdc_ignore_p->size(); ++i) {
+                    if (i) csv += ',';
+                    csv += (*kdc_ignore_p)[i];
+                }
+                kdc_p->set_ignore_list(csv);
+            };
+
+            std::vector<MenuItem> ignore_menu;
+            ignore_menu.push_back(with_desc(
+                leaf("Add Server / Chat\xE2\x80\xA6", [&menu_sys_pp, kdc_ignore_p, apply_ignore]{
+                    if (!menu_sys_pp || !*menu_sys_pp || !kdc_ignore_p) return;
+                    (*menu_sys_pp)->open_keyboard("Ignore (matches title/text)", "",
+                        [kdc_ignore_p, apply_ignore](const std::string& s){
+                            // trim surrounding whitespace
+                            size_t b = s.find_first_not_of(" \t");
+                            size_t e = s.find_last_not_of(" \t");
+                            if (b == std::string::npos) return;
+                            kdc_ignore_p->push_back(s.substr(b, e - b + 1));
+                            apply_ignore();
+                        });
+                }),
+                "Type a word/name; any phone notification whose title or text "
+                "contains it is muted. Good for noisy Discord servers."));
+            constexpr int kMaxIgnore = 16;
+            for (int i = 0; i < kMaxIgnore; ++i) {
+                MenuItem m;
+                m.type       = MenuItemType::LEAF;
+                m.label      = "ignore";
+                m.label_fn   = [kdc_ignore_p, i]{
+                    return (kdc_ignore_p && i < static_cast<int>(kdc_ignore_p->size()))
+                               ? ("\xE2\x9C\x95  " + (*kdc_ignore_p)[i]) : std::string();
+                };
+                m.visible_fn = [kdc_ignore_p, i]{
+                    return kdc_ignore_p && i < static_cast<int>(kdc_ignore_p->size());
+                };
+                m.action     = [kdc_ignore_p, i, apply_ignore]{
+                    if (kdc_ignore_p && i < static_cast<int>(kdc_ignore_p->size())) {
+                        kdc_ignore_p->erase(kdc_ignore_p->begin() + i);
+                        apply_ignore();
+                    }
+                };
+                ignore_menu.push_back(std::move(m));
+            }
+
+            std::vector<MenuItem> phone_menu;
+            phone_menu.push_back(with_desc(leaf("Ring My Phone", ring_toast),
+                "Ring the paired phone (KDE Connect findmyphone) so it plays its "
+                "ringtone \xE2\x80\x94 handy for locating it."));
+            phone_menu.push_back(with_desc(submenu("Ignore List", std::move(ignore_menu)),
+                "Mute phone notifications whose title/text contains any listed "
+                "word \xE2\x80\x94 e.g. a Discord server name. Select an entry to remove it."));
+            return with_desc(submenu("Phone (KDE Connect)", std::move(phone_menu)),
+                "Ring the paired phone and manage the notification ignore list.");
+        }(),
         with_desc(submenu("Demo Mode",  std::move(demo_menu)),
                   "Cycle prefab scenes for screenshots / video."),
     };
@@ -10542,6 +10602,23 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // KDE Connect notification ignore list — editable in the Phone menu, applied
+    // live to the bridge and persisted to cfg["kdeconnect"]["ignore_list"].
+    std::vector<std::string> kdc_ignore;
+    if (cfg.contains("kdeconnect") && cfg["kdeconnect"].is_object()) {
+        const std::string csv = cfg["kdeconnect"].value("ignore_list", std::string());
+        size_t pos = 0;
+        while (pos <= csv.size()) {
+            const size_t c = csv.find(',', pos);
+            std::string tok = csv.substr(pos, c == std::string::npos ? std::string::npos : c - pos);
+            const size_t b = tok.find_first_not_of(" \t");
+            const size_t e = tok.find_last_not_of(" \t");
+            if (b != std::string::npos) kdc_ignore.push_back(tok.substr(b, e - b + 1));
+            if (c == std::string::npos) break;
+            pos = c + 1;
+        }
+    }
+
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -10605,7 +10682,7 @@ int main(int argc, char* argv[]) {
                                    if (native_ctrl) native_ctrl->set_material_spec(spec);
                                },
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
-                               &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr));
+                               &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr, &kdc_ignore));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -11444,6 +11521,15 @@ int main(int argc, char* argv[]) {
                 jpins.push_back(std::move(jp));
             }
             cfg["gpio"]["pins"] = std::move(jpins);
+        }
+        {
+            // KDE Connect notification ignore list (edited in the Phone menu).
+            std::string csv;
+            for (size_t i = 0; i < kdc_ignore.size(); ++i) {
+                if (i) csv += ',';
+                csv += kdc_ignore[i];
+            }
+            cfg["kdeconnect"]["ignore_list"] = csv;
         }
         {
             static const char* kNames[] = { "center","outside","left","right","top","bottom" };
@@ -12770,7 +12856,9 @@ int main(int argc, char* argv[]) {
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
-        if (menu.is_deep_open()) {
+        if (menu.is_deep_open() || menu.is_keyboard_open()) {
+            // Keyboard takes over full-screen (draws only the OSK), so this also
+            // covers text entry opened from the corner / radial quick menu.
             menu.draw_fullscreen(xr.eye_width(), xr.eye_height());
         } else if (menu.is_open() && menu.quick_style() == QuickStyle::Radial
                    && !menu.is_keyboard_open()) {

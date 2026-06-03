@@ -1304,7 +1304,9 @@ void MenuSystem::draw_context_panel(const Level& lvl,
 // ── draw_fullscreen (deep menu) ─────────────────────────────────────────────────
 
 void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
-    if (!deep_open_ || stack_.empty()) return;
+    // Also render when only the on-screen keyboard is up (it takes over the
+    // screen below), so text entry works from the corner/radial quick menu too.
+    if ((!deep_open_ && !osk_active_) || stack_.empty()) return;
     s_menu_glow = glow_enabled_;
 
     const float W = static_cast<float>(screen_w);
