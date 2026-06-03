@@ -1408,9 +1408,15 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             face_editor_.set_brush_size(face_editor_.brush_size() + 1);
         if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))  face_editor_.cycle_palette(-1);
         if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) face_editor_.cycle_palette(+1);
+        // Press EDGE fires primary() exactly once; holding the button paints a
+        // drag stroke (freehand brushes only). Using IsMouseDown for the
+        // primary action re-fired it every frame, which corrupted the two-step
+        // tools (Line / Rect / Eye Region) — a single click would set then
+        // immediately clear the anchor.
         const ImVec2 mp = ImGui::GetMousePos();
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) face_editor_.mouse_down(mp.x, mp.y);
-        else                                            face_editor_.mouse_move(mp.x, mp.y);
+        if      (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) face_editor_.mouse_down(mp.x, mp.y);
+        else if (ImGui::IsMouseDown   (ImGuiMouseButton_Left)) face_editor_.mouse_drag(mp.x, mp.y);
+        else                                                   face_editor_.mouse_move(mp.x, mp.y);
 
         face_editor_.draw(dl, font, fs, W, H, accent_color_);
         ImGui::End();

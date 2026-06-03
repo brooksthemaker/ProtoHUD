@@ -100,8 +100,12 @@ public:
 
     // Mouse helpers — caller passes ImGui::GetMousePos relative to the
     // window origin (typically (0,0) at top-left of the framebuffer).
+    // mouse_down is the press EDGE (fires primary() once); mouse_drag is a
+    // held-button move (paints a stroke for freehand brushes only — two-step
+    // and point tools ignore it so a single click can't re-fire primary()).
     void mouse_move (float mouse_x, float mouse_y);
     void mouse_down (float mouse_x, float mouse_y);
+    void mouse_drag (float mouse_x, float mouse_y);
 
     const std::string& current_dir() const { return abs_path_; }
 

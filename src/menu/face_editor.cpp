@@ -455,6 +455,24 @@ void FaceEditor::mouse_down(float mx, float my) {
     primary();
 }
 
+// Held-button drag. Only the freehand brushes paint on drag (continuing the
+// stroke that the press-edge primary() began, so no extra undo entries and no
+// re-triggered anchor/commit on two-step tools). Other tools just track the
+// cursor so the live preview follows the pointer.
+void FaceEditor::mouse_drag(float mx, float my) {
+    if (!open_) return;
+    if (tool_ != Tool::Pencil && tool_ != Tool::Eraser) { mouse_move(mx, my); return; }
+    const int px = cursor_x_, py = cursor_y_;
+    mouse_move(mx, my);
+    if (cursor_x_ == px && cursor_y_ == py) return;   // same cell — nothing to add
+    draw_line(px, py, cursor_x_, cursor_y_);          // connect cells, brush-aware
+    if (mirror_) {
+        const int axis = (mirror_axis_x_ >= 0)
+            ? (2 * mirror_axis_x_ - 1) : (2 * bbox_.x + bbox_.width - 1);
+        draw_line(axis - px, py, axis - cursor_x_, cursor_y_);
+    }
+}
+
 void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                       float W, float H, ImU32 accent) {
     if (!open_) return;
