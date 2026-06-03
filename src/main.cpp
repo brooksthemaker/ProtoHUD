@@ -8170,7 +8170,12 @@ static std::vector<MenuItem> build_menu(
         std::move(gpio_buttons_item),
         with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
                   "Poll the face controller for a fresh status frame."),
-        [&]() -> MenuItem {
+        with_desc(submenu("Demo Mode",  std::move(demo_menu)),
+                  "Cycle prefab scenes for screenshots / video."),
+    };
+
+    // ── Communications: LoRa + Phone (KDE Connect) + Notification Log ─────────
+    MenuItem phone_item = [&]() -> MenuItem {
             // ── Phone (KDE Connect) ───────────────────────────────────────────
             // Ring the phone + edit the ignore list (mute servers/chats) and the
             // message-apps list (which apps get the big chat toast), from the HUD.
@@ -8243,8 +8248,8 @@ static std::vector<MenuItem> build_menu(
                 "message, held longer). Select an entry to remove it."));
             return with_desc(submenu("Phone (KDE Connect)", std::move(phone_menu)),
                 "Ring the phone, pick which apps get the big chat toast, and mute servers.");
-        }(),
-        [&]() -> MenuItem {
+    }();
+    MenuItem notiflog_item = [&]() -> MenuItem {
             // ── Notification Log browser ──────────────────────────────────────
             // Look through past notifications, filtered by type and/or sender.
             auto type_opt = [&leaf_sel, &state](const char* lbl, int t){
@@ -8315,10 +8320,12 @@ static std::vector<MenuItem> build_menu(
 
             return with_desc(submenu("Notification Log", std::move(nlog_menu)),
                 "Browse past notifications, filtered by type and/or sender.");
-        }(),
-        with_desc(submenu("Demo Mode",  std::move(demo_menu)),
-                  "Cycle prefab scenes for screenshots / video."),
-    };
+    }();
+    std::vector<MenuItem> communications_menu;
+    communications_menu.push_back(with_desc(submenu("LoRa", std::move(lora_menu)),
+        "Long-range radio: team nodes, messages and status."));
+    communications_menu.push_back(std::move(phone_item));
+    communications_menu.push_back(std::move(notiflog_item));
 
     // Audio submenu wrapped with its existing live-status context panel.
     MenuItem audio_item = with_panel(
@@ -8674,8 +8681,9 @@ static std::vector<MenuItem> build_menu(
                   "landing-page backgrounds. Face / mouth / boop PNGs live "
                   "under Face Display > Protoface > Faces — they're tied to "
                   "the active face backend (MAX7219 / RGB matrix)."),
-        with_desc(submenu("LoRa",         std::move(lora_menu)),
-                  "Long-range radio: team nodes, messages and status."),
+        with_desc(submenu("Communications", std::move(communications_menu)),
+                  "Radio + phone: LoRa team mesh, KDE Connect phone, and the "
+                  "notification log."),
         with_desc(submenu("System",       std::move(system_menu)),
                   "Display, audio, connectivity, Pi settings, timers, "
                   "diagnostics, profiles & power."),
