@@ -1359,6 +1359,10 @@ static std::vector<MenuItem> build_menu(
         // "gradient:…" spec to the live renderer for instant preview.
         PfGradient* pf_gradient_p = nullptr,
         std::function<void(const std::string&)> pf_set_material = nullptr,
+        // Restart the native HUB75 panel pusher (scripts/panel_driver.py) to
+        // recover the face feed after a GPIO conflict, without restarting all of
+        // ProtoHUD. No-op outside native HUB75 mode.
+        std::function<void()> pf_restart_renderer = nullptr,
         // Configurable GPIO switch map: array of assignable pin slots + count,
         // and the master enable flag. Edited in the GPIO Buttons menu; applied
         // on the next launch (the poller is built from these at startup).
@@ -4875,6 +4879,23 @@ static std::vector<MenuItem> build_menu(
                   "backend; the HUD keeps running through the transition. "
                   "Persists to config.json so the next launch starts here."),
     };
+    if (pf_restart_renderer) {
+        MenuItem rr = with_desc(leaf("Restart Face Renderer", [pf_restart_renderer, state_ptr]{
+            pf_restart_renderer();
+            if (!state_ptr) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            Notification n; n.type = NotifType::App;
+            n.title = "Face renderer restarted";
+            n.body  = "Relaunched the HUB75 panel driver";
+            n.auto_dismiss_s = 4.f;
+            state_ptr->notifs.push(std::move(n));
+        }),
+            "Kill + relaunch the HUB75 panel pusher to recover the face feed "
+            "(e.g. after the live GPIO read stole a panel pin), without "
+            "restarting ProtoHUD.");
+        rr.visible_fn = [pf_backend_p]{ return !pf_backend_p || *pf_backend_p == "hub75"; };
+        pf_hardware_menu.push_back(std::move(rr));
+    }
 
     // The chain layout config used to live under Hardware, but it's really a
     // face-authoring concern (it shapes the editor's bbox guides), so it now
@@ -7100,8 +7121,13 @@ static std::vector<MenuItem> build_menu(
             static sys::GpioInputReader reader;
             static bool reader_attempted = false;
             if (gpvz_draw->show_live_state && !reader_attempted) {
+                // Only request lines NOT already claimed by another subsystem.
+                // Requesting a pin piomatter is driving (HUB75 panels) steals it
+                // and blanks the face — so skip anything in the claims map.
                 std::vector<int> wanted;
-                for (int i = 0; i < 28; ++i) wanted.push_back(i);  // BCM 0..27
+                for (int i = 0; i < 28; ++i)
+                    if (claims.claimants.find(i) == claims.claimants.end())
+                        wanted.push_back(i);  // free BCM line
                 reader.open(wanted);
                 reader_attempted = true;
             }
@@ -8559,6 +8585,33 @@ static std::vector<MenuItem> build_menu(
             n.auto_dismiss_s = 4.f;
             state.notifs.push(std::move(n));
         }) });
+        // Diagnostics — quick recovery actions (CSI reinit + face-renderer restart).
+        {
+            std::vector<MenuItem> diag;
+            diag.push_back(with_desc(leaf("Reinit CSI Cameras", [cameras, &state]{
+                const bool ok = cameras->reinit_owls();
+                const bool lok = cameras->owl_left_ok(), rok = cameras->owl_right_ok();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "CSI cameras reinitialized" : "CSI reinit: no camera";
+                char b[64]; snprintf(b, sizeof(b), "Left %s  \xC2\xB7  Right %s",
+                                     lok ? "OK" : "\xE2\x80\x94", rok ? "OK" : "\xE2\x80\x94");
+                n.body = b; n.auto_dismiss_s = 5.f; state.notifs.push(std::move(n));
+            }), "Re-enumerate + restart the CSI cameras to recover a dark eye."));
+            if (pf_restart_renderer) {
+                MenuItem rf = with_desc(leaf("Restart Face Renderer", [pf_restart_renderer, state_ptr]{
+                    pf_restart_renderer();
+                    if (!state_ptr) return;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    Notification n; n.type = NotifType::App; n.title = "Face renderer restarted";
+                    n.body = "Relaunched the HUB75 panel driver"; n.auto_dismiss_s = 4.f;
+                    state_ptr->notifs.push(std::move(n));
+                }), "Kill + relaunch the HUB75 panel pusher to recover the face feed.");
+                rf.visible_fn = [pf_backend_p]{ return !pf_backend_p || *pf_backend_p == "hub75"; };
+                diag.push_back(std::move(rf));
+            }
+            catalog.push_back({ "diagnostics", submenu("Diagnostics", std::move(diag)) });
+        }
 
         // Pinned catalog items appear in the quick menu, gated on the favorites set.
         for (auto& f : catalog) {
@@ -10093,6 +10146,14 @@ int main(int argc, char* argv[]) {
         state.health.cam_usb3      = cameras.usb3_ok();
     }
 
+    // CSI boot auto-retry: a sensor that comes up wedged at boot leaves one eye
+    // dark until a reboot. Attempt reinit_owls() a few times early on (from the
+    // render loop, on the render thread) to recover it. csi_expected lets a mono
+    // build set 1 so it never retries a "missing" second camera it doesn't have.
+    int       csi_retries_left = jval(jcam, "csi_boot_retries", 2);
+    const int csi_expected     = std::clamp(jval(jcam, "csi_expected", 2), 0, 2);
+    auto      csi_next_retry   = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+
     // Startup autofocus
     bool af_on_startup = false;
     if (cfg.contains("camera"))
@@ -10804,6 +10865,13 @@ int main(int argc, char* argv[]) {
                                /* pf_gradient */ &pf_gradient,
                                /* pf_set_material */ [&](const std::string& spec){
                                    if (native_ctrl) native_ctrl->set_material_spec(spec);
+                               },
+                               /* pf_restart_renderer */ [&]{
+                                   if (!pf_launch_driver || pf_backend != "hub75" || !native_ctrl) return;
+                                   int gpw = 64, gph = 32, gchain = 2, gpar = 1;
+                                   pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
+                                   pf_launch_panel_driver(bin_dir, native_ctrl->canvas_width(),
+                                       native_ctrl->canvas_height(), gpw, gph, gchain, gpar);
                                },
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
                                &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr,
@@ -11918,6 +11986,21 @@ int main(int argc, char* argv[]) {
         double now = glfwGetTime();
         float  dt  = static_cast<float>(now - prev_time);
         prev_time  = now;
+
+        // ── CSI boot auto-retry ───────────────────────────────────────────────
+        // Recover a CSI eye that came up wedged at boot. Runs on the render
+        // thread (DmaCamera::init needs the GL context, which is current here).
+        if (csi_retries_left > 0) {
+            const int up = (cameras.owl_left_ok() ? 1 : 0) + (cameras.owl_right_ok() ? 1 : 0);
+            if (up >= csi_expected) {
+                csi_retries_left = 0;   // all expected eyes are up
+            } else if (std::chrono::steady_clock::now() >= csi_next_retry) {
+                std::cout << "[cam] CSI auto-retry (" << csi_retries_left << " left)\n";
+                cameras.reinit_owls();
+                --csi_retries_left;
+                csi_next_retry = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            }
+        }
 
         // ── Start frame: tick HUD state + begin ImGui for input/menu ─────────
         hud.set_dt(dt);
