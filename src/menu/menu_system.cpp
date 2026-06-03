@@ -354,6 +354,7 @@ void MenuSystem::open_face_editor(std::string title,
                                   int mirror_axis_x,
                                   menu::FaceEditor::Mode mode,
                                   std::vector<uint32_t> palette,
+                                  std::vector<cv::Rect> eye_regions,
                                   menu::FaceEditor::CommitFn on_commit,
                                   menu::FaceEditor::CancelFn on_cancel,
                                   menu::FaceEditor::PreviewFn on_preview,
@@ -368,6 +369,7 @@ void MenuSystem::open_face_editor(std::string title,
                       std::move(covered_labels),
                       mirror_axis_x,
                       mode, std::move(palette),
+                      std::move(eye_regions),
                       std::move(on_commit), std::move(on_cancel),
                       std::move(on_preview), std::move(live_frame),
                       preview_duration_s);
@@ -1389,6 +1391,7 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
         if (ImGui::IsKeyPressed(ImGuiKey_4))          face_editor_.set_tool(menu::FaceEditor::Tool::Eyedrop);
         if (ImGui::IsKeyPressed(ImGuiKey_5))          face_editor_.set_tool(menu::FaceEditor::Tool::Line);
         if (ImGui::IsKeyPressed(ImGuiKey_6))          face_editor_.set_tool(menu::FaceEditor::Tool::Rect);
+        if (ImGui::IsKeyPressed(ImGuiKey_7))          face_editor_.set_tool(menu::FaceEditor::Tool::EyeBox);
         if (ImGui::IsKeyPressed(ImGuiKey_P))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
         if (ImGui::IsKeyPressed(ImGuiKey_E))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
         if (ImGui::IsKeyPressed(ImGuiKey_B))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);

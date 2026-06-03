@@ -10968,6 +10968,29 @@ int main(int argc, char* argv[]) {
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
 
+        // Preload any blink eye-region boxes from the face folder's config.json
+        // (canvas coords) so the editor shows them and round-trips them on save.
+        std::vector<cv::Rect> eye_regions;
+        {
+            const fs::path cfgp = fs::path(abs_path).parent_path() / "config.json";
+            std::ifstream ef(cfgp);
+            if (ef) {
+                try {
+                    json ej; ef >> ej;
+                    auto rd = [&](const char* k){
+                        if (ej.contains(k) && ej[k].is_object()) {
+                            const auto& d = ej[k];
+                            eye_regions.emplace_back(
+                                d.value("x", 0), d.value("y", 0),
+                                std::max(1, d.value("w", 1)),
+                                std::max(1, d.value("h", 1)));
+                        }
+                    };
+                    rd("eye_left"); rd("eye_right");
+                } catch (...) {}
+            }
+        }
+
         const menu::FaceEditor::Mode mode =
             (pf_backend == "rgb_matrix") ? menu::FaceEditor::Mode::Color
                                          : menu::FaceEditor::Mode::Mono;
@@ -10980,8 +11003,10 @@ int main(int argc, char* argv[]) {
             title, abs_path, cw, ch, std::move(covered), std::move(labels),
             zones.mirror_x,
             mode, {} /* default palette */,
+            std::move(eye_regions),
             /* on_commit */ [&face_proxy, &native_ctrl, expression]
-                (const cv::Mat& rgba_canvas, const std::string& target_path) {
+                (const cv::Mat& rgba_canvas, const std::string& target_path,
+                 const std::vector<cv::Rect>& eye_regions) {
                 // Convert RGBA back to BGRA for cv::imwrite (PNG storage
                 // expects native channel order in OpenCV).
                 cv::Mat bgra;
@@ -10996,6 +11021,28 @@ int main(int argc, char* argv[]) {
                     std::fprintf(stderr, "[editor] save failed: %s\n",
                                  target_path.c_str());
                     return;
+                }
+                // Persist blink eye regions (canvas coords) into the face
+                // folder's config.json, merging so expressions/blink keys are
+                // preserved. The loader maps these onto each panel slice; a
+                // proper region blink only closes the eye(s) inside these boxes.
+                if (!eye_regions.empty()) {
+                    const std::filesystem::path cfgp =
+                        std::filesystem::path(target_path).parent_path() / "config.json";
+                    json ej = json::object();
+                    { std::ifstream ef(cfgp);
+                      if (ef) { try { ef >> ej; } catch (...) { ej = json::object(); } }
+                      if (!ej.is_object()) ej = json::object(); }
+                    auto wr = [&](const char* k, const cv::Rect& r){
+                        ej[k] = {{"x", r.x}, {"y", r.y}, {"w", r.width}, {"h", r.height}};
+                    };
+                    wr("eye_left", eye_regions[0]);
+                    if (eye_regions.size() > 1) wr("eye_right", eye_regions[1]);
+                    // draw_size lets single-panel faces scale regions; multi-
+                    // panel slices use canvas coords directly (ignored there).
+                    ej["draw_size"] = {rgba_canvas.cols, rgba_canvas.rows};
+                    std::ofstream of(cfgp);
+                    if (of) of << ej.dump(2);
                 }
                 // Rebuild the face loader so the new PNG shows up immediately
                 // — then pop the saved expression on-face so the user sees

@@ -118,12 +118,27 @@ void FaceLoader::load() {
         double dh = cfg["draw_size"][1].get<double>();
         if (dw > 0 && dh > 0) { sx = w_ / dw; sy = h_ / dh; }
     }
+    // When this loader is a slice of a wider canvas (multi-panel HUB75 face),
+    // eye/mouth regions are authored in CANVAS pixels — the same space the
+    // editor paints in. The face image is resized to the full canvas then this
+    // panel's [src_x_,src_y_,w_,h_] rect is cropped 1:1 (see load_img), so a
+    // canvas-space box maps to panel-local by simply subtracting the slice
+    // origin — no scaling. blend_region then clamps boxes that fall off this
+    // panel (e.g. the eye that lives on the other panel) to nothing.
+    const bool canvas_coords = (src_w_ > w_ && src_h_ > 0);
     auto parse_region = [&](const json& d) {
         Region r;
-        r.x = static_cast<int>(std::lround(d.value("x", 0) * sx));
-        r.y = static_cast<int>(std::lround(d.value("y", 0) * sy));
-        r.w = std::max(1, static_cast<int>(std::lround(d.value("w", 1) * sx)));
-        r.h = std::max(1, static_cast<int>(std::lround(d.value("h", 1) * sy)));
+        if (canvas_coords) {
+            r.x = static_cast<int>(std::lround(d.value("x", 0))) - src_x_;
+            r.y = static_cast<int>(std::lround(d.value("y", 0))) - src_y_;
+            r.w = std::max(1, static_cast<int>(std::lround(d.value("w", 1))));
+            r.h = std::max(1, static_cast<int>(std::lround(d.value("h", 1))));
+        } else {
+            r.x = static_cast<int>(std::lround(d.value("x", 0) * sx));
+            r.y = static_cast<int>(std::lround(d.value("y", 0) * sy));
+            r.w = std::max(1, static_cast<int>(std::lround(d.value("w", 1) * sx)));
+            r.h = std::max(1, static_cast<int>(std::lround(d.value("h", 1) * sy)));
+        }
         r.set = true;
         return r;
     };
@@ -168,15 +183,21 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
     // 2. Blink.
     double bw = std::clamp(state.blink_weight(), 0.0, 1.0);
     if (bw > 0.0 && !blink_.empty()) {
-        if (!whole_face_blink_ && (eye_left_.set || eye_right_.set)) {
+        if (eye_left_.set || eye_right_.set) {
+            // Region blink: cross-fade ONLY the eye box(es) from the open
+            // expression to the blink art, so the open eye is replaced (it
+            // closes) while the mouth/nose outside the boxes are untouched.
+            // Used in both single- and multi-panel mode whenever eye regions
+            // are defined — the boxes are mapped to this panel's slice above.
             if (eye_left_.set)  frame = blend_region(frame, blink_, eye_left_,  bw);
             if (eye_right_.set) frame = blend_region(frame, blink_, eye_right_, bw);
         } else {
-            // Whole-face blink: alpha-composite the blink canvas over the face
-            // using the blink PNG's own alpha (scaled by bw). Transparent areas
-            // (mouth, nose, everything that isn't the drawn eye) keep the live
-            // face instead of being wiped to the blink canvas's empty
-            // background — which is what made the mouth/nose vanish mid-blink.
+            // No eye regions defined → fall back to a whole-face alpha
+            // composite of the blink canvas over the face using the blink
+            // PNG's own alpha (scaled by bw). Transparent areas keep the live
+            // face. NOTE: this can't *close* an open eye that extends past the
+            // blink art (the blink only adds pixels, never removes the open
+            // eye), so define eye regions in the editor for a proper blink.
             // Both images are RGBA at this loader's panel size.
             if (blink_.size() == frame.size() && blink_.type() == CV_8UC4) {
                 for (int y = 0; y < frame.rows; ++y) {

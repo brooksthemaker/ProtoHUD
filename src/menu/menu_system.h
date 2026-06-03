@@ -290,6 +290,7 @@ public:
                           int mirror_axis_x,
                           menu::FaceEditor::Mode mode,
                           std::vector<uint32_t> palette,
+                          std::vector<cv::Rect> eye_regions,
                           menu::FaceEditor::CommitFn on_commit,
                           menu::FaceEditor::CancelFn on_cancel = {},
                           menu::FaceEditor::PreviewFn on_preview = {},
