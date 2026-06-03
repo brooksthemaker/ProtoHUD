@@ -793,7 +793,9 @@ ProtoHUD has a built-in **KDE Connect bridge** that pulls phone notifications an
 | Feature | Where it shows up |
 |---------|-------------------|
 | Phone notifications | Toast on the HUD + entry in the notification log (same pipeline as scheduler reminders) |
-| Phone battery % | Outer arc on the minimap battery gauge with a `P` / `P+` prefix (P+ = charging) |
+| Chat / DM messages | Larger toast (sender as the title, full message wrapped below) that stays up ~14 s. Apps treated as messaging are set by `message_apps`; mute servers/chats by name with `ignore_list` |
+| Phone battery % | Outer arc on the minimap battery gauge with a `P` / `P+` prefix (P+ = charging). When the CPU/GPU debug gauges are on, it stacks as a third **light-blue** arc so it stays visible |
+| Ring my phone | **System → Ring My Phone** fires KDE Connect's findmyphone plugin so the phone plays its ringtone — handy for locating it |
 | File drops | Toast: *"Got happy.png — import as 'happy'?"* → Import / Dismiss buttons. PNGs go to faces; GIFs are copied into `gifs_dir` and bound to the first empty slot |
 
 ### Setup
@@ -834,7 +836,10 @@ If you launch ProtoHUD directly from a terminal this step is unnecessary — the
   "enabled": true,
   "device_id": "",                   // empty → first paired+reachable
   "auto_dismiss_s": 8.0,
-  "app_blocklist": "KDE Connect"     // CSV, case-insensitive substring match on appName
+  "app_blocklist": "KDE Connect",    // CSV, case-insensitive substring match on appName
+  "message_apps": "Discord,Messages,Messenger,Signal,WhatsApp,Telegram,SMS,Slack",
+                                     // CSV of apps that get the larger chat toast
+  "ignore_list": ""                  // CSV; drop notifications whose title/text contains any (mute servers)
 },
 "phone_inbox": {
   "enabled": true,

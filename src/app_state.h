@@ -623,6 +623,7 @@ struct Notification {
     float       auto_dismiss_s = 8.f;  // 0 = manual only
     bool        read         = false;
     bool        dismissed    = false;
+    bool        big          = false;  // render a larger toast (wrapped body) — chat/DM messages
     std::string icon;                  // optional icon asset name; empty → by type
     std::vector<NotifAction> actions;
 };

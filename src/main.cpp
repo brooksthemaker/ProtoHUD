@@ -1368,7 +1368,8 @@ static std::vector<MenuItem> build_menu(
         // Rebuilds the GPIO poller from the live slots so menu edits apply
         // without a relaunch. Shared so main can install it after the poller
         // (which the menu is built before) exists.
-        std::shared_ptr<std::function<void()>> gpio_reload = nullptr)
+        std::shared_ptr<std::function<void()>> gpio_reload = nullptr,
+        integrations::KdeConnectBridge* kdc_p = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -8115,6 +8116,19 @@ static std::vector<MenuItem> build_menu(
         std::move(gpio_buttons_item),
         with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
                   "Poll the face controller for a fresh status frame."),
+        with_desc(leaf("Ring My Phone", [kdc_p, &state]{
+                      const bool ok = kdc_p && kdc_p->ring_phone();
+                      std::lock_guard<std::mutex> lk(state.mtx);
+                      Notification n;
+                      n.type = NotifType::App; n.icon = "message";
+                      n.title = ok ? "Ringing phone\xE2\x80\xA6" : "Phone not connected";
+                      n.body  = ok ? "KDE Connect \xC2\xB7 findmyphone"
+                                   : "Pair a device in the KDE Connect app first";
+                      n.auto_dismiss_s = 4.f;
+                      state.notifs.push(std::move(n));
+                  }),
+                  "Ring the paired phone (KDE Connect findmyphone) so it plays its "
+                  "ringtone \xE2\x80\x94 handy for locating it."),
         with_desc(submenu("Demo Mode",  std::move(demo_menu)),
                   "Cycle prefab scenes for screenshots / video."),
     };
@@ -9087,6 +9101,8 @@ int main(int argc, char* argv[]) {
         kdc_cfg.device_id      = jk.value("device_id",      kdc_cfg.device_id);
         kdc_cfg.auto_dismiss_s = jval(jk, "auto_dismiss_s", kdc_cfg.auto_dismiss_s);
         kdc_cfg.app_blocklist  = jk.value("app_blocklist",  kdc_cfg.app_blocklist);
+        kdc_cfg.message_apps   = jk.value("message_apps",   kdc_cfg.message_apps);
+        kdc_cfg.ignore_list    = jk.value("ignore_list",    kdc_cfg.ignore_list);
     }
 
     // Phone Inbox — watches a directory (default ~/Downloads) for files
@@ -9768,9 +9784,13 @@ int main(int argc, char* argv[]) {
     // KDE Connect bridge — RX phone notifications, pushed into AppState::notifs.
     // Optional (gated by HAVE_DBUS at build time + cfg.enabled at runtime); silent
     // no-op when the daemon isn't running so it doesn't spam logs on dev hosts.
+    // Visible to the menu regardless of HAVE_DBUS (the header is dbus-free);
+    // stays null when the bridge isn't compiled in, so "Ring My Phone" no-ops.
+    integrations::KdeConnectBridge* kdc_menu_ptr = nullptr;
 #ifdef HAVE_DBUS
     const bool kdc_enabled = kdc_cfg.enabled;
     integrations::KdeConnectBridge kdc(state, std::move(kdc_cfg));
+    kdc_menu_ptr = &kdc;
     if (kdc_enabled) {
         if (!kdc.start())
             std::cout << "[kdeconnect] disabled (failed to attach to session bus)\n";
@@ -10585,7 +10605,7 @@ int main(int argc, char* argv[]) {
                                    if (native_ctrl) native_ctrl->set_material_spec(spec);
                                },
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
-                               &gpio_inputs_enabled, gpio_reload));
+                               &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 

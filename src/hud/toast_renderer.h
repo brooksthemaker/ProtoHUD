@@ -34,6 +34,8 @@ public:
 private:
     static constexpr float kToastW    = 340.f;
     static constexpr float kToastH    = 72.f;
+    static constexpr float kBigToastW = 460.f;   // chat/DM messages (wrapped body)
+    static constexpr float kBigToastH = 140.f;
     static constexpr float kGap       = 6.f;
     static constexpr float kMarginR   = 16.f;
     static constexpr float kMarginT   = 16.f;
