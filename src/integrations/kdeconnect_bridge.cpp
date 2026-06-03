@@ -237,8 +237,11 @@ void KdeConnectBridge::set_ignore_list(std::string csv) {
 }
 
 bool KdeConnectBridge::ring_phone() {
-    if (!running_.load() || !device_ok_.load()) return false;
-    ring_request_.store(true);   // worker picks it up on its next dispatch
+    if (!running_.load()) return false;
+    // Optimistic: set the request even if the device looks unreachable right now.
+    // The worker forces a fresh discovery and keeps trying for a few seconds, so a
+    // phone that just reconnected (e.g. woke from doze) still rings.
+    ring_request_.store(true);
     return true;
 }
 
@@ -469,18 +472,31 @@ void KdeConnectBridge::worker() {
             poll_battery();
         }
 
-        // Ring-my-phone request (from the menu) — fire the findmyphone plugin
-        // on the worker thread so the DBus connection stays single-owner.
-        if (ring_request_.exchange(false) && !current_dev_id.empty()) {
-            const std::string obj =
-                "/modules/kdeconnect/devices/" + current_dev_id + "/findmyphone";
-            DBusMessage* msg = dbus_message_new_method_call(
-                kKdeService, obj.c_str(), kFindMyPhoneIface, "ring");
-            if (msg) {
-                dbus_connection_send(conn, msg, nullptr);
-                dbus_connection_flush(conn);
-                dbus_message_unref(msg);
-                std::fprintf(stderr, "[kdeconnect] ring requested\n");
+        // Ring-my-phone request (from the menu) — fire the findmyphone plugin on
+        // the worker thread so the DBus connection stays single-owner. If no
+        // device is bound yet, force discovery and keep the request pending for a
+        // few seconds so a phone that just reconnected still rings.
+        if (ring_request_.load()) {
+            if (current_dev_id.empty()) {
+                next_discovery = now;                 // re-scan ASAP next loop
+                if (++ring_attempts_ > 15) {          // ~3 s of 200 ms loops — give up
+                    ring_request_.store(false);
+                    ring_attempts_ = 0;
+                    std::fprintf(stderr, "[kdeconnect] ring: no reachable device\n");
+                }
+            } else {
+                const std::string obj =
+                    "/modules/kdeconnect/devices/" + current_dev_id + "/findmyphone";
+                DBusMessage* msg = dbus_message_new_method_call(
+                    kKdeService, obj.c_str(), kFindMyPhoneIface, "ring");
+                if (msg) {
+                    dbus_connection_send(conn, msg, nullptr);
+                    dbus_connection_flush(conn);
+                    dbus_message_unref(msg);
+                    std::fprintf(stderr, "[kdeconnect] ring sent\n");
+                }
+                ring_request_.store(false);
+                ring_attempts_ = 0;
             }
         }
 

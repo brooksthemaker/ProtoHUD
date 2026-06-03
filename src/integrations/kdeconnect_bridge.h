@@ -89,6 +89,7 @@ private:
     std::atomic<bool>    daemon_ok_{false};
     std::atomic<bool>    device_ok_{false};
     std::atomic<bool>    ring_request_{false};   // menu → worker: ring the phone
+    int                  ring_attempts_ = 0;     // worker-only: retry budget while no device
 
     mutable std::mutex   info_mtx_;
     std::string          active_device_name_;

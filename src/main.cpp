@@ -8250,107 +8250,155 @@ static std::vector<MenuItem> build_menu(
                 "Ring the phone, pick which apps get the big chat toast, and mute servers.");
     }();
     MenuItem notiflog_item = [&]() -> MenuItem {
-            // ── Notification Log browser ──────────────────────────────────────
-            // Look through past notifications, filtered by type and/or sender.
-            auto type_opt = [&leaf_sel, &state](const char* lbl, int t){
-                return leaf_sel(lbl, [&state, t]{ state.notif_type_filter = t; },
-                                     [&state, t]{ return state.notif_type_filter == t; });
-            };
-            std::vector<MenuItem> type_menu = {
-                type_opt("All Types",     -1),
-                type_opt("Alarms",        static_cast<int>(NotifType::Alarm)),
-                type_opt("Timers",        static_cast<int>(NotifType::Timer)),
-                type_opt("LoRa",          static_cast<int>(NotifType::LoRa)),
-                type_opt("Phone / Apps",  static_cast<int>(NotifType::App)),
-            };
+        // ── Notification Log: grouped by sender, filterable, full text in panel ──
+        // Type filter (radio).
+        auto type_opt = [&leaf_sel, &state](const char* lbl, int t){
+            return leaf_sel(lbl, [&state, t]{ state.notif_type_filter = t; },
+                                 [&state, t]{ return state.notif_type_filter == t; });
+        };
+        std::vector<MenuItem> typ_menu = {
+            type_opt("All Types",    -1),
+            type_opt("Alarms",       static_cast<int>(NotifType::Alarm)),
+            type_opt("Timers",       static_cast<int>(NotifType::Timer)),
+            type_opt("LoRa",         static_cast<int>(NotifType::LoRa)),
+            type_opt("Phone / Apps", static_cast<int>(NotifType::App)),
+        };
+        MenuItem typ_item = submenu("Filter: Type", std::move(typ_menu));
+        typ_item.label_fn = [&state]{
+            const char* t = state.notif_type_filter < 0 ? "All"
+                : state.notif_type_filter == (int)NotifType::Alarm ? "Alarms"
+                : state.notif_type_filter == (int)NotifType::Timer ? "Timers"
+                : state.notif_type_filter == (int)NotifType::LoRa  ? "LoRa" : "Phone/Apps";
+            return std::string("Filter: Type  [") + t + "]";
+        };
 
-            std::vector<MenuItem> nlog_menu;
-            MenuItem type_item = submenu("Filter: Type", std::move(type_menu));
-            type_item.label_fn = [&state]{
-                const char* t = state.notif_type_filter < 0 ? "All"
-                    : state.notif_type_filter == (int)NotifType::Alarm ? "Alarms"
-                    : state.notif_type_filter == (int)NotifType::Timer ? "Timers"
-                    : state.notif_type_filter == (int)NotifType::LoRa  ? "LoRa" : "Phone/Apps";
-                return std::string("Filter: Type  [") + t + "]";
-            };
-            nlog_menu.push_back(with_desc(std::move(type_item),
-                "Show only notifications of the chosen type."));
+        // Distinct sender names currently in the log (sorted).
+        auto distinct_senders = [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            std::set<std::string> s;
+            for (const auto& n : state.notifs.items) if (!n.title.empty()) s.insert(n.title);
+            return std::vector<std::string>(s.begin(), s.end());
+        };
+        // Sender checklist (multi-select).
+        std::vector<MenuItem> snd_menu;
+        snd_menu.push_back(with_desc(leaf("Show All Senders", [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx); state.notif_sender_sel.clear();
+        }), "Clear the selection so every sender shows."));
+        for (int i = 0; i < 24; ++i) {
+            MenuItem m; m.type = MenuItemType::TOGGLE; m.label = "sender";
+            m.label_fn   = [distinct_senders, i]{
+                auto d = distinct_senders(); return i < (int)d.size() ? d[i] : std::string(); };
+            m.visible_fn = [distinct_senders, i]{ return i < (int)distinct_senders().size(); };
+            m.get_toggle = [distinct_senders, i, &state]{
+                auto d = distinct_senders(); if (i >= (int)d.size()) return false;
+                std::lock_guard<std::mutex> lk(state.mtx); return state.notif_sender_sel.count(d[i]) > 0; };
+            m.set_toggle = [distinct_senders, i, &state](bool v){
+                auto d = distinct_senders(); if (i >= (int)d.size()) return;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (v) state.notif_sender_sel.insert(d[i]); else state.notif_sender_sel.erase(d[i]); };
+            snd_menu.push_back(std::move(m));
+        }
+        MenuItem snd_item = submenu("Filter: Senders", std::move(snd_menu));
+        snd_item.label_fn = [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            return state.notif_sender_sel.empty()
+                ? std::string("Filter: Senders  [all]")
+                : std::string("Filter: Senders  [") + std::to_string(state.notif_sender_sel.size()) + "]";
+        };
 
-            MenuItem sender_item; sender_item.type = MenuItemType::LEAF;
-            sender_item.label = "Filter: Sender";
-            sender_item.label_fn = [&state]{
-                return state.notif_sender_filter.empty()
-                    ? std::string("Filter: Sender  [any]")
-                    : std::string("Filter: Sender  [") + state.notif_sender_filter + "]";
-            };
-            sender_item.action = [menu_sys_pp, &state]{
-                if (!menu_sys_pp || !*menu_sys_pp) return;
-                (*menu_sys_pp)->open_keyboard("Sender contains", state.notif_sender_filter,
-                    [&state](const std::string& s){ state.notif_sender_filter = s; });
-            };
-            sender_item.description = "Match a word in the notification's title / sender "
-                                      "(case-insensitive). Leave empty for any.";
-            nlog_menu.push_back(std::move(sender_item));
-
-            nlog_menu.push_back([&state]{
-                MenuItem c; c.type = MenuItemType::LEAF; c.label = "Clear Sender Filter";
-                c.action = [&state]{ state.notif_sender_filter.clear(); };
-                c.visible_fn = [&state]{ return !state.notif_sender_filter.empty(); };
-                return c;
-            }());
-
-            // Persist + clear.
-            nlog_menu.push_back(with_desc(toggle("Persist Log",
-                [&state]{ return state.notif_persist; },
-                [&state](bool v){ state.notif_persist = v; }),
-                "Save the notification log to disk so a sudden reboot doesn't lose it."));
-            nlog_menu.push_back(with_desc([&state]{
-                MenuItem c; c.type = MenuItemType::LEAF; c.label = "Clear Log";
-                c.action = [&state]{ std::lock_guard<std::mutex> lk(state.mtx); state.notifs.items.clear(); };
-                return c;
-            }(), "Remove every stored notification."));
-
-            // Scrollable, filtered message rows (newest first). The menu's own
-            // scrolling pages through them; the filter gates each row's visibility.
-            auto row_match = [&state](const Notification& n){
+        // Display order: queue indices passing the filters, grouped by sender
+        // (sender A-Z, newest first within each). Rebuilt only when something changes.
+        auto order     = std::make_shared<std::vector<int>>();
+        auto order_key = std::make_shared<size_t>(SIZE_MAX);
+        auto ensure_order = [&state, order, order_key]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            size_t key = static_cast<size_t>(state.notifs.next_id) * 1315423911u
+                       + static_cast<size_t>(state.notif_type_filter + 2) * 2654435761u
+                       + state.notifs.items.size();
+            for (const auto& s : state.notif_sender_sel)
+                key ^= std::hash<std::string>{}(s) + 0x9e3779b9u + (key << 6) + (key >> 2);
+            if (key == *order_key) return;
+            *order_key = key;
+            order->clear();
+            for (int i = 0; i < (int)state.notifs.items.size(); ++i) {
+                const auto& n = state.notifs.items[i];
                 if (state.notif_type_filter >= 0 &&
-                    static_cast<int>(n.type) != state.notif_type_filter) return false;
-                if (!state.notif_sender_filter.empty()) {
-                    std::string hay = n.title, nd = state.notif_sender_filter;
-                    std::transform(hay.begin(), hay.end(), hay.begin(),
-                                   [](unsigned char c){ return std::tolower(c); });
-                    std::transform(nd.begin(), nd.end(), nd.begin(),
-                                   [](unsigned char c){ return std::tolower(c); });
-                    if (hay.find(nd) == std::string::npos) return false;
-                }
-                return true;
-            };
-            for (int i = 0; i < NotificationQueue::kMax; ++i) {
-                MenuItem m; m.type = MenuItemType::LEAF; m.label = "msg";
-                m.label_fn = [&state, i]{
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    if (i >= static_cast<int>(state.notifs.items.size())) return std::string();
-                    const auto& n = state.notifs.items[i];
-                    char ts[8]; time_t t = static_cast<time_t>(n.timestamp);
-                    strftime(ts, sizeof(ts), "%H:%M", localtime(&t));
-                    const char* tag = n.type == NotifType::Alarm ? "A"
-                                    : n.type == NotifType::Timer ? "T"
-                                    : n.type == NotifType::LoRa  ? "L" : "P";
-                    std::string s = std::string(ts) + "  " + tag + "  " + n.title;
-                    if (!n.body.empty()) s += " \xE2\x80\x94 " + n.body;
-                    if (s.size() > 64) s = s.substr(0, 63) + "\xE2\x80\xA6";
-                    return s;
-                };
-                m.visible_fn = [&state, i, row_match]{
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    return i < static_cast<int>(state.notifs.items.size())
-                           && row_match(state.notifs.items[i]);
-                };
-                nlog_menu.push_back(std::move(m));
+                    static_cast<int>(n.type) != state.notif_type_filter) continue;
+                if (!state.notif_sender_sel.empty() && !state.notif_sender_sel.count(n.title)) continue;
+                order->push_back(i);
             }
+            std::stable_sort(order->begin(), order->end(), [&state](int a, int b){
+                const auto& na = state.notifs.items[a]; const auto& nb = state.notifs.items[b];
+                if (na.title != nb.title) return na.title < nb.title;
+                return a < b;   // newest-first within a sender (queue is newest-first)
+            });
+        };
 
-            return with_desc(submenu("Notification Log", std::move(nlog_menu)),
-                "Browse past notifications, filtered by type and/or sender.");
+        std::vector<MenuItem> nlog_menu;
+        // Fixed items (must stay 4 — the context panel maps cursor → row via -4).
+        nlog_menu.push_back(with_desc(toggle("Persist Log",
+            [&state]{ return state.notif_persist; },
+            [&state](bool v){ state.notif_persist = v; }),
+            "Save the log to disk so a sudden reboot doesn't lose it."));
+        nlog_menu.push_back(with_desc([&state]{
+            MenuItem c; c.type = MenuItemType::LEAF; c.label = "Clear Log";
+            c.action = [&state]{ std::lock_guard<std::mutex> lk(state.mtx); state.notifs.items.clear(); };
+            return c;
+        }(), "Remove every stored notification."));
+        nlog_menu.push_back(with_desc(std::move(typ_item), "Show only the chosen type."));
+        nlog_menu.push_back(with_desc(std::move(snd_item),
+            "Tick which senders to show. None ticked = all senders."));
+        // Message rows (grouped by sender, scrollable). Full text shows in the panel.
+        for (int i = 0; i < NotificationQueue::kMax; ++i) {
+            MenuItem m; m.type = MenuItemType::LEAF; m.label = "msg";
+            m.label_fn = [&state, order, ensure_order, i]{
+                ensure_order();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (i >= (int)order->size()) return std::string();
+                const int qi = (*order)[i];
+                if (qi >= (int)state.notifs.items.size()) return std::string();
+                const auto& n = state.notifs.items[qi];
+                std::string s = n.title;
+                if (!n.body.empty()) s += "  \xC2\xB7  " + n.body;
+                if (s.size() > 60) s = s.substr(0, 59) + "\xE2\x80\xA6";
+                return s;
+            };
+            m.visible_fn = [order, ensure_order, i]{ ensure_order(); return i < (int)order->size(); };
+            nlog_menu.push_back(std::move(m));
+        }
+        // Context panel: full text of the focused row.
+        auto panel = [&state, order, ensure_order, menu_sys_pp]
+                     (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            ImFont* font = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const int idx  = (menu_sys_pp && *menu_sys_pp) ? (*menu_sys_pp)->current_index() : -1;
+            const int slot = idx - 4;   // 4 fixed items precede the rows
+            ensure_order();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (slot < 0 || slot >= (int)order->size() ||
+                (*order)[slot] >= (int)state.notifs.items.size()) {
+                dl->AddText(font, fs * 0.8f, {o.x, o.y}, IM_COL32(170,176,184,220),
+                            "Scroll to a message to read it here.");
+                return;
+            }
+            const auto& n = state.notifs.items[(*order)[slot]];
+            float y = o.y;
+            dl->AddText(font, fs * 1.05f, {o.x, y}, IM_COL32(235,240,245,255), n.title.c_str());
+            y += fs * 1.3f;
+            if (n.timestamp > 0) {
+                char ts[24]; time_t t = (time_t)n.timestamp;
+                strftime(ts, sizeof(ts), "%a %H:%M", localtime(&t));
+                dl->AddText(font, fs * 0.7f, {o.x, y}, IM_COL32(150,158,166,210), ts);
+                y += fs * 1.2f;
+            }
+            if (!n.body.empty())
+                dl->AddText(font, fs * 0.85f, {o.x, y}, IM_COL32(210,214,220,235),
+                            n.body.c_str(), nullptr, sz.x - 6.f);   // wrapped
+        };
+        return with_panel(with_desc(submenu("Notification Log", std::move(nlog_menu)),
+            "Browse the log grouped by sender; scroll to a message to read its full "
+            "text on the right. Filter by type and tick senders to narrow it."),
+            "Message", panel);
     }();
     std::vector<MenuItem> communications_menu;
     communications_menu.push_back(with_desc(submenu("LoRa", std::move(lora_menu)),

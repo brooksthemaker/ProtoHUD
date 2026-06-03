@@ -829,7 +829,8 @@ struct AppState {
     // else a NotifType value; sender_filter is a case-insensitive substring on
     // the title (empty = any sender).
     int                  notif_type_filter = -1;
-    std::string          notif_sender_filter;
+    std::string          notif_sender_filter;          // legacy substring (unused by the checklist UI)
+    std::set<std::string> notif_sender_sel;            // checklist of senders to show (empty = all)
     bool                 notif_persist = true;   // persist the log to disk across reboots
 
     // Particle effects config (render-thread only)
