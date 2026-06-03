@@ -8512,6 +8512,40 @@ static std::vector<MenuItem> build_menu(
         nlog_menu.push_back(with_desc(std::move(snd_item),
             "Tick which senders to show. None ticked = all senders."));
         // Message rows (grouped by sender, scrollable). Full text shows in the panel.
+        // Draw a single notification (full text) into a panel — used by both the
+        // log preview and the per-row delete confirmation.
+        auto draw_one = [&state, order, ensure_order](ImDrawList* dl, ImVec2 o, ImVec2 sz,
+                                                      int slot, bool confirm){
+            ImFont* font = ImGui::GetFont(); const float fs = ImGui::GetFontSize();
+            ensure_order();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (slot < 0 || slot >= (int)order->size() ||
+                (*order)[slot] >= (int)state.notifs.items.size()) {
+                dl->AddText(font, fs * 0.8f, {o.x, o.y}, IM_COL32(170,176,184,220),
+                            "Scroll to a message.");
+                return;
+            }
+            const auto& n = state.notifs.items[(*order)[slot]];
+            float y = o.y;
+            if (confirm) {
+                dl->AddText(font, fs * 0.95f, {o.x, y}, IM_COL32(255,110,100,255),
+                            "Delete this message?");
+                y += fs * 1.4f;
+            }
+            dl->AddText(font, fs * 1.05f, {o.x, y}, IM_COL32(235,240,245,255), n.title.c_str());
+            y += fs * 1.3f;
+            if (n.timestamp > 0) {
+                char ts[24]; time_t t = (time_t)n.timestamp;
+                strftime(ts, sizeof(ts), "%a %H:%M", localtime(&t));
+                dl->AddText(font, fs * 0.7f, {o.x, y}, IM_COL32(150,158,166,210), ts);
+                y += fs * 1.2f;
+            }
+            if (!n.body.empty())
+                dl->AddText(font, fs * 0.85f, {o.x, y}, IM_COL32(210,214,220,235),
+                            n.body.c_str(), nullptr, sz.x - 6.f);
+        };
+        // Each row IS the quick-delete trigger: selecting it opens a confirmation
+        // (this submenu) with the message shown and Confirm Delete / Cancel.
         for (int i = 0; i < NotificationQueue::kMax; ++i) {
             MenuItem m; m.type = MenuItemType::SUBMENU; m.label = "msg";
             m.label_fn = [&state, order, ensure_order, i]{
@@ -8527,8 +8561,7 @@ static std::vector<MenuItem> build_menu(
                 return s;
             };
             m.visible_fn = [order, ensure_order, i]{ ensure_order(); return i < (int)order->size(); };
-            // Select a row to act on it: Delete removes just that message.
-            m.children.push_back(with_desc(leaf("Delete Message",
+            MenuItem confirm = leaf("Confirm Delete",
                 [&state, order, ensure_order, i, menu_sys_pp]{
                     ensure_order();
                     {
@@ -8540,7 +8573,14 @@ static std::vector<MenuItem> build_menu(
                         }
                     }
                     if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();   // back to the log
-                }), "Remove this one notification from the log."));
+                });
+            confirm.warn_fn = []{ return true; };   // red — destructive
+            MenuItem cancel = leaf("Cancel",
+                [menu_sys_pp]{ if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back(); });
+            m.children = { std::move(confirm), std::move(cancel) };
+            m.context_panel_title = "Delete?";
+            m.context_panel_draw  = [draw_one, i](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+                draw_one(dl, o, sz, i, true); };
             nlog_menu.push_back(std::move(m));
         }
         // Context panel: full text of the focused row.
