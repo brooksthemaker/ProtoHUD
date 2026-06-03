@@ -74,7 +74,15 @@ void NativeFaceController::build_panels() {
                 pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
                 pn.particles_spec = pc.particles;
             }
-            pn.gif = std::make_unique<GifPlayer>(pc.w, pc.h);
+            // GIFs play per physical panel (duplicated on each side) rather than
+            // stretched across the whole multi-panel canvas, so size the player
+            // to one physical panel when this is a one-logical-panel face.
+            int gw = pc.w, gh = pc.h;
+            if (!cfg_.output_panels.empty()) {
+                gw = cfg_.output_panels.front().w;
+                gh = cfg_.output_panels.front().h;
+            }
+            pn.gif = std::make_unique<GifPlayer>(gw, gh);
             pn.material_spec  = pc.material.active;
         } else {
             pn.is_mirror = true;
@@ -209,7 +217,24 @@ void NativeFaceController::render_thread() {
                     // Procedural eye animation owns the whole panel.
                     face_layer = render_eye_animation(eye_anim_, eye_anim_t_, pc.w, pc.h);
                 } else if (!gframe.empty()) {
-                    face_layer = gframe;
+                    if (!cfg_.output_panels.empty() &&
+                        (gframe.cols != pc.w || gframe.rows != pc.h)) {
+                        // Duplicate the panel-sized GIF onto each physical panel
+                        // instead of stretching one copy across the whole canvas.
+                        face_layer = cv::Mat::zeros(pc.h, pc.w, CV_8UC4);
+                        for (const auto& op : cfg_.output_panels) {
+                            cv::Mat g = gframe;
+                            if (gframe.cols != op.w || gframe.rows != op.h)
+                                cv::resize(gframe, g, cv::Size(op.w, op.h), 0, 0, cv::INTER_NEAREST);
+                            const cv::Rect dst(op.x - pc.x, op.y - pc.y, op.w, op.h);
+                            const cv::Rect inter = dst & cv::Rect(0, 0, pc.w, pc.h);
+                            if (inter.width > 0 && inter.height > 0)
+                                g(cv::Rect(inter.x - dst.x, inter.y - dst.y, inter.width, inter.height))
+                                    .copyTo(face_layer(inter));
+                        }
+                    } else {
+                        face_layer = gframe;
+                    }
                 } else if (!cfg_.effects_enabled || !pn.material) {
                     face_layer = pn.loader->get_frame(*pn.state);
                 } else {
