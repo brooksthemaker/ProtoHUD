@@ -64,6 +64,7 @@ void NativeFaceController::build_panels() {
             pn.loader = std::make_unique<FaceLoader>(
                 cfg_.faces_dir + "/" + pc.face.active, pc.w, pc.h,
                 cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
+            pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
             pn.state = std::make_unique<FaceState>(
                 pc.face, pn.loader->expression_names());
             pn.material = load_material(pc.material.active, pc.w, pc.h,
@@ -616,6 +617,7 @@ bool NativeFaceController::import_face_image(const std::string& expression,
         pn.loader = std::make_unique<FaceLoader>(
             cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h,
             cfg_.canvas_w, cfg_.canvas_h, pn.cfg.x, pn.cfg.y);
+        pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
     }
     return true;
 }
@@ -671,6 +673,7 @@ void NativeFaceController::clear_face_image(const std::string& expression) {
         pn.loader = std::make_unique<FaceLoader>(
             cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h,
             cfg_.canvas_w, cfg_.canvas_h, pn.cfg.x, pn.cfg.y);
+        pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
     }
 }
 
@@ -782,6 +785,7 @@ void NativeFaceController::reload_active_face() {
         pn.loader = std::make_unique<FaceLoader>(
             cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h,
             cfg_.canvas_w, cfg_.canvas_h, pn.cfg.x, pn.cfg.y);
+        pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
     }
 }
 

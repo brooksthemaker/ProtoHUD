@@ -168,7 +168,7 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
     // 2. Blink.
     double bw = std::clamp(state.blink_weight(), 0.0, 1.0);
     if (bw > 0.0 && !blink_.empty()) {
-        if (eye_left_.set || eye_right_.set) {
+        if (!whole_face_blink_ && (eye_left_.set || eye_right_.set)) {
             if (eye_left_.set)  frame = blend_region(frame, blink_, eye_left_,  bw);
             if (eye_right_.set) frame = blend_region(frame, blink_, eye_right_, bw);
         } else {

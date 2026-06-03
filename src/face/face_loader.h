@@ -38,6 +38,12 @@ public:
     int     panel_width()  const { return w_; }
     int     panel_height() const { return h_; }
 
+    // Force whole-image blink (crossfade the entire frame to blink.png) instead
+    // of per-eye region blink. Used for a multi-panel face rendered as one
+    // canvas, where any eye regions in config.json were authored for a single
+    // panel and would only cover one eye on the wide canvas.
+    void    set_whole_face_blink(bool b) { whole_face_blink_ = b; }
+
 private:
     struct Region { int x = 0, y = 0, w = 0, h = 0; bool set = false; };
 
@@ -51,6 +57,7 @@ private:
     std::string folder_;
     int w_, h_;
     int src_w_ = 0, src_h_ = 0, src_x_ = 0, src_y_ = 0;   // canvas this panel slices
+    bool whole_face_blink_ = false;
 
     std::map<std::string, cv::Mat> expressions_;   // name → RGBA (h,w)
     std::vector<std::string>       expr_order_;     // stable insertion order
