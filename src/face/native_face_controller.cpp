@@ -226,6 +226,13 @@ void NativeFaceController::render_thread() {
                             cv::Mat g = gframe;
                             if (gframe.cols != op.w || gframe.rows != op.h)
                                 cv::resize(gframe, g, cv::Size(op.w, op.h), 0, 0, cv::INTER_NEAREST);
+                            // Pre-flip so the per-panel output flip cancels out:
+                            // GIFs (which may contain text) read forwards on every
+                            // panel regardless of its mounting flip.
+                            if (op.flip_x || op.flip_y) {
+                                const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
+                                cv::Mat tmp; cv::flip(g, tmp, code); g = tmp;
+                            }
                             const cv::Rect dst(op.x - pc.x, op.y - pc.y, op.w, op.h);
                             const cv::Rect inter = dst & cv::Rect(0, 0, pc.w, pc.h);
                             if (inter.width > 0 && inter.height > 0)
