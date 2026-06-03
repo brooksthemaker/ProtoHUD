@@ -35,10 +35,17 @@ void QrScanner::submit_rgba(const uint8_t* rgba, int w, int h) {
         const uint8_t* p = rgba + i * 4;
         gray[i] = static_cast<uint8_t>((p[0] * 77 + p[1] * 150 + p[2] * 29) >> 8);
     }
-    submit_gray(std::move(gray), w, h);
+    // Keep the colour frame too so the callback can save a camera image.
+    std::vector<uint8_t> color(rgba, rgba + static_cast<size_t>(w) * h * 4);
+    submit_(std::move(gray), std::move(color), w, h);
 }
 
 void QrScanner::submit_gray(std::vector<uint8_t> gray, int w, int h) {
+    submit_(std::move(gray), {}, w, h);   // no colour frame
+}
+
+void QrScanner::submit_(std::vector<uint8_t> gray, std::vector<uint8_t> rgba,
+                        int w, int h) {
     // Rate limit on the calling thread — cheap check before acquiring any lock.
     auto now     = clock_t2::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -48,7 +55,7 @@ void QrScanner::submit_gray(std::vector<uint8_t> gray, int w, int h) {
 
     {
         std::lock_guard lk(mtx_);
-        pending_     = { std::move(gray), w, h };
+        pending_     = { std::move(gray), std::move(rgba), w, h };
         has_pending_ = true;
     }
     cv_.notify_one();
@@ -94,7 +101,8 @@ void QrScanner::worker() {
                 if (!duplicate) {
                     last_result_ = text;
                     last_found_  = now2;
-                    if (callback_) callback_(text, type, frame.gray, frame.w, frame.h);
+                    if (callback_)
+                        callback_(text, type, frame.gray, frame.rgba, frame.w, frame.h);
                 }
                 sym = zbar_symbol_next(sym);
             }

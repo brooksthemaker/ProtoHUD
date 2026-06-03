@@ -19,12 +19,14 @@
 // Call set_callback() before submit_*() — callback fires on the worker thread.
 class QrScanner {
 public:
-    // (text, symbol_type_name, gray, w, h) — gray is the grayscale frame the
-    // decode came from (the raw image the QR was captured from), so callers can
-    // persist it alongside the link.
+    // (text, symbol_type_name, gray, rgba, w, h) — gray is the grayscale frame
+    // the decode came from (what ZBar saw); rgba is the matching colour camera
+    // frame (4ch, may be empty if a caller submitted gray only). Both are the
+    // raw images the QR was captured from, for persisting alongside the link.
     using Callback = std::function<void(const std::string& text,
                                         const std::string& type,
                                         const std::vector<uint8_t>& gray,
+                                        const std::vector<uint8_t>& rgba,
                                         int w, int h)>;
 
     QrScanner();
@@ -42,8 +44,14 @@ public:
 
 private:
     void worker();
+    // Shared rate-limit + enqueue used by submit_gray / submit_rgba.
+    void submit_(std::vector<uint8_t> gray, std::vector<uint8_t> rgba, int w, int h);
 
-    struct Frame { std::vector<uint8_t> gray; int w = 0, h = 0; };
+    struct Frame {
+        std::vector<uint8_t> gray;          // grayscale (what ZBar decodes)
+        std::vector<uint8_t> rgba;          // matching colour frame (4ch); may be empty
+        int w = 0, h = 0;
+    };
 
     Callback   callback_;
     int        scan_interval_ms_ = 500;
@@ -67,6 +75,7 @@ private:
 class QrScanner {
 public:
     using Callback = std::function<void(const std::string&, const std::string&,
+                                        const std::vector<uint8_t>&,
                                         const std::vector<uint8_t>&, int, int)>;
     void set_callback(Callback)         {}
     void set_scan_interval_ms(int)      {}

@@ -690,7 +690,8 @@ struct QrCapture {
     std::string type;            // symbol type, e.g. "QR-Code"
     int64_t     timestamp = 0;   // epoch seconds first captured
     std::string folder;          // absolute path to this capture's folder
-    std::string image;           // image filename within the folder (e.g. capture.png)
+    std::string image;           // colour camera frame filename (preview); may be empty
+    std::string decode;          // grayscale decode frame filename (what ZBar saw)
 };
 
 struct QrCaptureLog {

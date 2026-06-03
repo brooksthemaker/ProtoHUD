@@ -1303,7 +1303,7 @@ static void qr_write_index(const std::string& qr_dir, const QrCaptureLog& log) {
     json arr = json::array();
     for (const auto& c : log.items)
         arr.push_back({{"text", c.text}, {"type", c.type}, {"ts", c.timestamp},
-                       {"folder", c.folder}, {"image", c.image}});
+                       {"folder", c.folder}, {"image", c.image}, {"decode", c.decode}});
     std::error_code ec;
     std::filesystem::create_directories(qr_dir, ec);
     std::ofstream f(std::filesystem::path(qr_dir) / "index.json");
@@ -8712,9 +8712,11 @@ static std::vector<MenuItem> build_menu(
                 return;
             }
             float y = o.y;
+            // Prefer the colour camera frame; fall back to the grayscale decode.
             std::string ipath;
-            if (!c.folder.empty() && !c.image.empty())
-                ipath = (std::filesystem::path(c.folder) / c.image).string();
+            const std::string& fn = !c.image.empty() ? c.image : c.decode;
+            if (!c.folder.empty() && !fn.empty())
+                ipath = (std::filesystem::path(c.folder) / fn).string();
             if (!ipath.empty()) {
                 if (ipath != thumb->loaded) {
                     thumb->img = face::load_png_rgba(ipath, 240, 180);
@@ -10922,6 +10924,7 @@ int main(int argc, char* argv[]) {
                         c.timestamp = e.value("ts", static_cast<int64_t>(0));
                         c.folder    = e.value("folder", std::string());
                         c.image     = e.value("image", std::string());
+                        c.decode    = e.value("decode", std::string());
                         if (!c.text.empty()) state.qr_captures.items.push_back(std::move(c));
                     }
             } catch (...) {}
@@ -10933,6 +10936,7 @@ int main(int argc, char* argv[]) {
     qr_scanner.set_callback([&state, qr_dir](const std::string& text,
                                              const std::string& type,
                                              const std::vector<uint8_t>& gray,
+                                             const std::vector<uint8_t>& rgba,
                                              int w, int h) {
         // Honour mute window (set by "MUTE 1m" action)
         if (static_cast<int64_t>(time(nullptr)) < state.qr_mute_until_s.load()) return;
@@ -10965,14 +10969,23 @@ int main(int argc, char* argv[]) {
             fs::create_directories(folder, ec);
             cap.folder = folder.string();
             { std::ofstream lf(folder / "link.txt"); if (lf) lf << text << "\n"; }
+            // Grayscale decode frame (what ZBar saw).
             if (!gray.empty() && w > 0 && h > 0 &&
                 static_cast<int>(gray.size()) >= w * h) {
                 cv::Mat g(h, w, CV_8UC1, const_cast<uint8_t*>(gray.data()));
-                if (cv::imwrite((folder / "capture.png").string(), g))
-                    cap.image = "capture.png";
+                if (cv::imwrite((folder / "decode.png").string(), g))
+                    cap.decode = "decode.png";
+            }
+            // Colour camera frame (RGBA → BGR for PNG storage).
+            if (!rgba.empty() && w > 0 && h > 0 &&
+                static_cast<int>(rgba.size()) >= w * h * 4) {
+                cv::Mat r(h, w, CV_8UC4, const_cast<uint8_t*>(rgba.data()));
+                cv::Mat bgr; cv::cvtColor(r, bgr, cv::COLOR_RGBA2BGR);
+                if (cv::imwrite((folder / "camera.png").string(), bgr))
+                    cap.image = "camera.png";
             }
             json meta = {{"text", text}, {"type", type}, {"ts", now_s},
-                         {"image", cap.image}};
+                         {"camera", cap.image}, {"decode", cap.decode}};
             std::ofstream mf(folder / "meta.json");
             if (mf) mf << meta.dump(2);
         }
