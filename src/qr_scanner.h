@@ -19,9 +19,13 @@
 // Call set_callback() before submit_*() — callback fires on the worker thread.
 class QrScanner {
 public:
-    // (text, symbol_type_name) e.g. ("https://...", "QR-Code")
+    // (text, symbol_type_name, gray, w, h) — gray is the grayscale frame the
+    // decode came from (the raw image the QR was captured from), so callers can
+    // persist it alongside the link.
     using Callback = std::function<void(const std::string& text,
-                                        const std::string& type)>;
+                                        const std::string& type,
+                                        const std::vector<uint8_t>& gray,
+                                        int w, int h)>;
 
     QrScanner();
     ~QrScanner();
@@ -62,7 +66,8 @@ private:
 // No-op stub when ZBar is not installed.
 class QrScanner {
 public:
-    using Callback = std::function<void(const std::string&, const std::string&)>;
+    using Callback = std::function<void(const std::string&, const std::string&,
+                                        const std::vector<uint8_t>&, int, int)>;
     void set_callback(Callback)         {}
     void set_scan_interval_ms(int)      {}
     void set_cooldown_ms(int)           {}

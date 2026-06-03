@@ -681,6 +681,39 @@ struct NotificationQueue {
     }
 };
 
+// ── Scanned QR / barcode capture log ──────────────────────────────────────────
+// Each newly-seen code is saved to its own folder (link.txt + the raw frame it
+// was captured from + meta.json). The log keeps a running, de-duplicated list
+// (newest first) so the same code isn't captured twice across sessions.
+struct QrCapture {
+    std::string text;            // decoded payload (URL or raw text)
+    std::string type;            // symbol type, e.g. "QR-Code"
+    int64_t     timestamp = 0;   // epoch seconds first captured
+    std::string folder;          // absolute path to this capture's folder
+    std::string image;           // image filename within the folder (e.g. capture.png)
+};
+
+struct QrCaptureLog {
+    std::deque<QrCapture> items;       // newest first
+    std::set<std::string> seen;         // exact-payload set for de-duplication
+    static constexpr int  kMax = 200;   // safety cap on retained entries
+
+    bool contains(const std::string& t) const { return seen.count(t) > 0; }
+
+    void add(QrCapture c) {
+        seen.insert(c.text);
+        items.push_front(std::move(c));
+        while (static_cast<int>(items.size()) > kMax) {
+            seen.erase(items.back().text);
+            items.pop_back();
+        }
+    }
+    void rebuild_seen() {
+        seen.clear();
+        for (const auto& c : items) seen.insert(c.text);
+    }
+};
+
 // ── Video recording control ───────────────────────────────────────────────────
 // Requests are posted by input handlers / toast actions (any thread) and consumed
 // by the render thread, which owns the VideoRecorder. Start acts as a toggle.
@@ -781,6 +814,10 @@ struct AppState {
     // qr_scan_usb:  scanned in the USB capture thread from the raw BGR frame.
     bool qr_scan_main = false;
     bool qr_scan_usb  = false;
+    // Captured QR/barcode log + the directory each capture folder lives under
+    // (set once at boot). Guarded by mtx.
+    QrCaptureLog qr_captures;
+    std::string  qr_dir;
 
     // Profile requests — posted by deep-menu callbacks (any thread; hold mtx) and
     // consumed by the main loop. Empty string = no request.

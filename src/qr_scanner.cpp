@@ -94,7 +94,7 @@ void QrScanner::worker() {
                 if (!duplicate) {
                     last_result_ = text;
                     last_found_  = now2;
-                    if (callback_) callback_(text, type);
+                    if (callback_) callback_(text, type, frame.gray, frame.w, frame.h);
                 }
                 sym = zbar_symbol_next(sym);
             }

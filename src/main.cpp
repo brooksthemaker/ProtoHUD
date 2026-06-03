@@ -1295,6 +1295,21 @@ inline std::vector<Entry> list(const std::string& expr_png) {
 }
 } // namespace fvers
 
+// Serialize the captured-QR running list to <qr_dir>/index.json. Caller must
+// hold state.mtx (it reads the live log). The folders themselves hold the link
+// + raw image; this index is the de-dupe list and the menu's source of truth.
+static void qr_write_index(const std::string& qr_dir, const QrCaptureLog& log) {
+    if (qr_dir.empty()) return;
+    json arr = json::array();
+    for (const auto& c : log.items)
+        arr.push_back({{"text", c.text}, {"type", c.type}, {"ts", c.timestamp},
+                       {"folder", c.folder}, {"image", c.image}});
+    std::error_code ec;
+    std::filesystem::create_directories(qr_dir, ec);
+    std::ofstream f(std::filesystem::path(qr_dir) / "index.json");
+    if (f) f << arr.dump();
+}
+
 static std::vector<MenuItem> build_menu(
         IFaceController* teensy, XRDisplay* xr, CameraManager* cameras,
         LoRaRadio* lora, SmartKnob* knob, AudioEngine* audio, AppState& state,
@@ -8670,6 +8685,162 @@ static std::vector<MenuItem> build_menu(
     communications_menu.push_back(std::move(phone_item));
     communications_menu.push_back(std::move(notiflog_item));
 
+    // ── Scanned QR Codes ──────────────────────────────────────────────────
+    // Each captured code lives in its own folder (link + raw image). This
+    // submenu browses the de-duplicated running list; the panel shows the
+    // captured image + link, and each row can Open (URLs) or Delete.
+    MenuItem qr_codes_item = [&]() -> MenuItem {
+        struct QrThumb { GLuint tex = 0; std::string loaded; cv::Mat img; };
+        auto thumb = std::make_shared<QrThumb>();
+        auto focus = std::make_shared<int>(-1);
+
+        auto cap_at = [&state](int i) -> QrCapture {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i < 0 || i >= static_cast<int>(state.qr_captures.items.size())) return {};
+            return state.qr_captures.items[i];
+        };
+        auto is_url = [](const std::string& t){
+            return t.size() > 7 && (t.compare(0, 7, "http://") == 0 ||
+                                    t.compare(0, 8, "https://") == 0);
+        };
+        // Shared panel painter: thumbnail (top) + link (wrapped) + type/time.
+        auto draw_cap = [thumb](ImDrawList* dl, ImVec2 o, ImVec2 sz, const QrCapture& c){
+            ImFont* font = ImGui::GetFont(); const float fs = ImGui::GetFontSize();
+            if (c.text.empty()) {
+                dl->AddText(font, fs * 0.8f, {o.x, o.y}, IM_COL32(170,176,184,220),
+                            "Scroll to a code.");
+                return;
+            }
+            float y = o.y;
+            std::string ipath;
+            if (!c.folder.empty() && !c.image.empty())
+                ipath = (std::filesystem::path(c.folder) / c.image).string();
+            if (!ipath.empty()) {
+                if (ipath != thumb->loaded) {
+                    thumb->img = face::load_png_rgba(ipath, 240, 180);
+                    thumb->loaded = ipath;
+                }
+                const float pw = std::min(sz.x * 0.85f, 200.f), ph = pw * 0.75f;
+                const float px = o.x, py = y;
+                dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10,16,22,190));
+                if (!thumb->img.empty() && thumb->img.isContinuous()) {
+                    if (!thumb->tex) {
+                        glGenTextures(1, &thumb->tex);
+                        glBindTexture(GL_TEXTURE_2D, thumb->tex);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    }
+                    glBindTexture(GL_TEXTURE_2D, thumb->tex);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, thumb->img.cols, thumb->img.rows,
+                                 0, GL_RGBA, GL_UNSIGNED_BYTE, thumb->img.data);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    dl->AddImage(reinterpret_cast<ImTextureID>(
+                        static_cast<uintptr_t>(thumb->tex)), {px, py}, {px + pw, py + ph});
+                }
+                y = py + ph + 8.f;
+            }
+            dl->AddText(font, fs * 0.9f, {o.x, y}, IM_COL32(235,240,245,255),
+                        c.text.c_str(), nullptr, sz.x - 6.f);
+            ImVec2 tsz = font->CalcTextSizeA(fs * 0.9f, FLT_MAX, sz.x - 6.f, c.text.c_str());
+            y += tsz.y + 6.f;
+            char meta[80]; std::string when;
+            if (c.timestamp > 0) {
+                char ts[24]; time_t t = static_cast<time_t>(c.timestamp);
+                strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", localtime(&t));
+                when = ts;
+            }
+            std::snprintf(meta, sizeof(meta), "%s%s%s", c.type.c_str(),
+                          when.empty() ? "" : "  \xC2\xB7  ", when.c_str());
+            dl->AddText(font, fs * 0.72f, {o.x, y}, IM_COL32(150,158,166,210), meta);
+        };
+
+        std::vector<MenuItem> qmenu;
+        // Clear All (red) — drops every entry + its folder.
+        {
+            MenuItem clr = leaf("Clear All", [&state]{
+                std::vector<std::string> folders;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    for (auto& c : state.qr_captures.items)
+                        if (!c.folder.empty()) folders.push_back(c.folder);
+                    state.qr_captures.items.clear();
+                    state.qr_captures.seen.clear();
+                    qr_write_index(state.qr_dir, state.qr_captures);
+                }
+                std::error_code ec;
+                for (auto& f : folders) std::filesystem::remove_all(f, ec);
+            });
+            clr.warn_fn    = []{ return true; };
+            clr.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                       return !state.qr_captures.items.empty(); };
+            qmenu.push_back(with_desc(std::move(clr),
+                "Delete every saved QR code and its folder."));
+        }
+        // Capture rows (newest first).
+        for (int i = 0; i < 40; ++i) {
+            MenuItem row; row.type = MenuItemType::SUBMENU; row.label = "qr";
+            row.label_fn = [&state, i]{
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (i >= static_cast<int>(state.qr_captures.items.size())) return std::string();
+                std::string s = state.qr_captures.items[i].text;
+                if (s.size() > 48) s = s.substr(0, 47) + "\xE2\x80\xA6";
+                return s;
+            };
+            row.visible_fn   = [&state, i]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                 return i < static_cast<int>(state.qr_captures.items.size()); };
+            row.on_highlight = [focus, i]{ *focus = i; };
+            MenuItem open = leaf("Open Link", [cap_at, is_url, i]{
+                QrCapture c = cap_at(i);
+                if (!is_url(c.text)) return;
+                std::string safe = c.text; for (auto& ch : safe) if (ch == '\'') ch = ' ';
+                std::string cmd = "xdg-open '" + safe + "' >/dev/null 2>&1 &";
+                system(cmd.c_str());
+            });
+            open.visible_fn = [cap_at, is_url, i]{ return is_url(cap_at(i).text); };
+            MenuItem del = leaf("Delete", [&state, i, menu_sys_pp]{
+                std::string folder;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    if (i < static_cast<int>(state.qr_captures.items.size())) {
+                        folder = state.qr_captures.items[i].folder;
+                        state.qr_captures.seen.erase(state.qr_captures.items[i].text);
+                        state.qr_captures.items.erase(state.qr_captures.items.begin() + i);
+                        qr_write_index(state.qr_dir, state.qr_captures);
+                    }
+                }
+                if (!folder.empty()) { std::error_code ec;
+                    std::filesystem::remove_all(folder, ec); }
+                if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
+            });
+            del.warn_fn = []{ return true; };
+            row.children = { std::move(open), std::move(del) };
+            row.context_panel_title = "QR Code";
+            row.context_panel_draw  = [draw_cap, cap_at, i](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+                draw_cap(dl, o, sz, cap_at(i)); };
+            qmenu.push_back(std::move(row));
+        }
+        MenuItem sub = submenu("QR Codes", std::move(qmenu));
+        sub.label_fn = [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            const size_t n = state.qr_captures.items.size();
+            return n ? ("QR Codes  [" + std::to_string(n) + "]") : std::string("QR Codes");
+        };
+        sub.context_panel_title = "QR Code";
+        sub.context_panel_draw  = [draw_cap, focus, &state](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+            QrCapture c;
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              if (*focus >= 0 && *focus < static_cast<int>(state.qr_captures.items.size()))
+                  c = state.qr_captures.items[*focus]; }
+            draw_cap(dl, o, sz, c);
+        };
+        return with_desc(std::move(sub),
+            "Scanned QR/barcodes — each saved in its own folder with the link "
+            "and the captured image. Already-seen codes aren't captured twice.");
+    }();
+    communications_menu.push_back(std::move(qr_codes_item));
+
     // Audio submenu wrapped with its existing live-status context panel.
     MenuItem audio_item = with_panel(
         submenu("Audio", std::move(audio_menu)),
@@ -10729,49 +10900,107 @@ int main(int argc, char* argv[]) {
     }
 
     // QR / barcode scanner — active when either scan toggle is enabled.
+    // Captured-QR store: one folder per code (link.txt + the raw frame +
+    // meta.json) under <config-dir>/qr_codes, with a de-duplicated running
+    // list in index.json. Load the existing list so reboots keep history and
+    // already-seen codes aren't re-captured.
+    const std::string qr_dir =
+        (fs::path(cfg_path).parent_path() / "qr_codes").string();
+    {
+        std::lock_guard lk(state.mtx);
+        state.qr_dir = qr_dir;
+        std::ifstream f(fs::path(qr_dir) / "index.json");
+        if (f) {
+            try {
+                json arr; f >> arr;
+                if (arr.is_array())
+                    for (const auto& e : arr) {
+                        if (!e.is_object()) continue;
+                        QrCapture c;
+                        c.text      = e.value("text", std::string());
+                        c.type      = e.value("type", std::string());
+                        c.timestamp = e.value("ts", static_cast<int64_t>(0));
+                        c.folder    = e.value("folder", std::string());
+                        c.image     = e.value("image", std::string());
+                        if (!c.text.empty()) state.qr_captures.items.push_back(std::move(c));
+                    }
+            } catch (...) {}
+        }
+        state.qr_captures.rebuild_seen();
+    }
+
     QrScanner qr_scanner;
-    qr_scanner.set_callback([&state, cfg_photo_dir](const std::string& text,
-                                                       const std::string& type) {
+    qr_scanner.set_callback([&state, qr_dir](const std::string& text,
+                                             const std::string& type,
+                                             const std::vector<uint8_t>& gray,
+                                             int w, int h) {
         // Honour mute window (set by "MUTE 1m" action)
         if (static_cast<int64_t>(time(nullptr)) < state.qr_mute_until_s.load()) return;
+
+        // De-dupe against the running list: already-captured codes are dropped
+        // silently so they don't double up.
+        {
+            std::lock_guard lk(state.mtx);
+            if (state.qr_captures.contains(text)) return;
+        }
 
         const bool is_url = text.size() > 7 &&
                             (text.substr(0, 7) == "http://" ||
                              text.substr(0, 8) == "https://");
 
-        Notification n;
-        n.type           = NotifType::App;
-        n.title          = type + " Detected";
-        n.body           = text;
-        n.auto_dismiss_s = 20.f;   // longer so user has time to act
-
-        if (is_url) {
-            n.actions.push_back({"OPEN", [text](AppState&) {
-                // xdg-open in background; single-quote the URL to avoid expansion
-                std::string safe = text;
-                // Replace any single-quotes in the URL with %27 before shell-quoting
-                for (auto& c : safe) if (c == '\'') c = ' ';
-                std::string cmd = "xdg-open '" + safe + "' >/dev/null 2>&1 &";
-                system(cmd.c_str());
-            }});
-        }
-
-        n.actions.push_back({"SAVE", [text, cfg_photo_dir](AppState&) {
-            if (cfg_photo_dir.empty()) return;
-            time_t now = time(nullptr);
+        // Save this capture to its own folder: <ts>_<hash>/ with the link, the
+        // raw grayscale frame it was decoded from, and a small meta.json.
+        const int64_t now_s = static_cast<int64_t>(time(nullptr));
+        QrCapture cap;
+        cap.text = text; cap.type = type; cap.timestamp = now_s;
+        if (!qr_dir.empty()) {
+            time_t now = static_cast<time_t>(now_s);
             struct tm tm{}; localtime_r(&now, &tm);
             char ts[20]; strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm);
-            std::string path = cfg_photo_dir + "/qr_" + ts + ".txt";
-            std::ofstream f(path);
-            if (f) f << text << "\n";
-        }});
+            char name[40];
+            std::snprintf(name, sizeof(name), "%s_%08x", ts,
+                static_cast<unsigned>(std::hash<std::string>{}(text) & 0xffffffffu));
+            const fs::path folder = fs::path(qr_dir) / name;
+            std::error_code ec;
+            fs::create_directories(folder, ec);
+            cap.folder = folder.string();
+            { std::ofstream lf(folder / "link.txt"); if (lf) lf << text << "\n"; }
+            if (!gray.empty() && w > 0 && h > 0 &&
+                static_cast<int>(gray.size()) >= w * h) {
+                cv::Mat g(h, w, CV_8UC1, const_cast<uint8_t*>(gray.data()));
+                if (cv::imwrite((folder / "capture.png").string(), g))
+                    cap.image = "capture.png";
+            }
+            json meta = {{"text", text}, {"type", type}, {"ts", now_s},
+                         {"image", cap.image}};
+            std::ofstream mf(folder / "meta.json");
+            if (mf) mf << meta.dump(2);
+        }
 
-        n.actions.push_back({"MUTE 1m", [](AppState& s) {
-            s.qr_mute_until_s.store(static_cast<int64_t>(time(nullptr)) + 60);
-        }});
+        // Add to the running list + persist the index, then surface a toast.
+        {
+            std::lock_guard lk(state.mtx);
+            state.qr_captures.add(cap);
+            qr_write_index(state.qr_dir, state.qr_captures);
 
-        std::lock_guard lk(state.mtx);
-        state.notifs.push(std::move(n));
+            Notification n;
+            n.type           = NotifType::App;
+            n.title          = type + " Saved";
+            n.body           = text;
+            n.auto_dismiss_s = 20.f;   // longer so user has time to act
+            if (is_url) {
+                n.actions.push_back({"OPEN", [text](AppState&) {
+                    std::string safe = text;
+                    for (auto& c : safe) if (c == '\'') c = ' ';
+                    std::string cmd = "xdg-open '" + safe + "' >/dev/null 2>&1 &";
+                    system(cmd.c_str());
+                }});
+            }
+            n.actions.push_back({"MUTE 1m", [](AppState& s) {
+                s.qr_mute_until_s.store(static_cast<int64_t>(time(nullptr)) + 60);
+            }});
+            state.notifs.push(std::move(n));
+        }
     });
     cameras.set_qr_scanner(&qr_scanner);
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
