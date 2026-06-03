@@ -117,72 +117,12 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     }
 
     // ── OWLsight cameras (zero-copy DMA) ─────────────────────────────────────
-    if (lcam_mgr_) {
-        // Resolve both eyes to EXACT, distinct camera ids from a single enumeration.
-        // (Re-querying cameras() per DmaCamera could return a different order once
-        // the first camera is acquired/started, making the second eye resolve to
-        // the already-running camera — "Camera in Running state".)
-        auto cams = lcam_mgr_->cameras();
-        auto resolve = [&](const CamConfig& cc) -> std::string {
-            if (!cc.model_name.empty()) {
-                int m = 0;
-                for (auto& c : cams) {
-                    try {
-                        auto md = c->properties().get(libcamera::properties::Model);
-                        if (md && *md == cc.model_name) {
-                            if (m == cc.libcamera_id) return c->id();
-                            ++m;
-                        }
-                    } catch (...) {}
-                }
-            }
-            if (cc.libcamera_id >= 0 && cc.libcamera_id < static_cast<int>(cams.size()))
-                return cams[cc.libcamera_id]->id();
-            return {};
-        };
-        std::string left_id  = resolve(left);
-        std::string right_id = resolve(right);
-        // Never let both eyes land on the same physical camera.
-        if (!left_id.empty() && left_id == right_id) {
-            right_id.clear();
-            for (auto& c : cams) if (c->id() != left_id) { right_id = c->id(); break; }
-        }
-        std::cout << "[cam] OWL ids: left='" << left_id << "' right='" << right_id << "'\n";
-
-        // Only init a camera we actually resolved to a real id. With an empty id
-        // DmaCamera would fall back to the first/only camera — which is the one the
-        // other eye already holds — producing "Camera in Running state" on acquire.
-        // When only one OWLsight enumerates (the other is unplugged or wedged),
-        // skip the missing eye cleanly; the feed just shows mono.
-        if (left_id.empty()) {
-            std::cerr << "[cam] OWLsight left: no camera resolved — skipping "
-                         "(only " << cams.size() << " libcamera device(s) present)\n";
-        } else {
-            DmaCamera::Config lc { left.libcamera_id, left.model_name, left_id,
-                                   left.width, left.height, left.fps,
-                                   left.rotation_deg };
-            owl_left_ = std::make_unique<DmaCamera>();
-            if (!owl_left_->init(lcam_mgr_.get(), lc, nv12_vs, nv12_fs)) {
-                std::cerr << "[cam] OWLsight left init failed\n";
-                owl_left_.reset();
-            }
-        }
-
-        if (right_id.empty()) {
-            std::cerr << "[cam] OWLsight right: no second camera resolved — skipping "
-                         "(running mono). If you expect two CSI cameras, a reboot "
-                         "usually clears a wedged sensor — check 'rpicam-hello --list-cameras'.\n";
-        } else {
-            DmaCamera::Config rc { right.libcamera_id, right.model_name, right_id,
-                                   right.width, right.height, right.fps,
-                                   right.rotation_deg };
-            owl_right_ = std::make_unique<DmaCamera>();
-            if (!owl_right_->init(lcam_mgr_.get(), rc, nv12_vs, nv12_fs)) {
-                std::cerr << "[cam] OWLsight right init failed\n";
-                owl_right_.reset();
-            }
-        }
-    }
+    // Store the configs + shaders so reinit_owls() can re-run this later.
+    owl_left_cfg_  = left;
+    owl_right_cfg_ = right;
+    nv12_vs_ = nv12_vs ? nv12_vs : "";
+    nv12_fs_ = nv12_fs ? nv12_fs : "";
+    init_owls();
 
     // ── USB cameras (OpenCV) ──────────────────────────────────────────────────
     usb1_cfg_ = usb1;
@@ -280,6 +220,102 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     rgba_quad_vbo_ = gl::make_quad_vbo();
 
     return owl_left_ok() || owl_right_ok() || usb1_ok_ || usb2_ok_ || usb3_ok_;
+}
+
+// (Re)resolve both eyes from a single enumeration of the (already-started)
+// libcamera manager and (re)create their DmaCamera instances. Shared by init()
+// and reinit_owls(). Assumes any previous DmaCameras were already released.
+void CameraManager::init_owls() {
+    if (!lcam_mgr_) return;
+    const char* nv12_vs = nv12_vs_.c_str();
+    const char* nv12_fs = nv12_fs_.c_str();
+
+    // Resolve both eyes to EXACT, distinct camera ids from a single enumeration.
+    // (Re-querying cameras() per DmaCamera could return a different order once
+    // the first camera is acquired/started, making the second eye resolve to
+    // the already-running camera — "Camera in Running state".)
+    auto cams = lcam_mgr_->cameras();
+    auto resolve = [&](const CamConfig& cc) -> std::string {
+        if (!cc.model_name.empty()) {
+            int m = 0;
+            for (auto& c : cams) {
+                try {
+                    auto md = c->properties().get(libcamera::properties::Model);
+                    if (md && *md == cc.model_name) {
+                        if (m == cc.libcamera_id) return c->id();
+                        ++m;
+                    }
+                } catch (...) {}
+            }
+        }
+        if (cc.libcamera_id >= 0 && cc.libcamera_id < static_cast<int>(cams.size()))
+            return cams[cc.libcamera_id]->id();
+        return {};
+    };
+    std::string left_id  = resolve(owl_left_cfg_);
+    std::string right_id = resolve(owl_right_cfg_);
+    // Never let both eyes land on the same physical camera.
+    if (!left_id.empty() && left_id == right_id) {
+        right_id.clear();
+        for (auto& c : cams) if (c->id() != left_id) { right_id = c->id(); break; }
+    }
+    std::cout << "[cam] OWL ids: left='" << left_id << "' right='" << right_id << "'\n";
+
+    // Only init a camera we actually resolved to a real id. With an empty id
+    // DmaCamera would fall back to the first/only camera — which is the one the
+    // other eye already holds — producing "Camera in Running state" on acquire.
+    // When only one OWLsight enumerates (the other is unplugged or wedged),
+    // skip the missing eye cleanly; the feed just shows mono.
+    if (left_id.empty()) {
+        std::cerr << "[cam] OWLsight left: no camera resolved — skipping "
+                     "(only " << cams.size() << " libcamera device(s) present)\n";
+    } else {
+        DmaCamera::Config lc { owl_left_cfg_.libcamera_id, owl_left_cfg_.model_name, left_id,
+                               owl_left_cfg_.width, owl_left_cfg_.height, owl_left_cfg_.fps,
+                               owl_left_cfg_.rotation_deg };
+        owl_left_ = std::make_unique<DmaCamera>();
+        if (!owl_left_->init(lcam_mgr_.get(), lc, nv12_vs, nv12_fs)) {
+            std::cerr << "[cam] OWLsight left init failed\n";
+            owl_left_.reset();
+        }
+    }
+
+    if (right_id.empty()) {
+        std::cerr << "[cam] OWLsight right: no second camera resolved — skipping "
+                     "(running mono). If you expect two CSI cameras, a reboot "
+                     "usually clears a wedged sensor — check 'rpicam-hello --list-cameras'.\n";
+    } else {
+        DmaCamera::Config rc { owl_right_cfg_.libcamera_id, owl_right_cfg_.model_name, right_id,
+                               owl_right_cfg_.width, owl_right_cfg_.height, owl_right_cfg_.fps,
+                               owl_right_cfg_.rotation_deg };
+        owl_right_ = std::make_unique<DmaCamera>();
+        if (!owl_right_->init(lcam_mgr_.get(), rc, nv12_vs, nv12_fs)) {
+            std::cerr << "[cam] OWLsight right init failed\n";
+            owl_right_.reset();
+        }
+    }
+}
+
+// Render-thread only. Releases both CSI cameras + the libcamera manager, then
+// re-enumerates and re-inits — recovers a sensor that was missing/wedged at
+// boot without rebooting the whole system.
+bool CameraManager::reinit_owls() {
+    std::cout << "[cam] reinit OWLsight cameras…\n";
+    owl_left_.reset();
+    owl_right_.reset();
+    if (lcam_mgr_) { lcam_mgr_->stop(); lcam_mgr_.reset(); }
+
+    lcam_mgr_ = std::make_unique<libcamera::CameraManager>();
+    if (lcam_mgr_->start()) {
+        std::cerr << "[cam] reinit: libcamera manager start failed\n";
+        lcam_mgr_.reset();
+        return false;
+    }
+    init_owls();
+    const bool ok = owl_left_ok() || owl_right_ok();
+    std::cout << "[cam] reinit done: left=" << (owl_left_ok() ? "ok" : "—")
+              << " right=" << (owl_right_ok() ? "ok" : "—") << "\n";
+    return ok;
 }
 
 void CameraManager::shutdown() {

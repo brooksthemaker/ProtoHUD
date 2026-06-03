@@ -3101,6 +3101,32 @@ static std::vector<MenuItem> build_menu(
             "Single Camera Preview", single_cam_preview),
         submenu(left_label,         std::move(left_cam_menu)),
         submenu(right_label,        std::move(right_cam_menu)),
+        with_desc([&]{
+            // Recover a CSI sensor that came up dark/wedged at boot without a
+            // full reboot: tears down + re-enumerates + restarts both cameras.
+            MenuItem m; m.type = MenuItemType::LEAF; m.label = "Reinitialize CSI Cameras";
+            m.label_fn = [cameras]{
+                std::string s = "Reinitialize CSI  [L:";
+                s += cameras->owl_left_ok()  ? "ok" : "\xE2\x80\x94";
+                s += " R:"; s += cameras->owl_right_ok() ? "ok" : "\xE2\x80\x94";
+                return s + "]";
+            };
+            m.action = [cameras, &state]{
+                const bool ok = cameras->reinit_owls();
+                const bool lok = cameras->owl_left_ok(), rok = cameras->owl_right_ok();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "CSI cameras reinitialized" : "CSI reinit: no camera found";
+                char b[64]; snprintf(b, sizeof(b), "Left %s  \xC2\xB7  Right %s",
+                                     lok ? "OK" : "\xE2\x80\x94", rok ? "OK" : "\xE2\x80\x94");
+                n.body = b; n.auto_dismiss_s = 5.f;
+                state.notifs.push(std::move(n));
+            };
+            return m;
+        }(),
+            "Re-enumerate and restart the CSI (OWLsight) cameras \xE2\x80\x94 recovers an "
+            "eye that came up dark/wedged at boot, without rebooting. Briefly blacks "
+            "both feeds while it re-acquires."),
         submenu("Low-Light Mode",   std::move(nv_menu)),
         submenu("Autofocus Both",   std::move(af_both_menu)),
         submenu("Capture Photo",    std::move(capture_menu)),
