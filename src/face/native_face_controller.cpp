@@ -264,6 +264,19 @@ void NativeFaceController::render_thread() {
                 cv::flip(region, flipped, code);
                 flipped.copyTo(region);
             }
+
+            // Multi-panel face rendered as one logical canvas: flip each physical
+            // panel's slice in place so per-panel mounting flips apply to the
+            // whole composited image (face + material + effects + blink alike).
+            for (const auto& op : cfg_.output_panels) {
+                if (!op.flip_x && !op.flip_y) continue;
+                cv::Rect roi(op.x, op.y, op.w, op.h);
+                if ((roi & cv::Rect(0, 0, canvas.cols, canvas.rows)) != roi) continue;
+                const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
+                cv::Mat region = canvas(roi), flipped;
+                cv::flip(region, flipped, code);
+                flipped.copyTo(region);
+            }
         }
 
         {
@@ -716,6 +729,15 @@ void NativeFaceController::set_expression_fade(double seconds) {
 
 void NativeFaceController::set_panel_flips(const std::vector<std::array<bool, 2>>& flips) {
     std::lock_guard<std::mutex> lk(state_mtx_);
+    if (!cfg_.output_panels.empty()) {
+        // Multi-panel face rendered as one canvas: flips live on the physical
+        // output slices, applied at the end of the render loop.
+        for (size_t i = 0; i < cfg_.output_panels.size() && i < flips.size(); ++i) {
+            cfg_.output_panels[i].flip_x = flips[i][0];
+            cfg_.output_panels[i].flip_y = flips[i][1];
+        }
+        return;
+    }
     for (size_t i = 0; i < panels_.size() && i < flips.size(); ++i) {
         panels_[i].cfg.flip_x = flips[i][0];
         panels_[i].cfg.flip_y = flips[i][1];

@@ -950,22 +950,25 @@ static face::RenderConfig pf_build_render_config(const json& cfg,
         !(*jpf)["panels"].empty()) {
         for (const auto& jp : (*jpf)["panels"]) rc.panels.push_back(parse_panel(jp));
     } else if (hub75 && hub75->panel_count > 0) {
-        // HUB75 picker mode — one PanelCfg per laid-out physical panel.
-        // Canvas grows to fit the laid-out + nudged set so the renderer
-        // composes onto exactly the same surface the editor paints into.
+        // HUB75 picker mode — the face is drawn across all panels as ONE image.
+        // Render it as a single logical panel covering the whole canvas (so the
+        // material, particle effects and blink are continuous across the seam),
+        // then split + flip per physical panel at output time.
         const auto plist = pf_hub75_panels(*hub75);
         int cw = 0, ch = 0;
         pf_hub75_canvas(*hub75, cw, ch);
         rc.canvas_w = cw;
         rc.canvas_h = ch;
+        face::PanelCfg face;
+        face.name = "face"; face.x = 0; face.y = 0; face.w = cw; face.h = ch;
+        rc.panels.push_back(std::move(face));
         for (size_t i = 0; i < plist.size(); ++i) {
             const auto& p = plist[i];
-            face::PanelCfg pc;
-            pc.name = p.name;
-            pc.x = p.rect.x; pc.y = p.rect.y;
-            pc.w = p.rect.width; pc.h = p.rect.height;
-            if (i < 4) { pc.flip_x = hub75->flip_x[i]; pc.flip_y = hub75->flip_y[i]; }
-            rc.panels.push_back(std::move(pc));
+            face::RenderConfig::OutputPanel op;
+            op.x = p.rect.x; op.y = p.rect.y;
+            op.w = p.rect.width; op.h = p.rect.height;
+            if (i < 4) { op.flip_x = hub75->flip_x[i]; op.flip_y = hub75->flip_y[i]; }
+            rc.output_panels.push_back(op);
         }
     } else {
         face::PanelCfg left;  left.name  = "face_left";  left.x = 0;  left.w = 64; left.h = 32;

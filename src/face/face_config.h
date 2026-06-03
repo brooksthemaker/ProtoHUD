@@ -73,6 +73,14 @@ struct RenderConfig {
     // where particle effects don't read on a handful of 8x8 modules.
     bool                 effects_enabled = true;
     std::vector<PanelCfg> panels;
+
+    // Physical-panel output regions for a multi-panel face rendered as ONE
+    // logical canvas-wide panel. When non-empty, the controller composites the
+    // whole face once (so blink / material / effects are continuous across the
+    // seam) and then flips each physical panel's slice in place at output time —
+    // so per-panel mounting flips apply to everything, not just the face PNG.
+    struct OutputPanel { int x = 0, y = 0, w = 64, h = 32; bool flip_x = false, flip_y = false; };
+    std::vector<OutputPanel> output_panels;
 };
 
 } // namespace face
