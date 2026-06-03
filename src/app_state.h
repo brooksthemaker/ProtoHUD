@@ -830,6 +830,7 @@ struct AppState {
     // the title (empty = any sender).
     int                  notif_type_filter = -1;
     std::string          notif_sender_filter;
+    bool                 notif_persist = true;   // persist the log to disk across reboots
 
     // Particle effects config (render-thread only)
     EffectsConfig        effects_cfg;

@@ -216,6 +216,10 @@
     "auto_dismiss_s": 0.0,
     "_auto_dismiss_note": "0 keeps the import toast sticky until you act on it. Setting it would let untouched files quietly skip import, which is usually not what you want."
   },
+  "notifications": {
+    "_about": "The notification log (Communications > Notification Log) keeps the last 50 notifications, browseable and filterable by type/sender. persist saves it to protohud_notifications.json next to config.json so a sudden reboot doesn't lose them; toggle it live under Communications > Notification Log > Persist Log.",
+    "persist": true
+  },
   "audio": {
     "_note": "Audio capture is handled by the RP2350 helmet audio processor (USB Audio UAC2). The CM5 receives pre-processed stereo and routes it to the chosen output. Run 'arecord -l' to verify the RP2350 card name after connecting via USB.",
     "enabled": true,

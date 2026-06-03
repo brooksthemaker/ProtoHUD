@@ -8299,24 +8299,55 @@ static std::vector<MenuItem> build_menu(
                 return c;
             }());
 
-            MenuItem log; log.type = MenuItemType::NOTIF_LOG; log.label = "View";
-            log.notif_log.queue = &state.notifs;
-            log.notif_log.show_history = true;   // browse dismissed history too
-            log.notif_log.filter = [&state](const Notification& n){
+            // Persist + clear.
+            nlog_menu.push_back(with_desc(toggle("Persist Log",
+                [&state]{ return state.notif_persist; },
+                [&state](bool v){ state.notif_persist = v; }),
+                "Save the notification log to disk so a sudden reboot doesn't lose it."));
+            nlog_menu.push_back(with_desc([&state]{
+                MenuItem c; c.type = MenuItemType::LEAF; c.label = "Clear Log";
+                c.action = [&state]{ std::lock_guard<std::mutex> lk(state.mtx); state.notifs.items.clear(); };
+                return c;
+            }(), "Remove every stored notification."));
+
+            // Scrollable, filtered message rows (newest first). The menu's own
+            // scrolling pages through them; the filter gates each row's visibility.
+            auto row_match = [&state](const Notification& n){
                 if (state.notif_type_filter >= 0 &&
                     static_cast<int>(n.type) != state.notif_type_filter) return false;
                 if (!state.notif_sender_filter.empty()) {
-                    std::string hay = n.title, needle = state.notif_sender_filter;
+                    std::string hay = n.title, nd = state.notif_sender_filter;
                     std::transform(hay.begin(), hay.end(), hay.begin(),
                                    [](unsigned char c){ return std::tolower(c); });
-                    std::transform(needle.begin(), needle.end(), needle.begin(),
+                    std::transform(nd.begin(), nd.end(), nd.begin(),
                                    [](unsigned char c){ return std::tolower(c); });
-                    if (hay.find(needle) == std::string::npos) return false;
+                    if (hay.find(nd) == std::string::npos) return false;
                 }
                 return true;
             };
-            nlog_menu.push_back(with_desc(std::move(log),
-                "Matching notifications (newest first). Select to clear the ones shown."));
+            for (int i = 0; i < NotificationQueue::kMax; ++i) {
+                MenuItem m; m.type = MenuItemType::LEAF; m.label = "msg";
+                m.label_fn = [&state, i]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    if (i >= static_cast<int>(state.notifs.items.size())) return std::string();
+                    const auto& n = state.notifs.items[i];
+                    char ts[8]; time_t t = static_cast<time_t>(n.timestamp);
+                    strftime(ts, sizeof(ts), "%H:%M", localtime(&t));
+                    const char* tag = n.type == NotifType::Alarm ? "A"
+                                    : n.type == NotifType::Timer ? "T"
+                                    : n.type == NotifType::LoRa  ? "L" : "P";
+                    std::string s = std::string(ts) + "  " + tag + "  " + n.title;
+                    if (!n.body.empty()) s += " \xE2\x80\x94 " + n.body;
+                    if (s.size() > 64) s = s.substr(0, 63) + "\xE2\x80\xA6";
+                    return s;
+                };
+                m.visible_fn = [&state, i, row_match]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    return i < static_cast<int>(state.notifs.items.size())
+                           && row_match(state.notifs.items[i]);
+                };
+                nlog_menu.push_back(std::move(m));
+            }
 
             return with_desc(submenu("Notification Log", std::move(nlog_menu)),
                 "Browse past notifications, filtered by type and/or sender.");
@@ -8848,6 +8879,46 @@ int main(int argc, char* argv[]) {
     // (look for `active_face = …`, `menu_ptr = &menu`, etc.) populate them
     // once their owning objects exist.
     AppState state;
+
+    // ── Notification log persistence ──────────────────────────────────────────
+    // Save the notification queue next to config.json so a sudden reboot doesn't
+    // lose it. Loaded once here; saved (debounced) from the render loop + on exit.
+    const std::string notif_path =
+        (fs::path(cfg_path).parent_path() / "protohud_notifications.json").string();
+    if (cfg.contains("notifications") && cfg["notifications"].is_object())
+        state.notif_persist = cfg["notifications"].value("persist", true);
+    auto save_notifs = [&state, notif_path]{
+        json arr = json::array();
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (const auto& n : state.notifs.items)
+                arr.push_back({{"type", static_cast<int>(n.type)}, {"title", n.title},
+                               {"body", n.body}, {"ts", n.timestamp},
+                               {"read", n.read}, {"dismissed", n.dismissed}});
+        }
+        std::ofstream f(notif_path);
+        if (f) f << arr.dump();
+    };
+    if (state.notif_persist) {
+        std::ifstream f(notif_path);
+        json arr;
+        if (f) { try { f >> arr; } catch (...) { arr = json::array(); } }
+        if (arr.is_array()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (auto it = arr.rbegin(); it != arr.rend(); ++it) {   // file is newest-first
+                if (!it->is_object()) continue;
+                Notification n;
+                n.type      = static_cast<NotifType>(it->value("type", static_cast<int>(NotifType::App)));
+                n.title     = it->value("title", std::string());
+                n.body      = it->value("body",  std::string());
+                n.timestamp = it->value("ts", static_cast<int64_t>(0));
+                n.read      = true;    // loaded entries are history — never re-toast on boot
+                n.dismissed = true;
+                state.notifs.push(std::move(n));
+            }
+        }
+    }
+
     IFaceController* active_face      = nullptr;   // set after native_ctrl/teensy/protoface_ctrl exist
     FaceProxy        face_proxy(&active_face);     // proxy reads *active_face each call
     MenuSystem*      menu_ptr         = nullptr;   // set after MenuSystem is constructed
@@ -11735,6 +11806,7 @@ int main(int argc, char* argv[]) {
             cfg["kdeconnect"]["ignore_list"]  = join_csv(kdc_ignore);
             cfg["kdeconnect"]["message_apps"] = join_csv(kdc_msgapps);
         }
+        cfg["notifications"]["persist"] = state.notif_persist;
         {
             static const char* kNames[] = { "center","outside","left","right","top","bottom" };
             cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
@@ -11983,6 +12055,8 @@ int main(int argc, char* argv[]) {
     }
 
     double prev_time = glfwGetTime();
+    uint32_t notif_last_saved = state.notifs.next_id;   // debounced log persistence
+    double   notif_next_save  = 0.0;
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);
@@ -11995,6 +12069,14 @@ int main(int argc, char* argv[]) {
         double now = glfwGetTime();
         float  dt  = static_cast<float>(now - prev_time);
         prev_time  = now;
+
+        // ── Notification log persistence (debounced, ~5s) ─────────────────────
+        if (state.notif_persist && state.notifs.next_id != notif_last_saved
+            && now >= notif_next_save) {
+            save_notifs();
+            notif_last_saved = state.notifs.next_id;
+            notif_next_save  = now + 5.0;
+        }
 
         // ── CSI boot auto-retry ───────────────────────────────────────────────
         // Recover a CSI eye that came up wedged at boot. Runs on the render
@@ -13214,6 +13296,9 @@ int main(int argc, char* argv[]) {
         // ── Swap ──────────────────────────────────────────────────────────────
         xr.present();
     }
+
+    // Final notification-log flush so the last messages survive a clean exit.
+    if (state.notif_persist) save_notifs();
 
     // ── Persist runtime settings ──────────────────────────────────────────────
     // Write current settings back to config.json so they survive a restart. Skip
