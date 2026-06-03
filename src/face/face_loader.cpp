@@ -172,7 +172,28 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
             if (eye_left_.set)  frame = blend_region(frame, blink_, eye_left_,  bw);
             if (eye_right_.set) frame = blend_region(frame, blink_, eye_right_, bw);
         } else {
-            cv::addWeighted(frame, 1.0 - bw, blink_, bw, 0.0, frame);
+            // Whole-face blink: alpha-composite the blink canvas over the face
+            // using the blink PNG's own alpha (scaled by bw). Transparent areas
+            // (mouth, nose, everything that isn't the drawn eye) keep the live
+            // face instead of being wiped to the blink canvas's empty
+            // background — which is what made the mouth/nose vanish mid-blink.
+            // Both images are RGBA at this loader's panel size.
+            if (blink_.size() == frame.size() && blink_.type() == CV_8UC4) {
+                for (int y = 0; y < frame.rows; ++y) {
+                    cv::Vec4b*       fr = frame.ptr<cv::Vec4b>(y);
+                    const cv::Vec4b* bl = blink_.ptr<cv::Vec4b>(y);
+                    for (int x = 0; x < frame.cols; ++x) {
+                        double a = (bl[x][3] / 255.0) * bw;   // overlay coverage
+                        if (a <= 0.0) continue;
+                        for (int c = 0; c < 3; ++c)
+                            fr[x][c] = cv::saturate_cast<uchar>(
+                                fr[x][c] * (1.0 - a) + bl[x][c] * a);
+                        if (bl[x][3] > fr[x][3]) fr[x][3] = bl[x][3];  // stay opaque on the eye
+                    }
+                }
+            } else {
+                cv::addWeighted(frame, 1.0 - bw, blink_, bw, 0.0, frame);  // size mismatch fallback
+            }
         }
     }
 
