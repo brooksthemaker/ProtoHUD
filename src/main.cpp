@@ -1235,6 +1235,66 @@ static void import_face_into_slot(MenuSystem* menu,
         });
 }
 
+// ── Face version helpers ──────────────────────────────────────────────────────
+// Saved versions of an expression's PNG live in hidden sibling dirs so the
+// FaceLoader (which scans top-level *.png) never lists them as expressions:
+//   <folder>/.versions/<expr>/<name>.png   named, kept until deleted
+//   <folder>/.history/<expr>/<ts>.png      auto-backups, ring-buffered
+namespace fvers {
+namespace ffs = std::filesystem;
+inline ffs::path vdir(const std::string& expr_png, const char* kind) {
+    ffs::path p(expr_png);
+    return p.parent_path() / kind / p.stem();
+}
+inline std::string stamp() {
+    char b[32]; time_t t = time(nullptr);
+    strftime(b, sizeof(b), "%Y%m%d-%H%M%S", localtime(&t));
+    static int seq = 0;
+    char s[44]; std::snprintf(s, sizeof(s), "%s-%03d", b, (seq++) % 1000);
+    return s;
+}
+// Copy the live PNG into .history before it's overwritten; prune to `keep` newest.
+inline void backup_current(const std::string& expr_png, int keep) {
+    std::error_code ec;
+    if (!ffs::exists(expr_png, ec)) return;
+    ffs::path d = vdir(expr_png, ".history");
+    ffs::create_directories(d, ec);
+    ffs::copy_file(expr_png, d / (stamp() + ".png"),
+                   ffs::copy_options::overwrite_existing, ec);
+    std::vector<ffs::path> f;
+    for (auto& e : ffs::directory_iterator(d, ec))
+        if (e.path().extension() == ".png") f.push_back(e.path());
+    std::sort(f.begin(), f.end());   // names are timestamps → chronological
+    for (int i = 0; i + keep < static_cast<int>(f.size()); ++i) ffs::remove(f[i], ec);
+}
+inline bool save_named(const std::string& expr_png, std::string name) {
+    std::error_code ec;
+    if (!ffs::exists(expr_png, ec)) return false;
+    for (auto& c : name) if (c == '/' || c == '\\' || c == ':') c = '_';
+    if (name.empty()) return false;
+    ffs::path d = vdir(expr_png, ".versions");
+    ffs::create_directories(d, ec);
+    ffs::copy_file(expr_png, d / (name + ".png"),
+                   ffs::copy_options::overwrite_existing, ec);
+    return !ec;
+}
+struct Entry { ffs::path path; std::string label; bool named = false; };
+inline std::vector<Entry> list(const std::string& expr_png) {
+    std::vector<Entry> out; std::error_code ec;
+    std::vector<ffs::path> named;
+    for (auto& e : ffs::directory_iterator(vdir(expr_png, ".versions"), ec))
+        if (e.path().extension() == ".png") named.push_back(e.path());
+    std::sort(named.begin(), named.end());
+    for (auto& p : named) out.push_back({p, p.stem().string(), true});
+    std::vector<ffs::path> hist;
+    for (auto& e : ffs::directory_iterator(vdir(expr_png, ".history"), ec))
+        if (e.path().extension() == ".png") hist.push_back(e.path());
+    std::sort(hist.rbegin(), hist.rend());   // newest first
+    for (auto& p : hist) out.push_back({p, p.stem().string(), false});
+    return out;
+}
+} // namespace fvers
+
 static std::vector<MenuItem> build_menu(
         IFaceController* teensy, XRDisplay* xr, CameraManager* cameras,
         LoRaRadio* lora, SmartKnob* knob, AudioEngine* audio, AppState& state,
@@ -1807,7 +1867,99 @@ static std::vector<MenuItem> build_menu(
     // false here and the leaf stays hidden.
     auto have_led_regions = [teensy]{ return teensy->has_led_face_editor(); };
 
-    auto face_slot_row = [&, face_preview, edit_face](int slot_idx) -> MenuItem {
+    // Per-expression Versions submenu: Save Version… (named) + a list of saved
+    // versions (named + auto-backups) with a thumbnail panel; Make Current /
+    // Delete each. Copy-based — Make Current backs up the live PNG, copies the
+    // version in via the controller (which reloads), so the renderer is unchanged.
+    struct VerThumb { GLuint tex = 0; std::string loaded;
+                      std::filesystem::file_time_type mt{}; cv::Mat img; };
+    auto make_versions_submenu = [&, teensy, menu_sys_pp](const std::string& expr) -> MenuItem {
+        auto entries = std::make_shared<std::vector<fvers::Entry>>();
+        auto focus   = std::make_shared<int>(-1);
+        auto thumb   = std::make_shared<VerThumb>();
+        auto refresh = [entries, expr, teensy]{
+            *entries = fvers::list(teensy->face_image_path(expr)); };
+
+        std::vector<MenuItem> items;
+        items.push_back(with_desc(leaf("Save Version\xE2\x80\xA6",
+            [menu_sys_pp, expr, teensy, refresh, focus]{
+                *focus = -1;
+                if (!menu_sys_pp || !*menu_sys_pp) return;
+                (*menu_sys_pp)->open_keyboard("Version name", "",
+                    [expr, teensy, refresh](const std::string& nm){
+                        fvers::save_named(teensy->face_image_path(expr), nm);
+                        refresh();
+                    });
+            }), "Save the current art as a named version you can restore later."));
+        for (int i = 0; i < 24; ++i) {
+            MenuItem row; row.type = MenuItemType::SUBMENU; row.label = "version";
+            row.label_fn = [entries, i]{
+                if (i >= static_cast<int>(entries->size())) return std::string();
+                const auto& e = (*entries)[i];
+                return e.named ? e.label : ("auto: " + e.label);
+            };
+            row.visible_fn   = [entries, i]{ return i < static_cast<int>(entries->size()); };
+            row.on_highlight = [focus, i]{ *focus = i; };
+            MenuItem mk = leaf("Make Current",
+                [entries, i, expr, teensy, refresh]{
+                    if (i >= static_cast<int>(entries->size())) return;
+                    const std::string live = teensy->face_image_path(expr);
+                    fvers::backup_current(live, 15);                       // undo the switch
+                    teensy->import_face_image(expr, (*entries)[i].path.string());  // copy + reload
+                    teensy->set_face_by_name(expr);
+                    refresh();
+                });
+            MenuItem del = leaf("Delete", [entries, i, refresh]{
+                if (i >= static_cast<int>(entries->size())) return;
+                std::error_code ec; std::filesystem::remove((*entries)[i].path, ec);
+                refresh();
+            });
+            row.children = { std::move(mk), std::move(del) };
+            items.push_back(std::move(row));
+        }
+        MenuItem sub = submenu("Versions", std::move(items));
+        sub.action = refresh;   // SUBMENU on-enter hook: rescan disk
+        sub.context_panel_title = "Version Preview";
+        sub.context_panel_draw  = [thumb, focus, entries](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+            std::string path;
+            if (*focus >= 0 && *focus < static_cast<int>(entries->size()))
+                path = (*entries)[*focus].path.string();
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f), ph = pw * 0.5f;
+            const float px = o.x + (sz.x - pw) * 0.5f, py = o.y + (sz.y - ph) * 0.5f - 6.f;
+            dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10, 16, 22, 190));
+            if (path.empty()) {
+                const char* m = "Scroll to a version";
+                const ImVec2 ts = ImGui::CalcTextSize(m);
+                dl->AddText({px + pw * 0.5f - ts.x * 0.5f, py + ph * 0.5f - ts.y * 0.5f},
+                            IM_COL32(180, 190, 200, 200), m);
+                return;
+            }
+            std::error_code ec; auto mt = std::filesystem::last_write_time(path, ec);
+            if (path != thumb->loaded || mt != thumb->mt) {
+                thumb->img = face::load_png_rgba(path, 256, 128);
+                thumb->loaded = path; thumb->mt = mt;
+            }
+            if (!thumb->img.empty() && thumb->img.isContinuous()) {
+                if (!thumb->tex) {
+                    glGenTextures(1, &thumb->tex);
+                    glBindTexture(GL_TEXTURE_2D, thumb->tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                glBindTexture(GL_TEXTURE_2D, thumb->tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, thumb->img.cols, thumb->img.rows, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, thumb->img.data);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(thumb->tex)),
+                             {px, py}, {px + pw, py + ph});
+            }
+        };
+        return sub;
+    };
+
+    auto face_slot_row = [&, face_preview, edit_face, make_versions_submenu](int slot_idx) -> MenuItem {
         const std::string expr  = kFaceSlots[slot_idx].expression;
         const std::string label = kFaceSlots[slot_idx].label;
 
@@ -1889,7 +2041,12 @@ static std::vector<MenuItem> build_menu(
             [edit_face, expr]{ if (edit_face) edit_face(expr); });
         edit_it.visible_fn = have_led_regions;
 
-        m.children = { std::move(play), std::move(edit_it),
+        MenuItem versions = make_versions_submenu(expr);
+        versions.description = "Saved versions of this face (named + auto-backups) "
+                               "with thumbnails — Make Current to restore one.";
+        versions.visible_fn = bound_now;
+
+        m.children = { std::move(play), std::move(edit_it), std::move(versions),
                        std::move(replace), std::move(copy_from),
                        std::move(clear), std::move(imp) };
         return m;
@@ -2046,7 +2203,10 @@ static std::vector<MenuItem> build_menu(
             [edit_face, expr]{ if (edit_face) edit_face(expr); });
         edit_it.visible_fn = have_led_regions;
 
-        m.children = { std::move(edit_it), std::move(replace),
+        MenuItem versions = make_versions_submenu(expr);
+        versions.visible_fn = bound_now;
+
+        m.children = { std::move(edit_it), std::move(versions), std::move(replace),
                        std::move(copy_from), std::move(clear), std::move(imp) };
         return m;
     };
@@ -2217,7 +2377,10 @@ static std::vector<MenuItem> build_menu(
             return false;
         };
 
-        m.children = { std::move(play), std::move(edit_it),
+        MenuItem versions = make_versions_submenu(expr);
+        versions.visible_fn = bound_now;
+
+        m.children = { std::move(play), std::move(edit_it), std::move(versions),
                        std::move(replace), std::move(copy_from),
                        std::move(clear), std::move(imp) };
         return m;
@@ -10723,6 +10886,9 @@ int main(int argc, char* argv[]) {
                 std::error_code ec;
                 std::filesystem::create_directories(
                     std::filesystem::path(target_path).parent_path(), ec);
+                // Auto-backup the version we're about to overwrite (last 15 kept)
+                // so an edit can always be undone from the Versions menu.
+                fvers::backup_current(target_path, 15);
                 if (!cv::imwrite(target_path, bgra)) {
                     std::fprintf(stderr, "[editor] save failed: %s\n",
                                  target_path.c_str());
