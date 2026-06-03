@@ -8513,7 +8513,7 @@ static std::vector<MenuItem> build_menu(
             "Tick which senders to show. None ticked = all senders."));
         // Message rows (grouped by sender, scrollable). Full text shows in the panel.
         for (int i = 0; i < NotificationQueue::kMax; ++i) {
-            MenuItem m; m.type = MenuItemType::LEAF; m.label = "msg";
+            MenuItem m; m.type = MenuItemType::SUBMENU; m.label = "msg";
             m.label_fn = [&state, order, ensure_order, i]{
                 ensure_order();
                 std::lock_guard<std::mutex> lk(state.mtx);
@@ -8527,6 +8527,20 @@ static std::vector<MenuItem> build_menu(
                 return s;
             };
             m.visible_fn = [order, ensure_order, i]{ ensure_order(); return i < (int)order->size(); };
+            // Select a row to act on it: Delete removes just that message.
+            m.children.push_back(with_desc(leaf("Delete Message",
+                [&state, order, ensure_order, i, menu_sys_pp]{
+                    ensure_order();
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        if (i < (int)order->size()) {
+                            const int qi = (*order)[i];
+                            if (qi < (int)state.notifs.items.size())
+                                state.notifs.items.erase(state.notifs.items.begin() + qi);
+                        }
+                    }
+                    if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();   // back to the log
+                }), "Remove this one notification from the log."));
             nlog_menu.push_back(std::move(m));
         }
         // Context panel: full text of the focused row.
@@ -12270,6 +12284,7 @@ int main(int argc, char* argv[]) {
 
     double prev_time = glfwGetTime();
     uint32_t notif_last_saved = state.notifs.next_id;   // debounced log persistence
+    size_t   notif_last_size  = state.notifs.items.size();
     double   notif_next_save  = 0.0;
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
@@ -12285,11 +12300,16 @@ int main(int argc, char* argv[]) {
         prev_time  = now;
 
         // ── Notification log persistence (debounced, ~5s) ─────────────────────
-        if (state.notif_persist && state.notifs.next_id != notif_last_saved
-            && now >= notif_next_save) {
-            save_notifs();
-            notif_last_saved = state.notifs.next_id;
-            notif_next_save  = now + 5.0;
+        // Dirty on a new push (next_id) OR a delete/clear (size change).
+        if (state.notif_persist && now >= notif_next_save) {
+            const size_t sz = [&]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                   return state.notifs.items.size(); }();
+            if (state.notifs.next_id != notif_last_saved || sz != notif_last_size) {
+                save_notifs();
+                notif_last_saved = state.notifs.next_id;
+                notif_last_size  = sz;
+                notif_next_save  = now + 5.0;
+            }
         }
 
         // ── CSI boot auto-retry ───────────────────────────────────────────────
