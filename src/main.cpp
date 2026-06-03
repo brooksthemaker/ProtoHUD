@@ -79,6 +79,7 @@
 #endif
 
 #include <unistd.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <cerrno>
@@ -241,7 +242,24 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
     std::string ph  = std::to_string(panel_h);
     std::string ch  = std::to_string(chain);
     std::string par = std::to_string(parallel);
+    // Stop any existing driver and WAIT for it to actually exit before
+    // relaunching. piomatter (RP1 PIO + DMA + /dev/mem) can't be initialised
+    // by two processes at once, so an immediate relaunch races the dying
+    // process and the panels stay blank ("blanked but nothing restarted").
+    // SIGTERM first so piomatter cleans up its PIO/DMA, poll up to ~2s for it
+    // to go, then SIGKILL only stragglers and reap our old child.
     std::system("pkill -f panel_driver.py 2>/dev/null");
+    bool gone = false;
+    for (int i = 0; i < 20; ++i) {
+        if (std::system("pgrep -f panel_driver.py >/dev/null 2>&1") != 0) { gone = true; break; }
+        usleep(100 * 1000);
+    }
+    if (!gone) {
+        std::system("pkill -9 -f panel_driver.py 2>/dev/null");
+        usleep(300 * 1000);   // give the kernel time to tear down DMA + free /dev/mem
+    }
+    while (waitpid(-1, nullptr, WNOHANG) > 0) {}   // reap exited driver children
+
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
@@ -11553,11 +11571,27 @@ int main(int argc, char* argv[]) {
                                    if (native_ctrl) native_ctrl->set_material_spec(spec);
                                },
                                /* pf_restart_renderer */ [&]{
-                                   if (!pf_launch_driver || pf_backend != "hub75" || !native_ctrl) return;
+                                   if (!pf_launch_driver || pf_backend != "hub75" || !native_ctrl) {
+                                       Notification n; n.type = NotifType::App;
+                                       n.title = "Panel restart unavailable";
+                                       n.body  = "HUB75 panel driver is not in use.";
+                                       n.auto_dismiss_s = 5.f;
+                                       std::lock_guard<std::mutex> lk(state.mtx);
+                                       state.notifs.push(std::move(n));
+                                       return;
+                                   }
                                    int gpw = 64, gph = 32, gchain = 2, gpar = 1;
                                    pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
+                                   // pf_launch_panel_driver now stops the old driver, waits for it
+                                   // to release the PIO/DMA, then relaunches (see its comment).
                                    pf_launch_panel_driver(bin_dir, native_ctrl->canvas_width(),
                                        native_ctrl->canvas_height(), gpw, gph, gchain, gpar);
+                                   Notification n; n.type = NotifType::App;
+                                   n.title = "Panel driver restarted";
+                                   n.body  = "If panels stay dark, check /tmp/panel_driver.log";
+                                   n.auto_dismiss_s = 6.f;
+                                   std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.notifs.push(std::move(n));
                                },
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
                                &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr,
