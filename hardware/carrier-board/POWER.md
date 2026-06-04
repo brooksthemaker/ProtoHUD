@@ -195,6 +195,39 @@ current; the heavy amps live on the 5 V output (which is now the umbilical).
 | 1S Li-ion + boost | impractical to boost to 5 V at >10 A |
 | **Ryobi 40 V + buck** | ✅ low input current, high capacity, hot-swappable packs |
 
+## Umbilical (backpack ↔ helmet)
+
+System partition: the **backpack** holds the Ryobi battery, the 40 V→5 V
+regulator, and the **phone dock**; a tether runs to the **helmet** carrying two
+things:
+
+| Conductor | Carries | Notes |
+|-----------|---------|-------|
+| **5 V power** | up to ~24 A @ 5 V (see drop table above) | fat 10–12 AWG + GND; add a **remote-sense pair** to J1 |
+| **USB 2.0** | phone (in dock) ↔ CM5 host | scrcpy/ADB mirror + KDE Connect over USB; one CM5 port |
+
+The phone connects as a **USB device** to the CM5's USB **host** port — ProtoHUD
+runs `scrcpy` over ADB to mirror it into a V4L2 node (`src/android/android_mirror.cpp`).
+So the helmet end of the USB lands on a CM5 USB port (dedicate one to the
+umbilical — see `J11` in [`CONNECTORS.md`](CONNECTORS.md)); the in-helmet USB hub
+(RP2350 audio / knob / LoRa / VITURE / cams) stays on a separate port.
+
+### Build notes
+- **Keep USB away from the power conductors.** Use the cable's shielded,
+  twisted D+/D− pair; route it apart from the high-current 5 V leads to avoid
+  the panel/LED switching noise coupling into USB. USB 2.0 is fine to ~5 m, so
+  cable length isn't the worry — noise is.
+- **Phone charging / VBUS — decide one:**
+  - *Passive dock (simplest):* the single USB cable carries CM5 VBUS up to the
+    phone; the CM5 charges it slowly (limited port current, and it adds to the
+    5 V umbilical load).
+  - *Charge-injection dock (faster):* the dock charges the phone from the
+    backpack 5 V, data-only to the CM5 — **must isolate VBUS** so the dock
+    doesn't back-feed the CM5 port.
+- **One connector or two:** a single multi-pin circular (e.g. GX16/GX20 or a
+  rugged push-pull) can carry both power and USB, or keep them as two separate
+  keyed connectors. If combined, segregate the USB pair from the power pins.
+
 ## Protection & sequencing
 
 Split across the two units:
