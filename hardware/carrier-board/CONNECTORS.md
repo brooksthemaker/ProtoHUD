@@ -155,6 +155,25 @@ port is standard USB 2.0:
 
 ---
 
+## J11 — Backpack USB umbilical (phone → CM5 host)  ·  USB 2.0
+
+The phone (docked in the backpack) connects to a **CM5 USB host** port via the
+tether; ProtoHUD mirrors it with scrcpy/ADB. Dedicate one CM5 port to this so
+the long run doesn't share the in-helmet hub (J9).
+
+| Pin | Signal | Notes |
+|----:|--------|-------|
+| 1 | VBUS (+5V) | passive dock: CM5 powers/charges phone. Charge-injection dock: **leave VBUS isolated** from CM5 |
+| 2 | D− | shielded twisted pair; keep clear of power conductors |
+| 3 | D+ | |
+| 4 | GND | tie to system ground |
+| — | SHIELD | cable shield → chassis/ground at one end |
+
+> Pairs with the 5 V power feed (J1) as the **backpack→helmet umbilical**. They
+> can share one multi-pin circular connector (GX16/GX20 / push-pull) — if so,
+> segregate the USB pair from the high-current 5 V pins. See
+> [`POWER.md`](POWER.md#umbilical-backpack--helmet).
+
 ## J10 — HDMI out  ·  HDMI standard (×2)
 
 CM5 exposes two HDMI outputs. Use standard HDMI receptacles with an **ESD
