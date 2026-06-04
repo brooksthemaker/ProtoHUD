@@ -9,8 +9,10 @@
 #include <iostream>
 
 #include <fcntl.h>
+#include <linux/i2c.h>
 #include <linux/i2c-dev.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -27,6 +29,11 @@ constexpr uint8_t REG_OPR_MODE    = 0x3D;
 constexpr uint8_t REG_PWR_MODE    = 0x3E;
 constexpr uint8_t REG_SYS_TRIGGER = 0x3F;
 constexpr uint8_t REG_CHIP_ID     = 0x00;
+// Calibration profile: 22 contiguous bytes 0x55..0x6A (accel/mag/gyro offsets
+// + accel/mag radius). Only writable in CONFIG mode; persists in the chip
+// across mode switches but is lost on power-down — hence saving to disk.
+constexpr uint8_t REG_ACC_OFFSET  = 0x55;
+constexpr int     CALIB_BLOB_LEN  = 22;
 
 constexpr uint8_t CHIP_ID_BNO055  = 0xA0;
 constexpr uint8_t OPR_MODE_CONFIG = 0x00;
@@ -60,9 +67,22 @@ bool Bno055::write_reg(uint8_t reg, uint8_t val) {
 
 bool Bno055::read_regs(uint8_t reg, uint8_t* buf, size_t len) {
     if (i2c_fd_ < 0) return false;
-    if (ioctl(i2c_fd_, I2C_SLAVE, cfg_.i2c_addr) < 0) return false;
-    if (::write(i2c_fd_, &reg, 1) != 1) return false;
-    return ::read(i2c_fd_, buf, len) == static_cast<ssize_t>(len);
+    // Combined write-then-read in ONE transaction with a repeated START
+    // (I2C_RDWR) instead of a separate write+STOP+read. The BNO055 stretches
+    // the I2C clock, and a repeated-start read is far more reliable through the
+    // Pi/RP1 controller than two discrete transfers. (If reads are still flaky,
+    // slow the bus: dtparam=i2c_arm_baudrate=10000 in config.txt.)
+    struct i2c_msg msgs[2];
+    msgs[0].addr  = static_cast<__u16>(cfg_.i2c_addr);
+    msgs[0].flags = 0;
+    msgs[0].len   = 1;
+    msgs[0].buf   = &reg;
+    msgs[1].addr  = static_cast<__u16>(cfg_.i2c_addr);
+    msgs[1].flags = I2C_M_RD;
+    msgs[1].len   = static_cast<__u16>(len);
+    msgs[1].buf   = buf;
+    struct i2c_rdwr_ioctl_data xfer { msgs, 2 };
+    return ioctl(i2c_fd_, I2C_RDWR, &xfer) == 2;
 }
 
 bool Bno055::open_bus() {
@@ -101,8 +121,66 @@ bool Bno055::init_chip_locked() {
     write_reg(REG_PAGE_ID,   0x00);
     write_reg(REG_SYS_TRIGGER, 0x00);             // clear any external crystal bit
     write_reg(REG_UNIT_SEL,  UNIT_SEL_DEG);
+
+    // Restore a saved calibration profile while still in CONFIG mode (offsets
+    // are only writable here). The chip keeps refining the mag model in NDOF,
+    // but this gives it the gyro/accel cal and a big head start.
+    uint8_t blob[CALIB_BLOB_LEN];
+    if (load_calibration_file(blob)) {
+        if (write_calib_offsets(blob))
+            std::cerr << "[bno055] restored calibration from " << cfg_.calib_path << "\n";
+    }
+
     write_reg(REG_OPR_MODE,  OPR_MODE_NDOF);      // start fusion
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    return true;
+}
+
+// ── Calibration profile read/write/persist ──────────────────────────────────
+bool Bno055::read_calib_offsets(uint8_t out[22]) {
+    return read_regs(REG_ACC_OFFSET, out, CALIB_BLOB_LEN);
+}
+
+bool Bno055::write_calib_offsets(const uint8_t in[22]) {
+    // Written byte-by-byte (the chip latches each offset register on write);
+    // caller guarantees CONFIG mode.
+    for (int i = 0; i < CALIB_BLOB_LEN; ++i)
+        if (!write_reg(static_cast<uint8_t>(REG_ACC_OFFSET + i), in[i])) return false;
+    return true;
+}
+
+bool Bno055::load_calibration_file(uint8_t out[22]) const {
+    if (cfg_.calib_path.empty()) return false;
+    FILE* f = std::fopen(cfg_.calib_path.c_str(), "rb");
+    if (!f) return false;
+    size_t n = std::fread(out, 1, CALIB_BLOB_LEN, f);
+    std::fclose(f);
+    return n == CALIB_BLOB_LEN;
+}
+
+bool Bno055::has_saved_calibration() const {
+    if (cfg_.calib_path.empty()) return false;
+    struct stat st{};
+    return ::stat(cfg_.calib_path.c_str(), &st) == 0 && st.st_size >= CALIB_BLOB_LEN;
+}
+
+bool Bno055::save_calibration() {
+    if (cfg_.calib_path.empty()) return false;
+    uint8_t blob[CALIB_BLOB_LEN] = {0};
+    // Offsets are only stable/readable in CONFIG mode; bounce out of NDOF,
+    // read, then resume fusion. The in-chip calibration is unaffected.
+    write_reg(REG_OPR_MODE, OPR_MODE_CONFIG);
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    const bool ok = read_calib_offsets(blob);
+    write_reg(REG_OPR_MODE, OPR_MODE_NDOF);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (!ok) return false;
+    FILE* f = std::fopen(cfg_.calib_path.c_str(), "wb");
+    if (!f) return false;
+    const size_t n = std::fwrite(blob, 1, CALIB_BLOB_LEN, f);
+    std::fclose(f);
+    if (n != CALIB_BLOB_LEN) return false;
+    std::cerr << "[bno055] saved calibration to " << cfg_.calib_path << "\n";
     return true;
 }
 
@@ -115,6 +193,10 @@ bool Bno055::start() {
         i2c_fd_ = -1;
         return false;
     }
+    // If a calibration file already exists, treat the one-shot auto-save as
+    // done so we don't overwrite a good profile with a fresh (possibly worse)
+    // one. Explicit "Save" from the menu always overwrites.
+    auto_saved_.store(has_saved_calibration());
     running_.store(true);
     thread_ = std::thread(&Bno055::poll_loop, this);
     return true;
@@ -141,6 +223,20 @@ void Bno055::poll_loop() {
 
     while (running_.load()) {
         const auto next_t = std::chrono::steady_clock::now() + period;
+
+        // Calibration persistence (done on this thread so it owns the bus).
+        // Explicit request always saves; otherwise auto-save once when the chip
+        // first reports fully calibrated and no file exists yet.
+        if (save_req_.exchange(false)) {
+            const bool ok = save_calibration();
+            auto_saved_.store(true);
+            if (calib_saved_cb_) calib_saved_cb_(ok);
+        } else if (cfg_.auto_save_calibration && !auto_saved_.load() &&
+                   calib_sys_.load() >= 3) {
+            const bool ok = save_calibration();
+            auto_saved_.store(true);
+            if (calib_saved_cb_) calib_saved_cb_(ok);
+        }
 
         // One bulk read covers everything we care about: 0x08..0x35 inclusive.
         // 46 bytes — well within the i2c-dev write/read buffer limits.

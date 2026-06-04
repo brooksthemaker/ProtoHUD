@@ -261,6 +261,7 @@
   },
   "bno055": {
     "_about": "Adafruit BNO055 9-DOF absolute orientation sensor via I2C. On-chip sensor fusion — heading comes from the chip directly (no software AHRS needed) and stays stable through tilt. Preferred over MPU9250 when both are present (Auto IMU source picks BNO055 first). Wired to CM5 40-pin header: SDA=GPIO2(pin3), SCL=GPIO3(pin5), VCC=3.3V(pin1), GND(pin6). ADR pin floating/low = 0x28; ADR tied high = 0x29.",
+    "_clock_stretch_note": "The BNO055 stretches the I2C clock, which the Pi/RP1 hardware I2C handles poorly — it can read fine on an Arduino but be flaky/undetectable on the Pi. If `i2cdetect -y 1` doesn't show 28, or readings are unstable, slow the bus in /boot/firmware/config.txt: `dtparam=i2c_arm_baudrate=10000` (10 kHz). Alternatively use a software bus: `dtoverlay=i2c-gpio,bus=3,...` and set i2c_bus to /dev/i2c-3.",
     "enabled": true,
     "i2c_bus": "/dev/i2c-1",
     "i2c_addr": 40,
@@ -272,7 +273,9 @@
     "heading_axes": 0,
     "_heading_axes_note": "Axis remap for non-default mounting. 0 = factory default (X-forward, Y-left, Z-up). The chip's calibration is preserved across axis remaps so re-calibration isn't needed when this changes.",
     "poll_hz": 50.0,
-    "_poll_hz_note": "Sensor read rate. 50 Hz matches the chip's internal fusion rate; higher just resamples the same fused value."
+    "_poll_hz_note": "Sensor read rate. 50 Hz matches the chip's internal fusion rate; higher just resamples the same fused value.",
+    "save_calibration": true,
+    "_save_calibration_note": "Persist the chip's calibration profile to bno055_calib.bin (next to this file) so it survives reboots. Restored automatically at startup; saved on demand via Compass > Save IMU Calibration, and auto-saved once the chip first reaches full calibration (sys 3/3) if no file exists yet. Calibrate by rotating the head through several orientations + a figure-8 for the magnetometer until all four values read 3."
   },
   "post_process": {
     "edge_enabled": false,

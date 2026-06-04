@@ -1336,7 +1336,7 @@ static std::vector<MenuItem> build_menu(
         bool* pip_cam1_overlay, bool* pip_cam2_overlay, bool* pip_cam3_overlay,
         OverlayConfig* android_cfg,
         HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp,
-        Mpu9250* mpu9250,
+        Mpu9250* mpu9250, Bno055* bno055,
         const std::vector<std::string>& gif_names,
         BtMonitor* bt_mon,
         bool* sys_panel_active,
@@ -5935,6 +5935,20 @@ static std::vector<MenuItem> build_menu(
                   "fresh source each frame; explicit choices force their "
                   "source even if stale."),
         submenu("IMU Axis",            std::move(imu_axis_menu)),
+        [&]() -> MenuItem {
+            MenuItem m = leaf("Save IMU Calibration",
+                [bno055]{ if (bno055) bno055->request_calibration_save(); });
+            m.label_fn = [bno055]{
+                const int s = bno055 ? bno055->calib_sys() : 0;
+                return std::string("Save IMU Calibration  [sys ") +
+                       std::to_string(s) + "/3]";
+            };
+            m.visible_fn = [bno055]{ return bno055 && bno055->connected(); };
+            return with_desc(std::move(m),
+                "Store the BNO055's current calibration so it loads on boot. "
+                "Best when calibration reads 3/3 — rotate the head through "
+                "several orientations and a figure-8 for the magnetometer.");
+        }(),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
@@ -9595,7 +9609,12 @@ int main(int argc, char* argv[]) {
         bno_cfg.heading_offset  = jval(jb, "heading_offset",  0.0f);
         bno_cfg.heading_axes    = jval(jb, "heading_axes",    0);
         bno_cfg.poll_hz         = jval(jb, "poll_hz",         50.0f);
+        bno_cfg.auto_save_calibration = jval(jb, "save_calibration", true);
     }
+    // Persist the BNO055 calibration profile next to config.json so the sensor
+    // keeps its calibration across reboots (restored at start()).
+    bno_cfg.calib_path =
+        (fs::path(cfg_path).parent_path() / "bno055_calib.bin").string();
 
     // IMU source selector — replaces the old "Viture always wins, MPU is
     // backup" hardcoded priority. "auto" picks the best fresh source per
@@ -10357,6 +10376,16 @@ int main(int argc, char* argv[]) {
             d.bno_mag_ut[i]   = s.mag_ut[i];
             d.bno_euler[i]    = s.euler_deg[i];
         }
+    });
+    bno055.set_calib_saved_callback([&state](bool ok) {
+        Notification n;
+        n.type           = NotifType::App;
+        n.title          = ok ? "IMU calibration saved" : "IMU calibration save failed";
+        n.body           = ok ? "BNO055 offsets stored; they'll load on boot."
+                               : "Could not read/write the calibration profile.";
+        n.auto_dismiss_s = 6.f;
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.notifs.push(std::move(n));
     });
     if (!bno055.start() && bno_cfg.enabled)
         std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
@@ -11514,7 +11543,7 @@ int main(int argc, char* argv[]) {
                                &pip_cam1_overlay_active, &pip_cam2_overlay_active, &pip_cam3_overlay_active,
                                &android_overlay_cfg,
                                &hud.colors(), &hud.config(), &menu_ptr,
-                               &mpu9250, gif_names,
+                               &mpu9250, &bno055, gif_names,
                                &bt_mon, &sys_panel_active, &fps_overlay_active, &state,
                                &active_face,
                                static_cast<IFaceController*>(&teensy),
