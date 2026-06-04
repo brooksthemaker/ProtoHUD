@@ -1460,6 +1460,13 @@ Running both processes on the same CM5 requires resolving three GPIO conflicts:
 | SPI0 IMU GPIO 9/11 vs HUB75 data row-1 | Move ProtoHUD IMU to I2C bus 1 (GPIO 2/3, address 0x69) |
 | Boop sensor default GPIO 17 vs HUB75 CLK | Reassign to GPIO 16 (`inputs.boop.gpio_pin: 16`) |
 
+> **Panels dark, flickering, or wrong colors?** HUB75 panels are 5 V-logic
+> (input-high threshold ≈ 3.5 V) but the Pi/CM5 GPIO drives only 3.3 V, which is
+> below spec — it works intermittently at best. Drive the panel through a 5 V
+> **74AHCT245** buffer (3.3 V → 5 V), as on an Adafruit RGB Matrix Bonnet's
+> "active" adapter. See [`hardware/carrier-board/`](hardware/carrier-board/) for
+> the full level-shifting design, BOM, and requirements.
+
 See [Protoface/INTEGRATION.md](Protoface/INTEGRATION.md) for the full GPIO analysis, CPU budget, systemd service files, and minimal working configuration.
 
 ---
@@ -1726,6 +1733,7 @@ ip -br addr show usb0      # should now have a 192.168.42.x address
 │   └── timewarp.vs / timewarp.fs   — homography warp shader
 ├── config/config.json
 ├── overlays/cm5-6mic.dts           — 6-ch I2S DT overlay (boot config; audio handled by RP2350)
+├── hardware/carrier-board/         — CM5 carrier board: level-shifting design, BOM, requirements
 ├── vendor/viture/                  — VITURE XR SDK (pre-built aarch64 .so)
 ├── Protoface/                      — git submodule: HUB75 LED face daemon
 └── scripts/
