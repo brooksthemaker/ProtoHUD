@@ -457,6 +457,7 @@ IMU-driven reprojection reduces rotational display latency from ~16 ms to ~4 ms 
 - **Haptic feedback for alerts** — use SmartKnob motor for a short pulse on alarm/timer fire or incoming LoRa message.
 - **Speaker/buzzer support** — play a short tone on alarm events via the ALSA audio path.
 - **Additional GPIO inputs** — extra buttons for dedicated functions (e.g. dedicated capture button, one-touch effect cycle).
+- **I/O expander support (buttons + LEDs)** — let `gpio.pins` slots target an MCP23017 (or similar) exposed as a `/dev/gpiochipN` via DT overlay: add an optional per-slot `"chip"` field so `input::GpioInputs` drives expander pins with no new handling code, plus a thin LED-output helper (libgpiod set-value / PCA9685 PWM). Hardware design in `hardware/carrier-board/IO-EXPANSION.md`.
 - **Rotary encoder for zoom** — second SmartKnob or simple encoder wired to digital zoom without entering the menu.
 
 ### System & Infrastructure
