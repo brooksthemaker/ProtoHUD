@@ -29,14 +29,27 @@ serviceability, or telemetry but can be cut for a v1.
   see `src/main.cpp` `rail_currents_mA`). No local regulator required at the
   current load.
 
-### M3 — HUB75 (face panels) — the critical interface
+### M3 — Face display backend (HUB75 **or** MAX7219 — pick one)
+Both backends are 5 V-logic and share one 3.3 V → 5 V buffer block; a jumper
+(JP1) routes the buffered signals to whichever face connector is populated.
+
 - **R3.1** **74AHCT245** (or AHCT244/541) octal buffer(s) powered at **5 V**,
-  level-shifting all **14** HUB75 signals (R1 G1 B1 R2 G2 B2 A B C D E CLK
-  STB OE) from 3.3 V → 5 V. **Must be HCT/AHCT family** (TTL VIH ≈ 2 V), not
-  HC (which needs VIH ≈ 3.5 V at a 5 V rail and would not read 3.3 V as high).
-- **R3.2** Standard HUB75 **2×8 (16-pin) shrouded IDC** output connector(s).
+  level-shifting the face signals from 3.3 V → 5 V. **Must be HCT/AHCT family**
+  (TTL VIH ≈ 2 V), not HC (which needs VIH ≈ 3.5 V at a 5 V rail and would not
+  read 3.3 V as high).
+- **R3.2 (HUB75)** Buffer all **14** HUB75 signals (R1 G1 B1 R2 G2 B2 A B C D E
+  CLK STB OE) to a standard **2×8 (16-pin) shrouded IDC** connector (J2).
 - **R3.3** Optional series resistors (~33 Ω footprint) on CLK and high-speed
   lines to tame ringing on ribbon cables. Keep buffer-to-connector traces short.
+- **R3.4 (MAX7219)** Buffer the MAX7219 chain signals — **DIN, CLK, CS×4** —
+  to a header (J3) carrying 5 V, GND, DIN, CLK, CS1–CS4. DIN/CLK/CS are all
+  CM5 → driver (unidirectional), so the same '245 covers them; DOUT daisies
+  module-to-module and never returns to the CM5.
+- **R3.5** Source the MAX7219 signals to support **both transports**
+  (`src/face/max7219_chain.h`): hardware **SPI0** (DIN = BCM 10/MOSI, CLK =
+  BCM 11/SCLK, CS = BCM 7/8) *and* **bit-banged GPIO** (shared DIN/CLK + per-
+  chain CS). Use jumper/0 Ω selection so SPI0-MOSI isn't claimed by both WS2812
+  and MAX7219 simultaneously (see N11).
 
 ### M4 — WS2812 accessory LEDs
 - **R4.1** Level-shift the single data line (BCM 10 / SPI0 MOSI) 3.3 V → 5 V
