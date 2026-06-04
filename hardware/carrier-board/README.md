@@ -10,6 +10,7 @@ This folder is documentation only — there are no board files here yet. It
 captures **what the board must do** so a schematic/layout (KiCad) can be built
 against a fixed spec.
 
+- [`BLOCK-DIAGRAM.md`](BLOCK-DIAGRAM.md) — system block diagram (voltage domains + shifting boundary)
 - [`REQUIREMENTS.md`](REQUIREMENTS.md) — must-have requirements + nice-to-haves
 - [`BOM.md`](BOM.md) — bill of materials
 
