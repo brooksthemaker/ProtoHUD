@@ -62,9 +62,7 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
         action_cursor_ = 0;
     }
 
-    const float rest_x = fw - kToastW - kMarginR;
-
-    int slot = 0;
+    float stack_y = kMarginT;   // running top edge — toasts vary in height
     for (auto* np : visible) {
         Notification& n = *np;
         ensure_anim(n.id);
@@ -72,14 +70,30 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
         // Find anim
         ToastAnim* anim = nullptr;
         for (auto& a : anims_) if (a.id == n.id) { anim = &a; break; }
-        if (!anim) { ++slot; continue; }
+        if (!anim) { continue; }
 
         anim->age += dt;
 
         // Auto-dismiss
         if (n.auto_dismiss_s > 0.f && anim->age > n.auto_dismiss_s) {
-            n.dismissed = true; n.read = true; ++slot; continue;
+            n.dismissed = true; n.read = true; continue;
         }
+
+        // Per-toast size: chat/DM messages get a larger card with a wrapped body.
+        const float tw = n.big ? kBigToastW : kToastW;
+        float th = n.big ? kBigToastH : kToastH;
+        // Grow a regular toast so the wrapped body fits inside the block (capped).
+        // Measure at the narrowest body width (icon present → text starts at +46).
+        if (!n.big && !n.body.empty()) {
+            nvgFontFaceId(vg, font_mono);
+            nvgFontSize(vg, 12.f);
+            float bnd[4];
+            nvgTextBoxBounds(vg, 0.f, 0.f, tw - 54.f, n.body.c_str(), nullptr, bnd);
+            const float body_h = bnd[3] - bnd[1];
+            const float needed = 26.f + body_h + 10.f + (n.actions.empty() ? 0.f : 18.f);
+            th = std::max(kToastH, std::min(needed, kToastH * 2.6f));
+        }
+        const float rest_x = fw - tw - kMarginR;
 
         // Slide in (over 0.2s)
         const float target_slide = 0.f;
@@ -98,26 +112,26 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
         const uint8_t a = static_cast<uint8_t>(alpha * 240.f);
 
         const float tx = rest_x + anim->slide_x;
-        const float ty = kMarginT + slot * (kToastH + kGap);
+        const float ty = stack_y;
 
         const ImU32 tc  = type_color(n.type);
         const bool focused = (n.id == focused_id_);
 
         // Background
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, tx, ty, kToastW, kToastH, 6.f);
+        nvgRoundedRect(vg, tx, ty, tw, th, 6.f);
         nvgFillColor(vg, nvgRGBA(10, 15, 20, a));
         nvgFill(vg);
 
         // Left color bar (4px)
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, tx, ty, 4.f, kToastH, 3.f);
+        nvgRoundedRect(vg, tx, ty, 4.f, th, 3.f);
         nvgFillColor(vg, nvg_col_t(with_alpha_t(tc, a)));
         nvgFill(vg);
 
         // Border
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, tx, ty, kToastW, kToastH, 6.f);
+        nvgRoundedRect(vg, tx, ty, tw, th, 6.f);
         nvgStrokeColor(vg, nvg_col_t(with_alpha_t(IM_COL32(255,255,255,60), a)));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
@@ -128,13 +142,14 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
         if (icons) {
             const std::string& name = n.icon.empty()
                 ? std::string(notif_type_icon(n.type)) : n.icon;
-            if (icons->draw(vg, name, tx + 26.f, ty + kToastH * 0.5f, 28.f, a / 255.f))
+            const float icon_cy = (n.big || th > kToastH + 1.f) ? (ty + 22.f) : (ty + th * 0.5f);
+            if (icons->draw(vg, name, tx + 26.f, icon_cy, 28.f, a / 255.f))
                 text_x = tx + 46.f;
         }
 
-        // Title
+        // Title (sender). Larger on the big chat/DM card.
         nvgFontFaceId(vg, font_ui);
-        nvgFontSize(vg, 13.f);
+        nvgFontSize(vg, n.big ? 15.f : 13.f);
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
         nvgFillColor(vg, nvgRGBA(255, 255, 255, a));
         nvgText(vg, text_x, ty + 8.f, n.title.c_str(), nullptr);
@@ -146,16 +161,27 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
             nvgFontSize(vg, 11.f);
             nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_TOP);
             nvgFillColor(vg, nvgRGBA(180, 180, 180, a));
-            nvgText(vg, tx + kToastW - 8.f, ty + 8.f, ts.c_str(), nullptr);
+            nvgText(vg, tx + tw - 8.f, ty + 8.f, ts.c_str(), nullptr);
         }
 
-        // Body
-        if (!n.body.empty()) {
+        // Body — wrapped on the big card so the whole message is visible.
+        if (n.big && !n.body.empty()) {
+            nvgFontFaceId(vg, font_mono);
+            nvgFontSize(vg, 13.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            nvgFillColor(vg, nvgRGBA(210, 214, 220, a));
+            const float bx = tx + 12.f;
+            nvgTextBox(vg, bx, ty + 30.f, tw - 24.f, n.body.c_str(), nullptr);
+        } else if (!n.body.empty()) {
             nvgFontFaceId(vg, font_mono);
             nvgFontSize(vg, 12.f);
             nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
             nvgFillColor(vg, nvgRGBA(200, 200, 200, a));
-            nvgText(vg, text_x, ty + 26.f, n.body.c_str(), nullptr);
+            // Wrap to the block width; clip so it can't spill past the card.
+            nvgSave(vg);
+            nvgIntersectScissor(vg, tx, ty, tw, th);
+            nvgTextBox(vg, text_x, ty + 26.f, (tx + tw - 8.f) - text_x, n.body.c_str(), nullptr);
+            nvgRestore(vg);
         }
 
         // Action buttons (only shown when focused)
@@ -164,7 +190,7 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
             nvgFontSize(vg, 11.f);
             nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
             float bx = text_x;
-            const float by = ty + kToastH - 20.f;
+            const float by = ty + th - 20.f;
             for (int i = 0; i < (int)n.actions.size(); ++i) {
                 const char* lbl = n.actions[i].label.c_str();
                 float bounds[4];
@@ -183,7 +209,7 @@ void ToastRenderer::draw(NVGcontext* vg, NotificationQueue& q,
         }
 
         n.read = true;
-        ++slot;
+        stack_y += th + kGap;
     }
 }
 

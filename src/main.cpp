@@ -26,6 +26,8 @@
 #include "camera/camera_manager.h"
 #include "camera/viture_camera.h"
 #include "input/gpio_buttons.h"
+#include "input/gpio_inputs.h"
+#include "input/gpio_function.h"
 #include "input/gamepad_input.h"
 #include "input/wireless_controller.h"
 #include "serial/face_controller.h"
@@ -64,6 +66,7 @@
 #include "profile_manager.h"
 #include "face/face_config.h"
 #include "face/face_image.h"
+#include "face/eye_animations.h"
 #include "face/gif_player.h"
 #include "face/native_face_controller.h"
 #include "face/panel_output.h"
@@ -76,6 +79,7 @@
 #endif
 
 #include <unistd.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <cerrno>
@@ -222,12 +226,40 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
 // startup AND from the menu's backend hot-swap when switching back to HUB75.
 // fork()+setsid() (instead of `system("... &")`) so SIGINT to the parent
 // doesn't take the driver down with it.
+// Geometry (panel_w/panel_h/chain/parallel) must match the canvas the renderer
+// pushes into /dev/shm, otherwise panel_driver.py's piomatter framebuffer is a
+// different shape than the frame it reads and the blit throws on the first
+// frame (panels never light). The defaults below mirror panel_driver.py's own
+// argparse defaults so existing callers behave unchanged.
 static void pf_launch_panel_driver(const std::string& bin_dir,
-                                   int canvas_w, int canvas_h) {
+                                   int canvas_w, int canvas_h,
+                                   int panel_w = 64, int panel_h = 32,
+                                   int chain = 2, int parallel = 1) {
     std::string drv = bin_dir + "/../scripts/panel_driver.py";
     std::string cw  = std::to_string(canvas_w);
     std::string chh = std::to_string(canvas_h);
+    std::string pw  = std::to_string(panel_w);
+    std::string ph  = std::to_string(panel_h);
+    std::string ch  = std::to_string(chain);
+    std::string par = std::to_string(parallel);
+    // Stop any existing driver and WAIT for it to actually exit before
+    // relaunching. piomatter (RP1 PIO + DMA + /dev/mem) can't be initialised
+    // by two processes at once, so an immediate relaunch races the dying
+    // process and the panels stay blank ("blanked but nothing restarted").
+    // SIGTERM first so piomatter cleans up its PIO/DMA, poll up to ~2s for it
+    // to go, then SIGKILL only stragglers and reap our old child.
     std::system("pkill -f panel_driver.py 2>/dev/null");
+    bool gone = false;
+    for (int i = 0; i < 20; ++i) {
+        if (std::system("pgrep -f panel_driver.py >/dev/null 2>&1") != 0) { gone = true; break; }
+        usleep(100 * 1000);
+    }
+    if (!gone) {
+        std::system("pkill -9 -f panel_driver.py 2>/dev/null");
+        usleep(300 * 1000);   // give the kernel time to tear down DMA + free /dev/mem
+    }
+    while (waitpid(-1, nullptr, WNOHANG) > 0) {}   // reap exited driver children
+
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
@@ -237,11 +269,15 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
         if (nf >= 0) { dup2(nf, 0); ::close(nf); }
         execlp("python3", "python3", "-u", drv.c_str(),
                "--canvas-w", cw.c_str(), "--canvas-h", chh.c_str(),
+               "--panel-w", pw.c_str(), "--panel-h", ph.c_str(),
+               "--chain", ch.c_str(), "--parallel", par.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }
     std::cout << "[main] launched panel_driver.py pid=" << pid
-              << " (" << drv << ")\n";
+              << " (" << drv << ", canvas " << cw << "x" << chh
+              << ", panel " << pw << "x" << ph
+              << ", chain " << ch << ", parallel " << par << ")\n";
 }
 
 // Build the PanelOutput that NativeFaceController writes into. Reads
@@ -283,6 +319,11 @@ struct PfHub75Layout {
     // defaults are dx[0] = -32, dx[1] = +32 (P1 left of centre, P2 right).
     int         nudge_dx[4]     = {0, 0, 0, 0};
     int         nudge_dy[4]     = {0, 0, 0, 0};
+    // Per-panel orientation flips to match physical mounting/wiring. flip_x
+    // mirrors left-right, flip_y top-bottom (both = 180°). Independent of the
+    // nudge geometry — applied to each panel's composited region.
+    bool        flip_x[4]       = {false, false, false, false};
+    bool        flip_y[4]       = {false, false, false, false};
     // First-run flag — until apply_defaults has run we treat all-zero
     // nudges as "uninitialised" and populate them.
     bool        defaults_applied = false;
@@ -291,6 +332,48 @@ static std::vector<face::ShmPusherOutput::Panel>
 pf_hub75_panels(const PfHub75Layout& L);
 static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch);
 static void pf_hub75_apply_defaults(PfHub75Layout& L);
+static void pf_hub75_driver_geometry(const PfHub75Layout& L,
+                                     int& panel_w, int& panel_h,
+                                     int& chain, int& parallel);
+
+// ── Custom multi-colour gradient material ───────────────────────────────────
+// Editor state for Protoface > Material Color > Custom Gradient. Up to 6 colour
+// stops laid out along the face, smoothly blended or hard-banded, optionally
+// scrolling so the colours flow behind the face. Serialised to
+// cfg["protoface"]["gradient"]; rendered via face::GradientMaterial (the
+// "gradient:…" material spec built by pf_gradient_spec below).
+struct PfGradient {
+    int count = 3;                                   // active stops, 2..6
+    std::array<std::array<int, 3>, 6> colors {{
+        {{0, 220, 180}}, {{0, 100, 255}}, {{180, 30, 220}},
+        {{255, 80, 0}},  {{30, 220, 60}}, {{255, 220, 0}},
+    }};
+    bool        smooth    = true;                    // blend vs hard bands
+    std::string direction = "horizontal";            // horizontal | vertical
+    int         speed     = 0;                        // px/s, 0 = static
+};
+
+// Build the "gradient:<dir>:<mode>:<speed>:RRGGBB-…" spec face::load_material
+// parses. Clamped to 2..6 stops.
+static std::string pf_gradient_spec(const PfGradient& g) {
+    std::string s = "gradient:";
+    s += (g.direction == "vertical") ? "v" : "h";
+    s += ':';
+    s += g.smooth ? 's' : 'b';
+    s += ':';
+    s += std::to_string(g.speed);
+    s += ':';
+    const int n = std::clamp(g.count, 2, 6);
+    char buf[8];
+    for (int i = 0; i < n; ++i) {
+        if (i) s += '-';
+        std::snprintf(buf, sizeof(buf), "%02X%02X%02X",
+                      g.colors[i][0] & 0xFF, g.colors[i][1] & 0xFF,
+                      g.colors[i][2] & 0xFF);
+        s += buf;
+    }
+    return s;
+}
 
 // hot-swap action use the exact same construction logic.
 static std::unique_ptr<face::PanelOutput>
@@ -470,11 +553,16 @@ static void pf_hub75_panel_dims(const std::string& sz, int& w, int& h) {
 // Returns each panel's (x, y, panel_w, panel_h) with the user's nudge applied
 // and a canonical name ("panel_0" .. "panel_N"). The first panel always
 // anchors at (0, 0) + nudge[0]; subsequent panels lay out per arrangement.
-// 32-px background margin on each side of the panel set. Sized so the
-// per-panel nudge (±32 px) can slide a panel that much past a neighbour's
-// edge without the canvas truncating any pixels. With two 128×... panels
-// in a horizontal chain that puts the canvas at 256 + 64 = 320 px wide.
-static constexpr int kHub75Margin = 32;
+//
+// No background margin: the canvas is the *tight* bounding box of the panel
+// set so it maps 1:1 onto the physical HUB75 framebuffer that panel_driver.py
+// builds (a chain/parallel arrangement of panels has no border). A margin
+// would blit as a dark band around the face and shift it off the panels — and
+// since the renderer and the in-HUD editor share this layout, both stay WYSIWYG
+// with what actually lights up. Per-panel nudges still offset a panel within
+// the canvas; an extreme nudge that pushes a panel past the bounding box simply
+// clips, which is unavoidable on fixed-position hardware anyway.
+static constexpr int kHub75Margin = 0;
 
 // Centre = 0 model. nudge_dx[i] / nudge_dy[i] are stored as the offset of
 // panel i's CENTRE from the canvas centre (px). Default values are the
@@ -563,10 +651,10 @@ static void pf_hub75_apply_defaults(PfHub75Layout& L) {
     L.defaults_applied = true;
 }
 
-// Total canvas size = bounding box of the *un-nudged* panel set + a 32-px
-// margin on each side. Canvas size is therefore stable as the user tweaks
-// nudges (so the renderer canvas doesn't resize every slider step), and
-// every panel stays inside the canvas even at maximum nudge.
+// Total canvas size = bounding box of the *un-nudged* panel set (kHub75Margin
+// is 0 — see the note above). Canvas size is therefore stable as the user
+// tweaks nudges (so the renderer canvas doesn't resize every slider step) and
+// equals the physical HUB75 framebuffer the driver pushes into.
 static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch) {
     const int n = std::clamp(L.panel_count, 1, 4);
     int pw[4] = {0,0,0,0}, ph[4] = {0,0,0,0};
@@ -598,6 +686,35 @@ static void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch) {
     ch = bb_h + 2 * kHub75Margin;
     if (cw <= 0) cw = 64;
     if (ch <= 0) ch = 32;
+}
+
+// Translate the panel layout into the piomatter geometry panel_driver.py needs
+// so its framebuffer matches the (tight, margin-free) canvas the renderer
+// pushes. The single physical panel size feeds --panel-w/--panel-h; the
+// arrangement maps onto piomatter's chain (panels daisied along the data line)
+// and parallel (independent lanes) counts:
+//   horizontal → chain = N, parallel = 1   (canvas = pw*N × ph)
+//   vertical   → chain = 1, parallel = N   (canvas = pw   × ph*N)
+//   grid2x2    → chain = 2, parallel = 2   (canvas = pw*2 × ph*2)
+// Mixed per-panel sizes can't be expressed as a uniform chain (piomatter
+// assumes identical panels), so we fall back to panel 0's size; the canvas
+// still matches because pf_hub75_canvas sums the real per-panel dims, and the
+// driver derives missing geometry from the canvas as a backstop.
+static void pf_hub75_driver_geometry(const PfHub75Layout& L,
+                                     int& panel_w, int& panel_h,
+                                     int& chain, int& parallel) {
+    const int n = std::clamp(L.panel_count, 1, 4);
+    const std::string& s0 = L.panel_size_per[0].empty()
+                            ? L.panel_size : L.panel_size_per[0];
+    pf_hub75_panel_dims(s0, panel_w, panel_h);
+    if (L.arrangement == "vertical") {
+        chain = 1; parallel = n;
+    } else if (L.arrangement == "grid2x2") {
+        chain = (n >= 2) ? 2 : 1;
+        parallel = (n >= 3) ? 2 : 1;
+    } else { // horizontal
+        chain = n; parallel = 1;
+    }
 }
 
 // ── Chain layout → named zone rects ───────────────────────────────────────────
@@ -851,20 +968,25 @@ static face::RenderConfig pf_build_render_config(const json& cfg,
         !(*jpf)["panels"].empty()) {
         for (const auto& jp : (*jpf)["panels"]) rc.panels.push_back(parse_panel(jp));
     } else if (hub75 && hub75->panel_count > 0) {
-        // HUB75 picker mode — one PanelCfg per laid-out physical panel.
-        // Canvas grows to fit the laid-out + nudged set so the renderer
-        // composes onto exactly the same surface the editor paints into.
+        // HUB75 picker mode — the face is drawn across all panels as ONE image.
+        // Render it as a single logical panel covering the whole canvas (so the
+        // material, particle effects and blink are continuous across the seam),
+        // then split + flip per physical panel at output time.
         const auto plist = pf_hub75_panels(*hub75);
         int cw = 0, ch = 0;
         pf_hub75_canvas(*hub75, cw, ch);
         rc.canvas_w = cw;
         rc.canvas_h = ch;
-        for (const auto& p : plist) {
-            face::PanelCfg pc;
-            pc.name = p.name;
-            pc.x = p.rect.x; pc.y = p.rect.y;
-            pc.w = p.rect.width; pc.h = p.rect.height;
-            rc.panels.push_back(std::move(pc));
+        face::PanelCfg face;
+        face.name = "face"; face.x = 0; face.y = 0; face.w = cw; face.h = ch;
+        rc.panels.push_back(std::move(face));
+        for (size_t i = 0; i < plist.size(); ++i) {
+            const auto& p = plist[i];
+            face::RenderConfig::OutputPanel op;
+            op.x = p.rect.x; op.y = p.rect.y;
+            op.w = p.rect.width; op.h = p.rect.height;
+            if (i < 4) { op.flip_x = hub75->flip_x[i]; op.flip_y = hub75->flip_y[i]; }
+            rc.output_panels.push_back(op);
         }
     } else {
         face::PanelCfg left;  left.name  = "face_left";  left.x = 0;  left.w = 64; left.h = 32;
@@ -1131,6 +1253,81 @@ static void import_face_into_slot(MenuSystem* menu,
         });
 }
 
+// ── Face version helpers ──────────────────────────────────────────────────────
+// Saved versions of an expression's PNG live in hidden sibling dirs so the
+// FaceLoader (which scans top-level *.png) never lists them as expressions:
+//   <folder>/.versions/<expr>/<name>.png   named, kept until deleted
+//   <folder>/.history/<expr>/<ts>.png      auto-backups, ring-buffered
+namespace fvers {
+namespace ffs = std::filesystem;
+inline ffs::path vdir(const std::string& expr_png, const char* kind) {
+    ffs::path p(expr_png);
+    return p.parent_path() / kind / p.stem();
+}
+inline std::string stamp() {
+    char b[32]; time_t t = time(nullptr);
+    strftime(b, sizeof(b), "%Y%m%d-%H%M%S", localtime(&t));
+    static int seq = 0;
+    char s[44]; std::snprintf(s, sizeof(s), "%s-%03d", b, (seq++) % 1000);
+    return s;
+}
+// Copy the live PNG into .history before it's overwritten; prune to `keep` newest.
+inline void backup_current(const std::string& expr_png, int keep) {
+    std::error_code ec;
+    if (!ffs::exists(expr_png, ec)) return;
+    ffs::path d = vdir(expr_png, ".history");
+    ffs::create_directories(d, ec);
+    ffs::copy_file(expr_png, d / (stamp() + ".png"),
+                   ffs::copy_options::overwrite_existing, ec);
+    std::vector<ffs::path> f;
+    for (auto& e : ffs::directory_iterator(d, ec))
+        if (e.path().extension() == ".png") f.push_back(e.path());
+    std::sort(f.begin(), f.end());   // names are timestamps → chronological
+    for (int i = 0; i + keep < static_cast<int>(f.size()); ++i) ffs::remove(f[i], ec);
+}
+inline bool save_named(const std::string& expr_png, std::string name) {
+    std::error_code ec;
+    if (!ffs::exists(expr_png, ec)) return false;
+    for (auto& c : name) if (c == '/' || c == '\\' || c == ':') c = '_';
+    if (name.empty()) return false;
+    ffs::path d = vdir(expr_png, ".versions");
+    ffs::create_directories(d, ec);
+    ffs::copy_file(expr_png, d / (name + ".png"),
+                   ffs::copy_options::overwrite_existing, ec);
+    return !ec;
+}
+struct Entry { ffs::path path; std::string label; bool named = false; };
+inline std::vector<Entry> list(const std::string& expr_png) {
+    std::vector<Entry> out; std::error_code ec;
+    std::vector<ffs::path> named;
+    for (auto& e : ffs::directory_iterator(vdir(expr_png, ".versions"), ec))
+        if (e.path().extension() == ".png") named.push_back(e.path());
+    std::sort(named.begin(), named.end());
+    for (auto& p : named) out.push_back({p, p.stem().string(), true});
+    std::vector<ffs::path> hist;
+    for (auto& e : ffs::directory_iterator(vdir(expr_png, ".history"), ec))
+        if (e.path().extension() == ".png") hist.push_back(e.path());
+    std::sort(hist.rbegin(), hist.rend());   // newest first
+    for (auto& p : hist) out.push_back({p, p.stem().string(), false});
+    return out;
+}
+} // namespace fvers
+
+// Serialize the captured-QR running list to <qr_dir>/index.json. Caller must
+// hold state.mtx (it reads the live log). The folders themselves hold the link
+// + raw image; this index is the de-dupe list and the menu's source of truth.
+static void qr_write_index(const std::string& qr_dir, const QrCaptureLog& log) {
+    if (qr_dir.empty()) return;
+    json arr = json::array();
+    for (const auto& c : log.items)
+        arr.push_back({{"text", c.text}, {"type", c.type}, {"ts", c.timestamp},
+                       {"folder", c.folder}, {"image", c.image}, {"decode", c.decode}});
+    std::error_code ec;
+    std::filesystem::create_directories(qr_dir, ec);
+    std::ofstream f(std::filesystem::path(qr_dir) / "index.json");
+    if (f) f << arr.dump();
+}
+
 static std::vector<MenuItem> build_menu(
         IFaceController* teensy, XRDisplay* xr, CameraManager* cameras,
         LoRaRadio* lora, SmartKnob* knob, AudioEngine* audio, AppState& state,
@@ -1139,7 +1336,7 @@ static std::vector<MenuItem> build_menu(
         bool* pip_cam1_overlay, bool* pip_cam2_overlay, bool* pip_cam3_overlay,
         OverlayConfig* android_cfg,
         HudColors* hud_col, HudConfig* hud_cfg, MenuSystem** menu_sys_pp,
-        Mpu9250* mpu9250,
+        Mpu9250* mpu9250, Bno055* bno055,
         const std::vector<std::string>& gif_names,
         BtMonitor* bt_mon,
         bool* sys_panel_active,
@@ -1249,7 +1446,29 @@ static std::vector<MenuItem> build_menu(
         // panels set (1/2/3) so the render loop opens the stream, hides the
         // on-screen PiP, and shows the feed in the context pane while adjusting.
         GLuint* tex_usb1 = nullptr, GLuint* tex_usb2 = nullptr, GLuint* tex_usb3 = nullptr,
-        int*    usb_preview_req = nullptr)
+        int*    usb_preview_req = nullptr,
+        // Custom Gradient material editor (Protoface > Material Color). The
+        // working copy lives in main(); pf_set_material pushes the built
+        // "gradient:…" spec to the live renderer for instant preview.
+        PfGradient* pf_gradient_p = nullptr,
+        std::function<void(const std::string&)> pf_set_material = nullptr,
+        // Restart the native HUB75 panel pusher (scripts/panel_driver.py) to
+        // recover the face feed after a GPIO conflict, without restarting all of
+        // ProtoHUD. No-op outside native HUB75 mode.
+        std::function<void()> pf_restart_renderer = nullptr,
+        // Configurable GPIO switch map: array of assignable pin slots + count,
+        // and the master enable flag. Edited in the GPIO Buttons menu; applied
+        // on the next launch (the poller is built from these at startup).
+        input::GpioPinCfg* gpio_pins_p = nullptr,
+        int gpio_slot_count = 0,
+        bool* gpio_inputs_enabled_p = nullptr,
+        // Rebuilds the GPIO poller from the live slots so menu edits apply
+        // without a relaunch. Shared so main can install it after the poller
+        // (which the menu is built before) exists.
+        std::shared_ptr<std::function<void()>> gpio_reload = nullptr,
+        integrations::KdeConnectBridge* kdc_p = nullptr,
+        std::vector<std::string>* kdc_ignore_p = nullptr,
+        std::vector<std::string>* kdc_msg_p = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -1681,7 +1900,99 @@ static std::vector<MenuItem> build_menu(
     // false here and the leaf stays hidden.
     auto have_led_regions = [teensy]{ return teensy->has_led_face_editor(); };
 
-    auto face_slot_row = [&, face_preview, edit_face](int slot_idx) -> MenuItem {
+    // Per-expression Versions submenu: Save Version… (named) + a list of saved
+    // versions (named + auto-backups) with a thumbnail panel; Make Current /
+    // Delete each. Copy-based — Make Current backs up the live PNG, copies the
+    // version in via the controller (which reloads), so the renderer is unchanged.
+    struct VerThumb { GLuint tex = 0; std::string loaded;
+                      std::filesystem::file_time_type mt{}; cv::Mat img; };
+    auto make_versions_submenu = [&, teensy, menu_sys_pp](const std::string& expr) -> MenuItem {
+        auto entries = std::make_shared<std::vector<fvers::Entry>>();
+        auto focus   = std::make_shared<int>(-1);
+        auto thumb   = std::make_shared<VerThumb>();
+        auto refresh = [entries, expr, teensy]{
+            *entries = fvers::list(teensy->face_image_path(expr)); };
+
+        std::vector<MenuItem> items;
+        items.push_back(with_desc(leaf("Save Version\xE2\x80\xA6",
+            [menu_sys_pp, expr, teensy, refresh, focus]{
+                *focus = -1;
+                if (!menu_sys_pp || !*menu_sys_pp) return;
+                (*menu_sys_pp)->open_keyboard("Version name", "",
+                    [expr, teensy, refresh](const std::string& nm){
+                        fvers::save_named(teensy->face_image_path(expr), nm);
+                        refresh();
+                    });
+            }), "Save the current art as a named version you can restore later."));
+        for (int i = 0; i < 24; ++i) {
+            MenuItem row; row.type = MenuItemType::SUBMENU; row.label = "version";
+            row.label_fn = [entries, i]{
+                if (i >= static_cast<int>(entries->size())) return std::string();
+                const auto& e = (*entries)[i];
+                return e.named ? e.label : ("auto: " + e.label);
+            };
+            row.visible_fn   = [entries, i]{ return i < static_cast<int>(entries->size()); };
+            row.on_highlight = [focus, i]{ *focus = i; };
+            MenuItem mk = leaf("Make Current",
+                [entries, i, expr, teensy, refresh]{
+                    if (i >= static_cast<int>(entries->size())) return;
+                    const std::string live = teensy->face_image_path(expr);
+                    fvers::backup_current(live, 15);                       // undo the switch
+                    teensy->import_face_image(expr, (*entries)[i].path.string());  // copy + reload
+                    teensy->set_face_by_name(expr);
+                    refresh();
+                });
+            MenuItem del = leaf("Delete", [entries, i, refresh]{
+                if (i >= static_cast<int>(entries->size())) return;
+                std::error_code ec; std::filesystem::remove((*entries)[i].path, ec);
+                refresh();
+            });
+            row.children = { std::move(mk), std::move(del) };
+            items.push_back(std::move(row));
+        }
+        MenuItem sub = submenu("Versions", std::move(items));
+        sub.action = refresh;   // SUBMENU on-enter hook: rescan disk
+        sub.context_panel_title = "Version Preview";
+        sub.context_panel_draw  = [thumb, focus, entries](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+            std::string path;
+            if (*focus >= 0 && *focus < static_cast<int>(entries->size()))
+                path = (*entries)[*focus].path.string();
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f), ph = pw * 0.5f;
+            const float px = o.x + (sz.x - pw) * 0.5f, py = o.y + (sz.y - ph) * 0.5f - 6.f;
+            dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10, 16, 22, 190));
+            if (path.empty()) {
+                const char* m = "Scroll to a version";
+                const ImVec2 ts = ImGui::CalcTextSize(m);
+                dl->AddText({px + pw * 0.5f - ts.x * 0.5f, py + ph * 0.5f - ts.y * 0.5f},
+                            IM_COL32(180, 190, 200, 200), m);
+                return;
+            }
+            std::error_code ec; auto mt = std::filesystem::last_write_time(path, ec);
+            if (path != thumb->loaded || mt != thumb->mt) {
+                thumb->img = face::load_png_rgba(path, 256, 128);
+                thumb->loaded = path; thumb->mt = mt;
+            }
+            if (!thumb->img.empty() && thumb->img.isContinuous()) {
+                if (!thumb->tex) {
+                    glGenTextures(1, &thumb->tex);
+                    glBindTexture(GL_TEXTURE_2D, thumb->tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                glBindTexture(GL_TEXTURE_2D, thumb->tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, thumb->img.cols, thumb->img.rows, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, thumb->img.data);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(thumb->tex)),
+                             {px, py}, {px + pw, py + ph});
+            }
+        };
+        return sub;
+    };
+
+    auto face_slot_row = [&, face_preview, edit_face, make_versions_submenu](int slot_idx) -> MenuItem {
         const std::string expr  = kFaceSlots[slot_idx].expression;
         const std::string label = kFaceSlots[slot_idx].label;
 
@@ -1763,7 +2074,12 @@ static std::vector<MenuItem> build_menu(
             [edit_face, expr]{ if (edit_face) edit_face(expr); });
         edit_it.visible_fn = have_led_regions;
 
-        m.children = { std::move(play), std::move(edit_it),
+        MenuItem versions = make_versions_submenu(expr);
+        versions.description = "Saved versions of this face (named + auto-backups) "
+                               "with thumbnails — Make Current to restore one.";
+        versions.visible_fn = bound_now;
+
+        m.children = { std::move(play), std::move(edit_it), std::move(versions),
                        std::move(replace), std::move(copy_from),
                        std::move(clear), std::move(imp) };
         return m;
@@ -1920,7 +2236,10 @@ static std::vector<MenuItem> build_menu(
             [edit_face, expr]{ if (edit_face) edit_face(expr); });
         edit_it.visible_fn = have_led_regions;
 
-        m.children = { std::move(edit_it), std::move(replace),
+        MenuItem versions = make_versions_submenu(expr);
+        versions.visible_fn = bound_now;
+
+        m.children = { std::move(edit_it), std::move(versions), std::move(replace),
                        std::move(copy_from), std::move(clear), std::move(imp) };
         return m;
     };
@@ -2091,7 +2410,10 @@ static std::vector<MenuItem> build_menu(
             return false;
         };
 
-        m.children = { std::move(play), std::move(edit_it),
+        MenuItem versions = make_versions_submenu(expr);
+        versions.visible_fn = bound_now;
+
+        m.children = { std::move(play), std::move(edit_it), std::move(versions),
                        std::move(replace), std::move(copy_from),
                        std::move(clear), std::move(imp) };
         return m;
@@ -2979,6 +3301,32 @@ static std::vector<MenuItem> build_menu(
             "Single Camera Preview", single_cam_preview),
         submenu(left_label,         std::move(left_cam_menu)),
         submenu(right_label,        std::move(right_cam_menu)),
+        with_desc([&]{
+            // Recover a CSI sensor that came up dark/wedged at boot without a
+            // full reboot: tears down + re-enumerates + restarts both cameras.
+            MenuItem m; m.type = MenuItemType::LEAF; m.label = "Reinitialize CSI Cameras";
+            m.label_fn = [cameras]{
+                std::string s = "Reinitialize CSI  [L:";
+                s += cameras->owl_left_ok()  ? "ok" : "\xE2\x80\x94";
+                s += " R:"; s += cameras->owl_right_ok() ? "ok" : "\xE2\x80\x94";
+                return s + "]";
+            };
+            m.action = [cameras, &state]{
+                const bool ok = cameras->reinit_owls();
+                const bool lok = cameras->owl_left_ok(), rok = cameras->owl_right_ok();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "CSI cameras reinitialized" : "CSI reinit: no camera found";
+                char b[64]; snprintf(b, sizeof(b), "Left %s  \xC2\xB7  Right %s",
+                                     lok ? "OK" : "\xE2\x80\x94", rok ? "OK" : "\xE2\x80\x94");
+                n.body = b; n.auto_dismiss_s = 5.f;
+                state.notifs.push(std::move(n));
+            };
+            return m;
+        }(),
+            "Re-enumerate and restart the CSI (OWLsight) cameras \xE2\x80\x94 recovers an "
+            "eye that came up dark/wedged at boot, without rebooting. Briefly blacks "
+            "both feeds while it re-acquires."),
         submenu("Low-Light Mode",   std::move(nv_menu)),
         submenu("Autofocus Both",   std::move(af_both_menu)),
         submenu("Capture Photo",    std::move(capture_menu)),
@@ -4146,27 +4494,23 @@ static std::vector<MenuItem> build_menu(
                 [&state, id]{ return state.face.effect_id == id; }));
     }
 
-    std::vector<MenuItem> pf_colors;
-    pf_colors.push_back(leaf("Teal",   [teensy]{ teensy->set_color(0,220,180);   }));
-    pf_colors.push_back(leaf("Red",    [teensy]{ teensy->set_color(255,0,0);     }));
-    pf_colors.push_back(leaf("Orange", [teensy]{ teensy->set_color(255,110,0);   }));
-    pf_colors.push_back(leaf("Green",  [teensy]{ teensy->set_color(0,255,0);     }));
-    pf_colors.push_back(leaf("Blue",   [teensy]{ teensy->set_color(0,90,255);    }));
-    pf_colors.push_back(leaf("Purple", [teensy]{ teensy->set_color(160,0,255);   }));
-    pf_colors.push_back(leaf("White",  [teensy]{ teensy->set_color(255,255,255); }));
-    pf_colors.push_back(color_picker("Custom Color",
-        [teensy](uint8_t r, uint8_t g, uint8_t b){ teensy->set_color(r, g, b); },
-        [&state]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
-            return { state.face.r, state.face.g, state.face.b };
-        }));
-
+    // Material Color — the single colour/material picker (Face Color was folded
+    // in here). Named solids + multi-colour patterns/gradients, plus a Custom
+    // Color (solid) picker and the Custom Gradient editor below.
     std::vector<MenuItem> pf_palette;
     {
         struct PFMat { const char* label; uint8_t idx; };
         const PFMat pf_mats[] = {
+            // Solids
             { "Teal",    0 }, { "Yellow", 1 }, { "Orange", 2 }, { "White", 3 },
             { "Green",   4 }, { "Purple", 5 }, { "Red",    6 }, { "Blue",  7 },
-            { "Rainbow", 8 }, { "Cool",   9 }, { "Warm",  10 }, { "Black",11 },
+            { "Black",  11 },
+            // Multi-colour patterns / gradients (8-10 are PNG patterns; 12+ are
+            // built-in GradientMaterial presets — see preset_material()).
+            { "Rainbow", 8 }, { "Cool",    9 }, { "Warm",  10 },
+            { "Sunset", 12 }, { "Ocean",  13 }, { "Forest",14 }, { "Fire",  15 },
+            { "Aurora", 16 }, { "Lava",   17 }, { "Galaxy",18 }, { "Pastel",19 },
+            { "Candy",  20 }, { "Toxic",  21 },
         };
         for (const auto& m : pf_mats)
             pf_palette.push_back(leaf_sel(m.label,
@@ -4176,6 +4520,81 @@ static std::vector<MenuItem> build_menu(
                     state.face.material_color = idx;
                 },
                 [&state, idx = m.idx]{ return state.face.material_color == idx; }));
+
+        // Custom solid colour (moved here from the removed Face Color menu) —
+        // an arbitrary flat colour via the RGB/hex picker, applied as a
+        // SolidMaterial like the named solids above.
+        pf_palette.push_back(color_picker("Custom Color",
+            [teensy, &state](uint8_t r, uint8_t g, uint8_t b){
+                teensy->set_color(r, g, b);
+                // Remember the choice so the picker re-opens on it (get_color
+                // below reads these back — otherwise it always shows the default).
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.r = r; state.face.g = g; state.face.b = b;
+            },
+            [&state]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                return { state.face.r, state.face.g, state.face.b };
+            }));
+    }
+
+    // ── Custom Gradient — multi-colour material, optionally scrolling ─────────
+    // Appended to the Material Color list. Every edit previews live via
+    // pf_set_material (native renderer only); persisted to cfg["protoface"].
+    if (pf_gradient_p) {
+        auto* G = pf_gradient_p;
+        auto apply_grad = [G, pf_set_material]{
+            if (pf_set_material) pf_set_material(pf_gradient_spec(*G));
+        };
+        std::vector<MenuItem> grad_items;
+
+        std::vector<MenuItem> gcount_items;
+        for (int n = 2; n <= 6; ++n)
+            gcount_items.push_back(leaf_sel(std::to_string(n) + " colors",
+                [G, n, apply_grad]{ G->count = n; apply_grad(); },
+                [G, n]{ return G->count == n; }));
+        grad_items.push_back(submenu("Colors", std::move(gcount_items)));
+
+        for (int i = 0; i < 6; ++i) {
+            MenuItem cp = color_picker(std::string("Color ") + std::to_string(i + 1),
+                [G, i, apply_grad](uint8_t r, uint8_t g, uint8_t b){
+                    G->colors[i] = {r, g, b}; apply_grad();
+                },
+                [G, i]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+                    return { static_cast<uint8_t>(G->colors[i][0]),
+                             static_cast<uint8_t>(G->colors[i][1]),
+                             static_cast<uint8_t>(G->colors[i][2]) };
+                });
+            cp.visible_fn = [G, i]{ return i < G->count; };
+            grad_items.push_back(std::move(cp));
+        }
+
+        grad_items.push_back(toggle("Smooth Blend",
+            [G]{ return G->smooth; },
+            [G, apply_grad](bool v){ G->smooth = v; apply_grad(); }));
+
+        std::vector<MenuItem> gdir_items = {
+            leaf_sel("Horizontal",
+                [G, apply_grad]{ G->direction = "horizontal"; apply_grad(); },
+                [G]{ return G->direction != "vertical"; }),
+            leaf_sel("Vertical",
+                [G, apply_grad]{ G->direction = "vertical"; apply_grad(); },
+                [G]{ return G->direction == "vertical"; }),
+        };
+        grad_items.push_back(submenu("Direction", std::move(gdir_items)));
+
+        grad_items.push_back(slider("Speed", -60.f, 60.f, 1.f, " px/s",
+            [G]{ return static_cast<float>(G->speed); },
+            [G, apply_grad](float v){ G->speed = static_cast<int>(v); apply_grad(); }));
+
+        grad_items.push_back(leaf("Use This Gradient", apply_grad));
+
+        pf_palette.push_back(with_desc(
+            submenu("Custom Gradient", std::move(grad_items)),
+            "Multi-colour gradient painted behind the face. Pick 2–6 colours, "
+            "Smooth or banded, a flow Direction and a Speed to scroll them "
+            "behind the mask (0 = static). Previews live; persisted to "
+            "cfg[\"protoface\"][\"gradient\"]."));
     }
 
     std::vector<MenuItem> pf_gifs;
@@ -4422,6 +4841,22 @@ static std::vector<MenuItem> build_menu(
                 slider("Offset Y (from centre)", -ymax, ymax, 1.f, " px",
                     [H, i]{ return static_cast<float>(H->nudge_dy[i]); },
                     [H, i](float v){ H->nudge_dy[i] = static_cast<int>(v); }),
+                // Per-panel orientation. Pushed to the live renderer via
+                // pf_layout_changed so the flip is visible on the panels
+                // immediately (geometry edits above still need a restart/
+                // backend round-trip; flips don't).
+                toggle("Flip Horizontal",
+                    [H, i]{ return H->flip_x[i]; },
+                    [H, i, pf_layout_changed](bool v){
+                        H->flip_x[i] = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
+                toggle("Flip Vertical",
+                    [H, i]{ return H->flip_y[i]; },
+                    [H, i, pf_layout_changed](bool v){
+                        H->flip_y[i] = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
                 leaf("Reset to Default Position",
                      [H, i]{
                          // Reset just this slot by reapplying defaults to a
@@ -4616,7 +5051,9 @@ static std::vector<MenuItem> build_menu(
                        "HUB75 Panel Layout", hub_preview),
             "Panel size + count + arrangement for the HUB75 backend. "
             "Each panel exposes a Nudge X/Y slider (±32 px integer) so you "
-            "can align the editor canvas to physical mounting offsets. "
+            "can align the editor canvas to physical mounting offsets, plus "
+            "Flip Horizontal / Vertical toggles to match how each panel is "
+            "mounted/wired (these apply to the panels live). "
             "Save As / Load lets you keep multiple named layouts (e.g. one "
             "per helmet build); faces are stamped with the active layout "
             "name on import. Persisted to cfg[\"protoface\"][\"hub75_layouts\"].");
@@ -4638,6 +5075,23 @@ static std::vector<MenuItem> build_menu(
                   "backend; the HUD keeps running through the transition. "
                   "Persists to config.json so the next launch starts here."),
     };
+    if (pf_restart_renderer) {
+        MenuItem rr = with_desc(leaf("Restart Face Renderer", [pf_restart_renderer, state_ptr]{
+            pf_restart_renderer();
+            if (!state_ptr) return;
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            Notification n; n.type = NotifType::App;
+            n.title = "Face renderer restarted";
+            n.body  = "Relaunched the HUB75 panel driver";
+            n.auto_dismiss_s = 4.f;
+            state_ptr->notifs.push(std::move(n));
+        }),
+            "Kill + relaunch the HUB75 panel pusher to recover the face feed "
+            "(e.g. after the live GPIO read stole a panel pin), without "
+            "restarting ProtoHUD.");
+        rr.visible_fn = [pf_backend_p]{ return !pf_backend_p || *pf_backend_p == "hub75"; };
+        pf_hardware_menu.push_back(std::move(rr));
+    }
 
     // The chain layout config used to live under Hardware, but it's really a
     // face-authoring concern (it shapes the editor's bbox guides), so it now
@@ -4692,7 +5146,6 @@ static std::vector<MenuItem> build_menu(
 
     std::vector<MenuItem> protoface_inner_menu = {
         gated(submenu("Effects",        std::move(pf_effects)),  visible_for_hub75),
-        gated(submenu("Face Color",     std::move(pf_colors)),   visible_for_hub75),
         gated(submenu("Material Color", std::move(pf_palette)),  visible_for_hub75),
         // Face PNGs (per-expression slots, mouth shapes, boop reactions)
         // live here under Protoface rather than the generic Files menu —
@@ -4816,7 +5269,11 @@ static std::vector<MenuItem> build_menu(
                                                std::move(pf_preview_menu)));
 
     // ── Face Display root: Source picker (radios) + per-backend submenus ─────
+    // Protoface first (the primary renderer), then the source radios and the
+    // ProtoTracer submenu.
     std::vector<MenuItem> face_display_menu;
+    if (!protoface_inner_menu.empty())
+        face_display_menu.push_back(submenu("Protoface", std::move(protoface_inner_menu)));
     if (active_face_pp && teensy_option && fp_option) {
         face_display_menu.push_back(leaf_sel("Source: Teensy (ProtoTracer)",
             [active_face_pp, teensy_option]{ *active_face_pp = teensy_option; },
@@ -4826,8 +5283,6 @@ static std::vector<MenuItem> build_menu(
             [active_face_pp, fp_option]{ return *active_face_pp == fp_option; }));
     }
     face_display_menu.push_back(submenu("ProtoTracer", std::move(prototracer_inner_menu)));
-    if (!protoface_inner_menu.empty())
-        face_display_menu.push_back(submenu("Protoface", std::move(protoface_inner_menu)));
 
     // ── Boop sensor (Protoface-side reactive behaviour) ──────────────────────
     // One submenu per zone, each with Enabled / Expression / Hold Duration /
@@ -4901,6 +5356,24 @@ static std::vector<MenuItem> build_menu(
                 m.visible_fn = [idx]{ return idx != static_cast<int>(sensor::BoopSensor::Zone::BothCheeks); };
                 return m;
             }(),
+            // MPR121 electrode → zone mapping (the I²C cap-touch input). Applies
+            // on the next launch — the sensor reads it at start(). Hidden for
+            // BothCheeks (derived from the two cheek electrodes).
+            [&]{
+                MenuItem m = with_desc(slider("Electrode (MPR121)", -1.f, 11.f, 1.f, "",
+                    [&state, idx]{
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        return static_cast<float>(state.boop_zones[idx].electrode);
+                    },
+                    [&state, idx](float v){
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        state.boop_zones[idx].electrode = static_cast<int>(v);
+                    }),
+                    "Which MPR121 capacitive electrode (0-11) drives this zone; "
+                    "-1 disables it. Takes effect on the next launch.");
+                m.visible_fn = [idx]{ return idx != static_cast<int>(sensor::BoopSensor::Zone::BothCheeks); };
+                return m;
+            }(),
             leaf("Test Boop",
                 [teensy, &state, idx]{
                     std::string expr;
@@ -4913,6 +5386,85 @@ static std::vector<MenuItem> build_menu(
                     if (!expr.empty()) teensy->trigger_boop(expr, dur);
                 }),
         };
+
+        // ── Animated Eyes — rapid-boop easter egg ────────────────────────────
+        // After Trigger Count fast boops on this zone, a procedural eye
+        // animation plays instead of the normal reaction. The built-in
+        // animations are re-skinnable (rate / scale / colour / hold time).
+        {
+            auto& bz = state;   // capture helper alias
+            std::vector<MenuItem> anim_items;
+            for (int a = 0; a < face::eye_anim_count(); ++a)
+                anim_items.push_back(leaf_sel(face::eye_anim_name(static_cast<face::EyeAnim>(a)),
+                    [&bz, idx, a]{
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.anim = a;
+                    },
+                    [&bz, idx, a]{
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        return bz.boop_zones[idx].eye_trigger.anim == a;
+                    }));
+
+            std::vector<MenuItem> eye_items = {
+                toggle("Enabled",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return bz.boop_zones[idx].eye_trigger.enabled; },
+                    [&bz, idx](bool v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.enabled = v; }),
+                submenu("Animation", std::move(anim_items)),
+                with_desc(slider("Trigger Count", 2.f, 10.f, 1.f, " boops",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.count); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.count = static_cast<int>(v); }),
+                    "How many fast boops on this zone trigger the eyes."),
+                with_desc(slider("Window", 1.f, 8.f, 0.5f, " s",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.window_s); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.window_s = static_cast<double>(v); }),
+                    "Consecutive boops must land within this window or the "
+                    "counter resets."),
+                slider("Speed", 0.2f, 4.f, 0.1f, "x",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.speed); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.speed = static_cast<double>(v); }),
+                slider("Size", 0.4f, 2.5f, 0.1f, "x",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.size); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.size = static_cast<double>(v); }),
+                slider("Duration", 1.f, 8.f, 0.5f, " s",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.duration_s); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.duration_s = static_cast<double>(v); }),
+                color_picker("Color",
+                    [&bz, idx](uint8_t r, uint8_t g, uint8_t b){
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.r = r;
+                        bz.boop_zones[idx].eye_trigger.g = g;
+                        bz.boop_zones[idx].eye_trigger.b = b; },
+                    [&bz, idx]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        const auto& e = bz.boop_zones[idx].eye_trigger;
+                        return { e.r, e.g, e.b }; }),
+                leaf("Test Eyes",
+                    [teensy, &bz, idx]{
+                        EyeTriggerConfig e;
+                        { std::lock_guard<std::mutex> lk(bz.mtx);
+                          e = bz.boop_zones[idx].eye_trigger; }
+                        teensy->play_eye_animation(e.anim, e.speed, e.size,
+                                                   e.r, e.g, e.b, e.duration_s);
+                    }),
+            };
+            items.push_back(with_desc(submenu("Animated Eyes", std::move(eye_items)),
+                "Boop this zone Trigger-Count times within Window seconds and a "
+                "procedural eye animation plays instead of the normal reaction. "
+                "Tune the built-in animations with Speed / Size / Color."));
+        }
+
         return submenu(std::move(label), std::move(items));
     };
 
@@ -5383,6 +5935,20 @@ static std::vector<MenuItem> build_menu(
                   "fresh source each frame; explicit choices force their "
                   "source even if stale."),
         submenu("IMU Axis",            std::move(imu_axis_menu)),
+        [&]() -> MenuItem {
+            MenuItem m = leaf("Save IMU Calibration",
+                [bno055]{ if (bno055) bno055->request_calibration_save(); });
+            m.label_fn = [bno055]{
+                const int s = bno055 ? bno055->calib_sys() : 0;
+                return std::string("Save IMU Calibration  [sys ") +
+                       std::to_string(s) + "/3]";
+            };
+            m.visible_fn = [bno055]{ return bno055 && bno055->connected(); };
+            return with_desc(std::move(m),
+                "Store the BNO055's current calibration so it loads on boot. "
+                "Best when calibration reads 3/3 — rotate the head through "
+                "several orientations and a figure-8 for the magnetometer.");
+        }(),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
@@ -6558,24 +7124,27 @@ static std::vector<MenuItem> build_menu(
         std::map<int, std::vector<std::string>> claimants;
         std::map<int, int>                      spi_speed_hz;   // BCM → bus speed (for MOSI lines)
     };
-    auto gpio_pin_claims = [cfg_root]() -> PinClaims {
+    auto gpio_pin_claims = [cfg_root, gpio_pins_p, gpio_slot_count]() -> PinClaims {
         PinClaims pc;
         if (!cfg_root) return pc;
         const json& cfg = *cfg_root;
         auto add = [&pc](int bcm, std::string who) {
             if (bcm >= 0) pc.claimants[bcm].push_back(std::move(who));
         };
-        // GPIO buttons (defaults 17/27/22; cfg["gpio"] overrides). A
-        // hand-edited "gpio": null in cfg would let cfg.contains() pass
-        // but make jg null, and .value() throws type_error.306 on null —
-        // gate every dereference on is_object() to keep the visualizer
-        // safe against any cfg shape.
-        const json empty = json::object();
-        const json& jg = (cfg.contains("gpio") && cfg["gpio"].is_object())
-                         ? cfg["gpio"] : empty;
-        add(jg.value("button_1_gpio", 17), "Button 1");
-        add(jg.value("button_2_gpio", 27), "Button 2");
-        add(jg.value("button_3_gpio", 22), "Button 3");
+        // Configurable GPIO switch map — claim each assigned pin, labelled with
+        // its (short-press, else long-press) function. Reads the live slots so
+        // unsaved menu edits show up immediately.
+        if (gpio_pins_p) {
+            for (int i = 0; i < gpio_slot_count; ++i) {
+                const auto& s = gpio_pins_p[i];
+                const bool used = s.short_fn != input::GpioFunc::None ||
+                                  s.long_fn  != input::GpioFunc::None;
+                if (s.gpio >= 0 && used) {
+                    const auto fn = (s.short_fn != input::GpioFunc::None) ? s.short_fn : s.long_fn;
+                    add(s.gpio, std::string("GPIO: ") + input::gpio_func_name(fn));
+                }
+            }
+        }
 
         // I²C peripherals — each enabled sensor on /dev/i2c-1 claims SDA1/SCL1.
         auto add_i2c = [&](const char* key, const char* label) {
@@ -6762,11 +7331,28 @@ static std::vector<MenuItem> build_menu(
             static sys::GpioInputReader reader;
             static bool reader_attempted = false;
             if (gpvz_draw->show_live_state && !reader_attempted) {
+                // Only request lines NOT already claimed by another subsystem.
+                // Requesting a pin piomatter is driving (HUB75 panels) steals it
+                // and blanks the face — so skip anything in the claims map.
                 std::vector<int> wanted;
-                for (int i = 0; i < 28; ++i) wanted.push_back(i);  // BCM 0..27
+                for (int i = 0; i < 28; ++i)
+                    if (claims.claimants.find(i) == claims.claimants.end())
+                        wanted.push_back(i);  // free BCM line
                 reader.open(wanted);
                 reader_attempted = true;
             }
+
+            // Light rounded card + white border behind the visualizer, then
+            // inset the working area so content never touches the edges.
+            {
+                const ImU32 card_bg     = IM_COL32(214, 221, 228, 252);
+                const ImU32 card_border = IM_COL32(255, 255, 255, 255);
+                dl->AddRectFilled(o, {o.x + sz.x, o.y + sz.y}, card_bg, 10.f);
+                dl->AddRect(o, {o.x + sz.x, o.y + sz.y}, card_border, 10.f, 0, 2.f);
+            }
+            o.x += 8.f; o.y += 6.f; sz.x -= 16.f; sz.y -= 12.f;
+            const ImU32 text_dark = IM_COL32(22, 26, 32, 255);   // body text on the light card
+            const ImU32 text_dim  = IM_COL32(78, 86, 96, 255);   // secondary text
 
             // Layout: a dedicated text column on the left (title, rail
             // estimate, hovered-pin details — whatever used to live in the
@@ -6784,42 +7370,39 @@ static std::vector<MenuItem> build_menu(
             // Left text column: title + rail-current estimate (top), then a
             // "Pin info" block that follows the hovered pin.
             dl->AddText(font, fs * 1.05f, {info_x, o.y},
-                        IM_COL32(230, 235, 240, 255), "GPIO Header");
+                        text_dark, "GPIO Header");
             dl->AddText(font, fs * 0.7f, {info_x, o.y + fs * 1.05f},
-                        IM_COL32(170, 175, 185, 220), "Pi 5 / CM5 — 40-pin");
+                        text_dim, "Pi 5 / CM5 — 40-pin");
             char rail_buf[96];
             std::snprintf(rail_buf, sizeof(rail_buf),
                           "3.3V ~%d mA   5V ~%d mA", ma3, ma5);
             const ImU32 rail_col = (ma5 > 2500 || ma3 > 500)
-                ? IM_COL32(230, 160,  80, 220) : IM_COL32(170, 180, 190, 220);
+                ? IM_COL32(200, 110,  20, 255) : text_dim;
             dl->AddText(font, fs * 0.75f, {info_x, o.y + fs * 1.85f},
-                        IM_COL32(150, 160, 170, 200), "Est. rail draw:");
+                        text_dim, "Est. rail draw:");
             dl->AddText(font, fs * 0.85f, {info_x, o.y + fs * 2.65f},
                         rail_col, rail_buf);
 
             const float info_block_top = o.y + fs * 4.0f;
 
-            const float top    = o.y + fs * 0.2f;   // grid can start higher than the text block
-            const float avail_h = std::max(80.f, sz.y - (top - o.y) - 4.f);
-            const float row_h   = std::max(14.f, std::min(28.f, avail_h / 21.f));
-            const float pin_sz  = row_h * 0.78f;
-            const int   label_cols = 3 + (gpvz_draw->show_user_notes ? 1 : 0);
-            const float label_w = std::max(40.f,
-                (grid_pane_w - pin_sz * 2.f - 14.f) / static_cast<float>(label_cols * 2));
+            // Vertically centre the 20-row grid with equal top/bottom margin,
+            // zooming the rows up to a shared max so both panels match.
+            const float vmargin = 12.f;
+            const float usable  = std::max(80.f, sz.y - 2.f * vmargin);
+            const float row_h   = std::max(14.f, std::min(34.f, usable / 20.f));
+            const float grid_h  = row_h * 20.f;
+            const float top     = o.y + vmargin + std::max(0.f, (usable - grid_h) * 0.5f);
+            const float pin_sz  = row_h * 0.80f;
 
             const float center_x    = grid_pane_x + grid_pane_w * 0.5f;
             const float pin_left_x  = center_x - pin_sz - 3.f;
             const float pin_right_x = center_x + 3.f;
 
-            const ImU32 outline_active   = IM_COL32(120, 230, 110, 255);
-            const ImU32 outline_conflict = IM_COL32(240,  90,  70, 255);
-            const ImU32 outline_inactive = IM_COL32(120, 130, 140, 200);
-            const ImU32 label_col        = IM_COL32(220, 225, 230, 230);
-            const ImU32 label_dim        = IM_COL32(160, 170, 180, 220);
-            const ImU32 label_note       = IM_COL32(180, 220, 255, 230);
-            const ImU32 pin_num_col      = IM_COL32(20, 24, 28, 255);
-            const ImU32 live_high_col    = IM_COL32(120, 230, 110, 255);
-            const ImU32 live_low_col     = IM_COL32(150, 160, 170, 220);
+            const ImU32 outline_active   = IM_COL32( 40, 170,  60, 255);
+            const ImU32 outline_conflict = IM_COL32(220,  50,  35, 255);
+            const ImU32 outline_inactive = IM_COL32( 95, 105, 115, 220);
+            const ImU32 live_high_col    = IM_COL32( 40, 170,  60, 255);
+            const ImU32 live_low_col     = IM_COL32(110, 120, 130, 230);
 
             // Hover state for the tooltip.
             const ImVec2 mp = ImGui::GetMousePos();
@@ -6828,13 +7411,81 @@ static std::vector<MenuItem> build_menu(
             std::string   hovered_primary;
             ImVec2        hover_pos{};
 
-            auto draw_label = [&](float x, float y, float w, const char* text,
-                                  bool right_align, ImU32 col, bool dim) {
-                if (!text || !*text) return;
-                if (dim) col = (col & 0x00FFFFFFu) | (90u << 24);
-                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, text);
-                const float tx = right_align ? (x + w - ts.x) : x;
-                dl->AddText(font, label_fs, {tx, y}, col, text);
+            // Three columns per pin, ordered outward from the indicator box:
+            //   [GPIO #]  [primary function]  [user / predefined function]
+            // Each is its own grey box; per-column widths are uniform across pins.
+            auto note_for = [&notes](int bcm) -> const char* {
+                if (bcm < 0) return nullptr;
+                auto it = notes.find(bcm);
+                return (it == notes.end()) ? nullptr : it->second.c_str();
+            };
+            std::string c1[40], c2[40], c3[40]; ImU32 c3col[40] = {};
+            for (int idx = 0; idx < 40; ++idx) {
+                const sys::GpioPin& p = sys::kPi40Pins[idx];
+                c1[idx] = (p.bcm >= 0) ? ("GPIO" + std::to_string(p.bcm))
+                                       : std::string(p.primary ? p.primary : "");
+                std::string fn = (p.secondary && p.secondary[0]) ? p.secondary : "";
+                if (p.tertiary && p.tertiary[0]) { if (!fn.empty()) fn += " / "; fn += p.tertiary; }
+                c2[idx] = fn;
+                std::string cl;
+                if (p.bcm >= 0) {
+                    auto c = claims.claimants.find(p.bcm);
+                    if (c != claims.claimants.end() && !c->second.empty()) cl = c->second.front();
+                }
+                const char* note = gpvz_draw->show_user_notes ? note_for(p.bcm) : nullptr;
+                if (!cl.empty()) {
+                    c3[idx]    = cl;
+                    c3col[idx] = (cl.rfind("GPIO: ", 0) == 0) ? IM_COL32(120, 170, 235, 255)  // GPIO map
+                                                              : IM_COL32(235, 180,  90, 255); // hardware
+                } else if (note) {
+                    c3[idx]    = note;
+                    c3col[idx] = IM_COL32(150, 195, 235, 255);                                 // user note
+                }
+            }
+            auto colw = [&](std::string* arr) {
+                float w = 0.f;
+                for (int i = 0; i < 40; ++i)
+                    if (!arr[i].empty())
+                        w = std::max(w, font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, arr[i].c_str()).x);
+                return w;
+            };
+            const float box_pad = 5.f, colgap = 3.f;
+            const float side_w_l = (pin_left_x - 4.f) - grid_pane_x;
+            const float side_w_r = (grid_pane_x + grid_pane_w) - (pin_right_x + pin_sz + 4.f);
+            const float r1 = colw(c1), r2 = colw(c2), r3 = colw(c3);
+            float w1 = r1 > 0.f ? r1 + box_pad * 2.f : 0.f;
+            float w2 = r2 > 0.f ? r2 + box_pad * 2.f : 0.f;
+            float w3 = r3 > 0.f ? r3 + box_pad * 2.f : 0.f;
+            {
+                const float avail = std::max(40.f, std::min(side_w_l, side_w_r));
+                const float total = w1 + (w2 > 0.f ? w2 + colgap : 0.f) + (w3 > 0.f ? w3 + colgap : 0.f);
+                if (total > avail && total > 0.f) { const float k = avail / total; w1 *= k; w2 *= k; w3 *= k; }
+            }
+            const ImU32 desc_bg = IM_COL32(56, 62, 70, 240);
+            const ImU32 c1col   = IM_COL32(230, 234, 238, 255);   // GPIO #
+            const ImU32 c2col   = IM_COL32(180, 188, 196, 255);   // primary function
+            auto draw_cell = [&](float bx0, float w, float cy, const std::string& t, ImU32 col, bool dim) {
+                if (t.empty() || w < 6.f) return;
+                ImU32 bg = desc_bg;
+                if (dim) { bg = (bg & 0x00FFFFFFu) | (110u << 24); col = (col & 0x00FFFFFFu) | (110u << 24); }
+                dl->AddRectFilled({bx0, cy}, {bx0 + w, cy + pin_sz}, bg, 3.f);
+                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, t.c_str());
+                dl->PushClipRect({bx0, cy}, {bx0 + w, cy + pin_sz}, true);
+                dl->AddText(font, label_fs, {bx0 + box_pad, cy + (pin_sz - ts.y) * 0.5f}, col, t.c_str());
+                dl->PopClipRect();
+            };
+            auto draw_cols = [&](int idx, float cy, bool left, bool dim) {
+                if (left) {
+                    float x = pin_left_x - 4.f;
+                    draw_cell(x - w1, w1, cy, c1[idx], c1col, dim);                 x -= w1 + colgap;
+                    if (w2 > 0.f) { draw_cell(x - w2, w2, cy, c2[idx], c2col, dim); x -= w2 + colgap; }
+                    if (w3 > 0.f)   draw_cell(x - w3, w3, cy, c3[idx], c3col[idx], dim);
+                } else {
+                    float x = pin_right_x + pin_sz + 4.f;
+                    draw_cell(x, w1, cy, c1[idx], c1col, dim);                       x += w1 + colgap;
+                    if (w2 > 0.f) { draw_cell(x, w2, cy, c2[idx], c2col, dim);       x += w2 + colgap; }
+                    if (w3 > 0.f)   draw_cell(x, w3, cy, c3[idx], c3col[idx], dim);
+                }
             };
 
             for (int row = 0; row < 20; ++row) {
@@ -6867,10 +7518,14 @@ static std::vector<MenuItem> build_menu(
                         char buf[6];
                         std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(p.physical));
                         const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, buf);
-                        dl->AddText(font, label_fs,
-                                    {x + (pin_sz - ts.x) * 0.5f,
-                                     cy + (pin_sz - ts.y) * 0.5f},
-                                    pin_num_col, buf);
+                        const float tx = x + (pin_sz - ts.x) * 0.5f;
+                        const float ty = cy + (pin_sz - ts.y) * 0.5f;
+                        // Bold white with an 8-direction black outline.
+                        const ImU32 blk = IM_COL32(0, 0, 0, 235);
+                        for (int dx = -1; dx <= 1; ++dx)
+                            for (int dy = -1; dy <= 1; ++dy)
+                                if (dx || dy) dl->AddText(font, label_fs, {tx + dx, ty + dy}, blk, buf);
+                        dl->AddText(font, label_fs, {tx, ty}, IM_COL32(255, 255, 255, 255), buf);
                     }
                     // Live state badge — small H/L dot inside the square's
                     // corner. Skipped for non-GPIO pins (power / GND / ID).
@@ -6881,8 +7536,9 @@ static std::vector<MenuItem> build_menu(
                             dl->AddCircleFilled({x + pin_sz - 4.f, cy + 4.f}, 2.5f, col);
                         }
                     }
-                    // Hover detection (over square OR its label columns).
-                    const float side_w = label_w * label_cols + 8.f;
+                    // Hover detection (over square OR its description columns).
+                    const float side_w = w1 + (w2 > 0.f ? w2 + colgap : 0.f)
+                                            + (w3 > 0.f ? w3 + colgap : 0.f) + 6.f;
                     const float hit_l = right_side ? x : (x - side_w);
                     const float hit_r = right_side ? (x + pin_sz + side_w)
                                                    : (x + pin_sz);
@@ -6897,47 +7553,14 @@ static std::vector<MenuItem> build_menu(
                 draw_pin(pin_left_x,  pl, false);
                 draw_pin(pin_right_x, pr, true);
 
-                // Helper to look up a pin's user note (if any).
-                auto note_for = [&notes](int bcm) -> const char* {
-                    if (bcm < 0) return nullptr;
-                    auto it = notes.find(bcm);
-                    return (it == notes.end()) ? nullptr : it->second.c_str();
-                };
                 const bool dim_l = gpvz_draw->filter_kind >= 0 &&
                     static_cast<int>(pl.kind) != gpvz_draw->filter_kind;
                 const bool dim_r = gpvz_draw->filter_kind >= 0 &&
                     static_cast<int>(pr.kind) != gpvz_draw->filter_kind;
 
-                // Label columns radiate away from the centre.
-                const float ly = y + (row_h - label_fs) * 0.5f;
-                int col_l = 0, col_r = 0;
-                if (gpvz_draw->show_primary) {
-                    draw_label(pin_left_x - 4.f - label_w, ly, label_w, pl.primary,
-                               true, label_col, dim_l);
-                    draw_label(pin_right_x + pin_sz + 4.f, ly, label_w, pr.primary,
-                               false, label_col, dim_r);
-                    ++col_l; ++col_r;
-                }
-                if (gpvz_draw->show_secondary) {
-                    draw_label(pin_left_x - 4.f - label_w * (col_l + 1) - 4.f, ly, label_w,
-                               pl.secondary, true, label_dim, dim_l);
-                    draw_label(pin_right_x + pin_sz + 4.f + label_w * col_r + 4.f, ly, label_w,
-                               pr.secondary, false, label_dim, dim_r);
-                    ++col_l; ++col_r;
-                }
-                if (gpvz_draw->show_tertiary) {
-                    draw_label(pin_left_x - 4.f - label_w * (col_l + 1) - 8.f, ly, label_w,
-                               pl.tertiary, true, label_dim, dim_l);
-                    draw_label(pin_right_x + pin_sz + 4.f + label_w * col_r + 8.f, ly, label_w,
-                               pr.tertiary, false, label_dim, dim_r);
-                    ++col_l; ++col_r;
-                }
-                if (gpvz_draw->show_user_notes) {
-                    draw_label(pin_left_x - 4.f - label_w * (col_l + 1) - 12.f, ly, label_w,
-                               note_for(pl.bcm), true, label_note, dim_l);
-                    draw_label(pin_right_x + pin_sz + 4.f + label_w * col_r + 12.f, ly, label_w,
-                               note_for(pr.bcm), false, label_note, dim_r);
-                }
+                // Three description columns on each side.
+                draw_cols(row * 2,     cy, true,  dim_l);
+                draw_cols(row * 2 + 1, cy, false, dim_r);
             }
 
             // Pin info — used to be a floating tooltip near the cursor;
@@ -6945,8 +7568,8 @@ static std::vector<MenuItem> build_menu(
             // grid and shows even without active hover. Default copy
             // points the user at the grid.
             const bool   have_hover = hovered_bcm >= 0 || !hovered_primary.empty();
-            const ImU32  hint_col   = IM_COL32(150, 160, 170, 200);
-            const ImU32  body_col   = IM_COL32(220, 225, 230, 230);
+            const ImU32  hint_col   = text_dim;
+            const ImU32  body_col   = text_dark;
             const float  info_lh    = label_fs + 2.f;
             float        info_y     = info_block_top;
             // Section header — coloured by conflict state when applicable.
@@ -6954,7 +7577,7 @@ static std::vector<MenuItem> build_menu(
             const bool conflict = (cit != claims.claimants.end()
                                    && cit->second.size() > 1);
             const ImU32 head_col = conflict ? outline_conflict
-                                            : IM_COL32(190, 220, 250, 230);
+                                            : IM_COL32(40, 95, 165, 255);
             dl->AddText(font, fs * 0.8f, {info_x, info_y},
                         head_col, have_hover ? "Pin Info" : "Hover");
             info_y += fs * 1.0f;
@@ -7135,6 +7758,393 @@ static std::vector<MenuItem> build_menu(
         "  • Export Pinout… dumps the current view to /tmp/protohud_pinout.txt.\n"
         "  • Power-rail estimate (top of pane) sums known device current draws.\n"
         "  • Filter by Function dims everything not matching the selected family.";
+
+    // ── GPIO pin picker (visual header page) ──────────────────────────────────
+    // Helpers shared by the picker page + the slot list:
+    //   gpio_hw_claimants  — non-GPIO peripherals holding a pin (HUB75/SPI/I²C…).
+    //   gpio_other_slot    — another in-use slot bound to a pin (-1 = none).
+    //   gpio_pin_selectable— a real GPIO line not held by hardware. Pins already
+    //                        used by another *slot* stay selectable (override
+    //                        allowed); the clash is flagged afterwards.
+    //   gpio_slot_conflict — a slot whose pin collides with another slot or with
+    //                        hardware; the slot list paints it red.
+    auto gpio_hw_claimants = [gpio_pin_claims](int bcm) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        if (bcm < 0) return out;
+        PinClaims pc = gpio_pin_claims();
+        auto it = pc.claimants.find(bcm);
+        if (it != pc.claimants.end())
+            for (const auto& who : it->second)
+                if (who.rfind("GPIO: ", 0) != 0) out.push_back(who);   // skip GPIO-map self-claims
+        return out;
+    };
+    auto gpio_other_slot = [gpio_pins_p, gpio_slot_count](int bcm, int self_slot) -> int {
+        if (bcm < 0 || !gpio_pins_p) return -1;
+        for (int j = 0; j < gpio_slot_count; ++j) {
+            if (j == self_slot) continue;
+            const auto& s = gpio_pins_p[j];
+            const bool used = s.short_fn != input::GpioFunc::None ||
+                              s.long_fn  != input::GpioFunc::None;
+            if (used && s.gpio == bcm) return j;
+        }
+        return -1;
+    };
+    auto gpio_pin_selectable = [gpio_hw_claimants](int bcm) -> bool {
+        return bcm >= 0 && gpio_hw_claimants(bcm).empty();
+    };
+    auto gpio_slot_conflict = [gpio_pins_p, gpio_other_slot, gpio_hw_claimants](int i) -> bool {
+        if (!gpio_pins_p) return false;
+        const auto& s = gpio_pins_p[i];
+        const bool used = s.short_fn != input::GpioFunc::None ||
+                          s.long_fn  != input::GpioFunc::None;
+        if (!used || s.gpio < 0) return false;
+        return gpio_other_slot(s.gpio, i) >= 0 || !gpio_hw_claimants(s.gpio).empty();
+    };
+
+    // Context-panel renderer for the picker page. Mirrors the GPIO Visualizer's
+    // look — a left info column plus a centred 2x20 header grid — on a light
+    // rounded card with a white border. Each pin carries an easy-to-read label:
+    // its claimant ("HUB75 R1"), "Slot N" if another slot uses it, else its
+    // GPIO/alt-function name. Marking: green outline = this slot's pin, blue =
+    // another slot, amber = hardware peripheral, dark = the cursor.
+    auto draw_pin_picker_panel =
+        [gpio_hw_claimants, gpio_other_slot, gpio_pin_selectable]
+        (std::shared_ptr<int> focus, int self_slot,
+         input::GpioPinCfg* slot_p) -> MenuContextPanelDraw {
+        return [focus, self_slot, slot_p, gpio_hw_claimants, gpio_other_slot, gpio_pin_selectable]
+               (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            ImFont* font = ImGui::GetFont();
+            const float fs       = ImGui::GetFontSize();
+            const float label_fs = std::max(9.f, fs * 0.72f);
+            const int   fbcm     = focus  ? *focus      : -1;
+            const int   assigned = slot_p ? slot_p->gpio : -1;
+
+            // Light rounded card + white border behind the picker content.
+            const ImU32 card_bg     = IM_COL32(214, 221, 228, 252);
+            const ImU32 card_border = IM_COL32(255, 255, 255, 255);
+            const ImU32 text_dark   = IM_COL32( 22,  26,  32, 255);
+            const ImU32 text_dim    = IM_COL32( 78,  86,  96, 255);
+            dl->AddRectFilled(o, {o.x + sz.x, o.y + sz.y}, card_bg, 10.f);
+            dl->AddRect(o, {o.x + sz.x, o.y + sz.y}, card_border, 10.f, 0, 2.f);
+            const float cpad = 9.f;
+            const ImVec2 co{o.x + cpad, o.y + cpad};
+            const ImVec2 cs{sz.x - cpad * 2.f, sz.y - cpad * 2.f};
+
+            // Per-pin state + claimant label, computed once.
+            bool selectable[40]; int otherslot[40]; bool hardware[40];
+            std::string claim[40];
+            for (int idx = 0; idx < 40; ++idx) {
+                const int b = sys::kPi40Pins[idx].bcm;
+                auto hw = (b >= 0) ? gpio_hw_claimants(b) : std::vector<std::string>{};
+                hardware[idx]   = !hw.empty();
+                selectable[idx] = b >= 0 && !hardware[idx];
+                otherslot[idx]  = (b >= 0) ? gpio_other_slot(b, self_slot) : -1;
+                claim[idx]      = hw.empty() ? std::string() : hw.front();
+            }
+
+            const float info_w      = std::clamp(cs.x * 0.30f, 110.f, cs.x * 0.5f);
+            const float info_x      = co.x;
+            const float grid_pane_x = co.x + info_w + 6.f;
+            const float grid_pane_w = std::max(120.f, cs.x - info_w - 6.f);
+
+            // Vertically centre the 20-row grid with equal top/bottom margin,
+            // zooming the rows up to a shared max so both panels match.
+            const float vmargin = 12.f;
+            const float usable  = std::max(80.f, cs.y - 2.f * vmargin);
+            const float row_h   = std::max(13.f, std::min(34.f, usable / 20.f));
+            const float grid_h  = row_h * 20.f;
+            const float top     = co.y + vmargin + std::max(0.f, (usable - grid_h) * 0.5f);
+            const float pin_sz  = row_h * 0.80f;
+            const float center_x    = grid_pane_x + grid_pane_w * 0.5f;
+            const float pin_left_x  = center_x - pin_sz - 2.f;
+            const float pin_right_x = center_x + 2.f;
+            const float side_w_l    = (pin_left_x - 4.f) - grid_pane_x;
+            const float side_w_r    = (grid_pane_x + grid_pane_w) - (pin_right_x + pin_sz + 4.f);
+
+            const ImU32 out_focus    = IM_COL32( 15,  18,  24, 255);   // dark = cursor (pops on light)
+            const ImU32 out_assigned = IM_COL32( 40, 170,  60, 255);   // this slot
+            const ImU32 out_other    = IM_COL32( 40, 110, 210, 255);   // another slot
+            const ImU32 out_hardware = IM_COL32(205, 120,  20, 255);   // hardware peripheral
+
+            // Three columns per pin, ordered outward from the indicator box:
+            //   [GPIO #]  [primary function]  [user / predefined function]
+            // Each is its own grey box; per-column widths are uniform across pins.
+            std::string c1[40], c2[40], c3[40]; ImU32 c3col[40] = {};
+            for (int idx = 0; idx < 40; ++idx) {
+                const sys::GpioPin& p = sys::kPi40Pins[idx];
+                c1[idx] = (p.bcm >= 0) ? ("GPIO" + std::to_string(p.bcm))
+                                       : std::string(p.primary ? p.primary : "");
+                c2[idx] = (p.secondary && p.secondary[0]) ? p.secondary : "";
+                if (hardware[idx])            { c3[idx] = claim[idx];
+                                                c3col[idx] = IM_COL32(235, 180, 90, 255); }
+                else if (otherslot[idx] >= 0) { c3[idx] = "Slot " + std::to_string(otherslot[idx] + 1);
+                                                c3col[idx] = IM_COL32(120, 170, 235, 255); }
+            }
+            auto colw = [&](std::string* arr) {
+                float w = 0.f;
+                for (int i = 0; i < 40; ++i)
+                    if (!arr[i].empty())
+                        w = std::max(w, font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, arr[i].c_str()).x);
+                return w;
+            };
+            const float box_pad = 5.f, colgap = 3.f;
+            const float r1 = colw(c1), r2 = colw(c2), r3 = colw(c3);
+            float w1 = r1 > 0.f ? r1 + box_pad * 2.f : 0.f;
+            float w2 = r2 > 0.f ? r2 + box_pad * 2.f : 0.f;
+            float w3 = r3 > 0.f ? r3 + box_pad * 2.f : 0.f;
+            {   // shrink to fit the side gap if the three columns are too wide
+                const float avail = std::max(40.f, std::min(side_w_l, side_w_r));
+                const float total = w1 + (w2 > 0.f ? w2 + colgap : 0.f) + (w3 > 0.f ? w3 + colgap : 0.f);
+                if (total > avail && total > 0.f) { const float k = avail / total; w1 *= k; w2 *= k; w3 *= k; }
+            }
+            const ImU32 desc_bg = IM_COL32(56, 62, 70, 240);
+            const ImU32 c1col   = IM_COL32(230, 234, 238, 255);   // GPIO #
+            const ImU32 c2col   = IM_COL32(180, 188, 196, 255);   // primary function
+            auto draw_cell = [&](float bx0, float w, float cy, const std::string& t, ImU32 col) {
+                if (t.empty() || w < 6.f) return;
+                dl->AddRectFilled({bx0, cy}, {bx0 + w, cy + pin_sz}, desc_bg, 3.f);
+                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, t.c_str());
+                dl->PushClipRect({bx0, cy}, {bx0 + w, cy + pin_sz}, true);
+                dl->AddText(font, label_fs, {bx0 + box_pad, cy + (pin_sz - ts.y) * 0.5f}, col, t.c_str());
+                dl->PopClipRect();
+            };
+            auto draw_cols = [&](int idx, float cy, bool left) {
+                if (left) {
+                    float x = pin_left_x - 4.f;
+                    draw_cell(x - w1, w1, cy, c1[idx], c1col);                 x -= w1 + colgap;
+                    if (w2 > 0.f) { draw_cell(x - w2, w2, cy, c2[idx], c2col); x -= w2 + colgap; }
+                    if (w3 > 0.f)   draw_cell(x - w3, w3, cy, c3[idx], c3col[idx]);
+                } else {
+                    float x = pin_right_x + pin_sz + 4.f;
+                    draw_cell(x, w1, cy, c1[idx], c1col);                       x += w1 + colgap;
+                    if (w2 > 0.f) { draw_cell(x, w2, cy, c2[idx], c2col);       x += w2 + colgap; }
+                    if (w3 > 0.f)   draw_cell(x, w3, cy, c3[idx], c3col[idx]);
+                }
+            };
+
+            // 8-direction black outline — kept for the white pin numbers so they
+            // read on bright cells (descriptions use the grey box instead).
+            auto otext = [&](float x, float y, ImU32 col, const char* s) {
+                const ImU32 blk = IM_COL32(0, 0, 0, 225);
+                for (int dx = -1; dx <= 1; ++dx)
+                    for (int dy = -1; dy <= 1; ++dy)
+                        if (dx || dy) dl->AddText(font, label_fs, {x + dx, y + dy}, blk, s);
+                dl->AddText(font, label_fs, {x, y}, col, s);
+            };
+            auto draw_pin_num = [&](float bx, float by, const char* s) {
+                const ImVec2 ts = font->CalcTextSizeA(label_fs, FLT_MAX, 0.f, s);
+                otext(bx - ts.x * 0.5f, by - ts.y * 0.5f, IM_COL32(255, 255, 255, 255), s);
+            };
+
+            for (int row = 0; row < 20; ++row) {
+                const int il = row * 2, ir = row * 2 + 1;
+                const float y  = top + row * row_h;
+                const float cy = y + (row_h - pin_sz) * 0.5f;
+                auto draw_box = [&](float x, int idx) {
+                    const sys::GpioPin& p = sys::kPi40Pins[idx];
+                    ImU32 fill = sys::pin_kind_color(p.kind);
+                    if (p.bcm >= 0 && !selectable[idx]) fill = (fill & 0x00FFFFFFu) | (120u << 24);
+                    dl->AddRectFilled({x, cy}, {x + pin_sz, cy + pin_sz}, fill, 3.f);
+                    ImU32 oc = 0; float ow = 2.f;
+                    if      (p.bcm >= 0 && p.bcm == assigned) { oc = out_assigned; ow = 2.5f; }
+                    else if (hardware[idx])                   { oc = out_hardware; }
+                    else if (otherslot[idx] >= 0)             { oc = out_other; }
+                    if (oc) dl->AddRect({x, cy}, {x + pin_sz, cy + pin_sz}, oc, 3.f, 0, ow);
+                    if (p.bcm >= 0 && p.bcm == fbcm)
+                        dl->AddRect({x - 1.5f, cy - 1.5f}, {x + pin_sz + 1.5f, cy + pin_sz + 1.5f},
+                                    out_focus, 3.f, 0, 3.f);
+                    char buf[6]; std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(p.physical));
+                    draw_pin_num(x + pin_sz * 0.5f, cy + pin_sz * 0.5f, buf);
+                };
+                draw_box(pin_left_x,  il);
+                draw_box(pin_right_x, ir);
+
+                draw_cols(il, cy, true);
+                draw_cols(ir, cy, false);
+            }
+
+            // Info column (dark text on the light card): focused pin + legend.
+            dl->AddText(font, fs * 0.7f, {info_x, co.y}, text_dim, "Pi 5 / CM5 — 40-pin header");
+            int fidx = -1;
+            for (int idx = 0; idx < 40; ++idx)
+                if (sys::kPi40Pins[idx].bcm >= 0 && sys::kPi40Pins[idx].bcm == fbcm) { fidx = idx; break; }
+            float iy = co.y + fs * 1.5f;
+            if (fidx >= 0) {
+                const sys::GpioPin& fp = sys::kPi40Pins[fidx];
+                char hdr[24]; std::snprintf(hdr, sizeof(hdr), "GPIO %d", fp.bcm);
+                dl->AddText(font, fs * 0.95f, {info_x, iy}, text_dark, hdr);
+                iy += fs * 1.1f;
+                std::string fns = fp.primary;
+                if (fp.secondary && fp.secondary[0]) fns += " / " + std::string(fp.secondary);
+                if (fp.tertiary  && fp.tertiary[0])  fns += " / " + std::string(fp.tertiary);
+                dl->AddText(font, fs * 0.7f, {info_x, iy}, text_dim, fns.c_str());
+                iy += fs * 1.15f;
+                if (hardware[fidx]) {
+                    dl->AddText(font, fs * 0.74f, {info_x, iy}, out_hardware, "In use (hardware):");
+                    iy += fs * 0.92f;
+                    for (const auto& w : gpio_hw_claimants(fp.bcm)) {
+                        dl->AddText(font, fs * 0.7f, {info_x + 6.f, iy}, text_dark, w.c_str());
+                        iy += fs * 0.86f;
+                    }
+                } else if (fp.bcm == assigned) {
+                    dl->AddText(font, fs * 0.78f, {info_x, iy}, out_assigned, "This slot's pin");
+                    iy += fs * 1.0f;
+                } else if (otherslot[fidx] >= 0) {
+                    char b[44]; std::snprintf(b, sizeof(b), "Also on Slot %d", otherslot[fidx] + 1);
+                    dl->AddText(font, fs * 0.78f, {info_x, iy}, out_other, b);
+                    iy += fs * 0.9f;
+                    dl->AddText(font, fs * 0.66f, {info_x, iy}, text_dim, "override → fix later");
+                    iy += fs * 1.0f;
+                } else {
+                    dl->AddText(font, fs * 0.78f, {info_x, iy}, IM_COL32(30, 150, 50, 255), "Available");
+                    iy += fs * 1.0f;
+                }
+                iy += fs * 0.4f;
+            }
+            auto legend = [&](ImU32 c, const char* t) {
+                dl->AddRect({info_x, iy + 2.f}, {info_x + 11.f, iy + 13.f}, c, 2.f, 0, 2.f);
+                dl->AddText(font, fs * 0.66f, {info_x + 16.f, iy}, IM_COL32(20, 24, 30, 255), t);
+                iy += fs * 0.98f;
+            };
+            legend(out_assigned, "this slot");
+            legend(out_other,    "other slot");
+            legend(out_hardware, "hardware");
+            legend(out_focus,    "cursor");
+        };
+    };
+
+    // ── GPIO Buttons (configurable pin → function map) ────────────────────────
+    // One submenu per assignable slot: BCM pin, short/long-press function, pull
+    // bias, polarity, and long-press threshold. Edits the live gpio_pins array;
+    // persisted to cfg["gpio"]["pins"] and applied on the next launch.
+    MenuItem gpio_buttons_item;
+    if (gpio_pins_p) {
+        input::GpioPinCfg* GP = gpio_pins_p;
+        // Build a function-picker submenu (all GpioFunc options) writing *slot.
+        auto fn_picker = [&leaf_sel](input::GpioFunc* slot) {
+            std::vector<MenuItem> items;
+            for (int i = 0; i < input::gpio_func_count(); ++i) {
+                const auto f = static_cast<input::GpioFunc>(i);
+                items.push_back(leaf_sel(input::gpio_func_name(f),
+                    [slot, f]{ *slot = f; },
+                    [slot, f]{ return *slot == f; }));
+            }
+            return items;
+        };
+
+        std::vector<MenuItem> gpio_btn_menu;
+        if (gpio_inputs_enabled_p)
+            gpio_btn_menu.push_back(with_desc(toggle("Enabled",
+                [gpio_inputs_enabled_p]{ return *gpio_inputs_enabled_p; },
+                [gpio_inputs_enabled_p, gpio_reload](bool v){
+                    *gpio_inputs_enabled_p = v;
+                    if (gpio_reload && *gpio_reload) (*gpio_reload)();  // apply now
+                }),
+                "Master switch for the GPIO button map. Applies immediately."));
+        if (gpio_reload)
+            gpio_btn_menu.push_back(with_desc(
+                leaf("Apply Changes Now",
+                     [gpio_reload]{ if (*gpio_reload) (*gpio_reload)(); }),
+                "Rebuild the GPIO poller from the current slots so pin / "
+                "function / pull / polarity edits take effect right away."));
+
+        for (int i = 0; i < gpio_slot_count; ++i) {
+            input::GpioPinCfg* p = &GP[i];
+
+            // Pin picker page for this slot: an "(unused)" entry plus one leaf per
+            // header GPIO line, gated by gpio_pin_available so only free pins show.
+            // Selecting a pin sets it and pops back here to the slot's options.
+            auto picker_focus = std::make_shared<int>(p->gpio);
+            std::vector<MenuItem> picker_items;
+            picker_items.push_back(leaf_sel("(Unused / disable)",
+                [p, menu_sys_pp]{ p->gpio = -1;
+                                  if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back(); },
+                [p]{ return p->gpio < 0; }));
+            for (const auto& gp : sys::kPi40Pins) {
+                if (gp.bcm < 0) continue;   // skip power / ground / ID pins
+                const int bcm = gp.bcm;
+                const std::string alt = (gp.secondary && gp.secondary[0]) ? gp.secondary : "";
+                MenuItem pm;
+                pm.type         = MenuItemType::LEAF;
+                pm.label        = "GPIO " + std::to_string(bcm);
+                pm.label_fn     = [bcm, alt, i, gpio_other_slot]{
+                    std::string s = "GPIO " + std::to_string(bcm);
+                    if (!alt.empty()) s += "   (" + alt + ")";
+                    const int other = gpio_other_slot(bcm, i);
+                    if (other >= 0) s += "   ! Slot " + std::to_string(other + 1);
+                    return s;
+                };
+                pm.get_state    = [p, bcm]{ return p->gpio == bcm; };
+                pm.on_highlight = [picker_focus, bcm]{ *picker_focus = bcm; };
+                // List every GPIO line not held by hardware. Pins already on
+                // another slot stay listed (override allowed) and are flagged red.
+                pm.visible_fn   = [bcm, gpio_pin_selectable]{ return gpio_pin_selectable(bcm); };
+                pm.warn_fn      = [bcm, i, gpio_other_slot]{ return gpio_other_slot(bcm, i) >= 0; };
+                pm.action       = [p, bcm, menu_sys_pp]{
+                    p->gpio = bcm;
+                    if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
+                };
+                picker_items.push_back(std::move(pm));
+            }
+            MenuItem pin_item = with_panel(submenu("Pin", std::move(picker_items)),
+                                           "Select GPIO Pin",
+                                           draw_pin_picker_panel(picker_focus, i, p));
+            pin_item.action   = [picker_focus, p]{ *picker_focus = p->gpio; };  // sync focus on enter
+            pin_item.label_fn = [p]{
+                return p->gpio < 0 ? std::string("Pin: (unused)")
+                                   : std::string("Pin: GPIO ") + std::to_string(p->gpio);
+            };
+            pin_item.description =
+                "Pick which GPIO pin drives this slot (header view shown "
+                "alongside). Pins held by hardware (HUB75/SPI/I\xC2\xB2""C…) are "
+                "hidden; a pin already used by another slot stays selectable but "
+                "is flagged \xE2\x80\x94 overriding it marks both slots red until "
+                "you fix the clash. Selecting a pin returns here to set functions.";
+
+            std::vector<MenuItem> pull_items = {
+                leaf_sel("Pull Up",   [p]{ p->pull = 1; }, [p]{ return p->pull == 1; }),
+                leaf_sel("Pull Down", [p]{ p->pull = 2; }, [p]{ return p->pull == 2; }),
+                leaf_sel("None",      [p]{ p->pull = 0; }, [p]{ return p->pull == 0; }),
+            };
+            std::vector<MenuItem> items = {
+                pin_item,
+                submenu("Short Press", fn_picker(&p->short_fn)),
+                submenu("Long Press",  fn_picker(&p->long_fn)),
+                slider("Long-press Time", 200.f, 2000.f, 50.f, " ms",
+                    [p]{ return static_cast<float>(p->long_ms); },
+                    [p](float v){ p->long_ms = static_cast<int>(v); }),
+                submenu("Pull", std::move(pull_items)),
+                toggle("Active Low",
+                    [p]{ return p->active_low; },
+                    [p](bool v){ p->active_low = v; }),
+            };
+            MenuItem m = submenu(std::string("Slot ") + std::to_string(i + 1), std::move(items));
+            m.label_fn = [p, i, gpio_slot_conflict]{
+                std::string s = "Slot " + std::to_string(i + 1) + "  ";
+                if (p->gpio < 0) return s + "(unused)";
+                if (gpio_slot_conflict(i)) s = "! " + s;   // leading marker + red (warn_fn)
+                s += "GPIO" + std::to_string(p->gpio) + " \xE2\x86\x92 ";
+                s += input::gpio_func_name(p->short_fn);
+                return s;
+            };
+            // Paint the row red when this slot's pin collides with another slot
+            // or a hardware peripheral, so the user knows to go back and fix it.
+            m.warn_fn = [i, gpio_slot_conflict]{ return gpio_slot_conflict(i); };
+            gpio_btn_menu.push_back(std::move(m));
+        }
+
+        gpio_buttons_item = with_desc(
+            submenu("GPIO Buttons", std::move(gpio_btn_menu)),
+            "Assign functions to GPIO switches. Each slot's Pin page shows the "
+            "40-pin header and offers only the pins free of other peripherals; "
+            "pick one to set its Short-press and optional Long-press function, "
+            "pull bias, and polarity (Active Low = switch wired to GND with a "
+            "pull-up). Toggling Enabled applies instantly; after editing slots "
+            "choose \"Apply Changes Now\" to reload the poller. Saved to "
+            "cfg[\"gpio\"][\"pins\"].");
+    } else {
+        gpio_buttons_item.visible_fn = []{ return false; };
+    }
 
     // ── Pi Settings helpers ──────────────────────────────────────────────────
     // Most of these shell out to systemd/raspi tools. The ones that mutate
@@ -7367,11 +8377,503 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("Diagnostics",   std::move(diagnostics_menu)),
                   "Camera / network / Bluetooth / GPIO probes."),
         std::move(gpio_viz_item),
+        std::move(gpio_buttons_item),
         with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
                   "Poll the face controller for a fresh status frame."),
         with_desc(submenu("Demo Mode",  std::move(demo_menu)),
                   "Cycle prefab scenes for screenshots / video."),
     };
+
+    // ── Communications: LoRa + Phone (KDE Connect) + Notification Log ─────────
+    MenuItem phone_item = [&]() -> MenuItem {
+            // ── Phone (KDE Connect) ───────────────────────────────────────────
+            // Ring the phone + edit the ignore list (mute servers/chats) and the
+            // message-apps list (which apps get the big chat toast), from the HUD.
+            auto ring_toast = [kdc_p, &state]{
+                const bool ok = kdc_p && kdc_p->ring_phone();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n;
+                n.type = NotifType::App; n.icon = "message";
+                n.title = ok ? "Ringing phone\xE2\x80\xA6" : "Phone not connected";
+                n.body  = ok ? "KDE Connect \xC2\xB7 findmyphone"
+                             : "Pair a device in the KDE Connect app first";
+                n.auto_dismiss_s = 4.f;
+                state.notifs.push(std::move(n));
+            };
+            // Generic CSV-list editor: an "Add… (keyboard)" row plus up to 16
+            // removable entry rows. apply() pushes the joined CSV to the bridge.
+            // menu_sys_pp is captured by value (it points at main's menu_ptr).
+            auto list_menu = [menu_sys_pp](std::vector<std::string>* vec,
+                                           std::function<void()> apply,
+                                           std::string add_label, std::string osk_title) {
+                std::vector<MenuItem> items;
+                MenuItem add; add.type = MenuItemType::LEAF; add.label = std::move(add_label);
+                add.action = [menu_sys_pp, vec, apply, osk_title]{
+                    if (!menu_sys_pp || !*menu_sys_pp || !vec) return;
+                    (*menu_sys_pp)->open_keyboard(osk_title, "",
+                        [vec, apply](const std::string& s){
+                            const size_t b = s.find_first_not_of(" \t");
+                            const size_t e = s.find_last_not_of(" \t");
+                            if (b == std::string::npos) return;
+                            vec->push_back(s.substr(b, e - b + 1));
+                            apply();
+                        });
+                };
+                items.push_back(std::move(add));
+                for (int i = 0; i < 16; ++i) {
+                    MenuItem m; m.type = MenuItemType::LEAF; m.label = "entry";
+                    m.label_fn   = [vec, i]{
+                        return (vec && i < static_cast<int>(vec->size()))
+                                   ? ("\xE2\x9C\x95  " + (*vec)[i]) : std::string(); };
+                    m.visible_fn = [vec, i]{ return vec && i < static_cast<int>(vec->size()); };
+                    m.action     = [vec, i, apply]{
+                        if (vec && i < static_cast<int>(vec->size())) {
+                            vec->erase(vec->begin() + i); apply(); } };
+                    items.push_back(std::move(m));
+                }
+                return items;
+            };
+            auto join = [](std::vector<std::string>* v){
+                std::string csv;
+                if (v) for (size_t i = 0; i < v->size(); ++i) { if (i) csv += ','; csv += (*v)[i]; }
+                return csv;
+            };
+            auto apply_ignore = [kdc_p, kdc_ignore_p, join]{
+                if (kdc_p) kdc_p->set_ignore_list(join(kdc_ignore_p)); };
+            auto apply_msg = [kdc_p, kdc_msg_p, join]{
+                if (kdc_p) kdc_p->set_message_apps(join(kdc_msg_p)); };
+
+            std::vector<MenuItem> phone_menu;
+            phone_menu.push_back(with_desc(leaf("Ring My Phone", ring_toast),
+                "Ring the paired phone (KDE Connect findmyphone) so it plays its "
+                "ringtone \xE2\x80\x94 handy for locating it."));
+            phone_menu.push_back(with_desc(submenu("Ignore List",
+                list_menu(kdc_ignore_p, apply_ignore, "Add Server / Chat\xE2\x80\xA6",
+                          "Ignore (matches title/text)")),
+                "Mute phone notifications whose title/text contains any listed word "
+                "\xE2\x80\x94 e.g. a Discord server name. Select an entry to remove it."));
+            phone_menu.push_back(with_desc(submenu("Message Apps",
+                list_menu(kdc_msg_p, apply_msg, "Add App\xE2\x80\xA6", "App name (e.g. Discord)")),
+                "Apps whose notifications get the larger chat toast (sender + wrapped "
+                "message, held longer). Select an entry to remove it."));
+            return with_desc(submenu("Phone (KDE Connect)", std::move(phone_menu)),
+                "Ring the phone, pick which apps get the big chat toast, and mute servers.");
+    }();
+    MenuItem notiflog_item = [&]() -> MenuItem {
+        // ── Notification Log: grouped by sender, filterable, full text in panel ──
+        // Type filter (radio).
+        auto type_opt = [&leaf_sel, &state](const char* lbl, int t){
+            return leaf_sel(lbl, [&state, t]{ state.notif_type_filter = t; },
+                                 [&state, t]{ return state.notif_type_filter == t; });
+        };
+        std::vector<MenuItem> typ_menu = {
+            type_opt("All Types",    -1),
+            type_opt("Alarms",       static_cast<int>(NotifType::Alarm)),
+            type_opt("Timers",       static_cast<int>(NotifType::Timer)),
+            type_opt("LoRa",         static_cast<int>(NotifType::LoRa)),
+            type_opt("Phone / Apps", static_cast<int>(NotifType::App)),
+        };
+        MenuItem typ_item = submenu("Filter: Type", std::move(typ_menu));
+        typ_item.label_fn = [&state]{
+            const char* t = state.notif_type_filter < 0 ? "All"
+                : state.notif_type_filter == (int)NotifType::Alarm ? "Alarms"
+                : state.notif_type_filter == (int)NotifType::Timer ? "Timers"
+                : state.notif_type_filter == (int)NotifType::LoRa  ? "LoRa" : "Phone/Apps";
+            return std::string("Filter: Type  [") + t + "]";
+        };
+
+        // Distinct sender names currently in the log (sorted).
+        auto distinct_senders = [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            std::set<std::string> s;
+            for (const auto& n : state.notifs.items) if (!n.title.empty()) s.insert(n.title);
+            return std::vector<std::string>(s.begin(), s.end());
+        };
+        // Sender checklist (multi-select).
+        std::vector<MenuItem> snd_menu;
+        snd_menu.push_back(with_desc(leaf("Show All Senders", [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx); state.notif_sender_sel.clear();
+        }), "Clear the selection so every sender shows."));
+        for (int i = 0; i < 24; ++i) {
+            MenuItem m; m.type = MenuItemType::TOGGLE; m.label = "sender";
+            m.label_fn   = [distinct_senders, i]{
+                auto d = distinct_senders(); return i < (int)d.size() ? d[i] : std::string(); };
+            m.visible_fn = [distinct_senders, i]{ return i < (int)distinct_senders().size(); };
+            m.get_toggle = [distinct_senders, i, &state]{
+                auto d = distinct_senders(); if (i >= (int)d.size()) return false;
+                std::lock_guard<std::mutex> lk(state.mtx); return state.notif_sender_sel.count(d[i]) > 0; };
+            m.set_toggle = [distinct_senders, i, &state](bool v){
+                auto d = distinct_senders(); if (i >= (int)d.size()) return;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (v) state.notif_sender_sel.insert(d[i]); else state.notif_sender_sel.erase(d[i]); };
+            snd_menu.push_back(std::move(m));
+        }
+        MenuItem snd_item = submenu("Filter: Senders", std::move(snd_menu));
+        snd_item.label_fn = [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            return state.notif_sender_sel.empty()
+                ? std::string("Filter: Senders  [all]")
+                : std::string("Filter: Senders  [") + std::to_string(state.notif_sender_sel.size()) + "]";
+        };
+
+        // Display order: queue indices passing the filters, grouped by sender
+        // (sender A-Z, newest first within each). Rebuilt only when something changes.
+        auto order     = std::make_shared<std::vector<int>>();
+        auto order_key = std::make_shared<size_t>(SIZE_MAX);
+        auto ensure_order = [&state, order, order_key]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            size_t key = static_cast<size_t>(state.notifs.next_id) * 1315423911u
+                       + static_cast<size_t>(state.notif_type_filter + 2) * 2654435761u
+                       + state.notifs.items.size();
+            for (const auto& s : state.notif_sender_sel)
+                key ^= std::hash<std::string>{}(s) + 0x9e3779b9u + (key << 6) + (key >> 2);
+            if (key == *order_key) return;
+            *order_key = key;
+            order->clear();
+            for (int i = 0; i < (int)state.notifs.items.size(); ++i) {
+                const auto& n = state.notifs.items[i];
+                if (state.notif_type_filter >= 0 &&
+                    static_cast<int>(n.type) != state.notif_type_filter) continue;
+                if (!state.notif_sender_sel.empty() && !state.notif_sender_sel.count(n.title)) continue;
+                order->push_back(i);
+            }
+            std::stable_sort(order->begin(), order->end(), [&state](int a, int b){
+                const auto& na = state.notifs.items[a]; const auto& nb = state.notifs.items[b];
+                if (na.title != nb.title) return na.title < nb.title;
+                return a < b;   // newest-first within a sender (queue is newest-first)
+            });
+        };
+
+        std::vector<MenuItem> nlog_menu;
+        // Fixed items (must stay 4 — the context panel maps cursor → row via -4).
+        nlog_menu.push_back(with_desc(toggle("Persist Log",
+            [&state]{ return state.notif_persist; },
+            [&state](bool v){ state.notif_persist = v; }),
+            "Save the log to disk so a sudden reboot doesn't lose it."));
+        // Bulk clear — a small confirmation layer with the safe option first.
+        // "Clear Unsaved" keeps anything the user pinned; "Clear All" wipes
+        // everything including saved messages (red).
+        std::vector<MenuItem> clr_menu;
+        clr_menu.push_back(with_desc(leaf("Cancel", [menu_sys_pp]{
+            if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back(); }),
+            "Back out without clearing anything."));
+        clr_menu.push_back(with_desc(leaf("Clear Unsaved", [&state, menu_sys_pp]{
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              state.notifs.clear_if([](const Notification&){ return true; }, /*include_saved=*/false); }
+            if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
+        }), "Remove everything except messages you've saved."));
+        {
+            MenuItem all = leaf("Clear All", [&state, menu_sys_pp]{
+                { std::lock_guard<std::mutex> lk(state.mtx); state.notifs.items.clear(); }
+                if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
+            });
+            all.warn_fn = []{ return true; };   // red — also drops saved messages
+            clr_menu.push_back(with_desc(std::move(all),
+                "Remove every notification, including saved ones."));
+        }
+        MenuItem clr_item = submenu("Clear Log\xE2\x80\xA6", std::move(clr_menu));
+        clr_item.context_panel_title = "Clear";
+        clr_item.context_panel_draw  = [&state](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+            (void)sz; ImFont* f = ImGui::GetFont(); const float fs = ImGui::GetFontSize();
+            int total, saved; { std::lock_guard<std::mutex> lk(state.mtx);
+                total = (int)state.notifs.items.size(); saved = 0;
+                for (const auto& n : state.notifs.items) saved += n.saved ? 1 : 0; }
+            char ln[64]; float y = o.y;
+            snprintf(ln, sizeof(ln), "%d total", total);
+            dl->AddText(f, fs, {o.x,y}, IM_COL32(235,240,245,255), ln); y += fs*1.4f;
+            snprintf(ln, sizeof(ln), "%d saved \xC2\xB7 %d unsaved", saved, total - saved);
+            dl->AddText(f, fs*0.85f, {o.x,y}, IM_COL32(190,196,204,230), ln);
+        };
+        nlog_menu.push_back(with_desc(std::move(clr_item),
+            "Bulk-clear the log: keep saved messages or wipe everything."));
+        nlog_menu.push_back(with_desc(std::move(typ_item), "Show only the chosen type."));
+        nlog_menu.push_back(with_desc(std::move(snd_item),
+            "Tick which senders to show. None ticked = all senders."));
+        // Message rows (grouped by sender, scrollable). Full text shows in the panel.
+        // Draw a single notification (full text) into a panel — used by both the
+        // log preview and the per-row delete confirmation.
+        auto draw_one = [&state, order, ensure_order](ImDrawList* dl, ImVec2 o, ImVec2 sz,
+                                                      int slot, bool confirm){
+            ImFont* font = ImGui::GetFont(); const float fs = ImGui::GetFontSize();
+            ensure_order();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (slot < 0 || slot >= (int)order->size() ||
+                (*order)[slot] >= (int)state.notifs.items.size()) {
+                dl->AddText(font, fs * 0.8f, {o.x, o.y}, IM_COL32(170,176,184,220),
+                            "Scroll to a message.");
+                return;
+            }
+            const auto& n = state.notifs.items[(*order)[slot]];
+            float y = o.y;
+            if (confirm) {
+                dl->AddText(font, fs * 0.95f, {o.x, y}, IM_COL32(255,110,100,255),
+                            "Delete this message?");
+                y += fs * 1.4f;
+            }
+            dl->AddText(font, fs * 1.05f, {o.x, y}, IM_COL32(235,240,245,255), n.title.c_str());
+            y += fs * 1.3f;
+            if (n.timestamp > 0) {
+                char ts[24]; time_t t = (time_t)n.timestamp;
+                strftime(ts, sizeof(ts), "%a %H:%M", localtime(&t));
+                dl->AddText(font, fs * 0.7f, {o.x, y}, IM_COL32(150,158,166,210), ts);
+                y += fs * 1.2f;
+            }
+            if (!n.body.empty())
+                dl->AddText(font, fs * 0.85f, {o.x, y}, IM_COL32(210,214,220,235),
+                            n.body.c_str(), nullptr, sz.x - 6.f);
+        };
+        // Selecting a row opens a per-message popup with the full text in the
+        // panel and three actions: Save (pin), Confirm Delete (red), Cancel.
+        // Helper: queue index of the message currently at display slot `i`, or -1.
+        auto qindex = [&state, order, ensure_order](int i) -> int {
+            ensure_order();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i >= (int)order->size()) return -1;
+            const int qi = (*order)[i];
+            return qi < (int)state.notifs.items.size() ? qi : -1;
+        };
+        for (int i = 0; i < NotificationQueue::kMax; ++i) {
+            MenuItem m; m.type = MenuItemType::SUBMENU; m.label = "msg";
+            m.label_fn = [&state, qindex, i]{
+                const int qi = qindex(i);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (qi < 0) return std::string();
+                const auto& n = state.notifs.items[qi];
+                std::string s = n.saved ? std::string("\xE2\x98\x85 ") : std::string();  // ★ if saved
+                s += n.title;
+                if (!n.body.empty()) s += "  \xC2\xB7  " + n.body;
+                if (s.size() > 60) s = s.substr(0, 59) + "\xE2\x80\xA6";
+                return s;
+            };
+            m.visible_fn = [order, ensure_order, i]{ ensure_order(); return i < (int)order->size(); };
+            // Save / pin toggle. qindex() locks internally, so resolve it first,
+            // then re-validate the index after re-acquiring the lock.
+            MenuItem save; save.type = MenuItemType::TOGGLE; save.label = "Save Message";
+            save.get_toggle = [&state, qindex, i]{
+                const int qi = qindex(i); std::lock_guard<std::mutex> lk(state.mtx);
+                return qi >= 0 && qi < (int)state.notifs.items.size() && state.notifs.items[qi].saved; };
+            save.set_toggle = [&state, qindex, i](bool v){
+                const int qi = qindex(i);
+                { std::lock_guard<std::mutex> lk(state.mtx);
+                  if (qi >= 0 && qi < (int)state.notifs.items.size()) state.notifs.items[qi].saved = v; }
+                state.notif_dirty.store(true);   // metadata-only edit → force a flush
+            };
+            MenuItem confirm = leaf("Confirm Delete",
+                [&state, qindex, i, menu_sys_pp]{
+                    const int qi = qindex(i);
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      if (qi >= 0 && qi < (int)state.notifs.items.size())
+                          state.notifs.items.erase(state.notifs.items.begin() + qi); }
+                    if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();   // back to the log
+                });
+            confirm.warn_fn = []{ return true; };   // red — destructive
+            MenuItem cancel = leaf("Cancel",
+                [menu_sys_pp]{ if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back(); });
+            m.children = { with_desc(std::move(save), "Pin this message so Clear and the rolling buffer keep it."),
+                           std::move(confirm), std::move(cancel) };
+            m.context_panel_title = "Message";
+            m.context_panel_draw  = [draw_one, i](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+                draw_one(dl, o, sz, i, false); };
+            nlog_menu.push_back(std::move(m));
+        }
+        // Context panel: full text of the focused row.
+        auto panel = [&state, order, ensure_order, menu_sys_pp]
+                     (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            ImFont* font = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const int idx  = (menu_sys_pp && *menu_sys_pp) ? (*menu_sys_pp)->current_index() : -1;
+            const int slot = idx - 4;   // 4 fixed items precede the rows
+            ensure_order();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (slot < 0 || slot >= (int)order->size() ||
+                (*order)[slot] >= (int)state.notifs.items.size()) {
+                dl->AddText(font, fs * 0.8f, {o.x, o.y}, IM_COL32(170,176,184,220),
+                            "Scroll to a message to read it here.");
+                return;
+            }
+            const auto& n = state.notifs.items[(*order)[slot]];
+            float y = o.y;
+            dl->AddText(font, fs * 1.05f, {o.x, y}, IM_COL32(235,240,245,255), n.title.c_str());
+            y += fs * 1.3f;
+            if (n.timestamp > 0) {
+                char ts[24]; time_t t = (time_t)n.timestamp;
+                strftime(ts, sizeof(ts), "%a %H:%M", localtime(&t));
+                dl->AddText(font, fs * 0.7f, {o.x, y}, IM_COL32(150,158,166,210), ts);
+                y += fs * 1.2f;
+            }
+            if (!n.body.empty())
+                dl->AddText(font, fs * 0.85f, {o.x, y}, IM_COL32(210,214,220,235),
+                            n.body.c_str(), nullptr, sz.x - 6.f);   // wrapped
+        };
+        return with_panel(with_desc(submenu("Notification Log", std::move(nlog_menu)),
+            "Browse the log grouped by sender; scroll to a message to read its full "
+            "text on the right. Filter by type/sender, save messages to pin them, or "
+            "bulk-clear the rest."),
+            "Message", panel);
+    }();
+    std::vector<MenuItem> communications_menu;
+    communications_menu.push_back(with_desc(submenu("LoRa", std::move(lora_menu)),
+        "Long-range radio: team nodes, messages and status."));
+    communications_menu.push_back(std::move(phone_item));
+    communications_menu.push_back(std::move(notiflog_item));
+
+    // ── Scanned QR Codes ──────────────────────────────────────────────────
+    // Each captured code lives in its own folder (link + raw image). This
+    // submenu browses the de-duplicated running list; the panel shows the
+    // captured image + link, and each row can Open (URLs) or Delete.
+    MenuItem qr_codes_item = [&]() -> MenuItem {
+        struct QrThumb { GLuint tex = 0; std::string loaded; cv::Mat img; };
+        auto thumb = std::make_shared<QrThumb>();
+        auto focus = std::make_shared<int>(-1);
+
+        auto cap_at = [&state](int i) -> QrCapture {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i < 0 || i >= static_cast<int>(state.qr_captures.items.size())) return {};
+            return state.qr_captures.items[i];
+        };
+        auto is_url = [](const std::string& t){
+            return t.size() > 7 && (t.compare(0, 7, "http://") == 0 ||
+                                    t.compare(0, 8, "https://") == 0);
+        };
+        // Shared panel painter: thumbnail (top) + link (wrapped) + type/time.
+        auto draw_cap = [thumb](ImDrawList* dl, ImVec2 o, ImVec2 sz, const QrCapture& c){
+            ImFont* font = ImGui::GetFont(); const float fs = ImGui::GetFontSize();
+            if (c.text.empty()) {
+                dl->AddText(font, fs * 0.8f, {o.x, o.y}, IM_COL32(170,176,184,220),
+                            "Scroll to a code.");
+                return;
+            }
+            float y = o.y;
+            // Prefer the colour camera frame; fall back to the grayscale decode.
+            std::string ipath;
+            const std::string& fn = !c.image.empty() ? c.image : c.decode;
+            if (!c.folder.empty() && !fn.empty())
+                ipath = (std::filesystem::path(c.folder) / fn).string();
+            if (!ipath.empty()) {
+                if (ipath != thumb->loaded) {
+                    thumb->img = face::load_png_rgba(ipath, 240, 180);
+                    thumb->loaded = ipath;
+                }
+                const float pw = std::min(sz.x * 0.85f, 200.f), ph = pw * 0.75f;
+                const float px = o.x, py = y;
+                dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10,16,22,190));
+                if (!thumb->img.empty() && thumb->img.isContinuous()) {
+                    if (!thumb->tex) {
+                        glGenTextures(1, &thumb->tex);
+                        glBindTexture(GL_TEXTURE_2D, thumb->tex);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    }
+                    glBindTexture(GL_TEXTURE_2D, thumb->tex);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, thumb->img.cols, thumb->img.rows,
+                                 0, GL_RGBA, GL_UNSIGNED_BYTE, thumb->img.data);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    dl->AddImage(reinterpret_cast<ImTextureID>(
+                        static_cast<uintptr_t>(thumb->tex)), {px, py}, {px + pw, py + ph});
+                }
+                y = py + ph + 8.f;
+            }
+            dl->AddText(font, fs * 0.9f, {o.x, y}, IM_COL32(235,240,245,255),
+                        c.text.c_str(), nullptr, sz.x - 6.f);
+            ImVec2 tsz = font->CalcTextSizeA(fs * 0.9f, FLT_MAX, sz.x - 6.f, c.text.c_str());
+            y += tsz.y + 6.f;
+            char meta[80]; std::string when;
+            if (c.timestamp > 0) {
+                char ts[24]; time_t t = static_cast<time_t>(c.timestamp);
+                strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", localtime(&t));
+                when = ts;
+            }
+            std::snprintf(meta, sizeof(meta), "%s%s%s", c.type.c_str(),
+                          when.empty() ? "" : "  \xC2\xB7  ", when.c_str());
+            dl->AddText(font, fs * 0.72f, {o.x, y}, IM_COL32(150,158,166,210), meta);
+        };
+
+        std::vector<MenuItem> qmenu;
+        // Clear All (red) — drops every entry + its folder.
+        {
+            MenuItem clr = leaf("Clear All", [&state]{
+                std::vector<std::string> folders;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    for (auto& c : state.qr_captures.items)
+                        if (!c.folder.empty()) folders.push_back(c.folder);
+                    state.qr_captures.items.clear();
+                    state.qr_captures.seen.clear();
+                    qr_write_index(state.qr_dir, state.qr_captures);
+                }
+                std::error_code ec;
+                for (auto& f : folders) std::filesystem::remove_all(f, ec);
+            });
+            clr.warn_fn    = []{ return true; };
+            clr.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                       return !state.qr_captures.items.empty(); };
+            qmenu.push_back(with_desc(std::move(clr),
+                "Delete every saved QR code and its folder."));
+        }
+        // Capture rows (newest first).
+        for (int i = 0; i < 40; ++i) {
+            MenuItem row; row.type = MenuItemType::SUBMENU; row.label = "qr";
+            row.label_fn = [&state, i]{
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (i >= static_cast<int>(state.qr_captures.items.size())) return std::string();
+                std::string s = state.qr_captures.items[i].text;
+                if (s.size() > 48) s = s.substr(0, 47) + "\xE2\x80\xA6";
+                return s;
+            };
+            row.visible_fn   = [&state, i]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                 return i < static_cast<int>(state.qr_captures.items.size()); };
+            row.on_highlight = [focus, i]{ *focus = i; };
+            MenuItem open = leaf("Open Link", [cap_at, is_url, i]{
+                QrCapture c = cap_at(i);
+                if (!is_url(c.text)) return;
+                std::string safe = c.text; for (auto& ch : safe) if (ch == '\'') ch = ' ';
+                std::string cmd = "xdg-open '" + safe + "' >/dev/null 2>&1 &";
+                system(cmd.c_str());
+            });
+            open.visible_fn = [cap_at, is_url, i]{ return is_url(cap_at(i).text); };
+            MenuItem del = leaf("Delete", [&state, i, menu_sys_pp]{
+                std::string folder;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    if (i < static_cast<int>(state.qr_captures.items.size())) {
+                        folder = state.qr_captures.items[i].folder;
+                        state.qr_captures.seen.erase(state.qr_captures.items[i].text);
+                        state.qr_captures.items.erase(state.qr_captures.items.begin() + i);
+                        qr_write_index(state.qr_dir, state.qr_captures);
+                    }
+                }
+                if (!folder.empty()) { std::error_code ec;
+                    std::filesystem::remove_all(folder, ec); }
+                if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
+            });
+            del.warn_fn = []{ return true; };
+            row.children = { std::move(open), std::move(del) };
+            row.context_panel_title = "QR Code";
+            row.context_panel_draw  = [draw_cap, cap_at, i](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+                draw_cap(dl, o, sz, cap_at(i)); };
+            qmenu.push_back(std::move(row));
+        }
+        MenuItem sub = submenu("QR Codes", std::move(qmenu));
+        sub.label_fn = [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            const size_t n = state.qr_captures.items.size();
+            return n ? ("QR Codes  [" + std::to_string(n) + "]") : std::string("QR Codes");
+        };
+        sub.context_panel_title = "QR Code";
+        sub.context_panel_draw  = [draw_cap, focus, &state](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+            QrCapture c;
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              if (*focus >= 0 && *focus < static_cast<int>(state.qr_captures.items.size()))
+                  c = state.qr_captures.items[*focus]; }
+            draw_cap(dl, o, sz, c);
+        };
+        return with_desc(std::move(sub),
+            "Scanned QR/barcodes — each saved in its own folder with the link "
+            "and the captured image. Already-seen codes aren't captured twice.");
+    }();
+    communications_menu.push_back(std::move(qr_codes_item));
 
     // Audio submenu wrapped with its existing live-status context panel.
     MenuItem audio_item = with_panel(
@@ -7628,6 +9130,44 @@ static std::vector<MenuItem> build_menu(
         catalog.push_back({ "syspanel", toggle("System Panel",
             [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
             [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }) });
+        // Action item (not a toggle): rings the paired phone via KDE Connect.
+        catalog.push_back({ "ring_phone", leaf("Ring Phone", [kdc_p, &state]{
+            const bool ok = kdc_p && kdc_p->ring_phone();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            Notification n; n.type = NotifType::App; n.icon = "message";
+            n.title = ok ? "Ringing phone\xE2\x80\xA6" : "Phone not connected";
+            n.body  = ok ? "KDE Connect \xC2\xB7 findmyphone"
+                         : "Pair a device in the KDE Connect app first";
+            n.auto_dismiss_s = 4.f;
+            state.notifs.push(std::move(n));
+        }) });
+        // Diagnostics — quick recovery actions (CSI reinit + face-renderer restart).
+        {
+            std::vector<MenuItem> diag;
+            diag.push_back(with_desc(leaf("Reinit CSI Cameras", [cameras, &state]{
+                const bool ok = cameras->reinit_owls();
+                const bool lok = cameras->owl_left_ok(), rok = cameras->owl_right_ok();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "CSI cameras reinitialized" : "CSI reinit: no camera";
+                char b[64]; snprintf(b, sizeof(b), "Left %s  \xC2\xB7  Right %s",
+                                     lok ? "OK" : "\xE2\x80\x94", rok ? "OK" : "\xE2\x80\x94");
+                n.body = b; n.auto_dismiss_s = 5.f; state.notifs.push(std::move(n));
+            }), "Re-enumerate + restart the CSI cameras to recover a dark eye."));
+            if (pf_restart_renderer) {
+                MenuItem rf = with_desc(leaf("Restart Face Renderer", [pf_restart_renderer, state_ptr]{
+                    pf_restart_renderer();
+                    if (!state_ptr) return;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    Notification n; n.type = NotifType::App; n.title = "Face renderer restarted";
+                    n.body = "Relaunched the HUB75 panel driver"; n.auto_dismiss_s = 4.f;
+                    state_ptr->notifs.push(std::move(n));
+                }), "Kill + relaunch the HUB75 panel pusher to recover the face feed.");
+                rf.visible_fn = [pf_backend_p]{ return !pf_backend_p || *pf_backend_p == "hub75"; };
+                diag.push_back(std::move(rf));
+            }
+            catalog.push_back({ "diagnostics", submenu("Diagnostics", std::move(diag)) });
+        }
 
         // Pinned catalog items appear in the quick menu, gated on the favorites set.
         for (auto& f : catalog) {
@@ -7689,8 +9229,9 @@ static std::vector<MenuItem> build_menu(
                   "landing-page backgrounds. Face / mouth / boop PNGs live "
                   "under Face Display > Protoface > Faces — they're tied to "
                   "the active face backend (MAX7219 / RGB matrix)."),
-        with_desc(submenu("LoRa",         std::move(lora_menu)),
-                  "Long-range radio: team nodes, messages and status."),
+        with_desc(submenu("Communications", std::move(communications_menu)),
+                  "Radio + phone: LoRa team mesh, KDE Connect phone, and the "
+                  "notification log."),
         with_desc(submenu("System",       std::move(system_menu)),
                   "Display, audio, connectivity, Pi settings, timers, "
                   "diagnostics, profiles & power."),
@@ -7855,6 +9396,48 @@ int main(int argc, char* argv[]) {
     // (look for `active_face = …`, `menu_ptr = &menu`, etc.) populate them
     // once their owning objects exist.
     AppState state;
+
+    // ── Notification log persistence ──────────────────────────────────────────
+    // Save the notification queue next to config.json so a sudden reboot doesn't
+    // lose it. Loaded once here; saved (debounced) from the render loop + on exit.
+    const std::string notif_path =
+        (fs::path(cfg_path).parent_path() / "protohud_notifications.json").string();
+    if (cfg.contains("notifications") && cfg["notifications"].is_object())
+        state.notif_persist = cfg["notifications"].value("persist", true);
+    auto save_notifs = [&state, notif_path]{
+        json arr = json::array();
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (const auto& n : state.notifs.items)
+                arr.push_back({{"type", static_cast<int>(n.type)}, {"title", n.title},
+                               {"body", n.body}, {"ts", n.timestamp},
+                               {"read", n.read}, {"dismissed", n.dismissed},
+                               {"saved", n.saved}});
+        }
+        std::ofstream f(notif_path);
+        if (f) f << arr.dump();
+    };
+    if (state.notif_persist) {
+        std::ifstream f(notif_path);
+        json arr;
+        if (f) { try { f >> arr; } catch (...) { arr = json::array(); } }
+        if (arr.is_array()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (auto it = arr.rbegin(); it != arr.rend(); ++it) {   // file is newest-first
+                if (!it->is_object()) continue;
+                Notification n;
+                n.type      = static_cast<NotifType>(it->value("type", static_cast<int>(NotifType::App)));
+                n.title     = it->value("title", std::string());
+                n.body      = it->value("body",  std::string());
+                n.timestamp = it->value("ts", static_cast<int64_t>(0));
+                n.saved     = it->value("saved", false);
+                n.read      = true;    // loaded entries are history — never re-toast on boot
+                n.dismissed = true;
+                state.notifs.push(std::move(n));
+            }
+        }
+    }
+
     IFaceController* active_face      = nullptr;   // set after native_ctrl/teensy/protoface_ctrl exist
     FaceProxy        face_proxy(&active_face);     // proxy reads *active_face each call
     MenuSystem*      menu_ptr         = nullptr;   // set after MenuSystem is constructed
@@ -8026,7 +9609,12 @@ int main(int argc, char* argv[]) {
         bno_cfg.heading_offset  = jval(jb, "heading_offset",  0.0f);
         bno_cfg.heading_axes    = jval(jb, "heading_axes",    0);
         bno_cfg.poll_hz         = jval(jb, "poll_hz",         50.0f);
+        bno_cfg.auto_save_calibration = jval(jb, "save_calibration", true);
     }
+    // Persist the BNO055 calibration profile next to config.json so the sensor
+    // keeps its calibration across reboots (restored at start()).
+    bno_cfg.calib_path =
+        (fs::path(cfg_path).parent_path() / "bno055_calib.bin").string();
 
     // IMU source selector — replaces the old "Viture always wins, MPU is
     // backup" hardcoded priority. "auto" picks the best fresh source per
@@ -8110,8 +9698,11 @@ int main(int argc, char* argv[]) {
             // so its electrode field stays at -1 even if config sets it.
             for (size_t i = 0; i < jb["zones"].size() && i < 4; ++i) {
                 const auto& jz = jb["zones"][i];
-                boop_cfg.electrode[i] =
-                    static_cast<int8_t>(jval(jz, "electrode", static_cast<int>(boop_cfg.electrode[i])));
+                // Electrode mapping is editable in the menu (state.boop_zones)
+                // and mirrored into the sensor config consumed at start().
+                state.boop_zones[i].electrode =
+                    jval(jz, "electrode", state.boop_zones[i].electrode);
+                boop_cfg.electrode[i] = static_cast<int8_t>(state.boop_zones[i].electrode);
                 state.boop_zones[i].expression =
                     jz.value("expression", state.boop_zones[i].expression);
                 state.boop_zones[i].duration_s =
@@ -8120,6 +9711,24 @@ int main(int argc, char* argv[]) {
                     static_cast<uint8_t>(jval(jz, "threshold", static_cast<int>(state.boop_zones[i].threshold)));
                 state.boop_zones[i].enabled =
                     jval(jz, "enabled", state.boop_zones[i].enabled);
+                if (jz.contains("eye_trigger") && jz["eye_trigger"].is_object()) {
+                    const auto& je = jz["eye_trigger"];
+                    auto& et = state.boop_zones[i].eye_trigger;
+                    et.enabled    = jval(je, "enabled",    et.enabled);
+                    et.count      = std::clamp(jval(je, "count", et.count), 2, 10);
+                    et.window_s   = jval(je, "window_s",   et.window_s);
+                    et.anim       = std::clamp(jval(je, "anim", et.anim),
+                                               0, face::eye_anim_count() - 1);
+                    et.speed      = jval(je, "speed",      et.speed);
+                    et.size       = jval(je, "size",       et.size);
+                    et.duration_s = jval(je, "duration_s", et.duration_s);
+                    if (je.contains("color") && je["color"].is_array() &&
+                        je["color"].size() >= 3) {
+                        et.r = static_cast<uint8_t>(std::clamp(je["color"][0].get<int>(), 0, 255));
+                        et.g = static_cast<uint8_t>(std::clamp(je["color"][1].get<int>(), 0, 255));
+                        et.b = static_cast<uint8_t>(std::clamp(je["color"][2].get<int>(), 0, 255));
+                    }
+                }
                 boop_cfg.touch_threshold[i] = state.boop_zones[i].threshold;
                 boop_cfg.zone_enabled[i]    = state.boop_zones[i].enabled;
             }
@@ -8174,6 +9783,8 @@ int main(int argc, char* argv[]) {
     // name (NativeFaceController::set_active_layout_name + import_face_image).
     std::map<std::string, PfHub75Layout> pf_hub75_layouts;
     std::string pf_hub75_active = "Default";
+    // Custom Gradient material editor state (Protoface > Material Color).
+    PfGradient pf_gradient;
     // Face animation tunables — forwarded to every panel's FaceState live
     // and persisted to cfg["protoface"]["animation"] on save.
     bool   pf_blink_enabled   = true;
@@ -8211,6 +9822,12 @@ int main(int argc, char* argv[]) {
             if (jh.contains("nudge_dy") && jh["nudge_dy"].is_array())
                 for (size_t i = 0; i < jh["nudge_dy"].size() && i < 4; ++i)
                     L.nudge_dy[i] = jh["nudge_dy"][i].get<int>();
+            if (jh.contains("flip_x") && jh["flip_x"].is_array())
+                for (size_t i = 0; i < jh["flip_x"].size() && i < 4; ++i)
+                    L.flip_x[i] = jh["flip_x"][i].get<bool>();
+            if (jh.contains("flip_y") && jh["flip_y"].is_array())
+                for (size_t i = 0; i < jh["flip_y"].size() && i < 4; ++i)
+                    L.flip_y[i] = jh["flip_y"][i].get<bool>();
             L.defaults_applied = jval(jh, "defaults_applied", false);
             return L;
         };
@@ -8237,6 +9854,22 @@ int main(int argc, char* argv[]) {
             pf_expr_fade      = jval(ja, "expression_fade", pf_expr_fade);
             pf_preview_duration_s =
                 jval(ja, "preview_duration_s", pf_preview_duration_s);
+        }
+        if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
+            auto& jg = jpf["gradient"];
+            pf_gradient.count     = std::clamp(jval(jg, "count", pf_gradient.count), 2, 6);
+            pf_gradient.smooth    = jval(jg, "smooth", pf_gradient.smooth);
+            pf_gradient.direction = jg.value("direction", pf_gradient.direction);
+            pf_gradient.speed     = jval(jg, "speed", pf_gradient.speed);
+            if (jg.contains("colors") && jg["colors"].is_array()) {
+                for (size_t i = 0; i < jg["colors"].size() && i < 6; ++i) {
+                    const auto& jc = jg["colors"][i];
+                    if (jc.is_array() && jc.size() == 3)
+                        for (int k = 0; k < 3; ++k)
+                            pf_gradient.colors[i][k] =
+                                std::clamp(jc[k].get<int>(), 0, 255);
+                }
+            }
         }
         if (jpf.contains("preview")) {
             auto& jpv = jpf["preview"];
@@ -8296,6 +9929,8 @@ int main(int argc, char* argv[]) {
         kdc_cfg.device_id      = jk.value("device_id",      kdc_cfg.device_id);
         kdc_cfg.auto_dismiss_s = jval(jk, "auto_dismiss_s", kdc_cfg.auto_dismiss_s);
         kdc_cfg.app_blocklist  = jk.value("app_blocklist",  kdc_cfg.app_blocklist);
+        kdc_cfg.message_apps   = jk.value("message_apps",   kdc_cfg.message_apps);
+        kdc_cfg.ignore_list    = jk.value("ignore_list",    kdc_cfg.ignore_list);
     }
 
     // Phone Inbox — watches a directory (default ~/Downloads) for files
@@ -8668,9 +10303,9 @@ int main(int argc, char* argv[]) {
         constexpr float kAlpha   = 0.1f;
         constexpr float kDeg2Rad = 3.14159265f / 180.f;
         const float prev = state.imu_mpu.heading_deg;
-        const float fs = std::sinf(prev * kDeg2Rad) + kAlpha * (std::sinf(heading * kDeg2Rad) - std::sinf(prev * kDeg2Rad));
-        const float fc = std::cosf(prev * kDeg2Rad) + kAlpha * (std::cosf(heading * kDeg2Rad) - std::cosf(prev * kDeg2Rad));
-        float filtered = std::atan2f(fs, fc) / kDeg2Rad;
+        const float fs = std::sin(prev * kDeg2Rad) + kAlpha * (std::sin(heading * kDeg2Rad) - std::sin(prev * kDeg2Rad));
+        const float fc = std::cos(prev * kDeg2Rad) + kAlpha * (std::cos(heading * kDeg2Rad) - std::cos(prev * kDeg2Rad));
+        float filtered = std::atan2(fs, fc) / kDeg2Rad;
         if (filtered < 0.f) filtered += 360.f;
         state.imu_mpu.heading_deg = filtered;
         state.imu_mpu.last_us     = now_us;
@@ -8742,6 +10377,16 @@ int main(int argc, char* argv[]) {
             d.bno_euler[i]    = s.euler_deg[i];
         }
     });
+    bno055.set_calib_saved_callback([&state](bool ok) {
+        Notification n;
+        n.type           = NotifType::App;
+        n.title          = ok ? "IMU calibration saved" : "IMU calibration save failed";
+        n.body           = ok ? "BNO055 offsets stored; they'll load on boot."
+                               : "Could not read/write the calibration profile.";
+        n.auto_dismiss_s = 6.f;
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.notifs.push(std::move(n));
+    });
     if (!bno055.start() && bno_cfg.enabled)
         std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
 
@@ -8767,37 +10412,21 @@ int main(int argc, char* argv[]) {
         return "";
     };
 
-    boop_sensor.on_boop([&face_proxy, &state, &accessory_leds, boop_face_stem]
-                        (sensor::BoopSensor::Zone z) {
-        const auto zi = static_cast<size_t>(z);
-        if (zi >= 4) return;
-        // Snapshot under the state lock so a menu edit mid-boop can't tear
-        // the std::string read.
-        bool        enabled;
-        std::string fallback_expr;
-        double      duration_s;
-        {
-            std::lock_guard<std::mutex> lk(state.mtx);
-            enabled       = state.boop_zones[zi].enabled;
-            fallback_expr = state.boop_zones[zi].expression;
-            duration_s    = state.boop_zones[zi].duration_s;
-        }
-        if (!enabled) return;
-        // Prefer the dedicated boop_<zone> face when present on disk.
-        // face_image_exists() is the canonical "is this PNG in the active
-        // face folder" check the editor/import path uses too.
-        std::string expression;
-        const std::string stem = boop_face_stem(z);
-        if (!stem.empty() && face_proxy.face_image_exists(stem))
-            expression = stem;
-        else
-            expression = fallback_expr;
-        if (expression.empty()) return;
-        face_proxy.trigger_boop(expression, duration_s);
+    // Per-zone rapid-boop tracking for the animated-eyes easter egg. Touched
+    // only from the sensor poll thread, so no extra locking is needed here.
+    auto eye_now = []{
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    auto eye_last = std::make_shared<std::array<double, 4>>();   // last boop time / zone
+    auto eye_run  = std::make_shared<std::array<int, 4>>();      // consecutive run / zone
+    // fire_boop is now callable from BOTH the MPR121 poll thread and the GPIO
+    // input thread, so the rapid-boop counters need a lock.
+    auto eye_mtx  = std::make_shared<std::mutex>();
 
-        // Accessory LED flash overlay. Snout = both fins, single cheek =
-        // matching cheekhub, both cheeks = all four zones flash together
-        // (matches the "surprise" reaction's broader visual feedback).
+    // Accessory LED flash feedback per boop zone — shared by the normal boop
+    // reaction and the animated-eyes path.
+    auto flash_zone = [&accessory_leds](sensor::BoopSensor::Zone z) {
         using LZ = accessory::Zone;
         switch (z) {
         case sensor::BoopSensor::Zone::Snout:
@@ -8817,7 +10446,67 @@ int main(int argc, char* argv[]) {
             accessory_leds.trigger_flash(LZ::RightFin,      0.45);
             break;
         }
-    });
+    };
+
+    auto fire_boop = [&face_proxy, &state, boop_face_stem,
+                      eye_now, flash_zone, eye_last, eye_run, eye_mtx]
+                     (sensor::BoopSensor::Zone z) {
+        const auto zi = static_cast<size_t>(z);
+        if (zi >= 4) return;
+        // Snapshot under the state lock so a menu edit mid-boop can't tear
+        // the std::string read.
+        bool             enabled;
+        std::string      fallback_expr;
+        double           duration_s;
+        EyeTriggerConfig eye;
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            enabled       = state.boop_zones[zi].enabled;
+            fallback_expr = state.boop_zones[zi].expression;
+            duration_s    = state.boop_zones[zi].duration_s;
+            eye           = state.boop_zones[zi].eye_trigger;
+        }
+        if (!enabled) return;
+
+        // Rapid-boop animated-eyes easter egg: count boops on this zone landing
+        // within window_s of each other; on the Nth, play the procedural eye
+        // animation *instead* of the normal reaction and reset the counter.
+        if (eye.enabled && eye.count > 0) {
+            const double now = eye_now();
+            bool fire = false;
+            {
+                std::lock_guard<std::mutex> lk(*eye_mtx);
+                if (now - (*eye_last)[zi] <= eye.window_s) (*eye_run)[zi] += 1;
+                else                                       (*eye_run)[zi]  = 1;
+                (*eye_last)[zi] = now;
+                if ((*eye_run)[zi] >= eye.count) { (*eye_run)[zi] = 0; fire = true; }
+            }
+            if (fire) {
+                face_proxy.play_eye_animation(eye.anim, eye.speed, eye.size,
+                                              eye.r, eye.g, eye.b, eye.duration_s);
+                flash_zone(z);
+                return;   // eyes play instead of the normal boop reaction
+            }
+        } else {
+            std::lock_guard<std::mutex> lk(*eye_mtx);
+            (*eye_run)[zi] = 0;
+        }
+        // Prefer the dedicated boop_<zone> face when present on disk.
+        // face_image_exists() is the canonical "is this PNG in the active
+        // face folder" check the editor/import path uses too.
+        std::string expression;
+        const std::string stem = boop_face_stem(z);
+        if (!stem.empty() && face_proxy.face_image_exists(stem))
+            expression = stem;
+        else
+            expression = fallback_expr;
+        if (expression.empty()) return;
+        face_proxy.trigger_boop(expression, duration_s);
+
+        // Accessory LED flash feedback (same per-zone mapping for both paths).
+        flash_zone(z);
+    };
+    boop_sensor.on_boop(fire_boop);
     if (boop_cfg.enabled && !boop_sensor.start())
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
     boop_sensor_ptr = &boop_sensor;   // expose for the menu's live tuning
@@ -8933,9 +10622,13 @@ int main(int argc, char* argv[]) {
     // KDE Connect bridge — RX phone notifications, pushed into AppState::notifs.
     // Optional (gated by HAVE_DBUS at build time + cfg.enabled at runtime); silent
     // no-op when the daemon isn't running so it doesn't spam logs on dev hosts.
+    // Visible to the menu regardless of HAVE_DBUS (the header is dbus-free);
+    // stays null when the bridge isn't compiled in, so "Ring My Phone" no-ops.
+    integrations::KdeConnectBridge* kdc_menu_ptr = nullptr;
 #ifdef HAVE_DBUS
     const bool kdc_enabled = kdc_cfg.enabled;
     integrations::KdeConnectBridge kdc(state, std::move(kdc_cfg));
+    kdc_menu_ptr = &kdc;
     if (kdc_enabled) {
         if (!kdc.start())
             std::cout << "[kdeconnect] disabled (failed to attach to session bus)\n";
@@ -9066,6 +10759,14 @@ int main(int argc, char* argv[]) {
         state.health.cam_usb2      = cameras.usb2_ok();
         state.health.cam_usb3      = cameras.usb3_ok();
     }
+
+    // CSI boot auto-retry: a sensor that comes up wedged at boot leaves one eye
+    // dark until a reboot. Attempt reinit_owls() a few times early on (from the
+    // render loop, on the render thread) to recover it. csi_expected lets a mono
+    // build set 1 so it never retries a "missing" second camera it doesn't have.
+    int       csi_retries_left = jval(jcam, "csi_boot_retries", 2);
+    const int csi_expected     = std::clamp(jval(jcam, "csi_expected", 2), 0, 2);
+    auto      csi_next_retry   = std::chrono::steady_clock::now() + std::chrono::seconds(4);
 
     // Startup autofocus
     bool af_on_startup = false;
@@ -9235,7 +10936,10 @@ int main(int argc, char* argv[]) {
         // when the renderer writes into a /dev/shm frame. MAX7219 writes
         // directly to spidev and needs no Python helper.
         if (pf_launch_driver && pf_backend == "hub75") {
-            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h);
+            int gpw = 64, gph = 32, gchain = 2, gpar = 1;
+            pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
+            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
+                                   gpw, gph, gchain, gpar);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -9245,49 +10949,118 @@ int main(int argc, char* argv[]) {
     }
 
     // QR / barcode scanner — active when either scan toggle is enabled.
+    // Captured-QR store: one folder per code (link.txt + the raw frame +
+    // meta.json) under <config-dir>/qr_codes, with a de-duplicated running
+    // list in index.json. Load the existing list so reboots keep history and
+    // already-seen codes aren't re-captured.
+    const std::string qr_dir =
+        (fs::path(cfg_path).parent_path() / "qr_codes").string();
+    {
+        std::lock_guard lk(state.mtx);
+        state.qr_dir = qr_dir;
+        std::ifstream f(fs::path(qr_dir) / "index.json");
+        if (f) {
+            try {
+                json arr; f >> arr;
+                if (arr.is_array())
+                    for (const auto& e : arr) {
+                        if (!e.is_object()) continue;
+                        QrCapture c;
+                        c.text      = e.value("text", std::string());
+                        c.type      = e.value("type", std::string());
+                        c.timestamp = e.value("ts", static_cast<int64_t>(0));
+                        c.folder    = e.value("folder", std::string());
+                        c.image     = e.value("image", std::string());
+                        c.decode    = e.value("decode", std::string());
+                        if (!c.text.empty()) state.qr_captures.items.push_back(std::move(c));
+                    }
+            } catch (...) {}
+        }
+        state.qr_captures.rebuild_seen();
+    }
+
     QrScanner qr_scanner;
-    qr_scanner.set_callback([&state, cfg_photo_dir](const std::string& text,
-                                                       const std::string& type) {
+    qr_scanner.set_callback([&state, qr_dir](const std::string& text,
+                                             const std::string& type,
+                                             const std::vector<uint8_t>& gray,
+                                             const std::vector<uint8_t>& rgba,
+                                             int w, int h) {
         // Honour mute window (set by "MUTE 1m" action)
         if (static_cast<int64_t>(time(nullptr)) < state.qr_mute_until_s.load()) return;
+
+        // De-dupe against the running list: already-captured codes are dropped
+        // silently so they don't double up.
+        {
+            std::lock_guard lk(state.mtx);
+            if (state.qr_captures.contains(text)) return;
+        }
 
         const bool is_url = text.size() > 7 &&
                             (text.substr(0, 7) == "http://" ||
                              text.substr(0, 8) == "https://");
 
-        Notification n;
-        n.type           = NotifType::App;
-        n.title          = type + " Detected";
-        n.body           = text;
-        n.auto_dismiss_s = 20.f;   // longer so user has time to act
-
-        if (is_url) {
-            n.actions.push_back({"OPEN", [text](AppState&) {
-                // xdg-open in background; single-quote the URL to avoid expansion
-                std::string safe = text;
-                // Replace any single-quotes in the URL with %27 before shell-quoting
-                for (auto& c : safe) if (c == '\'') c = ' ';
-                std::string cmd = "xdg-open '" + safe + "' >/dev/null 2>&1 &";
-                system(cmd.c_str());
-            }});
-        }
-
-        n.actions.push_back({"SAVE", [text, cfg_photo_dir](AppState&) {
-            if (cfg_photo_dir.empty()) return;
-            time_t now = time(nullptr);
+        // Save this capture to its own folder: <ts>_<hash>/ with the link, the
+        // raw grayscale frame it was decoded from, and a small meta.json.
+        const int64_t now_s = static_cast<int64_t>(time(nullptr));
+        QrCapture cap;
+        cap.text = text; cap.type = type; cap.timestamp = now_s;
+        if (!qr_dir.empty()) {
+            time_t now = static_cast<time_t>(now_s);
             struct tm tm{}; localtime_r(&now, &tm);
             char ts[20]; strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm);
-            std::string path = cfg_photo_dir + "/qr_" + ts + ".txt";
-            std::ofstream f(path);
-            if (f) f << text << "\n";
-        }});
+            char name[40];
+            std::snprintf(name, sizeof(name), "%s_%08x", ts,
+                static_cast<unsigned>(std::hash<std::string>{}(text) & 0xffffffffu));
+            const fs::path folder = fs::path(qr_dir) / name;
+            std::error_code ec;
+            fs::create_directories(folder, ec);
+            cap.folder = folder.string();
+            { std::ofstream lf(folder / "link.txt"); if (lf) lf << text << "\n"; }
+            // Grayscale decode frame (what ZBar saw).
+            if (!gray.empty() && w > 0 && h > 0 &&
+                static_cast<int>(gray.size()) >= w * h) {
+                cv::Mat g(h, w, CV_8UC1, const_cast<uint8_t*>(gray.data()));
+                if (cv::imwrite((folder / "decode.png").string(), g))
+                    cap.decode = "decode.png";
+            }
+            // Colour camera frame (RGBA → BGR for PNG storage).
+            if (!rgba.empty() && w > 0 && h > 0 &&
+                static_cast<int>(rgba.size()) >= w * h * 4) {
+                cv::Mat r(h, w, CV_8UC4, const_cast<uint8_t*>(rgba.data()));
+                cv::Mat bgr; cv::cvtColor(r, bgr, cv::COLOR_RGBA2BGR);
+                if (cv::imwrite((folder / "camera.png").string(), bgr))
+                    cap.image = "camera.png";
+            }
+            json meta = {{"text", text}, {"type", type}, {"ts", now_s},
+                         {"camera", cap.image}, {"decode", cap.decode}};
+            std::ofstream mf(folder / "meta.json");
+            if (mf) mf << meta.dump(2);
+        }
 
-        n.actions.push_back({"MUTE 1m", [](AppState& s) {
-            s.qr_mute_until_s.store(static_cast<int64_t>(time(nullptr)) + 60);
-        }});
+        // Add to the running list + persist the index, then surface a toast.
+        {
+            std::lock_guard lk(state.mtx);
+            state.qr_captures.add(cap);
+            qr_write_index(state.qr_dir, state.qr_captures);
 
-        std::lock_guard lk(state.mtx);
-        state.notifs.push(std::move(n));
+            Notification n;
+            n.type           = NotifType::App;
+            n.title          = type + " Saved";
+            n.body           = text;
+            n.auto_dismiss_s = 20.f;   // longer so user has time to act
+            if (is_url) {
+                n.actions.push_back({"OPEN", [text](AppState&) {
+                    std::string safe = text;
+                    for (auto& c : safe) if (c == '\'') c = ' ';
+                    std::string cmd = "xdg-open '" + safe + "' >/dev/null 2>&1 &";
+                    system(cmd.c_str());
+                }});
+            }
+            n.actions.push_back({"MUTE 1m", [](AppState& s) {
+                s.qr_mute_until_s.store(static_cast<int64_t>(time(nullptr)) + 60);
+            }});
+            state.notifs.push(std::move(n));
+        }
     });
     cameras.set_qr_scanner(&qr_scanner);
     if (!lora.start())   std::cerr << "[main] LoRa not available on "   << lora_port   << "\n";
@@ -9421,7 +11194,10 @@ int main(int argc, char* argv[]) {
         if (new_backend == "max7219" || new_backend == "rgb_matrix") {
             std::system("pkill -f panel_driver.py 2>/dev/null");
         } else if (new_backend == "hub75" && pf_launch_driver) {
-            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h);
+            int gpw = 64, gph = 32, gchain = 2, gpar = 1;
+            pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
+            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
+                                   gpw, gph, gchain, gpar);
         }
     };
 
@@ -9481,6 +11257,29 @@ int main(int argc, char* argv[]) {
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
 
+        // Preload any blink eye-region boxes from the face folder's config.json
+        // (canvas coords) so the editor shows them and round-trips them on save.
+        std::vector<cv::Rect> eye_regions;
+        {
+            const fs::path cfgp = fs::path(abs_path).parent_path() / "config.json";
+            std::ifstream ef(cfgp);
+            if (ef) {
+                try {
+                    json ej; ef >> ej;
+                    auto rd = [&](const char* k){
+                        if (ej.contains(k) && ej[k].is_object()) {
+                            const auto& d = ej[k];
+                            eye_regions.emplace_back(
+                                d.value("x", 0), d.value("y", 0),
+                                std::max(1, d.value("w", 1)),
+                                std::max(1, d.value("h", 1)));
+                        }
+                    };
+                    rd("eye_left"); rd("eye_right");
+                } catch (...) {}
+            }
+        }
+
         const menu::FaceEditor::Mode mode =
             (pf_backend == "rgb_matrix") ? menu::FaceEditor::Mode::Color
                                          : menu::FaceEditor::Mode::Mono;
@@ -9493,8 +11292,10 @@ int main(int argc, char* argv[]) {
             title, abs_path, cw, ch, std::move(covered), std::move(labels),
             zones.mirror_x,
             mode, {} /* default palette */,
+            std::move(eye_regions),
             /* on_commit */ [&face_proxy, &native_ctrl, expression]
-                (const cv::Mat& rgba_canvas, const std::string& target_path) {
+                (const cv::Mat& rgba_canvas, const std::string& target_path,
+                 const std::vector<cv::Rect>& eye_regions) {
                 // Convert RGBA back to BGRA for cv::imwrite (PNG storage
                 // expects native channel order in OpenCV).
                 cv::Mat bgra;
@@ -9502,10 +11303,35 @@ int main(int argc, char* argv[]) {
                 std::error_code ec;
                 std::filesystem::create_directories(
                     std::filesystem::path(target_path).parent_path(), ec);
+                // Auto-backup the version we're about to overwrite (last 15 kept)
+                // so an edit can always be undone from the Versions menu.
+                fvers::backup_current(target_path, 15);
                 if (!cv::imwrite(target_path, bgra)) {
                     std::fprintf(stderr, "[editor] save failed: %s\n",
                                  target_path.c_str());
                     return;
+                }
+                // Persist blink eye regions (canvas coords) into the face
+                // folder's config.json, merging so expressions/blink keys are
+                // preserved. The loader maps these onto each panel slice; a
+                // proper region blink only closes the eye(s) inside these boxes.
+                if (!eye_regions.empty()) {
+                    const std::filesystem::path cfgp =
+                        std::filesystem::path(target_path).parent_path() / "config.json";
+                    json ej = json::object();
+                    { std::ifstream ef(cfgp);
+                      if (ef) { try { ef >> ej; } catch (...) { ej = json::object(); } }
+                      if (!ej.is_object()) ej = json::object(); }
+                    auto wr = [&](const char* k, const cv::Rect& r){
+                        ej[k] = {{"x", r.x}, {"y", r.y}, {"w", r.width}, {"h", r.height}};
+                    };
+                    wr("eye_left", eye_regions[0]);
+                    if (eye_regions.size() > 1) wr("eye_right", eye_regions[1]);
+                    // draw_size lets single-panel faces scale regions; multi-
+                    // panel slices use canvas coords directly (ignored there).
+                    ej["draw_size"] = {rgba_canvas.cols, rgba_canvas.rows};
+                    std::ofstream of(cfgp);
+                    if (of) of << ej.dump(2);
                 }
                 // Rebuild the face loader so the new PNG shows up immediately
                 // — then pop the saved expression on-face so the user sees
@@ -9642,13 +11468,82 @@ int main(int argc, char* argv[]) {
     // is set by those panels (1/2/3) and consumed by the render loop below.
     GLuint tex_usb1 = 0, tex_usb2 = 0, tex_usb3 = 0;
     int    usb_preview_req = 0;
+
+    // ── Configurable GPIO switch map ─────────────────────────────────────────
+    // Up to kGpioSlots assignable pins; each has a short-press and optional
+    // long-press function plus pull bias and polarity. Loaded from
+    // cfg["gpio"]["pins"], edited via the GPIO Buttons menu (applies on the next
+    // launch — use the Restart action / scripts/restart.sh), and persisted on
+    // save. The poller (input::GpioInputs) is built from these further down.
+    constexpr int kGpioSlots = 8;
+    std::array<input::GpioPinCfg, kGpioSlots> gpio_pins{};
+    bool gpio_inputs_enabled = false;
+    // Installed once the poller exists (below); the GPIO Buttons menu calls it
+    // to rebuild the poller live after edits.
+    auto gpio_reload = std::make_shared<std::function<void()>>();
+    if (cfg.contains("gpio") && cfg["gpio"].is_object()) {
+        const json& jg = cfg["gpio"];
+        gpio_inputs_enabled = jval(jg, "enabled", false);
+        if (jg.contains("pins") && jg["pins"].is_array()) {
+            const auto& arr = jg["pins"];
+            for (size_t i = 0; i < arr.size() && i < static_cast<size_t>(kGpioSlots); ++i) {
+                if (!arr[i].is_object()) continue;
+                const json& jp = arr[i];
+                auto& s = gpio_pins[i];
+                s.gpio       = jval(jp, "gpio", s.gpio);
+                s.active_low = jval(jp, "active_low", s.active_low);
+                const std::string pull = jp.value("pull", std::string("up"));
+                s.pull       = (pull == "down") ? 2 : (pull == "none" ? 0 : 1);
+                s.short_fn   = input::gpio_func_from_id(jp.value("short", std::string("none")));
+                s.long_fn    = input::gpio_func_from_id(jp.value("long",  std::string("none")));
+                s.long_ms    = std::clamp(jval(jp, "long_ms", s.long_ms), 200, 3000);
+            }
+        } else {
+            // Migrate the legacy fixed 3-button layout so existing configs keep
+            // a working menu Select/Back without manual re-assignment.
+            gpio_pins[0].gpio     = jval(jg, "button_1_gpio", 17);
+            gpio_pins[0].short_fn = input::GpioFunc::MenuSelect;
+            gpio_pins[0].long_fn  = input::GpioFunc::MenuBack;
+        }
+    }
+
+    // KDE Connect lists — editable in the Phone menu, applied live to the bridge
+    // and persisted to cfg["kdeconnect"]. ignore_list mutes servers/chats;
+    // message_apps picks which apps get the big chat toast.
+    auto split_csv_vec = [](const std::string& csv) {
+        std::vector<std::string> out;
+        size_t pos = 0;
+        while (pos <= csv.size()) {
+            const size_t c = csv.find(',', pos);
+            std::string tok = csv.substr(pos, c == std::string::npos ? std::string::npos : c - pos);
+            const size_t b = tok.find_first_not_of(" \t");
+            const size_t e = tok.find_last_not_of(" \t");
+            if (b != std::string::npos) out.push_back(tok.substr(b, e - b + 1));
+            if (c == std::string::npos) break;
+            pos = c + 1;
+        }
+        return out;
+    };
+    std::vector<std::string> kdc_ignore, kdc_msgapps;
+    {
+        const std::string def_msg =
+            "Discord,Messages,Messenger,Signal,WhatsApp,Telegram,SMS,Slack";
+        std::string ig, ms = def_msg;
+        if (cfg.contains("kdeconnect") && cfg["kdeconnect"].is_object()) {
+            ig = cfg["kdeconnect"].value("ignore_list",  std::string());
+            ms = cfg["kdeconnect"].value("message_apps", def_msg);
+        }
+        kdc_ignore  = split_csv_vec(ig);
+        kdc_msgapps = split_csv_vec(ms);
+    }
+
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
                                &pip_cam1_overlay_active, &pip_cam2_overlay_active, &pip_cam3_overlay_active,
                                &android_overlay_cfg,
                                &hud.colors(), &hud.config(), &menu_ptr,
-                               &mpu9250, gif_names,
+                               &mpu9250, &bno055, gif_names,
                                &bt_mon, &sys_panel_active, &fps_overlay_active, &state,
                                &active_face,
                                static_cast<IFaceController*>(&teensy),
@@ -9674,8 +11569,14 @@ int main(int argc, char* argv[]) {
                                &pf_hub75,
                                &pf_hub75_layouts, &pf_hub75_active,
                                /* pf_layout_changed */ [&]{
-                                   if (native_ctrl)
-                                       native_ctrl->set_active_layout_name(pf_hub75_active);
+                                   if (!native_ctrl) return;
+                                   native_ctrl->set_active_layout_name(pf_hub75_active);
+                                   // Push per-panel flips live so the orientation
+                                   // toggles take effect on the panels immediately.
+                                   std::vector<std::array<bool, 2>> flips;
+                                   for (int i = 0; i < pf_hub75.panel_count && i < 4; ++i)
+                                       flips.push_back({pf_hub75.flip_x[i], pf_hub75.flip_y[i]});
+                                   native_ctrl->set_panel_flips(flips);
                                },
                                &pf_blink_enabled, &pf_blink_min, &pf_blink_max,
                                &pf_blink_duration, &pf_expr_fade,
@@ -9693,7 +11594,37 @@ int main(int argc, char* argv[]) {
                                },
                                /* cfg_root */ &cfg,
                                /* USB camera preview wiring */
-                               &tex_usb1, &tex_usb2, &tex_usb3, &usb_preview_req));
+                               &tex_usb1, &tex_usb2, &tex_usb3, &usb_preview_req,
+                               /* pf_gradient */ &pf_gradient,
+                               /* pf_set_material */ [&](const std::string& spec){
+                                   if (native_ctrl) native_ctrl->set_material_spec(spec);
+                               },
+                               /* pf_restart_renderer */ [&]{
+                                   if (!pf_launch_driver || pf_backend != "hub75" || !native_ctrl) {
+                                       Notification n; n.type = NotifType::App;
+                                       n.title = "Panel restart unavailable";
+                                       n.body  = "HUB75 panel driver is not in use.";
+                                       n.auto_dismiss_s = 5.f;
+                                       std::lock_guard<std::mutex> lk(state.mtx);
+                                       state.notifs.push(std::move(n));
+                                       return;
+                                   }
+                                   int gpw = 64, gph = 32, gchain = 2, gpar = 1;
+                                   pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
+                                   // pf_launch_panel_driver now stops the old driver, waits for it
+                                   // to release the PIO/DMA, then relaunches (see its comment).
+                                   pf_launch_panel_driver(bin_dir, native_ctrl->canvas_width(),
+                                       native_ctrl->canvas_height(), gpw, gph, gchain, gpar);
+                                   Notification n; n.type = NotifType::App;
+                                   n.title = "Panel driver restarted";
+                                   n.body  = "If panels stay dark, check /tmp/panel_driver.log";
+                                   n.auto_dismiss_s = 6.f;
+                                   std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.notifs.push(std::move(n));
+                               },
+                               /* gpio_pins */ gpio_pins.data(), kGpioSlots,
+                               &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr,
+                               &kdc_ignore, &kdc_msgapps));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -9898,19 +11829,8 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    // ── GPIO button input ─────────────────────────────────────────────────────
-
-    bool gpio_enabled   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "enabled",           false);
-    int button_1_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_1_gpio",     17);
-    int button_2_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_2_gpio",     27);
-    int button_3_gpio   = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "button_3_gpio",     22);
-    int af_trigger_ms      = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "af_trigger_time_ms",      1500);
-    int pip_trigger_ms     = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "pip_trigger_time_ms",     2000);
-    int capture_trigger_ms = jval(cfg.contains("gpio") ? cfg["gpio"] : empty, "capture_trigger_time_ms", 5000);
-
-    GpioButtons buttons(button_1_gpio, button_2_gpio, button_3_gpio,
-                        af_trigger_ms, pip_trigger_ms, capture_trigger_ms);
-    bool pip_left_active  = false, pip_right_active  = false;  // GPIO-driven
+    // ── GPIO switch input (configurable map) ──────────────────────────────────
+    bool pip_left_active  = false, pip_right_active  = false;  // PiP toggle state
     bool kb_pip_left      = false, kb_pip_right      = false;  // keyboard-driven
 
     // Edge-detection state for direct GLFW key polling
@@ -9919,40 +11839,78 @@ int main(int argc, char* argv[]) {
     // USB stream lifecycle: track previous combined pip-active state per slot
     bool prev_p1 = false, prev_p2 = false, prev_p3 = false;
 
-    if (gpio_enabled) {
-        if (buttons.init()) {
-            buttons.on_af_left([&cameras]() {
-                std::cout << "[gpio] AF left\n";
-                if (cameras.owl_left()) cameras.owl_left()->start_autofocus();
-            });
-            buttons.on_af_right([&cameras]() {
-                std::cout << "[gpio] AF right\n";
-                if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
-            });
-            buttons.on_capture_left([&state]() {
-                std::cout << "[gpio] capture left\n";
-                std::lock_guard lk(state.mtx);
-                state.capture_request = CaptureRequest::Left;
-            });
-            buttons.on_capture_right([&state]() {
-                std::cout << "[gpio] capture right\n";
-                std::lock_guard lk(state.mtx);
-                state.capture_request = CaptureRequest::Right;
-            });
-            buttons.on_pip_left ([&pip_left_active] () { pip_left_active  = true; });
-            buttons.on_pip_right([&pip_right_active]() { pip_right_active = true; });
-            buttons.on_select([&menu, &hud, &state]() {
-                if      (menu.is_open())            menu.select();
-                else if (hud.toast_has_focused())   hud.toast_select(state);
-                else                                menu.open();   // short press opens menu when idle
-            });
-            buttons.on_back([&menu]() {
-                if (menu.is_open()) menu.back();
-            });
-        } else {
-            std::cerr << "[main] GPIO button init failed\n";
+    // Resolve scripts/restart.sh relative to the running binary so the System:
+    // Restart GPIO function works regardless of install location.
+    std::string restart_script;
+    {
+        char exe[4096];
+        ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            std::string p(exe);                                       // .../build/protohud
+            auto s = p.find_last_of('/'); if (s != std::string::npos) p.resize(s);  // .../build
+            s = p.find_last_of('/');      if (s != std::string::npos) p.resize(s);  // project root
+            restart_script = p + "/scripts/restart.sh";
         }
     }
+
+    // Map an assigned function to its action. Runs on the GPIO poll thread;
+    // each action hops onto an already-thread-safe path (fire_boop, the menu,
+    // state.mtx) or flips a plain bool the render loop reads.
+    auto gpio_dispatch = [&, restart_script](input::GpioFunc f) {
+        using F = input::GpioFunc;
+        switch (f) {
+        case F::BoopSnout: fire_boop(sensor::BoopSensor::Zone::Snout);      break;
+        case F::BoopLeft:  fire_boop(sensor::BoopSensor::Zone::LeftCheek);  break;
+        case F::BoopRight: fire_boop(sensor::BoopSensor::Zone::RightCheek); break;
+        case F::BoopBoth:  fire_boop(sensor::BoopSensor::Zone::BothCheeks); break;
+        case F::MenuOpen:  if (menu.is_open()) menu.close(); else menu.open(); break;
+        case F::MenuSelect:
+            if      (menu.is_open())          menu.select();
+            else if (hud.toast_has_focused()) hud.toast_select(state);
+            else                              menu.open();
+            break;
+        case F::MenuBack:  if (menu.is_open()) menu.back(); break;
+        case F::SystemRestart:
+            if (!restart_script.empty())
+                std::system(("setsid '" + restart_script +
+                             "' </dev/null >/tmp/protohud-restart.log 2>&1 &").c_str());
+            break;
+        case F::SystemShutdown:
+            std::system("sudo -n poweroff 2>/dev/null || poweroff 2>/dev/null &");
+            break;
+        case F::CamAfLeft:  if (cameras.owl_left())  cameras.owl_left()->start_autofocus();  break;
+        case F::CamAfRight: if (cameras.owl_right()) cameras.owl_right()->start_autofocus(); break;
+        case F::CamPipLeft:  pip_left_active  = !pip_left_active;  break;
+        case F::CamPipRight: pip_right_active = !pip_right_active; break;
+        case F::CamCaptureLeft:
+            { std::lock_guard<std::mutex> lk(state.mtx); state.capture_request = CaptureRequest::Left; }  break;
+        case F::CamCaptureRight:
+            { std::lock_guard<std::mutex> lk(state.mtx); state.capture_request = CaptureRequest::Right; } break;
+        case F::CamSwap:
+            { std::lock_guard<std::mutex> lk(state.mtx); state.cameras_swapped = !state.cameras_swapped; } break;
+        case F::PhoneRing: if (kdc_menu_ptr) kdc_menu_ptr->ring_phone(); break;
+        case F::None: default: break;
+        }
+    };
+
+    auto gpio_inputs = std::make_unique<input::GpioInputs>(
+        std::vector<input::GpioPinCfg>(gpio_pins.begin(), gpio_pins.end()), gpio_dispatch);
+    if (gpio_inputs_enabled && !gpio_inputs->init())
+        std::cerr << "[main] GPIO input map init failed (no pins assigned or chip busy)\n";
+
+    // Live reload: tear down the poll thread + release the lines, then rebuild
+    // from the current slots. Runs on the main thread (a menu action), so the
+    // old GpioInputs dtor joins its thread before the new one starts.
+    *gpio_reload = [&]{
+        gpio_inputs.reset();
+        gpio_inputs = std::make_unique<input::GpioInputs>(
+            std::vector<input::GpioPinCfg>(gpio_pins.begin(), gpio_pins.end()), gpio_dispatch);
+        if (gpio_inputs_enabled && !gpio_inputs->init())
+            std::cerr << "[main] GPIO reload: init failed (no pins assigned or chip busy)\n";
+        else
+            std::cout << "[gpio] input map reloaded\n";
+    };
 
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
     GamepadInput gamepad;
@@ -10285,6 +12243,17 @@ int main(int argc, char* argv[]) {
                 jzones[i]["expression"] = state.boop_zones[i].expression;
                 jzones[i]["duration_s"] = state.boop_zones[i].duration_s;
                 jzones[i]["threshold"]  = state.boop_zones[i].threshold;
+                jzones[i]["electrode"]  = state.boop_zones[i].electrode;
+                const auto& et = state.boop_zones[i].eye_trigger;
+                auto& je = jzones[i]["eye_trigger"];
+                je["enabled"]    = et.enabled;
+                je["count"]      = et.count;
+                je["window_s"]   = et.window_s;
+                je["anim"]       = et.anim;
+                je["speed"]      = et.speed;
+                je["size"]       = et.size;
+                je["duration_s"] = et.duration_s;
+                je["color"]      = json::array({ et.r, et.g, et.b });
             }
         }
 
@@ -10383,6 +12352,10 @@ int main(int argc, char* argv[]) {
                                                   L.nudge_dx[2], L.nudge_dx[3]});
             jh["nudge_dy"]         = json::array({L.nudge_dy[0], L.nudge_dy[1],
                                                   L.nudge_dy[2], L.nudge_dy[3]});
+            jh["flip_x"]           = json::array({L.flip_x[0], L.flip_x[1],
+                                                  L.flip_x[2], L.flip_x[3]});
+            jh["flip_y"]           = json::array({L.flip_y[0], L.flip_y[1],
+                                                  L.flip_y[2], L.flip_y[3]});
             return jh;
         };
         json jlayouts = json::object();
@@ -10397,6 +12370,19 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["animation"]["blink_duration"]  = pf_blink_duration;
         cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
         cfg["protoface"]["animation"]["preview_duration_s"] = pf_preview_duration_s;
+        {
+            auto& jg = cfg["protoface"]["gradient"];
+            jg["count"]     = std::clamp(pf_gradient.count, 2, 6);
+            jg["smooth"]    = pf_gradient.smooth;
+            jg["direction"] = pf_gradient.direction;
+            jg["speed"]     = pf_gradient.speed;
+            json jcolors = json::array();
+            for (int i = 0; i < 6; ++i)
+                jcolors.push_back(json::array({pf_gradient.colors[i][0],
+                                               pf_gradient.colors[i][1],
+                                               pf_gradient.colors[i][2]}));
+            jg["colors"] = std::move(jcolors);
+        }
         cfg["protoface"]["preview"]["anchor_x"] = protoface_preview_cfg.anchor_x;
         cfg["protoface"]["preview"]["anchor_y"] = protoface_preview_cfg.anchor_y;
         cfg["protoface"]["preview"]["pan_x"]    = protoface_preview_cfg.pan_x;
@@ -10462,6 +12448,34 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["usb_cam_3"]["auto_brightness"]        = cameras.usb3_cfg().auto_brightness;
         cfg["cameras"]["usb_cam_3"]["auto_brightness_target"] = cameras.usb3_cfg().auto_brightness_target;
         cfg["cameras"]["swapped"] = state.cameras_swapped;
+        {
+            // Configurable GPIO switch map.
+            cfg["gpio"]["enabled"] = gpio_inputs_enabled;
+            json jpins = json::array();
+            for (int i = 0; i < kGpioSlots; ++i) {
+                const auto& s = gpio_pins[i];
+                json jp;
+                jp["gpio"]       = s.gpio;
+                jp["active_low"] = s.active_low;
+                jp["pull"]       = (s.pull == 2) ? "down" : (s.pull == 0 ? "none" : "up");
+                jp["short"]      = input::gpio_func_id(s.short_fn);
+                jp["long"]       = input::gpio_func_id(s.long_fn);
+                jp["long_ms"]    = s.long_ms;
+                jpins.push_back(std::move(jp));
+            }
+            cfg["gpio"]["pins"] = std::move(jpins);
+        }
+        {
+            // KDE Connect lists (edited in the Phone menu).
+            auto join_csv = [](const std::vector<std::string>& v){
+                std::string csv;
+                for (size_t i = 0; i < v.size(); ++i) { if (i) csv += ','; csv += v[i]; }
+                return csv;
+            };
+            cfg["kdeconnect"]["ignore_list"]  = join_csv(kdc_ignore);
+            cfg["kdeconnect"]["message_apps"] = join_csv(kdc_msgapps);
+        }
+        cfg["notifications"]["persist"] = state.notif_persist;
         {
             static const char* kNames[] = { "center","outside","left","right","top","bottom" };
             cfg["cameras"]["theater_anchor"] = kNames[static_cast<int>(state.theater_anchor)];
@@ -10710,6 +12724,9 @@ int main(int argc, char* argv[]) {
     }
 
     double prev_time = glfwGetTime();
+    uint32_t notif_last_saved = state.notifs.next_id;   // debounced log persistence
+    size_t   notif_last_size  = state.notifs.items.size();
+    double   notif_next_save  = 0.0;
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);
@@ -10722,6 +12739,35 @@ int main(int argc, char* argv[]) {
         double now = glfwGetTime();
         float  dt  = static_cast<float>(now - prev_time);
         prev_time  = now;
+
+        // ── Notification log persistence (debounced, ~5s) ─────────────────────
+        // Dirty on a new push (next_id) OR a delete/clear (size change).
+        if (state.notif_persist && now >= notif_next_save) {
+            const size_t sz = [&]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                   return state.notifs.items.size(); }();
+            bool dirty = state.notif_dirty.exchange(false);
+            if (state.notifs.next_id != notif_last_saved || sz != notif_last_size || dirty) {
+                save_notifs();
+                notif_last_saved = state.notifs.next_id;
+                notif_last_size  = sz;
+                notif_next_save  = now + 5.0;
+            }
+        }
+
+        // ── CSI boot auto-retry ───────────────────────────────────────────────
+        // Recover a CSI eye that came up wedged at boot. Runs on the render
+        // thread (DmaCamera::init needs the GL context, which is current here).
+        if (csi_retries_left > 0) {
+            const int up = (cameras.owl_left_ok() ? 1 : 0) + (cameras.owl_right_ok() ? 1 : 0);
+            if (up >= csi_expected) {
+                csi_retries_left = 0;   // all expected eyes are up
+            } else if (std::chrono::steady_clock::now() >= csi_next_retry) {
+                std::cout << "[cam] CSI auto-retry (" << csi_retries_left << " left)\n";
+                cameras.reinit_owls();
+                --csi_retries_left;
+                csi_next_retry = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            }
+        }
 
         // ── Start frame: tick HUD state + begin ImGui for input/menu ─────────
         hud.set_dt(dt);
@@ -11036,12 +13082,9 @@ int main(int argc, char* argv[]) {
         if (want3) cameras.get_usb3(tex_usb3);
         android_mirror.get_frame(tex_android);
 
-        // ── GPIO PiP button state ─────────────────────────────────────────────
-        if (gpio_enabled) {
-            buttons.update_pip_state();
-            pip_left_active  = buttons.pip_left_active();
-            pip_right_active = buttons.pip_right_active();
-        }
+        // PiP toggle state (pip_left_active / pip_right_active) is now flipped
+        // directly by the GPIO dispatch (Camera: PiP toggle), so there's no
+        // per-frame button-hold polling here anymore.
 
         // ── Gamepad poll ──────────────────────────────────────────────────────
         gamepad.poll();
@@ -11420,11 +13463,11 @@ int main(int argc, char* argv[]) {
                 s_smooth = raw;
             } else {
                 constexpr float kTau = 0.35f;
-                float alpha = 1.f - std::expf(-dt / kTau);
+                float alpha = 1.f - std::exp(-dt / kTau);
                 constexpr float kD2R = 3.14159265f / 180.f;
-                float fs = std::sinf(s_smooth * kD2R) + alpha * (std::sinf(raw * kD2R) - std::sinf(s_smooth * kD2R));
-                float fc = std::cosf(s_smooth * kD2R) + alpha * (std::cosf(raw * kD2R) - std::cosf(s_smooth * kD2R));
-                s_smooth = std::atan2f(fs, fc) / kD2R;
+                float fs = std::sin(s_smooth * kD2R) + alpha * (std::sin(raw * kD2R) - std::sin(s_smooth * kD2R));
+                float fc = std::cos(s_smooth * kD2R) + alpha * (std::cos(raw * kD2R) - std::cos(s_smooth * kD2R));
+                s_smooth = std::atan2(fs, fc) / kD2R;
                 if (s_smooth < 0.f) s_smooth += 360.f;
             }
             snap.compass_heading = s_smooth;
@@ -11582,9 +13625,12 @@ int main(int argc, char* argv[]) {
         // applied by the NV12 shader as usual — so a 90° rotation on the
         // CSI cameras turns the top half into two upright portrait feeds.
         auto draw_multicam_into_current_fbo = [&](int fw, int fh) {
-            const int hw  = fw / 2;             // half width
-            const int hh  = fh / 2;             // half height
-            const int top = fh - hh;            // top quadrants start at y = fh/2
+            const int hw  = fw / 2;             // left half width
+            const int rw  = fw - hw;            // right half width (absorbs odd column)
+            const int hh  = fh / 2;             // top half height
+            const int top = fh - hh;            // bottom half height; top starts at y=top
+            // Bottom halves use height `top` and right halves width `rw` so an
+            // odd fw/fh leaves no 1px seam between the quadrants.
 
             // Top-left: CSI left (or right if swapped).
             glViewport(0, top, hw, hh);
@@ -11592,14 +13638,14 @@ int main(int argc, char* argv[]) {
             else                      cameras.draw_owl_left();
 
             // Top-right: CSI right (or left if swapped).
-            glViewport(hw, top, hw, hh);
+            glViewport(hw, top, rw, hh);
             if (snap.cameras_swapped) cameras.draw_owl_left();
             else                      cameras.draw_owl_right();
 
             // Bottom-left / bottom-right: selected USB cameras.
-            glViewport(0, 0, hw, hh);
+            glViewport(0, 0, hw, top);
             cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_a));
-            glViewport(hw, 0, hw, hh);
+            glViewport(hw, 0, rw, top);
             cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_b));
 
             // Restore full viewport so any later passes (post-process /
@@ -11787,7 +13833,9 @@ int main(int argc, char* argv[]) {
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
-        if (menu.is_deep_open()) {
+        if (menu.is_deep_open() || menu.is_keyboard_open()) {
+            // Keyboard takes over full-screen (draws only the OSK), so this also
+            // covers text entry opened from the corner / radial quick menu.
             menu.draw_fullscreen(xr.eye_width(), xr.eye_height());
         } else if (menu.is_open() && menu.quick_style() == QuickStyle::Radial
                    && !menu.is_keyboard_open()) {
@@ -11924,6 +13972,9 @@ int main(int argc, char* argv[]) {
         // ── Swap ──────────────────────────────────────────────────────────────
         xr.present();
     }
+
+    // Final notification-log flush so the last messages survive a clean exit.
+    if (state.notif_persist) save_notifs();
 
     // ── Persist runtime settings ──────────────────────────────────────────────
     // Write current settings back to config.json so they survive a restart. Skip

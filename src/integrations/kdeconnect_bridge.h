@@ -35,6 +35,13 @@ struct KdeConnectConfig {
     // Comma-separated app-name substrings that should NOT be forwarded
     // (e.g. "KDE Connect" so the daemon's own status pings don't loop).
     std::string app_blocklist   = "KDE Connect";
+    // Comma-separated app-name substrings treated as chat/DM messages: these
+    // get a larger toast (sender as the title, message wrapped below).
+    std::string message_apps    = "Discord,Messages,Messenger,Signal,WhatsApp,Telegram,SMS,Slack";
+    // Comma-separated substrings matched against a notification's title + text
+    // (case-insensitive). Anything matching is dropped — use it to mute noisy
+    // Discord servers / group chats by name.
+    std::string ignore_list;
 };
 
 class KdeConnectBridge {
@@ -61,9 +68,16 @@ public:
     std::string active_device_name() const;
     std::string active_device_id()   const;
 
+    // Ring the paired phone (KDE Connect findmyphone plugin) so it plays its
+    // ringtone — useful for locating it. Returns false when no device is bound
+    // or DBus isn't available. Safe to call from any thread.
+    bool ring_phone();
+
     // Live-tunable config — applied on the next worker dispatch.
     void set_auto_dismiss(float seconds) { cfg_.auto_dismiss_s = seconds; }
     void set_app_blocklist(std::string csv);
+    void set_message_apps(std::string csv);
+    void set_ignore_list(std::string csv);
 
 private:
     void worker();
@@ -74,6 +88,8 @@ private:
     std::atomic<bool>    running_{false};
     std::atomic<bool>    daemon_ok_{false};
     std::atomic<bool>    device_ok_{false};
+    std::atomic<bool>    ring_request_{false};   // menu → worker: ring the phone
+    int                  ring_attempts_ = 0;     // worker-only: retry budget while no device
 
     mutable std::mutex   info_mtx_;
     std::string          active_device_name_;

@@ -84,20 +84,20 @@ inline constexpr std::array<GpioPin, 40> kPi40Pins{{
     {40,  21, "GPIO 21", "SCLK",   "SPI1",   PinKind::Spi      },
 }};
 
-// Pi Foundation colour family (matched against the official pinout chart).
+// Colour family matched to the Raspberry Pi / pinout.xyz header chart.
 inline ImU32 pin_kind_color(PinKind k) {
     switch (k) {
-    case PinKind::Power3V3: return IM_COL32(255, 160,  60, 255);   // amber
-    case PinKind::Power5V:  return IM_COL32(220,  60,  60, 255);   // red
-    case PinKind::Ground:   return IM_COL32( 50,  55,  62, 255);   // dark grey
-    case PinKind::Gpio:     return IM_COL32( 80, 190,  90, 255);   // green
-    case PinKind::I2c:      return IM_COL32( 90, 150, 230, 255);   // blue
-    case PinKind::Spi:      return IM_COL32(180, 120, 220, 255);   // violet
-    case PinKind::Uart:     return IM_COL32(230, 200,  60, 255);   // yellow
-    case PinKind::Pwm:      return IM_COL32(180, 220, 100, 255);   // lime
-    case PinKind::Pcm:      return IM_COL32( 90, 200, 200, 255);   // teal
-    case PinKind::Gpclk:    return IM_COL32(255, 180, 110, 255);   // light orange
-    case PinKind::HatId:    return IM_COL32(170, 110,  80, 255);   // brown
+    case PinKind::Power3V3: return IM_COL32(255, 160,  70, 255);   // orange  (3V3)
+    case PinKind::Power5V:  return IM_COL32(235,  45,  40, 255);   // red     (5V)
+    case PinKind::Ground:   return IM_COL32( 40,  42,  46, 255);   // black   (GND)
+    case PinKind::Gpio:     return IM_COL32( 60, 180,  75, 255);   // green   (GPIO)
+    case PinKind::I2c:      return IM_COL32( 45, 140, 225, 255);   // blue    (I²C)
+    case PinKind::Spi:      return IM_COL32(230, 100, 180, 255);   // pink    (SPI)
+    case PinKind::Uart:     return IM_COL32(150, 100, 210, 255);   // purple  (UART)
+    case PinKind::Pwm:      return IM_COL32( 90, 190, 170, 255);   // teal-green (PWM)
+    case PinKind::Pcm:      return IM_COL32( 80, 195, 200, 255);   // teal    (PCM)
+    case PinKind::Gpclk:    return IM_COL32(240, 200,  70, 255);   // yellow  (GPCLK)
+    case PinKind::HatId:    return IM_COL32(150, 120, 100, 255);   // brown   (ID EEPROM)
     }
     return IM_COL32(120, 120, 120, 255);
 }

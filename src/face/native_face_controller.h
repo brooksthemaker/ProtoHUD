@@ -8,6 +8,7 @@
 // Scope note (Phase 1–2): face + materials + compositing are ported. Particles,
 // GIF playback, and the C++ Piomatter output are stubbed/TODO for later phases.
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -19,6 +20,7 @@
 #include <opencv2/core.hpp>
 
 #include "../serial/face_controller.h"
+#include "eye_anim.h"
 #include "face_config.h"
 #include "panel_output.h"   // PanelOutput + NamedRegion
 
@@ -75,6 +77,9 @@ public:
     void        clear_face_image(const std::string& expression) override;
     void        set_face_by_name(const std::string& expression) override;
     void        trigger_boop(const std::string& expression, double duration_s) override;
+    void        play_eye_animation(int type, double speed, double size,
+                                   uint8_t r, uint8_t g, uint8_t b,
+                                   double duration_s) override;
     void        set_audio_drive(double volume, double mouth_open) override;
     void        set_mouth_shape(const std::string& shape) override;
 
@@ -110,6 +115,14 @@ public:
     void set_blink_timing(double min_s, double max_s, double duration_s);
     void set_expression_fade(double seconds);
     void set_wiggle(const WiggleCfg& w);
+    // Live per-panel orientation flips (HUB75 layout Flip X / Flip Y). flips[i]
+    // = {flip_x, flip_y} for panel i; extra/missing entries are ignored. Read by
+    // the render thread on the next frame.
+    void set_panel_flips(const std::vector<std::array<bool, 2>>& flips);
+    // Apply an arbitrary material spec (e.g. "gradient:h:s:20:00DCB4-0064FF")
+    // to every self-rendered panel and persist it. Used by the Material Color
+    // gradient editor for live preview.
+    void set_material_spec(const std::string& spec);
 
     // Push a "transient" image for the named expression onto every panel
     // for duration_s seconds. The current image is stashed and restored
@@ -163,6 +176,13 @@ private:
         std::chrono::steady_clock::time_point deadline{};
     };
     std::vector<TransientFace> transient_faces_;
+
+    // Procedural "animated eye" reaction (boop rapid-trigger easter egg). While
+    // eye_anim_timer_ > 0 the panels render the animation instead of the face,
+    // and effects are suppressed. Lives under state_mtx_.
+    EyeAnimParams      eye_anim_;
+    double             eye_anim_timer_ = 0.0;   // seconds remaining
+    double             eye_anim_t_     = 0.0;   // elapsed seconds (animation phase)
 
     std::thread        thread_;
     std::atomic<bool>  running_{false};

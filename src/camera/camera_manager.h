@@ -145,6 +145,14 @@ public:
     bool scan_usb2();
     bool scan_usb3();
 
+    // ── CSI (OWLsight) re-init ────────────────────────────────────────────────
+    // Tear down both CSI cameras + the libcamera manager, re-enumerate, and
+    // re-init. Recovers a sensor that was missing / wedged at boot (the usual
+    // "one eye dark until reboot" symptom) without a full reboot. MUST be called
+    // from the render thread (DmaCamera::init needs the GL context current).
+    // Returns true if at least one CSI camera came up.
+    bool reinit_owls();
+
     // ── Status ────────────────────────────────────────────────────────────────
     bool owl_left_ok()  const { return owl_left_  && owl_left_->is_ok();  }
     bool owl_right_ok() const { return owl_right_ && owl_right_->is_ok(); }
@@ -232,6 +240,10 @@ private:
     // OWLsight cameras (zero-copy DMA)
     std::unique_ptr<DmaCamera> owl_left_;
     std::unique_ptr<DmaCamera> owl_right_;
+    // Stored so reinit_owls() can re-run the enumeration + init.
+    CamConfig    owl_left_cfg_, owl_right_cfg_;
+    std::string  nv12_vs_, nv12_fs_;
+    void init_owls();   // (re)resolve + (re)create the two DmaCameras from the stored cfgs
 
     // USB cameras (OpenCV capture)
     UsbCamConfig     usb1_cfg_, usb2_cfg_, usb3_cfg_;

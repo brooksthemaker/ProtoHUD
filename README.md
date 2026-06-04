@@ -136,13 +136,18 @@ The HUD's **IMU Source** menu (HUD → Compass → IMU Source) lets you force a 
 
 ### GPIO Button Wiring
 
-| Function | GPIO | Behaviour |
-|----------|------|-----------|
-| Left PiP / AF Left | GPIO 17 | Short press = PiP toggle · 1.5 s = AF left |
-| Right PiP / AF Right | GPIO 27 | Short press = PiP toggle · 1.5 s = AF right |
-| Menu Select | GPIO 22 | Press while menu open = select item |
+Up to 8 momentary switches, each freely assigned to a short-press and optional
+long-press function in **System → GPIO Buttons** (see
+[GPIO Buttons](#gpio-buttons)). A common starting layout:
 
-All buttons wire to GND; the libgpiod driver configures internal pull-ups.
+| GPIO | Short press | Long press |
+|------|-------------|------------|
+| 17 | Menu select | Menu back |
+| 27 | Boop snout | — |
+| 22 | PiP left toggle | Restart ProtoHUD |
+
+Switches wire to GND with `active_low: true`; the libgpiod driver configures the
+internal pull-up (or set `pull` per pin). Any function can go on any pin.
 
 ---
 
@@ -460,6 +465,29 @@ Keyboard shortcuts while running:
 | `Esc` | Quit |
 | `Ctrl+Q` / `Ctrl+K` | Force-kill the process immediately |
 
+### Updating
+
+`scripts/update.sh` pulls the latest code for a branch, rebuilds, and can
+restart the running instance — a repeatable "deploy latest" flow:
+
+```bash
+scripts/update.sh                      # update the current branch + build
+scripts/update.sh <branch>             # checkout + update a specific branch
+scripts/update.sh <branch> --restart   # update, build, then restart ProtoHUD
+scripts/update.sh --no-build           # pull only
+```
+
+To pull a feature branch by hand instead:
+
+```bash
+git fetch origin
+git checkout <branch>
+git pull --ff-only origin <branch>
+scripts/build.sh
+```
+
+Network steps in `update.sh` retry with exponential backoff (2/4/8/16 s).
+
 ---
 
 ## Camera Resolution
@@ -526,7 +554,10 @@ When `"autofocus_on_startup": true` is set in `config.json`, both cameras are pl
 
 ### GPIO Trigger
 
-Hold GPIO 17 (left) or GPIO 27 (right) for 1.5 s to trigger AF on that camera. In Slave mode the partner camera follows automatically.
+Assign the `cam_af_left` / `cam_af_right` functions to any GPIO switch (short or
+long press) in **System → GPIO Buttons** to trigger autofocus on that camera. In
+Slave mode the partner camera follows automatically. See
+[GPIO Buttons](#gpio-buttons).
 
 ---
 
@@ -619,33 +650,67 @@ When the layout is on, the two chosen USB cameras open automatically and the per
 
 ## GPIO Buttons
 
+ProtoHUD reads up to **8 GPIO switches**, each freely assignable to a function
+on **short press** and (optionally) a different function on **long press**. Pull
+bias and polarity are configurable per pin. Configure it all in-HUD under
+**System → GPIO Buttons** (no config-file editing required).
+
 ### Config
 
 ```json
 "gpio": {
-  "enabled":           true,
-  "button_1_gpio":     17,
-  "button_2_gpio":     27,
-  "button_3_gpio":     22,
-  "af_trigger_time_ms":  1500,
-  "pip_trigger_time_ms": 2000
+  "enabled": true,
+  "pins": [
+    { "gpio": 17, "active_low": true, "pull": "up", "short": "menu_select",  "long": "menu_back",      "long_ms": 600  },
+    { "gpio": 27, "active_low": true, "pull": "up", "short": "boop_snout",   "long": "none",           "long_ms": 600  },
+    { "gpio": 22, "active_low": true, "pull": "up", "short": "cam_pip_left", "long": "system_restart", "long_ms": 1200 }
+  ]
 }
 ```
 
-### Behaviour Summary
+| Field | Meaning |
+|-------|---------|
+| `gpio` | BCM pin number (`-1` = slot unused) |
+| `active_low` | `true` = pressed reads LOW (switch wired to GND with a pull-up) |
+| `pull` | `"up"`, `"down"`, or `"none"` — internal bias |
+| `short` | function on release (held < `long_ms`) |
+| `long` | function when held ≥ `long_ms` (`"none"` to disable) |
+| `long_ms` | long-press threshold in milliseconds |
 
-| Button | GPIO | Short press | Long press (1.5 s+) |
-|--------|------|-------------|---------------------|
-| 1 | 17 | Toggle left USB PiP | AF left camera |
-| 2 | 27 | Toggle right USB PiP | AF right camera |
-| 3 | 22 | Menu select | — (reserved) |
+### Assignable functions
+
+`none`, `boop_snout`, `boop_left`, `boop_right`, `boop_both`,
+`menu_open`, `menu_select`, `menu_back`,
+`system_restart`, `system_shutdown`,
+`cam_af_left`, `cam_af_right`, `cam_pip_left`, `cam_pip_right`,
+`cam_capture_left`, `cam_capture_right`, `cam_swap`.
+
+> `system_restart` runs `scripts/restart.sh`; `system_shutdown` calls
+> `poweroff` (needs the sudoers rule from `scripts/install_sudoers.sh`).
+
+### Applying changes
+
+- **Enabled** toggle and **Apply Changes Now** (in the GPIO Buttons menu) reload
+  the poller live — no relaunch needed.
+- Edits are saved to `cfg["gpio"]["pins"]` on the next config save.
+- Legacy `button_1/2/3_gpio` configs auto-migrate to a Menu Select/Back slot on
+  first launch.
+
+> **libgpiod v2 required.** The poller uses the libgpiod v2 API (Raspberry Pi OS
+> Bookworm/Trixie ship it). `scripts/install.sh` installs `libgpiod-dev`.
+
+### I²C boop electrodes
+
+Capacitive-touch boop zones (MPR121) are mapped to electrodes under
+**Menu → Boop → <zone> → Electrode (MPR121)** (`-1` disables a zone). This is
+saved to `cfg["boop"]["zones"][*]["electrode"]` and applies on the next launch.
 
 ### Diagnosis
 
 ```bash
-gpioinfo gpiochip0 | grep -E "17|27|22"
-gpioget gpiochip0 17   # 1 = released, 0 = pressed
-groups $USER           # must include: gpio
+gpioinfo gpiochip0 | grep -E "17|27|22"   # confirm the lines aren't already claimed
+gpioget gpiochip0 17                        # 1 = released, 0 = pressed (active-low)
+groups $USER                                # must include: gpio
 ```
 
 ---
@@ -728,7 +793,11 @@ ProtoHUD has a built-in **KDE Connect bridge** that pulls phone notifications an
 | Feature | Where it shows up |
 |---------|-------------------|
 | Phone notifications | Toast on the HUD + entry in the notification log (same pipeline as scheduler reminders) |
-| Phone battery % | Outer arc on the minimap battery gauge with a `P` / `P+` prefix (P+ = charging) |
+| Chat / DM messages | Larger toast (sender as the title, full message wrapped below) that stays up ~14 s. Apps treated as messaging are set by `message_apps`; mute servers/chats by name with `ignore_list` |
+| Phone battery % | Outer arc on the minimap battery gauge with a `P` / `P+` prefix (P+ = charging). When the CPU/GPU debug gauges are on, it stacks as a third **light-blue** arc so it stays visible |
+| Ring my phone | **System → Phone (KDE Connect) → Ring My Phone** fires KDE Connect's findmyphone plugin so the phone plays its ringtone — handy for locating it |
+| In-HUD lists | Under **System → Phone (KDE Connect)**: edit the **Ignore List** (mute servers/chats) and **Message Apps** (which apps get the big toast) with the on-screen keyboard — add via keyboard, select an entry to remove. Saved to config |
+| Browse the log | **System → Notification Log** lists past notifications filtered by **type** (All / Alarms / Timers / LoRa / Phone) and/or **sender** (title substring); select to clear the shown set |
 | File drops | Toast: *"Got happy.png — import as 'happy'?"* → Import / Dismiss buttons. PNGs go to faces; GIFs are copied into `gifs_dir` and bound to the first empty slot |
 
 ### Setup
@@ -769,7 +838,10 @@ If you launch ProtoHUD directly from a terminal this step is unnecessary — the
   "enabled": true,
   "device_id": "",                   // empty → first paired+reachable
   "auto_dismiss_s": 8.0,
-  "app_blocklist": "KDE Connect"     // CSV, case-insensitive substring match on appName
+  "app_blocklist": "KDE Connect",    // CSV, case-insensitive substring match on appName
+  "message_apps": "Discord,Messages,Messenger,Signal,WhatsApp,Telegram,SMS,Slack",
+                                     // CSV of apps that get the larger chat toast
+  "ignore_list": ""                  // CSV; drop notifications whose title/text contains any (mute servers)
 },
 "phone_inbox": {
   "enabled": true,

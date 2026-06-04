@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 #include <opencv2/core.hpp>
 
 namespace face {
@@ -37,6 +38,23 @@ private:
     int    w_, h_;
     double scroll_x_, scroll_y_, t_ = 0.0;
     cv::Mat base_;   // (h, w) CV_8UC3 RGB, already cropped to panel size
+};
+
+// Multi-colour gradient, optionally scrolling. The colour stops are laid out
+// cyclically along one axis (so a scroll wraps seamlessly): smooth = linear
+// blend between adjacent stops; banded = hard equal-width stripes. speed is the
+// scroll rate in px/s along the axis (0 = static, sign = direction).
+class GradientMaterial : public BaseMaterial {
+public:
+    GradientMaterial(std::vector<cv::Vec3b> colors, int width, int height,
+                     bool horizontal, bool smooth, double speed);
+    void update(double dt) override { t_ += dt; }
+    cv::Mat get_frame() override;
+private:
+    int     w_, h_;
+    bool    horizontal_;
+    double  speed_, t_ = 0.0;
+    cv::Mat base_;   // (h, w) CV_8UC3 RGB cyclic gradient
 };
 
 // Horizontal split: left of boundary uses mat_a, right uses mat_b.

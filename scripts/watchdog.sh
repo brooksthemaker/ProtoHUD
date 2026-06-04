@@ -10,7 +10,7 @@
 # Signals sent to the watchdog are forwarded to the child process:
 #   SIGTERM/SIGINT → child is killed cleanly (exit 0), watchdog exits.
 
-BINARY="$(cd "$(dirname "$0")/.." && pwd)/build/ProtoHUD"
+BINARY="$(cd "$(dirname "$0")/.." && pwd)/build/protohud"
 MAX_RESTARTS=10
 RESTART_DELAY=1
 

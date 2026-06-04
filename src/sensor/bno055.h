@@ -31,6 +31,12 @@ public:
         // Poll rate. BNO055 internal fusion runs at 100 Hz; sampling at
         // 50 Hz keeps CPU low and matches Mpu9250's cadence.
         float       poll_hz         = 50.0f;
+        // Where to persist the 22-byte on-chip calibration profile (empty →
+        // disabled). Restored at start() when the file exists; saved on
+        // request, or automatically the first time the chip reports fully
+        // calibrated (sys == 3) when no file exists yet.
+        std::string calib_path;
+        bool        auto_save_calibration = true;
     };
 
     explicit Bno055(const Config& cfg);
@@ -63,6 +69,17 @@ public:
     void set_heading_axes   (int   v) { heading_axes_   .store(v); }
     bool is_calibrated()      const   { return calib_sys_.load() >= 2; }
     uint8_t calib_sys()       const   { return calib_sys_.load(); }
+
+    // ── Calibration persistence ────────────────────────────────────────────
+    // Async: the poll thread drops to CONFIG mode, reads the 22-byte offset
+    // profile, returns to NDOF, writes it to cfg.calib_path, then fires the
+    // saved-callback with success/failure. Best done once the chip reports
+    // sys == 3. Restore is automatic at start() when the file exists.
+    void request_calibration_save() { save_req_.store(true); }
+    void set_calib_saved_callback(std::function<void(bool ok)> cb) {
+        calib_saved_cb_ = std::move(cb);
+    }
+    bool has_saved_calibration() const;   // a calib file exists + is the right size
     uint8_t calib_gyro()      const   { return calib_gyro_.load(); }
     uint8_t calib_accel()     const   { return calib_accel_.load(); }
     uint8_t calib_mag()       const   { return calib_mag_.load(); }
@@ -73,6 +90,13 @@ private:
     bool write_reg(uint8_t reg, uint8_t val);
     bool read_regs(uint8_t reg, uint8_t* buf, size_t len);
     void poll_loop();
+
+    // Calibration profile (22 bytes at 0x55..0x6A). read/write helpers assume
+    // the chip is already in CONFIG mode (offsets are only writable there).
+    bool read_calib_offsets(uint8_t out[22]);
+    bool write_calib_offsets(const uint8_t in[22]);
+    bool save_calibration();                       // CONFIG→read→NDOF→file (poll thread)
+    bool load_calibration_file(uint8_t out[22]) const;
 
     Config cfg_;
     int    i2c_fd_ = -1;
@@ -88,6 +112,10 @@ private:
     std::atomic<uint8_t> calib_gyro_      { 0   };
     std::atomic<uint8_t> calib_accel_     { 0   };
     std::atomic<uint8_t> calib_mag_       { 0   };
+
+    std::atomic<bool>    save_req_        { false };   // menu → poll thread: save now
+    std::atomic<bool>    auto_saved_      { false };   // one-shot auto-save guard
+    std::function<void(bool)> calib_saved_cb_;
 
     std::thread thread_;
 };

@@ -16,9 +16,43 @@ using json = nlohmann::json;
 
 namespace face {
 
-FaceLoader::FaceLoader(const std::string& folder, int width, int height)
-    : folder_(folder), w_(width), h_(height) {
+FaceLoader::FaceLoader(const std::string& folder, int width, int height,
+                       int src_w, int src_h, int src_x, int src_y)
+    : folder_(folder), w_(width), h_(height),
+      src_w_(src_w), src_h_(src_h), src_x_(src_x), src_y_(src_y) {
     load();
+}
+
+// Load a face PNG sized to this panel. When the panel is a slice of a wider
+// canvas (src_w_ > w_) and the PNG was authored at (roughly) canvas width, the
+// image is resized to the canvas and this panel's [src_x_,src_y_,w_,h_] rect is
+// cropped — so a face drawn across two panels lands on the right halves instead
+// of being squished onto each. Otherwise (panel-sized art, legacy faces) the
+// whole image is nearest-resized to the panel as before.
+cv::Mat FaceLoader::load_img(const std::string& path) const {
+    cv::Mat raw = cv::imread(path, cv::IMREAD_UNCHANGED);
+    if (raw.empty()) return cv::Mat();
+    cv::Mat rgba;
+    if      (raw.channels() == 4) cv::cvtColor(raw, rgba, cv::COLOR_BGRA2RGBA);
+    else if (raw.channels() == 3) cv::cvtColor(raw, rgba, cv::COLOR_BGR2RGBA);
+    else if (raw.channels() == 1) cv::cvtColor(raw, rgba, cv::COLOR_GRAY2RGBA);
+    else                          return cv::Mat();
+
+    if (src_w_ > w_ && src_h_ > 0 && rgba.cols > w_) {
+        // Canvas-authored multi-panel face → crop our slice.
+        cv::Mat canvas;
+        cv::resize(rgba, canvas, cv::Size(src_w_, src_h_), 0, 0, cv::INTER_NEAREST);
+        cv::Mat out(h_, w_, canvas.type(), cv::Scalar(0, 0, 0, 0));
+        const cv::Rect want(src_x_, src_y_, w_, h_);
+        const cv::Rect inter = want & cv::Rect(0, 0, canvas.cols, canvas.rows);
+        if (inter.width > 0 && inter.height > 0)
+            canvas(inter).copyTo(out(cv::Rect(inter.x - src_x_, inter.y - src_y_,
+                                              inter.width, inter.height)));
+        return out;
+    }
+    cv::Mat out;
+    cv::resize(rgba, out, cv::Size(w_, h_), 0, 0, cv::INTER_NEAREST);
+    return out;
 }
 
 void FaceLoader::load() {
@@ -48,7 +82,7 @@ void FaceLoader::load() {
     }
 
     for (auto& [name, filename] : expr_map) {
-        cv::Mat img = load_png_rgba((fs::path(folder_) / filename).string(), w_, h_);
+        cv::Mat img = load_img((fs::path(folder_) / filename).string());
         if (!img.empty()) {
             expressions_[name] = img;
             expr_order_.push_back(name);
@@ -62,7 +96,7 @@ void FaceLoader::load() {
 
     // Blink image.
     std::string blink_file = cfg.value("blink", std::string("blink.png"));
-    blink_ = load_png_rgba((fs::path(folder_) / blink_file).string(), w_, h_);
+    blink_ = load_img((fs::path(folder_) / blink_file).string());
 
     // Viseme overlays — all four are optional. A missing mouth_open simply
     // disables audio-driven mouth blending; missing visemes fall back to
@@ -71,7 +105,7 @@ void FaceLoader::load() {
     for (const char* shape : {"mouth_open", "mouth_small", "mouth_smile", "mouth_round"}) {
         fs::path p = fs::path(folder_) / (std::string(shape) + ".png");
         if (fs::exists(p)) {
-            cv::Mat img = load_png_rgba(p.string(), w_, h_);
+            cv::Mat img = load_img(p.string());
             if (!img.empty()) mouth_shapes_[shape] = std::move(img);
         }
     }
@@ -84,12 +118,27 @@ void FaceLoader::load() {
         double dh = cfg["draw_size"][1].get<double>();
         if (dw > 0 && dh > 0) { sx = w_ / dw; sy = h_ / dh; }
     }
+    // When this loader is a slice of a wider canvas (multi-panel HUB75 face),
+    // eye/mouth regions are authored in CANVAS pixels — the same space the
+    // editor paints in. The face image is resized to the full canvas then this
+    // panel's [src_x_,src_y_,w_,h_] rect is cropped 1:1 (see load_img), so a
+    // canvas-space box maps to panel-local by simply subtracting the slice
+    // origin — no scaling. blend_region then clamps boxes that fall off this
+    // panel (e.g. the eye that lives on the other panel) to nothing.
+    const bool canvas_coords = (src_w_ > w_ && src_h_ > 0);
     auto parse_region = [&](const json& d) {
         Region r;
-        r.x = static_cast<int>(std::lround(d.value("x", 0) * sx));
-        r.y = static_cast<int>(std::lround(d.value("y", 0) * sy));
-        r.w = std::max(1, static_cast<int>(std::lround(d.value("w", 1) * sx)));
-        r.h = std::max(1, static_cast<int>(std::lround(d.value("h", 1) * sy)));
+        if (canvas_coords) {
+            r.x = static_cast<int>(std::lround(d.value("x", 0))) - src_x_;
+            r.y = static_cast<int>(std::lround(d.value("y", 0))) - src_y_;
+            r.w = std::max(1, static_cast<int>(std::lround(d.value("w", 1))));
+            r.h = std::max(1, static_cast<int>(std::lround(d.value("h", 1))));
+        } else {
+            r.x = static_cast<int>(std::lround(d.value("x", 0) * sx));
+            r.y = static_cast<int>(std::lround(d.value("y", 0) * sy));
+            r.w = std::max(1, static_cast<int>(std::lround(d.value("w", 1) * sx)));
+            r.h = std::max(1, static_cast<int>(std::lround(d.value("h", 1) * sy)));
+        }
         r.set = true;
         return r;
     };
@@ -135,10 +184,37 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
     double bw = std::clamp(state.blink_weight(), 0.0, 1.0);
     if (bw > 0.0 && !blink_.empty()) {
         if (eye_left_.set || eye_right_.set) {
+            // Region blink: cross-fade ONLY the eye box(es) from the open
+            // expression to the blink art, so the open eye is replaced (it
+            // closes) while the mouth/nose outside the boxes are untouched.
+            // Used in both single- and multi-panel mode whenever eye regions
+            // are defined — the boxes are mapped to this panel's slice above.
             if (eye_left_.set)  frame = blend_region(frame, blink_, eye_left_,  bw);
             if (eye_right_.set) frame = blend_region(frame, blink_, eye_right_, bw);
         } else {
-            cv::addWeighted(frame, 1.0 - bw, blink_, bw, 0.0, frame);
+            // No eye regions defined → fall back to a whole-face alpha
+            // composite of the blink canvas over the face using the blink
+            // PNG's own alpha (scaled by bw). Transparent areas keep the live
+            // face. NOTE: this can't *close* an open eye that extends past the
+            // blink art (the blink only adds pixels, never removes the open
+            // eye), so define eye regions in the editor for a proper blink.
+            // Both images are RGBA at this loader's panel size.
+            if (blink_.size() == frame.size() && blink_.type() == CV_8UC4) {
+                for (int y = 0; y < frame.rows; ++y) {
+                    cv::Vec4b*       fr = frame.ptr<cv::Vec4b>(y);
+                    const cv::Vec4b* bl = blink_.ptr<cv::Vec4b>(y);
+                    for (int x = 0; x < frame.cols; ++x) {
+                        double a = (bl[x][3] / 255.0) * bw;   // overlay coverage
+                        if (a <= 0.0) continue;
+                        for (int c = 0; c < 3; ++c)
+                            fr[x][c] = cv::saturate_cast<uchar>(
+                                fr[x][c] * (1.0 - a) + bl[x][c] * a);
+                        if (bl[x][3] > fr[x][3]) fr[x][3] = bl[x][3];  // stay opaque on the eye
+                    }
+                }
+            } else {
+                cv::addWeighted(frame, 1.0 - bw, blink_, bw, 0.0, frame);  // size mismatch fallback
+            }
         }
     }
 

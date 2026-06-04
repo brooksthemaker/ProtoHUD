@@ -70,7 +70,7 @@ struct FaceState {
     uint8_t  spectrum_mirror = 0;
     uint8_t  face_size       = 5;
     uint8_t  fan_speed       = 5;
-    uint8_t  material_color  = 0;   // SET_MENU_ITEM(8) index 0-11
+    uint8_t  material_color  = 0;   // SET_MENU_ITEM(8) index (0-21; see preset_material)
     bool     playing_gif  = false;
     bool     connected    = false;
     bool     hud_control  = false;  // true = HUD has taken manual control; false = Teensy autonomous
@@ -175,11 +175,29 @@ struct VoiceMouthConfig {
 // touches (no expression knowledge); main.cpp's on_boop callback reads this
 // to call IFaceController::trigger_boop with the per-zone expression. Indexed
 // in lockstep with sensor::BoopSensor::Zone (Snout=0, LeftCheek=1, RightCheek=2).
+// Rapid-trigger "animated eyes" easter egg for a boop zone: boop the same zone
+// `count` times within `window_s` and a procedural eye animation takes over the
+// panels for `duration_s` (played instead of the normal reaction, then the
+// counter resets). anim is a face::EyeAnim value; the other fields re-skin the
+// built-in animations. Stored as plain types to keep app_state.h dependency-free.
+struct EyeTriggerConfig {
+    bool    enabled    = false;
+    int     count      = 3;       // boops within the window to fire
+    double  window_s   = 4.0;     // consecutive boops must land this close together
+    int     anim       = 0;       // face::EyeAnim value
+    double  speed      = 1.0;
+    double  size       = 1.0;
+    double  duration_s = 2.5;     // how long the animation plays
+    uint8_t r = 0, g = 220, b = 180;   // primary colour
+};
+
 struct BoopZoneConfig {
     bool        enabled    = true;
     std::string expression = "surprised";   // canonical face PNG name
     double      duration_s = 0.8;           // how long the expression holds
     uint8_t     threshold  = 12;            // MPR121 touch threshold (lower = more sensitive)
+    int         electrode  = -1;            // MPR121 electrode 0..11 driving this zone (-1 = none/derived)
+    EyeTriggerConfig eye_trigger;           // optional rapid-boop animated-eyes reaction
 };
 
 // ── Light-sensor squint trigger ──────────────────────────────────────────────
@@ -605,6 +623,8 @@ struct Notification {
     float       auto_dismiss_s = 8.f;  // 0 = manual only
     bool        read         = false;
     bool        dismissed    = false;
+    bool        big          = false;  // render a larger toast (wrapped body) — chat/DM messages
+    bool        saved        = false;  // pinned by the user: survives Clear and the rolling buffer
     std::string icon;                  // optional icon asset name; empty → by type
     std::vector<NotifAction> actions;
 };
@@ -618,7 +638,28 @@ struct NotificationQueue {
         n.id = next_id++;
         if (n.timestamp == 0) n.timestamp = static_cast<int64_t>(time(nullptr));
         items.push_front(std::move(n));
-        while (static_cast<int>(items.size()) > kMax) items.pop_back();
+        // Evict the oldest *unsaved* entry when over capacity so pinned
+        // messages aren't rolled off the end of the buffer.
+        while (static_cast<int>(items.size()) > kMax) {
+            auto victim = items.end();
+            for (auto it = items.begin(); it != items.end(); ++it)
+                if (!it->saved) victim = it;            // last (oldest) unsaved
+            if (victim == items.end()) break;           // all saved — keep them
+            items.erase(victim);
+        }
+    }
+
+    // Remove notifications matching pred, but never ones the user saved
+    // unless include_saved is set. Returns how many were removed.
+    template <typename Pred>
+    int clear_if(Pred pred, bool include_saved) {
+        int removed = 0;
+        for (auto it = items.begin(); it != items.end(); ) {
+            if ((include_saved || !it->saved) && pred(*it)) {
+                it = items.erase(it); ++removed;
+            } else ++it;
+        }
+        return removed;
     }
 
     int unread_count() const {
@@ -637,6 +678,40 @@ struct NotificationQueue {
 
     void dismiss_all() {
         for (auto& n : items) { n.dismissed = true; n.read = true; }
+    }
+};
+
+// ── Scanned QR / barcode capture log ──────────────────────────────────────────
+// Each newly-seen code is saved to its own folder (link.txt + the raw frame it
+// was captured from + meta.json). The log keeps a running, de-duplicated list
+// (newest first) so the same code isn't captured twice across sessions.
+struct QrCapture {
+    std::string text;            // decoded payload (URL or raw text)
+    std::string type;            // symbol type, e.g. "QR-Code"
+    int64_t     timestamp = 0;   // epoch seconds first captured
+    std::string folder;          // absolute path to this capture's folder
+    std::string image;           // colour camera frame filename (preview); may be empty
+    std::string decode;          // grayscale decode frame filename (what ZBar saw)
+};
+
+struct QrCaptureLog {
+    std::deque<QrCapture> items;       // newest first
+    std::set<std::string> seen;         // exact-payload set for de-duplication
+    static constexpr int  kMax = 200;   // safety cap on retained entries
+
+    bool contains(const std::string& t) const { return seen.count(t) > 0; }
+
+    void add(QrCapture c) {
+        seen.insert(c.text);
+        items.push_front(std::move(c));
+        while (static_cast<int>(items.size()) > kMax) {
+            seen.erase(items.back().text);
+            items.pop_back();
+        }
+    }
+    void rebuild_seen() {
+        seen.clear();
+        for (const auto& c : items) seen.insert(c.text);
     }
 };
 
@@ -740,6 +815,10 @@ struct AppState {
     // qr_scan_usb:  scanned in the USB capture thread from the raw BGR frame.
     bool qr_scan_main = false;
     bool qr_scan_usb  = false;
+    // Captured QR/barcode log + the directory each capture folder lives under
+    // (set once at boot). Guarded by mtx.
+    QrCaptureLog qr_captures;
+    std::string  qr_dir;
 
     // Profile requests — posted by deep-menu callbacks (any thread; hold mtx) and
     // consumed by the main loop. Empty string = no request.
@@ -774,10 +853,10 @@ struct AppState {
     // Threshold on the BothCheeks slot is unused (it doesn't probe an
     // electrode directly) but kept in the schema for index parity.
     BoopZoneConfig       boop_zones[4] = {
-        { true, "surprised", 0.8, 12 },
-        { true, "happy",     0.6, 12 },
-        { true, "happy",     0.6, 12 },
-        { true, "surprised", 1.0, 12 },
+        { true, "surprised", 0.8, 12,  0 },   // Snout      → electrode 0
+        { true, "happy",     0.6, 12,  1 },   // LeftCheek  → electrode 1
+        { true, "happy",     0.6, 12,  2 },   // RightCheek → electrode 2
+        { true, "surprised", 1.0, 12, -1 },   // BothCheeks → derived (no electrode)
     };
     // Coalesce window (seconds) for combining near-simultaneous left + right
     // cheek touches into a single BothCheeks event. Mirror of the sensor's
@@ -806,6 +885,14 @@ struct AppState {
 
     // Notification queue — render-thread owned; push from main thread while holding mtx
     NotificationQueue    notifs;
+    // Notification-browser filter (menu-driven): type_filter < 0 = all types,
+    // else a NotifType value; sender_filter is a case-insensitive substring on
+    // the title (empty = any sender).
+    int                  notif_type_filter = -1;
+    std::string          notif_sender_filter;          // legacy substring (unused by the checklist UI)
+    std::set<std::string> notif_sender_sel;            // checklist of senders to show (empty = all)
+    bool                 notif_persist = true;   // persist the log to disk across reboots
+    std::atomic<bool>    notif_dirty{false};     // a metadata-only edit (e.g. save/pin) wants a flush
 
     // Particle effects config (render-thread only)
     EffectsConfig        effects_cfg;

@@ -14,6 +14,9 @@
   "cameras": {
     "_fps_note": "OWLsight fps should match or exceed display.target_fps (90) to minimise camera-to-photon latency — sampling slower than the display wastes up to one frame interval of frame age. fps is a best-effort FrameDurationLimits request; libcamera clamps to the nearest rate the sensor supports at this resolution, so a value the sensor can't hit degrades gracefully rather than failing.",
     "_rotation_note": "rotation_deg snaps to {0, 90, 180, 270}; applied as UV math in the NV12 vertex shader (no readback, ~free). Use when the CSI camera is mounted sideways/upside-down on the helmet. Settable live from Cameras > Left/Right Camera > Rotation.",
+    "_csi_retry_note": "A CSI sensor that comes up wedged at boot leaves an eye dark until reboot. csi_boot_retries auto-attempts a reinit that many times early at startup (also available manually via Vision > CSI Camera Controls > Reinitialize CSI Cameras, or the quick-menu Diagnostics item). csi_expected is how many CSI eyes you have (set 1 for a mono build so it never retries a second camera you don't have).",
+    "csi_boot_retries": 2,
+    "csi_expected": 2,
     "owlsight_left": {
       "libcamera_id": 0,
       "model_name": "",
@@ -140,12 +143,13 @@
     "effects": { "type": 0, "palette": 0 }
   },
   "gpio": {
+    "_about": "Configurable GPIO switch map. Each entry in 'pins' assigns a BCM pin a short-press and optional long-press function, with pull bias ('up'|'down'|'none') and polarity (active_low=true means a momentary switch wired to GND). Edit in-HUD via System > GPIO Buttons; toggling Enabled applies instantly and 'Apply Changes Now' reloads the poller after slot edits (no relaunch needed). Functions: none, boop_snout, boop_left, boop_right, boop_both, menu_open, menu_select, menu_back, system_restart, system_shutdown, cam_af_left, cam_af_right, cam_pip_left, cam_pip_right, cam_capture_left, cam_capture_right, cam_swap, phone_ring.",
     "enabled": true,
-    "button_1_gpio": 17,
-    "button_2_gpio": 27,
-    "button_3_gpio": 22,
-    "af_trigger_time_ms": 1500,
-    "pip_trigger_time_ms": 2000
+    "pins": [
+      { "gpio": 17, "active_low": true, "pull": "up", "short": "menu_select",  "long": "menu_back",      "long_ms": 600  },
+      { "gpio": 27, "active_low": true, "pull": "up", "short": "boop_snout",   "long": "none",           "long_ms": 600  },
+      { "gpio": 22, "active_low": true, "pull": "up", "short": "cam_pip_left", "long": "system_restart", "long_ms": 1200 }
+    ]
   },
   "camera": {
     "autofocus_on_startup": true,
@@ -197,7 +201,11 @@
     "device_id": "",
     "_device_id_note": "Empty picks the first paired+reachable device. Set to a specific id (see kdeconnect-cli --list-devices) when multiple phones are paired.",
     "auto_dismiss_s": 8.0,
-    "app_blocklist": "KDE Connect"
+    "app_blocklist": "KDE Connect",
+    "message_apps": "Discord,Messages,Messenger,Signal,WhatsApp,Telegram,SMS,Slack",
+    "_message_apps_note": "CSV of appName substrings treated as chat/DMs: these get a larger toast (sender as the title, message wrapped below) that stays up ~14 s so you can read who sent it and what it says.",
+    "ignore_list": "",
+    "_ignore_list_note": "CSV of substrings matched against a notification's title + text (case-insensitive). Anything matching is dropped — use it to mute noisy Discord servers or group chats by name."
   },
   "phone_inbox": {
     "_about": "Watches a directory for files dropped in from the phone (KDE Connect's Share & Receive lands them in ~/Downloads by default). New face PNGs / GIFs surface an Import toast in the HUD; accept moves the file to <watch_dir>/.processed/, dismiss moves it to <watch_dir>/.dismissed/.",
@@ -207,6 +215,10 @@
     "settle_seconds": 2,
     "auto_dismiss_s": 0.0,
     "_auto_dismiss_note": "0 keeps the import toast sticky until you act on it. Setting it would let untouched files quietly skip import, which is usually not what you want."
+  },
+  "notifications": {
+    "_about": "The notification log (Communications > Notification Log) keeps the last 50 notifications, browseable and filterable by type/sender. persist saves it to protohud_notifications.json next to config.json so a sudden reboot doesn't lose them; toggle it live under Communications > Notification Log > Persist Log.",
+    "persist": true
   },
   "audio": {
     "_note": "Audio capture is handled by the RP2350 helmet audio processor (USB Audio UAC2). The CM5 receives pre-processed stereo and routes it to the chosen output. Run 'arecord -l' to verify the RP2350 card name after connecting via USB.",
@@ -249,6 +261,7 @@
   },
   "bno055": {
     "_about": "Adafruit BNO055 9-DOF absolute orientation sensor via I2C. On-chip sensor fusion — heading comes from the chip directly (no software AHRS needed) and stays stable through tilt. Preferred over MPU9250 when both are present (Auto IMU source picks BNO055 first). Wired to CM5 40-pin header: SDA=GPIO2(pin3), SCL=GPIO3(pin5), VCC=3.3V(pin1), GND(pin6). ADR pin floating/low = 0x28; ADR tied high = 0x29.",
+    "_clock_stretch_note": "The BNO055 stretches the I2C clock, which the Pi/RP1 hardware I2C handles poorly — it can read fine on an Arduino but be flaky/undetectable on the Pi. If `i2cdetect -y 1` doesn't show 28, or readings are unstable, slow the bus in /boot/firmware/config.txt: `dtparam=i2c_arm_baudrate=10000` (10 kHz). Alternatively use a software bus: `dtoverlay=i2c-gpio,bus=3,...` and set i2c_bus to /dev/i2c-3.",
     "enabled": true,
     "i2c_bus": "/dev/i2c-1",
     "i2c_addr": 40,
@@ -260,7 +273,9 @@
     "heading_axes": 0,
     "_heading_axes_note": "Axis remap for non-default mounting. 0 = factory default (X-forward, Y-left, Z-up). The chip's calibration is preserved across axis remaps so re-calibration isn't needed when this changes.",
     "poll_hz": 50.0,
-    "_poll_hz_note": "Sensor read rate. 50 Hz matches the chip's internal fusion rate; higher just resamples the same fused value."
+    "_poll_hz_note": "Sensor read rate. 50 Hz matches the chip's internal fusion rate; higher just resamples the same fused value.",
+    "save_calibration": true,
+    "_save_calibration_note": "Persist the chip's calibration profile to bno055_calib.bin (next to this file) so it survives reboots. Restored automatically at startup; saved on demand via Compass > Save IMU Calibration, and auto-saved once the chip first reaches full calibration (sys 3/3) if no file exists yet. Calibrate by rotating the head through several orientations + a figure-8 for the magnetometer until all four values read 3."
   },
   "post_process": {
     "edge_enabled": false,

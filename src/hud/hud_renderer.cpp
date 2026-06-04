@@ -568,6 +568,18 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
             gauge(r1, a0 + off, a1 + off, cpu, load_col(cpu), cb, true);  // inner, raised = CPU
             gauge(r2, a0,       a1,       gpu, load_col(gpu), gb, true);  // outer = GPU
+            // Stack the paired phone's battery as a third (outermost) arc in
+            // light blue when a KDE Connect device is bound, so it stays visible
+            // alongside the CPU/GPU gauges.
+            const int ppct = s.health.phone_battery_pct;
+            if (ppct >= 0) {
+                const float r3  = ringR + 80.f;
+                const float ppc = std::clamp(ppct / 100.f, 0.f, 1.f);
+                char ppb[12];
+                snprintf(ppb, sizeof(ppb), "%s%d%%",
+                         s.health.phone_charging ? "P+" : "P", ppct);
+                gauge(r3, a0, a1, ppc, nvgRGBA(120, 190, 255, 235), ppb, true);
+            }
         } else {
             // Controller battery — always drawn (inner arc). If a phone
             // battery is known (KDE Connect bridge bound to a paired

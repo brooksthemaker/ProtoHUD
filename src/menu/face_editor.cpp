@@ -40,6 +40,7 @@ void FaceEditor::open(std::string title,
                      int mirror_axis_x,
                      Mode mode,
                      std::vector<uint32_t> palette,
+                     std::vector<cv::Rect> eye_regions,
                      CommitFn on_commit,
                      CancelFn on_cancel,
                      PreviewFn on_preview,
@@ -55,6 +56,7 @@ void FaceEditor::open(std::string title,
     covered_labels_  = std::move(covered_labels);
     if (covered_labels_.size() != covered_.size()) covered_labels_.assign(covered_.size(), "");
     mirror_axis_x_   = mirror_axis_x;
+    eye_regions_     = std::move(eye_regions);
     mode_      = mode;
     tool_      = Tool::Pencil;
     mirror_    = false;
@@ -277,6 +279,37 @@ void FaceEditor::apply_at_cursor() {
         return;
     }
 
+    // Eye Region: two-step like Rect, but instead of painting it records a
+    // canvas-space box defining where a blink replaces the open eye. With
+    // mirror on, one drag sets both eyes (box + its mirror). With mirror off
+    // the first box is the left eye, the second the right, and a third resets.
+    if (tool_ == Tool::EyeBox) {
+        if (!anchor_set_) {
+            anchor_set_ = true;
+            anchor_x_   = cursor_x_;
+            anchor_y_   = cursor_y_;
+            return;
+        }
+        const int x0 = std::min(anchor_x_, cursor_x_);
+        const int y0 = std::min(anchor_y_, cursor_y_);
+        const int x1 = std::max(anchor_x_, cursor_x_);
+        const int y1 = std::max(anchor_y_, cursor_y_);
+        const cv::Rect box(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+        if (mirror_) {
+            const int axis = (mirror_axis_x_ >= 0)
+                ? (2 * mirror_axis_x_ - 1)
+                : (2 * bbox_.x + bbox_.width - 1);
+            const int mx0 = axis - x1, mx1 = axis - x0;
+            const cv::Rect mbox(mx0, y0, mx1 - mx0 + 1, y1 - y0 + 1);
+            eye_regions_ = { box, mbox };
+        } else {
+            if (eye_regions_.size() >= 2) eye_regions_.clear();
+            eye_regions_.push_back(box);
+        }
+        anchor_set_ = false;
+        return;
+    }
+
     // Line / Rect are two-step: first primary() sets the anchor, second
     // primary() commits the shape from anchor to cursor. Same behaviour
     // every standard pixel editor has.
@@ -372,8 +405,9 @@ void FaceEditor::save() {
     auto cb     = std::move(on_commit_);
     cv::Mat out = canvas_.clone();
     const std::string path = abs_path_;
+    std::vector<cv::Rect> eyes = eye_regions_;
     close();
-    if (cb) cb(out, path);
+    if (cb) cb(out, path, eyes);
 }
 
 void FaceEditor::cycle_palette(int dir) {
@@ -421,6 +455,24 @@ void FaceEditor::mouse_down(float mx, float my) {
     primary();
 }
 
+// Held-button drag. Only the freehand brushes paint on drag (continuing the
+// stroke that the press-edge primary() began, so no extra undo entries and no
+// re-triggered anchor/commit on two-step tools). Other tools just track the
+// cursor so the live preview follows the pointer.
+void FaceEditor::mouse_drag(float mx, float my) {
+    if (!open_) return;
+    if (tool_ != Tool::Pencil && tool_ != Tool::Eraser) { mouse_move(mx, my); return; }
+    const int px = cursor_x_, py = cursor_y_;
+    mouse_move(mx, my);
+    if (cursor_x_ == px && cursor_y_ == py) return;   // same cell — nothing to add
+    draw_line(px, py, cursor_x_, cursor_y_);          // connect cells, brush-aware
+    if (mirror_) {
+        const int axis = (mirror_axis_x_ >= 0)
+            ? (2 * mirror_axis_x_ - 1) : (2 * bbox_.x + bbox_.width - 1);
+        draw_line(axis - px, py, axis - cursor_x_, cursor_y_);
+    }
+}
+
 void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                       float W, float H, ImU32 accent) {
     if (!open_) return;
@@ -452,6 +504,7 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     case Tool::Eyedrop: tool_str = "Eyedrop"; break;
     case Tool::Line:    tool_str = anchor_set_ ? "Line (anchor set)"   : "Line";    break;
     case Tool::Rect:    tool_str = anchor_set_ ? "Rect (anchor set)"   : "Rect";    break;
+    case Tool::EyeBox:  tool_str = anchor_set_ ? "Eye Region (corner set)" : "Eye Region"; break;
     }
     const int brush_side = 1 + brush_size_ * 2;
     std::snprintf(sub, sizeof(sub),
@@ -472,7 +525,7 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     // numbered tools on the right. Height tracks the taller column.
     const float footer_line_h = fs * 0.95f + 2.f;
     const int   left_lines    = (mode_ == Mode::Color) ? 10 : 9;
-    const int   right_lines   = 6;   // 1..6 tool bindings
+    const int   right_lines   = 7;   // 1..7 tool bindings
     const int   footer_lines  = std::max(left_lines, right_lines);
     const float footer_h      = footer_line_h * footer_lines + 12.f;
     // Palette strip (color mode) above the footer.
@@ -598,6 +651,47 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
             dl->AddText(font, label_fs, {tx, ty}, label_col, lbl.c_str());
         }
 
+        // Existing eye-region boxes (where a blink replaces the open eye).
+        // Drawn in cyan with a small label so they're visible regardless of
+        // the active tool. Authored / re-authored with the EyeBox tool.
+        {
+            const ImU32 eye_col = IM_COL32(80, 220, 255, 235);
+            const float eye_fs  = std::max(10.f, fs * 0.62f);
+            for (size_t i = 0; i < eye_regions_.size(); ++i) {
+                const auto& r = eye_regions_[i];
+                const float rx = grid_origin_x_ + (r.x - bbox_.x) * cell_size_;
+                const float ry = grid_origin_y_ + (r.y - bbox_.y) * cell_size_;
+                dl->AddRect({rx, ry},
+                            {rx + r.width * cell_size_, ry + r.height * cell_size_},
+                            eye_col, 0.f, 0, 2.f);
+                const char* lbl = (eye_regions_.size() == 2)
+                                  ? (i == 0 ? "eye L" : "eye R") : "eye";
+                dl->AddText(font, eye_fs, {rx + 2.f, ry + 2.f}, eye_col, lbl);
+            }
+        }
+
+        // Live drag preview for the EyeBox tool — outline the box that the
+        // next primary() would record (plus its mirror when mirror is on).
+        if (anchor_set_ && tool_ == Tool::EyeBox) {
+            const int x0 = std::min(anchor_x_, cursor_x_);
+            const int y0 = std::min(anchor_y_, cursor_y_);
+            const int x1 = std::max(anchor_x_, cursor_x_);
+            const int y1 = std::max(anchor_y_, cursor_y_);
+            auto outline = [&](int bx0, int by0, int bx1, int by1, ImU32 col){
+                const float rx = grid_origin_x_ + (bx0 - bbox_.x) * cell_size_;
+                const float ry = grid_origin_y_ + (by0 - bbox_.y) * cell_size_;
+                const float rw = (bx1 - bx0 + 1) * cell_size_;
+                const float rh = (by1 - by0 + 1) * cell_size_;
+                dl->AddRect({rx, ry}, {rx + rw, ry + rh}, col, 0.f, 0, 2.f);
+            };
+            outline(x0, y0, x1, y1, IM_COL32(120, 235, 255, 255));
+            if (mirror_) {
+                const int axis = (mirror_axis_x_ >= 0)
+                    ? (2 * mirror_axis_x_ - 1) : (2 * bbox_.x + bbox_.width - 1);
+                outline(axis - x1, y0, axis - x0, y1, IM_COL32(120, 235, 255, 150));
+            }
+        }
+
         // Live anchor preview for Line / Rect tools (shape that would be
         // committed by the next primary()). Translucent so the underlying
         // canvas pixels still read through.
@@ -714,6 +808,7 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         "4            Eyedrop",
         "5            Line",
         "6            Rect",
+        "7            Eye Region",
     };
     const ImU32 hint_col = IM_COL32(170, 185, 200, 220);
     const float text_size = footer_line_h - 2.f;

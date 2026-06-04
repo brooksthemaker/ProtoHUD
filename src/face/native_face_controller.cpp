@@ -15,6 +15,7 @@
 #include "renderer.h"
 #include "particles.h"
 #include "gif_player.h"
+#include "eye_animations.h"
 #include "panel_output.h"
 
 namespace face {
@@ -61,7 +62,9 @@ void NativeFaceController::build_panels() {
         pn.cfg = pc;
         if (pc.mirror_of.empty()) {
             pn.loader = std::make_unique<FaceLoader>(
-                cfg_.faces_dir + "/" + pc.face.active, pc.w, pc.h);
+                cfg_.faces_dir + "/" + pc.face.active, pc.w, pc.h,
+                cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
+            pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
             pn.state = std::make_unique<FaceState>(
                 pc.face, pn.loader->expression_names());
             pn.material = load_material(pc.material.active, pc.w, pc.h,
@@ -71,7 +74,15 @@ void NativeFaceController::build_panels() {
                 pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
                 pn.particles_spec = pc.particles;
             }
-            pn.gif = std::make_unique<GifPlayer>(pc.w, pc.h);
+            // GIFs play per physical panel (duplicated on each side) rather than
+            // stretched across the whole multi-panel canvas, so size the player
+            // to one physical panel when this is a one-logical-panel face.
+            int gw = pc.w, gh = pc.h;
+            if (!cfg_.output_panels.empty()) {
+                gw = cfg_.output_panels.front().w;
+                gh = cfg_.output_panels.front().h;
+            }
+            pn.gif = std::make_unique<GifPlayer>(gw, gh);
             pn.material_spec  = pc.material.active;
         } else {
             pn.is_mirror = true;
@@ -148,6 +159,11 @@ void NativeFaceController::render_thread() {
         {
             std::lock_guard<std::mutex> lk(state_mtx_);
 
+            // Advance the procedural eye animation (if one is playing). When the
+            // timer runs out the panels fall back to the normal face render.
+            const bool eye_active = eye_anim_timer_ > 0.0;
+            if (eye_active) { eye_anim_timer_ -= dt; eye_anim_t_ += dt; }
+
             // Expire any transient face overlays whose deadline has passed —
             // restore the original expression image to the loader and drop
             // the record. Done before render so this tick uses the restored
@@ -196,9 +212,36 @@ void NativeFaceController::render_thread() {
                 // and use the face PNG verbatim — the material's luminance-
                 // modulation washes RGB-matrix art to grey/teal otherwise.
                 cv::Mat face_layer;
-                cv::Mat gframe = pn.gif ? pn.gif->get_frame() : cv::Mat();
-                if (!gframe.empty()) {
-                    face_layer = gframe;
+                cv::Mat gframe = (!eye_active && pn.gif) ? pn.gif->get_frame() : cv::Mat();
+                if (eye_active) {
+                    // Procedural eye animation owns the whole panel.
+                    face_layer = render_eye_animation(eye_anim_, eye_anim_t_, pc.w, pc.h);
+                } else if (!gframe.empty()) {
+                    if (!cfg_.output_panels.empty() &&
+                        (gframe.cols != pc.w || gframe.rows != pc.h)) {
+                        // Duplicate the panel-sized GIF onto each physical panel
+                        // instead of stretching one copy across the whole canvas.
+                        face_layer = cv::Mat::zeros(pc.h, pc.w, CV_8UC4);
+                        for (const auto& op : cfg_.output_panels) {
+                            cv::Mat g = gframe;
+                            if (gframe.cols != op.w || gframe.rows != op.h)
+                                cv::resize(gframe, g, cv::Size(op.w, op.h), 0, 0, cv::INTER_NEAREST);
+                            // Pre-flip so the per-panel output flip cancels out:
+                            // GIFs (which may contain text) read forwards on every
+                            // panel regardless of its mounting flip.
+                            if (op.flip_x || op.flip_y) {
+                                const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
+                                cv::Mat tmp; cv::flip(g, tmp, code); g = tmp;
+                            }
+                            const cv::Rect dst(op.x - pc.x, op.y - pc.y, op.w, op.h);
+                            const cv::Rect inter = dst & cv::Rect(0, 0, pc.w, pc.h);
+                            if (inter.width > 0 && inter.height > 0)
+                                g(cv::Rect(inter.x - dst.x, inter.y - dst.y, inter.width, inter.height))
+                                    .copyTo(face_layer(inter));
+                        }
+                    } else {
+                        face_layer = gframe;
+                    }
                 } else if (!cfg_.effects_enabled || !pn.material) {
                     face_layer = pn.loader->get_frame(*pn.state);
                 } else {
@@ -208,7 +251,11 @@ void NativeFaceController::render_thread() {
                 }
 
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
-                if (pn.particles) {
+                // Effects are suppressed while a GIF or eye animation plays —
+                // the clip owns the whole panel — and resume automatically when
+                // it ends and the face animation returns. (The sim keeps running
+                // so the field is already settled when it reappears.)
+                if (pn.particles && gframe.empty() && !eye_active) {
                     ParticleFrame pf = pn.particles->render();
                     if (pf.has) layers.push_back(Layer{pf.rgba, pf.blend});
                 }
@@ -234,6 +281,34 @@ void NativeFaceController::render_thread() {
                 cv::Mat flipped;
                 cv::flip(canvas(sroi), flipped, 1);
                 flipped.copyTo(canvas(droi));
+            }
+
+            // Per-panel orientation flips (HUB75 layout's Flip X / Flip Y).
+            // Applied last so it covers both self-rendered and mirror panels.
+            // flip code: 1 = horizontal (left-right), 0 = vertical (top-bottom),
+            // -1 = both (180°). Done in place on the panel's canvas region.
+            for (auto& pn : panels_) {
+                const PanelCfg& pc = pn.cfg;
+                if (!pc.flip_x && !pc.flip_y) continue;
+                cv::Rect roi(pc.x, pc.y, pc.w, pc.h);
+                if ((roi & cv::Rect(0, 0, canvas.cols, canvas.rows)) != roi) continue;
+                const int code = (pc.flip_x && pc.flip_y) ? -1 : (pc.flip_x ? 1 : 0);
+                cv::Mat region = canvas(roi), flipped;
+                cv::flip(region, flipped, code);
+                flipped.copyTo(region);
+            }
+
+            // Multi-panel face rendered as one logical canvas: flip each physical
+            // panel's slice in place so per-panel mounting flips apply to the
+            // whole composited image (face + material + effects + blink alike).
+            for (const auto& op : cfg_.output_panels) {
+                if (!op.flip_x && !op.flip_y) continue;
+                cv::Rect roi(op.x, op.y, op.w, op.h);
+                if ((roi & cv::Rect(0, 0, canvas.cols, canvas.rows)) != roi) continue;
+                const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
+                cv::Mat region = canvas(roi), flipped;
+                cv::flip(region, flipped, code);
+                flipped.copyTo(region);
             }
         }
 
@@ -350,6 +425,12 @@ void NativeFaceController::save_config() {
     save_state_locked();
 }
 
+void NativeFaceController::set_material_spec(const std::string& spec) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    apply_material_all(spec);
+    save_state_locked();
+}
+
 void NativeFaceController::apply_material_all(const std::string& name) {
     for (auto& pn : panels_)
         if (!pn.is_mirror) {
@@ -441,6 +522,19 @@ std::string NativeFaceController::preset_material(int idx) {
         case 9:  return "cool";
         case 10: return "warm";
         case 11: return "solid:0,0,0";
+        // Multi-colour gradient presets (rendered via GradientMaterial — no PNG
+        // asset needed). Smooth horizontal blends, static. Kept in sync with the
+        // pf_mats table in main.cpp's Material Color menu.
+        case 12: return "gradient:h:s:0:FF8C00-FF3D7F-8A2BE2";  // Sunset
+        case 13: return "gradient:h:s:0:00E5FF-0077FF-001F7F";  // Ocean
+        case 14: return "gradient:h:s:0:7CFF6B-1E9E3C-0B3D1A";  // Forest
+        case 15: return "gradient:h:s:0:FFE000-FF7A00-E01E1E";  // Fire
+        case 16: return "gradient:h:s:0:00FFA3-00D0FF-B14BFF";  // Aurora
+        case 17: return "gradient:h:s:0:2A0A0A-C81E00-FF8C00";  // Lava
+        case 18: return "gradient:h:s:0:2B0B5E-7A1EB4-FF4FD8";  // Galaxy
+        case 19: return "gradient:h:s:0:FFB3BA-BAE1FF-BAFFC9";  // Pastel
+        case 20: return "gradient:h:s:0:FF4FA3-FFD24F-4FC3FF";  // Candy
+        case 21: return "gradient:h:s:0:AEFF00-00FFB3-00A3FF";  // Toxic
         default: return "teal";
     }
 }
@@ -553,7 +647,9 @@ bool NativeFaceController::import_face_image(const std::string& expression,
     for (auto& pn : panels_) {
         if (pn.is_mirror || !pn.state) continue;
         pn.loader = std::make_unique<FaceLoader>(
-            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h,
+            cfg_.canvas_w, cfg_.canvas_h, pn.cfg.x, pn.cfg.y);
+        pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
     }
     return true;
 }
@@ -607,7 +703,9 @@ void NativeFaceController::clear_face_image(const std::string& expression) {
     for (auto& pn : panels_) {
         if (pn.is_mirror || !pn.state) continue;
         pn.loader = std::make_unique<FaceLoader>(
-            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h,
+            cfg_.canvas_w, cfg_.canvas_h, pn.cfg.x, pn.cfg.y);
+        pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
     }
 }
 
@@ -624,6 +722,21 @@ void NativeFaceController::trigger_boop(const std::string& expression, double du
         if (pn.state) pn.state->trigger_boop(expression, duration_s);
     // Don't save_state_locked() — boop is transient by design; the auto-revert
     // in FaceState::update will bring expression back without our help.
+}
+
+void NativeFaceController::play_eye_animation(int type, double speed, double size,
+                                              uint8_t r, uint8_t g, uint8_t b,
+                                              double duration_s) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    const int n = std::clamp(type, 0, static_cast<int>(EyeAnim::Count) - 1);
+    eye_anim_.type       = static_cast<EyeAnim>(n);
+    eye_anim_.speed      = (speed > 0.0) ? speed : 1.0;
+    eye_anim_.size       = (size  > 0.0) ? size  : 1.0;
+    eye_anim_.r = r; eye_anim_.g = g; eye_anim_.b = b;
+    eye_anim_.duration_s = duration_s;
+    eye_anim_timer_ = (duration_s > 0.0) ? duration_s : 0.0;
+    eye_anim_t_     = 0.0;
+    // Transient by design — no save_state_locked().
 }
 
 // ── Animation tuning ─────────────────────────────────────────────────────────
@@ -647,6 +760,23 @@ void NativeFaceController::set_expression_fade(double seconds) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_expression_fade(seconds);
+}
+
+void NativeFaceController::set_panel_flips(const std::vector<std::array<bool, 2>>& flips) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (!cfg_.output_panels.empty()) {
+        // Multi-panel face rendered as one canvas: flips live on the physical
+        // output slices, applied at the end of the render loop.
+        for (size_t i = 0; i < cfg_.output_panels.size() && i < flips.size(); ++i) {
+            cfg_.output_panels[i].flip_x = flips[i][0];
+            cfg_.output_panels[i].flip_y = flips[i][1];
+        }
+        return;
+    }
+    for (size_t i = 0; i < panels_.size() && i < flips.size(); ++i) {
+        panels_[i].cfg.flip_x = flips[i][0];
+        panels_[i].cfg.flip_y = flips[i][1];
+    }
 }
 
 void NativeFaceController::set_wiggle(const WiggleCfg& w) {
@@ -685,7 +815,9 @@ void NativeFaceController::reload_active_face() {
     for (auto& pn : panels_) {
         if (pn.is_mirror || !pn.state) continue;
         pn.loader = std::make_unique<FaceLoader>(
-            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h);
+            cfg_.faces_dir + "/" + pn.cfg.face.active, pn.cfg.w, pn.cfg.h,
+            cfg_.canvas_w, cfg_.canvas_h, pn.cfg.x, pn.cfg.y);
+        pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
     }
 }
 

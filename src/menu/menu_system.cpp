@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cfloat>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <ctime>
@@ -33,13 +34,47 @@ static std::string item_label(const MenuItem& it) {
 // row. Shared by the input (move/activate) and draw paths so they stay in sync.
 static const std::vector<std::vector<std::string>>& osk_rows() {
     static const std::vector<std::vector<std::string>> rows = {
-        {"1","2","3","4","5","6","7","8","9","0"},
+        {"1","2","3","4","5","6","7","8","9","0",","},
         {"Q","W","E","R","T","Y","U","I","O","P"},
         {"A","S","D","F","G","H","J","K","L"},
         {"Z","X","C","V","B","N","M"},
         {"SPACE","DEL","SAVE","CANCEL"},
     };
     return rows;
+}
+
+// Parse a hex colour string into 0-255 RGB. Ignores any non-hex characters
+// (so "#FF8000", "ff8000" both work) and expands 3-digit shorthand. Returns
+// false if fewer than 3 hex digits were found.
+static bool cp_parse_hex(const std::string& s, int& r, int& g, int& b) {
+    std::string h;
+    for (char c : s)
+        if (std::isxdigit(static_cast<unsigned char>(c))) h += c;
+    if (h.size() == 3) h = {h[0],h[0], h[1],h[1], h[2],h[2]};
+    if (h.size() < 6) return false;
+    auto hx = [&](size_t i){ return static_cast<int>(
+        std::strtol(h.substr(i, 2).c_str(), nullptr, 16)); };
+    r = hx(0); g = hx(2); b = hx(4);
+    return true;
+}
+
+// Parse "r,g,b" (any non-digit separators — comma or space) into 0-255 RGB.
+// Returns false unless three numbers were found.
+static bool cp_parse_rgb(const std::string& s, int& r, int& g, int& b) {
+    int v[3] = {0,0,0}, n = 0;
+    for (size_t i = 0; i < s.size() && n < 3; ) {
+        if (std::isdigit(static_cast<unsigned char>(s[i]))) {
+            int val = 0;
+            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) {
+                val = val * 10 + (s[i++] - '0');
+                if (val > 9999) val = 9999;   // cap before overflow; clamped to 255 below
+            }
+            v[n++] = std::min(255, val);
+        } else ++i;
+    }
+    if (n < 3) return false;
+    r = v[0]; g = v[1]; b = v[2];
+    return true;
 }
 
 // Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
@@ -125,6 +160,7 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items,
                             std::move(panel_title),
                             std::move(panel_draw) });
     cursor_ = init_cursor;
+    list_scroll_ = 0;        // start a fresh page at the top
     radial_prev_sel_ = -1;   // snap the radial spin to the new level
     emit_detents();
 }
@@ -133,6 +169,7 @@ void MenuSystem::pop_level() {
     if (stack_.size() > 1) {
         stack_.pop_back();
         cursor_ = stack_.back().cursor;  // restore cursor to where user was on this page
+        list_scroll_ = 0;                // recomputed from the cursor on next draw
         radial_prev_sel_ = -1;           // snap the radial spin to the restored level
         emit_detents();
     } else if (deep_open_) {
@@ -247,7 +284,8 @@ void MenuSystem::osk_step(int d) {
 
 void MenuSystem::osk_input_char(unsigned int c) {
     if (!osk_active_) return;
-    if (c == ' ' || c == '-' || c == '_' || std::isalnum(static_cast<int>(c))) {
+    if (c == ' ' || c == '-' || c == '_' || c == ',' || c == '#' ||
+        std::isalnum(static_cast<int>(c))) {
         if (osk_text_.size() < 40) osk_text_ += static_cast<char>(c);
     }
 }
@@ -316,6 +354,7 @@ void MenuSystem::open_face_editor(std::string title,
                                   int mirror_axis_x,
                                   menu::FaceEditor::Mode mode,
                                   std::vector<uint32_t> palette,
+                                  std::vector<cv::Rect> eye_regions,
                                   menu::FaceEditor::CommitFn on_commit,
                                   menu::FaceEditor::CancelFn on_cancel,
                                   menu::FaceEditor::PreviewFn on_preview,
@@ -330,6 +369,7 @@ void MenuSystem::open_face_editor(std::string title,
                       std::move(covered_labels),
                       mirror_axis_x,
                       mode, std::move(palette),
+                      std::move(eye_regions),
                       std::move(on_commit), std::move(on_cancel),
                       std::move(on_preview), std::move(live_frame),
                       preview_duration_s);
@@ -375,7 +415,8 @@ void MenuSystem::navigate(int direction) {
                                          static_cast<uint8_t>(edit_g_),
                                          static_cast<uint8_t>(edit_b_));
             } else {
-                edit_channel_ = ((edit_channel_ + direction) % 3 + 3) % 3;
+                // 0/1/2 = R/G/B dial bars, 3 = Hex text entry, 4 = RGB text entry.
+                edit_channel_ = ((edit_channel_ + direction) % 5 + 5) % 5;
             }
         } else if (item.type == MenuItemType::SLIDER) {
             edit_float_ = std::clamp(
@@ -431,7 +472,11 @@ void MenuSystem::select() {
         break;
 
     case MenuItemType::LEAF:
-        if (item.action) { item.action(); }
+        // Copy the callable before invoking: an action may pop its own level
+        // (e.g. the GPIO pin picker calls back() on select), which would destroy
+        // the items vector that owns this std::function mid-call. The local copy
+        // keeps it alive for the duration of the call.
+        if (item.action) { auto act = item.action; act(); }
         // Menu stays open — only "Close Menu" / "< Back" items call close()/back()
         break;
 
@@ -486,10 +531,51 @@ void MenuSystem::select() {
             edit_channel_    = 0;
             in_channel_edit_ = false;
             in_edit_mode_    = true;
-            emit_detents_override(3);
+            emit_detents_override(5);   // R, G, B, Hex, RGB
         } else if (!in_channel_edit_) {
-            in_channel_edit_ = true;
-            emit_detents_override(256);
+            if (edit_channel_ >= 3) {
+                // Hex / RGB rows → open the on-screen keyboard for text entry.
+                // Capture the set_color callback by value so it survives while
+                // the keyboard is up; the commit parses the typed value, updates
+                // the working channels, and applies the colour live.
+                auto setc = item.color.set_color;
+                // On a valid parse: apply, finalise (so a later "back" doesn't
+                // revert it via the orig snapshot), and leave edit mode. On a
+                // bad parse: keep the picker open so the user can retry.
+                auto commit_typed = [this, setc](int r, int g, int b){
+                    edit_r_ = (float)r; edit_g_ = (float)g; edit_b_ = (float)b;
+                    orig_r_ = edit_r_;  orig_g_ = edit_g_;  orig_b_ = edit_b_;
+                    if (setc) setc((uint8_t)r, (uint8_t)g, (uint8_t)b);
+                    in_channel_edit_ = false;
+                    in_edit_mode_    = false;
+                    emit_detents();
+                };
+                char cur[24];
+                if (edit_channel_ == 3) {
+                    std::snprintf(cur, sizeof(cur), "%02X%02X%02X",
+                                  static_cast<int>(edit_r_),
+                                  static_cast<int>(edit_g_),
+                                  static_cast<int>(edit_b_));
+                    open_keyboard("Hex Color (RRGGBB)", cur,
+                        [commit_typed](const std::string& s){
+                            int r, g, b;
+                            if (cp_parse_hex(s, r, g, b)) commit_typed(r, g, b);
+                        });
+                } else {
+                    std::snprintf(cur, sizeof(cur), "%d,%d,%d",
+                                  static_cast<int>(edit_r_),
+                                  static_cast<int>(edit_g_),
+                                  static_cast<int>(edit_b_));
+                    open_keyboard("Color R,G,B (0-255)", cur,
+                        [commit_typed](const std::string& s){
+                            int r, g, b;
+                            if (cp_parse_rgb(s, r, g, b)) commit_typed(r, g, b);
+                        });
+                }
+            } else {
+                in_channel_edit_ = true;
+                emit_detents_override(256);
+            }
         } else {
             in_channel_edit_ = false;
             edit_channel_    = (edit_channel_ + 1) % 3;
@@ -502,13 +588,21 @@ void MenuSystem::select() {
                 in_edit_mode_ = false;
                 emit_detents();
             } else {
-                emit_detents_override(3);
+                emit_detents_override(5);
             }
         }
         break;
 
     case MenuItemType::NOTIF_LOG:
-        if (item.notif_log.queue) item.notif_log.queue->dismiss_all();
+        if (item.notif_log.queue) {
+            if (item.notif_log.filter) {
+                // Filtered browser: clear only the matching notifications.
+                for (auto& n : item.notif_log.queue->items)
+                    if (!n.dismissed && item.notif_log.filter(n)) { n.dismissed = true; n.read = true; }
+            } else {
+                item.notif_log.queue->dismiss_all();
+            }
+        }
         break;
     }
 }
@@ -603,10 +697,13 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         }
     }
 
-    // Count only visible items for layout.
-    int visible_count = 0;
-    for (const auto& it : items)
-        if (!it.visible_fn || it.visible_fn()) ++visible_count;
+    // Count only visible items for layout, and locate the cursor among them.
+    int visible_count = 0, vis_cursor = 0;
+    for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+        if (items[i].visible_fn && !items[i].visible_fn()) continue;
+        if (i == cursor_) vis_cursor = visible_count;
+        ++visible_count;
+    }
 
     // Extra height for expanded editing rows
     float extra = 0.f;
@@ -614,14 +711,32 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         const auto& sel = items[cursor_];
         if (sel.type == MenuItemType::SLIDER)       extra = 30.f;
         if (sel.type == MenuItemType::FACE_PICKER)  extra = 90.f;
-        if (sel.type == MenuItemType::COLOR_PICKER) extra = 96.f;
+        if (sel.type == MenuItemType::COLOR_PICKER) extra = 152.f;
         if (sel.type == MenuItemType::NOTIF_LOG)    extra = 200.f;
     }
 
+    // ── Vertical scrolling when a level overflows the screen ─────────────────
+    // Fit as many rows as the viewport (screen minus margins + the expanded
+    // editing row's extra height) allows, then window the rows around the
+    // cursor. list_scroll_ is the first visible row (in visible-item space).
+    const float margin  = 48.f;
+    const float avail_h = static_cast<float>(screen_h) - margin * 2.f - pad_y * 2.f;
+    int max_rows = static_cast<int>((avail_h - extra) / item_h);
+    if (max_rows < 1) max_rows = 1;
+    const bool scrolling = visible_count > max_rows;
+    const int  shown     = scrolling ? max_rows : visible_count;
+    if (scrolling) {
+        if (vis_cursor < list_scroll_)             list_scroll_ = vis_cursor;
+        if (vis_cursor >= list_scroll_ + max_rows) list_scroll_ = vis_cursor - max_rows + 1;
+        if (list_scroll_ > visible_count - max_rows) list_scroll_ = visible_count - max_rows;
+        if (list_scroll_ < 0)                      list_scroll_ = 0;
+    } else {
+        list_scroll_ = 0;
+    }
+
     const float total_h = pad_y * 2.f
-                        + item_h * static_cast<float>(visible_count)
+                        + item_h * static_cast<float>(shown)
                         + extra;
-    const float margin = 48.f;
     float x, y;
     switch (anchor_) {
         default:
@@ -715,9 +830,15 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         }
     };
 
+    int vi = -1;        // running index among visible items
+    int drawn = 0;      // rows actually emitted this frame
     for (int i = 0; i < static_cast<int>(items.size()); i++) {
         const auto& item = items[i];
         if (item.visible_fn && !item.visible_fn()) continue;
+        ++vi;
+        if (vi < list_scroll_) continue;   // scrolled above the viewport
+        if (drawn >= shown)    break;      // past the bottom of the viewport
+        ++drawn;
 
         bool selected = (i == cursor_);
 
@@ -726,7 +847,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         if (selected && in_edit_mode_) {
             if (item.type == MenuItemType::SLIDER)       row_h = item_h + 25.f;
             if (item.type == MenuItemType::FACE_PICKER)  row_h = item_h + 85.f;
-            if (item.type == MenuItemType::COLOR_PICKER) row_h = item_h + 95.f;
+            if (item.type == MenuItemType::COLOR_PICKER) row_h = item_h + 151.f;
             if (item.type == MenuItemType::NOTIF_LOG)    row_h = item_h + 195.f;
         }
 
@@ -930,9 +1051,30 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                     dl->AddText({rmax.x - vsz.x - 6.f, by + 4.f}, text_col, cv);
                 }
 
-                float hint_y = rmin.y + item_h + 3 * 28.f + 2.f;
+                // Text-entry rows: HEX / RGB — select to open the keyboard.
+                char trow_val[2][24];
+                snprintf(trow_val[0], sizeof(trow_val[0]), "%02X%02X%02X",
+                         static_cast<int>(edit_r_), static_cast<int>(edit_g_),
+                         static_cast<int>(edit_b_));
+                snprintf(trow_val[1], sizeof(trow_val[1]), "%d,%d,%d",
+                         static_cast<int>(edit_r_), static_cast<int>(edit_g_),
+                         static_cast<int>(edit_b_));
+                const char* trow_name[2] = { "HEX", "RGB" };
+                for (int t = 0; t < 2; t++) {
+                    float by      = rmin.y + item_h + static_cast<float>(3 + t) * 28.f;
+                    bool  is_sel  = (edit_channel_ == 3 + t);
+                    ImU32 tcol    = is_sel ? IM_COL32(255, 255, 255, 255)
+                                           : IM_COL32(140, 170, 160, 200);
+                    dl->AddText({bx, by + 5.f}, tcol, trow_name[t]);
+                    dl->AddText({bx + 40.f, by + 5.f}, tcol, trow_val[t]);
+                    if (is_sel)
+                        dl->AddRect({bx - 1.f, by + 3.f}, {rmax.x - 6.f, by + 17.f},
+                                    menu_with_alpha(accent_color_, 200), 2.f);
+                }
+
+                float hint_y = rmin.y + item_h + 5 * 28.f + 2.f;
                 const char* hint = !in_channel_edit_
-                    ? "knob=channel  \xC2\xB7  select=edit  \xC2\xB7  back=cancel"
+                    ? "knob=row  \xC2\xB7  select=edit/type  \xC2\xB7  back=cancel"
                     : "knob adjusts  \xC2\xB7  select=next  \xC2\xB7  back=cancel";
                 dl->AddText({bx, hint_y}, menu_with_alpha(accent_color_, 180), hint);
 
@@ -962,7 +1104,10 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                 constexpr int kMaxShow = 5;
                 int shown = 0;
                 for (auto& n : q->items) {
-                    if (n.dismissed) continue;
+                    // History browser shows dismissed entries too; otherwise only
+                    // currently-active notifications.
+                    if (!item.notif_log.show_history && n.dismissed) continue;
+                    if (item.notif_log.filter && !item.notif_log.filter(n)) continue;
                     if (shown >= kMaxShow) break;
                     if (ly + lh_row > rmin.y + item_h + list_h) break;
 
@@ -974,6 +1119,9 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                         case NotifType::LoRa:  tc = IM_COL32(  0,180,255, 255); break;
                         default:               tc = IM_COL32( 80,140,255, 255); break;
                     }
+                    // Dim already-seen (dismissed) rows so new ones stand out.
+                    const int ta = n.dismissed ? 140 : 220;
+                    const int ba = n.dismissed ? 120 : 180;
                     // Row bg
                     dl->AddRectFilled({rmin.x + 2.f, ly}, {rmax.x - 2.f, ly + lh_row - 2.f},
                                       IM_COL32(15, 20, 25, 200), 3.f);
@@ -982,12 +1130,12 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                     char ts[8]; time_t t = (time_t)n.timestamp;
                     struct tm* tm = localtime(&t);
                     strftime(ts, sizeof(ts), "%H:%M", tm);
-                    dl->AddText({rmin.x + 8.f, ly + 3.f}, IM_COL32(255,255,255,220), n.title.c_str());
+                    dl->AddText({rmin.x + 8.f, ly + 3.f}, IM_COL32(255,255,255,ta), n.title.c_str());
                     ImVec2 tsz = ImGui::CalcTextSize(ts);
                     dl->AddText({rmax.x - tsz.x - 4.f, ly + 3.f}, IM_COL32(160,160,160,180), ts);
                     // Body
                     if (!n.body.empty())
-                        dl->AddText({rmin.x + 8.f, ly + 18.f}, IM_COL32(180,180,180,180), n.body.substr(0,40).c_str());
+                        dl->AddText({rmin.x + 8.f, ly + 18.f}, IM_COL32(180,180,180,ba), n.body.substr(0,40).c_str());
                     ly += lh_row;
                     ++shown;
                     n.read = true;
@@ -1007,7 +1155,16 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             std::string label = to_upper(item_label(item));
             if (item.type == MenuItemType::SUBMENU || !item.children.empty())
                 label += "   >";
-            draw_item_text({rmin.x + 4.f, ty}, label.c_str(), selected);
+            // Warning rows (e.g. a GPIO slot/pin conflict) render in red instead
+            // of the usual glow/accent text so the problem stands out.
+            if (item.warn_fn && item.warn_fn()) {
+                const ImU32 rc = (filled_row && selected) ? IM_COL32(185, 25, 15, 255)
+                                                          : IM_COL32(240, 95, 80, 255);
+                if (bold_text) dl->AddText({rmin.x + 4.7f, ty}, rc, label.c_str());
+                dl->AddText({rmin.x + 4.f, ty}, rc, label.c_str());
+            } else {
+                draw_item_text({rmin.x + 4.f, ty}, label.c_str(), selected);
+            }
 
             // Legacy radio indicator for items that still carry get_state
             if (item.get_state) {
@@ -1027,6 +1184,23 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         // Thin bottom separator
         dl->AddLine({rmin.x - pad_x, rmax.y - 1.f},
                     {rmax.x + pad_x, rmax.y - 1.f}, COL_SEP_EFF, 1.f);
+    }
+
+    // ── Scroll chevrons ──────────────────────────────────────────────────────
+    // Drawn in the top / bottom padding bands when more rows exist off-screen.
+    if (scrolling) {
+        const float cx  = wp.x + ws.x * 0.5f;
+        const ImU32 col = menu_with_alpha(accent_color_, 210);
+        if (list_scroll_ > 0) {
+            const float yc = wp.y + pad_y * 0.5f;
+            dl->AddTriangleFilled({cx - 6.f, yc + 3.f}, {cx + 6.f, yc + 3.f},
+                                  {cx, yc - 3.f}, col);
+        }
+        if (list_scroll_ + shown < visible_count) {
+            const float yc = wp.y + ws.y - pad_y * 0.5f;
+            dl->AddTriangleFilled({cx - 6.f, yc - 3.f}, {cx + 6.f, yc - 3.f},
+                                  {cx, yc + 3.f}, col);
+        }
     }
 
     ImGui::End();
@@ -1146,7 +1320,9 @@ void MenuSystem::draw_context_panel(const Level& lvl,
 // ── draw_fullscreen (deep menu) ─────────────────────────────────────────────────
 
 void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
-    if (!deep_open_ || stack_.empty()) return;
+    // Also render when only the on-screen keyboard is up (it takes over the
+    // screen below), so text entry works from the corner/radial quick menu too.
+    if ((!deep_open_ && !osk_active_) || stack_.empty()) return;
     s_menu_glow = glow_enabled_;
 
     const float W = static_cast<float>(screen_w);
@@ -1215,6 +1391,7 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
         if (ImGui::IsKeyPressed(ImGuiKey_4))          face_editor_.set_tool(menu::FaceEditor::Tool::Eyedrop);
         if (ImGui::IsKeyPressed(ImGuiKey_5))          face_editor_.set_tool(menu::FaceEditor::Tool::Line);
         if (ImGui::IsKeyPressed(ImGuiKey_6))          face_editor_.set_tool(menu::FaceEditor::Tool::Rect);
+        if (ImGui::IsKeyPressed(ImGuiKey_7))          face_editor_.set_tool(menu::FaceEditor::Tool::EyeBox);
         if (ImGui::IsKeyPressed(ImGuiKey_P))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
         if (ImGui::IsKeyPressed(ImGuiKey_E))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
         if (ImGui::IsKeyPressed(ImGuiKey_B))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);
@@ -1231,9 +1408,15 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             face_editor_.set_brush_size(face_editor_.brush_size() + 1);
         if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))  face_editor_.cycle_palette(-1);
         if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) face_editor_.cycle_palette(+1);
+        // Press EDGE fires primary() exactly once; holding the button paints a
+        // drag stroke (freehand brushes only). Using IsMouseDown for the
+        // primary action re-fired it every frame, which corrupted the two-step
+        // tools (Line / Rect / Eye Region) — a single click would set then
+        // immediately clear the anchor.
         const ImVec2 mp = ImGui::GetMousePos();
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) face_editor_.mouse_down(mp.x, mp.y);
-        else                                            face_editor_.mouse_move(mp.x, mp.y);
+        if      (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) face_editor_.mouse_down(mp.x, mp.y);
+        else if (ImGui::IsMouseDown   (ImGuiMouseButton_Left)) face_editor_.mouse_drag(mp.x, mp.y);
+        else                                                   face_editor_.mouse_move(mp.x, mp.y);
 
         face_editor_.draw(dl, font, fs, W, H, accent_color_);
         ImGui::End();
@@ -1338,10 +1521,33 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     const float lx0    = cx0;
     const float lx1    = split_x - 20.f;
     float ly = cy0;
+
+    // ── Vertical scrolling for the left list when it overflows the column ─────
+    int vcount_fs = 0, vcur_fs = 0;
+    for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+        if (items[i].visible_fn && !items[i].visible_fn()) continue;
+        if (i == cursor_) vcur_fs = vcount_fs;
+        ++vcount_fs;
+    }
+    int max_rows_fs = static_cast<int>((cy1 - cy0) / row_h);
+    if (max_rows_fs < 1) max_rows_fs = 1;
+    const bool scroll_fs = vcount_fs > max_rows_fs;
+    if (scroll_fs) {
+        if (vcur_fs < list_scroll_)                 list_scroll_ = vcur_fs;
+        if (vcur_fs >= list_scroll_ + max_rows_fs)  list_scroll_ = vcur_fs - max_rows_fs + 1;
+        if (list_scroll_ > vcount_fs - max_rows_fs) list_scroll_ = vcount_fs - max_rows_fs;
+        if (list_scroll_ < 0)                       list_scroll_ = 0;
+    } else {
+        list_scroll_ = 0;
+    }
+
+    int vi_fs = -1;
     for (int i = 0; i < static_cast<int>(items.size()); ++i) {
         const auto& it = items[i];
         if (it.visible_fn && !it.visible_fn()) continue;
-        if (ly + row_h > cy1) break;   // simple clip (no scrolling yet)
+        ++vi_fs;
+        if (vi_fs < list_scroll_) continue;   // scrolled above the column
+        if (ly + row_h > cy1) break;          // column full
 
         bool sel = (i == cursor_);
         ImVec2 rmin{ lx0, ly }, rmax{ lx1, ly + row_h };
@@ -1350,6 +1556,8 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             dl->AddRectFilled({ rmin.x, rmin.y }, { rmin.x + 4.f, rmax.y }, accent_color_);
         }
         ImU32 tcol = sel ? IM_COL32(255, 255, 255, 255) : IM_COL32(215, 220, 226, 175);
+        if (it.warn_fn && it.warn_fn())   // flag conflicts (e.g. GPIO pin clash) in red
+            tcol = sel ? IM_COL32(255, 120, 105, 255) : IM_COL32(235, 95, 80, 230);
         float ty = ly + (row_h - fs * 1.15f) * 0.5f;
         dl->AddText(font, fs * 1.15f, { lx0 + 14.f, ty }, tcol, to_upper(item_label(it)).c_str());
 
@@ -1375,6 +1583,18 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             }
         }
         ly += row_h;
+    }
+
+    // Scroll chevrons (centered at the top / bottom of the list column).
+    if (scroll_fs) {
+        const float lcx = (lx0 + lx1) * 0.5f;
+        const ImU32 c   = menu_with_alpha(accent_color_, 210);
+        if (list_scroll_ > 0)
+            dl->AddTriangleFilled({lcx - 7.f, cy0 + 8.f}, {lcx + 7.f, cy0 + 8.f},
+                                  {lcx, cy0 + 1.f}, c);
+        if (list_scroll_ + max_rows_fs < vcount_fs)
+            dl->AddTriangleFilled({lcx - 7.f, cy1 - 8.f}, {lcx + 7.f, cy1 - 8.f},
+                                  {lcx, cy1 - 1.f}, c);
     }
 
     // ── Right pane: description + editor ────────────────────────────────────────
@@ -1441,6 +1661,27 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
                 char cv[8]; std::snprintf(cv, sizeof(cv), "%.0f", chv[c]);
                 dl->AddText(font, fs, { rx1 - 40.f, by }, IM_COL32(220,225,230,220), cv);
             }
+            // Text-entry rows: HEX / RGB — select to type a value via the keyboard.
+            char tval[2][24];
+            std::snprintf(tval[0], sizeof(tval[0]), "%02X%02X%02X",
+                          (int)edit_r_, (int)edit_g_, (int)edit_b_);
+            std::snprintf(tval[1], sizeof(tval[1]), "%d,%d,%d",
+                          (int)edit_r_, (int)edit_g_, (int)edit_b_);
+            const char* tnm[2] = { "HEX", "RGB" };
+            for (int t = 0; t < 2; ++t) {
+                float by = ey + 6.f + (3 + t) * 30.f;
+                bool is_sel = (edit_channel_ == 3 + t);
+                ImU32 tc = is_sel ? IM_COL32(255,255,255,255) : IM_COL32(150,160,170,200);
+                dl->AddText(font, fs, { rx0, by }, tc, tnm[t]);
+                dl->AddText(font, fs, { rx0 + 50.f, by }, tc, tval[t]);
+                if (is_sel)
+                    dl->AddRect({ rx0 - 1.f, by - 1.f }, { rx1 - 6.f, by + fs + 1.f },
+                                menu_with_alpha(accent_color_, 220), 2.f, 0, 1.5f);
+            }
+            dl->AddText(font, fs * 0.9f, { rx0, ey + 6.f + 5 * 30.f },
+                        menu_with_alpha(accent_color_, 170),
+                        in_channel_edit_ ? "knob adjusts value"
+                                         : "knob = row  \xC2\xB7  select = edit / type");
         } else if (editing && sel.type == MenuItemType::FACE_PICKER) {
             int n = sel.face_picker.face_count;
             int cur = static_cast<int>(edit_float_);
@@ -1582,7 +1823,9 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
 // reads as curving inward like a visor rather than lying flat on glass.
 // Draw text centred at `center`, rotated by `angle` radians about it. ImGui's
 // AddText has no rotation, so we rotate the glyph vertices it just emitted.
-static void dl_text_rot(ImDrawList* dl, ImFont* font, float size, ImVec2 center,
+// Straight text rotated about its centre (kept for non-radial callers; the
+// radial wheel now curves labels along the arc via dl_text_arc).
+[[maybe_unused]] static void dl_text_rot(ImDrawList* dl, ImFont* font, float size, ImVec2 center,
                         ImU32 col, const char* text, float angle) {
     const ImVec2 tsz = font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
     const int v0 = dl->VtxBuffer.Size;
@@ -1633,6 +1876,49 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
     };
     auto PR = [&](float ang, float r) -> ImVec2 {
         return project(std::cos(ang) * r, std::sin(ang) * r);
+    };
+
+    // Draw `text` curved along the circle of radius `r`, centred on angle `ac`,
+    // so a wedge label follows its arc instead of being a straight chord. Each
+    // glyph is placed at its own angle (arc-length = advance width) and rotated
+    // to the local tangent; on the bottom half the run is mirrored so it still
+    // reads upright. `ofs` shifts the glyph centres in screen space (for the
+    // drop shadow). Splits on UTF-8 boundaries so accented chars stay intact.
+    auto dl_text_arc = [&](float size, float r, float ac, ImU32 col,
+                           const char* text, ImVec2 ofs) {
+        const float total = font->CalcTextSizeA(size, FLT_MAX, 0.f, text).x;
+        if (total <= 0.f || r <= 0.f) return;
+        const bool flip = std::sin(ac) > 0.f;
+        float x = -total * 0.5f;                 // running left edge along the chord
+        for (const char* p = text; *p; ) {
+            const char* q = p + 1;
+            while ((static_cast<unsigned char>(*q) & 0xC0) == 0x80) ++q;   // UTF-8 continuation
+            char buf[8]; int len = 0;
+            for (const char* t = p; t < q && len < 7; ++t) buf[len++] = *t;
+            buf[len] = 0;
+            const ImVec2 gsz = font->CalcTextSizeA(size, FLT_MAX, 0.f, buf);
+            const float adv  = gsz.x;
+            if (adv > 0.f && *buf != ' ') {
+                const float u   = x + adv * 0.5f;            // glyph centre along the chord
+                const float dth = u / r;                     // arc-length → angle
+                const float th  = flip ? (ac - dth) : (ac + dth);
+                const float rot = flip ? (th - static_cast<float>(M_PI) * 0.5f)
+                                       : (th + static_cast<float>(M_PI) * 0.5f);
+                ImVec2 ctr = PR(th, r); ctr.x += ofs.x; ctr.y += ofs.y;
+                const int v0 = dl->VtxBuffer.Size;
+                dl->AddText(font, size, { ctr.x - gsz.x * 0.5f, ctr.y - gsz.y * 0.5f }, col, buf);
+                const int v1 = dl->VtxBuffer.Size;
+                const float s = std::sin(rot), c = std::cos(rot);
+                for (int i = v0; i < v1; ++i) {
+                    ImDrawVert& v = dl->VtxBuffer[i];
+                    const float dx = v.pos.x - ctr.x, dy = v.pos.y - ctr.y;
+                    v.pos.x = ctr.x + dx * c - dy * s;
+                    v.pos.y = ctr.y + dx * s + dy * c;
+                }
+            }
+            x += adv;
+            p = q;
+        }
     };
 
     auto fill_sector = [&](float r0, float r1, float a0, float a1, ImU32 col) {
@@ -1755,21 +2041,20 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
             // Icon slot (inner band) — kept upright.
             draw_icon(it, PR(ac, r0 + ring_thick * 0.30f), 16.f * ui_scale_, icon_col);
 
-            // Label + value follow the arc (rotated to the tangent; flipped on the
-            // bottom half so they never read upside-down).
-            float ta = ac + static_cast<float>(M_PI) * 0.5f;
-            if (std::sin(ac) > 0.f) ta += static_cast<float>(M_PI);
-
+            // Label + value curve along the wedge's arc (each glyph rotated to
+            // the local tangent; mirrored on the bottom half so they read
+            // upright). Drop shadow first, then the text.
             std::string label = to_upper(item_label(it));
             std::string val   = value_summary(it);
             const float lsz = primary ? fs * 0.98f : fs * 0.86f;
-            ImVec2 lp = PR(ac, r0 + ring_thick * 0.62f);
-            dl_text_rot(dl, font, lsz, { lp.x + 1.f, lp.y + 1.f }, IM_COL32(0, 0, 0, 170), label.c_str(), ta);
-            dl_text_rot(dl, font, lsz, lp, text_col, label.c_str(), ta);
+            const float lr  = r0 + ring_thick * 0.62f;
+            dl_text_arc(lsz, lr, ac, IM_COL32(0, 0, 0, 170), label.c_str(), { 1.f, 1.f });
+            dl_text_arc(lsz, lr, ac, text_col,               label.c_str(), { 0.f, 0.f });
             if (!val.empty()) {
-                ImVec2 vp = PR(ac, r0 + ring_thick * 0.88f);
+                const float vr = r0 + ring_thick * 0.88f;
                 ImU32 vc = primary ? IM_COL32(20, 22, 26, 230) : menu_with_alpha(accent, 200);
-                dl_text_rot(dl, font, fs * 0.78f, vp, vc, val.c_str(), ta);
+                dl_text_arc(fs * 0.78f, vr, ac, IM_COL32(0, 0, 0, 160), val.c_str(), { 1.f, 1.f });
+                dl_text_arc(fs * 0.78f, vr, ac, vc, val.c_str(), { 0.f, 0.f });
             }
         }
     }
