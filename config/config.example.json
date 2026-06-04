@@ -151,6 +151,29 @@
       { "gpio": 22, "active_low": true, "pull": "up", "short": "cam_pip_left", "long": "system_restart", "long_ms": 1200 }
     ]
   },
+  "inputs": {
+    "coprocessor": {
+      "_about": "OPTIONAL button/switch coprocessor (RP2350/RP2040). When enabled, an external MCU debounces the switches and streams presses to the Pi, dispatched through the same functions as the GPIO map above. Never required — leave disabled to use on-board GPIO only. Toggle live in System > GPIO Buttons > Button Coprocessor. See docs/coprocessor-input.md.",
+      "enabled": false,
+      "transport": "usb_serial",
+      "_transport_note": "'usb_serial' (USB CDC, default) or 'i2c' (specified but not implemented in v1).",
+      "device": "/dev/serial/by-id/usb-ProtoHUD_Buttons-if00",
+      "_device_note": "Use a stable /dev/serial/by-id/... path matched on the coprocessor's USB serial string — NOT /dev/ttyACMn, which races with the Teensy/SmartKnob/RAK4631.",
+      "baud": 115200,
+      "i2c_bus": "/dev/i2c-1",
+      "i2c_addr": 66,
+      "irq_gpio": -1,
+      "replace_local_gpio": false,
+      "_replace_note": "false = additive (GPIO slots + coproc both fire). true = coproc is the only button source (local GPIO poller is not started).",
+      "heartbeat_timeout_ms": 2000,
+      "buttons": [
+        { "id": 0, "short": "menu_select", "long": "menu_back" },
+        { "id": 1, "short": "menu_open",   "long": "system_restart" },
+        { "id": 2, "short": "boop_snout",  "long": "none" }
+      ],
+      "_buttons_note": "Maps the coprocessor's button ids to functions (same function ids as gpio.pins). The MCU reports 'button N, short/long'; the Pi decides what N means, so remapping stays here."
+    }
+  },
   "camera": {
     "autofocus_on_startup": true,
     "autofocus_sync": true,
