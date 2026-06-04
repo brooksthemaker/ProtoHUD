@@ -1,0 +1,21 @@
+(kicad_sch
+  (version 20230121)
+  (generator protohud_skeleton)
+  (uuid 833500fc-08ba-4260-bcba-d50b8d06254c)
+  (paper "A3")
+  (title_block
+    (title "ProtoHUD Carrier — 4. WS2812 LEDs")
+    (rev "A")
+    (company "ProtoHUD")
+  )
+  (lib_symbols)
+  (text "4. WS2812 LEDs" (at 25.4 25.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid adfde73a-7d66-48c8-9ce6-5ef4cd93fde5))
+  (text "------------------------------------------------------------" (at 25.4 28.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 60e9c47f-f305-44e8-b43b-05aecaf00c20))
+  (text "WS2812 ACCESSORY LEDS" (at 25.4 31.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 860995a0-a450-481f-b9c0-f2b95fd781c9))
+  (text "Parts: U3 74AHCT1G125 @5V, J4 LED conn (5V/DIN/GND), bulk cap, series R." (at 25.4 34.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid d28f4ec3-5047-4671-8580-4d9b55c57ef9))
+  (text "Net: WS2812 DIN from GPIO10 (SPI0 MOSI), buffered to 5V; +5V_LED (fused)." (at 25.4 37.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid fc13807f-d79b-4dd7-b958-a57bc1f2a745))
+  (text "NOTE: GPIO10 shared with MAX7219-SPI0 — one owner at a time (PINMAP rule 1)." (at 25.4 40.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 0a1c85d4-f0b8-4b7d-a351-98d2c78baded))
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)

@@ -1,0 +1,22 @@
+(kicad_sch
+  (version 20230121)
+  (generator protohud_skeleton)
+  (uuid 4d61ad14-7947-4b5f-b9ac-ea72b52475d0)
+  (paper "A3")
+  (title_block
+    (title "ProtoHUD Carrier — 8. GPIO Buttons")
+    (rev "A")
+    (company "ProtoHUD")
+  )
+  (lib_symbols)
+  (text "8. GPIO Buttons" (at 25.4 25.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 051dc3fd-f561-4f9b-918c-6946f2ef45fa))
+  (text "------------------------------------------------------------" (at 25.4 28.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 0919eee8-ea95-4484-adac-33e3c757b5fc))
+  (text "GPIO BUTTONS / BOOP — direct CM5 lines (few switches; bulk via I2C expander)" (at 25.4 31.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid f5324184-c038-4084-bbe8-e3db3367c5eb))
+  (text "Parts: J6 header, series R, optional ESD array." (at 25.4 34.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 5de5fb9b-5cb6-4776-9f99-e0fd73cae2ba))
+  (text "Nets: GPIO14, GPIO15, GPIO18, GPIO19 (free w/ HUB75), +3V3, GND." (at 25.4 37.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 1c25519f-81ae-474a-8ff8-1cc8a0db08a5))
+  (text "Wire switches to GND (active_low); enable internal pull-ups in config." (at 25.4 40.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid c9551422-ce1d-47bc-8864-1179943b99fa))
+  (text "NOTE: GPIO18/19 shared with expander INT (JX2) — allocate per build." (at 25.4 43.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 7072485c-c528-4e26-9147-fb3464bb440b))
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
