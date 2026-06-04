@@ -1,0 +1,26 @@
+{
+  "board": { "design_settings": {}, "layer_presets": [], "viewports": [] },
+  "boards": [],
+  "cvpcb": { "equivalence_files": [] },
+  "libraries": { "pinned_footprint_libs": [], "pinned_symbol_libs": [] },
+  "meta": { "filename": "ProtoHUD-Carrier.kicad_pro", "version": 1 },
+  "net_settings": { "classes": [ { "name": "Default", "clearance": 0.2 } ] },
+  "pcbnew": { "page_layout_descr_file": "" },
+  "schematic": {
+    "drawing": {},
+    "legacy_lib_dir": "",
+    "legacy_lib_list": []
+  },
+  "sheets": [
+      ["fb9b62d2-d9b7-4b5e-86af-44187a7f9335", "Root"],
+      ["7fcf71da-42d5-4843-bf7d-f52f6f1fa308", "1. Power"],
+      ["3812e784-9e95-4c5b-856a-ca4e97dc1851", "2. CM5"],
+      ["eff6a452-77ae-416d-87a8-cfe219f371e8", "3. Face Buffer (HUB75 / MAX7219)"],
+      ["833500fc-08ba-4260-bcba-d50b8d06254c", "4. WS2812 LEDs"],
+      ["aa17a73e-e56b-4b1f-a092-064b3bde23cb", "5. Sensors + I2C expansion"],
+      ["b12d177a-080c-49c4-8372-6cdd7e6e9f72", "6. USB"],
+      ["c814e905-b80c-42d1-beeb-925e48192849", "7. Cameras + Display"],
+      ["4d61ad14-7947-4b5f-b9ac-ea72b52475d0", "8. GPIO Buttons"]
+    ],
+  "text_variables": {}
+}

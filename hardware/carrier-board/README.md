@@ -14,6 +14,7 @@ against a fixed spec.
 - [`PINMAP.md`](PINMAP.md) — master CM5 GPIO/net allocation (the source of truth)
 - [`CONNECTORS.md`](CONNECTORS.md) — pin-by-pin pinouts for every connector + jumper
 - [`POWER.md`](POWER.md) — power tree, rail budget, sizing, battery + protection
+- [`kicad/`](kicad/) — KiCad hierarchical schematic skeleton (one sheet per block)
 - [`REQUIREMENTS.md`](REQUIREMENTS.md) — must-have requirements + nice-to-haves
 - [`BOM.md`](BOM.md) — bill of materials
 - [`MULTI-BACKEND.md`](MULTI-BACKEND.md) — running HUB75 + MAX7219 + custom panels at once (pin budget + wiring)
