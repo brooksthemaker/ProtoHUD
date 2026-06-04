@@ -138,22 +138,21 @@ surface `connected()`.
   connects or drops, log it and (optionally) re-enable the local GPIO poller so
   the user is never locked out of the menu.
 
-## Implementation checklist
+## Implementation status — landed
 
-1. **Firmware** (`coproc_inputs.cpp`, add to `CMakeLists.txt` SOURCES): open the
-   transport, reader thread with reconnect, line parser → `handle_button(id,
-   is_long)` → map via `short_map`/`long_map` → `dispatch_(func)`; heartbeat
-   tracking sets `connected_`.
-2. **Config**: parse `inputs.coprocessor` into `CoprocConfig` (button list →
-   `short_map`/`long_map` via `gpio_func_from_id`).
-3. **main.cpp**: after `gpio_dispatch` is built, if enabled construct
-   `CoprocInputs(cfg, gpio_dispatch)`; gate the local `GpioInputs` on
-   `!replace_local_gpio`.
-4. **Menu/status**: add the toggle + `connected()` readout.
-5. **MCU sketch** (RP2350/RP2040): debounce each input, classify short/long,
-   emit `BTN <id> SHORT|LONG`, send `HELLO` on boot + `PING` ~1 Hz. Either a
-   dedicated Pico, or a **second USB interface (composite UAC2 + CDC)** on the
-   RP2350 helmet-audio board if you don't want a separate MCU.
+1. ✅ **Reader** — `src/input/coproc_inputs.cpp` (in `CMakeLists.txt` SOURCES):
+   USB-CDC open + termios raw config, reader thread with reconnect/backoff,
+   length-bounded line parser → `handle_button(id, is_long)` → `short_map`/
+   `long_map` → `dispatch_(func)`; heartbeat tracking drives `connected()`.
+   (I²C transport is parsed but returns a clean "not implemented in v1".)
+2. ✅ **Config** — `main.cpp` parses `inputs.coprocessor` into `CoprocConfig`
+   (button list → `short_map`/`long_map` via `gpio_func_from_id`).
+3. ✅ **Wiring** — `main.cpp` constructs `CoprocInputs(cfg, gpio_dispatch)` when
+   enabled, sharing the dispatch with the GPIO poller; the local `GpioInputs`
+   is gated on `!(coproc enabled && replace_local_gpio)`.
+4. ✅ **Menu** — **System → GPIO Buttons → Button Coprocessor**: live Enabled
+   toggle (applies via reload) + a Status readout (disabled/offline/connected).
+5. ✅ **MCU sketch** — reference Arduino sketch + protocol at
+   [`../firmware/button_coproc/README.md`](../firmware/button_coproc/README.md).
 
-> Ask and I can implement steps 1–4 against this skeleton and add a reference
-> MCU sketch under `firmware/`.
+Example config lives in `config/config.example.json` under `inputs.coprocessor`.

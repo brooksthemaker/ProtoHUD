@@ -27,6 +27,7 @@
 #include "camera/viture_camera.h"
 #include "input/gpio_buttons.h"
 #include "input/gpio_inputs.h"
+#include "input/coproc_inputs.h"
 #include "input/gpio_function.h"
 #include "input/gamepad_input.h"
 #include "input/wireless_controller.h"
@@ -1468,7 +1469,14 @@ static std::vector<MenuItem> build_menu(
         std::shared_ptr<std::function<void()>> gpio_reload = nullptr,
         integrations::KdeConnectBridge* kdc_p = nullptr,
         std::vector<std::string>* kdc_ignore_p = nullptr,
-        std::vector<std::string>* kdc_msg_p = nullptr)
+        std::vector<std::string>* kdc_msg_p = nullptr,
+        // Optional button/switch coprocessor (input::CoprocInputs). enabled flag
+        // + a live status string getter + a reload hook, mirroring the GPIO
+        // poller's shared-after-construction pattern. All null when the build
+        // has no coprocessor support wired.
+        bool* coproc_enabled_p = nullptr,
+        std::shared_ptr<std::function<void()>> coproc_reload = nullptr,
+        std::shared_ptr<std::function<std::string()>> coproc_status = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -8048,6 +8056,39 @@ static std::vector<MenuItem> build_menu(
                 "Rebuild the GPIO poller from the current slots so pin / "
                 "function / pull / polarity edits take effect right away."));
 
+        // Optional button/switch coprocessor (RP2350/RP2040). When enabled, an
+        // external MCU debounces the switches and streams presses to the Pi,
+        // dispatched through the same functions as the GPIO slots above. The
+        // slots stay live unless replace_local_gpio is set in config.
+        if (coproc_enabled_p) {
+            std::vector<MenuItem> coproc_menu;
+            coproc_menu.push_back(with_desc(toggle("Enabled",
+                [coproc_enabled_p]{ return *coproc_enabled_p; },
+                [coproc_enabled_p, coproc_reload](bool v){
+                    *coproc_enabled_p = v;
+                    if (coproc_reload && *coproc_reload) (*coproc_reload)();
+                }),
+                "Use an external button coprocessor (USB/I\xC2\xB2""C). Applies "
+                "immediately. GPIO slots above stay active too unless "
+                "replace_local_gpio is set in config.json."));
+            if (coproc_status) {
+                MenuItem st = leaf("Status", []{});
+                st.label_fn = [coproc_status]{
+                    return std::string("Status: ") +
+                           (*coproc_status ? (*coproc_status)() : std::string("n/a"));
+                };
+                coproc_menu.push_back(with_desc(std::move(st),
+                    "Connection state reported by the coprocessor link "
+                    "(connected / offline). Button mapping is edited in "
+                    "config.json under inputs.coprocessor.buttons."));
+            }
+            gpio_btn_menu.push_back(with_desc(
+                submenu("Button Coprocessor", std::move(coproc_menu)),
+                "Optional external MCU (RP2350/RP2040) that handles button "
+                "debounce and streams presses to the Pi \xE2\x80\x94 frees GPIO "
+                "and offloads timing. See docs/coprocessor-input.md."));
+        }
+
         for (int i = 0; i < gpio_slot_count; ++i) {
             input::GpioPinCfg* p = &GP[i];
 
@@ -11507,6 +11548,43 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ── Optional button/switch coprocessor (input::CoprocInputs) ──────────────
+    // Opt-in: when inputs.coprocessor.enabled, an external MCU (RP2350/RP2040)
+    // debounces the switches and streams presses to the Pi over USB CDC (or
+    // I²C). Events resolve to the same input::GpioFunc dispatch as the GPIO
+    // slots, so it's additive (or, with replace_local_gpio, the only source).
+    // Reload + status are installed after gpio_dispatch exists (mirrors the
+    // GPIO poller's shared-after-construction pattern).
+    input::CoprocConfig coproc_cfg;
+    auto coproc_reload = std::make_shared<std::function<void()>>();
+    auto coproc_status = std::make_shared<std::function<std::string()>>();
+    if (cfg.contains("inputs") && cfg["inputs"].is_object() &&
+        cfg["inputs"].contains("coprocessor") &&
+        cfg["inputs"]["coprocessor"].is_object()) {
+        const json& jc = cfg["inputs"]["coprocessor"];
+        coproc_cfg.enabled            = jval(jc, "enabled", false);
+        coproc_cfg.transport          = jc.value("transport", coproc_cfg.transport);
+        coproc_cfg.device             = jc.value("device",    coproc_cfg.device);
+        coproc_cfg.baud               = jval(jc, "baud",      coproc_cfg.baud);
+        coproc_cfg.i2c_bus            = jc.value("i2c_bus",   coproc_cfg.i2c_bus);
+        coproc_cfg.i2c_addr           = jval(jc, "i2c_addr",  coproc_cfg.i2c_addr);
+        coproc_cfg.irq_gpio           = jval(jc, "irq_gpio",  coproc_cfg.irq_gpio);
+        coproc_cfg.replace_local_gpio = jval(jc, "replace_local_gpio", false);
+        coproc_cfg.heartbeat_timeout_ms =
+            jval(jc, "heartbeat_timeout_ms", coproc_cfg.heartbeat_timeout_ms);
+        if (jc.contains("buttons") && jc["buttons"].is_array()) {
+            for (const auto& jb : jc["buttons"]) {
+                if (!jb.is_object()) continue;
+                const int id = jval(jb, "id", -1);
+                if (id < 0) continue;
+                coproc_cfg.short_map[id] =
+                    input::gpio_func_from_id(jb.value("short", std::string("none")));
+                coproc_cfg.long_map[id] =
+                    input::gpio_func_from_id(jb.value("long",  std::string("none")));
+            }
+        }
+    }
+
     // KDE Connect lists — editable in the Phone menu, applied live to the bridge
     // and persisted to cfg["kdeconnect"]. ignore_list mutes servers/chats;
     // message_apps picks which apps get the big chat toast.
@@ -11624,7 +11702,8 @@ int main(int argc, char* argv[]) {
                                },
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
                                &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr,
-                               &kdc_ignore, &kdc_msgapps));
+                               &kdc_ignore, &kdc_msgapps,
+                               &coproc_cfg.enabled, coproc_reload, coproc_status));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -11894,9 +11973,16 @@ int main(int argc, char* argv[]) {
         }
     };
 
+    // Local GPIO polling runs unless a coprocessor is enabled in replace mode
+    // (then the coproc is the sole button source).
+    auto local_gpio_wanted = [&]{
+        return gpio_inputs_enabled &&
+               !(coproc_cfg.enabled && coproc_cfg.replace_local_gpio);
+    };
+
     auto gpio_inputs = std::make_unique<input::GpioInputs>(
         std::vector<input::GpioPinCfg>(gpio_pins.begin(), gpio_pins.end()), gpio_dispatch);
-    if (gpio_inputs_enabled && !gpio_inputs->init())
+    if (local_gpio_wanted() && !gpio_inputs->init())
         std::cerr << "[main] GPIO input map init failed (no pins assigned or chip busy)\n";
 
     // Live reload: tear down the poll thread + release the lines, then rebuild
@@ -11906,10 +11992,32 @@ int main(int argc, char* argv[]) {
         gpio_inputs.reset();
         gpio_inputs = std::make_unique<input::GpioInputs>(
             std::vector<input::GpioPinCfg>(gpio_pins.begin(), gpio_pins.end()), gpio_dispatch);
-        if (gpio_inputs_enabled && !gpio_inputs->init())
+        if (local_gpio_wanted() && !gpio_inputs->init())
             std::cerr << "[main] GPIO reload: init failed (no pins assigned or chip busy)\n";
         else
             std::cout << "[gpio] input map reloaded\n";
+    };
+
+    // ── Button coprocessor source (optional, opt-in) ─────────────────────────
+    // Shares gpio_dispatch with the GPIO poller. Reload rebuilds it on a menu
+    // toggle; status surfaces the link state to the GPIO Buttons menu.
+    auto coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+    if (coproc_cfg.enabled && !coproc_inputs->init())
+        std::cerr << "[main] button coprocessor init failed (transport unavailable)\n";
+
+    *coproc_reload = [&]{
+        coproc_inputs.reset();
+        coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+        if (coproc_cfg.enabled && !coproc_inputs->init())
+            std::cerr << "[main] coprocessor reload: init failed (transport unavailable)\n";
+        // Re-evaluate the local poller — replace-mode may have just changed
+        // whether GPIO should be running.
+        if (gpio_reload && *gpio_reload) (*gpio_reload)();
+    };
+    *coproc_status = [&]() -> std::string {
+        if (!coproc_cfg.enabled)        return "disabled";
+        if (!coproc_inputs)             return "offline";
+        return coproc_inputs->connected() ? "connected" : "offline";
     };
 
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
