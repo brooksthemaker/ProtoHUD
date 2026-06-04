@@ -13,6 +13,7 @@ against a fixed spec.
 - [`BLOCK-DIAGRAM.md`](BLOCK-DIAGRAM.md) — system block diagram (voltage domains + shifting boundary)
 - [`REQUIREMENTS.md`](REQUIREMENTS.md) — must-have requirements + nice-to-haves
 - [`BOM.md`](BOM.md) — bill of materials
+- [`MULTI-BACKEND.md`](MULTI-BACKEND.md) — running HUB75 + MAX7219 + custom panels at once (pin budget + wiring)
 
 ## Why a carrier board at all
 
