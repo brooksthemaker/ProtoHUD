@@ -18,9 +18,10 @@ Three 5 V domains off one input, plus 3.3 V derived on the CM5:
 
 ```mermaid
 flowchart TB
-    IN["5 V INPUT (J1)<br/>USB-C PD or battery+regulator"]:::pwr
-    IN --> PROT["fuse · reverse-polarity FET · TVS"]:::pwr
-    PROT --> BUS["5 V distribution (common GND)<br/>star + bulk caps"]:::pwr
+    IN["Ryobi 40 V battery (J1)<br/>~30–42 V"]:::pwr
+    IN --> PROT["fuse · reverse-polarity FET · TVS<br/>(≥ 50 V rated) · LVC"]:::pwr
+    PROT --> BUCK["40 V → 5 V buck regulator<br/>sized for the 5 V peak"]:::pwr
+    BUCK --> BUS["5 V distribution (common GND)<br/>star + bulk caps"]:::pwr
 
     BUS -->|"≥ 5 A"| CM5["CM5"]:::cm5
     CM5 --> R33["3.3 V (CM5 internal LDO)<br/>sensors ~47 mA (code)"]:::cm5
@@ -102,20 +103,61 @@ Per 64×32 P2.5 panel @ 5 V:
 software brightness cap, or **≥ 20 A** for uncapped full-white panels. Give
 HUB75 its own high-current feed; don't push 16 A through the CM5 rail.
 
-## Input options (it's a helmet — mind the current)
+## Input — Ryobi 40 V battery + 5 V regulator (selected)
 
-| Source | Reality |
-|--------|---------|
-| **USB-C PD** | 5 V/3 A (15 W) is *not enough* with panels. Use a **PD trigger to 9–20 V** + a buck to 5 V, or PD 5 V only for a brightness-capped build. |
-| **Battery pack (recommended)** | 2S–3S Li-ion (7.4–11.1 V) + a **5 V buck rated for the peak** (≥ 10–20 A). Higher pack voltage = lower input current = thinner wiring. |
-| **Single-cell power bank** | Can't sustain 16 A @ 5 V — only viable with a hard brightness cap / few panels. |
+Powered from a **Ryobi 40 V pack** (10S Li-ion: ~30 V empty → 36 V nominal →
+~42 V full) through a **step-down (buck) regulator to 5 V**. This is a strong
+choice for this load — high pack voltage means low *input* current, so the heavy
+amps only live on the short 5 V output side.
 
-> A boost from 1S Li-ion to 5 V at >10 A is impractical; prefer a **buck from a
-> higher-voltage pack**. Account for buck efficiency (~90%) in pack sizing.
+### Regulator selection (the critical part)
+- **Wide input range:** must accept ~30–42 V; spec the converter for **≥ 50 V
+  input** for margin (transients, full charge).
+- **Output power = your 5 V peak:** a 42 V → 5 V buck must supply the full board
+  draw. From the budget that's **~50 W typical (cap brightness)** or up to
+  **~120 W full-white** (24 A @ 5 V). Size the converter accordingly:
+  - Brightness-capped build → a **5 V / 10–15 A (50–75 W)** buck.
+  - Uncapped full-white panels → a **5 V / 25–30 A (120–150 W)** buck.
+- **Input current is small:** 120 W ÷ 40 V ÷ ~0.9 eff ≈ **~3.3 A** on the
+  battery side → input wiring can be **16–18 AWG**; the **5 V output** is where
+  the 20 A lives, so put the regulator **close to the panels** and keep the 5 V
+  run fat and short.
+- **Thermal:** at ~90 % efficiency a 120 W converter dumps **~12 W** as heat —
+  heatsink it and give it airflow.
+
+### Battery interface & safety
+- **Dock/adapter:** mount via a Ryobi 40 V tool-side dock (3D-printable mounts +
+  contacts, or an aftermarket adapter). Connect **B+ / B−**; the large center
+  contacts carry current.
+- **Low-voltage cutoff:** the pack's internal BMS protects the cells, but
+  behavior varies — add a **low-voltage cutoff / battery monitor** (~3.0 V/cell,
+  ~30 V pack) so the HUD shuts down gracefully rather than relying on the pack
+  folding under load. Surface pack voltage via INA219 / an ADC divider.
+- **Fuse the battery feed** right at the dock for the pack's fault current.
+
+### Runtime (≈ pack Wh ÷ load)
+| Pack | Energy | Typical (~50 W) | Full-white (~120 W) |
+|------|-------:|----------------:|--------------------:|
+| 4.0 Ah | ~144 Wh | ~2.5–3 h | ~1.1 h |
+| 6.0 Ah | ~216 Wh | ~4 h | ~1.7 h |
+
+> Energy ≈ Ah × ~36 V nominal; usable is a bit less after the buck (~90 %) and
+> the low-voltage cutoff.
+
+### Why this beats the alternatives here
+| Source | vs. the 40 V plan |
+|--------|-------------------|
+| USB-C PD 5 V/3 A | far too little (15 W) for panels |
+| 1S Li-ion + boost | impractical to boost to 5 V at >10 A |
+| **Ryobi 40 V + buck** | ✅ low input current, high capacity, hot-swappable packs |
 
 ## Protection & sequencing
 
-- **Input:** fuse/polyfuse + reverse-polarity P-FET + TVS (REQ R2.1).
+- **Input is now 40 V** — rate input-side protection for **≥ 50 V**: the fuse,
+  reverse-polarity P-FET (VDS ≥ 60 V), and TVS (standoff ~45 V) must be
+  battery-voltage parts, **not** the 5 V-class parts used downstream. The buck's
+  input cap must also be ≥ 50 V.
+- **Input:** fuse + reverse-polarity FET + TVS at the battery dock (REQ R2.1).
 - **Per rail:** fuse the HUB75 and WS2812 rails (R2.3/R2.4); consider **e-fuses**
   (TPS259x, REQ N3) for latch-off short protection.
 - **Bulk capacitance:** ≥ 1000 µF at the HUB75 connector, 470–1000 µF on CM5 and
