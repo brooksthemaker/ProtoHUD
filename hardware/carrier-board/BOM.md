@@ -83,6 +83,17 @@ with the default sensor set.
 | 35 | Test points | loop / pad | many | N9 | Rails + CLK/LAT/OE/SDA/SCL |
 | 36 | HDMI connectors + ESD | micro/full HDMI, ESD array | 1–2 | N10 | CM5 dual HDMI / VITURE |
 
+## I/O expansion (optional — buttons + LEDs, keep options open)
+
+| # | Part | Example P/N | Qty | Req | Notes |
+|---|------|-------------|-----|-----|-------|
+| 37 | I²C GPIO expander | MCP23017 | 1–8 | N14 | 16 bidir GPIO each; addr `0x20–0x22`; buttons + LED outputs |
+| 38 | INT pull-up + header | 10 kΩ + INTA → BCM 25 | 1 | N14 | interrupt-driven button reads |
+| 39 | Spare I²C / STEMMA QT header | JST-SH 1 mm | 1–2 | N15 | drop-in 2nd expander / ADS1115 / PCA9685 |
+| 40 | (future) analog ADC | ADS1115 | 0–1 | N15 | 4-ch 16-bit, addr `0x48–0x4B` |
+| 41 | (future) PWM / LED driver | PCA9685 | 0–1 | N15 | 16-ch PWM, addr `0x40–0x46` |
+| 42 | (alt) SPI expander / shift regs | MCP23S17 / 74HC165 / 74HC595 | 0+ | N16 | second lane on free SPI0 |
+
 ---
 
 ### Not on this board

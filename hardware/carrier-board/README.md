@@ -14,6 +14,7 @@ against a fixed spec.
 - [`REQUIREMENTS.md`](REQUIREMENTS.md) — must-have requirements + nice-to-haves
 - [`BOM.md`](BOM.md) — bill of materials
 - [`MULTI-BACKEND.md`](MULTI-BACKEND.md) — running HUB75 + MAX7219 + custom panels at once (pin budget + wiring)
+- [`IO-EXPANSION.md`](IO-EXPANSION.md) — expanding GPIO for buttons + LEDs (MCP23017 on I²C, keep options open)
 
 ## Why a carrier board at all
 

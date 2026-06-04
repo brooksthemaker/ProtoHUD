@@ -109,6 +109,15 @@ Both backends are 5 V-logic and share one 3.3 V → 5 V buffer block; a jumper
   connector placement chosen for cable routing inside the helmet.
 - **N13 — Reverse-mount/ low-profile** connectors where the board sits close to
   the shell.
+- **N14 — I/O expander(s)** — MCP23017 (I²C, 16 bidirectional GPIO) for bulk
+  buttons + LED outputs, on bus 1 (zero extra Pi pins). Plan addresses
+  `0x20–0x22` (avoid `0x23` = BH1750); bring **INTA → BCM 25** for
+  interrupt-driven reads. See [`IO-EXPANSION.md`](IO-EXPANSION.md).
+- **N15 — Spare I²C expansion header / STEMMA QT** (JST-SH 1 mm) with reserved
+  address space so a 2nd MCP23017, an **ADS1115** (analog in), or a **PCA9685**
+  (PWM / LED dimming) drops in with no respin. Break 2–3 INT lines to spare GPIO.
+- **N16 — Second expansion lane on SPI0** (free with HUB75) for **MCP23S17** or
+  **74HC165/595** shift registers if the I²C bus fills.
 
 ---
 
