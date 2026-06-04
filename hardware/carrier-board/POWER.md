@@ -18,10 +18,14 @@ Three 5 V domains off one input, plus 3.3 V derived on the CM5:
 
 ```mermaid
 flowchart TB
-    IN["Ryobi 40 V battery (J1)<br/>~30–42 V"]:::pwr
-    IN --> PROT["fuse · reverse-polarity FET · TVS<br/>(≥ 50 V rated) · LVC"]:::pwr
-    PROT --> BUCK["40 V → 5 V buck regulator<br/>sized for the 5 V peak"]:::pwr
-    BUCK --> BUS["5 V distribution (common GND)<br/>star + bulk caps"]:::pwr
+    subgraph EXT["External unit (belt/back)"]
+        IN["Ryobi 40 V battery<br/>~30–42 V"]:::pwr
+        PROT["fuse · RP-FET · TVS<br/>(≥ 50 V) · LVC"]:::pwr
+        BUCK["40 V → 5 V buck<br/>sized for 5 V peak"]:::pwr
+        IN --> PROT --> BUCK
+    end
+    BUCK ==>|"5 V umbilical (≤24 A!)<br/>fat/short + remote sense"| J1["J1 · 5 V in (helmet)<br/>5 V TVS + big bulk caps"]:::pwr
+    J1 --> BUS["5 V distribution (common GND)<br/>star + bulk caps"]:::pwr
 
     BUS -->|"≥ 5 A"| CM5["CM5"]:::cm5
     CM5 --> R33["3.3 V (CM5 internal LDO)<br/>sensors ~47 mA (code)"]:::cm5
@@ -103,12 +107,52 @@ Per 64×32 P2.5 panel @ 5 V:
 software brightness cap, or **≥ 20 A** for uncapped full-white panels. Give
 HUB75 its own high-current feed; don't push 16 A through the CM5 rail.
 
-## Input — Ryobi 40 V battery + 5 V regulator (selected)
+## Power delivery — external 40 V→5 V unit, 5 V to the helmet (selected)
 
-Powered from a **Ryobi 40 V pack** (10S Li-ion: ~30 V empty → 36 V nominal →
-~42 V full) through a **step-down (buck) regulator to 5 V**. This is a strong
-choice for this load — high pack voltage means low *input* current, so the heavy
-amps only live on the short 5 V output side.
+Architecture: a **Ryobi 40 V pack + buck regulator live in an external unit**
+(belt/back), and a **5 V umbilical feeds the helmet**. The carrier's J1 input is
+therefore **5 V**, and all 40 V parts (dock, protection, buck) live off-helmet.
+
+> ⚠️ **The catch — the umbilical now carries the full helmet current at 5 V.**
+> Up to ~16–24 A (panels) flows through the cable, and 5 V has almost no margin
+> (CM5 wants 4.75–5.25 V; panels dim/colour-shift below ~4.5 V). This *undoes*
+> the low-current benefit of the 40 V battery, which only applied on the wire
+> between the pack and the buck.
+
+### Umbilical voltage drop (round-trip, copper)
+Drop = I × R, with R = 2 × length × wire resistance. For a ~3 ft (0.9 m) run:
+
+| 5 V load | 10 AWG (~6 mΩ) | 12 AWG (~9.5 mΩ) | 14 AWG (~15 mΩ) |
+|---------:|---------------:|-----------------:|----------------:|
+| 10 A (capped) | 0.06 V (1.2%) ✅ | 0.10 V (1.9%) ✅ | 0.15 V (3%) ⚠️ |
+| 20 A | 0.12 V (2.4%) ⚠️ | 0.19 V (3.8%) ⚠️ | 0.30 V (6%) ❌ |
+| 24 A (full white) | 0.14 V (2.9%) ⚠️ | 0.23 V (4.6%) ❌ | 0.36 V (7%) ❌ |
+
+Plus I²R heat in the cable (e.g. 20 A through 12 AWG ≈ 3.8 W). Longer runs scale
+linearly worse.
+
+### Making the 5 V feed work
+- **Fat + short umbilical** — 10–12 AWG silicone, as short as the build allows.
+- **Brightness cap** in software keeps the panels near the ~10 A column (the
+  green/✅ region) instead of full-white.
+- **Remote sense** — if the external buck supports 4-wire sense, run sense leads
+  to the carrier so it regulates 5 V *at the helmet*, cancelling cable drop.
+- **Large bulk capacitance at J1** to ride out spikes the cable can't deliver.
+- Consider **separate feeds** for the panel rail vs CM5 so a panel surge doesn't
+  drag the CM5 input down.
+
+### Strongly consider instead: distribute 40 V, step down *in* the helmet
+Putting the buck **on/near the carrier** and running **40 V down the umbilical**
+drops the cable current to **~3 A** — so a thin, light cable with negligible
+drop, and no high-current 5 V umbilical at all. Same battery, same buck, just
+relocated. This is the lower-loss, lighter-cable option; the only reasons to keep
+the buck external are to keep 40 V off the helmet (safety/regs) or to move the
+converter's bulk/heat off your head. **If you can, step down at the helmet.**
+
+### Regulator (in the external unit either way)
+
+The **40 V → 5 V buck** specs are unchanged — high pack voltage means low input
+current; the heavy amps live on the 5 V output (which is now the umbilical).
 
 ### Regulator selection (the critical part)
 - **Wide input range:** must accept ~30–42 V; spec the converter for **≥ 50 V
@@ -153,11 +197,14 @@ amps only live on the short 5 V output side.
 
 ## Protection & sequencing
 
-- **Input is now 40 V** — rate input-side protection for **≥ 50 V**: the fuse,
-  reverse-polarity P-FET (VDS ≥ 60 V), and TVS (standoff ~45 V) must be
-  battery-voltage parts, **not** the 5 V-class parts used downstream. The buck's
-  input cap must also be ≥ 50 V.
-- **Input:** fuse + reverse-polarity FET + TVS at the battery dock (REQ R2.1).
+Split across the two units:
+
+- **External unit (40 V):** rate input protection for **≥ 50 V** — fuse,
+  reverse-polarity P-FET (VDS ≥ 60 V), TVS (~45 V standoff), buck input cap
+  ≥ 50 V. This is where the battery-voltage parts live.
+- **Carrier / helmet (5 V at J1):** 5 V-class reverse-polarity FET + TVS
+  (SMBJ5.0A) + **large bulk capacitance** at the input to absorb umbilical drop
+  and spikes (REQ R2.1). If using remote sense, bring the sense pair to J1.
 - **Per rail:** fuse the HUB75 and WS2812 rails (R2.3/R2.4); consider **e-fuses**
   (TPS259x, REQ N3) for latch-off short protection.
 - **Bulk capacitance:** ≥ 1000 µF at the HUB75 connector, 470–1000 µF on CM5 and

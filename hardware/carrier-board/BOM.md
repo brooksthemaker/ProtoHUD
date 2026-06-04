@@ -18,12 +18,11 @@ with the default sensor set.
 
 | # | Part | Example P/N | Qty | Req | Notes |
 |---|------|-------------|-----|-----|-------|
-| 3 | Battery dock + connector | Ryobi 40 V tool-side mount + XT60 | 1 | M2.1 | ~30–42 V input; B+/B− |
-| 3b | **40 V → 5 V buck regulator** | sized for 5 V peak (10–30 A) | 1 | M2.2 | wide-input ≥50 V; heatsinked. See POWER.md |
-| 3c | Low-voltage cutoff / monitor | ~30 V (3.0 V/cell) | 1 | M2.1 | graceful shutdown / cell safety |
-| 4 | Input fuse | per pack fault current | 1 | M2.1 | at the battery dock |
-| 5 | Reverse-polarity P-FET | VDS ≥ 60 V | 1 | M2.1 | rated for 40 V input |
-| 6 | TVS diode (input) | ~45 V standoff (e.g. SMBJ40A) | 1 | M2.1 | 40 V transient clamp |
+| — | *External power unit (off-helmet):* Ryobi 40 V dock, ≥50 V fuse/RP-FET/TVS, **40 V→5 V buck** (10–30 A, heatsinked), low-voltage cutoff | — | 1 | M2.1/2 | belt/back; outputs 5 V on the umbilical. See POWER.md |
+| 3 | 5 V input connector (helmet) | XT60 / fat polarized | 1 | M2.1 | umbilical from external unit; 10–12 AWG |
+| 3b | Bulk cap at J1 | ≥ 2200 µF low-ESR | 1 | M2.1 | rides umbilical drop/spikes |
+| 5 | Reverse-polarity P-FET (5 V) | e.g. DMP3098L | 1 | M2.1 | helmet-side, 5 V-class |
+| 6 | TVS diode (5 V) | SMBJ5.0A | 1 | M2.1 | helmet-side transient clamp |
 | 7 | Bulk cap, CM5 rail | 470–1000 µF, low-ESR | 1–2 | M2.2 | |
 | 8 | Bulk cap, HUB75 rail | ≥ 1000 µF | 1+ | M2.3 | At panel connector |
 | 9 | Bulk cap, WS2812 rail | 470–1000 µF | 1 | M2.4 | |
