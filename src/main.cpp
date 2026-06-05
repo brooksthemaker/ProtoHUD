@@ -9278,62 +9278,111 @@ static std::vector<MenuItem> build_menu(
             }
             return *usb_cache;
         };
-        // Share a capture's image files with the paired phone over KDE Connect.
-        auto send_qr_phone = [kdc_p, &state](const QrCapture& c) {
-            const bool ok = kdc_p && kdc_p->device_ready();
-            int n = 0;
-            if (ok && !c.folder.empty()) {
-                std::error_code ec;
-                for (const auto& e : std::filesystem::directory_iterator(c.folder, ec))
-                    if (e.is_regular_file() && e.path().extension() == ".png"
-                        && kdc_p->share_file(e.path().string())) ++n;
+        // Derive a filename-safe, human-ish name from a code's text so the image
+        // matches its link in the manifest. Host/path for URLs, else first chars,
+        // plus a short hash of the full text to keep it unique.
+        auto qr_parsed_name = [](const std::string& text) -> std::string {
+            std::string base = text;
+            const auto scheme = base.find("://");
+            if (scheme != std::string::npos) base = base.substr(scheme + 3);
+            std::string out;
+            for (char ch : base) {
+                if (std::isalnum(static_cast<unsigned char>(ch))) out += ch;
+                else if (ch == '.' || ch == '-' || ch == '_') out += ch;
+                else out += '_';
+                if (out.size() >= 40) break;
             }
+            if (out.empty()) out = "qr";
+            char hx[8];
+            std::snprintf(hx, sizeof(hx), "%04x",
+                          static_cast<unsigned>(std::hash<std::string>{}(text) & 0xffff));
+            return out + "_" + hx;
+        };
+        // Stage a temp bundle: each code's image copied to <parsed_name>.png plus
+        // a qr_links.txt manifest mapping names → links. Returns the file list.
+        auto build_qr_bundle = [qr_parsed_name](const std::vector<QrCapture>& caps)
+            -> std::vector<std::string> {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const fs::path dir = fs::temp_directory_path(ec) / "protohud_qr_share";
+            fs::remove_all(dir, ec);
+            fs::create_directories(dir, ec);
+            std::vector<std::string> files;
+            std::ofstream man((dir / "qr_links.txt").string());
+            if (man) man << "ProtoHUD scanned codes\n======================\n\n";
+            for (const auto& c : caps) {
+                const std::string nm = qr_parsed_name(c.text);
+                std::string src;
+                if (!c.folder.empty()) {
+                    for (const char* pref : {"camera.png", "decode.png"}) {
+                        const fs::path p = fs::path(c.folder) / pref;
+                        if (fs::exists(p, ec)) { src = p.string(); break; }
+                    }
+                    if (src.empty())
+                        for (const auto& e : fs::directory_iterator(c.folder, ec))
+                            if (e.is_regular_file() && e.path().extension() == ".png") {
+                                src = e.path().string(); break; }
+                }
+                if (!src.empty()) {
+                    const fs::path dst = dir / (nm + ".png");
+                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+                    if (!ec) files.push_back(dst.string());
+                }
+                if (man) {
+                    char when[24] = "";
+                    if (c.timestamp > 0) { time_t t = static_cast<time_t>(c.timestamp);
+                        strftime(when, sizeof(when), "%Y-%m-%d %H:%M", localtime(&t)); }
+                    man << nm << ".png\n    " << c.text << "\n    [" << c.type
+                        << (when[0] ? std::string("  ") + when : std::string()) << "]\n\n";
+                }
+            }
+            if (man) { man.close(); files.push_back((dir / "qr_links.txt").string()); }
+            return files;
+        };
+        // Send a set of captures (images + manifest) to the paired phone.
+        auto send_to_phone = [kdc_p, build_qr_bundle, &state](const std::vector<QrCapture>& caps) {
+            const bool dev = kdc_p && kdc_p->device_ready();
+            int n = 0;
+            if (dev) for (const auto& f : build_qr_bundle(caps))
+                if (kdc_p->share_file(f)) ++n;
             std::lock_guard<std::mutex> lk(state.mtx);
             Notification nt; nt.type = NotifType::App;
-            nt.title = ok ? "Sent to phone" : "No phone connected";
-            nt.body  = ok ? (std::to_string(n) + " QR file(s) shared via KDE Connect")
-                          : "Pair + connect a device in KDE Connect first.";
+            nt.title = dev ? "Sent to phone" : "No phone connected";
+            nt.body  = dev ? (std::to_string(n) + " file(s) shared (images + qr_links.txt)")
+                           : "Pair + connect a device in KDE Connect first.";
             nt.auto_dismiss_s = 5.f; state.notifs.push(std::move(nt));
         };
-        // Copy a capture's folder (+ a link.txt) to a chosen mount.
-        auto export_qr_usb_to = [&state](const QrCapture& c, const std::string& dest) {
+        // Copy the bundle (renamed images + manifest) to a chosen mount.
+        auto export_to_usb = [build_qr_bundle, &state](const std::vector<QrCapture>& caps,
+                                                       const std::string& dest) {
             namespace fs = std::filesystem;
-            std::string body; bool ok = false;
-            if (c.folder.empty())      body = "Nothing to export for this code.";
-            else {
-                std::error_code ec;
-                const fs::path target = fs::path(dest) /
-                    ("protohud_qr_" + fs::path(c.folder).filename().string());
-                fs::create_directories(target, ec);
-                int n = 0;
-                for (const auto& e : fs::directory_iterator(c.folder, ec))
-                    if (e.is_regular_file()) {
-                        fs::copy_file(e.path(), target / e.path().filename(),
-                                      fs::copy_options::overwrite_existing, ec);
-                        if (!ec) ++n;
-                    }
-                std::ofstream f((target / "link.txt").string());
-                if (f) f << c.text << "\n";
-                ok = (n > 0);
-                body = ok ? ("Copied " + std::to_string(n) + " file(s) to " + target.string())
-                          : ("Could not write to " + dest);
+            std::error_code ec;
+            const fs::path target = fs::path(dest) / "protohud_qr";
+            fs::create_directories(target, ec);
+            int n = 0;
+            for (const auto& f : build_qr_bundle(caps)) {
+                fs::copy_file(f, target / fs::path(f).filename(),
+                              fs::copy_options::overwrite_existing, ec);
+                if (!ec) ++n;
             }
             std::lock_guard<std::mutex> lk(state.mtx);
             Notification nt; nt.type = NotifType::App;
-            nt.title = ok ? "Exported to USB" : "Export failed";
-            nt.body  = body; nt.auto_dismiss_s = 6.f; state.notifs.push(std::move(nt));
+            nt.title = n > 0 ? "Exported to USB" : "Export failed";
+            nt.body  = n > 0 ? ("Copied " + std::to_string(n) + " file(s) to " + target.string())
+                             : ("Could not write to " + dest);
+            nt.auto_dismiss_s = 6.f; state.notifs.push(std::move(nt));
         };
-        // Build the "Export / Send" target list (phone + each connected drive),
-        // wiring on_phone()/on_usb(path) to whatever the caller wants exported.
+        // Build the "Export / Send" target list (phone + each connected drive).
+        // get_caps() returns the captures to export (one row, or all).
         auto build_export_targets =
-            [kdc_p, list_usb_mounts](std::function<void()> on_phone,
-                                     std::function<void(std::string)> on_usb) {
+            [kdc_p, list_usb_mounts, send_to_phone, export_to_usb](
+                std::function<std::vector<QrCapture>()> get_caps) {
             std::vector<MenuItem> t;
             MenuItem p; p.type = MenuItemType::LEAF; p.label = "phone";
             p.label_fn   = [kdc_p]{ return std::string("Phone: ") +
                                     (kdc_p ? kdc_p->active_device_name() : std::string()); };
             p.visible_fn = [kdc_p]{ return kdc_p && kdc_p->device_ready(); };
-            p.action     = on_phone;
+            p.action     = [send_to_phone, get_caps]{ send_to_phone(get_caps()); };
             t.push_back(std::move(p));
             for (int j = 0; j < 6; ++j) {
                 MenuItem m; m.type = MenuItemType::LEAF; m.label = "drive";
@@ -9341,9 +9390,9 @@ static std::vector<MenuItem> build_menu(
                     const auto& v = list_usb_mounts();
                     return j < (int)v.size() ? ("USB: " + v[j].second) : std::string(); };
                 m.visible_fn = [list_usb_mounts, j]{ return j < (int)list_usb_mounts().size(); };
-                m.action     = [on_usb, list_usb_mounts, j]{
+                m.action     = [export_to_usb, get_caps, list_usb_mounts, j]{
                     const auto& v = list_usb_mounts();
-                    if (j < (int)v.size()) on_usb(v[j].first); };
+                    if (j < (int)v.size()) export_to_usb(get_caps(), v[j].first); };
                 t.push_back(std::move(m));
             }
             MenuItem none; none.type = MenuItemType::LEAF; none.label = "(no devices connected)";
@@ -9376,25 +9425,19 @@ static std::vector<MenuItem> build_menu(
                 "Delete every saved QR code and its folder."));
         }
         // Export / Send All — to a chosen connected device (phone or a drive).
+        // One bundle with every code's image + a combined qr_links.txt manifest.
         {
-            auto for_all = [&state](const std::function<void(const QrCapture&)>& fn){
-                std::vector<QrCapture> items;
-                { std::lock_guard<std::mutex> lk(state.mtx);
-                  items.assign(state.qr_captures.items.begin(),
-                               state.qr_captures.items.end()); }
-                for (const auto& c : items) fn(c);
-            };
             MenuItem all = submenu("Export / Send All", build_export_targets(
-                [for_all, send_qr_phone]{
-                    for_all([&send_qr_phone](const QrCapture& c){ send_qr_phone(c); }); },
-                [for_all, export_qr_usb_to](std::string dest){
-                    for_all([&export_qr_usb_to, dest](const QrCapture& c){
-                        export_qr_usb_to(c, dest); }); }));
+                [&state]() -> std::vector<QrCapture> {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    return std::vector<QrCapture>(state.qr_captures.items.begin(),
+                                                  state.qr_captures.items.end());
+                }));
             all.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
                                        return !state.qr_captures.items.empty(); };
             qmenu.push_back(with_desc(std::move(all),
-                "Send every saved QR code's files to a connected device (the paired "
-                "phone, or a USB/external drive)."));
+                "Send all saved codes to a connected device as named images plus a "
+                "single qr_links.txt listing every link."));
         }
         // Capture rows (newest first).
         for (int i = 0; i < 40; ++i) {
@@ -9434,11 +9477,10 @@ static std::vector<MenuItem> build_menu(
             });
             del.warn_fn = []{ return true; };
             MenuItem exp = submenu("Export / Send", build_export_targets(
-                [send_qr_phone, cap_at, i]{ send_qr_phone(cap_at(i)); },
-                [export_qr_usb_to, cap_at, i](std::string dest){ export_qr_usb_to(cap_at(i), dest); }));
+                [cap_at, i]() -> std::vector<QrCapture> { return { cap_at(i) }; }));
             exp.visible_fn = [cap_at, i]{ return !cap_at(i).folder.empty(); };
-            exp.description = "Send this code's files to a connected device — the "
-                              "paired phone (KDE Connect) or any plugged-in USB drive.";
+            exp.description = "Send this code (image + a qr_links.txt) to a connected "
+                              "device — the paired phone (KDE Connect) or a USB drive.";
             row.children = { std::move(open), std::move(exp), std::move(del) };
             row.context_panel_title = "QR Code";
             row.context_panel_draw  = [draw_cap, cap_at, i](ImDrawList* dl, ImVec2 o, ImVec2 sz){
