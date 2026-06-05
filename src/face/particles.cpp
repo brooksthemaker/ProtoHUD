@@ -925,53 +925,67 @@ class WaterEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
+        if (dt <= 0.0) return;
+        dt = std::min(dt, 0.05);   // clamp big frame gaps so the slosh solver stays stable
         // viscosity 0 = thin/snappy water, 1 = thick/sluggish (lags + resists slosh).
         const double v = std::clamp(jnum(cfg_, "viscosity", 0.3), 0.0, 1.0);
-        // Smooth tilt + pitch so a thicker liquid lags behind head movement.
         if (!tilt_init_) {
             tilt_smooth_  = motion_.roll_deg;
             pitch_smooth_ = motion_.pitch_deg;
             tilt_init_ = true;
         }
-        const double rate = std::min(1.0, dt * 8.0 * (1.0 - 0.9 * v));
+        // The "resting" lean follows head roll (gravity); a thicker liquid lags.
+        const double rate = std::min(1.0, dt * 6.0 * (1.0 - 0.85 * v));
         tilt_smooth_  += (motion_.roll_deg  - tilt_smooth_)  * rate;
         pitch_smooth_ += (motion_.pitch_deg - pitch_smooth_) * rate;
 
-        phase_ += jnum(cfg_, "wave_speed", 2.0) * (1.0 - 0.7 * v) * dt;   // slower ripple
-        const double slosh_max = jnum(cfg_, "slosh", h_ * 0.10) * (1.0 - 0.85 * v);
-        // Gyro yaw-rate + linear accel kick the surface ripple; a little idle
-        // motion keeps it alive at rest.
-        const double bump = std::min(1.0, std::fabs(motion_.yaw_rate) / 180.0
-                                        + std::fabs(motion_.accel_g - 1.0));
-        const double target = (0.15 + 0.85 * bump) * slosh_max;
-        const double ease = std::min(1.0, dt * 3.0 * (1.0 - 0.85 * v));   // sluggish response
-        amp_ += (target - amp_) * ease;
+        // Sloshing as a damped spring: slosh_x_ is the extra height (px) the
+        // fluid piles up at the right wall; it overshoots and settles like a
+        // real liquid. Driven by quick tilts, yaw rate and linear accel.
+        const double k = 34.0 * (1.0 - 0.45 * v);     // stiffness → slosh frequency
+        const double c = 5.0 + 14.0 * v;              // damping → thicker settles faster
+        const double drive = (motion_.roll_deg - tilt_smooth_) * 0.9
+                           + motion_.yaw_rate * 0.025
+                           + (motion_.accel_g - 1.0) * 7.0;
+        const double accel = -k * slosh_x_ - c * slosh_v_ + drive * (h_ * 0.02);
+        slosh_v_ += accel * dt;
+        slosh_x_  = std::clamp(slosh_x_ + slosh_v_ * dt, -h_ * 0.5, h_ * 0.5);
+
+        phase_ += jnum(cfg_, "wave_speed", 2.0) * (1.0 - 0.6 * v) * dt;   // travelling ripple
+        // Surface chop scales with how hard it's sloshing, plus a faint idle ripple.
+        const double target = (0.25 + std::min(2.0, std::fabs(slosh_v_) * 0.06))
+                            * (1.0 - 0.55 * v);
+        amp_ += (target - amp_) * std::min(1.0, dt * 4.0);
 
         update_bubbles(dt);
     }
     cv::Mat render() override {
         cv::Mat c = blank();
         const std::vector<Color> cols = read_colors();
-        const int A = (int)(std::clamp(jnum(cfg_, "alpha", 0.85), 0.0, 1.0) * 255.0);
+        const double alpha = std::clamp(jnum(cfg_, "alpha", 0.85), 0.0, 1.0);
         const double bottom = ch_ - 1;                 // canvas-space deepest row
         for (int lx = 0; lx < w_; ++lx) {
-            const double sy = surface_y_local(lx) + oy_;    // back to canvas-space row
+            const double sy = surface_y_local(lx) + oy_;    // canvas-space surface (float)
             const double span = std::max(1.0, bottom - sy);
             for (int ly = 0; ly < h_; ++ly) {
-                const double Y = oy_ + ly;
-                if (Y < sy) continue;                  // above the liquid surface
-                const Color col = sample_grad(cols, (Y - sy) / span);   // 0 surface → 1 deep
-                draw_pixel(c, lx, ly, col.r, col.g, col.b, A);
-            }
-            const int surf_ly = (int)std::lround(sy) - oy_;             // surface line, local
-            if (surf_ly >= 0 && surf_ly < h_) {
-                const Color s = cols.front();
-                draw_pixel(c, lx, surf_ly, std::min(255, s.r + 90),
-                           std::min(255, s.g + 90), std::min(255, s.b + 90),
-                           std::min(255, A + 40));
+                const double Y = oy_ + ly;              // top edge of this pixel
+                // Sub-pixel coverage: how much of this pixel sits below the
+                // surface. Soft top edge → no cartoony stair-stepping.
+                const double cover = std::clamp((Y + 1.0) - sy, 0.0, 1.0);
+                if (cover <= 0.0) continue;
+                const double depth = std::clamp((Y - sy) / span, 0.0, 1.0);
+                Color col = sample_grad(cols, depth);
+                // Specular sheen: lighten the first few px under the surface so it
+                // catches the light like a real meniscus, fading with depth.
+                const double sheen = std::exp(-std::max(0.0, Y - sy) / 2.2) * 0.55;
+                col.r = (int)std::lround(col.r + (255 - col.r) * sheen);
+                col.g = (int)std::lround(col.g + (255 - col.g) * sheen);
+                col.b = (int)std::lround(col.b + (255 - col.b) * sheen);
+                draw_pixel(c, lx, ly, col.r, col.g, col.b,
+                           (int)std::lround(alpha * 255.0 * cover));
             }
         }
-        render_bubbles(c, cols, A);
+        render_bubbles(c, cols, (int)(alpha * 255.0));
         return c;
     }
 private:
@@ -987,13 +1001,27 @@ private:
     double surface_y_local(double lx) const {
         const double base  = ch_ * (1.0 - level_eff());
         const double ccx   = cw_ * 0.5;
+        const double half  = std::max(1.0, cw_ * 0.5);
         const double waven = jnum(cfg_, "wave_count", 2.0);
         const double gain  = jnum(cfg_, "tilt_gain", 1.0);
         const double roll  = tilt_smooth_ * gain * kPi / 180.0;
-        const double slope = std::tan(std::clamp(roll, -1.2, 1.2));
         const double X     = ox_ + lx;
-        const double syc   = base - (X - ccx) * slope
-                           + amp_ * std::sin(waven * kTau * X / std::max(1, cw_) + phase_);
+        const double dx    = X - ccx;
+        // gravity lean (roll) + dynamic slosh lean (the fluid piled up at a wall)
+        double syc = base - dx * std::tan(std::clamp(roll, -1.2, 1.2))
+                          - slosh_x_ * (dx / half);
+        // Multi-frequency travelling chop — superposed waves read as real water
+        // instead of one cartoony sine. Amplitude follows slosh activity (amp_).
+        const double kf = waven * kTau / std::max(1, cw_);
+        syc += amp_ * (0.60 * std::sin(kf * X        + phase_)
+                     + 0.30 * std::sin(kf * X * 1.7  - phase_ * 1.3 + 1.1)
+                     + 0.22 * std::sin(kf * X * 0.5  + phase_ * 0.6 + 2.3));
+        // Meniscus: the surface curls up where it meets the container walls.
+        const double menisc = jnum(cfg_, "meniscus", 1.5);
+        if (menisc > 0.0) {
+            const double dl = X, dr = (cw_ - 1) - X;
+            syc -= menisc * (std::exp(-dl / 2.5) + std::exp(-dr / 2.5));
+        }
         return syc - oy_;
     }
     void update_bubbles(double dt) {
@@ -1072,6 +1100,7 @@ private:
     }
     double phase_ = 0.0, amp_ = 0.0;
     double tilt_smooth_ = 0.0, pitch_smooth_ = 0.0;
+    double slosh_x_ = 0.0, slosh_v_ = 0.0;   // damped-spring slosh (lean px + velocity)
     bool   tilt_init_ = false;
     std::vector<Particle> bubbles_;
 };
