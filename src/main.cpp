@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cfloat>
 #include <cmath>
+#include <random>
 #include <cctype>
 #include <ctime>
 #include <csignal>
@@ -856,6 +857,10 @@ struct LayerCfg {
     // -1 means "use the effect's historical default."
     float direction_deg = -1.f;
     std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
+    // Motion reactivity (opt-in): drives the layer's direction from head
+    // movement. "none" | "heading" (lock to compass) | "yaw" (drift when
+    // turning) | "tilt" (skew like gravity when rolling the head).
+    std::string direction_from = "none";
 };
 struct LayeredEffectState {
     static constexpr int kMaxLayers = 5;
@@ -3994,7 +3999,8 @@ static std::vector<MenuItem> build_menu(
     // drift the effect uses by default.
     auto effect_is_directional = [](const std::string& e) {
         return e == "snow" || e == "rain" || e == "embers"
-            || e == "confetti" || e == "clouds";
+            || e == "confetti" || e == "clouds"
+            || e == "lightning" || e == "meteor" || e == "bubbles";
     };
     static LayeredEffectState pf_layered;
     LayeredEffectState* pflz = &pf_layered;   // static address — safe to capture
@@ -4018,6 +4024,8 @@ static std::vector<MenuItem> build_menu(
             // class falls back to its historical default angle.
             if (L.direction_deg >= 0.f)
                 layer["direction_deg"] = L.direction_deg;
+            if (L.direction_from != "none")
+                layer["direction_from"] = L.direction_from;
             out["layers"].push_back(layer);
         }
         return out;
@@ -4045,6 +4053,7 @@ static std::vector<MenuItem> build_menu(
             L.speed_max = jl.value("speed_max", 15.f);
             L.blend     = jl.value("blend", std::string("add"));
             L.direction_deg = jl.value("direction_deg", -1.f);
+            L.direction_from = jl.value("direction_from", std::string("none"));
         }
     };
 
@@ -4054,6 +4063,7 @@ static std::vector<MenuItem> build_menu(
     static const char* const kLayerEffects[] = {
         "none", "sparkle", "embers", "rain", "snow",
         "confetti", "rings", "fireflies", "clouds",
+        "lightning", "meteor", "bubbles", "fireworks", "vortex",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
@@ -4302,6 +4312,9 @@ static std::vector<MenuItem> build_menu(
                 return with_panel(submenu("Color", std::move(color_items)),
                                   "Color Picker", picker_draw);
             })(),
+            slider("Density",    1.f, 120.f,  1.f, "",
+                [L]{ return static_cast<float>(L->count); },
+                [L](float v){ L->count = static_cast<int>(v); }),
             slider("Speed Min",  0.f, 100.f,  1.f, "",
                 [L]{ return L->speed_min; },
                 [L](float v){ L->speed_min = v; if (L->speed_max < v) L->speed_max = v; }),
@@ -4319,6 +4332,21 @@ static std::vector<MenuItem> build_menu(
                     return effect_is_directional(L->effect);
                 };
                 return dir;
+            })(),
+            // Motion reactivity — couple this layer's direction to head movement.
+            ([&]{
+                static const char* const kMotionSrc[] = {"none", "heading", "yaw", "tilt"};
+                std::vector<MenuItem> msrc;
+                for (const char* s : kMotionSrc)
+                    msrc.push_back(leaf_sel(s,
+                        [L, s]{ L->direction_from = s; },
+                        [L, s]{ return L->direction_from == s; }));
+                MenuItem m = with_desc(submenu("Motion Reactive", std::move(msrc)),
+                    "Drive this layer's direction from the IMU: heading locks it "
+                    "to the compass, yaw makes it drift as you turn your head, "
+                    "tilt skews it like gravity when you roll. Apply Now to push.");
+                m.label_fn = [L]{ return std::string("Motion: ") + L->direction_from; };
+                return m;
             })(),
             submenu("Blend Mode", std::move(blend_items)),
             std::move(move_up),
@@ -4344,6 +4372,57 @@ static std::vector<MenuItem> build_menu(
 
     layered_items.push_back(leaf("Apply Now",
         [build_layered_spec, pf_set_effect_json]{
+            if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
+        }));
+
+    // Built-in presets — apply a curated preset directly (also seeds the builder
+    // so you can tweak from there). Names mirror particles.cpp::presets().
+    {
+        static const char* const kBuiltinPresets[] = {
+            "gentle_snow", "heavy_snow", "campfire", "galaxy", "party", "radar",
+            "fire", "aurora", "blizzard", "sonar", "celebration", "plasma",
+            "thunderstorm", "meteor_shower", "fireworks", "bubbles", "vortex",
+            "nebula",
+        };
+        std::vector<MenuItem> preset_items;
+        for (const char* name : kBuiltinPresets)
+            preset_items.push_back(leaf(name,
+                [name, pf_set_effect_json, load_layered_spec]{
+                    nlohmann::json spec; spec["preset"] = name;
+                    if (pf_set_effect_json) pf_set_effect_json(spec);
+                    load_layered_spec(spec);   // best-effort: reflect in builder if it expands
+                }));
+        layered_items.push_back(submenu("Built-in Presets", std::move(preset_items)));
+    }
+
+    // Randomize — generate a fresh 1–3 layer mix from the primitives + a vivid
+    // palette and apply it. Great for discovery; tweak from the layers after.
+    layered_items.push_back(leaf("Randomize (Surprise Me)",
+        [pflz, build_layered_spec, pf_set_effect_json]{
+            static std::mt19937 rng(std::random_device{}());
+            static const char* const fx[] = {
+                "sparkle","embers","rain","snow","confetti","rings","fireflies",
+                "clouds","lightning","meteor","bubbles","fireworks","vortex"};
+            static const int pal[][3] = {
+                {0,220,180},{255,80,80},{80,180,255},{255,200,40},
+                {180,80,255},{80,255,160},{255,120,20},{255,255,255}};
+            const int nfx  = static_cast<int>(sizeof(fx)/sizeof(fx[0]));
+            const int npal = static_cast<int>(sizeof(pal)/sizeof(pal[0]));
+            for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i)
+                pflz->layers[i] = LayerCfg{};
+            std::uniform_int_distribution<int> nlayers(1,3), pf(0,nfx-1),
+                pp(0,npal-1), cnt(10,60), spd(2,30);
+            const int N = nlayers(rng);
+            for (int i = 0; i < N; ++i) {
+                LayerCfg& L = pflz->layers[i];
+                L.effect = fx[pf(rng)];
+                const int* c = pal[pp(rng)];
+                L.r = c[0]; L.g = c[1]; L.b = c[2];
+                L.count = cnt(rng);
+                L.speed_min = static_cast<float>(spd(rng));
+                L.speed_max = L.speed_min + static_cast<float>(spd(rng));
+                L.blend = "add";
+            }
             if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
         }));
 
@@ -12847,6 +12926,25 @@ int main(int argc, char* argv[]) {
         double now = glfwGetTime();
         float  dt  = static_cast<float>(now - prev_time);
         prev_time  = now;
+
+        // ── Feed IMU motion to the face (motion-reactive particle layers) ─────
+        // Snapshot under the lock, then push without it (face_proxy locks its
+        // own mutex). No-op unless a Protoface particle layer opted into motion.
+        {
+            double m_head, m_yaw, m_pitch, m_roll, m_accel;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                const auto& d = state.imu_data;
+                m_head  = state.imu_bno.heading_deg;
+                m_yaw   = d.bno_gyro_dps[2];          // yaw rate about vertical
+                m_roll  = d.bno_euler[1];
+                m_pitch = d.bno_euler[2];
+                m_accel = std::sqrt(d.bno_accel_g[0]*d.bno_accel_g[0] +
+                                    d.bno_accel_g[1]*d.bno_accel_g[1] +
+                                    d.bno_accel_g[2]*d.bno_accel_g[2]);
+            }
+            face_proxy.set_motion(m_head, m_yaw, m_pitch, m_roll, m_accel);
+        }
 
         // ── Notification log persistence (debounced, ~5s) ─────────────────────
         // Dirty on a new push (next_id) OR a delete/clear (size change).

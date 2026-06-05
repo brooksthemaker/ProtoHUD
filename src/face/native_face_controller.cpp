@@ -792,6 +792,18 @@ void NativeFaceController::set_audio_drive(double volume, double mouth_open) {
     // Transient — no persistence on every audio frame.
 }
 
+void NativeFaceController::set_motion(double heading_deg, double yaw_rate,
+                                      double pitch_deg, double roll_deg,
+                                      double accel_g) {
+    MotionInput m;
+    m.heading_deg = heading_deg; m.yaw_rate = yaw_rate;
+    m.pitch_deg = pitch_deg; m.roll_deg = roll_deg; m.accel_g = accel_g;
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.particles) pn.particles->set_motion(m);
+    // Transient — no persistence on every motion frame.
+}
+
 void NativeFaceController::set_mouth_shape(const std::string& shape) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)

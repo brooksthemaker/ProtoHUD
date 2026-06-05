@@ -89,6 +89,14 @@ public:
     // on-device, if any.
     virtual void        set_audio_drive(double /*volume*/, double /*mouth_open*/) {}
 
+    // Push latest IMU motion (heading + yaw rate in deg/s, pitch/roll in deg,
+    // total accel in g) so motion-reactive particle layers can drift/skew with
+    // head movement. Native Protoface forwards to each panel's ParticleSystem;
+    // no-op elsewhere.
+    virtual void        set_motion(double /*heading_deg*/, double /*yaw_rate*/,
+                                   double /*pitch_deg*/, double /*roll_deg*/,
+                                   double /*accel_g*/) {}
+
     // Pick which viseme overlay (mouth_open / mouth_small / mouth_smile /
     // mouth_round) the FaceLoader blends at the mouth region. Driven by the
     // voice analyzer's spectral-centroid-to-viseme classifier when visemes
@@ -164,6 +172,9 @@ public:
         (*active_)->play_eye_animation(type, speed, size, r, g, b, dur);
     }
     void set_audio_drive(double v, double m) override { (*active_)->set_audio_drive(v, m); }
+    void set_motion(double hd, double yr, double pi, double ro, double ac) override {
+        (*active_)->set_motion(hd, yr, pi, ro, ac);
+    }
     void set_mouth_shape(const std::string& s) override { (*active_)->set_mouth_shape(s); }
     bool has_led_face_editor() const override { return (*active_)->has_led_face_editor(); }
     void set_active_layout_name(const std::string& n) override {

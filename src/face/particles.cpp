@@ -1,5 +1,7 @@
 #include "particles.h"
 
+#include <opencv2/imgproc.hpp>   // cv::line / cv::circle for line-based effects
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -132,9 +134,22 @@ public:
     virtual void update(double dt) = 0;
     virtual cv::Mat render() = 0;   // CV_8UC4
 
+    // Latest IMU state, pushed each frame by the owning ParticleSystem. Effects
+    // read it through count()/direction_unit() when the cfg opts in.
+    void set_motion(const MotionInput& m) { motion_ = m; }
+
 protected:
     int count(int def) const {
-        return std::max(1, static_cast<int>(jnum(cfg_, "count", def) * intensity_));
+        double scale = intensity_;
+        const std::string from = cfg_.value("intensity_from", std::string("none"));
+        if (from != "none") {
+            const double gain = jnum(cfg_, "motion_gain", 1.0);
+            if (from == "yaw_rate")
+                scale *= 1.0 + std::min(std::fabs(motion_.yaw_rate) / 90.0, 3.0) * gain;
+            else if (from == "accel")
+                scale *= 1.0 + std::min(std::fabs(motion_.accel_g - 1.0) * 4.0, 3.0) * gain;
+        }
+        return std::max(1, static_cast<int>(jnum(cfg_, "count", def) * scale));
     }
     void draw_particle(cv::Mat& c, const Particle& p, double alpha) {
         std::string shape = cfg_.value("shape", std::string("dot"));
@@ -147,7 +162,18 @@ protected:
     // 270° = up (screen-space, +Y down). default_deg lets each effect keep
     // its historical motion direction when no "direction_deg" override is set.
     void direction_unit(double& dx, double& dy, double default_deg) const {
-        const double deg = jnum(cfg_, "direction_deg", default_deg);
+        double deg = jnum(cfg_, "direction_deg", default_deg);
+        // Motion coupling (opt-in): "heading" locks the angle to the compass,
+        // "yaw" drifts it as you turn, "tilt" skews it like gravity when you
+        // roll your head. "motion_gain" scales the response.
+        const std::string from = cfg_.value("direction_from", std::string("none"));
+        if (from != "none") {
+            const double gain = jnum(cfg_, "motion_gain", 1.0);
+            if (from == "heading")   deg  = motion_.heading_deg;
+            else if (from == "yaw")  deg += motion_.yaw_rate * 0.5 * gain;
+            else if (from == "tilt") deg += motion_.roll_deg * 2.0 * gain;
+        }
+        deg += jnum(cfg_, "direction_offset_deg", 0.0);
         const double rad = deg * kPi / 180.0;
         dx = std::cos(rad);
         dy = std::sin(rad);
@@ -181,6 +207,7 @@ protected:
     double intensity_;
     std::mt19937 rng_;
     std::vector<Particle> particles_;
+    MotionInput motion_{};
 };
 
 // ── Sparkle ──────────────────────────────────────────────────────────────────
@@ -619,6 +646,231 @@ private:
     std::vector<Clump> clumps_;
 };
 
+// ── Lightning ──────────────────────────────────────────────────────────────────
+// Periodic jagged bolts that flash and fade. "rate" ≈ strikes/sec; bolts walk
+// from the leading edge of the layer direction (default top → down).
+class LightningEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        for (auto& b : bolts_) b.life -= dt;
+        bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(),
+            [](const Bolt& b){ return b.life <= 0; }), bolts_.end());
+        timer_ -= dt;
+        if (timer_ > 0) return;
+        const double rate = std::max(0.05, jnum(cfg_, "rate", 1.0) * intensity_);
+        timer_ = frand(rng_, 0.4, 1.6) / rate;
+        double dx, dy; direction_unit(dx, dy, 90.0);          // default fall = down
+        Bolt b;
+        b.max_life = b.life = frand(rng_, 0.10, 0.22);
+        Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{180, 210, 255};
+        b.r = col.r; b.g = col.g; b.b = col.b;
+        // March a jagged path across the canvas along the direction vector.
+        double sx, sy; direction_spawn_point(0.0, 90.0, sx, sy);
+        const int steps = irand(rng_, 8, 14);
+        const double seg = (std::max(w_, h_) * 1.4) / steps;
+        double px = sx, py = sy;
+        for (int i = 0; i <= steps; ++i) {
+            b.pts.emplace_back((int)px, (int)py);
+            const double jit = frand(rng_, -6.0, 6.0);
+            px += dx * seg - dy * jit;   // step forward + perpendicular jitter
+            py += dy * seg + dx * jit;
+        }
+        bolts_.push_back(std::move(b));
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (const auto& b : bolts_) {
+            const double a = std::clamp(b.life / b.max_life, 0.0, 1.0);
+            const int A = (int)(a * 255.0);
+            for (size_t i = 1; i < b.pts.size(); ++i)
+                cv::line(c, b.pts[i-1], b.pts[i], cv::Scalar(b.r, b.g, b.b, A), 1, cv::LINE_8);
+        }
+        return c;
+    }
+private:
+    struct Bolt { std::vector<cv::Point> pts; double life=0, max_life=0; int r=255,g=255,b=255; };
+    std::vector<Bolt> bolts_;
+    double timer_ = 0.0;
+};
+
+// ── Meteor / shooting stars ─────────────────────────────────────────────────────
+// Fast streaks with a fading tail along their velocity. Directional (default
+// down-right); "tail" sets streak length.
+class MeteorEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        for (auto& p : particles_) {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                return !(p.x > -8 && p.x < w_ + 8 && p.y > -8 && p.y < h_ + 8 && p.life > 0);
+            }), particles_.end());
+        while ((int)particles_.size() < count(8)) {
+            double dx, dy; direction_unit(dx, dy, 30.0);     // default down-right
+            const double spd = pick_speed(cfg_, 40, 80, rng_);
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{200, 220, 255};
+            Particle p;
+            direction_spawn_point(8.0, 30.0, p.x, p.y);
+            p.vx = spd * dx; p.vy = spd * dy;
+            p.max_life = pick_life(cfg_, 0.6, 1.4, rng_); p.life = 1;
+            p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 2, rng_);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        const double tail = jnum(cfg_, "tail", 6.0);
+        for (const auto& p : particles_) {
+            const double a = std::clamp(p.life, 0.0, 1.0);
+            const double sp = std::hypot(p.vx, p.vy);
+            if (sp < 1e-3) continue;
+            const cv::Point head((int)p.x, (int)p.y);
+            const cv::Point back((int)(p.x - p.vx / sp * tail),
+                                 (int)(p.y - p.vy / sp * tail));
+            cv::line(c, back, head, cv::Scalar(p.r * 0.4, p.g * 0.4, p.b * 0.4, (int)(a*160)),
+                     1, cv::LINE_8);
+            draw_dot(c, p.x, p.y, p.r, p.g, p.b, a, p.size + 1);
+        }
+        return c;
+    }
+};
+
+// ── Bubbles ─────────────────────────────────────────────────────────────────────
+// Rising wobbling rings that grow and pop near the top. Directional (default up).
+class BubblesEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        double dx, dy; direction_unit(dx, dy, 270.0);        // default up
+        for (auto& p : particles_) {
+            p.extra += dt * 3.0;
+            const double wob = std::sin(p.extra) * jnum(cfg_, "wobble", 6.0);
+            p.x += (p.vy * dx) * dt + wob * dt;
+            p.y += (p.vy * dy) * dt;
+            p.size = (int)std::min(6.0, p.size + dt * 1.5);   // grow as they rise
+            p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                return !(p.x > -8 && p.x < w_ + 8 && p.y > -8 && p.y < h_ + 8 && p.life > 0);
+            }), particles_.end());
+        while ((int)particles_.size() < count(14)) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{160, 220, 255};
+            Particle p;
+            direction_spawn_point(2.0, 270.0, p.x, p.y);
+            p.vy = pick_speed(cfg_, 8, 18, rng_);
+            p.max_life = pick_life(cfg_, 1.5, 3.5, rng_); p.life = 1;
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = pick_size(cfg_, 2, 4, rng_); p.extra = frand(rng_, 0, kTau);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (const auto& p : particles_) {
+            const int A = (int)std::clamp(p.life * 200.0, 0.0, 255.0);
+            cv::circle(c, {(int)p.x, (int)p.y}, std::max(1, p.size),
+                       cv::Scalar(p.r, p.g, p.b, A), 1, cv::LINE_8);
+            draw_pixel(c, (int)p.x - 1, (int)p.y - 1, 255, 255, 255, (int)(A * 0.7));  // glint
+        }
+        return c;
+    }
+};
+
+// ── Fireworks ───────────────────────────────────────────────────────────────────
+// Rockets launch from the bottom and burst into a radial spark shower with
+// gravity. "count" ≈ concurrent rockets; "burst" = sparks per explosion.
+class FireworksEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const double grav = jnum(cfg_, "gravity", 30.0);
+        for (auto& p : particles_) {
+            p.vy += grav * dt;
+            p.x += p.vx * dt; p.y += p.vy * dt;
+            p.life -= dt / p.max_life;
+            if (p.extra > 0.5 && p.vy >= 0) { p.extra = -1.0; explode(p); }  // apex → burst
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){ return p.life <= 0 || p.y > h_ + 6; }), particles_.end());
+        int rockets = 0;
+        for (const auto& p : particles_) if (p.extra > 0.5) ++rockets;
+        if (rockets < count(2) && frand(rng_, 0, 1) < 0.05) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{255, 220, 120};
+            Particle r;
+            r.x = frand(rng_, w_ * 0.2, w_ * 0.8); r.y = h_;
+            r.vy = -pick_speed(cfg_, 45, 65, rng_); r.vx = frand(rng_, -6, 6);
+            r.r = col.r; r.g = col.g; r.b = col.b; r.size = 1;
+            r.max_life = 4.0; r.life = 1; r.extra = 1.0;   // >0.5 == rocket
+            particles_.push_back(r);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (const auto& p : particles_) {
+            const double a = (p.extra > 0.5) ? 1.0 : std::clamp(p.life, 0.0, 1.0);
+            draw_dot(c, p.x, p.y, p.r, p.g, p.b, a, p.size);
+        }
+        return c;
+    }
+private:
+    void explode(Particle& rocket) {
+        const int n = jint(cfg_, "burst", 22);
+        for (int i = 0; i < n; ++i) {
+            const double ang = kTau * i / n + frand(rng_, -0.1, 0.1);
+            const double spd = frand(rng_, 12, 34);
+            Particle s;
+            s.x = rocket.x; s.y = rocket.y;
+            s.vx = std::cos(ang) * spd; s.vy = std::sin(ang) * spd;
+            s.r = rocket.r; s.g = rocket.g; s.b = rocket.b; s.size = 1;
+            s.max_life = frand(rng_, 0.6, 1.3); s.life = 1; s.extra = 0.0;  // spark
+            particles_.push_back(s);
+        }
+    }
+};
+
+// ── Vortex ──────────────────────────────────────────────────────────────────────
+// Particles orbit the centre while spiralling inward, like a swirling drain.
+// "swirl" sets angular speed; negative "infall" spirals outward instead.
+class VortexEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const double swirl  = jnum(cfg_, "swirl", 2.2);
+        const double infall = jnum(cfg_, "infall", 6.0);
+        for (auto& p : particles_) {
+            p.extra += swirl * dt;          // angle
+            p.vy    -= infall * dt;         // radius
+            p.life  -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [](const Particle& p){ return p.life <= 0 || p.vy <= 1.0; }), particles_.end());
+        const double maxr = jnum(cfg_, "max_radius", std::min(w_, h_) * 0.5);
+        while ((int)particles_.size() < count(40)) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{120, 180, 255};
+            Particle p;
+            p.extra = frand(rng_, 0, kTau);                 // angle
+            p.vy    = frand(rng_, maxr * 0.5, maxr);        // radius (reuse vy)
+            p.max_life = pick_life(cfg_, 1.5, 3.5, rng_); p.life = 1;
+            p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 2, rng_);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        const double cx = w_ * 0.5, cy = h_ * 0.5;
+        for (const auto& p : particles_) {
+            const double x = cx + std::cos(p.extra) * p.vy;
+            const double y = cy + std::sin(p.extra) * p.vy;
+            draw_dot(c, x, y, p.r, p.g, p.b, std::clamp(p.life, 0.0, 1.0), p.size);
+        }
+        return c;
+    }
+};
+
 // ── Effect factory ───────────────────────────────────────────────────────────
 
 std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, const json& cfg) {
@@ -630,6 +882,11 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "rain")      return std::make_unique<RainEffect>(w, h, cfg);
     if (name == "fireflies") return std::make_unique<FirefliesEffect>(w, h, cfg);
     if (name == "clouds")    return std::make_unique<CloudsEffect>(w, h, cfg);
+    if (name == "lightning") return std::make_unique<LightningEffect>(w, h, cfg);
+    if (name == "meteor")    return std::make_unique<MeteorEffect>(w, h, cfg);
+    if (name == "bubbles")   return std::make_unique<BubblesEffect>(w, h, cfg);
+    if (name == "fireworks") return std::make_unique<FireworksEffect>(w, h, cfg);
+    if (name == "vortex")    return std::make_unique<VortexEffect>(w, h, cfg);
     return nullptr;
 }
 
@@ -664,6 +921,17 @@ const std::map<std::string, json>& presets() {
             {"effect":"embers","count":30,"colors":[[0,180,255],[0,140,220],[20,160,255]],"speed_min":8,"speed_max":20,"blend":"add"},
             {"effect":"embers","count":12,"colors":[[180,220,255],[200,240,255]],"speed_min":20,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
             {"effect":"rings","count":1,"colors":[[0,200,255]],"speed_min":10,"speed_max":15,"max_radius":15,"blend":"add"}]},
+          "thunderstorm": {"layers":[
+            {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":55,"speed_max":80,"drift_x":3.0,"blend":"add"},
+            {"effect":"lightning","rate":0.7,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},
+          "meteor_shower": {"layers":[
+            {"effect":"meteor","count":7,"colors":[[200,220,255],[255,240,200],[180,220,255]],"speed_min":45,"speed_max":85,"tail":7,"direction_deg":25,"blend":"add"},
+            {"effect":"sparkle","count":18,"colors":[[255,255,255],[200,220,255]],"life_min":0.3,"life_max":1.0,"blend":"add"}]},
+          "fireworks": {"effect":"fireworks","count":3,"burst":24,"colors":[[255,80,80],[80,180,255],[255,220,80],[180,80,255],[80,255,160]],"blend":"add"},
+          "bubbles": {"effect":"bubbles","count":16,"colors":[[160,220,255],[120,200,255],[200,240,255]],"speed_min":8,"speed_max":18,"wobble":7,"blend":"add"},
+          "vortex": {"layers":[
+            {"effect":"vortex","count":50,"swirl":2.4,"infall":7,"colors":[[0,200,255],[80,160,255],[120,100,255]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
           "nebula": {"layers":[
             {"effect":"clouds","count":4,"size_min":10,"size_max":18,"lobes_min":3,"lobes_max":6,"turbulence":0.55,"churn":0.3,"alpha_min":0.18,"alpha_max":0.4,"speed_min":0.5,"speed_max":1.8,"colors":[[150,40,140],[90,60,200],[40,90,200]],"blend":"add"},
             {"effect":"clouds","count":5,"size_min":5,"size_max":9,"lobes_min":2,"lobes_max":4,"turbulence":0.8,"churn":0.5,"alpha_min":0.15,"alpha_max":0.4,"speed_min":1.5,"speed_max":4.0,"colors":[[220,80,170],[60,160,200],[120,80,210]],"blend":"add"},
@@ -724,6 +992,7 @@ struct ParticleLayer {
     }
     void update(double dt) { if (effect) effect->update(dt); }
     cv::Mat render()       { return effect ? effect->render() : cv::Mat(); }
+    void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
 };
 
 } // namespace
@@ -733,11 +1002,15 @@ struct ParticleLayer {
 struct ParticleSystem::Impl {
     int w, h;
     std::vector<ParticleLayer> layers;
+    MotionInput motion{};   // latest IMU state, re-applied to rebuilt layers
 
     void build(const json& cfg) {
         layers.clear();
         json resolved = resolve_cfg(cfg);
-        for (auto& lc : resolved["layers"]) layers.emplace_back(lc, w, h);
+        for (auto& lc : resolved["layers"]) {
+            layers.emplace_back(lc, w, h);
+            layers.back().set_motion(motion);
+        }
     }
 };
 
@@ -749,6 +1022,11 @@ ParticleSystem::ParticleSystem(int width, int height, const json& cfg)
 ParticleSystem::~ParticleSystem() = default;
 
 void ParticleSystem::set_effect(const json& cfg) { impl_->build(cfg); }
+
+void ParticleSystem::set_motion(const MotionInput& m) {
+    impl_->motion = m;
+    for (auto& l : impl_->layers) l.set_motion(m);
+}
 
 void ParticleSystem::update(double dt) {
     for (auto& l : impl_->layers) l.update(dt);
