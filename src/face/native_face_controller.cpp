@@ -50,6 +50,16 @@ nlohmann::json effect_cfg_for_id(int id) {
 NativeFaceController::NativeFaceController(RenderConfig cfg,
                                           std::unique_ptr<PanelOutput> output)
     : cfg_(std::move(cfg)), output_(std::move(output)) {
+    // Default expression → mood-preset coupling (used when set_expression_effects
+    // is enabled). Keys match the face expression stems; values are presets in
+    // particles.cpp. An empty value (or missing key) means "show the base effect".
+    expr_effect_map_ = {
+        {"angry",     "fire"},
+        {"happy",     "celebration"},
+        {"sad",       "rain"},
+        {"shocked",   "galaxy"},
+        {"surprised", "galaxy"},
+    };
     build_panels();
 }
 
@@ -713,7 +723,36 @@ void NativeFaceController::set_face_by_name(const std::string& expression) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_expression(expression);
+    current_expression_ = expression;
+    apply_expression_effect_locked(expression);
     save_state_locked();
+}
+
+void NativeFaceController::set_expression_effects(bool enabled) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    expr_effects_ = enabled;
+    if (enabled) {
+        apply_expression_effect_locked(current_expression_);
+    } else {
+        // Restore each panel's user-chosen base effect.
+        for (auto& pn : panels_)
+            if (pn.particles) pn.particles->set_effect(pn.particles_spec);
+    }
+}
+
+void NativeFaceController::apply_expression_effect_locked(const std::string& expr) {
+    if (!expr_effects_) return;
+    auto it = expr_effect_map_.find(expr);
+    const bool mapped = (it != expr_effect_map_.end() && !it->second.empty());
+    for (auto& pn : panels_) {
+        if (!pn.particles) continue;
+        if (mapped) {
+            nlohmann::json spec; spec["preset"] = it->second;
+            pn.particles->set_effect(spec);     // transient — leaves particles_spec (base) intact
+        } else {
+            pn.particles->set_effect(pn.particles_spec);   // neutral/unmapped → base
+        }
+    }
 }
 
 void NativeFaceController::trigger_boop(const std::string& expression, double duration_s) {
@@ -787,8 +826,10 @@ void NativeFaceController::set_wiggle(const WiggleCfg& w) {
 
 void NativeFaceController::set_audio_drive(double volume, double mouth_open) {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    for (auto& pn : panels_)
-        if (pn.state) pn.state->set_audio(volume, mouth_open);
+    for (auto& pn : panels_) {
+        if (pn.state)     pn.state->set_audio(volume, mouth_open);
+        if (pn.particles) pn.particles->set_audio(volume);   // audio-reactive layers
+    }
     // Transient — no persistence on every audio frame.
 }
 

@@ -861,6 +861,9 @@ struct LayerCfg {
     // movement. "none" | "heading" (lock to compass) | "yaw" (drift when
     // turning) | "tilt" (skew like gravity when rolling the head).
     std::string direction_from = "none";
+    // Density reactivity (opt-in): scales particle count from a live signal.
+    // "none" | "audio" (mic level) | "yaw_rate" | "accel".
+    std::string intensity_from = "none";
 };
 struct LayeredEffectState {
     static constexpr int kMaxLayers = 5;
@@ -1441,6 +1444,10 @@ static std::vector<MenuItem> build_menu(
         // the effect_id mapping. Used by the Layered Effects builder so the
         // user can compose multi-layer particle configs at runtime.
         std::function<void(const nlohmann::json&)> pf_set_effect_json = nullptr,
+        // Toggle expression-coupled effects (mood preset follows the face) and
+        // the config-backed flag the menu reads. Null on non-native backends.
+        std::function<void(bool)> pf_set_expr_effects = nullptr,
+        bool* pf_expr_effects_p = nullptr,
         // The live cfg JSON object owned by main(). Used by the GPIO
         // Visualizer (pin-claim scan, I²C peripherals, user notes,
         // rail-current estimate) and the Layered Effects builder
@@ -4026,6 +4033,8 @@ static std::vector<MenuItem> build_menu(
                 layer["direction_deg"] = L.direction_deg;
             if (L.direction_from != "none")
                 layer["direction_from"] = L.direction_from;
+            if (L.intensity_from != "none")
+                layer["intensity_from"] = L.intensity_from;
             out["layers"].push_back(layer);
         }
         return out;
@@ -4054,6 +4063,7 @@ static std::vector<MenuItem> build_menu(
             L.blend     = jl.value("blend", std::string("add"));
             L.direction_deg = jl.value("direction_deg", -1.f);
             L.direction_from = jl.value("direction_from", std::string("none"));
+            L.intensity_from = jl.value("intensity_from", std::string("none"));
         }
     };
 
@@ -4348,6 +4358,21 @@ static std::vector<MenuItem> build_menu(
                 m.label_fn = [L]{ return std::string("Motion: ") + L->direction_from; };
                 return m;
             })(),
+            // Density reactivity — scale particle count from audio or motion.
+            ([&]{
+                static const char* const kIntSrc[] = {"none", "audio", "yaw_rate", "accel"};
+                std::vector<MenuItem> isrc;
+                for (const char* s : kIntSrc)
+                    isrc.push_back(leaf_sel(s,
+                        [L, s]{ L->intensity_from = s; },
+                        [L, s]{ return L->intensity_from == s; }));
+                MenuItem m = with_desc(submenu("Density Reactive", std::move(isrc)),
+                    "Scale this layer's particle count from a live signal: audio "
+                    "(mic level — pulses with sound), yaw_rate or accel (head "
+                    "movement). Apply Now to push.");
+                m.label_fn = [L]{ return std::string("Density: ") + L->intensity_from; };
+                return m;
+            })(),
             submenu("Blend Mode", std::move(blend_items)),
             std::move(move_up),
             std::move(move_dn),
@@ -4425,6 +4450,19 @@ static std::vector<MenuItem> build_menu(
             }
             if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
         }));
+
+    // Expression-coupled effects — mood preset follows the face expression.
+    if (pf_expr_effects_p && pf_set_expr_effects)
+        layered_items.push_back(with_desc(toggle("Expression Effects",
+            [pf_expr_effects_p]{ return *pf_expr_effects_p; },
+            [pf_expr_effects_p, pf_set_expr_effects, cfg_root](bool v){
+                *pf_expr_effects_p = v; pf_set_expr_effects(v);
+                if (cfg_root) (*cfg_root)["protoface"]["expression_effects"] = v;
+            }),
+            "Auto-swap the particle effect to a mood preset as the face changes "
+            "(angry\xe2\x86\x92""fire, happy\xe2\x86\x92""celebration, "
+            "sad\xe2\x86\x92""rain, shocked\xe2\x86\x92""galaxy). Restores your "
+            "chosen effect for neutral faces and when off."));
 
     // Save / Load — three numbered quick-save slots PLUS user-named
     // presets entered via the on-screen keyboard. Everything lands in
@@ -11694,6 +11732,12 @@ int main(int argc, char* argv[]) {
         kdc_msgapps = split_csv_vec(ms);
     }
 
+    // Expression-coupled effects flag (persisted under protoface). Applied to
+    // the native renderer now and toggled live from the effects menu.
+    bool pf_expr_effects = cfg.contains("protoface") && cfg["protoface"].is_object()
+        && cfg["protoface"].value("expression_effects", false);
+    if (native_ctrl) native_ctrl->set_expression_effects(pf_expr_effects);
+
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -11749,6 +11793,10 @@ int main(int argc, char* argv[]) {
                                /* pf_set_effect_json */ [&](const nlohmann::json& spec){
                                    if (native_ctrl) native_ctrl->set_effect_json(spec);
                                },
+                               /* pf_set_expr_effects */ [&](bool v){
+                                   if (native_ctrl) native_ctrl->set_expression_effects(v);
+                               },
+                               /* pf_expr_effects_p */ &pf_expr_effects,
                                /* cfg_root */ &cfg,
                                /* USB camera preview wiring */
                                &tex_usb1, &tex_usb2, &tex_usb3, &usb_preview_req,

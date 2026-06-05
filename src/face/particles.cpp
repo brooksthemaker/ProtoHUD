@@ -134,9 +134,10 @@ public:
     virtual void update(double dt) = 0;
     virtual cv::Mat render() = 0;   // CV_8UC4
 
-    // Latest IMU state, pushed each frame by the owning ParticleSystem. Effects
-    // read it through count()/direction_unit() when the cfg opts in.
+    // Latest IMU / audio state, pushed each frame by the owning ParticleSystem.
+    // Effects read it through count()/direction_unit() when the cfg opts in.
     void set_motion(const MotionInput& m) { motion_ = m; }
+    void set_audio(double level) { audio_ = level; }
 
 protected:
     int count(int def) const {
@@ -148,6 +149,8 @@ protected:
                 scale *= 1.0 + std::min(std::fabs(motion_.yaw_rate) / 90.0, 3.0) * gain;
             else if (from == "accel")
                 scale *= 1.0 + std::min(std::fabs(motion_.accel_g - 1.0) * 4.0, 3.0) * gain;
+            else if (from == "audio")
+                scale *= 1.0 + std::min(audio_, 1.0) * 3.0 * gain;
         }
         return std::max(1, static_cast<int>(jnum(cfg_, "count", def) * scale));
     }
@@ -208,6 +211,7 @@ protected:
     std::mt19937 rng_;
     std::vector<Particle> particles_;
     MotionInput motion_{};
+    double audio_ = 0.0;
 };
 
 // ── Sparkle ──────────────────────────────────────────────────────────────────
@@ -921,6 +925,7 @@ const std::map<std::string, json>& presets() {
             {"effect":"embers","count":30,"colors":[[0,180,255],[0,140,220],[20,160,255]],"speed_min":8,"speed_max":20,"blend":"add"},
             {"effect":"embers","count":12,"colors":[[180,220,255],[200,240,255]],"speed_min":20,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
             {"effect":"rings","count":1,"colors":[[0,200,255]],"speed_min":10,"speed_max":15,"max_radius":15,"blend":"add"}]},
+          "rain": {"effect":"rain","count":35,"colors":[[120,150,220],[150,180,255]],"speed_min":45,"speed_max":70,"drift_x":1.5,"blend":"add"},
           "thunderstorm": {"layers":[
             {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":55,"speed_max":80,"drift_x":3.0,"blend":"add"},
             {"effect":"lightning","rate":0.7,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},
@@ -993,6 +998,7 @@ struct ParticleLayer {
     void update(double dt) { if (effect) effect->update(dt); }
     cv::Mat render()       { return effect ? effect->render() : cv::Mat(); }
     void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
+    void set_audio(double level)          { if (effect) effect->set_audio(level); }
 };
 
 } // namespace
@@ -1003,6 +1009,7 @@ struct ParticleSystem::Impl {
     int w, h;
     std::vector<ParticleLayer> layers;
     MotionInput motion{};   // latest IMU state, re-applied to rebuilt layers
+    double audio = 0.0;     // latest mic level, re-applied to rebuilt layers
 
     void build(const json& cfg) {
         layers.clear();
@@ -1010,6 +1017,7 @@ struct ParticleSystem::Impl {
         for (auto& lc : resolved["layers"]) {
             layers.emplace_back(lc, w, h);
             layers.back().set_motion(motion);
+            layers.back().set_audio(audio);
         }
     }
 };
@@ -1026,6 +1034,11 @@ void ParticleSystem::set_effect(const json& cfg) { impl_->build(cfg); }
 void ParticleSystem::set_motion(const MotionInput& m) {
     impl_->motion = m;
     for (auto& l : impl_->layers) l.set_motion(m);
+}
+
+void ParticleSystem::set_audio(double level) {
+    impl_->audio = level;
+    for (auto& l : impl_->layers) l.set_audio(level);
 }
 
 void ParticleSystem::update(double dt) {

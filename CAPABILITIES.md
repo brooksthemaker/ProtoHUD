@@ -282,8 +282,13 @@ nebula, plasma, sonar, thunderstorm, meteor_shower, fireworks, bubbles, vortex`.
 
 - **Motion-reactive layers** — couple a layer's direction to the IMU: `heading`
   (lock to compass), `yaw` (drift as you turn your head), or `tilt` (skew like
-  gravity when you roll). Density can also scale with `yaw_rate`/`accel` via the
-  `intensity_from` config key. Fed live from the BNO055 each frame.
+  gravity when you roll). Fed live from the BNO055 each frame.
+- **Audio/motion-reactive density** — scale a layer's particle count from a live
+  signal via `intensity_from`: `audio` (mic level — pulses with sound),
+  `yaw_rate`, or `accel`. Audio rides the existing voice-analyzer path.
+- **Expression-coupled effects** — optional: the active effect auto-swaps to a
+  mood preset as the face changes (angry→fire, happy→celebration, sad→rain,
+  shocked→galaxy), restoring your chosen effect for neutral faces.
 - **Authoring** — Layered Builder with per-layer Density/Speed/Direction/Motion/
   Blend, **Built-in Presets** picker, **Randomize (Surprise Me)**, plus Save
   As… (on-screen keyboard), quick-save slots, Load/Delete, and Export to file.

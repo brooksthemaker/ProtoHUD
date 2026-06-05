@@ -195,6 +195,8 @@
     "mode": "daemon",
     "_mode_values": "daemon | native",
     "autostart": true,
+    "expression_effects": false,
+    "_expression_effects_note": "When true, the active particle effect auto-swaps to a mood preset as the face expression changes (angry->fire, happy->celebration, sad->rain, shocked->galaxy); neutral/unmapped faces restore your chosen effect. Toggle live in Face > Effects > Expression Effects.",
     "panel_driver": true,
     "_panel_driver_note": "native mode only: auto-launch scripts/panel_driver.py to drive the HUB75 panels. Set false for preview-only or if you run the driver yourself.",
     "_native_about": "native-mode options: assets_dir points at the Protoface checkout holding faces/materials/gifs (default $HOME/protohud/Protoface); panels overrides the default 2-panel mirrored layout.",

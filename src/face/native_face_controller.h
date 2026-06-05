@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -85,6 +86,12 @@ public:
                            double roll_deg, double accel_g) override;
     void        set_mouth_shape(const std::string& shape) override;
 
+    // Expression-coupled effects: when enabled, the active particle effect is
+    // swapped to a mood preset as the face expression changes (angry→fire,
+    // happy→celebration, sad→rain, shocked→galaxy), restoring the user's chosen
+    // base effect for neutral/unmapped expressions and when disabled.
+    void        set_expression_effects(bool enabled);
+
     // Face editor support: what the active PanelOutput addresses (so the
     // editor can pick the editable region), and a way to force a face
     // reload after the editor writes a PNG.
@@ -152,6 +159,9 @@ private:
 
     void build_panels();
     void render_thread();
+    // Apply the mood preset mapped to `expr` (or restore each panel's base
+    // particles_spec when neutral/unmapped). Caller holds state_mtx_.
+    void apply_expression_effect_locked(const std::string& expr);
     void apply_material_all(const std::string& name);   // caller holds state_mtx_
     void save_state_locked() const;                     // auto-save look; caller holds state_mtx_
     void load_state();                                  // overlay saved look at startup
@@ -185,6 +195,13 @@ private:
     EyeAnimParams      eye_anim_;
     double             eye_anim_timer_ = 0.0;   // seconds remaining
     double             eye_anim_t_     = 0.0;   // elapsed seconds (animation phase)
+
+    // Expression → mood-preset coupling (off by default). expr_effects_ gates
+    // it; current_expression_ tracks the latest set face so toggling re-applies
+    // correctly. Lives under state_mtx_.
+    bool                                          expr_effects_ = false;
+    std::string                                   current_expression_;
+    std::map<std::string, std::string>            expr_effect_map_;
 
     std::thread        thread_;
     std::atomic<bool>  running_{false};

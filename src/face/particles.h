@@ -39,6 +39,7 @@ public:
 
     void set_effect(const nlohmann::json& cfg);   // replace all layers at runtime
     void set_motion(const MotionInput& m);        // latest IMU state for reactive layers
+    void set_audio(double level);                 // mic level [0,1] for audio-reactive layers
     void update(double dt);
     ParticleFrame render();
 
