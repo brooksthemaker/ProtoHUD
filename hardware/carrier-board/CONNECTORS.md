@@ -184,6 +184,33 @@ adjacency. Drives VITURE / external display.
 
 ---
 
+## J12 — Cooling fan headers  ·  up to 4 fans in 2 zones
+
+Driven by `sys::FanController` (software PWM). Two zones, each switched by a
+**low-side N-MOSFET** whose gate is the zone's GPIO; up to two fan connectors per
+zone share the zone speed. Use GPIO clear of HUB75 (default **BCM 18 = Zone 1**,
+**BCM 19 = Zone 2**; PINMAP free set).
+
+Per fan connector (4-pin PC-fan compatible):
+
+| Pin | Signal | Notes |
+|----:|--------|-------|
+| 1 | GND (switched) | fan return through the zone MOSFET drain |
+| 2 | +V (fan rail) | 5 V or 12 V depending on fan; **not** the CM5 rail |
+| 3 | PWM/ctrl | tie to GND-switching for 2-pin fans; or drive a 4-pin fan's control line from the zone GPIO (add a buffer if the fan needs 5 V logic) |
+| 4 | TACH | optional RPM sense back to a spare GPIO |
+
+| Zone | Default GPIO | Fan headers |
+|------|--------------|-------------|
+| Zone 1 (e.g. Intake) | BCM 18 | 1–2 |
+| Zone 2 (e.g. Exhaust) | BCM 19 | 1–2 |
+
+> Each zone needs one MOSFET (gate ← GPIO, with a gate resistor + pulldown) and a
+> flyback diode across each fan. Software PWM ≈100 Hz suits MOSFET-switched 2-pin
+> fans; for quiet 4-pin control use a 25 kHz hardware-PWM pin/overlay later.
+
+---
+
 ## Jumpers
 
 ### JP1 — Face backend select

@@ -8540,46 +8540,68 @@ static std::vector<MenuItem> build_menu(
         std::move(gpio_buttons_item),
         // Cooling fans (Pi-driven PWM). Hidden when no FanController is wired.
         [&]() -> MenuItem {
-            if (!fans) { MenuItem m = leaf("Cooling Fans", []{}); m.visible_fn = []{ return false; }; return m; }
-            std::vector<MenuItem> mode_items = {
-                leaf_sel("Manual", [fans]{ fans->set_auto_mode(false); },
-                                   [fans]{ return !fans->auto_mode(); }),
-                leaf_sel("Auto (by CPU temp)", [fans]{ fans->set_auto_mode(true); },
-                                   [fans]{ return fans->auto_mode(); }),
+            if (!fans || fans->zone_count() == 0) {
+                MenuItem m = leaf("Cooling Fans", []{}); m.visible_fn = []{ return false; }; return m;
+            }
+            // Per-zone speed/mode/curve submenu.
+            auto build_zone = [&](int z) -> MenuItem {
+                std::vector<MenuItem> mode_items = {
+                    leaf_sel("Manual", [fans, z]{ fans->set_zone_auto(z, false); },
+                                       [fans, z]{ return !fans->zone_auto(z); }),
+                    leaf_sel("Auto (by CPU temp)", [fans, z]{ fans->set_zone_auto(z, true); },
+                                       [fans, z]{ return fans->zone_auto(z); }),
+                };
+                MenuItem speed = slider("Speed", 0.f, 100.f, 5.f, "%",
+                    [fans, z]{ return static_cast<float>(fans->zone_speed(z) * 100.0); },
+                    [fans, z](float v){ fans->set_zone_speed(z, v / 100.0); });
+                speed.visible_fn = [fans, z]{ return !fans->zone_auto(z); };
+                MenuItem amin = slider("Auto Min Temp", 30.f, 80.f, 1.f, "\xc2\xb0""C",
+                    [fans, z]{ return static_cast<float>(fans->zone_auto_min(z)); },
+                    [fans, z](float v){ fans->set_zone_auto_range(z, v, fans->zone_auto_max(z)); });
+                amin.visible_fn = [fans, z]{ return fans->zone_auto(z); };
+                MenuItem amax = slider("Auto Max Temp", 40.f, 90.f, 1.f, "\xc2\xb0""C",
+                    [fans, z]{ return static_cast<float>(fans->zone_auto_max(z)); },
+                    [fans, z](float v){ fans->set_zone_auto_range(z, fans->zone_auto_min(z), v); });
+                amax.visible_fn = [fans, z]{ return fans->zone_auto(z); };
+                MenuItem status = leaf("Output", []{});
+                status.label_fn = [fans, z]{
+                    char b[40];
+                    std::snprintf(b, sizeof(b), "Output: %d%%",
+                                  (int)std::lround(fans->zone_duty(z) * 100.0));
+                    return std::string(b);
+                };
+                std::vector<MenuItem> zi = {
+                    submenu("Mode", std::move(mode_items)),
+                    std::move(speed), std::move(amin), std::move(amax), std::move(status),
+                };
+                MenuItem m = submenu(fans->zone_name(z), std::move(zi));
+                m.label_fn = [fans, z]{
+                    char b[48];
+                    std::snprintf(b, sizeof(b), "%s  [%d%%%s]", fans->zone_name(z).c_str(),
+                                  (int)std::lround(fans->zone_duty(z) * 100.0),
+                                  fans->zone_auto(z) ? " auto" : "");
+                    return std::string(b);
+                };
+                return m;
             };
-            MenuItem speed = slider("Speed", 0.f, 100.f, 5.f, "%",
-                [fans]{ return static_cast<float>(fans->speed() * 100.0); },
-                [fans](float v){ fans->set_speed(v / 100.0); });
-            speed.visible_fn = [fans]{ return !fans->auto_mode(); };
-            MenuItem amin = slider("Auto Min Temp", 30.f, 80.f, 1.f, "\xc2\xb0""C",
-                [fans]{ return static_cast<float>(fans->auto_min_c()); },
-                [fans](float v){ fans->set_auto_range(v, fans->auto_max_c()); });
-            amin.visible_fn = [fans]{ return fans->auto_mode(); };
-            MenuItem amax = slider("Auto Max Temp", 40.f, 90.f, 1.f, "\xc2\xb0""C",
-                [fans]{ return static_cast<float>(fans->auto_max_c()); },
-                [fans](float v){ fans->set_auto_range(fans->auto_min_c(), v); });
-            amax.visible_fn = [fans]{ return fans->auto_mode(); };
-            MenuItem status = leaf("Status", []{});
-            status.label_fn = [fans]{
-                char b[48];
-                std::snprintf(b, sizeof(b), "Output: %d%%  (%.0f\xc2\xb0""C)",
-                              (int)std::lround(fans->current_duty() * 100.0),
-                              fans->current_temp_c());
+            std::vector<MenuItem> fan_items;
+            fan_items.push_back(with_desc(toggle("Enabled",
+                [fans]{ return fans->running(); },
+                [fans](bool v){ if (v) fans->start(); else fans->stop(); }),
+                "Drive the cooling fans on their configured GPIO. Off releases the lines."));
+            for (int z = 0; z < fans->zone_count(); ++z)
+                fan_items.push_back(build_zone(z));
+            MenuItem temp = leaf("CPU Temp", []{});
+            temp.label_fn = [fans]{
+                char b[32]; std::snprintf(b, sizeof(b), "CPU Temp: %.0f\xc2\xb0""C",
+                                          fans->current_temp_c());
                 return std::string(b);
             };
-            std::vector<MenuItem> fan_items = {
-                with_desc(toggle("Enabled",
-                    [fans]{ return fans->running(); },
-                    [fans](bool v){ if (v) fans->start(); else fans->stop(); }),
-                    "Drive the cooling fan(s) on their configured GPIO. Off "
-                    "releases the lines."),
-                with_desc(submenu("Mode", std::move(mode_items)),
-                    "Manual = fixed speed; Auto ramps speed with CPU temperature."),
-                std::move(speed), std::move(amin), std::move(amax), std::move(status),
-            };
+            fan_items.push_back(std::move(temp));
             return with_desc(submenu("Cooling Fans", std::move(fan_items)),
-                "Pi-driven PWM cooling fans. Pins/behaviour in config[\"fans\"]; "
-                "use GPIO clear of HUB75 (see carrier PINMAP).");
+                "Pi-driven PWM cooling fans \xe2\x80\x94 up to 4 fans in 2 zones, each "
+                "with its own speed/mode. Pins in config[\"fans\"][\"zones\"]; use "
+                "GPIO clear of HUB75 (see carrier PINMAP).");
         }(),
         with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
                   "Poll the face controller for a fresh status frame."),
@@ -9887,19 +9909,36 @@ int main(int argc, char* argv[]) {
     if (cfg.contains("fans") && cfg["fans"].is_object()) {
         const auto& jf = cfg["fans"];
         fan_cfg.enabled    = jval(jf, "enabled", false);
-        if (jf.contains("gpios") && jf["gpios"].is_array())
-            for (const auto& g : jf["gpios"]) if (g.is_number()) fan_cfg.gpios.push_back(g.get<int>());
-        else if (jf.contains("gpio") && jf["gpio"].is_number())
-            fan_cfg.gpios.push_back(jf["gpio"].get<int>());
         fan_cfg.chip       = jf.value("chip", fan_cfg.chip);
-        fan_cfg.pwm_hz     = jval(jf, "pwm_hz",    fan_cfg.pwm_hz);
-        fan_cfg.min_duty   = jval(jf, "min_duty",  fan_cfg.min_duty);
-        fan_cfg.invert     = jval(jf, "invert",    fan_cfg.invert);
-        fan_cfg.auto_mode  = (jf.value("mode", std::string("manual")) == "auto");
-        fan_cfg.speed      = jval(jf, "speed",      fan_cfg.speed);
-        fan_cfg.auto_min_c = jval(jf, "auto_min_c", fan_cfg.auto_min_c);
-        fan_cfg.auto_max_c = jval(jf, "auto_max_c", fan_cfg.auto_max_c);
+        fan_cfg.pwm_hz     = jval(jf, "pwm_hz",   fan_cfg.pwm_hz);
+        fan_cfg.min_duty   = jval(jf, "min_duty", fan_cfg.min_duty);
+        fan_cfg.invert     = jval(jf, "invert",   fan_cfg.invert);
         fan_cfg.temp_path  = jf.value("temp_path", fan_cfg.temp_path);
+        auto parse_zone = [&](const json& jz, const char* defname) {
+            sys::FanController::ZoneCfg z;
+            z.name = jz.value("name", std::string(defname));
+            if (jz.contains("gpios") && jz["gpios"].is_array())
+                for (const auto& g : jz["gpios"]) if (g.is_number()) z.gpios.push_back(g.get<int>());
+            else if (jz.contains("gpio") && jz["gpio"].is_number())
+                z.gpios.push_back(jz["gpio"].get<int>());
+            z.auto_mode  = (jz.value("mode", std::string("manual")) == "auto");
+            z.speed      = jval(jz, "speed",      z.speed);
+            z.auto_min_c = jval(jz, "auto_min_c", z.auto_min_c);
+            z.auto_max_c = jval(jz, "auto_max_c", z.auto_max_c);
+            return z;
+        };
+        if (jf.contains("zones") && jf["zones"].is_array()) {
+            int zi = 0;
+            for (const auto& jz : jf["zones"]) {
+                if (zi >= sys::FanController::kMaxZones) break;
+                if (!jz.is_object()) continue;
+                char dn[16]; std::snprintf(dn, sizeof(dn), "Zone %d", zi + 1);
+                fan_cfg.zones.push_back(parse_zone(jz, dn));
+                ++zi;
+            }
+        } else if (jf.contains("gpios") || jf.contains("gpio")) {
+            fan_cfg.zones.push_back(parse_zone(jf, "Zone 1"));   // legacy single-zone
+        }
     }
     sys::FanController cooling_fans(fan_cfg);
     if (fan_cfg.enabled && !cooling_fans.start())

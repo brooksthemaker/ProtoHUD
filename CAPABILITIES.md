@@ -319,10 +319,12 @@ Default, Yellow, Orange, White, Green, Purple, Red, Blue, Rainbow, Flow Noise, H
 
 ### Cooling Fans (Pi-driven PWM)
 Helmet cooling fans driven directly from the Pi GPIO via software PWM (2-pin fan
-through a MOSFET, or a 4-pin fan's control line). Menu: **System → Cooling
-Fans** — Enabled, Mode (**Manual** fixed speed / **Auto** ramps with CPU
-temperature between configurable min/max), Speed (0–100%), and a live duty/temp
-readout. Pins/behaviour in `config["fans"]`; use GPIO clear of HUB75 (see
+through a MOSFET, or a 4-pin fan's control line) — **up to 4 fans grouped into 2
+independently-controlled zones** (e.g. intake / exhaust). Menu: **System →
+Cooling Fans** — global Enabled, then per-zone Mode (**Manual** fixed speed /
+**Auto** ramps with CPU temperature between configurable min/max), Speed
+(0–100%), and a live output/temp readout. Pins/behaviour in
+`config["fans"]["zones"]`; use GPIO clear of HUB75 (see
 `hardware/carrier-board/PINMAP.md`). Distinct from the Teensy face-fan control
 above.
 

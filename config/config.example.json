@@ -272,20 +272,33 @@
     "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
   },
   "fans": {
-    "_about": "Pi-driven cooling fans via software PWM on GPIO (drive a 2-pin fan through a MOSFET, or a 4-pin fan's control line). Live controls in System > Cooling Fans. Use pins HUB75 doesn't claim — see hardware/carrier-board/PINMAP.md (e.g. BCM 18/19).",
+    "_about": "Pi-driven cooling fans via software PWM on GPIO (drive a 2-pin fan through a MOSFET, or a 4-pin fan's control line). Up to 4 fans grouped into 2 independently-controlled zones. Live controls in System > Cooling Fans. Use pins HUB75 doesn't claim — see hardware/carrier-board/PINMAP.md (e.g. BCM 18/19, and 14/15 if free).",
     "enabled": false,
-    "gpios": [18],
-    "_gpios_note": "BCM line(s) driving the fan(s); all share one speed. Single 'gpio': N also accepted.",
     "pwm_hz": 100,
     "min_duty": 0.2,
-    "_min_duty_note": "Fans stall below ~20% duty; this is the floor applied whenever the fan should be moving.",
+    "_min_duty_note": "Fans stall below ~20% duty; this is the floor applied whenever a zone should be moving.",
     "invert": false,
-    "mode": "manual",
-    "_mode_values": "manual | auto (auto ramps speed with CPU temperature between auto_min_c and auto_max_c)",
-    "speed": 0.6,
-    "auto_min_c": 50.0,
-    "auto_max_c": 75.0,
-    "temp_path": "/sys/class/thermal/thermal_zone0/temp"
+    "temp_path": "/sys/class/thermal/thermal_zone0/temp",
+    "zones": [
+      {
+        "name": "Intake",
+        "gpios": [18],
+        "_gpios_note": "1-2 BCM lines per zone; all fans in a zone share the zone's speed.",
+        "mode": "auto",
+        "_mode_values": "manual | auto (ramps speed with CPU temp between auto_min_c/auto_max_c)",
+        "speed": 0.6,
+        "auto_min_c": 50.0,
+        "auto_max_c": 75.0
+      },
+      {
+        "name": "Exhaust",
+        "gpios": [19],
+        "mode": "manual",
+        "speed": 0.5,
+        "auto_min_c": 50.0,
+        "auto_max_c": 75.0
+      }
+    ]
   },
   "mpu9250": {
     "_about": "HiLetgo GY-9250 / MPU-9250 backup compass via I2C. Wired to CM5 40-pin header: SDA=GPIO2(pin3), SCL=GPIO3(pin5), VCC=3.3V(pin1), GND(pin6). AD0 to GND for address 0x68.",

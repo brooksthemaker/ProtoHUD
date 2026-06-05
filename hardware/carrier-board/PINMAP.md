@@ -63,6 +63,7 @@ HUB75 (14), I²C (2), or HAT-ID (2). Demand on those 10:
 | MAX7219 on hardware SPI0 | 10, 11, 8/7 |
 | MAX7219 bit-bang (with WS2812) | 14, 15 (DIN/CLK) + 7/8/25 (CS) |
 | I/O-expander INT / coproc IRQ | 25 |
+| Cooling fans (2 zones) | 18, 19 (one GPIO per zone → MOSFET) |
 | Buttons via I/O expander | **0 Pi pins** (rides I²C) ✅ |
 
 This is exactly why the recommended button/LED path is the **I²C expander**
