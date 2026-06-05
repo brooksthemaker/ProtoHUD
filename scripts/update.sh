@@ -33,6 +33,39 @@ done
 
 log() { echo "[protohud-update] $*"; }
 
+# Record the current (pre-update) commit + config as the "last known good"
+# state, so scripts/rollback.sh (and the in-HUD Updates menu) can return here
+# if the new code misbehaves. Runs BEFORE we fetch/checkout/pull so the marker
+# always points at the code that was actually running. Best-effort: never abort
+# the update if this bookkeeping fails.
+record_good() {
+    local state_dir="${ROOT}/state/update"
+    local backups="${state_dir}/backups"
+    mkdir -p "${backups}" 2>/dev/null || return 0
+
+    local commit branch ts
+    commit="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+
+    local cfg_backup=""
+    if [ -f "${ROOT}/config/config.json" ]; then
+        cfg_backup="${backups}/config-${ts}.json"
+        cp -f "${ROOT}/config/config.json" "${cfg_backup}" 2>/dev/null || cfg_backup=""
+        # Prune to the 10 most recent config backups.
+        ls -1t "${backups}"/config-*.json 2>/dev/null | tail -n +11 | \
+            while read -r old; do rm -f "${old}"; done
+    fi
+
+    {
+        echo "LAST_GOOD_COMMIT=${commit}"
+        echo "LAST_GOOD_BRANCH=${branch}"
+        echo "LAST_GOOD_DATE=${ts}"
+        echo "LAST_GOOD_CONFIG=${cfg_backup}"
+    } > "${state_dir}/last_good.env" 2>/dev/null || true
+    log "recorded rollback point: ${commit:0:9} on ${branch}"
+}
+
 # Retry a git network command up to 4 times with backoff.
 retry_git() {
     local delay=2 i
@@ -50,6 +83,8 @@ if [ -z "${BRANCH}" ]; then
     BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 fi
 log "updating branch '${BRANCH}'"
+
+record_good
 
 retry_git fetch origin "${BRANCH}" || exit 1
 

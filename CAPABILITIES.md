@@ -463,6 +463,30 @@ Settings modified via the menu are persisted to config.json on exit.
 - **Check for Updates** — runs `git fetch origin main`
 - **Pull & Rebuild** — runs `git pull` + `./scripts/build.sh`
 
+### In-HUD Updater (System → Updates)
+User-initiated branch-based updater. **ProtoHUD never auto-updates** — nothing
+fetches, builds, or restarts unless picked from this menu.
+- **Current Version** — current branch + short hash + commit subject, with a
+  status panel (behind-count, last-checked time).
+- **Check for Updates** — the only network step: `git fetch --prune origin`,
+  then reports how far behind the current branch is (no code changes).
+- **Update This Branch & Restart** — pulls + rebuilds + restarts the current
+  branch via `scripts/update.sh <branch> --restart`.
+- **Select Branch** — lists remote branches (curated to `main` + `claude/*`,
+  with a *Show All Branches* toggle). Highlighting a branch shows its recent
+  commits in the context panel; selecting it updates + restarts to it.
+- **Rollback Last Update** — restores the build + config saved just before the
+  last update (via `scripts/rollback.sh`). Visible only when a rollback point
+  exists.
+- **Settings/content protection** — `config/config.json` and user faces/effects
+  live outside version control, so updates never clobber them. `update.sh`
+  records a rollback point (commit + config backup under `state/update/`)
+  before every update.
+- **Standalone recovery** — `scripts/rollback.sh` works outside ProtoHUD (over
+  SSH) if the HUD won't boot: `scripts/rollback.sh --restart` returns to the
+  last known-good build, `--main` is a last-resort reset to `origin/main`,
+  `--list` shows the recorded rollback point.
+
 ### Demo Mode (System → Demo Mode)
 Test all notification types without hardware: Trigger Alarm, Trigger Timer Done, LoRa Message, App Toast, Toast Stack (×4), Clear All.
 

@@ -8684,6 +8684,334 @@ static std::vector<MenuItem> build_menu(
             "halts and the board powers down."),
     };
 
+    // ── Updates submenu (in-HUD updater — Phase 1, user-initiated only) ───────
+    // Pings the repo over plain git (no GitHub API): lists remote branches,
+    // shows their change-notes/log in the context panel, and applies a chosen
+    // branch via scripts/update.sh <branch> --restart. A pre-update rollback
+    // point is recorded by update.sh; "Rollback" returns to it via
+    // scripts/rollback.sh (also runnable standalone over SSH if the HUD won't
+    // boot). POLICY: there is deliberately NO automatic update path here —
+    // nothing fetches, builds or restarts unless the user picks it.
+    struct UpdaterState {
+        std::mutex  mtx;
+        std::string root;          // repo root (resolved from /proc/self/exe)
+        std::string cur_short;     // current HEAD short hash
+        std::string cur_subject;   // current HEAD commit subject
+        std::string cur_branch;    // current branch name
+        std::vector<std::string> branches;  // remote branch short names
+        bool        show_all = false;       // curated (main + claude/*) vs all
+        int         behind   = -1;          // commits behind origin/<branch>; -1 unknown
+        std::string last_check;             // human time of last fetch; "" = never
+        std::string status   = "Not checked yet.";
+        bool        busy     = false;       // an async git/update op is running
+        int         sel      = -1;          // highlighted branch index (log panel)
+        std::string sel_name;               // highlighted branch name
+        std::string sel_log;                // cached git log for the highlighted branch
+        bool        rollback_avail = false; // state/update/last_good.env exists
+        std::string rollback_target;        // "hash on branch" for the label
+    };
+    auto upd = std::make_shared<UpdaterState>();
+    {
+        char exe[4096];
+        ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            std::string p(exe);                                       // .../build/protohud
+            auto s = p.find_last_of('/'); if (s != std::string::npos) p.resize(s);  // .../build
+            s = p.find_last_of('/');      if (s != std::string::npos) p.resize(s);  // project root
+            upd->root = p;
+        }
+    }
+
+    // Run `git -C <root> <args>` and capture stdout (local queries are fast;
+    // network ones — fetch — are only ever called from a worker thread).
+    auto git_q = [sh_read, upd](const std::string& args) -> std::string {
+        std::string root;
+        { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; }
+        if (root.empty()) return {};
+        const std::string cmd = "git -C '" + root + "' " + args;
+        return sh_read(cmd.c_str());
+    };
+
+    // Refresh the current-version fields (local, instant).
+    auto upd_refresh_cur = [git_q, upd]{
+        std::string sh = git_q("rev-parse --short HEAD");
+        std::string su = git_q("log -1 --pretty=%s");
+        std::string br = git_q("rev-parse --abbrev-ref HEAD");
+        std::lock_guard<std::mutex> lk(upd->mtx);
+        upd->cur_short = sh; upd->cur_subject = su; upd->cur_branch = br;
+    };
+
+    // Refresh the remote-branch list (local; reads refs/remotes/origin).
+    auto upd_refresh_branches = [git_q, upd]{
+        bool all; { std::lock_guard<std::mutex> lk(upd->mtx); all = upd->show_all; }
+        const std::string raw = git_q(
+            "for-each-ref --format=%(refname:short) --sort=-committerdate refs/remotes/origin");
+        std::vector<std::string> out;
+        size_t pos = 0;
+        while (pos < raw.size()) {
+            size_t nl = raw.find('\n', pos);
+            if (nl == std::string::npos) nl = raw.size();
+            std::string ref = raw.substr(pos, nl - pos);
+            pos = nl + 1;
+            // Strip the "origin/" prefix; drop the symbolic origin/HEAD entry.
+            const std::string pfx = "origin/";
+            if (ref.rfind(pfx, 0) == 0) ref = ref.substr(pfx.size());
+            if (ref.empty() || ref == "HEAD" || ref.find("HEAD ->") != std::string::npos) continue;
+            // Curated view: main/master plus the working claude/* branches.
+            if (!all) {
+                const bool keep = (ref == "main" || ref == "master"
+                                   || ref.rfind("claude/", 0) == 0);
+                if (!keep) continue;
+            }
+            out.push_back(ref);
+        }
+        std::lock_guard<std::mutex> lk(upd->mtx);
+        upd->branches = std::move(out);
+    };
+
+    // Refresh rollback availability from the marker update.sh writes.
+    auto upd_refresh_rollback = [sh_read, upd]{
+        std::string root;
+        { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; }
+        const std::string marker = root + "/state/update/last_good.env";
+        const std::string out = sh_read(
+            ("[ -f '" + marker + "' ] && . '" + marker +
+             "' && printf '%s|%s' \"${LAST_GOOD_COMMIT:0:9}\" \"${LAST_GOOD_BRANCH}\"").c_str());
+        std::lock_guard<std::mutex> lk(upd->mtx);
+        if (out.empty()) { upd->rollback_avail = false; upd->rollback_target.clear(); return; }
+        upd->rollback_avail = true;
+        auto bar = out.find('|');
+        upd->rollback_target = (bar == std::string::npos)
+            ? out : (out.substr(0, bar) + " on " + out.substr(bar + 1));
+    };
+
+    // Initial population (local only — never auto-fetches).
+    upd_refresh_cur();
+    upd_refresh_branches();
+    upd_refresh_rollback();
+
+    // "Check for Updates": async fetch + behind-count. The ONLY network call,
+    // and only when the user picks it.
+    auto upd_check = [git_q, upd_refresh_cur, upd_refresh_branches, sh_read, upd, push_notif]{
+        { std::lock_guard<std::mutex> lk(upd->mtx);
+          if (upd->busy) return; upd->busy = true; upd->status = "Checking\xe2\x80\xa6"; }
+        std::thread([git_q, upd_refresh_cur, upd_refresh_branches, sh_read, upd, push_notif]{
+            git_q("fetch --prune origin");                 // network (retry handled by git config / best-effort)
+            upd_refresh_cur();
+            upd_refresh_branches();
+            std::string br; { std::lock_guard<std::mutex> lk(upd->mtx); br = upd->cur_branch; }
+            const std::string beh = git_q("rev-list --count HEAD..origin/" + br);
+            int behind = beh.empty() ? -1 : std::atoi(beh.c_str());
+            const std::string now = sh_read("date '+%a %H:%M'");
+            std::string msg = behind > 0
+                ? (std::to_string(behind) + " new commit(s) on " + br)
+                : (behind == 0 ? "Up to date." : "Checked (branch not on remote).");
+            { std::lock_guard<std::mutex> lk(upd->mtx);
+              upd->behind = behind; upd->last_check = now; upd->status = msg; upd->busy = false; }
+            push_notif(NotifType::App, "Updates",
+                       behind > 0 ? (std::to_string(behind) + " update(s) available")
+                                  : "Already up to date", 5.f);
+        }).detach();
+    };
+
+    // Apply a branch via update.sh <branch> --restart, detached so the build +
+    // restart survive ProtoHUD being killed during the restart step.
+    auto upd_apply = [upd, push_notif](const std::string& branch){
+        std::string root; bool busy;
+        { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; busy = upd->busy; }
+        if (busy || root.empty() || branch.empty()) return;
+        const std::string sp = root + "/scripts/update.sh";
+        // setsid + bash -c '"$0" "$1" --restart' keeps the script in its own
+        // session; $0/$1 carry the (quoted) script path + branch so neither
+        // needs escaping in the -c string.
+        const std::string cmd =
+            "setsid bash -c '\"$0\" \"$1\" --restart' '" + sp + "' '" + branch +
+            "' </dev/null >/tmp/protohud-update.log 2>&1 &";
+        std::system(cmd.c_str());
+        push_notif(NotifType::App, "Update started",
+                   "Pulling " + branch + " and rebuilding. The HUD restarts when "
+                   "the build succeeds, and stays up if it fails. Log: "
+                   "/tmp/protohud-update.log", 0.f);
+    };
+
+    // Roll back to the recorded known-good build via the standalone script.
+    auto upd_rollback = [upd, push_notif]{
+        std::string root; bool busy, avail;
+        { std::lock_guard<std::mutex> lk(upd->mtx);
+          root = upd->root; busy = upd->busy; avail = upd->rollback_avail; }
+        if (busy || root.empty() || !avail) return;
+        const std::string sp = root + "/scripts/rollback.sh";
+        const std::string cmd =
+            "setsid bash -c '\"$0\" --restart' '" + sp +
+            "' </dev/null >/tmp/protohud-rollback.log 2>&1 &";
+        std::system(cmd.c_str());
+        push_notif(NotifType::App, "Rollback started",
+                   "Restoring the last known-good build + config, then restarting. "
+                   "Log: /tmp/protohud-rollback.log", 0.f);
+    };
+
+    std::vector<MenuItem> updates_menu;
+    {
+        // Current version + status panel.
+        MenuItem cur = leaf("Current Version", []{});
+        cur.label_fn = [upd]{
+            std::lock_guard<std::mutex> lk(upd->mtx);
+            std::string s = "On " + (upd->cur_branch.empty() ? "?" : upd->cur_branch)
+                          + " @ " + (upd->cur_short.empty() ? "?" : upd->cur_short);
+            if (upd->behind > 0) s += "  (" + std::to_string(upd->behind) + " behind)";
+            return s;
+        };
+        updates_menu.push_back(with_panel(std::move(cur), "Update Status",
+            [upd](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                ImFont* font = ImGui::GetFont();
+                const float fs = ImGui::GetFontSize();
+                std::lock_guard<std::mutex> lk(upd->mtx);
+                float y = o.y;
+                auto line = [&](const std::string& t, ImU32 col, float scale){
+                    dl->AddText(font, fs * scale, {o.x, y}, col, t.c_str());
+                    y += fs * (scale + 0.25f);
+                };
+                line("Current build", IM_COL32(230, 235, 240, 255), 1.0f);
+                line(upd->cur_branch.empty() ? "branch ?" : upd->cur_branch,
+                     IM_COL32(200, 210, 220, 220), 0.85f);
+                line((upd->cur_short.empty() ? "?" : upd->cur_short) + "  " + upd->cur_subject,
+                     IM_COL32(180, 190, 200, 210), 0.85f);
+                y += fs * 0.4f;
+                line(upd->last_check.empty() ? "Last checked: never"
+                                             : ("Last checked: " + upd->last_check),
+                     IM_COL32(200, 210, 220, 220), 0.85f);
+                line(upd->status, upd->behind > 0 ? IM_COL32(120, 220, 140, 235)
+                                                  : IM_COL32(200, 210, 220, 220), 0.85f);
+            }));
+
+        // Check for Updates (the only network action).
+        MenuItem chk = with_desc(leaf("Check for Updates", [upd_check]{ upd_check(); }),
+            "Fetch the latest commit list from the repo (git fetch) and report how "
+            "far behind the current branch is. Does NOT change any code \xe2\x80\x94 nothing "
+            "updates until you pick a branch below. This is the only step that uses "
+            "the network.");
+        chk.label_fn = [upd]{
+            std::lock_guard<std::mutex> lk(upd->mtx);
+            return upd->busy ? std::string("Checking\xe2\x80\xa6")
+                             : std::string("Check for Updates");
+        };
+        updates_menu.push_back(std::move(chk));
+
+        // Update current branch in place.
+        updates_menu.push_back(with_desc(
+            leaf("Update This Branch & Restart",
+                 [upd, upd_apply]{
+                     std::string br; { std::lock_guard<std::mutex> lk(upd->mtx); br = upd->cur_branch; }
+                     upd_apply(br);
+                 }),
+            "Pull the latest commits for the CURRENT branch, rebuild, and restart. "
+            "Your settings (config.json) and custom faces/effects are preserved \xe2\x80\x94 "
+            "they're outside version control. A rollback point is saved first."));
+
+        // Select Branch submenu — dynamic slots fed by upd->branches, with a
+        // level context panel showing the highlighted branch's change log.
+        std::vector<MenuItem> branch_items;
+        branch_items.push_back(with_desc(toggle("Show All Branches",
+            [upd]{ std::lock_guard<std::mutex> lk(upd->mtx); return upd->show_all; },
+            [upd, upd_refresh_branches](bool v){
+                { std::lock_guard<std::mutex> lk(upd->mtx); upd->show_all = v; }
+                upd_refresh_branches();
+            }),
+            "OFF: show only main + the claude/* working branches (recommended). "
+            "ON: list every remote branch."));
+        branch_items.push_back(with_desc(
+            leaf("Refresh List", [upd_refresh_branches]{ upd_refresh_branches(); }),
+            "Re-read the local list of remote branches (run \"Check for Updates\" "
+            "first to pull new ones from the repo)."));
+
+        static constexpr int kBranchSlots = 48;
+        for (int i = 0; i < kBranchSlots; ++i) {
+            MenuItem b = leaf("branch", []{});
+            b.visible_fn = [upd, i]{
+                std::lock_guard<std::mutex> lk(upd->mtx);
+                return i < static_cast<int>(upd->branches.size());
+            };
+            b.label_fn = [upd, i]{
+                std::lock_guard<std::mutex> lk(upd->mtx);
+                if (i >= static_cast<int>(upd->branches.size())) return std::string();
+                std::string nm = upd->branches[i];
+                if (nm == upd->cur_branch) nm += "  (current)";
+                return nm;
+            };
+            // Load the change-log into the panel cache when highlighted.
+            b.on_highlight = [upd, git_q, i]{
+                std::string nm;
+                { std::lock_guard<std::mutex> lk(upd->mtx);
+                  if (i >= static_cast<int>(upd->branches.size())) return;
+                  if (upd->sel == i) return;          // already cached
+                  nm = upd->branches[i]; upd->sel = i; upd->sel_name = nm;
+                  upd->sel_log = "Loading\xe2\x80\xa6"; }
+                std::string log = git_q(
+                    "log --oneline --decorate -n 14 origin/" + nm);
+                std::string ahead = git_q("rev-list --count HEAD..origin/" + nm);
+                std::lock_guard<std::mutex> lk(upd->mtx);
+                if (upd->sel != i) return;            // moved on while loading
+                upd->sel_log = (ahead.empty() ? "" : ("+" + ahead + " ahead of current\n\n"))
+                             + (log.empty() ? "(no log / branch not fetched)" : log);
+            };
+            b.action = [upd, upd_apply, i]{
+                std::string nm;
+                { std::lock_guard<std::mutex> lk(upd->mtx);
+                  if (i >= static_cast<int>(upd->branches.size())) return;
+                  nm = upd->branches[i]; }
+                upd_apply(nm);
+            };
+            b.description = "Select to update to this branch, rebuild, and restart. "
+                            "The panel shows its recent commits. Settings + custom "
+                            "content are preserved; a rollback point is saved first.";
+            branch_items.push_back(std::move(b));
+        }
+
+        MenuItem branch_sub = submenu("Select Branch", std::move(branch_items));
+        updates_menu.push_back(with_desc(
+            with_panel(std::move(branch_sub), "Branch Changes",
+                [upd](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                    (void)sz;
+                    ImFont* font = ImGui::GetFont();
+                    const float fs = ImGui::GetFontSize();
+                    std::lock_guard<std::mutex> lk(upd->mtx);
+                    dl->AddText(font, fs * 1.0f, {o.x, o.y}, IM_COL32(230, 235, 240, 255),
+                                upd->sel_name.empty() ? "Highlight a branch"
+                                                      : upd->sel_name.c_str());
+                    float y = o.y + fs * 1.5f;
+                    const std::string& t = upd->sel_log;
+                    size_t pos = 0;
+                    while (pos < t.size()) {
+                        size_t nl = t.find('\n', pos);
+                        if (nl == std::string::npos) nl = t.size();
+                        const std::string ln = t.substr(pos, nl - pos);
+                        dl->AddText(font, fs * 0.8f, {o.x, y},
+                                    IM_COL32(200, 210, 220, 220), ln.c_str());
+                        y += fs * 0.95f;
+                        pos = nl + 1;
+                    }
+                }),
+            "Choose a branch to update to. Highlight one to read its recent commits "
+            "in the panel, then select to apply (rebuild + restart)."));
+
+        // Rollback — visible only when a recorded known-good point exists.
+        MenuItem rb = with_desc(leaf("Rollback Last Update",
+            [upd_rollback]{ upd_rollback(); }),
+            "Restore the build + config saved just before your last update, then "
+            "rebuild and restart. If the HUD won't boot, run scripts/rollback.sh "
+            "over SSH to do the same from outside ProtoHUD.");
+        rb.visible_fn = [upd]{ std::lock_guard<std::mutex> lk(upd->mtx); return upd->rollback_avail; };
+        rb.label_fn   = [upd]{
+            std::lock_guard<std::mutex> lk(upd->mtx);
+            return upd->rollback_target.empty()
+                ? std::string("Rollback Last Update")
+                : ("Rollback to " + upd->rollback_target);
+        };
+        updates_menu.push_back(std::move(rb));
+    }
+
     // ── Power submenu (existing reboot/quit + new shutdown moved here) ──────
     std::vector<MenuItem> power_menu = {
         with_desc(toggle("Skip Startup Screen",
@@ -9563,6 +9891,9 @@ static std::vector<MenuItem> build_menu(
                   "SSH, Bluetooth and other network/peripheral toggles."),
         with_desc(submenu("Pi Settings",      std::move(pi_settings_items)),
                   "Hostname, timezone, NTP, system updates, storage, shutdown."),
+        with_desc(submenu("Updates",          std::move(updates_menu)),
+                  "Check the repo for new commits, switch/update branches, and roll "
+                  "back \xe2\x80\x94 all user-initiated. ProtoHUD never auto-updates."),
         with_desc(submenu("Headset & Tracking", std::move(headset_menu)),
                   "Glasses IMU, focus, recenter — everything specific to the XR display."),
         with_desc(submenu("Timers and Alarm",   std::move(timers_alarm_menu)),
