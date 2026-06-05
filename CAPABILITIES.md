@@ -308,7 +308,7 @@ Default, Yellow, Orange, White, Green, Purple, Red, Blue, Rainbow, Flow Noise, H
 | Brightness | 0–255, step 5 |
 | Accent Brightness | 0–10 |
 | Face Size | 0–10 |
-| Fan Speed | 0–10 |
+| Fan Speed (Teensy face fan) | 0–10 |
 | Microphone | Toggle |
 | Mic Level | 0–10 |
 | Boop Sensor | Toggle |
@@ -316,6 +316,15 @@ Default, Yellow, Orange, White, Green, Purple, Red, Blue, Rainbow, Flow Noise, H
 
 - **Release Control** — relinquishes HUD control; Teensy resumes autonomous animation
 - **Panel Preview** — live 128×64 LED canvas as floating HUD window
+
+### Cooling Fans (Pi-driven PWM)
+Helmet cooling fans driven directly from the Pi GPIO via software PWM (2-pin fan
+through a MOSFET, or a 4-pin fan's control line). Menu: **System → Cooling
+Fans** — Enabled, Mode (**Manual** fixed speed / **Auto** ramps with CPU
+temperature between configurable min/max), Speed (0–100%), and a live duty/temp
+readout. Pins/behaviour in `config["fans"]`; use GPIO clear of HUB75 (see
+`hardware/carrier-board/PINMAP.md`). Distinct from the Teensy face-fan control
+above.
 
 ---
 

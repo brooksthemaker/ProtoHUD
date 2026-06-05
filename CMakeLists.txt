@@ -217,6 +217,7 @@ set(SOURCES
     src/accessory/led_strip.cpp
     src/accessory/accessory_leds.cpp
     src/sys/system_monitor.cpp
+    src/sys/fan_controller.cpp
     src/sys/scheduler_monitor.cpp
     src/net/wifi_monitor.cpp
     src/net/ping_monitor.cpp
