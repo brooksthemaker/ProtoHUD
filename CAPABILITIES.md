@@ -277,9 +277,15 @@ Idle, Blink, Angry, Happy, Sad, Shocked, Rainbow, Pulse, Wave, Custom
 Composable, multi-layer particle compositor with per-layer color, density,
 speed, direction, and blend (add/normal). Primitives:
 `sparkle, embers, rain, snow, confetti, rings, fireflies, clouds, lightning,
-meteor, bubbles, fireworks, vortex`. Built-in presets include `fire, aurora,
-nebula, plasma, sonar, thunderstorm, meteor_shower, fireworks, bubbles, vortex`.
+meteor, bubbles, fireworks, vortex, water`. Built-in presets include `fire,
+aurora, nebula, plasma, sonar, thunderstorm, meteor_shower, fireworks, bubbles,
+vortex`, plus liquid palettes `water, lava, toxic, ocean, plasma_fluid, mercury`.
 
+- **Water / liquid fill** — the panel looks partially filled with a tinted
+  liquid (single colour or a deep→surface gradient, with a Fill Level control).
+  The surface stays level in world space, so it **tilts as you roll your head**
+  and **sloshes** when the gyro/accel kicks — driven by the BNO055. Use
+  `blend:normal` for an opaque liquid or `add` for a glowy lava/plasma look.
 - **Motion-reactive layers** — couple a layer's direction to the IMU: `heading`
   (lock to compass), `yaw` (drift as you turn your head), or `tilt` (skew like
   gravity when you roll). Fed live from the BNO055 each frame.

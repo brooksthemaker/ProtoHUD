@@ -875,6 +875,87 @@ public:
     }
 };
 
+// ── Water / liquid fill ─────────────────────────────────────────────────────────
+// The panel looks partially filled with a liquid. The surface stays level in
+// world space — so it tilts on the panel as you roll your head (motion_.roll_deg)
+// — and sloshes when the gyro/accel kicks (motion_.yaw_rate / accel_g). Multiple
+// "colors" form a deep→surface gradient. Best with "blend":"normal" (opaque
+// liquid); use "add" for a glowy lava/plasma look.
+//   level (0..1) fill fraction · alpha · tilt_gain · slosh (px) · wave_count
+//   · wave_speed
+class WaterEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        phase_ += jnum(cfg_, "wave_speed", 2.0) * dt;
+        const double slosh_max = jnum(cfg_, "slosh", h_ * 0.10);
+        // Gyro yaw-rate + linear accel kick the surface ripple; a little idle
+        // motion keeps it alive at rest.
+        const double bump = std::min(1.0, std::fabs(motion_.yaw_rate) / 180.0
+                                        + std::fabs(motion_.accel_g - 1.0));
+        const double target = (0.15 + 0.85 * bump) * slosh_max;
+        amp_ += (target - amp_) * std::min(1.0, dt * 3.0);
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        const std::vector<Color> cols = read_colors();
+        const double level = std::clamp(jnum(cfg_, "level", 0.40), 0.0, 1.0);
+        const int    A     = (int)(std::clamp(jnum(cfg_, "alpha", 0.85), 0.0, 1.0) * 255.0);
+        const double gain  = jnum(cfg_, "tilt_gain", 1.0);
+        const double waven = jnum(cfg_, "wave_count", 2.0);
+        const double base  = h_ * (1.0 - level);
+        const double cx    = w_ * 0.5;
+        const double roll  = motion_.roll_deg * gain * kPi / 180.0;
+        const double slope = std::tan(std::clamp(roll, -1.2, 1.2));
+        for (int x = 0; x < w_; ++x) {
+            double sy = base - (x - cx) * slope
+                      + amp_ * std::sin(waven * kTau * x / std::max(1, w_) + phase_);
+            int iy = (int)std::floor(sy);
+            if (iy < 0) iy = 0;
+            const double span = std::max(1, h_ - 1 - iy);
+            for (int y = iy; y < h_; ++y) {
+                const Color col = sample_grad(cols, (y - iy) / span);  // 0 surface → 1 deep
+                draw_pixel(c, x, y, col.r, col.g, col.b, A);
+            }
+            if (iy >= 0 && iy < h_) {                                  // brighter surface line
+                const Color s = cols.front();
+                draw_pixel(c, x, iy, std::min(255, s.r + 90),
+                           std::min(255, s.g + 90), std::min(255, s.b + 90),
+                           std::min(255, A + 40));
+            }
+        }
+        return c;
+    }
+private:
+    std::vector<Color> read_colors() const {
+        std::vector<Color> v;
+        auto it = cfg_.find("colors");
+        if (it != cfg_.end() && it->is_array() && !it->empty()) {
+            for (const auto& c : *it)
+                if (c.is_array() && c.size() >= 3)
+                    v.push_back({ c[0].get<int>(), c[1].get<int>(), c[2].get<int>() });
+        } else {
+            auto c = cfg_.find("color");
+            if (c != cfg_.end() && c->is_array() && c->size() >= 3)
+                v.push_back({ (*c)[0].get<int>(), (*c)[1].get<int>(), (*c)[2].get<int>() });
+        }
+        if (v.empty()) { v.push_back({120, 220, 255}); v.push_back({0, 80, 200}); }
+        return v;
+    }
+    static Color sample_grad(const std::vector<Color>& v, double f) {
+        if (v.size() == 1) return v[0];
+        f = std::clamp(f, 0.0, 1.0);
+        const double pos = f * (v.size() - 1);
+        const int i = (int)pos;
+        if (i >= (int)v.size() - 1) return v.back();
+        const double t = pos - i;
+        return { (int)std::lround(v[i].r + (v[i+1].r - v[i].r) * t),
+                 (int)std::lround(v[i].g + (v[i+1].g - v[i].g) * t),
+                 (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
+    }
+    double phase_ = 0.0, amp_ = 0.0;
+};
+
 // ── Effect factory ───────────────────────────────────────────────────────────
 
 std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, const json& cfg) {
@@ -891,6 +972,7 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "bubbles")   return std::make_unique<BubblesEffect>(w, h, cfg);
     if (name == "fireworks") return std::make_unique<FireworksEffect>(w, h, cfg);
     if (name == "vortex")    return std::make_unique<VortexEffect>(w, h, cfg);
+    if (name == "water")     return std::make_unique<WaterEffect>(w, h, cfg);
     return nullptr;
 }
 
@@ -926,6 +1008,12 @@ const std::map<std::string, json>& presets() {
             {"effect":"embers","count":12,"colors":[[180,220,255],[200,240,255]],"speed_min":20,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
             {"effect":"rings","count":1,"colors":[[0,200,255]],"speed_min":10,"speed_max":15,"max_radius":15,"blend":"add"}]},
           "rain": {"effect":"rain","count":35,"colors":[[120,150,220],[150,180,255]],"speed_min":45,"speed_max":70,"drift_x":1.5,"blend":"add"},
+          "water": {"effect":"water","level":0.42,"alpha":0.85,"slosh":6,"wave_count":2,"wave_speed":2.0,"colors":[[120,220,255],[0,110,210],[0,40,120]],"blend":"normal"},
+          "lava": {"effect":"water","level":0.36,"alpha":0.95,"slosh":4,"wave_count":2,"wave_speed":1.3,"colors":[[255,230,120],[255,90,0],[150,20,0]],"blend":"normal"},
+          "toxic": {"effect":"water","level":0.40,"alpha":0.9,"slosh":7,"wave_count":3,"wave_speed":2.4,"colors":[[210,255,120],[60,200,0],[15,110,0]],"blend":"normal"},
+          "ocean": {"effect":"water","level":0.52,"alpha":0.85,"slosh":8,"wave_count":3,"wave_speed":1.8,"colors":[[90,235,225],[0,130,170],[0,40,90]],"blend":"normal"},
+          "plasma_fluid": {"effect":"water","level":0.40,"alpha":0.9,"slosh":6,"wave_count":2,"colors":[[255,130,255],[150,0,200],[40,0,80]],"blend":"normal"},
+          "mercury": {"effect":"water","level":0.36,"alpha":0.96,"slosh":3,"wave_count":2,"colors":[[235,240,250],[120,130,150],[55,60,75]],"blend":"normal"},
           "thunderstorm": {"layers":[
             {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":55,"speed_max":80,"drift_x":3.0,"blend":"add"},
             {"effect":"lightning","rate":0.7,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},

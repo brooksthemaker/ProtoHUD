@@ -857,6 +857,8 @@ struct LayerCfg {
     // and radial effects ignore it and the slider is hidden in their UI.
     // -1 means "use the effect's historical default."
     float direction_deg = -1.f;
+    // Liquid fill fraction for the "water" effect (0..1). Ignored by others.
+    float level = 0.4f;
     std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
     // Motion reactivity (opt-in): drives the layer's direction from head
     // movement. "none" | "heading" (lock to compass) | "yaw" (drift when
@@ -4037,6 +4039,8 @@ static std::vector<MenuItem> build_menu(
                 layer["direction_from"] = L.direction_from;
             if (L.intensity_from != "none")
                 layer["intensity_from"] = L.intensity_from;
+            if (L.effect == "water")
+                layer["level"] = L.level;
             out["layers"].push_back(layer);
         }
         return out;
@@ -4066,6 +4070,7 @@ static std::vector<MenuItem> build_menu(
             L.direction_deg = jl.value("direction_deg", -1.f);
             L.direction_from = jl.value("direction_from", std::string("none"));
             L.intensity_from = jl.value("intensity_from", std::string("none"));
+            L.level = jl.value("level", 0.4f);
         }
     };
 
@@ -4075,7 +4080,7 @@ static std::vector<MenuItem> build_menu(
     static const char* const kLayerEffects[] = {
         "none", "sparkle", "embers", "rain", "snow",
         "confetti", "rings", "fireflies", "clouds",
-        "lightning", "meteor", "bubbles", "fireworks", "vortex",
+        "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
@@ -4345,6 +4350,14 @@ static std::vector<MenuItem> build_menu(
                 };
                 return dir;
             })(),
+            // Fill Level — only meaningful for the "water" liquid effect.
+            ([&]{
+                MenuItem lvl = slider("Fill Level", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->level * 100.f; },
+                    [L](float v){ L->level = v / 100.f; });
+                lvl.visible_fn = [L]{ return L->effect == "water"; };
+                return lvl;
+            })(),
             // Motion reactivity — couple this layer's direction to head movement.
             ([&]{
                 static const char* const kMotionSrc[] = {"none", "heading", "yaw", "tilt"};
@@ -4410,6 +4423,7 @@ static std::vector<MenuItem> build_menu(
             "fire", "aurora", "blizzard", "sonar", "celebration", "plasma",
             "thunderstorm", "meteor_shower", "fireworks", "bubbles", "vortex",
             "nebula",
+            "water", "lava", "toxic", "ocean", "plasma_fluid", "mercury",
         };
         std::vector<MenuItem> preset_items;
         for (const char* name : kBuiltinPresets)
