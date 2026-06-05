@@ -197,6 +197,8 @@
     "autostart": true,
     "expression_effects": false,
     "_expression_effects_note": "When true, the active particle effect auto-swaps to a mood preset as the face expression changes (angry->fire, happy->celebration, sad->rain, shocked->galaxy); neutral/unmapped faces restore your chosen effect. Toggle live in Face > Effects > Expression Effects.",
+    "continuous_effects": false,
+    "_continuous_effects_note": "When true, a mirrored 2-eye face renders BOTH eyes independently (the second eye's face is flipped to keep the mirrored look) so canvas-space effects like 'water' form one continuous tank across the visor instead of one eye being a flipped copy. Costs a second face/particle render. Applied at startup.",
     "panel_driver": true,
     "_panel_driver_note": "native mode only: auto-launch scripts/panel_driver.py to drive the HUB75 panels. Set false for preview-only or if you run the driver yourself.",
     "_native_about": "native-mode options: assets_dir points at the Protoface checkout holding faces/materials/gifs (default $HOME/protohud/Protoface); panels overrides the default 2-panel mirrored layout.",

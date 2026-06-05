@@ -286,7 +286,9 @@ vortex`, plus liquid palettes `water, lava, toxic, ocean, plasma_fluid, mercury`
   controls). The surface stays level in world space, so it **tilts as you roll
   your head** and **sloshes** when the gyro/accel kicks — driven by the BNO055.
   Rendered in **canvas space**, so a multi-panel face reads as one continuous
-  tank across the whole visor. Optional **rising bubbles** (in the liquid) or
+  tank across the whole visor (set `protoface.continuous_effects` to make a
+  mirrored 2-eye face self-render both eyes so the tank is world-continuous
+  rather than a flipped copy). Optional **rising bubbles** (in the liquid) or
   **drip droplets** (above the surface), and **pitch-driven fill** (look down →
   the liquid rises). Use `blend:normal` for an opaque liquid or `add` for a
   glowy lava/plasma look.

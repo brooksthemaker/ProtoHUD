@@ -940,6 +940,7 @@ static face::RenderConfig pf_build_render_config(const json& cfg,
         rc.canvas_w = jval(*jpf, "canvas_w", rc.canvas_w);
         rc.canvas_h = jval(*jpf, "canvas_h", rc.canvas_h);
         rc.fps      = jval(*jpf, "fps",      rc.fps);
+        rc.continuous_effects = jval(*jpf, "continuous_effects", false);
         if (jpf->contains("faces_dir"))     rc.faces_dir     = (*jpf)["faces_dir"].get<std::string>();
         if (jpf->contains("materials_dir")) rc.materials_dir = (*jpf)["materials_dir"].get<std::string>();
         if (jpf->contains("gifs_dir"))      rc.gifs_dir      = (*jpf)["gifs_dir"].get<std::string>();

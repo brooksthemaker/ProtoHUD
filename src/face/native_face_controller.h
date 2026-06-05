@@ -154,6 +154,7 @@ private:
         std::string    material_spec;              // current material spec (for persistence)
         nlohmann::json particles_spec = "none";    // current particle config (for persistence)
         bool is_mirror = false;
+        bool face_mirror = false;   // flip the face layer (continuous_effects un-mirror)
         int  src_index = -1;
     };
 

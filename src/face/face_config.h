@@ -72,6 +72,11 @@ struct RenderConfig {
     // makes set_effect() a no-op. Used by the MAX7219 / RGB-matrix backends
     // where particle effects don't read on a handful of 8x8 modules.
     bool                 effects_enabled = true;
+    // When true, mirror_of panels are built as full self-rendering panels (their
+    // own face + ParticleSystem) with the face layer flipped to preserve the
+    // mirrored look — so canvas-space effects (water) render continuously across
+    // both eyes instead of one eye being a flipped copy. Costs a second render.
+    bool                 continuous_effects = false;
     std::vector<PanelCfg> panels;
 
     // Physical-panel output regions for a multi-panel face rendered as ONE

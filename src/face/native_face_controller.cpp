@@ -67,39 +67,54 @@ NativeFaceController::~NativeFaceController() { stop(); }
 
 void NativeFaceController::build_panels() {
     panels_.clear();
+    auto find_cfg = [&](const std::string& name) -> const PanelCfg* {
+        for (const auto& p : cfg_.panels) if (p.name == name) return &p;
+        return nullptr;
+    };
     for (const PanelCfg& pc : cfg_.panels) {
         Panel pn;
         pn.cfg = pc;
-        if (pc.mirror_of.empty()) {
-            pn.loader = std::make_unique<FaceLoader>(
-                cfg_.faces_dir + "/" + pc.face.active, pc.w, pc.h,
-                cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
-            pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
-            pn.state = std::make_unique<FaceState>(
-                pc.face, pn.loader->expression_names());
-            pn.material = load_material(pc.material.active, pc.w, pc.h,
-                                        pc.material.scroll_x, pc.material.scroll_y,
-                                        cfg_.materials_dir);
-            if (cfg_.effects_enabled) {
-                pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
-                // Tell canvas-space effects (water) where this panel sits so a
-                // multi-panel face renders one continuous field.
-                pn.particles->set_canvas_geometry(cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
-                pn.particles_spec = pc.particles;
-            }
-            // GIFs play per physical panel (duplicated on each side) rather than
-            // stretched across the whole multi-panel canvas, so size the player
-            // to one physical panel when this is a one-logical-panel face.
-            int gw = pc.w, gh = pc.h;
-            if (!cfg_.output_panels.empty()) {
-                gw = cfg_.output_panels.front().w;
-                gh = cfg_.output_panels.front().h;
-            }
-            pn.gif = std::make_unique<GifPlayer>(gw, gh);
-            pn.material_spec  = pc.material.active;
-        } else {
-            pn.is_mirror = true;
+
+        // Decide the face/material/particles config source. Normally a panel is
+        // its own source; a mirror_of panel copies a flipped region. With
+        // continuous_effects on, un-mirror it: build a full self-rendering panel
+        // from the SOURCE's face config and flip just the face layer at render
+        // time, so canvas-space effects (water) stay continuous across eyes.
+        const PanelCfg* fc = &pc;
+        bool face_mirror = false;
+        if (!pc.mirror_of.empty()) {
+            const PanelCfg* src = cfg_.continuous_effects ? find_cfg(pc.mirror_of) : nullptr;
+            if (src) { fc = src; face_mirror = true; }
+            else     { pn.is_mirror = true; panels_.push_back(std::move(pn)); continue; }
         }
+
+        pn.loader = std::make_unique<FaceLoader>(
+            cfg_.faces_dir + "/" + fc->face.active, pc.w, pc.h,
+            cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
+        pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
+        pn.state = std::make_unique<FaceState>(
+            fc->face, pn.loader->expression_names());
+        pn.material = load_material(fc->material.active, pc.w, pc.h,
+                                    fc->material.scroll_x, fc->material.scroll_y,
+                                    cfg_.materials_dir);
+        if (cfg_.effects_enabled) {
+            pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, fc->particles);
+            // Tell canvas-space effects (water) where this panel sits so a
+            // multi-panel face renders one continuous field.
+            pn.particles->set_canvas_geometry(cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
+            pn.particles_spec = fc->particles;
+        }
+        // GIFs play per physical panel (duplicated on each side) rather than
+        // stretched across the whole multi-panel canvas, so size the player
+        // to one physical panel when this is a one-logical-panel face.
+        int gw = pc.w, gh = pc.h;
+        if (!cfg_.output_panels.empty()) {
+            gw = cfg_.output_panels.front().w;
+            gh = cfg_.output_panels.front().h;
+        }
+        pn.gif = std::make_unique<GifPlayer>(gw, gh);
+        pn.material_spec = fc->material.active;
+        pn.face_mirror   = face_mirror;
         panels_.push_back(std::move(pn));
     }
     // Resolve mirror sources by panel name.
@@ -262,6 +277,12 @@ void NativeFaceController::render_thread() {
                     cv::Mat face_rgba = pn.loader->get_frame(*pn.state);
                     face_layer = apply_material(face_rgba, mat);
                 }
+
+                // continuous_effects un-mirror: flip just the face/GIF layer so
+                // the eye still reads mirrored, while the canvas-space particle
+                // layer (added below) renders un-flipped and stays continuous.
+                if (pn.face_mirror && !face_layer.empty())
+                    cv::flip(face_layer, face_layer, 1);
 
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
                 // Effects are suppressed while a GIF or eye animation plays —
