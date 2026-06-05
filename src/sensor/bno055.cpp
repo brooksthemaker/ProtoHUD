@@ -11,8 +11,10 @@
 #include <fcntl.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <termios.h>
 #include <unistd.h>
 
 namespace {
@@ -48,6 +50,19 @@ constexpr float kAccelMsToG       = 1.0f / 9.80665f;
 constexpr float kGyroLsbPerDps    = 16.0f;
 constexpr float kMagLsbPerUt      = 16.0f;
 constexpr float kQuatLsb          = 1.0f / 16384.0f;
+
+speed_t baud_constant(int baud) {
+    switch (baud) {
+        case 9600:    return B9600;
+        case 19200:   return B19200;
+        case 38400:   return B38400;
+        case 57600:   return B57600;
+        case 115200:  return B115200;
+        case 230400:  return B230400;
+        case 460800:  return B460800;
+        default:      return B115200;   // BNO055 UART default
+    }
+}
 } // namespace
 
 Bno055::Bno055(const Config& cfg) : cfg_(cfg) {
@@ -59,6 +74,7 @@ Bno055::Bno055(const Config& cfg) : cfg_(cfg) {
 Bno055::~Bno055() { stop(); }
 
 bool Bno055::write_reg(uint8_t reg, uint8_t val) {
+    if (is_uart()) return uart_write_reg(reg, val);
     if (i2c_fd_ < 0) return false;
     if (ioctl(i2c_fd_, I2C_SLAVE, cfg_.i2c_addr) < 0) return false;
     uint8_t buf[2] = { reg, val };
@@ -66,6 +82,7 @@ bool Bno055::write_reg(uint8_t reg, uint8_t val) {
 }
 
 bool Bno055::read_regs(uint8_t reg, uint8_t* buf, size_t len) {
+    if (is_uart()) return uart_read_regs(reg, buf, len);
     if (i2c_fd_ < 0) return false;
     // Combined write-then-read in ONE transaction with a repeated START
     // (I2C_RDWR) instead of a separate write+STOP+read. The BNO055 stretches
@@ -86,6 +103,7 @@ bool Bno055::read_regs(uint8_t reg, uint8_t* buf, size_t len) {
 }
 
 bool Bno055::open_bus() {
+    if (is_uart()) return open_uart();
     i2c_fd_ = ::open(cfg_.i2c_bus.c_str(), O_RDWR);
     if (i2c_fd_ < 0) {
         std::cerr << "[bno055] cannot open " << cfg_.i2c_bus
@@ -95,11 +113,105 @@ bool Bno055::open_bus() {
     return true;
 }
 
+bool Bno055::open_uart() {
+    uart_fd_ = ::open(cfg_.uart_device.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (uart_fd_ < 0) {
+        std::cerr << "[bno055] cannot open " << cfg_.uart_device
+                  << ": " << std::strerror(errno) << "\n";
+        return false;
+    }
+    termios tio{};
+    if (tcgetattr(uart_fd_, &tio) != 0) {
+        std::cerr << "[bno055] tcgetattr failed on " << cfg_.uart_device << "\n";
+        ::close(uart_fd_); uart_fd_ = -1; return false;
+    }
+    cfmakeraw(&tio);
+    const speed_t spd = baud_constant(cfg_.uart_baud);
+    cfsetispeed(&tio, spd);
+    cfsetospeed(&tio, spd);
+    tio.c_cflag |= (CLOCAL | CREAD);
+    tio.c_cflag &= ~CRTSCTS;
+    tio.c_cc[VMIN]  = 0;
+    tio.c_cc[VTIME] = 0;
+    tcsetattr(uart_fd_, TCSANOW, &tio);
+    tcflush(uart_fd_, TCIOFLUSH);
+    return true;
+}
+
+void Bno055::close_bus() {
+    if (i2c_fd_  >= 0) { ::close(i2c_fd_);  i2c_fd_  = -1; }
+    if (uart_fd_ >= 0) { ::close(uart_fd_); uart_fd_ = -1; }
+}
+
+// ── BNO055 UART register protocol ────────────────────────────────────────────
+// Write: [0xAA 0x00 reg len data…] → ack [0xEE 0x01] on success.
+// Read:  [0xAA 0x01 reg len]        → [0xBB len data…] on success, else [0xEE st].
+// The link occasionally NAKs with 0xEE 0x07 (bus overrun); retry a few times.
+void Bno055::uart_flush_input() {
+    if (uart_fd_ >= 0) tcflush(uart_fd_, TCIFLUSH);
+}
+
+bool Bno055::uart_read_exact(uint8_t* buf, size_t n, int timeout_ms) {
+    if (uart_fd_ < 0) return false;
+    size_t got = 0;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeout_ms);
+    while (got < n) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return false;
+        const int left = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+        pollfd p{uart_fd_, POLLIN, 0};
+        const int pr = ::poll(&p, 1, left > 0 ? left : 1);
+        if (pr < 0) { if (errno == EINTR) continue; return false; }
+        if (pr == 0) return false;
+        const ssize_t r = ::read(uart_fd_, buf + got, n - got);
+        if (r > 0) got += static_cast<size_t>(r);
+        else if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return false;
+    }
+    return true;
+}
+
+bool Bno055::uart_write_reg(uint8_t reg, uint8_t val) {
+    if (uart_fd_ < 0) return false;
+    const uint8_t cmd[5] = { 0xAA, 0x00, reg, 1, val };
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        uart_flush_input();
+        if (::write(uart_fd_, cmd, sizeof cmd) != static_cast<ssize_t>(sizeof cmd))
+            return false;
+        uint8_t resp[2];
+        if (uart_read_exact(resp, 2, 30) && resp[0] == 0xEE && resp[1] == 0x01)
+            return true;                              // WRITE_SUCCESS
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    return false;
+}
+
+bool Bno055::uart_read_regs(uint8_t reg, uint8_t* buf, size_t len) {
+    if (uart_fd_ < 0 || len == 0 || len > 128) return false;
+    const uint8_t cmd[4] = { 0xAA, 0x01, reg, static_cast<uint8_t>(len) };
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        uart_flush_input();
+        if (::write(uart_fd_, cmd, sizeof cmd) != static_cast<ssize_t>(sizeof cmd))
+            return false;
+        uint8_t hdr[2];
+        if (!uart_read_exact(hdr, 2, 30)) continue;            // no response → retry
+        if (hdr[0] == 0xBB && hdr[1] == len) {
+            if (uart_read_exact(buf, len, 30)) return true;    // payload
+            continue;
+        }
+        // hdr[0] == 0xEE → error status hdr[1] (0x07 overrun / 0x02 read-fail) → retry
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    return false;
+}
+
 bool Bno055::init_chip_locked() {
     uint8_t id = 0;
     if (!read_regs(REG_CHIP_ID, &id, 1) || id != CHIP_ID_BNO055) {
-        std::cerr << "[bno055] CHIP_ID mismatch at 0x" << std::hex
-                  << cfg_.i2c_addr << " (got 0x" << static_cast<int>(id)
+        std::cerr << "[bno055] CHIP_ID mismatch on "
+                  << (is_uart() ? cfg_.uart_device : cfg_.i2c_bus)
+                  << " (got 0x" << std::hex << static_cast<int>(id)
                   << ", want 0xA0)\n" << std::dec;
         return false;
     }
@@ -189,8 +301,7 @@ bool Bno055::start() {
     if (running_.load()) return true;
     if (!open_bus()) return false;
     if (!init_chip_locked()) {
-        ::close(i2c_fd_);
-        i2c_fd_ = -1;
+        close_bus();
         return false;
     }
     // If a calibration file already exists, treat the one-shot auto-save as
@@ -205,10 +316,9 @@ bool Bno055::start() {
 void Bno055::stop() {
     if (!running_.exchange(false)) return;
     if (thread_.joinable()) thread_.join();
-    if (i2c_fd_ >= 0) {
+    if (i2c_fd_ >= 0 || uart_fd_ >= 0) {
         write_reg(REG_OPR_MODE, OPR_MODE_CONFIG);
-        ::close(i2c_fd_);
-        i2c_fd_ = -1;
+        close_bus();
     }
 }
 

@@ -9904,6 +9904,11 @@ int main(int argc, char* argv[]) {
         bno_cfg.heading_axes    = jval(jb, "heading_axes",    0);
         bno_cfg.poll_hz         = jval(jb, "poll_hz",         50.0f);
         bno_cfg.auto_save_calibration = jval(jb, "save_calibration", true);
+        // Transport: "i2c" (default) or "uart" (PS1→3.3V; sidesteps the Pi's
+        // I²C clock-stretch trouble). uart_device + uart_baud apply in UART mode.
+        bno_cfg.transport       = jb.value("transport",   std::string("i2c"));
+        bno_cfg.uart_device     = jb.value("uart_device", std::string("/dev/ttyAMA0"));
+        bno_cfg.uart_baud       = jval(jb, "uart_baud",   115200);
     }
     // Persist the BNO055 calibration profile next to config.json so the sensor
     // keeps its calibration across reboots (restored at start()).

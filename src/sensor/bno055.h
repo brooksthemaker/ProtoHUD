@@ -1,6 +1,8 @@
 #pragma once
 // ── bno055.h ──────────────────────────────────────────────────────────────────
-// Adafruit BNO055 (9-DOF absolute orientation) driver over Linux i2c-dev.
+// Adafruit BNO055 (9-DOF absolute orientation) driver over Linux i2c-dev or a
+// serial UART (Config::transport = "i2c" | "uart"). UART mode (PS1 → 3.3V)
+// sidesteps the Pi's I²C clock-stretching trouble — Adafruit's recommended path.
 // Unlike the MPU9250, the BNO055 does sensor fusion on-chip and reports
 // heading/roll/pitch directly in degrees, plus a calibration status byte.
 // We just init it in NDOF mode and poll the EUL_* registers — no Madgwick /
@@ -37,6 +39,13 @@ public:
         // calibrated (sys == 3) when no file exists yet.
         std::string calib_path;
         bool        auto_save_calibration = true;
+        // Transport: "i2c" (default) or "uart". The Pi's I²C clock-stretching is
+        // unreliable with the BNO055; UART mode (solder PS1 → 3.3V so SCL/SDA
+        // become RX/TX) sidesteps it. uart_device is the serial port; the
+        // BNO055 UART runs at 115200.
+        std::string transport   = "i2c";
+        std::string uart_device = "/dev/ttyAMA0";
+        int         uart_baud   = 115200;
     };
 
     explicit Bno055(const Config& cfg);
@@ -86,9 +95,17 @@ public:
 
 private:
     bool open_bus();
+    bool open_uart();
+    void close_bus();
+    bool is_uart() const { return cfg_.transport == "uart"; }
     bool init_chip_locked();
     bool write_reg(uint8_t reg, uint8_t val);
     bool read_regs(uint8_t reg, uint8_t* buf, size_t len);
+    // BNO055 serial register protocol (used when transport == "uart").
+    bool uart_write_reg(uint8_t reg, uint8_t val);
+    bool uart_read_regs(uint8_t reg, uint8_t* buf, size_t len);
+    bool uart_read_exact(uint8_t* buf, size_t n, int timeout_ms);
+    void uart_flush_input();
     void poll_loop();
 
     // Calibration profile (22 bytes at 0x55..0x6A). read/write helpers assume
@@ -99,7 +116,8 @@ private:
     bool load_calibration_file(uint8_t out[22]) const;
 
     Config cfg_;
-    int    i2c_fd_ = -1;
+    int    i2c_fd_  = -1;
+    int    uart_fd_ = -1;
 
     HeadingCallback                       cb_;
     std::function<void(const Sample&)>    samp_cb_;
