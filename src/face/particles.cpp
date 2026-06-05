@@ -315,14 +315,23 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        std::string shape = cfg_.value("shape", std::string("dot"));
+        // Embers render as little angled diamonds (45°) with a flicker spark
+        // above, which reads as natural fire far better than axis-aligned blocks.
         for (auto& p : particles_) {
-            double alpha = p.life;
-            int gr = (int)std::clamp(p.r, 0.0, 255.0);
-            int gg = (int)std::clamp(p.g * p.life, 0.0, 255.0);
-            int gb = (int)std::clamp(p.b * p.life * p.life, 0.0, 255.0);
-            if (shape == "rect") draw_rect(c, p.x, p.y, gr, gg, gb, alpha, p.size);
-            else                 draw_dot (c, p.x, p.y, gr, gg, gb, alpha, p.size);
+            const double alpha = p.life;
+            const int gr = (int)std::clamp(p.r, 0.0, 255.0);
+            const int gg = (int)std::clamp(p.g * p.life, 0.0, 255.0);
+            const int gb = (int)std::clamp(p.b * p.life * p.life, 0.0, 255.0);
+            const int A  = (int)std::clamp(alpha * 255.0, 0.0, 255.0);
+            const int rad = std::max(0, p.size - 1);          // size 1 = single pixel
+            const int ix = (int)p.x, iy = (int)p.y;
+            for (int dy = -rad; dy <= rad; ++dy)
+                for (int dx = -rad; dx <= rad; ++dx)
+                    if (std::abs(dx) + std::abs(dy) <= rad)    // diamond, not square
+                        draw_pixel(c, ix + dx, iy + dy, gr, gg, gb, A);
+            // flickering spark just above the ember (wobbles with its phase)
+            const int fx = (int)std::lround(std::sin(p.extra * 3.0) * 1.5);
+            draw_pixel(c, ix + fx, iy - rad - 1, 255, 230, 180, (int)(alpha * 200.0));
         }
         return c;
     }
@@ -795,7 +804,7 @@ class FireworksEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
-        const double grav = jnum(cfg_, "gravity", 30.0);
+        const double grav = jnum(cfg_, "gravity", 26.0);
         for (auto& p : particles_) {
             p.vy += grav * dt;
             p.x += p.vx * dt; p.y += p.vy * dt;
@@ -806,11 +815,15 @@ public:
             [&](const Particle& p){ return p.life <= 0 || p.y > h_ + 6; }), particles_.end());
         int rockets = 0;
         for (const auto& p : particles_) if (p.extra > 0.5) ++rockets;
-        if (rockets < count(2) && frand(rng_, 0, 1) < 0.05) {
+        if (rockets < count(2) && frand(rng_, 0, 1) < 0.06) {
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{255, 220, 120};
             Particle r;
             r.x = frand(rng_, w_ * 0.2, w_ * 0.8); r.y = h_;
-            r.vy = -pick_speed(cfg_, 45, 65, rng_); r.vx = frand(rng_, -6, 6);
+            // Panel-relative launch: pick an apex height inside the panel so the
+            // burst is always visible (apex = where vy crosses 0). v = sqrt(2gh).
+            const double rise = h_ * frand(rng_, 0.45, 0.72);
+            r.vy = -std::sqrt(2.0 * grav * std::max(4.0, rise));
+            r.vx = frand(rng_, -3, 3);
             r.r = col.r; r.g = col.g; r.b = col.b; r.size = 1;
             r.max_life = 4.0; r.life = 1; r.extra = 1.0;   // >0.5 == rocket
             particles_.push_back(r);
@@ -827,14 +840,16 @@ public:
 private:
     void explode(Particle& rocket) {
         const int n = jint(cfg_, "burst", 22);
+        // Scale the burst radius to the panel so the shower stays on-screen.
+        const double vmax = jnum(cfg_, "burst_speed", std::min(w_, h_) * 0.45);
         for (int i = 0; i < n; ++i) {
             const double ang = kTau * i / n + frand(rng_, -0.1, 0.1);
-            const double spd = frand(rng_, 12, 34);
+            const double spd = frand(rng_, vmax * 0.4, vmax);
             Particle s;
             s.x = rocket.x; s.y = rocket.y;
             s.vx = std::cos(ang) * spd; s.vy = std::sin(ang) * spd;
             s.r = rocket.r; s.g = rocket.g; s.b = rocket.b; s.size = 1;
-            s.max_life = frand(rng_, 0.6, 1.3); s.life = 1; s.extra = 0.0;  // spark
+            s.max_life = frand(rng_, 0.5, 1.1); s.life = 1; s.extra = 0.0;  // spark
             particles_.push_back(s);
         }
     }
@@ -856,12 +871,14 @@ public:
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [](const Particle& p){ return p.life <= 0 || p.vy <= 1.0; }), particles_.end());
-        const double maxr = jnum(cfg_, "max_radius", std::min(w_, h_) * 0.5);
-        while ((int)particles_.size() < count(40)) {
+        // Span the whole canvas (reaches the corners) so it's not a small blob
+        // stuck in the middle. cw_/ch_ default to this panel when no canvas set.
+        const double maxr = jnum(cfg_, "max_radius", std::hypot(cw_, ch_) * 0.55);
+        while ((int)particles_.size() < count(60)) {
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{120, 180, 255};
             Particle p;
             p.extra = frand(rng_, 0, kTau);                 // angle
-            p.vy    = frand(rng_, maxr * 0.5, maxr);        // radius (reuse vy)
+            p.vy    = frand(rng_, maxr * 0.30, maxr);       // radius (reuse vy)
             p.max_life = pick_life(cfg_, 1.5, 3.5, rng_); p.life = 1;
             p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 2, rng_);
             particles_.push_back(p);
@@ -869,11 +886,23 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        const double cx = w_ * 0.5, cy = h_ * 0.5;
+        // Centre on the whole canvas; render this panel's slice (continuous
+        // across a multi-panel face). Each particle is a little comet: a head
+        // dot plus an arc tail trailing along its spin, in its own hue.
+        const double cx = cw_ * 0.5, cy = ch_ * 0.5;
+        const double swirl = jnum(cfg_, "swirl", 2.2);
+        const double tailA = std::clamp(0.22 + swirl * 0.06, 0.1, 0.9);
         for (const auto& p : particles_) {
-            const double x = cx + std::cos(p.extra) * p.vy;
-            const double y = cy + std::sin(p.extra) * p.vy;
-            draw_dot(c, x, y, p.r, p.g, p.b, std::clamp(p.life, 0.0, 1.0), p.size);
+            const double a = p.extra, r = p.vy;
+            const double hx = cx + std::cos(a) * r - ox_;
+            const double hy = cy + std::sin(a) * r - oy_;
+            const double tx = cx + std::cos(a - tailA) * (r * 1.06) - ox_;
+            const double ty = cy + std::sin(a - tailA) * (r * 1.06) - oy_;
+            const double life = std::clamp(p.life, 0.0, 1.0);
+            cv::line(c, cv::Point((int)tx, (int)ty), cv::Point((int)hx, (int)hy),
+                     cv::Scalar(p.r * 0.45, p.g * 0.45, p.b * 0.45, (int)(life * 150.0)),
+                     1, cv::LINE_8);
+            draw_dot(c, hx, hy, p.r, p.g, p.b, life, p.size);
         }
         return c;
     }
@@ -1076,15 +1105,15 @@ const std::map<std::string, json>& presets() {
           "party": {"effect":"confetti","count":35,"colors":[[255,50,50],[255,180,30],[50,220,50],[50,150,255],[220,50,220],[255,255,50]],"speed_min":6,"speed_max":10,"blend":"normal"},
           "radar": {"effect":"rings","count":2,"colors":[[0,255,80]],"speed_min":12,"speed_max":18,"max_radius":25,"blend":"add"},
           "fire": {"layers":[
-            {"effect":"embers","count":35,"colors":[[255,50,0],[220,60,0],[200,40,0]],"speed_min":8,"speed_max":20,"size_min":1,"size_max":2,"blend":"add"},
-            {"effect":"embers","count":15,"colors":[[255,160,0],[255,200,20],[255,180,10]],"speed_min":18,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
+            {"effect":"embers","count":35,"colors":[[255,50,0],[220,60,0],[200,40,0]],"speed_min":8,"speed_max":20,"size_min":2,"size_max":3,"blend":"add"},
+            {"effect":"embers","count":15,"colors":[[255,160,0],[255,200,20],[255,180,10]],"speed_min":18,"speed_max":40,"size_min":1,"size_max":2,"blend":"add"},
             {"effect":"sparkle","count":5,"colors":[[255,255,200],[255,240,180]],"life_min":0.05,"life_max":0.12,"blend":"add"}]},
           "aurora": {"layers":[
             {"effect":"fireflies","count":20,"colors":[[0,200,180],[0,160,255],[0,220,200]],"speed_min":3,"speed_max":6,"blend":"add"},
             {"effect":"sparkle","count":10,"colors":[[100,255,220],[80,220,255]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
           "blizzard": {"layers":[
-            {"effect":"snow","count":40,"colors":[[180,200,255],[200,215,255],[220,230,255]],"speed_min":18,"speed_max":35,"drift_x":4.0,"blend":"add"},
-            {"effect":"rain","count":10,"colors":[[160,190,255],[180,200,255]],"speed_min":50,"speed_max":70,"drift_x":6.0,"blend":"add"}]},
+            {"effect":"snow","count":70,"colors":[[210,225,255],[235,245,255]],"speed_min":35,"speed_max":55,"drift_x":1.5,"direction_deg":118,"blend":"add"},
+            {"effect":"snow","count":45,"colors":[[235,245,255],[255,255,255]],"speed_min":55,"speed_max":85,"drift_x":2.0,"direction_deg":113,"size_min":1,"size_max":1,"blend":"add"}]},
           "sonar": {"layers":[
             {"effect":"rings","count":2,"colors":[[0,220,180],[0,200,160]],"speed_min":12,"speed_max":16,"max_radius":28,"blend":"add"},
             {"effect":"fireflies","count":4,"colors":[[0,255,200]],"speed_min":1,"speed_max":3,"blend":"add"}]},
@@ -1111,7 +1140,7 @@ const std::map<std::string, json>& presets() {
           "fireworks": {"effect":"fireworks","count":3,"burst":24,"colors":[[255,80,80],[80,180,255],[255,220,80],[180,80,255],[80,255,160]],"blend":"add"},
           "bubbles": {"effect":"bubbles","count":16,"colors":[[160,220,255],[120,200,255],[200,240,255]],"speed_min":8,"speed_max":18,"wobble":7,"blend":"add"},
           "vortex": {"layers":[
-            {"effect":"vortex","count":50,"swirl":2.4,"infall":7,"colors":[[0,200,255],[80,160,255],[120,100,255]],"blend":"add"},
+            {"effect":"vortex","count":70,"swirl":2.6,"infall":7,"colors":[[0,220,255],[0,255,200],[120,90,255],[200,80,255],[60,140,255]],"blend":"add"},
             {"effect":"sparkle","count":8,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
           "nebula": {"layers":[
             {"effect":"clouds","count":4,"size_min":10,"size_max":18,"lobes_min":3,"lobes_max":6,"turbulence":0.55,"churn":0.3,"alpha_min":0.18,"alpha_max":0.4,"speed_min":0.5,"speed_max":1.8,"colors":[[150,40,140],[90,60,200],[40,90,200]],"blend":"add"},
