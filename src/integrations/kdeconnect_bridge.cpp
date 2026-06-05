@@ -249,7 +249,14 @@ bool KdeConnectBridge::ring_phone() {
 bool KdeConnectBridge::share_file(const std::string& path) {
     if (!running_.load() || path.empty()) return false;
     std::lock_guard<std::mutex> lk(share_mtx_);
-    share_queue_.push_back(path);
+    share_queue_.push_back("file://" + path);   // queue holds ready-to-send URLs
+    return true;
+}
+
+bool KdeConnectBridge::share_url(const std::string& url) {
+    if (!running_.load() || url.empty()) return false;
+    std::lock_guard<std::mutex> lk(share_mtx_);
+    share_queue_.push_back(url);
     return true;
 }
 
@@ -515,8 +522,7 @@ void KdeConnectBridge::worker() {
             if (!pending.empty() && !current_dev_id.empty()) {
                 const std::string obj =
                     "/modules/kdeconnect/devices/" + current_dev_id + "/share";
-                for (const auto& p : pending) {
-                    const std::string url = "file://" + p;
+                for (const auto& url : pending) {   // each entry is a ready URL
                     DBusMessage* msg = dbus_message_new_method_call(
                         kKdeService, obj.c_str(), kShareIface, "shareUrl");
                     if (!msg) continue;

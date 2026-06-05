@@ -882,6 +882,7 @@ struct AppState {
     std::vector<ScheduledEvent> scheduler_events;   // sorted by start_utc
     SchedulerStatus             scheduler_status;
     int                         scheduler_lead_min = 10;  // reminder lead time (minutes)
+    bool                        sched_send_link_startup = false;  // push web link to phone on boot
 
     // Notification queue — render-thread owned; push from main thread while holding mtx
     NotificationQueue    notifs;

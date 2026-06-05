@@ -78,6 +78,10 @@ public:
     // false when the bridge isn't running. Safe to call from any thread.
     bool share_file(const std::string& path);
 
+    // Share a URL/text with the paired phone (KDE Connect opens http(s) links in
+    // the browser). Same queue/threading as share_file.
+    bool share_url(const std::string& url);
+
     // Live-tunable config — applied on the next worker dispatch.
     void set_auto_dismiss(float seconds) { cfg_.auto_dismiss_s = seconds; }
     void set_app_blocklist(std::string csv);

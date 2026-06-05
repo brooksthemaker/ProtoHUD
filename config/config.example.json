@@ -220,7 +220,9 @@
     "poll_interval_s": 20,
     "lead_minutes": 10,
     "all_day_reminder_hour": 8,
-    "web_port": 8770
+    "web_port": 8770,
+    "send_link_on_startup": false,
+    "_send_link_note": "When true, push the scheduler web-page link to the paired phone over KDE Connect once at boot (after the daemon publishes its URL and the phone is connected). Also available on demand via Info Panel > Schedule > Send Link to Phone."
   },
   "kdeconnect": {
     "_about": "Bridges phone notifications from KDE Connect (over LAN or USB tether) into the HUD's notification queue. Requires kdeconnectd running on the Pi and the phone paired via the KDE Connect Android/iOS app. Bridge is gated by libdbus-1-dev being available at build time; on platforms without DBus the section is silently ignored.",

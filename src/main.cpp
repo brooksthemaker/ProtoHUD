@@ -6932,6 +6932,30 @@ static std::vector<MenuItem> build_menu(
         slider("Reminder Lead", 0.f, 60.f, 5.f, "min",
             [&state]{ return static_cast<float>(state.scheduler_lead_min); },
             [&state](float v){ state.scheduler_lead_min = static_cast<int>(v); }),
+        // Push the scheduler web page link to the paired phone over KDE Connect.
+        with_desc(leaf("Send Link to Phone", [&state, kdc_p]{
+                std::string url;
+                { std::lock_guard<std::mutex> lk(state.mtx); url = state.scheduler_status.web_url; }
+                const bool ok = kdc_p && kdc_p->device_ready() && !url.empty()
+                                && kdc_p->share_url(url);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Link sent to phone"
+                             : (url.empty() ? "Scheduler link not ready" : "No phone connected");
+                n.body  = ok ? url : "Connect a KDE Connect device and wait for the "
+                                     "scheduler daemon to publish its URL.";
+                n.auto_dismiss_s = 6.f; state.notifs.push(std::move(n));
+            }),
+            "Open the scheduler web page on your phone — sends the link over KDE "
+            "Connect."),
+        with_desc(toggle("Send Link on Startup",
+            [&state]{ return state.sched_send_link_startup; },
+            [&state, cfg_root](bool v){
+                state.sched_send_link_startup = v;
+                if (cfg_root) (*cfg_root)["scheduler"]["send_link_on_startup"] = v;
+            }),
+            "Each boot, automatically push the scheduler web link to the paired "
+            "phone once its URL and the phone are both ready."),
     };
     std::vector<MenuItem> ip_weather_menu = {
         toggle("Show Current Page",
@@ -9224,25 +9248,35 @@ static std::vector<MenuItem> build_menu(
             dl->AddText(font, fs * 0.72f, {o.x, y}, IM_COL32(150,158,166,210), meta);
         };
 
-        // Find the first writable removable mount (USB stick etc.) under the
-        // usual auto-mount roots. Empty when nothing's plugged in.
-        auto find_usb_mount = []() -> std::string {
-            namespace fs = std::filesystem;
-            std::vector<std::string> roots;
-            if (const char* u = std::getenv("USER")) roots.push_back(std::string("/media/") + u);
-            roots.push_back("/media");
-            roots.push_back("/mnt");
-            std::error_code ec;
-            for (const auto& root : roots) {
-                if (!fs::is_directory(root, ec)) continue;
-                for (const auto& e : fs::directory_iterator(root, ec)) {
-                    if (!e.is_directory(ec)) continue;
-                    const fs::path probe = e.path() / ".protohud_wtest";
-                    std::ofstream t(probe.string());
-                    if (t.good()) { t.close(); fs::remove(probe, ec); return e.path().string(); }
+        // List removable mounts (USB sticks etc.) under the auto-mount roots as
+        // {path, display}. Cached ~1 s so the menu's per-slot label/visible fns
+        // don't readdir every frame. Cheap listing only (no write probe).
+        auto usb_cache   = std::make_shared<std::vector<std::pair<std::string,std::string>>>();
+        auto usb_cache_t = std::make_shared<double>(-100.0);
+        auto list_usb_mounts =
+            [usb_cache, usb_cache_t]() -> const std::vector<std::pair<std::string,std::string>>& {
+            const double now = ImGui::GetTime();
+            if (now - *usb_cache_t > 1.0) {
+                *usb_cache_t = now;
+                usb_cache->clear();
+                namespace fs = std::filesystem;
+                std::vector<std::string> roots;
+                std::error_code ec;
+                if (const char* u = std::getenv("USER")) {
+                    const std::string mu = std::string("/media/") + u;
+                    if (fs::is_directory(mu, ec)) roots.push_back(mu);
+                }
+                if (roots.empty()) roots.push_back("/media");
+                roots.push_back("/mnt");
+                for (const auto& root : roots) {
+                    if (!fs::is_directory(root, ec)) continue;
+                    for (const auto& e : fs::directory_iterator(root, ec))
+                        if (e.is_directory(ec))
+                            usb_cache->emplace_back(e.path().string(),
+                                                    e.path().filename().string());
                 }
             }
-            return {};
+            return *usb_cache;
         };
         // Share a capture's image files with the paired phone over KDE Connect.
         auto send_qr_phone = [kdc_p, &state](const QrCapture& c) {
@@ -9261,13 +9295,11 @@ static std::vector<MenuItem> build_menu(
                           : "Pair + connect a device in KDE Connect first.";
             nt.auto_dismiss_s = 5.f; state.notifs.push(std::move(nt));
         };
-        // Copy a capture's folder to a removable drive.
-        auto export_qr_usb = [find_usb_mount, &state](const QrCapture& c) {
+        // Copy a capture's folder (+ a link.txt) to a chosen mount.
+        auto export_qr_usb_to = [&state](const QrCapture& c, const std::string& dest) {
             namespace fs = std::filesystem;
-            const std::string dest = find_usb_mount();
             std::string body; bool ok = false;
-            if (dest.empty())            body = "No USB/external drive found under /media or /mnt.";
-            else if (c.folder.empty())   body = "Nothing to export for this code.";
+            if (c.folder.empty())      body = "Nothing to export for this code.";
             else {
                 std::error_code ec;
                 const fs::path target = fs::path(dest) /
@@ -9282,13 +9314,43 @@ static std::vector<MenuItem> build_menu(
                     }
                 std::ofstream f((target / "link.txt").string());
                 if (f) f << c.text << "\n";
-                ok = true;
-                body = "Copied " + std::to_string(n) + " file(s) to " + target.string();
+                ok = (n > 0);
+                body = ok ? ("Copied " + std::to_string(n) + " file(s) to " + target.string())
+                          : ("Could not write to " + dest);
             }
             std::lock_guard<std::mutex> lk(state.mtx);
             Notification nt; nt.type = NotifType::App;
             nt.title = ok ? "Exported to USB" : "Export failed";
             nt.body  = body; nt.auto_dismiss_s = 6.f; state.notifs.push(std::move(nt));
+        };
+        // Build the "Export / Send" target list (phone + each connected drive),
+        // wiring on_phone()/on_usb(path) to whatever the caller wants exported.
+        auto build_export_targets =
+            [kdc_p, list_usb_mounts](std::function<void()> on_phone,
+                                     std::function<void(std::string)> on_usb) {
+            std::vector<MenuItem> t;
+            MenuItem p; p.type = MenuItemType::LEAF; p.label = "phone";
+            p.label_fn   = [kdc_p]{ return std::string("Phone: ") +
+                                    (kdc_p ? kdc_p->active_device_name() : std::string()); };
+            p.visible_fn = [kdc_p]{ return kdc_p && kdc_p->device_ready(); };
+            p.action     = on_phone;
+            t.push_back(std::move(p));
+            for (int j = 0; j < 6; ++j) {
+                MenuItem m; m.type = MenuItemType::LEAF; m.label = "drive";
+                m.label_fn   = [list_usb_mounts, j]{
+                    const auto& v = list_usb_mounts();
+                    return j < (int)v.size() ? ("USB: " + v[j].second) : std::string(); };
+                m.visible_fn = [list_usb_mounts, j]{ return j < (int)list_usb_mounts().size(); };
+                m.action     = [on_usb, list_usb_mounts, j]{
+                    const auto& v = list_usb_mounts();
+                    if (j < (int)v.size()) on_usb(v[j].first); };
+                t.push_back(std::move(m));
+            }
+            MenuItem none; none.type = MenuItemType::LEAF; none.label = "(no devices connected)";
+            none.visible_fn = [kdc_p, list_usb_mounts]{
+                return !(kdc_p && kdc_p->device_ready()) && list_usb_mounts().empty(); };
+            t.push_back(std::move(none));
+            return t;
         };
 
         std::vector<MenuItem> qmenu;
@@ -9313,20 +9375,26 @@ static std::vector<MenuItem> build_menu(
             qmenu.push_back(with_desc(std::move(clr),
                 "Delete every saved QR code and its folder."));
         }
-        // Export All to USB — copy every capture folder to a removable drive.
+        // Export / Send All — to a chosen connected device (phone or a drive).
         {
-            MenuItem all = leaf("Export All to USB", [export_qr_usb, &state]{
+            auto for_all = [&state](const std::function<void(const QrCapture&)>& fn){
                 std::vector<QrCapture> items;
                 { std::lock_guard<std::mutex> lk(state.mtx);
                   items.assign(state.qr_captures.items.begin(),
                                state.qr_captures.items.end()); }
-                for (const auto& c : items) export_qr_usb(c);
-            });
+                for (const auto& c : items) fn(c);
+            };
+            MenuItem all = submenu("Export / Send All", build_export_targets(
+                [for_all, send_qr_phone]{
+                    for_all([&send_qr_phone](const QrCapture& c){ send_qr_phone(c); }); },
+                [for_all, export_qr_usb_to](std::string dest){
+                    for_all([&export_qr_usb_to, dest](const QrCapture& c){
+                        export_qr_usb_to(c, dest); }); }));
             all.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
                                        return !state.qr_captures.items.empty(); };
             qmenu.push_back(with_desc(std::move(all),
-                "Copy every saved QR code's files to the first USB/external drive "
-                "found (under /media or /mnt)."));
+                "Send every saved QR code's files to a connected device (the paired "
+                "phone, or a USB/external drive)."));
         }
         // Capture rows (newest first).
         for (int i = 0; i < 40; ++i) {
@@ -9365,13 +9433,13 @@ static std::vector<MenuItem> build_menu(
                 if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
             });
             del.warn_fn = []{ return true; };
-            MenuItem send = leaf("Send to Phone", [send_qr_phone, cap_at, i]{
-                send_qr_phone(cap_at(i)); });
-            send.visible_fn = [kdc_p, cap_at, i]{ return kdc_p && !cap_at(i).folder.empty(); };
-            MenuItem usb = leaf("Export to USB", [export_qr_usb, cap_at, i]{
-                export_qr_usb(cap_at(i)); });
-            usb.visible_fn = [cap_at, i]{ return !cap_at(i).folder.empty(); };
-            row.children = { std::move(open), std::move(send), std::move(usb), std::move(del) };
+            MenuItem exp = submenu("Export / Send", build_export_targets(
+                [send_qr_phone, cap_at, i]{ send_qr_phone(cap_at(i)); },
+                [export_qr_usb_to, cap_at, i](std::string dest){ export_qr_usb_to(cap_at(i), dest); }));
+            exp.visible_fn = [cap_at, i]{ return !cap_at(i).folder.empty(); };
+            exp.description = "Send this code's files to a connected device — the "
+                              "paired phone (KDE Connect) or any plugged-in USB drive.";
+            row.children = { std::move(open), std::move(exp), std::move(del) };
             row.context_panel_title = "QR Code";
             row.context_panel_draw  = [draw_cap, cap_at, i](ImDrawList* dl, ImVec2 o, ImVec2 sz){
                 draw_cap(dl, o, sz, cap_at(i)); };
@@ -10484,6 +10552,7 @@ int main(int argc, char* argv[]) {
         sched_events_path = jval(jsc, "events_path",     sched_events_path);
         sched_status_path = jval(jsc, "status_path",     sched_status_path);
         sched_lead_min    = jval(jsc, "lead_minutes",    sched_lead_min);
+        state.sched_send_link_startup = jval(jsc, "send_link_on_startup", false);
     }
 
     // KDE Connect bridge — RX phone notifications via DBus session bus.
@@ -12149,6 +12218,7 @@ int main(int argc, char* argv[]) {
 
     // Effects Live Preview tick — populated inside build_menu, polled each frame.
     auto pf_live_tick = std::make_shared<std::function<void()>>();
+    bool sched_link_pushed = false;   // one-shot guard for "send scheduler link on startup"
 
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
@@ -13411,6 +13481,21 @@ int main(int argc, char* argv[]) {
         // Effects Live Preview — re-apply the builder spec on change (no-op
         // unless the user enabled Live Preview in Face > Effects > Custom).
         if (pf_live_tick && *pf_live_tick) (*pf_live_tick)();
+
+        // Scheduler "send link on startup": once both the daemon's URL and the
+        // phone are ready, push the web link over KDE Connect exactly once.
+        if (!sched_link_pushed && state.sched_send_link_startup &&
+            kdc_menu_ptr && kdc_menu_ptr->device_ready()) {
+            std::string url;
+            { std::lock_guard<std::mutex> lk(state.mtx); url = state.scheduler_status.web_url; }
+            if (!url.empty() && kdc_menu_ptr->share_url(url)) {
+                sched_link_pushed = true;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App;
+                n.title = "Scheduler link sent"; n.body = url; n.auto_dismiss_s = 6.f;
+                state.notifs.push(std::move(n));
+            }
+        }
 
         // ── Notification log persistence (debounced, ~5s) ─────────────────────
         // Dirty on a new push (next_id) OR a delete/clear (size change).

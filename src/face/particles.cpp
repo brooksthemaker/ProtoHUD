@@ -706,6 +706,17 @@ private:
         return cv::Point(irand(rng_, 0, std::max(0, w_ - 1)),
                          irand(rng_, 0, std::max(0, h_ - 1)));
     }
+    // A point on one of the screen edges — arcs anchored here read like a
+    // discharge jumping off a wire / between insulators.
+    cv::Point rand_edge_point() {
+        const int W = std::max(1, w_), H = std::max(1, h_);
+        switch (irand(rng_, 0, 3)) {
+            case 0:  return cv::Point(irand(rng_, 0, W - 1), 0);        // top
+            case 1:  return cv::Point(irand(rng_, 0, W - 1), H - 1);    // bottom
+            case 2:  return cv::Point(0,        irand(rng_, 0, H - 1)); // left
+            default: return cv::Point(W - 1,    irand(rng_, 0, H - 1)); // right
+        }
+    }
     // Jagged polyline a→e with perpendicular jitter; randomly forks branches
     // (up to 2 levels deep) into `strokes` with the trunk pushed first.
     void build_strokes(cv::Point a, cv::Point e, int steps, double jit,
@@ -761,13 +772,13 @@ private:
     void update_arcs(double dt) {
         bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(),
             [](const Bolt& b){ return !b.arc; }), bolts_.end());   // drop leftover bolts
-        const int want = std::max(1, count(3));
+        const int want = std::max(1, count(2));        // fewer, deliberate arcs
         while (static_cast<int>(bolts_.size()) < want) {
             Bolt b; b.arc = true;
             const Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{150, 200, 255};
             b.r = col.r; b.g = col.g; b.b = col.b;
-            b.a = rand_point(); b.e = rand_point();
-            b.relocate = frand(rng_, 0.3, 1.2);
+            b.a = rand_edge_point(); b.e = rand_edge_point();   // both ends on edges
+            b.relocate = frand(rng_, 0.6, 1.8);                  // re-strike interval
             bolts_.push_back(std::move(b));
         }
         while (static_cast<int>(bolts_.size()) > want) bolts_.pop_back();
@@ -775,10 +786,10 @@ private:
         const double bp  = jnum(cfg_, "branches", 0.30);
         for (auto& b : bolts_) {
             b.age += dt;
-            b.alpha = frand(rng_, 0.5, 1.0);           // electrical flicker
-            if (b.age >= b.relocate) {                 // jump an endpoint
-                b.age = 0.0; b.relocate = frand(rng_, 0.3, 1.2);
-                if (irand(rng_, 0, 1)) b.e = rand_point(); else b.a = rand_point();
+            b.alpha = frand(rng_, 0.55, 1.0);          // electrical flicker
+            if (b.age >= b.relocate) {                 // re-strike: jump an endpoint to a new edge
+                b.age = 0.0; b.relocate = frand(rng_, 0.6, 1.8);
+                if (irand(rng_, 0, 1)) b.e = rand_edge_point(); else b.a = rand_edge_point();
             }
             b.strokes.clear();                         // regenerate each frame → crackle
             build_strokes(b.a, b.e, irand(rng_, 6, 12), jit, bp, b.strokes, 0);
@@ -1238,7 +1249,7 @@ const std::map<std::string, json>& presets() {
           "thunderstorm": {"layers":[
             {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":55,"speed_max":80,"drift_x":3.0,"blend":"add"},
             {"effect":"lightning","rate":0.7,"branches":0.45,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},
-          "arc": {"effect":"lightning","arc":true,"count":3,"branches":0.4,"jitter":5,"colors":[[160,200,255],[210,225,255],[120,170,255]],"blend":"add"},
+          "arc": {"effect":"lightning","arc":true,"count":2,"branches":0.35,"jitter":5,"colors":[[160,200,255],[210,225,255],[120,170,255]],"blend":"add"},
           "meteor_shower": {"layers":[
             {"effect":"meteor","count":7,"colors":[[200,220,255],[255,240,200],[180,220,255]],"speed_min":45,"speed_max":85,"tail":7,"direction_deg":25,"blend":"add"},
             {"effect":"sparkle","count":18,"colors":[[255,255,255],[200,220,255]],"life_min":0.3,"life_max":1.0,"blend":"add"}]},
