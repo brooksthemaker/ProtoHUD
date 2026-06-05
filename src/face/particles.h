@@ -40,6 +40,10 @@ public:
     void set_effect(const nlohmann::json& cfg);   // replace all layers at runtime
     void set_motion(const MotionInput& m);        // latest IMU state for reactive layers
     void set_audio(double level);                 // mic level [0,1] for audio-reactive layers
+    // Where this panel sits in the full logical canvas, so canvas-space effects
+    // (e.g. water) render one continuous field across a multi-panel face. Local
+    // pixel (lx,ly) maps to canvas (off_x+lx, off_y+ly). Defaults to per-panel.
+    void set_canvas_geometry(int canvas_w, int canvas_h, int off_x, int off_y);
     void update(double dt);
     ParticleFrame render();
 

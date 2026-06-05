@@ -126,7 +126,7 @@ inline void draw_rect(cv::Mat& c, double x, double y, int r, int g, int b,
 class BaseEffect {
 public:
     BaseEffect(int w, int h, json cfg)
-        : w_(w), h_(h), cfg_(std::move(cfg)),
+        : w_(w), h_(h), cw_(w), ch_(h), cfg_(std::move(cfg)),
           intensity_(jnum(cfg_, "intensity", 1.0)),
           rng_(static_cast<uint32_t>(
               std::chrono::steady_clock::now().time_since_epoch().count())) {}
@@ -138,6 +138,9 @@ public:
     // Effects read it through count()/direction_unit() when the cfg opts in.
     void set_motion(const MotionInput& m) { motion_ = m; }
     void set_audio(double level) { audio_ = level; }
+    void set_canvas_geometry(int cw, int ch, int ox, int oy) {
+        cw_ = cw; ch_ = ch; ox_ = ox; oy_ = oy;
+    }
 
 protected:
     int count(int def) const {
@@ -206,6 +209,7 @@ protected:
     }
 
     int w_, h_;
+    int cw_, ch_, ox_ = 0, oy_ = 0;   // full-canvas size + this panel's offset
     json cfg_;
     double intensity_;
     std::mt19937 rng_;
@@ -911,23 +915,28 @@ public:
         const int    A     = (int)(std::clamp(jnum(cfg_, "alpha", 0.85), 0.0, 1.0) * 255.0);
         const double gain  = jnum(cfg_, "tilt_gain", 1.0);
         const double waven = jnum(cfg_, "wave_count", 2.0);
-        const double base  = h_ * (1.0 - level);
-        const double cx    = w_ * 0.5;
+        // Compute the surface in CANVAS space so a multi-panel face reads as one
+        // continuous tank; this panel renders only the slice within its region.
+        const double base  = ch_ * (1.0 - level);
+        const double ccx   = cw_ * 0.5;
+        const double bottom = ch_ - 1;                 // canvas-space deepest row
         const double roll  = tilt_smooth_ * gain * kPi / 180.0;   // viscosity-smoothed
         const double slope = std::tan(std::clamp(roll, -1.2, 1.2));
-        for (int x = 0; x < w_; ++x) {
-            double sy = base - (x - cx) * slope
-                      + amp_ * std::sin(waven * kTau * x / std::max(1, w_) + phase_);
-            int iy = (int)std::floor(sy);
-            if (iy < 0) iy = 0;
-            const double span = std::max(1, h_ - 1 - iy);
-            for (int y = iy; y < h_; ++y) {
-                const Color col = sample_grad(cols, (y - iy) / span);  // 0 surface → 1 deep
-                draw_pixel(c, x, y, col.r, col.g, col.b, A);
+        for (int lx = 0; lx < w_; ++lx) {
+            const double X = ox_ + lx;                 // canvas-space column
+            const double sy = base - (X - ccx) * slope
+                            + amp_ * std::sin(waven * kTau * X / std::max(1, cw_) + phase_);
+            const double span = std::max(1.0, bottom - sy);
+            for (int ly = 0; ly < h_; ++ly) {
+                const double Y = oy_ + ly;             // canvas-space row
+                if (Y < sy) continue;                  // above the liquid surface
+                const Color col = sample_grad(cols, (Y - sy) / span);   // 0 surface → 1 deep
+                draw_pixel(c, lx, ly, col.r, col.g, col.b, A);
             }
-            if (iy >= 0 && iy < h_) {                                  // brighter surface line
+            const int surf_ly = (int)std::lround(sy) - oy_;             // surface line, local
+            if (surf_ly >= 0 && surf_ly < h_) {
                 const Color s = cols.front();
-                draw_pixel(c, x, iy, std::min(255, s.r + 90),
+                draw_pixel(c, lx, surf_ly, std::min(255, s.r + 90),
                            std::min(255, s.g + 90), std::min(255, s.b + 90),
                            std::min(255, A + 40));
             }
@@ -1097,6 +1106,9 @@ struct ParticleLayer {
     cv::Mat render()       { return effect ? effect->render() : cv::Mat(); }
     void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
     void set_audio(double level)          { if (effect) effect->set_audio(level); }
+    void set_canvas_geometry(int cw, int ch, int ox, int oy) {
+        if (effect) effect->set_canvas_geometry(cw, ch, ox, oy);
+    }
 };
 
 } // namespace
@@ -1108,6 +1120,7 @@ struct ParticleSystem::Impl {
     std::vector<ParticleLayer> layers;
     MotionInput motion{};   // latest IMU state, re-applied to rebuilt layers
     double audio = 0.0;     // latest mic level, re-applied to rebuilt layers
+    int cw, ch, ox = 0, oy = 0;   // canvas geometry, re-applied to rebuilt layers
 
     void build(const json& cfg) {
         layers.clear();
@@ -1116,6 +1129,7 @@ struct ParticleSystem::Impl {
             layers.emplace_back(lc, w, h);
             layers.back().set_motion(motion);
             layers.back().set_audio(audio);
+            layers.back().set_canvas_geometry(cw, ch, ox, oy);
         }
     }
 };
@@ -1123,11 +1137,17 @@ struct ParticleSystem::Impl {
 ParticleSystem::ParticleSystem(int width, int height, const json& cfg)
     : impl_(std::make_unique<Impl>()) {
     impl_->w = width; impl_->h = height;
+    impl_->cw = width; impl_->ch = height;   // default canvas = this panel (per-panel)
     impl_->build(cfg);
 }
 ParticleSystem::~ParticleSystem() = default;
 
 void ParticleSystem::set_effect(const json& cfg) { impl_->build(cfg); }
+
+void ParticleSystem::set_canvas_geometry(int canvas_w, int canvas_h, int off_x, int off_y) {
+    impl_->cw = canvas_w; impl_->ch = canvas_h; impl_->ox = off_x; impl_->oy = off_y;
+    for (auto& l : impl_->layers) l.set_canvas_geometry(canvas_w, canvas_h, off_x, off_y);
+}
 
 void ParticleSystem::set_motion(const MotionInput& m) {
     impl_->motion = m;

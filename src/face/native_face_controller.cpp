@@ -82,6 +82,9 @@ void NativeFaceController::build_panels() {
                                         cfg_.materials_dir);
             if (cfg_.effects_enabled) {
                 pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
+                // Tell canvas-space effects (water) where this panel sits so a
+                // multi-panel face renders one continuous field.
+                pn.particles->set_canvas_geometry(cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
                 pn.particles_spec = pc.particles;
             }
             // GIFs play per physical panel (duplicated on each side) rather than
