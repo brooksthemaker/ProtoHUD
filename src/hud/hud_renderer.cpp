@@ -537,18 +537,22 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
                 nvgStroke(vg);
             }
             nvgLineCap(vg, NVG_BUTT);
-            nvg_set_font_mono(10.f);
+            // Bigger UI-font label (was 10px mono) for legibility, anchored on
+            // the inner side of the arc and right-aligned so it grows toward the
+            // disc centre — staying inside the radial quick menu's hole when open.
+            nvg_set_font_ui(14.f);
             nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-            const float lblx = cx + std::cos(ga0) * (r - 8.f);
-            const float lbly = cy + std::sin(ga0) * (r - 8.f);
-            nvg_text_outline(vg, lblx, lbly, label, 1.4f);
-            nvgFillColor(vg, known ? fill : nvgRGBA(140, 150, 160, 200));
+            const float lblx = cx + std::cos(ga0) * (r - 10.f);
+            const float lbly = cy + std::sin(ga0) * (r - 10.f);
+            nvg_text_outline(vg, lblx, lbly, label, 1.8f);
+            nvgFillColor(vg, known ? fill : nvgRGBA(160, 170, 180, 220));
             nvgText(vg, lblx, lbly, label, nullptr);
         };
 
         const float r1 = ringR + 56.f;            // inner bar
         const float r2 = ringR + 68.f;            // outer bar, concentric
         const float off = 10.f * DEG;             // raise the inner bar ~10° at the top
+        const float cw  = 15.f * DEG;             // shift the inner two gauges 15° clockwise
 
         if (cfg.system_debug) {
             // CPU = inner bar raised 10° (its top sits higher, at ~135°);
@@ -566,8 +570,8 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
             };
             char cb[12]; snprintf(cb, sizeof(cb), "C%2.0f", cpu * 100.f);
             char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
-            gauge(r1, a0 + off, a1 + off, cpu, load_col(cpu), cb, true);  // inner, raised = CPU
-            gauge(r2, a0,       a1,       gpu, load_col(gpu), gb, true);  // outer = GPU
+            gauge(r1, a0 + off + cw, a1 + off + cw, cpu, load_col(cpu), cb, true);  // inner, raised = CPU
+            gauge(r2, a0 + cw,       a1 + cw,       gpu, load_col(gpu), gb, true);  // mid = GPU (CW 15°)
             // Stack the paired phone's battery as a third (outermost) arc in
             // light blue when a KDE Connect device is bound, so it stays visible
             // alongside the CPU/GPU gauges.
@@ -605,10 +609,10 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
                 char ppb[10];
                 snprintf(ppb, sizeof(ppb), "%s%d%%",
                          s.health.phone_charging ? "P+" : "P", ppct);
-                gauge(r1, a0 + off, a1 + off, pct, bc, pb, bpct >= 0);
-                gauge(r2, a0,       a1,       ppc, pc, ppb, true);
+                gauge(r1, a0 + off + cw, a1 + off + cw, pct, bc, pb, bpct >= 0);
+                gauge(r2, a0 + cw,       a1 + cw,       ppc, pc, ppb, true);
             } else {
-                gauge(r1, a0, a1, pct, bc, pb, bpct >= 0);
+                gauge(r1, a0 + cw, a1 + cw, pct, bc, pb, bpct >= 0);
             }
         }
     }
@@ -1150,24 +1154,62 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         char cnt[32]; snprintf(cnt, sizeof(cnt), "%d unread", s.notifs.unread_count());
         otext(px, py - r + 24.f, cnt, nvg_col_a(col_.text_fill, 180));
 
-        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-        float ty = py - r * 0.32f; const float lh = 17.f; int shown = 0;
-        const float lx = px - r * 0.82f;
+        // Group by app/source: one row per app with its icon and how many
+        // notifications it has (unread shown brighter, with the count on the
+        // right). Newest app first; App-type groups key on the sender/app name
+        // (KDE Connect sets the title to the app), others on their kind.
+        struct Grp { std::string key, icon; int total = 0, unread = 0; };
+        std::vector<Grp> groups;
         for (const auto& nt : s.notifs.items) {
             if (nt.dismissed) continue;
-            if (shown >= 4) break;
-            const std::string& nm = nt.icon.empty()
-                ? std::string(notif_type_icon(nt.type)) : nt.icon;
-            const float a = nt.read ? 0.6f : 1.f;
-            const float tx0 = icons_.draw(vg, nm, lx + 6.f, ty + 7.f, 13.f, a)
-                              ? lx + 17.f : lx;
-            otext(tx0, ty, nt.title.c_str(),
-                  nt.read ? nvg_col_a(col_.text_fill, 130) : nvg_col_a(col_.text_fill, 235));
-            ty += lh; ++shown;
+            std::string key;
+            switch (nt.type) {
+                case NotifType::App:
+                    key = !nt.title.empty() ? nt.title
+                        : (!nt.icon.empty() ? nt.icon : std::string("App")); break;
+                case NotifType::Alarm: key = "Alarms"; break;
+                case NotifType::Timer: key = "Timers"; break;
+                case NotifType::LoRa:  key = "LoRa";   break;
+            }
+            const std::string icon = !nt.icon.empty()
+                ? nt.icon : std::string(notif_type_icon(nt.type));
+            Grp* g = nullptr;
+            for (auto& e : groups) if (e.key == key) { g = &e; break; }
+            if (!g) { groups.push_back({ key, icon, 0, 0 }); g = &groups.back(); }
+            g->total++; if (!nt.read) g->unread++;
         }
-        if (shown == 0) {
+
+        if (groups.empty()) {
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             otext(px, py, "no notifications", nvg_col_a(col_.text_fill, 150));
+        } else {
+            const int   rows = std::min(static_cast<int>(groups.size()), 5);
+            const float lh   = std::clamp(r * 0.24f, 20.f, 30.f);
+            const float isz  = lh * 0.74f;
+            const float lx   = px - r * 0.74f;        // left edge (icon)
+            const float namx = lx + isz + 8.f;        // app name
+            const float cntx = px + r * 0.76f;        // right-aligned count
+            float ty = py - (rows - 1) * lh * 0.5f;   // vertically centered block
+            const float name_sz = std::clamp(r * 0.14f, 12.f, 18.f);
+            for (int i = 0; i < rows; ++i) {
+                const Grp& g   = groups[i];
+                const bool hot = g.unread > 0;
+                const float a  = hot ? 1.f : 0.55f;
+                // App icon (fallback: a dot in the type/text colour).
+                if (!icons_.draw(vg, g.icon, lx + isz * 0.5f, ty, isz, a)) {
+                    nvgBeginPath(vg); nvgCircle(vg, lx + isz * 0.5f, ty, isz * 0.32f);
+                    nvgFillColor(vg, nvg_col_a(col_.text_fill, hot ? 200 : 110)); nvgFill(vg);
+                }
+                nvg_set_font_ui(name_sz);
+                nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                otext(namx, ty, g.key.c_str(),
+                      hot ? nvg_col_a(col_.text_fill, 235) : nvg_col_a(col_.text_fill, 140));
+                char nb[16]; snprintf(nb, sizeof(nb), "%d", g.total);
+                nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+                otext(cntx, ty, nb,
+                      hot ? nvg_col_a(col_.glow_base, 255) : nvg_col_a(col_.text_fill, 150));
+                ty += lh;
+            }
         }
 
     } else if (widget == static_cast<int>(InfoWidget::Schedule)) {
@@ -1268,7 +1310,6 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
     //   • outer = system status badges (doubled), lit when active / dimmed.
     {
         const float DEG     = static_cast<float>(M_PI) / 180.f;
-        const float HALF_PI = static_cast<float>(M_PI) * 0.5f;
         const float base_sz = std::clamp(r * 0.15f, 14.f, 26.f);
         const float lbl_h   = base_sz * 0.66f;             // labels ~⅓ smaller
         const float icon_sz = base_sz * 2.f;               // icons doubled
@@ -1289,24 +1330,13 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         const float rmid  = (r0in + r1in) * 0.5f;          // text baseline radius
         const float gapR  = 3.f * DEG;                     // angular gap between wedges
 
-        // Curved label text, flipped on the bottom half so it never reads upside-down.
-        auto arc_label = [&](float center_ang, const char* str, NVGcolor col) {
-            float total = 0.f;
-            for (const char* p = str; *p; ++p) total += nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
-            total /= rmid;
+        // Upright label text: every page name reads horizontally in the same
+        // orientation, centred in its wedge — no arc-follow, so none can end up
+        // upside-down (e.g. PRECIP at the bottom of the arc).
+        auto upright_label = [&](float center_ang, const char* str, NVGcolor col) {
             nvgFillColor(vg, col);
-            const bool flip = std::sin(center_ang) > 0.f;
-            float ang = flip ? center_ang + total * 0.5f : center_ang - total * 0.5f;
-            for (const char* p = str; *p; ++p) {
-                const float adv = nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
-                const float th  = flip ? ang - (adv * 0.5f) / rmid : ang + (adv * 0.5f) / rmid;
-                nvgSave(vg);
-                nvgTranslate(vg, px + std::cos(th) * rmid, py + std::sin(th) * rmid);
-                nvgRotate(vg, flip ? th - HALF_PI : th + HALF_PI);
-                nvgText(vg, 0, 0, p, p + 1);
-                nvgRestore(vg);
-                ang += flip ? -adv / rmid : adv / rmid;
-            }
+            nvgText(vg, px + std::cos(center_ang) * rmid,
+                        py + std::sin(center_ang) * rmid, str, nullptr);
         };
 
         nvg_set_font_ui(lbl_h);
@@ -1330,8 +1360,8 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             nvgClosePath(vg);                               // straight radial short edges
             nvgFillColor(vg, fill); nvgFill(vg);
             nvgStrokeColor(vg, border); nvgStrokeWidth(vg, active ? 2.f : 1.f); nvgStroke(vg);
-            arc_label(sc, nm, active ? nvgRGBA(20, 22, 26, 255)        // dark text on accent
-                                     : nvgRGBA(230, 235, 240, 230));   // white text on dark box
+            upright_label(sc, nm, active ? nvgRGBA(20, 22, 26, 255)    // dark text on accent
+                                         : nvgRGBA(230, 235, 240, 230)); // white text on dark box
         }
 
         // ── Outer ring: status badges (outside the label band) ──────────────────
