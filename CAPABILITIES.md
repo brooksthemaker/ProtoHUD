@@ -286,8 +286,10 @@ vortex`, plus liquid palettes `water, lava, toxic, ocean, plasma_fluid, mercury`
   controls). The surface stays level in world space, so it **tilts as you roll
   your head** and **sloshes** when the gyro/accel kicks — driven by the BNO055.
   Rendered in **canvas space**, so a multi-panel face reads as one continuous
-  tank across the whole visor. Use `blend:normal` for an opaque liquid or `add`
-  for a glowy lava/plasma look.
+  tank across the whole visor. Optional **rising bubbles** (in the liquid) or
+  **drip droplets** (above the surface), and **pitch-driven fill** (look down →
+  the liquid rises). Use `blend:normal` for an opaque liquid or `add` for a
+  glowy lava/plasma look.
 - **Motion-reactive layers** — couple a layer's direction to the IMU: `heading`
   (lock to compass), `yaw` (drift as you turn your head), or `tilt` (skew like
   gravity when you roll). Fed live from the BNO055 each frame.

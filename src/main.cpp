@@ -861,6 +861,11 @@ struct LayerCfg {
     float level = 0.4f;
     // Liquid viscosity for "water" (0 = thin/snappy, 1 = thick/sluggish).
     float viscosity = 0.3f;
+    // "water" extras: pitch shifts the fill level (look down → liquid rises);
+    // bubbles count + style ("rise" bubbles in liquid / "drip" droplets above).
+    float pitch_fill = 0.0f;
+    int   bubbles = 0;
+    std::string bubble_mode = "rise";
     std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
     // Motion reactivity (opt-in): drives the layer's direction from head
     // movement. "none" | "heading" (lock to compass) | "yaw" (drift when
@@ -4042,8 +4047,13 @@ static std::vector<MenuItem> build_menu(
             if (L.intensity_from != "none")
                 layer["intensity_from"] = L.intensity_from;
             if (L.effect == "water") {
-                layer["level"]     = L.level;
-                layer["viscosity"] = L.viscosity;
+                layer["level"]      = L.level;
+                layer["viscosity"]  = L.viscosity;
+                layer["pitch_fill"] = L.pitch_fill;
+                if (L.bubbles > 0) {
+                    layer["bubbles"]     = L.bubbles;
+                    layer["bubble_mode"] = L.bubble_mode;
+                }
             }
             out["layers"].push_back(layer);
         }
@@ -4076,6 +4086,9 @@ static std::vector<MenuItem> build_menu(
             L.intensity_from = jl.value("intensity_from", std::string("none"));
             L.level = jl.value("level", 0.4f);
             L.viscosity = jl.value("viscosity", 0.3f);
+            L.pitch_fill = jl.value("pitch_fill", 0.0f);
+            L.bubbles = jl.value("bubbles", 0);
+            L.bubble_mode = jl.value("bubble_mode", std::string("rise"));
         }
     };
 
@@ -4370,6 +4383,34 @@ static std::vector<MenuItem> build_menu(
                     [L](float v){ L->viscosity = v / 100.f; });
                 vis.visible_fn = [L]{ return L->effect == "water"; };
                 return vis;
+            })(),
+            // Pitch Fill — water only: head pitch shifts the liquid level.
+            ([&]{
+                MenuItem pf = slider("Pitch Fill", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->pitch_fill * 100.f; },
+                    [L](float v){ L->pitch_fill = v / 100.f; });
+                pf.visible_fn = [L]{ return L->effect == "water"; };
+                return pf;
+            })(),
+            // Bubbles / droplets — water only.
+            ([&]{
+                MenuItem bub = slider("Bubbles", 0.f, 30.f, 1.f, "",
+                    [L]{ return static_cast<float>(L->bubbles); },
+                    [L](float v){ L->bubbles = static_cast<int>(v); });
+                bub.visible_fn = [L]{ return L->effect == "water"; };
+                return bub;
+            })(),
+            ([&]{
+                std::vector<MenuItem> bm = {
+                    leaf_sel("Rise (bubbles in liquid)", [L]{ L->bubble_mode = "rise"; },
+                                                         [L]{ return L->bubble_mode == "rise"; }),
+                    leaf_sel("Drip (droplets above)",    [L]{ L->bubble_mode = "drip"; },
+                                                         [L]{ return L->bubble_mode == "drip"; }),
+                };
+                MenuItem m = submenu("Bubble Style", std::move(bm));
+                m.label_fn   = [L]{ return std::string("Bubble Style: ") + L->bubble_mode; };
+                m.visible_fn = [L]{ return L->effect == "water" && L->bubbles > 0; };
+                return m;
             })(),
             // Motion reactivity — couple this layer's direction to head movement.
             ([&]{

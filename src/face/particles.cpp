@@ -886,17 +886,24 @@ public:
 // "colors" form a deep→surface gradient. Best with "blend":"normal" (opaque
 // liquid); use "add" for a glowy lava/plasma look.
 //   level (0..1) fill fraction · alpha · tilt_gain · slosh (px) · wave_count
-//   · wave_speed
+//   · wave_speed · viscosity (0..1 thicker=sluggish) · pitch_fill (head pitch
+//   shifts level) · bubbles (count) · bubble_mode ("rise" in liquid | "drip"
+//   droplets above the surface)
 class WaterEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
         // viscosity 0 = thin/snappy water, 1 = thick/sluggish (lags + resists slosh).
         const double v = std::clamp(jnum(cfg_, "viscosity", 0.3), 0.0, 1.0);
-        // Smooth the surface tilt so a thicker liquid lags behind head roll.
-        if (!tilt_init_) { tilt_smooth_ = motion_.roll_deg; tilt_init_ = true; }
-        const double tilt_rate = std::min(1.0, dt * 8.0 * (1.0 - 0.9 * v));
-        tilt_smooth_ += (motion_.roll_deg - tilt_smooth_) * tilt_rate;
+        // Smooth tilt + pitch so a thicker liquid lags behind head movement.
+        if (!tilt_init_) {
+            tilt_smooth_  = motion_.roll_deg;
+            pitch_smooth_ = motion_.pitch_deg;
+            tilt_init_ = true;
+        }
+        const double rate = std::min(1.0, dt * 8.0 * (1.0 - 0.9 * v));
+        tilt_smooth_  += (motion_.roll_deg  - tilt_smooth_)  * rate;
+        pitch_smooth_ += (motion_.pitch_deg - pitch_smooth_) * rate;
 
         phase_ += jnum(cfg_, "wave_speed", 2.0) * (1.0 - 0.7 * v) * dt;   // slower ripple
         const double slosh_max = jnum(cfg_, "slosh", h_ * 0.10) * (1.0 - 0.85 * v);
@@ -907,28 +914,19 @@ public:
         const double target = (0.15 + 0.85 * bump) * slosh_max;
         const double ease = std::min(1.0, dt * 3.0 * (1.0 - 0.85 * v));   // sluggish response
         amp_ += (target - amp_) * ease;
+
+        update_bubbles(dt);
     }
     cv::Mat render() override {
         cv::Mat c = blank();
         const std::vector<Color> cols = read_colors();
-        const double level = std::clamp(jnum(cfg_, "level", 0.40), 0.0, 1.0);
-        const int    A     = (int)(std::clamp(jnum(cfg_, "alpha", 0.85), 0.0, 1.0) * 255.0);
-        const double gain  = jnum(cfg_, "tilt_gain", 1.0);
-        const double waven = jnum(cfg_, "wave_count", 2.0);
-        // Compute the surface in CANVAS space so a multi-panel face reads as one
-        // continuous tank; this panel renders only the slice within its region.
-        const double base  = ch_ * (1.0 - level);
-        const double ccx   = cw_ * 0.5;
+        const int A = (int)(std::clamp(jnum(cfg_, "alpha", 0.85), 0.0, 1.0) * 255.0);
         const double bottom = ch_ - 1;                 // canvas-space deepest row
-        const double roll  = tilt_smooth_ * gain * kPi / 180.0;   // viscosity-smoothed
-        const double slope = std::tan(std::clamp(roll, -1.2, 1.2));
         for (int lx = 0; lx < w_; ++lx) {
-            const double X = ox_ + lx;                 // canvas-space column
-            const double sy = base - (X - ccx) * slope
-                            + amp_ * std::sin(waven * kTau * X / std::max(1, cw_) + phase_);
+            const double sy = surface_y_local(lx) + oy_;    // back to canvas-space row
             const double span = std::max(1.0, bottom - sy);
             for (int ly = 0; ly < h_; ++ly) {
-                const double Y = oy_ + ly;             // canvas-space row
+                const double Y = oy_ + ly;
                 if (Y < sy) continue;                  // above the liquid surface
                 const Color col = sample_grad(cols, (Y - sy) / span);   // 0 surface → 1 deep
                 draw_pixel(c, lx, ly, col.r, col.g, col.b, A);
@@ -941,9 +939,79 @@ public:
                            std::min(255, A + 40));
             }
         }
+        render_bubbles(c, cols, A);
         return c;
     }
 private:
+    // Effective fill fraction — base level shifted by smoothed pitch (look
+    // down → liquid rises) when pitch_fill is set.
+    double level_eff() const {
+        return std::clamp(jnum(cfg_, "level", 0.40)
+                          + jnum(cfg_, "pitch_fill", 0.0) * (pitch_smooth_ / 45.0),
+                          0.0, 1.0);
+    }
+    // Local surface row at local column lx, computed in canvas space (so the
+    // tank is continuous across panels) then shifted into this panel's frame.
+    double surface_y_local(double lx) const {
+        const double base  = ch_ * (1.0 - level_eff());
+        const double ccx   = cw_ * 0.5;
+        const double waven = jnum(cfg_, "wave_count", 2.0);
+        const double gain  = jnum(cfg_, "tilt_gain", 1.0);
+        const double roll  = tilt_smooth_ * gain * kPi / 180.0;
+        const double slope = std::tan(std::clamp(roll, -1.2, 1.2));
+        const double X     = ox_ + lx;
+        const double syc   = base - (X - ccx) * slope
+                           + amp_ * std::sin(waven * kTau * X / std::max(1, cw_) + phase_);
+        return syc - oy_;
+    }
+    void update_bubbles(double dt) {
+        const int want = jint(cfg_, "bubbles", 0);
+        if (want <= 0) { bubbles_.clear(); return; }
+        const bool drip = (cfg_.value("bubble_mode", std::string("rise")) == "drip");
+        const double spd = jnum(cfg_, "bubble_speed", drip ? 16.0 : 12.0);
+        for (auto& b : bubbles_) {
+            b.extra += dt * 2.0;
+            if (!drip) b.x += std::sin(b.extra) * 6.0 * dt;      // bubbles wobble as they rise
+            b.y += (drip ? spd : -spd) * dt;
+            const double sy = surface_y_local(b.x);
+            if (drip ? (b.y >= sy) : (b.y <= sy)) b.life = 0;    // hit surface → gone/pop
+        }
+        bubbles_.erase(std::remove_if(bubbles_.begin(), bubbles_.end(),
+            [&](const Particle& b){
+                return b.life <= 0 || b.x < -2 || b.x > w_ + 2 || b.y < -4 || b.y > h_ + 4;
+            }), bubbles_.end());
+        int guard = 0;
+        while ((int)bubbles_.size() < want && guard++ < want * 3) {
+            const double bx = frand(rng_, 0, w_ - 1);
+            const double sy = surface_y_local(bx);
+            Particle p; p.x = bx; p.size = irand(rng_, 1, 2);
+            p.extra = frand(rng_, 0, kTau); p.life = 1;
+            if (drip) {
+                if (sy <= 1.0) continue;                          // no room above the liquid here
+                p.y = frand(rng_, 0.0, std::max(1.0, sy - 1.0));
+            } else {
+                if (sy >= h_ - 1.0) continue;                     // no liquid in this column
+                p.y = frand(rng_, sy + 1.0, static_cast<double>(h_));
+            }
+            bubbles_.push_back(p);
+        }
+    }
+    void render_bubbles(cv::Mat& c, const std::vector<Color>& cols, int A) {
+        if (bubbles_.empty()) return;
+        const bool drip = (cfg_.value("bubble_mode", std::string("rise")) == "drip");
+        const Color base = cols.front();
+        const Color bcol{ std::min(255, base.r + 110), std::min(255, base.g + 110),
+                          std::min(255, base.b + 110) };
+        for (const auto& b : bubbles_) {
+            if (drip) {                                           // droplet above the surface
+                draw_dot(c, b.x, b.y, bcol.r, bcol.g, bcol.b, 0.85, b.size);
+            } else {                                              // bubble ring inside the liquid
+                cv::circle(c, {(int)b.x, (int)b.y}, std::max(1, b.size),
+                           cv::Scalar(bcol.r, bcol.g, bcol.b, std::min(255, A + 30)),
+                           1, cv::LINE_8);
+            }
+        }
+    }
     std::vector<Color> read_colors() const {
         std::vector<Color> v;
         auto it = cfg_.find("colors");
@@ -971,8 +1039,9 @@ private:
                  (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
     }
     double phase_ = 0.0, amp_ = 0.0;
-    double tilt_smooth_ = 0.0;
+    double tilt_smooth_ = 0.0, pitch_smooth_ = 0.0;
     bool   tilt_init_ = false;
+    std::vector<Particle> bubbles_;
 };
 
 // ── Effect factory ───────────────────────────────────────────────────────────
@@ -1027,9 +1096,9 @@ const std::map<std::string, json>& presets() {
             {"effect":"embers","count":12,"colors":[[180,220,255],[200,240,255]],"speed_min":20,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
             {"effect":"rings","count":1,"colors":[[0,200,255]],"speed_min":10,"speed_max":15,"max_radius":15,"blend":"add"}]},
           "rain": {"effect":"rain","count":35,"colors":[[120,150,220],[150,180,255]],"speed_min":45,"speed_max":70,"drift_x":1.5,"blend":"add"},
-          "water": {"effect":"water","level":0.42,"alpha":0.85,"slosh":6,"wave_count":2,"wave_speed":2.0,"colors":[[120,220,255],[0,110,210],[0,40,120]],"blend":"normal"},
+          "water": {"effect":"water","level":0.42,"alpha":0.85,"slosh":6,"wave_count":2,"wave_speed":2.0,"pitch_fill":0.25,"bubbles":8,"bubble_mode":"rise","colors":[[120,220,255],[0,110,210],[0,40,120]],"blend":"normal"},
           "lava": {"effect":"water","level":0.36,"alpha":0.95,"slosh":4,"wave_count":2,"wave_speed":1.3,"viscosity":0.6,"colors":[[255,230,120],[255,90,0],[150,20,0]],"blend":"normal"},
-          "toxic": {"effect":"water","level":0.40,"alpha":0.9,"slosh":7,"wave_count":3,"wave_speed":2.4,"colors":[[210,255,120],[60,200,0],[15,110,0]],"blend":"normal"},
+          "toxic": {"effect":"water","level":0.40,"alpha":0.9,"slosh":7,"wave_count":3,"wave_speed":2.4,"bubbles":12,"bubble_mode":"rise","colors":[[210,255,120],[60,200,0],[15,110,0]],"blend":"normal"},
           "ocean": {"effect":"water","level":0.52,"alpha":0.85,"slosh":8,"wave_count":3,"wave_speed":1.8,"colors":[[90,235,225],[0,130,170],[0,40,90]],"blend":"normal"},
           "plasma_fluid": {"effect":"water","level":0.40,"alpha":0.9,"slosh":6,"wave_count":2,"colors":[[255,130,255],[150,0,200],[40,0,80]],"blend":"normal"},
           "mercury": {"effect":"water","level":0.36,"alpha":0.96,"slosh":3,"wave_count":2,"viscosity":0.7,"colors":[[235,240,250],[120,130,150],[55,60,75]],"blend":"normal"},
