@@ -607,6 +607,21 @@ void MenuSystem::select() {
     }
 }
 
+// ── secondary (Ctrl+Select) ─────────────────────────────────────────────────────
+
+void MenuSystem::secondary() {
+    if (!open_ || stack_.empty() || in_edit_mode_) return;
+    auto& items = stack_.back().items;
+    if (cursor_ < 0 || cursor_ >= static_cast<int>(items.size())) return;
+    auto& item = items[cursor_];
+    if (!item.secondary_children.empty()) {
+        push_level(item.secondary_children,
+                   item.context_panel_title, item.context_panel_draw);
+    } else if (item.secondary_action) {
+        auto act = item.secondary_action; act();   // copy: act may mutate the level
+    }
+}
+
 // ── back ──────────────────────────────────────────────────────────────────────
 
 void MenuSystem::back() {

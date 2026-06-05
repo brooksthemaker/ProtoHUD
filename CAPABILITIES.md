@@ -301,9 +301,12 @@ vortex`, plus liquid palettes `water, lava, toxic, ocean, plasma_fluid, mercury`
 - **Expression-coupled effects** — optional: the active effect auto-swaps to a
   mood preset as the face changes (angry→fire, happy→celebration, sad→rain,
   shocked→galaxy), restoring your chosen effect for neutral faces.
-- **Authoring** — Layered Builder with per-layer Density/Speed/Direction/Motion/
-  Blend, **Built-in Presets** picker, **Randomize (Surprise Me)**, plus Save
-  As… (on-screen keyboard), quick-save slots, Load/Delete, and Export to file.
+- **Authoring** — the Effects menu opens to four pages: **Single Effects** (one
+  primitive at a time — Select applies it, **Ctrl+Select** opens its settings),
+  **Premade Effects** (curated combos with the recipe shown in the side panel;
+  Ctrl+Select saves a copy to Custom), **Custom** (the 5-layer builder with
+  per-layer Density/Speed/Direction/Motion/Blend, plus Save As…/slots/Load/
+  Delete/Export), and **Random** (Surprise-Me generator with Save-to-Custom).
   Presets persist under `cfg["protoface"]["custom_effects"]`.
 
 ### Material Colors (12)

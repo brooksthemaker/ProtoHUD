@@ -4470,70 +4470,8 @@ static std::vector<MenuItem> build_menu(
             if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
         }));
 
-    // Built-in presets — apply a curated preset directly (also seeds the builder
-    // so you can tweak from there). Names mirror particles.cpp::presets().
-    {
-        static const char* const kBuiltinPresets[] = {
-            "gentle_snow", "heavy_snow", "campfire", "galaxy", "party", "radar",
-            "fire", "aurora", "blizzard", "sonar", "celebration", "plasma",
-            "thunderstorm", "meteor_shower", "fireworks", "bubbles", "vortex",
-            "nebula",
-            "water", "lava", "toxic", "ocean", "plasma_fluid", "mercury",
-        };
-        std::vector<MenuItem> preset_items;
-        for (const char* name : kBuiltinPresets)
-            preset_items.push_back(leaf(name,
-                [name, pf_set_effect_json, load_layered_spec]{
-                    nlohmann::json spec; spec["preset"] = name;
-                    if (pf_set_effect_json) pf_set_effect_json(spec);
-                    load_layered_spec(spec);   // best-effort: reflect in builder if it expands
-                }));
-        layered_items.push_back(submenu("Built-in Presets", std::move(preset_items)));
-    }
-
-    // Randomize — generate a fresh 1–3 layer mix from the primitives + a vivid
-    // palette and apply it. Great for discovery; tweak from the layers after.
-    layered_items.push_back(leaf("Randomize (Surprise Me)",
-        [pflz, build_layered_spec, pf_set_effect_json]{
-            static std::mt19937 rng(std::random_device{}());
-            static const char* const fx[] = {
-                "sparkle","embers","rain","snow","confetti","rings","fireflies",
-                "clouds","lightning","meteor","bubbles","fireworks","vortex"};
-            static const int pal[][3] = {
-                {0,220,180},{255,80,80},{80,180,255},{255,200,40},
-                {180,80,255},{80,255,160},{255,120,20},{255,255,255}};
-            const int nfx  = static_cast<int>(sizeof(fx)/sizeof(fx[0]));
-            const int npal = static_cast<int>(sizeof(pal)/sizeof(pal[0]));
-            for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i)
-                pflz->layers[i] = LayerCfg{};
-            std::uniform_int_distribution<int> nlayers(1,3), pf(0,nfx-1),
-                pp(0,npal-1), cnt(10,60), spd(2,30);
-            const int N = nlayers(rng);
-            for (int i = 0; i < N; ++i) {
-                LayerCfg& L = pflz->layers[i];
-                L.effect = fx[pf(rng)];
-                const int* c = pal[pp(rng)];
-                L.r = c[0]; L.g = c[1]; L.b = c[2];
-                L.count = cnt(rng);
-                L.speed_min = static_cast<float>(spd(rng));
-                L.speed_max = L.speed_min + static_cast<float>(spd(rng));
-                L.blend = "add";
-            }
-            if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
-        }));
-
-    // Expression-coupled effects — mood preset follows the face expression.
-    if (pf_expr_effects_p && pf_set_expr_effects)
-        layered_items.push_back(with_desc(toggle("Expression Effects",
-            [pf_expr_effects_p]{ return *pf_expr_effects_p; },
-            [pf_expr_effects_p, pf_set_expr_effects, cfg_root](bool v){
-                *pf_expr_effects_p = v; pf_set_expr_effects(v);
-                if (cfg_root) (*cfg_root)["protoface"]["expression_effects"] = v;
-            }),
-            "Auto-swap the particle effect to a mood preset as the face changes "
-            "(angry\xe2\x86\x92""fire, happy\xe2\x86\x92""celebration, "
-            "sad\xe2\x86\x92""rain, shocked\xe2\x86\x92""galaxy). Restores your "
-            "chosen effect for neutral faces and when off."));
+    // (Built-in Presets / Randomize / Expression Effects are assembled as their
+    //  own top-level Effects pages below — Premade / Random / the toggle.)
 
     // Save / Load — three numbered quick-save slots PLUS user-named
     // presets entered via the on-screen keyboard. Everything lands in
@@ -4657,7 +4595,7 @@ static std::vector<MenuItem> build_menu(
     }));
 
     MenuItem pf_layered_item = with_desc(
-        submenu("Layered Builder", std::move(layered_items)),
+        submenu("Custom", std::move(layered_items)),
         "Compose up to five particle layers and apply the stack live. Each "
         "layer is independent: pick an effect, tweak count / colour / speed / "
         "blend, reorder with Move Up / Move Down, clear to disable.\n"
@@ -4670,24 +4608,174 @@ static std::vector<MenuItem> build_menu(
         "/tmp/protohud_layered_effect.json.\n"
         "All presets persist under cfg[\"protoface\"][\"custom_effects\"].");
 
+    // ── Effects first page: Single / Premade / Custom / Random ───────────────
+    // 1) SINGLE EFFECTS — one primitive at a time. Select applies it (on layer 0,
+    //    clearing the rest); Ctrl+Select opens that effect's full settings.
+    std::vector<MenuItem> single_items;
+    for (const char* nm : kLayerEffects) {
+        if (std::string(nm) == "none") continue;
+        const std::string name = nm;
+        MenuItem it = leaf(name, [pflz, name, build_layered_spec, pf_set_effect_json]{
+            for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i) pflz->layers[i] = LayerCfg{};
+            pflz->layers[0].effect = name;
+            if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
+        });
+        it.description = "Select: apply this effect.  Ctrl+Select: open its settings.";
+        // Ctrl+Select: switch layer 0 to this effect, then open the layer editor.
+        it.secondary_action = [pflz, name]{
+            pflz->layers[0] = LayerCfg{}; pflz->layers[0].effect = name;
+            for (int i = 1; i < LayeredEffectState::kMaxLayers; ++i) pflz->layers[i] = LayerCfg{};
+        };
+        it.secondary_children = build_layer_menu(0).children;   // full per-layer settings
+        single_items.push_back(std::move(it));
+    }
+    MenuItem single_item = with_desc(submenu("Single Effects", std::move(single_items)),
+        "One effect at a time. Select applies it; Ctrl+Select opens its settings "
+        "(colour, density, speed, and effect-specific options).");
+
+    // 2) PREMADE EFFECTS — curated combos; the side panel shows the recipe.
+    struct Premade { const char* name; const char* combo; };
+    static const Premade kPremades[] = {
+        {"gentle_snow","snow — light drift"}, {"heavy_snow","snow — dense"},
+        {"campfire","embers"}, {"galaxy","sparkle — multicolour"},
+        {"party","confetti"}, {"radar","expanding rings"},
+        {"fire","embers + embers + sparkle"}, {"aurora","fireflies + sparkle"},
+        {"blizzard","driven snow x2"}, {"sonar","rings + fireflies"},
+        {"celebration","confetti + sparkle"}, {"plasma","blue embers x2 + ring"},
+        {"thunderstorm","rain + lightning"}, {"meteor_shower","meteors + sparkle"},
+        {"fireworks","fireworks bursts"}, {"bubbles","rising bubbles"},
+        {"vortex","comet vortex + sparkle"}, {"nebula","clouds x2 + sparkle"},
+        {"water","liquid — cyan, bubbles"}, {"lava","liquid — lava, thick"},
+        {"toxic","liquid — green, bubbles"}, {"ocean","liquid — teal"},
+        {"plasma_fluid","liquid — magenta"}, {"mercury","liquid — silver, thick"},
+    };
+    auto premade_combo = std::make_shared<std::string>();
+    std::vector<MenuItem> premade_items;
+    for (const auto& pm : kPremades) {
+        const std::string name = pm.name, combo = pm.combo;
+        MenuItem it = leaf(name, [name, pf_set_effect_json]{
+            nlohmann::json spec; spec["preset"] = name;
+            if (pf_set_effect_json) pf_set_effect_json(spec);
+        });
+        it.on_highlight = [premade_combo, name, combo]{ *premade_combo = name + "\n" + combo; };
+        it.description  = "Select: apply.  Ctrl+Select: save a copy to Custom.";
+        it.secondary_action = [cfg_root, name, ensure_obj_path]{
+            if (!cfg_root) return;
+            nlohmann::json spec; spec["preset"] = name;
+            ensure_obj_path(*cfg_root, {"protoface", "custom_effects"})[name] = spec;
+        };
+        premade_items.push_back(std::move(it));
+    }
+    *premade_combo = std::string(kPremades[0].name) + "\n" + kPremades[0].combo;  // seed panel
+    MenuItem premade_item = submenu("Premade Effects", std::move(premade_items));
+    premade_item.context_panel_title = "Recipe";
+    premade_item.context_panel_draw =
+        [premade_combo](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            (void)sz;
+            ImFont* font = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const std::string& s = *premade_combo;
+            float y = o.y + 6.f;
+            size_t start = 0;
+            while (start <= s.size()) {
+                const size_t nl = s.find('\n', start);
+                const std::string line = s.substr(start,
+                    nl == std::string::npos ? std::string::npos : nl - start);
+                dl->AddText(font, fs, ImVec2(o.x + 6.f, y),
+                            IM_COL32(220, 225, 235, 255), line.c_str());
+                y += fs + 4.f;
+                if (nl == std::string::npos) break;
+                start = nl + 1;
+            }
+        };
+    premade_item = with_desc(std::move(premade_item),
+        "Curated multi-layer presets. The side panel shows what each is made of. "
+        "Select applies; Ctrl+Select saves a copy to Custom.");
+
+    // 3) CUSTOM is the layered builder (pf_layered_item, renamed above).
+    // 4) RANDOM — generate a fresh mix; optionally save it to Custom.
+    std::vector<MenuItem> random_items;
+    random_items.push_back(with_desc(leaf("Randomize (Surprise Me)",
+        [pflz, build_layered_spec, pf_set_effect_json]{
+            static std::mt19937 rng(std::random_device{}());
+            static const char* const fx[] = {
+                "sparkle","embers","rain","snow","confetti","rings","fireflies",
+                "clouds","lightning","meteor","bubbles","fireworks","vortex"};
+            static const int pal[][3] = {
+                {0,220,180},{255,80,80},{80,180,255},{255,200,40},
+                {180,80,255},{80,255,160},{255,120,20},{255,255,255}};
+            const int nfx  = static_cast<int>(sizeof(fx)/sizeof(fx[0]));
+            const int npal = static_cast<int>(sizeof(pal)/sizeof(pal[0]));
+            for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i)
+                pflz->layers[i] = LayerCfg{};
+            std::uniform_int_distribution<int> nlayers(1,3), pf(0,nfx-1),
+                pp(0,npal-1), cnt(10,60), spd(2,30);
+            const int N = nlayers(rng);
+            for (int i = 0; i < N; ++i) {
+                LayerCfg& L = pflz->layers[i];
+                L.effect = fx[pf(rng)];
+                const int* c = pal[pp(rng)];
+                L.r = c[0]; L.g = c[1]; L.b = c[2];
+                L.count = cnt(rng);
+                L.speed_min = static_cast<float>(spd(rng));
+                L.speed_max = L.speed_min + static_cast<float>(spd(rng));
+                L.blend = "add";
+            }
+            if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
+        }),
+        "Roll a fresh 1–3 layer mix and apply it. Tweak it in Custom, or save it "
+        "below."));
+    random_items.push_back(leaf("Save Current to Custom...",
+        [cfg_root, menu_sys_pp, build_layered_spec, ensure_obj_path]{
+            if (!menu_sys_pp || !*menu_sys_pp || !cfg_root) return;
+            (*menu_sys_pp)->open_keyboard("Preset Name", std::string(),
+                [cfg_root, build_layered_spec, ensure_obj_path](const std::string& name){
+                    if (!cfg_root || name.empty()) return;
+                    ensure_obj_path(*cfg_root, {"protoface", "custom_effects"})[name] =
+                        build_layered_spec();
+                });
+        }));
+    MenuItem random_item = with_desc(submenu("Random", std::move(random_items)),
+        "Discover new looks. Randomize applies a fresh mix; Save Current to Custom "
+        "keeps the one you like.");
+
     std::vector<MenuItem> pf_effects;
-    pf_effects.push_back(std::move(pf_layered_item));
+    pf_effects.push_back(std::move(single_item));
+    pf_effects.push_back(std::move(premade_item));
+    pf_effects.push_back(std::move(pf_layered_item));   // "Custom"
+    pf_effects.push_back(std::move(random_item));
+    if (pf_expr_effects_p && pf_set_expr_effects)
+        pf_effects.push_back(with_desc(toggle("Expression Effects",
+            [pf_expr_effects_p]{ return *pf_expr_effects_p; },
+            [pf_expr_effects_p, pf_set_expr_effects, cfg_root](bool v){
+                *pf_expr_effects_p = v; pf_set_expr_effects(v);
+                if (cfg_root) (*cfg_root)["protoface"]["expression_effects"] = v;
+            }),
+            "Auto-swap the particle effect to a mood preset as the face changes "
+            "(angry\xe2\x86\x92""fire, happy\xe2\x86\x92""celebration, "
+            "sad\xe2\x86\x92""rain, shocked\xe2\x86\x92""galaxy)."));
     {
+        // Legacy Teensy/ProtoTracer single-effect ids (only meaningful on the
+        // Teensy face backend) — tucked into their own page.
         const char* pf_effect_names[] = {
             "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
             "Fire","Aurora","Blizzard","Sonar","Plasma","Celebration","Galaxy","Party",
-            "Clouds","Nebula",   // Protoface-only (ids 16,17); no ProtoTracer equivalent
+            "Clouds","Nebula",
         };
         const uint8_t pf_effect_count =
             static_cast<uint8_t>(sizeof(pf_effect_names) / sizeof(pf_effect_names[0]));
+        std::vector<MenuItem> teensy_fx;
         for (uint8_t id = 0; id < pf_effect_count; id++)
-            pf_effects.push_back(leaf_sel(pf_effect_names[id],
+            teensy_fx.push_back(leaf_sel(pf_effect_names[id],
                 [teensy, id, &state]{
                     teensy->set_effect(id);
                     std::lock_guard<std::mutex> lk(state.mtx);
                     state.face.effect_id = id;
                 },
                 [&state, id]{ return state.face.effect_id == id; }));
+        pf_effects.push_back(with_desc(submenu("Teensy Face Effects", std::move(teensy_fx)),
+            "Single-effect ids for the Teensy/ProtoTracer face backend (no effect "
+            "on the native Protoface particle renderer)."));
     }
 
     // Material Color — the single colour/material picker (Face Color was folded
@@ -13403,8 +13491,12 @@ int main(int argc, char* argv[]) {
             // forwarding while the editor owns the keyboard. Enter / Backspace
             // still work (paint / cancel).
             const bool editor_up = menu.is_face_editor_open();
-            if (key_pressed(ImGuiKey_Enter) ||
-                (!editor_up && key_pressed(ImGuiKey_RightArrow))) menu.select();
+            if (key_pressed(ImGuiKey_Enter)) {
+                if (ImGui::GetIO().KeyCtrl) menu.secondary();   // Ctrl+Select → settings
+                else                        menu.select();
+            } else if (!editor_up && key_pressed(ImGuiKey_RightArrow)) {
+                menu.select();
+            }
             if (key_pressed(ImGuiKey_Backspace) ||
                 (!editor_up && key_pressed(ImGuiKey_LeftArrow)))  menu.back();
             // Deep-menu tab switching (Tab / Shift+Tab).

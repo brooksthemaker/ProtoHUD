@@ -94,6 +94,12 @@ struct MenuItem {
 
     // LEAF
     std::function<void()> action;
+    // Optional "secondary" action fired on Ctrl+Select. If secondary_children is
+    // non-empty it's pushed as a submenu (e.g. an effect's settings); otherwise
+    // secondary_action() runs. Lets a row "apply on select, open settings on
+    // Ctrl+select".
+    std::function<void()> secondary_action;
+    std::vector<MenuItem> secondary_children;
 
     // SUBMENU
     std::vector<MenuItem> children;
@@ -191,6 +197,7 @@ public:
     // Drive from knob events
     void navigate(int direction);   // +1 = next, -1 = prev (or adjust value in edit mode)
     void select();                  // confirm / toggle / enter edit mode
+    void secondary();               // Ctrl+Select: run secondary_action / push secondary_children
     void back();                    // pop menu level (or exit edit mode)
 
     // Render the compact corner "quick menu" overlay using Dear ImGui windows
