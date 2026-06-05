@@ -9224,6 +9224,73 @@ static std::vector<MenuItem> build_menu(
             dl->AddText(font, fs * 0.72f, {o.x, y}, IM_COL32(150,158,166,210), meta);
         };
 
+        // Find the first writable removable mount (USB stick etc.) under the
+        // usual auto-mount roots. Empty when nothing's plugged in.
+        auto find_usb_mount = []() -> std::string {
+            namespace fs = std::filesystem;
+            std::vector<std::string> roots;
+            if (const char* u = std::getenv("USER")) roots.push_back(std::string("/media/") + u);
+            roots.push_back("/media");
+            roots.push_back("/mnt");
+            std::error_code ec;
+            for (const auto& root : roots) {
+                if (!fs::is_directory(root, ec)) continue;
+                for (const auto& e : fs::directory_iterator(root, ec)) {
+                    if (!e.is_directory(ec)) continue;
+                    const fs::path probe = e.path() / ".protohud_wtest";
+                    std::ofstream t(probe.string());
+                    if (t.good()) { t.close(); fs::remove(probe, ec); return e.path().string(); }
+                }
+            }
+            return {};
+        };
+        // Share a capture's image files with the paired phone over KDE Connect.
+        auto send_qr_phone = [kdc_p, &state](const QrCapture& c) {
+            const bool ok = kdc_p && kdc_p->device_ready();
+            int n = 0;
+            if (ok && !c.folder.empty()) {
+                std::error_code ec;
+                for (const auto& e : std::filesystem::directory_iterator(c.folder, ec))
+                    if (e.is_regular_file() && e.path().extension() == ".png"
+                        && kdc_p->share_file(e.path().string())) ++n;
+            }
+            std::lock_guard<std::mutex> lk(state.mtx);
+            Notification nt; nt.type = NotifType::App;
+            nt.title = ok ? "Sent to phone" : "No phone connected";
+            nt.body  = ok ? (std::to_string(n) + " QR file(s) shared via KDE Connect")
+                          : "Pair + connect a device in KDE Connect first.";
+            nt.auto_dismiss_s = 5.f; state.notifs.push(std::move(nt));
+        };
+        // Copy a capture's folder to a removable drive.
+        auto export_qr_usb = [find_usb_mount, &state](const QrCapture& c) {
+            namespace fs = std::filesystem;
+            const std::string dest = find_usb_mount();
+            std::string body; bool ok = false;
+            if (dest.empty())            body = "No USB/external drive found under /media or /mnt.";
+            else if (c.folder.empty())   body = "Nothing to export for this code.";
+            else {
+                std::error_code ec;
+                const fs::path target = fs::path(dest) /
+                    ("protohud_qr_" + fs::path(c.folder).filename().string());
+                fs::create_directories(target, ec);
+                int n = 0;
+                for (const auto& e : fs::directory_iterator(c.folder, ec))
+                    if (e.is_regular_file()) {
+                        fs::copy_file(e.path(), target / e.path().filename(),
+                                      fs::copy_options::overwrite_existing, ec);
+                        if (!ec) ++n;
+                    }
+                std::ofstream f((target / "link.txt").string());
+                if (f) f << c.text << "\n";
+                ok = true;
+                body = "Copied " + std::to_string(n) + " file(s) to " + target.string();
+            }
+            std::lock_guard<std::mutex> lk(state.mtx);
+            Notification nt; nt.type = NotifType::App;
+            nt.title = ok ? "Exported to USB" : "Export failed";
+            nt.body  = body; nt.auto_dismiss_s = 6.f; state.notifs.push(std::move(nt));
+        };
+
         std::vector<MenuItem> qmenu;
         // Clear All (red) — drops every entry + its folder.
         {
@@ -9245,6 +9312,21 @@ static std::vector<MenuItem> build_menu(
                                        return !state.qr_captures.items.empty(); };
             qmenu.push_back(with_desc(std::move(clr),
                 "Delete every saved QR code and its folder."));
+        }
+        // Export All to USB — copy every capture folder to a removable drive.
+        {
+            MenuItem all = leaf("Export All to USB", [export_qr_usb, &state]{
+                std::vector<QrCapture> items;
+                { std::lock_guard<std::mutex> lk(state.mtx);
+                  items.assign(state.qr_captures.items.begin(),
+                               state.qr_captures.items.end()); }
+                for (const auto& c : items) export_qr_usb(c);
+            });
+            all.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                       return !state.qr_captures.items.empty(); };
+            qmenu.push_back(with_desc(std::move(all),
+                "Copy every saved QR code's files to the first USB/external drive "
+                "found (under /media or /mnt)."));
         }
         // Capture rows (newest first).
         for (int i = 0; i < 40; ++i) {
@@ -9283,7 +9365,13 @@ static std::vector<MenuItem> build_menu(
                 if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
             });
             del.warn_fn = []{ return true; };
-            row.children = { std::move(open), std::move(del) };
+            MenuItem send = leaf("Send to Phone", [send_qr_phone, cap_at, i]{
+                send_qr_phone(cap_at(i)); });
+            send.visible_fn = [kdc_p, cap_at, i]{ return kdc_p && !cap_at(i).folder.empty(); };
+            MenuItem usb = leaf("Export to USB", [export_qr_usb, cap_at, i]{
+                export_qr_usb(cap_at(i)); });
+            usb.visible_fn = [cap_at, i]{ return !cap_at(i).folder.empty(); };
+            row.children = { std::move(open), std::move(send), std::move(usb), std::move(del) };
             row.context_panel_title = "QR Code";
             row.context_panel_draw  = [draw_cap, cap_at, i](ImDrawList* dl, ImVec2 o, ImVec2 sz){
                 draw_cap(dl, o, sz, cap_at(i)); };

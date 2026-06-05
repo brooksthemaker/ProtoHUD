@@ -73,6 +73,11 @@ public:
     // or DBus isn't available. Safe to call from any thread.
     bool ring_phone();
 
+    // Share a file with the paired phone (KDE Connect Share plugin → it lands in
+    // the phone's Downloads). Queues the path for the worker thread; returns
+    // false when the bridge isn't running. Safe to call from any thread.
+    bool share_file(const std::string& path);
+
     // Live-tunable config — applied on the next worker dispatch.
     void set_auto_dismiss(float seconds) { cfg_.auto_dismiss_s = seconds; }
     void set_app_blocklist(std::string csv);
@@ -90,6 +95,9 @@ private:
     std::atomic<bool>    device_ok_{false};
     std::atomic<bool>    ring_request_{false};   // menu → worker: ring the phone
     int                  ring_attempts_ = 0;     // worker-only: retry budget while no device
+
+    std::mutex               share_mtx_;         // guards share_queue_
+    std::vector<std::string> share_queue_;       // menu → worker: files to share
 
     mutable std::mutex   info_mtx_;
     std::string          active_device_name_;

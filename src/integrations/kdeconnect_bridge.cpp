@@ -24,6 +24,7 @@ constexpr const char* kNotificationsIface   = "org.kde.kdeconnect.device.notific
 constexpr const char* kNotificationIface    = "org.kde.kdeconnect.device.notifications.notification";
 constexpr const char* kBatteryIface         = "org.kde.kdeconnect.device.battery";
 constexpr const char* kFindMyPhoneIface     = "org.kde.kdeconnect.device.findmyphone";
+constexpr const char* kShareIface           = "org.kde.kdeconnect.device.share";
 constexpr const char* kPropertiesIface      = "org.freedesktop.DBus.Properties";
 
 // Helper: append a single string argument to a DBus message.
@@ -242,6 +243,13 @@ bool KdeConnectBridge::ring_phone() {
     // The worker forces a fresh discovery and keeps trying for a few seconds, so a
     // phone that just reconnected (e.g. woke from doze) still rings.
     ring_request_.store(true);
+    return true;
+}
+
+bool KdeConnectBridge::share_file(const std::string& path) {
+    if (!running_.load() || path.empty()) return false;
+    std::lock_guard<std::mutex> lk(share_mtx_);
+    share_queue_.push_back(path);
     return true;
 }
 
@@ -497,6 +505,31 @@ void KdeConnectBridge::worker() {
                 }
                 ring_request_.store(false);
                 ring_attempts_ = 0;
+            }
+        }
+
+        // Share queued files via the Share plugin (shareUrl with a file:// URL).
+        {
+            std::vector<std::string> pending;
+            { std::lock_guard<std::mutex> lk(share_mtx_); pending.swap(share_queue_); }
+            if (!pending.empty() && !current_dev_id.empty()) {
+                const std::string obj =
+                    "/modules/kdeconnect/devices/" + current_dev_id + "/share";
+                for (const auto& p : pending) {
+                    const std::string url = "file://" + p;
+                    DBusMessage* msg = dbus_message_new_method_call(
+                        kKdeService, obj.c_str(), kShareIface, "shareUrl");
+                    if (!msg) continue;
+                    msg_append_str(msg, url.c_str());
+                    dbus_connection_send(conn, msg, nullptr);
+                    dbus_message_unref(msg);
+                }
+                dbus_connection_flush(conn);
+                std::fprintf(stderr, "[kdeconnect] shared %zu file(s)\n", pending.size());
+            } else if (!pending.empty()) {
+                std::fprintf(stderr,
+                    "[kdeconnect] share: no reachable device, dropped %zu file(s)\n",
+                    pending.size());
             }
         }
 
