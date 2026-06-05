@@ -82,6 +82,11 @@ public:
     // the browser). Same queue/threading as share_file.
     bool share_url(const std::string& url);
 
+    // Post a notification on the paired phone with a custom message (KDE Connect
+    // ping plugin). URLs in the message are tappable in the phone's notification
+    // shade and nothing auto-opens. Same queue/threading as share_file.
+    bool send_ping(const std::string& message);
+
     // Live-tunable config — applied on the next worker dispatch.
     void set_auto_dismiss(float seconds) { cfg_.auto_dismiss_s = seconds; }
     void set_app_blocklist(std::string csv);
@@ -100,8 +105,9 @@ private:
     std::atomic<bool>    ring_request_{false};   // menu → worker: ring the phone
     int                  ring_attempts_ = 0;     // worker-only: retry budget while no device
 
-    std::mutex               share_mtx_;         // guards share_queue_
-    std::vector<std::string> share_queue_;       // menu → worker: files to share
+    std::mutex               share_mtx_;         // guards share_queue_ + ping_queue_
+    std::vector<std::string> share_queue_;       // menu → worker: URLs/files to share
+    std::vector<std::string> ping_queue_;        // menu → worker: ping messages
 
     mutable std::mutex   info_mtx_;
     std::string          active_device_name_;

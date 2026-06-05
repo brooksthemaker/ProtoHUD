@@ -6937,7 +6937,7 @@ static std::vector<MenuItem> build_menu(
                 std::string url;
                 { std::lock_guard<std::mutex> lk(state.mtx); url = state.scheduler_status.web_url; }
                 const bool ok = kdc_p && kdc_p->device_ready() && !url.empty()
-                                && kdc_p->share_url(url);
+                                && kdc_p->send_ping("ProtoHUD scheduler: " + url);
                 std::lock_guard<std::mutex> lk(state.mtx);
                 Notification n; n.type = NotifType::App;
                 n.title = ok ? "Link sent to phone"
@@ -6946,8 +6946,8 @@ static std::vector<MenuItem> build_menu(
                                      "scheduler daemon to publish its URL.";
                 n.auto_dismiss_s = 6.f; state.notifs.push(std::move(n));
             }),
-            "Open the scheduler web page on your phone — sends the link over KDE "
-            "Connect."),
+            "Send a tappable notification with the scheduler web-page link to your "
+            "phone over KDE Connect (it won't auto-open)."),
         with_desc(toggle("Send Link on Startup",
             [&state]{ return state.sched_send_link_startup; },
             [&state, cfg_root](bool v){
@@ -13488,7 +13488,7 @@ int main(int argc, char* argv[]) {
             kdc_menu_ptr && kdc_menu_ptr->device_ready()) {
             std::string url;
             { std::lock_guard<std::mutex> lk(state.mtx); url = state.scheduler_status.web_url; }
-            if (!url.empty() && kdc_menu_ptr->share_url(url)) {
+            if (!url.empty() && kdc_menu_ptr->send_ping("ProtoHUD scheduler: " + url)) {
                 sched_link_pushed = true;
                 std::lock_guard<std::mutex> lk(state.mtx);
                 Notification n; n.type = NotifType::App;

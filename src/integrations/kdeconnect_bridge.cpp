@@ -25,6 +25,7 @@ constexpr const char* kNotificationIface    = "org.kde.kdeconnect.device.notific
 constexpr const char* kBatteryIface         = "org.kde.kdeconnect.device.battery";
 constexpr const char* kFindMyPhoneIface     = "org.kde.kdeconnect.device.findmyphone";
 constexpr const char* kShareIface           = "org.kde.kdeconnect.device.share";
+constexpr const char* kPingIface            = "org.kde.kdeconnect.device.ping";
 constexpr const char* kPropertiesIface      = "org.freedesktop.DBus.Properties";
 
 // Helper: append a single string argument to a DBus message.
@@ -257,6 +258,13 @@ bool KdeConnectBridge::share_url(const std::string& url) {
     if (!running_.load() || url.empty()) return false;
     std::lock_guard<std::mutex> lk(share_mtx_);
     share_queue_.push_back(url);
+    return true;
+}
+
+bool KdeConnectBridge::send_ping(const std::string& message) {
+    if (!running_.load() || message.empty()) return false;
+    std::lock_guard<std::mutex> lk(share_mtx_);
+    ping_queue_.push_back(message);
     return true;
 }
 
@@ -512,6 +520,30 @@ void KdeConnectBridge::worker() {
                 }
                 ring_request_.store(false);
                 ring_attempts_ = 0;
+            }
+        }
+
+        // Post queued ping notifications (ping plugin → tappable notification on
+        // the phone, nothing auto-opens).
+        {
+            std::vector<std::string> pings;
+            { std::lock_guard<std::mutex> lk(share_mtx_); pings.swap(ping_queue_); }
+            if (!pings.empty() && !current_dev_id.empty()) {
+                const std::string obj =
+                    "/modules/kdeconnect/devices/" + current_dev_id + "/ping";
+                for (const auto& m : pings) {
+                    DBusMessage* msg = dbus_message_new_method_call(
+                        kKdeService, obj.c_str(), kPingIface, "sendPing");
+                    if (!msg) continue;
+                    msg_append_str(msg, m.c_str());
+                    dbus_connection_send(conn, msg, nullptr);
+                    dbus_message_unref(msg);
+                }
+                dbus_connection_flush(conn);
+                std::fprintf(stderr, "[kdeconnect] sent %zu ping(s)\n", pings.size());
+            } else if (!pings.empty()) {
+                std::fprintf(stderr, "[kdeconnect] ping: no reachable device, dropped %zu\n",
+                             pings.size());
             }
         }
 
