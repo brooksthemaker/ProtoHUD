@@ -887,14 +887,22 @@ class WaterEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
-        phase_ += jnum(cfg_, "wave_speed", 2.0) * dt;
-        const double slosh_max = jnum(cfg_, "slosh", h_ * 0.10);
+        // viscosity 0 = thin/snappy water, 1 = thick/sluggish (lags + resists slosh).
+        const double v = std::clamp(jnum(cfg_, "viscosity", 0.3), 0.0, 1.0);
+        // Smooth the surface tilt so a thicker liquid lags behind head roll.
+        if (!tilt_init_) { tilt_smooth_ = motion_.roll_deg; tilt_init_ = true; }
+        const double tilt_rate = std::min(1.0, dt * 8.0 * (1.0 - 0.9 * v));
+        tilt_smooth_ += (motion_.roll_deg - tilt_smooth_) * tilt_rate;
+
+        phase_ += jnum(cfg_, "wave_speed", 2.0) * (1.0 - 0.7 * v) * dt;   // slower ripple
+        const double slosh_max = jnum(cfg_, "slosh", h_ * 0.10) * (1.0 - 0.85 * v);
         // Gyro yaw-rate + linear accel kick the surface ripple; a little idle
         // motion keeps it alive at rest.
         const double bump = std::min(1.0, std::fabs(motion_.yaw_rate) / 180.0
                                         + std::fabs(motion_.accel_g - 1.0));
         const double target = (0.15 + 0.85 * bump) * slosh_max;
-        amp_ += (target - amp_) * std::min(1.0, dt * 3.0);
+        const double ease = std::min(1.0, dt * 3.0 * (1.0 - 0.85 * v));   // sluggish response
+        amp_ += (target - amp_) * ease;
     }
     cv::Mat render() override {
         cv::Mat c = blank();
@@ -905,7 +913,7 @@ public:
         const double waven = jnum(cfg_, "wave_count", 2.0);
         const double base  = h_ * (1.0 - level);
         const double cx    = w_ * 0.5;
-        const double roll  = motion_.roll_deg * gain * kPi / 180.0;
+        const double roll  = tilt_smooth_ * gain * kPi / 180.0;   // viscosity-smoothed
         const double slope = std::tan(std::clamp(roll, -1.2, 1.2));
         for (int x = 0; x < w_; ++x) {
             double sy = base - (x - cx) * slope
@@ -954,6 +962,8 @@ private:
                  (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
     }
     double phase_ = 0.0, amp_ = 0.0;
+    double tilt_smooth_ = 0.0;
+    bool   tilt_init_ = false;
 };
 
 // ── Effect factory ───────────────────────────────────────────────────────────
@@ -1009,11 +1019,11 @@ const std::map<std::string, json>& presets() {
             {"effect":"rings","count":1,"colors":[[0,200,255]],"speed_min":10,"speed_max":15,"max_radius":15,"blend":"add"}]},
           "rain": {"effect":"rain","count":35,"colors":[[120,150,220],[150,180,255]],"speed_min":45,"speed_max":70,"drift_x":1.5,"blend":"add"},
           "water": {"effect":"water","level":0.42,"alpha":0.85,"slosh":6,"wave_count":2,"wave_speed":2.0,"colors":[[120,220,255],[0,110,210],[0,40,120]],"blend":"normal"},
-          "lava": {"effect":"water","level":0.36,"alpha":0.95,"slosh":4,"wave_count":2,"wave_speed":1.3,"colors":[[255,230,120],[255,90,0],[150,20,0]],"blend":"normal"},
+          "lava": {"effect":"water","level":0.36,"alpha":0.95,"slosh":4,"wave_count":2,"wave_speed":1.3,"viscosity":0.6,"colors":[[255,230,120],[255,90,0],[150,20,0]],"blend":"normal"},
           "toxic": {"effect":"water","level":0.40,"alpha":0.9,"slosh":7,"wave_count":3,"wave_speed":2.4,"colors":[[210,255,120],[60,200,0],[15,110,0]],"blend":"normal"},
           "ocean": {"effect":"water","level":0.52,"alpha":0.85,"slosh":8,"wave_count":3,"wave_speed":1.8,"colors":[[90,235,225],[0,130,170],[0,40,90]],"blend":"normal"},
           "plasma_fluid": {"effect":"water","level":0.40,"alpha":0.9,"slosh":6,"wave_count":2,"colors":[[255,130,255],[150,0,200],[40,0,80]],"blend":"normal"},
-          "mercury": {"effect":"water","level":0.36,"alpha":0.96,"slosh":3,"wave_count":2,"colors":[[235,240,250],[120,130,150],[55,60,75]],"blend":"normal"},
+          "mercury": {"effect":"water","level":0.36,"alpha":0.96,"slosh":3,"wave_count":2,"viscosity":0.7,"colors":[[235,240,250],[120,130,150],[55,60,75]],"blend":"normal"},
           "thunderstorm": {"layers":[
             {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":55,"speed_max":80,"drift_x":3.0,"blend":"add"},
             {"effect":"lightning","rate":0.7,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},

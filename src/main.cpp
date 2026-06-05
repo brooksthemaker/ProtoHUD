@@ -859,6 +859,8 @@ struct LayerCfg {
     float direction_deg = -1.f;
     // Liquid fill fraction for the "water" effect (0..1). Ignored by others.
     float level = 0.4f;
+    // Liquid viscosity for "water" (0 = thin/snappy, 1 = thick/sluggish).
+    float viscosity = 0.3f;
     std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
     // Motion reactivity (opt-in): drives the layer's direction from head
     // movement. "none" | "heading" (lock to compass) | "yaw" (drift when
@@ -4039,8 +4041,10 @@ static std::vector<MenuItem> build_menu(
                 layer["direction_from"] = L.direction_from;
             if (L.intensity_from != "none")
                 layer["intensity_from"] = L.intensity_from;
-            if (L.effect == "water")
-                layer["level"] = L.level;
+            if (L.effect == "water") {
+                layer["level"]     = L.level;
+                layer["viscosity"] = L.viscosity;
+            }
             out["layers"].push_back(layer);
         }
         return out;
@@ -4071,6 +4075,7 @@ static std::vector<MenuItem> build_menu(
             L.direction_from = jl.value("direction_from", std::string("none"));
             L.intensity_from = jl.value("intensity_from", std::string("none"));
             L.level = jl.value("level", 0.4f);
+            L.viscosity = jl.value("viscosity", 0.3f);
         }
     };
 
@@ -4357,6 +4362,14 @@ static std::vector<MenuItem> build_menu(
                     [L](float v){ L->level = v / 100.f; });
                 lvl.visible_fn = [L]{ return L->effect == "water"; };
                 return lvl;
+            })(),
+            // Viscosity — only for "water": higher = slower, resists sloshing.
+            ([&]{
+                MenuItem vis = slider("Viscosity", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->viscosity * 100.f; },
+                    [L](float v){ L->viscosity = v / 100.f; });
+                vis.visible_fn = [L]{ return L->effect == "water"; };
+                return vis;
             })(),
             // Motion reactivity — couple this layer's direction to head movement.
             ([&]{
