@@ -8698,7 +8698,8 @@ static std::vector<MenuItem> build_menu(
         std::string cur_short;     // current HEAD short hash
         std::string cur_subject;   // current HEAD commit subject
         std::string cur_branch;    // current branch name
-        std::vector<std::string> branches;  // remote branch short names
+        std::vector<std::string> all_remote; // every remote branch (authoritative)
+        std::vector<std::string> branches;  // filtered view shown in the menu
         bool        show_all = false;       // curated (main + claude/*) vs all
         int         behind   = -1;          // commits behind origin/<branch>; -1 unknown
         std::string last_check;             // human time of last fetch; "" = never
@@ -8742,32 +8743,62 @@ static std::vector<MenuItem> build_menu(
         upd->cur_short = sh; upd->cur_subject = su; upd->cur_branch = br;
     };
 
-    // Refresh the remote-branch list (local; reads refs/remotes/origin).
-    auto upd_refresh_branches = [git_q, upd]{
-        bool all; { std::lock_guard<std::mutex> lk(upd->mtx); all = upd->show_all; }
-        const std::string raw = git_q(
-            "for-each-ref --format=%(refname:short) --sort=-committerdate refs/remotes/origin");
+    // Recompute the visible list from the cached full list + curated filter.
+    // Instant (no git) — safe to call on the UI thread when toggling the view.
+    auto upd_apply_filter = [upd]{
+        std::lock_guard<std::mutex> lk(upd->mtx);
         std::vector<std::string> out;
-        size_t pos = 0;
-        while (pos < raw.size()) {
-            size_t nl = raw.find('\n', pos);
-            if (nl == std::string::npos) nl = raw.size();
-            std::string ref = raw.substr(pos, nl - pos);
-            pos = nl + 1;
-            // Strip the "origin/" prefix; drop the symbolic origin/HEAD entry.
-            const std::string pfx = "origin/";
-            if (ref.rfind(pfx, 0) == 0) ref = ref.substr(pfx.size());
-            if (ref.empty() || ref == "HEAD" || ref.find("HEAD ->") != std::string::npos) continue;
-            // Curated view: main/master plus the working claude/* branches.
-            if (!all) {
+        for (const auto& ref : upd->all_remote) {
+            if (!upd->show_all) {
+                // Curated view: main/master plus the working claude/* branches.
                 const bool keep = (ref == "main" || ref == "master"
                                    || ref.rfind("claude/", 0) == 0);
                 if (!keep) continue;
             }
             out.push_back(ref);
         }
-        std::lock_guard<std::mutex> lk(upd->mtx);
         upd->branches = std::move(out);
+    };
+
+    // Populate the full remote-branch list, then re-filter. local=true reads
+    // local tracking refs (instant, but only branches already fetched);
+    // local=false runs `git ls-remote --heads origin` (network — authoritative,
+    // lists EVERY branch on the repo even if it was never fetched locally).
+    auto upd_load_branches = [git_q, upd, upd_apply_filter](bool local){
+        const std::string raw = local
+            ? git_q("for-each-ref --format=%(refname:short) --sort=-committerdate refs/remotes/origin")
+            : git_q("ls-remote --heads origin");
+        std::vector<std::string> out;
+        size_t pos = 0;
+        while (pos < raw.size()) {
+            size_t nl = raw.find('\n', pos);
+            if (nl == std::string::npos) nl = raw.size();
+            std::string line = raw.substr(pos, nl - pos);
+            pos = nl + 1;
+            std::string ref;
+            if (local) {
+                ref = line;
+                const std::string pfx = "origin/";
+                if (ref.rfind(pfx, 0) == 0) ref = ref.substr(pfx.size());
+            } else {
+                // ls-remote line: "<sha>\trefs/heads/<branch>"
+                const auto tab = line.find('\t');
+                if (tab == std::string::npos) continue;
+                ref = line.substr(tab + 1);
+                const std::string pfx = "refs/heads/";
+                if (ref.rfind(pfx, 0) != 0) continue;
+                ref = ref.substr(pfx.size());
+            }
+            if (ref.empty() || ref == "HEAD" || ref.find("HEAD ->") != std::string::npos) continue;
+            out.push_back(ref);
+        }
+        // Don't clobber a good cached list with an empty network result
+        // (offline / fetch failed) — but always accept the local read.
+        if (!out.empty() || local) {
+            std::lock_guard<std::mutex> lk(upd->mtx);
+            upd->all_remote = std::move(out);
+        }
+        upd_apply_filter();
     };
 
     // Refresh rollback availability from the marker update.sh writes.
@@ -8786,20 +8817,20 @@ static std::vector<MenuItem> build_menu(
             ? out : (out.substr(0, bar) + " on " + out.substr(bar + 1));
     };
 
-    // Initial population (local only — never auto-fetches).
+    // Initial population (local only — never auto-fetches the network).
     upd_refresh_cur();
-    upd_refresh_branches();
+    upd_load_branches(/*local=*/true);
     upd_refresh_rollback();
 
     // "Check for Updates": async fetch + behind-count. The ONLY network call,
     // and only when the user picks it.
-    auto upd_check = [git_q, upd_refresh_cur, upd_refresh_branches, sh_read, upd, push_notif]{
+    auto upd_check = [git_q, upd_refresh_cur, upd_load_branches, sh_read, upd, push_notif]{
         { std::lock_guard<std::mutex> lk(upd->mtx);
           if (upd->busy) return; upd->busy = true; upd->status = "Checking\xe2\x80\xa6"; }
-        std::thread([git_q, upd_refresh_cur, upd_refresh_branches, sh_read, upd, push_notif]{
+        std::thread([git_q, upd_refresh_cur, upd_load_branches, sh_read, upd, push_notif]{
             git_q("fetch --prune origin");                 // network (retry handled by git config / best-effort)
             upd_refresh_cur();
-            upd_refresh_branches();
+            upd_load_branches(/*local=*/false);            // authoritative remote list
             std::string br; { std::lock_guard<std::mutex> lk(upd->mtx); br = upd->cur_branch; }
             const std::string beh = git_q("rev-list --count HEAD..origin/" + br);
             int behind = beh.empty() ? -1 : std::atoi(beh.c_str());
@@ -8915,16 +8946,21 @@ static std::vector<MenuItem> build_menu(
         std::vector<MenuItem> branch_items;
         branch_items.push_back(with_desc(toggle("Show All Branches",
             [upd]{ std::lock_guard<std::mutex> lk(upd->mtx); return upd->show_all; },
-            [upd, upd_refresh_branches](bool v){
+            [upd, upd_apply_filter, upd_load_branches](bool v){
                 { std::lock_guard<std::mutex> lk(upd->mtx); upd->show_all = v; }
-                upd_refresh_branches();
+                upd_apply_filter();   // instant re-filter of the cached list
+                // …then refresh the authoritative list from the repo so branches
+                // that were never fetched locally also appear (network).
+                std::thread([upd_load_branches]{ upd_load_branches(/*local=*/false); }).detach();
             }),
             "OFF: show only main + the claude/* working branches (recommended). "
-            "ON: list every remote branch."));
+            "ON: list every branch on the repo (refreshed over the network)."));
         branch_items.push_back(with_desc(
-            leaf("Refresh List", [upd_refresh_branches]{ upd_refresh_branches(); }),
-            "Re-read the local list of remote branches (run \"Check for Updates\" "
-            "first to pull new ones from the repo)."));
+            leaf("Refresh List", [upd_load_branches]{
+                std::thread([upd_load_branches]{ upd_load_branches(/*local=*/false); }).detach();
+            }),
+            "Re-query the repo for its full branch list (git ls-remote). Shows "
+            "every branch, including ones not yet downloaded to this Pi."));
 
         static constexpr int kBranchSlots = 48;
         for (int i = 0; i < kBranchSlots; ++i) {
@@ -8948,13 +8984,20 @@ static std::vector<MenuItem> build_menu(
                   if (upd->sel == i) return;          // already cached
                   nm = upd->branches[i]; upd->sel = i; upd->sel_name = nm;
                   upd->sel_log = "Loading\xe2\x80\xa6"; }
+                // Richer changelog: short hash + author-date + subject.
                 std::string log = git_q(
-                    "log --oneline --decorate -n 14 origin/" + nm);
-                std::string ahead = git_q("rev-list --count HEAD..origin/" + nm);
+                    "log --pretty=format:'%h %ad  %s' --date=short -n 20 origin/" + nm);
+                std::string ahead  = git_q("rev-list --count HEAD..origin/" + nm);
+                std::string behind = git_q("rev-list --count origin/" + nm + "..HEAD");
                 std::lock_guard<std::mutex> lk(upd->mtx);
                 if (upd->sel != i) return;            // moved on while loading
-                upd->sel_log = (ahead.empty() ? "" : ("+" + ahead + " ahead of current\n\n"))
-                             + (log.empty() ? "(no log / branch not fetched)" : log);
+                std::string hdr;
+                if (!ahead.empty() && ahead != "0")  hdr += "+" + ahead + " new commit(s) to apply";
+                if (!behind.empty() && behind != "0") hdr += (hdr.empty() ? "" : "  ") +
+                                                             ("-" + behind + " not on this branch");
+                if (hdr.empty() && !ahead.empty())   hdr = "Even with your current build";
+                upd->sel_log = (hdr.empty() ? "" : (hdr + "\n\n"))
+                             + (log.empty() ? "(no log \xe2\x80\x94 run Check for Updates to fetch it)" : log);
             };
             b.action = [upd, upd_apply, i]{
                 std::string nm;
@@ -9010,6 +9053,91 @@ static std::vector<MenuItem> build_menu(
                 : ("Rollback to " + upd->rollback_target);
         };
         updates_menu.push_back(std::move(rb));
+
+        // Update History — reads state/update/history.log (written by update.sh),
+        // newest first. Each line: ISO-date \t branch \t before..after \t subject.
+        MenuItem hist = leaf("Update History", []{});
+        hist.type = MenuItemType::SUBMENU;   // submenu so its context panel shows
+        updates_menu.push_back(with_panel(std::move(hist), "Update History",
+            [upd, sh_read](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                ImFont* font = ImGui::GetFont();
+                const float fs = ImGui::GetFontSize();
+                std::string root;
+                { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; }
+                const std::string log = root.empty() ? std::string() : sh_read(
+                    ("f='" + root + "/state/update/history.log'; "
+                     "[ -f \"$f\" ] && tac \"$f\" | head -n 18").c_str());
+                dl->AddText(font, fs * 1.0f, {o.x, o.y}, IM_COL32(230, 235, 240, 255),
+                            "Recent updates (newest first)");
+                float y = o.y + fs * 1.6f;
+                if (log.empty()) {
+                    dl->AddText(font, fs * 0.85f, {o.x, y}, IM_COL32(180, 190, 200, 210),
+                                "No updates recorded yet.");
+                    return;
+                }
+                size_t pos = 0;
+                while (pos < log.size()) {
+                    size_t nl = log.find('\n', pos);
+                    if (nl == std::string::npos) nl = log.size();
+                    std::string ln = log.substr(pos, nl - pos);
+                    pos = nl + 1;
+                    // Split the tab-separated record into a compact two-line entry.
+                    std::vector<std::string> f; size_t p = 0;
+                    while (true) { size_t t = ln.find('\t', p);
+                        f.push_back(ln.substr(p, t == std::string::npos ? std::string::npos : t - p));
+                        if (t == std::string::npos) break; p = t + 1; }
+                    std::string when = f.size() > 0 ? f[0] : ln;
+                    if (when.size() >= 16) when = when.substr(0, 16).replace(10, 1, " "); // YYYY-MM-DD HH:MM
+                    const std::string br  = f.size() > 1 ? f[1] : "";
+                    const std::string rng = f.size() > 2 ? f[2] : "";
+                    const std::string sub = f.size() > 3 ? f[3] : "";
+                    dl->AddText(font, fs * 0.82f, {o.x, y}, IM_COL32(210, 220, 230, 230),
+                                (when + "   " + br + "  " + rng).c_str());
+                    y += fs * 0.9f;
+                    if (!sub.empty()) {
+                        dl->AddText(font, fs * 0.78f, {o.x + fs * 0.8f, y},
+                                    IM_COL32(170, 180, 190, 200), sub.c_str());
+                        y += fs * 0.95f;
+                    }
+                    y += fs * 0.15f;
+                }
+            }));
+
+        // Settings & Data Safety — a static explainer of what survives an update.
+        MenuItem safe = leaf("Settings & Data Safety", []{});
+        safe.type = MenuItemType::SUBMENU;
+        updates_menu.push_back(with_panel(std::move(safe), "What's Preserved",
+            [](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                ImFont* font = ImGui::GetFont();
+                const float fs = ImGui::GetFontSize();
+                static const char* kLines[] = {
+                    "Updates never touch your data:",
+                    "",
+                    "\xe2\x80\xa2 config.json (all menu settings) is outside",
+                    "  version control \xe2\x80\x94 git can't overwrite it.",
+                    "\xe2\x80\xa2 New defaults from a release are merged IN;",
+                    "  your existing values always win.",
+                    "\xe2\x80\xa2 Custom faces/effects + IMU calibration",
+                    "  live in config.json / Protoface and persist.",
+                    "\xe2\x80\xa2 Protoface (imported faces) updates without",
+                    "  deleting anything you imported.",
+                    "",
+                    "Before each update a rollback point is saved",
+                    "(commit + a config backup under state/update/).",
+                    "Recover anytime via Rollback, or over SSH with",
+                    "scripts/rollback.sh --restart.",
+                };
+                float y = o.y;
+                for (const char* ln : kLines) {
+                    const bool head = (ln[0] != '\0' && ln[0] != ' ' && ln[0] != '\xe2');
+                    dl->AddText(font, fs * (head ? 0.92f : 0.82f), {o.x, y},
+                                head ? IM_COL32(230, 235, 240, 255)
+                                     : IM_COL32(195, 205, 215, 220), ln);
+                    y += fs * 0.95f;
+                }
+            }));
     }
 
     // ── Power submenu (existing reboot/quit + new shutdown moved here) ──────

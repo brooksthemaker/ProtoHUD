@@ -116,8 +116,12 @@ git submodule update --init --recursive 2>/dev/null || \
 
 log "now at $(git rev-parse --short HEAD) — $(git log -1 --pretty=%s)"
 
-# ── Restore the config that shipped with the known-good build ─────────────────
-if [ "${DO_CONFIG}" = "1" ] && [ -n "${GOOD_CONFIG}" ] && [ -f "${GOOD_CONFIG}" ]; then
+# Restore the config that shipped with the known-good build. Deferred until
+# AFTER the old instance has stopped (below) so its on-exit write can't clobber
+# what we put back; this function is called at the right moment in each path.
+restore_config() {
+    [ "${DO_CONFIG}" = "1" ] || return 0
+    [ -n "${GOOD_CONFIG}" ] && [ -f "${GOOD_CONFIG}" ] || return 0
     # Stash the current (possibly-broken) config alongside the backups first.
     if [ -f "${ROOT}/config/config.json" ]; then
         cp -f "${ROOT}/config/config.json" \
@@ -126,17 +130,25 @@ if [ "${DO_CONFIG}" = "1" ] && [ -n "${GOOD_CONFIG}" ] && [ -f "${GOOD_CONFIG}" 
     cp -f "${GOOD_CONFIG}" "${ROOT}/config/config.json" 2>/dev/null && \
         log "restored config from ${GOOD_CONFIG}" || \
         log "WARNING: could not restore config backup"
-fi
+}
 
-# ── Rebuild + restart ────────────────────────────────────────────────────────
+# ── Rebuild ──────────────────────────────────────────────────────────────────
 if [ "${DO_BUILD}" = "1" ]; then
     log "building"
     "${ROOT}/scripts/build.sh" || { log "ERROR: build failed — binary may be stale"; exit 1; }
 fi
 
+# ── Restart (stop → restore config → start) ──────────────────────────────────
 if [ "${DO_RESTART}" = "1" ]; then
-    log "restarting ProtoHUD"
-    "${ROOT}/scripts/restart.sh"
+    log "stopping current instance"
+    "${ROOT}/scripts/restart.sh" --stop
+    restore_config
+    log "starting rolled-back ProtoHUD"
+    "${ROOT}/scripts/restart.sh" --start
+else
+    # No restart requested — restore now (best-effort; a running instance would
+    # overwrite it on its next exit).
+    restore_config
 fi
 
 log "done"

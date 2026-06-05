@@ -472,20 +472,41 @@ fetches, builds, or restarts unless picked from this menu.
   then reports how far behind the current branch is (no code changes).
 - **Update This Branch & Restart** — pulls + rebuilds + restarts the current
   branch via `scripts/update.sh <branch> --restart`.
-- **Select Branch** — lists remote branches (curated to `main` + `claude/*`,
-  with a *Show All Branches* toggle). Highlighting a branch shows its recent
-  commits in the context panel; selecting it updates + restarts to it.
+- **Select Branch** — lists every branch on the repo via `git ls-remote`
+  (curated to `main` + `claude/*` by default, with a *Show All Branches*
+  toggle + *Refresh List*). Highlighting a branch shows a dated changelog
+  (`%h %ad %s`) plus how many commits it's ahead/behind in the context panel;
+  selecting it updates + restarts to it.
 - **Rollback Last Update** — restores the build + config saved just before the
   last update (via `scripts/rollback.sh`). Visible only when a rollback point
   exists.
-- **Settings/content protection** — `config/config.json` and user faces/effects
-  live outside version control, so updates never clobber them. `update.sh`
-  records a rollback point (commit + config backup under `state/update/`)
-  before every update.
-- **Standalone recovery** — `scripts/rollback.sh` works outside ProtoHUD (over
-  SSH) if the HUD won't boot: `scripts/rollback.sh --restart` returns to the
-  last known-good build, `--main` is a last-resort reset to `origin/main`,
-  `--list` shows the recorded rollback point.
+- **Update History** — reads `state/update/history.log` (newest first): when,
+  branch, `before..after` short hashes, and the new HEAD's subject.
+- **Settings & Data Safety** — in-menu explainer of what survives an update.
+
+**Settings & content protection (automatic on every update):**
+- `config/config.json` and user faces/effects live outside version control, so
+  git operations can't overwrite them.
+- `scripts/merge_config.py` deep-merges any new keys from `config.example.json`
+  into your `config.json` after an update — **existing values always win**;
+  lists (custom effects, fan zones) are kept verbatim. Run by `update.sh`
+  *after* the old instance has exited so its on-exit write can't clobber the
+  merge, and *before* the new build starts.
+- The Protoface submodule is updated (`git submodule update --init --recursive`,
+  no `--force`) so imported faces are never deleted.
+- `update.sh` records a rollback point (commit + config backup under
+  `state/update/`) before every update.
+
+**Standalone recovery** — `scripts/rollback.sh` works outside ProtoHUD (over
+SSH) if the HUD won't boot, and uses the same stop → restore-config → start
+ordering so the recovered config sticks:
+- `scripts/rollback.sh --restart` — return to the last known-good build + config
+- `scripts/rollback.sh <commit|branch>` — roll back to a specific ref
+- `scripts/rollback.sh --main` — last-resort hard reset to `origin/main`
+- `scripts/rollback.sh --list` — show the recorded rollback point
+
+**Policy:** there is no automatic update *checking* or *applying* — every step
+is user-initiated, by request.
 
 ### Demo Mode (System → Demo Mode)
 Test all notification types without hardware: Trigger Alarm, Trigger Timer Done, LoRa Message, App Toast, Toast Stack (×4), Clear All.

@@ -84,6 +84,7 @@ if [ -z "${BRANCH}" ]; then
 fi
 log "updating branch '${BRANCH}'"
 
+BEFORE_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 record_good
 
 retry_git fetch origin "${BRANCH}" || exit 1
@@ -94,7 +95,47 @@ if [ "$(git rev-parse --abbrev-ref HEAD)" != "${BRANCH}" ]; then
 fi
 
 retry_git pull --ff-only origin "${BRANCH}" || exit 1
+AFTER_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 log "now at $(git rev-parse --short HEAD) — $(git log -1 --pretty=%s)"
+
+# Bring the Protoface submodule in line with the new tree. No --force, so any
+# user-imported faces (untracked files in the submodule) are left in place.
+if [ -f "${ROOT}/.gitmodules" ]; then
+    log "updating submodules (Protoface)"
+    git submodule update --init --recursive 2>/dev/null || \
+        log "WARNING: submodule update failed (Protoface may be stale)"
+fi
+
+# Append to the update history log (state/update/history.log), newest line last.
+record_history() {
+    local hist="${ROOT}/state/update"
+    mkdir -p "${hist}" 2>/dev/null || return 0
+    local subj; subj="$(git log -1 --pretty=%s 2>/dev/null)"
+    printf '%s\t%s\t%s..%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BRANCH}" \
+        "${BEFORE_COMMIT:0:9}" "${AFTER_COMMIT:0:9}" "${subj}" \
+        >> "${hist}/history.log" 2>/dev/null || true
+    # Keep the log bounded to the last 200 entries.
+    if [ -f "${hist}/history.log" ]; then
+        tail -n 200 "${hist}/history.log" > "${hist}/history.log.tmp" 2>/dev/null && \
+            mv -f "${hist}/history.log.tmp" "${hist}/history.log" 2>/dev/null || true
+    fi
+}
+record_history
+
+# Merge any new config defaults shipped with this update into the user's
+# config.json (existing values always win). See scripts/merge_config.py.
+merge_config() {
+    local ex="${ROOT}/config/config.example.json"
+    local cfg="${ROOT}/config/config.json"
+    [ -f "${ex}" ] || return 0
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "${ROOT}/scripts/merge_config.py" "${cfg}" "${ex}" || \
+            log "WARNING: config merge failed (runtime defaults still apply)"
+    else
+        log "python3 not found — skipping config merge (runtime defaults apply)"
+    fi
+}
 
 if [ "${DO_BUILD}" = "1" ]; then
     log "building"
@@ -102,8 +143,20 @@ if [ "${DO_BUILD}" = "1" ]; then
 fi
 
 if [ "${DO_RESTART}" = "1" ]; then
-    log "restarting ProtoHUD"
-    "${ROOT}/scripts/restart.sh"
+    # Stop the old instance FIRST so its on-exit config write happens before we
+    # merge — otherwise the dying process would clobber the merged config. Then
+    # merge defaults into the now-quiescent config and start the new build.
+    log "stopping current instance"
+    "${ROOT}/scripts/restart.sh" --stop
+    log "merging config defaults"
+    merge_config
+    log "starting updated ProtoHUD"
+    "${ROOT}/scripts/restart.sh" --start
+else
+    # Not restarting: merge best-effort now. The running instance will rewrite
+    # config.json on its own next exit, but ProtoHUD's loader re-applies any
+    # missing defaults in-memory, so nothing is lost.
+    merge_config
 fi
 
 log "done"
