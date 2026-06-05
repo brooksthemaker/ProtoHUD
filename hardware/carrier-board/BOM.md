@@ -83,6 +83,9 @@ with the default sensor set.
 | 34 | STEMMA QT / Qwiic connectors | JST-SH 1 mm | as needed | N8 | Solderless sensors |
 | 35 | Test points | loop / pad | many | N9 | Rails + CLK/LAT/OE/SDA/SCL |
 | 36 | HDMI connectors + ESD | micro/full HDMI, ESD array | 1–2 | N10 | CM5 dual HDMI / VITURE |
+| 36b | Fan headers (4-pin) | PC-fan 2.54 mm | 2–4 | N5 | J12 · up to 4 fans in 2 zones |
+| 36c | Low-side N-MOSFET + gate R/pulldown | e.g. AO3400 / IRLML | 2 | N5 | one per fan zone (gate ← BCM 18/19) |
+| 36d | Flyback diode | e.g. 1N5819 | 2–4 | N5 | across each fan |
 
 ## I/O expansion (optional — buttons + LEDs, keep options open)
 
