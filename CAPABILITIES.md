@@ -305,8 +305,10 @@ vortex`, plus liquid palettes `water, lava, toxic, ocean, plasma_fluid, mercury`
   primitive at a time — Select applies it, **Ctrl+Select** opens its settings),
   **Premade Effects** (curated combos with the recipe shown in the side panel;
   Ctrl+Select saves a copy to Custom), **Custom** (the 5-layer builder with
-  per-layer Density/Speed/Direction/Motion/Blend, plus Save As…/slots/Load/
-  Delete/Export), and **Random** (Surprise-Me generator with Save-to-Custom).
+  per-layer Density/Speed/Direction/Motion/Blend, a **Live Preview** toggle that
+  applies edits to the panels continuously as you tweak — the sim updates in
+  place without resetting — plus Save As…/slots/Load/Delete/Export), and
+  **Random** (Surprise-Me generator with Save-to-Custom).
   Presets persist under `cfg["protoface"]["custom_effects"]`.
 
 ### Material Colors (12)

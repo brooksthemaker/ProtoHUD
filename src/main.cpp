@@ -1460,6 +1460,9 @@ static std::vector<MenuItem> build_menu(
         // the config-backed flag the menu reads. Null on non-native backends.
         std::function<void(bool)> pf_set_expr_effects = nullptr,
         bool* pf_expr_effects_p = nullptr,
+        // Live-preview tick: main calls this each frame; when Live Preview is on
+        // it re-applies the builder spec on change. Installed inside build_menu.
+        std::shared_ptr<std::function<void()>> pf_live_tick = nullptr,
         // The live cfg JSON object owned by main(). Used by the GPIO
         // Visualizer (pin-claim scan, I²C peripherals, user notes,
         // rail-current estimate) and the Layered Effects builder
@@ -4093,6 +4096,25 @@ static std::vector<MenuItem> build_menu(
         }
     };
 
+    // Live Preview — when on, edits in the builder/effect-settings apply
+    // continuously. ParticleSystem::set_effect updates params in place when the
+    // layer structure is unchanged, so tweaks don't reset the particle sim.
+    auto pf_live = std::make_shared<bool>(false);
+    auto live_apply = [pf_live, build_layered_spec, pf_set_effect_json]{
+        if (*pf_live && pf_set_effect_json) pf_set_effect_json(build_layered_spec());
+    };
+    // main calls *pf_live_tick each frame; it re-applies only when the spec
+    // actually changed, so dragging a slider previews smoothly (the particle
+    // sim updates in place) without spamming rebuilds.
+    if (pf_live_tick) {
+        auto last = std::make_shared<nlohmann::json>();
+        *pf_live_tick = [pf_live, build_layered_spec, pf_set_effect_json, last]{
+            if (!*pf_live || !pf_set_effect_json) return;
+            nlohmann::json s = build_layered_spec();
+            if (s != *last) { pf_set_effect_json(s); *last = s; }
+        };
+    }
+
     // Effects users can pick per layer. "none" is the sentinel for "disable
     // this slot." The strings line up with the names ParticleSystem's factory
     // recognises (see particles.cpp::make_effect).
@@ -4469,6 +4491,12 @@ static std::vector<MenuItem> build_menu(
         [build_layered_spec, pf_set_effect_json]{
             if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
         }));
+    layered_items.push_back(with_desc(toggle("Live Preview",
+        [pf_live]{ return *pf_live; },
+        [pf_live, live_apply](bool v){ *pf_live = v; if (v) live_apply(); }),
+        "Apply edits to the panels continuously as you tweak layers, instead of "
+        "hitting Apply Now. The sim updates in place (no reset) while the layer "
+        "structure is unchanged."));
 
     // (Built-in Presets / Randomize / Expression Effects are assembled as their
     //  own top-level Effects pages below — Premade / Random / the toggle.)
@@ -12007,6 +12035,9 @@ int main(int argc, char* argv[]) {
         && cfg["protoface"].value("expression_effects", false);
     if (native_ctrl) native_ctrl->set_expression_effects(pf_expr_effects);
 
+    // Effects Live Preview tick — populated inside build_menu, polled each frame.
+    auto pf_live_tick = std::make_shared<std::function<void()>>();
+
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -12067,6 +12098,7 @@ int main(int argc, char* argv[]) {
                                    if (native_ctrl) native_ctrl->set_expression_effects(v);
                                },
                                /* pf_expr_effects_p */ &pf_expr_effects,
+                               /* pf_live_tick */ pf_live_tick,
                                /* cfg_root */ &cfg,
                                /* USB camera preview wiring */
                                &tex_usb1, &tex_usb2, &tex_usb3, &usb_preview_req,
@@ -13263,6 +13295,10 @@ int main(int argc, char* argv[]) {
             }
             face_proxy.set_motion(m_head, m_yaw, m_pitch, m_roll, m_accel);
         }
+
+        // Effects Live Preview — re-apply the builder spec on change (no-op
+        // unless the user enabled Live Preview in Face > Effects > Custom).
+        if (pf_live_tick && *pf_live_tick) (*pf_live_tick)();
 
         // ── Notification log persistence (debounced, ~5s) ─────────────────────
         // Dirty on a new push (next_id) OR a delete/clear (size change).

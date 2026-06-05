@@ -138,6 +138,9 @@ public:
     // Effects read it through count()/direction_unit() when the cfg opts in.
     void set_motion(const MotionInput& m) { motion_ = m; }
     void set_audio(double level) { audio_ = level; }
+    // Swap in new params without recreating the effect — keeps the live particle
+    // sim (and motion/audio/canvas state) so menu edits preview without resetting.
+    void set_cfg(json cfg) { cfg_ = std::move(cfg); intensity_ = jnum(cfg_, "intensity", 1.0); }
     void set_canvas_geometry(int cw, int ch, int ox, int oy) {
         cw_ = cw; ch_ = ch; ox_ = ox; oy_ = oy;
     }
@@ -1194,10 +1197,11 @@ json resolve_cfg(const json& cfg) {
 struct ParticleLayer {
     std::unique_ptr<BaseEffect> effect;
     Blend blend = Blend::Add;
+    std::string name = "none";
 
     ParticleLayer(const json& layer_cfg, int w, int h) {
         blend = (layer_cfg.value("blend", std::string("add")) == "add") ? Blend::Add : Blend::Normal;
-        std::string name = layer_cfg.value("effect", std::string("none"));
+        name = layer_cfg.value("effect", std::string("none"));
         if (name != "none") effect = make_effect(name, w, h, layer_cfg);
     }
     void update(double dt) { if (effect) effect->update(dt); }
@@ -1206,6 +1210,11 @@ struct ParticleLayer {
     void set_audio(double level)          { if (effect) effect->set_audio(level); }
     void set_canvas_geometry(int cw, int ch, int ox, int oy) {
         if (effect) effect->set_canvas_geometry(cw, ch, ox, oy);
+    }
+    // In-place param update (same effect) — keeps the running sim.
+    void update_cfg(const json& layer_cfg) {
+        blend = (layer_cfg.value("blend", std::string("add")) == "add") ? Blend::Add : Blend::Normal;
+        if (effect) effect->set_cfg(layer_cfg);
     }
 };
 
@@ -1230,6 +1239,18 @@ struct ParticleSystem::Impl {
             layers.back().set_canvas_geometry(cw, ch, ox, oy);
         }
     }
+    // Update params in place when the layer structure (count + effect names) is
+    // unchanged, so live edits don't reset the particle sim. Returns false (→
+    // caller rebuilds) when the structure differs.
+    bool try_update(const json& cfg) {
+        json resolved = resolve_cfg(cfg);
+        const auto& nl = resolved["layers"];
+        if (nl.size() != layers.size()) return false;
+        for (size_t i = 0; i < layers.size(); ++i)
+            if (nl[i].value("effect", std::string("none")) != layers[i].name) return false;
+        for (size_t i = 0; i < layers.size(); ++i) layers[i].update_cfg(nl[i]);
+        return true;
+    }
 };
 
 ParticleSystem::ParticleSystem(int width, int height, const json& cfg)
@@ -1240,7 +1261,9 @@ ParticleSystem::ParticleSystem(int width, int height, const json& cfg)
 }
 ParticleSystem::~ParticleSystem() = default;
 
-void ParticleSystem::set_effect(const json& cfg) { impl_->build(cfg); }
+void ParticleSystem::set_effect(const json& cfg) {
+    if (!impl_->try_update(cfg)) impl_->build(cfg);   // in-place when structure matches
+}
 
 void ParticleSystem::set_canvas_geometry(int canvas_w, int canvas_h, int off_x, int off_y) {
     impl_->cw = canvas_w; impl_->ch = canvas_h; impl_->ox = off_x; impl_->oy = off_y;
