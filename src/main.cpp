@@ -866,6 +866,9 @@ struct LayerCfg {
     float pitch_fill = 0.0f;
     int   bubbles = 0;
     std::string bubble_mode = "rise";
+    // "lightning" extras: arc mode (crackling arcs vs falling bolts) + fork density.
+    bool  arc = false;
+    float branches = 0.35f;
     std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
     // Motion reactivity (opt-in): drives the layer's direction from head
     // movement. "none" | "heading" (lock to compass) | "yaw" (drift when
@@ -4059,6 +4062,10 @@ static std::vector<MenuItem> build_menu(
                     layer["bubble_mode"] = L.bubble_mode;
                 }
             }
+            if (L.effect == "lightning") {
+                layer["branches"] = L.branches;
+                if (L.arc) layer["arc"] = true;
+            }
             out["layers"].push_back(layer);
         }
         return out;
@@ -4093,6 +4100,8 @@ static std::vector<MenuItem> build_menu(
             L.pitch_fill = jl.value("pitch_fill", 0.0f);
             L.bubbles = jl.value("bubbles", 0);
             L.bubble_mode = jl.value("bubble_mode", std::string("rise"));
+            L.arc = jl.value("arc", false);
+            L.branches = jl.value("branches", 0.35f);
         }
     };
 
@@ -4435,6 +4444,20 @@ static std::vector<MenuItem> build_menu(
                 m.visible_fn = [L]{ return L->effect == "water" && L->bubbles > 0; };
                 return m;
             })(),
+            // Lightning extras — arc mode + fork density (lightning only).
+            ([&]{
+                MenuItem t = toggle("Arc Mode",
+                    [L]{ return L->arc; }, [L](bool v){ L->arc = v; });
+                t.visible_fn = [L]{ return L->effect == "lightning"; };
+                return t;
+            })(),
+            ([&]{
+                MenuItem br = slider("Branches", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->branches * 100.f; },
+                    [L](float v){ L->branches = v / 100.f; });
+                br.visible_fn = [L]{ return L->effect == "lightning"; };
+                return br;
+            })(),
             // Motion reactivity — couple this layer's direction to head movement.
             ([&]{
                 static const char* const kMotionSrc[] = {"none", "heading", "yaw", "tilt"};
@@ -4670,7 +4693,8 @@ static std::vector<MenuItem> build_menu(
         {"fire","embers + embers + sparkle"}, {"aurora","fireflies + sparkle"},
         {"blizzard","driven snow x2"}, {"sonar","rings + fireflies"},
         {"celebration","confetti + sparkle"}, {"plasma","blue embers x2 + ring"},
-        {"thunderstorm","rain + lightning"}, {"meteor_shower","meteors + sparkle"},
+        {"thunderstorm","rain + branched lightning"}, {"arc","crackling electric arcs"},
+        {"meteor_shower","meteors + sparkle"},
         {"fireworks","fireworks bursts"}, {"bubbles","rising bubbles"},
         {"vortex","comet vortex + sparkle"}, {"nebula","clouds x2 + sparkle"},
         {"water","liquid — cyan, bubbles"}, {"lava","liquid — lava, thick"},

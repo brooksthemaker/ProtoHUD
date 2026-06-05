@@ -278,8 +278,13 @@ Composable, multi-layer particle compositor with per-layer color, density,
 speed, direction, and blend (add/normal). Primitives:
 `sparkle, embers, rain, snow, confetti, rings, fireflies, clouds, lightning,
 meteor, bubbles, fireworks, vortex, water`. Built-in presets include `fire,
-aurora, nebula, plasma, sonar, thunderstorm, meteor_shower, fireworks, bubbles,
-vortex`, plus liquid palettes `water, lava, toxic, ocean, plasma_fluid, mercury`.
+aurora, nebula, plasma, sonar, thunderstorm, arc, meteor_shower, fireworks,
+bubbles, vortex`, plus liquid palettes `water, lava, toxic, ocean, plasma_fluid,
+mercury`.
+
+- **Lightning** forks **random branches** (Branches density control); with
+  **Arc Mode** it becomes continuous crackling electrical arcs between drifting
+  points (the `arc` preset). Both are per-layer options in the builder.
 
 - **Water / liquid fill** — the face looks partially filled with a tinted liquid
   (single colour or a deep→surface gradient, with Fill Level + Viscosity

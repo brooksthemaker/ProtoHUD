@@ -667,51 +667,123 @@ private:
 };
 
 // ── Lightning ──────────────────────────────────────────────────────────────────
-// Periodic jagged bolts that flash and fade. "rate" ≈ strikes/sec; bolts walk
-// from the leading edge of the layer direction (default top → down).
+// Jagged bolts that flash and fade, with random forked branches. "rate" ≈
+// strikes/sec; "branches" (0..1) sets fork density. With "arc": true it becomes
+// continuous crackling electrical arcs between drifting points ("count" arcs).
 class LightningEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
-        for (auto& b : bolts_) b.life -= dt;
-        bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(),
-            [](const Bolt& b){ return b.life <= 0; }), bolts_.end());
-        timer_ -= dt;
-        if (timer_ > 0) return;
-        const double rate = std::max(0.05, jnum(cfg_, "rate", 1.0) * intensity_);
-        timer_ = frand(rng_, 0.4, 1.6) / rate;
-        double dx, dy; direction_unit(dx, dy, 90.0);          // default fall = down
-        Bolt b;
-        b.max_life = b.life = frand(rng_, 0.10, 0.22);
-        Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{180, 210, 255};
-        b.r = col.r; b.g = col.g; b.b = col.b;
-        // March a jagged path across the canvas along the direction vector.
-        double sx, sy; direction_spawn_point(0.0, 90.0, sx, sy);
-        const int steps = irand(rng_, 8, 14);
-        const double seg = (std::max(w_, h_) * 1.4) / steps;
-        double px = sx, py = sy;
-        for (int i = 0; i <= steps; ++i) {
-            b.pts.emplace_back((int)px, (int)py);
-            const double jit = frand(rng_, -6.0, 6.0);
-            px += dx * seg - dy * jit;   // step forward + perpendicular jitter
-            py += dy * seg + dx * jit;
-        }
-        bolts_.push_back(std::move(b));
+        const bool arc = cfg_.value("arc", false)
+                      || cfg_.value("mode", std::string("bolt")) == "arc";
+        if (arc) update_arcs(dt); else update_bolts(dt);
     }
     cv::Mat render() override {
         cv::Mat c = blank();
         for (const auto& b : bolts_) {
-            const double a = std::clamp(b.life / b.max_life, 0.0, 1.0);
-            const int A = (int)(a * 255.0);
-            for (size_t i = 1; i < b.pts.size(); ++i)
-                cv::line(c, b.pts[i-1], b.pts[i], cv::Scalar(b.r, b.g, b.b, A), 1, cv::LINE_8);
+            const double a = b.arc ? b.alpha : std::clamp(b.life / b.max_life, 0.0, 1.0);
+            const int A = (int)std::clamp(a * 255.0, 0.0, 255.0);
+            for (const auto& stroke : b.strokes)
+                for (size_t i = 1; i < stroke.size(); ++i)
+                    cv::line(c, stroke[i-1], stroke[i],
+                             cv::Scalar(b.r, b.g, b.b, A), 1, cv::LINE_8);
         }
         return c;
     }
 private:
-    struct Bolt { std::vector<cv::Point> pts; double life=0, max_life=0; int r=255,g=255,b=255; };
+    struct Bolt {
+        std::vector<std::vector<cv::Point>> strokes;   // [0] = trunk, rest = branches
+        double life = 0, max_life = 1, alpha = 1.0;
+        int r = 255, g = 255, b = 255;
+        bool arc = false;
+        cv::Point a{0,0}, e{0,0};                       // arc endpoints
+        double relocate = 0.0, age = 0.0;
+    };
     std::vector<Bolt> bolts_;
     double timer_ = 0.0;
+
+    cv::Point rand_point() {
+        return cv::Point(irand(rng_, 0, std::max(0, w_ - 1)),
+                         irand(rng_, 0, std::max(0, h_ - 1)));
+    }
+    // Jagged polyline a→e with perpendicular jitter; randomly forks branches
+    // (up to 2 levels deep) into `strokes` with the trunk pushed first.
+    void build_strokes(cv::Point a, cv::Point e, int steps, double jit,
+                       double branch_prob, std::vector<std::vector<cv::Point>>& strokes,
+                       int depth) {
+        const double dxn = e.x - a.x, dyn = e.y - a.y;
+        const double len = std::hypot(dxn, dyn);
+        if (len < 1.0 || steps < 1) { strokes.push_back({a, e}); return; }
+        const double ux = dxn / len, uy = dyn / len;   // along
+        const double px = -uy, py = ux;                // perpendicular
+        std::vector<cv::Point> path;
+        std::vector<cv::Point> seeds;                  // branch start points
+        for (int i = 0; i <= steps; ++i) {
+            const double t = static_cast<double>(i) / steps;
+            const double off = (i == 0 || i == steps) ? 0.0 : frand(rng_, -jit, jit);
+            const int x = (int)std::lround(a.x + ux * len * t + px * off);
+            const int y = (int)std::lround(a.y + uy * len * t + py * off);
+            path.emplace_back(x, y);
+            if (depth < 2 && i > 0 && i < steps && frand(rng_, 0, 1) < branch_prob)
+                seeds.emplace_back(x, y);
+        }
+        strokes.push_back(std::move(path));            // trunk first
+        for (const auto& s : seeds) {
+            const double bang = std::atan2(uy, ux) + frand(rng_, -1.0, 1.0);
+            const double blen = len * frand(rng_, 0.18, 0.42);
+            const cv::Point bend((int)std::lround(s.x + std::cos(bang) * blen),
+                                 (int)std::lround(s.y + std::sin(bang) * blen));
+            build_strokes(s, bend, std::max(3, steps / 2), jit * 0.7,
+                          branch_prob * 0.5, strokes, depth + 1);
+        }
+    }
+    void update_bolts(double dt) {
+        for (auto& b : bolts_) b.life -= dt;
+        bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(),
+            [](const Bolt& b){ return b.arc || b.life <= 0; }), bolts_.end());
+        timer_ -= dt;
+        if (timer_ > 0) return;
+        const double rate = std::max(0.05, jnum(cfg_, "rate", 1.0) * intensity_);
+        timer_ = frand(rng_, 0.4, 1.6) / rate;
+        double dx, dy; direction_unit(dx, dy, 90.0);   // default fall = down
+        Bolt b;
+        b.max_life = b.life = frand(rng_, 0.10, 0.22);
+        const Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{180, 210, 255};
+        b.r = col.r; b.g = col.g; b.b = col.b;
+        double sx, sy; direction_spawn_point(0.0, 90.0, sx, sy);
+        const double L = std::max(w_, h_) * 1.4;
+        const cv::Point a((int)sx, (int)sy);
+        const cv::Point e((int)(sx + dx * L), (int)(sy + dy * L));
+        build_strokes(a, e, irand(rng_, 8, 14), jnum(cfg_, "jitter", 6.0),
+                      jnum(cfg_, "branches", 0.35), b.strokes, 0);
+        bolts_.push_back(std::move(b));
+    }
+    void update_arcs(double dt) {
+        bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(),
+            [](const Bolt& b){ return !b.arc; }), bolts_.end());   // drop leftover bolts
+        const int want = std::max(1, count(3));
+        while (static_cast<int>(bolts_.size()) < want) {
+            Bolt b; b.arc = true;
+            const Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{150, 200, 255};
+            b.r = col.r; b.g = col.g; b.b = col.b;
+            b.a = rand_point(); b.e = rand_point();
+            b.relocate = frand(rng_, 0.3, 1.2);
+            bolts_.push_back(std::move(b));
+        }
+        while (static_cast<int>(bolts_.size()) > want) bolts_.pop_back();
+        const double jit = jnum(cfg_, "jitter", 5.0);
+        const double bp  = jnum(cfg_, "branches", 0.30);
+        for (auto& b : bolts_) {
+            b.age += dt;
+            b.alpha = frand(rng_, 0.5, 1.0);           // electrical flicker
+            if (b.age >= b.relocate) {                 // jump an endpoint
+                b.age = 0.0; b.relocate = frand(rng_, 0.3, 1.2);
+                if (irand(rng_, 0, 1)) b.e = rand_point(); else b.a = rand_point();
+            }
+            b.strokes.clear();                         // regenerate each frame → crackle
+            build_strokes(b.a, b.e, irand(rng_, 6, 12), jit, bp, b.strokes, 0);
+        }
+    }
 };
 
 // ── Meteor / shooting stars ─────────────────────────────────────────────────────
@@ -1165,7 +1237,8 @@ const std::map<std::string, json>& presets() {
           "mercury": {"effect":"water","level":0.36,"alpha":0.96,"slosh":3,"wave_count":2,"viscosity":0.7,"colors":[[235,240,250],[120,130,150],[55,60,75]],"blend":"normal"},
           "thunderstorm": {"layers":[
             {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":55,"speed_max":80,"drift_x":3.0,"blend":"add"},
-            {"effect":"lightning","rate":0.7,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},
+            {"effect":"lightning","rate":0.7,"branches":0.45,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},
+          "arc": {"effect":"lightning","arc":true,"count":3,"branches":0.4,"jitter":5,"colors":[[160,200,255],[210,225,255],[120,170,255]],"blend":"add"},
           "meteor_shower": {"layers":[
             {"effect":"meteor","count":7,"colors":[[200,220,255],[255,240,200],[180,220,255]],"speed_min":45,"speed_max":85,"tail":7,"direction_deg":25,"blend":"add"},
             {"effect":"sparkle","count":18,"colors":[[255,255,255],[200,220,255]],"life_min":0.3,"life_max":1.0,"blend":"add"}]},
