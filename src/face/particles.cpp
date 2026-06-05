@@ -973,22 +973,38 @@ public:
     cv::Mat render() override {
         cv::Mat c = blank();
         // Centre on the whole canvas; render this panel's slice (continuous
-        // across a multi-panel face). Each particle is a little comet: a head
-        // dot plus an arc tail trailing along its spin, in its own hue.
+        // across a multi-panel face). Each particle is a comet: a rounded, bright
+        // head that tapers along its trailing arc into a thin fading tail. Drawn
+        // as a chain of anti-aliased circles (head → tail), each smaller/dimmer.
         const double cx = cw_ * 0.5, cy = ch_ * 0.5;
-        const double swirl = jnum(cfg_, "swirl", 2.2);
-        const double tailA = std::clamp(0.22 + swirl * 0.06, 0.1, 0.9);
+        const double swirl   = jnum(cfg_, "swirl", 2.2);
+        const double tailLen = std::clamp(0.30 + swirl * 0.08, 0.15, 1.1);  // tail arc span
+        const int    N       = 8;
         for (const auto& p : particles_) {
             const double a = p.extra, r = p.vy;
+            const double life = std::clamp(p.life, 0.0, 1.0);
+            const double headRad = std::max(1.0, static_cast<double>(p.size) + 1.0);
+            for (int k = N - 1; k >= 0; --k) {          // tail first → head drawn on top
+                const double t   = static_cast<double>(k) / (N - 1);   // 0 head … 1 tail
+                const double aa  = a - tailLen * t;
+                const double rr  = r * (1.0 + 0.12 * t);               // tail trails outward
+                const double x   = cx + std::cos(aa) * rr - ox_;
+                const double y   = cy + std::sin(aa) * rr - oy_;
+                const int    rad = (int)std::lround(headRad * (1.0 - 0.80 * t));  // taper
+                const int    A   = (int)std::clamp(life * std::pow(1.0 - t, 1.6) * 255.0,
+                                                   0.0, 255.0);
+                if (A <= 2) continue;
+                cv::circle(c, {(int)std::lround(x), (int)std::lround(y)}, std::max(0, rad),
+                           cv::Scalar(p.r, p.g, p.b, A), -1, cv::LINE_AA);
+            }
+            // Bright leading core for a little glow at the head.
             const double hx = cx + std::cos(a) * r - ox_;
             const double hy = cy + std::sin(a) * r - oy_;
-            const double tx = cx + std::cos(a - tailA) * (r * 1.06) - ox_;
-            const double ty = cy + std::sin(a - tailA) * (r * 1.06) - oy_;
-            const double life = std::clamp(p.life, 0.0, 1.0);
-            cv::line(c, cv::Point((int)tx, (int)ty), cv::Point((int)hx, (int)hy),
-                     cv::Scalar(p.r * 0.45, p.g * 0.45, p.b * 0.45, (int)(life * 150.0)),
-                     1, cv::LINE_8);
-            draw_dot(c, hx, hy, p.r, p.g, p.b, life, p.size);
+            cv::circle(c, {(int)std::lround(hx), (int)std::lround(hy)},
+                       std::max(0, (int)std::lround(headRad * 0.5)),
+                       cv::Scalar(std::min(255.0, p.r + 90.0), std::min(255.0, p.g + 90.0),
+                                  std::min(255.0, p.b + 90.0), life * 255.0),
+                       -1, cv::LINE_AA);
         }
         return c;
     }
@@ -1257,6 +1273,18 @@ const std::map<std::string, json>& presets() {
           "bubbles": {"effect":"bubbles","count":16,"colors":[[160,220,255],[120,200,255],[200,240,255]],"speed_min":8,"speed_max":18,"wobble":7,"blend":"add"},
           "vortex": {"layers":[
             {"effect":"vortex","count":70,"swirl":2.6,"infall":7,"colors":[[0,220,255],[0,255,200],[120,90,255],[200,80,255],[60,140,255]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
+          "vortex_ember": {"layers":[
+            {"effect":"vortex","count":70,"swirl":2.6,"infall":7,"colors":[[255,220,80],[255,140,0],[255,70,0],[210,40,20],[255,180,40]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[255,240,200]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
+          "vortex_toxic": {"layers":[
+            {"effect":"vortex","count":70,"swirl":2.6,"infall":7,"colors":[[210,255,120],[120,255,40],[40,200,0],[0,160,60],[160,255,80]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[230,255,200]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
+          "vortex_rose": {"layers":[
+            {"effect":"vortex","count":70,"swirl":2.6,"infall":7,"colors":[[255,120,200],[255,60,140],[210,40,255],[150,60,255],[255,150,230]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[255,230,245]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
+          "vortex_rainbow": {"layers":[
+            {"effect":"vortex","count":80,"swirl":2.6,"infall":7,"colors":[[255,60,60],[255,170,0],[80,230,40],[0,210,255],[120,90,255],[230,80,230]],"blend":"add"},
             {"effect":"sparkle","count":8,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
           "nebula": {"layers":[
             {"effect":"clouds","count":4,"size_min":10,"size_max":18,"lobes_min":3,"lobes_max":6,"turbulence":0.55,"churn":0.3,"alpha_min":0.18,"alpha_max":0.4,"speed_min":0.5,"speed_max":1.8,"colors":[[150,40,140],[90,60,200],[40,90,200]],"blend":"add"},
