@@ -22,13 +22,19 @@
 #include <dlfcn.h>
 #include <GLES2/gl2.h>
 #include <EGL/egl.h>
+#include <alsa/asoundlib.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <type_traits>
+#include <vector>
 
 #include <opencv2/imgproc.hpp>
 
@@ -48,6 +54,89 @@ extern "C" {
 namespace game {
 namespace {
 
+// ── ALSA playback sink for core audio ─────────────────────────────────────────
+// A core delivers interleaved stereo S16 from inside retro_run() (render thread);
+// we copy it into a ring buffer that a dedicated thread drains to ALSA with
+// blocking writes, so audio never stalls the render loop. ALSA soft-resample is
+// enabled, so the device can run at the core's native sample rate even if the
+// hardware can't. Self-contained: it doesn't touch ProtoHUD's spatial AudioEngine.
+class AudioSink {
+public:
+    AudioSink(std::string device, int rate) : dev_(std::move(device)), rate_(rate) {}
+    ~AudioSink() { stop(); }
+
+    bool start() {
+        if (dev_.empty() || rate_ <= 0) return false;
+        if (snd_pcm_open(&pcm_, dev_.c_str(), SND_PCM_STREAM_PLAYBACK, 0) < 0) {
+            pcm_ = nullptr; return false;
+        }
+        // S16 stereo, soft-resample on, ~120 ms of buffering.
+        if (snd_pcm_set_params(pcm_, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
+                               2, (unsigned)rate_, 1, 120000) < 0) {
+            snd_pcm_close(pcm_); pcm_ = nullptr; return false;
+        }
+        ring_.assign((size_t)rate_ * 2, 0);   // ~1 s capacity (samples, not frames)
+        running_.store(true);
+        thr_ = std::thread([this]{ run(); });
+        return true;
+    }
+
+    void stop() {
+        if (!running_.exchange(false)) { if (pcm_) { snd_pcm_close(pcm_); pcm_ = nullptr; } return; }
+        cv_.notify_all();
+        if (thr_.joinable()) thr_.join();
+        if (pcm_) { snd_pcm_close(pcm_); pcm_ = nullptr; }
+    }
+
+    // Interleaved stereo, `frames` sample-pairs. Never blocks: drops on overflow.
+    void push(const int16_t* data, size_t frames) {
+        if (!running_.load()) return;
+        std::unique_lock<std::mutex> lk(mtx_);
+        const size_t cap = ring_.size();
+        for (size_t i = 0; i < frames * 2; ++i) {
+            size_t next = (w_ + 1) % cap;
+            if (next == r_) break;               // full → drop the rest
+            ring_[w_] = data[i]; w_ = next;
+        }
+        lk.unlock();
+        cv_.notify_one();
+    }
+
+private:
+    void run() {
+        std::vector<int16_t> chunk(1024 * 2);
+        while (running_.load()) {
+            size_t got = 0;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                cv_.wait_for(lk, std::chrono::milliseconds(20),
+                             [this]{ return r_ != w_ || !running_.load(); });
+                while (got < chunk.size() && r_ != w_) {
+                    chunk[got++] = ring_[r_]; r_ = (r_ + 1) % ring_.size();
+                }
+            }
+            if (!running_.load()) break;
+            if (got == 0) continue;
+            size_t frames = got / 2, off = 0;
+            while (frames > 0 && running_.load()) {
+                snd_pcm_sframes_t wr = snd_pcm_writei(pcm_, chunk.data() + off * 2, frames);
+                if (wr < 0) { snd_pcm_recover(pcm_, (int)wr, 1); continue; }
+                frames -= (size_t)wr; off += (size_t)wr;
+            }
+        }
+    }
+
+    std::string          dev_;
+    int                  rate_ = 0;
+    snd_pcm_t*           pcm_  = nullptr;
+    std::vector<int16_t> ring_;
+    size_t               r_ = 0, w_ = 0;
+    std::mutex           mtx_;
+    std::condition_variable cv_;
+    std::atomic<bool>    running_{false};
+    std::thread          thr_;
+};
+
 // The libretro callbacks are plain C function pointers with no user-data slot,
 // so (like doomgeneric) we route them through a single live-instance pointer.
 class LibretroGame;
@@ -55,13 +144,14 @@ LibretroGame* g_lr = nullptr;
 
 class LibretroGame : public GameSource {
 public:
-    LibretroGame(std::string core, std::string rom, std::string sysdir)
+    LibretroGame(std::string core, std::string rom, std::string sysdir, std::string audio_dev)
         : core_path_(std::move(core)), rom_path_(std::move(rom)),
-          sys_dir_(std::move(sysdir)) {
+          sys_dir_(std::move(sysdir)), audio_dev_(std::move(audio_dev)) {
         frame_.create(240, 320, CV_8UC4);
         frame_.setTo(cv::Scalar(0, 0, 0, 255));
     }
     ~LibretroGame() override {
+        audio_.reset();   // stop the playback thread before tearing the core down
         if (hw_ && hw_cb_.context_destroy) hw_cb_.context_destroy();
         if (loaded_) { sym_.retro_unload_game(); sym_.retro_deinit(); }
         if (hw_fbo_) glDeleteFramebuffers(1, &hw_fbo_);
@@ -282,6 +372,13 @@ private:
         if (av.geometry.base_width && av.geometry.base_height)
             frame_.create((int)av.geometry.base_height, (int)av.geometry.base_width, CV_8UC4);
 
+        // Bring up audio at the core's native sample rate (ALSA soft-resamples to
+        // the device). Non-fatal: a game with no audio device still plays muted.
+        if (!audio_dev_.empty() && av.timing.sample_rate > 1.0) {
+            audio_ = std::make_unique<AudioSink>(audio_dev_, (int)(av.timing.sample_rate + 0.5));
+            if (!audio_->start()) audio_.reset();   // couldn't open device → silent
+        }
+
         // For a HW core, build the render-target FBO (sized to the core's max
         // geometry) and signal the core that its GL context is ready.
         if (hw_) {
@@ -424,15 +521,21 @@ private:
     static int16_t input_state_trampoline(unsigned port, unsigned dev, unsigned idx, unsigned id) {
         return g_lr ? g_lr->on_input_state(port, dev, idx, id) : 0;
     }
-    static void audio_sample_trampoline(int16_t, int16_t) {}
-    static size_t audio_batch_trampoline(const int16_t*, size_t frames) { return frames; }
+    static void audio_sample_trampoline(int16_t l, int16_t r) {
+        if (g_lr && g_lr->audio_) { int16_t s[2] = {l, r}; g_lr->audio_->push(s, 1); }
+    }
+    static size_t audio_batch_trampoline(const int16_t* data, size_t frames) {
+        if (g_lr && g_lr->audio_) g_lr->audio_->push(data, frames);
+        return frames;
+    }
     static void log_trampoline(enum retro_log_level, const char*, ...) {}
     static uintptr_t get_fbo_trampoline() { return g_lr ? (uintptr_t)g_lr->hw_fbo_ : 0; }
     static retro_proc_address_t get_proc_trampoline(const char* sym) {
         return reinterpret_cast<retro_proc_address_t>(eglGetProcAddress(sym));
     }
 
-    std::string core_path_, rom_path_, sys_dir_;
+    std::string core_path_, rom_path_, sys_dir_, audio_dev_;
+    std::unique_ptr<AudioSink> audio_;
     void*       handle_  = nullptr;
     bool        loaded_  = false;
     bool        failed_  = false;
@@ -458,8 +561,9 @@ private:
 
 std::unique_ptr<GameSource> make_libretro(const std::string& core_path,
                                           const std::string& rom_path,
-                                          const std::string& system_dir) {
-    return std::make_unique<LibretroGame>(core_path, rom_path, system_dir);
+                                          const std::string& system_dir,
+                                          const std::string& audio_device) {
+    return std::make_unique<LibretroGame>(core_path, rom_path, system_dir, audio_device);
 }
 
 }  // namespace game

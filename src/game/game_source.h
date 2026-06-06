@@ -60,11 +60,13 @@ std::unique_ptr<GameSource> make_snake();
 std::unique_ptr<GameSource> make_doom(const std::string& wad_path);
 
 // Libretro core source (the emulator ABI behind RetroArch). Built only in the
-// libretro-enabled build (PROTOHUD_HAVE_LIBRETRO). dlopen()s a software-rendered
-// core (.so) and runs the ROM; system_dir is handed back for BIOS/saves. As with
-// the others, guard call sites with #ifdef PROTOHUD_HAVE_LIBRETRO.
+// libretro-enabled build (PROTOHUD_HAVE_LIBRETRO). dlopen()s a software- or
+// GLES-hardware-rendered core (.so) and runs the ROM; system_dir is handed back
+// for BIOS/saves. audio_device is an ALSA playback device for the core's audio
+// (empty string disables audio). Guard call sites with #ifdef PROTOHUD_HAVE_LIBRETRO.
 std::unique_ptr<GameSource> make_libretro(const std::string& core_path,
                                           const std::string& rom_path,
-                                          const std::string& system_dir);
+                                          const std::string& system_dir,
+                                          const std::string& audio_device);
 
 }  // namespace game

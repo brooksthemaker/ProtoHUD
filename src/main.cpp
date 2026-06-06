@@ -14631,6 +14631,11 @@ int main(int argc, char* argv[]) {
     std::string lr_rom     = jgame.value("libretro_rom",    std::string());
     std::string lr_sysdir  = jgame.value("libretro_system_dir",
                                          std::string("/home/user/.local/share/protohud/system"));
+    // Core audio plays to its own ALSA device (independent of the spatial
+    // AudioEngine). "default" shares via dmix/PipeWire; set "" to mute.
+    std::string lr_audio   = jgame.value("audio_enabled", true)
+                               ? jgame.value("audio_device", std::string("default"))
+                               : std::string();
     int    game_which = 0;               // currently-built source (mirrors game_source_sel)
     std::unique_ptr<game::GameSource> game_src = game::make_snake();
     GLuint game_tex = 0;                 // lazily created on first frame upload
@@ -15631,7 +15636,7 @@ int main(int argc, char* argv[]) {
                 else
 #endif
 #ifdef PROTOHUD_HAVE_LIBRETRO
-                if (want == 2) game_src = game::make_libretro(lr_core, lr_rom, lr_sysdir);
+                if (want == 2) game_src = game::make_libretro(lr_core, lr_rom, lr_sysdir, lr_audio);
                 else
 #endif
                     game_src = game::make_snake();

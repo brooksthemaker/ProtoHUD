@@ -120,13 +120,32 @@ Point ProtoHUD at a core + ROM in `config.json`:
   "game": {
     "libretro_core": "/usr/lib/libretro/snes9x_libretro.so",
     "libretro_rom":  "/home/user/roms/game.sfc",
-    "libretro_system_dir": "/home/user/.local/share/protohud/system"
+    "libretro_system_dir": "/home/user/.local/share/protohud/system",
+    "audio_enabled": true,
+    "audio_device":  "default"
   }
 }
 ```
 
 `libretro_system_dir` is handed to the core as both the system and save
 directory (some cores need BIOS files or write SRAM there).
+
+### Audio
+
+Core audio plays through a self-contained ALSA sink (a ring buffer drained by a
+playback thread, so it never stalls the render loop). It runs **independently**
+of ProtoHUD's spatial mic engine, so set `audio_device` to a device that can be
+shared:
+
+- `"default"` (the recommended default) routes through dmix / PipeWire and
+  coexists with other audio.
+- A raw `"hw:CARD=…"` device is exclusive — don't point both the emulator and
+  the mic `AudioEngine` at the same `hw:` device, or one will fail to open.
+- Set `"audio_enabled": false` (or `"audio_device": ""`) to mute.
+
+ALSA soft-resamples the core's native rate (e.g. SNES 32040 Hz) to the device,
+so no rate config is needed. If the device can't be opened the game still plays,
+just silent.
 
 Get cores from your distro (`sudo apt install libretro-*`), from RetroArch's
 online updater, or from <https://buildbot.libretro.com/>.
@@ -159,6 +178,11 @@ Caveats — treat this as experimental:
 
 ### Not done yet
 
-- **Audio** is silent (no batch is routed to the audio engine), same as Doom.
-- **Core options / per-game settings** aren't exposed in the menu (cores run
-  with defaults).
+- **Core options / per-game settings** aren't exposed in the menu — cores run
+  with their defaults. (libretro cores publish tunables like internal
+  resolution, region, BIOS choice, frameskip, etc. via `SET_VARIABLES`; the
+  frontend currently accepts-but-ignores them.)
+
+> **Doom audio:** the bundled Doom (doomgeneric) is still silent — its portable
+> core links a no-op sound stub (no SDL_mixer / software synth), so there are no
+> samples to route. The ALSA sink above is specific to the libretro emulator.
