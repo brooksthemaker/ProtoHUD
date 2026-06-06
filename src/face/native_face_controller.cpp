@@ -599,6 +599,21 @@ std::string NativeFaceController::preset_material(int idx) {
         case 19: return "gradient:h:s:0:FFB3BA-BAE1FF-BAFFC9";  // Pastel
         case 20: return "gradient:h:s:0:FF4FA3-FFD24F-4FC3FF";  // Candy
         case 21: return "gradient:h:s:0:AEFF00-00FFB3-00A3FF";  // Toxic
+        // ── Pride flags ───────────────────────────────────────────────────────
+        // Vertical smooth gradients so the colours stack top→bottom like flag
+        // stripes. Kept in sync with the pf_pride table in main.cpp.
+        case 22: return "gradient:v:s:0:E40303-FF8C00-FFED00-008026-004DFF-750787";          // Rainbow
+        case 23: return "gradient:v:s:0:000000-613915-5BCEFA-F5A9B8-FFFFFF-E40303-FF8C00-FFED00-008026-004DFF-750787"; // Progress
+        case 24: return "gradient:v:s:0:5BCEFA-F5A9B8-FFFFFF-F5A9B8-5BCEFA";                  // Trans
+        case 25: return "gradient:v:s:0:D60270-D60270-9B4F96-0038A8-0038A8";                 // Bisexual
+        case 26: return "gradient:v:s:0:FF218C-FFD800-21B1FF";                               // Pansexual
+        case 27: return "gradient:v:s:0:D52D00-FF9A56-FFFFFF-D362A4-A30262";                 // Lesbian
+        case 28: return "gradient:v:s:0:FCF434-FFFFFF-9C59D1-2C2C2C";                        // Nonbinary
+        case 29: return "gradient:v:s:0:000000-A3A3A3-FFFFFF-800080";                        // Asexual
+        case 30: return "gradient:v:s:0:FF75A2-FFFFFF-BE18D6-000000-333EBD";                 // Genderfluid
+        case 31: return "gradient:v:s:0:B57EDC-FFFFFF-4A8123";                               // Genderqueer
+        case 32: return "gradient:v:s:0:3DA542-A7D379-FFFFFF-A9A9A9-000000";                 // Aromantic
+        case 33: return "gradient:v:s:0:FFD800-7902AA-FFD800";                               // Intersex
         default: return "teal";
     }
 }

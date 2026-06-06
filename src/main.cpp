@@ -4884,6 +4884,30 @@ static std::vector<MenuItem> build_menu(
                 },
                 [&state, idx = m.idx]{ return state.face.material_color == idx; }));
 
+        // ── Pride flags ──────────────────────────────────────────────────────
+        // Vertical smooth gradients matching each flag's colours (presets 22-33;
+        // see NativeFaceController::preset_material). Grouped in a submenu so the
+        // top-level Material Color list stays compact.
+        struct PFFlag { const char* label; uint8_t idx; };
+        const PFFlag pf_pride[] = {
+            { "Rainbow",     22 }, { "Progress",    23 }, { "Trans",       24 },
+            { "Bisexual",    25 }, { "Pansexual",   26 }, { "Lesbian",     27 },
+            { "Nonbinary",   28 }, { "Asexual",     29 }, { "Genderfluid", 30 },
+            { "Genderqueer", 31 }, { "Aromantic",   32 }, { "Intersex",    33 },
+        };
+        std::vector<MenuItem> pride_items;
+        for (const auto& f : pf_pride)
+            pride_items.push_back(leaf_sel(f.label,
+                [teensy, idx = f.idx, &state]{
+                    teensy->set_menu_item(8, idx);
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.face.material_color = idx;
+                },
+                [&state, idx = f.idx]{ return state.face.material_color == idx; }));
+        pf_palette.push_back(with_desc(submenu("Pride", std::move(pride_items)),
+            "Colour gradients matching pride flags (vertical stripes, top \xe2\x86\x92 "
+            "bottom). Applies like any other material; persists with your setup."));
+
         // Custom solid colour (moved here from the removed Face Color menu) —
         // an arbitrary flat colour via the RGB/hex picker, applied as a
         // SolidMaterial like the named solids above.
