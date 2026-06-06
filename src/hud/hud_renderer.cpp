@@ -559,19 +559,23 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
                 nvgStroke(vg);
             }
             nvgLineCap(vg, NVG_BUTT);
-            // Label at the arc's TOP end (highest on screen = smallest sin),
-            // floated just outside the track. Same font/outline as the date
-            // label; the value keeps its gauge colour so load still reads at a
-            // glance.
-            const float topAng = (std::sin(ga0) <= std::sin(ga1)) ? ga0 : ga1;
-            const float lr  = r + thick * 0.5f + lbl_sz * 0.85f;
-            const float lx  = cx + std::cos(topAng) * lr;
-            const float ly  = cy + std::sin(topAng) * lr;
-            nvg_set_font_ui(lbl_sz);
-            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvg_text_outline(vg, lx, ly, label, 1.4f);
+            // Label curves ALONG the arc, in-line with the gauge (same radius r),
+            // butted to the arc's TOP end and extending away from the bar body.
+            // Half the previous size; crisp outline like the minimap date label;
+            // value keeps its gauge colour so load still reads at a glance.
+            const float lsz = lbl_sz * 0.5f;
+            nvg_set_font_ui(lsz);
+            const float w     = arc_text_width(vg, label, r);
+            const float gap   = 3.f / r;
+            const bool  ga0Top = std::sin(ga0) <= std::sin(ga1);    // top end of the arc
+            const float start = ga0Top ? (ga0 - w - gap) : (ga1 + gap);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 210));                // 4-corner outline
+            nvg_text_arc(vg, cx - 1.f, cy - 1.f, r, start, label);
+            nvg_text_arc(vg, cx + 1.f, cy - 1.f, r, start, label);
+            nvg_text_arc(vg, cx - 1.f, cy + 1.f, r, start, label);
+            nvg_text_arc(vg, cx + 1.f, cy + 1.f, r, start, label);
             nvgFillColor(vg, known ? fill : nvgRGBA(160, 170, 180, 220));
-            nvgText(vg, lx, ly, label, nullptr);
+            nvg_text_arc(vg, cx, cy, r, start, label);
         };
 
         const float r1 = ringR + 56.f;            // inner bar (normal-mode battery)
@@ -612,12 +616,11 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
                 gauge(r_phn, a0 - 5.f * DEG, a1 - 5.f * DEG, ppc,
                       nvgRGBA(120, 190, 255, 235), ppb, true, 7.f);
             }
-            char cb[12]; snprintf(cb, sizeof(cb), "C%2.0f", cpu * 100.f);
-            char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
-            char rb[12]; snprintf(rb, sizeof(rb), "R%2.0f", ram * 100.f);
-            gauge(r_cpu, a0,             a1,             cpu, load_col(cpu), cb, true, thin);
-            gauge(r_gpu, a0 +  5.f * DEG, a1 +  5.f * DEG, gpu, load_col(gpu), gb, true, thin);
-            gauge(r_ram, a0 + 10.f * DEG, a1 + 10.f * DEG, ram, load_col(ram), rb, true, thin);
+            // Labels are the gauge NAMES (the arc fill already shows the value);
+            // phone keeps its P<percent> readout.
+            gauge(r_cpu, a0,              a1,              cpu, load_col(cpu), "CPU", true, thin);
+            gauge(r_gpu, a0 +  5.f * DEG, a1 +  5.f * DEG, gpu, load_col(gpu), "GPU", true, thin);
+            gauge(r_ram, a0 + 10.f * DEG, a1 + 10.f * DEG, ram, load_col(ram), "Ram", true, thin);
         } else {
             // Controller battery — always drawn (inner arc). If a phone
             // battery is known (KDE Connect bridge bound to a paired
@@ -725,14 +728,10 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         const float esz   = csz * 0.92f;
         const float dsz   = csz * 0.82f;
         const float DEGc  = static_cast<float>(M_PI) / 180.f;
-        // Clock/date arc curves along the disc edge facing the screen interior:
-        // above the disc when docked low, below when docked high; leaning toward
-        // the interior horizontally so it never clips at the screen edge, plus a
-        // ~10° nudge toward the right so it clears the corner cardinal.
-        const float clock_deg = dock_top ? (dock_left ?  60.f :  120.f)
-                                         : (dock_left ? -60.f : -120.f);
-        const float clock_nudge = (clock_deg < 0.f ? 10.f : -10.f);   // ~10° to the right
-        const float clock_angle = (clock_deg + clock_nudge) * DEGc;
+        // Clock/date arc sits straight up (12 o'clock) over the minimap. Screen
+        // angle −90° points up (y grows downward); the curved text is nearly
+        // horizontal there and reads upright.
+        const float clock_angle = -90.f * DEGc;
         const float rc    = ringR + (cfg.compass_ring ? 46.f : 16.f) + csz * 0.5f;
 
         // Crisp 4-corner black outline for arc text — a real outline, not a soft blur
