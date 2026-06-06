@@ -7464,14 +7464,10 @@ static std::vector<MenuItem> build_menu(
         }),
     };
 
-    std::vector<MenuItem> software_menu = {
-        leaf("Check for Updates", []{
-            system("git -C /home/user/ProtoHUD fetch origin main 2>&1 | logger -t protohud &");
-        }),
-        leaf("Pull && Rebuild", []{
-            system("cd /home/user/ProtoHUD && git pull origin main && ./scripts/build.sh 2>&1 | logger -t protohud &");
-        }),
-    };
+    // Software gets its contents (Updates, Demo Mode, Profiles & Backup) appended
+    // below once those menus are built; the old "Check for Updates" / "Pull &&
+    // Rebuild" shell shortcuts were removed in favour of the in-HUD Updater.
+    std::vector<MenuItem> software_menu;
 
     std::vector<MenuItem> fps_interval_menu = {
         leaf_sel("1 second",  [state_ptr]{ state_ptr->fps_avg_interval_s = 1;  }, [state_ptr]{ return state_ptr->fps_avg_interval_s == 1;  }),
@@ -9236,22 +9232,62 @@ static std::vector<MenuItem> build_menu(
     }
 
     // ── Power submenu (existing reboot/quit + new shutdown moved here) ──────
+    // Confirm wrapper: a destructive action becomes a submenu the user has to
+    // descend into and pick "Confirm …" before it fires — guards against an
+    // accidental select on Reboot Pi / Shutdown.
+    auto confirm_action = [&](const char* label, const char* warn,
+                              std::function<void()> act) -> MenuItem {
+        std::vector<MenuItem> kids;
+        kids.push_back(with_desc(leaf(std::string("Confirm: ") + label, std::move(act)), warn));
+        MenuItem m = submenu(label, std::move(kids));
+        m.description = warn;
+        return m;
+    };
+    // Relaunch ProtoHUD via scripts/restart.sh (resolved from /proc/self/exe),
+    // detached in its own session so it survives this process being killed.
+    auto restart_protohud = [] {
+        char exe[4096];
+        ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n <= 0) return;
+        exe[n] = '\0';
+        std::string p(exe);
+        auto s = p.find_last_of('/'); if (s != std::string::npos) p.resize(s);  // .../build
+        s = p.find_last_of('/');      if (s != std::string::npos) p.resize(s);  // project root
+        const std::string script = p + "/scripts/restart.sh";
+        std::system(("setsid \"" + script + "\" >/tmp/protohud.log 2>&1 </dev/null &").c_str());
+    };
     std::vector<MenuItem> power_menu = {
+        with_desc(leaf("Reboot ProtoHUD", restart_protohud),
+            "Relaunch ProtoHUD (stop + start via scripts/restart.sh). The display "
+            "blanks briefly while it comes back."),
+        with_desc(leaf("Reboot ProtoFace", [teensy]{ if (teensy) teensy->restart(); }),
+            "Restart the face backend (Protoface daemon / native renderer) without "
+            "touching the rest of the HUD."),
+        confirm_action("Reboot Pi",
+            "Reboots the whole Raspberry Pi after a short delay. Unsaved work is lost.",
+            [&state]{
+                state.quit = true;
+                std::thread([]{
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    std::system("sudo -n reboot 2>/dev/null || reboot 2>/dev/null &");
+                }).detach();
+            }),
+        confirm_action("Shutdown",
+            "Powers off the Raspberry Pi. You'll need to cycle power to start it again.",
+            [&state]{
+                state.quit = true;
+                std::thread([]{
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    std::system("sudo -n poweroff 2>/dev/null || poweroff 2>/dev/null &");
+                }).detach();
+            }),
+        with_desc(leaf("Close Program", [&state]{ state.quit = true; }),
+            "Exit ProtoHUD without rebooting the system."),
         with_desc(toggle("Skip Startup Screen",
             [&state]{ return state.skip_landing; },
             [&state](bool v){ state.skip_landing = v; }),
             "Bypass the profile/continue landing screen at boot and run the current "
             "config directly. Takes effect on the next launch."),
-        with_desc(leaf("Reboot System", [&state] {
-            state.quit = true;
-            std::thread([] {
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                std::system("reboot");
-            }).detach();
-        }), "Reboot the Pi after a short delay (so the HUD can wind down)."),
-        with_desc(leaf("Close Program",
-            [&state]{ state.quit = true; }),
-            "Exit ProtoHUD without rebooting the system."),
     };
 
     // ── Display & HUD submenu (cosmetic / per-window controls) ───────────────
@@ -9320,10 +9356,16 @@ static std::vector<MenuItem> build_menu(
                   "Averaging window for the FPS readout."),
         with_desc(submenu("Diagnostics",   std::move(diagnostics_menu)),
                   "Camera / network / Bluetooth / GPIO probes."),
-        std::move(gpio_viz_item),
-        std::move(gpio_buttons_item),
-        // Cooling fans (Pi-driven PWM). Hidden when no FanController is wired.
-        [&]() -> MenuItem {
+        with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
+                  "Poll the face controller for a fresh status frame."),
+    };
+    // Moved out of Diagnostics per the menu reorg: the GPIO visualizer + buttons
+    // and the cooling-fan controls live under Pi Settings (hardware); Demo Mode
+    // lives under Software (appended at the tail of this block).
+    pi_settings_items.push_back(std::move(gpio_viz_item));
+    pi_settings_items.push_back(std::move(gpio_buttons_item));
+    // Cooling fans (Pi-driven PWM). Hidden when no FanController is wired.
+    pi_settings_items.push_back([&]() -> MenuItem {
             if (!fans || fans->zone_count() == 0) {
                 MenuItem m = leaf("Cooling Fans", []{}); m.visible_fn = []{ return false; }; return m;
             }
@@ -9386,12 +9428,9 @@ static std::vector<MenuItem> build_menu(
                 "Pi-driven PWM cooling fans \xe2\x80\x94 up to 4 fans in 2 zones, each "
                 "with its own speed/mode. Pins in config[\"fans\"][\"zones\"]; use "
                 "GPIO clear of HUB75 (see carrier PINMAP).");
-        }(),
-        with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
-                  "Poll the face controller for a fresh status frame."),
-        with_desc(submenu("Demo Mode",  std::move(demo_menu)),
-                  "Cycle prefab scenes for screenshots / video."),
-    };
+        }());
+    software_menu.push_back(with_desc(submenu("Demo Mode", std::move(demo_menu)),
+        "Cycle prefab scenes for screenshots / video."));
 
     // ── Communications: LoRa + Phone (KDE Connect) + Notification Log ─────────
     MenuItem phone_item = [&]() -> MenuItem {
@@ -10323,20 +10362,15 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("Connectivity",     std::move(connectivity_menu)),
                   "SSH, Bluetooth and other network/peripheral toggles."),
         with_desc(submenu("Pi Settings",      std::move(pi_settings_items)),
-                  "Hostname, timezone, NTP, system updates, storage, shutdown."),
-        with_desc(submenu("Updates",          std::move(updates_menu)),
-                  "Check the repo for new commits, switch/update branches, and roll "
-                  "back \xe2\x80\x94 all user-initiated. ProtoHUD never auto-updates."),
+                  "Hostname, time, storage, GPIO visualizer/buttons and cooling fans."),
         with_desc(submenu("Headset & Tracking", std::move(headset_menu)),
                   "Glasses IMU, focus, recenter — everything specific to the XR display."),
         with_desc(submenu("Timers and Alarm",   std::move(timers_alarm_menu)),
                   "Stopwatches, countdowns and one-shot alarms."),
         with_desc(submenu("Diagnostics",        std::move(diagnostics_group_menu)),
-                  "Probes, overlays and the GPIO visualizer."),
-        with_desc(submenu("Software",           std::move(software_menu)),
-                  "Demo apps, on-board tools."),
+                  "Probes, overlays and per-tab tools."),
         with_desc(submenu("Power",              std::move(power_menu)),
-                  "Skip Startup, Reboot, Close Program."),
+                  "Restart ProtoHUD / ProtoFace, reboot or shut down the Pi."),
     };
 
     // ── Profiles ────────────────────────────────────────────────────────────────
@@ -10394,12 +10428,18 @@ static std::vector<MenuItem> build_menu(
     profiles_menu.push_back(with_desc(submenu("Delete Profile", std::move(profile_delete_menu)),
         "Remove a saved profile permanently."));
 
-    // Tuck Profiles & Backup inside the System root so the top-level tab list
-    // stays compact.
-    system_menu.push_back(with_desc(submenu("Profiles & Backup",
-                                             std::move(profiles_menu)),
-                                    "Save and load full-setup snapshots. "
-                                    "Loading a profile restarts ProtoHUD with that config."));
+    // Assemble Software last, now that profiles_menu exists: the in-HUD Updater
+    // first, then Demo Mode (appended earlier), then Profiles & Backup. Added to
+    // the System root as a single "Software" tab.
+    software_menu.insert(software_menu.begin(),
+        with_desc(submenu("Updates", std::move(updates_menu)),
+            "Check the repo for new commits, switch/update branches, and roll back "
+            "\xe2\x80\x94 all user-initiated. ProtoHUD never auto-updates."));
+    software_menu.push_back(with_desc(submenu("Profiles & Backup", std::move(profiles_menu)),
+        "Save and load full-setup snapshots. Loading a profile restarts ProtoHUD "
+        "with that config."));
+    system_menu.push_back(with_desc(submenu("Software", std::move(software_menu)),
+        "In-HUD updater, demo scenes, and full-setup profiles & backups."));
 
     // ── Quick (corner / radial) menu ─────────────────────────────────────────────
     // A short, curated set of mid-use actions — separate from the full settings tree
