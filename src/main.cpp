@@ -3175,27 +3175,11 @@ static std::vector<MenuItem> build_menu(
     std::string left_label  = cam_label(left_model,  "Left",  same_model ? "1" : nullptr);
     std::string right_label = cam_label(right_model, "Right", same_model ? "2" : nullptr);
 
-    // ── Multi-Cam quad layout ────────────────────────────────────────────────
-    // CSI left/right (rotated, per the Rotation submenu) fill the top half
-    // side-by-side; the two selected USB cameras fill the bottom half. The
-    // same composite is mirrored into both eyes. Build the "which two USB"
-    // pickers as 3-item radio lists; A and B may not be the same camera.
-    auto make_mc_usb_menu = [&](EyeSource* slot, EyeSource* other) -> std::vector<MenuItem> {
-        if (!slot) return {};
-        auto row = [&](const char* label, EyeSource v) {
-            return leaf_sel(label,
-                [slot, other, v]{
-                    *slot = v;
-                    if (other && *other == v) {   // keep the two slots distinct
-                        *other = (v == EyeSource::USB1) ? EyeSource::USB2 : EyeSource::USB1;
-                    }
-                },
-                [slot, v]{ return *slot == v; });
-        };
-        return { row("USB Cam 1", EyeSource::USB1),
-                 row("USB Cam 2", EyeSource::USB2),
-                 row("USB Cam 3", EyeSource::USB3) };
-    };
+    // ── Multi-Cam layout ─────────────────────────────────────────────────────
+    // Each eye shows a top + bottom image (full-width, stacked); the two eyes use
+    // independent sources, so side-by-side reads as four distinct feeds with no
+    // duplicates. All four slots (left/right eye × top/bottom) pick from both CSI
+    // cameras + the three USB cams via make_mc_src_menu below.
 
     // Quadrant source picker offering both CSI cameras + the three USB cams, so
     // any quadrant can show Left CSI, Right CSI or a USB feed.
@@ -3226,22 +3210,22 @@ static std::vector<MenuItem> build_menu(
                 "Which camera fills the top half of the RIGHT eye (default Right CSI)."));
         if (multicam_usb_a)
             multicam_menu.push_back(with_desc(
-                submenu("Bottom-Left Camera", make_mc_usb_menu(multicam_usb_a, multicam_usb_b)),
-                "Which USB camera fills the bottom-left quadrant."));
+                submenu("Left Eye Bottom Camera", make_mc_src_menu(multicam_usb_a)),
+                "Which camera fills the bottom half of the LEFT eye (default USB 1)."));
         if (multicam_usb_b)
             multicam_menu.push_back(with_desc(
-                submenu("Bottom-Right Camera", make_mc_usb_menu(multicam_usb_b, multicam_usb_a)),
-                "Which USB camera fills the bottom-right quadrant."));
+                submenu("Right Eye Bottom Camera", make_mc_src_menu(multicam_usb_b)),
+                "Which camera fills the bottom half of the RIGHT eye (default USB 2)."));
     }
 
     std::vector<MenuItem> main_cameras_menu = {
         submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
         submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
         with_desc(submenu("Multi-Cam Layout", std::move(multicam_menu)),
-            "Top half = one camera per eye (left-eye top + right-eye top, each "
-            "selectable), so side-by-side shows two distinct images on top instead "
-            "of a mirrored 2x2. Bottom half = two USB cameras side by side. Set "
-            "CSI rotation to 90\xc2\xb0 under Left/Right Camera > Rotation if needed."),
+            "Each eye stacks a top + bottom camera (full width); the two eyes use "
+            "independent sources, so side-by-side shows four distinct feeds with no "
+            "duplicates. Each of the four slots picks any CSI or USB camera. Set CSI "
+            "rotation to 90\xc2\xb0 under Left/Right Camera > Rotation if needed."),
         with_panel(
             with_desc(submenu("Raw View", std::move(raw_view_menu)),
                 "Pass the camera feed straight through. Toggle Enable to show it; "
@@ -15520,9 +15504,8 @@ int main(int argc, char* argv[]) {
         // two selected USB cams side by side. Sub-viewports inside the bound eye
         // FBO mean each feed's existing draw call fills only its region; the CSI
         // rotation from Cameras > Left/Right Camera > Rotation still applies.
-        auto draw_multicam_into_current_fbo = [&](int fw, int fh, EyeSource top_src) {
-            const int hw  = fw / 2;             // left half width
-            const int rw  = fw - hw;            // right half width (absorbs odd column)
+        auto draw_multicam_into_current_fbo = [&](int fw, int fh,
+                                                  EyeSource top_src, EyeSource bot_src) {
             const int hh  = fh / 2;             // top half height
             const int top = fh - hh;            // bottom half height; top starts at y=top
 
@@ -15538,9 +15521,8 @@ int main(int argc, char* argv[]) {
                 }
             };
 
-            glViewport(0, top, fw, hh);  draw_src(top_src);          // top: one per-eye image
-            glViewport(0, 0,   hw, top); draw_src(multicam_usb_a);   // bottom-left
-            glViewport(hw, 0,  rw, top); draw_src(multicam_usb_b);   // bottom-right
+            glViewport(0, top, fw, hh);  draw_src(top_src);   // top half (per eye)
+            glViewport(0, 0,   fw, top); draw_src(bot_src);   // bottom half (per eye)
 
             // Restore full viewport so any later passes (post-process /
             // HUD overlays into this FBO) see the whole eye region.
@@ -15556,7 +15538,8 @@ int main(int argc, char* argv[]) {
             if (multicam_layout) {
                 // Quad layout overrides the per-eye source pickers and
                 // theater mode — it owns the whole eye FBO.
-                draw_multicam_into_current_fbo(xr.eye_left().w, xr.eye_left().h, multicam_top_a);
+                draw_multicam_into_current_fbo(xr.eye_left().w, xr.eye_left().h,
+                                               multicam_top_a, multicam_usb_a);
             } else {
                 if (snap.theater_mode) {
                     auto vp = make_theater_vp(xr.eye_left().w, xr.eye_left().h, false);
@@ -15591,7 +15574,8 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT);
 
             if (multicam_layout) {
-                draw_multicam_into_current_fbo(xr.eye_right().w, xr.eye_right().h, multicam_top_b);
+                draw_multicam_into_current_fbo(xr.eye_right().w, xr.eye_right().h,
+                                               multicam_top_b, multicam_usb_b);
             } else {
                 if (snap.theater_mode) {
                     auto vp = make_theater_vp(xr.eye_right().w, xr.eye_right().h, true);
