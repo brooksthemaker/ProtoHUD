@@ -346,11 +346,12 @@ else()
                    "(set ENABLE_DOOM=ON and run: git submodule update --init)")
 endif()
 
-# ── Libretro game source ──────────────────────────────────────────────────────
-# Optional: a libretro frontend GameSource (dlopen a core .so + run a ROM) so
-# ProtoHUD can run emulators on the glasses + face. Only needs the libretro.h
-# header (vendored) and libdl; cores/ROMs are supplied at runtime via config.
-option(ENABLE_LIBRETRO "Build the libretro emulator game source" ON)
+# ── Libretro game source (optional emulator add-on) ───────────────────────────
+# OFF by default: the emulator is an opt-in add-on, not part of a stock build.
+# Enable it with `cmake -DENABLE_LIBRETRO=ON` or run scripts/install-emulator.sh.
+# Only needs the vendored libretro.h header + libdl + the GLES/EGL libs the app
+# already links; cores/ROMs are supplied at runtime via config.json.
+option(ENABLE_LIBRETRO "Build the libretro emulator game source (add-on)" OFF)
 
 set(LIBRETRO_HDR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libretro")
 if(ENABLE_LIBRETRO AND EXISTS "${LIBRETRO_HDR_DIR}/libretro.h")
@@ -358,9 +359,12 @@ if(ENABLE_LIBRETRO AND EXISTS "${LIBRETRO_HDR_DIR}/libretro.h")
     target_include_directories(protohud PRIVATE "${LIBRETRO_HDR_DIR}")
     target_link_libraries(protohud PRIVATE ${CMAKE_DL_LIBS})
     target_compile_definitions(protohud PRIVATE PROTOHUD_HAVE_LIBRETRO)
-    message(STATUS "Libretro game source: ENABLED")
+    message(STATUS "Libretro emulator add-on: ENABLED")
+elseif(ENABLE_LIBRETRO)
+    message(WARNING "ENABLE_LIBRETRO=ON but ${LIBRETRO_HDR_DIR}/libretro.h is missing")
 else()
-    message(STATUS "Libretro game source: disabled (set ENABLE_LIBRETRO=ON)")
+    message(STATUS "Libretro emulator add-on: disabled "
+                   "(opt in with -DENABLE_LIBRETRO=ON or scripts/install-emulator.sh)")
 endif()
 
 # ── Assets & Config ────────────────────────────────────────���──────────────────

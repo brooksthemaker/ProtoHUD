@@ -14,13 +14,13 @@ texture for the eyes, and mirrors it to the panels via
 `NativeFaceController::set_panel_override()`. A source never touches SDL or GL,
 so adding a new game is just implementing the interface.
 
-Three sources ship today:
+Sources:
 
-| Source | Notes |
-| ------ | ----- |
-| **Snake** | Built-in demo, no assets. Validates the whole pipeline. |
-| **Doom**  | [doomgeneric](https://github.com/ozkl/doomgeneric) submodule. Needs a WAD. |
-| **Emulator (libretro)** | dlopen a libretro core (`.so`) + run a ROM. Software cores only (for now). |
+| Source | Included? | Notes |
+| ------ | --------- | ----- |
+| **Snake** | built in | Demo, no assets. Validates the whole pipeline. |
+| **Doom**  | built (submodule) | [doomgeneric](https://github.com/ozkl/doomgeneric). Needs a WAD. |
+| **Emulator (libretro)** | **add-on (opt-in)** | dlopen a libretro core (`.so`) + run a ROM. Not in a stock build. |
 
 ## Turning it on
 
@@ -89,15 +89,29 @@ exists before ever handing control to Doom.
 - Doom renders at 640×400; it's scaled per output (fullscreen/windowed on the
   glasses, downscaled on the panels).
 
-## Emulator (libretro) setup
+## Emulator (libretro) — optional add-on
 
 The **Emulator** source is a minimal [libretro](https://docs.libretro.com/)
 frontend: it `dlopen()`s a core (the same `.so` files RetroArch uses) and runs a
 ROM, mapping the controller onto the standard RetroPad. No core or ROM ships
 with ProtoHUD — supply your own.
 
-Built when `ENABLE_LIBRETRO=ON` (the default; only needs the vendored
-`third_party/libretro/libretro.h` + `libdl`).
+It is an **opt-in add-on**, *not* part of a stock build (`ENABLE_LIBRETRO`
+defaults to **OFF**). When it isn't built, the **Emulator** entry simply doesn't
+appear in the Source picker. Install it with the helper script:
+
+```sh
+scripts/install-emulator.sh           # reconfigures with -DENABLE_LIBRETRO=ON + rebuilds
+```
+
+or by hand:
+
+```sh
+cmake -S . -B build -DENABLE_LIBRETRO=ON && cmake --build build
+```
+
+It only needs the vendored `third_party/libretro/libretro.h` plus `libdl` and
+the GLES/EGL libraries the app already links — no extra packages.
 
 Point ProtoHUD at a core + ROM in `config.json`:
 
@@ -117,21 +131,34 @@ directory (some cores need BIOS files or write SRAM there).
 Get cores from your distro (`sudo apt install libretro-*`), from RetroArch's
 online updater, or from <https://buildbot.libretro.com/>.
 
-### What works
+### Software-rendered cores
 
-- **Software-rendered cores**: NES (`fceumm`/`nestopia`), SNES (`snes9x`),
-  Genesis/MD (`genesis_plus_gx`), GB/GBC/GBA (`gambatte`/`mgba`), PC Engine,
-  arcade (`fbneo`), PS1 software (`pcsx_rearmed`, software renderer), …
-- Controls map label-to-label onto the RetroPad: d-pad, A/B/X/Y, L/R,
-  Start/Select. Reset performs a soft reset.
-- Audio is **not** wired yet (silent), same as Doom.
+NES (`fceumm`/`nestopia`), SNES (`snes9x`), Genesis/MD (`genesis_plus_gx`),
+GB/GBC/GBA (`gambatte`/`mgba`), PC Engine, arcade (`fbneo`), PS1 software
+(`pcsx_rearmed`, software renderer), … These hand back a pixel buffer (RGB565 /
+0RGB1555 / XRGB8888) which the frontend converts to RGBA. Rock-solid.
 
-### What doesn't work yet
+### Hardware-rendered cores (N64 / Dreamcast / PSP) — experimental
 
-- **Hardware-rendered cores** (N64 / Dreamcast / PSP, and PS1 with the hardware
-  renderer) ask for a GL render target via `SET_HW_RENDER`, which this frontend
-  currently refuses — so those cores won't start. Sharing ProtoHUD's GLES
-  context with a core is a planned follow-up; until then, use the **software**
-  variants where they exist (e.g. PCSX-ReARMed's software renderer for PS1).
-- Core options / per-game settings aren't exposed in the menu yet (cores run
-  with their defaults).
+These render through OpenGL rather than returning a bitmap. The frontend now
+implements the libretro **OpenGL ES** hardware-render path: it hands the core an
+FBO to draw into, shares ProtoHUD's GLES context (via `eglGetProcAddress`), and
+reads the result back each frame (the readback is needed anyway to mirror to the
+panels). So **N64** (`mupen64plus_next` / GLideN64), **Dreamcast** (`flycast`)
+and **PSP** (`ppsspp`) can run.
+
+Caveats — treat this as experimental:
+
+- Only **OpenGL ES** cores are accepted; desktop-GL / Vulkan cores are declined.
+- A core that needs **GLES 3.x** depends on ProtoHUD's actual EGL context
+  supporting it on your Pi/driver — GLideN64 in particular wants GLES 3.1+. If a
+  core needs more than the context provides it may fail to render; this is the
+  one thing that can't be guaranteed without trying it on your hardware.
+- The per-frame `glReadPixels` is a GPU→CPU stall; fine at these resolutions but
+  not free.
+
+### Not done yet
+
+- **Audio** is silent (no batch is routed to the audio engine), same as Doom.
+- **Core options / per-game settings** aren't exposed in the menu (cores run
+  with defaults).

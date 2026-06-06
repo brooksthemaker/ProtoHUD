@@ -6,11 +6,12 @@
 //   tick()   → pace + retro_run()      frame() → the converted RGBA framebuffer
 //   buttons  → retro_input_state       (held mask, sampled once per tick)
 //
-// SCOPE: software-rendered cores only (NES/SNES/Genesis/GB/GBA, PS1-software,
-// arcade, …). Hardware-rendered cores (N64/Dreamcast/PSP) ask for a GL render
-// target via RETRO_ENVIRONMENT_SET_HW_RENDER, which we currently refuse — that
-// path (sharing ProtoHUD's GLES context) is a planned follow-up. Audio is
-// dropped for now (a silent no-op batch sink), like the Doom source.
+// SCOPE: software-rendered cores (NES/SNES/Genesis/GB/GBA, PS1-software, arcade)
+// AND hardware-rendered OpenGL ES cores (N64/Dreamcast/PSP) via the libretro HW
+// render interface: the core renders into a frontend-provided FBO, and we read
+// it back into the RGBA frame each tick (a readback we need anyway to mirror to
+// the HUB75 panels). Desktop-GL / Vulkan cores are declined. Audio is dropped
+// for now (a silent no-op batch sink), like the Doom source.
 //
 // Built only when PROTOHUD_HAVE_LIBRETRO is defined (see CMakeLists). No core or
 // ROM ships with ProtoHUD; point game.libretro_core / game.libretro_rom at your
@@ -19,6 +20,8 @@
 #include "game_source.h"
 
 #include <dlfcn.h>
+#include <GLES2/gl2.h>
+#include <EGL/egl.h>
 
 #include <chrono>
 #include <cstdint>
@@ -32,6 +35,15 @@
 extern "C" {
 #include "libretro.h"
 }
+
+// Packed depth/stencil renderbuffer (OES ext) — declare the enums so we can try
+// it for HW cores that need depth+stencil without pulling in gl2ext.h.
+#ifndef GL_DEPTH24_STENCIL8_OES
+#define GL_DEPTH24_STENCIL8_OES 0x88F0
+#endif
+#ifndef GL_DEPTH_STENCIL_OES
+#define GL_DEPTH_STENCIL_OES 0x84F9
+#endif
 
 namespace game {
 namespace {
@@ -50,8 +62,12 @@ public:
         frame_.setTo(cv::Scalar(0, 0, 0, 255));
     }
     ~LibretroGame() override {
+        if (hw_ && hw_cb_.context_destroy) hw_cb_.context_destroy();
         if (loaded_) { sym_.retro_unload_game(); sym_.retro_deinit(); }
-        if (handle_)  dlclose(handle_);
+        if (hw_fbo_) glDeleteFramebuffers(1, &hw_fbo_);
+        if (hw_tex_) glDeleteTextures(1, &hw_tex_);
+        if (hw_ds_)  glDeleteRenderbuffers(1, &hw_ds_);
+        if (handle_) dlclose(handle_);
         if (g_lr == this) g_lr = nullptr;
     }
 
@@ -74,6 +90,10 @@ public:
         int ran = 0;
         while (acc_ >= step && ran < 4) { sym_.retro_run(); acc_ -= step; ++ran; }
         if (ran == 0 && !ran_once_) { sym_.retro_run(); ran_once_ = true; }  // first frame
+
+        // A HW core renders through its own GL programs/buffers/state; reset to a
+        // neutral state so ProtoHUD's subsequent eye/HUD passes aren't corrupted.
+        if (hw_ && ran > 0) restore_gl_state();
     }
 
     const cv::Mat& frame() const override { return frame_; }
@@ -107,8 +127,21 @@ public:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
             return true;                            // accepted, ignored
-        case RETRO_ENVIRONMENT_SET_HW_RENDER:
-            return false;                           // software only (for now)
+        case RETRO_ENVIRONMENT_SET_HW_RENDER: {
+            auto* cb = static_cast<struct retro_hw_render_callback*>(data);
+            // We provide an OpenGL ES context; accept GLES requests, decline
+            // desktop GL / Vulkan (the core would fail against our GLES context).
+            if (cb->context_type != RETRO_HW_CONTEXT_OPENGLES2 &&
+                cb->context_type != RETRO_HW_CONTEXT_OPENGLES3 &&
+                cb->context_type != RETRO_HW_CONTEXT_OPENGLES_VERSION)
+                return false;
+            hw_cb_ = *cb;
+            hw_cb_.get_current_framebuffer = &LibretroGame::get_fbo_trampoline;
+            hw_cb_.get_proc_address        = &LibretroGame::get_proc_trampoline;
+            *cb = hw_cb_;                            // hand our pointers back to the core
+            hw_ = true;
+            return true;
+        }
         default:
             return false;
         }
@@ -118,6 +151,24 @@ public:
         if (!data || w == 0 || h == 0) return;       // dupe: keep previous frame
         if (frame_.cols != (int)w || frame_.rows != (int)h)
             frame_.create((int)h, (int)w, CV_8UC4);
+        // Hardware frame: the core rendered into hw_fbo_. Read it back (bottom-up)
+        // and flip to top-down so it matches the software path's orientation.
+        if (data == RETRO_HW_FRAME_BUFFER_VALID) {
+            if (!hw_fbo_) return;
+            GLint prev = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
+            glBindFramebuffer(GL_FRAMEBUFFER, hw_fbo_);
+            readback_.create((int)h, (int)w, CV_8UC4);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, (GLsizei)w, (GLsizei)h, GL_RGBA, GL_UNSIGNED_BYTE,
+                         readback_.data);
+            glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev);
+            cv::flip(readback_, frame_, 0);          // GL bottom-left → image top-left
+            // Force opaque — some cores leave alpha at 0, which the eye blit reads.
+            const int n = frame_.rows * frame_.cols;
+            uint8_t* p = frame_.data;
+            for (int i = 0; i < n; ++i) p[i * 4 + 3] = 0xFF;
+            return;
+        }
         switch (pixfmt_) {
             case RETRO_PIXEL_FORMAT_XRGB8888: conv_xrgb8888(data, w, h, pitch); break;
             case RETRO_PIXEL_FORMAT_RGB565:   conv_rgb565  (data, w, h, pitch); break;
@@ -230,8 +281,79 @@ private:
         fps_ = av.timing.fps > 1.0 ? av.timing.fps : 60.0;
         if (av.geometry.base_width && av.geometry.base_height)
             frame_.create((int)av.geometry.base_height, (int)av.geometry.base_width, CV_8UC4);
+
+        // For a HW core, build the render-target FBO (sized to the core's max
+        // geometry) and signal the core that its GL context is ready.
+        if (hw_) {
+            int mw = (int)av.geometry.max_width, mh = (int)av.geometry.max_height;
+            if (mw <= 0) mw = frame_.cols; if (mh <= 0) mh = frame_.rows;
+            if (!build_hw_fbo(mw, mh)) { msg("HW render setup failed", core_path_); return false; }
+            if (hw_cb_.context_reset) hw_cb_.context_reset();
+            restore_gl_state();
+        }
         loaded_ = true;
         return true;
+    }
+
+    // Build the color FBO the HW core renders into. Tries a packed depth/stencil
+    // renderbuffer (for cores that need both), falling back to plain depth16.
+    bool build_hw_fbo(int w, int h) {
+        GLint prev_fbo = 0, prev_rb = 0, prev_tex = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+        glGetIntegerv(GL_RENDERBUFFER_BINDING, &prev_rb);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
+
+        glGenTextures(1, &hw_tex_);
+        glBindTexture(GL_TEXTURE_2D, hw_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glGenFramebuffers(1, &hw_fbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, hw_fbo_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, hw_tex_, 0);
+
+        glGenRenderbuffers(1, &hw_ds_);
+        glBindRenderbuffer(GL_RENDERBUFFER, hw_ds_);
+        bool packed = false;
+        if (hw_cb_.depth) {
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8_OES, w, h);
+            if (glGetError() == GL_NO_ERROR) {
+                glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                          GL_RENDERBUFFER, hw_ds_);
+                glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+                                          GL_RENDERBUFFER, hw_ds_);
+                packed = true;
+            }
+            if (!packed) {
+                glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, w, h);
+                glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                          GL_RENDERBUFFER, hw_ds_);
+            }
+        }
+
+        GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+        glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)prev_rb);
+        glBindTexture(GL_TEXTURE_2D, (GLuint)prev_tex);
+        return st == GL_FRAMEBUFFER_COMPLETE;
+    }
+
+    // Return ProtoHUD's GL to a neutral state after a HW core has rendered.
+    void restore_gl_state() {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glUseProgram(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
     }
 
     // ── pixel conversion → opaque RGBA ────────────────────────────────────────
@@ -305,6 +427,10 @@ private:
     static void audio_sample_trampoline(int16_t, int16_t) {}
     static size_t audio_batch_trampoline(const int16_t*, size_t frames) { return frames; }
     static void log_trampoline(enum retro_log_level, const char*, ...) {}
+    static uintptr_t get_fbo_trampoline() { return g_lr ? (uintptr_t)g_lr->hw_fbo_ : 0; }
+    static retro_proc_address_t get_proc_trampoline(const char* sym) {
+        return reinterpret_cast<retro_proc_address_t>(eglGetProcAddress(sym));
+    }
 
     std::string core_path_, rom_path_, sys_dir_;
     void*       handle_  = nullptr;
@@ -314,9 +440,18 @@ private:
     bool        ran_once_ = false;
     enum retro_pixel_format pixfmt_ = RETRO_PIXEL_FORMAT_0RGB1555;
     cv::Mat     frame_;
+    cv::Mat     readback_;            // scratch for HW glReadPixels (bottom-up)
     double      fps_ = 60.0;
     double      acc_ = 0.0;
     uint32_t    buttons_ = 0;
+
+    // Hardware-render (OpenGL ES) state. hw_ is set when a core requests an FBO
+    // render target via SET_HW_RENDER; we render it into hw_fbo_ and read it back.
+    bool        hw_     = false;
+    GLuint      hw_fbo_ = 0;
+    GLuint      hw_tex_ = 0;
+    GLuint      hw_ds_  = 0;          // depth (or packed depth/stencil) renderbuffer
+    struct retro_hw_render_callback hw_cb_{};
 };
 
 }  // namespace
