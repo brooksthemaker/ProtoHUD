@@ -1385,6 +1385,8 @@ static std::vector<MenuItem> build_menu(
         bool*      multicam_layout = nullptr,
         EyeSource* multicam_usb_a  = nullptr,
         EyeSource* multicam_usb_b  = nullptr,
+        EyeSource* multicam_top_a  = nullptr,
+        EyeSource* multicam_top_b  = nullptr,
         // Profile management (Profiles tab: save current / load by restart / delete)
         ProfileManager* profiles = nullptr,
         // HUD/menu visual presets (System tab: built-in themes + save/load/delete)
@@ -3195,11 +3197,33 @@ static std::vector<MenuItem> build_menu(
                  row("USB Cam 3", EyeSource::USB3) };
     };
 
+    // Quadrant source picker offering both CSI cameras + the three USB cams, so
+    // any quadrant can show Left CSI, Right CSI or a USB feed.
+    auto make_mc_src_menu = [&](EyeSource* slot) -> std::vector<MenuItem> {
+        if (!slot) return {};
+        auto row = [&](const char* label, EyeSource v) {
+            return leaf_sel(label, [slot, v]{ *slot = v; }, [slot, v]{ return *slot == v; });
+        };
+        return { row("Left CSI",  EyeSource::CSI_LEFT),
+                 row("Right CSI", EyeSource::CSI_RIGHT),
+                 row("USB Cam 1", EyeSource::USB1),
+                 row("USB Cam 2", EyeSource::USB2),
+                 row("USB Cam 3", EyeSource::USB3) };
+    };
+
     std::vector<MenuItem> multicam_menu;
     if (multicam_layout) {
         multicam_menu.push_back(toggle("Enable Multi-Cam Layout",
             [multicam_layout]{ return *multicam_layout; },
             [multicam_layout](bool v){ *multicam_layout = v; }));
+        if (multicam_top_a)
+            multicam_menu.push_back(with_desc(
+                submenu("Top-Left Camera", make_mc_src_menu(multicam_top_a)),
+                "Which camera fills the top-left quadrant (default Left CSI)."));
+        if (multicam_top_b)
+            multicam_menu.push_back(with_desc(
+                submenu("Top-Right Camera", make_mc_src_menu(multicam_top_b)),
+                "Which camera fills the top-right quadrant (default Right CSI)."));
         if (multicam_usb_a)
             multicam_menu.push_back(with_desc(
                 submenu("Bottom-Left Camera", make_mc_usb_menu(multicam_usb_a, multicam_usb_b)),
@@ -11223,6 +11247,8 @@ int main(int argc, char* argv[]) {
         if (s == "usb1") return EyeSource::USB1;
         if (s == "usb2") return EyeSource::USB2;
         if (s == "usb3") return EyeSource::USB3;
+        if (s == "csi_left")  return EyeSource::CSI_LEFT;
+        if (s == "csi_right") return EyeSource::CSI_RIGHT;
         return EyeSource::CSI;
     };
     EyeSource left_eye_src  = parse_eye_src(jcam.value("left_eye_source",  std::string("csi")));
@@ -11234,6 +11260,10 @@ int main(int argc, char* argv[]) {
     bool      multicam_layout = jcam.value("multicam_layout", false);
     EyeSource multicam_usb_a  = parse_eye_src(jcam.value("multicam_usb_a", std::string("usb1")));
     EyeSource multicam_usb_b  = parse_eye_src(jcam.value("multicam_usb_b", std::string("usb2")));
+    // Top-left / top-right quadrant sources — now selectable (default the two CSI
+    // cameras, one on each side); may also be set to a USB cam.
+    EyeSource multicam_top_a  = parse_eye_src(jcam.value("multicam_top_a", std::string("csi_left")));
+    EyeSource multicam_top_b  = parse_eye_src(jcam.value("multicam_top_b", std::string("csi_right")));
 
     HudConfig hud_cfg;
     hud_cfg.compass_height        = jval(jhud, "compass_height_px",        60);
@@ -13334,6 +13364,7 @@ int main(int argc, char* argv[]) {
                                cfg_map_dir,
                                &left_eye_src, &right_eye_src,
                                &multicam_layout, &multicam_usb_a, &multicam_usb_b,
+                               &multicam_top_a, &multicam_top_b,
                                &profiles, &hud_presets, &quick_items,
                                cfg_gifs_dir,
                                &bg_lib_ptr, cfg_bg_user_dir,
@@ -14364,10 +14395,12 @@ int main(int argc, char* argv[]) {
 
         auto eye_src_str = [](EyeSource s) -> const char* {
             switch (s) {
-                case EyeSource::USB1: return "usb1";
-                case EyeSource::USB2: return "usb2";
-                case EyeSource::USB3: return "usb3";
-                default:              return "csi";
+                case EyeSource::USB1:      return "usb1";
+                case EyeSource::USB2:      return "usb2";
+                case EyeSource::USB3:      return "usb3";
+                case EyeSource::CSI_LEFT:  return "csi_left";
+                case EyeSource::CSI_RIGHT: return "csi_right";
+                default:                   return "csi";
             }
         };
         cfg["cameras"]["left_eye_source"]  = eye_src_str(left_eye_src);
@@ -14375,6 +14408,8 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["multicam_layout"]  = multicam_layout;
         cfg["cameras"]["multicam_usb_a"]   = eye_src_str(multicam_usb_a);
         cfg["cameras"]["multicam_usb_b"]   = eye_src_str(multicam_usb_b);
+        cfg["cameras"]["multicam_top_a"]   = eye_src_str(multicam_top_a);
+        cfg["cameras"]["multicam_top_b"]   = eye_src_str(multicam_top_b);
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"]     = color_to_json(menu.accent_color());
@@ -14922,7 +14957,8 @@ int main(int argc, char* argv[]) {
         // even when no PiP is showing them. Fold that into the want flags so
         // the stream-lifecycle edge logic opens/closes them automatically.
         auto mc_needs = [&](EyeSource s){
-            return multicam_layout && (multicam_usb_a == s || multicam_usb_b == s);
+            return multicam_layout && (multicam_usb_a == s || multicam_usb_b == s ||
+                                       multicam_top_a == s || multicam_top_b == s);
         };
         bool want1 = (p1 || preview == 1 || mc_needs(EyeSource::USB1)) && !editor_open;
         bool want2 = (p2 || preview == 2 || mc_needs(EyeSource::USB2)) && !editor_open;
@@ -15492,21 +15528,22 @@ int main(int argc, char* argv[]) {
             // Bottom halves use height `top` and right halves width `rw` so an
             // odd fw/fh leaves no 1px seam between the quadrants.
 
-            // Top-left: CSI left (or right if swapped).
-            glViewport(0, top, hw, hh);
-            if (snap.cameras_swapped) cameras.draw_owl_right();
-            else                      cameras.draw_owl_left();
+            // Draw the chosen source into the current sub-viewport. Left/Right
+            // CSI are explicit (no global swap applied — the picker is explicit);
+            // USB sources blit their texture.
+            auto draw_src = [&](EyeSource s){
+                switch (s) {
+                    case EyeSource::CSI_LEFT:  cameras.draw_owl_left();  break;
+                    case EyeSource::CSI_RIGHT: cameras.draw_owl_right(); break;
+                    case EyeSource::CSI:       cameras.draw_owl_left();  break;
+                    default: cameras.draw_tex_fullscreen(usb_tex_for(s)); break;
+                }
+            };
 
-            // Top-right: CSI right (or left if swapped).
-            glViewport(hw, top, rw, hh);
-            if (snap.cameras_swapped) cameras.draw_owl_left();
-            else                      cameras.draw_owl_right();
-
-            // Bottom-left / bottom-right: selected USB cameras.
-            glViewport(0, 0, hw, top);
-            cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_a));
-            glViewport(hw, 0, rw, top);
-            cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_b));
+            glViewport(0,  top, hw, hh); draw_src(multicam_top_a);   // top-left
+            glViewport(hw, top, rw, hh); draw_src(multicam_top_b);   // top-right
+            glViewport(0,  0,   hw, top); draw_src(multicam_usb_a);  // bottom-left
+            glViewport(hw, 0,   rw, top); draw_src(multicam_usb_b);  // bottom-right
 
             // Restore full viewport so any later passes (post-process /
             // HUD overlays into this FBO) see the whole eye region.
