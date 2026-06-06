@@ -193,6 +193,7 @@ set(SOURCES
     src/input/coproc_inputs.cpp
     src/input/gamepad_input.cpp
     src/input/wireless_controller.cpp
+    src/game/snake_game.cpp
     src/serial/serial_port.cpp
     src/serial/teensy_controller.cpp
     src/serial/protoface_controller.cpp

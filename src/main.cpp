@@ -32,6 +32,7 @@
 #include "input/gpio_function.h"
 #include "input/gamepad_input.h"
 #include "input/wireless_controller.h"
+#include "game/game_source.h"
 #include "serial/face_controller.h"
 #include "serial/protoface_controller.h"
 #include "serial/teensy_controller.h"
@@ -10924,6 +10925,25 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("Communications", std::move(communications_menu)),
                   "Radio + phone: LoRa team mesh, KDE Connect phone, and the "
                   "notification log."),
+        with_desc(submenu("Games",        std::vector<MenuItem>{
+                      with_desc(toggle("Play (Snake)",
+                          [&state]{ return state.game_active.load(); },
+                          [&state, menu_sys_pp](bool v){
+                              state.game_active.store(v);
+                              if (v && menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->close();
+                          }),
+                          "Start the built-in Snake demo. It plays on the glasses "
+                          "and mirrors to the LED face. Controls: D-pad / arrows to "
+                          "steer, A / Z or Start / Enter to restart after a crash. "
+                          "Re-open the menu (or a GPIO Game-Toggle button) to stop."),
+                      with_desc(toggle("Windowed",
+                          [&state]{ return state.game_windowed.load(); },
+                          [&state](bool v){ state.game_windowed.store(v); }),
+                          "ON: show the game in a centred window so the HUD stays "
+                          "visible around it. OFF: fullscreen (HUD hidden)."),
+                  }),
+                  "Play games with controller input on the glasses + LED face. "
+                  "Ships with a Snake demo; more sources (e.g. Doom) drop in later."),
         with_desc(submenu("System",       std::move(system_menu)),
                   "Display, audio, connectivity, Pi settings, timers, "
                   "diagnostics, profiles & power."),
@@ -13705,6 +13725,11 @@ int main(int argc, char* argv[]) {
         case F::CamSwap:
             { std::lock_guard<std::mutex> lk(state.mtx); state.cameras_swapped = !state.cameras_swapped; } break;
         case F::PhoneRing: if (kdc_menu_ptr) kdc_menu_ptr->ring_phone(); break;
+        case F::GameToggle: {
+            bool on = !state.game_active.load();
+            state.game_active.store(on);
+            if (on && menu.is_open()) menu.close();   // hand the controller to the game
+        } break;
         case F::None: default: break;
         }
     };
@@ -14570,6 +14595,14 @@ int main(int argc, char* argv[]) {
         boot_af_pending = true;
         boot_af_t0      = glfwGetTime();
     }
+
+    // ── Game mode (Snake reference source) ────────────────────────────────────
+    // The active GameSource renders an RGBA framebuffer; in the render loop we
+    // tick it from the controller/keyboard, blit it to both eyes (fullscreen or
+    // windowed) and mirror it onto the HUB75 panels via the panel override.
+    std::unique_ptr<game::GameSource> game_src = game::make_snake();
+    GLuint game_tex = 0;                 // lazily created on first frame upload
+    bool   game_was_active = false;      // edge-detect to (re)start / clear override
 
     double prev_time = glfwGetTime();
     uint32_t notif_last_saved = state.notifs.next_id;   // debounced log persistence
@@ -15550,13 +15583,90 @@ int main(int argc, char* argv[]) {
             glViewport(0, 0, fw, fh);
         };
 
+        // ── Game mode: tick + upload frame ────────────────────────────────────
+        // When active, build the held-button mask from the gamepad and keyboard,
+        // advance the GameSource, upload its RGBA frame to game_tex, and mirror
+        // it onto the HUB75 panels. The per-eye blocks below blit game_tex
+        // (fullscreen or windowed) instead of the cameras.
+        const bool game_active = state.game_active.load();
+        if (game_active) {
+            uint32_t gb = 0;
+            auto gpb = gamepad.buttons();
+            if (gpb.dup)    gb |= game::BtnUp;
+            if (gpb.ddown)  gb |= game::BtnDown;
+            if (gpb.dleft)  gb |= game::BtnLeft;
+            if (gpb.dright) gb |= game::BtnRight;
+            if (gpb.a)      gb |= game::BtnA;
+            if (gpb.b)      gb |= game::BtnB;
+            if (gpb.x)      gb |= game::BtnX;
+            if (gpb.y)      gb |= game::BtnY;
+            if (gpb.lb)     gb |= game::BtnL;
+            if (gpb.rb)     gb |= game::BtnR;
+            if (gpb.start)  gb |= game::BtnStart;
+            // Keyboard fallback (arrows + Z/X/Enter), so the demo is playable
+            // without a controller on the desktop build.
+            if (GLFWwindow* w = static_cast<GLFWwindow*>(xr.glfw_window())) {
+                if (glfwGetKey(w, GLFW_KEY_UP)    == GLFW_PRESS) gb |= game::BtnUp;
+                if (glfwGetKey(w, GLFW_KEY_DOWN)  == GLFW_PRESS) gb |= game::BtnDown;
+                if (glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS) gb |= game::BtnLeft;
+                if (glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) gb |= game::BtnRight;
+                if (glfwGetKey(w, GLFW_KEY_Z)     == GLFW_PRESS) gb |= game::BtnA;
+                if (glfwGetKey(w, GLFW_KEY_X)     == GLFW_PRESS) gb |= game::BtnB;
+                if (glfwGetKey(w, GLFW_KEY_ENTER) == GLFW_PRESS) gb |= game::BtnStart;
+            }
+
+            if (!game_was_active) game_src->reset();
+            game_src->tick(dt, gb);
+
+            const cv::Mat& gf = game_src->frame();
+            if (!gf.empty() && gf.isContinuous() && gf.type() == CV_8UC4) {
+                if (game_tex == 0) {
+                    glGenTextures(1, &game_tex);
+                    glBindTexture(GL_TEXTURE_2D, game_tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                glBindTexture(GL_TEXTURE_2D, game_tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gf.cols, gf.rows, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, gf.data);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            if (native_ctrl) native_ctrl->set_panel_override(gf);   // mirror to HUB75
+        } else if (game_was_active) {
+            if (native_ctrl) native_ctrl->clear_panel_override();   // hand panels back to the face
+        }
+        game_was_active = game_active;
+
+        // Blit game_tex into the current eye FBO: fullscreen, or centred at a
+        // 1:1-ish "window" rect when game_windowed. Returns true so the eye
+        // blocks below can skip the camera path.
+        auto draw_game_into_current_fbo = [&](int fw, int fh) {
+            if (state.game_windowed.load()) {
+                const cv::Mat& gf = game_src->frame();
+                const float ar = (gf.cols > 0 && gf.rows > 0)
+                               ? float(gf.cols) / float(gf.rows) : 16.f / 9.f;
+                int vw = fw / 2, vh = static_cast<int>(vw / ar);
+                if (vh > fh) { vh = fh / 2; vw = static_cast<int>(vh * ar); }
+                glViewport((fw - vw) / 2, (fh - vh) / 2, vw, vh);
+                cameras.draw_tex_fullscreen(game_tex);
+                glViewport(0, 0, fw, fh);
+            } else {
+                cameras.draw_tex_fullscreen(game_tex);
+            }
+        };
+
         // Left eye
         {
             xr.eye_left().bind();
             glClearColor(0.f, 0.f, 0.f, 1.f);
             glClear(GL_COLOR_BUFFER_BIT);
 
-            if (multicam_layout) {
+            if (game_active && game_tex != 0) {
+                // Game mode owns the whole eye FBO (over cameras / multicam).
+                draw_game_into_current_fbo(xr.eye_left().w, xr.eye_left().h);
+            } else if (multicam_layout) {
                 // Quad layout overrides the per-eye source pickers and
                 // theater mode — it owns the whole eye FBO.
                 draw_multicam_into_current_fbo(xr.eye_left().w, xr.eye_left().h);
@@ -15593,7 +15703,9 @@ int main(int argc, char* argv[]) {
             glClearColor(0.f, 0.f, 0.f, 1.f);
             glClear(GL_COLOR_BUFFER_BIT);
 
-            if (multicam_layout) {
+            if (game_active && game_tex != 0) {
+                draw_game_into_current_fbo(xr.eye_right().w, xr.eye_right().h);
+            } else if (multicam_layout) {
                 draw_multicam_into_current_fbo(xr.eye_right().w, xr.eye_right().h);
             } else {
                 if (snap.theater_mode) {
@@ -15716,7 +15828,10 @@ int main(int argc, char* argv[]) {
         // the editor sits cleanly on top of the eye texture with no UI
         // clutter. Toasts re-appear on close because they're a queue, not a
         // timed overlay.
-        if (!editor_open) {
+        // Fullscreen game mode also hides the HUD chrome (the game owns the
+        // view); windowed game mode keeps it so the player still sees the HUD.
+        const bool game_fullscreen = game_active && !state.game_windowed.load();
+        if (!editor_open && !game_fullscreen) {
             // Hide the on-screen PiP for a slot whose live-preview panel is up — its
             // feed is shown in the context pane instead (preview set above this frame).
             hud.draw_pip_underlays(tex_usb1, p1 && preview != 1, pip_overlay_cfg1,

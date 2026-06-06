@@ -38,6 +38,18 @@ public:
     // Coarse battery level (0–100), or -1 if unknown / wired / disconnected.
     int         battery_pct()     const { return battery_pct_.load(); }
 
+    // Held (level) button state, refreshed each poll(). Edge callbacks above are
+    // for menu nav; a game wants the held state (e.g. hold d-pad to keep moving).
+    struct Buttons {
+        bool a=0,b=0,x=0,y=0;
+        bool lb=0,rb=0,start=0;
+        bool dup=0,ddown=0,dleft=0,dright=0;
+    };
+    Buttons buttons() const {
+        return { prev_.a, prev_.b, prev_.x, prev_.y, prev_.lb, prev_.rb, prev_.start,
+                 prev_.dup, prev_.ddown, prev_.dleft, prev_.dright };
+    }
+
     void on_select    (Cb cb) { select_cb_    = std::move(cb); }
     void on_back      (Cb cb) { back_cb_      = std::move(cb); }
     void on_menu      (Cb cb) { menu_cb_      = std::move(cb); }
@@ -82,6 +94,11 @@ public:
     bool        connected() const { return false; }
     std::string controller_name() const { return {}; }
     int         battery_pct() const { return -1; }
+    struct Buttons {
+        bool a=0,b=0,x=0,y=0; bool lb=0,rb=0,start=0;
+        bool dup=0,ddown=0,dleft=0,dright=0;
+    };
+    Buttons buttons() const { return {}; }
     void on_select    (Cb) {} void on_back      (Cb) {}
     void on_menu      (Cb) {} void on_pip_left  (Cb) {}
     void on_pip_right (Cb) {} void on_af        (Cb) {}

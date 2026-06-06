@@ -184,7 +184,19 @@ void NativeFaceController::render_thread() {
         cv::Mat canvas(cfg_.canvas_h, cfg_.canvas_w, CV_8UC3,
                        cv::Scalar(cfg_.background[0], cfg_.background[1],
                                   cfg_.background[2]));
-        {
+
+        // External panel override (e.g. game mode) — when set, the override frame
+        // fills the whole canvas and the normal face composite is skipped.
+        cv::Mat ov; { std::lock_guard<std::mutex> lk(override_mtx_); ov = panel_override_; }
+        const bool overridden = !ov.empty();
+        if (overridden) {
+            cv::Mat rgb;
+            if (ov.channels() == 4) cv::cvtColor(ov, rgb, cv::COLOR_RGBA2RGB);
+            else                    rgb = ov;
+            cv::resize(rgb, canvas, cv::Size(cfg_.canvas_w, cfg_.canvas_h),
+                       0, 0, cv::INTER_NEAREST);
+        }
+        if (!overridden) {
             std::lock_guard<std::mutex> lk(state_mtx_);
 
             // Advance the procedural eye animation (if one is playing). When the
@@ -750,6 +762,16 @@ void NativeFaceController::set_face_by_name(const std::string& expression) {
     current_expression_ = expression;
     apply_expression_effect_locked(expression);
     save_state_locked();
+}
+
+void NativeFaceController::set_panel_override(const cv::Mat& rgba) {
+    std::lock_guard<std::mutex> lk(override_mtx_);
+    panel_override_ = rgba.empty() ? cv::Mat() : rgba.clone();
+}
+
+void NativeFaceController::clear_panel_override() {
+    std::lock_guard<std::mutex> lk(override_mtx_);
+    panel_override_.release();
 }
 
 void NativeFaceController::set_expression_effects(bool enabled) {
