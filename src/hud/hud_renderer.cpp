@@ -240,6 +240,22 @@ void HudRenderer::load(void* glfw_window) {
     // Load a small UI font; fall back to default if not found
     ImFontConfig fc;
     fc.OversampleH = 2; fc.OversampleV = 2;
+    // Without an explicit glyph range ImGui only rasterizes Basic Latin +
+    // Latin-1, so the typographic punctuation/symbols used throughout the menu
+    // copy (… — · • ✕ ✉ → ▶ ▰ ▱ …) fall back to the missing-glyph box / "?".
+    // DejaVuSans has them all — pull in the extra Unicode blocks we actually use.
+    static const ImWchar kMenuRanges[] = {
+        0x0020, 0x00FF,   // Basic Latin + Latin-1 Supplement
+        0x2000, 0x206F,   // General Punctuation (… — ‘ ’ “ ” • ·)
+        0x2190, 0x21FF,   // Arrows (← ↑ → ↓)
+        0x2200, 0x22FF,   // Mathematical Operators (× ÷ ≈)
+        0x2300, 0x23FF,   // Misc Technical (⌚ ⏱)
+        0x25A0, 0x25FF,   // Geometric Shapes (▶ ◀ ■ ▰ ▱ ●)
+        0x2600, 0x26FF,   // Misc Symbols
+        0x2700, 0x27BF,   // Dingbats (✕ ✉ ✓ ✦)
+        0,
+    };
+    fc.GlyphRanges = kMenuRanges;
     font_ui_ = io.Fonts->AddFontFromFileTTF(
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         16.f * cfg_.scale, &fc);
