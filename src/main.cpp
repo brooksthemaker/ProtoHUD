@@ -9722,10 +9722,64 @@ static std::vector<MenuItem> build_menu(
                 pair_menu.push_back(std::move(d));
             }
 
+            // ── Export to Phone ─────────────────────────────────────────────────
+            // Bundle a whole category (faces / gifs / qr codes) into one .tar.gz
+            // and share it to the phone via KDE Connect. Source dirs are derived
+            // from the active face path (faces + its sibling gifs) and state.qr_dir,
+            // so no extra params have to be threaded through build_menu.
+            auto export_to_phone = [kdc_p, teensy, &state, toast](const char* kind) {
+                namespace fsx = std::filesystem;
+                std::string src;
+                if (std::string(kind) == "qr") {
+                    std::lock_guard<std::mutex> lk(state.mtx); src = state.qr_dir;
+                } else {
+                    const std::string fp = teensy ? teensy->face_image_path("neutral")
+                                                  : std::string();
+                    if (!fp.empty()) {
+                        fsx::path faces = fsx::path(fp).parent_path().parent_path();  // <assets>/faces
+                        src = (std::string(kind) == "faces")
+                                ? faces.string()
+                                : (faces.parent_path() / "gifs").string();           // <assets>/gifs
+                    }
+                }
+                const std::string k = kind;
+                // Archive + share off-thread so a big folder doesn't stall the menu.
+                std::thread([kdc_p, toast, src, k]{
+                    namespace fsx = std::filesystem;
+                    if (src.empty() || !fsx::exists(src)) {
+                        toast("Export failed", "No " + k + " folder found"); return;
+                    }
+                    const std::string out    = "/tmp/protohud_" + k + ".tar.gz";
+                    const std::string parent = fsx::path(src).parent_path().string();
+                    const std::string base   = fsx::path(src).filename().string();
+                    const std::string cmd = "tar -czf '" + out + "' -C '" + parent +
+                                            "' '" + base + "' 2>/dev/null";
+                    if (std::system(cmd.c_str()) != 0 || !fsx::exists(out)) {
+                        toast("Export failed", "Could not archive " + k); return;
+                    }
+                    if (kdc_p && kdc_p->share_file(out)) toast("Sent to phone", k + ".tar.gz");
+                    else                                 toast("Export ready", "Saved " + out);
+                }).detach();
+            };
+            std::vector<MenuItem> export_menu = {
+                with_desc(leaf("Export Faces",    [export_to_phone]{ export_to_phone("faces"); }),
+                    "Bundle the faces folder into one .tar.gz and send it to the phone."),
+                with_desc(leaf("Export GIFs",     [export_to_phone]{ export_to_phone("gifs"); }),
+                    "Bundle the gifs folder into one .tar.gz and send it to the phone."),
+                with_desc(leaf("Export QR Codes", [export_to_phone]{ export_to_phone("qr"); }),
+                    "Bundle the captured QR-code folder into one .tar.gz and send it."),
+                with_desc(leaf("Export All", [export_to_phone]{
+                    export_to_phone("faces"); export_to_phone("gifs"); export_to_phone("qr"); }),
+                    "Send all three bundles to the phone, one file each."),
+            };
+
             std::vector<MenuItem> phone_menu;
             phone_menu.push_back(with_desc(submenu("Pair Device", std::move(pair_menu)),
                 "Pair or unpair a KDE Connect device. Reachable devices are listed; "
                 "select an unpaired one and accept the prompt on the phone."));
+            phone_menu.push_back(with_desc(submenu("Export to Phone", std::move(export_menu)),
+                "Send your faces, GIFs or captured QR codes to the phone \xE2\x80\x94 each "
+                "category bundled into a single .tar.gz over KDE Connect."));
             phone_menu.push_back(with_desc(leaf("Ring My Phone", ring_toast),
                 "Ring the paired phone (KDE Connect findmyphone) so it plays its "
                 "ringtone \xE2\x80\x94 handy for locating it."));
