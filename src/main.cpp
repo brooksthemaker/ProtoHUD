@@ -29,6 +29,7 @@
 #include "input/gpio_buttons.h"
 #include "input/gpio_inputs.h"
 #include "input/coproc_inputs.h"
+#include "input/cmd_fifo.h"
 #include "input/gpio_function.h"
 #include "input/gamepad_input.h"
 #include "input/wireless_controller.h"
@@ -9898,6 +9899,26 @@ static std::vector<MenuItem> build_menu(
                 with_desc(leaf("Export All", [export_to_phone]{
                     export_to_phone("faces"); export_to_phone("gifs"); export_to_phone("qr"); }),
                     "Send all three bundles to the phone, one file each."),
+                // Send the most recent photo/recording (newest file in the photo
+                // dir, derived as the parent of map_dir).
+                with_desc(leaf("Send Last Capture", [kdc_p, map_dir, toast]{
+                    namespace fsx = std::filesystem;
+                    const std::string dir = fsx::path(map_dir).parent_path().string();
+                    std::error_code ec; fsx::path newest; fsx::file_time_type best{};
+                    fsx::directory_iterator it(dir, ec), end;
+                    for (; !ec && it != end; it.increment(ec)) {
+                        if (!it->is_regular_file(ec)) continue;
+                        const std::string ext = it->path().extension().string();
+                        if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".mp4")
+                            continue;
+                        const auto t = it->last_write_time(ec); if (ec) continue;
+                        if (newest.empty() || t > best) { best = t; newest = it->path(); }
+                    }
+                    if (newest.empty()) { toast("No captures", "Nothing in the photo folder yet"); return; }
+                    if (kdc_p && kdc_p->share_file(newest.string()))
+                        toast("Sent to phone", newest.filename().string());
+                    else toast("Export ready", newest.filename().string() + " (no phone)");
+                }), "Share the newest photo/recording with the phone over KDE Connect."),
             };
 
             std::vector<MenuItem> phone_menu;
@@ -13312,6 +13333,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Command FIFO (optional) — write a GpioFunc id to the FIFO to drive ProtoHUD
+    // (e.g. a KDE Connect "Run Command": `echo menu_open > /run/protohud/cmd`).
+    input::CmdFifoConfig cmd_fifo_cfg;
+    if (cfg.contains("inputs") && cfg["inputs"].is_object() &&
+        cfg["inputs"].contains("command_fifo") &&
+        cfg["inputs"]["command_fifo"].is_object()) {
+        const json& jf = cfg["inputs"]["command_fifo"];
+        cmd_fifo_cfg.enabled = jval(jf, "enabled", false);
+        cmd_fifo_cfg.path    = jf.value("path", cmd_fifo_cfg.path);
+    }
+
     // KDE Connect lists — editable in the Phone menu, applied live to the bridge
     // and persisted to cfg["kdeconnect"]. ignore_list mutes servers/chats;
     // message_apps picks which apps get the big chat toast.
@@ -13763,6 +13795,12 @@ int main(int argc, char* argv[]) {
         if (!coproc_inputs)             return "offline";
         return coproc_inputs->connected() ? "connected" : "offline";
     };
+
+    // ── Command FIFO source (optional) ───────────────────────────────────────
+    // Same shared gpio_dispatch — a line written to the FIFO is a GpioFunc id.
+    input::CmdFifo cmd_fifo(cmd_fifo_cfg, gpio_dispatch);
+    if (cmd_fifo_cfg.enabled && !cmd_fifo.start())
+        std::cerr << "[main] command FIFO init failed (" << cmd_fifo_cfg.path << ")\n";
 
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
     GamepadInput gamepad;

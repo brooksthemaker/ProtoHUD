@@ -172,6 +172,12 @@
         { "id": 2, "short": "boop_snout",  "long": "none" }
       ],
       "_buttons_note": "Maps the coprocessor's button ids to functions (same function ids as gpio.pins). The MCU reports 'button N, short/long'; the Pi decides what N means, so remapping stays here."
+    },
+    "command_fifo": {
+      "_about": "OPTIONAL local command pipe. When enabled, writing a GpioFunc id line to the FIFO drives ProtoHUD through the same functions as the GPIO map — e.g. a KDE Connect 'Run Command' doing `echo menu_open > /run/protohud/cmd`. Untrusted input: unknown ids are ignored. See docs/kdeconnect-commands.md and scripts/kdeconnect_commands.py.",
+      "enabled": false,
+      "path": "/run/protohud/cmd",
+      "_path_note": "FIFO is created (mkfifo) if absent. Use a tmpfs path (/run or /tmp). Valid command ids: menu_open, menu_select, menu_back, cam_capture_left, cam_capture_right, cam_af_left, cam_af_right, cam_pip_left, cam_pip_right, cam_swap, boop_snout, boop_left, boop_right, boop_both, phone_ring, system_restart, system_shutdown."
     }
   },
   "camera": {
