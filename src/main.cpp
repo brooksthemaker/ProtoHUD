@@ -3373,28 +3373,42 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── Headset controls ──────────────────────────────────────────────────────
+    auto xr_gaze = std::make_shared<bool>(false);   // local mirror of the mode state
+    auto xr_3d   = std::make_shared<bool>(false);
     std::vector<MenuItem> headset_menu = {
-        slider("Dimming", 0.f, 9.f, 1.f, "",
+        with_desc(slider("Electrochromic Transparency", 0.f, 9.f, 1.f, "",
             [&state]{ return static_cast<float>(state.xr_dimming); },
             [xr, &state](float v){
                 state.xr_dimming = static_cast<int>(v);
                 if (xr) xr->set_dimming(static_cast<int>(v));
             }),
-        slider("HUD Bright", 1.f, 9.f, 1.f, "",
+            "Darken the glasses' electrochromic film (0 = clear see-through, 9 = "
+            "fully dimmed) so the display stands out against bright surroundings."),
+        with_desc(slider("HUD Brightness", 1.f, 9.f, 1.f, "",
             [&state]{ return static_cast<float>(state.xr_hud_brightness); },
             [xr, &state](float v){
                 state.xr_hud_brightness = static_cast<int>(v);
                 if (xr) xr->set_hud_brightness(static_cast<int>(v));
             }),
-        slider("Backlight Brightness", 1.f, 7.f, 1.f, "",
+            "Brightness of the glasses' on-board HUD layer."),
+        with_desc(slider("Backlight Brightness", 1.f, 7.f, 1.f, "",
             [&state]{ return static_cast<float>(state.xr_brightness); },
             [xr, &state](float v){
                 state.xr_brightness = static_cast<int>(v);
                 if (xr) xr->set_brightness(static_cast<int>(v));
             }),
-        leaf("Recenter",  [xr]{ if (xr) xr->recenter_tracking(); }),
-        leaf("Gaze Lock", [xr]{ if (xr) xr->toggle_gaze_lock(); }),
-        leaf("3D SBS",    [xr]{ if (xr) xr->set_3d_mode(true); }),
+            "Display panel / backlight brightness."),
+        with_desc(leaf("Recenter Display", [xr]{ if (xr) xr->recenter_tracking(); }),
+            "Re-center the head-tracked view so straight-ahead is forward right now."),
+        with_desc(toggle("Gaze Lock (0-DoF Mode)",
+            [xr_gaze]{ return *xr_gaze; },
+            [xr, xr_gaze](bool v){ *xr_gaze = v; if (xr) xr->toggle_gaze_lock(); }),
+            "Lock the image to the glasses (0-DoF) instead of head-tracking it \xe2\x80\x94 "
+            "the HUD stays put as you look around."),
+        with_desc(toggle("3D Side-by-Side",
+            [xr_3d]{ return *xr_3d; },
+            [xr, xr_3d](bool v){ *xr_3d = v; if (xr) xr->set_3d_mode(v); }),
+            "Switch the glasses panel to 3D side-by-side stereo mode."),
     };
 
     // ── Audio controls ────────────────────────────────────────────────────────
@@ -10535,8 +10549,9 @@ static std::vector<MenuItem> build_menu(
                   "SSH, Bluetooth and other network/peripheral toggles."),
         with_desc(submenu("Pi Settings",      std::move(pi_settings_items)),
                   "Hostname, time, storage, GPIO visualizer/buttons and cooling fans."),
-        with_desc(submenu("Headset & Tracking", std::move(headset_menu)),
-                  "Glasses IMU, focus, recenter — everything specific to the XR display."),
+        with_desc(submenu("XR Headset (Viture Beast)", std::move(headset_menu)),
+                  "Electrochromic transparency, HUD/backlight brightness, recenter, "
+                  "gaze lock and 3D side-by-side \xe2\x80\x94 specific to the glasses."),
         with_desc(submenu("Timers and Alarm",   std::move(timers_alarm_menu)),
                   "Stopwatches, countdowns and one-shot alarms."),
         with_desc(submenu("Diagnostics",        std::move(diagnostics_group_menu)),
