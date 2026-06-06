@@ -10946,11 +10946,17 @@ static std::vector<MenuItem> build_menu(
                       [&state]{ state.game_source_sel.store(1); },
                       [&state]{ return state.game_source_sel.load() == 1; }));
 #endif
+#ifdef PROTOHUD_HAVE_LIBRETRO
+                  src.push_back(leaf_sel("Emulator (libretro)",
+                      [&state]{ state.game_source_sel.store(2); },
+                      [&state]{ return state.game_source_sel.load() == 2; }));
+#endif
                   games.push_back(with_desc(submenu("Source", std::move(src)),
                       "Pick the game. Snake is the built-in demo (D-pad / arrows "
                       "to steer, A / Z or Start / Enter to restart). Doom needs a "
-                      "DOOM/Freedoom WAD at game.doom_wad; controls: stick/d-pad "
-                      "move + turn, A fire, B use, X run, L/R strafe, Start menu."));
+                      "DOOM/Freedoom WAD at game.doom_wad. Emulator runs a libretro "
+                      "core (game.libretro_core) + ROM (game.libretro_rom) \xe2\x80\x94 "
+                      "software cores (NES/SNES/Genesis/GBA/PS1) for now."));
                   games.push_back(with_desc(toggle("Windowed",
                       [&state]{ return state.game_windowed.load(); },
                       [&state](bool v){ state.game_windowed.store(v); }),
@@ -14618,9 +14624,13 @@ int main(int argc, char* argv[]) {
     // tick it from the controller/keyboard, blit it to both eyes (fullscreen or
     // windowed) and mirror it onto the HUB75 panels via the panel override. The
     // source is hot-swappable via state.game_source_sel (0 = Snake, 1 = Doom).
-    std::string doom_wad = cfg.value("game", json::object())
-                              .value("doom_wad",
-                                     std::string("/home/user/.local/share/protohud/doom.wad"));
+    json   jgame   = cfg.value("game", json::object());
+    std::string doom_wad = jgame.value("doom_wad",
+                                       std::string("/home/user/.local/share/protohud/doom.wad"));
+    std::string lr_core    = jgame.value("libretro_core",   std::string());
+    std::string lr_rom     = jgame.value("libretro_rom",    std::string());
+    std::string lr_sysdir  = jgame.value("libretro_system_dir",
+                                         std::string("/home/user/.local/share/protohud/system"));
     int    game_which = 0;               // currently-built source (mirrors game_source_sel)
     std::unique_ptr<game::GameSource> game_src = game::make_snake();
     GLuint game_tex = 0;                 // lazily created on first frame upload
@@ -15618,6 +15628,10 @@ int main(int argc, char* argv[]) {
                 game_which = want;
 #ifdef PROTOHUD_HAVE_DOOM
                 if (want == 1) game_src = game::make_doom(doom_wad);
+                else
+#endif
+#ifdef PROTOHUD_HAVE_LIBRETRO
+                if (want == 2) game_src = game::make_libretro(lr_core, lr_rom, lr_sysdir);
                 else
 #endif
                     game_src = game::make_snake();

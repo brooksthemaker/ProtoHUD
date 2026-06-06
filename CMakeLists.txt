@@ -346,6 +346,23 @@ else()
                    "(set ENABLE_DOOM=ON and run: git submodule update --init)")
 endif()
 
+# ── Libretro game source ──────────────────────────────────────────────────────
+# Optional: a libretro frontend GameSource (dlopen a core .so + run a ROM) so
+# ProtoHUD can run emulators on the glasses + face. Only needs the libretro.h
+# header (vendored) and libdl; cores/ROMs are supplied at runtime via config.
+option(ENABLE_LIBRETRO "Build the libretro emulator game source" ON)
+
+set(LIBRETRO_HDR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libretro")
+if(ENABLE_LIBRETRO AND EXISTS "${LIBRETRO_HDR_DIR}/libretro.h")
+    target_sources(protohud PRIVATE src/game/libretro_game.cpp)
+    target_include_directories(protohud PRIVATE "${LIBRETRO_HDR_DIR}")
+    target_link_libraries(protohud PRIVATE ${CMAKE_DL_LIBS})
+    target_compile_definitions(protohud PRIVATE PROTOHUD_HAVE_LIBRETRO)
+    message(STATUS "Libretro game source: ENABLED")
+else()
+    message(STATUS "Libretro game source: disabled (set ENABLE_LIBRETRO=ON)")
+endif()
+
 # ── Assets & Config ────────────────────────────────────────���──────────────────
 
 # ── Native face renderer (Protoface C++ port) ─────────────────────────────────

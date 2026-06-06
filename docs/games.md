@@ -14,12 +14,13 @@ texture for the eyes, and mirrors it to the panels via
 `NativeFaceController::set_panel_override()`. A source never touches SDL or GL,
 so adding a new game is just implementing the interface.
 
-Two sources ship today:
+Three sources ship today:
 
 | Source | Notes |
 | ------ | ----- |
 | **Snake** | Built-in demo, no assets. Validates the whole pipeline. |
 | **Doom**  | [doomgeneric](https://github.com/ozkl/doomgeneric) submodule. Needs a WAD. |
+| **Emulator (libretro)** | dlopen a libretro core (`.so`) + run a ROM. Software cores only (for now). |
 
 ## Turning it on
 
@@ -87,3 +88,50 @@ exists before ever handing control to Doom.
 - Sound is disabled (the portable core links the no-op sound stub; no SDL).
 - Doom renders at 640×400; it's scaled per output (fullscreen/windowed on the
   glasses, downscaled on the panels).
+
+## Emulator (libretro) setup
+
+The **Emulator** source is a minimal [libretro](https://docs.libretro.com/)
+frontend: it `dlopen()`s a core (the same `.so` files RetroArch uses) and runs a
+ROM, mapping the controller onto the standard RetroPad. No core or ROM ships
+with ProtoHUD — supply your own.
+
+Built when `ENABLE_LIBRETRO=ON` (the default; only needs the vendored
+`third_party/libretro/libretro.h` + `libdl`).
+
+Point ProtoHUD at a core + ROM in `config.json`:
+
+```json
+{
+  "game": {
+    "libretro_core": "/usr/lib/libretro/snes9x_libretro.so",
+    "libretro_rom":  "/home/user/roms/game.sfc",
+    "libretro_system_dir": "/home/user/.local/share/protohud/system"
+  }
+}
+```
+
+`libretro_system_dir` is handed to the core as both the system and save
+directory (some cores need BIOS files or write SRAM there).
+
+Get cores from your distro (`sudo apt install libretro-*`), from RetroArch's
+online updater, or from <https://buildbot.libretro.com/>.
+
+### What works
+
+- **Software-rendered cores**: NES (`fceumm`/`nestopia`), SNES (`snes9x`),
+  Genesis/MD (`genesis_plus_gx`), GB/GBC/GBA (`gambatte`/`mgba`), PC Engine,
+  arcade (`fbneo`), PS1 software (`pcsx_rearmed`, software renderer), …
+- Controls map label-to-label onto the RetroPad: d-pad, A/B/X/Y, L/R,
+  Start/Select. Reset performs a soft reset.
+- Audio is **not** wired yet (silent), same as Doom.
+
+### What doesn't work yet
+
+- **Hardware-rendered cores** (N64 / Dreamcast / PSP, and PS1 with the hardware
+  renderer) ask for a GL render target via `SET_HW_RENDER`, which this frontend
+  currently refuses — so those cores won't start. Sharing ProtoHUD's GLES
+  context with a core is a planned follow-up; until then, use the **software**
+  variants where they exist (e.g. PCSX-ReARMed's software renderer for PS1).
+- Core options / per-game settings aren't exposed in the menu yet (cores run
+  with their defaults).
