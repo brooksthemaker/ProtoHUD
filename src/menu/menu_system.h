@@ -94,6 +94,12 @@ struct MenuItem {
 
     // LEAF
     std::function<void()> action;
+    // Optional "secondary" action fired on Ctrl+Select. If secondary_children is
+    // non-empty it's pushed as a submenu (e.g. an effect's settings); otherwise
+    // secondary_action() runs. Lets a row "apply on select, open settings on
+    // Ctrl+select".
+    std::function<void()> secondary_action;
+    std::vector<MenuItem> secondary_children;
 
     // SUBMENU
     std::vector<MenuItem> children;
@@ -191,6 +197,7 @@ public:
     // Drive from knob events
     void navigate(int direction);   // +1 = next, -1 = prev (or adjust value in edit mode)
     void select();                  // confirm / toggle / enter edit mode
+    void secondary();               // Ctrl+Select: run secondary_action / push secondary_children
     void back();                    // pop menu level (or exit edit mode)
 
     // Render the compact corner "quick menu" overlay using Dear ImGui windows
@@ -202,8 +209,12 @@ public:
     // drawn as concentric outer rings. When rotate_to_selected is true (minimap
     // anchored near a screen edge) the wheel spins so the selected item sits at the
     // top; otherwise the ring is static and the highlight moves.
+    // dock_top: the minimap (and thus this wheel) is pinned to the TOP half of
+    // the screen — curved wedge labels flip as one run so they still read
+    // right-way-up. Bottom-docked (default) labels curve without flipping.
     void draw_radial(float center_x, float center_y, float inner_radius,
-                     float focus_angle, bool rotate_to_selected);
+                     float focus_angle, bool rotate_to_selected,
+                     bool dock_top = false);
 
     // Quick-menu style (corner list vs. radial-around-minimap).
     void      set_quick_style(QuickStyle s) { quick_style_ = s; }
@@ -290,7 +301,7 @@ public:
                           int mirror_axis_x,
                           menu::FaceEditor::Mode mode,
                           std::vector<uint32_t> palette,
-                          std::vector<cv::Rect> eye_regions,
+                          std::vector<menu::FaceEditor::EyePoly> eye_polys,
                           menu::FaceEditor::CommitFn on_commit,
                           menu::FaceEditor::CancelFn on_cancel = {},
                           menu::FaceEditor::PreviewFn on_preview = {},

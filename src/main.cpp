@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cfloat>
 #include <cmath>
+#include <random>
 #include <cctype>
 #include <ctime>
 #include <csignal>
@@ -27,6 +28,7 @@
 #include "camera/viture_camera.h"
 #include "input/gpio_buttons.h"
 #include "input/gpio_inputs.h"
+#include "input/coproc_inputs.h"
 #include "input/gpio_function.h"
 #include "input/gamepad_input.h"
 #include "input/wireless_controller.h"
@@ -47,6 +49,7 @@
 #include "sensor/light_sensor.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
+#include "sys/fan_controller.h"
 #include "sys/system_monitor.h"
 #include "sys/scheduler_monitor.h"
 #include "sys/gpio_pinmap.h"
@@ -854,7 +857,26 @@ struct LayerCfg {
     // and radial effects ignore it and the slider is hidden in their UI.
     // -1 means "use the effect's historical default."
     float direction_deg = -1.f;
+    // Liquid fill fraction for the "water" effect (0..1). Ignored by others.
+    float level = 0.4f;
+    // Liquid viscosity for "water" (0 = thin/snappy, 1 = thick/sluggish).
+    float viscosity = 0.3f;
+    // "water" extras: pitch shifts the fill level (look down → liquid rises);
+    // bubbles count + style ("rise" bubbles in liquid / "drip" droplets above).
+    float pitch_fill = 0.0f;
+    int   bubbles = 0;
+    std::string bubble_mode = "rise";
+    // "lightning" extras: arc mode (crackling arcs vs falling bolts) + fork density.
+    bool  arc = false;
+    float branches = 0.35f;
     std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
+    // Motion reactivity (opt-in): drives the layer's direction from head
+    // movement. "none" | "heading" (lock to compass) | "yaw" (drift when
+    // turning) | "tilt" (skew like gravity when rolling the head).
+    std::string direction_from = "none";
+    // Density reactivity (opt-in): scales particle count from a live signal.
+    // "none" | "audio" (mic level) | "yaw_rate" | "accel".
+    std::string intensity_from = "none";
 };
 struct LayeredEffectState {
     static constexpr int kMaxLayers = 5;
@@ -921,6 +943,7 @@ static face::RenderConfig pf_build_render_config(const json& cfg,
         rc.canvas_w = jval(*jpf, "canvas_w", rc.canvas_w);
         rc.canvas_h = jval(*jpf, "canvas_h", rc.canvas_h);
         rc.fps      = jval(*jpf, "fps",      rc.fps);
+        rc.continuous_effects = jval(*jpf, "continuous_effects", false);
         if (jpf->contains("faces_dir"))     rc.faces_dir     = (*jpf)["faces_dir"].get<std::string>();
         if (jpf->contains("materials_dir")) rc.materials_dir = (*jpf)["materials_dir"].get<std::string>();
         if (jpf->contains("gifs_dir"))      rc.gifs_dir      = (*jpf)["gifs_dir"].get<std::string>();
@@ -1362,6 +1385,8 @@ static std::vector<MenuItem> build_menu(
         bool*      multicam_layout = nullptr,
         EyeSource* multicam_usb_a  = nullptr,
         EyeSource* multicam_usb_b  = nullptr,
+        EyeSource* multicam_top_a  = nullptr,
+        EyeSource* multicam_top_b  = nullptr,
         // Profile management (Profiles tab: save current / load by restart / delete)
         ProfileManager* profiles = nullptr,
         // HUD/menu visual presets (System tab: built-in themes + save/load/delete)
@@ -1386,6 +1411,7 @@ static std::vector<MenuItem> build_menu(
         // Accessory LED chain (cheekhubs + fins). Menu toggles/sliders push
         // through its zone setters so the next render tick uses them.
         accessory::AccessoryLeds* leds = nullptr,
+        sys::FanController* fans = nullptr,
         // Hot-swap callback for Protoface > Hardware > Backend; main wires it
         // to the tear-down-and-rebuild routine that swaps NativeFaceController
         // and panel_driver.py for the new backend. pf_backend_p is the live
@@ -1435,6 +1461,13 @@ static std::vector<MenuItem> build_menu(
         // the effect_id mapping. Used by the Layered Effects builder so the
         // user can compose multi-layer particle configs at runtime.
         std::function<void(const nlohmann::json&)> pf_set_effect_json = nullptr,
+        // Toggle expression-coupled effects (mood preset follows the face) and
+        // the config-backed flag the menu reads. Null on non-native backends.
+        std::function<void(bool)> pf_set_expr_effects = nullptr,
+        bool* pf_expr_effects_p = nullptr,
+        // Live-preview tick: main calls this each frame; when Live Preview is on
+        // it re-applies the builder spec on change. Installed inside build_menu.
+        std::shared_ptr<std::function<void()>> pf_live_tick = nullptr,
         // The live cfg JSON object owned by main(). Used by the GPIO
         // Visualizer (pin-claim scan, I²C peripherals, user notes,
         // rail-current estimate) and the Layered Effects builder
@@ -1468,7 +1501,14 @@ static std::vector<MenuItem> build_menu(
         std::shared_ptr<std::function<void()>> gpio_reload = nullptr,
         integrations::KdeConnectBridge* kdc_p = nullptr,
         std::vector<std::string>* kdc_ignore_p = nullptr,
-        std::vector<std::string>* kdc_msg_p = nullptr)
+        std::vector<std::string>* kdc_msg_p = nullptr,
+        // Optional button/switch coprocessor (input::CoprocInputs). enabled flag
+        // + a live status string getter + a reload hook, mirroring the GPIO
+        // poller's shared-after-construction pattern. All null when the build
+        // has no coprocessor support wired.
+        bool* coproc_enabled_p = nullptr,
+        std::shared_ptr<std::function<void()>> coproc_reload = nullptr,
+        std::shared_ptr<std::function<std::string()>> coproc_status = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -3157,11 +3197,33 @@ static std::vector<MenuItem> build_menu(
                  row("USB Cam 3", EyeSource::USB3) };
     };
 
+    // Quadrant source picker offering both CSI cameras + the three USB cams, so
+    // any quadrant can show Left CSI, Right CSI or a USB feed.
+    auto make_mc_src_menu = [&](EyeSource* slot) -> std::vector<MenuItem> {
+        if (!slot) return {};
+        auto row = [&](const char* label, EyeSource v) {
+            return leaf_sel(label, [slot, v]{ *slot = v; }, [slot, v]{ return *slot == v; });
+        };
+        return { row("Left CSI",  EyeSource::CSI_LEFT),
+                 row("Right CSI", EyeSource::CSI_RIGHT),
+                 row("USB Cam 1", EyeSource::USB1),
+                 row("USB Cam 2", EyeSource::USB2),
+                 row("USB Cam 3", EyeSource::USB3) };
+    };
+
     std::vector<MenuItem> multicam_menu;
     if (multicam_layout) {
         multicam_menu.push_back(toggle("Enable Multi-Cam Layout",
             [multicam_layout]{ return *multicam_layout; },
             [multicam_layout](bool v){ *multicam_layout = v; }));
+        if (multicam_top_a)
+            multicam_menu.push_back(with_desc(
+                submenu("Top-Left Camera", make_mc_src_menu(multicam_top_a)),
+                "Which camera fills the top-left quadrant (default Left CSI)."));
+        if (multicam_top_b)
+            multicam_menu.push_back(with_desc(
+                submenu("Top-Right Camera", make_mc_src_menu(multicam_top_b)),
+                "Which camera fills the top-right quadrant (default Right CSI)."));
         if (multicam_usb_a)
             multicam_menu.push_back(with_desc(
                 submenu("Bottom-Left Camera", make_mc_usb_menu(multicam_usb_a, multicam_usb_b)),
@@ -3335,28 +3397,42 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── Headset controls ──────────────────────────────────────────────────────
+    auto xr_gaze = std::make_shared<bool>(false);   // local mirror of the mode state
+    auto xr_3d   = std::make_shared<bool>(false);
     std::vector<MenuItem> headset_menu = {
-        slider("Dimming", 0.f, 9.f, 1.f, "",
+        with_desc(slider("Electrochromic Transparency", 0.f, 9.f, 1.f, "",
             [&state]{ return static_cast<float>(state.xr_dimming); },
             [xr, &state](float v){
                 state.xr_dimming = static_cast<int>(v);
                 if (xr) xr->set_dimming(static_cast<int>(v));
             }),
-        slider("HUD Bright", 1.f, 9.f, 1.f, "",
+            "Darken the glasses' electrochromic film (0 = clear see-through, 9 = "
+            "fully dimmed) so the display stands out against bright surroundings."),
+        with_desc(slider("HUD Brightness", 1.f, 9.f, 1.f, "",
             [&state]{ return static_cast<float>(state.xr_hud_brightness); },
             [xr, &state](float v){
                 state.xr_hud_brightness = static_cast<int>(v);
                 if (xr) xr->set_hud_brightness(static_cast<int>(v));
             }),
-        slider("Backlight Brightness", 1.f, 7.f, 1.f, "",
+            "Brightness of the glasses' on-board HUD layer."),
+        with_desc(slider("Backlight Brightness", 1.f, 7.f, 1.f, "",
             [&state]{ return static_cast<float>(state.xr_brightness); },
             [xr, &state](float v){
                 state.xr_brightness = static_cast<int>(v);
                 if (xr) xr->set_brightness(static_cast<int>(v));
             }),
-        leaf("Recenter",  [xr]{ if (xr) xr->recenter_tracking(); }),
-        leaf("Gaze Lock", [xr]{ if (xr) xr->toggle_gaze_lock(); }),
-        leaf("3D SBS",    [xr]{ if (xr) xr->set_3d_mode(true); }),
+            "Display panel / backlight brightness."),
+        with_desc(leaf("Recenter Display", [xr]{ if (xr) xr->recenter_tracking(); }),
+            "Re-center the head-tracked view so straight-ahead is forward right now."),
+        with_desc(toggle("Gaze Lock (0-DoF Mode)",
+            [xr_gaze]{ return *xr_gaze; },
+            [xr, xr_gaze](bool v){ *xr_gaze = v; if (xr) xr->toggle_gaze_lock(); }),
+            "Lock the image to the glasses (0-DoF) instead of head-tracking it \xe2\x80\x94 "
+            "the HUD stays put as you look around."),
+        with_desc(toggle("3D Side-by-Side",
+            [xr_3d]{ return *xr_3d; },
+            [xr, xr_3d](bool v){ *xr_3d = v; if (xr) xr->set_3d_mode(v); }),
+            "Switch the glasses panel to 3D side-by-side stereo mode."),
     };
 
     // ── Audio controls ────────────────────────────────────────────────────────
@@ -3986,7 +4062,8 @@ static std::vector<MenuItem> build_menu(
     // drift the effect uses by default.
     auto effect_is_directional = [](const std::string& e) {
         return e == "snow" || e == "rain" || e == "embers"
-            || e == "confetti" || e == "clouds";
+            || e == "confetti" || e == "clouds"
+            || e == "lightning" || e == "meteor" || e == "bubbles";
     };
     static LayeredEffectState pf_layered;
     LayeredEffectState* pflz = &pf_layered;   // static address — safe to capture
@@ -4010,6 +4087,23 @@ static std::vector<MenuItem> build_menu(
             // class falls back to its historical default angle.
             if (L.direction_deg >= 0.f)
                 layer["direction_deg"] = L.direction_deg;
+            if (L.direction_from != "none")
+                layer["direction_from"] = L.direction_from;
+            if (L.intensity_from != "none")
+                layer["intensity_from"] = L.intensity_from;
+            if (L.effect == "water") {
+                layer["level"]      = L.level;
+                layer["viscosity"]  = L.viscosity;
+                layer["pitch_fill"] = L.pitch_fill;
+                if (L.bubbles > 0) {
+                    layer["bubbles"]     = L.bubbles;
+                    layer["bubble_mode"] = L.bubble_mode;
+                }
+            }
+            if (L.effect == "lightning") {
+                layer["branches"] = L.branches;
+                if (L.arc) layer["arc"] = true;
+            }
             out["layers"].push_back(layer);
         }
         return out;
@@ -4037,8 +4131,36 @@ static std::vector<MenuItem> build_menu(
             L.speed_max = jl.value("speed_max", 15.f);
             L.blend     = jl.value("blend", std::string("add"));
             L.direction_deg = jl.value("direction_deg", -1.f);
+            L.direction_from = jl.value("direction_from", std::string("none"));
+            L.intensity_from = jl.value("intensity_from", std::string("none"));
+            L.level = jl.value("level", 0.4f);
+            L.viscosity = jl.value("viscosity", 0.3f);
+            L.pitch_fill = jl.value("pitch_fill", 0.0f);
+            L.bubbles = jl.value("bubbles", 0);
+            L.bubble_mode = jl.value("bubble_mode", std::string("rise"));
+            L.arc = jl.value("arc", false);
+            L.branches = jl.value("branches", 0.35f);
         }
     };
+
+    // Live Preview — when on, edits in the builder/effect-settings apply
+    // continuously. ParticleSystem::set_effect updates params in place when the
+    // layer structure is unchanged, so tweaks don't reset the particle sim.
+    auto pf_live = std::make_shared<bool>(false);
+    auto live_apply = [pf_live, build_layered_spec, pf_set_effect_json]{
+        if (*pf_live && pf_set_effect_json) pf_set_effect_json(build_layered_spec());
+    };
+    // main calls *pf_live_tick each frame; it re-applies only when the spec
+    // actually changed, so dragging a slider previews smoothly (the particle
+    // sim updates in place) without spamming rebuilds.
+    if (pf_live_tick) {
+        auto last = std::make_shared<nlohmann::json>();
+        *pf_live_tick = [pf_live, build_layered_spec, pf_set_effect_json, last]{
+            if (!*pf_live || !pf_set_effect_json) return;
+            nlohmann::json s = build_layered_spec();
+            if (s != *last) { pf_set_effect_json(s); *last = s; }
+        };
+    }
 
     // Effects users can pick per layer. "none" is the sentinel for "disable
     // this slot." The strings line up with the names ParticleSystem's factory
@@ -4046,6 +4168,7 @@ static std::vector<MenuItem> build_menu(
     static const char* const kLayerEffects[] = {
         "none", "sparkle", "embers", "rain", "snow",
         "confetti", "rings", "fireflies", "clouds",
+        "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
@@ -4294,6 +4417,9 @@ static std::vector<MenuItem> build_menu(
                 return with_panel(submenu("Color", std::move(color_items)),
                                   "Color Picker", picker_draw);
             })(),
+            slider("Density",    1.f, 120.f,  1.f, "",
+                [L]{ return static_cast<float>(L->count); },
+                [L](float v){ L->count = static_cast<int>(v); }),
             slider("Speed Min",  0.f, 100.f,  1.f, "",
                 [L]{ return L->speed_min; },
                 [L](float v){ L->speed_min = v; if (L->speed_max < v) L->speed_max = v; }),
@@ -4311,6 +4437,94 @@ static std::vector<MenuItem> build_menu(
                     return effect_is_directional(L->effect);
                 };
                 return dir;
+            })(),
+            // Fill Level — only meaningful for the "water" liquid effect.
+            ([&]{
+                MenuItem lvl = slider("Fill Level", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->level * 100.f; },
+                    [L](float v){ L->level = v / 100.f; });
+                lvl.visible_fn = [L]{ return L->effect == "water"; };
+                return lvl;
+            })(),
+            // Viscosity — only for "water": higher = slower, resists sloshing.
+            ([&]{
+                MenuItem vis = slider("Viscosity", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->viscosity * 100.f; },
+                    [L](float v){ L->viscosity = v / 100.f; });
+                vis.visible_fn = [L]{ return L->effect == "water"; };
+                return vis;
+            })(),
+            // Pitch Fill — water only: head pitch shifts the liquid level.
+            ([&]{
+                MenuItem pf = slider("Pitch Fill", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->pitch_fill * 100.f; },
+                    [L](float v){ L->pitch_fill = v / 100.f; });
+                pf.visible_fn = [L]{ return L->effect == "water"; };
+                return pf;
+            })(),
+            // Bubbles / droplets — water only.
+            ([&]{
+                MenuItem bub = slider("Bubbles", 0.f, 30.f, 1.f, "",
+                    [L]{ return static_cast<float>(L->bubbles); },
+                    [L](float v){ L->bubbles = static_cast<int>(v); });
+                bub.visible_fn = [L]{ return L->effect == "water"; };
+                return bub;
+            })(),
+            ([&]{
+                std::vector<MenuItem> bm = {
+                    leaf_sel("Rise (bubbles in liquid)", [L]{ L->bubble_mode = "rise"; },
+                                                         [L]{ return L->bubble_mode == "rise"; }),
+                    leaf_sel("Drip (droplets above)",    [L]{ L->bubble_mode = "drip"; },
+                                                         [L]{ return L->bubble_mode == "drip"; }),
+                };
+                MenuItem m = submenu("Bubble Style", std::move(bm));
+                m.label_fn   = [L]{ return std::string("Bubble Style: ") + L->bubble_mode; };
+                m.visible_fn = [L]{ return L->effect == "water" && L->bubbles > 0; };
+                return m;
+            })(),
+            // Lightning extras — arc mode + fork density (lightning only).
+            ([&]{
+                MenuItem t = toggle("Arc Mode",
+                    [L]{ return L->arc; }, [L](bool v){ L->arc = v; });
+                t.visible_fn = [L]{ return L->effect == "lightning"; };
+                return t;
+            })(),
+            ([&]{
+                MenuItem br = slider("Branches", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->branches * 100.f; },
+                    [L](float v){ L->branches = v / 100.f; });
+                br.visible_fn = [L]{ return L->effect == "lightning"; };
+                return br;
+            })(),
+            // Motion reactivity — couple this layer's direction to head movement.
+            ([&]{
+                static const char* const kMotionSrc[] = {"none", "heading", "yaw", "tilt"};
+                std::vector<MenuItem> msrc;
+                for (const char* s : kMotionSrc)
+                    msrc.push_back(leaf_sel(s,
+                        [L, s]{ L->direction_from = s; },
+                        [L, s]{ return L->direction_from == s; }));
+                MenuItem m = with_desc(submenu("Motion Reactive", std::move(msrc)),
+                    "Drive this layer's direction from the IMU: heading locks it "
+                    "to the compass, yaw makes it drift as you turn your head, "
+                    "tilt skews it like gravity when you roll. Apply Now to push.");
+                m.label_fn = [L]{ return std::string("Motion: ") + L->direction_from; };
+                return m;
+            })(),
+            // Density reactivity — scale particle count from audio or motion.
+            ([&]{
+                static const char* const kIntSrc[] = {"none", "audio", "yaw_rate", "accel"};
+                std::vector<MenuItem> isrc;
+                for (const char* s : kIntSrc)
+                    isrc.push_back(leaf_sel(s,
+                        [L, s]{ L->intensity_from = s; },
+                        [L, s]{ return L->intensity_from == s; }));
+                MenuItem m = with_desc(submenu("Density Reactive", std::move(isrc)),
+                    "Scale this layer's particle count from a live signal: audio "
+                    "(mic level — pulses with sound), yaw_rate or accel (head "
+                    "movement). Apply Now to push.");
+                m.label_fn = [L]{ return std::string("Density: ") + L->intensity_from; };
+                return m;
             })(),
             submenu("Blend Mode", std::move(blend_items)),
             std::move(move_up),
@@ -4338,6 +4552,15 @@ static std::vector<MenuItem> build_menu(
         [build_layered_spec, pf_set_effect_json]{
             if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
         }));
+    layered_items.push_back(with_desc(toggle("Live Preview",
+        [pf_live]{ return *pf_live; },
+        [pf_live, live_apply](bool v){ *pf_live = v; if (v) live_apply(); }),
+        "Apply edits to the panels continuously as you tweak layers, instead of "
+        "hitting Apply Now. The sim updates in place (no reset) while the layer "
+        "structure is unchanged."));
+
+    // (Built-in Presets / Randomize / Expression Effects are assembled as their
+    //  own top-level Effects pages below — Premade / Random / the toggle.)
 
     // Save / Load — three numbered quick-save slots PLUS user-named
     // presets entered via the on-screen keyboard. Everything lands in
@@ -4461,7 +4684,7 @@ static std::vector<MenuItem> build_menu(
     }));
 
     MenuItem pf_layered_item = with_desc(
-        submenu("Layered Builder", std::move(layered_items)),
+        submenu("Custom", std::move(layered_items)),
         "Compose up to five particle layers and apply the stack live. Each "
         "layer is independent: pick an effect, tweak count / colour / speed / "
         "blend, reorder with Move Up / Move Down, clear to disable.\n"
@@ -4474,24 +4697,180 @@ static std::vector<MenuItem> build_menu(
         "/tmp/protohud_layered_effect.json.\n"
         "All presets persist under cfg[\"protoface\"][\"custom_effects\"].");
 
+    // ── Effects first page: Single / Premade / Custom / Random ───────────────
+    // 1) SINGLE EFFECTS — one primitive at a time. Select applies it (on layer 0,
+    //    clearing the rest); Ctrl+Select opens that effect's full settings.
+    std::vector<MenuItem> single_items;
+    for (const char* nm : kLayerEffects) {
+        if (std::string(nm) == "none") continue;
+        const std::string name = nm;
+        MenuItem it = leaf(name, [pflz, name, build_layered_spec, pf_set_effect_json]{
+            for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i) pflz->layers[i] = LayerCfg{};
+            pflz->layers[0].effect = name;
+            if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
+        });
+        it.description = "Select: apply this effect.  Ctrl+Select: open its settings.";
+        // Ctrl+Select: switch layer 0 to this effect, then open the layer editor.
+        it.secondary_action = [pflz, name]{
+            pflz->layers[0] = LayerCfg{}; pflz->layers[0].effect = name;
+            for (int i = 1; i < LayeredEffectState::kMaxLayers; ++i) pflz->layers[i] = LayerCfg{};
+        };
+        it.secondary_children = build_layer_menu(0).children;   // full per-layer settings
+        single_items.push_back(std::move(it));
+    }
+    MenuItem single_item = with_desc(submenu("Single Effects", std::move(single_items)),
+        "One effect at a time. Select applies it; Ctrl+Select opens its settings "
+        "(colour, density, speed, and effect-specific options).");
+
+    // 2) PREMADE EFFECTS — curated combos; the side panel shows the recipe.
+    struct Premade { const char* name; const char* combo; };
+    static const Premade kPremades[] = {
+        {"gentle_snow","snow — light drift"}, {"heavy_snow","snow — dense"},
+        {"campfire","embers"}, {"galaxy","sparkle — multicolour"},
+        {"party","confetti"}, {"radar","expanding rings"},
+        {"fire","embers + embers + sparkle"}, {"aurora","fireflies + sparkle"},
+        {"blizzard","driven snow x2"}, {"sonar","rings + fireflies"},
+        {"celebration","confetti + sparkle"}, {"plasma","blue embers x2 + ring"},
+        {"thunderstorm","rain + branched lightning"}, {"arc","crackling electric arcs"},
+        {"meteor_shower","meteors + sparkle"},
+        {"fireworks","fireworks bursts"}, {"bubbles","rising bubbles"},
+        {"vortex","comet vortex (cool) + sparkle"},
+        {"vortex_ember","comet vortex (fire palette)"},
+        {"vortex_toxic","comet vortex (toxic green)"},
+        {"vortex_rose","comet vortex (pink/violet)"},
+        {"vortex_rainbow","comet vortex (rainbow)"},
+        {"nebula","clouds x2 + sparkle"},
+        {"water","liquid — cyan, bubbles"}, {"lava","liquid — lava, thick"},
+        {"toxic","liquid — green, bubbles"}, {"ocean","liquid — teal"},
+        {"plasma_fluid","liquid — magenta"}, {"mercury","liquid — silver, thick"},
+    };
+    auto premade_combo = std::make_shared<std::string>();
+    std::vector<MenuItem> premade_items;
+    for (const auto& pm : kPremades) {
+        const std::string name = pm.name, combo = pm.combo;
+        MenuItem it = leaf(name, [name, pf_set_effect_json]{
+            nlohmann::json spec; spec["preset"] = name;
+            if (pf_set_effect_json) pf_set_effect_json(spec);
+        });
+        it.on_highlight = [premade_combo, name, combo]{ *premade_combo = name + "\n" + combo; };
+        it.description  = "Select: apply.  Ctrl+Select: save a copy to Custom.";
+        it.secondary_action = [cfg_root, name, ensure_obj_path]{
+            if (!cfg_root) return;
+            nlohmann::json spec; spec["preset"] = name;
+            ensure_obj_path(*cfg_root, {"protoface", "custom_effects"})[name] = spec;
+        };
+        premade_items.push_back(std::move(it));
+    }
+    *premade_combo = std::string(kPremades[0].name) + "\n" + kPremades[0].combo;  // seed panel
+    MenuItem premade_item = submenu("Premade Effects", std::move(premade_items));
+    premade_item.context_panel_title = "Recipe";
+    premade_item.context_panel_draw =
+        [premade_combo](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            (void)sz;
+            ImFont* font = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const std::string& s = *premade_combo;
+            float y = o.y + 6.f;
+            size_t start = 0;
+            while (start <= s.size()) {
+                const size_t nl = s.find('\n', start);
+                const std::string line = s.substr(start,
+                    nl == std::string::npos ? std::string::npos : nl - start);
+                dl->AddText(font, fs, ImVec2(o.x + 6.f, y),
+                            IM_COL32(220, 225, 235, 255), line.c_str());
+                y += fs + 4.f;
+                if (nl == std::string::npos) break;
+                start = nl + 1;
+            }
+        };
+    premade_item = with_desc(std::move(premade_item),
+        "Curated multi-layer presets. The side panel shows what each is made of. "
+        "Select applies; Ctrl+Select saves a copy to Custom.");
+
+    // 3) CUSTOM is the layered builder (pf_layered_item, renamed above).
+    // 4) RANDOM — generate a fresh mix; optionally save it to Custom.
+    std::vector<MenuItem> random_items;
+    random_items.push_back(with_desc(leaf("Randomize (Surprise Me)",
+        [pflz, build_layered_spec, pf_set_effect_json]{
+            static std::mt19937 rng(std::random_device{}());
+            static const char* const fx[] = {
+                "sparkle","embers","rain","snow","confetti","rings","fireflies",
+                "clouds","lightning","meteor","bubbles","fireworks","vortex"};
+            static const int pal[][3] = {
+                {0,220,180},{255,80,80},{80,180,255},{255,200,40},
+                {180,80,255},{80,255,160},{255,120,20},{255,255,255}};
+            const int nfx  = static_cast<int>(sizeof(fx)/sizeof(fx[0]));
+            const int npal = static_cast<int>(sizeof(pal)/sizeof(pal[0]));
+            for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i)
+                pflz->layers[i] = LayerCfg{};
+            std::uniform_int_distribution<int> nlayers(1,3), pf(0,nfx-1),
+                pp(0,npal-1), cnt(10,60), spd(2,30);
+            const int N = nlayers(rng);
+            for (int i = 0; i < N; ++i) {
+                LayerCfg& L = pflz->layers[i];
+                L.effect = fx[pf(rng)];
+                const int* c = pal[pp(rng)];
+                L.r = c[0]; L.g = c[1]; L.b = c[2];
+                L.count = cnt(rng);
+                L.speed_min = static_cast<float>(spd(rng));
+                L.speed_max = L.speed_min + static_cast<float>(spd(rng));
+                L.blend = "add";
+            }
+            if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
+        }),
+        "Roll a fresh 1–3 layer mix and apply it. Tweak it in Custom, or save it "
+        "below."));
+    random_items.push_back(leaf("Save Current to Custom...",
+        [cfg_root, menu_sys_pp, build_layered_spec, ensure_obj_path]{
+            if (!menu_sys_pp || !*menu_sys_pp || !cfg_root) return;
+            (*menu_sys_pp)->open_keyboard("Preset Name", std::string(),
+                [cfg_root, build_layered_spec, ensure_obj_path](const std::string& name){
+                    if (!cfg_root || name.empty()) return;
+                    ensure_obj_path(*cfg_root, {"protoface", "custom_effects"})[name] =
+                        build_layered_spec();
+                });
+        }));
+    MenuItem random_item = with_desc(submenu("Random", std::move(random_items)),
+        "Discover new looks. Randomize applies a fresh mix; Save Current to Custom "
+        "keeps the one you like.");
+
     std::vector<MenuItem> pf_effects;
-    pf_effects.push_back(std::move(pf_layered_item));
+    pf_effects.push_back(std::move(single_item));
+    pf_effects.push_back(std::move(premade_item));
+    pf_effects.push_back(std::move(pf_layered_item));   // "Custom"
+    pf_effects.push_back(std::move(random_item));
+    if (pf_expr_effects_p && pf_set_expr_effects)
+        pf_effects.push_back(with_desc(toggle("Expression Effects",
+            [pf_expr_effects_p]{ return *pf_expr_effects_p; },
+            [pf_expr_effects_p, pf_set_expr_effects, cfg_root](bool v){
+                *pf_expr_effects_p = v; pf_set_expr_effects(v);
+                if (cfg_root) (*cfg_root)["protoface"]["expression_effects"] = v;
+            }),
+            "Auto-swap the particle effect to a mood preset as the face changes "
+            "(angry\xe2\x86\x92""fire, happy\xe2\x86\x92""celebration, "
+            "sad\xe2\x86\x92""rain, shocked\xe2\x86\x92""galaxy)."));
     {
+        // Legacy Teensy/ProtoTracer single-effect ids (only meaningful on the
+        // Teensy face backend) — tucked into their own page.
         const char* pf_effect_names[] = {
             "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
             "Fire","Aurora","Blizzard","Sonar","Plasma","Celebration","Galaxy","Party",
-            "Clouds","Nebula",   // Protoface-only (ids 16,17); no ProtoTracer equivalent
+            "Clouds","Nebula",
         };
         const uint8_t pf_effect_count =
             static_cast<uint8_t>(sizeof(pf_effect_names) / sizeof(pf_effect_names[0]));
+        std::vector<MenuItem> teensy_fx;
         for (uint8_t id = 0; id < pf_effect_count; id++)
-            pf_effects.push_back(leaf_sel(pf_effect_names[id],
+            teensy_fx.push_back(leaf_sel(pf_effect_names[id],
                 [teensy, id, &state]{
                     teensy->set_effect(id);
                     std::lock_guard<std::mutex> lk(state.mtx);
                     state.face.effect_id = id;
                 },
                 [&state, id]{ return state.face.effect_id == id; }));
+        pf_effects.push_back(with_desc(submenu("Teensy Face Effects", std::move(teensy_fx)),
+            "Single-effect ids for the Teensy/ProtoTracer face backend (no effect "
+            "on the native Protoface particle renderer)."));
     }
 
     // Material Color — the single colour/material picker (Face Color was folded
@@ -5098,6 +5477,81 @@ static std::vector<MenuItem> build_menu(
     // sits inside Face Options alongside the per-expression slots.
     face_files_menu.push_back(std::move(pf_chain_layout_item));
     if (pf_hub75_p) face_files_menu.push_back(std::move(pf_hub75_layout_item));
+
+    // ── Size & Position — per-face placement transform ───────────────────────
+    // Writes fit/scale/offset into the active face folder's config.json so a
+    // face drawn for one panel size scales + sits correctly on another, then
+    // reloads the loaders live. Honored by FaceLoader (see face_loader.cpp).
+    {
+        struct FaceXform { std::string folder, fit = "stretch"; double scale = 1.0; int ox = 0, oy = 0; };
+        auto fx = std::make_shared<FaceXform>();
+        auto fx_folder = [teensy]() -> std::string {
+            const std::string p = teensy ? teensy->face_image_path("neutral") : std::string();
+            if (p.empty()) return {};
+            return std::filesystem::path(p).parent_path().string();
+        };
+        auto fx_load = [fx, fx_folder]{
+            *fx = FaceXform{};
+            fx->folder = fx_folder();
+            if (fx->folder.empty()) return;
+            std::ifstream f(fx->folder + "/config.json");
+            if (!f) return;
+            json j; try { f >> j; } catch (...) { return; }
+            if (j.contains("fit") && j["fit"].is_string())          fx->fit   = j["fit"].get<std::string>();
+            if (j.contains("scale") && j["scale"].is_number())      fx->scale = j["scale"].get<double>();
+            if (j.contains("offset_x") && j["offset_x"].is_number())fx->ox    = (int)std::lround(j["offset_x"].get<double>());
+            if (j.contains("offset_y") && j["offset_y"].is_number())fx->oy    = (int)std::lround(j["offset_y"].get<double>());
+        };
+        auto fx_save = [fx, teensy]{
+            if (fx->folder.empty()) return;
+            const std::string cp = fx->folder + "/config.json";
+            json j = json::object();
+            { std::ifstream f(cp); if (f) { try { f >> j; } catch (...) { j = json::object(); } } }
+            if (!j.is_object()) j = json::object();
+            j["fit"] = fx->fit; j["scale"] = fx->scale;
+            j["offset_x"] = fx->ox; j["offset_y"] = fx->oy;
+            const std::string tmp = cp + ".tmp";
+            { std::ofstream f(tmp); if (f) f << j.dump(2); }
+            std::error_code ec; std::filesystem::rename(tmp, cp, ec);
+            if (teensy) teensy->reload_faces();      // live preview
+        };
+        std::vector<MenuItem> fit_items = {
+            leaf_sel("Stretch (fill)", [fx, fx_save]{ fx->fit = "stretch"; fx_save(); },
+                                       [fx]{ return fx->fit == "stretch"; }),
+            leaf_sel("Contain (fit)",  [fx, fx_save]{ fx->fit = "contain"; fx_save(); },
+                                       [fx]{ return fx->fit == "contain"; }),
+            leaf_sel("Cover (crop)",   [fx, fx_save]{ fx->fit = "cover";   fx_save(); },
+                                       [fx]{ return fx->fit == "cover"; }),
+        };
+        std::vector<MenuItem> xform_items = {
+            with_desc(submenu("Fit Mode", std::move(fit_items)),
+                "How the face fills the panel when its drawn size differs: Stretch "
+                "fills both axes (may distort); Contain keeps aspect + letterboxes; "
+                "Cover keeps aspect + crops to fill."),
+            with_desc(slider("Scale", 0.25f, 3.0f, 0.05f, "x",
+                [fx]{ return (float)fx->scale; },
+                [fx, fx_save](float v){ fx->scale = v; fx_save(); }),
+                "Extra uniform zoom on top of the fit. 1.0 = none."),
+            with_desc(slider("Offset X", -128.f, 128.f, 1.f, "px",
+                [fx]{ return (float)fx->ox; },
+                [fx, fx_save](float v){ fx->ox = (int)std::lround(v); fx_save(); }),
+                "Shift the face left/right (panel pixels)."),
+            with_desc(slider("Offset Y", -128.f, 128.f, 1.f, "px",
+                [fx]{ return (float)fx->oy; },
+                [fx, fx_save](float v){ fx->oy = (int)std::lround(v); fx_save(); }),
+                "Shift the face up/down (panel pixels)."),
+            with_desc(leaf("Reset", [fx, fx_save]{
+                fx->fit = "stretch"; fx->scale = 1.0; fx->ox = 0; fx->oy = 0; fx_save(); }),
+                "Back to fill-the-panel with no zoom or shift."),
+        };
+        MenuItem xform_sub = with_desc(submenu("Size & Position", std::move(xform_items)),
+            "Scale and shift the current face so art drawn for a different panel "
+            "size fits this one. Applies live and is saved into the face folder, so "
+            "it travels with the face. Affects every expression in the face.");
+        xform_sub.action     = fx_load;   // on-enter: read current values from disk
+        xform_sub.visible_fn = [fx_folder]{ return !fx_folder().empty(); };
+        face_files_menu.push_back(std::move(xform_sub));
+    }
 
     // Visibility predicates — Effects / Face Color / Material Color /
     // Animations / Save Face Config / Release Control are concepts from
@@ -6392,9 +6846,6 @@ static std::vector<MenuItem> build_menu(
     // overlay chrome; Map Options handles the underlying map image.
     auto ipw = [](InfoWidget w) { return static_cast<int>(w); };
     std::vector<MenuItem> module_controls_menu = {
-        toggle("Circle Window",
-            [&state]{ return state.map_overlay.circle_window; },
-            [&state](bool v){ state.map_overlay.circle_window = v; }),
         toggle("Compass Ring",
             [&state]{ return state.map_overlay.compass_ring; },
             [&state](bool v){ state.map_overlay.compass_ring = v; }),
@@ -6421,6 +6872,9 @@ static std::vector<MenuItem> build_menu(
             [&state](float v){ state.map_overlay.portrait_scale = v; }),
     };
     std::vector<MenuItem> map_options_menu = {
+        toggle("Circle Window",
+            [&state]{ return state.map_overlay.circle_window; },
+            [&state](bool v){ state.map_overlay.circle_window = v; }),
         submenu("Select Map",   std::move(map_select_items)),
         submenu("Move Map",     std::move(map_move_menu)),
         submenu("Rotate Map",   std::move(map_rotate_menu)),
@@ -6457,10 +6911,11 @@ static std::vector<MenuItem> build_menu(
             "Hide the cycling info panel while the map is expanded (its weather / "
             "schedule / time already appear in the sidebar)."),
     };
-    std::vector<MenuItem> mini_map_menu = {
-        submenu("Module Controls", std::move(module_controls_menu)),
-        submenu("Map Options",     std::move(map_options_menu)),
-    };
+    // Mini-Map Module: the module-control toggles sit directly at the top (no
+    // longer nested under a "Module Controls" leaf), with the map image controls
+    // folded into a single "Map Options" submenu (Circle Window lives there too).
+    std::vector<MenuItem> mini_map_menu = std::move(module_controls_menu);
+    mini_map_menu.push_back(submenu("Map Options", std::move(map_options_menu)));
 
     // ── Info-Panel Module ─────────────────────────────────────────────────────
     // Live preview of the selected analog clock face for the Clock Face context
@@ -6596,6 +7051,30 @@ static std::vector<MenuItem> build_menu(
         slider("Reminder Lead", 0.f, 60.f, 5.f, "min",
             [&state]{ return static_cast<float>(state.scheduler_lead_min); },
             [&state](float v){ state.scheduler_lead_min = static_cast<int>(v); }),
+        // Push the scheduler web page link to the paired phone over KDE Connect.
+        with_desc(leaf("Send Link to Phone", [&state, kdc_p]{
+                std::string url;
+                { std::lock_guard<std::mutex> lk(state.mtx); url = state.scheduler_status.web_url; }
+                const bool ok = kdc_p && kdc_p->device_ready() && !url.empty()
+                                && kdc_p->send_ping("ProtoHUD scheduler: " + url);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "Link sent to phone"
+                             : (url.empty() ? "Scheduler link not ready" : "No phone connected");
+                n.body  = ok ? url : "Connect a KDE Connect device and wait for the "
+                                     "scheduler daemon to publish its URL.";
+                n.auto_dismiss_s = 6.f; state.notifs.push(std::move(n));
+            }),
+            "Send a tappable notification with the scheduler web-page link to your "
+            "phone over KDE Connect (it won't auto-open)."),
+        with_desc(toggle("Send Link on Startup",
+            [&state]{ return state.sched_send_link_startup; },
+            [&state, cfg_root](bool v){
+                state.sched_send_link_startup = v;
+                if (cfg_root) (*cfg_root)["scheduler"]["send_link_on_startup"] = v;
+            }),
+            "Each boot, automatically push the scheduler web link to the paired "
+            "phone once its URL and the phone are both ready."),
     };
     std::vector<MenuItem> ip_weather_menu = {
         toggle("Show Current Page",
@@ -6712,17 +7191,36 @@ static std::vector<MenuItem> build_menu(
             [&state]{ state.hud_dock.v_offset += 5.f; apply_hud_dock(state); }),
     };
 
-    std::vector<MenuItem> hud_menu = {
-        toggle("Flip to Top",
+    // Legacy HUD group: the master toggle plus the legacy-only chrome settings
+    // (Flip to Top + the compass tape). Everything except the toggle is hidden
+    // until Legacy HUD is on, so the modular-HUD user never sees dead options.
+    std::vector<MenuItem> legacy_hud_menu;
+    legacy_hud_menu.push_back(with_desc(toggle("Legacy HUD",
+        [&state]{ return state.legacy_hud; },
+        [&state](bool v){ state.legacy_hud = v; }),
+        "ON: show the legacy edge/corner HUD (compass tape, health indicators, "
+        "face indicator, corner clock/timer, LoRa messages). OFF: show only the "
+        "modular HUD \xe2\x80\x94 the minimap and info panel."));
+    {
+        MenuItem flip = with_desc(toggle("Flip to Top",
             [hud_cfg]{ return hud_cfg->hud_flip_vertical; },
             [hud_cfg](bool v){ hud_cfg->hud_flip_vertical = v; }),
-        submenu("Location",         std::move(location_menu)),
+            "Mirror the legacy HUD chrome to the top edge instead of the bottom.");
+        flip.visible_fn = [&state]{ return state.legacy_hud; };
+        legacy_hud_menu.push_back(std::move(flip));
+        MenuItem comp = submenu("Compass", std::move(compass_menu));
+        comp.visible_fn = [&state]{ return state.legacy_hud; };
+        legacy_hud_menu.push_back(std::move(comp));
+    }
+
+    std::vector<MenuItem> hud_menu = {
         submenu("Mini-Map Module",  std::move(mini_map_menu)),
         submenu("Info-Panel Module",std::move(info_panel_menu)),
-        submenu("Compass",          std::move(compass_menu)),
+        submenu("Location",         std::move(location_menu)),
         submenu("Clock",            std::move(clock_menu)),
         submenu("Color",            std::move(color_options_menu)),
         submenu("Menu Position",    std::move(menu_position_menu)),
+        submenu("Legacy HUD",       std::move(legacy_hud_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
@@ -7004,14 +7502,10 @@ static std::vector<MenuItem> build_menu(
         }),
     };
 
-    std::vector<MenuItem> software_menu = {
-        leaf("Check for Updates", []{
-            system("git -C /home/user/ProtoHUD fetch origin main 2>&1 | logger -t protohud &");
-        }),
-        leaf("Pull && Rebuild", []{
-            system("cd /home/user/ProtoHUD && git pull origin main && ./scripts/build.sh 2>&1 | logger -t protohud &");
-        }),
-    };
+    // Software gets its contents (Updates, Demo Mode, Profiles & Backup) appended
+    // below once those menus are built; the old "Check for Updates" / "Pull &&
+    // Rebuild" shell shortcuts were removed in favour of the in-HUD Updater.
+    std::vector<MenuItem> software_menu;
 
     std::vector<MenuItem> fps_interval_menu = {
         leaf_sel("1 second",  [state_ptr]{ state_ptr->fps_avg_interval_s = 1;  }, [state_ptr]{ return state_ptr->fps_avg_interval_s == 1;  }),
@@ -8048,6 +8542,39 @@ static std::vector<MenuItem> build_menu(
                 "Rebuild the GPIO poller from the current slots so pin / "
                 "function / pull / polarity edits take effect right away."));
 
+        // Optional button/switch coprocessor (RP2350/RP2040). When enabled, an
+        // external MCU debounces the switches and streams presses to the Pi,
+        // dispatched through the same functions as the GPIO slots above. The
+        // slots stay live unless replace_local_gpio is set in config.
+        if (coproc_enabled_p) {
+            std::vector<MenuItem> coproc_menu;
+            coproc_menu.push_back(with_desc(toggle("Enabled",
+                [coproc_enabled_p]{ return *coproc_enabled_p; },
+                [coproc_enabled_p, coproc_reload](bool v){
+                    *coproc_enabled_p = v;
+                    if (coproc_reload && *coproc_reload) (*coproc_reload)();
+                }),
+                "Use an external button coprocessor (USB/I\xC2\xB2""C). Applies "
+                "immediately. GPIO slots above stay active too unless "
+                "replace_local_gpio is set in config.json."));
+            if (coproc_status) {
+                MenuItem st = leaf("Status", []{});
+                st.label_fn = [coproc_status]{
+                    return std::string("Status: ") +
+                           (*coproc_status ? (*coproc_status)() : std::string("n/a"));
+                };
+                coproc_menu.push_back(with_desc(std::move(st),
+                    "Connection state reported by the coprocessor link "
+                    "(connected / offline). Button mapping is edited in "
+                    "config.json under inputs.coprocessor.buttons."));
+            }
+            gpio_btn_menu.push_back(with_desc(
+                submenu("Button Coprocessor", std::move(coproc_menu)),
+                "Optional external MCU (RP2350/RP2040) that handles button "
+                "debounce and streams presses to the Pi \xE2\x80\x94 frees GPIO "
+                "and offloads timing. See docs/coprocessor-input.md."));
+        }
+
         for (int i = 0; i < gpio_slot_count; ++i) {
             input::GpioPinCfg* p = &GP[i];
 
@@ -8206,48 +8733,64 @@ static std::vector<MenuItem> build_menu(
         }
     }
     std::vector<MenuItem> pi_settings_items = {
-        with_desc(leaf("Hostname...",
-            [menu_sys_pp, run_sh, sh_read]{
-                if (!menu_sys_pp || !*menu_sys_pp) return;
+        // Hostname — current value shown in the context panel; descend to change it.
+        with_panel(
+            submenu("Hostname", std::vector<MenuItem>{
+                with_desc(leaf("Set Hostname\xE2\x80\xA6",
+                    [menu_sys_pp, run_sh]{
+                        if (!menu_sys_pp || !*menu_sys_pp) return;
+                        char host[256] = {0};
+                        if (::gethostname(host, sizeof(host) - 1) != 0) host[0] = '\0';
+                        (*menu_sys_pp)->open_keyboard("Hostname", host,
+                            [run_sh](const std::string& nm){
+                                if (nm.empty()) return;
+                                std::string safe;   // keep only hostname-legal chars
+                                for (char c : nm)
+                                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                                        || (c >= '0' && c <= '9') || c == '-' || c == '.')
+                                        safe.push_back(c);
+                                if (safe.empty()) return;
+                                run_sh("Hostname", "sudo hostnamectl set-hostname " + safe);
+                            });
+                    }),
+                    "Change the Pi's hostname (hostnamectl). Applies to new logins."),
+            }),
+            "Hostname",
+            [](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+                (void)sz;
                 char host[256] = {0};
-                if (::gethostname(host, sizeof(host) - 1) != 0) host[0] = '\0';
-                (*menu_sys_pp)->open_keyboard(
-                    "Hostname", host,
-                    [run_sh](const std::string& nm){
-                        if (nm.empty()) return;
-                        // Crude shell-safe quoting — drop anything that isn't a hostname char.
-                        std::string safe;
-                        for (char c : nm) {
-                            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                                || (c >= '0' && c <= '9') || c == '-' || c == '.')
-                                safe.push_back(c);
-                        }
-                        if (safe.empty()) return;
-                        run_sh("Hostname",
-                               "sudo hostnamectl set-hostname " + safe);
-                    });
+                const char* hn = (::gethostname(host, sizeof(host) - 1) == 0 && host[0])
+                                   ? host : "(unknown)";
+                ImFont* font = ImGui::GetFont(); const float fs = ImGui::GetFontSize();
+                dl->AddText(font, fs * 0.95f, {o.x, o.y},
+                            IM_COL32(150, 160, 170, 210), "Current hostname");
+                dl->AddText(font, fs * 1.4f, {o.x, o.y + fs * 1.4f},
+                            IM_COL32(225, 235, 245, 240), hn);
             }),
-            "Set the Pi's hostname (hostnamectl). Takes effect immediately for "
-            "new logins; the prompt updates after the next shell start."),
-        with_desc(submenu("Timezone", std::move(tz_items)),
-                  "System timezone (timedatectl). Affects clock display, "
-                  "log timestamps, and scheduled tasks."),
-        with_desc(toggle("NTP Time Sync",
-            [sh_read]{ return sh_read("timedatectl show -p NTP --value") == "yes"; },
-            [run_sh](bool v){
-                run_sh(v ? "NTP On" : "NTP Off",
-                       std::string("sudo timedatectl set-ntp ") + (v ? "true" : "false"));
+        // Time — timezone, automatic sync, and clock display settings together.
+        with_desc(submenu("Time", std::vector<MenuItem>{
+            with_desc(submenu("Timezone", std::move(tz_items)),
+                "System timezone (timedatectl). Affects the clock, log timestamps "
+                "and scheduled tasks."),
+            with_desc(toggle("Auto Time Sync (NTP)",
+                [sh_read]{ return sh_read("timedatectl show -p NTP --value") == "yes"; },
+                [run_sh](bool v){
+                    run_sh(v ? "NTP On" : "NTP Off",
+                           std::string("sudo timedatectl set-ntp ") + (v ? "true" : "false"));
+                }),
+                "Automatic time sync via systemd-timesyncd. Off to set time manually."),
+            submenu("Clock", std::vector<MenuItem>{
+                toggle("24-Hour",   [&state]{ return state.clock_cfg.use_24h; },
+                                    [&state](bool v){ state.clock_cfg.use_24h = v; }),
+                toggle("Seconds",   [&state]{ return state.clock_cfg.show_seconds; },
+                                    [&state](bool v){ state.clock_cfg.show_seconds = v; }),
+                toggle("Show Date", [&state]{ return state.clock_cfg.show_date; },
+                                    [&state](bool v){ state.clock_cfg.show_date = v; }),
+                slider("Font Size", 1.f, 3.f, 0.25f, "x",
+                    [&state]{ return state.clock_cfg.font_scale; },
+                    [&state](float v){ state.clock_cfg.font_scale = v; }),
             }),
-            "Automatic time sync via systemd-timesyncd. Turn off to set the "
-            "clock manually."),
-        with_desc(leaf("Update System (apt upgrade)",
-            [run_sh]{
-                run_sh("System Update",
-                       "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive "
-                       "apt-get -y upgrade");
-            }),
-            "Runs apt-get update && apt-get upgrade in the background. Notif "
-            "fires on success or failure (~30 s – several minutes)."),
+        }), "Timezone, automatic NTP sync, and clock display settings."),
         with_panel(
             // Storage usage context panel — runs df once per draw.
             submenu("Storage", std::vector<MenuItem>{}),
@@ -8271,38 +8814,524 @@ static std::vector<MenuItem> build_menu(
                     pos = nl + 1;
                 }
             }),
-        with_desc(leaf("Restart ProtoHUD",
-            [run_sh]{
-                run_sh("Restart",
-                       "sudo systemctl restart protohud.service");
-            }),
-            "Restart the protohud systemd service (loses unsaved menu state). "
-            "Useful after editing config.json by hand."),
-        with_desc(leaf("Shutdown System",
-            [run_sh]{
-                run_sh("Shutdown", "sudo poweroff");
-            }),
-            "Power off the Pi cleanly. The HUD will close, then the kernel "
-            "halts and the board powers down."),
+        // (Restart ProtoHUD + Shutdown moved to System > Power; the apt updater
+        //  moved to System > Software. GPIO visualizer/buttons + cooling fans are
+        //  appended to this list further below.)
     };
 
+    // ── Updates submenu (in-HUD updater — Phase 1, user-initiated only) ───────
+    // Pings the repo over plain git (no GitHub API): lists remote branches,
+    // shows their change-notes/log in the context panel, and applies a chosen
+    // branch via scripts/update.sh <branch> --restart. A pre-update rollback
+    // point is recorded by update.sh; "Rollback" returns to it via
+    // scripts/rollback.sh (also runnable standalone over SSH if the HUD won't
+    // boot). POLICY: there is deliberately NO automatic update path here —
+    // nothing fetches, builds or restarts unless the user picks it.
+    struct UpdaterState {
+        std::mutex  mtx;
+        std::string root;          // repo root (resolved from /proc/self/exe)
+        std::string cur_short;     // current HEAD short hash
+        std::string cur_subject;   // current HEAD commit subject
+        std::string cur_branch;    // current branch name
+        std::vector<std::string> all_remote; // every remote branch (authoritative)
+        std::vector<std::string> branches;  // filtered view shown in the menu
+        bool        show_all = false;       // curated (main + claude/*) vs all
+        int         behind   = -1;          // commits behind origin/<branch>; -1 unknown
+        std::string last_check;             // human time of last fetch; "" = never
+        std::string status   = "Not checked yet.";
+        bool        busy     = false;       // an async git/update op is running
+        int         sel      = -1;          // highlighted branch index (log panel)
+        std::string sel_name;               // highlighted branch name
+        std::string sel_log;                // cached git log for the highlighted branch
+        bool        rollback_avail = false; // state/update/last_good.env exists
+        std::string rollback_target;        // "hash on branch" for the label
+    };
+    auto upd = std::make_shared<UpdaterState>();
+    {
+        char exe[4096];
+        ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            std::string p(exe);                                       // .../build/protohud
+            auto s = p.find_last_of('/'); if (s != std::string::npos) p.resize(s);  // .../build
+            s = p.find_last_of('/');      if (s != std::string::npos) p.resize(s);  // project root
+            upd->root = p;
+        }
+    }
+
+    // Run `git -C <root> <args>` and capture stdout (local queries are fast;
+    // network ones — fetch — are only ever called from a worker thread).
+    auto git_q = [sh_read, upd](const std::string& args) -> std::string {
+        std::string root;
+        { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; }
+        if (root.empty()) return {};
+        const std::string cmd = "git -C '" + root + "' " + args;
+        return sh_read(cmd.c_str());
+    };
+
+    // Refresh the current-version fields (local, instant).
+    auto upd_refresh_cur = [git_q, upd]{
+        std::string sh = git_q("rev-parse --short HEAD");
+        std::string su = git_q("log -1 --pretty=%s");
+        std::string br = git_q("rev-parse --abbrev-ref HEAD");
+        std::lock_guard<std::mutex> lk(upd->mtx);
+        upd->cur_short = sh; upd->cur_subject = su; upd->cur_branch = br;
+    };
+
+    // Recompute the visible list from the cached full list + curated filter.
+    // Instant (no git) — safe to call on the UI thread when toggling the view.
+    auto upd_apply_filter = [upd]{
+        std::lock_guard<std::mutex> lk(upd->mtx);
+        std::vector<std::string> out;
+        for (const auto& ref : upd->all_remote) {
+            if (!upd->show_all) {
+                // Curated view: main/master plus the working claude/* branches.
+                const bool keep = (ref == "main" || ref == "master"
+                                   || ref.rfind("claude/", 0) == 0);
+                if (!keep) continue;
+            }
+            out.push_back(ref);
+        }
+        upd->branches = std::move(out);
+    };
+
+    // Populate the full remote-branch list, then re-filter. local=true reads
+    // local tracking refs (instant, but only branches already fetched);
+    // local=false runs `git ls-remote --heads origin` (network — authoritative,
+    // lists EVERY branch on the repo even if it was never fetched locally).
+    auto upd_load_branches = [git_q, upd, upd_apply_filter](bool local){
+        const std::string raw = local
+            ? git_q("for-each-ref --format=%(refname:short) --sort=-committerdate refs/remotes/origin")
+            : git_q("ls-remote --heads origin");
+        std::vector<std::string> out;
+        size_t pos = 0;
+        while (pos < raw.size()) {
+            size_t nl = raw.find('\n', pos);
+            if (nl == std::string::npos) nl = raw.size();
+            std::string line = raw.substr(pos, nl - pos);
+            pos = nl + 1;
+            std::string ref;
+            if (local) {
+                ref = line;
+                const std::string pfx = "origin/";
+                if (ref.rfind(pfx, 0) == 0) ref = ref.substr(pfx.size());
+            } else {
+                // ls-remote line: "<sha>\trefs/heads/<branch>"
+                const auto tab = line.find('\t');
+                if (tab == std::string::npos) continue;
+                ref = line.substr(tab + 1);
+                const std::string pfx = "refs/heads/";
+                if (ref.rfind(pfx, 0) != 0) continue;
+                ref = ref.substr(pfx.size());
+            }
+            if (ref.empty() || ref == "HEAD" || ref.find("HEAD ->") != std::string::npos) continue;
+            out.push_back(ref);
+        }
+        // Don't clobber a good cached list with an empty network result
+        // (offline / fetch failed) — but always accept the local read.
+        if (!out.empty() || local) {
+            std::lock_guard<std::mutex> lk(upd->mtx);
+            upd->all_remote = std::move(out);
+        }
+        upd_apply_filter();
+    };
+
+    // Refresh rollback availability from the marker update.sh writes.
+    auto upd_refresh_rollback = [sh_read, upd]{
+        std::string root;
+        { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; }
+        const std::string marker = root + "/state/update/last_good.env";
+        const std::string out = sh_read(
+            ("[ -f '" + marker + "' ] && . '" + marker +
+             "' && printf '%s|%s' \"${LAST_GOOD_COMMIT:0:9}\" \"${LAST_GOOD_BRANCH}\"").c_str());
+        std::lock_guard<std::mutex> lk(upd->mtx);
+        if (out.empty()) { upd->rollback_avail = false; upd->rollback_target.clear(); return; }
+        upd->rollback_avail = true;
+        auto bar = out.find('|');
+        upd->rollback_target = (bar == std::string::npos)
+            ? out : (out.substr(0, bar) + " on " + out.substr(bar + 1));
+    };
+
+    // Initial population (local only — never auto-fetches the network).
+    upd_refresh_cur();
+    upd_load_branches(/*local=*/true);
+    upd_refresh_rollback();
+
+    // "Check for Updates": async fetch + behind-count. The ONLY network call,
+    // and only when the user picks it.
+    auto upd_check = [git_q, upd_refresh_cur, upd_load_branches, sh_read, upd, push_notif]{
+        { std::lock_guard<std::mutex> lk(upd->mtx);
+          if (upd->busy) return; upd->busy = true; upd->status = "Checking\xe2\x80\xa6"; }
+        std::thread([git_q, upd_refresh_cur, upd_load_branches, sh_read, upd, push_notif]{
+            git_q("fetch --prune origin");                 // network (retry handled by git config / best-effort)
+            upd_refresh_cur();
+            upd_load_branches(/*local=*/false);            // authoritative remote list
+            std::string br; { std::lock_guard<std::mutex> lk(upd->mtx); br = upd->cur_branch; }
+            const std::string beh = git_q("rev-list --count HEAD..origin/" + br);
+            int behind = beh.empty() ? -1 : std::atoi(beh.c_str());
+            const std::string now = sh_read("date '+%a %H:%M'");
+            std::string msg = behind > 0
+                ? (std::to_string(behind) + " new commit(s) on " + br)
+                : (behind == 0 ? "Up to date." : "Checked (branch not on remote).");
+            { std::lock_guard<std::mutex> lk(upd->mtx);
+              upd->behind = behind; upd->last_check = now; upd->status = msg; upd->busy = false; }
+            push_notif(NotifType::App, "Updates",
+                       behind > 0 ? (std::to_string(behind) + " update(s) available")
+                                  : "Already up to date", 5.f);
+        }).detach();
+    };
+
+    // Apply a branch via update.sh <branch> --restart, detached so the build +
+    // restart survive ProtoHUD being killed during the restart step.
+    auto upd_apply = [upd, push_notif](const std::string& branch){
+        std::string root; bool busy;
+        { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; busy = upd->busy; }
+        if (busy || root.empty() || branch.empty()) return;
+        const std::string sp = root + "/scripts/update.sh";
+        // setsid + bash -c '"$0" "$1" --restart' keeps the script in its own
+        // session; $0/$1 carry the (quoted) script path + branch so neither
+        // needs escaping in the -c string.
+        const std::string cmd =
+            "setsid bash -c '\"$0\" \"$1\" --restart' '" + sp + "' '" + branch +
+            "' </dev/null >/tmp/protohud-update.log 2>&1 &";
+        std::system(cmd.c_str());
+        push_notif(NotifType::App, "Update started",
+                   "Pulling " + branch + " and rebuilding. The HUD restarts when "
+                   "the build succeeds, and stays up if it fails. Log: "
+                   "/tmp/protohud-update.log", 0.f);
+    };
+
+    // Roll back to the recorded known-good build via the standalone script.
+    auto upd_rollback = [upd, push_notif]{
+        std::string root; bool busy, avail;
+        { std::lock_guard<std::mutex> lk(upd->mtx);
+          root = upd->root; busy = upd->busy; avail = upd->rollback_avail; }
+        if (busy || root.empty() || !avail) return;
+        const std::string sp = root + "/scripts/rollback.sh";
+        const std::string cmd =
+            "setsid bash -c '\"$0\" --restart' '" + sp +
+            "' </dev/null >/tmp/protohud-rollback.log 2>&1 &";
+        std::system(cmd.c_str());
+        push_notif(NotifType::App, "Rollback started",
+                   "Restoring the last known-good build + config, then restarting. "
+                   "Log: /tmp/protohud-rollback.log", 0.f);
+    };
+
+    std::vector<MenuItem> updates_menu;
+    {
+        // Current version + status panel.
+        MenuItem cur = leaf("Current Version", []{});
+        cur.label_fn = [upd]{
+            std::lock_guard<std::mutex> lk(upd->mtx);
+            std::string s = "On " + (upd->cur_branch.empty() ? "?" : upd->cur_branch)
+                          + " @ " + (upd->cur_short.empty() ? "?" : upd->cur_short);
+            if (upd->behind > 0) s += "  (" + std::to_string(upd->behind) + " behind)";
+            return s;
+        };
+        updates_menu.push_back(with_panel(std::move(cur), "Update Status",
+            [upd](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                ImFont* font = ImGui::GetFont();
+                const float fs = ImGui::GetFontSize();
+                std::lock_guard<std::mutex> lk(upd->mtx);
+                float y = o.y;
+                auto line = [&](const std::string& t, ImU32 col, float scale){
+                    dl->AddText(font, fs * scale, {o.x, y}, col, t.c_str());
+                    y += fs * (scale + 0.25f);
+                };
+                line("Current build", IM_COL32(230, 235, 240, 255), 1.0f);
+                line(upd->cur_branch.empty() ? "branch ?" : upd->cur_branch,
+                     IM_COL32(200, 210, 220, 220), 0.85f);
+                line((upd->cur_short.empty() ? "?" : upd->cur_short) + "  " + upd->cur_subject,
+                     IM_COL32(180, 190, 200, 210), 0.85f);
+                y += fs * 0.4f;
+                line(upd->last_check.empty() ? "Last checked: never"
+                                             : ("Last checked: " + upd->last_check),
+                     IM_COL32(200, 210, 220, 220), 0.85f);
+                line(upd->status, upd->behind > 0 ? IM_COL32(120, 220, 140, 235)
+                                                  : IM_COL32(200, 210, 220, 220), 0.85f);
+            }));
+
+        // Check for Updates (the only network action).
+        MenuItem chk = with_desc(leaf("Check for Updates", [upd_check]{ upd_check(); }),
+            "Fetch the latest commit list from the repo (git fetch) and report how "
+            "far behind the current branch is. Does NOT change any code \xe2\x80\x94 nothing "
+            "updates until you pick a branch below. This is the only step that uses "
+            "the network.");
+        chk.label_fn = [upd]{
+            std::lock_guard<std::mutex> lk(upd->mtx);
+            return upd->busy ? std::string("Checking\xe2\x80\xa6")
+                             : std::string("Check for Updates");
+        };
+        updates_menu.push_back(std::move(chk));
+
+        // Update current branch in place.
+        updates_menu.push_back(with_desc(
+            leaf("Update This Branch & Restart",
+                 [upd, upd_apply]{
+                     std::string br; { std::lock_guard<std::mutex> lk(upd->mtx); br = upd->cur_branch; }
+                     upd_apply(br);
+                 }),
+            "Pull the latest commits for the CURRENT branch, rebuild, and restart. "
+            "Your settings (config.json) and custom faces/effects are preserved \xe2\x80\x94 "
+            "they're outside version control. A rollback point is saved first."));
+
+        // Select Branch submenu — dynamic slots fed by upd->branches, with a
+        // level context panel showing the highlighted branch's change log.
+        std::vector<MenuItem> branch_items;
+        branch_items.push_back(with_desc(toggle("Show All Branches",
+            [upd]{ std::lock_guard<std::mutex> lk(upd->mtx); return upd->show_all; },
+            [upd, upd_apply_filter, upd_load_branches](bool v){
+                { std::lock_guard<std::mutex> lk(upd->mtx); upd->show_all = v; }
+                upd_apply_filter();   // instant re-filter of the cached list
+                // …then refresh the authoritative list from the repo so branches
+                // that were never fetched locally also appear (network).
+                std::thread([upd_load_branches]{ upd_load_branches(/*local=*/false); }).detach();
+            }),
+            "OFF: show only main + the claude/* working branches (recommended). "
+            "ON: list every branch on the repo (refreshed over the network)."));
+        branch_items.push_back(with_desc(
+            leaf("Refresh List", [upd_load_branches]{
+                std::thread([upd_load_branches]{ upd_load_branches(/*local=*/false); }).detach();
+            }),
+            "Re-query the repo for its full branch list (git ls-remote). Shows "
+            "every branch, including ones not yet downloaded to this Pi."));
+
+        static constexpr int kBranchSlots = 48;
+        for (int i = 0; i < kBranchSlots; ++i) {
+            MenuItem b = leaf("branch", []{});
+            b.visible_fn = [upd, i]{
+                std::lock_guard<std::mutex> lk(upd->mtx);
+                return i < static_cast<int>(upd->branches.size());
+            };
+            b.label_fn = [upd, i]{
+                std::lock_guard<std::mutex> lk(upd->mtx);
+                if (i >= static_cast<int>(upd->branches.size())) return std::string();
+                std::string nm = upd->branches[i];
+                if (nm == upd->cur_branch) nm += "  (current)";
+                return nm;
+            };
+            // Load the change-log into the panel cache when highlighted.
+            b.on_highlight = [upd, git_q, i]{
+                std::string nm;
+                { std::lock_guard<std::mutex> lk(upd->mtx);
+                  if (i >= static_cast<int>(upd->branches.size())) return;
+                  if (upd->sel == i) return;          // already cached
+                  nm = upd->branches[i]; upd->sel = i; upd->sel_name = nm;
+                  upd->sel_log = "Loading\xe2\x80\xa6"; }
+                // Richer changelog: short hash + author-date + subject.
+                std::string log = git_q(
+                    "log --pretty=format:'%h %ad  %s' --date=short -n 20 origin/" + nm);
+                std::string ahead  = git_q("rev-list --count HEAD..origin/" + nm);
+                std::string behind = git_q("rev-list --count origin/" + nm + "..HEAD");
+                std::lock_guard<std::mutex> lk(upd->mtx);
+                if (upd->sel != i) return;            // moved on while loading
+                std::string hdr;
+                if (!ahead.empty() && ahead != "0")  hdr += "+" + ahead + " new commit(s) to apply";
+                if (!behind.empty() && behind != "0") hdr += (hdr.empty() ? "" : "  ") +
+                                                             ("-" + behind + " not on this branch");
+                if (hdr.empty() && !ahead.empty())   hdr = "Even with your current build";
+                upd->sel_log = (hdr.empty() ? "" : (hdr + "\n\n"))
+                             + (log.empty() ? "(no log \xe2\x80\x94 run Check for Updates to fetch it)" : log);
+            };
+            b.action = [upd, upd_apply, i]{
+                std::string nm;
+                { std::lock_guard<std::mutex> lk(upd->mtx);
+                  if (i >= static_cast<int>(upd->branches.size())) return;
+                  nm = upd->branches[i]; }
+                upd_apply(nm);
+            };
+            b.description = "Select to update to this branch, rebuild, and restart. "
+                            "The panel shows its recent commits. Settings + custom "
+                            "content are preserved; a rollback point is saved first.";
+            branch_items.push_back(std::move(b));
+        }
+
+        MenuItem branch_sub = submenu("Select Branch", std::move(branch_items));
+        updates_menu.push_back(with_desc(
+            with_panel(std::move(branch_sub), "Branch Changes",
+                [upd](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                    (void)sz;
+                    ImFont* font = ImGui::GetFont();
+                    const float fs = ImGui::GetFontSize();
+                    std::lock_guard<std::mutex> lk(upd->mtx);
+                    dl->AddText(font, fs * 1.0f, {o.x, o.y}, IM_COL32(230, 235, 240, 255),
+                                upd->sel_name.empty() ? "Highlight a branch"
+                                                      : upd->sel_name.c_str());
+                    float y = o.y + fs * 1.5f;
+                    const std::string& t = upd->sel_log;
+                    size_t pos = 0;
+                    while (pos < t.size()) {
+                        size_t nl = t.find('\n', pos);
+                        if (nl == std::string::npos) nl = t.size();
+                        const std::string ln = t.substr(pos, nl - pos);
+                        dl->AddText(font, fs * 0.8f, {o.x, y},
+                                    IM_COL32(200, 210, 220, 220), ln.c_str());
+                        y += fs * 0.95f;
+                        pos = nl + 1;
+                    }
+                }),
+            "Choose a branch to update to. Highlight one to read its recent commits "
+            "in the panel, then select to apply (rebuild + restart)."));
+
+        // Rollback — visible only when a recorded known-good point exists.
+        MenuItem rb = with_desc(leaf("Rollback Last Update",
+            [upd_rollback]{ upd_rollback(); }),
+            "Restore the build + config saved just before your last update, then "
+            "rebuild and restart. If the HUD won't boot, run scripts/rollback.sh "
+            "over SSH to do the same from outside ProtoHUD.");
+        rb.visible_fn = [upd]{ std::lock_guard<std::mutex> lk(upd->mtx); return upd->rollback_avail; };
+        rb.label_fn   = [upd]{
+            std::lock_guard<std::mutex> lk(upd->mtx);
+            return upd->rollback_target.empty()
+                ? std::string("Rollback Last Update")
+                : ("Rollback to " + upd->rollback_target);
+        };
+        updates_menu.push_back(std::move(rb));
+
+        // Update History — reads state/update/history.log (written by update.sh),
+        // newest first. Each line: ISO-date \t branch \t before..after \t subject.
+        MenuItem hist = leaf("Update History", []{});
+        hist.type = MenuItemType::SUBMENU;   // submenu so its context panel shows
+        updates_menu.push_back(with_panel(std::move(hist), "Update History",
+            [upd, sh_read](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                ImFont* font = ImGui::GetFont();
+                const float fs = ImGui::GetFontSize();
+                std::string root;
+                { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; }
+                const std::string log = root.empty() ? std::string() : sh_read(
+                    ("f='" + root + "/state/update/history.log'; "
+                     "[ -f \"$f\" ] && tac \"$f\" | head -n 18").c_str());
+                dl->AddText(font, fs * 1.0f, {o.x, o.y}, IM_COL32(230, 235, 240, 255),
+                            "Recent updates (newest first)");
+                float y = o.y + fs * 1.6f;
+                if (log.empty()) {
+                    dl->AddText(font, fs * 0.85f, {o.x, y}, IM_COL32(180, 190, 200, 210),
+                                "No updates recorded yet.");
+                    return;
+                }
+                size_t pos = 0;
+                while (pos < log.size()) {
+                    size_t nl = log.find('\n', pos);
+                    if (nl == std::string::npos) nl = log.size();
+                    std::string ln = log.substr(pos, nl - pos);
+                    pos = nl + 1;
+                    // Split the tab-separated record into a compact two-line entry.
+                    std::vector<std::string> f; size_t p = 0;
+                    while (true) { size_t t = ln.find('\t', p);
+                        f.push_back(ln.substr(p, t == std::string::npos ? std::string::npos : t - p));
+                        if (t == std::string::npos) break; p = t + 1; }
+                    std::string when = f.size() > 0 ? f[0] : ln;
+                    if (when.size() >= 16) when = when.substr(0, 16).replace(10, 1, " "); // YYYY-MM-DD HH:MM
+                    const std::string br  = f.size() > 1 ? f[1] : "";
+                    const std::string rng = f.size() > 2 ? f[2] : "";
+                    const std::string sub = f.size() > 3 ? f[3] : "";
+                    dl->AddText(font, fs * 0.82f, {o.x, y}, IM_COL32(210, 220, 230, 230),
+                                (when + "   " + br + "  " + rng).c_str());
+                    y += fs * 0.9f;
+                    if (!sub.empty()) {
+                        dl->AddText(font, fs * 0.78f, {o.x + fs * 0.8f, y},
+                                    IM_COL32(170, 180, 190, 200), sub.c_str());
+                        y += fs * 0.95f;
+                    }
+                    y += fs * 0.15f;
+                }
+            }));
+
+        // Settings & Data Safety — a static explainer of what survives an update.
+        MenuItem safe = leaf("Settings & Data Safety", []{});
+        safe.type = MenuItemType::SUBMENU;
+        updates_menu.push_back(with_panel(std::move(safe), "What's Preserved",
+            [](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                (void)sz;
+                ImFont* font = ImGui::GetFont();
+                const float fs = ImGui::GetFontSize();
+                static const char* kLines[] = {
+                    "Updates never touch your data:",
+                    "",
+                    "\xe2\x80\xa2 config.json (all menu settings) is outside",
+                    "  version control \xe2\x80\x94 git can't overwrite it.",
+                    "\xe2\x80\xa2 New defaults from a release are merged IN;",
+                    "  your existing values always win.",
+                    "\xe2\x80\xa2 Custom faces/effects + IMU calibration",
+                    "  live in config.json / Protoface and persist.",
+                    "\xe2\x80\xa2 Protoface (imported faces) updates without",
+                    "  deleting anything you imported.",
+                    "",
+                    "Before each update a rollback point is saved",
+                    "(commit + a config backup under state/update/).",
+                    "Recover anytime via Rollback, or over SSH with",
+                    "scripts/rollback.sh --restart.",
+                };
+                float y = o.y;
+                for (const char* ln : kLines) {
+                    const bool head = (ln[0] != '\0' && ln[0] != ' ' && ln[0] != '\xe2');
+                    dl->AddText(font, fs * (head ? 0.92f : 0.82f), {o.x, y},
+                                head ? IM_COL32(230, 235, 240, 255)
+                                     : IM_COL32(195, 205, 215, 220), ln);
+                    y += fs * 0.95f;
+                }
+            }));
+    }
+
     // ── Power submenu (existing reboot/quit + new shutdown moved here) ──────
+    // Confirm wrapper: a destructive action becomes a submenu the user has to
+    // descend into and pick "Confirm …" before it fires — guards against an
+    // accidental select on Reboot Pi / Shutdown.
+    auto confirm_action = [&](const char* label, const char* warn,
+                              std::function<void()> act) -> MenuItem {
+        std::vector<MenuItem> kids;
+        kids.push_back(with_desc(leaf(std::string("Confirm: ") + label, std::move(act)), warn));
+        MenuItem m = submenu(label, std::move(kids));
+        m.description = warn;
+        return m;
+    };
+    // Relaunch ProtoHUD via scripts/restart.sh (resolved from /proc/self/exe),
+    // detached in its own session so it survives this process being killed.
+    auto restart_protohud = [] {
+        char exe[4096];
+        ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n <= 0) return;
+        exe[n] = '\0';
+        std::string p(exe);
+        auto s = p.find_last_of('/'); if (s != std::string::npos) p.resize(s);  // .../build
+        s = p.find_last_of('/');      if (s != std::string::npos) p.resize(s);  // project root
+        const std::string script = p + "/scripts/restart.sh";
+        std::system(("setsid \"" + script + "\" >/tmp/protohud.log 2>&1 </dev/null &").c_str());
+    };
     std::vector<MenuItem> power_menu = {
+        with_desc(leaf("Reboot ProtoHUD", restart_protohud),
+            "Relaunch ProtoHUD (stop + start via scripts/restart.sh). The display "
+            "blanks briefly while it comes back."),
+        with_desc(leaf("Reboot ProtoFace", [teensy]{ if (teensy) teensy->restart(); }),
+            "Restart the face backend (Protoface daemon / native renderer) without "
+            "touching the rest of the HUD."),
+        confirm_action("Reboot Pi",
+            "Reboots the whole Raspberry Pi after a short delay. Unsaved work is lost.",
+            [&state]{
+                state.quit = true;
+                std::thread([]{
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    std::system("sudo -n reboot 2>/dev/null || reboot 2>/dev/null &");
+                }).detach();
+            }),
+        confirm_action("Shutdown",
+            "Powers off the Raspberry Pi. You'll need to cycle power to start it again.",
+            [&state]{
+                state.quit = true;
+                std::thread([]{
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    std::system("sudo -n poweroff 2>/dev/null || poweroff 2>/dev/null &");
+                }).detach();
+            }),
+        with_desc(leaf("Close Program", [&state]{ state.quit = true; }),
+            "Exit ProtoHUD without rebooting the system."),
         with_desc(toggle("Skip Startup Screen",
             [&state]{ return state.skip_landing; },
             [&state](bool v){ state.skip_landing = v; }),
             "Bypass the profile/continue landing screen at boot and run the current "
             "config directly. Takes effect on the next launch."),
-        with_desc(leaf("Reboot System", [&state] {
-            state.quit = true;
-            std::thread([] {
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                std::system("reboot");
-            }).detach();
-        }), "Reboot the Pi after a short delay (so the HUD can wind down)."),
-        with_desc(leaf("Close Program",
-            [&state]{ state.quit = true; }),
-            "Exit ProtoHUD without rebooting the system."),
     };
 
     // ── Display & HUD submenu (cosmetic / per-window controls) ───────────────
@@ -8327,25 +9356,95 @@ static std::vector<MenuItem> build_menu(
             [hud_cfg]{ return hud_cfg->text_scale; },
             [hud_cfg](float v){ hud_cfg->text_scale = v; }),
             "Scale factor applied to all HUD text. Lower = more on-screen at once."),
+        // Window mode (Fullscreen/Frameless) + Resolution moved to System > Display.
+        // Legacy HUD toggle moved to HUD > Legacy HUD (grouped with its settings).
+    };
+
+    // ── Display submenu (window mode + windowed resolution) ───────────────────
+    // Desktop/dev only — ignored while the glasses drive the window.
+    std::vector<MenuItem> resolution_menu;
+    {
+        static const struct { const char* l; int w, h; } kRes[] = {
+            {"1280 x 720",  1280,  720}, {"1600 x 900",  1600,  900},
+            {"1920 x 1080", 1920, 1080}, {"2560 x 1440", 2560, 1440},
+            {"3840 x 1080 (SBS)", 3840, 1080}, {"3840 x 2160", 3840, 2160},
+        };
+        for (const auto& r : kRes) {
+            const int w = r.w, h = r.h;
+            resolution_menu.push_back(leaf(r.l, [&state, w, h]{
+                state.win_resize_w.store(w); state.win_resize_h.store(h);
+                state.win_resize_dirty.store(true);
+            }));
+        }
+    }
+    std::vector<MenuItem> display_menu = {
         with_desc(toggle("Fullscreen",
             [&state]{ return state.win_fullscreen.load(); },
             [&state](bool v){ state.win_fullscreen.store(v); state.win_mode_dirty.store(true); }),
-            "Borderless fullscreen covering the whole screen. Desktop/dev only — "
+            "Borderless fullscreen covering the whole screen. Desktop/dev only \xe2\x80\x94 "
             "ignored while the glasses are connected. Applied live."),
         with_desc(toggle("Frameless Window",
             [&state]{ return state.win_frameless.load(); },
             [&state](bool v){ state.win_frameless.store(v); state.win_mode_dirty.store(true); }),
             "Remove the OS window title bar and borders (windowed mode). Desktop/dev "
             "only. Applied live."),
-        with_desc(toggle("Legacy HUD",
-            [&state]{ return state.legacy_hud; },
-            [&state](bool v){ state.legacy_hud = v; }),
-            "ON: show the legacy edge/corner HUD (compass tape, health indicators, "
-            "face indicator, corner clock/timer, LoRa messages). OFF: show only the "
-            "modular HUD — the minimap and info panel."),
+        with_desc(submenu("Resolution", std::move(resolution_menu)),
+            "Resize the windowed (non-fullscreen) output. Desktop/dev only; ignored "
+            "while the glasses drive the display."),
     };
 
     // ── Connectivity submenu ─────────────────────────────────────────────────
+    // ── Bluetooth controls (bluetoothctl shell-out) ──────────────────────────
+    // Scan/power + per-device connect/pair/trust/remove. Devices come from
+    // BtMonitor (state.bt_devices), which now also lists discovered-but-unpaired
+    // devices after a scan so they can be paired here.
+    auto bt_cmd = [&state, bt_mon](int i, const char* verb) {
+        std::string mac;
+        { std::lock_guard<std::mutex> lk(state.mtx);
+          if (i >= 0 && i < (int)state.bt_devices.size()) mac = state.bt_devices[i].mac; }
+        if (mac.empty()) return;
+        std::system((std::string("bluetoothctl ") + verb + " " + mac +
+                     " >/dev/null 2>&1 &").c_str());
+        if (bt_mon) bt_mon->refresh();
+    };
+    std::vector<MenuItem> bluetooth_menu;
+    bluetooth_menu.push_back(with_desc(leaf("Scan for Devices", [bt_mon]{
+        std::system("bluetoothctl --timeout 20 scan on >/dev/null 2>&1 &");
+        if (bt_mon) bt_mon->refresh();
+    }), "Discover nearby devices for ~20s; new ones appear in the list below to pair."));
+    bluetooth_menu.push_back(with_desc(leaf("Power On", [bt_mon]{
+        std::system("bluetoothctl power on >/dev/null 2>&1 &"); if (bt_mon) bt_mon->refresh(); }),
+        "Turn the Bluetooth adapter on."));
+    bluetooth_menu.push_back(with_desc(leaf("Power Off", [bt_mon]{
+        std::system("bluetoothctl power off >/dev/null 2>&1 &"); if (bt_mon) bt_mon->refresh(); }),
+        "Turn the Bluetooth adapter off."));
+    bluetooth_menu.push_back(with_desc(leaf("Refresh", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
+        "Re-scan known devices and update the list now."));
+    for (int i = 0; i < 12; ++i) {
+        MenuItem dev; dev.type = MenuItemType::SUBMENU; dev.label = "btdev";
+        dev.label_fn = [&state, i]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i >= (int)state.bt_devices.size()) return std::string();
+            const auto& d = state.bt_devices[i];
+            return d.name + (d.connected ? "  \xE2\x9C\x93" : d.paired ? "  (paired)" : "  (new)");
+        };
+        dev.visible_fn = [&state, i]{
+            std::lock_guard<std::mutex> lk(state.mtx); return i < (int)state.bt_devices.size(); };
+        dev.children = {
+            with_desc(leaf("Connect",    [bt_cmd, i]{ bt_cmd(i, "connect"); }),
+                "Connect to this device."),
+            with_desc(leaf("Disconnect", [bt_cmd, i]{ bt_cmd(i, "disconnect"); }),
+                "Disconnect this device."),
+            with_desc(leaf("Pair",       [bt_cmd, i]{ bt_cmd(i, "pair"); }),
+                "Pair with this device (confirm any prompt on both ends)."),
+            with_desc(leaf("Trust",      [bt_cmd, i]{ bt_cmd(i, "trust"); }),
+                "Mark trusted so it can auto-reconnect."),
+            with_desc(leaf("Remove",     [bt_cmd, i]{ bt_cmd(i, "remove"); }),
+                "Unpair and forget this device."),
+        };
+        bluetooth_menu.push_back(std::move(dev));
+    }
+
     std::vector<MenuItem> connectivity_menu = {
         with_desc(toggle("SSH Access",
             [state_ptr]{ return state_ptr && state_ptr->ssh.active; },
@@ -8358,8 +9457,8 @@ static std::vector<MenuItem> build_menu(
                 }
             }),
             "Toggle the sshd service. ON exposes the Pi to network logins on TCP 22."),
-        with_desc(leaf("Refresh Bluetooth", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
-                  "Re-scan for paired Bluetooth devices and update the indicator."),
+        with_desc(submenu("Bluetooth", std::move(bluetooth_menu)),
+                  "Scan, pair, connect and manage Bluetooth devices."),
     };
 
     // ── Diagnostics submenu (probes + overlays + per-tab tools) ──────────────
@@ -8376,13 +9475,81 @@ static std::vector<MenuItem> build_menu(
                   "Averaging window for the FPS readout."),
         with_desc(submenu("Diagnostics",   std::move(diagnostics_menu)),
                   "Camera / network / Bluetooth / GPIO probes."),
-        std::move(gpio_viz_item),
-        std::move(gpio_buttons_item),
         with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
                   "Poll the face controller for a fresh status frame."),
-        with_desc(submenu("Demo Mode",  std::move(demo_menu)),
-                  "Cycle prefab scenes for screenshots / video."),
     };
+    // Moved out of Diagnostics per the menu reorg: the GPIO visualizer + buttons
+    // and the cooling-fan controls live under Pi Settings (hardware); Demo Mode
+    // lives under Software (appended at the tail of this block).
+    pi_settings_items.push_back(std::move(gpio_viz_item));
+    pi_settings_items.push_back(std::move(gpio_buttons_item));
+    // Cooling fans (Pi-driven PWM). Hidden when no FanController is wired.
+    pi_settings_items.push_back([&]() -> MenuItem {
+            if (!fans || fans->zone_count() == 0) {
+                MenuItem m = leaf("Cooling Fans", []{}); m.visible_fn = []{ return false; }; return m;
+            }
+            // Per-zone speed/mode/curve submenu.
+            auto build_zone = [&](int z) -> MenuItem {
+                std::vector<MenuItem> mode_items = {
+                    leaf_sel("Manual", [fans, z]{ fans->set_zone_auto(z, false); },
+                                       [fans, z]{ return !fans->zone_auto(z); }),
+                    leaf_sel("Auto (by CPU temp)", [fans, z]{ fans->set_zone_auto(z, true); },
+                                       [fans, z]{ return fans->zone_auto(z); }),
+                };
+                MenuItem speed = slider("Speed", 0.f, 100.f, 5.f, "%",
+                    [fans, z]{ return static_cast<float>(fans->zone_speed(z) * 100.0); },
+                    [fans, z](float v){ fans->set_zone_speed(z, v / 100.0); });
+                speed.visible_fn = [fans, z]{ return !fans->zone_auto(z); };
+                MenuItem amin = slider("Auto Min Temp", 30.f, 80.f, 1.f, "\xc2\xb0""C",
+                    [fans, z]{ return static_cast<float>(fans->zone_auto_min(z)); },
+                    [fans, z](float v){ fans->set_zone_auto_range(z, v, fans->zone_auto_max(z)); });
+                amin.visible_fn = [fans, z]{ return fans->zone_auto(z); };
+                MenuItem amax = slider("Auto Max Temp", 40.f, 90.f, 1.f, "\xc2\xb0""C",
+                    [fans, z]{ return static_cast<float>(fans->zone_auto_max(z)); },
+                    [fans, z](float v){ fans->set_zone_auto_range(z, fans->zone_auto_min(z), v); });
+                amax.visible_fn = [fans, z]{ return fans->zone_auto(z); };
+                MenuItem status = leaf("Output", []{});
+                status.label_fn = [fans, z]{
+                    char b[40];
+                    std::snprintf(b, sizeof(b), "Output: %d%%",
+                                  (int)std::lround(fans->zone_duty(z) * 100.0));
+                    return std::string(b);
+                };
+                std::vector<MenuItem> zi = {
+                    submenu("Mode", std::move(mode_items)),
+                    std::move(speed), std::move(amin), std::move(amax), std::move(status),
+                };
+                MenuItem m = submenu(fans->zone_name(z), std::move(zi));
+                m.label_fn = [fans, z]{
+                    char b[48];
+                    std::snprintf(b, sizeof(b), "%s  [%d%%%s]", fans->zone_name(z).c_str(),
+                                  (int)std::lround(fans->zone_duty(z) * 100.0),
+                                  fans->zone_auto(z) ? " auto" : "");
+                    return std::string(b);
+                };
+                return m;
+            };
+            std::vector<MenuItem> fan_items;
+            fan_items.push_back(with_desc(toggle("Enabled",
+                [fans]{ return fans->running(); },
+                [fans](bool v){ if (v) fans->start(); else fans->stop(); }),
+                "Drive the cooling fans on their configured GPIO. Off releases the lines."));
+            for (int z = 0; z < fans->zone_count(); ++z)
+                fan_items.push_back(build_zone(z));
+            MenuItem temp = leaf("CPU Temp", []{});
+            temp.label_fn = [fans]{
+                char b[32]; std::snprintf(b, sizeof(b), "CPU Temp: %.0f\xc2\xb0""C",
+                                          fans->current_temp_c());
+                return std::string(b);
+            };
+            fan_items.push_back(std::move(temp));
+            return with_desc(submenu("Cooling Fans", std::move(fan_items)),
+                "Pi-driven PWM cooling fans \xe2\x80\x94 up to 4 fans in 2 zones, each "
+                "with its own speed/mode. Pins in config[\"fans\"][\"zones\"]; use "
+                "GPIO clear of HUB75 (see carrier PINMAP).");
+        }());
+    software_menu.push_back(with_desc(submenu("Demo Mode", std::move(demo_menu)),
+        "Cycle prefab scenes for screenshots / video."));
 
     // ── Communications: LoRa + Phone (KDE Connect) + Notification Log ─────────
     MenuItem phone_item = [&]() -> MenuItem {
@@ -8443,21 +9610,323 @@ static std::vector<MenuItem> build_menu(
             auto apply_msg = [kdc_p, kdc_msg_p, join]{
                 if (kdc_p) kdc_p->set_message_apps(join(kdc_msg_p)); };
 
+            // Small toast helper for action feedback.
+            auto toast = [&state](std::string t, std::string b){
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App; n.icon = "message";
+                n.title = std::move(t); n.body = std::move(b); n.auto_dismiss_s = 4.f;
+                state.notifs.push(std::move(n));
+            };
+
+            // ── Notifications (reply / dismiss) ────────────────────────────────
+            // Each row mirrors a recent phone notification; Reply (messaging apps)
+            // opens the OSK, Dismiss clears it on the phone.
+            std::vector<MenuItem> notif_menu;
+            notif_menu.push_back(with_desc(leaf("Dismiss All", [kdc_p, toast]{
+                if (kdc_p && kdc_p->dismiss_notification("")) toast("Dismissed", "Cleared phone notifications");
+            }), "Dismiss every active notification on the phone."));
+            for (int i = 0; i < 12; ++i) {
+                MenuItem row; row.type = MenuItemType::SUBMENU; row.label = "notif";
+                row.label_fn = [kdc_p, i]{
+                    if (!kdc_p) return std::string();
+                    auto v = kdc_p->phone_notifications();
+                    if (i >= (int)v.size()) return std::string();
+                    const auto& n = v[i];
+                    std::string who = !n.title.empty() ? n.title
+                                    : (!n.app.empty() ? n.app : std::string("Phone"));
+                    return who + (n.repliable ? "  \xE2\x9C\x89" : "");
+                };
+                row.visible_fn = [kdc_p, i]{ return kdc_p && i < (int)kdc_p->phone_notifications().size(); };
+                MenuItem reply = leaf("Reply\xE2\x80\xA6", [kdc_p, i, menu_sys_pp, toast]{
+                    if (!kdc_p || !menu_sys_pp || !*menu_sys_pp) return;
+                    auto v = kdc_p->phone_notifications();
+                    if (i >= (int)v.size()) return;
+                    const std::string id = v[i].id, who = v[i].title;
+                    (*menu_sys_pp)->open_keyboard("Reply to " + who, "",
+                        [kdc_p, id, toast](const std::string& s){
+                            if (s.empty()) return;
+                            if (kdc_p->reply_notification(id, s)) toast("Reply sent", s);
+                        });
+                });
+                reply.visible_fn = [kdc_p, i]{
+                    auto v = kdc_p ? kdc_p->phone_notifications() : std::vector<integrations::KdeConnectBridge::PhoneNotif>{};
+                    return i < (int)v.size() && v[i].repliable; };
+                MenuItem dismiss = leaf("Dismiss", [kdc_p, i, toast]{
+                    if (!kdc_p) return;
+                    auto v = kdc_p->phone_notifications();
+                    if (i < (int)v.size() && kdc_p->dismiss_notification(v[i].id))
+                        toast("Dismissed", v[i].title);
+                });
+                // Context panel: show the full body text of the focused notification.
+                row.children = { std::move(reply), std::move(dismiss) };
+                notif_menu.push_back(std::move(row));
+            }
+
+            // ── Media control (mprisremote) ────────────────────────────────────
+            std::vector<MenuItem> media_menu;
+            {
+                MenuItem now; now.type = MenuItemType::LEAF; now.label = "now playing";
+                now.label_fn = [kdc_p]{
+                    if (!kdc_p) return std::string("No media");
+                    auto m = kdc_p->media_status();
+                    if (!m.has_player) return std::string("No media");
+                    std::string s = m.playing ? "\xE2\x96\xB6 " : "\xE2\x9D\x9A ";
+                    s += !m.title.empty() ? m.title : std::string("(unknown)");
+                    if (!m.artist.empty()) s += " \xE2\x80\x94 " + m.artist;
+                    return s;
+                };
+                media_menu.push_back(std::move(now));
+                auto act = [kdc_p](const char* a){ if (kdc_p) kdc_p->media_action(a); };
+                media_menu.push_back(leaf("Play / Pause", [act]{ act("PlayPause"); }));
+                media_menu.push_back(leaf("Next",         [act]{ act("Next"); }));
+                media_menu.push_back(leaf("Previous",     [act]{ act("Previous"); }));
+                media_menu.push_back(leaf("Stop",         [act]{ act("Stop"); }));
+                media_menu.push_back(slider("Volume", 0.f, 100.f, 5.f, "%",
+                    [kdc_p]{ auto m = kdc_p ? kdc_p->media_status() : integrations::KdeConnectBridge::MediaStatus{};
+                             return (float)(m.volume < 0 ? 0 : m.volume); },
+                    [kdc_p](float v){ if (kdc_p) kdc_p->media_set_volume((int)v); }));
+                // Player picker (up to 6).
+                std::vector<MenuItem> players;
+                for (int i = 0; i < 6; ++i) {
+                    MenuItem p; p.type = MenuItemType::LEAF; p.label = "player";
+                    p.label_fn = [kdc_p, i]{ auto m = kdc_p ? kdc_p->media_status()
+                            : integrations::KdeConnectBridge::MediaStatus{};
+                        if (i >= (int)m.players.size()) return std::string();
+                        return m.players[i] + (m.players[i] == m.player ? "  \xE2\x97\x8F" : ""); };
+                    p.visible_fn = [kdc_p, i]{ auto m = kdc_p ? kdc_p->media_status()
+                            : integrations::KdeConnectBridge::MediaStatus{};
+                        return i < (int)m.players.size(); };
+                    p.action = [kdc_p, i]{ if (!kdc_p) return; auto m = kdc_p->media_status();
+                        if (i < (int)m.players.size()) kdc_p->media_set_player(m.players[i]); };
+                    players.push_back(std::move(p));
+                }
+                media_menu.push_back(submenu("Player", std::move(players)));
+            }
+
+            // ── Run commands (remotecommands) ──────────────────────────────────
+            std::vector<MenuItem> cmd_menu;
+            for (int i = 0; i < 16; ++i) {
+                MenuItem c; c.type = MenuItemType::LEAF; c.label = "command";
+                c.label_fn = [kdc_p, i]{ auto v = kdc_p ? kdc_p->run_commands()
+                        : std::vector<integrations::KdeConnectBridge::RunCommand>{};
+                    return i < (int)v.size() ? v[i].name : std::string(); };
+                c.visible_fn = [kdc_p, i]{ return kdc_p && i < (int)kdc_p->run_commands().size(); };
+                c.action = [kdc_p, i, toast]{ if (!kdc_p) return; auto v = kdc_p->run_commands();
+                    if (i < (int)v.size() && kdc_p->run_command(v[i].key)) toast("Sent", v[i].name); };
+                cmd_menu.push_back(std::move(c));
+            }
+
+            // ── Grouped ignore picker (app → senders; red = muted) ─────────────
+            auto roster = [kdc_p]{ return kdc_p ? kdc_p->notif_roster()
+                : std::vector<std::pair<std::string, std::vector<std::string>>>{}; };
+            auto ig_has = [kdc_ignore_p](const std::string& s){
+                return kdc_ignore_p && std::find(kdc_ignore_p->begin(), kdc_ignore_p->end(), s)
+                                       != kdc_ignore_p->end(); };
+            auto ig_toggle = [kdc_ignore_p, apply_ignore](const std::string& s){
+                if (!kdc_ignore_p || s.empty()) return;
+                auto it = std::find(kdc_ignore_p->begin(), kdc_ignore_p->end(), s);
+                if (it != kdc_ignore_p->end()) kdc_ignore_p->erase(it);
+                else                           kdc_ignore_p->push_back(s);
+                apply_ignore();
+            };
+            auto build_app_senders = [roster, ig_has, ig_toggle](int ai){
+                std::vector<MenuItem> kids;
+                MenuItem all; all.type = MenuItemType::TOGGLE; all.label = "Mute whole app";
+                all.get_toggle = [roster, ig_has, ai]{ auto r = roster();
+                    return ai < (int)r.size() && ig_has(r[ai].first); };
+                all.set_toggle = [roster, ig_toggle, ai](bool){ auto r = roster();
+                    if (ai < (int)r.size()) ig_toggle(r[ai].first); };
+                all.warn_fn = [roster, ig_has, ai]{ auto r = roster();
+                    return ai < (int)r.size() && ig_has(r[ai].first); };
+                kids.push_back(std::move(all));
+                for (int si = 0; si < 24; ++si) {
+                    MenuItem m; m.type = MenuItemType::TOGGLE; m.label = "sender";
+                    m.label_fn   = [roster, ai, si]{ auto r = roster();
+                        return (ai < (int)r.size() && si < (int)r[ai].second.size())
+                                   ? r[ai].second[si] : std::string(); };
+                    m.visible_fn = [roster, ai, si]{ auto r = roster();
+                        return ai < (int)r.size() && si < (int)r[ai].second.size(); };
+                    m.get_toggle = [roster, ig_has, ai, si]{ auto r = roster();
+                        if (ai >= (int)r.size() || si >= (int)r[ai].second.size()) return false;
+                        return ig_has(r[ai].second[si]); };
+                    m.set_toggle = [roster, ig_toggle, ai, si](bool){ auto r = roster();
+                        if (ai < (int)r.size() && si < (int)r[ai].second.size())
+                            ig_toggle(r[ai].second[si]); };
+                    m.warn_fn    = [roster, ig_has, ai, si]{ auto r = roster();
+                        if (ai >= (int)r.size() || si >= (int)r[ai].second.size()) return false;
+                        return ig_has(r[ai].second[si]); };
+                    kids.push_back(std::move(m));
+                }
+                return kids;
+            };
+            std::vector<MenuItem> ignore_menu;
+            ignore_menu.push_back(with_desc(leaf("Add Word\xE2\x80\xA6 (keyboard)",
+                [menu_sys_pp, kdc_ignore_p, apply_ignore]{
+                    if (!menu_sys_pp || !*menu_sys_pp || !kdc_ignore_p) return;
+                    (*menu_sys_pp)->open_keyboard("Ignore (matches title/text)", "",
+                        [kdc_ignore_p, apply_ignore](const std::string& s){
+                            const size_t b = s.find_first_not_of(" \t");
+                            const size_t e = s.find_last_not_of(" \t");
+                            if (b == std::string::npos) return;
+                            kdc_ignore_p->push_back(s.substr(b, e - b + 1)); apply_ignore();
+                        });
+                }), "Add a free-text mute (matches a notification's title/text)."));
+            ignore_menu.push_back(with_desc(leaf("Unmute All",
+                [kdc_ignore_p, apply_ignore]{ if (kdc_ignore_p) { kdc_ignore_p->clear(); apply_ignore(); } }),
+                "Clear every mute."));
+            for (int ai = 0; ai < 24; ++ai) {
+                MenuItem appsub = submenu("app", build_app_senders(ai));
+                appsub.label_fn   = [roster, ai]{ auto r = roster();
+                    return ai < (int)r.size() ? r[ai].first : std::string(); };
+                appsub.visible_fn = [roster, ai]{ return ai < (int)roster().size(); };
+                appsub.warn_fn    = [roster, ig_has, ai]{ auto r = roster();
+                    return ai < (int)r.size() && ig_has(r[ai].first); };
+                ignore_menu.push_back(std::move(appsub));
+            }
+
+            // ── SMS (send) ─────────────────────────────────────────────────────
+            auto send_sms_flow = [menu_sys_pp, kdc_p, toast]{
+                if (!menu_sys_pp || !*menu_sys_pp || !kdc_p) return;
+                (*menu_sys_pp)->open_keyboard("SMS to (number)", "",
+                    [menu_sys_pp, kdc_p, toast](const std::string& num){
+                        if (num.empty() || !menu_sys_pp || !*menu_sys_pp) return;
+                        (*menu_sys_pp)->open_keyboard("Message", "",
+                            [kdc_p, num, toast](const std::string& msg){
+                                if (msg.empty()) return;
+                                if (kdc_p->send_sms(num, msg)) toast("SMS sent", num + ": " + msg);
+                            });
+                    });
+            };
+
+            // ── Connectivity readout ───────────────────────────────────────────
+            MenuItem conn_item; conn_item.type = MenuItemType::LEAF; conn_item.label = "Signal";
+            conn_item.label_fn = [kdc_p]{
+                if (!kdc_p) return std::string("Signal: n/a");
+                auto c = kdc_p->connectivity();
+                if (!c.ok) return std::string("Signal: n/a");
+                std::string s = "Signal: " + (c.network_type.empty() ? std::string("?") : c.network_type);
+                if (c.strength >= 0) { s += "  "; for (int i = 0; i < 5; ++i) s += (i < c.strength) ? "\xE2\x96\xB0" : "\xE2\x96\xB1"; }
+                return s;
+            };
+
+            // ── Pair Device ────────────────────────────────────────────────────
+            // Lists every reachable KDE Connect device (paired or not). Selecting
+            // an unpaired one requests pairing (accept the prompt on the phone);
+            // selecting a paired one unpairs it.
+            std::vector<MenuItem> pair_menu;
+            for (int i = 0; i < 8; ++i) {
+                MenuItem d; d.type = MenuItemType::LEAF; d.label = "device";
+                d.label_fn = [kdc_p, i]{
+                    if (!kdc_p) return std::string();
+                    auto v = kdc_p->devices();
+                    if (i >= (int)v.size()) return std::string();
+                    const auto& dev = v[i];
+                    std::string suffix = dev.paired ? "  \xE2\x9C\x93 paired"
+                                       : dev.reachable ? "  \xE2\x80\x94 tap to pair"
+                                                       : "  (offline)";
+                    return dev.name + suffix;
+                };
+                d.visible_fn = [kdc_p, i]{ return kdc_p && i < (int)kdc_p->devices().size(); };
+                d.action = [kdc_p, i, toast]{
+                    if (!kdc_p) return;
+                    auto v = kdc_p->devices();
+                    if (i >= (int)v.size()) return;
+                    const auto& dev = v[i];
+                    if (dev.paired) {
+                        if (kdc_p->unpair(dev.id)) toast("Unpaired", dev.name);
+                    } else if (kdc_p->request_pairing(dev.id)) {
+                        toast("Pairing requested", "Accept the prompt on " + dev.name);
+                    }
+                };
+                pair_menu.push_back(std::move(d));
+            }
+
+            // ── Export to Phone ─────────────────────────────────────────────────
+            // Bundle a whole category (faces / gifs / qr codes) into one .tar.gz
+            // and share it to the phone via KDE Connect. Source dirs are derived
+            // from the active face path (faces + its sibling gifs) and state.qr_dir,
+            // so no extra params have to be threaded through build_menu.
+            auto export_to_phone = [kdc_p, teensy, &state, toast](const char* kind) {
+                namespace fsx = std::filesystem;
+                std::string src;
+                if (std::string(kind) == "qr") {
+                    std::lock_guard<std::mutex> lk(state.mtx); src = state.qr_dir;
+                } else {
+                    const std::string fp = teensy ? teensy->face_image_path("neutral")
+                                                  : std::string();
+                    if (!fp.empty()) {
+                        fsx::path faces = fsx::path(fp).parent_path().parent_path();  // <assets>/faces
+                        src = (std::string(kind) == "faces")
+                                ? faces.string()
+                                : (faces.parent_path() / "gifs").string();           // <assets>/gifs
+                    }
+                }
+                const std::string k = kind;
+                // Archive + share off-thread so a big folder doesn't stall the menu.
+                std::thread([kdc_p, toast, src, k]{
+                    namespace fsx = std::filesystem;
+                    if (src.empty() || !fsx::exists(src)) {
+                        toast("Export failed", "No " + k + " folder found"); return;
+                    }
+                    const std::string out    = "/tmp/protohud_" + k + ".tar.gz";
+                    const std::string parent = fsx::path(src).parent_path().string();
+                    const std::string base   = fsx::path(src).filename().string();
+                    const std::string cmd = "tar -czf '" + out + "' -C '" + parent +
+                                            "' '" + base + "' 2>/dev/null";
+                    if (std::system(cmd.c_str()) != 0 || !fsx::exists(out)) {
+                        toast("Export failed", "Could not archive " + k); return;
+                    }
+                    if (kdc_p && kdc_p->share_file(out)) toast("Sent to phone", k + ".tar.gz");
+                    else                                 toast("Export ready", "Saved " + out);
+                }).detach();
+            };
+            std::vector<MenuItem> export_menu = {
+                with_desc(leaf("Export Faces",    [export_to_phone]{ export_to_phone("faces"); }),
+                    "Bundle the faces folder into one .tar.gz and send it to the phone."),
+                with_desc(leaf("Export GIFs",     [export_to_phone]{ export_to_phone("gifs"); }),
+                    "Bundle the gifs folder into one .tar.gz and send it to the phone."),
+                with_desc(leaf("Export QR Codes", [export_to_phone]{ export_to_phone("qr"); }),
+                    "Bundle the captured QR-code folder into one .tar.gz and send it."),
+                with_desc(leaf("Export All", [export_to_phone]{
+                    export_to_phone("faces"); export_to_phone("gifs"); export_to_phone("qr"); }),
+                    "Send all three bundles to the phone, one file each."),
+            };
+
             std::vector<MenuItem> phone_menu;
+            phone_menu.push_back(with_desc(submenu("Pair Device", std::move(pair_menu)),
+                "Pair or unpair a KDE Connect device. Reachable devices are listed; "
+                "select an unpaired one and accept the prompt on the phone."));
+            phone_menu.push_back(with_desc(submenu("Export to Phone", std::move(export_menu)),
+                "Send your faces, GIFs or captured QR codes to the phone \xE2\x80\x94 each "
+                "category bundled into a single .tar.gz over KDE Connect."));
             phone_menu.push_back(with_desc(leaf("Ring My Phone", ring_toast),
                 "Ring the paired phone (KDE Connect findmyphone) so it plays its "
                 "ringtone \xE2\x80\x94 handy for locating it."));
-            phone_menu.push_back(with_desc(submenu("Ignore List",
-                list_menu(kdc_ignore_p, apply_ignore, "Add Server / Chat\xE2\x80\xA6",
-                          "Ignore (matches title/text)")),
-                "Mute phone notifications whose title/text contains any listed word "
-                "\xE2\x80\x94 e.g. a Discord server name. Select an entry to remove it."));
+            phone_menu.push_back(with_desc(submenu("Notifications", std::move(notif_menu)),
+                "Recent phone notifications. Reply to messaging apps or dismiss them "
+                "(clears on the phone too)."));
+            phone_menu.push_back(with_desc(submenu("Media", std::move(media_menu)),
+                "Control the phone's media playback (play/pause, skip, volume, player)."));
+            phone_menu.push_back(with_desc(submenu("Run Command", std::move(cmd_menu)),
+                "Trigger one of the phone's saved KDE Connect commands."));
+            phone_menu.push_back(with_desc(leaf("Send SMS\xE2\x80\xA6", send_sms_flow),
+                "Send a text message through the phone (enter number, then message)."));
+            phone_menu.push_back(with_desc(leaf("Mute Ringer", [kdc_p, toast]{
+                if (kdc_p && kdc_p->mute_ringer()) toast("Ringer muted", "Silenced incoming call"); }),
+                "Silence an incoming call's ringer (best-effort, depends on the phone)."));
+            phone_menu.push_back(with_desc(conn_item,
+                "Cellular network type + signal strength reported by the phone."));
+            phone_menu.push_back(with_desc(submenu("Ignore List", std::move(ignore_menu)),
+                "Mute notifications by app or sender. Apps/senders the phone has sent "
+                "are grouped here \xE2\x80\x94 select one to mute it (muted entries turn red). "
+                "\"Add Word\" still takes free text."));
             phone_menu.push_back(with_desc(submenu("Message Apps",
                 list_menu(kdc_msg_p, apply_msg, "Add App\xE2\x80\xA6", "App name (e.g. Discord)")),
                 "Apps whose notifications get the larger chat toast (sender + wrapped "
                 "message, held longer). Select an entry to remove it."));
             return with_desc(submenu("Phone (KDE Connect)", std::move(phone_menu)),
-                "Ring the phone, pick which apps get the big chat toast, and mute servers.");
+                "Ring/mute, reply to & dismiss notifications, control media, run "
+                "commands, send SMS, and mute apps/senders.");
     }();
     MenuItem notiflog_item = [&]() -> MenuItem {
         // ── Notification Log: grouped by sender, filterable, full text in panel ──
@@ -8714,7 +10183,9 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> communications_menu;
     communications_menu.push_back(with_desc(submenu("LoRa", std::move(lora_menu)),
         "Long-range radio: team nodes, messages and status."));
-    communications_menu.push_back(std::move(phone_item));
+    // KDE Connect now lives under System > Connectivity (alongside SSH/Bluetooth);
+    // Communications keeps the notification log + QR codes.
+    connectivity_menu.push_back(std::move(phone_item));
     communications_menu.push_back(std::move(notiflog_item));
 
     // ── Scanned QR Codes ──────────────────────────────────────────────────
@@ -8790,6 +10261,160 @@ static std::vector<MenuItem> build_menu(
             dl->AddText(font, fs * 0.72f, {o.x, y}, IM_COL32(150,158,166,210), meta);
         };
 
+        // List removable mounts (USB sticks etc.) under the auto-mount roots as
+        // {path, display}. Cached ~1 s so the menu's per-slot label/visible fns
+        // don't readdir every frame. Cheap listing only (no write probe).
+        auto usb_cache   = std::make_shared<std::vector<std::pair<std::string,std::string>>>();
+        auto usb_cache_t = std::make_shared<double>(-100.0);
+        auto list_usb_mounts =
+            [usb_cache, usb_cache_t]() -> const std::vector<std::pair<std::string,std::string>>& {
+            const double now = ImGui::GetTime();
+            if (now - *usb_cache_t > 1.0) {
+                *usb_cache_t = now;
+                usb_cache->clear();
+                namespace fs = std::filesystem;
+                std::vector<std::string> roots;
+                std::error_code ec;
+                if (const char* u = std::getenv("USER")) {
+                    const std::string mu = std::string("/media/") + u;
+                    if (fs::is_directory(mu, ec)) roots.push_back(mu);
+                }
+                if (roots.empty()) roots.push_back("/media");
+                roots.push_back("/mnt");
+                for (const auto& root : roots) {
+                    if (!fs::is_directory(root, ec)) continue;
+                    for (const auto& e : fs::directory_iterator(root, ec))
+                        if (e.is_directory(ec))
+                            usb_cache->emplace_back(e.path().string(),
+                                                    e.path().filename().string());
+                }
+            }
+            return *usb_cache;
+        };
+        // Derive a filename-safe, human-ish name from a code's text so the image
+        // matches its link in the manifest. Host/path for URLs, else first chars,
+        // plus a short hash of the full text to keep it unique.
+        auto qr_parsed_name = [](const std::string& text) -> std::string {
+            std::string base = text;
+            const auto scheme = base.find("://");
+            if (scheme != std::string::npos) base = base.substr(scheme + 3);
+            std::string out;
+            for (char ch : base) {
+                if (std::isalnum(static_cast<unsigned char>(ch))) out += ch;
+                else if (ch == '.' || ch == '-' || ch == '_') out += ch;
+                else out += '_';
+                if (out.size() >= 40) break;
+            }
+            if (out.empty()) out = "qr";
+            char hx[8];
+            std::snprintf(hx, sizeof(hx), "%04x",
+                          static_cast<unsigned>(std::hash<std::string>{}(text) & 0xffff));
+            return out + "_" + hx;
+        };
+        // Stage a temp bundle: each code's image copied to <parsed_name>.png plus
+        // a qr_links.txt manifest mapping names → links. Returns the file list.
+        auto build_qr_bundle = [qr_parsed_name](const std::vector<QrCapture>& caps)
+            -> std::vector<std::string> {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const fs::path dir = fs::temp_directory_path(ec) / "protohud_qr_share";
+            fs::remove_all(dir, ec);
+            fs::create_directories(dir, ec);
+            std::vector<std::string> files;
+            std::ofstream man((dir / "qr_links.txt").string());
+            if (man) man << "ProtoHUD scanned codes\n======================\n\n";
+            for (const auto& c : caps) {
+                const std::string nm = qr_parsed_name(c.text);
+                std::string src;
+                if (!c.folder.empty()) {
+                    for (const char* pref : {"camera.png", "decode.png"}) {
+                        const fs::path p = fs::path(c.folder) / pref;
+                        if (fs::exists(p, ec)) { src = p.string(); break; }
+                    }
+                    if (src.empty())
+                        for (const auto& e : fs::directory_iterator(c.folder, ec))
+                            if (e.is_regular_file() && e.path().extension() == ".png") {
+                                src = e.path().string(); break; }
+                }
+                if (!src.empty()) {
+                    const fs::path dst = dir / (nm + ".png");
+                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+                    if (!ec) files.push_back(dst.string());
+                }
+                if (man) {
+                    char when[24] = "";
+                    if (c.timestamp > 0) { time_t t = static_cast<time_t>(c.timestamp);
+                        strftime(when, sizeof(when), "%Y-%m-%d %H:%M", localtime(&t)); }
+                    man << nm << ".png\n    " << c.text << "\n    [" << c.type
+                        << (when[0] ? std::string("  ") + when : std::string()) << "]\n\n";
+                }
+            }
+            if (man) { man.close(); files.push_back((dir / "qr_links.txt").string()); }
+            return files;
+        };
+        // Send a set of captures (images + manifest) to the paired phone.
+        auto send_to_phone = [kdc_p, build_qr_bundle, &state](const std::vector<QrCapture>& caps) {
+            const bool dev = kdc_p && kdc_p->device_ready();
+            int n = 0;
+            if (dev) for (const auto& f : build_qr_bundle(caps))
+                if (kdc_p->share_file(f)) ++n;
+            std::lock_guard<std::mutex> lk(state.mtx);
+            Notification nt; nt.type = NotifType::App;
+            nt.title = dev ? "Sent to phone" : "No phone connected";
+            nt.body  = dev ? (std::to_string(n) + " file(s) shared (images + qr_links.txt)")
+                           : "Pair + connect a device in KDE Connect first.";
+            nt.auto_dismiss_s = 5.f; state.notifs.push(std::move(nt));
+        };
+        // Copy the bundle (renamed images + manifest) to a chosen mount.
+        auto export_to_usb = [build_qr_bundle, &state](const std::vector<QrCapture>& caps,
+                                                       const std::string& dest) {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const fs::path target = fs::path(dest) / "protohud_qr";
+            fs::create_directories(target, ec);
+            int n = 0;
+            for (const auto& f : build_qr_bundle(caps)) {
+                fs::copy_file(f, target / fs::path(f).filename(),
+                              fs::copy_options::overwrite_existing, ec);
+                if (!ec) ++n;
+            }
+            std::lock_guard<std::mutex> lk(state.mtx);
+            Notification nt; nt.type = NotifType::App;
+            nt.title = n > 0 ? "Exported to USB" : "Export failed";
+            nt.body  = n > 0 ? ("Copied " + std::to_string(n) + " file(s) to " + target.string())
+                             : ("Could not write to " + dest);
+            nt.auto_dismiss_s = 6.f; state.notifs.push(std::move(nt));
+        };
+        // Build the "Export / Send" target list (phone + each connected drive).
+        // get_caps() returns the captures to export (one row, or all).
+        auto build_export_targets =
+            [kdc_p, list_usb_mounts, send_to_phone, export_to_usb](
+                std::function<std::vector<QrCapture>()> get_caps) {
+            std::vector<MenuItem> t;
+            MenuItem p; p.type = MenuItemType::LEAF; p.label = "phone";
+            p.label_fn   = [kdc_p]{ return std::string("Phone: ") +
+                                    (kdc_p ? kdc_p->active_device_name() : std::string()); };
+            p.visible_fn = [kdc_p]{ return kdc_p && kdc_p->device_ready(); };
+            p.action     = [send_to_phone, get_caps]{ send_to_phone(get_caps()); };
+            t.push_back(std::move(p));
+            for (int j = 0; j < 6; ++j) {
+                MenuItem m; m.type = MenuItemType::LEAF; m.label = "drive";
+                m.label_fn   = [list_usb_mounts, j]{
+                    const auto& v = list_usb_mounts();
+                    return j < (int)v.size() ? ("USB: " + v[j].second) : std::string(); };
+                m.visible_fn = [list_usb_mounts, j]{ return j < (int)list_usb_mounts().size(); };
+                m.action     = [export_to_usb, get_caps, list_usb_mounts, j]{
+                    const auto& v = list_usb_mounts();
+                    if (j < (int)v.size()) export_to_usb(get_caps(), v[j].first); };
+                t.push_back(std::move(m));
+            }
+            MenuItem none; none.type = MenuItemType::LEAF; none.label = "(no devices connected)";
+            none.visible_fn = [kdc_p, list_usb_mounts]{
+                return !(kdc_p && kdc_p->device_ready()) && list_usb_mounts().empty(); };
+            t.push_back(std::move(none));
+            return t;
+        };
+
         std::vector<MenuItem> qmenu;
         // Clear All (red) — drops every entry + its folder.
         {
@@ -8811,6 +10436,21 @@ static std::vector<MenuItem> build_menu(
                                        return !state.qr_captures.items.empty(); };
             qmenu.push_back(with_desc(std::move(clr),
                 "Delete every saved QR code and its folder."));
+        }
+        // Export / Send All — to a chosen connected device (phone or a drive).
+        // One bundle with every code's image + a combined qr_links.txt manifest.
+        {
+            MenuItem all = submenu("Export / Send All", build_export_targets(
+                [&state]() -> std::vector<QrCapture> {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    return std::vector<QrCapture>(state.qr_captures.items.begin(),
+                                                  state.qr_captures.items.end());
+                }));
+            all.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                       return !state.qr_captures.items.empty(); };
+            qmenu.push_back(with_desc(std::move(all),
+                "Send all saved codes to a connected device as named images plus a "
+                "single qr_links.txt listing every link."));
         }
         // Capture rows (newest first).
         for (int i = 0; i < 40; ++i) {
@@ -8849,7 +10489,12 @@ static std::vector<MenuItem> build_menu(
                 if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->back();
             });
             del.warn_fn = []{ return true; };
-            row.children = { std::move(open), std::move(del) };
+            MenuItem exp = submenu("Export / Send", build_export_targets(
+                [cap_at, i]() -> std::vector<QrCapture> { return { cap_at(i) }; }));
+            exp.visible_fn = [cap_at, i]{ return !cap_at(i).folder.empty(); };
+            exp.description = "Send this code (image + a qr_links.txt) to a connected "
+                              "device — the paired phone (KDE Connect) or a USB drive.";
+            row.children = { std::move(open), std::move(exp), std::move(del) };
             row.context_panel_title = "QR Code";
             row.context_panel_draw  = [draw_cap, cap_at, i](ImDrawList* dl, ImVec2 o, ImVec2 sz){
                 draw_cap(dl, o, sz, cap_at(i)); };
@@ -8919,23 +10564,24 @@ static std::vector<MenuItem> build_menu(
 
     // ── System root: grouped, one screen tall ────────────────────────────────
     std::vector<MenuItem> system_menu = {
-        with_desc(submenu("Display & HUD", std::move(display_hud_menu)),
-                  "Window mode, text scale, HUD/menu theme + presets."),
+        with_desc(submenu("Display", std::move(display_menu)),
+                  "Fullscreen / frameless window mode and windowed resolution."),
+        with_desc(submenu("HUD & Menu", std::move(display_hud_menu)),
+                  "Text scale, HUD/menu theme + presets, radial-menu options."),
         std::move(audio_item),
         with_desc(submenu("Connectivity",     std::move(connectivity_menu)),
                   "SSH, Bluetooth and other network/peripheral toggles."),
         with_desc(submenu("Pi Settings",      std::move(pi_settings_items)),
-                  "Hostname, timezone, NTP, system updates, storage, shutdown."),
-        with_desc(submenu("Headset & Tracking", std::move(headset_menu)),
-                  "Glasses IMU, focus, recenter — everything specific to the XR display."),
+                  "Hostname, time, storage, GPIO visualizer/buttons and cooling fans."),
+        with_desc(submenu("XR Headset (Viture Beast)", std::move(headset_menu)),
+                  "Electrochromic transparency, HUD/backlight brightness, recenter, "
+                  "gaze lock and 3D side-by-side \xe2\x80\x94 specific to the glasses."),
         with_desc(submenu("Timers and Alarm",   std::move(timers_alarm_menu)),
                   "Stopwatches, countdowns and one-shot alarms."),
         with_desc(submenu("Diagnostics",        std::move(diagnostics_group_menu)),
-                  "Probes, overlays and the GPIO visualizer."),
-        with_desc(submenu("Software",           std::move(software_menu)),
-                  "Demo apps, on-board tools."),
+                  "Probes, overlays and per-tab tools."),
         with_desc(submenu("Power",              std::move(power_menu)),
-                  "Skip Startup, Reboot, Close Program."),
+                  "Restart ProtoHUD / ProtoFace, reboot or shut down the Pi."),
     };
 
     // ── Profiles ────────────────────────────────────────────────────────────────
@@ -8993,12 +10639,58 @@ static std::vector<MenuItem> build_menu(
     profiles_menu.push_back(with_desc(submenu("Delete Profile", std::move(profile_delete_menu)),
         "Remove a saved profile permanently."));
 
-    // Tuck Profiles & Backup inside the System root so the top-level tab list
-    // stays compact.
-    system_menu.push_back(with_desc(submenu("Profiles & Backup",
-                                             std::move(profiles_menu)),
-                                    "Save and load full-setup snapshots. "
-                                    "Loading a profile restarts ProtoHUD with that config."));
+    // Assemble Software last, now that profiles_menu exists: the in-HUD Updater
+    // first, then Demo Mode (appended earlier), then Profiles & Backup. Added to
+    // the System root as a single "Software" tab.
+    software_menu.insert(software_menu.begin(),
+        with_desc(submenu("Updates", std::move(updates_menu)),
+            "Check the repo for new commits, switch/update branches, and roll back "
+            "\xe2\x80\x94 all user-initiated. ProtoHUD never auto-updates."));
+    // Pi system (apt) update — confirm-gated, since it changes the OS. Runs in
+    // the background and toasts on completion.
+    software_menu.push_back(confirm_action("Pi System Update",
+        "Runs apt-get update && apt-get -y upgrade in the background (30 s to "
+        "several minutes). Don't power off while it runs.",
+        [run_sh]{ run_sh("System Update",
+            "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade"); }));
+    // Submit Issue — compose a short report; saved under state/issues/ and (when a
+    // phone is connected) shared to it so it can be filed on GitHub. No network /
+    // token is used on the Pi, so it can't post directly.
+    software_menu.push_back(with_desc(leaf("Submit Issue\xE2\x80\xA6",
+        [menu_sys_pp, &state, kdc_p]{
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+            (*menu_sys_pp)->open_keyboard("Describe the issue", "",
+                [&state, kdc_p](const std::string& text){
+                    if (text.empty()) return;
+                    char exe[4096]; ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+                    std::string root;
+                    if (n > 0) { exe[n] = '\0'; std::string p(exe);
+                        auto s = p.find_last_of('/'); if (s != std::string::npos) p.resize(s);
+                        s = p.find_last_of('/');      if (s != std::string::npos) p.resize(s);
+                        root = p; }
+                    const std::string dir = (root.empty() ? std::string("/tmp")
+                                                          : root + "/state/issues");
+                    std::error_code ec; std::filesystem::create_directories(dir, ec);
+                    std::time_t t = std::time(nullptr); char ts[32];
+                    std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", std::localtime(&t));
+                    const std::string path = dir + "/issue_" + ts + ".txt";
+                    { std::ofstream f(path);
+                      if (f) f << "ProtoHUD issue (" << ts << ")\n\n" << text << "\n\n"
+                               << "File at: https://github.com/brooksthemaker/protohud/issues/new\n"; }
+                    if (kdc_p) kdc_p->share_file(path);   // hand off to the phone if paired
+                    Notification nt; nt.type = NotifType::App; nt.icon = "message";
+                    nt.title = "Issue saved"; nt.body = path; nt.auto_dismiss_s = 6.f;
+                    std::lock_guard<std::mutex> lk(state.mtx); state.notifs.push(std::move(nt));
+                });
+        }),
+        "Write a short bug report. Saved under state/issues/ and shared to the "
+        "phone (if connected) so you can file it on GitHub."));
+    software_menu.push_back(with_desc(submenu("Profiles & Backup", std::move(profiles_menu)),
+        "Save and load full-setup snapshots. Loading a profile restarts ProtoHUD "
+        "with that config."));
+    system_menu.push_back(with_desc(submenu("Software", std::move(software_menu)),
+        "In-HUD updater, Pi system update, demo scenes, issue reports, and "
+        "full-setup profiles & backups."));
 
     // ── Quick (corner / radial) menu ─────────────────────────────────────────────
     // A short, curated set of mid-use actions — separate from the full settings tree
@@ -9555,6 +11247,8 @@ int main(int argc, char* argv[]) {
         if (s == "usb1") return EyeSource::USB1;
         if (s == "usb2") return EyeSource::USB2;
         if (s == "usb3") return EyeSource::USB3;
+        if (s == "csi_left")  return EyeSource::CSI_LEFT;
+        if (s == "csi_right") return EyeSource::CSI_RIGHT;
         return EyeSource::CSI;
     };
     EyeSource left_eye_src  = parse_eye_src(jcam.value("left_eye_source",  std::string("csi")));
@@ -9566,6 +11260,10 @@ int main(int argc, char* argv[]) {
     bool      multicam_layout = jcam.value("multicam_layout", false);
     EyeSource multicam_usb_a  = parse_eye_src(jcam.value("multicam_usb_a", std::string("usb1")));
     EyeSource multicam_usb_b  = parse_eye_src(jcam.value("multicam_usb_b", std::string("usb2")));
+    // Top-left / top-right quadrant sources — now selectable (default the two CSI
+    // cameras, one on each side); may also be set to a USB cam.
+    EyeSource multicam_top_a  = parse_eye_src(jcam.value("multicam_top_a", std::string("csi_left")));
+    EyeSource multicam_top_b  = parse_eye_src(jcam.value("multicam_top_b", std::string("csi_right")));
 
     HudConfig hud_cfg;
     hud_cfg.compass_height        = jval(jhud, "compass_height_px",        60);
@@ -9610,6 +11308,11 @@ int main(int argc, char* argv[]) {
         bno_cfg.heading_axes    = jval(jb, "heading_axes",    0);
         bno_cfg.poll_hz         = jval(jb, "poll_hz",         50.0f);
         bno_cfg.auto_save_calibration = jval(jb, "save_calibration", true);
+        // Transport: "i2c" (default) or "uart" (PS1→3.3V; sidesteps the Pi's
+        // I²C clock-stretch trouble). uart_device + uart_baud apply in UART mode.
+        bno_cfg.transport       = jb.value("transport",   std::string("i2c"));
+        bno_cfg.uart_device     = jb.value("uart_device", std::string("/dev/ttyAMA0"));
+        bno_cfg.uart_baud       = jval(jb, "uart_baud",   115200);
     }
     // Persist the BNO055 calibration profile next to config.json so the sensor
     // keeps its calibration across reboots (restored at start()).
@@ -9678,6 +11381,46 @@ int main(int argc, char* argv[]) {
         led_cfg.strip.count = max_end;
     }
     accessory::AccessoryLeds accessory_leds(led_cfg);
+
+    // ── Cooling fans (Pi-driven software-PWM on GPIO) ─────────────────────────
+    sys::FanController::Config fan_cfg;
+    if (cfg.contains("fans") && cfg["fans"].is_object()) {
+        const auto& jf = cfg["fans"];
+        fan_cfg.enabled    = jval(jf, "enabled", false);
+        fan_cfg.chip       = jf.value("chip", fan_cfg.chip);
+        fan_cfg.pwm_hz     = jval(jf, "pwm_hz",   fan_cfg.pwm_hz);
+        fan_cfg.min_duty   = jval(jf, "min_duty", fan_cfg.min_duty);
+        fan_cfg.invert     = jval(jf, "invert",   fan_cfg.invert);
+        fan_cfg.temp_path  = jf.value("temp_path", fan_cfg.temp_path);
+        auto parse_zone = [&](const json& jz, const char* defname) {
+            sys::FanController::ZoneCfg z;
+            z.name = jz.value("name", std::string(defname));
+            if (jz.contains("gpios") && jz["gpios"].is_array())
+                for (const auto& g : jz["gpios"]) if (g.is_number()) z.gpios.push_back(g.get<int>());
+            else if (jz.contains("gpio") && jz["gpio"].is_number())
+                z.gpios.push_back(jz["gpio"].get<int>());
+            z.auto_mode  = (jz.value("mode", std::string("manual")) == "auto");
+            z.speed      = jval(jz, "speed",      z.speed);
+            z.auto_min_c = jval(jz, "auto_min_c", z.auto_min_c);
+            z.auto_max_c = jval(jz, "auto_max_c", z.auto_max_c);
+            return z;
+        };
+        if (jf.contains("zones") && jf["zones"].is_array()) {
+            int zi = 0;
+            for (const auto& jz : jf["zones"]) {
+                if (zi >= sys::FanController::kMaxZones) break;
+                if (!jz.is_object()) continue;
+                char dn[16]; std::snprintf(dn, sizeof(dn), "Zone %d", zi + 1);
+                fan_cfg.zones.push_back(parse_zone(jz, dn));
+                ++zi;
+            }
+        } else if (jf.contains("gpios") || jf.contains("gpio")) {
+            fan_cfg.zones.push_back(parse_zone(jf, "Zone 1"));   // legacy single-zone
+        }
+    }
+    sys::FanController cooling_fans(fan_cfg);
+    if (fan_cfg.enabled && !cooling_fans.start())
+        std::cerr << "[main] cooling fans unavailable (check fans.gpios / pin conflicts)\n";
 
     // ── Boop sensor (MPR121 capacitive over I²C) ─────────────────────────────
     // Per-zone user-facing config (expression, duration, sensitivity) lives in
@@ -9917,6 +11660,7 @@ int main(int argc, char* argv[]) {
         sched_events_path = jval(jsc, "events_path",     sched_events_path);
         sched_status_path = jval(jsc, "status_path",     sched_status_path);
         sched_lead_min    = jval(jsc, "lead_minutes",    sched_lead_min);
+        state.sched_send_link_startup = jval(jsc, "send_link_on_startup", false);
     }
 
     // KDE Connect bridge — RX phone notifications via DBus session bus.
@@ -9931,6 +11675,7 @@ int main(int argc, char* argv[]) {
         kdc_cfg.app_blocklist  = jk.value("app_blocklist",  kdc_cfg.app_blocklist);
         kdc_cfg.message_apps   = jk.value("message_apps",   kdc_cfg.message_apps);
         kdc_cfg.ignore_list    = jk.value("ignore_list",    kdc_cfg.ignore_list);
+        kdc_cfg.low_battery_pct= jk.value("low_battery_pct", kdc_cfg.low_battery_pct);
     }
 
     // Phone Inbox — watches a directory (default ~/Downloads) for files
@@ -11257,9 +13002,11 @@ int main(int argc, char* argv[]) {
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
 
-        // Preload any blink eye-region boxes from the face folder's config.json
+        // Preload any blink eye polygons from the face folder's config.json
         // (canvas coords) so the editor shows them and round-trips them on save.
-        std::vector<cv::Rect> eye_regions;
+        // Accepts the new {"points":[[x,y],...]} polygon form and the legacy
+        // {x,y,w,h} rectangle (promoted to a 4-corner polygon for editing).
+        std::vector<menu::FaceEditor::EyePoly> eye_polys;
         {
             const fs::path cfgp = fs::path(abs_path).parent_path() / "config.json";
             std::ifstream ef(cfgp);
@@ -11267,13 +13014,21 @@ int main(int argc, char* argv[]) {
                 try {
                     json ej; ef >> ej;
                     auto rd = [&](const char* k){
-                        if (ej.contains(k) && ej[k].is_object()) {
-                            const auto& d = ej[k];
-                            eye_regions.emplace_back(
-                                d.value("x", 0), d.value("y", 0),
-                                std::max(1, d.value("w", 1)),
-                                std::max(1, d.value("h", 1)));
+                        if (!ej.contains(k) || !ej[k].is_object()) return;
+                        const auto& d = ej[k];
+                        menu::FaceEditor::EyePoly poly;
+                        if (d.contains("points") && d["points"].is_array()) {
+                            for (const auto& pt : d["points"])
+                                if (pt.is_array() && pt.size() == 2)
+                                    poly.emplace_back(pt[0].get<int>(), pt[1].get<int>());
+                        } else {                              // legacy rectangle
+                            const int x = d.value("x", 0), y = d.value("y", 0);
+                            const int w = std::max(1, d.value("w", 1));
+                            const int h = std::max(1, d.value("h", 1));
+                            poly = { {x, y}, {x + w - 1, y},
+                                     {x + w - 1, y + h - 1}, {x, y + h - 1} };
                         }
+                        if (poly.size() >= 3) eye_polys.push_back(std::move(poly));
                     };
                     rd("eye_left"); rd("eye_right");
                 } catch (...) {}
@@ -11292,10 +13047,10 @@ int main(int argc, char* argv[]) {
             title, abs_path, cw, ch, std::move(covered), std::move(labels),
             zones.mirror_x,
             mode, {} /* default palette */,
-            std::move(eye_regions),
+            std::move(eye_polys),
             /* on_commit */ [&face_proxy, &native_ctrl, expression]
                 (const cv::Mat& rgba_canvas, const std::string& target_path,
-                 const std::vector<cv::Rect>& eye_regions) {
+                 const std::vector<menu::FaceEditor::EyePoly>& eye_polys) {
                 // Convert RGBA back to BGRA for cv::imwrite (PNG storage
                 // expects native channel order in OpenCV).
                 cv::Mat bgra;
@@ -11311,22 +13066,27 @@ int main(int argc, char* argv[]) {
                                  target_path.c_str());
                     return;
                 }
-                // Persist blink eye regions (canvas coords) into the face
+                // Persist blink eye polygons (canvas coords) into the face
                 // folder's config.json, merging so expressions/blink keys are
-                // preserved. The loader maps these onto each panel slice; a
-                // proper region blink only closes the eye(s) inside these boxes.
-                if (!eye_regions.empty()) {
+                // preserved. Stored as {"points":[[x,y],...]}; the loader fills
+                // each polygon to a mask so a region blink only closes the eye(s)
+                // inside the shape. Always rewrite both keys so clearing an eye
+                // (drawing fewer shapes) removes the stale one.
+                {
                     const std::filesystem::path cfgp =
                         std::filesystem::path(target_path).parent_path() / "config.json";
                     json ej = json::object();
                     { std::ifstream ef(cfgp);
                       if (ef) { try { ef >> ej; } catch (...) { ej = json::object(); } }
                       if (!ej.is_object()) ej = json::object(); }
-                    auto wr = [&](const char* k, const cv::Rect& r){
-                        ej[k] = {{"x", r.x}, {"y", r.y}, {"w", r.width}, {"h", r.height}};
+                    auto wr = [&](const char* k, const menu::FaceEditor::EyePoly& poly){
+                        json pts = json::array();
+                        for (const auto& p : poly) pts.push_back({p.x, p.y});
+                        ej[k] = {{"points", std::move(pts)}};
                     };
-                    wr("eye_left", eye_regions[0]);
-                    if (eye_regions.size() > 1) wr("eye_right", eye_regions[1]);
+                    ej.erase("eye_left"); ej.erase("eye_right");
+                    if (!eye_polys.empty())          wr("eye_left",  eye_polys[0]);
+                    if (eye_polys.size() > 1)        wr("eye_right", eye_polys[1]);
                     // draw_size lets single-panel faces scale regions; multi-
                     // panel slices use canvas coords directly (ignored there).
                     ej["draw_size"] = {rgba_canvas.cols, rgba_canvas.rows};
@@ -11507,6 +13267,43 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ── Optional button/switch coprocessor (input::CoprocInputs) ──────────────
+    // Opt-in: when inputs.coprocessor.enabled, an external MCU (RP2350/RP2040)
+    // debounces the switches and streams presses to the Pi over USB CDC (or
+    // I²C). Events resolve to the same input::GpioFunc dispatch as the GPIO
+    // slots, so it's additive (or, with replace_local_gpio, the only source).
+    // Reload + status are installed after gpio_dispatch exists (mirrors the
+    // GPIO poller's shared-after-construction pattern).
+    input::CoprocConfig coproc_cfg;
+    auto coproc_reload = std::make_shared<std::function<void()>>();
+    auto coproc_status = std::make_shared<std::function<std::string()>>();
+    if (cfg.contains("inputs") && cfg["inputs"].is_object() &&
+        cfg["inputs"].contains("coprocessor") &&
+        cfg["inputs"]["coprocessor"].is_object()) {
+        const json& jc = cfg["inputs"]["coprocessor"];
+        coproc_cfg.enabled            = jval(jc, "enabled", false);
+        coproc_cfg.transport          = jc.value("transport", coproc_cfg.transport);
+        coproc_cfg.device             = jc.value("device",    coproc_cfg.device);
+        coproc_cfg.baud               = jval(jc, "baud",      coproc_cfg.baud);
+        coproc_cfg.i2c_bus            = jc.value("i2c_bus",   coproc_cfg.i2c_bus);
+        coproc_cfg.i2c_addr           = jval(jc, "i2c_addr",  coproc_cfg.i2c_addr);
+        coproc_cfg.irq_gpio           = jval(jc, "irq_gpio",  coproc_cfg.irq_gpio);
+        coproc_cfg.replace_local_gpio = jval(jc, "replace_local_gpio", false);
+        coproc_cfg.heartbeat_timeout_ms =
+            jval(jc, "heartbeat_timeout_ms", coproc_cfg.heartbeat_timeout_ms);
+        if (jc.contains("buttons") && jc["buttons"].is_array()) {
+            for (const auto& jb : jc["buttons"]) {
+                if (!jb.is_object()) continue;
+                const int id = jval(jb, "id", -1);
+                if (id < 0) continue;
+                coproc_cfg.short_map[id] =
+                    input::gpio_func_from_id(jb.value("short", std::string("none")));
+                coproc_cfg.long_map[id] =
+                    input::gpio_func_from_id(jb.value("long",  std::string("none")));
+            }
+        }
+    }
+
     // KDE Connect lists — editable in the Phone menu, applied live to the bridge
     // and persisted to cfg["kdeconnect"]. ignore_list mutes servers/chats;
     // message_apps picks which apps get the big chat toast.
@@ -11537,6 +13334,16 @@ int main(int argc, char* argv[]) {
         kdc_msgapps = split_csv_vec(ms);
     }
 
+    // Expression-coupled effects flag (persisted under protoface). Applied to
+    // the native renderer now and toggled live from the effects menu.
+    bool pf_expr_effects = cfg.contains("protoface") && cfg["protoface"].is_object()
+        && cfg["protoface"].value("expression_effects", false);
+    if (native_ctrl) native_ctrl->set_expression_effects(pf_expr_effects);
+
+    // Effects Live Preview tick — populated inside build_menu, polled each frame.
+    auto pf_live_tick = std::make_shared<std::function<void()>>();
+    bool sched_link_pushed = false;   // one-shot guard for "send scheduler link on startup"
+
     MenuSystem menu(build_menu(&face_proxy, &xr, &cameras, &lora, &knob, &audio, state,
                                &android_mirror, &android_overlay_active,
                                &pip_overlay_cfg1, &pip_overlay_cfg2, &pip_overlay_cfg3,
@@ -11557,12 +13364,14 @@ int main(int argc, char* argv[]) {
                                cfg_map_dir,
                                &left_eye_src, &right_eye_src,
                                &multicam_layout, &multicam_usb_a, &multicam_usb_b,
+                               &multicam_top_a, &multicam_top_b,
                                &profiles, &hud_presets, &quick_items,
                                cfg_gifs_dir,
                                &bg_lib_ptr, cfg_bg_user_dir,
                                &boop_sensor_ptr,
                                audio.voice(),
                                &accessory_leds,
+                               &cooling_fans,
                                swap_backend, &pf_backend,
                                edit_face,
                                &pf_eye_layout, &pf_mouth_layout, &pf_nose_layout,
@@ -11592,6 +13401,11 @@ int main(int argc, char* argv[]) {
                                /* pf_set_effect_json */ [&](const nlohmann::json& spec){
                                    if (native_ctrl) native_ctrl->set_effect_json(spec);
                                },
+                               /* pf_set_expr_effects */ [&](bool v){
+                                   if (native_ctrl) native_ctrl->set_expression_effects(v);
+                               },
+                               /* pf_expr_effects_p */ &pf_expr_effects,
+                               /* pf_live_tick */ pf_live_tick,
                                /* cfg_root */ &cfg,
                                /* USB camera preview wiring */
                                &tex_usb1, &tex_usb2, &tex_usb3, &usb_preview_req,
@@ -11624,7 +13438,8 @@ int main(int argc, char* argv[]) {
                                },
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
                                &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr,
-                               &kdc_ignore, &kdc_msgapps));
+                               &kdc_ignore, &kdc_msgapps,
+                               &coproc_cfg.enabled, coproc_reload, coproc_status));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -11894,9 +13709,16 @@ int main(int argc, char* argv[]) {
         }
     };
 
+    // Local GPIO polling runs unless a coprocessor is enabled in replace mode
+    // (then the coproc is the sole button source).
+    auto local_gpio_wanted = [&]{
+        return gpio_inputs_enabled &&
+               !(coproc_cfg.enabled && coproc_cfg.replace_local_gpio);
+    };
+
     auto gpio_inputs = std::make_unique<input::GpioInputs>(
         std::vector<input::GpioPinCfg>(gpio_pins.begin(), gpio_pins.end()), gpio_dispatch);
-    if (gpio_inputs_enabled && !gpio_inputs->init())
+    if (local_gpio_wanted() && !gpio_inputs->init())
         std::cerr << "[main] GPIO input map init failed (no pins assigned or chip busy)\n";
 
     // Live reload: tear down the poll thread + release the lines, then rebuild
@@ -11906,10 +13728,32 @@ int main(int argc, char* argv[]) {
         gpio_inputs.reset();
         gpio_inputs = std::make_unique<input::GpioInputs>(
             std::vector<input::GpioPinCfg>(gpio_pins.begin(), gpio_pins.end()), gpio_dispatch);
-        if (gpio_inputs_enabled && !gpio_inputs->init())
+        if (local_gpio_wanted() && !gpio_inputs->init())
             std::cerr << "[main] GPIO reload: init failed (no pins assigned or chip busy)\n";
         else
             std::cout << "[gpio] input map reloaded\n";
+    };
+
+    // ── Button coprocessor source (optional, opt-in) ─────────────────────────
+    // Shares gpio_dispatch with the GPIO poller. Reload rebuilds it on a menu
+    // toggle; status surfaces the link state to the GPIO Buttons menu.
+    auto coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+    if (coproc_cfg.enabled && !coproc_inputs->init())
+        std::cerr << "[main] button coprocessor init failed (transport unavailable)\n";
+
+    *coproc_reload = [&]{
+        coproc_inputs.reset();
+        coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+        if (coproc_cfg.enabled && !coproc_inputs->init())
+            std::cerr << "[main] coprocessor reload: init failed (transport unavailable)\n";
+        // Re-evaluate the local poller — replace-mode may have just changed
+        // whether GPIO should be running.
+        if (gpio_reload && *gpio_reload) (*gpio_reload)();
+    };
+    *coproc_status = [&]() -> std::string {
+        if (!coproc_cfg.enabled)        return "disabled";
+        if (!coproc_inputs)             return "offline";
+        return coproc_inputs->connected() ? "connected" : "offline";
     };
 
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
@@ -12551,10 +14395,12 @@ int main(int argc, char* argv[]) {
 
         auto eye_src_str = [](EyeSource s) -> const char* {
             switch (s) {
-                case EyeSource::USB1: return "usb1";
-                case EyeSource::USB2: return "usb2";
-                case EyeSource::USB3: return "usb3";
-                default:              return "csi";
+                case EyeSource::USB1:      return "usb1";
+                case EyeSource::USB2:      return "usb2";
+                case EyeSource::USB3:      return "usb3";
+                case EyeSource::CSI_LEFT:  return "csi_left";
+                case EyeSource::CSI_RIGHT: return "csi_right";
+                default:                   return "csi";
             }
         };
         cfg["cameras"]["left_eye_source"]  = eye_src_str(left_eye_src);
@@ -12562,6 +14408,8 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["multicam_layout"]  = multicam_layout;
         cfg["cameras"]["multicam_usb_a"]   = eye_src_str(multicam_usb_a);
         cfg["cameras"]["multicam_usb_b"]   = eye_src_str(multicam_usb_b);
+        cfg["cameras"]["multicam_top_a"]   = eye_src_str(multicam_top_a);
+        cfg["cameras"]["multicam_top_b"]   = eye_src_str(multicam_top_b);
 
         auto& jm = cfg["menu_style"];
         jm["accent_color"]     = color_to_json(menu.accent_color());
@@ -12734,11 +14582,54 @@ int main(int argc, char* argv[]) {
         // Apply a pending window-mode change (Settings > Fullscreen / Frameless).
         if (state.win_mode_dirty.exchange(false))
             xr.apply_window_mode(state.win_fullscreen.load(), state.win_frameless.load());
+        if (state.win_resize_dirty.exchange(false)) {
+            const int rw = state.win_resize_w.load(), rh = state.win_resize_h.load();
+            if (rw > 0 && rh > 0 && xr.glfw_window())
+                glfwSetWindowSize(xr.glfw_window(), rw, rh);
+        }
 
         // ── Delta time ────────────────────────────────────────────────────────
         double now = glfwGetTime();
         float  dt  = static_cast<float>(now - prev_time);
         prev_time  = now;
+
+        // ── Feed IMU motion to the face (motion-reactive particle layers) ─────
+        // Snapshot under the lock, then push without it (face_proxy locks its
+        // own mutex). No-op unless a Protoface particle layer opted into motion.
+        {
+            double m_head, m_yaw, m_pitch, m_roll, m_accel;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                const auto& d = state.imu_data;
+                m_head  = state.imu_bno.heading_deg;
+                m_yaw   = d.bno_gyro_dps[2];          // yaw rate about vertical
+                m_roll  = d.bno_euler[1];
+                m_pitch = d.bno_euler[2];
+                m_accel = std::sqrt(d.bno_accel_g[0]*d.bno_accel_g[0] +
+                                    d.bno_accel_g[1]*d.bno_accel_g[1] +
+                                    d.bno_accel_g[2]*d.bno_accel_g[2]);
+            }
+            face_proxy.set_motion(m_head, m_yaw, m_pitch, m_roll, m_accel);
+        }
+
+        // Effects Live Preview — re-apply the builder spec on change (no-op
+        // unless the user enabled Live Preview in Face > Effects > Custom).
+        if (pf_live_tick && *pf_live_tick) (*pf_live_tick)();
+
+        // Scheduler "send link on startup": once both the daemon's URL and the
+        // phone are ready, push the web link over KDE Connect exactly once.
+        if (!sched_link_pushed && state.sched_send_link_startup &&
+            kdc_menu_ptr && kdc_menu_ptr->device_ready()) {
+            std::string url;
+            { std::lock_guard<std::mutex> lk(state.mtx); url = state.scheduler_status.web_url; }
+            if (!url.empty() && kdc_menu_ptr->send_ping("ProtoHUD scheduler: " + url)) {
+                sched_link_pushed = true;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App;
+                n.title = "Scheduler link sent"; n.body = url; n.auto_dismiss_s = 6.f;
+                state.notifs.push(std::move(n));
+            }
+        }
 
         // ── Notification log persistence (debounced, ~5s) ─────────────────────
         // Dirty on a new push (next_id) OR a delete/clear (size change).
@@ -12967,8 +14858,12 @@ int main(int argc, char* argv[]) {
             // forwarding while the editor owns the keyboard. Enter / Backspace
             // still work (paint / cancel).
             const bool editor_up = menu.is_face_editor_open();
-            if (key_pressed(ImGuiKey_Enter) ||
-                (!editor_up && key_pressed(ImGuiKey_RightArrow))) menu.select();
+            if (key_pressed(ImGuiKey_Enter)) {
+                if (ImGui::GetIO().KeyCtrl) menu.secondary();   // Ctrl+Select → settings
+                else                        menu.select();
+            } else if (!editor_up && key_pressed(ImGuiKey_RightArrow)) {
+                menu.select();
+            }
             if (key_pressed(ImGuiKey_Backspace) ||
                 (!editor_up && key_pressed(ImGuiKey_LeftArrow)))  menu.back();
             // Deep-menu tab switching (Tab / Shift+Tab).
@@ -13062,7 +14957,8 @@ int main(int argc, char* argv[]) {
         // even when no PiP is showing them. Fold that into the want flags so
         // the stream-lifecycle edge logic opens/closes them automatically.
         auto mc_needs = [&](EyeSource s){
-            return multicam_layout && (multicam_usb_a == s || multicam_usb_b == s);
+            return multicam_layout && (multicam_usb_a == s || multicam_usb_b == s ||
+                                       multicam_top_a == s || multicam_top_b == s);
         };
         bool want1 = (p1 || preview == 1 || mc_needs(EyeSource::USB1)) && !editor_open;
         bool want2 = (p2 || preview == 2 || mc_needs(EyeSource::USB2)) && !editor_open;
@@ -13632,21 +15528,22 @@ int main(int argc, char* argv[]) {
             // Bottom halves use height `top` and right halves width `rw` so an
             // odd fw/fh leaves no 1px seam between the quadrants.
 
-            // Top-left: CSI left (or right if swapped).
-            glViewport(0, top, hw, hh);
-            if (snap.cameras_swapped) cameras.draw_owl_right();
-            else                      cameras.draw_owl_left();
+            // Draw the chosen source into the current sub-viewport. Left/Right
+            // CSI are explicit (no global swap applied — the picker is explicit);
+            // USB sources blit their texture.
+            auto draw_src = [&](EyeSource s){
+                switch (s) {
+                    case EyeSource::CSI_LEFT:  cameras.draw_owl_left();  break;
+                    case EyeSource::CSI_RIGHT: cameras.draw_owl_right(); break;
+                    case EyeSource::CSI:       cameras.draw_owl_left();  break;
+                    default: cameras.draw_tex_fullscreen(usb_tex_for(s)); break;
+                }
+            };
 
-            // Top-right: CSI right (or left if swapped).
-            glViewport(hw, top, rw, hh);
-            if (snap.cameras_swapped) cameras.draw_owl_left();
-            else                      cameras.draw_owl_right();
-
-            // Bottom-left / bottom-right: selected USB cameras.
-            glViewport(0, 0, hw, top);
-            cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_a));
-            glViewport(hw, 0, rw, top);
-            cameras.draw_tex_fullscreen(usb_tex_for(multicam_usb_b));
+            glViewport(0,  top, hw, hh); draw_src(multicam_top_a);   // top-left
+            glViewport(hw, top, rw, hh); draw_src(multicam_top_b);   // top-right
+            glViewport(0,  0,   hw, top); draw_src(multicam_usb_a);  // bottom-left
+            glViewport(hw, 0,   rw, top); draw_src(multicam_usb_b);  // bottom-right
 
             // Restore full viewport so any later passes (post-process /
             // HUD overlays into this FBO) see the whole eye region.
@@ -13857,7 +15754,10 @@ int main(int argc, char* argv[]) {
             const float focus = std::atan2(region_cy - mcy, region_cx - mcx);
             const bool rotate = (mo.anchor_x < 0.35f || mo.anchor_x > 0.65f ||
                                  mo.anchor_y < 0.35f || mo.anchor_y > 0.65f);
-            menu.draw_radial(mcx, mcy, half, focus, rotate);
+            // Top-docked (minimap in the upper screen half) → flip wedge labels
+            // as one run so they read right-way-up; matches the info module.
+            const bool radial_top = mcy < dispH * 0.5f;
+            menu.draw_radial(mcx, mcy, half, focus, rotate, radial_top);
         } else {
             menu.draw(xr.eye_width(), xr.eye_height());
         }

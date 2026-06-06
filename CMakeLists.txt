@@ -190,6 +190,7 @@ set(SOURCES
     src/camera/viture_camera.cpp
     src/input/gpio_buttons.cpp
     src/input/gpio_inputs.cpp
+    src/input/coproc_inputs.cpp
     src/input/gamepad_input.cpp
     src/input/wireless_controller.cpp
     src/serial/serial_port.cpp
@@ -216,6 +217,7 @@ set(SOURCES
     src/accessory/led_strip.cpp
     src/accessory/accessory_leds.cpp
     src/sys/system_monitor.cpp
+    src/sys/fan_controller.cpp
     src/sys/scheduler_monitor.cpp
     src/net/wifi_monitor.cpp
     src/net/ping_monitor.cpp

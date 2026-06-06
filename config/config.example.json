@@ -151,6 +151,29 @@
       { "gpio": 22, "active_low": true, "pull": "up", "short": "cam_pip_left", "long": "system_restart", "long_ms": 1200 }
     ]
   },
+  "inputs": {
+    "coprocessor": {
+      "_about": "OPTIONAL button/switch coprocessor (RP2350/RP2040). When enabled, an external MCU debounces the switches and streams presses to the Pi, dispatched through the same functions as the GPIO map above. Never required — leave disabled to use on-board GPIO only. Toggle live in System > GPIO Buttons > Button Coprocessor. See docs/coprocessor-input.md.",
+      "enabled": false,
+      "transport": "usb_serial",
+      "_transport_note": "'usb_serial' (USB CDC, default) or 'i2c' (specified but not implemented in v1).",
+      "device": "/dev/serial/by-id/usb-ProtoHUD_Buttons-if00",
+      "_device_note": "Use a stable /dev/serial/by-id/... path matched on the coprocessor's USB serial string — NOT /dev/ttyACMn, which races with the Teensy/SmartKnob/RAK4631.",
+      "baud": 115200,
+      "i2c_bus": "/dev/i2c-1",
+      "i2c_addr": 66,
+      "irq_gpio": -1,
+      "replace_local_gpio": false,
+      "_replace_note": "false = additive (GPIO slots + coproc both fire). true = coproc is the only button source (local GPIO poller is not started).",
+      "heartbeat_timeout_ms": 2000,
+      "buttons": [
+        { "id": 0, "short": "menu_select", "long": "menu_back" },
+        { "id": 1, "short": "menu_open",   "long": "system_restart" },
+        { "id": 2, "short": "boop_snout",  "long": "none" }
+      ],
+      "_buttons_note": "Maps the coprocessor's button ids to functions (same function ids as gpio.pins). The MCU reports 'button N, short/long'; the Pi decides what N means, so remapping stays here."
+    }
+  },
   "camera": {
     "autofocus_on_startup": true,
     "autofocus_sync": true,
@@ -172,6 +195,10 @@
     "mode": "daemon",
     "_mode_values": "daemon | native",
     "autostart": true,
+    "expression_effects": false,
+    "_expression_effects_note": "When true, the active particle effect auto-swaps to a mood preset as the face expression changes (angry->fire, happy->celebration, sad->rain, shocked->galaxy); neutral/unmapped faces restore your chosen effect. Toggle live in Face > Effects > Expression Effects.",
+    "continuous_effects": false,
+    "_continuous_effects_note": "When true, a mirrored 2-eye face renders BOTH eyes independently (the second eye's face is flipped to keep the mirrored look) so canvas-space effects like 'water' form one continuous tank across the visor instead of one eye being a flipped copy. Costs a second face/particle render. Applied at startup.",
     "panel_driver": true,
     "_panel_driver_note": "native mode only: auto-launch scripts/panel_driver.py to drive the HUB75 panels. Set false for preview-only or if you run the driver yourself.",
     "_native_about": "native-mode options: assets_dir points at the Protoface checkout holding faces/materials/gifs (default $HOME/protohud/Protoface); panels overrides the default 2-panel mirrored layout.",
@@ -193,7 +220,9 @@
     "poll_interval_s": 20,
     "lead_minutes": 10,
     "all_day_reminder_hour": 8,
-    "web_port": 8770
+    "web_port": 8770,
+    "send_link_on_startup": false,
+    "_send_link_note": "When true, send a tappable notification with the scheduler web-page link to the paired phone over KDE Connect once at boot (after the daemon publishes its URL and the phone is connected) — it won't auto-open. Also available on demand via Info Panel > Schedule > Send Link to Phone."
   },
   "kdeconnect": {
     "_about": "Bridges phone notifications from KDE Connect (over LAN or USB tether) into the HUD's notification queue. Requires kdeconnectd running on the Pi and the phone paired via the KDE Connect Android/iOS app. Bridge is gated by libdbus-1-dev being available at build time; on platforms without DBus the section is silently ignored.",
@@ -205,7 +234,9 @@
     "message_apps": "Discord,Messages,Messenger,Signal,WhatsApp,Telegram,SMS,Slack",
     "_message_apps_note": "CSV of appName substrings treated as chat/DMs: these get a larger toast (sender as the title, message wrapped below) that stays up ~14 s so you can read who sent it and what it says.",
     "ignore_list": "",
-    "_ignore_list_note": "CSV of substrings matched against a notification's title + text (case-insensitive). Anything matching is dropped — use it to mute noisy Discord servers or group chats by name."
+    "_ignore_list_note": "CSV of substrings matched against a notification's title + text (case-insensitive). Anything matching is dropped — use it to mute noisy Discord servers or group chats by name. Communications > Phone (KDE Connect) > Ignore List groups the apps/senders the bridge has seen so you can mute them with one tap (muted rows show red).",
+    "low_battery_pct": 20,
+    "_low_battery_note": "Raise a one-shot HUD warning when the phone battery falls to/below this percent while discharging. 0 disables; it re-arms after the phone charges back above the threshold."
   },
   "phone_inbox": {
     "_about": "Watches a directory for files dropped in from the phone (KDE Connect's Share & Receive lands them in ~/Downloads by default). New face PNGs / GIFs surface an Import toast in the HUD; accept moves the file to <watch_dir>/.processed/, dismiss moves it to <watch_dir>/.dismissed/.",
@@ -246,6 +277,35 @@
     "anchor":    "bottom_left",
     "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
   },
+  "fans": {
+    "_about": "Pi-driven cooling fans via software PWM on GPIO (drive a 2-pin fan through a MOSFET, or a 4-pin fan's control line). Up to 4 fans grouped into 2 independently-controlled zones. Live controls in System > Cooling Fans. Use pins HUB75 doesn't claim — see hardware/carrier-board/PINMAP.md (e.g. BCM 18/19, and 14/15 if free).",
+    "enabled": false,
+    "pwm_hz": 100,
+    "min_duty": 0.2,
+    "_min_duty_note": "Fans stall below ~20% duty; this is the floor applied whenever a zone should be moving.",
+    "invert": false,
+    "temp_path": "/sys/class/thermal/thermal_zone0/temp",
+    "zones": [
+      {
+        "name": "Intake",
+        "gpios": [18],
+        "_gpios_note": "1-2 BCM lines per zone; all fans in a zone share the zone's speed.",
+        "mode": "auto",
+        "_mode_values": "manual | auto (ramps speed with CPU temp between auto_min_c/auto_max_c)",
+        "speed": 0.6,
+        "auto_min_c": 50.0,
+        "auto_max_c": 75.0
+      },
+      {
+        "name": "Exhaust",
+        "gpios": [19],
+        "mode": "manual",
+        "speed": 0.5,
+        "auto_min_c": 50.0,
+        "auto_max_c": 75.0
+      }
+    ]
+  },
   "mpu9250": {
     "_about": "HiLetgo GY-9250 / MPU-9250 backup compass via I2C. Wired to CM5 40-pin header: SDA=GPIO2(pin3), SCL=GPIO3(pin5), VCC=3.3V(pin1), GND(pin6). AD0 to GND for address 0x68.",
     "enabled": false,
@@ -261,7 +321,7 @@
   },
   "bno055": {
     "_about": "Adafruit BNO055 9-DOF absolute orientation sensor via I2C. On-chip sensor fusion — heading comes from the chip directly (no software AHRS needed) and stays stable through tilt. Preferred over MPU9250 when both are present (Auto IMU source picks BNO055 first). Wired to CM5 40-pin header: SDA=GPIO2(pin3), SCL=GPIO3(pin5), VCC=3.3V(pin1), GND(pin6). ADR pin floating/low = 0x28; ADR tied high = 0x29.",
-    "_clock_stretch_note": "The BNO055 stretches the I2C clock, which the Pi/RP1 hardware I2C handles poorly — it can read fine on an Arduino but be flaky/undetectable on the Pi. If `i2cdetect -y 1` doesn't show 28, or readings are unstable, slow the bus in /boot/firmware/config.txt: `dtparam=i2c_arm_baudrate=10000` (10 kHz). Alternatively use a software bus: `dtoverlay=i2c-gpio,bus=3,...` and set i2c_bus to /dev/i2c-3.",
+    "_clock_stretch_note": "The BNO055 stretches the I2C clock, which the Pi/RP1 hardware I2C handles poorly — it can read fine on an Arduino but be flaky/undetectable on the Pi. If `i2cdetect -y 1` doesn't show 28, or readings are unstable, slow the bus in /boot/firmware/config.txt: `dtparam=i2c_arm_baudrate=10000` (10 kHz). If I2C still won't work, switch to UART — set transport:'uart' (see _transport_note); this is Adafruit's recommended path on a Pi.",
     "enabled": true,
     "i2c_bus": "/dev/i2c-1",
     "i2c_addr": 40,
@@ -275,7 +335,11 @@
     "poll_hz": 50.0,
     "_poll_hz_note": "Sensor read rate. 50 Hz matches the chip's internal fusion rate; higher just resamples the same fused value.",
     "save_calibration": true,
-    "_save_calibration_note": "Persist the chip's calibration profile to bno055_calib.bin (next to this file) so it survives reboots. Restored automatically at startup; saved on demand via Compass > Save IMU Calibration, and auto-saved once the chip first reaches full calibration (sys 3/3) if no file exists yet. Calibrate by rotating the head through several orientations + a figure-8 for the magnetometer until all four values read 3."
+    "_save_calibration_note": "Persist the chip's calibration profile to bno055_calib.bin (next to this file) so it survives reboots. Restored automatically at startup; saved on demand via Compass > Save IMU Calibration, and auto-saved once the chip first reaches full calibration (sys 3/3) if no file exists yet. Calibrate by rotating the head through several orientations + a figure-8 for the magnetometer until all four values read 3.",
+    "transport": "i2c",
+    "_transport_note": "'i2c' (default) or 'uart'. UART sidesteps the Pi's I2C clock-stretch problem entirely (Adafruit's recommended path on a Pi). UART setup: (1) solder the PS1 jumper to 3.3V so the chip boots in UART mode (SCL/SDA become RX/TX); (2) wire BNO SDA(TX)->Pi RXD, SCL(RX)->Pi TXD, PS1->3.3V; (3) free the serial port: add 'enable_uart=1' to /boot/firmware/config.txt, disable the serial login console (raspi-config > Interface > Serial > login shell No) and 'sudo systemctl disable serial-getty@ttyAMA0'. On CM5/Pi5, prefer a dedicated RP1 UART via dtoverlay so you don't fight Bluetooth; set uart_device to that port.",
+    "uart_device": "/dev/ttyAMA0",
+    "uart_baud": 115200
   },
   "post_process": {
     "edge_enabled": false,

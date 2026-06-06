@@ -9,7 +9,12 @@
 #   scripts/restart.sh                 # stop everything, then start (direct)
 #   scripts/restart.sh --service       # ... start via systemd instead
 #   scripts/restart.sh --stop          # stop everything, don't start
+#   scripts/restart.sh --start         # start only, don't stop first
 #   scripts/restart.sh [config.json]   # direct launch with a specific config
+#
+# --stop then --start (instead of a plain restart) lets a caller slip work in
+# between — e.g. update.sh merges config defaults after the old instance has
+# exited (and written its config) but before the new one reads it.
 #
 # Run as root (e.g. from a GPIO handler), or as a user that owns the ProtoHUD
 # processes. systemd control uses `sudo -n systemctl restart protohud.service`,
@@ -93,17 +98,19 @@ start() {
 
 USE_SERVICE=0
 DO_START=1
+DO_STOP=1
 CONFIG=""
 for arg in "$@"; do
     case "${arg}" in
         --service)   USE_SERVICE=1 ;;
         --stop)      DO_START=0 ;;
-        -h|--help)   sed -n '2,16p' "$0"; exit 0 ;;
+        --start)     DO_STOP=0 ;;
+        -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
         -*)          log "unknown option: ${arg}"; exit 2 ;;
         *)           CONFIG="${arg}" ;;
     esac
 done
 
-stop_all
+[ "${DO_STOP}"  = "1" ] && stop_all
 [ "${DO_START}" = "1" ] && start "${CONFIG}"
 log "done"

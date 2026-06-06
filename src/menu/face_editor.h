@@ -31,12 +31,15 @@ public:
     enum class Tool : uint8_t { Pencil, Eraser, Bucket, Eyedrop, Line, Rect, EyeBox };
     static constexpr int kToolCount = 7;
 
-    // eye_regions are canvas-space boxes (one per eye) defining where a blink
-    // replaces the open eye with the blink art — authored with the EyeBox tool
-    // and round-tripped through the face folder's config.json.
+    // eye_regions are canvas-space closed polygons (one per eye) defining where
+    // a blink replaces the open eye with the blink art — authored point-by-point
+    // with the EyeBox tool and round-tripped through the face folder's
+    // config.json. Each inner vector is the ordered vertex list of one closed
+    // shape (the editor implicitly closes last→first).
+    using EyePoly  = std::vector<cv::Point>;
     using CommitFn = std::function<void(const cv::Mat& rgba_canvas,
                                         const std::string& abs_path,
-                                        const std::vector<cv::Rect>& eye_regions)>;
+                                        const std::vector<EyePoly>& eye_polys)>;
     using CancelFn = std::function<void()>;
     // Push the current canvas onto the physical panels as a transient face
     // for `duration_s` seconds — main.cpp wires this to
@@ -60,7 +63,7 @@ public:
               int mirror_axis_x,                          // canvas col index used by mirror brush; <0 → bbox centre
               Mode mode,
               std::vector<uint32_t> palette,    // 0xRRGGBB
-              std::vector<cv::Rect> eye_regions,// existing blink eye boxes (canvas px); empty = none
+              std::vector<EyePoly>  eye_polys,  // existing blink eye polygons (canvas px); empty = none
               CommitFn on_commit,
               CancelFn on_cancel = {},
               PreviewFn on_preview = {},
@@ -80,8 +83,8 @@ public:
     void cycle_palette(int dir);         // shoulder buttons / wheel scroll
     void set_tool(Tool t);               // P/E/B/I keys
     Tool tool()         const { return tool_; }
-    // Eye boxes authored this session (canvas px). Persisted by the caller on save.
-    const std::vector<cv::Rect>& eye_regions() const { return eye_regions_; }
+    // Eye polygons authored this session (canvas px). Persisted by the caller on save.
+    const std::vector<EyePoly>& eye_polys() const { return eye_polys_; }
     void set_brush_size(int radius);     // 0 = 1px, 1 = 3x3, 2 = 5x5
     int  brush_size()   const { return brush_size_; }
     void undo();
@@ -135,9 +138,14 @@ private:
     int  anchor_x_   = 0;
     int  anchor_y_   = 0;
 
-    // Blink eye boxes (canvas coords). Authored with Tool::EyeBox; preloaded
-    // from config.json on open() and handed back to the caller on save().
-    std::vector<cv::Rect> eye_regions_;
+    // Blink eye polygons (canvas coords). Authored with Tool::EyeBox; preloaded
+    // from config.json on open() and handed back to the caller on save(). Each
+    // entry is one closed shape's ordered vertices.
+    std::vector<EyePoly> eye_polys_;
+    // In-progress polygon being placed vertex-by-vertex with the EyeBox tool.
+    // Committed into eye_polys_ when the user clicks back on the first vertex
+    // (>= 3 points); cleared by back/undo/tool-change.
+    EyePoly eye_pts_;
 
     std::string title_;
     std::string abs_path_;

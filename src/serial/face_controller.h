@@ -63,6 +63,11 @@ public:
     virtual bool        import_face_image(const std::string& /*expression*/,
                                           const std::string& /*src_path*/) { return false; }
     virtual void        clear_face_image(const std::string& /*expression*/) {}
+    // Re-read the active face folder from disk and rebuild the loaders, so an
+    // out-of-band change to its PNGs or config.json (e.g. the Size & Position
+    // adjust writing a fit/scale/offset transform) takes effect live. No-op on
+    // backends without an on-disk face folder.
+    virtual void        reload_faces() {}
     // Set the active expression by name (mirror of set_face but by string).
     // Useful for the Files > Faces "Play" action where the index of a slot
     // isn't known statically.
@@ -88,6 +93,14 @@ public:
     // No-op on non-native backends — those run their own audio reactivity
     // on-device, if any.
     virtual void        set_audio_drive(double /*volume*/, double /*mouth_open*/) {}
+
+    // Push latest IMU motion (heading + yaw rate in deg/s, pitch/roll in deg,
+    // total accel in g) so motion-reactive particle layers can drift/skew with
+    // head movement. Native Protoface forwards to each panel's ParticleSystem;
+    // no-op elsewhere.
+    virtual void        set_motion(double /*heading_deg*/, double /*yaw_rate*/,
+                                   double /*pitch_deg*/, double /*roll_deg*/,
+                                   double /*accel_g*/) {}
 
     // Pick which viseme overlay (mouth_open / mouth_small / mouth_smile /
     // mouth_round) the FaceLoader blends at the mouth region. Driven by the
@@ -157,6 +170,7 @@ public:
         return (*active_)->import_face_image(e, s);
     }
     void clear_face_image(const std::string& e) override { (*active_)->clear_face_image(e); }
+    void reload_faces() override { (*active_)->reload_faces(); }
     void set_face_by_name(const std::string& e) override { (*active_)->set_face_by_name(e); }
     void trigger_boop(const std::string& e, double d) override { (*active_)->trigger_boop(e, d); }
     void play_eye_animation(int type, double speed, double size,
@@ -164,6 +178,9 @@ public:
         (*active_)->play_eye_animation(type, speed, size, r, g, b, dur);
     }
     void set_audio_drive(double v, double m) override { (*active_)->set_audio_drive(v, m); }
+    void set_motion(double hd, double yr, double pi, double ro, double ac) override {
+        (*active_)->set_motion(hd, yr, pi, ro, ac);
+    }
     void set_mouth_shape(const std::string& s) override { (*active_)->set_mouth_shape(s); }
     bool has_led_face_editor() const override { return (*active_)->has_led_face_editor(); }
     void set_active_layout_name(const std::string& n) override {

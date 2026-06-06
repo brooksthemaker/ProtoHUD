@@ -17,8 +17,9 @@ void BtMonitor::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
-// Parse "Device XX:XX:XX:XX:XX:XX Name" lines from bluetoothctl output.
-static std::vector<BtDevice> parse_devices(FILE* fp, bool connected) {
+// Parse "Device XX:XX:XX:XX:XX:XX Name" lines from bluetoothctl output. Flags
+// (connected/paired) are applied by the caller during the merge.
+static std::vector<BtDevice> parse_devices(FILE* fp) {
     std::vector<BtDevice> out;
     char line[256];
     while (fgets(line, sizeof(line), fp)) {
@@ -34,9 +35,8 @@ static std::vector<BtDevice> parse_devices(FILE* fp, bool connected) {
         std::string name(name_start);
         if (!name.empty() && name.back() == '\n') name.pop_back();
         BtDevice d;
-        d.mac       = mac;
-        d.name      = name.empty() ? mac : name;
-        d.connected = connected;
+        d.mac  = mac;
+        d.name = name.empty() ? mac : name;
         out.push_back(std::move(d));
     }
     return out;
@@ -44,27 +44,31 @@ static std::vector<BtDevice> parse_devices(FILE* fp, bool connected) {
 
 std::vector<BtDevice> BtMonitor::scan_devices() {
     std::vector<BtDevice> all;
-
-    // Connected devices
-    FILE* fp = popen("bluetoothctl devices Connected 2>/dev/null", "r");
-    if (fp) {
-        auto connected = parse_devices(fp, true);
-        pclose(fp);
-        all.insert(all.end(), connected.begin(), connected.end());
-    }
-
-    // Paired-but-not-connected devices (de-duplicate against already-connected MACs)
-    fp = popen("bluetoothctl devices Paired 2>/dev/null", "r");
-    if (fp) {
-        auto paired = parse_devices(fp, false);
-        pclose(fp);
-        for (auto& p : paired) {
-            bool dup = false;
-            for (const auto& a : all) if (a.mac == p.mac) { dup = true; break; }
-            if (!dup) all.push_back(std::move(p));
+    // Merge a bluetoothctl list into `all`, OR-ing the connected/paired flags
+    // onto an existing entry (same MAC) or appending a fresh one.
+    auto merge = [&](std::vector<BtDevice> list, bool set_conn, bool set_paired) {
+        for (auto& d : list) {
+            BtDevice* ex = nullptr;
+            for (auto& a : all) if (a.mac == d.mac) { ex = &a; break; }
+            if (ex) {
+                if (set_conn)   ex->connected = true;
+                if (set_paired) ex->paired    = true;
+            } else {
+                d.connected = set_conn;
+                d.paired    = set_paired;
+                all.push_back(std::move(d));
+            }
         }
-    }
-
+    };
+    FILE* fp = popen("bluetoothctl devices Connected 2>/dev/null", "r");
+    if (fp) { auto v = parse_devices(fp); pclose(fp); merge(std::move(v), true,  true);  }
+    fp = popen("bluetoothctl devices Paired 2>/dev/null", "r");
+    if (fp) { auto v = parse_devices(fp); pclose(fp); merge(std::move(v), false, true);  }
+    // All known devices — includes ones just discovered by a scan; these stay
+    // unpaired so the menu can offer to pair them (and the System panel hides
+    // discovered-only entries).
+    fp = popen("bluetoothctl devices 2>/dev/null", "r");
+    if (fp) { auto v = parse_devices(fp); pclose(fp); merge(std::move(v), false, false); }
     return all;
 }
 

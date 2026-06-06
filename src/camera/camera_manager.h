@@ -47,8 +47,10 @@ struct UsbCamConfig {
     float auto_brightness_target = 100.f; // target mean luma 0-255 (default ~39%)
 };
 
-// Which image source feeds a given eye.
-enum class EyeSource { CSI, USB1, USB2, USB3 };
+// Which image source feeds a given eye / a multi-cam quadrant. CSI is the
+// "this eye's own CSI" used by the per-eye pickers; CSI_LEFT / CSI_RIGHT name a
+// specific OWLsight camera and are used by the multi-cam quadrant pickers.
+enum class EyeSource { CSI, USB1, USB2, USB3, CSI_LEFT, CSI_RIGHT };
 
 // CameraManager owns:
 //   • Two DmaCamera instances (CSI cameras, default OWLsight) — zero-copy NV12 path

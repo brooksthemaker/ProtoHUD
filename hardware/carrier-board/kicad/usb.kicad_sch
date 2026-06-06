@@ -1,0 +1,22 @@
+(kicad_sch
+  (version 20230121)
+  (generator protohud_skeleton)
+  (uuid b12d177a-080c-49c4-8372-6cdd7e6e9f72)
+  (paper "A3")
+  (title_block
+    (title "ProtoHUD Carrier — 6. USB")
+    (rev "A")
+    (company "ProtoHUD")
+  )
+  (lib_symbols)
+  (text "6. USB" (at 25.4 25.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 3193b0e8-4c5d-4e47-a9dc-f34dbaad3676))
+  (text "------------------------------------------------------------" (at 25.4 28.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 67e7a66d-863c-455b-92a9-7deeb89c8786))
+  (text "USB — in-helmet hub + backpack uplink" (at 25.4 31.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 847dbf00-0954-4950-b349-1ec17a604469))
+  (text "Parts: USB2514B/2517 hub, J9 downstream ports (RP2350 audio / knob /" (at 25.4 34.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 675cf322-0b0f-4c46-a960-fcbd463f6509))
+  (text "  LoRa / VITURE / cams), J11 backpack USB uplink (phone->CM5, scrcpy/ADB)," (at 25.4 37.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 6d221679-f98e-4803-99e3-52b27cc6f246))
+  (text "  USBLC6 ESD on data pairs." (at 25.4 40.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid b78bbdb2-232a-4f71-b497-63031ac08b3c))
+  (text "Nets: CM5 USB D+/D-, VBUS.  J11 = dedicated CM5 host port (see CONNECTORS.md)." (at 25.4 43.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid ea99d92f-c975-41ba-9017-672c4a7f2c63))
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)

@@ -50,6 +50,16 @@ nlohmann::json effect_cfg_for_id(int id) {
 NativeFaceController::NativeFaceController(RenderConfig cfg,
                                           std::unique_ptr<PanelOutput> output)
     : cfg_(std::move(cfg)), output_(std::move(output)) {
+    // Default expression → mood-preset coupling (used when set_expression_effects
+    // is enabled). Keys match the face expression stems; values are presets in
+    // particles.cpp. An empty value (or missing key) means "show the base effect".
+    expr_effect_map_ = {
+        {"angry",     "fire"},
+        {"happy",     "celebration"},
+        {"sad",       "rain"},
+        {"shocked",   "galaxy"},
+        {"surprised", "galaxy"},
+    };
     build_panels();
 }
 
@@ -57,36 +67,54 @@ NativeFaceController::~NativeFaceController() { stop(); }
 
 void NativeFaceController::build_panels() {
     panels_.clear();
+    auto find_cfg = [&](const std::string& name) -> const PanelCfg* {
+        for (const auto& p : cfg_.panels) if (p.name == name) return &p;
+        return nullptr;
+    };
     for (const PanelCfg& pc : cfg_.panels) {
         Panel pn;
         pn.cfg = pc;
-        if (pc.mirror_of.empty()) {
-            pn.loader = std::make_unique<FaceLoader>(
-                cfg_.faces_dir + "/" + pc.face.active, pc.w, pc.h,
-                cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
-            pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
-            pn.state = std::make_unique<FaceState>(
-                pc.face, pn.loader->expression_names());
-            pn.material = load_material(pc.material.active, pc.w, pc.h,
-                                        pc.material.scroll_x, pc.material.scroll_y,
-                                        cfg_.materials_dir);
-            if (cfg_.effects_enabled) {
-                pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, pc.particles);
-                pn.particles_spec = pc.particles;
-            }
-            // GIFs play per physical panel (duplicated on each side) rather than
-            // stretched across the whole multi-panel canvas, so size the player
-            // to one physical panel when this is a one-logical-panel face.
-            int gw = pc.w, gh = pc.h;
-            if (!cfg_.output_panels.empty()) {
-                gw = cfg_.output_panels.front().w;
-                gh = cfg_.output_panels.front().h;
-            }
-            pn.gif = std::make_unique<GifPlayer>(gw, gh);
-            pn.material_spec  = pc.material.active;
-        } else {
-            pn.is_mirror = true;
+
+        // Decide the face/material/particles config source. Normally a panel is
+        // its own source; a mirror_of panel copies a flipped region. With
+        // continuous_effects on, un-mirror it: build a full self-rendering panel
+        // from the SOURCE's face config and flip just the face layer at render
+        // time, so canvas-space effects (water) stay continuous across eyes.
+        const PanelCfg* fc = &pc;
+        bool face_mirror = false;
+        if (!pc.mirror_of.empty()) {
+            const PanelCfg* src = cfg_.continuous_effects ? find_cfg(pc.mirror_of) : nullptr;
+            if (src) { fc = src; face_mirror = true; }
+            else     { pn.is_mirror = true; panels_.push_back(std::move(pn)); continue; }
         }
+
+        pn.loader = std::make_unique<FaceLoader>(
+            cfg_.faces_dir + "/" + fc->face.active, pc.w, pc.h,
+            cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
+        pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
+        pn.state = std::make_unique<FaceState>(
+            fc->face, pn.loader->expression_names());
+        pn.material = load_material(fc->material.active, pc.w, pc.h,
+                                    fc->material.scroll_x, fc->material.scroll_y,
+                                    cfg_.materials_dir);
+        if (cfg_.effects_enabled) {
+            pn.particles = std::make_unique<ParticleSystem>(pc.w, pc.h, fc->particles);
+            // Tell canvas-space effects (water) where this panel sits so a
+            // multi-panel face renders one continuous field.
+            pn.particles->set_canvas_geometry(cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
+            pn.particles_spec = fc->particles;
+        }
+        // GIFs play per physical panel (duplicated on each side) rather than
+        // stretched across the whole multi-panel canvas, so size the player
+        // to one physical panel when this is a one-logical-panel face.
+        int gw = pc.w, gh = pc.h;
+        if (!cfg_.output_panels.empty()) {
+            gw = cfg_.output_panels.front().w;
+            gh = cfg_.output_panels.front().h;
+        }
+        pn.gif = std::make_unique<GifPlayer>(gw, gh);
+        pn.material_spec = fc->material.active;
+        pn.face_mirror   = face_mirror;
         panels_.push_back(std::move(pn));
     }
     // Resolve mirror sources by panel name.
@@ -249,6 +277,12 @@ void NativeFaceController::render_thread() {
                     cv::Mat face_rgba = pn.loader->get_frame(*pn.state);
                     face_layer = apply_material(face_rgba, mat);
                 }
+
+                // continuous_effects un-mirror: flip just the face/GIF layer so
+                // the eye still reads mirrored, while the canvas-space particle
+                // layer (added below) renders un-flipped and stays continuous.
+                if (pn.face_mirror && !face_layer.empty())
+                    cv::flip(face_layer, face_layer, 1);
 
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
                 // Effects are suppressed while a GIF or eye animation plays —
@@ -713,7 +747,36 @@ void NativeFaceController::set_face_by_name(const std::string& expression) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_expression(expression);
+    current_expression_ = expression;
+    apply_expression_effect_locked(expression);
     save_state_locked();
+}
+
+void NativeFaceController::set_expression_effects(bool enabled) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    expr_effects_ = enabled;
+    if (enabled) {
+        apply_expression_effect_locked(current_expression_);
+    } else {
+        // Restore each panel's user-chosen base effect.
+        for (auto& pn : panels_)
+            if (pn.particles) pn.particles->set_effect(pn.particles_spec);
+    }
+}
+
+void NativeFaceController::apply_expression_effect_locked(const std::string& expr) {
+    if (!expr_effects_) return;
+    auto it = expr_effect_map_.find(expr);
+    const bool mapped = (it != expr_effect_map_.end() && !it->second.empty());
+    for (auto& pn : panels_) {
+        if (!pn.particles) continue;
+        if (mapped) {
+            nlohmann::json spec; spec["preset"] = it->second;
+            pn.particles->set_effect(spec);     // transient — leaves particles_spec (base) intact
+        } else {
+            pn.particles->set_effect(pn.particles_spec);   // neutral/unmapped → base
+        }
+    }
 }
 
 void NativeFaceController::trigger_boop(const std::string& expression, double duration_s) {
@@ -787,9 +850,23 @@ void NativeFaceController::set_wiggle(const WiggleCfg& w) {
 
 void NativeFaceController::set_audio_drive(double volume, double mouth_open) {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    for (auto& pn : panels_)
-        if (pn.state) pn.state->set_audio(volume, mouth_open);
+    for (auto& pn : panels_) {
+        if (pn.state)     pn.state->set_audio(volume, mouth_open);
+        if (pn.particles) pn.particles->set_audio(volume);   // audio-reactive layers
+    }
     // Transient — no persistence on every audio frame.
+}
+
+void NativeFaceController::set_motion(double heading_deg, double yaw_rate,
+                                      double pitch_deg, double roll_deg,
+                                      double accel_g) {
+    MotionInput m;
+    m.heading_deg = heading_deg; m.yaw_rate = yaw_rate;
+    m.pitch_deg = pitch_deg; m.roll_deg = roll_deg; m.accel_g = accel_g;
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.particles) pn.particles->set_motion(m);
+    // Transient — no persistence on every motion frame.
 }
 
 void NativeFaceController::set_mouth_shape(const std::string& shape) {

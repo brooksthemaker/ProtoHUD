@@ -273,11 +273,84 @@ Two interchangeable backends — Teensy (ProtoTracer) and Protoface Python daemo
 ### Effects (10 face animations)
 Idle, Blink, Angry, Happy, Sad, Shocked, Rainbow, Pulse, Wave, Custom
 
+### Layered Particle Effects (native Protoface)
+Composable, multi-layer particle compositor with per-layer color, density,
+speed, direction, and blend (add/normal). Primitives:
+`sparkle, embers, rain, snow, confetti, rings, fireflies, clouds, lightning,
+meteor, bubbles, fireworks, vortex, water`. Built-in presets include `fire,
+aurora, nebula, plasma, sonar, thunderstorm, arc, meteor_shower, fireworks,
+bubbles, vortex`, plus liquid palettes `water, lava, toxic, ocean, plasma_fluid,
+mercury`.
+
+- **Lightning** forks **random branches** (Branches density control); with
+  **Arc Mode** it becomes continuous crackling electrical arcs between drifting
+  points (the `arc` preset). Both are per-layer options in the builder.
+
+- **Water / liquid fill** — the face looks partially filled with a tinted liquid
+  (single colour or a deep→surface gradient, with Fill Level + Viscosity
+  controls). Modelled as a real fluid: a **damped-spring slosh** (it leans and
+  settles, overshooting like liquid in a container), **multi-frequency surface
+  waves**, a **sub-pixel anti-aliased surface** with a **specular sheen** and an
+  **edge meniscus**. The surface stays level in world space, so it **tilts as you
+  roll your head** and **sloshes** when the gyro/accel kicks — driven by the BNO055.
+  Rendered in **canvas space**, so a multi-panel face reads as one continuous
+  tank across the whole visor (set `protoface.continuous_effects` to make a
+  mirrored 2-eye face self-render both eyes so the tank is world-continuous
+  rather than a flipped copy). Optional **rising bubbles** (in the liquid) or
+  **drip droplets** (above the surface), and **pitch-driven fill** (look down →
+  the liquid rises). Use `blend:normal` for an opaque liquid or `add` for a
+  glowy lava/plasma look.
+- **Motion-reactive layers** — couple a layer's direction to the IMU: `heading`
+  (lock to compass), `yaw` (drift as you turn your head), or `tilt` (skew like
+  gravity when you roll). Fed live from the BNO055 each frame.
+- **Audio/motion-reactive density** — scale a layer's particle count from a live
+  signal via `intensity_from`: `audio` (mic level — pulses with sound),
+  `yaw_rate`, or `accel`. Audio rides the existing voice-analyzer path.
+- **Expression-coupled effects** — optional: the active effect auto-swaps to a
+  mood preset as the face changes (angry→fire, happy→celebration, sad→rain,
+  shocked→galaxy), restoring your chosen effect for neutral faces.
+- **Authoring** — the Effects menu opens to four pages: **Single Effects** (one
+  primitive at a time — Select applies it, **Ctrl+Select** opens its settings),
+  **Premade Effects** (curated combos with the recipe shown in the side panel;
+  Ctrl+Select saves a copy to Custom), **Custom** (the 5-layer builder with
+  per-layer Density/Speed/Direction/Motion/Blend, a **Live Preview** toggle that
+  applies edits to the panels continuously as you tweak — the sim updates in
+  place without resetting — plus Save As…/slots/Load/Delete/Export), and
+  **Random** (Surprise-Me generator with Save-to-Custom).
+  Presets persist under `cfg["protoface"]["custom_effects"]`.
+
 ### Material Colors (12)
 Default, Yellow, Orange, White, Green, Purple, Red, Blue, Rainbow, Flow Noise, H Rainbow, Black
 
 ### GIF Playback
 8 GIF slots (labels configurable via `serial.teensy.gif_names[]` in config)
+
+### Face Size & Position (per-face placement transform)
+Face Options → **Size & Position** scales/shifts the active face so art drawn
+for one panel size fits another, applied live:
+- **Fit Mode** — `stretch` (legacy fill, may distort), `contain` (aspect-fit +
+  letterbox), `cover` (aspect-fill + crop).
+- **Scale** (0.25–3.0×) extra uniform zoom; **Offset X/Y** (±128 px) shift.
+- Saved as `fit`/`scale`/`offset_x`/`offset_y` in the **face folder's
+  `config.json`**, so it travels with the face and applies to every expression.
+- Honored by `FaceLoader` on every backend/preview; eye/mouth blink regions
+  track the scale+offset. Legacy faces (no transform keys) render unchanged.
+- Faces are auto-tagged with their authored size (`draw_size`) on save, so the
+  loader knows the source resolution to scale from.
+
+### Blink Eye Regions (pixel editor)
+The face pixel editor's **Eye Region** tool (key `7`, MAX7219 / RGB-matrix
+backends) defines where a blink replaces the open eye:
+- Drawn as a **free-form closed polygon** — drop vertices point-by-point like the
+  line tool, then click the first vertex (ringed once ≥3 points) to close. Back/
+  Undo removes the last vertex. Mirror on → one shape sets both eyes.
+- Saved as `eye_left`/`eye_right` `{"points":[[x,y],...]}` in the face folder's
+  `config.json`; `FaceLoader` fills each polygon to a stencil so only pixels
+  inside the shape blink. Legacy `{x,y,w,h}` rectangles still load (and are shown
+  as editable 4-corner polygons).
+- Set regions are **always drawn** (cyan outline + faint fill + vertex dots),
+  whatever tool is active, so the eye/blink area is always visible.
+- The paint cursor has a dark halo outline so it stays visible over white pixels.
 
 ### Controls
 | Control | Range |
@@ -287,7 +360,7 @@ Default, Yellow, Orange, White, Green, Purple, Red, Blue, Rainbow, Flow Noise, H
 | Brightness | 0–255, step 5 |
 | Accent Brightness | 0–10 |
 | Face Size | 0–10 |
-| Fan Speed | 0–10 |
+| Fan Speed (Teensy face fan) | 0–10 |
 | Microphone | Toggle |
 | Mic Level | 0–10 |
 | Boop Sensor | Toggle |
@@ -295,6 +368,17 @@ Default, Yellow, Orange, White, Green, Purple, Red, Blue, Rainbow, Flow Noise, H
 
 - **Release Control** — relinquishes HUD control; Teensy resumes autonomous animation
 - **Panel Preview** — live 128×64 LED canvas as floating HUD window
+
+### Cooling Fans (Pi-driven PWM)
+Helmet cooling fans driven directly from the Pi GPIO via software PWM (2-pin fan
+through a MOSFET, or a 4-pin fan's control line) — **up to 4 fans grouped into 2
+independently-controlled zones** (e.g. intake / exhaust). Menu: **System →
+Cooling Fans** — global Enabled, then per-zone Mode (**Manual** fixed speed /
+**Auto** ramps with CPU temperature between configurable min/max), Speed
+(0–100%), and a live output/temp readout. Pins/behaviour in
+`config["fans"]["zones"]`; use GPIO clear of HUB75 (see
+`hardware/carrier-board/PINMAP.md`). Distinct from the Teensy face-fan control
+above.
 
 ---
 
@@ -397,6 +481,25 @@ Settings modified via the menu are persisted to config.json on exit.
 
 ## 14. Other Features
 
+### Phone Integration (KDE Connect)
+Built-in bridge over the DBus session bus (gated by `libdbus-1-dev`). All actions
+run on a single worker thread; missing plugins/devices just no-op. Lives under
+**Communications → Phone (KDE Connect)**.
+
+| Feature | Plugin | Notes |
+|---|---|---|
+| Notifications → toasts + log | notifications | Chat/DM apps get the big toast; `message_apps` / `app_blocklist` / `ignore_list` classify |
+| Reply / Dismiss / Dismiss All | notifications | Reply (messaging apps) via OSK; dismiss clears on the phone |
+| Battery + low-battery alert | battery | Pushed via `refreshed` signal (2 s poll backstop); one-shot warning at `low_battery_pct` |
+| Media control | mprisremote | Now-playing, Play/Pause/Next/Previous/Stop, Volume slider, Player picker |
+| Run commands | remotecommands | Lists the phone's saved commands; select to trigger |
+| Send SMS | sms | Number then message via OSK |
+| Cellular signal | connectivity_report | Network type + strength bars (menu readout) |
+| Ring / Mute Ringer | findmyphone / telephony | Ring plays the ringtone; mute silences a call (best-effort) |
+| Share files / URL / ping | share / ping | Send captures or a tappable notification to the phone |
+| Grouped mute picker | — | Apps→senders seen by the bridge; select to mute (rows turn **red**); free-text **Add Word**; **Unmute All** |
+| Phone Inbox | (file watch) | Watches `~/Downloads` for dropped face PNGs/GIFs → import toast |
+
 ### Timers & Alarms
 - Countdown timer: preset durations (5/10/30/60 min) or custom (0–99 min + 0–59 s)
 - Alarm: set by hour/minute, fires as a pulsing red edge gradient + toast with DISMISS action
@@ -405,6 +508,51 @@ Settings modified via the menu are persisted to config.json on exit.
 ### Software Updates (System → Software)
 - **Check for Updates** — runs `git fetch origin main`
 - **Pull & Rebuild** — runs `git pull` + `./scripts/build.sh`
+
+### In-HUD Updater (System → Updates)
+User-initiated branch-based updater. **ProtoHUD never auto-updates** — nothing
+fetches, builds, or restarts unless picked from this menu.
+- **Current Version** — current branch + short hash + commit subject, with a
+  status panel (behind-count, last-checked time).
+- **Check for Updates** — the only network step: `git fetch --prune origin`,
+  then reports how far behind the current branch is (no code changes).
+- **Update This Branch & Restart** — pulls + rebuilds + restarts the current
+  branch via `scripts/update.sh <branch> --restart`.
+- **Select Branch** — lists every branch on the repo via `git ls-remote`
+  (curated to `main` + `claude/*` by default, with a *Show All Branches*
+  toggle + *Refresh List*). Highlighting a branch shows a dated changelog
+  (`%h %ad %s`) plus how many commits it's ahead/behind in the context panel;
+  selecting it updates + restarts to it.
+- **Rollback Last Update** — restores the build + config saved just before the
+  last update (via `scripts/rollback.sh`). Visible only when a rollback point
+  exists.
+- **Update History** — reads `state/update/history.log` (newest first): when,
+  branch, `before..after` short hashes, and the new HEAD's subject.
+- **Settings & Data Safety** — in-menu explainer of what survives an update.
+
+**Settings & content protection (automatic on every update):**
+- `config/config.json` and user faces/effects live outside version control, so
+  git operations can't overwrite them.
+- `scripts/merge_config.py` deep-merges any new keys from `config.example.json`
+  into your `config.json` after an update — **existing values always win**;
+  lists (custom effects, fan zones) are kept verbatim. Run by `update.sh`
+  *after* the old instance has exited so its on-exit write can't clobber the
+  merge, and *before* the new build starts.
+- The Protoface submodule is updated (`git submodule update --init --recursive`,
+  no `--force`) so imported faces are never deleted.
+- `update.sh` records a rollback point (commit + config backup under
+  `state/update/`) before every update.
+
+**Standalone recovery** — `scripts/rollback.sh` works outside ProtoHUD (over
+SSH) if the HUD won't boot, and uses the same stop → restore-config → start
+ordering so the recovered config sticks:
+- `scripts/rollback.sh --restart` — return to the last known-good build + config
+- `scripts/rollback.sh <commit|branch>` — roll back to a specific ref
+- `scripts/rollback.sh --main` — last-resort hard reset to `origin/main`
+- `scripts/rollback.sh --list` — show the recorded rollback point
+
+**Policy:** there is no automatic update *checking* or *applying* — every step
+is user-initiated, by request.
 
 ### Demo Mode (System → Demo Mode)
 Test all notification types without hardware: Trigger Alarm, Trigger Timer Done, LoRa Message, App Toast, Toast Stack (×4), Clear All.
@@ -457,6 +605,7 @@ IMU-driven reprojection reduces rotational display latency from ~16 ms to ~4 ms 
 - **Haptic feedback for alerts** — use SmartKnob motor for a short pulse on alarm/timer fire or incoming LoRa message.
 - **Speaker/buzzer support** — play a short tone on alarm events via the ALSA audio path.
 - **Additional GPIO inputs** — extra buttons for dedicated functions (e.g. dedicated capture button, one-touch effect cycle).
+- **I/O expander support (buttons + LEDs)** — let `gpio.pins` slots target an MCP23017 (or similar) exposed as a `/dev/gpiochipN` via DT overlay: add an optional per-slot `"chip"` field so `input::GpioInputs` drives expander pins with no new handling code, plus a thin LED-output helper (libgpiod set-value / PCA9685 PWM). Hardware design in `hardware/carrier-board/IO-EXPANSION.md`.
 - **Rotary encoder for zoom** — second SmartKnob or simple encoder wired to digital zoom without entering the menu.
 
 ### System & Infrastructure

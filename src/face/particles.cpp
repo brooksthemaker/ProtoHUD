@@ -1,5 +1,7 @@
 #include "particles.h"
 
+#include <opencv2/imgproc.hpp>   // cv::line / cv::circle for line-based effects
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -124,7 +126,7 @@ inline void draw_rect(cv::Mat& c, double x, double y, int r, int g, int b,
 class BaseEffect {
 public:
     BaseEffect(int w, int h, json cfg)
-        : w_(w), h_(h), cfg_(std::move(cfg)),
+        : w_(w), h_(h), cw_(w), ch_(h), cfg_(std::move(cfg)),
           intensity_(jnum(cfg_, "intensity", 1.0)),
           rng_(static_cast<uint32_t>(
               std::chrono::steady_clock::now().time_since_epoch().count())) {}
@@ -132,9 +134,31 @@ public:
     virtual void update(double dt) = 0;
     virtual cv::Mat render() = 0;   // CV_8UC4
 
+    // Latest IMU / audio state, pushed each frame by the owning ParticleSystem.
+    // Effects read it through count()/direction_unit() when the cfg opts in.
+    void set_motion(const MotionInput& m) { motion_ = m; }
+    void set_audio(double level) { audio_ = level; }
+    // Swap in new params without recreating the effect — keeps the live particle
+    // sim (and motion/audio/canvas state) so menu edits preview without resetting.
+    void set_cfg(json cfg) { cfg_ = std::move(cfg); intensity_ = jnum(cfg_, "intensity", 1.0); }
+    void set_canvas_geometry(int cw, int ch, int ox, int oy) {
+        cw_ = cw; ch_ = ch; ox_ = ox; oy_ = oy;
+    }
+
 protected:
     int count(int def) const {
-        return std::max(1, static_cast<int>(jnum(cfg_, "count", def) * intensity_));
+        double scale = intensity_;
+        const std::string from = cfg_.value("intensity_from", std::string("none"));
+        if (from != "none") {
+            const double gain = jnum(cfg_, "motion_gain", 1.0);
+            if (from == "yaw_rate")
+                scale *= 1.0 + std::min(std::fabs(motion_.yaw_rate) / 90.0, 3.0) * gain;
+            else if (from == "accel")
+                scale *= 1.0 + std::min(std::fabs(motion_.accel_g - 1.0) * 4.0, 3.0) * gain;
+            else if (from == "audio")
+                scale *= 1.0 + std::min(audio_, 1.0) * 3.0 * gain;
+        }
+        return std::max(1, static_cast<int>(jnum(cfg_, "count", def) * scale));
     }
     void draw_particle(cv::Mat& c, const Particle& p, double alpha) {
         std::string shape = cfg_.value("shape", std::string("dot"));
@@ -147,7 +171,18 @@ protected:
     // 270° = up (screen-space, +Y down). default_deg lets each effect keep
     // its historical motion direction when no "direction_deg" override is set.
     void direction_unit(double& dx, double& dy, double default_deg) const {
-        const double deg = jnum(cfg_, "direction_deg", default_deg);
+        double deg = jnum(cfg_, "direction_deg", default_deg);
+        // Motion coupling (opt-in): "heading" locks the angle to the compass,
+        // "yaw" drifts it as you turn, "tilt" skews it like gravity when you
+        // roll your head. "motion_gain" scales the response.
+        const std::string from = cfg_.value("direction_from", std::string("none"));
+        if (from != "none") {
+            const double gain = jnum(cfg_, "motion_gain", 1.0);
+            if (from == "heading")   deg  = motion_.heading_deg;
+            else if (from == "yaw")  deg += motion_.yaw_rate * 0.5 * gain;
+            else if (from == "tilt") deg += motion_.roll_deg * 2.0 * gain;
+        }
+        deg += jnum(cfg_, "direction_offset_deg", 0.0);
         const double rad = deg * kPi / 180.0;
         dx = std::cos(rad);
         dy = std::sin(rad);
@@ -177,10 +212,13 @@ protected:
     }
 
     int w_, h_;
+    int cw_, ch_, ox_ = 0, oy_ = 0;   // full-canvas size + this panel's offset
     json cfg_;
     double intensity_;
     std::mt19937 rng_;
     std::vector<Particle> particles_;
+    MotionInput motion_{};
+    double audio_ = 0.0;
 };
 
 // ── Sparkle ──────────────────────────────────────────────────────────────────
@@ -280,14 +318,23 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        std::string shape = cfg_.value("shape", std::string("dot"));
+        // Embers render as little angled diamonds (45°) with a flicker spark
+        // above, which reads as natural fire far better than axis-aligned blocks.
         for (auto& p : particles_) {
-            double alpha = p.life;
-            int gr = (int)std::clamp(p.r, 0.0, 255.0);
-            int gg = (int)std::clamp(p.g * p.life, 0.0, 255.0);
-            int gb = (int)std::clamp(p.b * p.life * p.life, 0.0, 255.0);
-            if (shape == "rect") draw_rect(c, p.x, p.y, gr, gg, gb, alpha, p.size);
-            else                 draw_dot (c, p.x, p.y, gr, gg, gb, alpha, p.size);
+            const double alpha = p.life;
+            const int gr = (int)std::clamp(p.r, 0.0, 255.0);
+            const int gg = (int)std::clamp(p.g * p.life, 0.0, 255.0);
+            const int gb = (int)std::clamp(p.b * p.life * p.life, 0.0, 255.0);
+            const int A  = (int)std::clamp(alpha * 255.0, 0.0, 255.0);
+            const int rad = std::max(0, p.size - 1);          // size 1 = single pixel
+            const int ix = (int)p.x, iy = (int)p.y;
+            for (int dy = -rad; dy <= rad; ++dy)
+                for (int dx = -rad; dx <= rad; ++dx)
+                    if (std::abs(dx) + std::abs(dy) <= rad)    // diamond, not square
+                        draw_pixel(c, ix + dx, iy + dy, gr, gg, gb, A);
+            // flickering spark just above the ember (wobbles with its phase)
+            const int fx = (int)std::lround(std::sin(p.extra * 3.0) * 1.5);
+            draw_pixel(c, ix + fx, iy - rad - 1, 255, 230, 180, (int)(alpha * 200.0));
         }
         return c;
     }
@@ -619,6 +666,544 @@ private:
     std::vector<Clump> clumps_;
 };
 
+// ── Lightning ──────────────────────────────────────────────────────────────────
+// Jagged bolts that flash and fade, with random forked branches. "rate" ≈
+// strikes/sec; "branches" (0..1) sets fork density. With "arc": true it becomes
+// continuous crackling electrical arcs between drifting points ("count" arcs).
+class LightningEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const bool arc = cfg_.value("arc", false)
+                      || cfg_.value("mode", std::string("bolt")) == "arc";
+        if (arc) update_arcs(dt); else update_bolts(dt);
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (const auto& b : bolts_) {
+            const double a = b.arc ? b.alpha : std::clamp(b.life / b.max_life, 0.0, 1.0);
+            const int A = (int)std::clamp(a * 255.0, 0.0, 255.0);
+            for (const auto& stroke : b.strokes)
+                for (size_t i = 1; i < stroke.size(); ++i)
+                    cv::line(c, stroke[i-1], stroke[i],
+                             cv::Scalar(b.r, b.g, b.b, A), 1, cv::LINE_8);
+        }
+        return c;
+    }
+private:
+    struct Bolt {
+        std::vector<std::vector<cv::Point>> strokes;   // [0] = trunk, rest = branches
+        double life = 0, max_life = 1, alpha = 1.0;
+        int r = 255, g = 255, b = 255;
+        bool arc = false;
+        cv::Point a{0,0}, e{0,0};                       // arc endpoints
+        double relocate = 0.0, age = 0.0;
+    };
+    std::vector<Bolt> bolts_;
+    double timer_ = 0.0;
+
+    cv::Point rand_point() {
+        return cv::Point(irand(rng_, 0, std::max(0, w_ - 1)),
+                         irand(rng_, 0, std::max(0, h_ - 1)));
+    }
+    // A point on one of the screen edges — arcs anchored here read like a
+    // discharge jumping off a wire / between insulators.
+    cv::Point rand_edge_point() {
+        const int W = std::max(1, w_), H = std::max(1, h_);
+        switch (irand(rng_, 0, 3)) {
+            case 0:  return cv::Point(irand(rng_, 0, W - 1), 0);        // top
+            case 1:  return cv::Point(irand(rng_, 0, W - 1), H - 1);    // bottom
+            case 2:  return cv::Point(0,        irand(rng_, 0, H - 1)); // left
+            default: return cv::Point(W - 1,    irand(rng_, 0, H - 1)); // right
+        }
+    }
+    // Jagged polyline a→e with perpendicular jitter; randomly forks branches
+    // (up to 2 levels deep) into `strokes` with the trunk pushed first.
+    void build_strokes(cv::Point a, cv::Point e, int steps, double jit,
+                       double branch_prob, std::vector<std::vector<cv::Point>>& strokes,
+                       int depth) {
+        const double dxn = e.x - a.x, dyn = e.y - a.y;
+        const double len = std::hypot(dxn, dyn);
+        if (len < 1.0 || steps < 1) { strokes.push_back({a, e}); return; }
+        const double ux = dxn / len, uy = dyn / len;   // along
+        const double px = -uy, py = ux;                // perpendicular
+        std::vector<cv::Point> path;
+        std::vector<cv::Point> seeds;                  // branch start points
+        for (int i = 0; i <= steps; ++i) {
+            const double t = static_cast<double>(i) / steps;
+            const double off = (i == 0 || i == steps) ? 0.0 : frand(rng_, -jit, jit);
+            const int x = (int)std::lround(a.x + ux * len * t + px * off);
+            const int y = (int)std::lround(a.y + uy * len * t + py * off);
+            path.emplace_back(x, y);
+            if (depth < 2 && i > 0 && i < steps && frand(rng_, 0, 1) < branch_prob)
+                seeds.emplace_back(x, y);
+        }
+        strokes.push_back(std::move(path));            // trunk first
+        for (const auto& s : seeds) {
+            const double bang = std::atan2(uy, ux) + frand(rng_, -1.0, 1.0);
+            const double blen = len * frand(rng_, 0.18, 0.42);
+            const cv::Point bend((int)std::lround(s.x + std::cos(bang) * blen),
+                                 (int)std::lround(s.y + std::sin(bang) * blen));
+            build_strokes(s, bend, std::max(3, steps / 2), jit * 0.7,
+                          branch_prob * 0.5, strokes, depth + 1);
+        }
+    }
+    void update_bolts(double dt) {
+        for (auto& b : bolts_) b.life -= dt;
+        bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(),
+            [](const Bolt& b){ return b.arc || b.life <= 0; }), bolts_.end());
+        timer_ -= dt;
+        if (timer_ > 0) return;
+        const double rate = std::max(0.05, jnum(cfg_, "rate", 1.0) * intensity_);
+        timer_ = frand(rng_, 0.4, 1.6) / rate;
+        double dx, dy; direction_unit(dx, dy, 90.0);   // default fall = down
+        Bolt b;
+        b.max_life = b.life = frand(rng_, 0.10, 0.22);
+        const Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{180, 210, 255};
+        b.r = col.r; b.g = col.g; b.b = col.b;
+        double sx, sy; direction_spawn_point(0.0, 90.0, sx, sy);
+        const double L = std::max(w_, h_) * 1.4;
+        const cv::Point a((int)sx, (int)sy);
+        const cv::Point e((int)(sx + dx * L), (int)(sy + dy * L));
+        build_strokes(a, e, irand(rng_, 8, 14), jnum(cfg_, "jitter", 6.0),
+                      jnum(cfg_, "branches", 0.35), b.strokes, 0);
+        bolts_.push_back(std::move(b));
+    }
+    void update_arcs(double dt) {
+        bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(),
+            [](const Bolt& b){ return !b.arc; }), bolts_.end());   // drop leftover bolts
+        const int want = std::max(1, count(2));        // fewer, deliberate arcs
+        while (static_cast<int>(bolts_.size()) < want) {
+            Bolt b; b.arc = true;
+            const Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{150, 200, 255};
+            b.r = col.r; b.g = col.g; b.b = col.b;
+            b.a = rand_edge_point(); b.e = rand_edge_point();   // both ends on edges
+            b.relocate = frand(rng_, 0.6, 1.8);                  // re-strike interval
+            bolts_.push_back(std::move(b));
+        }
+        while (static_cast<int>(bolts_.size()) > want) bolts_.pop_back();
+        const double jit = jnum(cfg_, "jitter", 5.0);
+        const double bp  = jnum(cfg_, "branches", 0.30);
+        for (auto& b : bolts_) {
+            b.age += dt;
+            b.alpha = frand(rng_, 0.55, 1.0);          // electrical flicker
+            if (b.age >= b.relocate) {                 // re-strike: jump an endpoint to a new edge
+                b.age = 0.0; b.relocate = frand(rng_, 0.6, 1.8);
+                if (irand(rng_, 0, 1)) b.e = rand_edge_point(); else b.a = rand_edge_point();
+            }
+            b.strokes.clear();                         // regenerate each frame → crackle
+            build_strokes(b.a, b.e, irand(rng_, 6, 12), jit, bp, b.strokes, 0);
+        }
+    }
+};
+
+// ── Meteor / shooting stars ─────────────────────────────────────────────────────
+// Fast streaks with a fading tail along their velocity. Directional (default
+// down-right); "tail" sets streak length.
+class MeteorEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        for (auto& p : particles_) {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                return !(p.x > -8 && p.x < w_ + 8 && p.y > -8 && p.y < h_ + 8 && p.life > 0);
+            }), particles_.end());
+        while ((int)particles_.size() < count(8)) {
+            double dx, dy; direction_unit(dx, dy, 30.0);     // default down-right
+            const double spd = pick_speed(cfg_, 40, 80, rng_);
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{200, 220, 255};
+            Particle p;
+            direction_spawn_point(8.0, 30.0, p.x, p.y);
+            p.vx = spd * dx; p.vy = spd * dy;
+            p.max_life = pick_life(cfg_, 0.6, 1.4, rng_); p.life = 1;
+            p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 2, rng_);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        const double tail = jnum(cfg_, "tail", 6.0);
+        for (const auto& p : particles_) {
+            const double a = std::clamp(p.life, 0.0, 1.0);
+            const double sp = std::hypot(p.vx, p.vy);
+            if (sp < 1e-3) continue;
+            const cv::Point head((int)p.x, (int)p.y);
+            const cv::Point back((int)(p.x - p.vx / sp * tail),
+                                 (int)(p.y - p.vy / sp * tail));
+            cv::line(c, back, head, cv::Scalar(p.r * 0.4, p.g * 0.4, p.b * 0.4, (int)(a*160)),
+                     1, cv::LINE_8);
+            draw_dot(c, p.x, p.y, p.r, p.g, p.b, a, p.size + 1);
+        }
+        return c;
+    }
+};
+
+// ── Bubbles ─────────────────────────────────────────────────────────────────────
+// Rising wobbling rings that grow and pop near the top. Directional (default up).
+class BubblesEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        double dx, dy; direction_unit(dx, dy, 270.0);        // default up
+        for (auto& p : particles_) {
+            p.extra += dt * 3.0;
+            const double wob = std::sin(p.extra) * jnum(cfg_, "wobble", 6.0);
+            p.x += (p.vy * dx) * dt + wob * dt;
+            p.y += (p.vy * dy) * dt;
+            p.size = (int)std::min(6.0, p.size + dt * 1.5);   // grow as they rise
+            p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                return !(p.x > -8 && p.x < w_ + 8 && p.y > -8 && p.y < h_ + 8 && p.life > 0);
+            }), particles_.end());
+        while ((int)particles_.size() < count(14)) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{160, 220, 255};
+            Particle p;
+            direction_spawn_point(2.0, 270.0, p.x, p.y);
+            p.vy = pick_speed(cfg_, 8, 18, rng_);
+            p.max_life = pick_life(cfg_, 1.5, 3.5, rng_); p.life = 1;
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = pick_size(cfg_, 2, 4, rng_); p.extra = frand(rng_, 0, kTau);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (const auto& p : particles_) {
+            const int A = (int)std::clamp(p.life * 200.0, 0.0, 255.0);
+            cv::circle(c, {(int)p.x, (int)p.y}, std::max(1, p.size),
+                       cv::Scalar(p.r, p.g, p.b, A), 1, cv::LINE_8);
+            draw_pixel(c, (int)p.x - 1, (int)p.y - 1, 255, 255, 255, (int)(A * 0.7));  // glint
+        }
+        return c;
+    }
+};
+
+// ── Fireworks ───────────────────────────────────────────────────────────────────
+// Rockets launch from the bottom and burst into a radial spark shower with
+// gravity. "count" ≈ concurrent rockets; "burst" = sparks per explosion.
+class FireworksEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const double grav = jnum(cfg_, "gravity", 26.0);
+        for (auto& p : particles_) {
+            p.vy += grav * dt;
+            p.x += p.vx * dt; p.y += p.vy * dt;
+            p.life -= dt / p.max_life;
+            if (p.extra > 0.5 && p.vy >= 0) { p.extra = -1.0; explode(p); }  // apex → burst
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){ return p.life <= 0 || p.y > h_ + 6; }), particles_.end());
+        int rockets = 0;
+        for (const auto& p : particles_) if (p.extra > 0.5) ++rockets;
+        if (rockets < count(2) && frand(rng_, 0, 1) < 0.06) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{255, 220, 120};
+            Particle r;
+            r.x = frand(rng_, w_ * 0.2, w_ * 0.8); r.y = h_;
+            // Panel-relative launch: pick an apex height inside the panel so the
+            // burst is always visible (apex = where vy crosses 0). v = sqrt(2gh).
+            const double rise = h_ * frand(rng_, 0.45, 0.72);
+            r.vy = -std::sqrt(2.0 * grav * std::max(4.0, rise));
+            r.vx = frand(rng_, -3, 3);
+            r.r = col.r; r.g = col.g; r.b = col.b; r.size = 1;
+            r.max_life = 4.0; r.life = 1; r.extra = 1.0;   // >0.5 == rocket
+            particles_.push_back(r);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (const auto& p : particles_) {
+            const double a = (p.extra > 0.5) ? 1.0 : std::clamp(p.life, 0.0, 1.0);
+            draw_dot(c, p.x, p.y, p.r, p.g, p.b, a, p.size);
+        }
+        return c;
+    }
+private:
+    void explode(Particle& rocket) {
+        const int n = jint(cfg_, "burst", 22);
+        // Scale the burst radius to the panel so the shower stays on-screen.
+        const double vmax = jnum(cfg_, "burst_speed", std::min(w_, h_) * 0.45);
+        for (int i = 0; i < n; ++i) {
+            const double ang = kTau * i / n + frand(rng_, -0.1, 0.1);
+            const double spd = frand(rng_, vmax * 0.4, vmax);
+            Particle s;
+            s.x = rocket.x; s.y = rocket.y;
+            s.vx = std::cos(ang) * spd; s.vy = std::sin(ang) * spd;
+            s.r = rocket.r; s.g = rocket.g; s.b = rocket.b; s.size = 1;
+            s.max_life = frand(rng_, 0.5, 1.1); s.life = 1; s.extra = 0.0;  // spark
+            particles_.push_back(s);
+        }
+    }
+};
+
+// ── Vortex ──────────────────────────────────────────────────────────────────────
+// Particles orbit the centre while spiralling inward, like a swirling drain.
+// "swirl" sets angular speed; negative "infall" spirals outward instead.
+class VortexEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const double swirl  = jnum(cfg_, "swirl", 2.2);
+        const double infall = jnum(cfg_, "infall", 6.0);
+        for (auto& p : particles_) {
+            p.extra += swirl * dt;          // angle
+            p.vy    -= infall * dt;         // radius
+            p.life  -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [](const Particle& p){ return p.life <= 0 || p.vy <= 1.0; }), particles_.end());
+        // Span the whole canvas (reaches the corners) so it's not a small blob
+        // stuck in the middle. cw_/ch_ default to this panel when no canvas set.
+        const double maxr = jnum(cfg_, "max_radius", std::hypot(cw_, ch_) * 0.55);
+        while ((int)particles_.size() < count(60)) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{120, 180, 255};
+            Particle p;
+            p.extra = frand(rng_, 0, kTau);                 // angle
+            p.vy    = frand(rng_, maxr * 0.30, maxr);       // radius (reuse vy)
+            p.max_life = pick_life(cfg_, 1.5, 3.5, rng_); p.life = 1;
+            p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 2, rng_);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        // Centre on the whole canvas; render this panel's slice (continuous
+        // across a multi-panel face). Each particle is a comet: a rounded, bright
+        // head that tapers along its trailing arc into a thin fading tail. Drawn
+        // as a chain of anti-aliased circles (head → tail), each smaller/dimmer.
+        const double cx = cw_ * 0.5, cy = ch_ * 0.5;
+        const double swirl   = jnum(cfg_, "swirl", 2.2);
+        const double tailLen = std::clamp(0.30 + swirl * 0.08, 0.15, 1.1);  // tail arc span
+        const int    N       = 8;
+        for (const auto& p : particles_) {
+            const double a = p.extra, r = p.vy;
+            const double life = std::clamp(p.life, 0.0, 1.0);
+            const double headRad = std::max(1.0, static_cast<double>(p.size) + 1.0);
+            for (int k = N - 1; k >= 0; --k) {          // tail first → head drawn on top
+                const double t   = static_cast<double>(k) / (N - 1);   // 0 head … 1 tail
+                const double aa  = a - tailLen * t;
+                const double rr  = r * (1.0 + 0.12 * t);               // tail trails outward
+                const double x   = cx + std::cos(aa) * rr - ox_;
+                const double y   = cy + std::sin(aa) * rr - oy_;
+                const int    rad = (int)std::lround(headRad * (1.0 - 0.80 * t));  // taper
+                const int    A   = (int)std::clamp(life * std::pow(1.0 - t, 1.6) * 255.0,
+                                                   0.0, 255.0);
+                if (A <= 2) continue;
+                cv::circle(c, {(int)std::lround(x), (int)std::lround(y)}, std::max(0, rad),
+                           cv::Scalar(p.r, p.g, p.b, A), -1, cv::LINE_AA);
+            }
+            // Bright leading core for a little glow at the head.
+            const double hx = cx + std::cos(a) * r - ox_;
+            const double hy = cy + std::sin(a) * r - oy_;
+            cv::circle(c, {(int)std::lround(hx), (int)std::lround(hy)},
+                       std::max(0, (int)std::lround(headRad * 0.5)),
+                       cv::Scalar(std::min(255.0, p.r + 90.0), std::min(255.0, p.g + 90.0),
+                                  std::min(255.0, p.b + 90.0), life * 255.0),
+                       -1, cv::LINE_AA);
+        }
+        return c;
+    }
+};
+
+// ── Water / liquid fill ─────────────────────────────────────────────────────────
+// The panel looks partially filled with a liquid. The surface stays level in
+// world space — so it tilts on the panel as you roll your head (motion_.roll_deg)
+// — and sloshes when the gyro/accel kicks (motion_.yaw_rate / accel_g). Multiple
+// "colors" form a deep→surface gradient. Best with "blend":"normal" (opaque
+// liquid); use "add" for a glowy lava/plasma look.
+//   level (0..1) fill fraction · alpha · tilt_gain · slosh (px) · wave_count
+//   · wave_speed · viscosity (0..1 thicker=sluggish) · pitch_fill (head pitch
+//   shifts level) · bubbles (count) · bubble_mode ("rise" in liquid | "drip"
+//   droplets above the surface)
+class WaterEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        if (dt <= 0.0) return;
+        dt = std::min(dt, 0.05);   // clamp big frame gaps so the slosh solver stays stable
+        // viscosity 0 = thin/snappy water, 1 = thick/sluggish (lags + resists slosh).
+        const double v = std::clamp(jnum(cfg_, "viscosity", 0.3), 0.0, 1.0);
+        if (!tilt_init_) {
+            tilt_smooth_  = motion_.roll_deg;
+            pitch_smooth_ = motion_.pitch_deg;
+            tilt_init_ = true;
+        }
+        // The "resting" lean follows head roll (gravity); a thicker liquid lags.
+        const double rate = std::min(1.0, dt * 6.0 * (1.0 - 0.85 * v));
+        tilt_smooth_  += (motion_.roll_deg  - tilt_smooth_)  * rate;
+        pitch_smooth_ += (motion_.pitch_deg - pitch_smooth_) * rate;
+
+        // Sloshing as a damped spring: slosh_x_ is the extra height (px) the
+        // fluid piles up at the right wall; it overshoots and settles like a
+        // real liquid. Driven by quick tilts, yaw rate and linear accel.
+        const double k = 34.0 * (1.0 - 0.45 * v);     // stiffness → slosh frequency
+        const double c = 5.0 + 14.0 * v;              // damping → thicker settles faster
+        const double drive = (motion_.roll_deg - tilt_smooth_) * 0.9
+                           + motion_.yaw_rate * 0.025
+                           + (motion_.accel_g - 1.0) * 7.0;
+        const double accel = -k * slosh_x_ - c * slosh_v_ + drive * (h_ * 0.02);
+        slosh_v_ += accel * dt;
+        slosh_x_  = std::clamp(slosh_x_ + slosh_v_ * dt, -h_ * 0.5, h_ * 0.5);
+
+        phase_ += jnum(cfg_, "wave_speed", 2.0) * (1.0 - 0.6 * v) * dt;   // travelling ripple
+        // Surface chop scales with how hard it's sloshing, plus a faint idle ripple.
+        const double target = (0.25 + std::min(2.0, std::fabs(slosh_v_) * 0.06))
+                            * (1.0 - 0.55 * v);
+        amp_ += (target - amp_) * std::min(1.0, dt * 4.0);
+
+        update_bubbles(dt);
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        const std::vector<Color> cols = read_colors();
+        const double alpha = std::clamp(jnum(cfg_, "alpha", 0.85), 0.0, 1.0);
+        const double bottom = ch_ - 1;                 // canvas-space deepest row
+        for (int lx = 0; lx < w_; ++lx) {
+            const double sy = surface_y_local(lx) + oy_;    // canvas-space surface (float)
+            const double span = std::max(1.0, bottom - sy);
+            for (int ly = 0; ly < h_; ++ly) {
+                const double Y = oy_ + ly;              // top edge of this pixel
+                // Sub-pixel coverage: how much of this pixel sits below the
+                // surface. Soft top edge → no cartoony stair-stepping.
+                const double cover = std::clamp((Y + 1.0) - sy, 0.0, 1.0);
+                if (cover <= 0.0) continue;
+                const double depth = std::clamp((Y - sy) / span, 0.0, 1.0);
+                Color col = sample_grad(cols, depth);
+                // Specular sheen: lighten the first few px under the surface so it
+                // catches the light like a real meniscus, fading with depth.
+                const double sheen = std::exp(-std::max(0.0, Y - sy) / 2.2) * 0.55;
+                col.r = (int)std::lround(col.r + (255 - col.r) * sheen);
+                col.g = (int)std::lround(col.g + (255 - col.g) * sheen);
+                col.b = (int)std::lround(col.b + (255 - col.b) * sheen);
+                draw_pixel(c, lx, ly, col.r, col.g, col.b,
+                           (int)std::lround(alpha * 255.0 * cover));
+            }
+        }
+        render_bubbles(c, cols, (int)(alpha * 255.0));
+        return c;
+    }
+private:
+    // Effective fill fraction — base level shifted by smoothed pitch (look
+    // down → liquid rises) when pitch_fill is set.
+    double level_eff() const {
+        return std::clamp(jnum(cfg_, "level", 0.40)
+                          + jnum(cfg_, "pitch_fill", 0.0) * (pitch_smooth_ / 45.0),
+                          0.0, 1.0);
+    }
+    // Local surface row at local column lx, computed in canvas space (so the
+    // tank is continuous across panels) then shifted into this panel's frame.
+    double surface_y_local(double lx) const {
+        const double base  = ch_ * (1.0 - level_eff());
+        const double ccx   = cw_ * 0.5;
+        const double half  = std::max(1.0, cw_ * 0.5);
+        const double waven = jnum(cfg_, "wave_count", 2.0);
+        const double gain  = jnum(cfg_, "tilt_gain", 1.0);
+        const double roll  = tilt_smooth_ * gain * kPi / 180.0;
+        const double X     = ox_ + lx;
+        const double dx    = X - ccx;
+        // gravity lean (roll) + dynamic slosh lean (the fluid piled up at a wall)
+        double syc = base - dx * std::tan(std::clamp(roll, -1.2, 1.2))
+                          - slosh_x_ * (dx / half);
+        // Multi-frequency travelling chop — superposed waves read as real water
+        // instead of one cartoony sine. Amplitude follows slosh activity (amp_).
+        const double kf = waven * kTau / std::max(1, cw_);
+        syc += amp_ * (0.60 * std::sin(kf * X        + phase_)
+                     + 0.30 * std::sin(kf * X * 1.7  - phase_ * 1.3 + 1.1)
+                     + 0.22 * std::sin(kf * X * 0.5  + phase_ * 0.6 + 2.3));
+        // Meniscus: the surface curls up where it meets the container walls.
+        const double menisc = jnum(cfg_, "meniscus", 1.5);
+        if (menisc > 0.0) {
+            const double dl = X, dr = (cw_ - 1) - X;
+            syc -= menisc * (std::exp(-dl / 2.5) + std::exp(-dr / 2.5));
+        }
+        return syc - oy_;
+    }
+    void update_bubbles(double dt) {
+        const int want = jint(cfg_, "bubbles", 0);
+        if (want <= 0) { bubbles_.clear(); return; }
+        const bool drip = (cfg_.value("bubble_mode", std::string("rise")) == "drip");
+        const double spd = jnum(cfg_, "bubble_speed", drip ? 16.0 : 12.0);
+        for (auto& b : bubbles_) {
+            b.extra += dt * 2.0;
+            if (!drip) b.x += std::sin(b.extra) * 6.0 * dt;      // bubbles wobble as they rise
+            b.y += (drip ? spd : -spd) * dt;
+            const double sy = surface_y_local(b.x);
+            if (drip ? (b.y >= sy) : (b.y <= sy)) b.life = 0;    // hit surface → gone/pop
+        }
+        bubbles_.erase(std::remove_if(bubbles_.begin(), bubbles_.end(),
+            [&](const Particle& b){
+                return b.life <= 0 || b.x < -2 || b.x > w_ + 2 || b.y < -4 || b.y > h_ + 4;
+            }), bubbles_.end());
+        int guard = 0;
+        while ((int)bubbles_.size() < want && guard++ < want * 3) {
+            const double bx = frand(rng_, 0, w_ - 1);
+            const double sy = surface_y_local(bx);
+            Particle p; p.x = bx; p.size = irand(rng_, 1, 2);
+            p.extra = frand(rng_, 0, kTau); p.life = 1;
+            if (drip) {
+                if (sy <= 1.0) continue;                          // no room above the liquid here
+                p.y = frand(rng_, 0.0, std::max(1.0, sy - 1.0));
+            } else {
+                if (sy >= h_ - 1.0) continue;                     // no liquid in this column
+                p.y = frand(rng_, sy + 1.0, static_cast<double>(h_));
+            }
+            bubbles_.push_back(p);
+        }
+    }
+    void render_bubbles(cv::Mat& c, const std::vector<Color>& cols, int A) {
+        if (bubbles_.empty()) return;
+        const bool drip = (cfg_.value("bubble_mode", std::string("rise")) == "drip");
+        const Color base = cols.front();
+        const Color bcol{ std::min(255, base.r + 110), std::min(255, base.g + 110),
+                          std::min(255, base.b + 110) };
+        for (const auto& b : bubbles_) {
+            if (drip) {                                           // droplet above the surface
+                draw_dot(c, b.x, b.y, bcol.r, bcol.g, bcol.b, 0.85, b.size);
+            } else {                                              // bubble ring inside the liquid
+                cv::circle(c, {(int)b.x, (int)b.y}, std::max(1, b.size),
+                           cv::Scalar(bcol.r, bcol.g, bcol.b, std::min(255, A + 30)),
+                           1, cv::LINE_8);
+            }
+        }
+    }
+    std::vector<Color> read_colors() const {
+        std::vector<Color> v;
+        auto it = cfg_.find("colors");
+        if (it != cfg_.end() && it->is_array() && !it->empty()) {
+            for (const auto& c : *it)
+                if (c.is_array() && c.size() >= 3)
+                    v.push_back({ c[0].get<int>(), c[1].get<int>(), c[2].get<int>() });
+        } else {
+            auto c = cfg_.find("color");
+            if (c != cfg_.end() && c->is_array() && c->size() >= 3)
+                v.push_back({ (*c)[0].get<int>(), (*c)[1].get<int>(), (*c)[2].get<int>() });
+        }
+        if (v.empty()) { v.push_back({120, 220, 255}); v.push_back({0, 80, 200}); }
+        return v;
+    }
+    static Color sample_grad(const std::vector<Color>& v, double f) {
+        if (v.size() == 1) return v[0];
+        f = std::clamp(f, 0.0, 1.0);
+        const double pos = f * (v.size() - 1);
+        const int i = (int)pos;
+        if (i >= (int)v.size() - 1) return v.back();
+        const double t = pos - i;
+        return { (int)std::lround(v[i].r + (v[i+1].r - v[i].r) * t),
+                 (int)std::lround(v[i].g + (v[i+1].g - v[i].g) * t),
+                 (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
+    }
+    double phase_ = 0.0, amp_ = 0.0;
+    double tilt_smooth_ = 0.0, pitch_smooth_ = 0.0;
+    double slosh_x_ = 0.0, slosh_v_ = 0.0;   // damped-spring slosh (lean px + velocity)
+    bool   tilt_init_ = false;
+    std::vector<Particle> bubbles_;
+};
+
 // ── Effect factory ───────────────────────────────────────────────────────────
 
 std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, const json& cfg) {
@@ -630,6 +1215,12 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "rain")      return std::make_unique<RainEffect>(w, h, cfg);
     if (name == "fireflies") return std::make_unique<FirefliesEffect>(w, h, cfg);
     if (name == "clouds")    return std::make_unique<CloudsEffect>(w, h, cfg);
+    if (name == "lightning") return std::make_unique<LightningEffect>(w, h, cfg);
+    if (name == "meteor")    return std::make_unique<MeteorEffect>(w, h, cfg);
+    if (name == "bubbles")   return std::make_unique<BubblesEffect>(w, h, cfg);
+    if (name == "fireworks") return std::make_unique<FireworksEffect>(w, h, cfg);
+    if (name == "vortex")    return std::make_unique<VortexEffect>(w, h, cfg);
+    if (name == "water")     return std::make_unique<WaterEffect>(w, h, cfg);
     return nullptr;
 }
 
@@ -645,15 +1236,15 @@ const std::map<std::string, json>& presets() {
           "party": {"effect":"confetti","count":35,"colors":[[255,50,50],[255,180,30],[50,220,50],[50,150,255],[220,50,220],[255,255,50]],"speed_min":6,"speed_max":10,"blend":"normal"},
           "radar": {"effect":"rings","count":2,"colors":[[0,255,80]],"speed_min":12,"speed_max":18,"max_radius":25,"blend":"add"},
           "fire": {"layers":[
-            {"effect":"embers","count":35,"colors":[[255,50,0],[220,60,0],[200,40,0]],"speed_min":8,"speed_max":20,"size_min":1,"size_max":2,"blend":"add"},
-            {"effect":"embers","count":15,"colors":[[255,160,0],[255,200,20],[255,180,10]],"speed_min":18,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
+            {"effect":"embers","count":35,"colors":[[255,50,0],[220,60,0],[200,40,0]],"speed_min":8,"speed_max":20,"size_min":2,"size_max":3,"blend":"add"},
+            {"effect":"embers","count":15,"colors":[[255,160,0],[255,200,20],[255,180,10]],"speed_min":18,"speed_max":40,"size_min":1,"size_max":2,"blend":"add"},
             {"effect":"sparkle","count":5,"colors":[[255,255,200],[255,240,180]],"life_min":0.05,"life_max":0.12,"blend":"add"}]},
           "aurora": {"layers":[
             {"effect":"fireflies","count":20,"colors":[[0,200,180],[0,160,255],[0,220,200]],"speed_min":3,"speed_max":6,"blend":"add"},
             {"effect":"sparkle","count":10,"colors":[[100,255,220],[80,220,255]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
           "blizzard": {"layers":[
-            {"effect":"snow","count":40,"colors":[[180,200,255],[200,215,255],[220,230,255]],"speed_min":18,"speed_max":35,"drift_x":4.0,"blend":"add"},
-            {"effect":"rain","count":10,"colors":[[160,190,255],[180,200,255]],"speed_min":50,"speed_max":70,"drift_x":6.0,"blend":"add"}]},
+            {"effect":"snow","count":70,"colors":[[210,225,255],[235,245,255]],"speed_min":35,"speed_max":55,"drift_x":1.5,"direction_deg":118,"blend":"add"},
+            {"effect":"snow","count":45,"colors":[[235,245,255],[255,255,255]],"speed_min":55,"speed_max":85,"drift_x":2.0,"direction_deg":113,"size_min":1,"size_max":1,"blend":"add"}]},
           "sonar": {"layers":[
             {"effect":"rings","count":2,"colors":[[0,220,180],[0,200,160]],"speed_min":12,"speed_max":16,"max_radius":28,"blend":"add"},
             {"effect":"fireflies","count":4,"colors":[[0,255,200]],"speed_min":1,"speed_max":3,"blend":"add"}]},
@@ -664,6 +1255,37 @@ const std::map<std::string, json>& presets() {
             {"effect":"embers","count":30,"colors":[[0,180,255],[0,140,220],[20,160,255]],"speed_min":8,"speed_max":20,"blend":"add"},
             {"effect":"embers","count":12,"colors":[[180,220,255],[200,240,255]],"speed_min":20,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
             {"effect":"rings","count":1,"colors":[[0,200,255]],"speed_min":10,"speed_max":15,"max_radius":15,"blend":"add"}]},
+          "rain": {"effect":"rain","count":35,"colors":[[120,150,220],[150,180,255]],"speed_min":45,"speed_max":70,"drift_x":1.5,"blend":"add"},
+          "water": {"effect":"water","level":0.42,"alpha":0.85,"slosh":6,"wave_count":2,"wave_speed":2.0,"pitch_fill":0.25,"bubbles":8,"bubble_mode":"rise","colors":[[120,220,255],[0,110,210],[0,40,120]],"blend":"normal"},
+          "lava": {"effect":"water","level":0.36,"alpha":0.95,"slosh":4,"wave_count":2,"wave_speed":1.3,"viscosity":0.6,"colors":[[255,230,120],[255,90,0],[150,20,0]],"blend":"normal"},
+          "toxic": {"effect":"water","level":0.40,"alpha":0.9,"slosh":7,"wave_count":3,"wave_speed":2.4,"bubbles":12,"bubble_mode":"rise","colors":[[210,255,120],[60,200,0],[15,110,0]],"blend":"normal"},
+          "ocean": {"effect":"water","level":0.52,"alpha":0.85,"slosh":8,"wave_count":3,"wave_speed":1.8,"colors":[[90,235,225],[0,130,170],[0,40,90]],"blend":"normal"},
+          "plasma_fluid": {"effect":"water","level":0.40,"alpha":0.9,"slosh":6,"wave_count":2,"colors":[[255,130,255],[150,0,200],[40,0,80]],"blend":"normal"},
+          "mercury": {"effect":"water","level":0.36,"alpha":0.96,"slosh":3,"wave_count":2,"viscosity":0.7,"colors":[[235,240,250],[120,130,150],[55,60,75]],"blend":"normal"},
+          "thunderstorm": {"layers":[
+            {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":55,"speed_max":80,"drift_x":3.0,"blend":"add"},
+            {"effect":"lightning","rate":0.7,"branches":0.45,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},
+          "arc": {"effect":"lightning","arc":true,"count":2,"branches":0.35,"jitter":5,"colors":[[160,200,255],[210,225,255],[120,170,255]],"blend":"add"},
+          "meteor_shower": {"layers":[
+            {"effect":"meteor","count":7,"colors":[[200,220,255],[255,240,200],[180,220,255]],"speed_min":45,"speed_max":85,"tail":7,"direction_deg":25,"blend":"add"},
+            {"effect":"sparkle","count":18,"colors":[[255,255,255],[200,220,255]],"life_min":0.3,"life_max":1.0,"blend":"add"}]},
+          "fireworks": {"effect":"fireworks","count":3,"burst":24,"colors":[[255,80,80],[80,180,255],[255,220,80],[180,80,255],[80,255,160]],"blend":"add"},
+          "bubbles": {"effect":"bubbles","count":16,"colors":[[160,220,255],[120,200,255],[200,240,255]],"speed_min":8,"speed_max":18,"wobble":7,"blend":"add"},
+          "vortex": {"layers":[
+            {"effect":"vortex","count":70,"swirl":2.6,"infall":7,"colors":[[0,220,255],[0,255,200],[120,90,255],[200,80,255],[60,140,255]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
+          "vortex_ember": {"layers":[
+            {"effect":"vortex","count":70,"swirl":2.6,"infall":7,"colors":[[255,220,80],[255,140,0],[255,70,0],[210,40,20],[255,180,40]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[255,240,200]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
+          "vortex_toxic": {"layers":[
+            {"effect":"vortex","count":70,"swirl":2.6,"infall":7,"colors":[[210,255,120],[120,255,40],[40,200,0],[0,160,60],[160,255,80]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[230,255,200]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
+          "vortex_rose": {"layers":[
+            {"effect":"vortex","count":70,"swirl":2.6,"infall":7,"colors":[[255,120,200],[255,60,140],[210,40,255],[150,60,255],[255,150,230]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[255,230,245]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
+          "vortex_rainbow": {"layers":[
+            {"effect":"vortex","count":80,"swirl":2.6,"infall":7,"colors":[[255,60,60],[255,170,0],[80,230,40],[0,210,255],[120,90,255],[230,80,230]],"blend":"add"},
+            {"effect":"sparkle","count":8,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
           "nebula": {"layers":[
             {"effect":"clouds","count":4,"size_min":10,"size_max":18,"lobes_min":3,"lobes_max":6,"turbulence":0.55,"churn":0.3,"alpha_min":0.18,"alpha_max":0.4,"speed_min":0.5,"speed_max":1.8,"colors":[[150,40,140],[90,60,200],[40,90,200]],"blend":"add"},
             {"effect":"clouds","count":5,"size_min":5,"size_max":9,"lobes_min":2,"lobes_max":4,"turbulence":0.8,"churn":0.5,"alpha_min":0.15,"alpha_max":0.4,"speed_min":1.5,"speed_max":4.0,"colors":[[220,80,170],[60,160,200],[120,80,210]],"blend":"add"},
@@ -716,14 +1338,25 @@ json resolve_cfg(const json& cfg) {
 struct ParticleLayer {
     std::unique_ptr<BaseEffect> effect;
     Blend blend = Blend::Add;
+    std::string name = "none";
 
     ParticleLayer(const json& layer_cfg, int w, int h) {
         blend = (layer_cfg.value("blend", std::string("add")) == "add") ? Blend::Add : Blend::Normal;
-        std::string name = layer_cfg.value("effect", std::string("none"));
+        name = layer_cfg.value("effect", std::string("none"));
         if (name != "none") effect = make_effect(name, w, h, layer_cfg);
     }
     void update(double dt) { if (effect) effect->update(dt); }
     cv::Mat render()       { return effect ? effect->render() : cv::Mat(); }
+    void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
+    void set_audio(double level)          { if (effect) effect->set_audio(level); }
+    void set_canvas_geometry(int cw, int ch, int ox, int oy) {
+        if (effect) effect->set_canvas_geometry(cw, ch, ox, oy);
+    }
+    // In-place param update (same effect) — keeps the running sim.
+    void update_cfg(const json& layer_cfg) {
+        blend = (layer_cfg.value("blend", std::string("add")) == "add") ? Blend::Add : Blend::Normal;
+        if (effect) effect->set_cfg(layer_cfg);
+    }
 };
 
 } // namespace
@@ -733,22 +1366,60 @@ struct ParticleLayer {
 struct ParticleSystem::Impl {
     int w, h;
     std::vector<ParticleLayer> layers;
+    MotionInput motion{};   // latest IMU state, re-applied to rebuilt layers
+    double audio = 0.0;     // latest mic level, re-applied to rebuilt layers
+    int cw, ch, ox = 0, oy = 0;   // canvas geometry, re-applied to rebuilt layers
 
     void build(const json& cfg) {
         layers.clear();
         json resolved = resolve_cfg(cfg);
-        for (auto& lc : resolved["layers"]) layers.emplace_back(lc, w, h);
+        for (auto& lc : resolved["layers"]) {
+            layers.emplace_back(lc, w, h);
+            layers.back().set_motion(motion);
+            layers.back().set_audio(audio);
+            layers.back().set_canvas_geometry(cw, ch, ox, oy);
+        }
+    }
+    // Update params in place when the layer structure (count + effect names) is
+    // unchanged, so live edits don't reset the particle sim. Returns false (→
+    // caller rebuilds) when the structure differs.
+    bool try_update(const json& cfg) {
+        json resolved = resolve_cfg(cfg);
+        const auto& nl = resolved["layers"];
+        if (nl.size() != layers.size()) return false;
+        for (size_t i = 0; i < layers.size(); ++i)
+            if (nl[i].value("effect", std::string("none")) != layers[i].name) return false;
+        for (size_t i = 0; i < layers.size(); ++i) layers[i].update_cfg(nl[i]);
+        return true;
     }
 };
 
 ParticleSystem::ParticleSystem(int width, int height, const json& cfg)
     : impl_(std::make_unique<Impl>()) {
     impl_->w = width; impl_->h = height;
+    impl_->cw = width; impl_->ch = height;   // default canvas = this panel (per-panel)
     impl_->build(cfg);
 }
 ParticleSystem::~ParticleSystem() = default;
 
-void ParticleSystem::set_effect(const json& cfg) { impl_->build(cfg); }
+void ParticleSystem::set_effect(const json& cfg) {
+    if (!impl_->try_update(cfg)) impl_->build(cfg);   // in-place when structure matches
+}
+
+void ParticleSystem::set_canvas_geometry(int canvas_w, int canvas_h, int off_x, int off_y) {
+    impl_->cw = canvas_w; impl_->ch = canvas_h; impl_->ox = off_x; impl_->oy = off_y;
+    for (auto& l : impl_->layers) l.set_canvas_geometry(canvas_w, canvas_h, off_x, off_y);
+}
+
+void ParticleSystem::set_motion(const MotionInput& m) {
+    impl_->motion = m;
+    for (auto& l : impl_->layers) l.set_motion(m);
+}
+
+void ParticleSystem::set_audio(double level) {
+    impl_->audio = level;
+    for (auto& l : impl_->layers) l.set_audio(level);
+}
 
 void ParticleSystem::update(double dt) {
     for (auto& l : impl_->layers) l.update(dt);

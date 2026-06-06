@@ -240,6 +240,22 @@ void HudRenderer::load(void* glfw_window) {
     // Load a small UI font; fall back to default if not found
     ImFontConfig fc;
     fc.OversampleH = 2; fc.OversampleV = 2;
+    // Without an explicit glyph range ImGui only rasterizes Basic Latin +
+    // Latin-1, so the typographic punctuation/symbols used throughout the menu
+    // copy (… — · • ✕ ✉ → ▶ ▰ ▱ …) fall back to the missing-glyph box / "?".
+    // DejaVuSans has them all — pull in the extra Unicode blocks we actually use.
+    static const ImWchar kMenuRanges[] = {
+        0x0020, 0x00FF,   // Basic Latin + Latin-1 Supplement
+        0x2000, 0x206F,   // General Punctuation (… — ‘ ’ “ ” • ·)
+        0x2190, 0x21FF,   // Arrows (← ↑ → ↓)
+        0x2200, 0x22FF,   // Mathematical Operators (× ÷ ≈)
+        0x2300, 0x23FF,   // Misc Technical (⌚ ⏱)
+        0x25A0, 0x25FF,   // Geometric Shapes (▶ ◀ ■ ▰ ▱ ●)
+        0x2600, 0x26FF,   // Misc Symbols
+        0x2700, 0x27BF,   // Dingbats (✕ ✉ ✓ ✦)
+        0,
+    };
+    fc.GlyphRanges = kMenuRanges;
     font_ui_ = io.Fonts->AddFontFromFileTTF(
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         16.f * cfg_.scale, &fc);
@@ -519,67 +535,96 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         const float a0  = (dock_left ? -35.f : 145.f) * DEG;
         const float a1  = (dock_left ?  35.f : 215.f) * DEG;
 
-        // Draw one gauge arc (dark track + coloured fill + a short value label).
+        // Date-label styling shared by every gauge label (matches the minimap
+        // clock's date arc: small UI font + crisp outline).
+        const float lbl_scale = std::max(0.6f, s.clock_cfg.font_scale);
+        const float lbl_sz    = 11.f * lbl_scale * 0.82f;
+
+        // Draw one gauge arc (dark track + coloured fill) with its value label
+        // floated just past the TOP end of the arc, styled like the date label.
         auto gauge = [&](float r, float ga0, float ga1, float v01,
-                         NVGcolor fill, const char* label, bool known) {
+                         NVGcolor fill, const char* label, bool known, float thick) {
             nvgLineCap(vg, NVG_ROUND);
             nvgBeginPath(vg);
             nvgArc(vg, cx, cy, r, ga0, ga1, NVG_CW);
             nvgStrokeColor(vg, nvgRGBA(40, 48, 56, 200));
-            nvgStrokeWidth(vg, 8.f);
+            nvgStrokeWidth(vg, thick);
             nvgStroke(vg);
             if (known) {
                 v01 = std::clamp(v01, 0.f, 1.f);
                 nvgBeginPath(vg);
                 nvgArc(vg, cx, cy, r, ga0, ga0 + (ga1 - ga0) * v01, NVG_CW);
                 nvgStrokeColor(vg, fill);
-                nvgStrokeWidth(vg, 8.f);
+                nvgStrokeWidth(vg, thick);
                 nvgStroke(vg);
             }
             nvgLineCap(vg, NVG_BUTT);
-            nvg_set_font_mono(10.f);
-            nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-            const float lblx = cx + std::cos(ga0) * (r - 8.f);
-            const float lbly = cy + std::sin(ga0) * (r - 8.f);
-            nvg_text_outline(vg, lblx, lbly, label, 1.4f);
-            nvgFillColor(vg, known ? fill : nvgRGBA(140, 150, 160, 200));
-            nvgText(vg, lblx, lbly, label, nullptr);
+            // Label: straight text anchored at the gauge's TOP end, rotated 45°
+            // clockwise so it reads like a little tag off the bar tip. Crisp
+            // 4-corner outline; value keeps its gauge colour so load still reads.
+            const float lsz = lbl_sz * 0.75f;
+            nvg_set_font_ui(lsz);
+            const float topAng = (std::sin(ga0) <= std::sin(ga1)) ? ga0 : ga1;
+            const float ar = r + thick * 0.5f + 1.f;          // just outside the stroke
+            const float ex = cx + std::cos(topAng) * ar;
+            const float ey = cy + std::sin(topAng) * ar;
+            nvgSave(vg);
+            nvgTranslate(vg, ex, ey);
+            nvgRotate(vg, 45.f * DEG);                          // 45° CW (screen y down)
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 210));            // 4-corner outline
+            nvgText(vg, -1.f, -1.f, label, nullptr);
+            nvgText(vg,  1.f, -1.f, label, nullptr);
+            nvgText(vg, -1.f,  1.f, label, nullptr);
+            nvgText(vg,  1.f,  1.f, label, nullptr);
+            nvgFillColor(vg, known ? fill : nvgRGBA(160, 170, 180, 220));
+            nvgText(vg, 0.f, 0.f, label, nullptr);
+            nvgRestore(vg);
         };
 
-        const float r1 = ringR + 56.f;            // inner bar
+        const float r1 = ringR + 56.f;            // inner bar (normal-mode battery)
         const float r2 = ringR + 68.f;            // outer bar, concentric
         const float off = 10.f * DEG;             // raise the inner bar ~10° at the top
+        const float cw  = 15.f * DEG;             // shift the inner two gauges 15° clockwise
 
         if (cfg.system_debug) {
-            // CPU = inner bar raised 10° (its top sits higher, at ~135°);
-            // GPU/render-load = outer bar (top at ~145°). GPU comes from
-            // instantaneous frame time, so smooth it (EMA) to stop the jumpiness.
+            // Gauge stack, inner → outer: phone battery, CPU, GPU, RAM. The phone
+            // arc sits innermost and 5° CCW; CPU at the baseline angle; GPU +5° CW;
+            // RAM +10° CW. CPU/GPU/RAM are thin so all three fit in the radial band
+            // the old CPU+GPU pair used (ringR+56 … ringR+68).
             const float cpu = std::clamp(s.sys_metrics.cpu_pct / 100.f, 0.f, 1.f);
             const float ft  = s.sys_metrics.frame_time_ms;
             const float gpu_inst = std::clamp(ft / (1000.f / 60.f), 0.f, 1.f);
             gpu_load_smooth_ += (gpu_inst - gpu_load_smooth_) * 0.10f;
             const float gpu = gpu_load_smooth_;
+            const float ram = s.sys_metrics.ram_total_mb > 0.f
+                ? std::clamp(s.sys_metrics.ram_used_mb / s.sys_metrics.ram_total_mb, 0.f, 1.f)
+                : 0.f;
             auto load_col = [](float v) {
                 return v > 0.8f ? nvgRGBA(230, 70, 60, 235)
                      : v > 0.5f ? nvgRGBA(235, 180, 50, 230)
                      :            nvgRGBA(70, 210, 90, 230);
             };
-            char cb[12]; snprintf(cb, sizeof(cb), "C%2.0f", cpu * 100.f);
-            char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
-            gauge(r1, a0 + off, a1 + off, cpu, load_col(cpu), cb, true);  // inner, raised = CPU
-            gauge(r2, a0,       a1,       gpu, load_col(gpu), gb, true);  // outer = GPU
-            // Stack the paired phone's battery as a third (outermost) arc in
-            // light blue when a KDE Connect device is bound, so it stays visible
-            // alongside the CPU/GPU gauges.
+            const float thin   = 5.f;             // thinner CPU/GPU/RAM arcs
+            const float r_phn  = ringR + 47.f;    // phone battery — innermost
+            const float r_cpu  = ringR + 56.f;
+            const float r_gpu  = ringR + 62.f;
+            const float r_ram  = ringR + 68.f;
+
+            // Phone battery first (innermost, 5° CCW), light blue, when bound.
             const int ppct = s.health.phone_battery_pct;
             if (ppct >= 0) {
-                const float r3  = ringR + 80.f;
                 const float ppc = std::clamp(ppct / 100.f, 0.f, 1.f);
-                char ppb[12];
-                snprintf(ppb, sizeof(ppb), "%s%d%%",
-                         s.health.phone_charging ? "P+" : "P", ppct);
-                gauge(r3, a0, a1, ppc, nvgRGBA(120, 190, 255, 235), ppb, true);
+                char ppb[12]; snprintf(ppb, sizeof(ppb), "%s%d%%",
+                                       s.health.phone_charging ? "P+" : "P", ppct);
+                gauge(r_phn, a0 - 5.f * DEG, a1 - 5.f * DEG, ppc,
+                      nvgRGBA(120, 190, 255, 235), ppb, true, 7.f);
             }
+            // Labels are the gauge NAMES (the arc fill already shows the value);
+            // phone keeps its P<percent> readout.
+            gauge(r_cpu, a0,              a1,              cpu, load_col(cpu), "CPU", true, thin);
+            gauge(r_gpu, a0 +  5.f * DEG, a1 +  5.f * DEG, gpu, load_col(gpu), "GPU", true, thin);
+            gauge(r_ram, a0 + 10.f * DEG, a1 + 10.f * DEG, ram, load_col(ram), "Ram", true, thin);
         } else {
             // Controller battery — always drawn (inner arc). If a phone
             // battery is known (KDE Connect bridge bound to a paired
@@ -605,10 +650,10 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
                 char ppb[10];
                 snprintf(ppb, sizeof(ppb), "%s%d%%",
                          s.health.phone_charging ? "P+" : "P", ppct);
-                gauge(r1, a0 + off, a1 + off, pct, bc, pb, bpct >= 0);
-                gauge(r2, a0,       a1,       ppc, pc, ppb, true);
+                gauge(r1, a0 + off + cw, a1 + off + cw, pct, bc, pb, bpct >= 0, 8.f);
+                gauge(r2, a0 + cw,       a1 + cw,       ppc, pc, ppb, true, 8.f);
             } else {
-                gauge(r1, a0, a1, pct, bc, pb, bpct >= 0);
+                gauge(r1, a0 + cw, a1 + cw, pct, bc, pb, bpct >= 0, 8.f);
             }
         }
     }
@@ -687,15 +732,13 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         const float esz   = csz * 0.92f;
         const float dsz   = csz * 0.82f;
         const float DEGc  = static_cast<float>(M_PI) / 180.f;
-        // Clock/date arc curves along the disc edge facing the screen interior:
-        // above the disc when docked low, below when docked high; leaning toward
-        // the interior horizontally so it never clips at the screen edge, plus a
-        // ~10° nudge toward the right so it clears the corner cardinal.
-        const float clock_deg = dock_top ? (dock_left ?  60.f :  120.f)
-                                         : (dock_left ? -60.f : -120.f);
-        const float clock_nudge = (clock_deg < 0.f ? 10.f : -10.f);   // ~10° to the right
-        const float clock_angle = (clock_deg + clock_nudge) * DEGc;
-        const float rc    = ringR + (cfg.compass_ring ? 46.f : 16.f) + csz * 0.5f;
+        // Clock/date arc sits straight up (12 o'clock) over the minimap. Screen
+        // angle −90° points up (y grows downward); the curved text is nearly
+        // horizontal there and reads upright.
+        const float clock_angle = -90.f * DEGc;
+        // Sit a bit further out so the straight-up clock/date clears the compass
+        // ring's cardinal labels (the "N" at the top).
+        const float rc    = ringR + (cfg.compass_ring ? 62.f : 26.f) + csz * 0.5f;
 
         // Crisp 4-corner black outline for arc text — a real outline, not a soft blur
         // (which reads as a drop shadow). Offsetting the arc centre translates the
@@ -1150,24 +1193,62 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         char cnt[32]; snprintf(cnt, sizeof(cnt), "%d unread", s.notifs.unread_count());
         otext(px, py - r + 24.f, cnt, nvg_col_a(col_.text_fill, 180));
 
-        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-        float ty = py - r * 0.32f; const float lh = 17.f; int shown = 0;
-        const float lx = px - r * 0.82f;
+        // Group by app/source: one row per app with its icon and how many
+        // notifications it has (unread shown brighter, with the count on the
+        // right). Newest app first; App-type groups key on the sender/app name
+        // (KDE Connect sets the title to the app), others on their kind.
+        struct Grp { std::string key, icon; int total = 0, unread = 0; };
+        std::vector<Grp> groups;
         for (const auto& nt : s.notifs.items) {
             if (nt.dismissed) continue;
-            if (shown >= 4) break;
-            const std::string& nm = nt.icon.empty()
-                ? std::string(notif_type_icon(nt.type)) : nt.icon;
-            const float a = nt.read ? 0.6f : 1.f;
-            const float tx0 = icons_.draw(vg, nm, lx + 6.f, ty + 7.f, 13.f, a)
-                              ? lx + 17.f : lx;
-            otext(tx0, ty, nt.title.c_str(),
-                  nt.read ? nvg_col_a(col_.text_fill, 130) : nvg_col_a(col_.text_fill, 235));
-            ty += lh; ++shown;
+            std::string key;
+            switch (nt.type) {
+                case NotifType::App:
+                    key = !nt.title.empty() ? nt.title
+                        : (!nt.icon.empty() ? nt.icon : std::string("App")); break;
+                case NotifType::Alarm: key = "Alarms"; break;
+                case NotifType::Timer: key = "Timers"; break;
+                case NotifType::LoRa:  key = "LoRa";   break;
+            }
+            const std::string icon = !nt.icon.empty()
+                ? nt.icon : std::string(notif_type_icon(nt.type));
+            Grp* g = nullptr;
+            for (auto& e : groups) if (e.key == key) { g = &e; break; }
+            if (!g) { groups.push_back({ key, icon, 0, 0 }); g = &groups.back(); }
+            g->total++; if (!nt.read) g->unread++;
         }
-        if (shown == 0) {
+
+        if (groups.empty()) {
             nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             otext(px, py, "no notifications", nvg_col_a(col_.text_fill, 150));
+        } else {
+            const int   rows = std::min(static_cast<int>(groups.size()), 5);
+            const float lh   = std::clamp(r * 0.24f, 20.f, 30.f);
+            const float isz  = lh * 0.74f;
+            const float lx   = px - r * 0.74f;        // left edge (icon)
+            const float namx = lx + isz + 8.f;        // app name
+            const float cntx = px + r * 0.76f;        // right-aligned count
+            float ty = py - (rows - 1) * lh * 0.5f;   // vertically centered block
+            const float name_sz = std::clamp(r * 0.14f, 12.f, 18.f);
+            for (int i = 0; i < rows; ++i) {
+                const Grp& g   = groups[i];
+                const bool hot = g.unread > 0;
+                const float a  = hot ? 1.f : 0.55f;
+                // App icon (fallback: a dot in the type/text colour).
+                if (!icons_.draw(vg, g.icon, lx + isz * 0.5f, ty, isz, a)) {
+                    nvgBeginPath(vg); nvgCircle(vg, lx + isz * 0.5f, ty, isz * 0.32f);
+                    nvgFillColor(vg, nvg_col_a(col_.text_fill, hot ? 200 : 110)); nvgFill(vg);
+                }
+                nvg_set_font_ui(name_sz);
+                nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                otext(namx, ty, g.key.c_str(),
+                      hot ? nvg_col_a(col_.text_fill, 235) : nvg_col_a(col_.text_fill, 140));
+                char nb[16]; snprintf(nb, sizeof(nb), "%d", g.total);
+                nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+                otext(cntx, ty, nb,
+                      hot ? nvg_col_a(col_.glow_base, 255) : nvg_col_a(col_.text_fill, 150));
+                ty += lh;
+            }
         }
 
     } else if (widget == static_cast<int>(InfoWidget::Schedule)) {
@@ -1275,7 +1356,8 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         // When the disc sits in the top half of the screen, swing the whole
         // label/icon ring 90° clockwise so it fans below the disc instead of off
         // the top edge. Position-based (not the dock flag) so it fires however the
-        // panel ended up there. Glyphs stay upright; only the arc position moves.
+        // panel ended up there. The labels also flip (see arc_label) only when
+        // top-docked so they read right-way-up against the inverted arc.
         const bool  top_dock = py < fh * 0.5f;
         const float arc_rot  = top_dock ? -90.f : 0.f;
         const float arc0     = 120.f + arc_rot, arc1 = -24.f + arc_rot;  // shared label/icon span
@@ -1289,13 +1371,17 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         const float rmid  = (r0in + r1in) * 0.5f;          // text baseline radius
         const float gapR  = 3.f * DEG;                     // angular gap between wedges
 
-        // Curved label text, flipped on the bottom half so it never reads upside-down.
+        // Curved label text: each glyph follows the wedge's arc (tangent-rotated)
+        // so the band reads like a visor ring. The whole run flips as one only
+        // when the disc is top-docked — so it never reads upside-down there — and
+        // is NOT flipped per glyph by angle (which used to leave the bottom-half
+        // labels facing the opposite way from the top-half ones).
         auto arc_label = [&](float center_ang, const char* str, NVGcolor col) {
             float total = 0.f;
             for (const char* p = str; *p; ++p) total += nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
             total /= rmid;
             nvgFillColor(vg, col);
-            const bool flip = std::sin(center_ang) > 0.f;
+            const bool flip = top_dock;
             float ang = flip ? center_ang + total * 0.5f : center_ang - total * 0.5f;
             for (const char* p = str; *p; ++p) {
                 const float adv = nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
@@ -1331,7 +1417,7 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             nvgFillColor(vg, fill); nvgFill(vg);
             nvgStrokeColor(vg, border); nvgStrokeWidth(vg, active ? 2.f : 1.f); nvgStroke(vg);
             arc_label(sc, nm, active ? nvgRGBA(20, 22, 26, 255)        // dark text on accent
-                                     : nvgRGBA(230, 235, 240, 230));   // white text on dark box
+                                     : nvgRGBA(230, 235, 240, 230));    // white text on dark box
         }
 
         // ── Outer ring: status badges (outside the label band) ──────────────────
@@ -3814,6 +3900,7 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         int shown = 0;
         for (const auto& dev : snap.bt_devices) {
             if (shown >= MAX_BT) break;
+            if (!dev.paired && !dev.connected) continue;   // hide discovered-only
             const ImU32 dot_col = dev.connected ? col_.ind_good : col_.ind_inactive;
             dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f, dot_col);
             char buf[64];

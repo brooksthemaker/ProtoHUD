@@ -48,6 +48,10 @@ overlays/*.dtbo
 # config/config.example.json is the tracked defaults reference.
 config/config.json
 
+# Updater runtime state — rollback marker + config backups written by
+# scripts/update.sh (see scripts/rollback.sh). Never committed.
+state/
+
 # Scheduler daemon — secrets and runtime artifacts (never commit OAuth creds).
 scheduler_daemon/client_secret.json
 scheduler_daemon/token.json

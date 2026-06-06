@@ -14,10 +14,13 @@
 
 #include <atomic>
 #include <functional>
+#include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 struct AppState;
@@ -42,6 +45,9 @@ struct KdeConnectConfig {
     // (case-insensitive). Anything matching is dropped — use it to mute noisy
     // Discord servers / group chats by name.
     std::string ignore_list;
+    // Push a HUD warning when the phone's battery drops to/below this percent
+    // while discharging (raised once per crossing). 0 disables the alert.
+    int         low_battery_pct = 20;
 };
 
 class KdeConnectBridge {
@@ -73,6 +79,84 @@ public:
     // or DBus isn't available. Safe to call from any thread.
     bool ring_phone();
 
+    // Share a file with the paired phone (KDE Connect Share plugin → it lands in
+    // the phone's Downloads). Queues the path for the worker thread; returns
+    // false when the bridge isn't running. Safe to call from any thread.
+    bool share_file(const std::string& path);
+
+    // Share a URL/text with the paired phone (KDE Connect opens http(s) links in
+    // the browser). Same queue/threading as share_file.
+    bool share_url(const std::string& url);
+
+    // Post a notification on the paired phone with a custom message (KDE Connect
+    // ping plugin). URLs in the message are tappable in the phone's notification
+    // shade and nothing auto-opens. Same queue/threading as share_file.
+    bool send_ping(const std::string& message);
+
+    // ── Snapshots read by the menu / HUD (mutex-guarded copies) ───────────────
+    // A phone notification we've seen this session — used for the in-HUD reply /
+    // dismiss list. `id` is the KDE Connect notification id (object suffix).
+    struct PhoneNotif {
+        std::string id, app, title, text;
+        bool repliable = false;
+    };
+    // Now-playing snapshot from the phone's media session (mprisremote plugin).
+    struct MediaStatus {
+        bool        has_player = false;
+        bool        playing    = false;
+        std::string player, title, artist, album;
+        int         volume = -1;        // 0..100, -1 = unknown
+        std::vector<std::string> players;
+    };
+    // Cellular connectivity (connectivity_report plugin).
+    struct Connectivity {
+        bool        ok = false;
+        std::string network_type;       // "LTE", "5G", "HSPA", …
+        int         strength = -1;      // 0..4 bars, -1 = unknown
+    };
+    struct RunCommand { std::string key, name; };
+    // A device KDE Connect can see (reachable), paired or not — for the in-HUD
+    // pairing picker.
+    struct DeviceInfo {
+        std::string id, name;
+        bool paired = false, reachable = false;
+    };
+
+    std::vector<PhoneNotif> phone_notifications() const;
+    MediaStatus             media_status()        const;
+    Connectivity            connectivity()         const;
+    std::vector<RunCommand> run_commands()        const;
+    std::vector<DeviceInfo> devices()             const;
+    // Pairing (KDE Connect device plugin). request_pairing pops a prompt on the
+    // phone the user must accept; unpair removes the bond. Queued for the worker.
+    bool request_pairing(const std::string& device_id);
+    bool unpair(const std::string& device_id);
+    // Roster for the grouped ignore picker: app → sorted distinct senders seen.
+    std::vector<std::pair<std::string, std::vector<std::string>>> notif_roster() const;
+    // Is `needle` currently muted by the ignore list? (case-insensitive substring
+    // against the live list — lets the picker show ignored rows in red).
+    bool is_ignored(const std::string& needle) const;
+    // Toggle a sender/app substring in the ignore list (adds if absent, removes
+    // the exact entry if present). Returns the new "ignored?" state.
+    bool toggle_ignore(const std::string& needle);
+
+    // ── TX actions (queued; the worker drains them on its next loop) ──────────
+    // Reply to a repliable phone notification (messaging apps). Empty message is
+    // ignored. Returns false when the bridge isn't running.
+    bool reply_notification(const std::string& notif_id, const std::string& message);
+    // Dismiss a phone notification (empty id → dismiss every active one).
+    bool dismiss_notification(const std::string& notif_id);
+    // Trigger one of the phone's saved commands (remotecommands plugin).
+    bool run_command(const std::string& key);
+    // Media transport: "Play","Pause","PlayPause","Next","Previous","Stop".
+    bool media_action(const std::string& action);
+    bool media_set_volume(int volume);                 // 0..100
+    bool media_set_player(const std::string& player);  // switch active session
+    // Send an SMS via the phone (sms plugin). address = phone number.
+    bool send_sms(const std::string& address, const std::string& message);
+    // Silence an incoming call's ringer (telephony plugin; best-effort).
+    bool mute_ringer();
+
     // Live-tunable config — applied on the next worker dispatch.
     void set_auto_dismiss(float seconds) { cfg_.auto_dismiss_s = seconds; }
     void set_app_blocklist(std::string csv);
@@ -90,6 +174,34 @@ private:
     std::atomic<bool>    device_ok_{false};
     std::atomic<bool>    ring_request_{false};   // menu → worker: ring the phone
     int                  ring_attempts_ = 0;     // worker-only: retry budget while no device
+
+    std::mutex               share_mtx_;         // guards share_queue_ + ping_queue_
+    std::vector<std::string> share_queue_;       // menu → worker: URLs/files to share
+    std::vector<std::string> ping_queue_;        // menu → worker: ping messages
+
+    // ── Extra TX queues (menu → worker), guarded by tx_mtx_ ───────────────────
+    struct ReplyReq { std::string id, msg; };
+    struct SmsReq   { std::string addr, msg; };
+    struct MediaReq { std::string kind, arg; };   // kind: "action"/"volume"/"player"
+    std::mutex               tx_mtx_;
+    std::vector<ReplyReq>    reply_q_;
+    std::vector<std::string> dismiss_q_;          // notif id; "" = dismiss all
+    std::vector<std::string> runcmd_q_;
+    std::vector<MediaReq>    media_q_;
+    std::vector<SmsReq>      sms_q_;
+    std::vector<std::pair<std::string, bool>> pair_q_;   // {device id, pair? else unpair}
+    std::atomic<bool>        mute_ringer_req_{false};
+
+    // ── Snapshot state (worker writes, menu/HUD read), guarded by snap_mtx_ ────
+    mutable std::mutex                                 snap_mtx_;
+    std::vector<PhoneNotif>                            phone_notifs_;
+    MediaStatus                                        media_;
+    Connectivity                                       connectivity_;
+    std::vector<RunCommand>                            commands_;
+    bool                                               commands_fetched_ = false;
+    std::vector<DeviceInfo>                            devices_;
+    std::map<std::string, std::set<std::string>>       roster_;   // app → senders
+    int                                                last_batt_alert_pct_ = 200;  // worker-only
 
     mutable std::mutex   info_mtx_;
     std::string          active_device_name_;

@@ -354,7 +354,7 @@ void MenuSystem::open_face_editor(std::string title,
                                   int mirror_axis_x,
                                   menu::FaceEditor::Mode mode,
                                   std::vector<uint32_t> palette,
-                                  std::vector<cv::Rect> eye_regions,
+                                  std::vector<menu::FaceEditor::EyePoly> eye_polys,
                                   menu::FaceEditor::CommitFn on_commit,
                                   menu::FaceEditor::CancelFn on_cancel,
                                   menu::FaceEditor::PreviewFn on_preview,
@@ -369,7 +369,7 @@ void MenuSystem::open_face_editor(std::string title,
                       std::move(covered_labels),
                       mirror_axis_x,
                       mode, std::move(palette),
-                      std::move(eye_regions),
+                      std::move(eye_polys),
                       std::move(on_commit), std::move(on_cancel),
                       std::move(on_preview), std::move(live_frame),
                       preview_duration_s);
@@ -604,6 +604,21 @@ void MenuSystem::select() {
             }
         }
         break;
+    }
+}
+
+// ── secondary (Ctrl+Select) ─────────────────────────────────────────────────────
+
+void MenuSystem::secondary() {
+    if (!open_ || stack_.empty() || in_edit_mode_) return;
+    auto& items = stack_.back().items;
+    if (cursor_ < 0 || cursor_ >= static_cast<int>(items.size())) return;
+    auto& item = items[cursor_];
+    if (!item.secondary_children.empty()) {
+        push_level(item.secondary_children,
+                   item.context_panel_title, item.context_panel_draw);
+    } else if (item.secondary_action) {
+        auto act = item.secondary_action; act();   // copy: act may mutate the level
     }
 }
 
@@ -1841,7 +1856,8 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
 }
 
 void MenuSystem::draw_radial(float cx, float cy, float inner_r,
-                             float focus_angle, bool rotate_to_selected) {
+                             float focus_angle, bool rotate_to_selected,
+                             bool dock_top) {
     (void)rotate_to_selected;   // the wheel always rotates the selection to focus now
     if (!open_ || stack_.empty()) return;
     s_menu_glow = glow_enabled_;
@@ -1881,14 +1897,16 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
     // Draw `text` curved along the circle of radius `r`, centred on angle `ac`,
     // so a wedge label follows its arc instead of being a straight chord. Each
     // glyph is placed at its own angle (arc-length = advance width) and rotated
-    // to the local tangent; on the bottom half the run is mirrored so it still
-    // reads upright. `ofs` shifts the glyph centres in screen space (for the
+    // to the local tangent. The whole run flips together ONLY when the wheel is
+    // top-docked (so labels stay right-way-up there) — never per-glyph by angle,
+    // so a label never reads one way at the top of the wheel and the opposite
+    // way at the bottom. `ofs` shifts the glyph centres in screen space (for the
     // drop shadow). Splits on UTF-8 boundaries so accented chars stay intact.
     auto dl_text_arc = [&](float size, float r, float ac, ImU32 col,
                            const char* text, ImVec2 ofs) {
         const float total = font->CalcTextSizeA(size, FLT_MAX, 0.f, text).x;
         if (total <= 0.f || r <= 0.f) return;
-        const bool flip = std::sin(ac) > 0.f;
+        const bool flip = dock_top;
         float x = -total * 0.5f;                 // running left edge along the chord
         for (const char* p = text; *p; ) {
             const char* q = p + 1;
@@ -2042,8 +2060,9 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
             draw_icon(it, PR(ac, r0 + ring_thick * 0.30f), 16.f * ui_scale_, icon_col);
 
             // Label + value curve along the wedge's arc (each glyph rotated to
-            // the local tangent; mirrored on the bottom half so they read
-            // upright). Drop shadow first, then the text.
+            // the local tangent). The whole run flips together only when the
+            // wheel is top-docked (handled in dl_text_arc), so labels follow the
+            // ring but never read upside-down. Drop shadow first, then the text.
             std::string label = to_upper(item_label(it));
             std::string val   = value_summary(it);
             const float lsz = primary ? fs * 0.98f : fs * 0.86f;
@@ -2052,9 +2071,9 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
             dl_text_arc(lsz, lr, ac, text_col,               label.c_str(), { 0.f, 0.f });
             if (!val.empty()) {
                 const float vr = r0 + ring_thick * 0.88f;
-                ImU32 vc = primary ? IM_COL32(20, 22, 26, 230) : menu_with_alpha(accent, 200);
+                ImU32 vcol = primary ? IM_COL32(20, 22, 26, 230) : menu_with_alpha(accent, 200);
                 dl_text_arc(fs * 0.78f, vr, ac, IM_COL32(0, 0, 0, 160), val.c_str(), { 1.f, 1.f });
-                dl_text_arc(fs * 0.78f, vr, ac, vc, val.c_str(), { 0.f, 0.f });
+                dl_text_arc(fs * 0.78f, vr, ac, vcol, val.c_str(), { 0.f, 0.f });
             }
         }
     }

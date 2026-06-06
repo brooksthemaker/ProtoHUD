@@ -515,6 +515,7 @@ struct BtDevice {
     std::string name;
     std::string mac;
     bool        connected = false;
+    bool        paired    = false;   // false + !connected ⇒ discovered-only (pairable)
 };
 
 struct SshState {
@@ -882,6 +883,7 @@ struct AppState {
     std::vector<ScheduledEvent> scheduler_events;   // sorted by start_utc
     SchedulerStatus             scheduler_status;
     int                         scheduler_lead_min = 10;  // reminder lead time (minutes)
+    bool                        sched_send_link_startup = false;  // push web link to phone on boot
 
     // Notification queue — render-thread owned; push from main thread while holding mtx
     NotificationQueue    notifs;
@@ -965,6 +967,11 @@ struct AppState {
     std::atomic<bool> win_fullscreen { false };
     std::atomic<bool> win_frameless  { false };
     std::atomic<bool> win_mode_dirty { false };
+    // Windowed resolution (desktop/dev): menu sets w/h + dirty; the render loop
+    // applies glfwSetWindowSize on the main thread. Ignored on the glasses.
+    std::atomic<int>  win_resize_w     { 0 };
+    std::atomic<int>  win_resize_h     { 0 };
+    std::atomic<bool> win_resize_dirty { false };
 
     // QR scan mute: set to future epoch-seconds to suppress notifications temporarily.
     std::atomic<int64_t> qr_mute_until_s { 0 };
