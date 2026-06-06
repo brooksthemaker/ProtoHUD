@@ -481,6 +481,25 @@ Settings modified via the menu are persisted to config.json on exit.
 
 ## 14. Other Features
 
+### Phone Integration (KDE Connect)
+Built-in bridge over the DBus session bus (gated by `libdbus-1-dev`). All actions
+run on a single worker thread; missing plugins/devices just no-op. Lives under
+**Communications → Phone (KDE Connect)**.
+
+| Feature | Plugin | Notes |
+|---|---|---|
+| Notifications → toasts + log | notifications | Chat/DM apps get the big toast; `message_apps` / `app_blocklist` / `ignore_list` classify |
+| Reply / Dismiss / Dismiss All | notifications | Reply (messaging apps) via OSK; dismiss clears on the phone |
+| Battery + low-battery alert | battery | Pushed via `refreshed` signal (2 s poll backstop); one-shot warning at `low_battery_pct` |
+| Media control | mprisremote | Now-playing, Play/Pause/Next/Previous/Stop, Volume slider, Player picker |
+| Run commands | remotecommands | Lists the phone's saved commands; select to trigger |
+| Send SMS | sms | Number then message via OSK |
+| Cellular signal | connectivity_report | Network type + strength bars (menu readout) |
+| Ring / Mute Ringer | findmyphone / telephony | Ring plays the ringtone; mute silences a call (best-effort) |
+| Share files / URL / ping | share / ping | Send captures or a tappable notification to the phone |
+| Grouped mute picker | — | Apps→senders seen by the bridge; select to mute (rows turn **red**); free-text **Add Word**; **Unmute All** |
+| Phone Inbox | (file watch) | Watches `~/Downloads` for dropped face PNGs/GIFs → import toast |
+
 ### Timers & Alarms
 - Countdown timer: preset durations (5/10/30/60 min) or custom (0–99 min + 0–59 s)
 - Alarm: set by hour/minute, fires as a pulsing red edge gradient + toast with DISMISS action

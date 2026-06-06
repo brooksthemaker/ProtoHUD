@@ -794,9 +794,15 @@ ProtoHUD has a built-in **KDE Connect bridge** that pulls phone notifications an
 |---------|-------------------|
 | Phone notifications | Toast on the HUD + entry in the notification log (same pipeline as scheduler reminders) |
 | Chat / DM messages | Larger toast (sender as the title, full message wrapped below) that stays up ~14 s. Apps treated as messaging are set by `message_apps`; mute servers/chats by name with `ignore_list` |
-| Phone battery % | Outer arc on the minimap battery gauge with a `P` / `P+` prefix (P+ = charging). When the CPU/GPU debug gauges are on, it stacks as a third **light-blue** arc so it stays visible |
-| Ring my phone | **System → Phone (KDE Connect) → Ring My Phone** fires KDE Connect's findmyphone plugin so the phone plays its ringtone — handy for locating it |
-| In-HUD lists | Under **System → Phone (KDE Connect)**: edit the **Ignore List** (mute servers/chats) and **Message Apps** (which apps get the big toast) with the on-screen keyboard — add via keyboard, select an entry to remove. Saved to config |
+| Phone battery % | Outer arc on the minimap battery gauge with a `P` / `P+` prefix (P+ = charging). When the CPU/GPU debug gauges are on, it stacks as a third **light-blue** arc so it stays visible. Updates instantly via KDE Connect's `refreshed` signal, with a 2 s poll backstop |
+| Low-battery alert | One-shot HUD warning when the phone drops to/below `kdeconnect.low_battery_pct` (default 20 %) while discharging; re-arms after charging back up |
+| Reply & dismiss | **Phone (KDE Connect) → Notifications**: each recent notification can be **dismissed** (clears it on the phone too) or, for messaging apps, **replied** to with the on-screen keyboard. **Dismiss All** clears everything |
+| Media control | **Phone (KDE Connect) → Media**: now-playing line + Play/Pause / Next / Previous / Stop, a Volume slider, and a Player picker (mprisremote) |
+| Run commands | **Phone (KDE Connect) → Run Command** lists the phone's saved KDE Connect commands; select one to trigger it |
+| Send SMS | **Phone (KDE Connect) → Send SMS…** — enter a number, then a message |
+| Cellular signal | **Phone (KDE Connect) → Signal** shows the phone's network type + strength bars (connectivity_report) |
+| Ring / mute | **Ring My Phone** (findmyphone) plays the ringtone; **Mute Ringer** silences an incoming call (best-effort) |
+| Mute by app / sender | **Phone (KDE Connect) → Ignore List** groups every app & sender the bridge has seen — select one (or **Mute whole app**) to mute it; muted rows turn **red**. **Add Word** keeps the free-text option; **Unmute All** clears. Saved to config |
 | Browse the log | **System → Notification Log** lists past notifications filtered by **type** (All / Alarms / Timers / LoRa / Phone) and/or **sender** (title substring); select to clear the shown set |
 | File drops | Toast: *"Got happy.png — import as 'happy'?"* → Import / Dismiss buttons. PNGs go to faces; GIFs are copied into `gifs_dir` and bound to the first empty slot |
 
