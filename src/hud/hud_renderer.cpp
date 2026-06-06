@@ -559,23 +559,27 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
                 nvgStroke(vg);
             }
             nvgLineCap(vg, NVG_BUTT);
-            // Label curves ALONG the arc, in-line with the gauge (same radius r),
-            // butted to the arc's TOP end and extending away from the bar body.
-            // Half the previous size; crisp outline like the minimap date label;
-            // value keeps its gauge colour so load still reads at a glance.
-            const float lsz = lbl_sz * 0.5f;
+            // Label: straight text anchored at the gauge's TOP end, rotated 45°
+            // clockwise so it reads like a little tag off the bar tip. Crisp
+            // 4-corner outline; value keeps its gauge colour so load still reads.
+            const float lsz = lbl_sz * 0.75f;
             nvg_set_font_ui(lsz);
-            const float w     = arc_text_width(vg, label, r);
-            const float gap   = 3.f / r;
-            const bool  ga0Top = std::sin(ga0) <= std::sin(ga1);    // top end of the arc
-            const float start = ga0Top ? (ga0 - w - gap) : (ga1 + gap);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 210));                // 4-corner outline
-            nvg_text_arc(vg, cx - 1.f, cy - 1.f, r, start, label);
-            nvg_text_arc(vg, cx + 1.f, cy - 1.f, r, start, label);
-            nvg_text_arc(vg, cx - 1.f, cy + 1.f, r, start, label);
-            nvg_text_arc(vg, cx + 1.f, cy + 1.f, r, start, label);
+            const float topAng = (std::sin(ga0) <= std::sin(ga1)) ? ga0 : ga1;
+            const float ar = r + thick * 0.5f + 1.f;          // just outside the stroke
+            const float ex = cx + std::cos(topAng) * ar;
+            const float ey = cy + std::sin(topAng) * ar;
+            nvgSave(vg);
+            nvgTranslate(vg, ex, ey);
+            nvgRotate(vg, 45.f * DEG);                          // 45° CW (screen y down)
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 210));            // 4-corner outline
+            nvgText(vg, -1.f, -1.f, label, nullptr);
+            nvgText(vg,  1.f, -1.f, label, nullptr);
+            nvgText(vg, -1.f,  1.f, label, nullptr);
+            nvgText(vg,  1.f,  1.f, label, nullptr);
             nvgFillColor(vg, known ? fill : nvgRGBA(160, 170, 180, 220));
-            nvg_text_arc(vg, cx, cy, r, start, label);
+            nvgText(vg, 0.f, 0.f, label, nullptr);
+            nvgRestore(vg);
         };
 
         const float r1 = ringR + 56.f;            // inner bar (normal-mode battery)
@@ -732,7 +736,9 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         // angle −90° points up (y grows downward); the curved text is nearly
         // horizontal there and reads upright.
         const float clock_angle = -90.f * DEGc;
-        const float rc    = ringR + (cfg.compass_ring ? 46.f : 16.f) + csz * 0.5f;
+        // Sit a bit further out so the straight-up clock/date clears the compass
+        // ring's cardinal labels (the "N" at the top).
+        const float rc    = ringR + (cfg.compass_ring ? 62.f : 26.f) + csz * 0.5f;
 
         // Crisp 4-corner black outline for arc text — a real outline, not a soft blur
         // (which reads as a drop shadow). Offsetting the arc centre translates the
