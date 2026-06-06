@@ -234,7 +234,9 @@
     "message_apps": "Discord,Messages,Messenger,Signal,WhatsApp,Telegram,SMS,Slack",
     "_message_apps_note": "CSV of appName substrings treated as chat/DMs: these get a larger toast (sender as the title, message wrapped below) that stays up ~14 s so you can read who sent it and what it says.",
     "ignore_list": "",
-    "_ignore_list_note": "CSV of substrings matched against a notification's title + text (case-insensitive). Anything matching is dropped — use it to mute noisy Discord servers or group chats by name."
+    "_ignore_list_note": "CSV of substrings matched against a notification's title + text (case-insensitive). Anything matching is dropped — use it to mute noisy Discord servers or group chats by name. Communications > Phone (KDE Connect) > Ignore List groups the apps/senders the bridge has seen so you can mute them with one tap (muted rows show red).",
+    "low_battery_pct": 20,
+    "_low_battery_note": "Raise a one-shot HUD warning when the phone battery falls to/below this percent while discharging. 0 disables; it re-arms after the phone charges back above the threshold."
   },
   "phone_inbox": {
     "_about": "Watches a directory for files dropped in from the phone (KDE Connect's Share & Receive lands them in ~/Downloads by default). New face PNGs / GIFs surface an Import toast in the HUD; accept moves the file to <watch_dir>/.processed/, dismiss moves it to <watch_dir>/.dismissed/.",

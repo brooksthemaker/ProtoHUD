@@ -11148,6 +11148,7 @@ int main(int argc, char* argv[]) {
         kdc_cfg.app_blocklist  = jk.value("app_blocklist",  kdc_cfg.app_blocklist);
         kdc_cfg.message_apps   = jk.value("message_apps",   kdc_cfg.message_apps);
         kdc_cfg.ignore_list    = jk.value("ignore_list",    kdc_cfg.ignore_list);
+        kdc_cfg.low_battery_pct= jk.value("low_battery_pct", kdc_cfg.low_battery_pct);
     }
 
     // Phone Inbox — watches a directory (default ~/Downloads) for files
