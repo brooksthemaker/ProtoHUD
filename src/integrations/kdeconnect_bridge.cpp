@@ -566,6 +566,7 @@ void KdeConnectBridge::worker() {
     // HUD feel live; battery also arrives via the refreshed signal (push).
     auto next_fast = clock::now();
     const auto fast_interval = std::chrono::seconds(2);
+    std::string seeded_dev;   // device whose active notifications we've ingested
 
     auto drop_match = [&](const std::string& rule){
         if (rule.empty()) return;
@@ -852,6 +853,45 @@ void KdeConnectBridge::worker() {
         commands_fetched_ = true;
     };
 
+    // Seed the roster + reply/dismiss list from the phone's already-active
+    // notifications when we first bind, so the menus aren't empty until new
+    // notifications arrive. Doesn't raise toasts (these predate the session).
+    auto seed_active = [&]() {
+        if (current_dev_id.empty()) return;
+        const std::string np =
+            "/modules/kdeconnect/devices/" + current_dev_id + "/notifications";
+        auto ids = call_get_str_array(conn, np.c_str(), kNotifPluginIface,
+                                      "activeNotifications");
+        for (const auto& id : ids) {
+            { std::lock_guard<std::mutex> lk(seen_mtx_); seen_.insert(id); }  // don't re-toast
+            const std::string obj = np + "/" + id;
+            std::string app   = call_get_str_prop(conn, obj.c_str(), kNotificationIface, "appName");
+            std::string title = call_get_str_prop(conn, obj.c_str(), kNotificationIface, "title");
+            std::string text  = call_get_str_prop(conn, obj.c_str(), kNotificationIface, "text");
+            bool block = false;
+            for (const auto& b : split_csv(cfg_.app_blocklist))
+                if (icontains(app, b)) { block = true; break; }
+            if (block) continue;
+            bool is_msg = false;
+            for (const auto& m : split_csv(cfg_.message_apps))
+                if (icontains(app, m)) { is_msg = true; break; }
+            const std::string A = app.empty() ? std::string("Phone") : app;
+            const std::string S = !title.empty() ? title : A;
+            std::lock_guard<std::mutex> lk(snap_mtx_);
+            if (roster_.size() < 64 || roster_.count(A)) {
+                auto& set = roster_[A]; if (set.size() < 64) set.insert(S);
+            }
+            bool exists = false;
+            for (const auto& p : phone_notifs_) if (p.id == id) { exists = true; break; }
+            if (!exists) {
+                PhoneNotif pn; pn.id = id; pn.app = app; pn.title = title;
+                pn.text = text; pn.repliable = is_msg;
+                phone_notifs_.push_back(std::move(pn));
+                if (phone_notifs_.size() > 30) phone_notifs_.resize(30);
+            }
+        }
+    };
+
     // Drain the menu→worker TX queues (reply / dismiss / runcommand / media /
     // sms / mute-ringer). Single-owner DBus access stays on this thread.
     auto drain_tx = [&]() {
@@ -941,6 +981,12 @@ void KdeConnectBridge::worker() {
             poll_media();
             poll_connectivity();
             fetch_commands();
+            if (!current_dev_id.empty() && seeded_dev != current_dev_id) {
+                seed_active();
+                seeded_dev = current_dev_id;
+            } else if (current_dev_id.empty()) {
+                seeded_dev.clear();
+            }
         }
 
         // Drain queued TX actions (reply/dismiss/runcommand/media/sms/mute).

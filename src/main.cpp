@@ -9437,21 +9437,234 @@ static std::vector<MenuItem> build_menu(
             auto apply_msg = [kdc_p, kdc_msg_p, join]{
                 if (kdc_p) kdc_p->set_message_apps(join(kdc_msg_p)); };
 
+            // Small toast helper for action feedback.
+            auto toast = [&state](std::string t, std::string b){
+                std::lock_guard<std::mutex> lk(state.mtx);
+                Notification n; n.type = NotifType::App; n.icon = "message";
+                n.title = std::move(t); n.body = std::move(b); n.auto_dismiss_s = 4.f;
+                state.notifs.push(std::move(n));
+            };
+
+            // ── Notifications (reply / dismiss) ────────────────────────────────
+            // Each row mirrors a recent phone notification; Reply (messaging apps)
+            // opens the OSK, Dismiss clears it on the phone.
+            std::vector<MenuItem> notif_menu;
+            notif_menu.push_back(with_desc(leaf("Dismiss All", [kdc_p, toast]{
+                if (kdc_p && kdc_p->dismiss_notification("")) toast("Dismissed", "Cleared phone notifications");
+            }), "Dismiss every active notification on the phone."));
+            for (int i = 0; i < 12; ++i) {
+                MenuItem row; row.type = MenuItemType::SUBMENU; row.label = "notif";
+                row.label_fn = [kdc_p, i]{
+                    if (!kdc_p) return std::string();
+                    auto v = kdc_p->phone_notifications();
+                    if (i >= (int)v.size()) return std::string();
+                    const auto& n = v[i];
+                    std::string who = !n.title.empty() ? n.title
+                                    : (!n.app.empty() ? n.app : std::string("Phone"));
+                    return who + (n.repliable ? "  \xE2\x9C\x89" : "");
+                };
+                row.visible_fn = [kdc_p, i]{ return kdc_p && i < (int)kdc_p->phone_notifications().size(); };
+                MenuItem reply = leaf("Reply\xE2\x80\xA6", [kdc_p, i, menu_sys_pp, toast]{
+                    if (!kdc_p || !menu_sys_pp || !*menu_sys_pp) return;
+                    auto v = kdc_p->phone_notifications();
+                    if (i >= (int)v.size()) return;
+                    const std::string id = v[i].id, who = v[i].title;
+                    (*menu_sys_pp)->open_keyboard("Reply to " + who, "",
+                        [kdc_p, id, toast](const std::string& s){
+                            if (s.empty()) return;
+                            if (kdc_p->reply_notification(id, s)) toast("Reply sent", s);
+                        });
+                });
+                reply.visible_fn = [kdc_p, i]{
+                    auto v = kdc_p ? kdc_p->phone_notifications() : std::vector<integrations::KdeConnectBridge::PhoneNotif>{};
+                    return i < (int)v.size() && v[i].repliable; };
+                MenuItem dismiss = leaf("Dismiss", [kdc_p, i, toast]{
+                    if (!kdc_p) return;
+                    auto v = kdc_p->phone_notifications();
+                    if (i < (int)v.size() && kdc_p->dismiss_notification(v[i].id))
+                        toast("Dismissed", v[i].title);
+                });
+                // Context panel: show the full body text of the focused notification.
+                row.children = { std::move(reply), std::move(dismiss) };
+                notif_menu.push_back(std::move(row));
+            }
+
+            // ── Media control (mprisremote) ────────────────────────────────────
+            std::vector<MenuItem> media_menu;
+            {
+                MenuItem now; now.type = MenuItemType::LEAF; now.label = "now playing";
+                now.label_fn = [kdc_p]{
+                    if (!kdc_p) return std::string("No media");
+                    auto m = kdc_p->media_status();
+                    if (!m.has_player) return std::string("No media");
+                    std::string s = m.playing ? "\xE2\x96\xB6 " : "\xE2\x9D\x9A ";
+                    s += !m.title.empty() ? m.title : std::string("(unknown)");
+                    if (!m.artist.empty()) s += " \xE2\x80\x94 " + m.artist;
+                    return s;
+                };
+                media_menu.push_back(std::move(now));
+                auto act = [kdc_p](const char* a){ if (kdc_p) kdc_p->media_action(a); };
+                media_menu.push_back(leaf("Play / Pause", [act]{ act("PlayPause"); }));
+                media_menu.push_back(leaf("Next",         [act]{ act("Next"); }));
+                media_menu.push_back(leaf("Previous",     [act]{ act("Previous"); }));
+                media_menu.push_back(leaf("Stop",         [act]{ act("Stop"); }));
+                media_menu.push_back(slider("Volume", 0.f, 100.f, 5.f, "%",
+                    [kdc_p]{ auto m = kdc_p ? kdc_p->media_status() : integrations::KdeConnectBridge::MediaStatus{};
+                             return (float)(m.volume < 0 ? 0 : m.volume); },
+                    [kdc_p](float v){ if (kdc_p) kdc_p->media_set_volume((int)v); }));
+                // Player picker (up to 6).
+                std::vector<MenuItem> players;
+                for (int i = 0; i < 6; ++i) {
+                    MenuItem p; p.type = MenuItemType::LEAF; p.label = "player";
+                    p.label_fn = [kdc_p, i]{ auto m = kdc_p ? kdc_p->media_status()
+                            : integrations::KdeConnectBridge::MediaStatus{};
+                        if (i >= (int)m.players.size()) return std::string();
+                        return m.players[i] + (m.players[i] == m.player ? "  \xE2\x97\x8F" : ""); };
+                    p.visible_fn = [kdc_p, i]{ auto m = kdc_p ? kdc_p->media_status()
+                            : integrations::KdeConnectBridge::MediaStatus{};
+                        return i < (int)m.players.size(); };
+                    p.action = [kdc_p, i]{ if (!kdc_p) return; auto m = kdc_p->media_status();
+                        if (i < (int)m.players.size()) kdc_p->media_set_player(m.players[i]); };
+                    players.push_back(std::move(p));
+                }
+                media_menu.push_back(submenu("Player", std::move(players)));
+            }
+
+            // ── Run commands (remotecommands) ──────────────────────────────────
+            std::vector<MenuItem> cmd_menu;
+            for (int i = 0; i < 16; ++i) {
+                MenuItem c; c.type = MenuItemType::LEAF; c.label = "command";
+                c.label_fn = [kdc_p, i]{ auto v = kdc_p ? kdc_p->run_commands()
+                        : std::vector<integrations::KdeConnectBridge::RunCommand>{};
+                    return i < (int)v.size() ? v[i].name : std::string(); };
+                c.visible_fn = [kdc_p, i]{ return kdc_p && i < (int)kdc_p->run_commands().size(); };
+                c.action = [kdc_p, i, toast]{ if (!kdc_p) return; auto v = kdc_p->run_commands();
+                    if (i < (int)v.size() && kdc_p->run_command(v[i].key)) toast("Sent", v[i].name); };
+                cmd_menu.push_back(std::move(c));
+            }
+
+            // ── Grouped ignore picker (app → senders; red = muted) ─────────────
+            auto roster = [kdc_p]{ return kdc_p ? kdc_p->notif_roster()
+                : std::vector<std::pair<std::string, std::vector<std::string>>>{}; };
+            auto ig_has = [kdc_ignore_p](const std::string& s){
+                return kdc_ignore_p && std::find(kdc_ignore_p->begin(), kdc_ignore_p->end(), s)
+                                       != kdc_ignore_p->end(); };
+            auto ig_toggle = [kdc_ignore_p, apply_ignore](const std::string& s){
+                if (!kdc_ignore_p || s.empty()) return;
+                auto it = std::find(kdc_ignore_p->begin(), kdc_ignore_p->end(), s);
+                if (it != kdc_ignore_p->end()) kdc_ignore_p->erase(it);
+                else                           kdc_ignore_p->push_back(s);
+                apply_ignore();
+            };
+            auto build_app_senders = [roster, ig_has, ig_toggle](int ai){
+                std::vector<MenuItem> kids;
+                MenuItem all; all.type = MenuItemType::TOGGLE; all.label = "Mute whole app";
+                all.get_toggle = [roster, ig_has, ai]{ auto r = roster();
+                    return ai < (int)r.size() && ig_has(r[ai].first); };
+                all.set_toggle = [roster, ig_toggle, ai](bool){ auto r = roster();
+                    if (ai < (int)r.size()) ig_toggle(r[ai].first); };
+                all.warn_fn = [roster, ig_has, ai]{ auto r = roster();
+                    return ai < (int)r.size() && ig_has(r[ai].first); };
+                kids.push_back(std::move(all));
+                for (int si = 0; si < 24; ++si) {
+                    MenuItem m; m.type = MenuItemType::TOGGLE; m.label = "sender";
+                    m.label_fn   = [roster, ai, si]{ auto r = roster();
+                        return (ai < (int)r.size() && si < (int)r[ai].second.size())
+                                   ? r[ai].second[si] : std::string(); };
+                    m.visible_fn = [roster, ai, si]{ auto r = roster();
+                        return ai < (int)r.size() && si < (int)r[ai].second.size(); };
+                    m.get_toggle = [roster, ig_has, ai, si]{ auto r = roster();
+                        if (ai >= (int)r.size() || si >= (int)r[ai].second.size()) return false;
+                        return ig_has(r[ai].second[si]); };
+                    m.set_toggle = [roster, ig_toggle, ai, si](bool){ auto r = roster();
+                        if (ai < (int)r.size() && si < (int)r[ai].second.size())
+                            ig_toggle(r[ai].second[si]); };
+                    m.warn_fn    = [roster, ig_has, ai, si]{ auto r = roster();
+                        if (ai >= (int)r.size() || si >= (int)r[ai].second.size()) return false;
+                        return ig_has(r[ai].second[si]); };
+                    kids.push_back(std::move(m));
+                }
+                return kids;
+            };
+            std::vector<MenuItem> ignore_menu;
+            ignore_menu.push_back(with_desc(leaf("Add Word\xE2\x80\xA6 (keyboard)",
+                [menu_sys_pp, kdc_ignore_p, apply_ignore]{
+                    if (!menu_sys_pp || !*menu_sys_pp || !kdc_ignore_p) return;
+                    (*menu_sys_pp)->open_keyboard("Ignore (matches title/text)", "",
+                        [kdc_ignore_p, apply_ignore](const std::string& s){
+                            const size_t b = s.find_first_not_of(" \t");
+                            const size_t e = s.find_last_not_of(" \t");
+                            if (b == std::string::npos) return;
+                            kdc_ignore_p->push_back(s.substr(b, e - b + 1)); apply_ignore();
+                        });
+                }), "Add a free-text mute (matches a notification's title/text)."));
+            ignore_menu.push_back(with_desc(leaf("Unmute All",
+                [kdc_ignore_p, apply_ignore]{ if (kdc_ignore_p) { kdc_ignore_p->clear(); apply_ignore(); } }),
+                "Clear every mute."));
+            for (int ai = 0; ai < 24; ++ai) {
+                MenuItem appsub = submenu("app", build_app_senders(ai));
+                appsub.label_fn   = [roster, ai]{ auto r = roster();
+                    return ai < (int)r.size() ? r[ai].first : std::string(); };
+                appsub.visible_fn = [roster, ai]{ return ai < (int)roster().size(); };
+                appsub.warn_fn    = [roster, ig_has, ai]{ auto r = roster();
+                    return ai < (int)r.size() && ig_has(r[ai].first); };
+                ignore_menu.push_back(std::move(appsub));
+            }
+
+            // ── SMS (send) ─────────────────────────────────────────────────────
+            auto send_sms_flow = [menu_sys_pp, kdc_p, toast]{
+                if (!menu_sys_pp || !*menu_sys_pp || !kdc_p) return;
+                (*menu_sys_pp)->open_keyboard("SMS to (number)", "",
+                    [menu_sys_pp, kdc_p, toast](const std::string& num){
+                        if (num.empty() || !menu_sys_pp || !*menu_sys_pp) return;
+                        (*menu_sys_pp)->open_keyboard("Message", "",
+                            [kdc_p, num, toast](const std::string& msg){
+                                if (msg.empty()) return;
+                                if (kdc_p->send_sms(num, msg)) toast("SMS sent", num + ": " + msg);
+                            });
+                    });
+            };
+
+            // ── Connectivity readout ───────────────────────────────────────────
+            MenuItem conn_item; conn_item.type = MenuItemType::LEAF; conn_item.label = "Signal";
+            conn_item.label_fn = [kdc_p]{
+                if (!kdc_p) return std::string("Signal: n/a");
+                auto c = kdc_p->connectivity();
+                if (!c.ok) return std::string("Signal: n/a");
+                std::string s = "Signal: " + (c.network_type.empty() ? std::string("?") : c.network_type);
+                if (c.strength >= 0) { s += "  "; for (int i = 0; i < 5; ++i) s += (i < c.strength) ? "\xE2\x96\xB0" : "\xE2\x96\xB1"; }
+                return s;
+            };
+
             std::vector<MenuItem> phone_menu;
             phone_menu.push_back(with_desc(leaf("Ring My Phone", ring_toast),
                 "Ring the paired phone (KDE Connect findmyphone) so it plays its "
                 "ringtone \xE2\x80\x94 handy for locating it."));
-            phone_menu.push_back(with_desc(submenu("Ignore List",
-                list_menu(kdc_ignore_p, apply_ignore, "Add Server / Chat\xE2\x80\xA6",
-                          "Ignore (matches title/text)")),
-                "Mute phone notifications whose title/text contains any listed word "
-                "\xE2\x80\x94 e.g. a Discord server name. Select an entry to remove it."));
+            phone_menu.push_back(with_desc(submenu("Notifications", std::move(notif_menu)),
+                "Recent phone notifications. Reply to messaging apps or dismiss them "
+                "(clears on the phone too)."));
+            phone_menu.push_back(with_desc(submenu("Media", std::move(media_menu)),
+                "Control the phone's media playback (play/pause, skip, volume, player)."));
+            phone_menu.push_back(with_desc(submenu("Run Command", std::move(cmd_menu)),
+                "Trigger one of the phone's saved KDE Connect commands."));
+            phone_menu.push_back(with_desc(leaf("Send SMS\xE2\x80\xA6", send_sms_flow),
+                "Send a text message through the phone (enter number, then message)."));
+            phone_menu.push_back(with_desc(leaf("Mute Ringer", [kdc_p, toast]{
+                if (kdc_p && kdc_p->mute_ringer()) toast("Ringer muted", "Silenced incoming call"); }),
+                "Silence an incoming call's ringer (best-effort, depends on the phone)."));
+            phone_menu.push_back(with_desc(conn_item,
+                "Cellular network type + signal strength reported by the phone."));
+            phone_menu.push_back(with_desc(submenu("Ignore List", std::move(ignore_menu)),
+                "Mute notifications by app or sender. Apps/senders the phone has sent "
+                "are grouped here \xE2\x80\x94 select one to mute it (muted entries turn red). "
+                "\"Add Word\" still takes free text."));
             phone_menu.push_back(with_desc(submenu("Message Apps",
                 list_menu(kdc_msg_p, apply_msg, "Add App\xE2\x80\xA6", "App name (e.g. Discord)")),
                 "Apps whose notifications get the larger chat toast (sender + wrapped "
                 "message, held longer). Select an entry to remove it."));
             return with_desc(submenu("Phone (KDE Connect)", std::move(phone_menu)),
-                "Ring the phone, pick which apps get the big chat toast, and mute servers.");
+                "Ring/mute, reply to & dismiss notifications, control media, run "
+                "commands, send SMS, and mute apps/senders.");
     }();
     MenuItem notiflog_item = [&]() -> MenuItem {
         // ── Notification Log: grouped by sender, filterable, full text in panel ──
