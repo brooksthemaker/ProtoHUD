@@ -967,6 +967,11 @@ struct AppState {
     std::atomic<bool> win_fullscreen { false };
     std::atomic<bool> win_frameless  { false };
     std::atomic<bool> win_mode_dirty { false };
+    // Windowed resolution (desktop/dev): menu sets w/h + dirty; the render loop
+    // applies glfwSetWindowSize on the main thread. Ignored on the glasses.
+    std::atomic<int>  win_resize_w     { 0 };
+    std::atomic<int>  win_resize_h     { 0 };
+    std::atomic<bool> win_resize_dirty { false };
 
     // QR scan mute: set to future epoch-seconds to suppress notifications temporarily.
     std::atomic<int64_t> qr_mute_until_s { 0 };

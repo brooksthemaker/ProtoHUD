@@ -9318,17 +9318,41 @@ static std::vector<MenuItem> build_menu(
             [hud_cfg]{ return hud_cfg->text_scale; },
             [hud_cfg](float v){ hud_cfg->text_scale = v; }),
             "Scale factor applied to all HUD text. Lower = more on-screen at once."),
+        // Window mode (Fullscreen/Frameless) + Resolution moved to System > Display.
+        // Legacy HUD toggle moved to HUD > Legacy HUD (grouped with its settings).
+    };
+
+    // ── Display submenu (window mode + windowed resolution) ───────────────────
+    // Desktop/dev only — ignored while the glasses drive the window.
+    std::vector<MenuItem> resolution_menu;
+    {
+        static const struct { const char* l; int w, h; } kRes[] = {
+            {"1280 x 720",  1280,  720}, {"1600 x 900",  1600,  900},
+            {"1920 x 1080", 1920, 1080}, {"2560 x 1440", 2560, 1440},
+            {"3840 x 1080 (SBS)", 3840, 1080}, {"3840 x 2160", 3840, 2160},
+        };
+        for (const auto& r : kRes) {
+            const int w = r.w, h = r.h;
+            resolution_menu.push_back(leaf(r.l, [&state, w, h]{
+                state.win_resize_w.store(w); state.win_resize_h.store(h);
+                state.win_resize_dirty.store(true);
+            }));
+        }
+    }
+    std::vector<MenuItem> display_menu = {
         with_desc(toggle("Fullscreen",
             [&state]{ return state.win_fullscreen.load(); },
             [&state](bool v){ state.win_fullscreen.store(v); state.win_mode_dirty.store(true); }),
-            "Borderless fullscreen covering the whole screen. Desktop/dev only — "
+            "Borderless fullscreen covering the whole screen. Desktop/dev only \xe2\x80\x94 "
             "ignored while the glasses are connected. Applied live."),
         with_desc(toggle("Frameless Window",
             [&state]{ return state.win_frameless.load(); },
             [&state](bool v){ state.win_frameless.store(v); state.win_mode_dirty.store(true); }),
             "Remove the OS window title bar and borders (windowed mode). Desktop/dev "
             "only. Applied live."),
-        // Legacy HUD toggle moved to HUD > Legacy HUD (grouped with its settings).
+        with_desc(submenu("Resolution", std::move(resolution_menu)),
+            "Resize the windowed (non-fullscreen) output. Desktop/dev only; ignored "
+            "while the glasses drive the display."),
     };
 
     // ── Connectivity submenu ─────────────────────────────────────────────────
@@ -10502,8 +10526,10 @@ static std::vector<MenuItem> build_menu(
 
     // ── System root: grouped, one screen tall ────────────────────────────────
     std::vector<MenuItem> system_menu = {
-        with_desc(submenu("Display & HUD", std::move(display_hud_menu)),
-                  "Window mode, text scale, HUD/menu theme + presets."),
+        with_desc(submenu("Display", std::move(display_menu)),
+                  "Fullscreen / frameless window mode and windowed resolution."),
+        with_desc(submenu("HUD & Menu", std::move(display_hud_menu)),
+                  "Text scale, HUD/menu theme + presets, radial-menu options."),
         std::move(audio_item),
         with_desc(submenu("Connectivity",     std::move(connectivity_menu)),
                   "SSH, Bluetooth and other network/peripheral toggles."),
@@ -14506,6 +14532,11 @@ int main(int argc, char* argv[]) {
         // Apply a pending window-mode change (Settings > Fullscreen / Frameless).
         if (state.win_mode_dirty.exchange(false))
             xr.apply_window_mode(state.win_fullscreen.load(), state.win_frameless.load());
+        if (state.win_resize_dirty.exchange(false)) {
+            const int rw = state.win_resize_w.load(), rh = state.win_resize_h.load();
+            if (rw > 0 && rh > 0 && xr.glfw_window())
+                glfwSetWindowSize(xr.glfw_window(), rw, rh);
+        }
 
         // ── Delta time ────────────────────────────────────────────────────────
         double now = glfwGetTime();
