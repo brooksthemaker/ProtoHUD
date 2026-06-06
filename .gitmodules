@@ -1,3 +1,6 @@
 [submodule "Protoface"]
 	path = Protoface
 	url = https://github.com/brooksthemaker/ProtoFace.git
+[submodule "third_party/doomgeneric"]
+	path = third_party/doomgeneric
+	url = https://github.com/ozkl/doomgeneric.git

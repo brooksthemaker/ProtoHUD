@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <opencv2/core.hpp>
 
 namespace game {
@@ -51,5 +52,11 @@ public:
 
 // Reference game (no external assets) used to validate the pipeline.
 std::unique_ptr<GameSource> make_snake();
+
+// Doom (doomgeneric) source. Built only in the Doom-enabled build
+// (PROTOHUD_HAVE_DOOM); needs a DOOM / Freedoom IWAD at wad_path. The
+// declaration is always visible, but the factory is only linked when Doom is
+// compiled in — guard call sites with #ifdef PROTOHUD_HAVE_DOOM.
+std::unique_ptr<GameSource> make_doom(const std::string& wad_path);
 
 }  // namespace game

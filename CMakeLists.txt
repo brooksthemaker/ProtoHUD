@@ -305,6 +305,47 @@ set_target_properties(protohud PROPERTIES
     INSTALL_RPATH "\$ORIGIN/../lib"
 )
 
+# ── Doom game source (doomgeneric) ────────────────────────────────────────────
+# Optional: builds the embeddable Doom engine (third_party/doomgeneric submodule)
+# as a static lib and links it + the DoomGame GameSource shim into protohud.
+# Disabled automatically if the submodule isn't checked out. No external deps —
+# we compile the engine's portable core (the canonical SRC_DOOM set minus the
+# platform main), and src/game/doom_game.cpp provides the DG_* callbacks.
+option(ENABLE_DOOM "Build the doomgeneric Doom game source" ON)
+
+set(DOOMGENERIC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/doomgeneric/doomgeneric")
+if(ENABLE_DOOM AND EXISTS "${DOOMGENERIC_DIR}/doomgeneric.c")
+    set(DOOMGENERIC_SOURCES
+        dummy.c am_map.c doomdef.c doomstat.c dstrings.c d_event.c d_items.c
+        d_iwad.c d_loop.c d_main.c d_mode.c d_net.c f_finale.c f_wipe.c g_game.c
+        hu_lib.c hu_stuff.c info.c i_cdmus.c i_endoom.c i_joystick.c i_scale.c
+        i_sound.c i_system.c i_timer.c memio.c m_argv.c m_bbox.c m_cheat.c
+        m_config.c m_controls.c m_fixed.c m_menu.c m_misc.c m_random.c p_ceilng.c
+        p_doors.c p_enemy.c p_floor.c p_inter.c p_lights.c p_map.c p_maputl.c
+        p_mobj.c p_plats.c p_pspr.c p_saveg.c p_setup.c p_sight.c p_spec.c
+        p_switch.c p_telept.c p_tick.c p_user.c r_bsp.c r_data.c r_draw.c
+        r_main.c r_plane.c r_segs.c r_sky.c r_things.c sha1.c sounds.c statdump.c
+        st_lib.c st_stuff.c s_sound.c tables.c v_video.c wi_stuff.c w_checksum.c
+        w_file.c w_main.c w_wad.c z_zone.c w_file_stdc.c i_input.c i_video.c
+        doomgeneric.c)
+    list(TRANSFORM DOOMGENERIC_SOURCES PREPEND "${DOOMGENERIC_DIR}/")
+
+    add_library(doomgeneric STATIC ${DOOMGENERIC_SOURCES})
+    target_include_directories(doomgeneric PUBLIC "${DOOMGENERIC_DIR}")
+    target_compile_definitions(doomgeneric PRIVATE NORMALUNIX LINUX _DEFAULT_SOURCE)
+    # Vintage C — silence its warnings and let it use its own loose dialect so
+    # it doesn't drown out (or fail) the ProtoHUD build.
+    target_compile_options(doomgeneric PRIVATE -w -fcommon)
+
+    target_sources(protohud PRIVATE src/game/doom_game.cpp)
+    target_link_libraries(protohud PRIVATE doomgeneric)
+    target_compile_definitions(protohud PRIVATE PROTOHUD_HAVE_DOOM)
+    message(STATUS "Doom game source: ENABLED")
+else()
+    message(STATUS "Doom game source: disabled "
+                   "(set ENABLE_DOOM=ON and run: git submodule update --init)")
+endif()
+
 # ── Assets & Config ────────────────────────────────────────���──────────────────
 
 # ── Native face renderer (Protoface C++ port) ─────────────────────────────────

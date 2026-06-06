@@ -982,6 +982,7 @@ struct AppState {
     // suppressed in fullscreen game mode. Toggled from the menu / GpioFunc.
     std::atomic<bool> game_active   { false };
     std::atomic<bool> game_windowed { false };
+    std::atomic<int>  game_source_sel { 0 };   // 0 = Snake, 1 = Doom (if built)
 
     // ── Helpers (call with mutex held) ────────────────────────────────────────
 

@@ -10925,25 +10925,42 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("Communications", std::move(communications_menu)),
                   "Radio + phone: LoRa team mesh, KDE Connect phone, and the "
                   "notification log."),
-        with_desc(submenu("Games",        std::vector<MenuItem>{
-                      with_desc(toggle("Play (Snake)",
-                          [&state]{ return state.game_active.load(); },
-                          [&state, menu_sys_pp](bool v){
-                              state.game_active.store(v);
-                              if (v && menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->close();
-                          }),
-                          "Start the built-in Snake demo. It plays on the glasses "
-                          "and mirrors to the LED face. Controls: D-pad / arrows to "
-                          "steer, A / Z or Start / Enter to restart after a crash. "
-                          "Re-open the menu (or a GPIO Game-Toggle button) to stop."),
-                      with_desc(toggle("Windowed",
-                          [&state]{ return state.game_windowed.load(); },
-                          [&state](bool v){ state.game_windowed.store(v); }),
-                          "ON: show the game in a centred window so the HUD stays "
-                          "visible around it. OFF: fullscreen (HUD hidden)."),
-                  }),
+        with_desc(submenu("Games",        [&]{
+                  std::vector<MenuItem> games;
+                  games.push_back(with_desc(toggle("Play",
+                      [&state]{ return state.game_active.load(); },
+                      [&state, menu_sys_pp](bool v){
+                          state.game_active.store(v);
+                          if (v && menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->close();
+                      }),
+                      "Start the selected game. It plays on the glasses and mirrors "
+                      "to the LED face. Re-open the menu (or a GPIO Game-Toggle "
+                      "button) to stop."));
+                  // Source picker — Snake always; Doom only in the Doom-enabled build.
+                  std::vector<MenuItem> src;
+                  src.push_back(leaf_sel("Snake",
+                      [&state]{ state.game_source_sel.store(0); },
+                      [&state]{ return state.game_source_sel.load() == 0; }));
+#ifdef PROTOHUD_HAVE_DOOM
+                  src.push_back(leaf_sel("Doom",
+                      [&state]{ state.game_source_sel.store(1); },
+                      [&state]{ return state.game_source_sel.load() == 1; }));
+#endif
+                  games.push_back(with_desc(submenu("Source", std::move(src)),
+                      "Pick the game. Snake is the built-in demo (D-pad / arrows "
+                      "to steer, A / Z or Start / Enter to restart). Doom needs a "
+                      "DOOM/Freedoom WAD at game.doom_wad; controls: stick/d-pad "
+                      "move + turn, A fire, B use, X run, L/R strafe, Start menu."));
+                  games.push_back(with_desc(toggle("Windowed",
+                      [&state]{ return state.game_windowed.load(); },
+                      [&state](bool v){ state.game_windowed.store(v); }),
+                      "ON: show the game in a centred window so the HUD stays "
+                      "visible around it. OFF: fullscreen (HUD hidden)."));
+                  return games;
+              }()),
                   "Play games with controller input on the glasses + LED face. "
-                  "Ships with a Snake demo; more sources (e.g. Doom) drop in later."),
+                  "Ships with a Snake demo; Doom (doomgeneric) is available when "
+                  "built with ENABLE_DOOM and a WAD is provided."),
         with_desc(submenu("System",       std::move(system_menu)),
                   "Display, audio, connectivity, Pi settings, timers, "
                   "diagnostics, profiles & power."),
@@ -14596,10 +14613,15 @@ int main(int argc, char* argv[]) {
         boot_af_t0      = glfwGetTime();
     }
 
-    // ── Game mode (Snake reference source) ────────────────────────────────────
+    // ── Game mode ─────────────────────────────────────────────────────────────
     // The active GameSource renders an RGBA framebuffer; in the render loop we
     // tick it from the controller/keyboard, blit it to both eyes (fullscreen or
-    // windowed) and mirror it onto the HUB75 panels via the panel override.
+    // windowed) and mirror it onto the HUB75 panels via the panel override. The
+    // source is hot-swappable via state.game_source_sel (0 = Snake, 1 = Doom).
+    std::string doom_wad = cfg.value("game", json::object())
+                              .value("doom_wad",
+                                     std::string("/home/user/.local/share/protohud/doom.wad"));
+    int    game_which = 0;               // currently-built source (mirrors game_source_sel)
     std::unique_ptr<game::GameSource> game_src = game::make_snake();
     GLuint game_tex = 0;                 // lazily created on first frame upload
     bool   game_was_active = false;      // edge-detect to (re)start / clear override
@@ -15590,6 +15612,18 @@ int main(int argc, char* argv[]) {
         // (fullscreen or windowed) instead of the cameras.
         const bool game_active = state.game_active.load();
         if (game_active) {
+            // Hot-swap the source if the menu changed the selection.
+            int want = state.game_source_sel.load();
+            if (want != game_which) {
+                game_which = want;
+#ifdef PROTOHUD_HAVE_DOOM
+                if (want == 1) game_src = game::make_doom(doom_wad);
+                else
+#endif
+                    game_src = game::make_snake();
+                game_was_active = false;   // run the (re)start path below
+            }
+
             uint32_t gb = 0;
             auto gpb = gamepad.buttons();
             if (gpb.dup)    gb |= game::BtnUp;
