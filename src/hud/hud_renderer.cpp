@@ -519,71 +519,89 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         const float a0  = (dock_left ? -35.f : 145.f) * DEG;
         const float a1  = (dock_left ?  35.f : 215.f) * DEG;
 
-        // Draw one gauge arc (dark track + coloured fill + a short value label).
+        // Date-label styling shared by every gauge label (matches the minimap
+        // clock's date arc: small UI font + crisp outline).
+        const float lbl_scale = std::max(0.6f, s.clock_cfg.font_scale);
+        const float lbl_sz    = 11.f * lbl_scale * 0.82f;
+
+        // Draw one gauge arc (dark track + coloured fill) with its value label
+        // floated just past the TOP end of the arc, styled like the date label.
         auto gauge = [&](float r, float ga0, float ga1, float v01,
-                         NVGcolor fill, const char* label, bool known) {
+                         NVGcolor fill, const char* label, bool known, float thick) {
             nvgLineCap(vg, NVG_ROUND);
             nvgBeginPath(vg);
             nvgArc(vg, cx, cy, r, ga0, ga1, NVG_CW);
             nvgStrokeColor(vg, nvgRGBA(40, 48, 56, 200));
-            nvgStrokeWidth(vg, 8.f);
+            nvgStrokeWidth(vg, thick);
             nvgStroke(vg);
             if (known) {
                 v01 = std::clamp(v01, 0.f, 1.f);
                 nvgBeginPath(vg);
                 nvgArc(vg, cx, cy, r, ga0, ga0 + (ga1 - ga0) * v01, NVG_CW);
                 nvgStrokeColor(vg, fill);
-                nvgStrokeWidth(vg, 8.f);
+                nvgStrokeWidth(vg, thick);
                 nvgStroke(vg);
             }
             nvgLineCap(vg, NVG_BUTT);
-            // Bigger UI-font label (was 10px mono) for legibility, anchored on
-            // the inner side of the arc and right-aligned so it grows toward the
-            // disc centre — staying inside the radial quick menu's hole when open.
-            nvg_set_font_ui(14.f);
-            nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-            const float lblx = cx + std::cos(ga0) * (r - 10.f);
-            const float lbly = cy + std::sin(ga0) * (r - 10.f);
-            nvg_text_outline(vg, lblx, lbly, label, 1.8f);
+            // Label at the arc's TOP end (highest on screen = smallest sin),
+            // floated just outside the track. Same font/outline as the date
+            // label; the value keeps its gauge colour so load still reads at a
+            // glance.
+            const float topAng = (std::sin(ga0) <= std::sin(ga1)) ? ga0 : ga1;
+            const float lr  = r + thick * 0.5f + lbl_sz * 0.85f;
+            const float lx  = cx + std::cos(topAng) * lr;
+            const float ly  = cy + std::sin(topAng) * lr;
+            nvg_set_font_ui(lbl_sz);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvg_text_outline(vg, lx, ly, label, 1.4f);
             nvgFillColor(vg, known ? fill : nvgRGBA(160, 170, 180, 220));
-            nvgText(vg, lblx, lbly, label, nullptr);
+            nvgText(vg, lx, ly, label, nullptr);
         };
 
-        const float r1 = ringR + 56.f;            // inner bar
+        const float r1 = ringR + 56.f;            // inner bar (normal-mode battery)
         const float r2 = ringR + 68.f;            // outer bar, concentric
         const float off = 10.f * DEG;             // raise the inner bar ~10° at the top
         const float cw  = 15.f * DEG;             // shift the inner two gauges 15° clockwise
 
         if (cfg.system_debug) {
-            // CPU = inner bar raised 10° (its top sits higher, at ~135°);
-            // GPU/render-load = outer bar (top at ~145°). GPU comes from
-            // instantaneous frame time, so smooth it (EMA) to stop the jumpiness.
+            // Gauge stack, inner → outer: phone battery, CPU, GPU, RAM. The phone
+            // arc sits innermost and 5° CCW; CPU at the baseline angle; GPU +5° CW;
+            // RAM +10° CW. CPU/GPU/RAM are thin so all three fit in the radial band
+            // the old CPU+GPU pair used (ringR+56 … ringR+68).
             const float cpu = std::clamp(s.sys_metrics.cpu_pct / 100.f, 0.f, 1.f);
             const float ft  = s.sys_metrics.frame_time_ms;
             const float gpu_inst = std::clamp(ft / (1000.f / 60.f), 0.f, 1.f);
             gpu_load_smooth_ += (gpu_inst - gpu_load_smooth_) * 0.10f;
             const float gpu = gpu_load_smooth_;
+            const float ram = s.sys_metrics.ram_total_mb > 0.f
+                ? std::clamp(s.sys_metrics.ram_used_mb / s.sys_metrics.ram_total_mb, 0.f, 1.f)
+                : 0.f;
             auto load_col = [](float v) {
                 return v > 0.8f ? nvgRGBA(230, 70, 60, 235)
                      : v > 0.5f ? nvgRGBA(235, 180, 50, 230)
                      :            nvgRGBA(70, 210, 90, 230);
             };
-            char cb[12]; snprintf(cb, sizeof(cb), "C%2.0f", cpu * 100.f);
-            char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
-            gauge(r1, a0 + off + cw, a1 + off + cw, cpu, load_col(cpu), cb, true);  // inner, raised = CPU
-            gauge(r2, a0 + cw,       a1 + cw,       gpu, load_col(gpu), gb, true);  // mid = GPU (CW 15°)
-            // Stack the paired phone's battery as a third (outermost) arc in
-            // light blue when a KDE Connect device is bound, so it stays visible
-            // alongside the CPU/GPU gauges.
+            const float thin   = 5.f;             // thinner CPU/GPU/RAM arcs
+            const float r_phn  = ringR + 47.f;    // phone battery — innermost
+            const float r_cpu  = ringR + 56.f;
+            const float r_gpu  = ringR + 62.f;
+            const float r_ram  = ringR + 68.f;
+
+            // Phone battery first (innermost, 5° CCW), light blue, when bound.
             const int ppct = s.health.phone_battery_pct;
             if (ppct >= 0) {
-                const float r3  = ringR + 80.f;
                 const float ppc = std::clamp(ppct / 100.f, 0.f, 1.f);
-                char ppb[12];
-                snprintf(ppb, sizeof(ppb), "%s%d%%",
-                         s.health.phone_charging ? "P+" : "P", ppct);
-                gauge(r3, a0, a1, ppc, nvgRGBA(120, 190, 255, 235), ppb, true);
+                char ppb[12]; snprintf(ppb, sizeof(ppb), "%s%d%%",
+                                       s.health.phone_charging ? "P+" : "P", ppct);
+                gauge(r_phn, a0 - 5.f * DEG, a1 - 5.f * DEG, ppc,
+                      nvgRGBA(120, 190, 255, 235), ppb, true, 7.f);
             }
+            char cb[12]; snprintf(cb, sizeof(cb), "C%2.0f", cpu * 100.f);
+            char gb[12]; snprintf(gb, sizeof(gb), "G%2.0f", gpu * 100.f);
+            char rb[12]; snprintf(rb, sizeof(rb), "R%2.0f", ram * 100.f);
+            gauge(r_cpu, a0,             a1,             cpu, load_col(cpu), cb, true, thin);
+            gauge(r_gpu, a0 +  5.f * DEG, a1 +  5.f * DEG, gpu, load_col(gpu), gb, true, thin);
+            gauge(r_ram, a0 + 10.f * DEG, a1 + 10.f * DEG, ram, load_col(ram), rb, true, thin);
         } else {
             // Controller battery — always drawn (inner arc). If a phone
             // battery is known (KDE Connect bridge bound to a paired
@@ -609,10 +627,10 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
                 char ppb[10];
                 snprintf(ppb, sizeof(ppb), "%s%d%%",
                          s.health.phone_charging ? "P+" : "P", ppct);
-                gauge(r1, a0 + off + cw, a1 + off + cw, pct, bc, pb, bpct >= 0);
-                gauge(r2, a0 + cw,       a1 + cw,       ppc, pc, ppb, true);
+                gauge(r1, a0 + off + cw, a1 + off + cw, pct, bc, pb, bpct >= 0, 8.f);
+                gauge(r2, a0 + cw,       a1 + cw,       ppc, pc, ppb, true, 8.f);
             } else {
-                gauge(r1, a0 + cw, a1 + cw, pct, bc, pb, bpct >= 0);
+                gauge(r1, a0 + cw, a1 + cw, pct, bc, pb, bpct >= 0, 8.f);
             }
         }
     }
