@@ -197,6 +197,12 @@ public:
         const auto& o = opts_[i];
         return o.desc + ": " + o.values[o.idx];
     }
+    std::string option_key(int i) const override {
+        return (i >= 0 && i < (int)opts_.size()) ? opts_[i].key : std::string();
+    }
+    std::string option_value(int i) const override {
+        return (i >= 0 && i < (int)opts_.size()) ? opts_[i].values[opts_[i].idx] : std::string();
+    }
     void option_cycle(int i, int dir) override {
         if (i < 0 || i >= (int)opts_.size()) return;
         auto& o = opts_[i];
@@ -204,6 +210,8 @@ public:
         o.idx = ((o.idx + dir) % n + n) % n;
         opts_dirty_ = true;                          // core re-reads on next GET_VARIABLE_UPDATE
     }
+
+    void set_audio_enabled(bool on) override { audio_on_ = on; }
 
     // ── libretro C callbacks (via g_lr) ───────────────────────────────────────
     bool on_environment(unsigned cmd, void* data) {
@@ -584,10 +592,10 @@ private:
         return g_lr ? g_lr->on_input_state(port, dev, idx, id) : 0;
     }
     static void audio_sample_trampoline(int16_t l, int16_t r) {
-        if (g_lr && g_lr->audio_) { int16_t s[2] = {l, r}; g_lr->audio_->push(s, 1); }
+        if (g_lr && g_lr->audio_ && g_lr->audio_on_) { int16_t s[2] = {l, r}; g_lr->audio_->push(s, 1); }
     }
     static size_t audio_batch_trampoline(const int16_t* data, size_t frames) {
-        if (g_lr && g_lr->audio_) g_lr->audio_->push(data, frames);
+        if (g_lr && g_lr->audio_ && g_lr->audio_on_) g_lr->audio_->push(data, frames);
         return frames;
     }
     static void log_trampoline(enum retro_log_level, const char*, ...) {}
@@ -607,6 +615,7 @@ private:
 
     std::string core_path_, rom_path_, sys_dir_, audio_dev_;
     std::unique_ptr<AudioSink> audio_;
+    bool        audio_on_ = true;        // runtime mute gate (menu toggle)
     void*       handle_  = nullptr;
     bool        loaded_  = false;
     bool        failed_  = false;

@@ -10963,6 +10963,18 @@ static std::vector<MenuItem> build_menu(
                       "ON: show the game in a centred window so the HUD stays "
                       "visible around it. OFF: fullscreen (HUD hidden)."));
 #ifdef PROTOHUD_HAVE_LIBRETRO
+                  {
+                      MenuItem au = with_desc(toggle("Audio",
+                          [&state]{ return state.game_audio_enabled.load(); },
+                          [&state](bool v){
+                              state.game_audio_enabled.store(v);
+                              if (auto* g = state.game_src_live.load()) g->set_audio_enabled(v);
+                          }),
+                          "Emulator sound on/off. Mutes/unmutes the running core live; "
+                          "persisted to config game.audio_enabled.");
+                      au.visible_fn = [&state]{ return state.game_source_sel.load() == 2; };
+                      games.push_back(std::move(au));
+                  }
                   // Core Options — emulator only. The list is discovered when the
                   // core loads (first Play), so it's built from fixed slot rows
                   // driven by the live source: Select cycles forward, Ctrl+Select
@@ -14503,6 +14515,20 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["multicam_top_a"]   = eye_src_str(multicam_top_a);
         cfg["cameras"]["multicam_top_b"]   = eye_src_str(multicam_top_b);
 
+        // Game / emulator settings: persist the audio toggle and the live core's
+        // current option values (so menu changes survive a restart).
+        cfg["game"]["audio_enabled"] = state.game_audio_enabled.load();
+        if (auto* g = state.game_src_live.load()) {
+            const int n = g->option_count();
+            if (n > 0) {
+                auto& jo = cfg["game"]["libretro_options"];
+                for (int i = 0; i < n; ++i) {
+                    const std::string k = g->option_key(i);
+                    if (!k.empty()) jo[k] = g->option_value(i);
+                }
+            }
+        }
+
         auto& jm = cfg["menu_style"];
         jm["accent_color"]     = color_to_json(menu.accent_color());
         jm["bg_color"]         = color_to_json(menu.bg_color());
@@ -14676,10 +14702,10 @@ int main(int argc, char* argv[]) {
     std::string lr_sysdir  = jgame.value("libretro_system_dir",
                                          std::string("/home/user/.local/share/protohud/system"));
     // Core audio plays to its own ALSA device (independent of the spatial
-    // AudioEngine). "default" shares via dmix/PipeWire; set "" to mute.
-    std::string lr_audio   = jgame.value("audio_enabled", true)
-                               ? jgame.value("audio_device", std::string("default"))
-                               : std::string();
+    // AudioEngine). "default" shares via dmix/PipeWire. The device is always
+    // opened; the Games > Audio toggle (game_audio_enabled) mutes/unmutes live.
+    std::string lr_audio   = jgame.value("audio_device", std::string("default"));
+    state.game_audio_enabled.store(jgame.value("audio_enabled", true));
     // Pinned core-option values (key → value) from config, for persistence across
     // restarts. The menu can cycle them live; config makes a choice stick.
     std::vector<std::pair<std::string, std::string>> lr_options;
@@ -15693,6 +15719,7 @@ int main(int argc, char* argv[]) {
                 else
 #endif
                     game_src = game::make_snake();
+                game_src->set_audio_enabled(state.game_audio_enabled.load());
                 state.game_src_live.store(game_src.get());   // re-publish for the menu
                 game_was_active = false;   // run the (re)start path below
             }

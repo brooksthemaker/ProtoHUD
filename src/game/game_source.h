@@ -59,8 +59,14 @@ public:
     virtual int         option_count() const { return 0; }
     // "Title: currentValue" for row i (i in [0, option_count)).
     virtual std::string option_label(int /*i*/) const { return {}; }
+    // Stable key / current value of option i — used to persist choices to config.
+    virtual std::string option_key(int /*i*/)   const { return {}; }
+    virtual std::string option_value(int /*i*/) const { return {}; }
     // Advance option i by dir (+1 / -1), wrapping; takes effect on the next tick.
     virtual void        option_cycle(int /*i*/, int /*dir*/) {}
+
+    // Enable/disable this source's audio output at runtime (default: no-op).
+    virtual void        set_audio_enabled(bool /*on*/) {}
 };
 
 // Reference game (no external assets) used to validate the pipeline.

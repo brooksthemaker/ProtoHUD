@@ -141,7 +141,10 @@ shared:
   coexists with other audio.
 - A raw `"hw:CARD=…"` device is exclusive — don't point both the emulator and
   the mic `AudioEngine` at the same `hw:` device, or one will fail to open.
-- Set `"audio_enabled": false` (or `"audio_device": ""`) to mute.
+
+Toggle sound live from **Games → Audio** (shown when the Emulator source is
+selected); it mutes/unmutes the running core and is saved to
+`game.audio_enabled` on exit. (`"audio_device": ""` disables audio entirely.)
 
 ALSA soft-resamples the core's native rate (e.g. SNES 32040 Hz) to the device,
 so no rate config is needed. If the device can't be opened the game still plays,
@@ -187,9 +190,9 @@ selected):
   that you'll see "start the game to load options").
 - **Select** cycles a value forward, **Ctrl+Select** cycles back; the core
   applies the change live.
-- Menu changes are **session-scoped**. To make a choice persist across restarts,
-  pin it in `config.json` under `game.libretro_options` (the core's own option
-  key → value):
+- Menu changes are **saved to `config.json`** (`game.libretro_options`) on exit,
+  so they persist across restarts. You can also pre-seed them by hand — the
+  core's own option key → value:
 
   ```json
   "game": {
@@ -202,11 +205,6 @@ selected):
 
   (Find exact key/value names in the core's docs or RetroArch's Core Options
   screen.)
-
-### Not done yet
-
-- **Persisting menu changes automatically** — for now, live menu edits are
-  session-scoped; use `game.libretro_options` in config to make them stick.
 
 > **Doom audio:** the bundled Doom (doomgeneric) is still silent — its portable
 > core links a no-op sound stub (no SDL_mixer / software synth), so there are no

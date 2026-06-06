@@ -985,6 +985,7 @@ struct AppState {
     std::atomic<bool> game_active   { false };
     std::atomic<bool> game_windowed { false };
     std::atomic<int>  game_source_sel { 0 };   // 0 = Snake, 1 = Doom, 2 = Emulator (if built)
+    std::atomic<bool> game_audio_enabled { true };   // emulator audio on/off (menu + config)
     // Live active GameSource (owned by main's render loop). Published so the menu
     // can read/cycle the source's runtime options. Render-thread access only.
     std::atomic<game::GameSource*> game_src_live { nullptr };
