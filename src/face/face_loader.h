@@ -59,6 +59,20 @@ private:
     int src_w_ = 0, src_h_ = 0, src_x_ = 0, src_y_ = 0;   // canvas this panel slices
     bool whole_face_blink_ = false;
 
+    // Optional placement transform read from the face folder's config.json so a
+    // face authored for one panel size scales/positions sensibly on another:
+    //   fit:      "stretch" (legacy fill, default), "contain" (aspect-fit +
+    //             letterbox), or "cover" (aspect-fill + crop)
+    //   scale:    extra uniform multiplier on top of the fit (1.0 = none)
+    //   offset_x/y: post-scale nudge in target pixels (canvas px for multi-panel
+    //             faces, panel px otherwise)
+    // xform_active_ stays false for legacy faces (no fit/scale/offset keys) so
+    // their rendering is byte-for-byte unchanged.
+    std::string fit_mode_;
+    double      user_scale_ = 1.0;
+    int         off_x_ = 0, off_y_ = 0;
+    bool        xform_active_ = false;
+
     std::map<std::string, cv::Mat> expressions_;   // name → RGBA (h,w)
     std::vector<std::string>       expr_order_;     // stable insertion order
     cv::Mat  blink_;            // may be empty

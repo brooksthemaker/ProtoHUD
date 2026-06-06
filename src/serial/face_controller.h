@@ -63,6 +63,11 @@ public:
     virtual bool        import_face_image(const std::string& /*expression*/,
                                           const std::string& /*src_path*/) { return false; }
     virtual void        clear_face_image(const std::string& /*expression*/) {}
+    // Re-read the active face folder from disk and rebuild the loaders, so an
+    // out-of-band change to its PNGs or config.json (e.g. the Size & Position
+    // adjust writing a fit/scale/offset transform) takes effect live. No-op on
+    // backends without an on-disk face folder.
+    virtual void        reload_faces() {}
     // Set the active expression by name (mirror of set_face but by string).
     // Useful for the Files > Faces "Play" action where the index of a slot
     // isn't known statically.
@@ -165,6 +170,7 @@ public:
         return (*active_)->import_face_image(e, s);
     }
     void clear_face_image(const std::string& e) override { (*active_)->clear_face_image(e); }
+    void reload_faces() override { (*active_)->reload_faces(); }
     void set_face_by_name(const std::string& e) override { (*active_)->set_face_by_name(e); }
     void trigger_boop(const std::string& e, double d) override { (*active_)->trigger_boop(e, d); }
     void play_eye_animation(int type, double speed, double size,

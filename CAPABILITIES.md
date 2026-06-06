@@ -325,6 +325,19 @@ Default, Yellow, Orange, White, Green, Purple, Red, Blue, Rainbow, Flow Noise, H
 ### GIF Playback
 8 GIF slots (labels configurable via `serial.teensy.gif_names[]` in config)
 
+### Face Size & Position (per-face placement transform)
+Face Options → **Size & Position** scales/shifts the active face so art drawn
+for one panel size fits another, applied live:
+- **Fit Mode** — `stretch` (legacy fill, may distort), `contain` (aspect-fit +
+  letterbox), `cover` (aspect-fill + crop).
+- **Scale** (0.25–3.0×) extra uniform zoom; **Offset X/Y** (±128 px) shift.
+- Saved as `fit`/`scale`/`offset_x`/`offset_y` in the **face folder's
+  `config.json`**, so it travels with the face and applies to every expression.
+- Honored by `FaceLoader` on every backend/preview; eye/mouth blink regions
+  track the scale+offset. Legacy faces (no transform keys) render unchanged.
+- Faces are auto-tagged with their authored size (`draw_size`) on save, so the
+  loader knows the source resolution to scale from.
+
 ### Controls
 | Control | Range |
 |---|---|

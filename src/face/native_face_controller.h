@@ -76,6 +76,7 @@ public:
     bool        import_face_image(const std::string& expression,
                                   const std::string& src_path) override;
     void        clear_face_image(const std::string& expression) override;
+    void        reload_faces() override { reload_active_face(); }
     void        set_face_by_name(const std::string& expression) override;
     void        trigger_boop(const std::string& expression, double duration_s) override;
     void        play_eye_animation(int type, double speed, double size,

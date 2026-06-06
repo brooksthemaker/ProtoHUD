@@ -5440,6 +5440,81 @@ static std::vector<MenuItem> build_menu(
     face_files_menu.push_back(std::move(pf_chain_layout_item));
     if (pf_hub75_p) face_files_menu.push_back(std::move(pf_hub75_layout_item));
 
+    // ── Size & Position — per-face placement transform ───────────────────────
+    // Writes fit/scale/offset into the active face folder's config.json so a
+    // face drawn for one panel size scales + sits correctly on another, then
+    // reloads the loaders live. Honored by FaceLoader (see face_loader.cpp).
+    {
+        struct FaceXform { std::string folder, fit = "stretch"; double scale = 1.0; int ox = 0, oy = 0; };
+        auto fx = std::make_shared<FaceXform>();
+        auto fx_folder = [teensy]() -> std::string {
+            const std::string p = teensy ? teensy->face_image_path("neutral") : std::string();
+            if (p.empty()) return {};
+            return std::filesystem::path(p).parent_path().string();
+        };
+        auto fx_load = [fx, fx_folder]{
+            *fx = FaceXform{};
+            fx->folder = fx_folder();
+            if (fx->folder.empty()) return;
+            std::ifstream f(fx->folder + "/config.json");
+            if (!f) return;
+            json j; try { f >> j; } catch (...) { return; }
+            if (j.contains("fit") && j["fit"].is_string())          fx->fit   = j["fit"].get<std::string>();
+            if (j.contains("scale") && j["scale"].is_number())      fx->scale = j["scale"].get<double>();
+            if (j.contains("offset_x") && j["offset_x"].is_number())fx->ox    = (int)std::lround(j["offset_x"].get<double>());
+            if (j.contains("offset_y") && j["offset_y"].is_number())fx->oy    = (int)std::lround(j["offset_y"].get<double>());
+        };
+        auto fx_save = [fx, teensy]{
+            if (fx->folder.empty()) return;
+            const std::string cp = fx->folder + "/config.json";
+            json j = json::object();
+            { std::ifstream f(cp); if (f) { try { f >> j; } catch (...) { j = json::object(); } } }
+            if (!j.is_object()) j = json::object();
+            j["fit"] = fx->fit; j["scale"] = fx->scale;
+            j["offset_x"] = fx->ox; j["offset_y"] = fx->oy;
+            const std::string tmp = cp + ".tmp";
+            { std::ofstream f(tmp); if (f) f << j.dump(2); }
+            std::error_code ec; std::filesystem::rename(tmp, cp, ec);
+            if (teensy) teensy->reload_faces();      // live preview
+        };
+        std::vector<MenuItem> fit_items = {
+            leaf_sel("Stretch (fill)", [fx, fx_save]{ fx->fit = "stretch"; fx_save(); },
+                                       [fx]{ return fx->fit == "stretch"; }),
+            leaf_sel("Contain (fit)",  [fx, fx_save]{ fx->fit = "contain"; fx_save(); },
+                                       [fx]{ return fx->fit == "contain"; }),
+            leaf_sel("Cover (crop)",   [fx, fx_save]{ fx->fit = "cover";   fx_save(); },
+                                       [fx]{ return fx->fit == "cover"; }),
+        };
+        std::vector<MenuItem> xform_items = {
+            with_desc(submenu("Fit Mode", std::move(fit_items)),
+                "How the face fills the panel when its drawn size differs: Stretch "
+                "fills both axes (may distort); Contain keeps aspect + letterboxes; "
+                "Cover keeps aspect + crops to fill."),
+            with_desc(slider("Scale", 0.25f, 3.0f, 0.05f, "x",
+                [fx]{ return (float)fx->scale; },
+                [fx, fx_save](float v){ fx->scale = v; fx_save(); }),
+                "Extra uniform zoom on top of the fit. 1.0 = none."),
+            with_desc(slider("Offset X", -128.f, 128.f, 1.f, "px",
+                [fx]{ return (float)fx->ox; },
+                [fx, fx_save](float v){ fx->ox = (int)std::lround(v); fx_save(); }),
+                "Shift the face left/right (panel pixels)."),
+            with_desc(slider("Offset Y", -128.f, 128.f, 1.f, "px",
+                [fx]{ return (float)fx->oy; },
+                [fx, fx_save](float v){ fx->oy = (int)std::lround(v); fx_save(); }),
+                "Shift the face up/down (panel pixels)."),
+            with_desc(leaf("Reset", [fx, fx_save]{
+                fx->fit = "stretch"; fx->scale = 1.0; fx->ox = 0; fx->oy = 0; fx_save(); }),
+                "Back to fill-the-panel with no zoom or shift."),
+        };
+        MenuItem xform_sub = with_desc(submenu("Size & Position", std::move(xform_items)),
+            "Scale and shift the current face so art drawn for a different panel "
+            "size fits this one. Applies live and is saved into the face folder, so "
+            "it travels with the face. Affects every expression in the face.");
+        xform_sub.action     = fx_load;   // on-enter: read current values from disk
+        xform_sub.visible_fn = [fx_folder]{ return !fx_folder().empty(); };
+        face_files_menu.push_back(std::move(xform_sub));
+    }
+
     // Visibility predicates — Effects / Face Color / Material Color /
     // Animations / Save Face Config / Release Control are concepts from
     // the existing HUB75 + Protoface-daemon path; the native MAX7219 /
