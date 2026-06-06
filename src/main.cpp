@@ -12474,9 +12474,11 @@ int main(int argc, char* argv[]) {
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
 
-        // Preload any blink eye-region boxes from the face folder's config.json
+        // Preload any blink eye polygons from the face folder's config.json
         // (canvas coords) so the editor shows them and round-trips them on save.
-        std::vector<cv::Rect> eye_regions;
+        // Accepts the new {"points":[[x,y],...]} polygon form and the legacy
+        // {x,y,w,h} rectangle (promoted to a 4-corner polygon for editing).
+        std::vector<menu::FaceEditor::EyePoly> eye_polys;
         {
             const fs::path cfgp = fs::path(abs_path).parent_path() / "config.json";
             std::ifstream ef(cfgp);
@@ -12484,13 +12486,21 @@ int main(int argc, char* argv[]) {
                 try {
                     json ej; ef >> ej;
                     auto rd = [&](const char* k){
-                        if (ej.contains(k) && ej[k].is_object()) {
-                            const auto& d = ej[k];
-                            eye_regions.emplace_back(
-                                d.value("x", 0), d.value("y", 0),
-                                std::max(1, d.value("w", 1)),
-                                std::max(1, d.value("h", 1)));
+                        if (!ej.contains(k) || !ej[k].is_object()) return;
+                        const auto& d = ej[k];
+                        menu::FaceEditor::EyePoly poly;
+                        if (d.contains("points") && d["points"].is_array()) {
+                            for (const auto& pt : d["points"])
+                                if (pt.is_array() && pt.size() == 2)
+                                    poly.emplace_back(pt[0].get<int>(), pt[1].get<int>());
+                        } else {                              // legacy rectangle
+                            const int x = d.value("x", 0), y = d.value("y", 0);
+                            const int w = std::max(1, d.value("w", 1));
+                            const int h = std::max(1, d.value("h", 1));
+                            poly = { {x, y}, {x + w - 1, y},
+                                     {x + w - 1, y + h - 1}, {x, y + h - 1} };
                         }
+                        if (poly.size() >= 3) eye_polys.push_back(std::move(poly));
                     };
                     rd("eye_left"); rd("eye_right");
                 } catch (...) {}
@@ -12509,10 +12519,10 @@ int main(int argc, char* argv[]) {
             title, abs_path, cw, ch, std::move(covered), std::move(labels),
             zones.mirror_x,
             mode, {} /* default palette */,
-            std::move(eye_regions),
+            std::move(eye_polys),
             /* on_commit */ [&face_proxy, &native_ctrl, expression]
                 (const cv::Mat& rgba_canvas, const std::string& target_path,
-                 const std::vector<cv::Rect>& eye_regions) {
+                 const std::vector<menu::FaceEditor::EyePoly>& eye_polys) {
                 // Convert RGBA back to BGRA for cv::imwrite (PNG storage
                 // expects native channel order in OpenCV).
                 cv::Mat bgra;
@@ -12528,22 +12538,27 @@ int main(int argc, char* argv[]) {
                                  target_path.c_str());
                     return;
                 }
-                // Persist blink eye regions (canvas coords) into the face
+                // Persist blink eye polygons (canvas coords) into the face
                 // folder's config.json, merging so expressions/blink keys are
-                // preserved. The loader maps these onto each panel slice; a
-                // proper region blink only closes the eye(s) inside these boxes.
-                if (!eye_regions.empty()) {
+                // preserved. Stored as {"points":[[x,y],...]}; the loader fills
+                // each polygon to a mask so a region blink only closes the eye(s)
+                // inside the shape. Always rewrite both keys so clearing an eye
+                // (drawing fewer shapes) removes the stale one.
+                {
                     const std::filesystem::path cfgp =
                         std::filesystem::path(target_path).parent_path() / "config.json";
                     json ej = json::object();
                     { std::ifstream ef(cfgp);
                       if (ef) { try { ef >> ej; } catch (...) { ej = json::object(); } }
                       if (!ej.is_object()) ej = json::object(); }
-                    auto wr = [&](const char* k, const cv::Rect& r){
-                        ej[k] = {{"x", r.x}, {"y", r.y}, {"w", r.width}, {"h", r.height}};
+                    auto wr = [&](const char* k, const menu::FaceEditor::EyePoly& poly){
+                        json pts = json::array();
+                        for (const auto& p : poly) pts.push_back({p.x, p.y});
+                        ej[k] = {{"points", std::move(pts)}};
                     };
-                    wr("eye_left", eye_regions[0]);
-                    if (eye_regions.size() > 1) wr("eye_right", eye_regions[1]);
+                    ej.erase("eye_left"); ej.erase("eye_right");
+                    if (!eye_polys.empty())          wr("eye_left",  eye_polys[0]);
+                    if (eye_polys.size() > 1)        wr("eye_right", eye_polys[1]);
                     // draw_size lets single-panel faces scale regions; multi-
                     // panel slices use canvas coords directly (ignored there).
                     ej["draw_size"] = {rgba_canvas.cols, rgba_canvas.rows};

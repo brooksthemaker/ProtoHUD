@@ -338,6 +338,20 @@ for one panel size fits another, applied live:
 - Faces are auto-tagged with their authored size (`draw_size`) on save, so the
   loader knows the source resolution to scale from.
 
+### Blink Eye Regions (pixel editor)
+The face pixel editor's **Eye Region** tool (key `7`, MAX7219 / RGB-matrix
+backends) defines where a blink replaces the open eye:
+- Drawn as a **free-form closed polygon** — drop vertices point-by-point like the
+  line tool, then click the first vertex (ringed once ≥3 points) to close. Back/
+  Undo removes the last vertex. Mirror on → one shape sets both eyes.
+- Saved as `eye_left`/`eye_right` `{"points":[[x,y],...]}` in the face folder's
+  `config.json`; `FaceLoader` fills each polygon to a stencil so only pixels
+  inside the shape blink. Legacy `{x,y,w,h}` rectangles still load (and are shown
+  as editable 4-corner polygons).
+- Set regions are **always drawn** (cyan outline + faint fill + vertex dots),
+  whatever tool is active, so the eye/blink area is always visible.
+- The paint cursor has a dark halo outline so it stays visible over white pixels.
+
 ### Controls
 | Control | Range |
 |---|---|

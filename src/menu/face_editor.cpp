@@ -40,7 +40,7 @@ void FaceEditor::open(std::string title,
                      int mirror_axis_x,
                      Mode mode,
                      std::vector<uint32_t> palette,
-                     std::vector<cv::Rect> eye_regions,
+                     std::vector<EyePoly>  eye_polys,
                      CommitFn on_commit,
                      CancelFn on_cancel,
                      PreviewFn on_preview,
@@ -56,7 +56,8 @@ void FaceEditor::open(std::string title,
     covered_labels_  = std::move(covered_labels);
     if (covered_labels_.size() != covered_.size()) covered_labels_.assign(covered_.size(), "");
     mirror_axis_x_   = mirror_axis_x;
-    eye_regions_     = std::move(eye_regions);
+    eye_polys_       = std::move(eye_polys);
+    eye_pts_.clear();
     mode_      = mode;
     tool_      = Tool::Pencil;
     mirror_    = false;
@@ -279,34 +280,39 @@ void FaceEditor::apply_at_cursor() {
         return;
     }
 
-    // Eye Region: two-step like Rect, but instead of painting it records a
-    // canvas-space box defining where a blink replaces the open eye. With
-    // mirror on, one drag sets both eyes (box + its mirror). With mirror off
-    // the first box is the left eye, the second the right, and a third resets.
+    // Eye Region: a free-form closed polygon drawn point-by-point (like the
+    // line tool, but the ends join up). Each primary() drops a vertex; clicking
+    // back on (or next to) the first vertex with >= 3 points closes the shape
+    // and records it. With mirror on, closing also adds the mirrored polygon so
+    // one shape sets both eyes. With mirror off the first closed shape is the
+    // left eye, the second the right, and a third resets.
     if (tool_ == Tool::EyeBox) {
-        if (!anchor_set_) {
-            anchor_set_ = true;
-            anchor_x_   = cursor_x_;
-            anchor_y_   = cursor_y_;
+        // Close when the cursor lands on the first vertex and we have a real
+        // polygon (>= 3 points). Otherwise append this vertex.
+        const bool can_close =
+            eye_pts_.size() >= 3 &&
+            cursor_x_ == eye_pts_.front().x && cursor_y_ == eye_pts_.front().y;
+        if (!can_close) {
+            // Avoid duplicate consecutive vertices (a double-click on one cell).
+            if (eye_pts_.empty() ||
+                eye_pts_.back().x != cursor_x_ || eye_pts_.back().y != cursor_y_)
+                eye_pts_.emplace_back(cursor_x_, cursor_y_);
             return;
         }
-        const int x0 = std::min(anchor_x_, cursor_x_);
-        const int y0 = std::min(anchor_y_, cursor_y_);
-        const int x1 = std::max(anchor_x_, cursor_x_);
-        const int y1 = std::max(anchor_y_, cursor_y_);
-        const cv::Rect box(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+        EyePoly poly = eye_pts_;
+        eye_pts_.clear();
         if (mirror_) {
             const int axis = (mirror_axis_x_ >= 0)
                 ? (2 * mirror_axis_x_ - 1)
                 : (2 * bbox_.x + bbox_.width - 1);
-            const int mx0 = axis - x1, mx1 = axis - x0;
-            const cv::Rect mbox(mx0, y0, mx1 - mx0 + 1, y1 - y0 + 1);
-            eye_regions_ = { box, mbox };
+            EyePoly mpoly;
+            mpoly.reserve(poly.size());
+            for (const auto& p : poly) mpoly.emplace_back(axis - p.x, p.y);
+            eye_polys_ = { std::move(poly), std::move(mpoly) };
         } else {
-            if (eye_regions_.size() >= 2) eye_regions_.clear();
-            eye_regions_.push_back(box);
+            if (eye_polys_.size() >= 2) eye_polys_.clear();
+            eye_polys_.push_back(std::move(poly));
         }
-        anchor_set_ = false;
         return;
     }
 
@@ -370,6 +376,7 @@ void FaceEditor::secondary() {
     // Cycle Pencil → Eraser → Bucket → Eyedrop → Line → Rect → Pencil…
     tool_ = static_cast<Tool>((static_cast<int>(tool_) + 1) % kToolCount);
     anchor_set_ = false;
+    eye_pts_.clear();
 }
 
 void FaceEditor::tertiary()  { if (open_) mirror_ = !mirror_; }
@@ -378,6 +385,7 @@ void FaceEditor::set_tool(Tool t) {
     if (!open_) return;
     tool_ = t;
     anchor_set_ = false;
+    eye_pts_.clear();
 }
 
 void FaceEditor::set_brush_size(int radius) {
@@ -395,6 +403,12 @@ void FaceEditor::back() {
         anchor_set_ = false;
         return;
     }
+    // A partially-drawn eye polygon: back removes the last vertex (and a final
+    // press on the empty shape falls through to closing the editor).
+    if (!eye_pts_.empty()) {
+        eye_pts_.pop_back();
+        return;
+    }
     auto cb = std::move(on_cancel_);
     close();
     if (cb) cb();
@@ -405,7 +419,7 @@ void FaceEditor::save() {
     auto cb     = std::move(on_commit_);
     cv::Mat out = canvas_.clone();
     const std::string path = abs_path_;
-    std::vector<cv::Rect> eyes = eye_regions_;
+    std::vector<EyePoly> eyes = eye_polys_;
     close();
     if (cb) cb(out, path, eyes);
 }
@@ -435,6 +449,7 @@ void FaceEditor::undo() {
     // Z while a shape anchor is set just cancels it (no canvas change to
     // roll back). Otherwise pop the most recent undo snapshot.
     if (anchor_set_) { anchor_set_ = false; return; }
+    if (!eye_pts_.empty()) { eye_pts_.pop_back(); return; }
     if (undo_stack_.empty()) return;
     canvas_ = std::move(undo_stack_.back());
     undo_stack_.pop_back();
@@ -504,7 +519,8 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     case Tool::Eyedrop: tool_str = "Eyedrop"; break;
     case Tool::Line:    tool_str = anchor_set_ ? "Line (anchor set)"   : "Line";    break;
     case Tool::Rect:    tool_str = anchor_set_ ? "Rect (anchor set)"   : "Rect";    break;
-    case Tool::EyeBox:  tool_str = anchor_set_ ? "Eye Region (corner set)" : "Eye Region"; break;
+    case Tool::EyeBox:  tool_str = eye_pts_.empty() ? "Eye Region"
+                                                    : "Eye Region (drawing)"; break;
     }
     const int brush_side = 1 + brush_size_ * 2;
     std::snprintf(sub, sizeof(sub),
@@ -651,44 +667,76 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
             dl->AddText(font, label_fs, {tx, ty}, label_col, lbl.c_str());
         }
 
-        // Existing eye-region boxes (where a blink replaces the open eye).
-        // Drawn in cyan with a small label so they're visible regardless of
-        // the active tool. Authored / re-authored with the EyeBox tool.
+        // Existing eye-region polygons (where a blink replaces the open eye).
+        // Always drawn — cyan closed outline + a small label + faint fill — so
+        // the user can see where the eyes / blink area sit regardless of the
+        // active tool. Vertices are marked so a saved shape stays editable.
         {
-            const ImU32 eye_col = IM_COL32(80, 220, 255, 235);
-            const float eye_fs  = std::max(10.f, fs * 0.62f);
-            for (size_t i = 0; i < eye_regions_.size(); ++i) {
-                const auto& r = eye_regions_[i];
-                const float rx = grid_origin_x_ + (r.x - bbox_.x) * cell_size_;
-                const float ry = grid_origin_y_ + (r.y - bbox_.y) * cell_size_;
-                dl->AddRect({rx, ry},
-                            {rx + r.width * cell_size_, ry + r.height * cell_size_},
-                            eye_col, 0.f, 0, 2.f);
-                const char* lbl = (eye_regions_.size() == 2)
+            // Canvas pixel (col,row) → screen point at cell centre.
+            auto to_screen = [&](int cxp, int cyp) -> ImVec2 {
+                return { grid_origin_x_ + (cxp - bbox_.x + 0.5f) * cell_size_,
+                         grid_origin_y_ + (cyp - bbox_.y + 0.5f) * cell_size_ };
+            };
+            const ImU32 eye_col  = IM_COL32(80, 220, 255, 235);
+            const ImU32 eye_fill = IM_COL32(80, 220, 255, 40);
+            const ImU32 vtx_col  = IM_COL32(200, 245, 255, 255);
+            const float eye_fs   = std::max(10.f, fs * 0.62f);
+            for (size_t i = 0; i < eye_polys_.size(); ++i) {
+                const auto& poly = eye_polys_[i];
+                if (poly.empty()) continue;
+                std::vector<ImVec2> pts;
+                pts.reserve(poly.size());
+                for (const auto& p : poly) pts.push_back(to_screen(p.x, p.y));
+                if (pts.size() >= 3)
+                    dl->AddConvexPolyFilled(pts.data(), (int)pts.size(), eye_fill);
+                dl->AddPolyline(pts.data(), (int)pts.size(), eye_col,
+                                ImDrawFlags_Closed, 2.f);
+                for (const auto& sp : pts)
+                    dl->AddRectFilled({sp.x - 1.5f, sp.y - 1.5f},
+                                      {sp.x + 1.5f, sp.y + 1.5f}, vtx_col);
+                const char* lbl = (eye_polys_.size() == 2)
                                   ? (i == 0 ? "eye L" : "eye R") : "eye";
-                dl->AddText(font, eye_fs, {rx + 2.f, ry + 2.f}, eye_col, lbl);
+                dl->AddText(font, eye_fs, {pts.front().x + 3.f, pts.front().y + 3.f},
+                            eye_col, lbl);
             }
         }
 
-        // Live drag preview for the EyeBox tool — outline the box that the
-        // next primary() would record (plus its mirror when mirror is on).
-        if (anchor_set_ && tool_ == Tool::EyeBox) {
-            const int x0 = std::min(anchor_x_, cursor_x_);
-            const int y0 = std::min(anchor_y_, cursor_y_);
-            const int x1 = std::max(anchor_x_, cursor_x_);
-            const int y1 = std::max(anchor_y_, cursor_y_);
-            auto outline = [&](int bx0, int by0, int bx1, int by1, ImU32 col){
-                const float rx = grid_origin_x_ + (bx0 - bbox_.x) * cell_size_;
-                const float ry = grid_origin_y_ + (by0 - bbox_.y) * cell_size_;
-                const float rw = (bx1 - bx0 + 1) * cell_size_;
-                const float rh = (by1 - by0 + 1) * cell_size_;
-                dl->AddRect({rx, ry}, {rx + rw, ry + rh}, col, 0.f, 0, 2.f);
+        // Live preview for the EyeBox tool while a polygon is being placed:
+        // draw the edges between dropped vertices, a rubber-band edge to the
+        // cursor, and highlight the first vertex (the close target) once the
+        // shape has enough points to close.
+        if (tool_ == Tool::EyeBox && !eye_pts_.empty()) {
+            auto to_screen = [&](int cxp, int cyp) -> ImVec2 {
+                return { grid_origin_x_ + (cxp - bbox_.x + 0.5f) * cell_size_,
+                         grid_origin_y_ + (cyp - bbox_.y + 0.5f) * cell_size_ };
             };
-            outline(x0, y0, x1, y1, IM_COL32(120, 235, 255, 255));
+            const ImU32 edge_col = IM_COL32(120, 235, 255, 255);
+            const ImU32 band_col = IM_COL32(120, 235, 255, 140);
+            std::vector<ImVec2> pts;
+            pts.reserve(eye_pts_.size());
+            for (const auto& p : eye_pts_) pts.push_back(to_screen(p.x, p.y));
+            if (pts.size() >= 2)
+                dl->AddPolyline(pts.data(), (int)pts.size(), edge_col,
+                                ImDrawFlags_None, 2.f);
+            // Rubber-band edge from the last placed vertex to the cursor.
+            dl->AddLine(pts.back(), to_screen(cursor_x_, cursor_y_), band_col, 1.5f);
+            // Vertex dots; ring the first one when the shape can close.
+            for (size_t k = 0; k < pts.size(); ++k) {
+                dl->AddRectFilled({pts[k].x - 1.5f, pts[k].y - 1.5f},
+                                  {pts[k].x + 1.5f, pts[k].y + 1.5f}, edge_col);
+            }
+            if (eye_pts_.size() >= 3)
+                dl->AddCircle(pts.front(), cell_size_ * 0.8f,
+                              IM_COL32(255, 240, 130, 255), 0, 2.f);
             if (mirror_) {
                 const int axis = (mirror_axis_x_ >= 0)
                     ? (2 * mirror_axis_x_ - 1) : (2 * bbox_.x + bbox_.width - 1);
-                outline(axis - x1, y0, axis - x0, y1, IM_COL32(120, 235, 255, 150));
+                std::vector<ImVec2> mpts;
+                mpts.reserve(eye_pts_.size());
+                for (const auto& p : eye_pts_) mpts.push_back(to_screen(axis - p.x, p.y));
+                if (mpts.size() >= 2)
+                    dl->AddPolyline(mpts.data(), (int)mpts.size(),
+                                    IM_COL32(120, 235, 255, 110), ImDrawFlags_None, 1.5f);
             }
         }
 
@@ -749,6 +797,14 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         const float ccx = grid_origin_x_ + (cursor_x_ - bbox_.x - cur_radius) * cell_size_;
         const float ccy = grid_origin_y_ + (cursor_y_ - bbox_.y - cur_radius) * cell_size_;
         const float ccs = cell_size_ * static_cast<float>(cur_side);
+        // Dark halo first (one px outside + inside), then the accent box on top.
+        // The grey/black outline keeps the cursor readable over white paint —
+        // a plain white accent would vanish against lit pixels.
+        const ImU32 cursor_halo = IM_COL32(20, 20, 24, 230);
+        dl->AddRect({ccx - 1.5f, ccy - 1.5f}, {ccx + ccs + 1.5f, ccy + ccs + 1.5f},
+                    cursor_halo, 0.f, 0, 1.5f);
+        dl->AddRect({ccx + 1.5f, ccy + 1.5f}, {ccx + ccs - 1.5f, ccy + ccs - 1.5f},
+                    cursor_halo, 0.f, 0, 1.5f);
         dl->AddRect({ccx, ccy}, {ccx + ccs, ccy + ccs},
                     accent, 0.f, 0, 2.f);
         // Mirror cursor preview — same brush footprint, mirrored around axis.
@@ -761,6 +817,8 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                 mirror_canvas_x >= bbox_.x &&
                 mirror_canvas_x <  bbox_.x + bbox_.width) {
                 const float mcx = grid_origin_x_ + (mirror_canvas_x - bbox_.x - cur_radius) * cell_size_;
+                dl->AddRect({mcx - 1.5f, ccy - 1.5f}, {mcx + ccs + 1.5f, ccy + ccs + 1.5f},
+                            cursor_halo, 0.f, 0, 1.5f);
                 dl->AddRect({mcx, ccy}, {mcx + ccs, ccy + ccs},
                             (accent & 0x00FFFFFFu) | (140u << 24), 0.f, 0, 2.f);
             }

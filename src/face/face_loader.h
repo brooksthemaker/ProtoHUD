@@ -45,7 +45,16 @@ public:
     void    set_whole_face_blink(bool b) { whole_face_blink_ = b; }
 
 private:
-    struct Region { int x = 0, y = 0, w = 0, h = 0; bool set = false; };
+    // A blink/mouth region. x,y,w,h is always the (panel-local) bounding box
+    // used to clip the blend ROI. When `mask` is non-empty it is a panel-sized
+    // CV_8U stencil (255 inside the authored polygon) so non-rectangular eye
+    // shapes only swap pixels inside the polygon; legacy rectangle regions leave
+    // `mask` empty and fill the whole bounding box.
+    struct Region {
+        int x = 0, y = 0, w = 0, h = 0;
+        bool set = false;
+        cv::Mat mask;   // empty = rectangular; else panel-sized polygon stencil
+    };
 
     void load();
     // Load a face PNG sized to this panel: crops our slice when the PNG is

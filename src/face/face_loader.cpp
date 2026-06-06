@@ -176,25 +176,59 @@ void FaceLoader::load() {
     // origin — no scaling. blend_region then clamps boxes that fall off this
     // panel (e.g. the eye that lives on the other panel) to nothing.
     const bool canvas_coords = (src_w_ > w_ && src_h_ > 0);
+    const double cx = canvas_coords ? src_w_ * 0.5 : w_ * 0.5;
+    const double cy = canvas_coords ? src_h_ * 0.5 : h_ * 0.5;
+    // Map one source-space point (config coords) to this panel's local pixels,
+    // matching fit_image's placement so region-blink tracks the artwork.
+    // (contain/cover's aspect change isn't applied to regions — only the user
+    // scale + offset — so they may drift a little under those modes; whole-face
+    // blink is unaffected.)
+    auto map_pt = [&](double px, double py) -> cv::Point {
+        if (!canvas_coords) { px *= sx; py *= sy; }      // draw_size → panel scale
+        if (xform_active_) {
+            px = cx + (px - cx) * user_scale_ + off_x_;
+            py = cy + (py - cy) * user_scale_ + off_y_;
+        }
+        if (canvas_coords) { px -= src_x_; py -= src_y_; }
+        return { static_cast<int>(std::lround(px)), static_cast<int>(std::lround(py)) };
+    };
     auto parse_region = [&](const json& d) {
         Region r;
-        // Work in the same space as the artwork (canvas px for a multi-panel
-        // slice, panel px otherwise), apply the placement transform there, then
-        // localise. (The aspect change of contain/cover isn't applied to the
-        // boxes — only the user scale + offset — so region-blink may drift a
-        // little under those modes; whole-face blink is unaffected.)
-        double rx, ry, rw, rh, cx, cy;
+        // New form: a free-form closed polygon {"points":[[x,y],...]}. Build a
+        // panel-sized stencil so the blink only swaps pixels inside the shape.
+        if (d.contains("points") && d["points"].is_array() && d["points"].size() >= 3) {
+            std::vector<cv::Point> poly;
+            poly.reserve(d["points"].size());
+            for (const auto& pt : d["points"])
+                if (pt.is_array() && pt.size() == 2)
+                    poly.push_back(map_pt(pt[0].get<double>(), pt[1].get<double>()));
+            if (poly.size() >= 3) {
+                int minx = poly[0].x, miny = poly[0].y, maxx = poly[0].x, maxy = poly[0].y;
+                for (const auto& p : poly) {
+                    minx = std::min(minx, p.x); miny = std::min(miny, p.y);
+                    maxx = std::max(maxx, p.x); maxy = std::max(maxy, p.y);
+                }
+                r.x = minx; r.y = miny;
+                r.w = std::max(1, maxx - minx + 1);
+                r.h = std::max(1, maxy - miny + 1);
+                r.mask = cv::Mat::zeros(h_, w_, CV_8U);
+                std::vector<std::vector<cv::Point>> fill = { poly };
+                cv::fillPoly(r.mask, fill, cv::Scalar(255), cv::LINE_8);
+                r.set = true;
+            }
+            return r;
+        }
+        // Legacy rectangle {x,y,w,h} — same as before, no stencil.
+        double rx, ry, rw, rh;
         if (canvas_coords) {
             rx = static_cast<double>(d.value("x", 0));
             ry = static_cast<double>(d.value("y", 0));
             rw = std::max(1.0, static_cast<double>(d.value("w", 1)));
             rh = std::max(1.0, static_cast<double>(d.value("h", 1)));
-            cx = src_w_ * 0.5; cy = src_h_ * 0.5;
         } else {
             rx = d.value("x", 0) * sx; ry = d.value("y", 0) * sy;
             rw = std::max(1.0, d.value("w", 1) * sx);
             rh = std::max(1.0, d.value("h", 1) * sy);
-            cx = w_ * 0.5; cy = h_ * 0.5;
         }
         if (xform_active_) {                        // mirror fit_image's placement
             rx = cx + (rx - cx) * user_scale_ + off_x_;
@@ -222,6 +256,14 @@ cv::Mat FaceLoader::blend_region(const cv::Mat& base, const cv::Mat& overlay,
     x = std::max(0, x); y = std::max(0, y);
     if (x2 <= x || y2 <= y) return out;
     cv::Rect roi(x, y, x2 - x, y2 - y);
+    if (!region.mask.empty() && region.mask.size() == base.size()) {
+        // Polygon region: blend the whole ROI, then copy back only the pixels
+        // inside the stencil so a non-rectangular eye shape is honoured.
+        cv::Mat blended;
+        cv::addWeighted(base(roi), 1.0 - t, overlay(roi), t, 0.0, blended);
+        blended.copyTo(out(roi), region.mask(roi));
+        return out;
+    }
     cv::addWeighted(base(roi), 1.0 - t, overlay(roi), t, 0.0, out(roi));
     return out;
 }
