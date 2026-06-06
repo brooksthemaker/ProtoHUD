@@ -11,6 +11,8 @@
 #include <imgui.h>
 #include "capture.h"
 
+namespace game { class GameSource; }   // live game source pointer (see game_src_live)
+
 // ── Post-processing config ────────────────────────────────────────────────────
 // Modified from menu (any thread); read by the render thread via snap.
 // Simple struct — individual fields are written atomically enough for a bool/float.
@@ -982,7 +984,10 @@ struct AppState {
     // suppressed in fullscreen game mode. Toggled from the menu / GpioFunc.
     std::atomic<bool> game_active   { false };
     std::atomic<bool> game_windowed { false };
-    std::atomic<int>  game_source_sel { 0 };   // 0 = Snake, 1 = Doom (if built)
+    std::atomic<int>  game_source_sel { 0 };   // 0 = Snake, 1 = Doom, 2 = Emulator (if built)
+    // Live active GameSource (owned by main's render loop). Published so the menu
+    // can read/cycle the source's runtime options. Render-thread access only.
+    std::atomic<game::GameSource*> game_src_live { nullptr };
 
     // ── Helpers (call with mutex held) ────────────────────────────────────────
 

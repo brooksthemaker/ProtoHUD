@@ -10962,6 +10962,50 @@ static std::vector<MenuItem> build_menu(
                       [&state](bool v){ state.game_windowed.store(v); }),
                       "ON: show the game in a centred window so the HUD stays "
                       "visible around it. OFF: fullscreen (HUD hidden)."));
+#ifdef PROTOHUD_HAVE_LIBRETRO
+                  // Core Options — emulator only. The list is discovered when the
+                  // core loads (first Play), so it's built from fixed slot rows
+                  // driven by the live source: Select cycles forward, Ctrl+Select
+                  // back. Hidden slots collapse when the core exposes fewer.
+                  {
+                      std::vector<MenuItem> opts;
+                      MenuItem hint;
+                      hint.type = MenuItemType::LEAF;
+                      hint.label = "(start the game to load options)";
+                      hint.visible_fn = [&state]{
+                          auto* g = state.game_src_live.load();
+                          return !g || g->option_count() == 0;
+                      };
+                      opts.push_back(std::move(hint));
+                      for (int i = 0; i < 64; ++i) {
+                          MenuItem row;
+                          row.type = MenuItemType::LEAF;
+                          row.label = "opt";
+                          row.label_fn = [&state, i]{
+                              auto* g = state.game_src_live.load();
+                              return g ? g->option_label(i) : std::string();
+                          };
+                          row.visible_fn = [&state, i]{
+                              auto* g = state.game_src_live.load();
+                              return g && i < g->option_count();
+                          };
+                          row.action = [&state, i]{
+                              if (auto* g = state.game_src_live.load()) g->option_cycle(i, +1);
+                          };
+                          row.secondary_action = [&state, i]{
+                              if (auto* g = state.game_src_live.load()) g->option_cycle(i, -1);
+                          };
+                          opts.push_back(std::move(row));
+                      }
+                      MenuItem core_opts = with_desc(submenu("Core Options", std::move(opts)),
+                          "Per-core emulator settings (internal resolution, region, "
+                          "BIOS, frameskip, \xe2\x80\xa6). Select cycles a value forward, "
+                          "Ctrl+Select back. Populated when the core loads; pin choices "
+                          "in config game.libretro_options to persist them.");
+                      core_opts.visible_fn = [&state]{ return state.game_source_sel.load() == 2; };
+                      games.push_back(std::move(core_opts));
+                  }
+#endif
                   return games;
               }()),
                   "Play games with controller input on the glasses + LED face. "
@@ -14636,8 +14680,16 @@ int main(int argc, char* argv[]) {
     std::string lr_audio   = jgame.value("audio_enabled", true)
                                ? jgame.value("audio_device", std::string("default"))
                                : std::string();
+    // Pinned core-option values (key → value) from config, for persistence across
+    // restarts. The menu can cycle them live; config makes a choice stick.
+    std::vector<std::pair<std::string, std::string>> lr_options;
+    if (auto it = jgame.find("libretro_options"); it != jgame.end() && it->is_object())
+        for (auto& [k, v] : it->items())
+            if (v.is_string()) lr_options.emplace_back(k, v.get<std::string>());
+
     int    game_which = 0;               // currently-built source (mirrors game_source_sel)
     std::unique_ptr<game::GameSource> game_src = game::make_snake();
+    state.game_src_live.store(game_src.get());   // publish for the Core Options menu
     GLuint game_tex = 0;                 // lazily created on first frame upload
     bool   game_was_active = false;      // edge-detect to (re)start / clear override
 
@@ -15636,10 +15688,12 @@ int main(int argc, char* argv[]) {
                 else
 #endif
 #ifdef PROTOHUD_HAVE_LIBRETRO
-                if (want == 2) game_src = game::make_libretro(lr_core, lr_rom, lr_sysdir, lr_audio);
+                if (want == 2) game_src = game::make_libretro(lr_core, lr_rom, lr_sysdir,
+                                                              lr_audio, lr_options);
                 else
 #endif
                     game_src = game::make_snake();
+                state.game_src_live.store(game_src.get());   // re-publish for the menu
                 game_was_active = false;   // run the (re)start path below
             }
 

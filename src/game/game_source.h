@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 #include <opencv2/core.hpp>
 
 namespace game {
@@ -48,6 +50,17 @@ public:
     // Latest rendered frame — RGBA (CV_8UC4), the source's native resolution.
     // The host scales it per output (fullscreen glasses + downscaled HUB75).
     virtual const cv::Mat& frame() const = 0;
+
+    // ── Runtime options (libretro core options) ───────────────────────────────
+    // A source may expose a list of named multiple-choice options discovered when
+    // it loads (e.g. an emulator core's internal resolution / region / BIOS). The
+    // host surfaces these in the menu. Default: no options. All calls happen on
+    // the render thread (same as tick), so no locking is required.
+    virtual int         option_count() const { return 0; }
+    // "Title: currentValue" for row i (i in [0, option_count)).
+    virtual std::string option_label(int /*i*/) const { return {}; }
+    // Advance option i by dir (+1 / -1), wrapping; takes effect on the next tick.
+    virtual void        option_cycle(int /*i*/, int /*dir*/) {}
 };
 
 // Reference game (no external assets) used to validate the pipeline.
@@ -63,10 +76,13 @@ std::unique_ptr<GameSource> make_doom(const std::string& wad_path);
 // libretro-enabled build (PROTOHUD_HAVE_LIBRETRO). dlopen()s a software- or
 // GLES-hardware-rendered core (.so) and runs the ROM; system_dir is handed back
 // for BIOS/saves. audio_device is an ALSA playback device for the core's audio
-// (empty string disables audio). Guard call sites with #ifdef PROTOHUD_HAVE_LIBRETRO.
-std::unique_ptr<GameSource> make_libretro(const std::string& core_path,
-                                          const std::string& rom_path,
-                                          const std::string& system_dir,
-                                          const std::string& audio_device);
+// (empty string disables audio). option_overrides pins core-option values by key
+// (from config) so they survive restarts. Guard call sites with PROTOHUD_HAVE_LIBRETRO.
+std::unique_ptr<GameSource> make_libretro(
+    const std::string& core_path,
+    const std::string& rom_path,
+    const std::string& system_dir,
+    const std::string& audio_device,
+    const std::vector<std::pair<std::string, std::string>>& option_overrides);
 
 }  // namespace game

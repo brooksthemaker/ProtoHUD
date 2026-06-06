@@ -176,12 +176,37 @@ Caveats — treat this as experimental:
 - The per-frame `glReadPixels` is a GPU→CPU stall; fine at these resolutions but
   not free.
 
+### Core options (per-core settings)
+
+libretro cores publish tunables — internal resolution, region (NTSC/PAL), BIOS
+choice, frameskip, controller type, aspect ratio, etc. ProtoHUD reads them and
+surfaces them under **Games → Core Options** (shown when the Emulator source is
+selected):
+
+- The list populates when the core loads, i.e. after the first **Play** (before
+  that you'll see "start the game to load options").
+- **Select** cycles a value forward, **Ctrl+Select** cycles back; the core
+  applies the change live.
+- Menu changes are **session-scoped**. To make a choice persist across restarts,
+  pin it in `config.json` under `game.libretro_options` (the core's own option
+  key → value):
+
+  ```json
+  "game": {
+    "libretro_options": {
+      "mupen64plus-43screensize": "640x480",
+      "mupen64plus-rdp-plugin":   "gliden64"
+    }
+  }
+  ```
+
+  (Find exact key/value names in the core's docs or RetroArch's Core Options
+  screen.)
+
 ### Not done yet
 
-- **Core options / per-game settings** aren't exposed in the menu — cores run
-  with their defaults. (libretro cores publish tunables like internal
-  resolution, region, BIOS choice, frameskip, etc. via `SET_VARIABLES`; the
-  frontend currently accepts-but-ignores them.)
+- **Persisting menu changes automatically** — for now, live menu edits are
+  session-scoped; use `game.libretro_options` in config to make them stick.
 
 > **Doom audio:** the bundled Doom (doomgeneric) is still silent — its portable
 > core links a no-op sound stub (no SDL_mixer / software synth), so there are no

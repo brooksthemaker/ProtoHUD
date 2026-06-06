@@ -144,9 +144,11 @@ LibretroGame* g_lr = nullptr;
 
 class LibretroGame : public GameSource {
 public:
-    LibretroGame(std::string core, std::string rom, std::string sysdir, std::string audio_dev)
+    LibretroGame(std::string core, std::string rom, std::string sysdir, std::string audio_dev,
+                 std::vector<std::pair<std::string, std::string>> overrides)
         : core_path_(std::move(core)), rom_path_(std::move(rom)),
-          sys_dir_(std::move(sysdir)), audio_dev_(std::move(audio_dev)) {
+          sys_dir_(std::move(sysdir)), audio_dev_(std::move(audio_dev)),
+          overrides_(std::move(overrides)) {
         frame_.create(240, 320, CV_8UC4);
         frame_.setTo(cv::Scalar(0, 0, 0, 255));
     }
@@ -188,6 +190,21 @@ public:
 
     const cv::Mat& frame() const override { return frame_; }
 
+    // ── core options (surfaced in the menu) ───────────────────────────────────
+    int option_count() const override { return (int)opts_.size(); }
+    std::string option_label(int i) const override {
+        if (i < 0 || i >= (int)opts_.size()) return {};
+        const auto& o = opts_[i];
+        return o.desc + ": " + o.values[o.idx];
+    }
+    void option_cycle(int i, int dir) override {
+        if (i < 0 || i >= (int)opts_.size()) return;
+        auto& o = opts_[i];
+        const int n = (int)o.values.size();
+        o.idx = ((o.idx + dir) % n + n) % n;
+        opts_dirty_ = true;                          // core re-reads on next GET_VARIABLE_UPDATE
+    }
+
     // ── libretro C callbacks (via g_lr) ───────────────────────────────────────
     bool on_environment(unsigned cmd, void* data) {
         switch (cmd) {
@@ -204,8 +221,22 @@ public:
         case RETRO_ENVIRONMENT_GET_LANGUAGE:
             *static_cast<unsigned*>(data) = RETRO_LANGUAGE_ENGLISH;
             return true;
+        case RETRO_ENVIRONMENT_SET_VARIABLES:
+            // Legacy core-options API. Modern cores fall back to this because we
+            // don't advertise a newer core-options version, so this single path
+            // covers old and new cores. Parse the {key,"Title; a|b|c"} array.
+            parse_variables(static_cast<const struct retro_variable*>(data));
+            return true;
+        case RETRO_ENVIRONMENT_GET_VARIABLE: {
+            auto* v = static_cast<struct retro_variable*>(data);
+            v->value = nullptr;
+            for (const auto& o : opts_)
+                if (o.key == v->key) { v->value = o.values[o.idx].c_str(); break; }
+            return v->value != nullptr;
+        }
         case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
-            *static_cast<bool*>(data) = false;      // we never change core options
+            *static_cast<bool*>(data) = opts_dirty_;
+            opts_dirty_ = false;                    // edge: cleared once consumed
             return true;
         case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: {
             auto* cb = static_cast<struct retro_log_callback*>(data);
@@ -213,7 +244,6 @@ public:
             return true;
         }
         case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
-        case RETRO_ENVIRONMENT_SET_VARIABLES:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
             return true;                            // accepted, ignored
@@ -499,6 +529,38 @@ private:
         }
     }
 
+    // Parse a SET_VARIABLES array: each entry is {key, "Title; v1|v2|v3"} where
+    // the first value is the default. Honour any config override for the key.
+    void parse_variables(const struct retro_variable* vars) {
+        opts_.clear();
+        if (!vars) return;
+        for (const struct retro_variable* v = vars; v->key && v->value; ++v) {
+            std::string spec = v->value;
+            size_t semi = spec.find(';');
+            Opt o;
+            o.key  = v->key;
+            o.desc = (semi == std::string::npos) ? o.key : spec.substr(0, semi);
+            std::string vals = (semi == std::string::npos) ? spec : spec.substr(semi + 1);
+            size_t a = vals.find_first_not_of(' ');         // skip the single space after ';'
+            if (a == std::string::npos) continue;
+            for (size_t p = a; p <= vals.size();) {
+                size_t bar = vals.find('|', p);
+                std::string tok = vals.substr(p, bar == std::string::npos ? std::string::npos : bar - p);
+                if (!tok.empty()) o.values.push_back(tok);
+                if (bar == std::string::npos) break;
+                p = bar + 1;
+            }
+            if (o.values.empty()) continue;
+            o.idx = 0;                                       // first value = default
+            for (const auto& ov : overrides_)               // pin from config if present
+                if (ov.first == o.key)
+                    for (int k = 0; k < (int)o.values.size(); ++k)
+                        if (o.values[k] == ov.second) { o.idx = k; break; }
+            opts_.push_back(std::move(o));
+        }
+        opts_dirty_ = true;
+    }
+
     void msg(const std::string& l1, const std::string& l2) {
         frame_.create(240, 320, CV_8UC4);
         frame_.setTo(cv::Scalar(8, 8, 12, 255));
@@ -534,6 +596,15 @@ private:
         return reinterpret_cast<retro_proc_address_t>(eglGetProcAddress(sym));
     }
 
+    struct Opt {
+        std::string key, desc;
+        std::vector<std::string> values;
+        int idx = 0;
+    };
+    std::vector<Opt> opts_;
+    bool             opts_dirty_ = false;
+    std::vector<std::pair<std::string, std::string>> overrides_;
+
     std::string core_path_, rom_path_, sys_dir_, audio_dev_;
     std::unique_ptr<AudioSink> audio_;
     void*       handle_  = nullptr;
@@ -559,11 +630,14 @@ private:
 
 }  // namespace
 
-std::unique_ptr<GameSource> make_libretro(const std::string& core_path,
-                                          const std::string& rom_path,
-                                          const std::string& system_dir,
-                                          const std::string& audio_device) {
-    return std::make_unique<LibretroGame>(core_path, rom_path, system_dir, audio_device);
+std::unique_ptr<GameSource> make_libretro(
+    const std::string& core_path,
+    const std::string& rom_path,
+    const std::string& system_dir,
+    const std::string& audio_device,
+    const std::vector<std::pair<std::string, std::string>>& option_overrides) {
+    return std::make_unique<LibretroGame>(core_path, rom_path, system_dir,
+                                          audio_device, option_overrides);
 }
 
 }  // namespace game
