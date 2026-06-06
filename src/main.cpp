@@ -6808,9 +6808,6 @@ static std::vector<MenuItem> build_menu(
     // overlay chrome; Map Options handles the underlying map image.
     auto ipw = [](InfoWidget w) { return static_cast<int>(w); };
     std::vector<MenuItem> module_controls_menu = {
-        toggle("Circle Window",
-            [&state]{ return state.map_overlay.circle_window; },
-            [&state](bool v){ state.map_overlay.circle_window = v; }),
         toggle("Compass Ring",
             [&state]{ return state.map_overlay.compass_ring; },
             [&state](bool v){ state.map_overlay.compass_ring = v; }),
@@ -6837,6 +6834,9 @@ static std::vector<MenuItem> build_menu(
             [&state](float v){ state.map_overlay.portrait_scale = v; }),
     };
     std::vector<MenuItem> map_options_menu = {
+        toggle("Circle Window",
+            [&state]{ return state.map_overlay.circle_window; },
+            [&state](bool v){ state.map_overlay.circle_window = v; }),
         submenu("Select Map",   std::move(map_select_items)),
         submenu("Move Map",     std::move(map_move_menu)),
         submenu("Rotate Map",   std::move(map_rotate_menu)),
@@ -6873,10 +6873,11 @@ static std::vector<MenuItem> build_menu(
             "Hide the cycling info panel while the map is expanded (its weather / "
             "schedule / time already appear in the sidebar)."),
     };
-    std::vector<MenuItem> mini_map_menu = {
-        submenu("Module Controls", std::move(module_controls_menu)),
-        submenu("Map Options",     std::move(map_options_menu)),
-    };
+    // Mini-Map Module: the module-control toggles sit directly at the top (no
+    // longer nested under a "Module Controls" leaf), with the map image controls
+    // folded into a single "Map Options" submenu (Circle Window lives there too).
+    std::vector<MenuItem> mini_map_menu = std::move(module_controls_menu);
+    mini_map_menu.push_back(submenu("Map Options", std::move(map_options_menu)));
 
     // ── Info-Panel Module ─────────────────────────────────────────────────────
     // Live preview of the selected analog clock face for the Clock Face context
@@ -7152,17 +7153,36 @@ static std::vector<MenuItem> build_menu(
             [&state]{ state.hud_dock.v_offset += 5.f; apply_hud_dock(state); }),
     };
 
-    std::vector<MenuItem> hud_menu = {
-        toggle("Flip to Top",
+    // Legacy HUD group: the master toggle plus the legacy-only chrome settings
+    // (Flip to Top + the compass tape). Everything except the toggle is hidden
+    // until Legacy HUD is on, so the modular-HUD user never sees dead options.
+    std::vector<MenuItem> legacy_hud_menu;
+    legacy_hud_menu.push_back(with_desc(toggle("Legacy HUD",
+        [&state]{ return state.legacy_hud; },
+        [&state](bool v){ state.legacy_hud = v; }),
+        "ON: show the legacy edge/corner HUD (compass tape, health indicators, "
+        "face indicator, corner clock/timer, LoRa messages). OFF: show only the "
+        "modular HUD \xe2\x80\x94 the minimap and info panel."));
+    {
+        MenuItem flip = with_desc(toggle("Flip to Top",
             [hud_cfg]{ return hud_cfg->hud_flip_vertical; },
             [hud_cfg](bool v){ hud_cfg->hud_flip_vertical = v; }),
-        submenu("Location",         std::move(location_menu)),
+            "Mirror the legacy HUD chrome to the top edge instead of the bottom.");
+        flip.visible_fn = [&state]{ return state.legacy_hud; };
+        legacy_hud_menu.push_back(std::move(flip));
+        MenuItem comp = submenu("Compass", std::move(compass_menu));
+        comp.visible_fn = [&state]{ return state.legacy_hud; };
+        legacy_hud_menu.push_back(std::move(comp));
+    }
+
+    std::vector<MenuItem> hud_menu = {
         submenu("Mini-Map Module",  std::move(mini_map_menu)),
         submenu("Info-Panel Module",std::move(info_panel_menu)),
-        submenu("Compass",          std::move(compass_menu)),
+        submenu("Location",         std::move(location_menu)),
         submenu("Clock",            std::move(clock_menu)),
         submenu("Color",            std::move(color_options_menu)),
         submenu("Menu Position",    std::move(menu_position_menu)),
+        submenu("Legacy HUD",       std::move(legacy_hud_menu)),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────
@@ -9266,12 +9286,7 @@ static std::vector<MenuItem> build_menu(
             [&state](bool v){ state.win_frameless.store(v); state.win_mode_dirty.store(true); }),
             "Remove the OS window title bar and borders (windowed mode). Desktop/dev "
             "only. Applied live."),
-        with_desc(toggle("Legacy HUD",
-            [&state]{ return state.legacy_hud; },
-            [&state](bool v){ state.legacy_hud = v; }),
-            "ON: show the legacy edge/corner HUD (compass tape, health indicators, "
-            "face indicator, corner clock/timer, LoRa messages). OFF: show only the "
-            "modular HUD — the minimap and info panel."),
+        // Legacy HUD toggle moved to HUD > Legacy HUD (grouped with its settings).
     };
 
     // ── Connectivity submenu ─────────────────────────────────────────────────
@@ -9921,7 +9936,9 @@ static std::vector<MenuItem> build_menu(
     std::vector<MenuItem> communications_menu;
     communications_menu.push_back(with_desc(submenu("LoRa", std::move(lora_menu)),
         "Long-range radio: team nodes, messages and status."));
-    communications_menu.push_back(std::move(phone_item));
+    // KDE Connect now lives under System > Connectivity (alongside SSH/Bluetooth);
+    // Communications keeps the notification log + QR codes.
+    connectivity_menu.push_back(std::move(phone_item));
     communications_menu.push_back(std::move(notiflog_item));
 
     // ── Scanned QR Codes ──────────────────────────────────────────────────
