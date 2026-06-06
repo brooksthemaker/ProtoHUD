@@ -15428,7 +15428,10 @@ int main(int argc, char* argv[]) {
             const float focus = std::atan2(region_cy - mcy, region_cx - mcx);
             const bool rotate = (mo.anchor_x < 0.35f || mo.anchor_x > 0.65f ||
                                  mo.anchor_y < 0.35f || mo.anchor_y > 0.65f);
-            menu.draw_radial(mcx, mcy, half, focus, rotate);
+            // Top-docked (minimap in the upper screen half) → flip wedge labels
+            // as one run so they read right-way-up; matches the info module.
+            const bool radial_top = mcy < dispH * 0.5f;
+            menu.draw_radial(mcx, mcy, half, focus, rotate, radial_top);
         } else {
             menu.draw(xr.eye_width(), xr.eye_height());
         }

@@ -1310,13 +1310,15 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
     //   • outer = system status badges (doubled), lit when active / dimmed.
     {
         const float DEG     = static_cast<float>(M_PI) / 180.f;
+        const float HALF_PI = static_cast<float>(M_PI) * 0.5f;
         const float base_sz = std::clamp(r * 0.15f, 14.f, 26.f);
         const float lbl_h   = base_sz * 0.66f;             // labels ~⅓ smaller
         const float icon_sz = base_sz * 2.f;               // icons doubled
         // When the disc sits in the top half of the screen, swing the whole
         // label/icon ring 90° clockwise so it fans below the disc instead of off
         // the top edge. Position-based (not the dock flag) so it fires however the
-        // panel ended up there. Glyphs stay upright; only the arc position moves.
+        // panel ended up there. The labels also flip (see arc_label) only when
+        // top-docked so they read right-way-up against the inverted arc.
         const bool  top_dock = py < fh * 0.5f;
         const float arc_rot  = top_dock ? -90.f : 0.f;
         const float arc0     = 120.f + arc_rot, arc1 = -24.f + arc_rot;  // shared label/icon span
@@ -1330,13 +1332,28 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         const float rmid  = (r0in + r1in) * 0.5f;          // text baseline radius
         const float gapR  = 3.f * DEG;                     // angular gap between wedges
 
-        // Upright label text: every page name reads horizontally in the same
-        // orientation, centred in its wedge — no arc-follow, so none can end up
-        // upside-down (e.g. PRECIP at the bottom of the arc).
-        auto upright_label = [&](float center_ang, const char* str, NVGcolor col) {
+        // Curved label text: each glyph follows the wedge's arc (tangent-rotated)
+        // so the band reads like a visor ring. The whole run flips as one only
+        // when the disc is top-docked — so it never reads upside-down there — and
+        // is NOT flipped per glyph by angle (which used to leave the bottom-half
+        // labels facing the opposite way from the top-half ones).
+        auto arc_label = [&](float center_ang, const char* str, NVGcolor col) {
+            float total = 0.f;
+            for (const char* p = str; *p; ++p) total += nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+            total /= rmid;
             nvgFillColor(vg, col);
-            nvgText(vg, px + std::cos(center_ang) * rmid,
-                        py + std::sin(center_ang) * rmid, str, nullptr);
+            const bool flip = top_dock;
+            float ang = flip ? center_ang + total * 0.5f : center_ang - total * 0.5f;
+            for (const char* p = str; *p; ++p) {
+                const float adv = nvgTextBounds(vg, 0, 0, p, p + 1, nullptr);
+                const float th  = flip ? ang - (adv * 0.5f) / rmid : ang + (adv * 0.5f) / rmid;
+                nvgSave(vg);
+                nvgTranslate(vg, px + std::cos(th) * rmid, py + std::sin(th) * rmid);
+                nvgRotate(vg, flip ? th - HALF_PI : th + HALF_PI);
+                nvgText(vg, 0, 0, p, p + 1);
+                nvgRestore(vg);
+                ang += flip ? -adv / rmid : adv / rmid;
+            }
         };
 
         nvg_set_font_ui(lbl_h);
@@ -1360,8 +1377,8 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
             nvgClosePath(vg);                               // straight radial short edges
             nvgFillColor(vg, fill); nvgFill(vg);
             nvgStrokeColor(vg, border); nvgStrokeWidth(vg, active ? 2.f : 1.f); nvgStroke(vg);
-            upright_label(sc, nm, active ? nvgRGBA(20, 22, 26, 255)    // dark text on accent
-                                         : nvgRGBA(230, 235, 240, 230)); // white text on dark box
+            arc_label(sc, nm, active ? nvgRGBA(20, 22, 26, 255)        // dark text on accent
+                                     : nvgRGBA(230, 235, 240, 230));    // white text on dark box
         }
 
         // ── Outer ring: status badges (outside the label band) ──────────────────

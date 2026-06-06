@@ -209,8 +209,12 @@ public:
     // drawn as concentric outer rings. When rotate_to_selected is true (minimap
     // anchored near a screen edge) the wheel spins so the selected item sits at the
     // top; otherwise the ring is static and the highlight moves.
+    // dock_top: the minimap (and thus this wheel) is pinned to the TOP half of
+    // the screen — curved wedge labels flip as one run so they still read
+    // right-way-up. Bottom-docked (default) labels curve without flipping.
     void draw_radial(float center_x, float center_y, float inner_radius,
-                     float focus_angle, bool rotate_to_selected);
+                     float focus_angle, bool rotate_to_selected,
+                     bool dock_top = false);
 
     // Quick-menu style (corner list vs. radial-around-minimap).
     void      set_quick_style(QuickStyle s) { quick_style_ = s; }
