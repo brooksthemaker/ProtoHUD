@@ -20,63 +20,47 @@ PING                               # heartbeat ~1 Hz
 Pi → MCU (optional): `PONG` (heartbeat ack). The Pi maps `<id>` → function via
 `inputs.coprocessor.buttons`, so the firmware stays "dumb about meaning".
 
-## USB identity
+## Buildable firmware: [`pico/`](pico/)
 
-Set the USB **serial string** (and ideally product = `ProtoHUD_Buttons`) so the
-Pi can bind a stable `/dev/serial/by-id/usb-ProtoHUD_Buttons-if00` path instead
-of a racing `/dev/ttyACMn`. In Arduino-Pico: `Serial` is USB CDC by default; set
-the board's USB product/serial in the IDE or via `TinyUSB`.
+A complete PlatformIO project (RP2350 / **Raspberry Pi Pico 2 W**, earlephilhower
+`arduino-pico` core — same toolchain as `firmware/mp3_player/pico`):
 
-## Reference sketch (Arduino — RP2040/RP2350 "arduino-pico" core)
+```
+pico/
+  platformio.ini      # board=rpipico2w, USB identity, build/flash notes
+  include/config.h     # button pin map + LED pins + debounce/long/ping timing
+  src/main.cpp         # debounce → SHORT/LONG, HELLO, PING, CFG/LED handling
+```
 
-```cpp
-// button_coproc.ino — debounce N switches, stream SHORT/LONG over USB CDC.
-#include <Arduino.h>
+Build & flash:
 
-constexpr uint8_t  PINS[]    = {2, 3, 4};        // GPIOs wired to switches (to GND)
-constexpr size_t   N         = sizeof(PINS);
-constexpr uint32_t DEBOUNCE  = 15;               // ms
-constexpr uint32_t LONG_MS   = 600;              // short/long threshold
-constexpr uint32_t HEARTBEAT = 1000;             // ms between PINGs
+```bash
+cd firmware/button_coproc/pico
+pio run -t upload        # hold BOOTSEL on the first flash; it auto-resets after
+pio device monitor       # watch the HELLO / BTN / PING stream (115200)
+```
 
-bool     stable[N], lastRaw[N], longSent[N];
-uint32_t tEdge[N], tDown[N], tPing;
+Edit **`include/config.h`** to set your switch GPIOs (the button **id** is the
+index in `kButtonPins`), optional per-switch LED pins, and the debounce / long-
+press / heartbeat timing. `src/main.cpp` handles the protocol; you usually don't
+need to touch it. It also accepts `CFG long_ms=<n>` (retune the threshold live)
+and `LED <id> <0|1>` (drive a switch backlight) from the Pi.
 
-void setup() {
-  Serial.begin(115200);                          // USB CDC
-  for (size_t i = 0; i < N; ++i) {
-    pinMode(PINS[i], INPUT_PULLUP);              // pressed = LOW
-    stable[i] = lastRaw[i] = true;               // released (HIGH)
-    longSent[i] = false;
-  }
-  uint32_t t0 = millis();
-  while (!Serial && millis() - t0 < 2000) {}     // wait briefly for host
-  Serial.print("HELLO proto-buttons v1 n="); Serial.println(N);
-  tPing = millis();
-}
+Other RP2040/RP2350 boards work too — swap `board` in `platformio.ini`
+(`rpipico2`, `rpipicow`, `rpipico`).
 
-void loop() {
-  const uint32_t now = millis();
-  for (size_t i = 0; i < N; ++i) {
-    const bool raw = digitalRead(PINS[i]);       // HIGH=released, LOW=pressed
-    if (raw != lastRaw[i]) { lastRaw[i] = raw; tEdge[i] = now; }   // bounce timer
-    if (now - tEdge[i] >= DEBOUNCE && raw != stable[i]) {
-      stable[i] = raw;
-      if (!raw) {                                // pressed (falling edge)
-        tDown[i] = now; longSent[i] = false;
-      } else {                                   // released (rising edge)
-        if (!longSent[i]) { Serial.print("BTN "); Serial.print(i); Serial.println(" SHORT"); }
-      }
-    }
-    if (!stable[i] && !longSent[i] && now - tDown[i] >= LONG_MS) {
-      longSent[i] = true;                        // fire LONG once while held
-      Serial.print("BTN "); Serial.print(i); Serial.println(" LONG");
-    }
-  }
-  if (now - tPing >= HEARTBEAT) { tPing = now; Serial.println("PING"); }
+## USB identity (stable serial path)
 
-  while (Serial.available()) Serial.read();      // drain PONG/etc.
-}
+`platformio.ini` sets the USB manufacturer/product so udev exposes a stable
+`/dev/serial/by-id/usb-ProtoHUD_Buttons-if00`-style path instead of a racing
+`/dev/ttyACMn` (the Teensy / SmartKnob / RAK4631 also enumerate as `ACM*`).
+
+After flashing, confirm the actual path and point the HUD config at it — the
+board's unique serial may be appended, so use whatever appears:
+
+```bash
+ls -l /dev/serial/by-id/
+# inputs.coprocessor.device = the matching ...ProtoHUD_Buttons...-if00 path
 ```
 
 ## Wiring notes
