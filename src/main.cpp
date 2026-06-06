@@ -8695,48 +8695,64 @@ static std::vector<MenuItem> build_menu(
         }
     }
     std::vector<MenuItem> pi_settings_items = {
-        with_desc(leaf("Hostname...",
-            [menu_sys_pp, run_sh, sh_read]{
-                if (!menu_sys_pp || !*menu_sys_pp) return;
+        // Hostname — current value shown in the context panel; descend to change it.
+        with_panel(
+            submenu("Hostname", std::vector<MenuItem>{
+                with_desc(leaf("Set Hostname\xE2\x80\xA6",
+                    [menu_sys_pp, run_sh]{
+                        if (!menu_sys_pp || !*menu_sys_pp) return;
+                        char host[256] = {0};
+                        if (::gethostname(host, sizeof(host) - 1) != 0) host[0] = '\0';
+                        (*menu_sys_pp)->open_keyboard("Hostname", host,
+                            [run_sh](const std::string& nm){
+                                if (nm.empty()) return;
+                                std::string safe;   // keep only hostname-legal chars
+                                for (char c : nm)
+                                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                                        || (c >= '0' && c <= '9') || c == '-' || c == '.')
+                                        safe.push_back(c);
+                                if (safe.empty()) return;
+                                run_sh("Hostname", "sudo hostnamectl set-hostname " + safe);
+                            });
+                    }),
+                    "Change the Pi's hostname (hostnamectl). Applies to new logins."),
+            }),
+            "Hostname",
+            [](ImDrawList* dl, ImVec2 o, ImVec2 sz){
+                (void)sz;
                 char host[256] = {0};
-                if (::gethostname(host, sizeof(host) - 1) != 0) host[0] = '\0';
-                (*menu_sys_pp)->open_keyboard(
-                    "Hostname", host,
-                    [run_sh](const std::string& nm){
-                        if (nm.empty()) return;
-                        // Crude shell-safe quoting — drop anything that isn't a hostname char.
-                        std::string safe;
-                        for (char c : nm) {
-                            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                                || (c >= '0' && c <= '9') || c == '-' || c == '.')
-                                safe.push_back(c);
-                        }
-                        if (safe.empty()) return;
-                        run_sh("Hostname",
-                               "sudo hostnamectl set-hostname " + safe);
-                    });
+                const char* hn = (::gethostname(host, sizeof(host) - 1) == 0 && host[0])
+                                   ? host : "(unknown)";
+                ImFont* font = ImGui::GetFont(); const float fs = ImGui::GetFontSize();
+                dl->AddText(font, fs * 0.95f, {o.x, o.y},
+                            IM_COL32(150, 160, 170, 210), "Current hostname");
+                dl->AddText(font, fs * 1.4f, {o.x, o.y + fs * 1.4f},
+                            IM_COL32(225, 235, 245, 240), hn);
             }),
-            "Set the Pi's hostname (hostnamectl). Takes effect immediately for "
-            "new logins; the prompt updates after the next shell start."),
-        with_desc(submenu("Timezone", std::move(tz_items)),
-                  "System timezone (timedatectl). Affects clock display, "
-                  "log timestamps, and scheduled tasks."),
-        with_desc(toggle("NTP Time Sync",
-            [sh_read]{ return sh_read("timedatectl show -p NTP --value") == "yes"; },
-            [run_sh](bool v){
-                run_sh(v ? "NTP On" : "NTP Off",
-                       std::string("sudo timedatectl set-ntp ") + (v ? "true" : "false"));
+        // Time — timezone, automatic sync, and clock display settings together.
+        with_desc(submenu("Time", std::vector<MenuItem>{
+            with_desc(submenu("Timezone", std::move(tz_items)),
+                "System timezone (timedatectl). Affects the clock, log timestamps "
+                "and scheduled tasks."),
+            with_desc(toggle("Auto Time Sync (NTP)",
+                [sh_read]{ return sh_read("timedatectl show -p NTP --value") == "yes"; },
+                [run_sh](bool v){
+                    run_sh(v ? "NTP On" : "NTP Off",
+                           std::string("sudo timedatectl set-ntp ") + (v ? "true" : "false"));
+                }),
+                "Automatic time sync via systemd-timesyncd. Off to set time manually."),
+            submenu("Clock", std::vector<MenuItem>{
+                toggle("24-Hour",   [&state]{ return state.clock_cfg.use_24h; },
+                                    [&state](bool v){ state.clock_cfg.use_24h = v; }),
+                toggle("Seconds",   [&state]{ return state.clock_cfg.show_seconds; },
+                                    [&state](bool v){ state.clock_cfg.show_seconds = v; }),
+                toggle("Show Date", [&state]{ return state.clock_cfg.show_date; },
+                                    [&state](bool v){ state.clock_cfg.show_date = v; }),
+                slider("Font Size", 1.f, 3.f, 0.25f, "x",
+                    [&state]{ return state.clock_cfg.font_scale; },
+                    [&state](float v){ state.clock_cfg.font_scale = v; }),
             }),
-            "Automatic time sync via systemd-timesyncd. Turn off to set the "
-            "clock manually."),
-        with_desc(leaf("Update System (apt upgrade)",
-            [run_sh]{
-                run_sh("System Update",
-                       "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive "
-                       "apt-get -y upgrade");
-            }),
-            "Runs apt-get update && apt-get upgrade in the background. Notif "
-            "fires on success or failure (~30 s – several minutes)."),
+        }), "Timezone, automatic NTP sync, and clock display settings."),
         with_panel(
             // Storage usage context panel — runs df once per draw.
             submenu("Storage", std::vector<MenuItem>{}),
@@ -8760,19 +8776,9 @@ static std::vector<MenuItem> build_menu(
                     pos = nl + 1;
                 }
             }),
-        with_desc(leaf("Restart ProtoHUD",
-            [run_sh]{
-                run_sh("Restart",
-                       "sudo systemctl restart protohud.service");
-            }),
-            "Restart the protohud systemd service (loses unsaved menu state). "
-            "Useful after editing config.json by hand."),
-        with_desc(leaf("Shutdown System",
-            [run_sh]{
-                run_sh("Shutdown", "sudo poweroff");
-            }),
-            "Power off the Pi cleanly. The HUD will close, then the kernel "
-            "halts and the board powers down."),
+        // (Restart ProtoHUD + Shutdown moved to System > Power; the apt updater
+        //  moved to System > Software. GPIO visualizer/buttons + cooling fans are
+        //  appended to this list further below.)
     };
 
     // ── Updates submenu (in-HUD updater — Phase 1, user-initiated only) ───────
@@ -10575,11 +10581,51 @@ static std::vector<MenuItem> build_menu(
         with_desc(submenu("Updates", std::move(updates_menu)),
             "Check the repo for new commits, switch/update branches, and roll back "
             "\xe2\x80\x94 all user-initiated. ProtoHUD never auto-updates."));
+    // Pi system (apt) update — confirm-gated, since it changes the OS. Runs in
+    // the background and toasts on completion.
+    software_menu.push_back(confirm_action("Pi System Update",
+        "Runs apt-get update && apt-get -y upgrade in the background (30 s to "
+        "several minutes). Don't power off while it runs.",
+        [run_sh]{ run_sh("System Update",
+            "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade"); }));
+    // Submit Issue — compose a short report; saved under state/issues/ and (when a
+    // phone is connected) shared to it so it can be filed on GitHub. No network /
+    // token is used on the Pi, so it can't post directly.
+    software_menu.push_back(with_desc(leaf("Submit Issue\xE2\x80\xA6",
+        [menu_sys_pp, &state, kdc_p]{
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+            (*menu_sys_pp)->open_keyboard("Describe the issue", "",
+                [&state, kdc_p](const std::string& text){
+                    if (text.empty()) return;
+                    char exe[4096]; ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+                    std::string root;
+                    if (n > 0) { exe[n] = '\0'; std::string p(exe);
+                        auto s = p.find_last_of('/'); if (s != std::string::npos) p.resize(s);
+                        s = p.find_last_of('/');      if (s != std::string::npos) p.resize(s);
+                        root = p; }
+                    const std::string dir = (root.empty() ? std::string("/tmp")
+                                                          : root + "/state/issues");
+                    std::error_code ec; std::filesystem::create_directories(dir, ec);
+                    std::time_t t = std::time(nullptr); char ts[32];
+                    std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", std::localtime(&t));
+                    const std::string path = dir + "/issue_" + ts + ".txt";
+                    { std::ofstream f(path);
+                      if (f) f << "ProtoHUD issue (" << ts << ")\n\n" << text << "\n\n"
+                               << "File at: https://github.com/brooksthemaker/protohud/issues/new\n"; }
+                    if (kdc_p) kdc_p->share_file(path);   // hand off to the phone if paired
+                    Notification nt; nt.type = NotifType::App; nt.icon = "message";
+                    nt.title = "Issue saved"; nt.body = path; nt.auto_dismiss_s = 6.f;
+                    std::lock_guard<std::mutex> lk(state.mtx); state.notifs.push(std::move(nt));
+                });
+        }),
+        "Write a short bug report. Saved under state/issues/ and shared to the "
+        "phone (if connected) so you can file it on GitHub."));
     software_menu.push_back(with_desc(submenu("Profiles & Backup", std::move(profiles_menu)),
         "Save and load full-setup snapshots. Loading a profile restarts ProtoHUD "
         "with that config."));
     system_menu.push_back(with_desc(submenu("Software", std::move(software_menu)),
-        "In-HUD updater, demo scenes, and full-setup profiles & backups."));
+        "In-HUD updater, Pi system update, demo scenes, issue reports, and "
+        "full-setup profiles & backups."));
 
     // ── Quick (corner / radial) menu ─────────────────────────────────────────────
     // A short, curated set of mid-use actions — separate from the full settings tree
