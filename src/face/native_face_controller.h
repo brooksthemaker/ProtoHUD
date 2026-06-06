@@ -100,6 +100,12 @@ public:
     std::vector<NamedRegion> led_named_regions()   const;
     void                     reload_active_face();
 
+    // Panel override: while set, this RGBA frame fills the whole canvas instead
+    // of the face composite (used by game mode to show a game on the panels).
+    // Resized to the canvas with nearest-neighbour; thread-safe.
+    void                     set_panel_override(const cv::Mat& rgba);
+    void                     clear_panel_override();
+
     // Surface to IFaceController: true iff the active PanelOutput exposes
     // sub-region coverage info (MAX7219 / RGB matrix backends).
     bool has_led_face_editor() const override;
@@ -180,6 +186,8 @@ private:
     mutable std::mutex frame_mtx_;   // latest_
     cv::Mat            latest_;
     bool               have_frame_ = false;
+    mutable std::mutex override_mtx_;   // panel_override_
+    cv::Mat            panel_override_;  // non-empty → fills the canvas (game mode)
     // Transient face overlays — one record per panel a push_transient_face
     // call has touched. tick_render_locked() restores them as their deadlines
     // pass. stop() restores any still-active records before tearing down.

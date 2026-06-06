@@ -976,6 +976,14 @@ struct AppState {
     // QR scan mute: set to future epoch-seconds to suppress notifications temporarily.
     std::atomic<int64_t> qr_mute_until_s { 0 };
 
+    // Game mode: when game_active, the render loop ticks the active GameSource
+    // each frame, shows its frame on both eyes (fullscreen, or centred in a
+    // window when game_windowed) and mirrors it to the HUB75 panels. The HUD is
+    // suppressed in fullscreen game mode. Toggled from the menu / GpioFunc.
+    std::atomic<bool> game_active   { false };
+    std::atomic<bool> game_windowed { false };
+    std::atomic<int>  game_source_sel { 0 };   // 0 = Snake, 1 = Doom (if built)
+
     // ── Helpers (call with mutex held) ────────────────────────────────────────
 
     void upsert_lora_node(const LoRaNode& n) {
