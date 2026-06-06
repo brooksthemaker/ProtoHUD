@@ -3900,6 +3900,7 @@ void HudRenderer::draw_sys_panel(const AppState& snap, int w, int h, bool active
         int shown = 0;
         for (const auto& dev : snap.bt_devices) {
             if (shown >= MAX_BT) break;
+            if (!dev.paired && !dev.connected) continue;   // hide discovered-only
             const ImU32 dot_col = dev.connected ? col_.ind_good : col_.ind_inactive;
             dl->AddCircleFilled({cx + PAD + 5.f, cy + lh * 0.5f}, 4.f, dot_col);
             char buf[64];

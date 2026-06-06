@@ -9326,6 +9326,57 @@ static std::vector<MenuItem> build_menu(
     };
 
     // ── Connectivity submenu ─────────────────────────────────────────────────
+    // ── Bluetooth controls (bluetoothctl shell-out) ──────────────────────────
+    // Scan/power + per-device connect/pair/trust/remove. Devices come from
+    // BtMonitor (state.bt_devices), which now also lists discovered-but-unpaired
+    // devices after a scan so they can be paired here.
+    auto bt_cmd = [&state, bt_mon](int i, const char* verb) {
+        std::string mac;
+        { std::lock_guard<std::mutex> lk(state.mtx);
+          if (i >= 0 && i < (int)state.bt_devices.size()) mac = state.bt_devices[i].mac; }
+        if (mac.empty()) return;
+        std::system((std::string("bluetoothctl ") + verb + " " + mac +
+                     " >/dev/null 2>&1 &").c_str());
+        if (bt_mon) bt_mon->refresh();
+    };
+    std::vector<MenuItem> bluetooth_menu;
+    bluetooth_menu.push_back(with_desc(leaf("Scan for Devices", [bt_mon]{
+        std::system("bluetoothctl --timeout 20 scan on >/dev/null 2>&1 &");
+        if (bt_mon) bt_mon->refresh();
+    }), "Discover nearby devices for ~20s; new ones appear in the list below to pair."));
+    bluetooth_menu.push_back(with_desc(leaf("Power On", [bt_mon]{
+        std::system("bluetoothctl power on >/dev/null 2>&1 &"); if (bt_mon) bt_mon->refresh(); }),
+        "Turn the Bluetooth adapter on."));
+    bluetooth_menu.push_back(with_desc(leaf("Power Off", [bt_mon]{
+        std::system("bluetoothctl power off >/dev/null 2>&1 &"); if (bt_mon) bt_mon->refresh(); }),
+        "Turn the Bluetooth adapter off."));
+    bluetooth_menu.push_back(with_desc(leaf("Refresh", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
+        "Re-scan known devices and update the list now."));
+    for (int i = 0; i < 12; ++i) {
+        MenuItem dev; dev.type = MenuItemType::SUBMENU; dev.label = "btdev";
+        dev.label_fn = [&state, i]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i >= (int)state.bt_devices.size()) return std::string();
+            const auto& d = state.bt_devices[i];
+            return d.name + (d.connected ? "  \xE2\x9C\x93" : d.paired ? "  (paired)" : "  (new)");
+        };
+        dev.visible_fn = [&state, i]{
+            std::lock_guard<std::mutex> lk(state.mtx); return i < (int)state.bt_devices.size(); };
+        dev.children = {
+            with_desc(leaf("Connect",    [bt_cmd, i]{ bt_cmd(i, "connect"); }),
+                "Connect to this device."),
+            with_desc(leaf("Disconnect", [bt_cmd, i]{ bt_cmd(i, "disconnect"); }),
+                "Disconnect this device."),
+            with_desc(leaf("Pair",       [bt_cmd, i]{ bt_cmd(i, "pair"); }),
+                "Pair with this device (confirm any prompt on both ends)."),
+            with_desc(leaf("Trust",      [bt_cmd, i]{ bt_cmd(i, "trust"); }),
+                "Mark trusted so it can auto-reconnect."),
+            with_desc(leaf("Remove",     [bt_cmd, i]{ bt_cmd(i, "remove"); }),
+                "Unpair and forget this device."),
+        };
+        bluetooth_menu.push_back(std::move(dev));
+    }
+
     std::vector<MenuItem> connectivity_menu = {
         with_desc(toggle("SSH Access",
             [state_ptr]{ return state_ptr && state_ptr->ssh.active; },
@@ -9338,8 +9389,8 @@ static std::vector<MenuItem> build_menu(
                 }
             }),
             "Toggle the sshd service. ON exposes the Pi to network logins on TCP 22."),
-        with_desc(leaf("Refresh Bluetooth", [bt_mon]{ if (bt_mon) bt_mon->refresh(); }),
-                  "Re-scan for paired Bluetooth devices and update the indicator."),
+        with_desc(submenu("Bluetooth", std::move(bluetooth_menu)),
+                  "Scan, pair, connect and manage Bluetooth devices."),
     };
 
     // ── Diagnostics submenu (probes + overlays + per-tab tools) ──────────────

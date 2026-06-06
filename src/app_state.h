@@ -515,6 +515,7 @@ struct BtDevice {
     std::string name;
     std::string mac;
     bool        connected = false;
+    bool        paired    = false;   // false + !connected ⇒ discovered-only (pairable)
 };
 
 struct SshState {
