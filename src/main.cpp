@@ -13712,6 +13712,36 @@ int main(int argc, char* argv[]) {
     // Map an assigned function to its action. Runs on the GPIO poll thread;
     // each action hops onto an already-thread-safe path (fire_boop, the menu,
     // state.mtx) or flips a plain bool the render loop reads.
+    // Face expression jump + "return to set face": the first jump remembers the
+    // expression that was playing, so FaceReturn snaps back to it. Guarded because
+    // dispatch can fire from the GPIO / coprocessor / command-FIFO threads.
+    std::string cmd_base_face;
+    bool        cmd_face_jumped = false;
+    std::mutex  cmd_face_mtx;
+    auto jump_face = [&](const std::string& name) {
+        {
+            std::lock_guard<std::mutex> lk(cmd_face_mtx);
+            if (!cmd_face_jumped) {
+                cmd_base_face   = face_proxy.current_expression();
+                cmd_face_jumped = true;
+            }
+        }
+        face_proxy.set_face_by_name(name);
+    };
+    auto return_face = [&] {
+        std::string base; bool had;
+        {
+            std::lock_guard<std::mutex> lk(cmd_face_mtx);
+            had = cmd_face_jumped; base = cmd_base_face; cmd_face_jumped = false;
+        }
+        if (had) face_proxy.set_face_by_name(base.empty() ? "neutral" : base);
+    };
+    auto jump_material = [&](int idx) {
+        face_proxy.set_menu_item(8, static_cast<uint8_t>(idx));
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.face.material_color = static_cast<uint8_t>(idx);
+    };
+
     auto gpio_dispatch = [&, restart_script](input::GpioFunc f) {
         using F = input::GpioFunc;
         switch (f) {
@@ -13745,6 +13775,25 @@ int main(int argc, char* argv[]) {
         case F::CamSwap:
             { std::lock_guard<std::mutex> lk(state.mtx); state.cameras_swapped = !state.cameras_swapped; } break;
         case F::PhoneRing: if (kdc_menu_ptr) kdc_menu_ptr->ring_phone(); break;
+        case F::FaceNeutral:    jump_face("neutral");   break;
+        case F::FaceHappy:      jump_face("happy");     break;
+        case F::FaceAngry:      jump_face("angry");     break;
+        case F::FaceSad:        jump_face("sad");       break;
+        case F::FaceSurprised:  jump_face("surprised"); break;
+        case F::FaceReturn:     return_face();          break;
+        case F::MatRainbow:     jump_material(8);       break;
+        case F::MatPride:       jump_material(22);      break;
+        case F::MatProgress:    jump_material(23);      break;
+        case F::MatTrans:       jump_material(24);      break;
+        case F::MatBi:          jump_material(25);      break;
+        case F::MatPan:         jump_material(26);      break;
+        case F::MatLesbian:     jump_material(27);      break;
+        case F::MatNonbinary:   jump_material(28);      break;
+        case F::MatAsexual:     jump_material(29);      break;
+        case F::MatGenderfluid: jump_material(30);      break;
+        case F::MatGenderqueer: jump_material(31);      break;
+        case F::MatAromantic:   jump_material(32);      break;
+        case F::MatIntersex:    jump_material(33);      break;
         case F::None: default: break;
         }
     };

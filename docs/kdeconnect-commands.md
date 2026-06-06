@@ -34,8 +34,13 @@ echo phone_ring       > /run/protohud/cmd
 Valid ids (same as `gpio.pins` functions): `menu_open menu_select menu_back
 cam_capture_left cam_capture_right cam_af_left cam_af_right cam_pip_left
 cam_pip_right cam_swap boop_snout boop_left boop_right boop_both phone_ring
-system_restart system_shutdown`. Unknown lines are ignored (untrusted input is
-length-bounded). Disabled by default; never required.
+system_restart system_shutdown`, plus **face jumps** `face_neutral face_happy
+face_angry face_sad face_surprised` and `face_return` (snap back to the
+previously-set face), and **material jumps** `material_rainbow material_pride
+material_progress material_trans material_bisexual material_pansexual
+material_lesbian material_nonbinary material_asexual material_genderfluid
+material_genderqueer material_aromantic material_intersex`. Unknown lines are
+ignored (untrusted input is length-bounded). Disabled by default; never required.
 
 ## 2. Register the commands in KDE Connect
 

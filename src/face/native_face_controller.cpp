@@ -767,6 +767,11 @@ void NativeFaceController::set_face_by_name(const std::string& expression) {
     save_state_locked();
 }
 
+std::string NativeFaceController::current_expression() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    return current_expression_;
+}
+
 void NativeFaceController::set_expression_effects(bool enabled) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     expr_effects_ = enabled;
