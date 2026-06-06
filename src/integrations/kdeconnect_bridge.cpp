@@ -423,6 +423,25 @@ std::vector<KdeConnectBridge::RunCommand> KdeConnectBridge::run_commands() const
     return commands_;
 }
 
+std::vector<KdeConnectBridge::DeviceInfo> KdeConnectBridge::devices() const {
+    std::lock_guard<std::mutex> lk(snap_mtx_);
+    return devices_;
+}
+
+bool KdeConnectBridge::request_pairing(const std::string& device_id) {
+    if (!running_.load() || device_id.empty()) return false;
+    std::lock_guard<std::mutex> lk(tx_mtx_);
+    pair_q_.push_back({device_id, true});
+    return true;
+}
+
+bool KdeConnectBridge::unpair(const std::string& device_id) {
+    if (!running_.load() || device_id.empty()) return false;
+    std::lock_guard<std::mutex> lk(tx_mtx_);
+    pair_q_.push_back({device_id, false});
+    return true;
+}
+
 std::vector<std::pair<std::string, std::vector<std::string>>>
 KdeConnectBridge::notif_roster() const {
     std::lock_guard<std::mutex> lk(snap_mtx_);
@@ -829,6 +848,25 @@ void KdeConnectBridge::worker() {
         connectivity_ = std::move(c);
     };
 
+    // All reachable devices (paired or not) for the pairing picker. Independent
+    // of the bound device, so it works before any device is "active".
+    auto poll_devices = [&]() {
+        auto ids = call_get_str_array(conn, kDaemonObject, kDaemonInterface,
+                                      "devices", true, true, false);  // reachable, any pair state
+        std::vector<DeviceInfo> out;
+        for (const auto& id : ids) {
+            const std::string dp = "/modules/kdeconnect/devices/" + id;
+            DeviceInfo d; d.id = id;
+            d.name      = call_get_str_prop(conn, dp.c_str(), kDeviceInterface, "name");
+            d.paired    = call_get_bool_prop(conn, dp.c_str(), kDeviceInterface, "isPaired", false);
+            d.reachable = call_get_bool_prop(conn, dp.c_str(), kDeviceInterface, "isReachable", true);
+            if (d.name.empty()) d.name = id;
+            out.push_back(std::move(d));
+        }
+        std::lock_guard<std::mutex> lk(snap_mtx_);
+        devices_ = std::move(out);
+    };
+
     // Saved phone commands (remotecommands plugin) — fetched once per binding.
     auto fetch_commands = [&]() {
         bool done; { std::lock_guard<std::mutex> lk(snap_mtx_); done = commands_fetched_; }
@@ -899,11 +937,23 @@ void KdeConnectBridge::worker() {
         std::vector<std::string> dismisses, runcmds;
         std::vector<MediaReq>    medias;
         std::vector<SmsReq>      smses;
+        std::vector<std::pair<std::string, bool>> pairs;
         {
             std::lock_guard<std::mutex> lk(tx_mtx_);
             replies.swap(reply_q_);   dismisses.swap(dismiss_q_);
             runcmds.swap(runcmd_q_);  medias.swap(media_q_);  smses.swap(sms_q_);
+            pairs.swap(pair_q_);
         }
+        // Pairing targets an explicit device id, so handle it before the
+        // "is a device bound?" guard (you pair a not-yet-paired device).
+        for (const auto& [id, do_pair] : pairs) {
+            const std::string dp = "/modules/kdeconnect/devices/" + id;
+            call_method_void(conn, dp.c_str(), kDeviceInterface,
+                             do_pair ? "requestPairing" : "unpair");
+            std::fprintf(stderr, "[kdeconnect] %s %s\n",
+                         do_pair ? "pair-request" : "unpair", id.c_str());
+        }
+        if (!pairs.empty()) { dbus_connection_flush(conn); poll_devices(); }
         const bool want_mute = mute_ringer_req_.exchange(false);
         const bool any = !replies.empty() || !dismisses.empty() || !runcmds.empty() ||
                          !medias.empty() || !smses.empty() || want_mute;
@@ -980,6 +1030,7 @@ void KdeConnectBridge::worker() {
             poll_battery();
             poll_media();
             poll_connectivity();
+            poll_devices();
             fetch_commands();
             if (!current_dev_id.empty() && seeded_dev != current_dev_id) {
                 seed_active();

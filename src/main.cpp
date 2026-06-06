@@ -9690,7 +9690,42 @@ static std::vector<MenuItem> build_menu(
                 return s;
             };
 
+            // ── Pair Device ────────────────────────────────────────────────────
+            // Lists every reachable KDE Connect device (paired or not). Selecting
+            // an unpaired one requests pairing (accept the prompt on the phone);
+            // selecting a paired one unpairs it.
+            std::vector<MenuItem> pair_menu;
+            for (int i = 0; i < 8; ++i) {
+                MenuItem d; d.type = MenuItemType::LEAF; d.label = "device";
+                d.label_fn = [kdc_p, i]{
+                    if (!kdc_p) return std::string();
+                    auto v = kdc_p->devices();
+                    if (i >= (int)v.size()) return std::string();
+                    const auto& dev = v[i];
+                    std::string suffix = dev.paired ? "  \xE2\x9C\x93 paired"
+                                       : dev.reachable ? "  \xE2\x80\x94 tap to pair"
+                                                       : "  (offline)";
+                    return dev.name + suffix;
+                };
+                d.visible_fn = [kdc_p, i]{ return kdc_p && i < (int)kdc_p->devices().size(); };
+                d.action = [kdc_p, i, toast]{
+                    if (!kdc_p) return;
+                    auto v = kdc_p->devices();
+                    if (i >= (int)v.size()) return;
+                    const auto& dev = v[i];
+                    if (dev.paired) {
+                        if (kdc_p->unpair(dev.id)) toast("Unpaired", dev.name);
+                    } else if (kdc_p->request_pairing(dev.id)) {
+                        toast("Pairing requested", "Accept the prompt on " + dev.name);
+                    }
+                };
+                pair_menu.push_back(std::move(d));
+            }
+
             std::vector<MenuItem> phone_menu;
+            phone_menu.push_back(with_desc(submenu("Pair Device", std::move(pair_menu)),
+                "Pair or unpair a KDE Connect device. Reachable devices are listed; "
+                "select an unpaired one and accept the prompt on the phone."));
             phone_menu.push_back(with_desc(leaf("Ring My Phone", ring_toast),
                 "Ring the paired phone (KDE Connect findmyphone) so it plays its "
                 "ringtone \xE2\x80\x94 handy for locating it."));

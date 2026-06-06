@@ -115,11 +115,22 @@ public:
         int         strength = -1;      // 0..4 bars, -1 = unknown
     };
     struct RunCommand { std::string key, name; };
+    // A device KDE Connect can see (reachable), paired or not — for the in-HUD
+    // pairing picker.
+    struct DeviceInfo {
+        std::string id, name;
+        bool paired = false, reachable = false;
+    };
 
     std::vector<PhoneNotif> phone_notifications() const;
     MediaStatus             media_status()        const;
     Connectivity            connectivity()         const;
     std::vector<RunCommand> run_commands()        const;
+    std::vector<DeviceInfo> devices()             const;
+    // Pairing (KDE Connect device plugin). request_pairing pops a prompt on the
+    // phone the user must accept; unpair removes the bond. Queued for the worker.
+    bool request_pairing(const std::string& device_id);
+    bool unpair(const std::string& device_id);
     // Roster for the grouped ignore picker: app → sorted distinct senders seen.
     std::vector<std::pair<std::string, std::vector<std::string>>> notif_roster() const;
     // Is `needle` currently muted by the ignore list? (case-insensitive substring
@@ -178,6 +189,7 @@ private:
     std::vector<std::string> runcmd_q_;
     std::vector<MediaReq>    media_q_;
     std::vector<SmsReq>      sms_q_;
+    std::vector<std::pair<std::string, bool>> pair_q_;   // {device id, pair? else unpair}
     std::atomic<bool>        mute_ringer_req_{false};
 
     // ── Snapshot state (worker writes, menu/HUD read), guarded by snap_mtx_ ────
@@ -187,6 +199,7 @@ private:
     Connectivity                                       connectivity_;
     std::vector<RunCommand>                            commands_;
     bool                                               commands_fetched_ = false;
+    std::vector<DeviceInfo>                            devices_;
     std::map<std::string, std::set<std::string>>       roster_;   // app → senders
     int                                                last_batt_alert_pct_ = 200;  // worker-only
 
