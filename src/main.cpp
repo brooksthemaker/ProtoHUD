@@ -29,6 +29,7 @@
 #include "input/gpio_buttons.h"
 #include "input/gpio_inputs.h"
 #include "input/coproc_inputs.h"
+#include "input/cmd_fifo.h"
 #include "input/gpio_function.h"
 #include "input/gamepad_input.h"
 #include "input/wireless_controller.h"
@@ -3175,27 +3176,11 @@ static std::vector<MenuItem> build_menu(
     std::string left_label  = cam_label(left_model,  "Left",  same_model ? "1" : nullptr);
     std::string right_label = cam_label(right_model, "Right", same_model ? "2" : nullptr);
 
-    // ── Multi-Cam quad layout ────────────────────────────────────────────────
-    // CSI left/right (rotated, per the Rotation submenu) fill the top half
-    // side-by-side; the two selected USB cameras fill the bottom half. The
-    // same composite is mirrored into both eyes. Build the "which two USB"
-    // pickers as 3-item radio lists; A and B may not be the same camera.
-    auto make_mc_usb_menu = [&](EyeSource* slot, EyeSource* other) -> std::vector<MenuItem> {
-        if (!slot) return {};
-        auto row = [&](const char* label, EyeSource v) {
-            return leaf_sel(label,
-                [slot, other, v]{
-                    *slot = v;
-                    if (other && *other == v) {   // keep the two slots distinct
-                        *other = (v == EyeSource::USB1) ? EyeSource::USB2 : EyeSource::USB1;
-                    }
-                },
-                [slot, v]{ return *slot == v; });
-        };
-        return { row("USB Cam 1", EyeSource::USB1),
-                 row("USB Cam 2", EyeSource::USB2),
-                 row("USB Cam 3", EyeSource::USB3) };
-    };
+    // ── Multi-Cam layout ─────────────────────────────────────────────────────
+    // Each eye shows a top + bottom image (full-width, stacked); the two eyes use
+    // independent sources, so side-by-side reads as four distinct feeds with no
+    // duplicates. All four slots (left/right eye × top/bottom) pick from both CSI
+    // cameras + the three USB cams via make_mc_src_menu below.
 
     // Quadrant source picker offering both CSI cameras + the three USB cams, so
     // any quadrant can show Left CSI, Right CSI or a USB feed.
@@ -3218,30 +3203,30 @@ static std::vector<MenuItem> build_menu(
             [multicam_layout](bool v){ *multicam_layout = v; }));
         if (multicam_top_a)
             multicam_menu.push_back(with_desc(
-                submenu("Top-Left Camera", make_mc_src_menu(multicam_top_a)),
-                "Which camera fills the top-left quadrant (default Left CSI)."));
+                submenu("Left Eye Top Camera", make_mc_src_menu(multicam_top_a)),
+                "Which camera fills the top half of the LEFT eye (default Left CSI)."));
         if (multicam_top_b)
             multicam_menu.push_back(with_desc(
-                submenu("Top-Right Camera", make_mc_src_menu(multicam_top_b)),
-                "Which camera fills the top-right quadrant (default Right CSI)."));
+                submenu("Right Eye Top Camera", make_mc_src_menu(multicam_top_b)),
+                "Which camera fills the top half of the RIGHT eye (default Right CSI)."));
         if (multicam_usb_a)
             multicam_menu.push_back(with_desc(
-                submenu("Bottom-Left Camera", make_mc_usb_menu(multicam_usb_a, multicam_usb_b)),
-                "Which USB camera fills the bottom-left quadrant."));
+                submenu("Left Eye Bottom Camera", make_mc_src_menu(multicam_usb_a)),
+                "Which camera fills the bottom half of the LEFT eye (default USB 1)."));
         if (multicam_usb_b)
             multicam_menu.push_back(with_desc(
-                submenu("Bottom-Right Camera", make_mc_usb_menu(multicam_usb_b, multicam_usb_a)),
-                "Which USB camera fills the bottom-right quadrant."));
+                submenu("Right Eye Bottom Camera", make_mc_src_menu(multicam_usb_b)),
+                "Which camera fills the bottom half of the RIGHT eye (default USB 2)."));
     }
 
     std::vector<MenuItem> main_cameras_menu = {
         submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
         submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
         with_desc(submenu("Multi-Cam Layout", std::move(multicam_menu)),
-            "CSI cameras side-by-side on the top half (rotated per each "
-            "camera's Rotation setting), two USB cameras side-by-side on the "
-            "bottom. Same view in both eyes. Set the CSI rotation to 90\xc2\xb0 "
-            "under Left/Right Camera > Rotation for the intended portrait fit."),
+            "Each eye stacks a top + bottom camera (full width); the two eyes use "
+            "independent sources, so side-by-side shows four distinct feeds with no "
+            "duplicates. Each of the four slots picks any CSI or USB camera. Set CSI "
+            "rotation to 90\xc2\xb0 under Left/Right Camera > Rotation if needed."),
         with_panel(
             with_desc(submenu("Raw View", std::move(raw_view_menu)),
                 "Pass the camera feed straight through. Toggle Enable to show it; "
@@ -4899,6 +4884,30 @@ static std::vector<MenuItem> build_menu(
                     state.face.material_color = idx;
                 },
                 [&state, idx = m.idx]{ return state.face.material_color == idx; }));
+
+        // ── Pride flags ──────────────────────────────────────────────────────
+        // Vertical smooth gradients matching each flag's colours (presets 22-33;
+        // see NativeFaceController::preset_material). Grouped in a submenu so the
+        // top-level Material Color list stays compact.
+        struct PFFlag { const char* label; uint8_t idx; };
+        const PFFlag pf_pride[] = {
+            { "Rainbow",     22 }, { "Progress",    23 }, { "Trans",       24 },
+            { "Bisexual",    25 }, { "Pansexual",   26 }, { "Lesbian",     27 },
+            { "Nonbinary",   28 }, { "Asexual",     29 }, { "Genderfluid", 30 },
+            { "Genderqueer", 31 }, { "Aromantic",   32 }, { "Intersex",    33 },
+        };
+        std::vector<MenuItem> pride_items;
+        for (const auto& f : pf_pride)
+            pride_items.push_back(leaf_sel(f.label,
+                [teensy, idx = f.idx, &state]{
+                    teensy->set_menu_item(8, idx);
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.face.material_color = idx;
+                },
+                [&state, idx = f.idx]{ return state.face.material_color == idx; }));
+        pf_palette.push_back(with_desc(submenu("Pride", std::move(pride_items)),
+            "Colour gradients matching pride flags (vertical stripes, top \xe2\x86\x92 "
+            "bottom). Applies like any other material; persists with your setup."));
 
         // Custom solid colour (moved here from the removed Face Color menu) —
         // an arbitrary flat colour via the RGB/hex picker, applied as a
@@ -9890,6 +9899,26 @@ static std::vector<MenuItem> build_menu(
                 with_desc(leaf("Export All", [export_to_phone]{
                     export_to_phone("faces"); export_to_phone("gifs"); export_to_phone("qr"); }),
                     "Send all three bundles to the phone, one file each."),
+                // Send the most recent photo/recording (newest file in the photo
+                // dir, derived as the parent of map_dir).
+                with_desc(leaf("Send Last Capture", [kdc_p, map_dir, toast]{
+                    namespace fsx = std::filesystem;
+                    const std::string dir = fsx::path(map_dir).parent_path().string();
+                    std::error_code ec; fsx::path newest; fsx::file_time_type best{};
+                    fsx::directory_iterator it(dir, ec), end;
+                    for (; !ec && it != end; it.increment(ec)) {
+                        if (!it->is_regular_file(ec)) continue;
+                        const std::string ext = it->path().extension().string();
+                        if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".mp4")
+                            continue;
+                        const auto t = it->last_write_time(ec); if (ec) continue;
+                        if (newest.empty() || t > best) { best = t; newest = it->path(); }
+                    }
+                    if (newest.empty()) { toast("No captures", "Nothing in the photo folder yet"); return; }
+                    if (kdc_p && kdc_p->share_file(newest.string()))
+                        toast("Sent to phone", newest.filename().string());
+                    else toast("Export ready", newest.filename().string() + " (no phone)");
+                }), "Share the newest photo/recording with the phone over KDE Connect."),
             };
 
             std::vector<MenuItem> phone_menu;
@@ -13304,6 +13333,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Command FIFO (optional) — write a GpioFunc id to the FIFO to drive ProtoHUD
+    // (e.g. a KDE Connect "Run Command": `echo menu_open > /run/protohud/cmd`).
+    input::CmdFifoConfig cmd_fifo_cfg;
+    if (cfg.contains("inputs") && cfg["inputs"].is_object() &&
+        cfg["inputs"].contains("command_fifo") &&
+        cfg["inputs"]["command_fifo"].is_object()) {
+        const json& jf = cfg["inputs"]["command_fifo"];
+        cmd_fifo_cfg.enabled = jval(jf, "enabled", false);
+        cmd_fifo_cfg.path    = jf.value("path", cmd_fifo_cfg.path);
+    }
+
     // KDE Connect lists — editable in the Phone menu, applied live to the bridge
     // and persisted to cfg["kdeconnect"]. ignore_list mutes servers/chats;
     // message_apps picks which apps get the big chat toast.
@@ -13672,6 +13712,36 @@ int main(int argc, char* argv[]) {
     // Map an assigned function to its action. Runs on the GPIO poll thread;
     // each action hops onto an already-thread-safe path (fire_boop, the menu,
     // state.mtx) or flips a plain bool the render loop reads.
+    // Face expression jump + "return to set face": the first jump remembers the
+    // expression that was playing, so FaceReturn snaps back to it. Guarded because
+    // dispatch can fire from the GPIO / coprocessor / command-FIFO threads.
+    std::string cmd_base_face;
+    bool        cmd_face_jumped = false;
+    std::mutex  cmd_face_mtx;
+    auto jump_face = [&](const std::string& name) {
+        {
+            std::lock_guard<std::mutex> lk(cmd_face_mtx);
+            if (!cmd_face_jumped) {
+                cmd_base_face   = face_proxy.current_expression();
+                cmd_face_jumped = true;
+            }
+        }
+        face_proxy.set_face_by_name(name);
+    };
+    auto return_face = [&] {
+        std::string base; bool had;
+        {
+            std::lock_guard<std::mutex> lk(cmd_face_mtx);
+            had = cmd_face_jumped; base = cmd_base_face; cmd_face_jumped = false;
+        }
+        if (had) face_proxy.set_face_by_name(base.empty() ? "neutral" : base);
+    };
+    auto jump_material = [&](int idx) {
+        face_proxy.set_menu_item(8, static_cast<uint8_t>(idx));
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.face.material_color = static_cast<uint8_t>(idx);
+    };
+
     auto gpio_dispatch = [&, restart_script](input::GpioFunc f) {
         using F = input::GpioFunc;
         switch (f) {
@@ -13705,6 +13775,25 @@ int main(int argc, char* argv[]) {
         case F::CamSwap:
             { std::lock_guard<std::mutex> lk(state.mtx); state.cameras_swapped = !state.cameras_swapped; } break;
         case F::PhoneRing: if (kdc_menu_ptr) kdc_menu_ptr->ring_phone(); break;
+        case F::FaceNeutral:    jump_face("neutral");   break;
+        case F::FaceHappy:      jump_face("happy");     break;
+        case F::FaceAngry:      jump_face("angry");     break;
+        case F::FaceSad:        jump_face("sad");       break;
+        case F::FaceSurprised:  jump_face("surprised"); break;
+        case F::FaceReturn:     return_face();          break;
+        case F::MatRainbow:     jump_material(8);       break;
+        case F::MatPride:       jump_material(22);      break;
+        case F::MatProgress:    jump_material(23);      break;
+        case F::MatTrans:       jump_material(24);      break;
+        case F::MatBi:          jump_material(25);      break;
+        case F::MatPan:         jump_material(26);      break;
+        case F::MatLesbian:     jump_material(27);      break;
+        case F::MatNonbinary:   jump_material(28);      break;
+        case F::MatAsexual:     jump_material(29);      break;
+        case F::MatGenderfluid: jump_material(30);      break;
+        case F::MatGenderqueer: jump_material(31);      break;
+        case F::MatAromantic:   jump_material(32);      break;
+        case F::MatIntersex:    jump_material(33);      break;
         case F::None: default: break;
         }
     };
@@ -13755,6 +13844,12 @@ int main(int argc, char* argv[]) {
         if (!coproc_inputs)             return "offline";
         return coproc_inputs->connected() ? "connected" : "offline";
     };
+
+    // ── Command FIFO source (optional) ───────────────────────────────────────
+    // Same shared gpio_dispatch — a line written to the FIFO is a GpioFunc id.
+    input::CmdFifo cmd_fifo(cmd_fifo_cfg, gpio_dispatch);
+    if (cmd_fifo_cfg.enabled && !cmd_fifo.start())
+        std::cerr << "[main] command FIFO init failed (" << cmd_fifo_cfg.path << ")\n";
 
     // ── Gamepad (SDL2, optional) ──────────────────────────────────────────────
     GamepadInput gamepad;
@@ -15513,20 +15608,17 @@ int main(int argc, char* argv[]) {
             return 0;
         };
 
-        // Multi-cam quad composite. Renders the same content into both eyes
-        // (CSI L/R on the top half, two selected USB cams on the bottom),
-        // using sub-viewports inside the bound eye FBO so each feed's
-        // existing draw call fills only its quadrant. The CSI rotation
-        // configured under Cameras > Left/Right Camera > Rotation is
-        // applied by the NV12 shader as usual — so a 90° rotation on the
-        // CSI cameras turns the top half into two upright portrait feeds.
-        auto draw_multicam_into_current_fbo = [&](int fw, int fh) {
-            const int hw  = fw / 2;             // left half width
-            const int rw  = fw - hw;            // right half width (absorbs odd column)
+        // Multi-cam composite. The TOP HALF is a single full-width camera that
+        // DIFFERS per eye (top_src), so in side-by-side the top reads as two
+        // images — one per eye — instead of a 2x2 split mirrored into both eyes
+        // (which showed 4 images with 2 duplicates). The BOTTOM half stays as the
+        // two selected USB cams side by side. Sub-viewports inside the bound eye
+        // FBO mean each feed's existing draw call fills only its region; the CSI
+        // rotation from Cameras > Left/Right Camera > Rotation still applies.
+        auto draw_multicam_into_current_fbo = [&](int fw, int fh,
+                                                  EyeSource top_src, EyeSource bot_src) {
             const int hh  = fh / 2;             // top half height
             const int top = fh - hh;            // bottom half height; top starts at y=top
-            // Bottom halves use height `top` and right halves width `rw` so an
-            // odd fw/fh leaves no 1px seam between the quadrants.
 
             // Draw the chosen source into the current sub-viewport. Left/Right
             // CSI are explicit (no global swap applied — the picker is explicit);
@@ -15540,10 +15632,8 @@ int main(int argc, char* argv[]) {
                 }
             };
 
-            glViewport(0,  top, hw, hh); draw_src(multicam_top_a);   // top-left
-            glViewport(hw, top, rw, hh); draw_src(multicam_top_b);   // top-right
-            glViewport(0,  0,   hw, top); draw_src(multicam_usb_a);  // bottom-left
-            glViewport(hw, 0,   rw, top); draw_src(multicam_usb_b);  // bottom-right
+            glViewport(0, top, fw, hh);  draw_src(top_src);   // top half (per eye)
+            glViewport(0, 0,   fw, top); draw_src(bot_src);   // bottom half (per eye)
 
             // Restore full viewport so any later passes (post-process /
             // HUD overlays into this FBO) see the whole eye region.
@@ -15559,7 +15649,8 @@ int main(int argc, char* argv[]) {
             if (multicam_layout) {
                 // Quad layout overrides the per-eye source pickers and
                 // theater mode — it owns the whole eye FBO.
-                draw_multicam_into_current_fbo(xr.eye_left().w, xr.eye_left().h);
+                draw_multicam_into_current_fbo(xr.eye_left().w, xr.eye_left().h,
+                                               multicam_top_a, multicam_usb_a);
             } else {
                 if (snap.theater_mode) {
                     auto vp = make_theater_vp(xr.eye_left().w, xr.eye_left().h, false);
@@ -15594,7 +15685,8 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT);
 
             if (multicam_layout) {
-                draw_multicam_into_current_fbo(xr.eye_right().w, xr.eye_right().h);
+                draw_multicam_into_current_fbo(xr.eye_right().w, xr.eye_right().h,
+                                               multicam_top_b, multicam_usb_b);
             } else {
                 if (snap.theater_mode) {
                     auto vp = make_theater_vp(xr.eye_right().w, xr.eye_right().h, true);

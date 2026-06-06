@@ -72,6 +72,10 @@ public:
     // Useful for the Files > Faces "Play" action where the index of a slot
     // isn't known statically.
     virtual void        set_face_by_name(const std::string& /*expression*/) {}
+    // The expression currently set (the face that boops/transients revert to).
+    // Empty on backends without a named-expression notion. Lets a "jump to
+    // expression then return" command remember what was playing.
+    virtual std::string current_expression() const { return {}; }
 
     // Trigger a temporary expression that auto-reverts after duration_s
     // seconds. Used by the boop sensor module — no-op on non-native backends
@@ -172,6 +176,7 @@ public:
     void clear_face_image(const std::string& e) override { (*active_)->clear_face_image(e); }
     void reload_faces() override { (*active_)->reload_faces(); }
     void set_face_by_name(const std::string& e) override { (*active_)->set_face_by_name(e); }
+    std::string current_expression() const override { return (*active_)->current_expression(); }
     void trigger_boop(const std::string& e, double d) override { (*active_)->trigger_boop(e, d); }
     void play_eye_animation(int type, double speed, double size,
                             uint8_t r, uint8_t g, uint8_t b, double dur) override {

@@ -78,6 +78,7 @@ public:
     void        clear_face_image(const std::string& expression) override;
     void        reload_faces() override { reload_active_face(); }
     void        set_face_by_name(const std::string& expression) override;
+    std::string current_expression() const override;
     void        trigger_boop(const std::string& expression, double duration_s) override;
     void        play_eye_animation(int type, double speed, double size,
                                    uint8_t r, uint8_t g, uint8_t b,
