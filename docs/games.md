@@ -60,10 +60,18 @@ only Snake).
 ### Provide a WAD
 
 doomgeneric needs an IWAD. ProtoHUD does **not** ship one (the retail Doom WADs
-are copyrighted). Use either:
+are copyrighted). Quickest path — fetch the libre **Freedoom** WAD into the
+default location:
+
+```sh
+scripts/install-doom-wad.sh        # downloads Freedoom → ~/.local/share/protohud/doom.wad
+```
+
+Or supply your own:
 
 - the **shareware** `doom1.wad` (free to distribute), or
-- **[Freedoom](https://freedoom.github.io/)** (`freedoom1.wad` / `freedoom2.wad`, libre).
+- **[Freedoom](https://freedoom.github.io/)** (`freedoom1.wad` / `freedoom2.wad`, libre), or
+- a `doom.wad` / `doom2.wad` you own.
 
 Point ProtoHUD at it in `config.json`:
 
