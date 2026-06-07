@@ -1,0 +1,22 @@
+(kicad_sch
+  (version 20230121)
+  (generator protohud_skeleton)
+  (uuid a1b2c3d4-0003-4aaa-9bbb-000000000008)
+  (paper "A3")
+  (title_block
+    (title "ProtoHUD Carrier — 8. Servos (RP2354B)")
+    (rev "A")
+    (company "ProtoHUD")
+  )
+  (lib_symbols)
+  (text "8. Servos (RP2354B)" (at 25.4 25.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 7d56c830-c939-49f1-aa6e-57eab10f8e6f))
+  (text "------------------------------------------------------------" (at 25.4 28.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 77b29d9e-0e66-422e-9902-d15bd54353cc))
+  (text "SERVOS — 8 channels, RP2354B PWM (3.3V signal direct)" (at 25.4 31.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 0c3f36c8-617f-4863-b7c7-d4c6eedb54ef))
+  (text "Parts: J20-J27 eight 3-pin headers (SIG / +V_SERVO / GND)," (at 25.4 34.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 7945eabc-24bf-44f3-a122-03c89e0cce61))
+  (text "  +V_SERVO rail fuse + bulk cap >=1000uF, optional 6V buck." (at 25.4 37.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 0fc58772-75f3-4253-8aa6-a4fb791f2ce4))
+  (text "Nets: SRV1..8 = GP20..GP27.  +V_SERVO 5-6V, GND." (at 25.4 40.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 9a93db14-eca2-4d1a-bb51-112bee52d8b1))
+  (text "Optional 74AHCT buffer footprint if 5V servo signal is needed." (at 25.4 43.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 80b2e614-3a49-40ee-a3fb-ca4a95000d8e))
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)

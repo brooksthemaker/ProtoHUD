@@ -365,7 +365,7 @@ out = f"""(kicad_sch
   (uuid {SHEET_OBJ_UUID})
   (paper "A3")
   (title_block
-    (title "ProtoHUD Carrier — 3. Face Buffer (HUB75 / MAX7219)")
+    (title "ProtoHUD Carrier — 3. Face Buffer (HUB75)")
     (rev "A")
     (company "ProtoHUD")
   )

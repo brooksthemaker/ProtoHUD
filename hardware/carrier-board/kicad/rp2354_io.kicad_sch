@@ -1,0 +1,23 @@
+(kicad_sch
+  (version 20230121)
+  (generator protohud_skeleton)
+  (uuid a1b2c3d4-0001-4aaa-9bbb-000000000004)
+  (paper "A3")
+  (title_block
+    (title "ProtoHUD Carrier — 4. RP2354B I/O MCU")
+    (rev "A")
+    (company "ProtoHUD")
+  )
+  (lib_symbols)
+  (text "4. RP2354B I/O MCU" (at 25.4 25.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 58387043-eaa2-4373-8a36-367a6731e9b9))
+  (text "------------------------------------------------------------" (at 25.4 28.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid bd9250f9-1f67-4f5c-a8e6-bca570432b37))
+  (text "RP2354B I/O COPROCESSOR — core (USB-CDC to CM5 via hub)" (at 25.4 31.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 32d247b4-0b0b-4f0d-bc81-7a9ecc4a8515))
+  (text "Parts: RP2354B (QFN-80, 48 GPIO, 2MB flash), 12 MHz xtal + load caps," (at 25.4 34.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 5aaf96fa-46eb-41af-ab42-cd33445743b4))
+  (text "  decoupling/core-reg per RP2350 guide, BOOTSEL + RUN buttons, SWD hdr," (at 25.4 37.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 5dd15e52-77ae-4e51-b3d6-cddcdc06fa49))
+  (text "  SW1 USB selector (hub<->J12), J12 USB-C program port, USBLC6 ESD." (at 25.4 40.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 907a9130-7a65-47ad-9423-b2bb861ed77f))
+  (text "Nets: RP_DP/DM -> SW1; +3V3_RP, +5V, GND.  DBG_TX=GP0 DBG_RX=GP1." (at 25.4 43.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid cd122c62-b6eb-4e40-a9b3-15f7a13563be))
+  (text "See RP2354-IO.md for the full GP allocation." (at 25.4 46.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 2fa3c891-4b1b-4f5b-b367-107d5d22cde6))
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)

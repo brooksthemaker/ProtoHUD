@@ -1,0 +1,21 @@
+(kicad_sch
+  (version 20230121)
+  (generator protohud_skeleton)
+  (uuid a1b2c3d4-0002-4aaa-9bbb-000000000005)
+  (paper "A3")
+  (title_block
+    (title "ProtoHUD Carrier — 5. MAX7219 Buffer (RP2354B)")
+    (rev "A")
+    (company "ProtoHUD")
+  )
+  (lib_symbols)
+  (text "5. MAX7219 Buffer (RP2354B)" (at 25.4 25.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 7600a059-a63c-4b52-9d98-657a2e8fd422))
+  (text "------------------------------------------------------------" (at 25.4 28.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid b564791c-7195-476d-bdd7-67c474cc68e6))
+  (text "MAX7219 face backend — RP2354B side, 3.3V->5V" (at 25.4 31.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 2688ff5e-ea5e-4def-a524-044266a8e3bd))
+  (text "Parts: U10 74AHCT245 @5V, J3 MAX7219 header (5V/GND/DIN/CLK/CS x4), decoupl." (at 25.4 34.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 8662e6ec-6640-485c-8656-68f350ba9916))
+  (text "Nets: MX_CLK=GP2 MX_DIN=GP3 MX_CS1..4=GP7..GP10 (SPI0), buffered to 5V." (at 25.4 37.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid df63f99e-31b3-4d58-abf2-3cbdcb6c4f40))
+  (text "Runs alongside HUB75 (different brain). See MULTI-BACKEND.md." (at 25.4 40.40 0) (effects (font (size 1.5 1.5)) (justify left bottom)) (uuid 1bd8003b-eae8-429a-bdd7-ca3e50d65b9a))
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
