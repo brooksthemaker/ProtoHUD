@@ -3219,12 +3219,12 @@ static std::vector<MenuItem> build_menu(
             [multicam_layout](bool v){ *multicam_layout = v; }));
         if (multicam_top_a)
             multicam_menu.push_back(with_desc(
-                submenu("Top-Left Camera", make_mc_src_menu(multicam_top_a)),
-                "Which camera fills the top-left quadrant (default Left CSI)."));
+                submenu("Left Eye Top Camera", make_mc_src_menu(multicam_top_a)),
+                "Which camera fills the top half of the LEFT eye (default Left CSI)."));
         if (multicam_top_b)
             multicam_menu.push_back(with_desc(
-                submenu("Top-Right Camera", make_mc_src_menu(multicam_top_b)),
-                "Which camera fills the top-right quadrant (default Right CSI)."));
+                submenu("Right Eye Top Camera", make_mc_src_menu(multicam_top_b)),
+                "Which camera fills the top half of the RIGHT eye (default Right CSI)."));
         if (multicam_usb_a)
             multicam_menu.push_back(with_desc(
                 submenu("Bottom-Left Camera", make_mc_usb_menu(multicam_usb_a, multicam_usb_b)),
@@ -3239,10 +3239,10 @@ static std::vector<MenuItem> build_menu(
         submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
         submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
         with_desc(submenu("Multi-Cam Layout", std::move(multicam_menu)),
-            "CSI cameras side-by-side on the top half (rotated per each "
-            "camera's Rotation setting), two USB cameras side-by-side on the "
-            "bottom. Same view in both eyes. Set the CSI rotation to 90\xc2\xb0 "
-            "under Left/Right Camera > Rotation for the intended portrait fit."),
+            "Top half = one camera per eye (left-eye top + right-eye top, each "
+            "selectable), so side-by-side shows two distinct images on top instead "
+            "of a mirrored 2x2. Bottom half = two USB cameras side by side. Set the "
+            "CSI rotation to 90\xc2\xb0 under Left/Right Camera > Rotation if needed."),
         with_panel(
             with_desc(submenu("Raw View", std::move(raw_view_menu)),
                 "Pass the camera feed straight through. Toggle Enable to show it; "
@@ -15661,14 +15661,13 @@ int main(int argc, char* argv[]) {
             return 0;
         };
 
-        // Multi-cam quad composite. Renders the same content into both eyes
-        // (CSI L/R on the top half, two selected USB cams on the bottom),
-        // using sub-viewports inside the bound eye FBO so each feed's
-        // existing draw call fills only its quadrant. The CSI rotation
-        // configured under Cameras > Left/Right Camera > Rotation is
-        // applied by the NV12 shader as usual — so a 90° rotation on the
-        // CSI cameras turns the top half into two upright portrait feeds.
-        auto draw_multicam_into_current_fbo = [&](int fw, int fh) {
+        // Multi-cam composite. The TOP HALF is a single full-width camera that
+        // DIFFERS per eye (top_src), so in side-by-side the top reads as TWO
+        // distinct images — one per eye — instead of a 2x2 split mirrored into
+        // both eyes (which showed four images, two of them duplicates). The
+        // BOTTOM half stays as the two selected USB cams side by side. The CSI
+        // rotation under Cameras > Left/Right Camera > Rotation still applies.
+        auto draw_multicam_into_current_fbo = [&](int fw, int fh, EyeSource top_src) {
             const int hw  = fw / 2;             // left half width
             const int rw  = fw - hw;            // right half width (absorbs odd column)
             const int hh  = fh / 2;             // top half height
@@ -15688,10 +15687,9 @@ int main(int argc, char* argv[]) {
                 }
             };
 
-            glViewport(0,  top, hw, hh); draw_src(multicam_top_a);   // top-left
-            glViewport(hw, top, rw, hh); draw_src(multicam_top_b);   // top-right
-            glViewport(0,  0,   hw, top); draw_src(multicam_usb_a);  // bottom-left
-            glViewport(hw, 0,   rw, top); draw_src(multicam_usb_b);  // bottom-right
+            glViewport(0, top, fw, hh); draw_src(top_src);          // top: one full-width image per eye
+            glViewport(0, 0,  hw, top); draw_src(multicam_usb_a);   // bottom-left USB
+            glViewport(hw, 0, rw, top); draw_src(multicam_usb_b);   // bottom-right USB
 
             // Restore full viewport so any later passes (post-process /
             // HUD overlays into this FBO) see the whole eye region.
@@ -15803,7 +15801,7 @@ int main(int argc, char* argv[]) {
             } else if (multicam_layout) {
                 // Quad layout overrides the per-eye source pickers and
                 // theater mode — it owns the whole eye FBO.
-                draw_multicam_into_current_fbo(xr.eye_left().w, xr.eye_left().h);
+                draw_multicam_into_current_fbo(xr.eye_left().w, xr.eye_left().h, multicam_top_a);
             } else {
                 if (snap.theater_mode) {
                     auto vp = make_theater_vp(xr.eye_left().w, xr.eye_left().h, false);
@@ -15840,7 +15838,7 @@ int main(int argc, char* argv[]) {
             if (game_active && game_tex != 0) {
                 draw_game_into_current_fbo(xr.eye_right().w, xr.eye_right().h);
             } else if (multicam_layout) {
-                draw_multicam_into_current_fbo(xr.eye_right().w, xr.eye_right().h);
+                draw_multicam_into_current_fbo(xr.eye_right().w, xr.eye_right().h, multicam_top_b);
             } else {
                 if (snap.theater_mode) {
                     auto vp = make_theater_vp(xr.eye_right().w, xr.eye_right().h, true);
