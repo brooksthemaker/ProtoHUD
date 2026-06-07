@@ -19,6 +19,7 @@ board must do** so a schematic/layout can be built against a fixed spec.
 - [`RP2354-IO.md`](RP2354-IO.md) — **the I/O coprocessor** (pin budget, buses, servos, USB-CDC, programming) ⭐
 - [`BLOCK-DIAGRAM.md`](BLOCK-DIAGRAM.md) — system block diagram (two brains, voltage domains, shifting boundaries)
 - [`PINMAP.md`](PINMAP.md) — master GPIO/net allocation, CM5 + RP2354B (the source of truth)
+- [`GPIO-MAP.md`](GPIO-MAP.md) — full per-pin GPIO reference (main + auxiliary functions) for both chips
 - [`CONNECTORS.md`](CONNECTORS.md) — pin-by-pin pinouts for every connector + jumper
 - [`POWER.md`](POWER.md) — power tree, rail budget, sizing, battery + protection
 - [`kicad/`](kicad/) — KiCad hierarchical schematic (one sheet per block)
