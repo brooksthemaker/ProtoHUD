@@ -51,10 +51,14 @@ other interfaces used by the carrier are its dedicated blocks, not GPIO:
 > Spare CM5 GPIO (BCM 2/3, 7–11, 14/15, 18/19, 25, …) are now genuinely free —
 > break a few to a debug header (R1.3) but they carry no required function.
 >
-> **Two exceptions (recommended):** dedicate two spare CM5 lines as RP2354B
-> control — **BCM 7 → `RP_RUN`**, **BCM 8 → `RP_BOOTSEL`** — so the CM5 can force
-> the RP2354B into its ROM bootloader for buttonless brick-recovery (see
-> [`RP2354-IO.md`](RP2354-IO.md#programming-paths-two)).
+> **Exceptions — four non-HUB75 CM5 lines are used:**
+> - **BCM 7 → `RP_RUN`**, **BCM 8 → `RP_BOOTSEL`** — RP2354B control, so the CM5
+>   can force the MCU into its ROM bootloader for buttonless brick-recovery (see
+>   [`RP2354-IO.md`](RP2354-IO.md#programming-paths-two)).
+> - **BCM 18 → fan zone 1**, **BCM 19 → fan zone 2** — `sys::FanController`
+>   (CM5-local, so cooling survives a USB-link hang).
+>
+> So CM5 free = BCM 2, 3, 9, 10, 11, 14, 15, 25.
 
 ---
 

@@ -120,8 +120,8 @@ serviceability, or telemetry but can be cut for a v1.
 - **N2 — e-Fuse per rail** (e.g. TPS259x) for latch-off short protection
   instead of slow polyfuses — especially the servo and panel rails.
 - **N3 — RTC battery** connector/coin-cell holder for the CM5's onboard RTC.
-- **N4 — PWM fan header** (4-pin) + thermal pad area — drivable by the RP2354B
-  (a spare PWM) or the CM5.
+- **N4 — PWM fan headers** (2 zones) + thermal pad area — **CM5-local**, driven
+  by `sys::FanController` on BCM 18/19 (so cooling survives a USB-link hang).
 - **N5 — Power-good / diagnostic LEDs** per rail + heartbeat LEDs on both brains.
 - **N6 — Spare buffer channels** from the '245/'125 broken out to a header.
 - **N7 — STEMMA QT / Qwiic (JST-SH 1 mm)** on the RP2354B I²C0 for solderless

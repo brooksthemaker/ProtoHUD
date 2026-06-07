@@ -37,8 +37,8 @@ lines. Everything else is spare. Alt-function labels follow the project's
 | 15 | spare | | | UART0 RXD | |
 | 16 | **HUB75 G2** | | SPI1 CE2 | UART0 CTS | |
 | 17 | **HUB75 CLK** | | SPI1 CE1 | UART0 RTS | |
-| 18 | spare | | SPI1 CE0 | | PCM CLK, PWM0 |
-| 19 | spare | | SPI1 MISO | | PCM FS, PWM1 |
+| 18 | **fan zone 1** (`sys::FanController`) | | SPI1 CE0 | | PCM CLK, PWM0 |
+| 19 | **fan zone 2** (`sys::FanController`) | | SPI1 MISO | | PCM FS, PWM1 |
 | 20 | **HUB75 D** | | SPI1 MOSI | | PCM DIN |
 | 21 | **HUB75 STB/LAT** | | SPI1 SCLK | | PCM DOUT |
 | 22 | **HUB75 A** | | | | SD/SDIO |
@@ -48,9 +48,9 @@ lines. Everything else is spare. Alt-function labels follow the project's
 | 26 | **HUB75 B** | | | | SD/SDIO |
 | 27 | **HUB75 C** | | | | SD/SDIO |
 
-**CM5 free now:** BCM 2, 3, 9, 10, 11, 14, 15, 18, 19, 25 (10 lines) — no
-required function. BCM 7/8 are *recommended* for RP2354B RUN/BOOTSEL control;
-BCM 0/1 are HAT-ID, leave alone.
+**CM5 free now:** BCM 2, 3, 9, 10, 11, 14, 15, 25 (8 lines) — no required
+function. Non-HUB75 CM5 GPIO in use: BCM 7/8 = RP2354B `RP_RUN`/`RP_BOOTSEL`,
+BCM 18/19 = fan zones 1/2. BCM 0/1 are HAT-ID, leave alone.
 
 > The CM5 also has its dedicated, non-GPIO interfaces — 2× CSI (cameras), 2×
 > HDMI, USB 2.0 host, the 3V3/5V rails. Those aren't in this bank-0 table.
@@ -106,8 +106,8 @@ RP-series mux, ADC = GP40–47, HSTX = GP12–19).
 | 35 | **`BTN8`** | SIO in | SPI0 TX | UART0 RTS | I2C1 SCL | 5B | |
 | 36 | **`BTN9`** | SIO in | SPI0 RX | UART1 TX | I2C0 SDA | 6A | |
 | 37 | **`BTN10`** | SIO in | SPI0 CSn | UART1 RX | I2C0 SCL | 6B | |
-| 38 | spare *(fan zone 1?)* | — | SPI0 SCK | UART1 CTS | I2C1 SDA | 7A | |
-| 39 | spare *(fan zone 2?)* | — | SPI0 TX | UART1 RTS | I2C1 SCL | 7B | |
+| 38 | spare | — | SPI0 SCK | UART1 CTS | I2C1 SDA | 7A | |
+| 39 | spare | — | SPI0 TX | UART1 RTS | I2C1 SCL | 7B | |
 | 40 | **`AIN0`** (analog) | ADC0 | SPI1 RX | UART1 TX | I2C0 SDA | 8A | **ADC0** |
 | 41 | **`AIN1`** | ADC1 | SPI1 CSn | UART1 RX | I2C0 SCL | 8B | **ADC1** |
 | 42 | **`AIN2`** | ADC2 | SPI1 SCK | UART1 CTS | I2C1 SDA | 9A | **ADC2** |
@@ -122,8 +122,9 @@ Non-GPIO pins: **USB_DP/USB_DM** (native USB, → SW1 selector), **XIN/XOUT**
 2 MB flash; QSPI_SS = BOOTSEL strap), power/ground.
 
 **RP2354B free now:** GP11–GP15 (5 digital spares; GP12–15 are HSTX-capable) and
-GP38/GP39 (2 more, suggested for fan PWM). The 8 ADC pins (GP40–47) are mapped to
-`AIN0..7` headers but are free to repurpose. → ~7 spare digital + 8 analog.
+GP38/GP39 (2 more). The 8 ADC pins (GP40–47) are mapped to `AIN0..7` headers but
+are free to repurpose. → ~7 spare digital + 8 analog. (Fans are on the CM5, not
+here.)
 
 ### Why these assignments are mux-legal
 The ProtoHUD picks line up with the function mux: `SDA0`/`SCL0` on GP4/GP5 = a
@@ -140,7 +141,7 @@ on the only ADC-capable pins (GP40–47). No conflicts.
 | | CM5 | RP2354B |
 |--|-----|---------|
 | Total GPIO | 28 (BCM 0–27) | 48 (GP0–47) |
-| In ProtoHUD use | 14 HUB75 + 2 ctrl | ~31 |
-| Free | 10 | ~7 digital + 8 ADC |
-| Drives | HUB75 only | sensors, MAX7219, WS2812, servos, buttons, analog |
+| In ProtoHUD use | 14 HUB75 + 2 ctrl + 2 fan | ~31 |
+| Free | 8 | ~7 digital + 8 ADC |
+| Drives | HUB75 + fans (+ RP2354B ctrl) | sensors, MAX7219, WS2812, servos, buttons, analog |
 | Logic | 3.3 V (not 5 V-tol) | 3.3 V (not 5 V-tol) |

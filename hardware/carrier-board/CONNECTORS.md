@@ -323,23 +323,16 @@ RP2354B UART0 console for logs/serial debug, separate from the USB-CDC link.
 
 ---
 
-## Cooling fan headers  ·  up to 4 fans in 2 zones  ·  brain: **RP2354B (default) or CM5**
+## Cooling fan headers  ·  up to 4 fans in 2 zones  ·  brain: **CM5**
 
-Two zones, each switched by a **low-side N-MOSFET** whose gate is a zone control
-line; up to two fan connectors per zone share the zone speed. **Two ways to
-drive it — a design choice (see note):**
+**Fans are CM5-local** — driven directly by the existing `sys::FanController`
+software PWM on spare CM5 GPIO (**BCM 18 = Zone 1**, **BCM 19 = Zone 2**). This is
+the deliberate choice over RP2354B: the CM5 keeps cooling itself even if the
+MCU/USB link hangs, and it reuses firmware that already exists. (These two
+control lines are the only non-HUB75 CM5 GPIO besides `RP_RUN`/`RP_BOOTSEL`.)
 
-- **RP2354B (default, two-brain-consistent):** zone PWM from spare RP2354B GPIO
-  (e.g. GP38/GP39); the CM5 requests fan speed over USB-CDC and `sys::FanController`
-  becomes a coprocessor command. Keeps the CM5 GPIO HUB75-only.
-- **CM5-local (fail-safe):** zone GPIO straight from the CM5 (default **BCM 18 =
-  Zone 1**, **BCM 19 = Zone 2** — genuinely free now), driven by `sys::FanController`
-  directly. Keeps CM5 cooling independent of the USB link.
-
-> ⚠️ **Decision pending:** which brain owns the fans. RP2354B is consistent with
-> the architecture; CM5-local guarantees the CM5 keeps cooling even if the MCU/
-> USB link hangs. Fit both gate-resistor footprints + a 0 Ω/jumper to pick at
-> assembly if undecided.
+Two zones, each switched by a **low-side N-MOSFET** whose gate is the zone's CM5
+GPIO; up to two fan connectors per zone share the zone speed.
 
 Per fan connector (4-pin PC-fan compatible):
 

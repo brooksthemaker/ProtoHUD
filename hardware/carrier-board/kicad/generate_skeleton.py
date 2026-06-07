@@ -37,7 +37,9 @@ SHEETS = [
         "Parts: 2x Hirose DF40C-100DS-0.4V(51), decoupling per CM5 guide,",
         "  nRPIBOOT jumper + USB (eMMC flash), spare-GPIO debug header.",
         "Nets: HUB75 BCM 4-27 (see PINMAP.md) -> face_buffer; +5V, +3V3, GND.",
-        "All non-HUB75 I/O lives on the RP2354B, not here.",
+        "Non-HUB75 CM5 lines: BCM7=RP_RUN, BCM8=RP_BOOTSEL (RP2354B control),",
+        "  BCM18/BCM19 = fan zone 1/2 (low-side MOSFET gates, sys::FanController).",
+        "All other peripheral I/O lives on the RP2354B, not here.",
     ]),
     ("face_buffer", "3. Face Buffer (HUB75)", [
         "POPULATED separately by populate_face_buffer.py — HUB75-only, CM5 side.",
