@@ -325,26 +325,11 @@ for pnum, net in J2_MAP.items():
     kind = "global" if net == "GND" else "label"
     nets.append(label(net, x, y, side, kind, "input"))
 
-# --- J3: MAX7219 chain header (alt backend) ---------------------------------
-J3_X, J3_Y = 210, 150
-items.append(instance("Connector_Generic:Conn_01x08", "J3", "MAX7219",
-                      J3_X, J3_Y))
-J3_MAP = {1: "+5V", 2: "GND", 3: "M_DIN", 4: "M_CLK",
-          5: "M_CS1", 6: "M_CS2", 7: "M_CS3", 8: "M_CS4"}
-for pnum, net in J3_MAP.items():
-    x, y = pin_xy("Connector_Generic:Conn_01x08", str(pnum), J3_X, J3_Y)
-    kind = "global" if net in ("+5V", "GND") else "label"
-    nets.append(label(net, x, y, 180, kind, "input"))
-
-# --- JP2: MAX7219 DIN source select (SPI0 vs bit-bang) ----------------------
-JP2_X, JP2_Y = 160, 155
-items.append(instance("Connector_Generic:Conn_01x03", "JP2", "DIN src",
-                      JP2_X, JP2_Y))
-JP2_MAP = {1: "GPIO10", 2: "M_DIN", 3: "GPIO14"}   # SPI0-MOSI / out / bit-bang
-for pnum, net in JP2_MAP.items():
-    x, y = pin_xy("Connector_Generic:Conn_01x03", str(pnum), JP2_X, JP2_Y)
-    kind = "hier" if net.startswith("GPIO") else "label"
-    nets.append(label(net, x, y, 180, kind, "input"))
+# --- J3 / JP2 (MAX7219) intentionally NOT on this sheet -----------------------
+# In the RP2354B-coprocessor architecture the CM5 drives ONLY HUB75; MAX7219 is
+# owned by the RP2354B I/O MCU (its own SPI + 74AHCT245 buffer on the rp2354
+# sheets). This sheet is therefore HUB75-only. U2 channels 7-8 (B7/B8) stay
+# spare and break out at an N7 header in the full pass.
 
 # --- Decoupling caps on U1/U2 VCC -------------------------------------------
 for ref, cx, cy in [("C1", 70, 55), ("C2", 70, 115)]:
@@ -354,11 +339,11 @@ for ref, cx, cy in [("C1", 70, 55), ("C2", 70, 115)]:
 
 # ── on-canvas documentation text ────────────────────────────────────────────
 doc = [
-    "3. FACE BUFFER — 3.3 V -> 5 V (HUB75 / MAX7219)",
+    "3. FACE BUFFER — HUB75 only, 3.3 V -> 5 V (CM5 side)",
     "U1/U2 74AHCT245 @ +5V (TTL VIH ~2V reads 3.3V CM5 as HIGH).",
     "DIR=+5V (A->B), /OE=GND (always enabled). 33R series on CLK/LAT/OE.",
     "GPIOxx hier-labels come from sheet 2 (CM5); +5V/GND are global rails.",
-    "Backend = pick one: populate J2 (HUB75) OR J3 (MAX7219). JP2 = DIN source.",
+    "CM5 drives ONLY HUB75. MAX7219/WS2812/sensors/buttons/servos = RP2354B I/O MCU.",
     "NOTE: cached symbols are reconstructions -> run Symbol>Update from Library.",
 ]
 doc_text = "\n".join(
