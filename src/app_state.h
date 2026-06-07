@@ -1,10 +1,13 @@
 #pragma once
 #include <atomic>
+#include <algorithm>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <set>
 #include <string>
+#include <system_error>
 #include <vector>
 #include <cstdint>
 #include <ctime>
@@ -989,6 +992,40 @@ struct AppState {
     // Live active GameSource (owned by main's render loop). Published so the menu
     // can read/cycle the source's runtime options. Render-thread access only.
     std::atomic<game::GameSource*> game_src_live { nullptr };
+
+    // Libretro ROM picker. The menu lists files found in game_rom_dir; selecting
+    // one sets game_rom_path and bumps game_rom_gen so the render loop rebuilds
+    // the emulator source with the new ROM. All three strings are guarded by
+    // game_rom_mtx; game_rom_gen is the lock-free change signal for the loop.
+    std::mutex                game_rom_mtx;
+    std::string               game_rom_dir;             // folder scanned for ROMs (absolute)
+    std::string               game_rom_path;            // active ROM (absolute path; "" = none)
+    std::vector<std::string>  game_rom_files;           // filenames found in game_rom_dir
+    std::atomic<int>          game_rom_gen { 0 };        // bumped on every ROM selection
+
+    // Rescan game_rom_dir into game_rom_files (sorted, hidden + doc files skipped).
+    // Safe to call from the menu thread or at startup.
+    void rescan_roms() {
+        std::string dir;
+        { std::lock_guard<std::mutex> lk(game_rom_mtx); dir = game_rom_dir; }
+        std::vector<std::string> found;
+        if (!dir.empty()) {
+            std::error_code ec;
+            for (std::filesystem::directory_iterator it(dir, ec), end; it != end && !ec;
+                 it.increment(ec)) {
+                if (!it->is_regular_file(ec)) continue;
+                const std::string name = it->path().filename().string();
+                if (name.empty() || name.front() == '.') continue;       // hidden / .gitignore
+                const std::string ext = it->path().extension().string();
+                if (ext == ".md" || ext == ".txt") continue;             // README / notes
+                found.push_back(name);
+            }
+        }
+        std::sort(found.begin(), found.end());
+        std::lock_guard<std::mutex> lk(game_rom_mtx);
+        game_rom_files = std::move(found);
+    }
+
 
     // ── Helpers (call with mutex held) ────────────────────────────────────────
 

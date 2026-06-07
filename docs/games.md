@@ -128,6 +128,7 @@ Point ProtoHUD at a core + ROM in `config.json`:
   "game": {
     "libretro_core": "/usr/lib/libretro/snes9x_libretro.so",
     "libretro_rom":  "/home/user/roms/game.sfc",
+    "libretro_rom_dir": "",
     "libretro_system_dir": "/home/user/.local/share/protohud/system",
     "audio_enabled": true,
     "audio_device":  "default"
@@ -137,6 +138,20 @@ Point ProtoHUD at a core + ROM in `config.json`:
 
 `libretro_system_dir` is handed to the core as both the system and save
 directory (some cores need BIOS files or write SRAM there).
+
+### Picking a ROM from the menu
+
+You don't have to hand-edit `libretro_rom`. Drop ROM files into the **ROM
+folder** and pick one in **Games → Source → Emulator (libretro) → ROM**:
+
+- The ROM folder is `game.libretro_rom_dir`, which defaults to
+  **`third_party/roms/`** in the repo (created by `scripts/install-emulator.sh`).
+  Set the key to use a different folder.
+- The menu lists every file in that folder; selecting one loads it immediately,
+  makes Emulator the active source, and is saved back to `libretro_rom` so it
+  reloads next launch. A dot marks the active ROM.
+- Added files while running? **ROM → Rescan Folder** refreshes the list.
+- `libretro_rom` still works for a fixed path and seeds the picker's selection.
 
 ### Audio
 

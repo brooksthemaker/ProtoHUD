@@ -1,0 +1,6 @@
+# Libretro ROMs live here. ProtoHUD's Games > Source > Emulator > ROM menu lists
+# every file in this folder. ROMs are user-supplied and must never be committed,
+# so ignore everything except this file and the README.
+*
+!.gitignore
+!README.md

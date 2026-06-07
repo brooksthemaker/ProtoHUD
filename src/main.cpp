@@ -10938,8 +10938,9 @@ static std::vector<MenuItem> build_menu(
                       "Pick the game. Snake is the built-in demo (D-pad / arrows "
                       "to steer, A / Z or Start / Enter to restart). Doom needs a "
                       "DOOM/Freedoom WAD at game.doom_wad. Emulator runs a libretro "
-                      "core (game.libretro_core) + ROM (game.libretro_rom) \xe2\x80\x94 "
-                      "software cores (NES/SNES/Genesis/GBA/PS1) for now."));
+                      "core (game.libretro_core) + a ROM (pick one under ROM below, "
+                      "or set game.libretro_rom) \xe2\x80\x94 software cores "
+                      "(NES/SNES/Genesis/GBA/PS1) for now."));
                   games.push_back(with_desc(toggle("Windowed",
                       [&state]{ return state.game_windowed.load(); },
                       [&state](bool v){ state.game_windowed.store(v); }),
@@ -10957,6 +10958,65 @@ static std::vector<MenuItem> build_menu(
                           "persisted to config game.audio_enabled.");
                       au.visible_fn = [&state]{ return state.game_source_sel.load() == 2; };
                       games.push_back(std::move(au));
+                  }
+                  // ROM picker — emulator only. Lists files in game_rom_dir
+                  // (third_party/roms by default). Selecting a row sets the active
+                  // ROM and bumps game_rom_gen so the loop reloads the core with it.
+                  // Fixed slot rows driven by the live file list (like Core Options),
+                  // so newly-dropped ROMs appear after "Rescan Folder" without a
+                  // menu rebuild.
+                  {
+                      std::vector<MenuItem> roms_menu;
+                      roms_menu.push_back(leaf("Rescan Folder",
+                          [&state]{ state.rescan_roms(); }));
+                      MenuItem empty_hint;
+                      empty_hint.type  = MenuItemType::LEAF;
+                      empty_hint.label = "(no ROMs — drop files in the ROM folder)";
+                      empty_hint.visible_fn = [&state]{
+                          std::lock_guard<std::mutex> lk(state.game_rom_mtx);
+                          return state.game_rom_files.empty();
+                      };
+                      roms_menu.push_back(std::move(empty_hint));
+                      for (int i = 0; i < 128; ++i) {
+                          MenuItem row;
+                          row.type = MenuItemType::LEAF;
+                          row.label_fn = [&state, i]{
+                              std::lock_guard<std::mutex> lk(state.game_rom_mtx);
+                              if (i >= static_cast<int>(state.game_rom_files.size()))
+                                  return std::string();
+                              return state.game_rom_files[i];
+                          };
+                          row.visible_fn = [&state, i]{
+                              std::lock_guard<std::mutex> lk(state.game_rom_mtx);
+                              return i < static_cast<int>(state.game_rom_files.size());
+                          };
+                          row.get_state = [&state, i]{   // radio dot on the active ROM
+                              std::lock_guard<std::mutex> lk(state.game_rom_mtx);
+                              if (i >= static_cast<int>(state.game_rom_files.size()))
+                                  return false;
+                              return !state.game_rom_path.empty() &&
+                                     state.game_rom_path ==
+                                         state.game_rom_dir + "/" + state.game_rom_files[i];
+                          };
+                          row.action = [&state, i]{
+                              {
+                                  std::lock_guard<std::mutex> lk(state.game_rom_mtx);
+                                  if (i >= static_cast<int>(state.game_rom_files.size())) return;
+                                  state.game_rom_path =
+                                      state.game_rom_dir + "/" + state.game_rom_files[i];
+                              }
+                              state.game_source_sel.store(2);      // make Emulator the source
+                              state.game_rom_gen.fetch_add(1);     // trigger a reload
+                          };
+                          roms_menu.push_back(std::move(row));
+                      }
+                      MenuItem rom_pick = with_desc(submenu("ROM", std::move(roms_menu)),
+                          "Pick a ROM from the ROM folder (third_party/roms by "
+                          "default; set game.libretro_rom_dir to change). Selecting "
+                          "one loads it in the emulator and makes Emulator the active "
+                          "source. Drop new ROMs in that folder, then Rescan Folder.");
+                      rom_pick.visible_fn = [&state]{ return state.game_source_sel.load() == 2; };
+                      games.push_back(std::move(rom_pick));
                   }
                   // Core Options — emulator only. The list is discovered when the
                   // core loads (first Play), so it's built from fixed slot rows
@@ -14501,6 +14561,12 @@ int main(int argc, char* argv[]) {
         // Game / emulator settings: persist the audio toggle and the live core's
         // current option values (so menu changes survive a restart).
         cfg["game"]["audio_enabled"] = state.game_audio_enabled.load();
+        // Persist the ROM picked from the menu so it reloads on next launch.
+        {
+            std::lock_guard<std::mutex> lk(state.game_rom_mtx);
+            if (!state.game_rom_path.empty())
+                cfg["game"]["libretro_rom"] = state.game_rom_path;
+        }
         if (auto* g = state.game_src_live.load()) {
             const int n = g->option_count();
             if (n > 0) {
@@ -14684,6 +14750,27 @@ int main(int argc, char* argv[]) {
     std::string lr_rom     = jgame.value("libretro_rom",    std::string());
     std::string lr_sysdir  = jgame.value("libretro_system_dir",
                                          std::string("/home/user/.local/share/protohud/system"));
+    // ROM picker folder. Defaults to <repo>/third_party/roms (created by
+    // scripts/install-emulator.sh); overridable via game.libretro_rom_dir.
+    std::string lr_rom_dir = jgame.value("libretro_rom_dir", std::string());
+    if (lr_rom_dir.empty()) {
+        char exe[4096];
+        ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            std::string p(exe);                                       // .../build/protohud
+            auto s = p.find_last_of('/'); if (s != std::string::npos) p.resize(s);  // .../build
+            s = p.find_last_of('/');      if (s != std::string::npos) p.resize(s);  // repo root
+            lr_rom_dir = p + "/third_party/roms";
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(state.game_rom_mtx);
+        state.game_rom_dir  = lr_rom_dir;
+        state.game_rom_path = lr_rom;          // config's libretro_rom seeds the picker
+    }
+    state.rescan_roms();
+    int lr_rom_gen_seen = state.game_rom_gen.load();
     // Core audio plays to its own ALSA device (independent of the spatial
     // AudioEngine). "default" shares via dmix/PipeWire. The device is always
     // opened; the Games > Audio toggle (game_audio_enabled) mutes/unmutes live.
@@ -15682,18 +15769,24 @@ int main(int argc, char* argv[]) {
         // (fullscreen or windowed) instead of the cameras.
         const bool game_active = state.game_active.load();
         if (game_active) {
-            // Hot-swap the source if the menu changed the selection.
-            int want = state.game_source_sel.load();
-            if (want != game_which) {
-                game_which = want;
+            // Hot-swap the source if the menu changed the selection, or — for the
+            // emulator — if the ROM picker chose a different ROM (game_rom_gen).
+            int want      = state.game_source_sel.load();
+            int rom_gen   = state.game_rom_gen.load();
+            const bool rom_changed = (want == 2 && rom_gen != lr_rom_gen_seen);
+            if (want != game_which || rom_changed) {
+                game_which      = want;
+                lr_rom_gen_seen = rom_gen;
 #ifdef PROTOHUD_HAVE_DOOM
                 if (want == 1) game_src = game::make_doom(doom_wad);
                 else
 #endif
 #ifdef PROTOHUD_HAVE_LIBRETRO
-                if (want == 2) game_src = game::make_libretro(lr_core, lr_rom, lr_sysdir,
-                                                              lr_audio, lr_options);
-                else
+                if (want == 2) {
+                    std::string rom;
+                    { std::lock_guard<std::mutex> lk(state.game_rom_mtx); rom = state.game_rom_path; }
+                    game_src = game::make_libretro(lr_core, rom, lr_sysdir, lr_audio, lr_options);
+                } else
 #endif
                     game_src = game::make_snake();
                 game_src->set_audio_enabled(state.game_audio_enabled.load());

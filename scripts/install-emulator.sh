@@ -27,6 +27,11 @@ if [[ ! -f "$HDR" ]]; then
         -o "$HDR"
 fi
 
+# ROM drop folder for the in-menu ROM picker (game.libretro_rom_dir default).
+ROMS_DIR="$ROOT/third_party/roms"
+mkdir -p "$ROMS_DIR"
+echo "ROM folder ready: $ROMS_DIR"
+
 echo "Configuring with -DENABLE_LIBRETRO=ON…"
 cmake -S "$ROOT" -B "$BUILD_DIR" -DENABLE_LIBRETRO=ON
 
@@ -41,13 +46,13 @@ Next steps:
   1. Get a libretro core (.so), e.g.:
         sudo apt install libretro-snes9x        # or any libretro-* package
      or download from https://buildbot.libretro.com/
-  2. Point ProtoHUD at the core + a ROM in config.json:
-        "game": {
-          "libretro_core": "/usr/lib/libretro/snes9x_libretro.so",
-          "libretro_rom":  "/home/user/roms/game.sfc",
-          "libretro_system_dir": "/home/user/.local/share/protohud/system"
-        }
-  3. In ProtoHUD: Games > Source > Emulator (libretro) > Play.
+     Point config.json at it:
+        "game": { "libretro_core": "/usr/lib/libretro/snes9x_libretro.so" }
+  2. Drop ROMs into the ROM folder:
+        third_party/roms/
+  3. In ProtoHUD: Games > Source > Emulator (libretro) > ROM > pick one > Play.
+     (Or set game.libretro_rom directly. Use a different folder via
+      game.libretro_rom_dir.)
 
 See docs/games.md for details (supported cores, N64/hardware-render notes).
 EOF
