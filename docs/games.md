@@ -209,3 +209,38 @@ selected):
 > **Doom audio:** the bundled Doom (doomgeneric) is still silent — its portable
 > core links a no-op sound stub (no SDL_mixer / software synth), so there are no
 > samples to route. The ALSA sink above is specific to the libretro emulator.
+
+## Future additions (not implemented yet)
+
+### Game streaming (Steam library) — a `StreamSource`
+
+Idea: stream a game from a PC's Steam library (or the cloud) and show it on the
+glasses + face like any other source, with the existing gamepad forwarding input
+back to the host.
+
+Candidate backends:
+
+- **Moonlight + Sunshine** (recommended): [Sunshine](https://github.com/LizardByte/Sunshine)
+  on the gaming PC + [Moonlight](https://github.com/moonlight-stream) on the Pi.
+  Open-source, low latency, GPU-agnostic; replaced NVIDIA GameStream. Sunshine
+  can launch Steam Big Picture or a specific game.
+- **Steam Link app** — Valve's official in-home streaming client (Pi package).
+  Simpler, but less flexible and weaker Pi 5 support than Moonlight.
+- **GeForce NOW** — play games you already own on Steam from NVIDIA's cloud
+  (browser-based on the Pi); no local gaming PC required.
+
+How it would fit ProtoHUD (the work involved):
+
+- Unlike Doom / libretro (which hand back an RGBA bitmap), a stream is a
+  hardware-decoded H.264/HEVC video surface — so this is a real project, not a
+  drop-in `GameSource`.
+- `moonlight-embedded` already decodes via the Pi's V4L2 hardware decoder into a
+  DRM/EGL surface. ProtoHUD does the analogous thing for cameras
+  (`DmaCamera` → libcamera → EGL → GL texture), so the plumbing pattern exists:
+  decode → `EGLImage` → GL texture → both eyes + downscaled to the HUB75 face.
+- Hard parts: the zero-copy H.264 → EGL path and the controller input round-trip
+  back to Moonlight; needs real hardware to verify.
+
+Interim options without the full integration: run Moonlight / Steam Link as a
+separate fullscreen app, or add a launcher that starts Moonlight as an external
+process and hands it the display.
