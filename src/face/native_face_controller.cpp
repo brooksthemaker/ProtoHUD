@@ -186,15 +186,33 @@ void NativeFaceController::render_thread() {
                                   cfg_.background[2]));
 
         // External panel override (e.g. game mode) — when set, the override frame
-        // fills the whole canvas and the normal face composite is skipped.
+        // replaces the normal face composite. On a multi-panel (HUB75) layout the
+        // frame is shown complete on EACH physical panel rather than stretched
+        // once across the whole multi-panel canvas: stretching splits the image
+        // across the mirrored panels so it reads as a doubled/garbled frame (the
+        // same reason the GIF player duplicates clips per panel below). With no
+        // output_panels (single logical display) it just fills the canvas.
         cv::Mat ov; { std::lock_guard<std::mutex> lk(override_mtx_); ov = panel_override_; }
         const bool overridden = !ov.empty();
         if (overridden) {
             cv::Mat rgb;
             if (ov.channels() == 4) cv::cvtColor(ov, rgb, cv::COLOR_RGBA2RGB);
             else                    rgb = ov;
-            cv::resize(rgb, canvas, cv::Size(cfg_.canvas_w, cfg_.canvas_h),
-                       0, 0, cv::INTER_NEAREST);
+            if (cfg_.output_panels.empty()) {
+                cv::resize(rgb, canvas, cv::Size(cfg_.canvas_w, cfg_.canvas_h),
+                           0, 0, cv::INTER_NEAREST);
+            } else {
+                canvas.setTo(cv::Scalar(0, 0, 0));
+                for (const auto& op : cfg_.output_panels) {
+                    cv::Rect roi(op.x, op.y, op.w, op.h);
+                    cv::Rect inter = roi & cv::Rect(0, 0, canvas.cols, canvas.rows);
+                    if (inter.width <= 0 || inter.height <= 0) continue;
+                    cv::Mat g;
+                    cv::resize(rgb, g, cv::Size(op.w, op.h), 0, 0, cv::INTER_NEAREST);
+                    g(cv::Rect(inter.x - roi.x, inter.y - roi.y, inter.width, inter.height))
+                        .copyTo(canvas(inter));
+                }
+            }
         }
         if (!overridden) {
             std::lock_guard<std::mutex> lk(state_mtx_);
