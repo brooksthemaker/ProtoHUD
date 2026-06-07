@@ -100,9 +100,13 @@ SHEETS = [
     ]),
 ]
 
-# Sheets whose sub-sheet .kicad_sch is authored elsewhere — included in the
-# hierarchy/project but NOT overwritten by this skeleton generator.
-POPULATED = {"face_buffer"}
+# Sheets whose sub-sheet .kicad_sch is authored by populate_sheets.py — included
+# in the hierarchy/project but NOT overwritten by this skeleton generator. All
+# sheets are now populated, so this generator only (re)writes the root + project.
+POPULATED = {
+    "power", "cm5", "face_buffer", "rp2354_io", "rp2354_face", "leds",
+    "sensors_i2c", "servos", "gpio_buttons", "usb", "cameras_display",
+}
 
 # Stable UUIDs (idempotent re-runs; keeps the populated face_buffer linkage at
 # its hard-coded SHEET_OBJ_UUID in populate_face_buffer.py).
