@@ -367,6 +367,26 @@ bool XRDisplay::find_and_connect() {
 void XRDisplay::set_sbs_display_mode() {
     if (!device_) return;
 
+    // ── Safety guard ─────────────────────────────────────────────────────────
+    // Switching the glasses into a 3840-wide SBS/3D mode while the host is only
+    // outputting 1920×1080 leaves the panels with a signal they can't display
+    // in 3D — the screen goes dark. Only request SBS when the host output is
+    // actually ≥3840 wide; otherwise stay in 2D so the picture remains visible.
+    // (On Beast we can't command a 2D mode back — bypass only accepts 3840×1200
+    // and native is rejected — so the glasses' own 2D default is what keeps them
+    // visible; we just must not push the 3D mode at them.) Once the HDMI output
+    // is forced to 3840×1200, this guard passes and SBS engages automatically.
+    int host_w = 0;
+    if (GLFWmonitor* m = choose_monitor()) {
+        if (const GLFWvidmode* vm = glfwGetVideoMode(m)) host_w = vm->width;
+    }
+    if (host_w < 3840) {
+        std::cerr << "[xr] host output is " << host_w << "px wide (<3840) — "
+                     "skipping the SBS switch so the display stays visible. "
+                     "Force the HDMI output to 3840x1200 to enable per-eye SBS.\n";
+        return;
+    }
+
     // The Beast boots in bypass mode, where native_set_display_mode /
     // switch_dimension are rejected.  Enter native mode first — and *verify* it
     // took.  The old code ignored native_set_mode()'s return code, so a failed
