@@ -54,6 +54,21 @@ def build_commands(root: str, fifo: str, include_fifo: bool):
             ("Ring My Phone",    "phone_ring"),
             ("Boop: Snout",      "boop_snout"),
             ("Boop: Both",       "boop_both"),
+            # Capture / recording / view
+            ("Capture Stereo",   "cam_capture_stereo"),
+            ("Record Toggle",    "rec_toggle"),
+            ("Night Vision",     "nv_toggle"),
+            ("Zoom In",          "cam_zoom_in"),
+            ("Zoom Out",         "cam_zoom_out"),
+            ("Theater Mode",     "theater_toggle"),
+            ("Recenter Display", "xr_recenter"),
+            # Face / look
+            ("Next Expression",  "face_next"),
+            ("Next Material",    "material_next"),
+            ("Next Effect",      "effect_next"),
+            ("Face Brighter",    "face_bright_up"),
+            ("Face Dimmer",      "face_bright_down"),
+            ("Reboot Face",      "face_restart"),
         ]:
             cmds.append((name, f"echo {func} > {fifo}"))
     return cmds

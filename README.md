@@ -683,10 +683,26 @@ bias and polarity are configurable per pin. Configure it all in-HUD under
 `menu_open`, `menu_select`, `menu_back`,
 `system_restart`, `system_shutdown`,
 `cam_af_left`, `cam_af_right`, `cam_pip_left`, `cam_pip_right`,
-`cam_capture_left`, `cam_capture_right`, `cam_swap`.
+`cam_capture_left`, `cam_capture_right`, `cam_swap`, `phone_ring`.
+
+**Face jumps:** `face_neutral`, `face_happy`, `face_angry`, `face_sad`,
+`face_surprised`, `face_return` (snap back to the previously-set face).
+
+**Material jumps:** `material_rainbow`, `material_pride`, `material_progress`,
+`material_trans`, `material_bisexual`, `material_pansexual`, `material_lesbian`,
+`material_nonbinary`, `material_asexual`, `material_genderfluid`,
+`material_genderqueer`, `material_aromantic`, `material_intersex`.
+
+**Camera / display:** `cam_capture_stereo`, `rec_toggle`, `cam_zoom_in`,
+`cam_zoom_out`, `nv_toggle`, `theater_toggle`, `xr_recenter`.
+
+**Face browse / look:** `face_next`, `face_prev`, `material_next`, `effect_next`,
+`face_bright_up`, `face_bright_down`, `face_restart`.
 
 > `system_restart` runs `scripts/restart.sh`; `system_shutdown` calls
 > `poweroff` (needs the sudoers rule from `scripts/install_sudoers.sh`).
+> `face_next`/`face_prev` browse the loaded expression set (native face backend;
+> the Teensy backend addresses faces by numeric id, so they're a no-op there).
 
 ### Applying changes
 
