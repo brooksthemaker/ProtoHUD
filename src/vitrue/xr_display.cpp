@@ -390,38 +390,63 @@ void XRDisplay::set_sbs_display_mode() {
     // Pick the SBS display mode.  The SDK validator accepts every
     // VITURE_NATIVE_DISPLAY_MODE_* constant, but current Beast firmware silently
     // rejects/no-ops everything except 3840x1200@60 SBS — so set_rc alone can't
-    // be trusted.  Try the configured mode first, then fall back to the only SBS
-    // mode the Beast actually accepts, and confirm each by reading it back.
-    const int configured = fps_to_display_mode(cfg_.target_fps, cfg_.sbs_height);
-    const int beast_sbs  = VITURE_NATIVE_DISPLAY_MODE_3D_SBS_3840_1200_60HZ;
-    int candidates[2]; int n = 0;
-    candidates[n++] = configured;
-    if (configured != beast_sbs) candidates[n++] = beast_sbs;
-
+    // be trusted.  We confirm by reading the mode back.
     bool applied = false;
-    for (int i = 0; i < n; ++i) {
-        const int mode = candidates[i];
-        int dm_rc = xr_device_provider_native_set_display_mode(device_, mode);
-        std::this_thread::sleep_for(std::chrono::milliseconds(60));
-        int got = xr_device_provider_native_get_display_mode(device_);
-        std::cerr << "[xr] native set_display_mode=0x" << std::hex << mode << std::dec
-                  << " set_rc=" << dm_rc
-                  << " readback=0x" << std::hex << got << std::dec << "\n";
-        if (got == mode) { applied = true; break; }
-        if (i + 1 < n)
-            std::cerr << "[xr] mode 0x" << std::hex << mode << std::dec
-                      << " not accepted by firmware — falling back to Beast "
-                         "3840x1200@60 SBS\n";
-    }
-    if (!applied)
-        std::cerr << "[xr] WARNING: no SBS display mode was accepted — output "
-                     "will be 2D (both images shown to each eye). Check the "
-                     "glasses firmware and that the HDMI output is 3840x1200.\n";
 
-    // Ensure the 3D dimension is active.  Redundant once an SBS mode is applied,
-    // and NOT_SUPPORTED on some devices, so its failure is informational only.
-    int sd_rc = xr_device_provider_native_switch_dimension(device_, 1);
-    std::cerr << "[xr] native switch_dimension(1) rc=" << sd_rc << "\n";
+    // ── Native path ────────────────────────────────────────────────────────
+    // Only worth trying if native mode actually engaged.  Try the configured
+    // mode first, then the only SBS mode current Beast firmware accepts.
+    if (native_ok) {
+        const int configured = fps_to_display_mode(cfg_.target_fps, cfg_.sbs_height);
+        const int beast_sbs  = VITURE_NATIVE_DISPLAY_MODE_3D_SBS_3840_1200_60HZ;
+        int candidates[2]; int n = 0;
+        candidates[n++] = configured;
+        if (configured != beast_sbs) candidates[n++] = beast_sbs;
+
+        for (int i = 0; i < n; ++i) {
+            const int mode = candidates[i];
+            int dm_rc = xr_device_provider_native_set_display_mode(device_, mode);
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+            int got = xr_device_provider_native_get_display_mode(device_);
+            std::cerr << "[xr] native set_display_mode=0x" << std::hex << mode << std::dec
+                      << " set_rc=" << dm_rc
+                      << " readback=0x" << std::hex << got << std::dec << "\n";
+            if (got == mode) {
+                applied = true;
+                int sd_rc = xr_device_provider_native_switch_dimension(device_, 1);
+                std::cerr << "[xr] native switch_dimension(1) rc=" << sd_rc << "\n";
+                break;
+            }
+            if (i + 1 < n)
+                std::cerr << "[xr] mode 0x" << std::hex << mode << std::dec
+                          << " not accepted by firmware — trying next\n";
+        }
+    }
+
+    // ── Bypass path ──────────────────────────────────────────────────────────
+    // On current Beast firmware the entire native-DOF command set is rejected
+    // (every native call returns -7, even the is_native query), and the SDK
+    // notes mark native display modes as "reserved for future firmware".  The
+    // documented working Beast path is bypass mode, whose single accepted mode
+    // is 3840x1200@90 — itself a 3D/SBS mode.  Try it and confirm via readback.
+    if (!applied) {
+        const int bypass_mode = VITURE_DISPLAY_MODE_3840_1200_90HZ;
+        int bm_rc = xr_device_provider_set_display_mode(device_, bypass_mode);
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        int got = xr_device_provider_get_display_mode(device_);
+        std::cerr << "[xr] bypass set_display_mode=0x" << std::hex << bypass_mode << std::dec
+                  << " set_rc=" << bm_rc
+                  << " readback=0x" << std::hex << got << std::dec << "\n";
+        if (got == bypass_mode) applied = true;
+        int sd_rc = xr_device_provider_switch_dimension(device_, 1);
+        std::cerr << "[xr] bypass switch_dimension(1) rc=" << sd_rc << "\n";
+    }
+
+    if (!applied)
+        std::cerr << "[xr] WARNING: no SBS/3D display mode was accepted (native "
+                     "and bypass both rejected) — output will be 2D (both images "
+                     "shown to each eye). Check the glasses firmware/USB control "
+                     "channel and that the HDMI output is 3840x1200.\n";
 }
 
 void XRDisplay::open_imu() {
