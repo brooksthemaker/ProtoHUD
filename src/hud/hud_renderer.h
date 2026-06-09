@@ -165,8 +165,15 @@ public:
     void draw_sys_panel(const AppState& snap, int w, int h, bool active,
                         float x_offset = 0.f, bool narrow = false);
 
-    // Flush ImGui draw data to current GL framebuffer.
-    void render_menu_overlay();
+    // Flush ImGui draw data to the current GL framebuffer.
+    //
+    // When duplicate is set and the framebuffer is an SBS pair (0 < eye_w <
+    // display_w), the overlay is drawn into BOTH eye halves: once for the left
+    // eye, then again with the projection origin shifted one eye-width so the
+    // same (left-eye-local, [0, eye_w]) content lands in the right eye. Callers
+    // pass duplicate=true only for eye-local overlays (the menu); display-coord
+    // overlays (e.g. the radial wheel) leave it false.
+    void render_menu_overlay(int eye_w = 0, int display_w = 0, bool duplicate = false);
 
     // ── Popup API ─────────────────────────────────────────────────────────────
 

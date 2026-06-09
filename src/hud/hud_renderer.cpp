@@ -313,10 +313,27 @@ void HudRenderer::begin_menu_frame() {
     ImGui::GetIO().FontGlobalScale = cfg_.text_scale;
 }
 
-void HudRenderer::render_menu_overlay() {
+void HudRenderer::render_menu_overlay(int eye_w, int display_w, bool duplicate) {
     ImGui::SetCurrentContext(ctx_);
     ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    ImDrawData* dd = ImGui::GetDrawData();
+    if (!dd) return;
+
+    // Single pass unless we're duplicating an eye-local overlay across an SBS
+    // pair. The menu is laid out in left-eye-local coords [0, eye_w]; shifting
+    // the projection origin one eye-width left re-projects that same content
+    // into the right-eye half, so it shows in both eyes instead of just the left.
+    const bool split = duplicate && eye_w > 0 && eye_w < display_w;
+    if (!split) {
+        ImGui_ImplOpenGL3_RenderDrawData(dd);
+        return;
+    }
+
+    const ImVec2 saved = dd->DisplayPos;
+    ImGui_ImplOpenGL3_RenderDrawData(dd);                                  // left eye
+    dd->DisplayPos = ImVec2(saved.x - static_cast<float>(eye_w), saved.y);
+    ImGui_ImplOpenGL3_RenderDrawData(dd);                                  // right eye
+    dd->DisplayPos = saved;
 }
 
 void HudRenderer::nvg_set_font_ui(float sz) {

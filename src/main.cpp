@@ -15822,10 +15822,15 @@ int main(int argc, char* argv[]) {
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
+        // Eye-local ImGui overlays are duplicated into both SBS eyes at flush
+        // time (render_menu_overlay). The radial wheel is positioned in display
+        // coords, so it opts out and stays a single instance.
+        bool menu_dup = false;
         if (menu.is_deep_open() || menu.is_keyboard_open()) {
             // Keyboard takes over full-screen (draws only the OSK), so this also
             // covers text entry opened from the corner / radial quick menu.
             menu.draw_fullscreen(xr.eye_width(), xr.eye_height());
+            menu_dup = true;
         } else if (menu.is_open() && menu.quick_style() == QuickStyle::Radial
                    && !menu.is_keyboard_open()) {
             // Radial quick menu encircling the round minimap. Geometry matches
@@ -15852,6 +15857,7 @@ int main(int argc, char* argv[]) {
             menu.draw_radial(mcx, mcy, half, focus, rotate, radial_top);
         } else {
             menu.draw(xr.eye_width(), xr.eye_height());
+            menu_dup = true;
         }
 
         hud.draw_android_overlay(tex_android,
@@ -15959,7 +15965,7 @@ int main(int argc, char* argv[]) {
         // Alarm / timer-expired popups — disabled, toasts handle these now.
         // hud.draw_popups(state, xr.eye_width(), xr.eye_height());
 
-        hud.render_menu_overlay();
+        hud.render_menu_overlay(xr.eye_width(), xr.display_width(), menu_dup);
 
         // ── Swap ──────────────────────────────────────────────────────────────
         xr.present();
