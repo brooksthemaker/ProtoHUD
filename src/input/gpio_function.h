@@ -25,6 +25,12 @@ enum class GpioFunc : int {
     // Jump to a material (rainbow + the pride-flag gradients).
     MatRainbow, MatPride, MatProgress, MatTrans, MatBi, MatPan, MatLesbian,
     MatNonbinary, MatAsexual, MatGenderfluid, MatGenderqueer, MatAromantic, MatIntersex,
+    // Camera / capture / display helpers — handy on a phone (KDE Connect Run Command).
+    CamCaptureStereo, CamZoomIn, CamZoomOut, NightVisionToggle, RecToggle, TheaterToggle,
+    XrRecenter,
+    // Face browse + look adjust (cycle expression/material/effect, nudge brightness,
+    // reboot the face daemon).
+    FaceNext, FacePrev, MaterialNext, FaceBrightUp, FaceBrightDown, EffectNext, FaceRestart,
     Count
 };
 
@@ -68,6 +74,20 @@ inline const char* gpio_func_name(GpioFunc f) {
     case GpioFunc::MatGenderqueer:  return "Material: Genderqueer";
     case GpioFunc::MatAromantic:    return "Material: Aromantic";
     case GpioFunc::MatIntersex:     return "Material: Intersex";
+    case GpioFunc::CamCaptureStereo:  return "Camera: Capture Stereo";
+    case GpioFunc::CamZoomIn:         return "Camera: Zoom In";
+    case GpioFunc::CamZoomOut:        return "Camera: Zoom Out";
+    case GpioFunc::NightVisionToggle: return "Camera: Night Vision Toggle";
+    case GpioFunc::RecToggle:         return "Camera: Record Toggle";
+    case GpioFunc::TheaterToggle:     return "Display: Theater Mode Toggle";
+    case GpioFunc::XrRecenter:        return "XR: Recenter Display";
+    case GpioFunc::FaceNext:          return "Face: Next Expression";
+    case GpioFunc::FacePrev:          return "Face: Prev Expression";
+    case GpioFunc::MaterialNext:      return "Material: Next";
+    case GpioFunc::FaceBrightUp:      return "Face: Brightness Up";
+    case GpioFunc::FaceBrightDown:    return "Face: Brightness Down";
+    case GpioFunc::EffectNext:        return "Face: Next Effect";
+    case GpioFunc::FaceRestart:       return "Face: Reboot ProtoFace";
     default:                        return "?";
     }
 }
@@ -112,6 +132,20 @@ inline const char* gpio_func_id(GpioFunc f) {
     case GpioFunc::MatGenderqueer:  return "material_genderqueer";
     case GpioFunc::MatAromantic:    return "material_aromantic";
     case GpioFunc::MatIntersex:     return "material_intersex";
+    case GpioFunc::CamCaptureStereo:  return "cam_capture_stereo";
+    case GpioFunc::CamZoomIn:         return "cam_zoom_in";
+    case GpioFunc::CamZoomOut:        return "cam_zoom_out";
+    case GpioFunc::NightVisionToggle: return "nv_toggle";
+    case GpioFunc::RecToggle:         return "rec_toggle";
+    case GpioFunc::TheaterToggle:     return "theater_toggle";
+    case GpioFunc::XrRecenter:        return "xr_recenter";
+    case GpioFunc::FaceNext:          return "face_next";
+    case GpioFunc::FacePrev:          return "face_prev";
+    case GpioFunc::MaterialNext:      return "material_next";
+    case GpioFunc::FaceBrightUp:      return "face_bright_up";
+    case GpioFunc::FaceBrightDown:    return "face_bright_down";
+    case GpioFunc::EffectNext:        return "effect_next";
+    case GpioFunc::FaceRestart:       return "face_restart";
     default:                        return "none";
     }
 }

@@ -13794,6 +13794,55 @@ int main(int argc, char* argv[]) {
         case F::MatGenderqueer: jump_material(31);      break;
         case F::MatAromantic:   jump_material(32);      break;
         case F::MatIntersex:    jump_material(33);      break;
+        // ── Camera / capture / display helpers ───────────────────────────────
+        case F::CamCaptureStereo:
+            { std::lock_guard<std::mutex> lk(state.mtx); state.capture_request = CaptureRequest::Stereo; } break;
+        case F::RecToggle:
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              state.video_request = state.video_recording ? VideoRequest::Stop : VideoRequest::Start; } break;
+        case F::CamZoomIn:
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              const float z = std::clamp(state.zoom_left.zoom + 0.25f, 1.0f, 3.0f);
+              state.zoom_left.zoom = z; state.zoom_right.zoom = z; } break;
+        case F::CamZoomOut:
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              const float z = std::clamp(state.zoom_left.zoom - 0.25f, 1.0f, 3.0f);
+              state.zoom_left.zoom = z; state.zoom_right.zoom = z; } break;
+        case F::NightVisionToggle:
+            { std::lock_guard<std::mutex> lk(state.mtx); state.night_vision.nv_enabled = !state.night_vision.nv_enabled; } break;
+        case F::TheaterToggle:
+            { std::lock_guard<std::mutex> lk(state.mtx); state.theater_mode = !state.theater_mode; } break;
+        case F::XrRecenter:     xr.recenter_tracking(); break;
+        // ── Face browse + look adjust ────────────────────────────────────────
+        case F::FaceNext:       face_proxy.next_expression(); break;
+        case F::FacePrev:       face_proxy.prev_expression(); break;
+        case F::MaterialNext: {
+            int next;
+            { std::lock_guard<std::mutex> lk(state.mtx); next = (state.face.material_color + 1) % 34; }
+            jump_material(next);
+        } break;
+        case F::FaceBrightUp: {
+            int b;
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              b = std::clamp(static_cast<int>(state.face.brightness) + 25, 0, 255);
+              state.face.brightness = static_cast<uint8_t>(b); }
+            face_proxy.set_brightness(static_cast<uint8_t>(b));
+        } break;
+        case F::FaceBrightDown: {
+            int b;
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              b = std::clamp(static_cast<int>(state.face.brightness) - 25, 0, 255);
+              state.face.brightness = static_cast<uint8_t>(b); }
+            face_proxy.set_brightness(static_cast<uint8_t>(b));
+        } break;
+        case F::EffectNext: {
+            int id;
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              id = (state.face.effect_id + 1) % 18;   // pf_effect_names count (None..Nebula)
+              state.face.effect_id = static_cast<uint8_t>(id); }
+            face_proxy.set_effect(static_cast<uint8_t>(id));
+        } break;
+        case F::FaceRestart:    face_proxy.restart(); break;
         case F::None: default: break;
         }
     };

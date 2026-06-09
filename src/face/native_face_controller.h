@@ -79,6 +79,8 @@ public:
     void        reload_faces() override { reload_active_face(); }
     void        set_face_by_name(const std::string& expression) override;
     std::string current_expression() const override;
+    void        next_expression() override;
+    void        prev_expression() override;
     void        trigger_boop(const std::string& expression, double duration_s) override;
     void        play_eye_animation(int type, double speed, double size,
                                    uint8_t r, uint8_t g, uint8_t b,
@@ -166,6 +168,7 @@ private:
     // particles_spec when neutral/unmapped). Caller holds state_mtx_.
     void apply_expression_effect_locked(const std::string& expr);
     void apply_material_all(const std::string& name);   // caller holds state_mtx_
+    void cycle_expression(int dir);                     // +1 next / -1 prev; mirrors to all panels
     void save_state_locked() const;                     // auto-save look; caller holds state_mtx_
     void load_state();                                  // overlay saved look at startup
     static std::string preset_material(int idx);

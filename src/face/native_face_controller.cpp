@@ -772,6 +772,31 @@ std::string NativeFaceController::current_expression() const {
     return current_expression_;
 }
 
+void NativeFaceController::next_expression() { cycle_expression(+1); }
+void NativeFaceController::prev_expression() { cycle_expression(-1); }
+
+void NativeFaceController::cycle_expression(int dir) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    // Advance the first real panel as the "master" index, read back its new
+    // expression name, then mirror it to every panel so multi-panel faces stay
+    // in sync (each FaceState tracks its own index; always stepping the same
+    // master keeps the set coherent across repeated calls).
+    std::string name;
+    for (auto& pn : panels_) {
+        if (!pn.state) continue;
+        if (dir >= 0) pn.state->next_expression();
+        else          pn.state->prev_expression();
+        name = pn.state->expression();
+        break;
+    }
+    if (name.empty()) return;
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_expression(name);
+    current_expression_ = name;
+    apply_expression_effect_locked(name);
+    save_state_locked();
+}
+
 void NativeFaceController::set_expression_effects(bool enabled) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     expr_effects_ = enabled;

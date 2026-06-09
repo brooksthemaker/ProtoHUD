@@ -39,8 +39,12 @@ face_angry face_sad face_surprised` and `face_return` (snap back to the
 previously-set face), and **material jumps** `material_rainbow material_pride
 material_progress material_trans material_bisexual material_pansexual
 material_lesbian material_nonbinary material_asexual material_genderfluid
-material_genderqueer material_aromantic material_intersex`. Unknown lines are
-ignored (untrusted input is length-bounded). Disabled by default; never required.
+material_genderqueer material_aromantic material_intersex`, plus **camera/display
+helpers** `cam_capture_stereo rec_toggle cam_zoom_in cam_zoom_out nv_toggle
+theater_toggle xr_recenter`, and **face browse/look** `face_next face_prev
+material_next effect_next face_bright_up face_bright_down face_restart`. Unknown
+lines are ignored (untrusted input is length-bounded). Disabled by default; never
+required.
 
 ## 2. Register the commands in KDE Connect
 
@@ -65,7 +69,9 @@ It installs:
   Shut Down. (Reboot/Shutdown/`sudo` need passwordless sudo — see
   `scripts/install_sudoers.sh`.)
 - **In-app (FIFO):** Open/Close Menu, Menu Select/Back, Capture Photo L/R,
-  Autofocus L/R, Swap Cameras, Ring My Phone, Boop reactions.
+  Autofocus L/R, Swap Cameras, Ring My Phone, Boop reactions, Capture Stereo,
+  Record Toggle, Night Vision, Zoom In/Out, Theater Mode, Recenter Display,
+  Next Expression, Next Material, Next Effect, Face Brighter/Dimmer, Reboot Face.
 
 ## 3. Pi → phone bits (already in the menu)
 
