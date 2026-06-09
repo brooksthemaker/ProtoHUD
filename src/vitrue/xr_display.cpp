@@ -366,19 +366,62 @@ bool XRDisplay::find_and_connect() {
 
 void XRDisplay::set_sbs_display_mode() {
     if (!device_) return;
-    // The Beast boots in bypass mode, where native_set_display_mode /
-    // switch_dimension are rejected.  Enter native mode first.  On devices
-    // without native-DOF support this returns an error, which we ignore.
-    int nm_rc = xr_device_provider_native_set_mode(device_, 1);
-    if (nm_rc != VITURE_GLASSES_SUCCESS)
-        std::cerr << "[xr] native_set_mode(1) rc=" << nm_rc
-                  << " (expected on non-native-DOF devices)\n";
 
-    const int mode = fps_to_display_mode(cfg_.target_fps, cfg_.sbs_height);
-    int dm_rc = xr_device_provider_native_set_display_mode(device_, mode);
+    // The Beast boots in bypass mode, where native_set_display_mode /
+    // switch_dimension are rejected.  Enter native mode first — and *verify* it
+    // took.  The old code ignored native_set_mode()'s return code, so a failed
+    // entry silently left the glasses in 2D: each eye then shows the whole
+    // frame (both SBS halves overlaid), which looks like "I see both images".
+    // Poll native_get_mode() until it reports native (1); the device can need a
+    // few tries right after start() on a cold plug.
+    bool native_ok = false;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        int nm_rc = xr_device_provider_native_set_mode(device_, 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        if (xr_device_provider_native_get_mode(device_) == 1) { native_ok = true; break; }
+        if (attempt == 0)
+            std::cerr << "[xr] native_set_mode(1) rc=" << nm_rc
+                      << " — not native yet, retrying\n";
+    }
+    if (!native_ok)
+        std::cerr << "[xr] WARNING: glasses did not enter native mode; SBS modes "
+                     "will be rejected and you'll see both eyes' images overlaid\n";
+
+    // Pick the SBS display mode.  The SDK validator accepts every
+    // VITURE_NATIVE_DISPLAY_MODE_* constant, but current Beast firmware silently
+    // rejects/no-ops everything except 3840x1200@60 SBS — so set_rc alone can't
+    // be trusted.  Try the configured mode first, then fall back to the only SBS
+    // mode the Beast actually accepts, and confirm each by reading it back.
+    const int configured = fps_to_display_mode(cfg_.target_fps, cfg_.sbs_height);
+    const int beast_sbs  = VITURE_NATIVE_DISPLAY_MODE_3D_SBS_3840_1200_60HZ;
+    int candidates[2]; int n = 0;
+    candidates[n++] = configured;
+    if (configured != beast_sbs) candidates[n++] = beast_sbs;
+
+    bool applied = false;
+    for (int i = 0; i < n; ++i) {
+        const int mode = candidates[i];
+        int dm_rc = xr_device_provider_native_set_display_mode(device_, mode);
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        int got = xr_device_provider_native_get_display_mode(device_);
+        std::cerr << "[xr] native set_display_mode=0x" << std::hex << mode << std::dec
+                  << " set_rc=" << dm_rc
+                  << " readback=0x" << std::hex << got << std::dec << "\n";
+        if (got == mode) { applied = true; break; }
+        if (i + 1 < n)
+            std::cerr << "[xr] mode 0x" << std::hex << mode << std::dec
+                      << " not accepted by firmware — falling back to Beast "
+                         "3840x1200@60 SBS\n";
+    }
+    if (!applied)
+        std::cerr << "[xr] WARNING: no SBS display mode was accepted — output "
+                     "will be 2D (both images shown to each eye). Check the "
+                     "glasses firmware and that the HDMI output is 3840x1200.\n";
+
+    // Ensure the 3D dimension is active.  Redundant once an SBS mode is applied,
+    // and NOT_SUPPORTED on some devices, so its failure is informational only.
     int sd_rc = xr_device_provider_native_switch_dimension(device_, 1);
-    std::cerr << "[xr] native display_mode=0x" << std::hex << mode << std::dec
-              << " set_rc=" << dm_rc << " switch_dim_rc=" << sd_rc << "\n";
+    std::cerr << "[xr] native switch_dimension(1) rc=" << sd_rc << "\n";
 }
 
 void XRDisplay::open_imu() {

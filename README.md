@@ -1,6 +1,6 @@
 # ProtoHUD
 
-A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a protogen costume helmet. It composites zero-copy libcamera frames from two OWLsight CSI cameras into a VITURE Beast XR glasses display (3840×1080 SBS), overlays a NanoVG HUD and Dear ImGui menu, and integrates audio routing, LoRa mesh radio, a haptic SmartKnob, and GPIO hardware buttons.
+A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a protogen costume helmet. It composites zero-copy libcamera frames from two OWLsight CSI cameras into a VITURE Beast XR glasses display (3840×1200 SBS), overlays a NanoVG HUD and Dear ImGui menu, and integrates audio routing, LoRa mesh radio, a haptic SmartKnob, and GPIO hardware buttons.
 
 Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival) is handled by a companion **RP2350 helmet audio processor** over USB Audio. The CM5 receives pre-processed stereo and routes it to VITURE glasses, headphones, or HDMI.
 
@@ -44,7 +44,7 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 │                          left FBO ◄────────────────────────────────  │
 │                         right FBO ◄────────────────────────────────  │
 │                                                                      │
-│  GLFW / EGL context  ──► XRDisplay (3840×1080 SBS)                  │
+│  GLFW / EGL context  ──► XRDisplay (3840×1200 SBS)                  │
 │                           composite() → ImGui overlay → present()   │
 │                                                                      │
 │  NanoVG      ──► HudRenderer (NVG pass)  ──► compass, arms, particles│
@@ -86,7 +86,7 @@ Optional async timewarp warps each eye FBO using the latest IMU pose before comp
 | Component | Details |
 |-----------|---------|
 | SBC | Raspberry Pi CM5 (8 GB RAM recommended) |
-| Display | VITURE Beast / Luma XR glasses (3840×1080 SBS, 60/90/120 Hz) |
+| Display | VITURE Beast / Luma XR glasses (3840×1200 SBS @ 60 Hz on current Beast firmware) |
 | OS | Raspberry Pi OS Bookworm · Debian Trixie + RPT packages (64-bit, aarch64) |
 
 ### Vision
