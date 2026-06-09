@@ -317,6 +317,21 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="239a", \
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", \
     SYMLINK+="lora", MODE="0660", GROUP="dialout"
 
+# BNO055 IMU on a USB-UART adapter (optional) — for a stable /dev/bno055.
+# Most adapters are CP2102 (10c4:ea60), which COLLIDES with the SmartKnob rule
+# above (same VID:PID), so match the adapter's SERIAL instead. Find it with:
+#   udevadm info -a -n /dev/ttyUSB0 | grep '{serial}' | head -1
+# then uncomment + fill SERIAL below. If your SmartKnob is ALSO a CP2102, add the
+# same ATTRS{serial} guard to its rule so the two don't cross-link.
+# Simpler alternative (no udev): set bno055.uart_device in config.json to the
+# /dev/serial/by-id/usb-Silicon_Labs_CP2102_..._<serial>-if00-port0 path.
+#SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
+#    ATTRS{serial}=="REPLACE_WITH_BNO_ADAPTER_SERIAL", \
+#    SYMLINK+="bno055", MODE="0660", GROUP="dialout"
+# FTDI adapter (0403:6001) instead? It doesn't collide — use this:
+#SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", \
+#    SYMLINK+="bno055", MODE="0660", GROUP="dialout"
+
 # USB cameras — readable by video group
 SUBSYSTEM=="video4linux", MODE="0660", GROUP="video"
 
