@@ -226,8 +226,35 @@ void AudioEngine::audio_thread_fn() {
             continue;
         }
         if (frames < 0) {
-            std::cerr << "[audio] Capture error: " << snd_strerror(frames) << "\n";
-            break;
+            // Fatal capture error (e.g. -ENODEV when the RP2350 is unplugged).
+            // Don't just exit the thread — that left audio_ok/device_ok/enabled
+            // all reporting healthy with audio silently dead and no recovery.
+            std::cerr << "[audio] Capture error: " << snd_strerror(frames)
+                      << " — will retry reopen every 2 s\n";
+            {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                state_.health.audio_ok = false;
+                state_.audio.device_ok = false;
+            }
+            snd_pcm_close(cap);
+            cap          = nullptr;
+            pcm_capture_ = nullptr;
+
+            while (running_.load()) {
+                // Retry every 2 s; sleep in 100 ms chunks so stop() stays responsive.
+                for (int i = 0; i < 20 && running_.load(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!running_.load()) break;
+                if (open_alsa_capture(&pcm_capture_)) {
+                    cap = static_cast<snd_pcm_t*>(pcm_capture_);
+                    snd_pcm_start(cap);
+                    std::lock_guard<std::mutex> lk(state_.mtx);
+                    state_.health.audio_ok = true;
+                    state_.audio.device_ok = true;
+                    break;
+                }
+            }
+            continue;   // re-checks running_; cap is valid again on success
         }
 
         auto t0 = std::chrono::steady_clock::now();
