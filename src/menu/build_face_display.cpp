@@ -1906,6 +1906,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     // and exposes a per-panel Nudge X/Y so the user can shift any single panel
     // ±32 px to compensate for tiny mounting offsets between physical panels.
     MenuItem pf_hub75_layout_item;
+    MenuItem pf_color_order_item;
     if (pf_hub75_p) {
         auto* H = pf_hub75_p;
         // String picker that also reapplies the auto-placed centre offsets
@@ -2187,7 +2188,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             // Panel color-channel order. "Auto" = the pinout's default;
             // explicit orders fix oddly-wired panels (red/green swapped →
             // GRB, red/blue swapped → BGR). Applies by relaunching the
-            // panel driver so the fix shows immediately.
+            // panel driver so the fix shows immediately. Lives under
+            // Protoface > Hardware (it's wiring, not layout), but the value
+            // is stored per HUB75 layout so builds can differ.
             auto restart = pf_restart_renderer;
             auto order_pick = [H, restart](const char* lbl, const char* v) {
                 return leaf_sel(lbl,
@@ -2206,14 +2209,21 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 order_pick("BRG", "brg"),
                 order_pick("BGR", "bgr"),
             };
-            hub_items.push_back(with_desc(
+            pf_color_order_item = with_desc(
                 submenu("Color Order", std::move(order_items)),
-                "Color-channel order the panels expect. Auto uses the "
+                "Color-channel order the HUB75 panels expect. Auto uses the "
                 "bonnet's default (straight RGB on the Adafruit bonnet, the "
                 "Active-3 rotate on active3). If red and green are swapped "
                 "pick GRB; red/blue swapped is BGR; otherwise try options "
                 "until the colors look right. Selecting restarts the panel "
-                "driver so it applies immediately."));
+                "driver so it applies immediately.");
+            pf_color_order_item.label_fn = [H]{
+                return std::string("Color Order  (") +
+                       (H->color_order == "auto" ? "auto" : H->color_order) + ")";
+            };
+            pf_color_order_item.visible_fn = [pf_backend_p]{
+                return pf_backend_p && *pf_backend_p == "hub75";
+            };
         }
         for (auto& it : nudge_items) hub_items.push_back(std::move(it));
         hub_items.push_back(with_desc(
@@ -2251,6 +2261,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                   "backend; the HUD keeps running through the transition. "
                   "Persists to config.json so the next launch starts here."),
     };
+    // HUB75 panel wiring fix-up — hidden on other backends.
+    if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_color_order_item));
     if (pf_restart_renderer) {
         pf_hardware_menu.push_back(with_desc(
             menu_shared::restart_face_renderer_leaf(pf_restart_renderer,
