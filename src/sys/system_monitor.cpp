@@ -132,7 +132,12 @@ void SystemMonitor::thread_fn() {
     read_cpu_jiffies(prev_total_, prev_idle_,
                      prev_core_total_, prev_core_idle_, kMaxCpuCores);
 
-    int gpu_tick = 0;
+    // GPU metrics come from vcgencmd, which fork+execs a subprocess per query
+    // (6 of them per poll) — keep that on a slow 10 s cadence while the cheap
+    // /proc-based stats stay at 1 s. Start near the threshold so the first GPU
+    // sample still lands a couple of seconds after boot.
+    constexpr int kGpuPollPeriodS = 10;
+    int gpu_tick = kGpuPollPeriodS - 2;
 
     while (running_) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -203,8 +208,8 @@ void SystemMonitor::thread_fn() {
             m.history_head   = h;
         }
 
-        // ── GPU (every 2 s — vcgencmd spawns a subprocess) ────────────────────
-        if (++gpu_tick >= 2) {
+        // ── GPU (every 10 s — each vcgencmd spawns a subprocess) ──────────────
+        if (++gpu_tick >= kGpuPollPeriodS) {
             gpu_tick = 0;
             poll_gpu();
         }
