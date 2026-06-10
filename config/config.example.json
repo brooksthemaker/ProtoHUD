@@ -209,6 +209,14 @@
     "_panel_driver_note": "native mode only: auto-launch scripts/panel_driver.py to drive the HUB75 panels. Set false for preview-only or if you run the driver yourself.",
     "_native_about": "native-mode options: assets_dir points at the Protoface checkout holding faces/materials/gifs (default $HOME/protohud/Protoface); panels overrides the default 2-panel mirrored layout.",
     "assets_dir": "",
+    "hub75": {
+      "_about": "HUB75 panel layout (native mode; drives scripts/panel_driver.py). Edit live in Face > HUB75 Layout. panel_size like '64x32'; arrangement 'horizontal'|'vertical'|'grid2x2'; panel_count 1-4.",
+      "panel_size": "64x32",
+      "arrangement": "horizontal",
+      "panel_count": 2,
+      "pinout": "adafruit_bonnet",
+      "_pinout_note": "HUB75 bonnet wiring: 'adafruit_bonnet' (single-connector Adafruit RGB Matrix Bonnet/HAT, default) or 'active3' (triple-connector Active-3 board). Append '_bgr' (e.g. 'adafruit_bonnet_bgr') if red/blue are swapped. Selects both the piomatter pinout and the geometry/mapper — Active-3 uses the multilane mapper, the Adafruit bonnet a plain serpentine-chained geometry."
+    },
     "preview": {
       "anchor_x": 1.0,
       "anchor_y": 0.0,
@@ -344,7 +352,9 @@
     "_save_calibration_note": "Persist the chip's calibration profile to bno055_calib.bin (next to this file) so it survives reboots. Restored automatically at startup; saved on demand via Compass > Save IMU Calibration, and auto-saved once the chip first reaches full calibration (sys 3/3) if no file exists yet. Calibrate by rotating the head through several orientations + a figure-8 for the magnetometer until all four values read 3.",
     "transport": "i2c",
     "_transport_note": "'i2c' (default) or 'uart'. UART sidesteps the Pi's I2C clock-stretch problem entirely (Adafruit's recommended path on a Pi). UART setup: (1) solder the PS1 jumper to 3.3V so the chip boots in UART mode (SCL/SDA become RX/TX); (2) wire BNO SDA(TX)->Pi RXD, SCL(RX)->Pi TXD, PS1->3.3V; (3) free the serial port: add 'enable_uart=1' to /boot/firmware/config.txt, disable the serial login console (raspi-config > Interface > Serial > login shell No) and 'sudo systemctl disable serial-getty@ttyAMA0'. On CM5/Pi5, prefer a dedicated RP1 UART via dtoverlay so you don't fight Bluetooth; set uart_device to that port.",
+    "_uart_usb_note": "Easiest UART route: a USB-UART adapter (FTDI/CP2102/CH340) instead of the Pi's hardware UART — no enable_uart, no disabling the serial console. Still set PS1->3.3V on the BNO so it boots in UART mode, then wire BNO SDA(TX)->adapter RX, SCL(RX)->adapter TX, GND, 3.3V. The adapter enumerates as /dev/ttyUSB* — point uart_device at it (see _uart_device_note).",
     "uart_device": "/dev/ttyAMA0",
+    "_uart_device_note": "Serial port for transport:'uart'. Pi hardware UART = /dev/ttyAMA0 (or your RP1 dtoverlay port). USB-UART adapter = its /dev/ttyUSB* — but prefer the stable by-id path so it survives replug/enumeration order, e.g. /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_XXXX-if00-port0 (run `ls -l /dev/serial/by-id/` to find yours). A CP2102 adapter shares its USB VID:PID with the SmartKnob, so the by-id path (keyed on the adapter's serial) avoids a /dev/ttyUSBn mix-up.",
     "uart_baud": 115200
   },
   "post_process": {

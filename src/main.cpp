@@ -238,7 +238,8 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
 static void pf_launch_panel_driver(const std::string& bin_dir,
                                    int canvas_w, int canvas_h,
                                    int panel_w = 64, int panel_h = 32,
-                                   int chain = 2, int parallel = 1) {
+                                   int chain = 2, int parallel = 1,
+                                   const std::string& pinout = "adafruit_bonnet") {
     std::string drv = bin_dir + "/../scripts/panel_driver.py";
     std::string cw  = std::to_string(canvas_w);
     std::string chh = std::to_string(canvas_h);
@@ -275,6 +276,7 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                "--canvas-w", cw.c_str(), "--canvas-h", chh.c_str(),
                "--panel-w", pw.c_str(), "--panel-h", ph.c_str(),
                "--chain", ch.c_str(), "--parallel", par.c_str(),
+               "--pinout", pinout.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }
@@ -316,6 +318,11 @@ struct PfHub75Layout {
     std::string panel_size      = "64x32";
     std::string arrangement     = "horizontal"; // horizontal / vertical / grid2x2
     int         panel_count     = 1;            // 1..4
+    // HUB75 bonnet wiring → piomatter pinout + geometry (scripts/panel_driver.py).
+    // "adafruit_bonnet" = the single-connector Adafruit RGB Matrix Bonnet/HAT
+    // (default; plain serpentine-chained geometry). "active3" = the triple-
+    // connector Active-3 board (multilane mapper). *_bgr variants swap R/B.
+    std::string pinout          = "adafruit_bonnet";
     std::string panel_size_per[4] = {"", "", "", ""};
     // Nudge stores each panel's CENTRE as an offset from the canvas centre
     // (in canvas pixels). Default = auto-placed by apply_defaults() per
@@ -11584,6 +11591,7 @@ int main(int argc, char* argv[]) {
             L.panel_size  = jh.value("panel_size",  L.panel_size);
             L.arrangement = jh.value("arrangement", L.arrangement);
             L.panel_count = jval(jh, "panel_count", L.panel_count);
+            L.pinout      = jh.value("pinout",      L.pinout);
             if (jh.contains("panel_size_per") && jh["panel_size_per"].is_array())
                 for (size_t i = 0; i < jh["panel_size_per"].size() && i < 4; ++i)
                     if (jh["panel_size_per"][i].is_string())
@@ -12713,7 +12721,7 @@ int main(int argc, char* argv[]) {
             int gpw = 64, gph = 32, gchain = 2, gpar = 1;
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
-                                   gpw, gph, gchain, gpar);
+                                   gpw, gph, gchain, gpar, pf_hub75.pinout);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -12971,7 +12979,7 @@ int main(int argc, char* argv[]) {
             int gpw = 64, gph = 32, gchain = 2, gpar = 1;
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
-                                   gpw, gph, gchain, gpar);
+                                   gpw, gph, gchain, gpar, pf_hub75.pinout);
         }
     };
 
@@ -13468,7 +13476,7 @@ int main(int argc, char* argv[]) {
                                    // pf_launch_panel_driver now stops the old driver, waits for it
                                    // to release the PIO/DMA, then relaunches (see its comment).
                                    pf_launch_panel_driver(bin_dir, native_ctrl->canvas_width(),
-                                       native_ctrl->canvas_height(), gpw, gph, gchain, gpar);
+                                       native_ctrl->canvas_height(), gpw, gph, gchain, gpar, pf_hub75.pinout);
                                    Notification n; n.type = NotifType::App;
                                    n.title = "Panel driver restarted";
                                    n.body  = "If panels stay dark, check /tmp/panel_driver.log";
@@ -14333,6 +14341,7 @@ int main(int argc, char* argv[]) {
             jh["panel_size"]       = L.panel_size;
             jh["arrangement"]      = L.arrangement;
             jh["panel_count"]      = L.panel_count;
+            jh["pinout"]           = L.pinout;
             jh["panel_size_per"]   = json::array({L.panel_size_per[0], L.panel_size_per[1],
                                                   L.panel_size_per[2], L.panel_size_per[3]});
             jh["defaults_applied"] = L.defaults_applied;
