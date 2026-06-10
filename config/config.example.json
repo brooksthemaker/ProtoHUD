@@ -215,7 +215,9 @@
       "arrangement": "horizontal",
       "panel_count": 2,
       "pinout": "adafruit_bonnet",
-      "_pinout_note": "HUB75 bonnet wiring: 'adafruit_bonnet' (single-connector Adafruit RGB Matrix Bonnet/HAT, default) or 'active3' (triple-connector Active-3 board). Append '_bgr' (e.g. 'adafruit_bonnet_bgr') if red/blue are swapped. Selects both the piomatter pinout and the geometry/mapper — Active-3 uses the multilane mapper, the Adafruit bonnet a plain serpentine-chained geometry."
+      "_pinout_note": "HUB75 bonnet wiring: 'adafruit_bonnet' (single-connector Adafruit RGB Matrix Bonnet/HAT, default) or 'active3' (triple-connector Active-3 board). Append '_bgr' (e.g. 'adafruit_bonnet_bgr') if red/blue are swapped. Selects both the piomatter pinout and the geometry/mapper — Active-3 uses the multilane mapper, the Adafruit bonnet a plain serpentine-chained geometry.",
+      "color_order": "auto",
+      "_color_order_note": "Panel color-channel order: 'auto' uses the pinout's default; or force 'rgb'/'rbg'/'grb'/'gbr'/'brg'/'bgr' for oddly-wired panels (red/green swapped is usually 'grb', red/blue swapped 'bgr'). Also settable live from Face Display > HUB75 Layout > Color Order."
     },
     "preview": {
       "anchor_x": 1.0,

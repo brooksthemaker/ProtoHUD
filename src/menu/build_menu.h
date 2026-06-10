@@ -63,6 +63,11 @@ struct PfHub75Layout {
     // (default; plain serpentine-chained geometry). "active3" = the triple-
     // connector Active-3 board (multilane mapper). *_bgr variants swap R/B.
     std::string pinout          = "adafruit_bonnet";
+    // Panel color-channel order ("auto" = the pinout's default; or one of
+    // rgb/rbg/grb/gbr/brg/bgr to match oddly-wired panels — red/green
+    // swapped is usually fixed by "grb", red/blue by "bgr"). Passed to
+    // panel_driver.py as --order; applied on driver (re)launch.
+    std::string color_order     = "auto";
     std::string panel_size_per[4] = {"", "", "", ""};
     // Nudge stores each panel's CENTRE as an offset from the canvas centre
     // (in canvas pixels). Default = auto-placed by apply_defaults() per

@@ -241,8 +241,15 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                                    int canvas_w, int canvas_h,
                                    int panel_w = 64, int panel_h = 32,
                                    int chain = 2, int parallel = 1,
-                                   const std::string& pinout = "adafruit_bonnet") {
+                                   const std::string& pinout = "adafruit_bonnet",
+                                   const std::string& color_order = "auto") {
     std::string drv = bin_dir + "/../scripts/panel_driver.py";
+    // Validate host-side — an unknown value would hit the driver's argparse
+    // choices and exit, leaving the panels dark with only a log to explain.
+    static const char* kOrders[] = {"auto","rgb","rbg","grb","gbr","brg","bgr"};
+    std::string order = "auto";
+    for (const char* o : kOrders)
+        if (color_order == o) { order = color_order; break; }
     std::string cw  = std::to_string(canvas_w);
     std::string chh = std::to_string(canvas_h);
     std::string pw  = std::to_string(panel_w);
@@ -279,6 +286,7 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                "--panel-w", pw.c_str(), "--panel-h", ph.c_str(),
                "--chain", ch.c_str(), "--parallel", par.c_str(),
                "--pinout", pinout.c_str(),
+               "--order", order.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }
@@ -1690,6 +1698,7 @@ int main(int argc, char* argv[]) {
             L.arrangement = jh.value("arrangement", L.arrangement);
             L.panel_count = jval(jh, "panel_count", L.panel_count);
             L.pinout      = jh.value("pinout",      L.pinout);
+            L.color_order = jh.value("color_order", L.color_order);
             if (jh.contains("panel_size_per") && jh["panel_size_per"].is_array())
                 for (size_t i = 0; i < jh["panel_size_per"].size() && i < 4; ++i)
                     if (jh["panel_size_per"][i].is_string())
@@ -2822,7 +2831,8 @@ int main(int argc, char* argv[]) {
             int gpw = 64, gph = 32, gchain = 2, gpar = 1;
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
-                                   gpw, gph, gchain, gpar, pf_hub75.pinout);
+                                   gpw, gph, gchain, gpar, pf_hub75.pinout,
+                                   pf_hub75.color_order);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -3081,7 +3091,8 @@ int main(int argc, char* argv[]) {
             int gpw = 64, gph = 32, gchain = 2, gpar = 1;
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
-                                   gpw, gph, gchain, gpar, pf_hub75.pinout);
+                                   gpw, gph, gchain, gpar, pf_hub75.pinout,
+                                   pf_hub75.color_order);
         }
     };
 
@@ -3615,7 +3626,8 @@ int main(int argc, char* argv[]) {
         // pf_launch_panel_driver now stops the old driver, waits for it
         // to release the PIO/DMA, then relaunches (see its comment).
         pf_launch_panel_driver(bin_dir, native_ctrl->canvas_width(),
-            native_ctrl->canvas_height(), gpw, gph, gchain, gpar, pf_hub75.pinout);
+            native_ctrl->canvas_height(), gpw, gph, gchain, gpar,
+            pf_hub75.pinout, pf_hub75.color_order);
         Notification n; n.type = NotifType::App;
         n.title = "Panel driver restarted";
         n.body  = "If panels stay dark, check /tmp/panel_driver.log";
@@ -4559,6 +4571,7 @@ int main(int argc, char* argv[]) {
             jh["arrangement"]      = L.arrangement;
             jh["panel_count"]      = L.panel_count;
             jh["pinout"]           = L.pinout;
+            jh["color_order"]      = L.color_order;
             jh["panel_size_per"]   = json::array({L.panel_size_per[0], L.panel_size_per[1],
                                                   L.panel_size_per[2], L.panel_size_per[3]});
             jh["defaults_applied"] = L.defaults_applied;

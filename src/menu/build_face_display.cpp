@@ -2183,6 +2183,38 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                       "build mix sizes."));
         hub_items.push_back(submenu("Panel Count", std::move(count_items)));
         hub_items.push_back(submenu("Arrangement", std::move(arr_items)));
+        {
+            // Panel color-channel order. "Auto" = the pinout's default;
+            // explicit orders fix oddly-wired panels (red/green swapped →
+            // GRB, red/blue swapped → BGR). Applies by relaunching the
+            // panel driver so the fix shows immediately.
+            auto restart = pf_restart_renderer;
+            auto order_pick = [H, restart](const char* lbl, const char* v) {
+                return leaf_sel(lbl,
+                    [H, restart, v]{
+                        H->color_order = v;
+                        if (restart) restart();
+                    },
+                    [H, v]{ return H->color_order == v; });
+            };
+            std::vector<MenuItem> order_items = {
+                order_pick("Auto (board default)", "auto"),
+                order_pick("RGB", "rgb"),
+                order_pick("RBG", "rbg"),
+                order_pick("GRB", "grb"),
+                order_pick("GBR", "gbr"),
+                order_pick("BRG", "brg"),
+                order_pick("BGR", "bgr"),
+            };
+            hub_items.push_back(with_desc(
+                submenu("Color Order", std::move(order_items)),
+                "Color-channel order the panels expect. Auto uses the "
+                "bonnet's default (straight RGB on the Adafruit bonnet, the "
+                "Active-3 rotate on active3). If red and green are swapped "
+                "pick GRB; red/blue swapped is BGR; otherwise try options "
+                "until the colors look right. Selecting restarts the panel "
+                "driver so it applies immediately."));
+        }
         for (auto& it : nudge_items) hub_items.push_back(std::move(it));
         hub_items.push_back(with_desc(
             leaf("Reset All Positions",
