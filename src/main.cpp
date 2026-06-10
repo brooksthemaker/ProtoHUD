@@ -239,7 +239,8 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
 static void pf_launch_panel_driver(const std::string& bin_dir,
                                    int canvas_w, int canvas_h,
                                    int panel_w = 64, int panel_h = 32,
-                                   int chain = 2, int parallel = 1) {
+                                   int chain = 2, int parallel = 1,
+                                   const std::string& pinout = "adafruit_bonnet") {
     std::string drv = bin_dir + "/../scripts/panel_driver.py";
     std::string cw  = std::to_string(canvas_w);
     std::string chh = std::to_string(canvas_h);
@@ -276,6 +277,7 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                "--canvas-w", cw.c_str(), "--canvas-h", chh.c_str(),
                "--panel-w", pw.c_str(), "--panel-h", ph.c_str(),
                "--chain", ch.c_str(), "--parallel", par.c_str(),
+               "--pinout", pinout.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }
@@ -317,6 +319,11 @@ struct PfHub75Layout {
     std::string panel_size      = "64x32";
     std::string arrangement     = "horizontal"; // horizontal / vertical / grid2x2
     int         panel_count     = 1;            // 1..4
+    // HUB75 bonnet wiring → piomatter pinout + geometry (scripts/panel_driver.py).
+    // "adafruit_bonnet" = the single-connector Adafruit RGB Matrix Bonnet/HAT
+    // (default; plain serpentine-chained geometry). "active3" = the triple-
+    // connector Active-3 board (multilane mapper). *_bgr variants swap R/B.
+    std::string pinout          = "adafruit_bonnet";
     std::string panel_size_per[4] = {"", "", "", ""};
     // Nudge stores each panel's CENTRE as an offset from the canvas centre
     // (in canvas pixels). Default = auto-placed by apply_defaults() per
@@ -1510,7 +1517,10 @@ static std::vector<MenuItem> build_menu(
         // has no coprocessor support wired.
         bool* coproc_enabled_p = nullptr,
         std::shared_ptr<std::function<void()>> coproc_reload = nullptr,
-        std::shared_ptr<std::function<std::string()>> coproc_status = nullptr)
+        std::shared_ptr<std::function<std::string()>> coproc_status = nullptr,
+        // Glitch post-effect config (null on non-native backends). The menu
+        // mutates it in place and re-pushes via pf_anim_push().
+        face::GlitchConfig* pf_glitch_p = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -4155,6 +4165,7 @@ static std::vector<MenuItem> build_menu(
         "none", "sparkle", "embers", "rain", "snow",
         "confetti", "rings", "fireflies", "clouds",
         "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
+        "starfield", "warp", "constellation", "shootingstars",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
@@ -4726,6 +4737,11 @@ static std::vector<MenuItem> build_menu(
         {"vortex_rose","comet vortex (pink/violet)"},
         {"vortex_rainbow","comet vortex (rainbow)"},
         {"nebula","clouds x2 + sparkle"},
+        {"starfield","parallax stars from centre"},
+        {"warp","hyperspace streaks"},
+        {"constellation","still twinkling sky"},
+        {"shooting_stars","meteors from centre"},
+        {"night_sky","twinkle + shooting stars"},
         {"water","liquid — cyan, bubbles"}, {"lava","liquid — lava, thick"},
         {"toxic","liquid — green, bubbles"}, {"ocean","liquid — teal"},
         {"plasma_fluid","liquid — magenta"}, {"mercury","liquid — silver, thick"},
@@ -4781,7 +4797,8 @@ static std::vector<MenuItem> build_menu(
             static std::mt19937 rng(std::random_device{}());
             static const char* const fx[] = {
                 "sparkle","embers","rain","snow","confetti","rings","fireflies",
-                "clouds","lightning","meteor","bubbles","fireworks","vortex"};
+                "clouds","lightning","meteor","bubbles","fireworks","vortex",
+                "starfield","constellation"};
             static const int pal[][3] = {
                 {0,220,180},{255,80,80},{80,180,255},{255,200,40},
                 {180,80,255},{80,255,160},{255,120,20},{255,255,255}};
@@ -5702,6 +5719,45 @@ static std::vector<MenuItem> build_menu(
                 "Idle-face animation tuning: blink cadence, blink duration, "
                 "and the crossfade time between expressions. Applies to the "
                 "native (MAX7219 / RGB matrix) renderer.");
+        })(),
+        // Glitch post-effect — one effect, every look an independent variable.
+        ([&]() -> MenuItem {
+            if (!pf_glitch_p) { MenuItem e; e.visible_fn = []{ return false; }; return e; }
+            face::GlitchConfig* G = pf_glitch_p;
+            std::vector<MenuItem> gi;
+            gi.push_back(toggle("Glitch",
+                [G]{ return G->enabled; },
+                [G, pf_anim_push](bool v){ G->enabled = v; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Intensity", 0.f, 200.f, 5.f, "%",
+                [G]{ return static_cast<float>(G->intensity * 100.0); },
+                [G, pf_anim_push](float v){ G->intensity = v / 100.0; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Burst Rate", 0.f, 3.f, 0.1f, "/s",
+                [G]{ return static_cast<float>(G->burst_rate); },
+                [G, pf_anim_push](float v){ G->burst_rate = v; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Burst Min", 0.02f, 1.f, 0.02f, "s",
+                [G]{ return static_cast<float>(G->burst_min); },
+                [G, pf_anim_push](float v){ G->burst_min = v; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Burst Max", 0.05f, 2.f, 0.05f, "s",
+                [G]{ return static_cast<float>(G->burst_max); },
+                [G, pf_anim_push](float v){ G->burst_max = v; if (pf_anim_push) pf_anim_push(); }));
+            // Per-component amounts (0 = off). Each is an independent variable.
+            auto comp = [&](const char* name, double face::GlitchConfig::* member) {
+                gi.push_back(slider(name, 0.f, 100.f, 5.f, "%",
+                    [G, member]{ return static_cast<float>((G->*member) * 100.0); },
+                    [G, member, pf_anim_push](float v){ G->*member = v / 100.0; if (pf_anim_push) pf_anim_push(); }));
+            };
+            comp("Chromatic Split",    &face::GlitchConfig::chromatic);
+            comp("Band Tearing",       &face::GlitchConfig::tearing);
+            comp("Block Shuffle",      &face::GlitchConfig::blocks);
+            comp("Bitcrush",           &face::GlitchConfig::bitcrush);
+            comp("Dropout Bars",       &face::GlitchConfig::dropout);
+            comp("Datamosh",           &face::GlitchConfig::datamosh);
+            comp("Eyes/Mouth Desync",  &face::GlitchConfig::region_desync);
+            comp("Expression Flicker", &face::GlitchConfig::expr_flicker);
+            return with_desc(submenu("Glitch", std::move(gi)),
+                "Digital glitch corruption of the face. Master Intensity and Burst "
+                "Rate gate the look (Burst Rate 0 = constant); each component below "
+                "is an independent amount.");
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),
@@ -11199,7 +11255,7 @@ int main(int argc, char* argv[]) {
     xr_cfg.product_id       = jval(jvtr,  "product_id",       0);
     xr_cfg.monitor_index    = jval(jvtr,  "monitor_index",    -1);
     xr_cfg.target_fps       = jval(jdisp, "target_fps",       90);
-    xr_cfg.sbs_height       = jval(jdisp, "sbs_height",       1080);
+    xr_cfg.sbs_height       = jval(jdisp, "sbs_height",       1200);
     xr_cfg.use_beast_camera = jval(jvtr,  "use_beast_camera", true);
     xr_cfg.enable_imu       = jval(jvtr,  "enable_imu",       true);
     xr_cfg.frameless        = jval(jdisp, "frameless",         false);
@@ -11572,6 +11628,11 @@ int main(int argc, char* argv[]) {
     std::string pf_hub75_active = "Default";
     // Custom Gradient material editor state (Protoface > Material Color).
     PfGradient pf_gradient;
+    // Glitch post-effect config — forwarded to the native controller live and
+    // persisted to cfg["protoface"]["glitch"]. Tunable via the settings JSON;
+    // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
+    // region_desync, expr_flicker) is an independent variable.
+    face::GlitchConfig pf_glitch;
     // Face animation tunables — forwarded to every panel's FaceState live
     // and persisted to cfg["protoface"]["animation"] on save.
     bool   pf_blink_enabled   = true;
@@ -11599,6 +11660,7 @@ int main(int argc, char* argv[]) {
             L.panel_size  = jh.value("panel_size",  L.panel_size);
             L.arrangement = jh.value("arrangement", L.arrangement);
             L.panel_count = jval(jh, "panel_count", L.panel_count);
+            L.pinout      = jh.value("pinout",      L.pinout);
             if (jh.contains("panel_size_per") && jh["panel_size_per"].is_array())
                 for (size_t i = 0; i < jh["panel_size_per"].size() && i < 4; ++i)
                     if (jh["panel_size_per"][i].is_string())
@@ -11642,6 +11704,8 @@ int main(int argc, char* argv[]) {
             pf_preview_duration_s =
                 jval(ja, "preview_duration_s", pf_preview_duration_s);
         }
+        if (jpf.contains("glitch") && jpf["glitch"].is_object())
+            pf_glitch = face::GlitchConfig::from_json(jpf["glitch"]);
         if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
             auto& jg = jpf["gradient"];
             pf_gradient.count     = std::clamp(jval(jg, "count", pf_gradient.count), 2, 6);
@@ -12712,6 +12776,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
+        native_ctrl->set_glitch(pf_glitch);
         native_ctrl->set_active_layout_name(pf_hub75_active);
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
         std::cout << "[main] Protoface: native in-process renderer\n";
@@ -12728,7 +12793,7 @@ int main(int argc, char* argv[]) {
             int gpw = 64, gph = 32, gchain = 2, gpar = 1;
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
-                                   gpw, gph, gchain, gpar);
+                                   gpw, gph, gchain, gpar, pf_hub75.pinout);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -12974,6 +13039,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
+        native_ctrl->set_glitch(pf_glitch);
         native_ctrl->set_active_layout_name(pf_hub75_active);
 
         // panel_driver.py choreography. The Python shim is only needed for
@@ -12986,7 +13052,7 @@ int main(int argc, char* argv[]) {
             int gpw = 64, gph = 32, gchain = 2, gpar = 1;
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
-                                   gpw, gph, gchain, gpar);
+                                   gpw, gph, gchain, gpar, pf_hub75.pinout);
         }
     };
 
@@ -13452,6 +13518,7 @@ int main(int argc, char* argv[]) {
                                                                  pf_blink_max,
                                                                  pf_blink_duration);
                                    native_ctrl->set_expression_fade(pf_expr_fade);
+                                   native_ctrl->set_glitch(pf_glitch);
                                },
                                /* pf_set_effect_json */ [&](const nlohmann::json& spec){
                                    if (native_ctrl) native_ctrl->set_effect_json(spec);
@@ -13483,7 +13550,7 @@ int main(int argc, char* argv[]) {
                                    // pf_launch_panel_driver now stops the old driver, waits for it
                                    // to release the PIO/DMA, then relaunches (see its comment).
                                    pf_launch_panel_driver(bin_dir, native_ctrl->canvas_width(),
-                                       native_ctrl->canvas_height(), gpw, gph, gchain, gpar);
+                                       native_ctrl->canvas_height(), gpw, gph, gchain, gpar, pf_hub75.pinout);
                                    Notification n; n.type = NotifType::App;
                                    n.title = "Panel driver restarted";
                                    n.body  = "If panels stay dark, check /tmp/panel_driver.log";
@@ -13494,7 +13561,8 @@ int main(int argc, char* argv[]) {
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
                                &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr,
                                &kdc_ignore, &kdc_msgapps,
-                               &coproc_cfg.enabled, coproc_reload, coproc_status));
+                               &coproc_cfg.enabled, coproc_reload, coproc_status,
+                               /* pf_glitch_p */ &pf_glitch));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -14384,6 +14452,7 @@ int main(int argc, char* argv[]) {
             jh["panel_size"]       = L.panel_size;
             jh["arrangement"]      = L.arrangement;
             jh["panel_count"]      = L.panel_count;
+            jh["pinout"]           = L.pinout;
             jh["panel_size_per"]   = json::array({L.panel_size_per[0], L.panel_size_per[1],
                                                   L.panel_size_per[2], L.panel_size_per[3]});
             jh["defaults_applied"] = L.defaults_applied;
@@ -14409,6 +14478,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["animation"]["blink_duration"]  = pf_blink_duration;
         cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
         cfg["protoface"]["animation"]["preview_duration_s"] = pf_preview_duration_s;
+        cfg["protoface"]["glitch"] = pf_glitch.to_json();
         {
             auto& jg = cfg["protoface"]["gradient"];
             jg["count"]     = std::clamp(pf_gradient.count, 2, 6);
@@ -15940,10 +16010,15 @@ int main(int argc, char* argv[]) {
 
         // ── Phase 2: ImGui overlays (menu, popups) ────────────────────────
         menu.set_glow_enabled(hud.config().glow_enabled);
+        // Eye-local ImGui overlays are duplicated into both SBS eyes at flush
+        // time (render_menu_overlay). The radial wheel is positioned in display
+        // coords, so it opts out and stays a single instance.
+        bool menu_dup = false;
         if (menu.is_deep_open() || menu.is_keyboard_open()) {
             // Keyboard takes over full-screen (draws only the OSK), so this also
             // covers text entry opened from the corner / radial quick menu.
             menu.draw_fullscreen(xr.eye_width(), xr.eye_height());
+            menu_dup = true;
         } else if (menu.is_open() && menu.quick_style() == QuickStyle::Radial
                    && !menu.is_keyboard_open()) {
             // Radial quick menu encircling the round minimap. Geometry matches
@@ -15970,6 +16045,7 @@ int main(int argc, char* argv[]) {
             menu.draw_radial(mcx, mcy, half, focus, rotate, radial_top);
         } else {
             menu.draw(xr.eye_width(), xr.eye_height());
+            menu_dup = true;
         }
 
         hud.draw_android_overlay(tex_android,
@@ -16077,7 +16153,7 @@ int main(int argc, char* argv[]) {
         // Alarm / timer-expired popups — disabled, toasts handle these now.
         // hud.draw_popups(state, xr.eye_width(), xr.eye_height());
 
-        hud.render_menu_overlay();
+        hud.render_menu_overlay(xr.eye_width(), xr.display_width(), menu_dup);
 
         // ── Swap ──────────────────────────────────────────────────────────────
         xr.present();

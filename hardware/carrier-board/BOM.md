@@ -2,8 +2,9 @@
 
 Indicative parts list for the [requirements](REQUIREMENTS.md). Reference part
 numbers are starting points, not a locked sourcing list — substitute pin- and
-spec-compatible equivalents. Quantities assume a **4-panel HUB75** face build
-with the default sensor set.
+spec-compatible equivalents. Quantities assume a **4-panel HUB75** face on the
+CM5 **plus** the **RP2354B I/O coprocessor** with the default sensor set,
+**8 servos**, and **4 WS2812 zones**.
 
 `Req` ties each line back to a requirement (M = must-have, N = nice-to-have).
 
@@ -29,30 +30,34 @@ with the default sensor set.
 | 10 | Fuse, WS2812 rail | per LED count | 1 | M2.4 | |
 | 11 | Decoupling caps (assorted) | 0.1 µF / 1 µF / 10 µF | many | M1.2 | Per CM5 design guide |
 
-## Face backend level shifting (critical) — HUB75 **or** MAX7219
+## HUB75 face buffer (critical) — CM5 side
 
 | # | Part | Example P/N | Qty | Req | Notes |
 |---|------|-------------|-----|-----|-------|
-| 12 | Octal buffer, **AHCT** | SN74AHCT245PWR | 2 | M3.1 | 5 V VCC, 3.3 V TTL in → 5 V out. **Not** HC. Shared by HUB75/MAX7219. |
+| 12 | Octal buffer, **AHCT** | SN74AHCT245PWR | 2 | M3.1 | **U1/U2** · 5 V VCC, 3.3 V TTL in → 5 V out. **Not** HC. HUB75 only (MAX7219 buffer is U10, RP2354B side). |
 | 13 | HUB75 IDC header, 2×8 shrouded | 2.54 mm boxed | 1–4 | M3.2 | J2 · one per chain |
-| 14 | Series resistors (CLK/data) | 33 Ω 0603 | ~14 | M3.3 | Optional-fit footprints |
-| 15 | Buffer decoupling | 0.1 µF 0603 | 2 | M3.1 | One per '245 |
-| 16 | **MAX7219 chain header** | keyed, 5 V/GND/DIN/CLK/CS×4 | 1 | M3.4 | J3 · alternative face backend |
-| 17 | Backend-select jumper | 2.54 mm jumper / 0 Ω | 1 | M3.5/N11 | JP1 · routes buffer → HUB75 or MAX7219; SPI0-MOSI share guard |
+| 14 | Series resistors (CLK/LAT/OE) | 33 Ω 0603 | ~3 | M3.3 | Optional-fit footprints |
+| 15 | Buffer decoupling | 0.1 µF 0603 | 2 | M3.1 | One per '245 (U1/U2) |
+
+> The old backend-select jumper (JP1) and MAX7219-source jumper (JP2) are gone:
+> HUB75 (CM5) and MAX7219 (RP2354B) are on different brains. MAX7219's header
+> (J3) and buffer (U10) are in the **RP2354B level shifting** section below.
 
 ## WS2812 accessory LEDs
 
+The level-shift buffer (U11) is listed once under **RP2354B level shifting**
+(item 55) — these are the LED-side connectors only.
+
 | # | Part | Example P/N | Qty | Req | Notes |
 |---|------|-------------|-----|-----|-------|
-| 18 | Single-gate buffer (3.3→5) | SN74AHCT1G125 | 1 | M4.1 | Or reuse a '245 channel |
-| 19 | LED power+data connector | JST (keyed) | 1 | M4.1/2 | 5 V, GND, DIN |
+| 19 | LED power+data connectors | JST (keyed) | 4 | M6.2 | 5 V, GND, DIN · one per WS2812 zone (`LED1..4_DAT`) |
 
 ## I²C sensors
 
 | # | Part | Example P/N | Qty | Req | Notes |
 |---|------|-------------|-----|-----|-------|
-| 20 | I²C pull-up resistors | 4.7 kΩ 0603 | 2 | M5.1 | SDA/SCL → 3.3 V |
-| 21 | Sensor connectors | keyed 4-pin (or STEMMA QT) | 4 | M5.2 | BNO055/MPU9250/MPR121/BH1750 |
+| 20 | I²C pull-up resistors | 4.7 kΩ 0603 | 2 | M5.1 | `SDA0`/`SCL0` → **+3V3_RP** (RP2354B bus, not CM5) |
+| 21 | Sensor connectors | keyed 5-pin (or STEMMA QT) | 4 | M5.2 | BNO055/MPU9250/MPR121/BH1750 · 3V3/GND/SDA/SCL + **`SENS_INT`** |
 
 ## GPIO / buttons
 
@@ -97,6 +102,61 @@ with the default sensor set.
 | 40 | (future) analog ADC | ADS1115 | 0–1 | N15 | 4-ch 16-bit, addr `0x48–0x4B` |
 | 41 | (future) PWM / LED driver | PCA9685 | 0–1 | N15 | 16-ch PWM, addr `0x40–0x46` |
 | 42 | (alt) SPI expander / shift regs | MCP23S17 / 74HC165 / 74HC595 | 0+ | N16 | second lane on free SPI0 |
+
+## RP2354B I/O coprocessor
+
+The second brain — owns sensors, WS2812, buttons, MAX7219, and servos; talks to
+the CM5 as USB-CDC. See [`RP2354-IO.md`](RP2354-IO.md). *(Req tags `M-RP*` are
+placeholders pending the two-brain rev of [`REQUIREMENTS.md`](REQUIREMENTS.md).)*
+
+| # | Part | Example P/N | Qty | Req | Notes |
+|---|------|-------------|-----|-----|-------|
+| 43 | RP2354B MCU (QFN-80) | Raspberry Pi RP2354B | 1 | M-RP | 48 GPIO, 2 MB on-package stacked flash (no external QSPI) |
+| 44 | Crystal, 12 MHz | e.g. ABM8-12.000MHZ | 1 | M-RP | XIN/XOUT · required for native USB |
+| 45 | Crystal load caps | 2× 15 pF 0603 (per XTAL spec) | 2 | M-RP | tune to crystal C_L |
+| 46 | Decoupling caps, RP2354B | 0.1 µF 0603 (per IOVDD/DVDD/USB pin) + bulk | ~10 | M-RP | Per RP2350 hardware design guide |
+| 47 | Core-regulator caps | 1 µF/4.7 µF (VREG IN/OUT) | 2–3 | M-RP | internal core LDO; per RP2350 design guide |
+| 48 | Core-regulator inductor + caps | only if switched-mode VREG scheme used | 0–1 | M-RP | omit if internal LDO mode; per chosen power scheme |
+| 49 | 3.3 V regulator for **+3V3_RP** | AP2112K-3.3 (LDO) or small buck | 1 | M-RP | off `+5V`, ≥ 500 mA · feeds RP core/IO + sensors + buffer A-side |
+| 50 | BOOTSEL button | SMD tact | 1 | M-RP | UF2 bootloader entry |
+| 51 | RUN/reset button | SMD tact | 1 | M-RP | RUN pin reset |
+| 52 | SWD debug header | 1×4 (SWCLK/SWDIO/GND/3V3) or Cortex 2×5 | 1 | M-RP | probe flash + live debug |
+| 53 | UART debug-console header | 1×3/1×4 2.54 mm | 1 | M-RP | `DBG_TX`/`DBG_RX` (GP0/GP1) |
+
+## RP2354B level shifting
+
+5 V-logic loads shift on the RP2354B side (`74AHCT*` TTL VIH reads 3.3 V as
+high). Servos and I²C sensors stay 3.3 V-native.
+
+| # | Part | Example P/N | Qty | Req | Notes |
+|---|------|-------------|-----|-----|-------|
+| 54 | Octal buffer, **AHCT** | SN74AHCT245PWR | 1 | M-RP | **U10** · 5 V VCC · MAX7219 `MX_DIN`/`MX_CLK`/`MX_CS1..4` (3.3→5 V) |
+| 55 | Quad buffer, **AHCT** | SN74AHCT125 | 1 | M-RP | **U11** · 5 V VCC · WS2812 ×4 `LED1..4_DAT` (3.3→5 V). *(same part as item 18)* |
+| 56 | Buffer decoupling | 0.1 µF 0603 | 2 | M-RP | one per buffer (U10/U11) |
+
+## USB selector / programming (RP2354B)
+
+RP2350 has one USB pair — shared between the CM5 hub (CDC link) and a standalone
+program port via the SW1 selector. See
+[`RP2354-IO.md`](RP2354-IO.md#usb-selector-cm5-hub--standalone-port).
+
+| # | Part | Example P/N | Qty | Req | Notes |
+|---|------|-------------|-----|-----|-------|
+| 57 | USB 2.0 selector — **option A** | DPDT slide switch (**SW1**) | 1 | M-RP | manual D+/D− steer; fine for full-speed USB |
+| 57b | USB 2.0 selector — **option B** | TS3USB221A mux | 1 | M-RP | alt to SW1 · cleaner electronic switching (pick one) |
+| 58 | Standalone USB-C receptacle | USB 2.0 Type-C | 1 | M-RP | **J12** · isolated program port (VBUS sense only, do not back-feed) |
+| 59 | USB ESD protection | USBLC6-2 | 1 | M-RP | on the RP2354B `RP_DP/RP_DM` pair |
+
+## Servos (RP2354B PWM)
+
+8 PWM channels (GP20–27) → 8 headers; V+ and GND are the shared `+V_SERVO` rail.
+
+| # | Part | Example P/N | Qty | Req | Notes |
+|---|------|-------------|-----|-----|-------|
+| 60 | 3-pin servo headers, 2.54 mm | generic | 8 | M-RP | **J20–J27** · pin order **SIG / +V_SERVO / GND** (`SRV1..8`) |
+| 61 | Servo-rail fuse | per servo count/stall | 1 | M-RP | protects `+V_SERVO` (fused tap off `+5V`) |
+| 62 | Servo-rail bulk cap | ≥ 1000 µF low-ESR | 1+ | M-RP | rides stall surges; isolates logic |
+| 63 | (optional) 6 V buck for `+V_SERVO` | small step regulator | 0–1 | M-RP | **optional** · only if 6 V servos used; else rail = `+5V` |
 
 ---
 

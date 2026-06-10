@@ -14,13 +14,16 @@
   "sheets": [
       ["fb9b62d2-d9b7-4b5e-86af-44187a7f9335", "Root"],
       ["7fcf71da-42d5-4843-bf7d-f52f6f1fa308", "1. Power"],
-      ["3812e784-9e95-4c5b-856a-ca4e97dc1851", "2. CM5"],
-      ["eff6a452-77ae-416d-87a8-cfe219f371e8", "3. Face Buffer (HUB75 / MAX7219)"],
-      ["833500fc-08ba-4260-bcba-d50b8d06254c", "4. WS2812 LEDs"],
-      ["aa17a73e-e56b-4b1f-a092-064b3bde23cb", "5. Sensors + I2C expansion"],
-      ["b12d177a-080c-49c4-8372-6cdd7e6e9f72", "6. USB"],
-      ["c814e905-b80c-42d1-beeb-925e48192849", "7. Cameras + Display"],
-      ["4d61ad14-7947-4b5f-b9ac-ea72b52475d0", "8. GPIO Buttons"]
+      ["3812e784-9e95-4c5b-856a-ca4e97dc1851", "2. CM5 (HUB75 + cameras + USB)"],
+      ["eff6a452-77ae-416d-87a8-cfe219f371e8", "3. Face Buffer (HUB75)"],
+      ["a1b2c3d4-0001-4aaa-9bbb-000000000004", "4. RP2354B I/O MCU"],
+      ["a1b2c3d4-0002-4aaa-9bbb-000000000005", "5. MAX7219 Buffer (RP2354B)"],
+      ["833500fc-08ba-4260-bcba-d50b8d06254c", "6. WS2812 LEDs (RP2354B)"],
+      ["aa17a73e-e56b-4b1f-a092-064b3bde23cb", "7. Sensors I2C (RP2354B)"],
+      ["a1b2c3d4-0003-4aaa-9bbb-000000000008", "8. Servos (RP2354B)"],
+      ["4d61ad14-7947-4b5f-b9ac-ea72b52475d0", "9. Buttons / Boop (RP2354B)"],
+      ["b12d177a-080c-49c4-8372-6cdd7e6e9f72", "10. USB Hub"],
+      ["c814e905-b80c-42d1-beeb-925e48192849", "11. Cameras + Display (CM5)"]
     ],
   "text_variables": {}
 }

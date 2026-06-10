@@ -1,6 +1,6 @@
 # ProtoHUD
 
-A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a protogen costume helmet. It composites zero-copy libcamera frames from two OWLsight CSI cameras into a VITURE Beast XR glasses display (3840×1080 SBS), overlays a NanoVG HUD and Dear ImGui menu, and integrates audio routing, LoRa mesh radio, a haptic SmartKnob, and GPIO hardware buttons.
+A stereo XR heads-up display running on a Raspberry Pi CM5, designed for a protogen costume helmet. It composites zero-copy libcamera frames from two OWLsight CSI cameras into a VITURE Beast XR glasses display (3840×1200 SBS), overlays a NanoVG HUD and Dear ImGui menu, and integrates audio routing, LoRa mesh radio, a haptic SmartKnob, and GPIO hardware buttons.
 
 Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival) is handled by a companion **RP2350 helmet audio processor** over USB Audio. The CM5 receives pre-processed stereo and routes it to VITURE glasses, headphones, or HDMI.
 
@@ -44,7 +44,7 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 │                          left FBO ◄────────────────────────────────  │
 │                         right FBO ◄────────────────────────────────  │
 │                                                                      │
-│  GLFW / EGL context  ──► XRDisplay (3840×1080 SBS)                  │
+│  GLFW / EGL context  ──► XRDisplay (3840×1200 SBS)                  │
 │                           composite() → ImGui overlay → present()   │
 │                                                                      │
 │  NanoVG      ──► HudRenderer (NVG pass)  ──► compass, arms, particles│
@@ -86,7 +86,7 @@ Optional async timewarp warps each eye FBO using the latest IMU pose before comp
 | Component | Details |
 |-----------|---------|
 | SBC | Raspberry Pi CM5 (8 GB RAM recommended) |
-| Display | VITURE Beast / Luma XR glasses (3840×1080 SBS, 60/90/120 Hz) |
+| Display | VITURE Beast / Luma XR glasses (3840×1200 SBS @ 60 Hz on current Beast firmware) |
 | OS | Raspberry Pi OS Bookworm · Debian Trixie + RPT packages (64-bit, aarch64) |
 
 ### Vision
@@ -1152,6 +1152,35 @@ You should see `28` (or `29`) in the grid. **An empty grid means the chip isn't 
 | `heading_axes` | Axis remap preset for non-default mounting. Chip calibration survives axis changes |
 | `poll_hz` | Sensor read rate. 50 Hz matches the chip's internal fusion rate; higher just resamples the same value |
 
+### Over a USB-UART adapter
+
+The BNO055 also speaks **UART**, which sidesteps the Pi's I²C clock-stretching entirely. The simplest path is a **USB-UART adapter** (FTDI / CP2102 / CH340) — no `enable_uart`, no disabling the serial console:
+
+1. **PS1 → 3.3 V** on the BNO055 so it boots in UART mode (PS0 stays low). Adafruit's board ties both PS pads low for I²C — lift PS1 high.
+2. Wire to the adapter: **BNO SDA(TX) → adapter RX**, **BNO SCL(RX) → adapter TX**, plus **GND** and **3.3 V**.
+3. Plug the adapter into a CM5 USB port — it enumerates as `/dev/ttyUSB*`.
+
+Point the config at it, preferring the stable **by-id** path so it survives replug / enumeration order:
+
+```bash
+ls -l /dev/serial/by-id/
+# usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0 -> ../../ttyUSB0
+```
+
+```json
+"bno055": {
+  "enabled": true,
+  "transport": "uart",
+  "uart_device": "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0",
+  "uart_baud": 115200,
+  "declination_deg": 0.0
+}
+```
+
+> **CP2102 adapters share their USB id (`10c4:ea60`) with the SmartKnob**, so a plain `/dev/ttyUSB0` can swap between the two across reboots. The by-id path keys on the adapter's serial and stays put. For a fixed `/dev/bno055` symlink instead, see the commented template in `scripts/install.sh` (match on `ATTRS{serial}`).
+
+Everything downstream is identical to I²C — on-chip fusion, the same calibration flow, and **Auto** still prefers BNO055.
+
 ### Menu trail
 
 ```
@@ -1530,6 +1559,7 @@ Faces (PNGs created via the in-HUD pixel editor) are **stamped** with the active
       "panel_size": "64x32",
       "arrangement": "horizontal",
       "panel_count": 2,
+      "pinout": "adafruit_bonnet",
       "panel_size_per": ["", "", "", ""],
       "nudge_dx":  [-64, 64, 0, 0],
       "nudge_dy":  [0, 0, 0, 0],
@@ -1540,6 +1570,19 @@ Faces (PNGs created via the in-HUD pixel editor) are **stamped** with the active
 ```
 
 Legacy single-block configs (`cfg["protoface"]["hub75"]`) migrate to `hub75_layouts["Default"]` on first load.
+
+### Bonnet / pinout
+
+`pinout` selects how the panels are wired to the Pi — it sets both the piomatter pinout **and** the geometry/mapper in `scripts/panel_driver.py`:
+
+| `pinout` | Board | Geometry |
+|----------|-------|----------|
+| `adafruit_bonnet` *(default)* | Single-connector **Adafruit RGB Matrix Bonnet / HAT** | One output; panels daisy-chained (serpentine for multi-row). Plain `Geometry(width, height, n_addr_lines)` |
+| `active3` | Triple-connector **Active-3** board | Up to 3 parallel chains sharing address lines via the multilane mapper |
+
+Append `_bgr` (e.g. `adafruit_bonnet_bgr`) if red and blue come out swapped.
+
+> **Single connector = one chain.** The Adafruit bonnet has a single HUB75 output, so `parallel` collapses to 1 (multi-row builds are wired **serpentine** and the geometry stacks them by height). The Active-3 board is the only one that drives genuine parallel lanes. The `arrangement` / `panel_count` you set above feed the driver's `--chain`/`--parallel` automatically, so just pick the layout and the right `pinout`.
 
 ### Pixel editor extras (MAX7219 / RGB matrix)
 

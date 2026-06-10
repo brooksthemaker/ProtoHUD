@@ -42,6 +42,11 @@ nlohmann::json effect_cfg_for_id(int id) {
         case 15: return nlohmann::json{{"preset", "party"}};
         case 16: return std::string("clouds");
         case 17: return nlohmann::json{{"preset", "nebula"}};
+        case 18: return nlohmann::json{{"preset", "starfield"}};
+        case 19: return nlohmann::json{{"preset", "warp"}};
+        case 20: return nlohmann::json{{"preset", "constellation"}};
+        case 21: return nlohmann::json{{"preset", "shooting_stars"}};
+        case 22: return nlohmann::json{{"preset", "night_sky"}};
         default: return std::string("none");
     }
 }
@@ -192,6 +197,10 @@ void NativeFaceController::render_thread() {
             const bool eye_active = eye_anim_timer_ > 0.0;
             if (eye_active) { eye_anim_timer_ -= dt; eye_anim_t_ += dt; }
 
+            // Advance the glitch burst envelope once per frame so every panel
+            // (and both eyes) corrupts identically this tick.
+            glitch_.tick(dt, glitch_cfg_);
+
             // Expire any transient face overlays whose deadline has passed —
             // restore the original expression image to the loader and drop
             // the record. Done before render so this tick uses the restored
@@ -213,6 +222,21 @@ void NativeFaceController::render_thread() {
                     }
                 }
             }
+
+            // When the glitch fires an expression flash this frame, swap the
+            // rendered face for a different expression's raw image — same pick
+            // for every panel so both eyes flash the same wrong expression.
+            auto glitch_flicker = [&](FaceLoader* loader, FaceState* st, cv::Mat& face) {
+                if (!glitch_cfg_.enabled || !glitch_.flicker_expr() || !loader || !st) return;
+                const auto& names = loader->expression_names();
+                if (names.size() < 2) return;
+                int idx = std::min<int>(static_cast<int>(names.size()) - 1,
+                                        static_cast<int>(glitch_.flicker_pick() * names.size()));
+                if (names[idx] == st->expression())
+                    idx = (idx + 1) % static_cast<int>(names.size());
+                cv::Mat alt = loader->get_expression_image(names[idx]);
+                if (!alt.empty() && alt.size() == face.size()) face = alt;
+            };
 
             // Render each self-rendering panel into its region.
             for (auto& pn : panels_) {
@@ -272,9 +296,11 @@ void NativeFaceController::render_thread() {
                     }
                 } else if (!cfg_.effects_enabled || !pn.material) {
                     face_layer = pn.loader->get_frame(*pn.state);
+                    glitch_flicker(pn.loader.get(), pn.state.get(), face_layer);
                 } else {
                     cv::Mat mat = pn.material->get_frame();
                     cv::Mat face_rgba = pn.loader->get_frame(*pn.state);
+                    glitch_flicker(pn.loader.get(), pn.state.get(), face_rgba);
                     face_layer = apply_material(face_rgba, mat);
                 }
 
@@ -344,6 +370,10 @@ void NativeFaceController::render_thread() {
                 cv::flip(region, flipped, code);
                 flipped.copyTo(region);
             }
+
+            // Glitch post-effect: corrupt the fully-composited face canvas in a
+            // single pass so it reads as one signal glitch across the whole face.
+            if (glitch_cfg_.enabled) glitch_.apply(canvas, glitch_cfg_);
         }
 
         {
@@ -924,6 +954,11 @@ void NativeFaceController::set_wiggle(const WiggleCfg& w) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_wiggle(w);
+}
+
+void NativeFaceController::set_glitch(const GlitchConfig& cfg) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    glitch_cfg_ = cfg;
 }
 
 void NativeFaceController::set_audio_drive(double volume, double mouth_open) {

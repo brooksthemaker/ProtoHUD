@@ -1,47 +1,65 @@
-# ProtoHUD Carrier — KiCad project skeleton
+# ProtoHUD Carrier — KiCad project
 
-A **hierarchical schematic skeleton** scaffolding the carrier design. Open
-`ProtoHUD-Carrier.kicad_pro` in KiCad (**7 or 8** — v8 will offer a one-time
-format upgrade on first save). The root sheet contains one **hierarchical
-sheet** per functional block; each sub-sheet is pre-annotated with its parts
-list and the **exact BCM net names from [`../PINMAP.md`](../PINMAP.md)** so it's
-a fill-in guide, not a blank page.
+A **hierarchical schematic** for the two-brain carrier (CM5 = HUB75 only;
+RP2354B = all other I/O — see [`../RP2354-IO.md`](../RP2354-IO.md)). Open
+`ProtoHUD-Carrier.kicad_pro` in **KiCad 9**. The root sheet has one
+**hierarchical sheet** per functional block.
 
-> This is scaffolding, not a finished schematic: symbols and nets aren't placed
-> yet. It was generated programmatically and has **not** been opened/validated
-> in KiCad in this environment — if anything doesn't load, regenerate or tell me
-> and I'll fix the format.
+Two generators:
+- **`populate_sheets.py`** — emits all **11 populated** sub-sheets (real symbols
+  + a label netlist; global labels for rails/cross-sheet nets). Reuses the
+  KiCad-9 format proven by the original face_buffer proof sheet.
+- **`generate_skeleton.py`** — emits the root sheet + project file (and would
+  emit annotated *stubs* for any sheet not in its `POPULATED` set; all 11 are
+  now populated, so it only writes root + project). Stable UUIDs.
+
+> Status: **all 11 sheets are populated.** Symbols use official-style `lib_id`s
+> with embedded cached bodies and **condensed big-IC symbols** (the CM5 = 2×
+> DF40-100 and RP2354B = QFN-80 show only the pins the carrier uses — full pads
+> are a footprint/layout-time task). Connectivity is by net labels. Generated
+> programmatically and **not yet opened in KiCad in this environment** — open in
+> KiCad 9, run ERC (expect to-be-cleaned warnings: add `PWR_FLAG`s on rails,
+> tidy unconnected pins), and report any load errors.
 
 ## Sheets
 
-| # | Sheet file | Block | Source doc |
-|---|-----------|-------|-----------|
-| 1 | `power.kicad_sch` | 5 V input, protection, rails, INA219 | [`../POWER.md`](../POWER.md) |
-| 2 | `cm5.kicad_sch` | DF40 connectors, decoupling, nRPIBOOT | [`../REQUIREMENTS.md`](../REQUIREMENTS.md) |
-| 3 | `face_buffer.kicad_sch` | 74AHCT245, JP1/JP2, J2 HUB75, J3 MAX7219 | [`../CONNECTORS.md`](../CONNECTORS.md) |
-| 4 | `leds.kicad_sch` | 74AHCT1G125, J4 WS2812 | [`../CONNECTORS.md`](../CONNECTORS.md) |
-| 5 | `sensors_i2c.kicad_sch` | I²C pull-ups, J5/JX1, MCP23017, JX2 | [`../IO-EXPANSION.md`](../IO-EXPANSION.md) |
-| 6 | `usb.kicad_sch` | hub, J9 downstream, J11 backpack uplink | [`../CONNECTORS.md`](../CONNECTORS.md) |
-| 7 | `cameras_display.kicad_sch` | J7/J8 CSI, J10 HDMI | [`../CONNECTORS.md`](../CONNECTORS.md) |
-| 8 | `gpio_buttons.kicad_sch` | J6 buttons/boop | [`../CONNECTORS.md`](../CONNECTORS.md) |
+| # | Sheet file | Brain | Block | Source doc |
+|---|-----------|-------|-------|-----------|
+| 1 | `power.kicad_sch`  ✅ | — | 5 V input, protection, rails (+5V/+5V_PANEL/+5V_LED/+V_SERVO/+3V3_RP) | [`../POWER.md`](../POWER.md) |
+| 2 | `cm5.kicad_sch`  ✅ | CM5 | DF40 connectors, decoupling, nRPIBOOT, HUB75 GPIO out | [`../REQUIREMENTS.md`](../REQUIREMENTS.md) |
+| 3 | `face_buffer.kicad_sch` ✅ | CM5 | U1/U2 74AHCT245 → J2 HUB75 (**populated**) | [`../CONNECTORS.md`](../CONNECTORS.md) |
+| 4 | `rp2354_io.kicad_sch`  ✅ | RP2354B | MCU core, 12 MHz xtal, +3V3_RP, BOOTSEL/SWD, SW1, J12 | [`../RP2354-IO.md`](../RP2354-IO.md) |
+| 5 | `rp2354_face.kicad_sch`  ✅ | RP2354B | U10 74AHCT245, J3 MAX7219 (MX_*) | [`../CONNECTORS.md`](../CONNECTORS.md) |
+| 6 | `leds.kicad_sch`  ✅ | RP2354B | U11 74AHCT125, J4 WS2812 ×4 (LED1..4_DAT) | [`../CONNECTORS.md`](../CONNECTORS.md) |
+| 7 | `sensors_i2c.kicad_sch`  ✅ | RP2354B | I²C0 pull-ups, J5, SENS_INT, expanders | [`../IO-EXPANSION.md`](../IO-EXPANSION.md) |
+| 8 | `servos.kicad_sch`  ✅ | RP2354B | J20–J27 servo headers, +V_SERVO rail (SRV1..8) | [`../RP2354-IO.md`](../RP2354-IO.md) |
+| 9 | `gpio_buttons.kicad_sch`  ✅ | RP2354B | J6 buttons/boop (BTN1..10) | [`../CONNECTORS.md`](../CONNECTORS.md) |
+| 10 | `usb.kicad_sch`  ✅ | CM5 | hub, J9 downstream (RP2354B/RP2350/…), J11 uplink | [`../CONNECTORS.md`](../CONNECTORS.md) |
+| 11 | `cameras_display.kicad_sch`  ✅ | CM5 | J7/J8 CSI, J10 HDMI | [`../CONNECTORS.md`](../CONNECTORS.md) |
 
-## Fill-in workflow
+All 11 are populated (✅) — symbols placed, nets labelled. Cross-sheet nets are
+**global labels** (rails `+5V`/`+5V_PANEL`/`+5V_LED`/`+V_SERVO`/`+3V3_RP`/`GND`,
+the `GPIOxx` HUB75 group, `MX_*`/`LED*_DAT`/`SRV*`/`BTN*`, `*_USB_*`), so blocks
+connect without manual sheet-pin plumbing.
 
-1. Open the project; double-click a sheet to enter it. The on-canvas text lists
-   the parts and nets for that block.
-2. Place symbols (parts per [`../BOM.md`](../BOM.md)) and draw nets, **labeling
-   them with the PINMAP net names** so the schematic, the firmware GPIO map, and
-   the silkscreen all agree.
-3. Promote shared rails/buses (`+5V`, `+3V3`, `GND`, `SDA`/`SCL`, the HUB75
-   group) to **hierarchical/global labels** so they connect across sheets.
-4. Assign footprints, then lay out the PCB. Honor the
-   [`../PINMAP.md`](../PINMAP.md) contention rules (BCM 10 single-owner, SPI1
-   off-limits with HUB75).
+## Review / finishing workflow
+
+1. Open the project in KiCad 9; double-click each sheet. Run **`Symbol > Update
+   Symbols from Library`** to swap the embedded cached bodies for the pretty
+   official ones (matched by `lib_id` + pin number).
+2. Expand the **condensed CM5 / RP2354B** symbols to full pinout when assigning
+   footprints (the carrier physically uses 2× DF40-100 for the CM5 and a QFN-80
+   for the RP2354B).
+3. Run **ERC** and clean expected warnings: add `PWR_FLAG`s on the rails, tie
+   off unconnected buffer/ESD pins, confirm net names vs [`../PINMAP.md`](../PINMAP.md).
+4. Assign footprints (parts per [`../BOM.md`](../BOM.md)), then lay out the PCB.
 
 ## Regenerating
 
 ```bash
-python3 generate_skeleton.py
+python3 populate_sheets.py        # all 11 populated sub-sheets
+python3 generate_skeleton.py      # root sheet + project file
 ```
-Edit the `SHEETS` table in the script to change the block list or annotations;
-re-running rewrites the `.kicad_sch`/`.kicad_pro` with fresh UUIDs.
+UUIDs are stable across runs (sheet hierarchy links hold). Edit `SHEET_UUID` /
+the per-sheet builders in `populate_sheets.py`; keep `POPULATED` in
+`generate_skeleton.py` in sync.

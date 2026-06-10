@@ -14,7 +14,7 @@ Shared-memory format (matches src/serial/shm_frame_reader.h / ShmPusherOutput):
 
 Usage: panel_driver.py [--canvas-w 128] [--canvas-h 32]
                        [--panel-w 64] [--panel-h 32] [--chain 2] [--parallel 1]
-                       [--shm /dev/shm/protoface_frame]
+                       [--pinout adafruit_bonnet] [--shm /dev/shm/protoface_frame]
 """
 
 import argparse
@@ -29,6 +29,17 @@ import adafruit_blinka_raspberry_pi5_piomatter as piomatter
 from adafruit_blinka_raspberry_pi5_piomatter.pixelmappers import simple_multilane_mapper
 
 
+# HUB75 bonnet wiring → piomatter pinout. "adafruit_bonnet" is the single-
+# connector Adafruit RGB Matrix Bonnet/HAT; "active3" is the triple-connector
+# Active-3 board. *_bgr swaps the panel's red/blue channel order.
+PINOUTS = {
+    'adafruit_bonnet':     piomatter.Pinout.AdafruitMatrixBonnet,
+    'adafruit_bonnet_bgr': piomatter.Pinout.AdafruitMatrixBonnetBGR,
+    'active3':             piomatter.Pinout.Active3,
+    'active3_bgr':         piomatter.Pinout.Active3BGR,
+}
+
+
 def addr_lines(panel_h: int) -> int:
     return (panel_h // 2).bit_length() - 1
 
@@ -41,6 +52,10 @@ def main():
     ap.add_argument('--panel-h', type=int, default=32)
     ap.add_argument('--chain', type=int, default=2)
     ap.add_argument('--parallel', type=int, default=1)
+    ap.add_argument('--pinout', default='adafruit_bonnet', choices=sorted(PINOUTS),
+                    help='HUB75 bonnet wiring: adafruit_bonnet (single-connector '
+                         'Adafruit bonnet/HAT, default) or active3 (triple-connector); '
+                         '*_bgr swaps red/blue')
     ap.add_argument('--shm', default='/dev/shm/protoface_frame')
     ap.add_argument('--fps', type=float, default=60.0, help='poll rate cap')
     args = ap.parse_args()
@@ -48,20 +63,33 @@ def main():
     W, H = args.canvas_w, args.canvas_h
     size = 1 + W * H * 3
     print(f"[panel_driver] starting: canvas {W}x{H}, panel {args.panel_w}x{args.panel_h}, "
-          f"chain {args.chain}, parallel {args.parallel}, shm {args.shm}", flush=True)
+          f"chain {args.chain}, parallel {args.parallel}, pinout {args.pinout}, "
+          f"shm {args.shm}", flush=True)
 
-    # Piomatter geometry — identical to Protoface's hub75.py.
+    # Piomatter geometry depends on the bonnet. The Active-3 board drives parallel
+    # chains that share address lines, so it needs the multilane mapper. The
+    # single-connector Adafruit bonnet has one output with the panels daisy-
+    # chained (serpentine for multi-row), so it uses a plain geometry whose
+    # width/height are the physical canvas dimensions.
     n_addr  = addr_lines(args.panel_h)
-    n_lanes = 2 * args.parallel
-    width   = args.panel_w * args.chain
-    height  = n_lanes << n_addr
-    pixelmap = simple_multilane_mapper(width, height, n_addr, n_lanes)
-    geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
-                                  n_planes=10, n_temporal_planes=4,
-                                  map=pixelmap, n_lanes=n_lanes)
+    if args.pinout.startswith('active3'):
+        n_lanes  = 2 * args.parallel
+        width    = args.panel_w * args.chain
+        height   = n_lanes << n_addr
+        pixelmap = simple_multilane_mapper(width, height, n_addr, n_lanes)
+        geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
+                                      n_planes=10, n_temporal_planes=4,
+                                      map=pixelmap, n_lanes=n_lanes)
+        chan = [1, 2, 0]    # Active-3 panels display R->G->B rotated; resend (G,B,R)
+    else:
+        width    = args.panel_w * args.chain
+        height   = args.panel_h * args.parallel
+        geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
+                                      rotation=piomatter.Orientation.Normal)
+        chan = [0, 1, 2]    # straight RGB; switch to *_bgr pinout if red/blue swap
     fb = np.zeros((height, width, 3), dtype=np.uint8)
     matrix = piomatter.PioMatter(colorspace=piomatter.Colorspace.RGB888Packed,
-                                 pinout=piomatter.Pinout.Active3,
+                                 pinout=PINOUTS[args.pinout],
                                  framebuffer=fb, geometry=geometry)
     print("[panel_driver] piomatter ready", flush=True)
 
@@ -100,8 +128,9 @@ def main():
                 last_seq = seq
                 buf = np.frombuffer(mm, dtype=np.uint8, count=W * H * 3, offset=1)
                 frame = buf.reshape((H, W, 3))
-                # Panels display R->G->B rotated; resend as (G,B,R) to correct.
-                fb[:copy_h, :copy_w] = frame[:copy_h, :copy_w, [1, 2, 0]]
+                # Channel order is per-bonnet (see chan above): Active-3 needs a
+                # (G,B,R) rotate; the Adafruit bonnet takes straight RGB.
+                fb[:copy_h, :copy_w] = frame[:copy_h, :copy_w, chan]
                 matrix.show()
             time.sleep(period)
     finally:
