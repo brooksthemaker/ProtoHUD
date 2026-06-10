@@ -14819,12 +14819,17 @@ int main(int argc, char* argv[]) {
         // ── Notification log persistence (debounced, ~5s) ─────────────────────
         // Dirty on a new push (next_id) OR a delete/clear (size change).
         if (state.notif_persist && now >= notif_next_save) {
-            const size_t sz = [&]{ std::lock_guard<std::mutex> lk(state.mtx);
-                                   return state.notifs.items.size(); }();
+            size_t   sz;
+            uint32_t next_id;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                sz      = state.notifs.items.size();
+                next_id = state.notifs.next_id;
+            }
             bool dirty = state.notif_dirty.exchange(false);
-            if (state.notifs.next_id != notif_last_saved || sz != notif_last_size || dirty) {
+            if (next_id != notif_last_saved || sz != notif_last_size || dirty) {
                 save_notifs();
-                notif_last_saved = state.notifs.next_id;
+                notif_last_saved = next_id;
                 notif_last_size  = sz;
                 notif_next_save  = now + 5.0;
             }
@@ -15906,7 +15911,13 @@ int main(int argc, char* argv[]) {
                                    tex_usb3, p3 && preview != 3, pip_overlay_cfg3,
                                    xr.display_width(), xr.display_height());
             hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
-            hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
+            {
+                // Toasts draw from (and mark read/dismissed on) the LIVE queue
+                // while worker threads push into it — hold the lock for the
+                // few visible cards so the deque can't reallocate mid-draw.
+                std::lock_guard<std::mutex> lk(state.mtx);
+                hud.draw_toasts(state.notifs, xr.display_width(), xr.display_height());
+            }
         }
         hud.end_nvg_overlay();
 

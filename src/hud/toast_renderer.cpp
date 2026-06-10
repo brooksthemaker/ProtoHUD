@@ -223,14 +223,21 @@ void ToastRenderer::navigate(int delta) {
 
 void ToastRenderer::select(AppState& state) {
     if (focused_id_ == 0) return;
-    for (auto& n : state.notifs.items) {
-        if (n.id != focused_id_) continue;
-        if (action_cursor_ < (int)n.actions.size()) {
-            n.actions[action_cursor_].fn(state);
+    // Worker threads push into the queue under state.mtx, so the lookup +
+    // dismiss must hold it too. The action callback runs after unlocking —
+    // actions are free to take state.mtx themselves.
+    std::function<void(AppState&)> fn;
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        for (auto& n : state.notifs.items) {
+            if (n.id != focused_id_) continue;
+            if (action_cursor_ < (int)n.actions.size())
+                fn = n.actions[action_cursor_].fn;
+            n.dismissed = true;
+            focused_id_    = 0;
+            action_cursor_ = 0;
+            break;
         }
-        n.dismissed = true;
-        focused_id_    = 0;
-        action_cursor_ = 0;
-        return;
     }
+    if (fn) fn(state);
 }
