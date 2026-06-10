@@ -13623,11 +13623,17 @@ int main(int argc, char* argv[]) {
             if (menu.is_open()) menu.navigate(menu.editing_value() ? -1 : +1); }); });
         wireless.on_nav_left ([&]{ post_input([&]{
             if (menu.is_face_editor_open())   return;
+            // Color picker: Left/Right move within the SV square / hue strip /
+            // swatch rows — unless the OSK is up on top (hex entry).
+            if (menu.is_color_picker_open() && !menu.is_keyboard_open())
+                { menu.overlay_move(-1, 0); return; }
             if      (hud.toast_has_focused()) hud.toast_navigate(-1);
             else if (menu.is_open())          menu.back();
         }); });
         wireless.on_nav_right([&]{ post_input([&]{
             if (menu.is_face_editor_open())   return;
+            if (menu.is_color_picker_open() && !menu.is_keyboard_open())
+                { menu.overlay_move(+1, 0); return; }
             if      (hud.toast_has_focused()) hud.toast_navigate(+1);
             else if (menu.is_open())          menu.select();
         }); });
@@ -13664,6 +13670,16 @@ int main(int argc, char* argv[]) {
             else if (a == "bottom_right") menu.set_anchor(MenuAnchor::BottomRight);
             else                          menu.set_anchor(MenuAnchor::TopLeft);
         }
+    }
+
+    // Seed the shared color-picker history ("RRGGBB" strings, newest first).
+    if (cfg.contains("color_history") && cfg["color_history"].is_array()) {
+        std::vector<uint32_t> hist;
+        for (const auto& s : cfg["color_history"])
+            if (s.is_string())
+                hist.push_back(static_cast<uint32_t>(
+                    std::strtoul(s.get<std::string>().c_str(), nullptr, 16)) & 0xFFFFFFu);
+        menu::ColorPicker::set_history(hist);
     }
 
     // Quick (corner/radial) menu style + user-pinned favorites.
@@ -14071,6 +14087,7 @@ int main(int argc, char* argv[]) {
         if (menu.is_face_editor_open())   return;   // editor owns the d-pad
         if      (state.map_overlay.expanded) map_pan(+0.06f, 0);
         else if (menu.is_keyboard_open()) menu.osk_move(-1, 0);
+        else if (menu.is_color_picker_open()) menu.overlay_move(-1, 0);
         else if (landing.active)          bg_lib.prev();
         else if (hud.toast_has_focused()) hud.toast_navigate(-1);
         else if (menu.is_open())          menu.back();
@@ -14079,6 +14096,7 @@ int main(int argc, char* argv[]) {
         if (menu.is_face_editor_open())   return;
         if      (state.map_overlay.expanded) map_pan(-0.06f, 0);
         else if (menu.is_keyboard_open()) menu.osk_move(+1, 0);
+        else if (menu.is_color_picker_open()) menu.overlay_move(+1, 0);
         else if (landing.active)          bg_lib.next();
         else if (hud.toast_has_focused()) hud.toast_navigate(+1);
         else if (menu.is_open())          menu.select();
@@ -14730,6 +14748,17 @@ int main(int argc, char* argv[]) {
             cfg["quick_menu"]["favorites"] = arr;
         }
 
+        // Shared color-picker history ("RRGGBB" strings, newest first).
+        {
+            json arr = json::array();
+            char hx[8];
+            for (uint32_t c : menu::ColorPicker::get_history()) {
+                std::snprintf(hx, sizeof(hx), "%06X", c & 0xFFFFFFu);
+                arr.push_back(hx);
+            }
+            cfg["color_history"] = arr;
+        }
+
         // Persist MPU-9250 enabled state + calibration biases so the menu's
         // "Active" toggle and calibration survive a restart.
         if (mpu9250.is_running() || mpu9250.is_enabled() || cfg.contains("mpu9250")) {
@@ -15160,16 +15189,23 @@ int main(int argc, char* argv[]) {
             // which would cancel or paint on every arrow press. The editor
             // polls Left/Right directly for cursor_step, so skip the menu
             // forwarding while the editor owns the keyboard. Enter / Backspace
-            // still work (paint / cancel).
+            // still work (paint / cancel). The color picker wants Left/Right
+            // as horizontal movement (SV square / hue strip / swatch rows),
+            // routed through overlay_move instead of back/select.
             const bool editor_up = menu.is_face_editor_open();
+            const bool cp_up     = menu.is_color_picker_open();
+            if (cp_up) {
+                if (key_pressed(ImGuiKey_LeftArrow))  menu.overlay_move(-1, 0);
+                if (key_pressed(ImGuiKey_RightArrow)) menu.overlay_move(+1, 0);
+            }
             if (key_pressed(ImGuiKey_Enter)) {
                 if (ImGui::GetIO().KeyCtrl) menu.secondary();   // Ctrl+Select → settings
                 else                        menu.select();
-            } else if (!editor_up && key_pressed(ImGuiKey_RightArrow)) {
+            } else if (!editor_up && !cp_up && key_pressed(ImGuiKey_RightArrow)) {
                 menu.select();
             }
             if (key_pressed(ImGuiKey_Backspace) ||
-                (!editor_up && key_pressed(ImGuiKey_LeftArrow)))  menu.back();
+                (!editor_up && !cp_up && key_pressed(ImGuiKey_LeftArrow)))  menu.back();
             // Deep-menu tab switching (Tab / Shift+Tab).
             if (menu.is_deep_open() && key_pressed(ImGuiKey_Tab)) {
                 if (ImGui::GetIO().KeyShift) menu.prev_tab(); else menu.next_tab();
@@ -16043,9 +16079,11 @@ int main(int argc, char* argv[]) {
         // time (render_menu_overlay). The radial wheel is positioned in display
         // coords, so it opts out and stays a single instance.
         bool menu_dup = false;
-        if (menu.is_deep_open() || menu.is_keyboard_open()) {
-            // Keyboard takes over full-screen (draws only the OSK), so this also
-            // covers text entry opened from the corner / radial quick menu.
+        if (menu.is_deep_open() || menu.is_keyboard_open()
+            || menu.is_color_picker_open()) {
+            // Keyboard / color picker take over full-screen, so this also
+            // covers text entry and color editing opened from the corner /
+            // radial quick menu.
             menu.draw_fullscreen(xr.eye_width(), xr.eye_height());
             menu_dup = true;
         } else if (menu.is_open() && menu.quick_style() == QuickStyle::Radial

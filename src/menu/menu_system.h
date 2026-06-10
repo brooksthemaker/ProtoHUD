@@ -10,6 +10,7 @@
 #include "overlay.h"
 #include "file_picker.h"
 #include "face_editor.h"
+#include "color_picker.h"
 
 // ── Item types ────────────────────────────────────────────────────────────────
 
@@ -18,7 +19,7 @@ enum class MenuItemType {
     SUBMENU,       // descends into children
     TOGGLE,        // flips a bool; menu stays open; shows ON/OFF indicator
     SLIDER,        // enters numeric edit mode; knob adjusts value
-    COLOR_PICKER,  // enters R/G/B channel edit mode
+    COLOR_PICKER,  // opens the unified color-picker overlay (menu::ColorPicker)
     FACE_PICKER,   // radial dot selector for face index
     NOTIF_LOG,     // scrollable notification history list
 };
@@ -241,11 +242,11 @@ public:
         open_            = false;
         deep_open_       = false;
         in_edit_mode_    = false;
-        in_channel_edit_ = false;
         osk_active_      = false;
         osk_commit_      = nullptr;
         file_picker_.close();
         face_editor_.close();
+        color_picker_.close();
         overlay_ = nullptr;
         stack_.clear();
     }
@@ -313,6 +314,16 @@ public:
     bool is_face_editor_open() const { return face_editor_.is_open(); }
     menu::FaceEditor& face_editor() { return face_editor_; }
 
+    // ── Color picker ────────────────────────────────────────────────────────────
+    // Selecting any COLOR_PICKER item opens the unified picker overlay (see
+    // color_picker.h). Same routing as the other overlays; input handlers use
+    // overlay_move() to forward horizontal d-pad / arrow presses (SV square,
+    // hue strip, swatch rows) while it's open.
+    bool is_color_picker_open() const { return color_picker_.is_open(); }
+    void overlay_move(int dx, int dy) {
+        if (overlay_ && overlay_->is_open()) overlay_->move(dx, dy);
+    }
+
     int  current_index() const { return cursor_; }
     int  menu_depth()    const { return static_cast<int>(stack_.size()); }
     const std::string& current_label() const;
@@ -361,14 +372,10 @@ private:
     void emit_detents();
     void emit_detents_override(int count);
 
-    // ── edit-mode state ───────────────────────────────────────────────────────
+    // ── edit-mode state (SLIDER / FACE_PICKER; colors use the overlay) ────────
     bool  in_edit_mode_    = false;
     float edit_float_      = 0.f;     // working copy for SLIDER
-    int   edit_channel_    = 0;       // 0=R 1=G 2=B for COLOR_PICKER
-    bool  in_channel_edit_ = false;   // true when knob adjusts channel value
-    float edit_r_ = 0.f, edit_g_ = 0.f, edit_b_ = 0.f;
-    float orig_float_ = 0.f;                              // pre-edit value for SLIDER cancel/restore
-    float orig_r_ = 0.f, orig_g_ = 0.f, orig_b_ = 0.f;  // pre-edit RGB for COLOR_PICKER cancel/restore
+    float orig_float_ = 0.f;          // pre-edit value for cancel/restore
 
     // ── deep (full-screen) menu state ───────────────────────────────────────────
     void build_deep_tabs();     // derive tabs from root_items_
@@ -395,6 +402,9 @@ private:
 
     // Face editor overlay (pixel-art authoring) — same overlay pattern.
     menu::FaceEditor face_editor_;
+
+    // Unified color picker overlay — opened by any COLOR_PICKER item.
+    menu::ColorPicker color_picker_;
 
     // Active full-screen overlay (one of the members above), or nullptr.
     // navigate/select/back/draw_fullscreen dispatch through this instead of

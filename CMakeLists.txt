@@ -205,6 +205,7 @@ set(SOURCES
     src/menu/menu_system.cpp
     src/menu/file_picker.cpp
     src/menu/face_editor.cpp
+    src/menu/color_picker.cpp
     src/profile_manager.cpp
     src/vitrue/xr_display.cpp
     src/vitrue/timewarp.cpp
