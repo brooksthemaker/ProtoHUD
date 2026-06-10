@@ -7,14 +7,17 @@ ground.
 
 ## Domains
 
-Three 5 V domains off one input, plus 3.3 V derived on the CM5:
+Four 5 V-class domains off one input, plus a **local 3.3 V** rail. (The CM5's
+own internal 3V3 is no longer the sensor supply — sensors moved to the RP2354B
+brain, fed by `+3V3_RP`.)
 
 | Rail | Feeds | Why separate |
 |------|-------|--------------|
-| **5 V · CM5** | CM5 + USB peripherals | clean, steady; must not brown out |
-| **5 V · HUB75 panels** | J2 panel VCC | huge, spiky current — own copper + bulk caps |
-| **5 V · WS2812** | J4 LED VCC | fused; LED inrush/noise off the CM5 rail |
-| **3.3 V** (from CM5) | I²C sensors + expanders | low draw, CM5 supplies it |
+| **5 V · CM5** (`+5V`) | CM5 + USB hub/peripherals + buffers' B-side | clean, steady; must not brown out |
+| **5 V · HUB75 panels** (`+5V_PANEL`) | J2 panel VCC | huge, spiky current — own copper + bulk caps |
+| **5 V · WS2812** (`+5V_LED`) | J4 LED VCC | fused; LED inrush/noise off the CM5 rail |
+| **5–6 V · servos** (`+V_SERVO`) | J20–J27 servo V+ | stall/inrush surges — own fused rail + bulk caps |
+| **3.3 V · local** (`+3V3_RP`) | RP2354B + I²C sensors + buffers' A-side | LDO/buck off 5 V; isolates MCU/sensors from CM5 |
 
 ```mermaid
 flowchart TB
@@ -27,38 +30,43 @@ flowchart TB
     BUCK ==>|"5 V umbilical (≤24 A!)<br/>fat/short + remote sense"| J1["J1 · 5 V in (helmet)<br/>5 V TVS + big bulk caps"]:::pwr
     J1 --> BUS["5 V distribution (common GND)<br/>star + bulk caps"]:::pwr
 
-    BUS -->|"≥ 5 A"| CM5["CM5"]:::cm5
-    CM5 --> R33["3.3 V (CM5 internal LDO)<br/>sensors ~47 mA (code)"]:::cm5
-    R33 --> SENS["BNO055 12 · MPU9250 4 ·<br/>MPR121 30 · BH1750 1 mA (code)"]:::dir
-    R33 -. expanders .-> EXP["MCP23017 (+ LED loads)"]:::dir
+    BUS -->|"≥ 5 A"| CM5["CM5 (HUB75 + cams + USB)"]:::cm5
+    BUS -->|"LDO/buck"| R33["+3V3_RP (local)<br/>RP2354B + sensors"]:::pwr
+    R33 --> RP["RP2354B I/O MCU"]:::rp
+    RP --> SENS["I²C sensors: BNO055 12 · MPU9250 4 ·<br/>MPR121 30 · BH1750 1 mA (code)"]:::dir
 
     BUS -->|"fused, high-current"| HUB["HUB75 panel rail → J2<br/>bulk caps at connector"]:::load
     BUS -->|"fused"| LED["WS2812 rail → J4"]:::load
-    CM5 -->|"USB VBUS"| USB["USB hub → RP2350 audio /<br/>knob / LoRa / VITURE / cams"]:::usb
+    BUS -->|"fused (5–6 V)"| SRV["servo rail → J20–J27<br/>bulk caps"]:::load
+    CM5 -->|"USB VBUS"| USB["USB hub → RP2354B (CDC) /<br/>RP2350 audio / knob / LoRa / VITURE / cams"]:::usb
 
     BUS -. tap .-> INA["INA219 ×N (optional)<br/>per-rail telemetry → HUD"]:::opt
 
     classDef pwr  fill:#fde2c4,stroke:#c9772a,color:#000;
     classDef cm5  fill:#cfe3ff,stroke:#2a5bc9,color:#000,font-weight:bold;
+    classDef rp   fill:#cfeaff,stroke:#1f8fc9,color:#000,font-weight:bold;
     classDef load fill:#e8e8e8,stroke:#666,color:#000;
     classDef dir  fill:#d6f5d6,stroke:#2a9d3a,color:#000;
     classDef usb  fill:#ece0ff,stroke:#7a3ac9,color:#000;
     classDef opt  fill:#fff3b0,stroke:#b59000,color:#000;
 ```
 
-## Budget — 3.3 V rail (from CM5)
+## Budget — 3.3 V rail (`+3V3_RP`, local LDO/buck off 5 V)
 
 | Load | Typical | Source |
 |------|--------:|--------|
+| RP2354B (cores + IO + USB) | ~30–50 mA | datasheet-typical |
 | BNO055 IMU | 12 mA | (code) |
 | MPU9250 IMU | 4 mA | (code) |
 | MPR121 boop | 30 mA | (code) |
 | BH1750 light | 1 mA | (code) |
-| MCP23017 expander(s) | ~1 mA each | datasheet |
-| **3.3 V subtotal** | **~50 mA** | well within CM5's 3V3 |
+| 74AHCT245/'125 A-side + pull-ups | ~5 mA | — |
+| MCP23017 expander(s), if fitted | ~1 mA each | datasheet |
+| **3.3 V subtotal** | **~85–105 mA** | well within a 500 mA LDO |
 
-> LEDs driven *by* an expander draw from **5 V**, not this rail — only the chip
-> logic is on 3V3. Add a local 3.3 V buck only if the sensor set grows a lot.
+> Spec the `+3V3_RP` regulator for **≥ 500 mA** for headroom (LED-logic A-side,
+> expanders, future sensors). LEDs/servos draw from **5 V / +V_SERVO**, not this
+> rail — only chip logic sits on 3V3.
 
 ## Budget — 5 V rails
 
@@ -89,23 +97,44 @@ Per 64×32 P2.5 panel @ 5 V:
 | 30 | 0.6 A | 1.8 A |
 | 60 | 1.2 A | 3.6 A |
 
-### MAX7219 (if used instead of HUB75)
-`rail5 += modules × 80 mA` **(code)** at full brightness. An 8-module face ≈
-0.64 A — trivial next to HUB75.
+### MAX7219 (RP2354B side, alongside HUB75)
+`rail5 += modules × 80 mA` **(code)** at full brightness. An 8-module accent
+matrix ≈ 0.64 A — trivial next to HUB75. Driven by the RP2354B, so it can run
+*with* HUB75, not instead of it.
 
-## Worked total (4-panel HUB75 + full sensors + 30 WS2812 + USB)
+### Servos (`+V_SERVO`, 5–6 V)
+Hobby-servo current is load-dependent and **spiky**:
 
-| Rail | Typical | Full-white peak |
-|------|--------:|----------------:|
+| State (per micro/standard servo) | Current |
+|---|--:|
+| Idle / holding light | ~0.1–0.3 A |
+| Moving under load | ~0.5–1.0 A |
+| **Stall (worst case)** | ~1.5–2.5 A |
+
+| 8 servos | Typical (moving, ~0.5 A) | Worst (simultaneous stall) |
+|---|--:|--:|
+| `+V_SERVO` | ~2–4 A | ~12–20 A |
+
+> Servos rarely all stall at once, but size the rail + fuse + bulk caps for a
+> healthy fraction of worst-case (e.g. **≥ 5–8 A** for 8 micro servos) and add
+> ≥ 1000 µF bulk so a move-transient doesn't sag logic. Big/standard servos:
+> budget per the actual datasheet stall current.
+
+## Worked total (4-panel HUB75 + sensors + 30 WS2812 + 8 servos + USB)
+
+| Rail | Typical | Peak |
+|------|--------:|-----:|
 | CM5 + USB | ~4.5 A | ~6.5 A |
-| HUB75 | ~5 A | ~16 A |
-| WS2812 | ~0.6 A | ~1.8 A |
-| 3.3 V (≈0.05 A → ~0.03 A@5V in) | — | — |
-| **Total @ 5 V** | **~10 A (≈50 W)** | **~24 A (≈120 W)** |
+| HUB75 (`+5V_PANEL`) | ~5 A | ~16 A (full white) |
+| WS2812 (`+5V_LED`) | ~0.6 A | ~1.8 A |
+| Servos (`+V_SERVO`) | ~2–4 A | ~5–8 A (sized) |
+| 3.3 V (`+3V3_RP`, ≈0.1 A → ~0.07 A@5V in) | — | — |
+| **Total @ 5 V** | **~12–14 A (≈60–70 W)** | **~28–32 A (≈140–160 W)** |
 
-**Recommendation:** size the 5 V supply for **≥ 10–12 A (50–60 W)** with a
-software brightness cap, or **≥ 20 A** for uncapped full-white panels. Give
-HUB75 its own high-current feed; don't push 16 A through the CM5 rail.
+**Recommendation:** size the 5 V supply for **≥ 12–15 A (60–75 W)** with a
+software brightness cap, or **≥ 25–30 A** for uncapped full-white panels +
+active servos. Give HUB75 and the servo rail their own high-current feeds; don't
+push panel/servo surges through the CM5 rail.
 
 ## Power delivery — external 40 V→5 V unit, 5 V to the helmet (selected)
 
@@ -238,8 +267,10 @@ Split across the two units:
 - **Carrier / helmet (5 V at J1):** 5 V-class reverse-polarity FET + TVS
   (SMBJ5.0A) + **large bulk capacitance** at the input to absorb umbilical drop
   and spikes (REQ R2.1). If using remote sense, bring the sense pair to J1.
-- **Per rail:** fuse the HUB75 and WS2812 rails (R2.3/R2.4); consider **e-fuses**
-  (TPS259x, REQ N3) for latch-off short protection.
+- **Per rail:** fuse the HUB75, WS2812, **and servo** rails (R2.3/R2.4/R2.5);
+  consider **e-fuses** (TPS259x, REQ N2) for latch-off short protection —
+  servos short easily when a horn jams. The `+3V3_RP` LDO/buck has its own
+  current limit.
 - **Bulk capacitance:** ≥ 1000 µF at the HUB75 connector, 470–1000 µF on CM5 and
   WS2812 rails — LED/panel rows switch hard.
 - **Inrush:** big bulk + panels = inrush; consider soft-start / NTC on the panel
