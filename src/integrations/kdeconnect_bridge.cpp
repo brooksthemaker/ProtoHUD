@@ -360,14 +360,17 @@ std::string KdeConnectBridge::active_device_id() const {
 }
 
 void KdeConnectBridge::set_app_blocklist(std::string csv) {
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
     cfg_.app_blocklist = std::move(csv);
 }
 
 void KdeConnectBridge::set_message_apps(std::string csv) {
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
     cfg_.message_apps = std::move(csv);
 }
 
 void KdeConnectBridge::set_ignore_list(std::string csv) {
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
     cfg_.ignore_list = std::move(csv);
 }
 
@@ -454,13 +457,19 @@ KdeConnectBridge::notif_roster() const {
 
 bool KdeConnectBridge::is_ignored(const std::string& needle) const {
     if (needle.empty()) return false;
-    for (const auto& e : split_csv(cfg_.ignore_list))
+    std::string ign;
+    {
+        std::lock_guard<std::mutex> lk(cfg_mtx_);
+        ign = cfg_.ignore_list;
+    }
+    for (const auto& e : split_csv(ign))
         if (e == needle || icontains(needle, e)) return true;
     return false;
 }
 
 bool KdeConnectBridge::toggle_ignore(const std::string& needle) {
     if (needle.empty()) return false;
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
     auto items = split_csv(cfg_.ignore_list);
     auto it = std::find(items.begin(), items.end(), needle);
     bool now_ignored;
@@ -690,14 +699,23 @@ void KdeConnectBridge::worker() {
         std::string text     = call_get_str_prop(conn, obj.c_str(),
                                                  kNotificationIface, "text");
 
+        // Snapshot the CSV filters — the menu thread edits these live.
+        std::string f_block, f_msg, f_ign;
+        {
+            std::lock_guard<std::mutex> lk(cfg_mtx_);
+            f_block = cfg_.app_blocklist;
+            f_msg   = cfg_.message_apps;
+            f_ign   = cfg_.ignore_list;
+        }
+
         // Blocklist (case-insensitive substring match on appName).
-        for (const auto& b : split_csv(cfg_.app_blocklist))
+        for (const auto& b : split_csv(f_block))
             if (icontains(app_name, b)) return;
 
         // Chat / DM apps get a larger toast with the sender as the title and
         // the message wrapped below. (Computed early — also gates "repliable".)
         bool is_msg = false;
-        for (const auto& m : split_csv(cfg_.message_apps))
+        for (const auto& m : split_csv(f_msg))
             if (icontains(app_name, m)) { is_msg = true; break; }
 
         // Record into the roster (app → senders) for the grouped ignore picker.
@@ -715,7 +733,7 @@ void KdeConnectBridge::worker() {
 
         // Ignore list — mute noisy servers / group chats by name (matched
         // against the notification's title + text + ticker).
-        for (const auto& ig : split_csv(cfg_.ignore_list))
+        for (const auto& ig : split_csv(f_ign))
             if (icontains(title, ig) || icontains(text, ig) || icontains(ticker, ig)) return;
 
         Notification n;
@@ -900,6 +918,13 @@ void KdeConnectBridge::worker() {
             "/modules/kdeconnect/devices/" + current_dev_id + "/notifications";
         auto ids = call_get_str_array(conn, np.c_str(), kNotifPluginIface,
                                       "activeNotifications");
+        // Snapshot the CSV filters once for the batch — menu edits them live.
+        std::string f_block, f_msg;
+        {
+            std::lock_guard<std::mutex> lk(cfg_mtx_);
+            f_block = cfg_.app_blocklist;
+            f_msg   = cfg_.message_apps;
+        }
         for (const auto& id : ids) {
             { std::lock_guard<std::mutex> lk(seen_mtx_); seen_.insert(id); }  // don't re-toast
             const std::string obj = np + "/" + id;
@@ -907,11 +932,11 @@ void KdeConnectBridge::worker() {
             std::string title = call_get_str_prop(conn, obj.c_str(), kNotificationIface, "title");
             std::string text  = call_get_str_prop(conn, obj.c_str(), kNotificationIface, "text");
             bool block = false;
-            for (const auto& b : split_csv(cfg_.app_blocklist))
+            for (const auto& b : split_csv(f_block))
                 if (icontains(app, b)) { block = true; break; }
             if (block) continue;
             bool is_msg = false;
-            for (const auto& m : split_csv(cfg_.message_apps))
+            for (const auto& m : split_csv(f_msg))
                 if (icontains(app, m)) { is_msg = true; break; }
             const std::string A = app.empty() ? std::string("Phone") : app;
             const std::string S = !title.empty() ? title : A;

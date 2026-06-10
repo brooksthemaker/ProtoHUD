@@ -193,19 +193,25 @@ public:
     void set_usb3_ctrl(uint32_t id, int32_t value);
 
     // ── USB config access (for menu read-back and config-save persistence) ────
+    // Writes hold the per-camera cap mutex: the capture thread reads the cfg
+    // (device path string) under that mutex for its reconnect check, and a
+    // concurrent std::string assign vs. read is UB.
     void update_usb1_cfg(const UsbCamConfig& c) {
+        std::lock_guard<std::mutex> lk(usb1_cap_mtx_);
         usb1_cfg_ = c;
         usb1_flip_                   = c.flip;
         usb1_auto_brightness_        = c.auto_brightness;
         usb1_auto_brightness_target_ = c.auto_brightness_target;
     }
     void update_usb2_cfg(const UsbCamConfig& c) {
+        std::lock_guard<std::mutex> lk(usb2_cap_mtx_);
         usb2_cfg_ = c;
         usb2_flip_                   = c.flip;
         usb2_auto_brightness_        = c.auto_brightness;
         usb2_auto_brightness_target_ = c.auto_brightness_target;
     }
     void update_usb3_cfg(const UsbCamConfig& c) {
+        std::lock_guard<std::mutex> lk(usb3_cap_mtx_);
         usb3_cfg_ = c;
         usb3_flip_                   = c.flip;
         usb3_auto_brightness_        = c.auto_brightness;

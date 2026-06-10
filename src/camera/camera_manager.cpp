@@ -506,8 +506,15 @@ void CameraManager::usb_capture_thread(int cam) {
         }
 
         // Auto-reconnect: periodically reopen this camera when enabled.
+        // The device-path read takes the cap mutex — update_usbN_cfg can swap
+        // the string from the menu thread at any time.
         auto now = std::chrono::steady_clock::now();
-        if (reconnect_ref->load() && !ok_flag->load() && !cfg_ref->device.empty() &&
+        bool dev_configured;
+        {
+            std::lock_guard<std::mutex> lk(*cap_mtx);
+            dev_configured = !cfg_ref->device.empty();
+        }
+        if (reconnect_ref->load() && !ok_flag->load() && dev_configured &&
             now - *last_retry >= kReconnectInterval) {
             *last_retry = now;
             consec = 0; bad = 0;  // reset counters for the new attempt
