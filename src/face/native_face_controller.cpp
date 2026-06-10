@@ -192,6 +192,27 @@ void NativeFaceController::render_thread() {
         {
             std::lock_guard<std::mutex> lk(state_mtx_);
 
+            // Forward the latest cross-thread drive inputs (stored lock-free by
+            // set_audio_drive / set_motion so the audio and IMU threads never
+            // block on this tick-long lock) into each panel.
+            {
+                const double vol   = audio_volume_.load(std::memory_order_relaxed);
+                const double mouth = audio_mouth_.load(std::memory_order_relaxed);
+                MotionInput mi;
+                mi.heading_deg = motion_heading_.load(std::memory_order_relaxed);
+                mi.yaw_rate    = motion_yaw_rate_.load(std::memory_order_relaxed);
+                mi.pitch_deg   = motion_pitch_.load(std::memory_order_relaxed);
+                mi.roll_deg    = motion_roll_.load(std::memory_order_relaxed);
+                mi.accel_g     = motion_accel_.load(std::memory_order_relaxed);
+                for (auto& pn : panels_) {
+                    if (pn.state) pn.state->set_audio(vol, mouth);
+                    if (pn.particles) {
+                        pn.particles->set_audio(vol);
+                        pn.particles->set_motion(mi);
+                    }
+                }
+            }
+
             // Advance the procedural eye animation (if one is playing). When the
             // timer runs out the panels fall back to the normal face render.
             const bool eye_active = eye_anim_timer_ > 0.0;
@@ -400,7 +421,7 @@ bool NativeFaceController::latest_frame(cv::Mat& out) const {
 // ── Commands (mutate state under state_mtx_) ─────────────────────────────────
 
 void NativeFaceController::set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     char spec[32];
     std::snprintf(spec, sizeof(spec), "solid:%u,%u,%u", r, g, b);
     for (auto& pn : panels_)
@@ -408,74 +429,110 @@ void NativeFaceController::set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t) {
             pn.material = std::make_shared<SolidMaterial>(r, g, b, pn.cfg.w, pn.cfg.h);
             pn.material_spec = spec;
         }
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::set_effect(uint8_t effect_id, uint8_t, uint8_t) {
     if (!cfg_.effects_enabled) return;       // gated by RenderConfig (see face_config.h)
     nlohmann::json cfg = effect_cfg_for_id(effect_id);
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.particles) { pn.particles->set_effect(cfg); pn.particles_spec = cfg; }
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::set_effect_json(const nlohmann::json& spec) {
     if (!cfg_.effects_enabled) return;
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.particles) { pn.particles->set_effect(spec); pn.particles_spec = spec; }
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::set_face(uint8_t face_id) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_expression_by_index(face_id);
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::play_gif(uint8_t gif_id) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
-
-    // Prefer the slot manifest binding; fall back to the sorted scan when the
-    // slot is unbound or its bound file has been removed from gifs_dir.
+    // Resolve the path and per-panel player sizes under the lock, but decode
+    // OUTSIDE it: a full GIF decode takes tens of ms and the render thread
+    // holds state_mtx_ for every tick, so decoding under the lock froze both
+    // the face and the calling thread.
     std::string path;
-    if (gif_id < gif_slots_.size() && !gif_slots_[gif_id].empty()) {
-        const std::string p = cfg_.gifs_dir + "/" + gif_slots_[gif_id];
-        std::error_code ec;
-        if (std::filesystem::exists(p, ec)) path = p;
-    }
-    if (path.empty()) {
-        if (gif_id >= gif_files_.size()) return;
-        path = gif_files_[gif_id];
+    std::vector<std::pair<int, int>> sizes;   // (w,h) per panel; (0,0) = no player
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+
+        // Prefer the slot manifest binding; fall back to the sorted scan when the
+        // slot is unbound or its bound file has been removed from gifs_dir.
+        if (gif_id < gif_slots_.size() && !gif_slots_[gif_id].empty()) {
+            const std::string p = cfg_.gifs_dir + "/" + gif_slots_[gif_id];
+            std::error_code ec;
+            if (std::filesystem::exists(p, ec)) path = p;
+        }
+        if (path.empty()) {
+            if (gif_id >= gif_files_.size()) return;
+            path = gif_files_[gif_id];
+        }
+
+        sizes.reserve(panels_.size());
+        for (const auto& pn : panels_)
+            sizes.emplace_back(pn.gif ? pn.gif->width()  : 0,
+                               pn.gif ? pn.gif->height() : 0);
     }
 
-    for (auto& pn : panels_)
-        if (pn.gif) {
-            pn.gif->load(path);
-            pn.gif_release_timer = gif_release_;   // 0 = loop forever
-        }
+    // Decode one player per panel (matches the old per-panel load) without the lock.
+    std::vector<std::unique_ptr<GifPlayer>> decoded(sizes.size());
+    for (size_t i = 0; i < sizes.size(); ++i) {
+        if (sizes[i].first <= 0 || sizes[i].second <= 0) continue;
+        decoded[i] = std::make_unique<GifPlayer>(sizes[i].first, sizes[i].second);
+        decoded[i]->load(path);
+    }
+
+    // Swap the freshly-decoded players in under the lock (cheap pointer moves).
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (size_t i = 0; i < panels_.size() && i < decoded.size(); ++i) {
+        if (!decoded[i] || !panels_[i].gif) continue;
+        panels_[i].gif = std::move(decoded[i]);
+        panels_[i].gif_release_timer = gif_release_;   // 0 = loop forever
+    }
 }
 
 void NativeFaceController::set_brightness(uint8_t value) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_brightness(value);
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::set_palette(uint8_t palette_id) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     apply_material_all(preset_material(palette_id));
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::set_menu_item(uint8_t menu_index, uint8_t value) {
     if (menu_index != 8) return;   // 8 = material colour preset (matches Protoface)
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     apply_material_all(preset_material(value));
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::release_control() {
@@ -485,14 +542,18 @@ void NativeFaceController::release_control() {
 }
 
 void NativeFaceController::save_config() {
-    std::lock_guard<std::mutex> lk(state_mtx_);
-    save_state_locked();
+    std::unique_lock<std::mutex> lk(state_mtx_);
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::set_material_spec(const std::string& spec) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     apply_material_all(spec);
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::apply_material_all(const std::string& name) {
@@ -508,8 +569,12 @@ void NativeFaceController::apply_material_all(const std::string& name) {
 
 // ── Persistence (auto-saved live look) ───────────────────────────────────────
 
-void NativeFaceController::save_state_locked() const {
-    if (cfg_.state_path.empty()) return;
+// Serialize the auto-saved look to JSON text. Caller holds state_mtx_; the
+// actual file write happens in write_state_file AFTER the lock is released —
+// disk I/O under state_mtx_ stalled the render thread on every set_face /
+// set_effect / set_brightness.
+std::string NativeFaceController::serialize_state_locked() const {
+    if (cfg_.state_path.empty()) return {};
     nlohmann::json j;
     for (const auto& pn : panels_)
         if (pn.state) { j["brightness"] = pn.state->brightness(); break; }
@@ -524,9 +589,13 @@ void NativeFaceController::save_state_locked() const {
     }
     j["panels"] = jp;
     j["gif_slots"] = gif_slots_;
+    return j.dump(2);
+}
 
+void NativeFaceController::write_state_file(const std::string& json_text) const {
+    if (json_text.empty() || cfg_.state_path.empty()) return;
     const std::string tmp = cfg_.state_path + ".tmp";
-    { std::ofstream f(tmp); if (!f) return; f << j.dump(2); }
+    { std::ofstream f(tmp); if (!f) return; f << json_text; }
     std::error_code ec;
     std::filesystem::rename(tmp, cfg_.state_path, ec);   // atomic replace
 }
@@ -627,18 +696,22 @@ std::string NativeFaceController::gif_slot(uint8_t slot) const {
 }
 
 void NativeFaceController::bind_gif_slot(uint8_t slot, const std::string& filename) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     if (slot >= gif_slots_.size()) return;
     // Always store a basename so the manifest survives folder relocation.
     gif_slots_[slot] = std::filesystem::path(filename).filename().string();
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::clear_gif_slot(uint8_t slot) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     if (slot >= gif_slots_.size()) return;
     gif_slots_[slot].clear();
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 // ── Face image management ─────────────────────────────────────────────────────
@@ -789,12 +862,14 @@ void NativeFaceController::clear_face_image(const std::string& expression) {
 }
 
 void NativeFaceController::set_face_by_name(const std::string& expression) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_expression(expression);
     current_expression_ = expression;
     apply_expression_effect_locked(expression);
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 std::string NativeFaceController::current_expression() const {
@@ -806,7 +881,7 @@ void NativeFaceController::next_expression() { cycle_expression(+1); }
 void NativeFaceController::prev_expression() { cycle_expression(-1); }
 
 void NativeFaceController::cycle_expression(int dir) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
+    std::unique_lock<std::mutex> lk(state_mtx_);
     // Advance the first real panel as the "master" index, read back its new
     // expression name, then mirror it to every panel so multi-panel faces stay
     // in sync (each FaceState tracks its own index; always stepping the same
@@ -824,7 +899,9 @@ void NativeFaceController::cycle_expression(int dir) {
         if (pn.state) pn.state->set_expression(name);
     current_expression_ = name;
     apply_expression_effect_locked(name);
-    save_state_locked();
+    const std::string snap = serialize_state_locked();
+    lk.unlock();
+    write_state_file(snap);
 }
 
 void NativeFaceController::set_expression_effects(bool enabled) {
@@ -929,24 +1006,23 @@ void NativeFaceController::set_glitch(const GlitchConfig& cfg) {
 }
 
 void NativeFaceController::set_audio_drive(double volume, double mouth_open) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
-    for (auto& pn : panels_) {
-        if (pn.state)     pn.state->set_audio(volume, mouth_open);
-        if (pn.particles) pn.particles->set_audio(volume);   // audio-reactive layers
-    }
-    // Transient — no persistence on every audio frame.
+    // Called per audio period from the audio thread. Lock-free on purpose:
+    // the render thread holds state_mtx_ for its whole compositing pass, so
+    // taking it here stalled the audio thread for milliseconds. The render
+    // thread forwards these into the panels at the top of every tick.
+    audio_volume_.store(volume, std::memory_order_relaxed);
+    audio_mouth_.store(mouth_open, std::memory_order_relaxed);
 }
 
 void NativeFaceController::set_motion(double heading_deg, double yaw_rate,
                                       double pitch_deg, double roll_deg,
                                       double accel_g) {
-    MotionInput m;
-    m.heading_deg = heading_deg; m.yaw_rate = yaw_rate;
-    m.pitch_deg = pitch_deg; m.roll_deg = roll_deg; m.accel_g = accel_g;
-    std::lock_guard<std::mutex> lk(state_mtx_);
-    for (auto& pn : panels_)
-        if (pn.particles) pn.particles->set_motion(m);
-    // Transient — no persistence on every motion frame.
+    // Per-frame IMU input — same lock-free handoff as set_audio_drive.
+    motion_heading_.store(heading_deg, std::memory_order_relaxed);
+    motion_yaw_rate_.store(yaw_rate, std::memory_order_relaxed);
+    motion_pitch_.store(pitch_deg, std::memory_order_relaxed);
+    motion_roll_.store(roll_deg, std::memory_order_relaxed);
+    motion_accel_.store(accel_g, std::memory_order_relaxed);
 }
 
 void NativeFaceController::set_mouth_shape(const std::string& shape) {
