@@ -5727,6 +5727,20 @@ static std::vector<MenuItem> build_menu(
             gi.push_back(toggle("Glitch",
                 [G]{ return G->enabled; },
                 [G, pf_anim_push](bool v){ G->enabled = v; if (pf_anim_push) pf_anim_push(); }));
+            {   // Curated looks — applying one overwrites every slider below.
+                std::vector<MenuItem> pi;
+                for (const auto& [pname, pcfg] : face::GlitchConfig::presets()) {
+                    const face::GlitchConfig pc = pcfg;
+                    pi.push_back(leaf(pname, [G, pc, pf_anim_push]{
+                        *G = pc;
+                        if (pf_anim_push) pf_anim_push();
+                    }));
+                }
+                gi.push_back(with_desc(submenu("Presets", std::move(pi)),
+                    "Curated glitch looks (vhs, datamosh, signal_loss, haunted, "
+                    "subtle, meltdown). Selecting one enables the glitch and sets "
+                    "every slider; tweak from there."));
+            }
             gi.push_back(slider("Intensity", 0.f, 200.f, 5.f, "%",
                 [G]{ return static_cast<float>(G->intensity * 100.0); },
                 [G, pf_anim_push](float v){ G->intensity = v / 100.0; if (pf_anim_push) pf_anim_push(); }));
