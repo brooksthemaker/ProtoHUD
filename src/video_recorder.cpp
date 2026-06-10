@@ -2,6 +2,7 @@
 
 #include "app_state.h"
 #include "gl_utils.h"
+#include "gl_async_read.h"
 #include "vitrue/xr_display.h"
 
 #include <opencv2/core.hpp>
@@ -25,20 +26,6 @@ namespace fs = std::filesystem;
 using clock_t_ = std::chrono::steady_clock;
 
 namespace {
-
-// Read an FBO into a top-down RGBA buffer (OpenGL is bottom-up). Render thread only.
-std::vector<uint8_t> read_fbo_rgba(gl::Fbo& fbo) {
-    const int w = fbo.w, h = fbo.h;
-    std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4);
-    fbo.bind();
-    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    fbo.unbind();
-    for (int row = 0; row < h / 2; ++row)
-        std::swap_ranges(px.begin() + static_cast<size_t>(row) * w * 4,
-                         px.begin() + static_cast<size_t>(row + 1) * w * 4,
-                         px.begin() + static_cast<size_t>(h - 1 - row) * w * 4);
-    return px;
-}
 
 std::string now_stamp() {
     auto tt = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -69,7 +56,14 @@ constexpr size_t kMaxQueue = 8;  // frames buffered before the encoder; drop old
 
 struct VideoRecorder::Impl {
     // ── Encode worker ──────────────────────────────────────────────────────────
+    // Frames carry bottom-up rows straight from the GPU readback; the worker
+    // flips while converting so the render thread never touches the pixels.
     struct Frame { std::vector<uint8_t> rgba; int w = 0, h = 0; int stream = 0; };
+
+    // Async double-buffered FBO readback, one per eye stream. A synchronous
+    // glReadPixels here drained the GPU pipeline per eye per capture tick —
+    // recording "Both" at 30fps was 60 full stalls a second.
+    gl::AsyncFboReader readers[2];
 
     std::thread             worker;
     std::mutex              qmtx;
@@ -106,6 +100,8 @@ struct VideoRecorder::Impl {
 
     // Idempotent: stop the encode worker (draining queued frames) and finalise
     // any open writers. Safe to call more than once and from the dtor.
+    // The PBOs are released only on the first (explicit, render-thread) call —
+    // by the time the dtor runs at scope exit the GL context is already gone.
     void stop() {
         bool was_running = false;
         {
@@ -115,6 +111,7 @@ struct VideoRecorder::Impl {
         if (was_running) qcv.notify_all();
         if (worker.joinable()) worker.join();
         close_writers();
+        if (was_running) { readers[0].release(); readers[1].release(); }
     }
 
     void worker_loop() {
@@ -135,6 +132,7 @@ struct VideoRecorder::Impl {
                 cv::Mat rgba(f.h, f.w, CV_8UC4, f.rgba.data());
                 cv::Mat bgr;
                 cv::cvtColor(rgba, bgr, cv::COLOR_RGBA2BGR);
+                cv::flip(bgr, bgr, 0);   // GL readback is bottom-up
                 std::lock_guard<std::mutex> wl(writer_mtx);
                 if (f.stream >= 0 && f.stream < 2 && writer_open[f.stream])
                     writers[f.stream].write(bgr);
@@ -277,6 +275,7 @@ void VideoRecorder::tick(XRDisplay& xr, AppState& state, const VideoConfig& cfg)
         state.video_paused    = false;
     }
     else if (req == VideoRequest::Pause && d.recording && !d.paused) {
+        d.readers[0].cancel(); d.readers[1].cancel();   // drop in-flight readbacks
         d.drain();
         d.close_writers();
         d.accumulated_s += std::chrono::duration<double>(clock_t_::now() - d.seg_start).count();
@@ -315,6 +314,7 @@ void VideoRecorder::tick(XRDisplay& xr, AppState& state, const VideoConfig& cfg)
             d.accumulated_s += std::chrono::duration<double>(clock_t_::now() - d.seg_start).count();
         d.recording = false;
         d.paused    = false;
+        d.readers[0].cancel(); d.readers[1].cancel();   // drop in-flight readbacks
         d.drain();
         d.close_writers();
 
@@ -350,9 +350,11 @@ void VideoRecorder::tick(XRDisplay& xr, AppState& state, const VideoConfig& cfg)
                 int s = streams[i];
                 gl::Fbo& fbo = (s == 0) ? xr.eye_left() : xr.eye_right();
                 Impl::Frame f;
-                f.w = fbo.w; f.h = fbo.h; f.stream = s;
-                f.rgba = read_fbo_rgba(fbo);
-                d.enqueue(std::move(f));
+                f.stream = s;
+                // Kicks this tick's GPU→PBO copy and delivers the previous
+                // one — no pipeline drain, one capture interval of latency.
+                if (d.readers[s].read(fbo, f.rgba, f.w, f.h))
+                    d.enqueue(std::move(f));
             }
         }
     }

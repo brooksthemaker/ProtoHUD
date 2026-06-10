@@ -61,6 +61,7 @@
 #include "net/bt_monitor.h"
 #include "crash_reporter.h"
 #include "capture.h"
+#include "gl_async_read.h"
 #include "video_recorder.h"
 #include "qr_scanner.h"
 #include "splash.h"
@@ -15856,21 +15857,23 @@ int main(int argc, char* argv[]) {
         video_recorder.tick(xr, state, cfg_video);
 
         // ── QR scan — main cameras ────────────────────────────────────────────
-        // Periodic glReadPixels from the left eye FBO (rate-limited to 2 Hz by
-        // the timer below; ZBar's own interval also guards the worker thread).
+        // Periodic readback from the left eye FBO (rate-limited to 2 Hz by the
+        // timer below; ZBar's own interval also guards the worker thread).
+        // Async PBO read — the old sync glReadPixels drained the GPU pipeline
+        // every 500ms, a visible judder spike. The decoder gets the previous
+        // tick's frame, which QR scanning doesn't mind.
         cameras.enable_qr_usb(snap.qr_scan_usb);
         if (snap.qr_scan_main) {
             static auto s_last_qr = std::chrono::steady_clock::now();
+            static gl::AsyncFboReader  s_qr_reader;
+            static std::vector<uint8_t> s_qr_px;
             auto now_qr = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::milliseconds>(
                     now_qr - s_last_qr).count() >= 500) {
                 s_last_qr = now_qr;
-                const int qw = xr.eye_left().w, qh = xr.eye_left().h;
-                std::vector<uint8_t> px(static_cast<size_t>(qw * qh * 4));
-                xr.eye_left().bind();
-                glReadPixels(0, 0, qw, qh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-                xr.eye_left().unbind();
-                qr_scanner.submit_rgba(px.data(), qw, qh);
+                int qw = 0, qh = 0;
+                if (s_qr_reader.read(xr.eye_left(), s_qr_px, qw, qh))
+                    qr_scanner.submit_rgba(s_qr_px.data(), qw, qh);
             }
         }
 
