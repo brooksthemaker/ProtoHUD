@@ -180,6 +180,22 @@ private:
     std::vector<std::string>     gif_slots_;   // size 8, basename per slot ("" = unbound)
     double                       gif_release_ = 5.0;   // auto-revert seconds
 
+    // Cached results for face_image_exists / face_image_layout. The menu's
+    // label_fn/visible_fn hooks call those dozens of times per frame, and a
+    // raw probe is a stat plus a config.json open+parse — formerly taken
+    // under state_mtx_, contending with the face render thread. Entries
+    // refresh on a short TTL and the cache clears on import/clear/reload so
+    // edits show immediately.
+    struct FaceProbe {
+        bool        exists = false;
+        std::string layout;
+        std::chrono::steady_clock::time_point t{};
+    };
+    FaceProbe probe_face_image(const std::string& expression) const;
+    void      invalidate_face_probes();
+    mutable std::mutex                       probe_mtx_;
+    mutable std::map<std::string, FaceProbe> probe_cache_;
+
     mutable std::mutex state_mtx_;   // panels_ mutation + render reads
     mutable std::mutex frame_mtx_;   // latest_
     cv::Mat            latest_;

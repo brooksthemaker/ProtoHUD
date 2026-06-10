@@ -639,14 +639,67 @@ std::string NativeFaceController::face_image_path(const std::string& expression)
 }
 
 bool NativeFaceController::face_image_exists(const std::string& expression) const {
-    const std::string p = face_image_path(expression);
-    if (p.empty()) return false;
-    std::error_code ec;
-    return std::filesystem::exists(p, ec);
+    return probe_face_image(expression).exists;
+}
+
+// Shared probe behind face_image_exists / face_image_layout. Paths come from
+// a brief state_mtx_ hold; the stat + config.json parse run unlocked so the
+// face render thread isn't stalled by menu redraws.
+NativeFaceController::FaceProbe
+NativeFaceController::probe_face_image(const std::string& expression) const {
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lk(probe_mtx_);
+        auto it = probe_cache_.find(expression);
+        if (it != probe_cache_.end() &&
+            now - it->second.t < std::chrono::seconds(1))
+            return it->second;
+    }
+
+    std::string png, cfg_path;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        for (const auto& pn : panels_) {
+            if (pn.is_mirror || !pn.loader) continue;
+            const std::string folder = cfg_.faces_dir + "/" + pn.cfg.face.active;
+            png      = folder + "/" + canonical_face_filename(expression);
+            cfg_path = folder + "/config.json";
+            break;
+        }
+    }
+
+    FaceProbe p;
+    p.t = now;
+    if (!png.empty()) {
+        std::error_code ec;
+        p.exists = std::filesystem::exists(png, ec);
+        // Only carry a layout tag when the actual PNG exists — keeps
+        // "(empty)" slots from picking up a folder-wide tag they don't own.
+        if (p.exists) {
+            std::ifstream fr(cfg_path);
+            if (fr) {
+                try {
+                    nlohmann::json j; fr >> j;
+                    if (j.is_object() && j.contains("layout") && j["layout"].is_string())
+                        p.layout = j["layout"].get<std::string>();
+                } catch (...) {}
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lk(probe_mtx_);
+    probe_cache_[expression] = p;
+    return p;
+}
+
+void NativeFaceController::invalidate_face_probes() {
+    std::lock_guard<std::mutex> lk(probe_mtx_);
+    probe_cache_.clear();
 }
 
 bool NativeFaceController::import_face_image(const std::string& expression,
                                              const std::string& src_path) {
+    invalidate_face_probes();
     std::lock_guard<std::mutex> lk(state_mtx_);
 
     // Find the first non-mirror panel's active face folder.
@@ -709,34 +762,14 @@ void NativeFaceController::set_active_layout_name(const std::string& name) {
 }
 
 std::string NativeFaceController::face_image_layout(const std::string& expression) const {
-    std::lock_guard<std::mutex> lk(state_mtx_);
     // Layout tags live at face-folder scope (faces/<folder>/config.json),
     // so all expressions in the same folder share a tag. We look at the
     // first non-mirror panel's active folder, same as face_image_path.
-    for (const auto& pn : panels_) {
-        if (pn.is_mirror || !pn.loader) continue;
-        const std::string cfg_path =
-            cfg_.faces_dir + "/" + pn.cfg.face.active + "/config.json";
-        // Only return a tag when the actual PNG exists — keeps "(empty)"
-        // slots from picking up a folder-wide tag they don't own.
-        const std::string png =
-            cfg_.faces_dir + "/" + pn.cfg.face.active + "/" +
-            canonical_face_filename(expression);
-        std::error_code ec;
-        if (!std::filesystem::exists(png, ec)) return {};
-        std::ifstream fr(cfg_path);
-        if (!fr) return {};
-        try {
-            nlohmann::json j; fr >> j;
-            if (j.is_object() && j.contains("layout") && j["layout"].is_string())
-                return j["layout"].get<std::string>();
-        } catch (...) {}
-        return {};
-    }
-    return {};
+    return probe_face_image(expression).layout;
 }
 
 void NativeFaceController::clear_face_image(const std::string& expression) {
+    invalidate_face_probes();
     std::lock_guard<std::mutex> lk(state_mtx_);
 
     const Panel* anchor = nullptr;
@@ -933,6 +966,7 @@ std::vector<NamedRegion> NativeFaceController::led_named_regions() const {
 }
 
 void NativeFaceController::reload_active_face() {
+    invalidate_face_probes();
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_) {
         if (pn.is_mirror || !pn.state) continue;
