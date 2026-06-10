@@ -219,6 +219,58 @@ static void import_face_into_slot(MenuSystem* menu,
         });
 }
 
+// Dynamic label shared by every PNG-backed slot row (face / mouth / boop):
+// "(empty)" when no PNG; "[<layout>]" when the saved PNG was stamped with a
+// layout name that doesn't match the currently-active one. Untagged (legacy)
+// faces show plain.
+static std::function<std::string()> png_slot_label_fn(
+        IFaceController* teensy, std::string expr, std::string label,
+        const std::string* active_layout) {
+    return [teensy, expr = std::move(expr), label = std::move(label),
+            active_layout]() -> std::string {
+        if (!teensy->face_image_exists(expr)) return label + " (empty)";
+        const std::string tag = teensy->face_image_layout(expr);
+        if (tag.empty() || !active_layout || tag == *active_layout)
+            return label;
+        return label + "  [" + tag + "]";
+    };
+}
+
+// "Copy from..." submenu over a peer slot table — useful as a starting point
+// ("clone 'happy' into 'wink' then tweak the eye"). peers holds every slot in
+// the table as (expr, label); self is skipped here. Listed slots are gated
+// per-row to hide empties; the submenu itself hides when there's nothing
+// copyable. import_face_image reloads the controller so the new art shows
+// immediately, matching the editor's commit path.
+static MenuItem make_copy_from_submenu(
+        IFaceController* teensy, const std::string& expr,
+        std::vector<std::pair<std::string, std::string>> peers,
+        std::string desc) {
+    std::vector<MenuItem> copy_children;
+    for (const auto& [src_expr, src_label] : peers) {
+        if (src_expr == expr) continue;
+        MenuItem ci = leaf(src_label,
+            [teensy, src_expr = src_expr, expr]{
+                const std::string src = teensy->face_image_path(src_expr);
+                if (!src.empty()) teensy->import_face_image(expr, src);
+            });
+        ci.visible_fn = [teensy, src_expr = src_expr]{
+            return teensy->face_image_exists(src_expr); };
+        copy_children.push_back(std::move(ci));
+    }
+    MenuItem copy_from = submenu("Copy from...", std::move(copy_children));
+    copy_from.description = std::move(desc);
+    copy_from.visible_fn = [teensy, expr, peers = std::move(peers)]{
+        for (const auto& [peer_expr, peer_label] : peers) {
+            (void)peer_label;
+            if (peer_expr == expr) continue;
+            if (teensy->face_image_exists(peer_expr)) return true;
+        }
+        return false;
+    };
+    return copy_from;
+}
+
 std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
 {
     // ── Parameter aliases ─────────────────────────────────────────────────────
@@ -559,97 +611,46 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         return sub;
     };
 
+    // Peer tables for the Copy from... submenus, as (expr, label) pairs.
+    std::vector<std::pair<std::string, std::string>> face_peers, mouth_peers, boop_peers;
+    for (int j = 0; j < kFaceSlotCount; ++j)
+        face_peers.emplace_back(kFaceSlots[j].expression, kFaceSlots[j].label);
+    for (int j = 0; j < kMouthShapeCount; ++j)
+        mouth_peers.emplace_back(kMouthShapes[j].file_stem, kMouthShapes[j].label);
+    for (int j = 0; j < kBoopFaceSlotCount; ++j)
+        boop_peers.emplace_back(kBoopFaceSlots[j].file_stem, kBoopFaceSlots[j].label);
+
     auto face_slot_row = [&, face_preview, edit_face, make_versions_submenu](int slot_idx) -> MenuItem {
         const std::string expr  = kFaceSlots[slot_idx].expression;
         const std::string label = kFaceSlots[slot_idx].label;
 
-        MenuItem m;
-        m.type  = MenuItemType::SUBMENU;
-        m.label = label;
-
-        // Slot label: "(empty)" when no PNG; "[Other Layout]" when the
-        // saved PNG was stamped with a layout name that doesn't match the
-        // currently-active one. Untagged (legacy) faces show plain.
-        m.label_fn = [teensy, expr, label, pf_hub75_active_p]() -> std::string {
-            if (!teensy->face_image_exists(expr)) return label + " (empty)";
-            const std::string tag = teensy->face_image_layout(expr);
-            if (tag.empty() || !pf_hub75_active_p || tag == *pf_hub75_active_p)
-                return label;
-            return label + "  [" + tag + "]";
-        };
-
-        m.on_highlight = [face_preview, slot_idx]{ face_preview->want = slot_idx; };
-
-        auto bound_now = [teensy, expr]{ return teensy->face_image_exists(expr); };
-
-        MenuItem play = leaf("Play",
-            [teensy, expr]{ teensy->set_face_by_name(expr); });
-        play.visible_fn = bound_now;
-
-        MenuItem replace = leaf("Replace...",
-            [teensy, menu_sys_pp, expr, label]() {
-                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
-                                      teensy, expr, label);
-            });
-        replace.visible_fn = bound_now;
-
-        MenuItem clear = leaf("Clear",
-            [teensy, expr]{ teensy->clear_face_image(expr); });
-        clear.visible_fn = bound_now;
-
-        MenuItem imp = leaf("Import...",
-            [teensy, menu_sys_pp, expr, label]() {
-                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
-                                      teensy, expr, label);
-            });
-        imp.visible_fn = [bound_now]{ return !bound_now(); };
-
-        // Copy from another face slot — useful as a starting point ("clone
-        // 'happy' into 'wink' then tweak the eye"). Listed slots are gated
-        // per-row to hide empties and self; the submenu itself hides when
-        // there's nothing copyable. native_ctrl reload + on-screen set so
-        // the new art shows immediately, matching the editor's commit path.
-        std::vector<MenuItem> copy_children;
-        for (int src_idx = 0; src_idx < kFaceSlotCount; ++src_idx) {
-            if (src_idx == slot_idx) continue;
-            const std::string src_expr  = kFaceSlots[src_idx].expression;
-            const std::string src_label = kFaceSlots[src_idx].label;
-            MenuItem ci = leaf(src_label,
-                [teensy, src_expr, expr]{
-                    const std::string src = teensy->face_image_path(src_expr);
-                    if (!src.empty()) teensy->import_face_image(expr, src);
-                });
-            ci.visible_fn = [teensy, src_expr]{ return teensy->face_image_exists(src_expr); };
-            copy_children.push_back(std::move(ci));
-        }
-        MenuItem copy_from = submenu("Copy from...", std::move(copy_children));
-        copy_from.description = "Copy another face's PNG into this slot as a "
-                                "starting point. The source slot keeps its art.";
-        copy_from.visible_fn = [teensy, expr]{
-            for (int j = 0; j < kFaceSlotCount; ++j) {
-                if (kFaceSlots[j].expression == expr) continue;
-                if (teensy->face_image_exists(kFaceSlots[j].expression)) return true;
-            }
-            return false;
-        };
-
+        AssetSlotRowDesc d;
+        d.label        = label;
+        d.label_fn     = png_slot_label_fn(teensy, expr, label, pf_hub75_active_p);
+        d.on_highlight = [face_preview, slot_idx]{ face_preview->want = slot_idx; };
+        d.exists       = [teensy, expr]{ return teensy->face_image_exists(expr); };
+        d.play         = [teensy, expr]{ teensy->set_face_by_name(expr); };
         // Edit launches the pixel editor on this slot's PNG. Visible only
         // when the active backend exposes covered LED regions — keeps the
         // option hidden in HUB75 / daemon modes where the editor would
         // have nothing meaningful to draw against.
-        MenuItem edit_it = leaf("Edit...",
-            [edit_face, expr]{ if (edit_face) edit_face(expr); });
-        edit_it.visible_fn = have_led_regions;
+        d.edit         = [edit_face, expr]{ if (edit_face) edit_face(expr); };
+        d.edit_visible = have_led_regions;
+        d.clear        = [teensy, expr]{ teensy->clear_face_image(expr); };
+        d.import_action = [teensy, menu_sys_pp, expr, label]() {
+            import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                  teensy, expr, label);
+        };
 
         MenuItem versions = make_versions_submenu(expr);
         versions.description = "Saved versions of this face (named + auto-backups) "
                                "with thumbnails — Make Current to restore one.";
-        versions.visible_fn = bound_now;
+        d.versions = std::move(versions);
 
-        m.children = { std::move(play), std::move(edit_it), std::move(versions),
-                       std::move(replace), std::move(copy_from),
-                       std::move(clear), std::move(imp) };
-        return m;
+        d.copy_from = make_copy_from_submenu(teensy, expr, face_peers,
+            "Copy another face's PNG into this slot as a "
+            "starting point. The source slot keeps its art.");
+        return make_asset_slot_row(std::move(d));
     };
 
     std::vector<MenuItem> face_files_menu;
@@ -729,86 +730,35 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             }
         };
 
+    // No Play row for mouth shapes — these are overlay assets; calling
+    // set_face_by_name("mouth_*") would just fall back to neutral since they
+    // aren't entries in the loader's expressions_ map.
     auto mouth_slot_row = [&, mouth_preview, edit_face, have_led_regions](int idx) -> MenuItem {
         const std::string expr  = kMouthShapes[idx].file_stem;
         const std::string label = kMouthShapes[idx].label;
 
-        MenuItem m;
-        m.type  = MenuItemType::SUBMENU;
-        m.label = label;
-
-        // Slot label: "(empty)" when no PNG; "[Other Layout]" when the
-        // saved PNG was stamped with a layout name that doesn't match the
-        // currently-active one. Untagged (legacy) faces show plain.
-        m.label_fn = [teensy, expr, label, pf_hub75_active_p]() -> std::string {
-            if (!teensy->face_image_exists(expr)) return label + " (empty)";
-            const std::string tag = teensy->face_image_layout(expr);
-            if (tag.empty() || !pf_hub75_active_p || tag == *pf_hub75_active_p)
-                return label;
-            return label + "  [" + tag + "]";
-        };
-        m.on_highlight = [mouth_preview, idx]{ mouth_preview->want = idx; };
-
-        auto bound_now = [teensy, expr]{ return teensy->face_image_exists(expr); };
-
-        MenuItem replace = leaf("Replace...",
-            [teensy, menu_sys_pp, expr, label]() {
-                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
-                                      teensy, expr, label);
-            });
-        replace.visible_fn = bound_now;
-
-        MenuItem clear = leaf("Clear",
-            [teensy, expr]{ teensy->clear_face_image(expr); });
-        clear.visible_fn = bound_now;
-
-        MenuItem imp = leaf("Import...",
-            [teensy, menu_sys_pp, expr, label]() {
-                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
-                                      teensy, expr, label);
-            });
-        imp.visible_fn = [bound_now]{ return !bound_now(); };
-
-        // Copy from another mouth-shape slot — useful when one viseme is
-        // a small tweak on another (e.g. small → smile). Same pattern as
-        // the expression Copy from... above.
-        std::vector<MenuItem> copy_children;
-        for (int src_idx = 0; src_idx < kMouthShapeCount; ++src_idx) {
-            if (src_idx == idx) continue;
-            const std::string src_expr  = kMouthShapes[src_idx].file_stem;
-            const std::string src_label = kMouthShapes[src_idx].label;
-            MenuItem ci = leaf(src_label,
-                [teensy, src_expr, expr]{
-                    const std::string src = teensy->face_image_path(src_expr);
-                    if (!src.empty()) teensy->import_face_image(expr, src);
-                });
-            ci.visible_fn = [teensy, src_expr]{ return teensy->face_image_exists(src_expr); };
-            copy_children.push_back(std::move(ci));
-        }
-        MenuItem copy_from = submenu("Copy from...", std::move(copy_children));
-        copy_from.description = "Copy another viseme's PNG into this slot as a "
-                                "starting point. The source slot keeps its art.";
-        copy_from.visible_fn = [teensy, expr]{
-            for (int j = 0; j < kMouthShapeCount; ++j) {
-                if (kMouthShapes[j].file_stem == expr) continue;
-                if (teensy->face_image_exists(kMouthShapes[j].file_stem)) return true;
-            }
-            return false;
-        };
-
+        AssetSlotRowDesc d;
+        d.label        = label;
+        d.label_fn     = png_slot_label_fn(teensy, expr, label, pf_hub75_active_p);
+        d.on_highlight = [mouth_preview, idx]{ mouth_preview->want = idx; };
+        d.exists       = [teensy, expr]{ return teensy->face_image_exists(expr); };
         // Edit the mouth-shape PNG with the pixel editor (mono on MAX7219,
         // color on RGB matrix). Same visibility gate as the expression
         // slots — hidden in HUB75 / daemon modes.
-        MenuItem edit_it = leaf("Edit...",
-            [edit_face, expr]{ if (edit_face) edit_face(expr); });
-        edit_it.visible_fn = have_led_regions;
-
-        MenuItem versions = make_versions_submenu(expr);
-        versions.visible_fn = bound_now;
-
-        m.children = { std::move(edit_it), std::move(versions), std::move(replace),
-                       std::move(copy_from), std::move(clear), std::move(imp) };
-        return m;
+        d.edit         = [edit_face, expr]{ if (edit_face) edit_face(expr); };
+        d.edit_visible = have_led_regions;
+        d.clear        = [teensy, expr]{ teensy->clear_face_image(expr); };
+        d.import_action = [teensy, menu_sys_pp, expr, label]() {
+            import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                  teensy, expr, label);
+        };
+        d.versions = make_versions_submenu(expr);
+        // Copy from another mouth-shape slot — useful when one viseme is
+        // a small tweak on another (e.g. small → smile).
+        d.copy_from = make_copy_from_submenu(teensy, expr, mouth_peers,
+            "Copy another viseme's PNG into this slot as a "
+            "starting point. The source slot keeps its art.");
+        return make_asset_slot_row(std::move(d));
     };
 
     std::vector<MenuItem> face_mouth_menu;
@@ -899,91 +849,35 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         const std::string expr  = kBoopFaceSlots[idx].file_stem;
         const std::string label = kBoopFaceSlots[idx].label;
 
-        MenuItem m;
-        m.type  = MenuItemType::SUBMENU;
-        m.label = label;
-
-        // Slot label: "(empty)" when no PNG; "[Other Layout]" when the
-        // saved PNG was stamped with a layout name that doesn't match the
-        // currently-active one. Untagged (legacy) faces show plain.
-        m.label_fn = [teensy, expr, label, pf_hub75_active_p]() -> std::string {
-            if (!teensy->face_image_exists(expr)) return label + " (empty)";
-            const std::string tag = teensy->face_image_layout(expr);
-            if (tag.empty() || !pf_hub75_active_p || tag == *pf_hub75_active_p)
-                return label;
-            return label + "  [" + tag + "]";
-        };
-        m.on_highlight = [boop_face_preview, idx]{ boop_face_preview->want = idx; };
-
-        auto bound_now = [teensy, expr]{ return teensy->face_image_exists(expr); };
-
-        MenuItem play = leaf("Play",
-            [teensy, expr, idx, &state]() {
-                double dur = 0.8;
-                {
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    if (idx >= 0 && idx < 4) dur = state.boop_zones[idx].duration_s;
-                }
-                teensy->trigger_boop(expr, dur);
-            });
-        play.visible_fn = bound_now;
-
-        MenuItem edit_it = leaf("Edit...",
-            [edit_face, expr]{ if (edit_face) edit_face(expr); });
-        edit_it.visible_fn = have_led_regions;
-
-        MenuItem replace = leaf("Replace...",
-            [teensy, menu_sys_pp, expr, label]() {
-                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
-                                      teensy, expr, label);
-            });
-        replace.visible_fn = bound_now;
-
-        MenuItem clear = leaf("Clear",
-            [teensy, expr]{ teensy->clear_face_image(expr); });
-        clear.visible_fn = bound_now;
-
-        MenuItem imp = leaf("Import...",
-            [teensy, menu_sys_pp, expr, label]() {
-                import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
-                                      teensy, expr, label);
-            });
-        imp.visible_fn = [bound_now]{ return !bound_now(); };
-
-        // Copy from another boop reaction slot — same pattern as the
-        // expression / mouth slot rows.
-        std::vector<MenuItem> copy_children;
-        for (int src_idx = 0; src_idx < kBoopFaceSlotCount; ++src_idx) {
-            if (src_idx == idx) continue;
-            const std::string src_expr  = kBoopFaceSlots[src_idx].file_stem;
-            const std::string src_label = kBoopFaceSlots[src_idx].label;
-            MenuItem ci = leaf(src_label,
-                [teensy, src_expr, expr]{
-                    const std::string src = teensy->face_image_path(src_expr);
-                    if (!src.empty()) teensy->import_face_image(expr, src);
-                });
-            ci.visible_fn = [teensy, src_expr]{ return teensy->face_image_exists(src_expr); };
-            copy_children.push_back(std::move(ci));
-        }
-        MenuItem copy_from = submenu("Copy from...", std::move(copy_children));
-        copy_from.description = "Copy another boop reaction's PNG into this "
-                                "slot as a starting point. The source slot "
-                                "keeps its art.";
-        copy_from.visible_fn = [teensy, expr]{
-            for (int j = 0; j < kBoopFaceSlotCount; ++j) {
-                if (kBoopFaceSlots[j].file_stem == expr) continue;
-                if (teensy->face_image_exists(kBoopFaceSlots[j].file_stem)) return true;
+        AssetSlotRowDesc d;
+        d.label        = label;
+        d.label_fn     = png_slot_label_fn(teensy, expr, label, pf_hub75_active_p);
+        d.on_highlight = [boop_face_preview, idx]{ boop_face_preview->want = idx; };
+        d.exists       = [teensy, expr]{ return teensy->face_image_exists(expr); };
+        // Play pops the dedicated boop face via trigger_boop (so it
+        // auto-reverts after the zone's configured duration), unlike the
+        // expression rows' plain set_face_by_name.
+        d.play = [teensy, expr, idx, &state]() {
+            double dur = 0.8;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (idx >= 0 && idx < 4) dur = state.boop_zones[idx].duration_s;
             }
-            return false;
+            teensy->trigger_boop(expr, dur);
         };
-
-        MenuItem versions = make_versions_submenu(expr);
-        versions.visible_fn = bound_now;
-
-        m.children = { std::move(play), std::move(edit_it), std::move(versions),
-                       std::move(replace), std::move(copy_from),
-                       std::move(clear), std::move(imp) };
-        return m;
+        d.edit         = [edit_face, expr]{ if (edit_face) edit_face(expr); };
+        d.edit_visible = have_led_regions;
+        d.clear        = [teensy, expr]{ teensy->clear_face_image(expr); };
+        d.import_action = [teensy, menu_sys_pp, expr, label]() {
+            import_face_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                  teensy, expr, label);
+        };
+        d.versions = make_versions_submenu(expr);
+        d.copy_from = make_copy_from_submenu(teensy, expr, boop_peers,
+            "Copy another boop reaction's PNG into this "
+            "slot as a starting point. The source slot "
+            "keeps its art.");
+        return make_asset_slot_row(std::move(d));
     };
 
     std::vector<MenuItem> face_boop_menu;

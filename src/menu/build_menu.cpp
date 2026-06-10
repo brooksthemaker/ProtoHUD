@@ -452,17 +452,18 @@ std::vector<MenuItem> build_menu(MenuBuildContext& ctx)
         return m;
     };
 
-    // Slot-management row for the Files > GIFs hub. The row itself is a
-    // submenu whose visible children depend on whether the slot is bound:
+    // Slot-management row for the Files > GIFs hub (make_asset_slot_row):
     //   bound   → Play / Replace... / Clear
     //   unbound → Import...
-    // Same dynamic label and preview-highlight behaviour as gif_leaf.
+    // Same dynamic label and preview-highlight behaviour as gif_leaf. GIF
+    // slots bind files in the manifest (vs the face slots' per-expression
+    // PNG imports), so exists/import/clear go through the gif_slot API; no
+    // Edit / Versions / Copy from for GIFs.
     auto gif_slot_row = [&, gif_preview](uint8_t i) -> MenuItem {
-        MenuItem m;
-        m.type  = MenuItemType::SUBMENU;
-        m.label = "GIF Slot #" + std::to_string(static_cast<int>(i));
+        AssetSlotRowDesc d;
+        d.label = "GIF Slot #" + std::to_string(static_cast<int>(i));
 
-        m.label_fn = [teensy, i, gn = gif_names]() -> std::string {
+        d.label_fn = [teensy, i, gn = gif_names]() -> std::string {
             const std::string bound = teensy->gif_slot(i);
             const bool named = (i < gn.size() && !gn[i].empty());
             std::string name = !bound.empty()
@@ -472,33 +473,15 @@ std::vector<MenuItem> build_menu(MenuBuildContext& ctx)
             return name;
         };
 
-        m.on_highlight = [gif_preview, i]{ gif_preview->want = static_cast<int>(i); };
-
-        auto bound_now = [teensy, i]{ return !teensy->gif_slot(i).empty(); };
-
-        MenuItem play = leaf("Play", [teensy, i]{ teensy->play_gif(i); });
-        play.visible_fn = bound_now;
-
-        MenuItem replace = leaf("Replace...",
-            [teensy, i, menu_sys_pp, gifs_dir]() {
-                import_gif_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
-                                     teensy, gifs_dir, i);
-            });
-        replace.visible_fn = bound_now;
-
-        MenuItem clear = leaf("Clear", [teensy, i]{ teensy->clear_gif_slot(i); });
-        clear.visible_fn = bound_now;
-
-        MenuItem imp = leaf("Import...",
-            [teensy, i, menu_sys_pp, gifs_dir]() {
-                import_gif_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
-                                     teensy, gifs_dir, i);
-            });
-        imp.visible_fn = [bound_now]{ return !bound_now(); };
-
-        m.children = { std::move(play), std::move(replace),
-                       std::move(clear), std::move(imp) };
-        return m;
+        d.on_highlight  = [gif_preview, i]{ gif_preview->want = static_cast<int>(i); };
+        d.exists        = [teensy, i]{ return !teensy->gif_slot(i).empty(); };
+        d.play          = [teensy, i]{ teensy->play_gif(i); };
+        d.clear         = [teensy, i]{ teensy->clear_gif_slot(i); };
+        d.import_action = [teensy, i, menu_sys_pp, gifs_dir]() {
+            import_gif_into_slot(menu_sys_pp ? *menu_sys_pp : nullptr,
+                                 teensy, gifs_dir, i);
+        };
+        return make_asset_slot_row(std::move(d));
     };
 
     // Publish the GIF machinery for the Face Display + Files tab builders.

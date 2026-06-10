@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -117,6 +118,74 @@ inline MenuItem face_picker(std::string lbl, int face_count,
     m.face_picker.face_count  = face_count;
     m.face_picker.get_face    = std::move(get_fn);
     m.face_picker.set_face    = std::move(set_fn);
+    return m;
+}
+
+// ── Asset-slot management row ────────────────────────────────────────────────
+// One parameterized builder for the slot rows under Files > GIFs and
+// Face Display > Faces / Mouth Shapes / Boop Reactions. Each row is a SUBMENU
+// whose children gate on whether the slot is bound on disk:
+//   bound   → Play, Edit…, Versions, Replace…, Copy from…, Clear
+//   unbound → Import…
+// Per-asset behaviour goes through the descriptor: callbacks left null (and
+// optionals left empty) drop that child entirely, so e.g. GIF slots get no
+// Edit/Versions/Copy and mouth shapes get no Play. Replace… and Import… share
+// import_action — they have always been the same operation on every slot type.
+struct AssetSlotRowDesc {
+    std::string                  label;         // static fallback / id
+    std::function<std::string()> label_fn;      // dynamic label (manifest/disk state)
+    std::function<bool()>        exists;        // slot bound on disk? (gates children)
+    std::function<void()>        on_highlight;  // preview hook (slot thumbnail panes)
+    std::function<void()>        play;          // null → no Play row
+    std::function<void()>        edit;          // null → no Edit… row
+    std::function<bool()>        edit_visible;  // capability gate for Edit… (e.g.
+                                                // only backends with LED regions)
+    std::optional<MenuItem>      versions;      // pre-built Versions submenu
+    std::optional<MenuItem>      copy_from;     // pre-built Copy from… submenu
+    std::function<void()>        import_action; // shared by Replace… and Import…
+    std::function<void()>        clear;
+};
+
+inline MenuItem make_asset_slot_row(AssetSlotRowDesc d) {
+    MenuItem m;
+    m.type         = MenuItemType::SUBMENU;
+    m.label        = std::move(d.label);
+    m.label_fn     = std::move(d.label_fn);
+    m.on_highlight = std::move(d.on_highlight);
+
+    const std::function<bool()> exists = std::move(d.exists);
+
+    if (d.play) {
+        MenuItem play = leaf("Play", std::move(d.play));
+        play.visible_fn = exists;
+        m.children.push_back(std::move(play));
+    }
+    if (d.edit) {
+        MenuItem edit_it = leaf("Edit...", std::move(d.edit));
+        edit_it.visible_fn = std::move(d.edit_visible);
+        m.children.push_back(std::move(edit_it));
+    }
+    if (d.versions) {
+        MenuItem versions = std::move(*d.versions);
+        versions.visible_fn = exists;
+        m.children.push_back(std::move(versions));
+    }
+    {
+        MenuItem replace = leaf("Replace...", d.import_action);
+        replace.visible_fn = exists;
+        m.children.push_back(std::move(replace));
+    }
+    if (d.copy_from) m.children.push_back(std::move(*d.copy_from));
+    {
+        MenuItem clear = leaf("Clear", std::move(d.clear));
+        clear.visible_fn = exists;
+        m.children.push_back(std::move(clear));
+    }
+    {
+        MenuItem imp = leaf("Import...", std::move(d.import_action));
+        imp.visible_fn = [exists]{ return !exists(); };
+        m.children.push_back(std::move(imp));
+    }
     return m;
 }
 
