@@ -319,6 +319,11 @@ bool CameraManager::reinit_owls() {
 }
 
 void CameraManager::shutdown() {
+    // Join any background reopen from reassign_usbN first — open_v4l2 can
+    // block for seconds and must not touch members after we tear down.
+    for (auto& t : usb_open_threads_)
+        if (t.joinable()) t.join();
+
     stop_usb_threads();
 
     owl_left_.reset();
@@ -679,28 +684,35 @@ std::vector<CameraManager::UsbDeviceInfo> CameraManager::list_usb_devices() cons
 // Close the slot, update its device path, and reopen it on a background thread.
 // The capture lambda holds the per-camera mutex during cap.read(); close_usbN()
 // acquires the same mutex, so the swap is safe without stopping the thread.
+// The reopen thread is owned (usb_open_threads_), never detached: a detached
+// open_v4l2 could still be running when CameraManager is destroyed (it can
+// block for seconds) — a use-after-free. Any previous reopen is joined before
+// the close so a stale open can't land after the new assignment.
 void CameraManager::reassign_usb1(const std::string& path) {
+    if (usb_open_threads_[0].joinable()) usb_open_threads_[0].join();
     UsbCamConfig c = usb1_cfg_; c.device = path; update_usb1_cfg(c);
     close_usb1();  // acquires usb1_cap_mtx_, releases cap, clears reconnect
     if (!path.empty()) {
         usb1_reconnect_ = true;
-        std::thread([this]{ open_usb1(); }).detach();
+        usb_open_threads_[0] = std::thread([this]{ open_usb1(); });
     }
 }
 void CameraManager::reassign_usb2(const std::string& path) {
+    if (usb_open_threads_[1].joinable()) usb_open_threads_[1].join();
     UsbCamConfig c = usb2_cfg_; c.device = path; update_usb2_cfg(c);
     close_usb2();
     if (!path.empty()) {
         usb2_reconnect_ = true;
-        std::thread([this]{ open_usb2(); }).detach();
+        usb_open_threads_[1] = std::thread([this]{ open_usb2(); });
     }
 }
 void CameraManager::reassign_usb3(const std::string& path) {
+    if (usb_open_threads_[2].joinable()) usb_open_threads_[2].join();
     UsbCamConfig c = usb3_cfg_; c.device = path; update_usb3_cfg(c);
     close_usb3();
     if (!path.empty()) {
         usb3_reconnect_ = true;
-        std::thread([this]{ open_usb3(); }).detach();
+        usb_open_threads_[2] = std::thread([this]{ open_usb3(); });
     }
 }
 

@@ -289,6 +289,11 @@ private:
 
     std::atomic<bool> running_     { false };
     std::thread       usb_threads_[3];   // one per usb camera (see usb_capture_thread)
+    // Background reopen launched by reassign_usbN (open_v4l2 can block for
+    // seconds, so it can't run on the menu thread). Owned — joined before a
+    // new reopen is launched and in shutdown(), so the thread can never
+    // outlive *this (a detached thread here was a use-after-free on exit).
+    std::thread       usb_open_threads_[3];
 
     QrScanner*        qr_scanner_  { nullptr };
     std::atomic<bool> qr_scan_usb_ { false };
