@@ -23,6 +23,7 @@
 #include "../serial/face_controller.h"
 #include "eye_anim.h"
 #include "face_config.h"
+#include "glitch.h"         // GlitchEffect + GlitchConfig
 #include "panel_output.h"   // PanelOutput + NamedRegion
 
 namespace face {
@@ -136,6 +137,10 @@ public:
     // to every self-rendered panel and persist it. Used by the Material Color
     // gradient editor for live preview.
     void set_material_spec(const std::string& spec);
+    // Live "glitch" post-effect config — corrupts the composited face (chromatic
+    // split, tearing, blocks, bitcrush, dropout, datamosh, region desync, and an
+    // occasional wrong-expression flash). Read by the render thread each frame.
+    void set_glitch(const GlitchConfig& cfg);
 
     // Push a "transient" image for the named expression onto every panel
     // for duration_s seconds. The current image is stashed and restored
@@ -201,6 +206,11 @@ private:
     EyeAnimParams      eye_anim_;
     double             eye_anim_timer_ = 0.0;   // seconds remaining
     double             eye_anim_t_     = 0.0;   // elapsed seconds (animation phase)
+
+    // Glitch post-effect. glitch_ (sim state) is touched only by the render
+    // thread; glitch_cfg_ is written by set_glitch() under state_mtx_.
+    GlitchEffect       glitch_;
+    GlitchConfig       glitch_cfg_;
 
     // Expression → mood-preset coupling (off by default). expr_effects_ gates
     // it; current_expression_ tracks the latest set face so toggling re-applies
