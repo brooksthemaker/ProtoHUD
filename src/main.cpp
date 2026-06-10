@@ -4154,6 +4154,7 @@ static std::vector<MenuItem> build_menu(
         "none", "sparkle", "embers", "rain", "snow",
         "confetti", "rings", "fireflies", "clouds",
         "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
+        "starfield", "warp", "constellation", "shootingstars",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
@@ -4725,6 +4726,11 @@ static std::vector<MenuItem> build_menu(
         {"vortex_rose","comet vortex (pink/violet)"},
         {"vortex_rainbow","comet vortex (rainbow)"},
         {"nebula","clouds x2 + sparkle"},
+        {"starfield","parallax stars from centre"},
+        {"warp","hyperspace streaks"},
+        {"constellation","still twinkling sky"},
+        {"shooting_stars","meteors from centre"},
+        {"night_sky","twinkle + shooting stars"},
         {"water","liquid — cyan, bubbles"}, {"lava","liquid — lava, thick"},
         {"toxic","liquid — green, bubbles"}, {"ocean","liquid — teal"},
         {"plasma_fluid","liquid — magenta"}, {"mercury","liquid — silver, thick"},
@@ -4780,7 +4786,8 @@ static std::vector<MenuItem> build_menu(
             static std::mt19937 rng(std::random_device{}());
             static const char* const fx[] = {
                 "sparkle","embers","rain","snow","confetti","rings","fireflies",
-                "clouds","lightning","meteor","bubbles","fireworks","vortex"};
+                "clouds","lightning","meteor","bubbles","fireworks","vortex",
+                "starfield","constellation"};
             static const int pal[][3] = {
                 {0,220,180},{255,80,80},{80,180,255},{255,200,40},
                 {180,80,255},{80,255,160},{255,120,20},{255,255,255}};

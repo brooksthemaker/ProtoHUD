@@ -1204,6 +1204,232 @@ private:
     std::vector<Particle> bubbles_;
 };
 
+// ── Star field (3-D parallax) ────────────────────────────────────────────────
+// Stars stream outward from the full-canvas centre (the origin) toward the
+// panel edges (the far plane). Each star has a fixed world direction (vx/vy in
+// [-1,1]) and a depth z in `extra`; depth shrinks each frame so the projection
+// screen = centre + dir * fov / z pushes it out, brightening and growing as it
+// "approaches". The centre uses cw_/ch_ (full canvas) so the origin stays put
+// even when the canvas is split across panels; positions convert to panel-local
+// via -ox_/-oy_. Stars recycle to the far depth once they leave the canvas.
+
+class StarfieldEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const double cx = cw_ * 0.5, cy = ch_ * 0.5;
+        const double fov = jnum(cfg_, "fov", cw_ * 0.5);
+        const int size_max = jint(cfg_, "size_max", 2);
+        const double zfar = kZFar, znear = znear_();
+        const double span = std::max(1e-3, zfar - znear);
+        for (auto& p : particles_) {
+            p.extra -= p.max_life * dt;          // approach: depth shrinks
+            bool recycle = p.extra <= znear;
+            double gx = 0, gy = 0;
+            if (!recycle) {
+                const double f = fov / p.extra;
+                gx = cx + p.vx * f;
+                gy = cy + p.vy * f;
+                if (gx < -2 || gx > cw_ + 1 || gy < -2 || gy > ch_ + 1) recycle = true;
+            }
+            if (recycle) {
+                respawn(p);
+                const double f = fov / p.extra;
+                gx = cx + p.vx * f;
+                gy = cy + p.vy * f;
+            }
+            p.x = gx - ox_;                      // full-canvas → panel-local
+            p.y = gy - oy_;
+            const double near = std::clamp((zfar - p.extra) / span, 0.0, 1.0);
+            p.life = near;
+            p.size = (size_max > 1 && near > 0.75) ? size_max : 1;
+        }
+        while ((int)particles_.size() < count(70)) particles_.push_back(spawn());
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (const auto& p : particles_)
+            draw_dot(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, 0.2 + 0.8 * p.life, p.size);
+        return c;
+    }
+
+protected:
+    static constexpr double kZFar = 8.0;
+    virtual double znear_() const { return 0.55; }
+    virtual void speed_range(double& lo, double& hi) const { lo = 1.2; hi = 3.0; }
+
+    Color pick() {
+        if (has_colors(cfg_)) return pick_color(cfg_, rng_);
+        static const Color pool[4] = {{255,255,255},{200,220,255},{255,240,210},{210,235,255}};
+        return pool[irand(rng_, 0, 3)];
+    }
+    void respawn(Particle& p) {
+        double wx = frand(rng_, -1, 1), wy = frand(rng_, -1, 1);
+        while (std::fabs(wx) < 0.05 && std::fabs(wy) < 0.05) {   // avoid dead centre
+            wx = frand(rng_, -1, 1); wy = frand(rng_, -1, 1);
+        }
+        p.vx = wx; p.vy = wy; p.extra = kZFar;
+        double lo, hi; speed_range(lo, hi);
+        p.max_life = pick_speed(cfg_, lo, hi, rng_);
+        Color col = pick(); p.r = col.r; p.g = col.g; p.b = col.b;
+        p.life = 0;
+    }
+    Particle spawn() {
+        Particle p; respawn(p);
+        p.extra = frand(rng_, znear_() + 0.5, kZFar);   // spread depths on first fill
+        return p;
+    }
+};
+
+// ── Warp (hyperspace) ────────────────────────────────────────────────────────
+// The star field cranked to "jump to lightspeed": faster stars smeared into
+// radial streaks that point back to the centre and lengthen as they near the
+// edge. Reuses the star field's projection/update via inheritance.
+
+class WarpEffect : public StarfieldEffect {
+public:
+    using StarfieldEffect::StarfieldEffect;
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        const double cx = cw_ * 0.5 - ox_, cy = ch_ * 0.5 - oy_;   // panel-local centre
+        const double gain = jnum(cfg_, "streak", 1.0);
+        for (const auto& p : particles_) {
+            const double alpha = 0.25 + 0.75 * p.life;
+            double dx = p.x - cx, dy = p.y - cy;
+            double dist = std::hypot(dx, dy); if (dist < 1e-6) dist = 1.0;
+            const double ux = dx / dist, uy = dy / dist;           // outward unit
+            const double length = (1.0 + p.life * 6.0) * gain;     // longer near edge
+            const int n = std::max(1, (int)length);
+            for (int i = 0; i <= n; ++i) {                         // streak toward centre
+                const double t = (double)i / n;
+                const double a = alpha * (1.0 - t);
+                if (a <= 0) break;
+                draw_dot(c, p.x - ux * length * t, p.y - uy * length * t,
+                         (int)p.r, (int)p.g, (int)p.b, a, i == 0 ? p.size : 1);
+            }
+        }
+        return c;
+    }
+protected:
+    double znear_() const override { return 0.4; }
+    void speed_range(double& lo, double& hi) const override { lo = 2.5; hi = 5.5; }
+};
+
+// ── Constellation (still twinkling sky) ──────────────────────────────────────
+// Fixed stars that breathe brightness on independent phases/rates; a fraction
+// are "bright" and grow a soft cross glint at their peak. Nothing moves off
+// screen, so no centre/edge geometry — stars fill the panel like sparkle.
+
+class ConstellationEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        // vx = twinkle rate, vy = base brightness, extra = phase, size 2 = bright.
+        for (auto& p : particles_) {
+            p.extra += p.vx * dt;
+            p.life = p.vy * (0.45 + 0.55 * (0.5 + 0.5 * std::sin(p.extra)));
+        }
+        while ((int)particles_.size() < count(50)) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : default_pick();
+            const bool bright = frand(rng_, 0, 1) < jnum(cfg_, "bright_frac", 0.15);
+            Particle p;
+            p.x = frand(rng_, 0, w_ - 1); p.y = frand(rng_, 0, h_ - 1);
+            p.vx = frand(rng_, jnum(cfg_, "twinkle_min", 0.8), jnum(cfg_, "twinkle_max", 3.0));
+            p.vy = bright ? 1.0 : frand(rng_, 0.4, 0.85);
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = bright ? 2 : 1; p.max_life = 9999; p.life = 1;
+            p.extra = frand(rng_, 0, kTau);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (const auto& p : particles_) {
+            const double alpha = std::clamp(p.life, 0.0, 1.0);
+            const int r = (int)p.r, g = (int)p.g, b = (int)p.b;
+            draw_dot(c, p.x, p.y, r, g, b, alpha, 1);
+            if (p.size >= 2 && alpha > 0.55) {                 // soft cross glint at peak
+                const double a2 = (alpha - 0.55) * 1.5;
+                draw_dot(c, p.x + 1, p.y, r, g, b, a2, 1);
+                draw_dot(c, p.x - 1, p.y, r, g, b, a2, 1);
+                draw_dot(c, p.x, p.y + 1, r, g, b, a2, 1);
+                draw_dot(c, p.x, p.y - 1, r, g, b, a2, 1);
+            }
+        }
+        return c;
+    }
+private:
+    Color default_pick() {
+        static const Color pool[4] = {{255,255,255},{200,220,255},{255,240,210},{255,255,235}};
+        return pool[irand(rng_, 0, 3)];
+    }
+};
+
+// ── Shooting stars (meteors from centre) ─────────────────────────────────────
+// Sparse meteors that launch from the full-canvas centre (the origin) out to a
+// panel edge with a fading tail. Distinct from MeteorEffect, which streaks all
+// meteors in one shared direction; here each flies radially from the centre.
+
+class ShootingStarsEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const double cx = cw_ * 0.5, cy = ch_ * 0.5;
+        const double tail = jnum(cfg_, "tail", 8.0);
+        for (auto& p : particles_) {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                const double gx = p.x + ox_, gy = p.y + oy_;       // back to full canvas
+                return !(p.life > 0 && gx >= -tail && gx <= cw_ + tail
+                         && gy >= -tail && gy <= ch_ + tail);
+            }), particles_.end());
+        const double rate = jnum(cfg_, "rate", 0.8) * intensity_;
+        acc_ += dt * rate;
+        const int cap = count(3);
+        while (acc_ >= 1.0) {
+            acc_ -= 1.0;
+            if ((int)particles_.size() < cap) particles_.push_back(spawn(cx, cy));
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        const int tail = (int)jnum(cfg_, "tail", 8.0);
+        for (const auto& p : particles_) {
+            const double sp = std::hypot(p.vx, p.vy);
+            if (sp < 1e-3) continue;
+            const double ux = p.vx / sp, uy = p.vy / sp;
+            const double head = std::clamp(p.life * 1.5, 0.0, 1.0);
+            for (int i = 0; i < tail; ++i) {
+                const double a = (1.0 - (double)i / tail) * head;
+                if (a <= 0) break;
+                draw_dot(c, p.x - ux * i, p.y - uy * i, (int)p.r, (int)p.g, (int)p.b, a, 1);
+            }
+        }
+        return c;
+    }
+private:
+    double acc_ = 0.0;
+    Particle spawn(double cx, double cy) {
+        const double ang = frand(rng_, 0, kTau);
+        const double spd = pick_speed(cfg_, 55, 90, rng_);
+        Color col;
+        if (has_colors(cfg_)) col = pick_color(cfg_, rng_);
+        else { static const Color pool[3] = {{255,255,255},{200,225,255},{255,240,220}};
+               col = pool[irand(rng_, 0, 2)]; }
+        const double r0 = frand(rng_, 0, 6);                       // nudge off-centre
+        Particle p;
+        p.x = cx + std::cos(ang) * r0 - ox_;
+        p.y = cy + std::sin(ang) * r0 - oy_;
+        p.vx = std::cos(ang) * spd; p.vy = std::sin(ang) * spd;
+        p.r = col.r; p.g = col.g; p.b = col.b;
+        p.size = pick_size(cfg_, 1, 1, rng_);
+        p.max_life = 2.5; p.life = 1; p.extra = ang;
+        return p;
+    }
+};
+
 // ── Effect factory ───────────────────────────────────────────────────────────
 
 std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, const json& cfg) {
@@ -1221,6 +1447,10 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "fireworks") return std::make_unique<FireworksEffect>(w, h, cfg);
     if (name == "vortex")    return std::make_unique<VortexEffect>(w, h, cfg);
     if (name == "water")     return std::make_unique<WaterEffect>(w, h, cfg);
+    if (name == "starfield")     return std::make_unique<StarfieldEffect>(w, h, cfg);
+    if (name == "warp")          return std::make_unique<WarpEffect>(w, h, cfg);
+    if (name == "constellation") return std::make_unique<ConstellationEffect>(w, h, cfg);
+    if (name == "shootingstars") return std::make_unique<ShootingStarsEffect>(w, h, cfg);
     return nullptr;
 }
 
@@ -1289,7 +1519,14 @@ const std::map<std::string, json>& presets() {
           "nebula": {"layers":[
             {"effect":"clouds","count":4,"size_min":10,"size_max":18,"lobes_min":3,"lobes_max":6,"turbulence":0.55,"churn":0.3,"alpha_min":0.18,"alpha_max":0.4,"speed_min":0.5,"speed_max":1.8,"colors":[[150,40,140],[90,60,200],[40,90,200]],"blend":"add"},
             {"effect":"clouds","count":5,"size_min":5,"size_max":9,"lobes_min":2,"lobes_max":4,"turbulence":0.8,"churn":0.5,"alpha_min":0.15,"alpha_max":0.4,"speed_min":1.5,"speed_max":4.0,"colors":[[220,80,170],[60,160,200],[120,80,210]],"blend":"add"},
-            {"effect":"sparkle","count":10,"colors":[[255,255,255],[200,220,255]],"life_min":0.4,"life_max":1.2,"blend":"add"}]}
+            {"effect":"sparkle","count":10,"colors":[[255,255,255],[200,220,255]],"life_min":0.4,"life_max":1.2,"blend":"add"}]},
+          "starfield": {"effect":"starfield","count":80,"colors":[[255,255,255],[200,220,255],[255,240,210],[210,235,255]],"speed_min":1.2,"speed_max":3.2,"size_max":2,"blend":"add"},
+          "warp": {"effect":"warp","count":70,"colors":[[255,255,255],[200,225,255],[180,210,255]],"speed_min":3.0,"speed_max":6.0,"streak":1.2,"blend":"add"},
+          "constellation": {"effect":"constellation","count":55,"colors":[[255,255,255],[200,220,255],[255,240,210],[255,255,235]],"twinkle_min":0.7,"twinkle_max":3.0,"bright_frac":0.18,"blend":"add"},
+          "shooting_stars": {"effect":"shootingstars","count":3,"colors":[[255,255,255],[200,225,255],[255,240,220]],"speed_min":55,"speed_max":95,"rate":0.8,"tail":9,"blend":"add"},
+          "night_sky": {"layers":[
+            {"effect":"constellation","count":55,"colors":[[255,255,255],[200,220,255],[255,240,210],[255,255,235]],"twinkle_min":0.6,"twinkle_max":2.6,"bright_frac":0.18,"blend":"add"},
+            {"effect":"shootingstars","count":2,"colors":[[255,255,255],[210,230,255]],"speed_min":55,"speed_max":95,"rate":0.5,"tail":10,"blend":"add"}]}
         })JSON";
         std::map<std::string, json> m;
         json all = json::parse(kJson);

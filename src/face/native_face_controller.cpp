@@ -42,6 +42,11 @@ nlohmann::json effect_cfg_for_id(int id) {
         case 15: return nlohmann::json{{"preset", "party"}};
         case 16: return std::string("clouds");
         case 17: return nlohmann::json{{"preset", "nebula"}};
+        case 18: return nlohmann::json{{"preset", "starfield"}};
+        case 19: return nlohmann::json{{"preset", "warp"}};
+        case 20: return nlohmann::json{{"preset", "constellation"}};
+        case 21: return nlohmann::json{{"preset", "shooting_stars"}};
+        case 22: return nlohmann::json{{"preset", "night_sky"}};
         default: return std::string("none");
     }
 }
