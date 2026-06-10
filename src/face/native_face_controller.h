@@ -174,7 +174,11 @@ private:
     void apply_expression_effect_locked(const std::string& expr);
     void apply_material_all(const std::string& name);   // caller holds state_mtx_
     void cycle_expression(int dir);                     // +1 next / -1 prev; mirrors to all panels
-    void save_state_locked() const;                     // auto-save look; caller holds state_mtx_
+    // Auto-save is split so the file write happens outside state_mtx_ (the
+    // render thread holds it for whole ticks; blocking it on disk I/O froze
+    // the face). serialize under the lock, write after releasing it.
+    std::string serialize_state_locked() const;          // build the state JSON; caller holds state_mtx_
+    void        write_state_file(const std::string& json_text) const; // tmp+rename; call WITHOUT the lock
     void load_state();                                  // overlay saved look at startup
     static std::string preset_material(int idx);
 
@@ -237,6 +241,19 @@ private:
 
     std::thread        thread_;
     std::atomic<bool>  running_{false};
+
+    // Per-frame drive inputs written by other threads (audio thread, IMU
+    // pump) at high rate. Atomics instead of state_mtx_: the render thread
+    // holds that mutex for its entire compositing pass (multiple ms), so
+    // taking it per audio/motion sample stalled the producer threads. The
+    // render thread forwards the latest values into each panel every tick.
+    std::atomic<double> audio_volume_{0.0};
+    std::atomic<double> audio_mouth_{0.0};
+    std::atomic<double> motion_heading_{0.0};
+    std::atomic<double> motion_yaw_rate_{0.0};
+    std::atomic<double> motion_pitch_{0.0};
+    std::atomic<double> motion_roll_{0.0};
+    std::atomic<double> motion_accel_{1.0};   // ≈1 g at rest (MotionInput default)
 
     // Name of the currently-active HUB75 layout (or "" when unset). Used to
     // stamp face folders on import_face_image and surfaced via

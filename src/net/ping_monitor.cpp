@@ -22,6 +22,19 @@ void PingMonitor::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
+// The host comes from user config and is interpolated into a shell command —
+// allow only hostname/IP characters so shell metacharacters can't run commands.
+static bool host_is_safe(const std::string& h) {
+    if (h.empty()) return false;
+    for (char c : h) {
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') ||
+                        c == '.' || c == '_' || c == ':' || c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 // Run one ping and return latency in ms, or -1 if unreachable/error.
 static float ping_once(const std::string& host) {
     char cmd[256];
@@ -42,8 +55,14 @@ static float ping_once(const std::string& host) {
 }
 
 void PingMonitor::thread_fn() {
+    const bool host_ok = host_is_safe(host_);
+    if (!host_.empty() && !host_ok)
+        std::fprintf(stderr,
+                     "[ping] ping_host '%s' contains invalid characters — "
+                     "ping disabled\n", host_.c_str());
+
     while (running_) {
-        float ms = host_.empty() ? -1.f : ping_once(host_);
+        float ms = host_ok ? ping_once(host_) : -1.f;
         bool  ok = ms >= 0.f;
 
         {

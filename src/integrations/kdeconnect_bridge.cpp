@@ -594,6 +594,12 @@ void KdeConnectBridge::worker() {
     // HUD feel live; battery also arrives via the refreshed signal (push).
     auto next_fast = clock::now();
     const auto fast_interval = std::chrono::seconds(2);
+    // Device-list poll is the heaviest periodic worker job (3 blocking property
+    // round-trips per visible device) and only feeds the pairing picker, so it
+    // runs on its own slow cadence. Pair/unpair actions refresh it immediately
+    // in drain_tx, so the picker still reacts to user actions.
+    auto next_devices = clock::now();
+    const auto devices_interval = std::chrono::seconds(10);
     std::string seeded_dev;   // device whose active notifications we've ingested
 
     auto drop_match = [&](const std::string& rule){
@@ -1055,7 +1061,6 @@ void KdeConnectBridge::worker() {
             poll_battery();
             poll_media();
             poll_connectivity();
-            poll_devices();
             fetch_commands();
             if (!current_dev_id.empty() && seeded_dev != current_dev_id) {
                 seed_active();
@@ -1063,6 +1068,12 @@ void KdeConnectBridge::worker() {
             } else if (current_dev_id.empty()) {
                 seeded_dev.clear();
             }
+        }
+
+        // Slow cadence: device list for the pairing picker (see devices_interval).
+        if (now >= next_devices) {
+            next_devices = now + devices_interval;
+            poll_devices();
         }
 
         // Drain queued TX actions (reply/dismiss/runcommand/media/sms/mute).
