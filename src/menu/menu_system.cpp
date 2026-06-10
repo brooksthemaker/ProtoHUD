@@ -14,18 +14,27 @@
 
 static bool s_menu_glow = true;
 
-static std::string to_upper(const std::string& s) {
-    std::string r; r.reserve(s.size());
+// Returns a reference into a reused scratch buffer — the menu renderers call
+// this for every visible row every frame, and the old per-call std::string
+// was real allocation churn. Valid until the next to_upper call; every caller
+// either consumes it immediately or copies when it needs to append.
+static const std::string& to_upper(const std::string& s) {
+    static thread_local std::string r;
+    r.clear();
+    r.reserve(s.size());
     for (unsigned char c : s) r += static_cast<char>(::toupper(c));
     return r;
 }
 
 // Rendered label for an item: dynamic label_fn() if present, else the static
 // label.  Lets profile rows show live names without rebuilding the menu tree.
-static std::string item_label(const MenuItem& it) {
+// Same scratch-buffer contract as to_upper (the common static-label case is
+// a plain reference into the tree, allocation-free).
+static const std::string& item_label(const MenuItem& it) {
     if (it.label_fn) {
-        std::string s = it.label_fn();
-        if (!s.empty()) return s;
+        static thread_local std::string s_dyn;
+        s_dyn = it.label_fn();
+        if (!s_dyn.empty()) return s_dyn;
     }
     return it.label;
 }
@@ -202,6 +211,24 @@ void MenuSystem::load_tab(int idx) {
     if (deep_tabs_.empty()) return;
     int n = static_cast<int>(deep_tabs_.size());
     tab_index_ = ((idx % n) + n) % n;
+    // Switching tabs mid-edit used to silently COMMIT the live-previewed
+    // value (edit mode was just cleared); back() would have reverted it.
+    // Run the same restore before leaving the level.
+    if ((in_edit_mode_ || in_channel_edit_) && !stack_.empty()
+        && cursor_ >= 0 && cursor_ < stack_.back().size()) {
+        const auto& item = stack_.back().at(cursor_);
+        if (item.type == MenuItemType::SLIDER) {
+            if (item.slider.set_value) item.slider.set_value(orig_float_);
+        } else if (item.type == MenuItemType::FACE_PICKER) {
+            if (item.face_picker.set_face)
+                item.face_picker.set_face(static_cast<int>(orig_float_));
+        } else if (item.type == MenuItemType::COLOR_PICKER) {
+            if (item.color.set_color)
+                item.color.set_color(static_cast<uint8_t>(orig_r_),
+                                     static_cast<uint8_t>(orig_g_),
+                                     static_cast<uint8_t>(orig_b_));
+        }
+    }
     in_edit_mode_    = false;
     in_channel_edit_ = false;
     stack_.clear();
@@ -1961,7 +1988,9 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
     };
     auto stroke_sector = [&](float r0, float r1, float a0, float a1, ImU32 col, float th) {
         int seg = std::max(2, static_cast<int>(std::ceil((a1 - a0) / 0.10f)));
-        std::vector<ImVec2> pts;
+        // Reused across wedges/frames — this runs per wedge per frame.
+        static thread_local std::vector<ImVec2> pts;
+        pts.clear();
         for (int i = 0; i <= seg; ++i) pts.push_back(PR(a0 + (a1 - a0) * (float)i / seg, r1));
         for (int i = 0; i <= seg; ++i) pts.push_back(PR(a1 - (a1 - a0) * (float)i / seg, r0));
         dl->AddPolyline(pts.data(), (int)pts.size(), col, ImDrawFlags_Closed, th);
