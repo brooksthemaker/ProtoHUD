@@ -322,11 +322,31 @@ public:
     bool editing_value() const;
 
 private:
+    // A page references the stable menu tree instead of deep-copying it —
+    // MenuItem owns its children by value, so the old per-level copy cloned
+    // every nested subtree (thousands of string/std::function allocations =
+    // a visible hitch on every open/descend). The tree (root_items_ /
+    // quick_items_ / deep tabs) is structurally immutable after build_menu;
+    // dynamic rows read live data through their label_fn/visible_fn hooks,
+    // so the pointer stays valid for the life of the level. `nav` is the
+    // synthesized "Close Menu"/"< Back" row appended as the last index.
     struct Level {
-        std::vector<MenuItem> items;
+        const std::vector<MenuItem>* src = nullptr;
+        MenuItem              nav;
         int                   cursor = 0;
         std::string           panel_title;
         MenuContextPanelDraw  panel_draw;
+
+        int size() const { return src ? static_cast<int>(src->size()) + 1 : 0; }
+        const MenuItem& at(int i) const {
+            return i < static_cast<int>(src->size()) ? (*src)[i] : nav;
+        }
+    };
+    // Adapter so nav/draw code keeps its `items[i]` / `items.size()` shape.
+    struct LevelView {
+        const Level& lv;
+        int size() const { return lv.size(); }
+        const MenuItem& operator[](int i) const { return lv.at(i); }
     };
 
     void push_level(const std::vector<MenuItem>& items,
@@ -353,7 +373,11 @@ private:
     void load_tab(int idx);     // reset stack_ to the given tab's items
     bool deep_open_  = false;
     int  tab_index_  = 0;
-    std::vector<std::pair<std::string, std::vector<MenuItem>>> deep_tabs_;
+    // Tab pages point into root_items_'s submenu children; rows that aren't
+    // submenus get an owned home in deep_general_. Built once — see
+    // build_deep_tabs().
+    std::vector<std::pair<std::string, const std::vector<MenuItem>*>> deep_tabs_;
+    std::vector<MenuItem> deep_general_;
 
     // ── on-screen keyboard state ────────────────────────────────────────────────
     void draw_keyboard(ImDrawList* dl, ImFont* font, float fs, float W, float H);

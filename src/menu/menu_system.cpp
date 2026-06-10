@@ -137,15 +137,19 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items,
                              std::string panel_title,
                              MenuContextPanelDraw panel_draw) {
     if (items.empty()) return;
-    std::vector<MenuItem> level = items;
 
-    // Append navigation item: "Close Menu" at root, "< Back" in submenus.
-    // When selected, back() pops the level (or closes at root depth=1).
-    MenuItem nav;
-    nav.type   = MenuItemType::LEAF;
-    nav.label  = stack_.empty() ? "Close Menu" : "< Back";
-    nav.action = [this] { this->back(); };
-    level.push_back(nav);
+    // The level references the caller's vector (a stable tree node) rather
+    // than copying it — see the Level comment in the header. The synthesized
+    // navigation row ("Close Menu" at root, "< Back" in submenus) is the
+    // level's final index; when selected, back() pops the level (or closes
+    // at root depth=1).
+    Level level;
+    level.src         = &items;
+    level.nav.type    = MenuItemType::LEAF;
+    level.nav.label   = stack_.empty() ? "Close Menu" : "< Back";
+    level.nav.action  = [this] { this->back(); };
+    level.panel_title = std::move(panel_title);
+    level.panel_draw  = std::move(panel_draw);
 
     if (!stack_.empty())
         stack_.back().cursor = cursor_;  // remember where we were on the parent page
@@ -153,12 +157,11 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items,
     // Start the cursor on the currently-selected option (so option lists open
     // highlighting the active choice), else on the first item.
     int init_cursor = 0;
-    for (int i = 0; i < static_cast<int>(level.size()); ++i)
-        if (level[i].get_state && level[i].get_state()) { init_cursor = i; break; }
+    for (int i = 0; i < level.size(); ++i)
+        if (level.at(i).get_state && level.at(i).get_state()) { init_cursor = i; break; }
+    level.cursor = init_cursor;
 
-    stack_.push_back(Level{ std::move(level), init_cursor,
-                            std::move(panel_title),
-                            std::move(panel_draw) });
+    stack_.push_back(std::move(level));
     cursor_ = init_cursor;
     list_scroll_ = 0;        // start a fresh page at the top
     radial_prev_sel_ = -1;   // snap the radial spin to the new level
@@ -182,16 +185,17 @@ void MenuSystem::pop_level() {
 // ── Deep (full-screen) menu management ──────────────────────────────────────────
 
 void MenuSystem::build_deep_tabs() {
-    deep_tabs_.clear();
-    std::vector<MenuItem> general;
+    // The tree is static after build_menu, so tabs are derived exactly once —
+    // this used to re-copy every submenu's whole subtree on each deep open.
+    if (!deep_tabs_.empty()) return;
     for (const auto& it : root_items_) {
         if (it.type == MenuItemType::SUBMENU && !it.children.empty())
-            deep_tabs_.emplace_back(it.label, it.children);
+            deep_tabs_.emplace_back(it.label, &it.children);
         else
-            general.push_back(it);
+            deep_general_.push_back(it);
     }
-    if (!general.empty())
-        deep_tabs_.emplace_back(std::string("General"), std::move(general));
+    if (!deep_general_.empty())
+        deep_tabs_.emplace_back(std::string("General"), &deep_general_);
 }
 
 void MenuSystem::load_tab(int idx) {
@@ -202,7 +206,7 @@ void MenuSystem::load_tab(int idx) {
     in_channel_edit_ = false;
     stack_.clear();
     cursor_ = 0;
-    push_level(deep_tabs_[tab_index_].second);
+    push_level(*deep_tabs_[tab_index_].second);
 }
 
 void MenuSystem::open_deep() {
@@ -381,9 +385,10 @@ void MenuSystem::close_face_editor() {
 
 void MenuSystem::emit_detents() {
     if (detent_cb_ && !stack_.empty()) {
+        const LevelView items{stack_.back()};
         int count = 0;
-        for (const auto& it : stack_.back().items)
-            if (!it.visible_fn || it.visible_fn()) ++count;
+        for (int i = 0; i < items.size(); ++i)
+            if (!items[i].visible_fn || items[i].visible_fn()) ++count;
         detent_cb_(count);
     }
 }
@@ -401,7 +406,7 @@ void MenuSystem::navigate(int direction) {
     if (!open_ || stack_.empty()) return;
 
     if (in_edit_mode_) {
-        auto& item = stack_.back().items[cursor_];
+        const auto& item = stack_.back().at(cursor_);
 
         if (item.type == MenuItemType::COLOR_PICKER) {
             if (in_channel_edit_) {
@@ -433,8 +438,8 @@ void MenuSystem::navigate(int direction) {
         return;
     }
 
-    const auto& items = stack_.back().items;
-    int n = static_cast<int>(items.size());
+    const LevelView items{stack_.back()};
+    int n = items.size();
     if (n == 0) return;
 
     // Advance cursor, skipping invisible items (up to n steps to avoid infinite loop).
@@ -457,9 +462,9 @@ void MenuSystem::select() {
     if (file_picker_.is_open()) { file_picker_.activate(); return; }
     if (osk_active_) { osk_activate(); return; }
     if (!open_ || stack_.empty()) return;
-    auto& items = stack_.back().items;
-    if (cursor_ >= static_cast<int>(items.size())) return;
-    auto& item = items[cursor_];
+    const LevelView items{stack_.back()};
+    if (cursor_ >= items.size()) return;
+    const auto& item = items[cursor_];
 
     switch (item.type) {
     case MenuItemType::SUBMENU:
@@ -611,9 +616,9 @@ void MenuSystem::select() {
 
 void MenuSystem::secondary() {
     if (!open_ || stack_.empty() || in_edit_mode_) return;
-    auto& items = stack_.back().items;
-    if (cursor_ < 0 || cursor_ >= static_cast<int>(items.size())) return;
-    auto& item = items[cursor_];
+    const LevelView items{stack_.back()};
+    if (cursor_ < 0 || cursor_ >= items.size()) return;
+    const auto& item = items[cursor_];
     if (!item.secondary_children.empty()) {
         push_level(item.secondary_children,
                    item.context_panel_title, item.context_panel_draw);
@@ -628,8 +633,8 @@ void MenuSystem::back() {
     if (face_editor_.is_open()) { face_editor_.back(); return; }
     if (file_picker_.is_open()) { file_picker_.back(); return; }
     if (osk_active_) { osk_backspace(); return; }
-    if (!stack_.empty() && cursor_ < static_cast<int>(stack_.back().items.size())) {
-        auto& item = stack_.back().items[cursor_];
+    if (!stack_.empty() && cursor_ < stack_.back().size()) {
+        const auto& item = stack_.back().at(cursor_);
 
         if (in_channel_edit_) {
             // Restore original color, reset working copies, exit channel-edit
@@ -667,16 +672,16 @@ void MenuSystem::back() {
 const std::string& MenuSystem::current_label() const {
     static std::string empty;
     if (stack_.empty()) return empty;
-    const auto& items = stack_.back().items;
-    if (cursor_ < static_cast<int>(items.size()))
+    const LevelView items{stack_.back()};
+    if (cursor_ < items.size())
         return items[cursor_].label;
     return empty;
 }
 
 bool MenuSystem::editing_value() const {
     if (!in_edit_mode_ || stack_.empty()) return false;
-    const auto& items = stack_.back().items;
-    if (cursor_ < 0 || cursor_ >= static_cast<int>(items.size())) return false;
+    const LevelView items{stack_.back()};
+    if (cursor_ < 0 || cursor_ >= items.size()) return false;
     switch (items[cursor_].type) {
         case MenuItemType::SLIDER:       return true;
         case MenuItemType::FACE_PICKER:  return true;
@@ -691,7 +696,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     if (!open_ || stack_.empty()) return;
     s_menu_glow = glow_enabled_;
 
-    const auto& items  = stack_.back().items;
+    const LevelView items{stack_.back()};
     const float item_h = 38.f;
     const float pad_x  = 18.f;
     const float pad_y  = 14.f;
@@ -1498,11 +1503,11 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     const float split_x = pmin.x + (pmax.x - pmin.x) * 0.42f;
     dl->AddLine({ split_x, cy0 }, { split_x, cy1 }, menu_with_alpha(accent_color_, 60), 1.f);
 
-    const auto& items = stack_.back().items;
+    const LevelView items{stack_.back()};
 
     // Keep the cursor on a visible item.
     {
-        int n = static_cast<int>(items.size());
+        int n = items.size();
         if (n > 0 && cursor_ < n) {
             const auto& cur = items[cursor_];
             if (cur.visible_fn && !cur.visible_fn()) {
@@ -2007,8 +2012,8 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
         const int   sel_idx = active ? cursor_ : lvl.cursor;
 
         std::vector<int> vis;
-        for (int i = 0; i < static_cast<int>(lvl.items.size()); ++i)
-            if (!lvl.items[i].visible_fn || lvl.items[i].visible_fn()) vis.push_back(i);
+        for (int i = 0; i < lvl.size(); ++i)
+            if (!lvl.at(i).visible_fn || lvl.at(i).visible_fn()) vis.push_back(i);
         const int N = static_cast<int>(vis.size());
         if (N == 0) continue;
 
@@ -2038,7 +2043,7 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
         }
 
         for (int k = 0; k < N; ++k) {
-            const MenuItem& it = lvl.items[vis[k]];
+            const MenuItem& it = lvl.at(vis[k]);
             const bool primary = (vis[k] == sel_idx);
             float ac = focus_angle + (static_cast<float>(k) - anim_sel) * step;
             float a0 = ac - step * 0.5f + wedge_gap * 0.5f;
@@ -2088,8 +2093,8 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
     // Selecting Zoom/Focus opens a half-height outer ring: Up/Down adjust the value,
     // Enter confirms, Left returns. Shown as an arc gauge + the live value.
     if (in_edit_mode_ && !stack_.empty()) {
-        const auto& items = stack_.back().items;
-        if (cursor_ >= 0 && cursor_ < static_cast<int>(items.size())) {
+        const LevelView items{stack_.back()};
+        if (cursor_ >= 0 && cursor_ < items.size()) {
             const MenuItem& it = items[cursor_];
             const bool is_val = (it.type == MenuItemType::SLIDER ||
                                  it.type == MenuItemType::FACE_PICKER);
