@@ -23,9 +23,11 @@
 #include <imgui.h>
 #include <opencv2/core.hpp>
 
+#include "overlay.h"
+
 namespace menu {
 
-class FaceEditor {
+class FaceEditor : public IOverlay {
 public:
     enum class Mode : uint8_t { Mono, Color };
     enum class Tool : uint8_t { Pencil, Eraser, Bucket, Eyedrop, Line, Rect, EyeBox };
@@ -69,16 +71,21 @@ public:
               PreviewFn on_preview = {},
               LiveFrameFn live_frame = {},
               double preview_duration_s = 10.0);
-    void close();
-    bool is_open() const { return open_; }
+    void close() override;
+    bool is_open() const override { return open_; }
 
     // Input — wired from MenuSystem when is_open() is true.
     void cursor_step(int dx, int dy);    // D-pad / arrow keys (one pixel)
     void primary();                      // A / Space — paint at cursor
     void secondary();                    // X — cycle tool
     void tertiary();                     // Y — toggle mirror
-    void back();                         // B — cancel (close without save)
+    void back() override;                // B — cancel (close without save)
     void save();                         // Apply + close
+
+    // IOverlay adapters — knob walk is a vertical cursor step, select paints.
+    void step(int d) override            { cursor_step(0, d); }
+    void move(int dx, int dy) override   { cursor_step(dx, dy); }
+    void activate() override             { primary(); }
 
     void cycle_palette(int dir);         // shoulder buttons / wheel scroll
     void set_tool(Tool t);               // P/E/B/I keys
@@ -97,9 +104,12 @@ public:
     void toggle_live();
     bool live_mode() const { return live_mode_; }
 
-    // Full-screen overlay drawn in place of the deep menu while open.
+    // Full-screen overlay drawn in place of the deep menu while open. Also
+    // polls the editor-specific ImGui keys (tools, brush, undo, save, …) and
+    // the mouse — they're editor-only, so the polling lives here rather than
+    // in MenuSystem's input set.
     void draw(ImDrawList* dl, ImFont* font, float fs,
-              float screen_w, float screen_h, ImU32 accent);
+              float screen_w, float screen_h, ImU32 accent) override;
 
     // Mouse helpers — caller passes ImGui::GetMousePos relative to the
     // window origin (typically (0,0) at top-left of the framebuffer).

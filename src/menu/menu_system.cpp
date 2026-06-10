@@ -369,10 +369,12 @@ void MenuSystem::open_file_picker(std::string title,
     file_picker_.open(std::move(title), std::move(start_dir),
                       std::move(extensions),
                       std::move(on_commit), std::move(on_cancel));
+    overlay_ = &file_picker_;
 }
 
 void MenuSystem::close_file_picker() {
     file_picker_.cancel();
+    if (overlay_ == &file_picker_) overlay_ = nullptr;
 }
 
 // ── Face editor ───────────────────────────────────────────────────────────────
@@ -404,10 +406,12 @@ void MenuSystem::open_face_editor(std::string title,
                       std::move(on_commit), std::move(on_cancel),
                       std::move(on_preview), std::move(live_frame),
                       preview_duration_s);
+    overlay_ = &face_editor_;
 }
 
 void MenuSystem::close_face_editor() {
     face_editor_.back();
+    if (overlay_ == &face_editor_) overlay_ = nullptr;
 }
 
 void MenuSystem::emit_detents() {
@@ -427,9 +431,8 @@ void MenuSystem::emit_detents_override(int count) {
 // ── navigate ──────────────────────────────────────────────────────────────────
 
 void MenuSystem::navigate(int direction) {
-    if (face_editor_.is_open()) { face_editor_.cursor_step(0, direction); return; }
-    if (file_picker_.is_open()) { file_picker_.step(direction); return; }
     if (osk_active_) { osk_step(direction); return; }
+    if (overlay_ && overlay_->is_open()) { overlay_->step(direction); return; }
     if (!open_ || stack_.empty()) return;
 
     if (in_edit_mode_) {
@@ -485,9 +488,12 @@ void MenuSystem::navigate(int direction) {
 // ── select ────────────────────────────────────────────────────────────────────
 
 void MenuSystem::select() {
-    if (face_editor_.is_open()) { face_editor_.primary(); return; }
-    if (file_picker_.is_open()) { file_picker_.activate(); return; }
     if (osk_active_) { osk_activate(); return; }
+    if (overlay_ && overlay_->is_open()) {
+        overlay_->activate();
+        if (!overlay_->is_open()) overlay_ = nullptr;   // commit may close it
+        return;
+    }
     if (!open_ || stack_.empty()) return;
     const LevelView items{stack_.back()};
     if (cursor_ >= items.size()) return;
@@ -657,9 +663,12 @@ void MenuSystem::secondary() {
 // ── back ──────────────────────────────────────────────────────────────────────
 
 void MenuSystem::back() {
-    if (face_editor_.is_open()) { face_editor_.back(); return; }
-    if (file_picker_.is_open()) { file_picker_.back(); return; }
     if (osk_active_) { osk_backspace(); return; }
+    if (overlay_ && overlay_->is_open()) {
+        overlay_->back();
+        if (!overlay_->is_open()) overlay_ = nullptr;   // back may close it
+        return;
+    }
     if (!stack_.empty() && cursor_ < stack_.back().size()) {
         const auto& item = stack_.back().at(cursor_);
 
@@ -1411,76 +1420,11 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
         return;
     }
 
-    // Face editor overlays the deep menu. Drawn ahead of the picker so a
-    // background "Edit…" doesn't hide while the picker is open (the cases
-    // are mutually exclusive in practice, but the order keeps it
-    // deterministic). Keyboard shortcuts are sampled from ImGui state here
-    // so the editor can react to S / Z / X / Y / [ / ] without separate
-    // input plumbing — same pattern the file picker leans on.
-    if (face_editor_.is_open()) {
-        // Vertical cursor motion already comes in through menu.navigate()
-        // when the deep menu is open (route in MenuSystem::navigate forwards
-        // to face_editor_.cursor_step). Horizontal cursor + tool/palette
-        // shortcuts are editor-only and not in the menu's input set, so we
-        // poll them directly here.
-        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  face_editor_.cursor_step(-1, 0);
-        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) face_editor_.cursor_step(+1, 0);
-        if (ImGui::IsKeyPressed(ImGuiKey_Space))      face_editor_.primary();
-        if (ImGui::IsKeyPressed(ImGuiKey_X))          face_editor_.secondary();
-        if (ImGui::IsKeyPressed(ImGuiKey_Y) ||
-            ImGui::IsKeyPressed(ImGuiKey_M))          face_editor_.tertiary();
-        if (ImGui::IsKeyPressed(ImGuiKey_Z))          face_editor_.undo();
-        if (ImGui::IsKeyPressed(ImGuiKey_V))          face_editor_.preview();
-        if (ImGui::IsKeyPressed(ImGuiKey_T))          face_editor_.toggle_live();
-        if (ImGui::IsKeyPressed(ImGuiKey_S))          face_editor_.save();
-        // Direct tool selection. Number keys 1-6 map to the six tools in
-        // declaration order (Pencil/Eraser/Bucket/Eyedrop/Line/Rect); the
-        // letter shortcuts (P/E/B/I/L/R) are kept as mnemonics. The deep
-        // menu's number-key handlers and main's camera-PiP toggles are
-        // both gated by is_face_editor_open(), so 1-6 are exclusive here.
-        if (ImGui::IsKeyPressed(ImGuiKey_1))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
-        if (ImGui::IsKeyPressed(ImGuiKey_2))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
-        if (ImGui::IsKeyPressed(ImGuiKey_3))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);
-        if (ImGui::IsKeyPressed(ImGuiKey_4))          face_editor_.set_tool(menu::FaceEditor::Tool::Eyedrop);
-        if (ImGui::IsKeyPressed(ImGuiKey_5))          face_editor_.set_tool(menu::FaceEditor::Tool::Line);
-        if (ImGui::IsKeyPressed(ImGuiKey_6))          face_editor_.set_tool(menu::FaceEditor::Tool::Rect);
-        if (ImGui::IsKeyPressed(ImGuiKey_7))          face_editor_.set_tool(menu::FaceEditor::Tool::EyeBox);
-        if (ImGui::IsKeyPressed(ImGuiKey_P))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
-        if (ImGui::IsKeyPressed(ImGuiKey_E))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
-        if (ImGui::IsKeyPressed(ImGuiKey_B))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);
-        if (ImGui::IsKeyPressed(ImGuiKey_I))          face_editor_.set_tool(menu::FaceEditor::Tool::Eyedrop);
-        if (ImGui::IsKeyPressed(ImGuiKey_L))          face_editor_.set_tool(menu::FaceEditor::Tool::Line);
-        if (ImGui::IsKeyPressed(ImGuiKey_R))          face_editor_.set_tool(menu::FaceEditor::Tool::Rect);
-        // Brush size — Minus shrinks, Equals/Plus grows. Clamped 0..2 by
-        // the setter itself, so we just pass current ± 1.
-        if (ImGui::IsKeyPressed(ImGuiKey_Minus) ||
-            ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract))
-            face_editor_.set_brush_size(face_editor_.brush_size() - 1);
-        if (ImGui::IsKeyPressed(ImGuiKey_Equal) ||
-            ImGui::IsKeyPressed(ImGuiKey_KeypadAdd))
-            face_editor_.set_brush_size(face_editor_.brush_size() + 1);
-        if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))  face_editor_.cycle_palette(-1);
-        if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) face_editor_.cycle_palette(+1);
-        // Press EDGE fires primary() exactly once; holding the button paints a
-        // drag stroke (freehand brushes only). Using IsMouseDown for the
-        // primary action re-fired it every frame, which corrupted the two-step
-        // tools (Line / Rect / Eye Region) — a single click would set then
-        // immediately clear the anchor.
-        const ImVec2 mp = ImGui::GetMousePos();
-        if      (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) face_editor_.mouse_down(mp.x, mp.y);
-        else if (ImGui::IsMouseDown   (ImGuiMouseButton_Left)) face_editor_.mouse_drag(mp.x, mp.y);
-        else                                                   face_editor_.mouse_move(mp.x, mp.y);
-
-        face_editor_.draw(dl, font, fs, W, H, accent_color_);
-        ImGui::End();
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(1);
-        return;
-    }
-
-    // File picker overlays the deep menu, same as OSK.
-    if (file_picker_.is_open()) {
-        file_picker_.draw(dl, font, fs, W, H, accent_color_);
+    // Active overlay (file picker / face editor / color picker) replaces the
+    // deep-menu body. Each overlay polls its own extra ImGui keys inside its
+    // draw() (the face editor's tool shortcuts, mouse painting, …).
+    if (overlay_ && overlay_->is_open()) {
+        overlay_->draw(dl, font, fs, W, H, accent_color_);
         ImGui::End();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(1);

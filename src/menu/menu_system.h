@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <imgui.h>
 #include "../app_state.h"
+#include "overlay.h"
 #include "file_picker.h"
 #include "face_editor.h"
 
@@ -245,6 +246,7 @@ public:
         osk_commit_      = nullptr;
         file_picker_.close();
         face_editor_.close();
+        overlay_ = nullptr;
         stack_.clear();
     }
 
@@ -393,6 +395,11 @@ private:
 
     // Face editor overlay (pixel-art authoring) — same overlay pattern.
     menu::FaceEditor face_editor_;
+
+    // Active full-screen overlay (one of the members above), or nullptr.
+    // navigate/select/back/draw_fullscreen dispatch through this instead of
+    // per-class if-chains; the OSK is still checked first, before the overlay.
+    menu::IOverlay* overlay_ = nullptr;
 
     std::vector<MenuItem>  root_items_;
     std::vector<MenuItem>  quick_items_;   // curated corner "quick menu" tree
