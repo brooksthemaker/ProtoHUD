@@ -368,6 +368,23 @@ struct MenuBuildContext {
     // Glitch post-effect config (null on non-native backends). The menu
     // mutates it in place and re-pushes via pf_anim_push().
     face::GlitchConfig* pf_glitch_p = nullptr;
+
+    // ── Build-phase shared fragments ──────────────────────────────────────────
+    // NOT caller-supplied: set by build_menu() before the tab builders run
+    // (shared helpers), or by an earlier tab builder for a later one
+    // (cross-tab menu fragments).
+    //
+    // Thread-safe notification push (was a build_menu local lambda shared by
+    // the LoRa menu and the System tab's Demo Mode / Updates). Tab builders
+    // re-wrap it locally to restore the optional trailing actions argument.
+    std::function<void(NotifType, std::string, std::string, float,
+                       std::vector<NotifAction>)> push_notif;
+    // Built-in coordinated HUD/menu theme leaves — the same quick-apply list
+    // lives under HUD (Themes and Effects) and System > HUD/Menu Presets.
+    std::function<std::vector<MenuItem>()> make_builtin_theme_leaves;
+    // Phone (KDE Connect) item: built by the Communications builder, shown
+    // under System > Connectivity (alongside SSH/Bluetooth).
+    MenuItem phone_item;
 };
 
 // Builds the full deep-menu tree (six top-level tabs) and, when
