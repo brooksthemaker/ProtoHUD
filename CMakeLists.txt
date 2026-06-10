@@ -202,6 +202,7 @@ set(SOURCES
     src/serial/smartknob.cpp
     src/hud/hud_renderer.cpp
     src/hud/background_library.cpp
+    src/menu/build_menu.cpp
     src/menu/menu_system.cpp
     src/menu/file_picker.cpp
     src/menu/face_editor.cpp
