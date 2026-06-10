@@ -385,6 +385,14 @@ struct MenuBuildContext {
     // Phone (KDE Connect) item: built by the Communications builder, shown
     // under System > Connectivity (alongside SSH/Bluetooth).
     MenuItem phone_item;
+    // GIF slot machinery, constructed in build_menu() around one shared
+    // animated-preview state. draw_gif_preview is safe to keep in items
+    // (captures by value / shared_ptr); gif_leaf and gif_slot_row are
+    // BUILD-PHASE ONLY — they capture build_menu locals by reference and
+    // must not be called after the build returns.
+    MenuContextPanelDraw draw_gif_preview;          // animated slot preview panel
+    std::function<MenuItem(uint8_t)> gif_leaf;      // play/import leaf for slot i
+    std::function<MenuItem(uint8_t)> gif_slot_row;  // Files management row for slot i
 };
 
 // Builds the full deep-menu tree (six top-level tabs) and, when

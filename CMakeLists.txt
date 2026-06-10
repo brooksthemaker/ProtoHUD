@@ -205,6 +205,7 @@ set(SOURCES
     src/menu/build_hud.cpp
     src/menu/build_menu.cpp
     src/menu/build_communications.cpp
+    src/menu/build_face_display.cpp
     src/menu/build_quick.cpp
     src/menu/build_system.cpp
     src/menu/build_vision.cpp
