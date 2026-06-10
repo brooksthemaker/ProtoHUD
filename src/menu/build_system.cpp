@@ -442,16 +442,17 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
     // ── HUD / Menu Presets ───────────────────────────────────────────────────────
     // Visual-only presets (HUD colors + menu accent/border/selection/scale). Built-in
     // coordinated themes apply instantly; custom ones are saved/loaded live (no
-    // restart, unlike full Profiles). Load/delete lists are dynamic (label_fn reads
-    // the manager live). kProfileSlots = max dynamic rows shown for save/load lists.
+    // restart, unlike full Profiles). Load/delete lists are dynamic
+    // (make_dynamic_rows — label_fn reads the manager live). kProfileSlots = max
+    // dynamic rows shown for save/load lists.
     constexpr int kProfileSlots = 16;
-    std::vector<MenuItem> hud_preset_delete_menu;
-    for (int i = 0; i < kProfileSlots; ++i) {
+    auto hud_presets_count = [hud_presets]{ return hud_presets ? hud_presets->count() : 0; };
+    std::vector<MenuItem> hud_preset_delete_menu = make_dynamic_rows(
+        kProfileSlots, hud_presets_count, [&](int i) -> MenuItem {
         MenuItem m;
         m.type        = MenuItemType::LEAF;
         m.label       = "preset";
         m.label_fn    = [hud_presets, i]{ return hud_presets ? hud_presets->name(i) : std::string(); };
-        m.visible_fn  = [hud_presets, i]{ return hud_presets && i < hud_presets->count(); };
         m.description = "Delete this HUD/menu preset permanently.";
         m.action = [state_ptr, hud_presets, i]{
             if (!state_ptr || !hud_presets) return;
@@ -460,8 +461,8 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
             std::lock_guard<std::mutex> lk(state_ptr->mtx);
             state_ptr->hud_preset_delete_name = nm;
         };
-        hud_preset_delete_menu.push_back(std::move(m));
-    }
+        return m;
+    });
 
     std::vector<MenuItem> hud_presets_menu;
     // Built-in coordinated themes (instant apply).
@@ -482,12 +483,12 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         "Save the current HUD colors + menu style (accent, border, selection, UI "
         "scale) as a named preset. Applies live when loaded — no restart."));
     // Dynamic load slots.
-    for (int i = 0; i < kProfileSlots; ++i) {
+    for (auto& m : make_dynamic_rows(kProfileSlots, hud_presets_count,
+                                     [&](int i) -> MenuItem {
         MenuItem m;
         m.type        = MenuItemType::LEAF;
         m.label       = "preset";
         m.label_fn    = [hud_presets, i]{ return hud_presets ? hud_presets->name(i) : std::string(); };
-        m.visible_fn  = [hud_presets, i]{ return hud_presets && i < hud_presets->count(); };
         m.description = "Apply this HUD/menu preset (live, no restart).";
         m.action = [state_ptr, hud_presets, i]{
             if (!state_ptr || !hud_presets) return;
@@ -496,8 +497,9 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
             std::lock_guard<std::mutex> lk(state_ptr->mtx);
             state_ptr->hud_preset_load_name = nm;
         };
+        return m;
+    }))
         hud_presets_menu.push_back(std::move(m));
-    }
     hud_presets_menu.push_back(with_desc(submenu("Delete Preset", std::move(hud_preset_delete_menu)),
         "Remove a saved HUD/menu preset permanently."));
 
@@ -2544,16 +2546,17 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
 
     // ── Profiles ────────────────────────────────────────────────────────────────
     // Save the current setup as a named snapshot, load one (relaunches ProtoHUD),
-    // or delete one. The load/delete lists are dynamic: label_fn/visible_fn read the
-    // ProfileManager live, so newly-saved profiles appear without rebuilding the menu.
+    // or delete one. The load/delete lists are dynamic (make_dynamic_rows): the
+    // rows read the ProfileManager live, so newly-saved profiles appear without
+    // rebuilding the menu.
     // (kProfileSlots declared above, near the HUD/Menu Presets section.)
-    std::vector<MenuItem> profile_delete_menu;
-    for (int i = 0; i < kProfileSlots; ++i) {
+    auto profiles_count = [profiles]{ return profiles ? profiles->count() : 0; };
+    std::vector<MenuItem> profile_delete_menu = make_dynamic_rows(
+        kProfileSlots, profiles_count, [&](int i) -> MenuItem {
         MenuItem m;
         m.type       = MenuItemType::LEAF;
         m.label      = "profile";
         m.label_fn   = [profiles, i]{ return profiles ? profiles->name(i) : std::string(); };
-        m.visible_fn = [profiles, i]{ return profiles && i < profiles->count(); };
         m.description = "Delete this profile permanently.";
         m.action = [state_ptr, profiles, i]{
             if (!state_ptr || !profiles) return;
@@ -2562,8 +2565,8 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
             std::lock_guard<std::mutex> lk(state_ptr->mtx);
             state_ptr->profile_delete_name = nm;
         };
-        profile_delete_menu.push_back(std::move(m));
-    }
+        return m;
+    });
 
     std::vector<MenuItem> profiles_menu;
     profiles_menu.push_back(with_desc(
@@ -2578,12 +2581,12 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         }),
         "Save every current setting (HUD layout, menu style, camera/vision, "
         "Protoface look) as a named profile you can switch to later."));
-    for (int i = 0; i < kProfileSlots; ++i) {
+    for (auto& m : make_dynamic_rows(kProfileSlots, profiles_count,
+                                     [&](int i) -> MenuItem {
         MenuItem m;
         m.type        = MenuItemType::LEAF;
         m.label       = "profile";
         m.label_fn    = [profiles, i]{ return profiles ? profiles->name(i) : std::string(); };
-        m.visible_fn  = [profiles, i]{ return profiles && i < profiles->count(); };
         m.description = "Load this profile. ProtoHUD restarts to apply it.";
         m.action = [state_ptr, profiles, i]{
             if (!state_ptr || !profiles) return;
@@ -2592,8 +2595,9 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
             std::lock_guard<std::mutex> lk(state_ptr->mtx);
             state_ptr->profile_load_name = nm;
         };
+        return m;
+    }))
         profiles_menu.push_back(std::move(m));
-    }
     profiles_menu.push_back(with_desc(submenu("Delete Profile", std::move(profile_delete_menu)),
         "Remove a saved profile permanently."));
 

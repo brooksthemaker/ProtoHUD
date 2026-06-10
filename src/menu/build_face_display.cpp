@@ -543,14 +543,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         refresh();
                     });
             }), "Save the current art as a named version you can restore later."));
-        for (int i = 0; i < 24; ++i) {
+        for (auto& row : make_dynamic_rows(24,
+                 [entries]{ return static_cast<int>(entries->size()); },
+                 [&](int i) -> MenuItem {
             MenuItem row; row.type = MenuItemType::SUBMENU; row.label = "version";
             row.label_fn = [entries, i]{
                 if (i >= static_cast<int>(entries->size())) return std::string();
                 const auto& e = (*entries)[i];
                 return e.named ? e.label : ("auto: " + e.label);
             };
-            row.visible_fn   = [entries, i]{ return i < static_cast<int>(entries->size()); };
             row.on_highlight = [focus, i]{ *focus = i; };
             MenuItem mk = leaf("Make Current",
                 [entries, i, expr, teensy, refresh]{
@@ -567,8 +568,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 refresh();
             });
             row.children = { std::move(mk), std::move(del) };
+            return row;
+        }))
             items.push_back(std::move(row));
-        }
         MenuItem sub = submenu("Versions", std::move(items));
         sub.action = refresh;   // SUBMENU on-enter hook: rescan disk
         sub.context_panel_title = "Version Preview";
@@ -2108,31 +2110,30 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "named layout. Subsequent edits go to the new layout; switch "
                 "back via Load Layout."));
 
-            // Load — pre-allocated 16 slot rows; each one's label_fn pulls the
-            // i-th map entry and the action loads it. Hidden when i is past
-            // the current map size. Matches the profile-slots pattern.
-            constexpr int kLayoutSlots = 16;
-            std::vector<MenuItem> load_items;
-            for (int i = 0; i < kLayoutSlots; ++i) {
-                MenuItem li;
-                li.type  = MenuItemType::LEAF;
-                li.label = "layout";
-                li.label_fn = [nth_name, A, i]{
-                    const std::string nm = nth_name(i);
-                    if (nm.empty()) return std::string();
-                    return (*A == nm) ? (nm + "  *") : nm;
-                };
-                li.visible_fn = [M, i]{ return i < static_cast<int>(M->size()); };
-                li.action = [H, M, A, layout_changed, nth_name, i]{
-                    const std::string nm = nth_name(i);
-                    if (nm.empty() || *A == nm) return;
-                    (*M)[*A] = *H;
-                    *A = nm;
-                    *H = (*M)[nm];
-                    if (layout_changed) layout_changed();
-                };
-                load_items.push_back(std::move(li));
-            }
+            // Load — pre-allocated slot rows (make_dynamic_rows); each one's
+            // label_fn pulls the i-th map entry and the action loads it.
+            // Hidden when i is past the current map size.
+            std::vector<MenuItem> load_items = make_dynamic_rows(16,
+                [M]{ return static_cast<int>(M->size()); },
+                [&](int i) -> MenuItem {
+                    MenuItem li;
+                    li.type  = MenuItemType::LEAF;
+                    li.label = "layout";
+                    li.label_fn = [nth_name, A, i]{
+                        const std::string nm = nth_name(i);
+                        if (nm.empty()) return std::string();
+                        return (*A == nm) ? (nm + "  *") : nm;
+                    };
+                    li.action = [H, M, A, layout_changed, nth_name, i]{
+                        const std::string nm = nth_name(i);
+                        if (nm.empty() || *A == nm) return;
+                        (*M)[*A] = *H;
+                        *A = nm;
+                        *H = (*M)[nm];
+                        if (layout_changed) layout_changed();
+                    };
+                    return li;
+                });
             MenuItem load_sub = submenu("Load Layout", std::move(load_items));
             load_sub.label_fn = [A]{ return std::string("Load Layout  (") + *A + ")"; };
             load_sub.description =

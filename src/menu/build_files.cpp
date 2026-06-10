@@ -326,11 +326,10 @@ std::vector<MenuItem> build_files_menu(MenuBuildContext& ctx)
         });
 
     // One leaf per library entry — highlight-only, so the preview pane animates
-    // as the user scrolls. visible_fn tied to the live count, so adds / deletes
-    // show up without rebuilding the menu tree. Caps at 16 entries; bump if
-    // needed. A read-only suffix on bundled defaults makes it obvious which
-    // entries can be deleted.
-    constexpr int kBgRowCap = 16;
+    // as the user scrolls. Rows come from make_dynamic_rows tied to the live
+    // count, so adds / deletes show up without rebuilding the menu tree. Caps
+    // at 16 entries; bump if needed. A read-only suffix on bundled defaults
+    // makes it obvious which entries can be deleted.
     auto bg_is_user_at = [bg_get_lib, bg_user_dir](int idx) -> bool {
         auto* lib = bg_get_lib();
         if (!lib || idx < 0 || idx >= lib->count()) return false;
@@ -349,10 +348,6 @@ std::vector<MenuItem> build_files_menu(MenuBuildContext& ctx)
             std::string n = lib->name(idx);
             if (!bg_is_user_at(idx)) n += "  (read-only)";
             return n;
-        };
-        m.visible_fn = [bg_get_lib, idx]{
-            auto* lib = bg_get_lib();
-            return lib && idx < lib->count();
         };
         m.on_highlight = [bg_preview, idx]{ bg_preview->want = idx; };
         m.action = []{};   // highlighting drives the preview; selecting is a no-op
@@ -382,7 +377,10 @@ std::vector<MenuItem> build_files_menu(MenuBuildContext& ctx)
 
     std::vector<MenuItem> bg_files_menu;
     bg_files_menu.push_back(std::move(bg_import));
-    for (int i = 0; i < kBgRowCap; ++i) bg_files_menu.push_back(bg_row(i));
+    for (auto& r : make_dynamic_rows(16,
+             [bg_get_lib]{ auto* lib = bg_get_lib(); return lib ? lib->count() : 0; },
+             bg_row))
+        bg_files_menu.push_back(std::move(r));
     bg_files_menu.push_back(std::move(bg_delete));
 
     return {

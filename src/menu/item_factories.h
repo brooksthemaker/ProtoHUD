@@ -121,6 +121,35 @@ inline MenuItem face_picker(std::string lbl, int face_count,
     return m;
 }
 
+// ── Dynamic placeholder lists ────────────────────────────────────────────────
+// MenuSystem levels hold POINTERS into the menu tree, so a list whose contents
+// change at runtime must NOT add/remove MenuItems while the menu is open.
+// Instead, pre-allocate max_rows placeholder rows up front and let each row
+// materialize through its hooks: visible_fn hides rows at/past the live count,
+// and the row_builder-supplied label_fn / action read the live data by index.
+// Refreshing the backing data happens elsewhere — typically the enclosing
+// SUBMENU's on-enter action. max_rows is the hard cap on visible entries;
+// bump it at the call site if a list outgrows it.
+//
+// row_builder(i) returns the row for index i; any visible_fn it already set
+// is kept and ANDed with the count gate.
+inline std::vector<MenuItem> make_dynamic_rows(
+        int max_rows,
+        std::function<int()> live_count,
+        const std::function<MenuItem(int)>& row_builder) {
+    std::vector<MenuItem> rows;
+    rows.reserve(max_rows);
+    for (int i = 0; i < max_rows; ++i) {
+        MenuItem m = row_builder(i);
+        std::function<bool()> extra = std::move(m.visible_fn);
+        m.visible_fn = [live_count, extra = std::move(extra), i]{
+            return i < live_count() && (!extra || extra());
+        };
+        rows.push_back(std::move(m));
+    }
+    return rows;
+}
+
 // ── Asset-slot management row ────────────────────────────────────────────────
 // One parameterized builder for the slot rows under Files > GIFs and
 // Face Display > Faces / Mouth Shapes / Boop Reactions. Each row is a SUBMENU
