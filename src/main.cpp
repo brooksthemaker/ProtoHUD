@@ -1509,7 +1509,10 @@ static std::vector<MenuItem> build_menu(
         // has no coprocessor support wired.
         bool* coproc_enabled_p = nullptr,
         std::shared_ptr<std::function<void()>> coproc_reload = nullptr,
-        std::shared_ptr<std::function<std::string()>> coproc_status = nullptr)
+        std::shared_ptr<std::function<std::string()>> coproc_status = nullptr,
+        // Glitch post-effect config (null on non-native backends). The menu
+        // mutates it in place and re-pushes via pf_anim_push().
+        face::GlitchConfig* pf_glitch_p = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -5708,6 +5711,45 @@ static std::vector<MenuItem> build_menu(
                 "Idle-face animation tuning: blink cadence, blink duration, "
                 "and the crossfade time between expressions. Applies to the "
                 "native (MAX7219 / RGB matrix) renderer.");
+        })(),
+        // Glitch post-effect — one effect, every look an independent variable.
+        ([&]() -> MenuItem {
+            if (!pf_glitch_p) { MenuItem e; e.visible_fn = []{ return false; }; return e; }
+            face::GlitchConfig* G = pf_glitch_p;
+            std::vector<MenuItem> gi;
+            gi.push_back(toggle("Glitch",
+                [G]{ return G->enabled; },
+                [G, pf_anim_push](bool v){ G->enabled = v; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Intensity", 0.f, 200.f, 5.f, "%",
+                [G]{ return static_cast<float>(G->intensity * 100.0); },
+                [G, pf_anim_push](float v){ G->intensity = v / 100.0; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Burst Rate", 0.f, 3.f, 0.1f, "/s",
+                [G]{ return static_cast<float>(G->burst_rate); },
+                [G, pf_anim_push](float v){ G->burst_rate = v; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Burst Min", 0.02f, 1.f, 0.02f, "s",
+                [G]{ return static_cast<float>(G->burst_min); },
+                [G, pf_anim_push](float v){ G->burst_min = v; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Burst Max", 0.05f, 2.f, 0.05f, "s",
+                [G]{ return static_cast<float>(G->burst_max); },
+                [G, pf_anim_push](float v){ G->burst_max = v; if (pf_anim_push) pf_anim_push(); }));
+            // Per-component amounts (0 = off). Each is an independent variable.
+            auto comp = [&](const char* name, double face::GlitchConfig::* member) {
+                gi.push_back(slider(name, 0.f, 100.f, 5.f, "%",
+                    [G, member]{ return static_cast<float>((G->*member) * 100.0); },
+                    [G, member, pf_anim_push](float v){ G->*member = v / 100.0; if (pf_anim_push) pf_anim_push(); }));
+            };
+            comp("Chromatic Split",    &face::GlitchConfig::chromatic);
+            comp("Band Tearing",       &face::GlitchConfig::tearing);
+            comp("Block Shuffle",      &face::GlitchConfig::blocks);
+            comp("Bitcrush",           &face::GlitchConfig::bitcrush);
+            comp("Dropout Bars",       &face::GlitchConfig::dropout);
+            comp("Datamosh",           &face::GlitchConfig::datamosh);
+            comp("Eyes/Mouth Desync",  &face::GlitchConfig::region_desync);
+            comp("Expression Flicker", &face::GlitchConfig::expr_flicker);
+            return with_desc(submenu("Glitch", std::move(gi)),
+                "Digital glitch corruption of the face. Master Intensity and Burst "
+                "Rate gate the look (Burst Rate 0 = constant); each component below "
+                "is an independent amount.");
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),
@@ -13453,6 +13495,7 @@ int main(int argc, char* argv[]) {
                                                                  pf_blink_max,
                                                                  pf_blink_duration);
                                    native_ctrl->set_expression_fade(pf_expr_fade);
+                                   native_ctrl->set_glitch(pf_glitch);
                                },
                                /* pf_set_effect_json */ [&](const nlohmann::json& spec){
                                    if (native_ctrl) native_ctrl->set_effect_json(spec);
@@ -13495,7 +13538,8 @@ int main(int argc, char* argv[]) {
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
                                &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr,
                                &kdc_ignore, &kdc_msgapps,
-                               &coproc_cfg.enabled, coproc_reload, coproc_status));
+                               &coproc_cfg.enabled, coproc_reload, coproc_status,
+                               /* pf_glitch_p */ &pf_glitch));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
