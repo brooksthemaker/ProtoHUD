@@ -13483,36 +13483,60 @@ int main(int argc, char* argv[]) {
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
-    // Wire wireless controller callbacks now that menu exists
+    // ── Input event marshalling ───────────────────────────────────────────────
+    // The SmartKnob, wireless controller, GPIO poller, button coprocessor and
+    // command FIFO all deliver events on their own reader/poll threads, but
+    // MenuSystem, the toast renderer and the pip/landing flags have no locks —
+    // they belong to the render thread. Reader threads post their handlers
+    // here; the render loop drains the queue once per frame so everything
+    // below actually runs on the render thread. (Keyboard + gamepad already
+    // fire on the render thread and stay direct.)
+    std::mutex                        input_events_mtx;
+    std::deque<std::function<void()>> input_events;
+    auto post_input = [&input_events_mtx, &input_events](std::function<void()> fn){
+        std::lock_guard<std::mutex> lk(input_events_mtx);
+        input_events.push_back(std::move(fn));
+    };
+    auto drain_input_events = [&input_events_mtx, &input_events]{
+        std::deque<std::function<void()>> ev;
+        {
+            std::lock_guard<std::mutex> lk(input_events_mtx);
+            ev.swap(input_events);
+        }
+        for (auto& fn : ev) fn();
+    };
+
+    // Wire wireless controller callbacks now that menu exists. Callbacks fire
+    // on the SerialPort reader thread → post to the render thread.
     if (wireless_enabled) {
-        wireless.on_menu([&menu]{
+        wireless.on_menu([&]{ post_input([&]{
             if (menu.is_open()) menu.close(); else menu.open();
-        });
-        wireless.on_select([&menu, &hud, &state]{
+        }); });
+        wireless.on_select([&]{ post_input([&]{
             if      (menu.is_open())          menu.select();
             else if (hud.toast_has_focused()) hud.toast_select(state);
-        });
-        wireless.on_back([&menu, &hud]{
+        }); });
+        wireless.on_back([&]{ post_input([&]{
             if      (hud.toast_has_focused()) hud.toast_navigate(-1);
             else if (menu.is_open())          menu.back();
-        });
+        }); });
         // Editor lockdown — when the face editor is the active overlay the
         // wireless cursor must not page through the menu underneath. Up/Down
         // still route through menu.navigate (which forwards to face_editor_'s
         // vertical cursor step); Left/Right route through menu.back/select,
         // which would cancel/paint inside the editor — drop those.
-        wireless.on_nav_up   ([&menu]{ if (menu.is_open()) menu.navigate(-1); });
-        wireless.on_nav_down ([&menu]{ if (menu.is_open()) menu.navigate(+1); });
-        wireless.on_nav_left ([&menu, &hud]{
+        wireless.on_nav_up   ([&]{ post_input([&]{ if (menu.is_open()) menu.navigate(-1); }); });
+        wireless.on_nav_down ([&]{ post_input([&]{ if (menu.is_open()) menu.navigate(+1); }); });
+        wireless.on_nav_left ([&]{ post_input([&]{
             if (menu.is_face_editor_open())   return;
             if      (hud.toast_has_focused()) hud.toast_navigate(-1);
             else if (menu.is_open())          menu.back();
-        });
-        wireless.on_nav_right([&menu, &hud, &state]{
+        }); });
+        wireless.on_nav_right([&]{ post_input([&]{
             if (menu.is_face_editor_open())   return;
             if      (hud.toast_has_focused()) hud.toast_navigate(+1);
             else if (menu.is_open())          menu.select();
-        });
+        }); });
         wireless.on_af([&cameras]{
             if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
             if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
@@ -13637,13 +13661,15 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    knob.on_move([&menu, &hud, &landing, &landing_nav](int8_t dir, int) {
+    // Knob callbacks fire on the SmartKnob serial reader thread → post to the
+    // render thread (same marshalling as the wireless controller above).
+    knob.on_move([&](int8_t dir, int) { post_input([&, dir]{
         // if (hud.popup_active())    hud.popup_navigate(dir);  // modal popup disabled
         if      (menu.is_keyboard_open()) menu.osk_step(dir);
         else if (landing.active)        landing_nav(dir);
         else if (menu.is_open())        menu.navigate(dir);
         else if (hud.toast_has_focused()) hud.toast_navigate(dir);
-    });
+    }); });
 
     knob.on_status([&state](uint8_t status, uint8_t param) {
         if      (status == 0x01) {
@@ -13655,7 +13681,7 @@ int main(int argc, char* argv[]) {
         else if (status == 0x03) std::cout << "[knob] woke up reason=" << (int)param << "\n";
     });
 
-    knob.on_button([&menu, &hud, &state, &landing, &landing_select](uint8_t btn, uint8_t ev) {
+    knob.on_button([&](uint8_t btn, uint8_t ev) { post_input([&, btn, ev]{
         if (landing.active) {
             if ((ev == KnobButtonEvent::PRESS || ev == KnobButtonEvent::LONG_PRESS)
                 && btn == KnobButton::ENCODER)
@@ -13682,7 +13708,7 @@ int main(int argc, char* argv[]) {
             if      (hud.toast_has_focused()) hud.toast_navigate(-1);
             else if (menu.is_open())          menu.back();
         }
-    });
+    }); });
 
     // ── GPIO switch input (configurable map) ──────────────────────────────────
     bool pip_left_active  = false, pip_right_active  = false;  // PiP toggle state
@@ -13709,9 +13735,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Map an assigned function to its action. Runs on the GPIO poll thread;
-    // each action hops onto an already-thread-safe path (fire_boop, the menu,
-    // state.mtx) or flips a plain bool the render loop reads.
+    // Map an assigned function to its action. gpio_apply always runs on the
+    // RENDER thread — the GPIO / coprocessor / command-FIFO reader threads go
+    // through gpio_dispatch below, which posts onto the per-frame input queue.
+    // (The menu, toasts and the pip flags have no locks of their own, so
+    // touching them from a reader thread was a use-after-free waiting on a
+    // button press.)
     // Face expression jump + "return to set face": the first jump remembers the
     // expression that was playing, so FaceReturn snaps back to it. Guarded because
     // dispatch can fire from the GPIO / coprocessor / command-FIFO threads.
@@ -13742,7 +13771,7 @@ int main(int argc, char* argv[]) {
         state.face.material_color = static_cast<uint8_t>(idx);
     };
 
-    auto gpio_dispatch = [&, restart_script](input::GpioFunc f) {
+    auto gpio_apply = [&, restart_script](input::GpioFunc f) {
         using F = input::GpioFunc;
         switch (f) {
         case F::BoopSnout: fire_boop(sensor::BoopSensor::Zone::Snout);      break;
@@ -13845,6 +13874,12 @@ int main(int argc, char* argv[]) {
         case F::FaceRestart:    face_proxy.restart(); break;
         case F::None: default: break;
         }
+    };
+
+    // Shared entry point for the GPIO poller, button coprocessor and command
+    // FIFO — their reader threads only enqueue; the render loop applies.
+    auto gpio_dispatch = [&post_input, &gpio_apply](input::GpioFunc f) {
+        post_input([&gpio_apply, f]{ gpio_apply(f); });
     };
 
     // Local GPIO polling runs unless a coprocessor is enabled in replace mode
@@ -14060,6 +14095,7 @@ int main(int argc, char* argv[]) {
     landing.deadline = glfwGetTime() + landing_continue_timeout_s;
     while (landing.active && !glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);  // keep the watchdog from force-exiting
+        drain_input_events();   // knob/wireless nav posted from reader threads
         gamepad.poll();
         int fw = 0, fh = 0;
         glfwGetFramebufferSize(xr.glfw_window(), &fw, &fh);
@@ -14736,6 +14772,11 @@ int main(int argc, char* argv[]) {
         double now = glfwGetTime();
         float  dt  = static_cast<float>(now - prev_time);
         prev_time  = now;
+
+        // ── Drain marshalled input (knob / wireless / GPIO / coproc / FIFO) ──
+        // Reader threads only enqueue; their menu/toast/pip actions run here,
+        // on the render thread, before anything draws this frame.
+        drain_input_events();
 
         // ── Feed IMU motion to the face (motion-reactive particle layers) ─────
         // Snapshot under the lock, then push without it (face_proxy locks its
@@ -16071,6 +16112,9 @@ int main(int argc, char* argv[]) {
     step("protoface");       protoface_ctrl.shutdown_daemon(); protoface_ctrl.stop();
     step("lora");            lora.stop();
     step("knob");            knob.stop();
+    // Stop the wireless reader before scope unwind — its callbacks post into
+    // the input event queue, which is declared later and so dies first.
+    step("wireless");        if (wireless_enabled) wireless.stop();
     step("textures");
     if (tex_usb1)    glDeleteTextures(1, &tex_usb1);
     if (tex_usb2)    glDeleteTextures(1, &tex_usb2);

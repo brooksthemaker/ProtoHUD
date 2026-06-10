@@ -847,6 +847,9 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
     int vi = -1;        // running index among visible items
     int drawn = 0;      // rows actually emitted this frame
+    int clicked = -1;   // mouse-click select, deferred until after the loop —
+                        // select() can push/pop stack_, which frees `items`
+                        // while this loop is still iterating it
     for (int i = 0; i < static_cast<int>(items.size()); i++) {
         const auto& item = items[i];
         if (item.visible_fn && !item.visible_fn()) continue;
@@ -867,10 +870,8 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         }
 
         char id[32]; snprintf(id, sizeof(id), "##item%d", i);
-        if (ImGui::Selectable(id, selected, 0, ImVec2(0.f, row_h))) {
-            cursor_ = i;
-            select();
-        }
+        if (ImGui::Selectable(id, selected, 0, ImVec2(0.f, row_h)))
+            clicked = i;
 
         const ImVec2 rmin = ImGui::GetItemRectMin();
         const ImVec2 rmax = ImGui::GetItemRectMax();
@@ -1199,6 +1200,11 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         // Thin bottom separator
         dl->AddLine({rmin.x - pad_x, rmax.y - 1.f},
                     {rmax.x + pad_x, rmax.y - 1.f}, COL_SEP_EFF, 1.f);
+    }
+
+    if (clicked >= 0) {
+        cursor_ = clicked;
+        select();
     }
 
     // ── Scroll chevrons ──────────────────────────────────────────────────────
