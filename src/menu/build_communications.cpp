@@ -104,6 +104,7 @@ using json = nlohmann::json;
 
 #include "menu/build_menu.h"
 #include "menu/item_factories.h"
+#include "menu/shared_items.h"
 
 std::vector<MenuItem> build_communications_menu(MenuBuildContext& ctx)
 {
@@ -281,17 +282,7 @@ std::vector<MenuItem> build_communications_menu(MenuBuildContext& ctx)
             // ── Phone (KDE Connect) ───────────────────────────────────────────
             // Ring the phone + edit the ignore list (mute servers/chats) and the
             // message-apps list (which apps get the big chat toast), from the HUD.
-            auto ring_toast = [kdc_p, &state]{
-                const bool ok = kdc_p && kdc_p->ring_phone();
-                std::lock_guard<std::mutex> lk(state.mtx);
-                Notification n;
-                n.type = NotifType::App; n.icon = "message";
-                n.title = ok ? "Ringing phone\xE2\x80\xA6" : "Phone not connected";
-                n.body  = ok ? "KDE Connect \xC2\xB7 findmyphone"
-                             : "Pair a device in the KDE Connect app first";
-                n.auto_dismiss_s = 4.f;
-                state.notifs.push(std::move(n));
-            };
+            auto ring_toast = menu_shared::ring_phone_action(kdc_p, state);
             // Generic CSV-list editor: an "Add… (keyboard)" row plus up to 16
             // removable entry rows. apply() pushes the joined CSV to the bridge.
             // menu_sys_pp is captured by value (it points at main's menu_ptr).

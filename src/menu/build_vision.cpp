@@ -103,6 +103,7 @@ using json = nlohmann::json;
 
 #include "menu/build_menu.h"
 #include "menu/item_factories.h"
+#include "menu/shared_items.h"
 
 std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
 {
@@ -283,13 +284,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     }
 
     std::vector<MenuItem> nv_menu = {
-        with_desc(toggle("Enable Low-Light",
-            [&state]{ return state.night_vision.nv_enabled; },
-            [&state](bool v){
-                state.night_vision.nv_enabled  = v;
-                state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
-                state.night_vision.shutter_us  = v ? 40000 : 16667;
-            }),
+        with_desc(menu_shared::night_vision_toggle(state, "Enable Low-Light"),
             "Brighten dark scenes by raising exposure and lengthening the shutter. "
             "Makes the view usable in low light, but adds motion blur and image noise."),
         with_desc(toggle("Auto Low-Light",
@@ -410,10 +405,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     for (const auto& z : ZOOM_PRESETS) {
         zoom_level_menu.push_back(live(leaf_sel(
             z.label,
-            [&state, zoom = z.zoom]{
-                state.zoom_left.zoom  = zoom;
-                state.zoom_right.zoom = zoom;
-            },
+            [&state, zoom = z.zoom]{ menu_shared::set_both_eye_zoom(state, zoom); },
             [&state, zoom = z.zoom]{ return state.zoom_left.zoom == zoom; }
         )));
     }
@@ -540,10 +532,13 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     // "Autofocus Both" shortcut kept for convenience — triggers AF on both cameras at once.
     std::vector<MenuItem> af_both_menu = std::move(af_triggers);
 
+    // burst_extra = -1: the deep capture leaves have never touched
+    // capture_burst, so a pending quick-photo burst counter is deliberately
+    // left as-is here (divergence from the quick menu's burst modes).
     std::vector<MenuItem> capture_menu = {
-        leaf("Left Eye",   [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Left;   }),
-        leaf("Right Eye",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Right;  }),
-        leaf("Both Eyes",  [&state]{ std::lock_guard lk(state.mtx); state.capture_request = CaptureRequest::Stereo; }),
+        leaf("Left Eye",  menu_shared::capture_action(state_ptr, CaptureRequest::Left,   -1)),
+        leaf("Right Eye", menu_shared::capture_action(state_ptr, CaptureRequest::Right,  -1)),
+        leaf("Both Eyes", menu_shared::capture_action(state_ptr, CaptureRequest::Stereo, -1)),
     };
 
     std::vector<MenuItem> video_camera_menu = {
@@ -556,10 +551,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     };
 
     std::vector<MenuItem> video_menu = {
-        toggle("Record",
-            [&state]{ return state.video_recording; },
-            [&state](bool v){ std::lock_guard lk(state.mtx);
-                              state.video_request = v ? VideoRequest::Start : VideoRequest::Stop; }),
+        menu_shared::record_toggle(state),
         submenu("Camera", std::move(video_camera_menu)),
     };
 
@@ -705,9 +697,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
 
     // Raw View groups the camera-passthrough toggle with its placement options.
     std::vector<MenuItem> raw_view_menu = {
-        toggle("Enable",
-            [&state]{ return state.theater_mode; },
-            [&state](bool v){ state.theater_mode = v; }),
+        menu_shared::theater_toggle(state, "Enable"),
         submenu("Position", std::move(theater_pos_menu)),
     };
 
@@ -787,9 +777,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 "Pass the camera feed straight through. Toggle Enable to show it; "
                 "Position places each eye. The preview at right shows it live."),
             "Raw View Preview", eye_pos_preview),
-        toggle("Swap Cameras",
-            [&state]{ return state.cameras_swapped; },
-            [&state](bool v){ state.cameras_swapped = v; }),
+        menu_shared::swap_cameras_toggle(state),
         with_panel(
             submenu("Resolution", std::move(resolution_presets)),
             "Camera Resolution",
@@ -903,29 +891,11 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
             "Single Camera Preview", single_cam_preview),
         submenu(left_label,         std::move(left_cam_menu)),
         submenu(right_label,        std::move(right_cam_menu)),
-        with_desc([&]{
-            // Recover a CSI sensor that came up dark/wedged at boot without a
-            // full reboot: tears down + re-enumerates + restarts both cameras.
-            MenuItem m; m.type = MenuItemType::LEAF; m.label = "Reinitialize CSI Cameras";
-            m.label_fn = [cameras]{
-                std::string s = "Reinitialize CSI  [L:";
-                s += cameras->owl_left_ok()  ? "ok" : "\xE2\x80\x94";
-                s += " R:"; s += cameras->owl_right_ok() ? "ok" : "\xE2\x80\x94";
-                return s + "]";
-            };
-            m.action = [cameras, &state]{
-                const bool ok = cameras->reinit_owls();
-                const bool lok = cameras->owl_left_ok(), rok = cameras->owl_right_ok();
-                std::lock_guard<std::mutex> lk(state.mtx);
-                Notification n; n.type = NotifType::App;
-                n.title = ok ? "CSI cameras reinitialized" : "CSI reinit: no camera found";
-                char b[64]; snprintf(b, sizeof(b), "Left %s  \xC2\xB7  Right %s",
-                                     lok ? "OK" : "\xE2\x80\x94", rok ? "OK" : "\xE2\x80\x94");
-                n.body = b; n.auto_dismiss_s = 5.f;
-                state.notifs.push(std::move(n));
-            };
-            return m;
-        }(),
+        // Recover a CSI sensor that came up dark/wedged at boot without a
+        // full reboot: tears down + re-enumerates + restarts both cameras.
+        with_desc(menu_shared::reinit_csi_leaf(cameras, state,
+                                               "Reinitialize CSI Cameras",
+                                               /*live_status_label=*/true),
             "Re-enumerate and restart the CSI (OWLsight) cameras \xE2\x80\x94 recovers an "
             "eye that came up dark/wedged at boot, without rebooting. Briefly blacks "
             "both feeds while it re-acquires."),
@@ -1496,9 +1466,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     };
 
     std::vector<MenuItem> edge_menu = {
-        toggle("Edge Highlight",
-            [&state]{ return state.pp_cfg.edge_enabled; },
-            [&state](bool v){ state.pp_cfg.edge_enabled = v; }),
+        menu_shared::edge_highlight_toggle(state),
         submenu("Strength",  std::move(edge_strength_menu)),
         submenu("Color",     std::move(edge_color_menu)),
         submenu("Detail",    std::move(edge_detail_menu)),
@@ -1507,9 +1475,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     };
 
     std::vector<MenuItem> motion_menu = {
-        toggle("Motion Highlight",
-            [&state]{ return state.pp_cfg.motion_enabled; },
-            [&state](bool v){ state.pp_cfg.motion_enabled = v; }),
+        menu_shared::motion_highlight_toggle(state),
         submenu("Mode",        std::move(motion_mode_menu)),
         submenu("Sensitivity", std::move(motion_sensitivity_menu)),
         submenu("Spread",      std::move(motion_spread_menu)),
@@ -1518,9 +1484,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     };
 
     std::vector<MenuItem> desat_menu = {
-        toggle("Bg Desaturate",
-            [&state]{ return state.pp_cfg.desat_enabled; },
-            [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
+        menu_shared::desaturate_toggle(state, "Bg Desaturate"),
         submenu("Strength",    std::move(desat_strength_menu)),
         submenu("BG Threshold", std::move(bg_threshold_menu)),
         submenu("Focus Blend", std::move(focus_blend_menu)),
@@ -1533,15 +1497,9 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     };
 
     std::vector<MenuItem> vision_menu = {
-        toggle("Edge Highlight",
-            [&state]{ return state.pp_cfg.edge_enabled; },
-            [&state](bool v){ state.pp_cfg.edge_enabled = v; }),
-        toggle("Motion Highlight",
-            [&state]{ return state.pp_cfg.motion_enabled; },
-            [&state](bool v){ state.pp_cfg.motion_enabled = v; }),
-        toggle("Bg Desaturate",
-            [&state]{ return state.pp_cfg.desat_enabled; },
-            [&state](bool v){ state.pp_cfg.desat_enabled = v; }),
+        menu_shared::edge_highlight_toggle(state),
+        menu_shared::motion_highlight_toggle(state),
+        menu_shared::desaturate_toggle(state, "Bg Desaturate"),
         submenu("Edge Highlight", std::move(edge_menu)),
         submenu("Motion Highlight", std::move(motion_menu)),
         submenu("Bg Desaturate",  std::move(desat_menu)),

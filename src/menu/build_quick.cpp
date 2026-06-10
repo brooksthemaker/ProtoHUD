@@ -102,6 +102,7 @@ using json = nlohmann::json;
 
 #include "menu/build_menu.h"
 #include "menu/item_factories.h"
+#include "menu/shared_items.h"
 
     // ── Quick (corner / radial) menu ─────────────────────────────────────────────
     // A short, curated set of mid-use actions — separate from the full settings tree
@@ -208,19 +209,14 @@ std::vector<MenuItem> build_quick_menu(MenuBuildContext& ctx)
 
     std::vector<MenuItem> q;
 
-    // Night vision (mirror of the Low-Light "Night Vision" toggle).
-    q.push_back(toggle("Night Vision",
-        [&state]{ return state.night_vision.nv_enabled; },
-        [&state](bool v){
-            state.night_vision.nv_enabled  = v;
-            state.night_vision.exposure_ev = v ? 3.0f : 0.0f;
-            state.night_vision.shutter_us  = v ? 40000 : 16667;
-        }));
+    // Night vision (same item as Vision > Low-Light Mode > "Enable Low-Light").
+    q.push_back(menu_shared::night_vision_toggle(state, "Night Vision"));
 
-    // Digital zoom (both eyes together).
+    // Digital zoom (both eyes together) — continuous slider here vs the deep
+    // tab's preset leaves; both go through the shared setter.
     q.push_back(slider("Zoom", 1.0f, 4.0f, 0.25f, "x",
         [&state]{ return state.zoom_left.zoom; },
-        [&state](float v){ state.zoom_left.zoom = v; state.zoom_right.zoom = v; }));
+        [&state](float v){ menu_shared::set_both_eye_zoom(state, v); }));
 
     // Manual focus — only when OWLsight cameras are present.
     {
@@ -245,16 +241,12 @@ std::vector<MenuItem> build_quick_menu(MenuBuildContext& ctx)
     // Quick photo → opens a sub-ring of capture modes; entering it locks focus
     // (stops AF + manual) so the whole burst shares one focus. All shoot both eyes.
     {
-        auto shoot = [state_ptr](int extra) {
-            if (!state_ptr) return;
-            std::lock_guard<std::mutex> lk(state_ptr->mtx);
-            state_ptr->capture_request = CaptureRequest::Stereo;
-            state_ptr->capture_burst   = extra;
-        };
+        // burst_extra >= 0: unlike the deep Capture Photo leaves, the quick
+        // modes (re)set capture_burst so each shot count is explicit.
         std::vector<MenuItem> photo = {
-            leaf("Single",   [shoot]{ shoot(0); }),
-            leaf("Burst x3", [shoot]{ shoot(2); }),
-            leaf("Burst",    [shoot]{ shoot(7); }),
+            leaf("Single",   menu_shared::capture_action(state_ptr, CaptureRequest::Stereo, 0)),
+            leaf("Burst x3", menu_shared::capture_action(state_ptr, CaptureRequest::Stereo, 2)),
+            leaf("Burst",    menu_shared::capture_action(state_ptr, CaptureRequest::Stereo, 7)),
         };
         MenuItem pm = submenu("Quick Photo", std::move(photo));
         pm.action = [cameras, state_ptr] {            // on-enter: lock focus
@@ -270,101 +262,50 @@ std::vector<MenuItem> build_quick_menu(MenuBuildContext& ctx)
         };
         q.push_back(std::move(pm));
     }
-    q.push_back(toggle("Record",
-        [&state]{ return state.video_recording; },
-        [&state](bool v){ std::lock_guard<std::mutex> lk(state.mtx);
-                          state.video_request = v ? VideoRequest::Start : VideoRequest::Stop; }));
+    q.push_back(menu_shared::record_toggle(state));
 
-    // Timers.
-    {
-        auto set_timer = [&state](int secs){
-            state.timer_alarm.timer_active = true;
-            state.timer_alarm.timer_end    = time(nullptr) + secs;
-        };
-        std::vector<MenuItem> timers = {
-            leaf("5 min",  [set_timer]{ set_timer(300);  }),
-            leaf("10 min", [set_timer]{ set_timer(600);  }),
-            leaf("30 min", [set_timer]{ set_timer(1800); }),
-            leaf("60 min", [set_timer]{ set_timer(3600); }),
-            leaf("Cancel", [&state]{ state.timer_alarm.timer_active = false; }),
-        };
-        q.push_back(submenu("Timers", std::move(timers)));
-    }
+    // Timers — show_selected_state = false: the wheel keeps plain leaves (no
+    // running-preset radio dots, unlike System > Timers and Alarm).
+    q.push_back(submenu("Timers",
+        menu_shared::timer_preset_items(state, /*show_selected_state=*/false,
+                                        "Cancel")));
 
-    // Expand Map — open the Helldivers-style pan/zoom view (closes the wheel).
-    q.push_back(leaf("Expand Map", [state_ptr, menu_sys_pp]{
-        if (state_ptr) {
-            std::lock_guard<std::mutex> lk(state_ptr->mtx);
-            state_ptr->map_overlay.expanded   = true;
-            state_ptr->map_overlay.view_zoom  = 1.f;
-            state_ptr->map_overlay.view_pan_x = 0.f;
-            state_ptr->map_overlay.view_pan_y = 0.f;
-        }
-        if (menu_sys_pp && *menu_sys_pp) (*menu_sys_pp)->close();
-    }));
+    // Expand Map — open the Helldivers-style pan/zoom view. Passing
+    // menu_sys_pp also closes the wheel (the deep copy stays open).
+    q.push_back(menu_shared::expand_map_leaf(state_ptr, "Expand Map", menu_sys_pp));
 
     // ── Favorites catalog (optional, user-pinned) ────────────────────────────
     struct QuickFav { std::string key; MenuItem item; };
     std::vector<QuickFav> catalog;
-    catalog.push_back({ "edge", toggle("Edge Highlight",
-        [&state]{ return state.pp_cfg.edge_enabled; },
-        [&state](bool v){ state.pp_cfg.edge_enabled = v; }) });
-    catalog.push_back({ "desat", toggle("Desaturate BG",
-        [&state]{ return state.pp_cfg.desat_enabled; },
-        [&state](bool v){ state.pp_cfg.desat_enabled = v; }) });
-    catalog.push_back({ "motion", toggle("Motion Highlight",
-        [&state]{ return state.pp_cfg.motion_enabled; },
-        [&state](bool v){ state.pp_cfg.motion_enabled = v; }) });
+    catalog.push_back({ "edge",   menu_shared::edge_highlight_toggle(state) });
+    catalog.push_back({ "desat",  menu_shared::desaturate_toggle(state, "Desaturate BG") });
+    catalog.push_back({ "motion", menu_shared::motion_highlight_toggle(state) });
+    // Quick-only: the deep Mini-Map module has no enable toggle (apply_hud_dock
+    // forces it on); this favorite flips the raw flag directly.
     catalog.push_back({ "map", toggle("Map Overlay",
         [&state]{ return state.map_overlay.enabled; },
         [&state](bool v){ state.map_overlay.enabled = v; }) });
-    catalog.push_back({ "theater", toggle("Theater Mode",
-        [&state]{ return state.theater_mode; },
-        [&state](bool v){ state.theater_mode = v; }) });
-    catalog.push_back({ "swap", toggle("Swap Cameras",
-        [&state]{ return state.cameras_swapped; },
-        [&state](bool v){ state.cameras_swapped = v; }) });
-    catalog.push_back({ "fps", toggle("FPS Overlay",
-        [fps_overlay_active]{ return fps_overlay_active && *fps_overlay_active; },
-        [fps_overlay_active](bool v){ if (fps_overlay_active) *fps_overlay_active = v; }) });
-    catalog.push_back({ "syspanel", toggle("System Panel",
-        [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
-        [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }) });
+    catalog.push_back({ "theater", menu_shared::theater_toggle(state, "Theater Mode") });
+    catalog.push_back({ "swap",    menu_shared::swap_cameras_toggle(state) });
+    catalog.push_back({ "fps",     menu_shared::fps_overlay_toggle(fps_overlay_active) });
+    catalog.push_back({ "syspanel", menu_shared::system_panel_toggle(sys_panel_active) });
     // Action item (not a toggle): rings the paired phone via KDE Connect.
-    catalog.push_back({ "ring_phone", leaf("Ring Phone", [kdc_p, &state]{
-        const bool ok = kdc_p && kdc_p->ring_phone();
-        std::lock_guard<std::mutex> lk(state.mtx);
-        Notification n; n.type = NotifType::App; n.icon = "message";
-        n.title = ok ? "Ringing phone\xE2\x80\xA6" : "Phone not connected";
-        n.body  = ok ? "KDE Connect \xC2\xB7 findmyphone"
-                     : "Pair a device in the KDE Connect app first";
-        n.auto_dismiss_s = 4.f;
-        state.notifs.push(std::move(n));
-    }) });
+    catalog.push_back({ "ring_phone",
+        leaf("Ring Phone", menu_shared::ring_phone_action(kdc_p, state)) });
     // Diagnostics — quick recovery actions (CSI reinit + face-renderer restart).
     {
         std::vector<MenuItem> diag;
-        diag.push_back(with_desc(leaf("Reinit CSI Cameras", [cameras, &state]{
-            const bool ok = cameras->reinit_owls();
-            const bool lok = cameras->owl_left_ok(), rok = cameras->owl_right_ok();
-            std::lock_guard<std::mutex> lk(state.mtx);
-            Notification n; n.type = NotifType::App;
-            n.title = ok ? "CSI cameras reinitialized" : "CSI reinit: no camera";
-            char b[64]; snprintf(b, sizeof(b), "Left %s  \xC2\xB7  Right %s",
-                                 lok ? "OK" : "\xE2\x80\x94", rok ? "OK" : "\xE2\x80\x94");
-            n.body = b; n.auto_dismiss_s = 5.f; state.notifs.push(std::move(n));
-        }), "Re-enumerate + restart the CSI cameras to recover a dark eye."));
+        // live_status_label = false: the wheel keeps its short static label
+        // (the deep Vision copy shows the live "[L:ok R:—]" suffix).
+        diag.push_back(with_desc(
+            menu_shared::reinit_csi_leaf(cameras, state, "Reinit CSI Cameras",
+                                         /*live_status_label=*/false),
+            "Re-enumerate + restart the CSI cameras to recover a dark eye."));
         if (pf_restart_renderer) {
-            MenuItem rf = with_desc(leaf("Restart Face Renderer", [pf_restart_renderer, state_ptr]{
-                pf_restart_renderer();
-                if (!state_ptr) return;
-                std::lock_guard<std::mutex> lk(state_ptr->mtx);
-                Notification n; n.type = NotifType::App; n.title = "Face renderer restarted";
-                n.body = "Relaunched the HUB75 panel driver"; n.auto_dismiss_s = 4.f;
-                state_ptr->notifs.push(std::move(n));
-            }), "Kill + relaunch the HUB75 panel pusher to recover the face feed.");
-            rf.visible_fn = [pf_backend_p]{ return !pf_backend_p || *pf_backend_p == "hub75"; };
-            diag.push_back(std::move(rf));
+            diag.push_back(with_desc(
+                menu_shared::restart_face_renderer_leaf(pf_restart_renderer,
+                                                        state_ptr, pf_backend_p),
+                "Kill + relaunch the HUB75 panel pusher to recover the face feed."));
         }
         catalog.push_back({ "diagnostics", submenu("Diagnostics", std::move(diag)) });
     }

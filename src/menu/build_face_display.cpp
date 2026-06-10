@@ -105,6 +105,7 @@ using json = nlohmann::json;
 
 #include "menu/build_menu.h"
 #include "menu/item_factories.h"
+#include "menu/shared_items.h"
 
 // One layer in the Protoface Effects > Layered Builder. State lives in a
 // file-scope struct so kMaxLayers can be a static constexpr (forbidden on a
@@ -2219,21 +2220,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                   "Persists to config.json so the next launch starts here."),
     };
     if (pf_restart_renderer) {
-        MenuItem rr = with_desc(leaf("Restart Face Renderer", [pf_restart_renderer, state_ptr]{
-            pf_restart_renderer();
-            if (!state_ptr) return;
-            std::lock_guard<std::mutex> lk(state_ptr->mtx);
-            Notification n; n.type = NotifType::App;
-            n.title = "Face renderer restarted";
-            n.body  = "Relaunched the HUB75 panel driver";
-            n.auto_dismiss_s = 4.f;
-            state_ptr->notifs.push(std::move(n));
-        }),
+        pf_hardware_menu.push_back(with_desc(
+            menu_shared::restart_face_renderer_leaf(pf_restart_renderer,
+                                                    state_ptr, pf_backend_p),
             "Kill + relaunch the HUB75 panel pusher to recover the face feed "
             "(e.g. after the live GPIO read stole a panel pin), without "
-            "restarting ProtoHUD.");
-        rr.visible_fn = [pf_backend_p]{ return !pf_backend_p || *pf_backend_p == "hub75"; };
-        pf_hardware_menu.push_back(std::move(rr));
+            "restarting ProtoHUD."));
     }
 
     // The chain layout config used to live under Hardware, but it's really a

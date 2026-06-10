@@ -210,6 +210,7 @@ set(SOURCES
     src/menu/build_quick.cpp
     src/menu/build_system.cpp
     src/menu/build_vision.cpp
+    src/menu/shared_items.cpp
     src/menu/menu_system.cpp
     src/menu/file_picker.cpp
     src/menu/face_editor.cpp

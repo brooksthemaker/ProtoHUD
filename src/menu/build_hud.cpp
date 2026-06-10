@@ -103,6 +103,7 @@ using json = nlohmann::json;
 
 #include "menu/build_menu.h"
 #include "menu/item_factories.h"
+#include "menu/shared_items.h"
 
 std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
 {
@@ -785,13 +786,9 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             state.map_overlay.map_north_deg = state.compass_heading;
             state.map_overlay.calibrated    = true;
         }),
-        leaf("Expand Map (Pan/Zoom)", [&state]{
-            std::lock_guard<std::mutex> lk(state.mtx);
-            state.map_overlay.expanded   = true;
-            state.map_overlay.view_zoom  = 1.f;
-            state.map_overlay.view_pan_x = 0.f;
-            state.map_overlay.view_pan_y = 0.f;
-        }),
+        // close_menu = nullptr: unlike the quick wheel's Expand Map, the deep
+        // menu stays open behind the expanded view.
+        menu_shared::expand_map_leaf(state_ptr, "Expand Map (Pan/Zoom)", nullptr),
         with_desc(toggle("Expanded: Debug Window",
             [&state]{ return state.expanded_show_debug; },
             [&state](bool v){ state.expanded_show_debug = v; }),

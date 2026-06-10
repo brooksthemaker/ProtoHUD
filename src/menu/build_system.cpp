@@ -105,6 +105,7 @@ using json = nlohmann::json;
 
 #include "menu/build_menu.h"
 #include "menu/item_factories.h"
+#include "menu/shared_items.h"
 
 // ── I2C bus scanner ───────────────────────────────────────────────────────────
 // Runs in a background thread. Opens the bus, probes addresses 0x08–0x77, stores
@@ -313,29 +314,15 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         }),
     };
 
+    // Shared 5/10/30/60-min presets (menu_shared); the deep tab adds the
+    // "which preset is running" radio indicators — the quick wheel's copy
+    // passes false and shows plain leaves.
     std::vector<MenuItem> timer_presets_menu = {
         submenu("Custom", std::move(custom_timer_menu)),
-        leaf_sel("5 min",  [&state]{ state.timer_alarm.timer_active = true;
-                                      state.timer_alarm.timer_end = time(nullptr) + 300; },
-                 [&state]{ return state.timer_alarm.timer_active
-                              && (state.timer_alarm.timer_end - time(nullptr)) <= 300
-                              && (state.timer_alarm.timer_end - time(nullptr)) > 0; }),
-        leaf_sel("10 min", [&state]{ state.timer_alarm.timer_active = true;
-                                      state.timer_alarm.timer_end = time(nullptr) + 600; },
-                 [&state]{ return state.timer_alarm.timer_active
-                              && (state.timer_alarm.timer_end - time(nullptr)) <= 600
-                              && (state.timer_alarm.timer_end - time(nullptr)) > 300; }),
-        leaf_sel("30 min", [&state]{ state.timer_alarm.timer_active = true;
-                                      state.timer_alarm.timer_end = time(nullptr) + 1800; },
-                 [&state]{ return state.timer_alarm.timer_active
-                              && (state.timer_alarm.timer_end - time(nullptr)) <= 1800
-                              && (state.timer_alarm.timer_end - time(nullptr)) > 600; }),
-        leaf_sel("60 min", [&state]{ state.timer_alarm.timer_active = true;
-                                      state.timer_alarm.timer_end = time(nullptr) + 3600; },
-                 [&state]{ return state.timer_alarm.timer_active
-                              && (state.timer_alarm.timer_end - time(nullptr)) > 1800; }),
-        leaf("Cancel Timer", [&state]{ state.timer_alarm.timer_active = false; }),
     };
+    for (auto& t : menu_shared::timer_preset_items(
+             state, /*show_selected_state=*/true, "Cancel Timer"))
+        timer_presets_menu.push_back(std::move(t));
 
     std::vector<MenuItem> alarm_picker_menu = {
         slider("Hour",   0.f, 23.f, 1.f, "",
@@ -2387,13 +2374,9 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
 
     // ── Diagnostics submenu (probes + overlays + per-tab tools) ──────────────
     std::vector<MenuItem> diagnostics_group_menu = {
-        with_desc(toggle("System Panel",
-            [sys_panel_active]{ return sys_panel_active && *sys_panel_active; },
-            [sys_panel_active](bool v){ if (sys_panel_active) *sys_panel_active = v; }),
+        with_desc(menu_shared::system_panel_toggle(sys_panel_active),
             "Live system overlay (CPU, RAM, GPU temp, network ping)."),
-        with_desc(toggle("FPS Overlay",
-            [fps_overlay_active]{ return fps_overlay_active && *fps_overlay_active; },
-            [fps_overlay_active](bool v){ if (fps_overlay_active) *fps_overlay_active = v; }),
+        with_desc(menu_shared::fps_overlay_toggle(fps_overlay_active),
             "Show the current frame rate as an overlay."),
         with_desc(submenu("FPS Average",   std::move(fps_interval_menu)),
                   "Averaging window for the FPS readout."),
