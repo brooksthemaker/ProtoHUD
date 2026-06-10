@@ -203,6 +203,7 @@ set(SOURCES
     src/hud/hud_renderer.cpp
     src/hud/background_library.cpp
     src/menu/build_menu.cpp
+    src/menu/build_communications.cpp
     src/menu/build_quick.cpp
     src/menu/build_system.cpp
     src/menu/menu_system.cpp
