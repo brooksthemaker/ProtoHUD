@@ -8716,6 +8716,19 @@ static std::vector<MenuItem> build_menu(
             out.pop_back();
         return out;
     };
+    // get_state / get_toggle / context-panel hooks run for every visible row
+    // every frame — raw sh_read() in one of those forks a process per row per
+    // draw (the Timezone list alone was 11 forks/frame while open). A short
+    // TTL keeps the shown values honest without the fork storm. Menu hooks
+    // only run on the render thread, so the cache needs no lock.
+    auto sh_read_cached = [sh_read](const char* cmd, double ttl_s) -> std::string {
+        struct Entry { double t = -1e9; std::string out; };
+        static std::map<std::string, Entry> cache;
+        Entry& e = cache[cmd];
+        const double now = glfwGetTime();
+        if (now - e.t >= ttl_s) { e.out = sh_read(cmd); e.t = now; }
+        return e.out;
+    };
 
     // ── Pi Settings submenu ──────────────────────────────────────────────────
     std::vector<MenuItem> tz_items;
@@ -8736,8 +8749,8 @@ static std::vector<MenuItem> build_menu(
                     run_sh(std::string("Timezone → ") + z,
                            std::string("sudo timedatectl set-timezone ") + z);
                 },
-                [sh_read, z]{
-                    return sh_read("timedatectl show -p Timezone --value") == z;
+                [sh_read_cached, z]{
+                    return sh_read_cached("timedatectl show -p Timezone --value", 2.0) == z;
                 }));
         }
     }
@@ -8782,7 +8795,7 @@ static std::vector<MenuItem> build_menu(
                 "System timezone (timedatectl). Affects the clock, log timestamps "
                 "and scheduled tasks."),
             with_desc(toggle("Auto Time Sync (NTP)",
-                [sh_read]{ return sh_read("timedatectl show -p NTP --value") == "yes"; },
+                [sh_read_cached]{ return sh_read_cached("timedatectl show -p NTP --value", 2.0) == "yes"; },
                 [run_sh](bool v){
                     run_sh(v ? "NTP On" : "NTP Off",
                            std::string("sudo timedatectl set-ntp ") + (v ? "true" : "false"));
@@ -8801,16 +8814,17 @@ static std::vector<MenuItem> build_menu(
             }),
         }), "Timezone, automatic NTP sync, and clock display settings."),
         with_panel(
-            // Storage usage context panel — runs df once per draw.
+            // Storage usage context panel — df refreshes every few seconds,
+            // not once per draw.
             submenu("Storage", std::vector<MenuItem>{}),
             "Disk Usage",
-            [sh_read](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            [sh_read_cached](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
                 (void)sz;
                 ImFont* font = ImGui::GetFont();
                 const float fs = ImGui::GetFontSize();
                 dl->AddText(font, fs * 1.0f, {o.x, o.y},
                             IM_COL32(230, 235, 240, 255), "Disk Usage");
-                const std::string out = sh_read("df -h /");
+                const std::string out = sh_read_cached("df -h /", 5.0);
                 float y = o.y + fs * 1.5f;
                 size_t pos = 0;
                 while (pos < out.size()) {
