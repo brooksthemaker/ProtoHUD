@@ -11196,7 +11196,7 @@ int main(int argc, char* argv[]) {
         (fs::path(cfg_path).parent_path() / "protohud_notifications.json").string();
     if (cfg.contains("notifications") && cfg["notifications"].is_object())
         state.notif_persist = cfg["notifications"].value("persist", true);
-    auto save_notifs = [&state, notif_path]{
+    auto save_notifs = [&state, notif_path](bool async = true){
         json arr = json::array();
         {
             std::lock_guard<std::mutex> lk(state.mtx);
@@ -11206,8 +11206,15 @@ int main(int argc, char* argv[]) {
                                {"read", n.read}, {"dismissed", n.dismissed},
                                {"saved", n.saved}});
         }
-        std::ofstream f(notif_path);
-        if (f) f << arr.dump();
+        // The debounced caller is the render loop, and a busy SD card can
+        // stall a write for tens of ms — push the file I/O off-thread. The
+        // shutdown call passes async=false so the final save can't be lost.
+        auto write = [notif_path, payload = arr.dump()]{
+            std::ofstream f(notif_path);
+            if (f) f << payload;
+        };
+        if (async) std::thread(std::move(write)).detach();
+        else       write();
     };
     if (state.notif_persist) {
         std::ifstream f(notif_path);
@@ -13608,8 +13615,12 @@ int main(int argc, char* argv[]) {
         // still route through menu.navigate (which forwards to face_editor_'s
         // vertical cursor step); Left/Right route through menu.back/select,
         // which would cancel/paint inside the editor — drop those.
-        wireless.on_nav_up   ([&]{ post_input([&]{ if (menu.is_open()) menu.navigate(-1); }); });
-        wireless.on_nav_down ([&]{ post_input([&]{ if (menu.is_open()) menu.navigate(+1); }); });
+        // Same editing_value() flip as the keyboard/gamepad handlers, so Up
+        // always increases a slider value (it used to decrease here only).
+        wireless.on_nav_up   ([&]{ post_input([&]{
+            if (menu.is_open()) menu.navigate(menu.editing_value() ? +1 : -1); }); });
+        wireless.on_nav_down ([&]{ post_input([&]{
+            if (menu.is_open()) menu.navigate(menu.editing_value() ? -1 : +1); }); });
         wireless.on_nav_left ([&]{ post_input([&]{
             if (menu.is_face_editor_open())   return;
             if      (hud.toast_has_focused()) hud.toast_navigate(-1);
@@ -14121,20 +14132,19 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Signal handling: Ctrl+C / SIGTERM → graceful quit + 5s force-kill ──────
+    // The handler only touches atomics — the old version constructed a
+    // std::thread (allocates) inside the handler, which deadlocks on the
+    // malloc lock if the signal lands mid-allocation on any thread. The
+    // watchdog thread below enforces the 5s force-exit deadline instead.
+    static std::atomic<bool>    g_sig_quit{false};
+    static std::atomic<int64_t> g_sig_quit_at{0};
     {
         static std::atomic<bool>* g_quit = &state.quit;
         auto handler = [](int) {
             if (g_quit) g_quit->store(true);
-            // If cleanup stalls, force-exit after 5 seconds.  Exit 0, not 1:
-            // SIGINT/SIGTERM is an explicit quit request (Ctrl+C, `kill`, or the
-            // watchdog forwarding a stop), so report a clean exit — otherwise the
-            // respawn supervisor (scripts/watchdog.sh) treats the non-zero code as
-            // a crash and relaunches the program.
-            std::thread([] {
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                std::cerr << "[signal] cleanup timed out — forcing clean exit\n";
-                std::_Exit(0);
-            }).detach();
+            // time(2) is async-signal-safe; record the deadline start.
+            g_sig_quit_at.store(static_cast<int64_t>(::time(nullptr)));
+            g_sig_quit.store(true);
         };
         std::signal(SIGINT,  handler);
         std::signal(SIGTERM, handler);
@@ -14149,6 +14159,18 @@ int main(int argc, char* argv[]) {
         while (!wd_stop.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             if (wd_stop.load(std::memory_order_relaxed)) break;
+            // Signal-initiated quit: if cleanup stalls past 5s, force a CLEAN
+            // exit. Exit 0, not 1: SIGINT/SIGTERM is an explicit quit request
+            // (Ctrl+C, `kill`, or the watchdog script forwarding a stop), and
+            // scripts/watchdog.sh treats non-zero as a crash and relaunches.
+            if (g_sig_quit.load(std::memory_order_relaxed)) {
+                if (::time(nullptr) -
+                        g_sig_quit_at.load(std::memory_order_relaxed) >= 5) {
+                    std::cerr << "[signal] cleanup timed out — forcing clean exit\n";
+                    std::_Exit(0);
+                }
+                continue;   // render loop is exiting — skip the stall check
+            }
             uint64_t cur = wd_heartbeat.load(std::memory_order_relaxed);
             stall = (cur == prev) ? stall + 1 : 0;
             prev  = cur;
@@ -14841,6 +14863,13 @@ int main(int argc, char* argv[]) {
     size_t   notif_last_size  = state.notifs.items.size();
     double   notif_next_save  = 0.0;
 
+    // Persistent snapshot target — constructing a fresh AppState every frame
+    // re-allocated every vector/deque/string member (hundreds of allocations)
+    // while holding state.mtx, convoying every sensor/input worker. Reusing
+    // one instance lets the copy-assignments below recycle capacity; every
+    // field the HUD reads is reassigned under the lock each frame.
+    AppState snap;
+
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);
 
@@ -15497,7 +15526,7 @@ int main(int argc, char* argv[]) {
         // ── State snapshot ────────────────────────────────────────────────────
         // Also update render-thread metrics (frame time, knob event age) here
         // so they're included in the snapshot under a single lock acquisition.
-        AppState snap;
+        // (snap itself is declared once above the loop — see comment there.)
         {
             std::lock_guard<std::mutex> lk(state.mtx);
 
@@ -16117,8 +16146,16 @@ int main(int argc, char* argv[]) {
             return FaceTex{native_tex, native_w, native_h, true};
         };
 
-        if (panel_preview_enabled && !editor_open) {
-            const FaceTex ft = pick_face_tex();
+        // Fetch the face texture once per frame — preview + portrait share it.
+        // (pick_face_tex copies the latest frame, converts, and re-uploads the
+        // texture every call; doing it twice doubled that work when both
+        // surfaces were on.)
+        const bool want_preview  = panel_preview_enabled && !editor_open;
+        const bool want_portrait = snap.map_overlay.portrait && !menu.is_open();
+        FaceTex ft;
+        if (want_preview || want_portrait) ft = pick_face_tex();
+
+        if (want_preview) {
             // On native backends the texture already IS the centred face
             // (canvas-mirroring is HUB75-only), so left/right/full views
             // would all show the same content — force "full" so the user
@@ -16131,8 +16168,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Protoface portrait beside the minimap (closed-menu HUD element).
-        if (snap.map_overlay.portrait && !menu.is_open()) {
-            const FaceTex ft = pick_face_tex();
+        if (want_portrait) {
             hud.draw_face_portrait(ft.id, ft.w, ft.h, ft.native,
                                    xr.display_width(), xr.display_height(), snap);
         }
@@ -16160,7 +16196,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Final notification-log flush so the last messages survive a clean exit.
-    if (state.notif_persist) save_notifs();
+    if (state.notif_persist) save_notifs(/*async=*/false);
 
     // ── Persist runtime settings ──────────────────────────────────────────────
     // Write current settings back to config.json so they survive a restart. Skip
