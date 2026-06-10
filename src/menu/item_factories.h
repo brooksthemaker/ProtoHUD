@@ -5,6 +5,7 @@
 // they are stateless, so they live here as inline free functions with identical
 // semantics.
 
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -12,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "app_state.h"
 #include "menu/menu_system.h"
 
 inline MenuItem leaf(std::string lbl, std::function<void()> fn) {
@@ -116,4 +118,59 @@ inline MenuItem face_picker(std::string lbl, int face_count,
     m.face_picker.get_face    = std::move(get_fn);
     m.face_picker.set_face    = std::move(set_fn);
     return m;
+}
+
+// ── Overlay placement factories ──────────────────────────────────────────────
+// Shared by the Vision tab (camera PiPs, Android mirror) and the Face Display
+// tab (Protoface panel preview placement). Were local lambdas in build_menu().
+
+// Snap position presets — sets anchor_x/y and resets any pan offset.
+inline std::vector<MenuItem> make_position_items(OverlayConfig* cfg) {
+    auto snap = [cfg](float ax, float ay){
+        cfg->anchor_x = ax; cfg->anchor_y = ay;
+        cfg->pan_x = 0.f;   cfg->pan_y = 0.f;
+    };
+    auto at   = [cfg](float ax, float ay){
+        return std::abs(cfg->anchor_x - ax) < 0.01f &&
+               std::abs(cfg->anchor_y - ay) < 0.01f;
+    };
+    std::vector<MenuItem> nudge = {
+        leaf("Left  -10px", [cfg]{ cfg->pan_x -= 10.f; }),
+        leaf("Right +10px", [cfg]{ cfg->pan_x += 10.f; }),
+        leaf("Up    -10px", [cfg]{ cfg->pan_y -= 10.f; }),
+        leaf("Down  +10px", [cfg]{ cfg->pan_y += 10.f; }),
+        leaf("Left  -50px", [cfg]{ cfg->pan_x -= 50.f; }),
+        leaf("Right +50px", [cfg]{ cfg->pan_x += 50.f; }),
+        leaf("Up    -50px", [cfg]{ cfg->pan_y -= 50.f; }),
+        leaf("Down  +50px", [cfg]{ cfg->pan_y += 50.f; }),
+        leaf("Reset Nudge", [cfg]{ cfg->pan_x = 0.f; cfg->pan_y = 0.f; }),
+    };
+    return std::vector<MenuItem>{
+        leaf_sel("Top Left",      [snap]{ snap(0.0f, 0.0f); }, [cfg, at]{ return at(0.0f, 0.0f); }),
+        leaf_sel("Top Center",    [snap]{ snap(0.5f, 0.0f); }, [cfg, at]{ return at(0.5f, 0.0f); }),
+        leaf_sel("Top Right",     [snap]{ snap(1.0f, 0.0f); }, [cfg, at]{ return at(1.0f, 0.0f); }),
+        leaf_sel("Center Left",   [snap]{ snap(0.0f, 0.5f); }, [cfg, at]{ return at(0.0f, 0.5f); }),
+        leaf_sel("Center",        [snap]{ snap(0.5f, 0.5f); }, [cfg, at]{ return at(0.5f, 0.5f); }),
+        leaf_sel("Center Right",  [snap]{ snap(1.0f, 0.5f); }, [cfg, at]{ return at(1.0f, 0.5f); }),
+        leaf_sel("Bottom Left",   [snap]{ snap(0.0f, 1.0f); }, [cfg, at]{ return at(0.0f, 1.0f); }),
+        leaf_sel("Bottom Center", [snap]{ snap(0.5f, 1.0f); }, [cfg, at]{ return at(0.5f, 1.0f); }),
+        leaf_sel("Bottom Right",  [snap]{ snap(1.0f, 1.0f); }, [cfg, at]{ return at(1.0f, 1.0f); }),
+        submenu("Nudge", std::move(nudge)),
+    };
+}
+
+inline MenuItem make_size_slider(std::string lbl, OverlayConfig* cfg) {
+    return slider(std::move(lbl), 15.f, 60.f, 5.f, " %",
+        [cfg]{ return cfg->size * 100.f; },
+        [cfg](float v){ cfg->size = v / 100.f; });
+}
+
+inline std::vector<MenuItem> make_rotation_items(OverlayConfig* cfg) {
+    using R = OverlayConfig::Rotation;
+    return std::vector<MenuItem>{
+        leaf_sel("Landscape",         [cfg]{ cfg->rotation = R::Landscape;        }, [cfg]{ return cfg->rotation == R::Landscape;        }),
+        leaf_sel("Portrait",          [cfg]{ cfg->rotation = R::Portrait;          }, [cfg]{ return cfg->rotation == R::Portrait;          }),
+        leaf_sel("Landscape Flipped", [cfg]{ cfg->rotation = R::LandscapeFlipped; }, [cfg]{ return cfg->rotation == R::LandscapeFlipped; }),
+        leaf_sel("Portrait Flipped",  [cfg]{ cfg->rotation = R::PortraitFlipped;  }, [cfg]{ return cfg->rotation == R::PortraitFlipped;  }),
+    };
 }
