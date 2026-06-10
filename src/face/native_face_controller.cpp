@@ -50,6 +50,32 @@ nlohmann::json effect_cfg_for_id(int id) {
         default: return std::string("none");
     }
 }
+
+// Add the submerged face back over a composited frame as a liquid-tinted glow,
+// so eyes "shine through" the water. For each pixel the glow is the face's own
+// brightness × the liquid colour there × the liquid coverage (its alpha) ×
+// strength, gated by the face's alpha mask so only real face pixels light up
+// (this is what keeps it inside the eye boxes). All Mats are this panel's size;
+// rgb is CV_8UC3, the two source layers CV_8UC4, channel 0 = R throughout.
+void apply_face_glow(cv::Mat& rgb, const cv::Mat& face_rgba,
+                     const cv::Mat& water_rgba, double strength) {
+    if (rgb.empty() || rgb.type() != CV_8UC3) return;
+    if (face_rgba.size() != rgb.size() || water_rgba.size() != rgb.size()) return;
+    const float s = static_cast<float>(strength);
+    for (int y = 0; y < rgb.rows; ++y) {
+        for (int x = 0; x < rgb.cols; ++x) {
+            const cv::Vec4b& f = face_rgba.at<cv::Vec4b>(y, x);
+            const cv::Vec4b& w = water_rgba.at<cv::Vec4b>(y, x);
+            const float k = (w[3] / 255.f) * (f[3] / 255.f) * s;  // coverage × mask
+            if (k <= 0.f) continue;
+            cv::Vec3b& o = rgb.at<cv::Vec3b>(y, x);
+            for (int ch = 0; ch < 3; ++ch) {
+                const float glow = (f[ch] / 255.f) * (w[ch] / 255.f) * 255.f * k;
+                o[ch] = cv::saturate_cast<uchar>(o[ch] + glow);
+            }
+        }
+    }
+}
 } // namespace
 
 NativeFaceController::NativeFaceController(RenderConfig cfg,
@@ -315,12 +341,17 @@ void NativeFaceController::render_thread() {
                 // the clip owns the whole panel — and resume automatically when
                 // it ends and the face animation returns. (The sim keeps running
                 // so the field is already settled when it reappears.)
+                ParticleFrame pf;
                 if (pn.particles && gframe.empty() && !eye_active) {
-                    ParticleFrame pf = pn.particles->render();
+                    pf = pn.particles->render();
                     if (pf.has) layers.push_back(Layer{pf.rgba, pf.blend});
                 }
 
                 cv::Mat frame = composite(bg, layers);
+                // Refraction: let the submerged face glow back through a liquid
+                // layer, tinted by the liquid, so eyes read through the water.
+                if (pf.has && pf.face_glow > 0.0 && !face_layer.empty())
+                    apply_face_glow(frame, face_layer, pf.rgba, pf.face_glow);
                 frame = scale_brightness(frame, pn.state->brightness());
 
                 cv::Rect roi(pc.x, pc.y, pc.w, pc.h);
