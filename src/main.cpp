@@ -1516,7 +1516,10 @@ static std::vector<MenuItem> build_menu(
         // has no coprocessor support wired.
         bool* coproc_enabled_p = nullptr,
         std::shared_ptr<std::function<void()>> coproc_reload = nullptr,
-        std::shared_ptr<std::function<std::string()>> coproc_status = nullptr)
+        std::shared_ptr<std::function<std::string()>> coproc_status = nullptr,
+        // Glitch post-effect config (null on non-native backends). The menu
+        // mutates it in place and re-pushes via pf_anim_push().
+        face::GlitchConfig* pf_glitch_p = nullptr)
 {
     (void)lora; (void)knob;
 
@@ -4161,6 +4164,7 @@ static std::vector<MenuItem> build_menu(
         "none", "sparkle", "embers", "rain", "snow",
         "confetti", "rings", "fireflies", "clouds",
         "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
+        "starfield", "warp", "constellation", "shootingstars",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
@@ -4732,6 +4736,11 @@ static std::vector<MenuItem> build_menu(
         {"vortex_rose","comet vortex (pink/violet)"},
         {"vortex_rainbow","comet vortex (rainbow)"},
         {"nebula","clouds x2 + sparkle"},
+        {"starfield","parallax stars from centre"},
+        {"warp","hyperspace streaks"},
+        {"constellation","still twinkling sky"},
+        {"shooting_stars","meteors from centre"},
+        {"night_sky","twinkle + shooting stars"},
         {"water","liquid — cyan, bubbles"}, {"lava","liquid — lava, thick"},
         {"toxic","liquid — green, bubbles"}, {"ocean","liquid — teal"},
         {"plasma_fluid","liquid — magenta"}, {"mercury","liquid — silver, thick"},
@@ -4787,7 +4796,8 @@ static std::vector<MenuItem> build_menu(
             static std::mt19937 rng(std::random_device{}());
             static const char* const fx[] = {
                 "sparkle","embers","rain","snow","confetti","rings","fireflies",
-                "clouds","lightning","meteor","bubbles","fireworks","vortex"};
+                "clouds","lightning","meteor","bubbles","fireworks","vortex",
+                "starfield","constellation"};
             static const int pal[][3] = {
                 {0,220,180},{255,80,80},{80,180,255},{255,200,40},
                 {180,80,255},{80,255,160},{255,120,20},{255,255,255}};
@@ -5708,6 +5718,45 @@ static std::vector<MenuItem> build_menu(
                 "Idle-face animation tuning: blink cadence, blink duration, "
                 "and the crossfade time between expressions. Applies to the "
                 "native (MAX7219 / RGB matrix) renderer.");
+        })(),
+        // Glitch post-effect — one effect, every look an independent variable.
+        ([&]() -> MenuItem {
+            if (!pf_glitch_p) { MenuItem e; e.visible_fn = []{ return false; }; return e; }
+            face::GlitchConfig* G = pf_glitch_p;
+            std::vector<MenuItem> gi;
+            gi.push_back(toggle("Glitch",
+                [G]{ return G->enabled; },
+                [G, pf_anim_push](bool v){ G->enabled = v; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Intensity", 0.f, 200.f, 5.f, "%",
+                [G]{ return static_cast<float>(G->intensity * 100.0); },
+                [G, pf_anim_push](float v){ G->intensity = v / 100.0; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Burst Rate", 0.f, 3.f, 0.1f, "/s",
+                [G]{ return static_cast<float>(G->burst_rate); },
+                [G, pf_anim_push](float v){ G->burst_rate = v; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Burst Min", 0.02f, 1.f, 0.02f, "s",
+                [G]{ return static_cast<float>(G->burst_min); },
+                [G, pf_anim_push](float v){ G->burst_min = v; if (pf_anim_push) pf_anim_push(); }));
+            gi.push_back(slider("Burst Max", 0.05f, 2.f, 0.05f, "s",
+                [G]{ return static_cast<float>(G->burst_max); },
+                [G, pf_anim_push](float v){ G->burst_max = v; if (pf_anim_push) pf_anim_push(); }));
+            // Per-component amounts (0 = off). Each is an independent variable.
+            auto comp = [&](const char* name, double face::GlitchConfig::* member) {
+                gi.push_back(slider(name, 0.f, 100.f, 5.f, "%",
+                    [G, member]{ return static_cast<float>((G->*member) * 100.0); },
+                    [G, member, pf_anim_push](float v){ G->*member = v / 100.0; if (pf_anim_push) pf_anim_push(); }));
+            };
+            comp("Chromatic Split",    &face::GlitchConfig::chromatic);
+            comp("Band Tearing",       &face::GlitchConfig::tearing);
+            comp("Block Shuffle",      &face::GlitchConfig::blocks);
+            comp("Bitcrush",           &face::GlitchConfig::bitcrush);
+            comp("Dropout Bars",       &face::GlitchConfig::dropout);
+            comp("Datamosh",           &face::GlitchConfig::datamosh);
+            comp("Eyes/Mouth Desync",  &face::GlitchConfig::region_desync);
+            comp("Expression Flicker", &face::GlitchConfig::expr_flicker);
+            return with_desc(submenu("Glitch", std::move(gi)),
+                "Digital glitch corruption of the face. Master Intensity and Burst "
+                "Rate gate the look (Burst Rate 0 = constant); each component below "
+                "is an independent amount.");
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),
@@ -11564,6 +11613,11 @@ int main(int argc, char* argv[]) {
     std::string pf_hub75_active = "Default";
     // Custom Gradient material editor state (Protoface > Material Color).
     PfGradient pf_gradient;
+    // Glitch post-effect config — forwarded to the native controller live and
+    // persisted to cfg["protoface"]["glitch"]. Tunable via the settings JSON;
+    // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
+    // region_desync, expr_flicker) is an independent variable.
+    face::GlitchConfig pf_glitch;
     // Face animation tunables — forwarded to every panel's FaceState live
     // and persisted to cfg["protoface"]["animation"] on save.
     bool   pf_blink_enabled   = true;
@@ -11635,6 +11689,8 @@ int main(int argc, char* argv[]) {
             pf_preview_duration_s =
                 jval(ja, "preview_duration_s", pf_preview_duration_s);
         }
+        if (jpf.contains("glitch") && jpf["glitch"].is_object())
+            pf_glitch = face::GlitchConfig::from_json(jpf["glitch"]);
         if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
             auto& jg = jpf["gradient"];
             pf_gradient.count     = std::clamp(jval(jg, "count", pf_gradient.count), 2, 6);
@@ -12705,6 +12761,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
+        native_ctrl->set_glitch(pf_glitch);
         native_ctrl->set_active_layout_name(pf_hub75_active);
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
         std::cout << "[main] Protoface: native in-process renderer\n";
@@ -12967,6 +13024,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
+        native_ctrl->set_glitch(pf_glitch);
         native_ctrl->set_active_layout_name(pf_hub75_active);
 
         // panel_driver.py choreography. The Python shim is only needed for
@@ -13445,6 +13503,7 @@ int main(int argc, char* argv[]) {
                                                                  pf_blink_max,
                                                                  pf_blink_duration);
                                    native_ctrl->set_expression_fade(pf_expr_fade);
+                                   native_ctrl->set_glitch(pf_glitch);
                                },
                                /* pf_set_effect_json */ [&](const nlohmann::json& spec){
                                    if (native_ctrl) native_ctrl->set_effect_json(spec);
@@ -13487,7 +13546,8 @@ int main(int argc, char* argv[]) {
                                /* gpio_pins */ gpio_pins.data(), kGpioSlots,
                                &gpio_inputs_enabled, gpio_reload, kdc_menu_ptr,
                                &kdc_ignore, &kdc_msgapps,
-                               &coproc_cfg.enabled, coproc_reload, coproc_status));
+                               &coproc_cfg.enabled, coproc_reload, coproc_status,
+                               /* pf_glitch_p */ &pf_glitch));
     menu_ptr = &menu;
     menu.set_quick_items(std::move(quick_items));
 
@@ -14367,6 +14427,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["animation"]["blink_duration"]  = pf_blink_duration;
         cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
         cfg["protoface"]["animation"]["preview_duration_s"] = pf_preview_duration_s;
+        cfg["protoface"]["glitch"] = pf_glitch.to_json();
         {
             auto& jg = cfg["protoface"]["gradient"];
             jg["count"]     = std::clamp(pf_gradient.count, 2, 6);
