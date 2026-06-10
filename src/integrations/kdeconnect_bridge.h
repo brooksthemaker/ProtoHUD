@@ -168,6 +168,11 @@ private:
 
     AppState&            state_;
     KdeConnectConfig     cfg_;
+    // Guards the runtime-editable CSV filter strings in cfg_ (app_blocklist,
+    // message_apps, ignore_list) — the menu thread edits them live while the
+    // worker matches notifications against them, and a concurrent std::string
+    // realloc vs. read is UB.
+    mutable std::mutex   cfg_mtx_;
 
     std::atomic<bool>    running_{false};
     std::atomic<bool>    daemon_ok_{false};

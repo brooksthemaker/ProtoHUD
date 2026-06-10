@@ -177,10 +177,19 @@ inline void blit_tex(GLuint tex, GLuint vbo,
                      float x, float y, float w, float h,
                      int screen_w, int screen_h,
                      GLuint blit_prog) {
+    // Uniform locations cached per program — blits run in per-frame paths and
+    // glGetUniformLocation is a string lookup. Render thread only (as above).
+    static GLuint s_prog = 0;
+    static GLint  s_loc_tex = -1, s_loc_rect = -1;
+    if (blit_prog != s_prog) {
+        s_prog     = blit_prog;
+        s_loc_tex  = glGetUniformLocation(blit_prog, "u_tex");
+        s_loc_rect = glGetUniformLocation(blit_prog, "u_rect");
+    }
     glUseProgram(blit_prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glUniform1i(glGetUniformLocation(blit_prog, "u_tex"), 0);
+    glUniform1i(s_loc_tex, 0);
 
     // Transform quad to pixel rect [x,y,w,h] in screen space
     float sx =  2.f * w  / screen_w;
@@ -188,7 +197,7 @@ inline void blit_tex(GLuint tex, GLuint vbo,
     float tx =  2.f * x  / screen_w - 1.f + sx * 0.5f;  // not right, use model matrix
     float ty = -2.f * y  / screen_h + 1.f - sy * 0.5f;
     // Just pass the NDC rect directly via uniform
-    glUniform4f(glGetUniformLocation(blit_prog, "u_rect"),
+    glUniform4f(s_loc_rect,
                 2.f * x / screen_w - 1.f,
                 1.f - 2.f * (y + h) / screen_h,
                 2.f * (x + w) / screen_w - 1.f,

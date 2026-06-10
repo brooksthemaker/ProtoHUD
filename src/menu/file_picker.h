@@ -18,9 +18,11 @@
 
 #include <imgui.h>
 
+#include "overlay.h"
+
 namespace menu {
 
-class FilePicker {
+class FilePicker : public IOverlay {
 public:
     using CommitFn = std::function<void(const std::string& abs_path)>;
     using CancelFn = std::function<void()>;
@@ -34,18 +36,18 @@ public:
               CommitFn on_commit,
               CancelFn on_cancel = {});
 
-    void close();
-    bool is_open() const { return open_; }
+    void close() override;
+    bool is_open() const override { return open_; }
 
-    // Input — wired from MenuSystem when is_open() is true.
-    void step(int dir);   // cursor up (-1) / down (+1)
-    void activate();      // enter dir or pick file
-    void back();          // up one dir, or cancel at fs root
-    void cancel();        // close without commit (fires on_cancel)
+    // Input — wired from MenuSystem (via IOverlay) when is_open() is true.
+    void step(int dir) override;   // cursor up (-1) / down (+1)
+    void activate() override;      // enter dir or pick file
+    void back() override;          // up one dir, or cancel at fs root
+    void cancel();                 // close without commit (fires on_cancel)
 
     // Full-screen overlay drawn in place of the deep menu when open.
     void draw(ImDrawList* dl, ImFont* font, float base_font_size,
-              float screen_w, float screen_h, ImU32 accent_color);
+              float screen_w, float screen_h, ImU32 accent_color) override;
 
     // Last directory navigated to — useful to remember per media type.
     const std::string& current_dir() const { return cur_dir_; }

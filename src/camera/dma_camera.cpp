@@ -185,6 +185,8 @@ bool DmaCamera::configure_camera() {
 // ── Buffer allocation + EGLImage creation ─────────────────────────────────────
 
 bool DmaCamera::allocate_buffers_and_egl() {
+    requests_.clear();   // drop any requests left over from a failed attempt
+
     allocator_ = std::make_unique<FrameBufferAllocator>(camera_);
     if (allocator_->allocate(stream_) < 0) {
         std::cerr << "[dma] frame buffer allocation failed\n";
@@ -205,14 +207,18 @@ bool DmaCamera::allocate_buffers_and_egl() {
 
         if (!create_egl_image(buf, slots_[i])) return false;
 
-        // Create libcamera Request (one per slot)
-        slots_[i].request = camera_->createRequest().release();
-        if (!slots_[i].request) {
+        // Create libcamera Request (one per slot). createRequest() hands us
+        // ownership — store it in requests_ (freed on shutdown/reconfigure)
+        // and keep a raw pointer in the slot for queueRequest/reuse.
+        auto req = camera_->createRequest();
+        if (!req) {
             std::cerr << "[dma] createRequest failed for slot " << i << "\n";
             return false;
         }
+        slots_[i].request = req.get();
         slots_[i].request->addBuffer(stream_, buf);
         req_to_slot_[slots_[i].request] = i;
+        requests_.push_back(std::move(req));
     }
     return true;
 }
@@ -352,9 +358,11 @@ void DmaCamera::event_loop() {
     // The libcamera CameraManager on Pi OS Bullseye dispatches events
     // internally; we do not need to call processEvents() ourselves.
     // This thread simply keeps running so that the thread handle stays
-    // valid for the lifetime of the capture session.
-    while (running_)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    // valid for the lifetime of the capture session. Block until stop —
+    // the previous 5 ms poll burned ~200 scheduler wakeups/s per camera
+    // doing nothing.
+    std::unique_lock<std::mutex> lk(stop_mtx_);
+    stop_cv_.wait(lk, [this] { return !running_.load(); });
 }
 
 // ── Request-complete callback (capture thread) ────────────────────────────────
@@ -476,8 +484,14 @@ void DmaCamera::shutdown() {
     // cleaned up even when ok_ is false due to a later EGL failure).
     if (!ok_ && !running_ && !camera_) return;
 
-    ok_      = false;
-    running_ = false;
+    ok_ = false;
+    {
+        // Store under stop_mtx_ so event_loop can't miss the wakeup between
+        // its predicate check and the wait.
+        std::lock_guard<std::mutex> lk(stop_mtx_);
+        running_ = false;
+    }
+    stop_cv_.notify_all();
     if (event_thread_.joinable()) event_thread_.join();
 
     if (camera_) {
@@ -492,8 +506,11 @@ void DmaCamera::shutdown() {
         if (s.img_uv != EGL_NO_IMAGE_KHR && pfn_destroy_image_)
             pfn_destroy_image_(egl_display_, s.img_uv);
         s.img_y = s.img_uv = EGL_NO_IMAGE_KHR;
-        // Requests are owned by the camera; don't delete them
+        s.request = nullptr;   // owned by requests_, freed below
     }
+    // Free the requests we own (camera is stopped — none are in flight).
+    requests_.clear();
+    req_to_slot_.clear();
 
     if (tex_y_)     { glDeleteTextures(1, &tex_y_);    tex_y_    = 0; }
     if (nv12_prog_) { glDeleteProgram(nv12_prog_);     nv12_prog_ = 0; }
@@ -511,7 +528,11 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
     if (!camera_) return false;
 
     // 1. Stop capture thread
-    running_ = false;
+    {
+        std::lock_guard<std::mutex> lk(stop_mtx_);
+        running_ = false;
+    }
+    stop_cv_.notify_all();
     if (event_thread_.joinable()) event_thread_.join();
 
     camera_->stop();
@@ -530,7 +551,9 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
         s.state     = SlotState::IDLE;
     }
 
-    // 3. Free libcamera buffer allocations
+    // 3. Free the old requests (camera stopped, none in flight) and the
+    //    libcamera buffer allocations
+    requests_.clear();
     if (allocator_) {
         allocator_->free(stream_);
         allocator_.reset();

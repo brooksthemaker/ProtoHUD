@@ -19,12 +19,14 @@
 // init() MUST be called from the render thread (after the GL context is current).
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <array>
 #include <unordered_map>
+#include <vector>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -141,6 +143,10 @@ private:
     // Slots
     static constexpr int NUM_SLOTS = 3;
     std::array<Slot, NUM_SLOTS>                       slots_;
+    // createRequest() returns a unique_ptr the caller owns — keep them here so
+    // they're freed on shutdown/reconfigure. Slot::request is a raw view into
+    // these (must stay valid while queued with the camera).
+    std::vector<std::unique_ptr<libcamera::Request>>  requests_;
     std::unordered_map<libcamera::FrameBuffer*, int>  buf_to_slot_;
     std::unordered_map<libcamera::Request*, int>      req_to_slot_;
 
@@ -170,9 +176,12 @@ private:
     // called from menu / main without coordinating with the render thread.
     std::atomic<int> rotation_deg_ { 0 };
 
-    // Capture thread
-    std::atomic<bool> running_ { false };
-    std::thread       event_thread_;
+    // Capture thread — event_loop() blocks on stop_cv_ until shutdown (libcamera
+    // dispatches events internally; the thread only has to exist, not poll).
+    std::atomic<bool>       running_ { false };
+    std::thread             event_thread_;
+    std::mutex              stop_mtx_;
+    std::condition_variable stop_cv_;
 
     // ── Pending controls ──────────────────────────────────────────────────────
     // Written by any thread (main/menu), consumed atomically by capture thread

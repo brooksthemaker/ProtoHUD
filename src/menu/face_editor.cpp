@@ -492,6 +492,64 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                       float W, float H, ImU32 accent) {
     if (!open_) return;
 
+    // ── Editor-specific input, sampled from ImGui state ──────────────────────
+    // Vertical cursor motion comes in through MenuSystem::navigate (forwarded
+    // to step/cursor_step) while the overlay is open. Horizontal cursor +
+    // tool/palette shortcuts are editor-only and not in the menu's input set,
+    // so we poll them directly here.
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  cursor_step(-1, 0);
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) cursor_step(+1, 0);
+    if (ImGui::IsKeyPressed(ImGuiKey_Space))      primary();
+    if (ImGui::IsKeyPressed(ImGuiKey_X))          secondary();
+    if (ImGui::IsKeyPressed(ImGuiKey_Y) ||
+        ImGui::IsKeyPressed(ImGuiKey_M))          tertiary();
+    if (ImGui::IsKeyPressed(ImGuiKey_Z))          undo();
+    if (ImGui::IsKeyPressed(ImGuiKey_V))          preview();
+    if (ImGui::IsKeyPressed(ImGuiKey_T))          toggle_live();
+    if (ImGui::IsKeyPressed(ImGuiKey_S))          save();
+    // Direct tool selection. Number keys 1-6 map to the six tools in
+    // declaration order (Pencil/Eraser/Bucket/Eyedrop/Line/Rect); the
+    // letter shortcuts (P/E/B/I/L/R) are kept as mnemonics. The deep
+    // menu's number-key handlers and main's camera-PiP toggles are
+    // both gated by is_face_editor_open(), so 1-6 are exclusive here.
+    if (ImGui::IsKeyPressed(ImGuiKey_1))          set_tool(Tool::Pencil);
+    if (ImGui::IsKeyPressed(ImGuiKey_2))          set_tool(Tool::Eraser);
+    if (ImGui::IsKeyPressed(ImGuiKey_3))          set_tool(Tool::Bucket);
+    if (ImGui::IsKeyPressed(ImGuiKey_4))          set_tool(Tool::Eyedrop);
+    if (ImGui::IsKeyPressed(ImGuiKey_5))          set_tool(Tool::Line);
+    if (ImGui::IsKeyPressed(ImGuiKey_6))          set_tool(Tool::Rect);
+    if (ImGui::IsKeyPressed(ImGuiKey_7))          set_tool(Tool::EyeBox);
+    if (ImGui::IsKeyPressed(ImGuiKey_P))          set_tool(Tool::Pencil);
+    if (ImGui::IsKeyPressed(ImGuiKey_E))          set_tool(Tool::Eraser);
+    if (ImGui::IsKeyPressed(ImGuiKey_B))          set_tool(Tool::Bucket);
+    if (ImGui::IsKeyPressed(ImGuiKey_I))          set_tool(Tool::Eyedrop);
+    if (ImGui::IsKeyPressed(ImGuiKey_L))          set_tool(Tool::Line);
+    if (ImGui::IsKeyPressed(ImGuiKey_R))          set_tool(Tool::Rect);
+    // Brush size — Minus shrinks, Equals/Plus grows. Clamped 0..2 by
+    // the setter itself, so we just pass current ± 1.
+    if (ImGui::IsKeyPressed(ImGuiKey_Minus) ||
+        ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract))
+        set_brush_size(brush_size_ - 1);
+    if (ImGui::IsKeyPressed(ImGuiKey_Equal) ||
+        ImGui::IsKeyPressed(ImGuiKey_KeypadAdd))
+        set_brush_size(brush_size_ + 1);
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))  cycle_palette(-1);
+    if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) cycle_palette(+1);
+    // Press EDGE fires primary() exactly once; holding the button paints a
+    // drag stroke (freehand brushes only). Using IsMouseDown for the
+    // primary action re-fired it every frame, which corrupted the two-step
+    // tools (Line / Rect / Eye Region) — a single click would set then
+    // immediately clear the anchor.
+    {
+        const ImVec2 mp = ImGui::GetMousePos();
+        if      (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) mouse_down(mp.x, mp.y);
+        else if (ImGui::IsMouseDown   (ImGuiMouseButton_Left)) mouse_drag(mp.x, mp.y);
+        else                                                   mouse_move(mp.x, mp.y);
+    }
+    // A polled key (S = save) may have just closed the editor — the canvas is
+    // released by close(), so don't draw this frame.
+    if (!open_) return;
+
     // Dim + panel chrome (same look as the file picker).
     dl->AddRectFilled({0.f, 0.f}, {W, H}, IM_COL32(4, 8, 12, 175));
     const float mx = W * 0.05f, my = H * 0.06f;

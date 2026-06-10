@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <imgui.h>
 #include "../app_state.h"
+#include "overlay.h"
 #include "file_picker.h"
 #include "face_editor.h"
+#include "color_picker.h"
 
 // ── Item types ────────────────────────────────────────────────────────────────
 
@@ -17,7 +19,7 @@ enum class MenuItemType {
     SUBMENU,       // descends into children
     TOGGLE,        // flips a bool; menu stays open; shows ON/OFF indicator
     SLIDER,        // enters numeric edit mode; knob adjusts value
-    COLOR_PICKER,  // enters R/G/B channel edit mode
+    COLOR_PICKER,  // opens the unified color-picker overlay (menu::ColorPicker)
     FACE_PICKER,   // radial dot selector for face index
     NOTIF_LOG,     // scrollable notification history list
 };
@@ -240,11 +242,12 @@ public:
         open_            = false;
         deep_open_       = false;
         in_edit_mode_    = false;
-        in_channel_edit_ = false;
         osk_active_      = false;
         osk_commit_      = nullptr;
         file_picker_.close();
         face_editor_.close();
+        color_picker_.close();
+        overlay_ = nullptr;
         stack_.clear();
     }
 
@@ -311,6 +314,16 @@ public:
     bool is_face_editor_open() const { return face_editor_.is_open(); }
     menu::FaceEditor& face_editor() { return face_editor_; }
 
+    // ── Color picker ────────────────────────────────────────────────────────────
+    // Selecting any COLOR_PICKER item opens the unified picker overlay (see
+    // color_picker.h). Same routing as the other overlays; input handlers use
+    // overlay_move() to forward horizontal d-pad / arrow presses (SV square,
+    // hue strip, swatch rows) while it's open.
+    bool is_color_picker_open() const { return color_picker_.is_open(); }
+    void overlay_move(int dx, int dy) {
+        if (overlay_ && overlay_->is_open()) overlay_->move(dx, dy);
+    }
+
     int  current_index() const { return cursor_; }
     int  menu_depth()    const { return static_cast<int>(stack_.size()); }
     const std::string& current_label() const;
@@ -322,11 +335,31 @@ public:
     bool editing_value() const;
 
 private:
+    // A page references the stable menu tree instead of deep-copying it —
+    // MenuItem owns its children by value, so the old per-level copy cloned
+    // every nested subtree (thousands of string/std::function allocations =
+    // a visible hitch on every open/descend). The tree (root_items_ /
+    // quick_items_ / deep tabs) is structurally immutable after build_menu;
+    // dynamic rows read live data through their label_fn/visible_fn hooks,
+    // so the pointer stays valid for the life of the level. `nav` is the
+    // synthesized "Close Menu"/"< Back" row appended as the last index.
     struct Level {
-        std::vector<MenuItem> items;
+        const std::vector<MenuItem>* src = nullptr;
+        MenuItem              nav;
         int                   cursor = 0;
         std::string           panel_title;
         MenuContextPanelDraw  panel_draw;
+
+        int size() const { return src ? static_cast<int>(src->size()) + 1 : 0; }
+        const MenuItem& at(int i) const {
+            return i < static_cast<int>(src->size()) ? (*src)[i] : nav;
+        }
+    };
+    // Adapter so nav/draw code keeps its `items[i]` / `items.size()` shape.
+    struct LevelView {
+        const Level& lv;
+        int size() const { return lv.size(); }
+        const MenuItem& operator[](int i) const { return lv.at(i); }
     };
 
     void push_level(const std::vector<MenuItem>& items,
@@ -339,21 +372,21 @@ private:
     void emit_detents();
     void emit_detents_override(int count);
 
-    // ── edit-mode state ───────────────────────────────────────────────────────
+    // ── edit-mode state (SLIDER / FACE_PICKER; colors use the overlay) ────────
     bool  in_edit_mode_    = false;
     float edit_float_      = 0.f;     // working copy for SLIDER
-    int   edit_channel_    = 0;       // 0=R 1=G 2=B for COLOR_PICKER
-    bool  in_channel_edit_ = false;   // true when knob adjusts channel value
-    float edit_r_ = 0.f, edit_g_ = 0.f, edit_b_ = 0.f;
-    float orig_float_ = 0.f;                              // pre-edit value for SLIDER cancel/restore
-    float orig_r_ = 0.f, orig_g_ = 0.f, orig_b_ = 0.f;  // pre-edit RGB for COLOR_PICKER cancel/restore
+    float orig_float_ = 0.f;          // pre-edit value for cancel/restore
 
     // ── deep (full-screen) menu state ───────────────────────────────────────────
     void build_deep_tabs();     // derive tabs from root_items_
     void load_tab(int idx);     // reset stack_ to the given tab's items
     bool deep_open_  = false;
     int  tab_index_  = 0;
-    std::vector<std::pair<std::string, std::vector<MenuItem>>> deep_tabs_;
+    // Tab pages point into root_items_'s submenu children; rows that aren't
+    // submenus get an owned home in deep_general_. Built once — see
+    // build_deep_tabs().
+    std::vector<std::pair<std::string, const std::vector<MenuItem>*>> deep_tabs_;
+    std::vector<MenuItem> deep_general_;
 
     // ── on-screen keyboard state ────────────────────────────────────────────────
     void draw_keyboard(ImDrawList* dl, ImFont* font, float fs, float W, float H);
@@ -369,6 +402,14 @@ private:
 
     // Face editor overlay (pixel-art authoring) — same overlay pattern.
     menu::FaceEditor face_editor_;
+
+    // Unified color picker overlay — opened by any COLOR_PICKER item.
+    menu::ColorPicker color_picker_;
+
+    // Active full-screen overlay (one of the members above), or nullptr.
+    // navigate/select/back/draw_fullscreen dispatch through this instead of
+    // per-class if-chains; the OSK is still checked first, before the overlay.
+    menu::IOverlay* overlay_ = nullptr;
 
     std::vector<MenuItem>  root_items_;
     std::vector<MenuItem>  quick_items_;   // curated corner "quick menu" tree

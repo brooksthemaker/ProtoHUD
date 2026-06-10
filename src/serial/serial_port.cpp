@@ -4,10 +4,14 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
-#include <stdexcept>
 #include <array>
 
+// B0 = unsupported; open() fails cleanly instead of an uncaught throw
+// terminating the whole app over a config typo.
 static speed_t baud_constant(int baud) {
     switch (baud) {
         case 9600:   return B9600;
@@ -18,7 +22,7 @@ static speed_t baud_constant(int baud) {
         case 230400: return B230400;
         case 460800: return B460800;
         case 921600: return B921600;
-        default:     throw std::invalid_argument("unsupported baud rate");
+        default:     return B0;
     }
 }
 
@@ -28,13 +32,19 @@ SerialPort::SerialPort(std::string device, int baud)
 SerialPort::~SerialPort() { close(); }
 
 bool SerialPort::open() {
+    speed_t spd = baud_constant(baud_);
+    if (spd == B0) {
+        std::fprintf(stderr, "[serial] %s: unsupported baud %d\n",
+                     device_.c_str(), baud_);
+        return false;
+    }
+
     fd_ = ::open(device_.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
     if (fd_ < 0) return false;
 
     termios tty {};
     tcgetattr(fd_, &tty);
 
-    speed_t spd = baud_constant(baud_);
     cfsetispeed(&tty, spd);
     cfsetospeed(&tty, spd);
 
@@ -73,6 +83,10 @@ bool SerialPort::send(uint8_t cmd, const uint8_t* payload, uint8_t len) {
     if (fd_ < 0) return false;
     std::array<uint8_t, PROTO_MAX_FRAME> buf;
     size_t sz = proto_build(buf.data(), cmd, payload, len);
+    // Serialize writers — a poll thread (e.g. Teensy REQ_STATUS every 200ms)
+    // and the menu both send on the same port; two concurrent write()s can
+    // interleave frame bytes and the device CRC-drops both commands.
+    std::lock_guard<std::mutex> lk(write_mtx_);
     ssize_t written = write(fd_, buf.data(), sz);
     return written == static_cast<ssize_t>(sz);
 }
@@ -92,6 +106,11 @@ void SerialPort::reader_thread() {
         ssize_t n = read(fd_, &byte, 1);
         if (n <= 0) {
             if (!running_) break;
+            // n == 0 is the VTIME poll timeout (already ~100ms). n < 0 with a
+            // real error (EIO/ENXIO after a USB unplug) returns immediately
+            // and forever — without a backoff this loop pegged a whole core.
+            if (n < 0 && errno != EAGAIN && errno != EINTR)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 

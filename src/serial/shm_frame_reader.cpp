@@ -15,6 +15,16 @@ bool ShmFrameReader::open(const char* path) {
         return false;
     }
 
+    // Refuse to map a file shorter than SHM_SIZE: reading past EOF of a mapped
+    // file raises SIGBUS, and Protoface mid-startup leaves the file truncated.
+    // Treat it like "not running yet" and let the caller retry later.
+    struct stat st {};
+    if (::fstat(fd_, &st) != 0 || st.st_size < static_cast<off_t>(SHM_SIZE)) {
+        ::close(fd_);
+        fd_ = -1;
+        return false;
+    }
+
     map_ = ::mmap(nullptr, SHM_SIZE, PROT_READ, MAP_SHARED, fd_, 0);
     if (map_ == MAP_FAILED) {
         std::fprintf(stderr, "[shm] mmap failed: %s\n", std::strerror(errno));

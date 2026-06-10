@@ -13,8 +13,9 @@
 // The same bridge forwards HAPTIC and LED frames back to the controller.
 //
 // THREADING: action callbacks fire on the SerialPort reader thread.
-//   — Navigation callbacks (menu/toast) are safe to call there (same pattern
-//     as SmartKnob's on_move callback).
+//   — Menu/toast work is NOT safe to do directly on that thread (MenuSystem
+//     has no locks) — main.cpp's handlers post onto the per-frame input
+//     event queue so the actual action runs on the render thread.
 //   — pip_left/right_active() are std::atomic<bool> — safe to read on the
 //     main thread each frame, exactly like GpioButtons::pip_left_active().
 //   — Callbacks touching state under a mutex must take the lock themselves.

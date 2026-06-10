@@ -202,9 +202,19 @@ set(SOURCES
     src/serial/smartknob.cpp
     src/hud/hud_renderer.cpp
     src/hud/background_library.cpp
+    src/menu/build_hud.cpp
+    src/menu/build_menu.cpp
+    src/menu/build_communications.cpp
+    src/menu/build_face_display.cpp
+    src/menu/build_files.cpp
+    src/menu/build_quick.cpp
+    src/menu/build_system.cpp
+    src/menu/build_vision.cpp
+    src/menu/shared_items.cpp
     src/menu/menu_system.cpp
     src/menu/file_picker.cpp
     src/menu/face_editor.cpp
+    src/menu/color_picker.cpp
     src/profile_manager.cpp
     src/vitrue/xr_display.cpp
     src/vitrue/timewarp.cpp

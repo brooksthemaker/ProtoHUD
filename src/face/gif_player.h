@@ -20,6 +20,8 @@ public:
     void update(double dt);
     cv::Mat get_frame() const;          // empty Mat when not playing
     bool playing() const { return playing_; }
+    int  width()   const { return w_; } // target frame size frames are decoded to
+    int  height()  const { return h_; }
 
     // Sorted list of *.gif paths in folder.
     static std::vector<std::string> scan_folder(const std::string& folder);

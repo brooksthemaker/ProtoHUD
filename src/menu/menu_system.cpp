@@ -14,18 +14,27 @@
 
 static bool s_menu_glow = true;
 
-static std::string to_upper(const std::string& s) {
-    std::string r; r.reserve(s.size());
+// Returns a reference into a reused scratch buffer — the menu renderers call
+// this for every visible row every frame, and the old per-call std::string
+// was real allocation churn. Valid until the next to_upper call; every caller
+// either consumes it immediately or copies when it needs to append.
+static const std::string& to_upper(const std::string& s) {
+    static thread_local std::string r;
+    r.clear();
+    r.reserve(s.size());
     for (unsigned char c : s) r += static_cast<char>(::toupper(c));
     return r;
 }
 
 // Rendered label for an item: dynamic label_fn() if present, else the static
 // label.  Lets profile rows show live names without rebuilding the menu tree.
-static std::string item_label(const MenuItem& it) {
+// Same scratch-buffer contract as to_upper (the common static-label case is
+// a plain reference into the tree, allocation-free).
+static const std::string& item_label(const MenuItem& it) {
     if (it.label_fn) {
-        std::string s = it.label_fn();
-        if (!s.empty()) return s;
+        static thread_local std::string s_dyn;
+        s_dyn = it.label_fn();
+        if (!s_dyn.empty()) return s_dyn;
     }
     return it.label;
 }
@@ -41,40 +50,6 @@ static const std::vector<std::vector<std::string>>& osk_rows() {
         {"SPACE","DEL","SAVE","CANCEL"},
     };
     return rows;
-}
-
-// Parse a hex colour string into 0-255 RGB. Ignores any non-hex characters
-// (so "#FF8000", "ff8000" both work) and expands 3-digit shorthand. Returns
-// false if fewer than 3 hex digits were found.
-static bool cp_parse_hex(const std::string& s, int& r, int& g, int& b) {
-    std::string h;
-    for (char c : s)
-        if (std::isxdigit(static_cast<unsigned char>(c))) h += c;
-    if (h.size() == 3) h = {h[0],h[0], h[1],h[1], h[2],h[2]};
-    if (h.size() < 6) return false;
-    auto hx = [&](size_t i){ return static_cast<int>(
-        std::strtol(h.substr(i, 2).c_str(), nullptr, 16)); };
-    r = hx(0); g = hx(2); b = hx(4);
-    return true;
-}
-
-// Parse "r,g,b" (any non-digit separators — comma or space) into 0-255 RGB.
-// Returns false unless three numbers were found.
-static bool cp_parse_rgb(const std::string& s, int& r, int& g, int& b) {
-    int v[3] = {0,0,0}, n = 0;
-    for (size_t i = 0; i < s.size() && n < 3; ) {
-        if (std::isdigit(static_cast<unsigned char>(s[i]))) {
-            int val = 0;
-            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) {
-                val = val * 10 + (s[i++] - '0');
-                if (val > 9999) val = 9999;   // cap before overflow; clamped to 255 below
-            }
-            v[n++] = std::min(255, val);
-        } else ++i;
-    }
-    if (n < 3) return false;
-    r = v[0]; g = v[1]; b = v[2];
-    return true;
 }
 
 // Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
@@ -137,15 +112,19 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items,
                              std::string panel_title,
                              MenuContextPanelDraw panel_draw) {
     if (items.empty()) return;
-    std::vector<MenuItem> level = items;
 
-    // Append navigation item: "Close Menu" at root, "< Back" in submenus.
-    // When selected, back() pops the level (or closes at root depth=1).
-    MenuItem nav;
-    nav.type   = MenuItemType::LEAF;
-    nav.label  = stack_.empty() ? "Close Menu" : "< Back";
-    nav.action = [this] { this->back(); };
-    level.push_back(nav);
+    // The level references the caller's vector (a stable tree node) rather
+    // than copying it — see the Level comment in the header. The synthesized
+    // navigation row ("Close Menu" at root, "< Back" in submenus) is the
+    // level's final index; when selected, back() pops the level (or closes
+    // at root depth=1).
+    Level level;
+    level.src         = &items;
+    level.nav.type    = MenuItemType::LEAF;
+    level.nav.label   = stack_.empty() ? "Close Menu" : "< Back";
+    level.nav.action  = [this] { this->back(); };
+    level.panel_title = std::move(panel_title);
+    level.panel_draw  = std::move(panel_draw);
 
     if (!stack_.empty())
         stack_.back().cursor = cursor_;  // remember where we were on the parent page
@@ -153,12 +132,11 @@ void MenuSystem::push_level(const std::vector<MenuItem>& items,
     // Start the cursor on the currently-selected option (so option lists open
     // highlighting the active choice), else on the first item.
     int init_cursor = 0;
-    for (int i = 0; i < static_cast<int>(level.size()); ++i)
-        if (level[i].get_state && level[i].get_state()) { init_cursor = i; break; }
+    for (int i = 0; i < level.size(); ++i)
+        if (level.at(i).get_state && level.at(i).get_state()) { init_cursor = i; break; }
+    level.cursor = init_cursor;
 
-    stack_.push_back(Level{ std::move(level), init_cursor,
-                            std::move(panel_title),
-                            std::move(panel_draw) });
+    stack_.push_back(std::move(level));
     cursor_ = init_cursor;
     list_scroll_ = 0;        // start a fresh page at the top
     radial_prev_sel_ = -1;   // snap the radial spin to the new level
@@ -182,27 +160,40 @@ void MenuSystem::pop_level() {
 // ── Deep (full-screen) menu management ──────────────────────────────────────────
 
 void MenuSystem::build_deep_tabs() {
-    deep_tabs_.clear();
-    std::vector<MenuItem> general;
+    // The tree is static after build_menu, so tabs are derived exactly once —
+    // this used to re-copy every submenu's whole subtree on each deep open.
+    if (!deep_tabs_.empty()) return;
     for (const auto& it : root_items_) {
         if (it.type == MenuItemType::SUBMENU && !it.children.empty())
-            deep_tabs_.emplace_back(it.label, it.children);
+            deep_tabs_.emplace_back(it.label, &it.children);
         else
-            general.push_back(it);
+            deep_general_.push_back(it);
     }
-    if (!general.empty())
-        deep_tabs_.emplace_back(std::string("General"), std::move(general));
+    if (!deep_general_.empty())
+        deep_tabs_.emplace_back(std::string("General"), &deep_general_);
 }
 
 void MenuSystem::load_tab(int idx) {
     if (deep_tabs_.empty()) return;
     int n = static_cast<int>(deep_tabs_.size());
     tab_index_ = ((idx % n) + n) % n;
-    in_edit_mode_    = false;
-    in_channel_edit_ = false;
+    // Switching tabs mid-edit used to silently COMMIT the live-previewed
+    // value (edit mode was just cleared); back() would have reverted it.
+    // Run the same restore before leaving the level.
+    if (in_edit_mode_ && !stack_.empty()
+        && cursor_ >= 0 && cursor_ < stack_.back().size()) {
+        const auto& item = stack_.back().at(cursor_);
+        if (item.type == MenuItemType::SLIDER) {
+            if (item.slider.set_value) item.slider.set_value(orig_float_);
+        } else if (item.type == MenuItemType::FACE_PICKER) {
+            if (item.face_picker.set_face)
+                item.face_picker.set_face(static_cast<int>(orig_float_));
+        }
+    }
+    in_edit_mode_ = false;
     stack_.clear();
     cursor_ = 0;
-    push_level(deep_tabs_[tab_index_].second);
+    push_level(*deep_tabs_[tab_index_].second);
 }
 
 void MenuSystem::open_deep() {
@@ -214,12 +205,11 @@ void MenuSystem::open_deep() {
 }
 
 void MenuSystem::close_deep() {
-    deep_open_       = false;
-    open_            = false;
-    in_edit_mode_    = false;
-    in_channel_edit_ = false;
-    osk_active_      = false;
-    osk_commit_      = nullptr;
+    deep_open_    = false;
+    open_         = false;
+    in_edit_mode_ = false;
+    osk_active_   = false;
+    osk_commit_   = nullptr;
     stack_.clear();
 }
 
@@ -334,14 +324,17 @@ void MenuSystem::open_file_picker(std::string title,
                                   std::function<void(const std::string&)> on_commit,
                                   std::function<void()> on_cancel) {
     // Make sure mutually-exclusive overlays don't stack.
-    if (osk_active_) close_keyboard();
+    if (osk_active_)              close_keyboard();
+    if (color_picker_.is_open())  color_picker_.close();
     file_picker_.open(std::move(title), std::move(start_dir),
                       std::move(extensions),
                       std::move(on_commit), std::move(on_cancel));
+    overlay_ = &file_picker_;
 }
 
 void MenuSystem::close_file_picker() {
     file_picker_.cancel();
+    if (overlay_ == &file_picker_) overlay_ = nullptr;
 }
 
 // ── Face editor ───────────────────────────────────────────────────────────────
@@ -363,6 +356,7 @@ void MenuSystem::open_face_editor(std::string title,
     // Mutually-exclusive overlays — bring others down first.
     if (osk_active_)              close_keyboard();
     if (file_picker_.is_open())   file_picker_.cancel();
+    if (color_picker_.is_open())  color_picker_.close();
     face_editor_.open(std::move(title), std::move(abs_path),
                       canvas_w, canvas_h,
                       std::move(covered_regions),
@@ -373,17 +367,20 @@ void MenuSystem::open_face_editor(std::string title,
                       std::move(on_commit), std::move(on_cancel),
                       std::move(on_preview), std::move(live_frame),
                       preview_duration_s);
+    overlay_ = &face_editor_;
 }
 
 void MenuSystem::close_face_editor() {
     face_editor_.back();
+    if (overlay_ == &face_editor_) overlay_ = nullptr;
 }
 
 void MenuSystem::emit_detents() {
     if (detent_cb_ && !stack_.empty()) {
+        const LevelView items{stack_.back()};
         int count = 0;
-        for (const auto& it : stack_.back().items)
-            if (!it.visible_fn || it.visible_fn()) ++count;
+        for (int i = 0; i < items.size(); ++i)
+            if (!items[i].visible_fn || items[i].visible_fn()) ++count;
         detent_cb_(count);
     }
 }
@@ -395,30 +392,14 @@ void MenuSystem::emit_detents_override(int count) {
 // ── navigate ──────────────────────────────────────────────────────────────────
 
 void MenuSystem::navigate(int direction) {
-    if (face_editor_.is_open()) { face_editor_.cursor_step(0, direction); return; }
-    if (file_picker_.is_open()) { file_picker_.step(direction); return; }
     if (osk_active_) { osk_step(direction); return; }
+    if (overlay_ && overlay_->is_open()) { overlay_->step(direction); return; }
     if (!open_ || stack_.empty()) return;
 
     if (in_edit_mode_) {
-        auto& item = stack_.back().items[cursor_];
+        const auto& item = stack_.back().at(cursor_);
 
-        if (item.type == MenuItemType::COLOR_PICKER) {
-            if (in_channel_edit_) {
-                float* ch = (edit_channel_ == 0) ? &edit_r_
-                          : (edit_channel_ == 1) ? &edit_g_
-                          :                        &edit_b_;
-                *ch = std::clamp(*ch + static_cast<float>(direction), 0.f, 255.f);
-                // Live preview — apply immediately so the user sees/feels the change
-                if (item.color.set_color)
-                    item.color.set_color(static_cast<uint8_t>(edit_r_),
-                                         static_cast<uint8_t>(edit_g_),
-                                         static_cast<uint8_t>(edit_b_));
-            } else {
-                // 0/1/2 = R/G/B dial bars, 3 = Hex text entry, 4 = RGB text entry.
-                edit_channel_ = ((edit_channel_ + direction) % 5 + 5) % 5;
-            }
-        } else if (item.type == MenuItemType::SLIDER) {
+        if (item.type == MenuItemType::SLIDER) {
             edit_float_ = std::clamp(
                 edit_float_ + static_cast<float>(direction) * item.slider.step,
                 item.slider.min, item.slider.max);
@@ -433,8 +414,8 @@ void MenuSystem::navigate(int direction) {
         return;
     }
 
-    const auto& items = stack_.back().items;
-    int n = static_cast<int>(items.size());
+    const LevelView items{stack_.back()};
+    int n = items.size();
     if (n == 0) return;
 
     // Advance cursor, skipping invisible items (up to n steps to avoid infinite loop).
@@ -453,13 +434,19 @@ void MenuSystem::navigate(int direction) {
 // ── select ────────────────────────────────────────────────────────────────────
 
 void MenuSystem::select() {
-    if (face_editor_.is_open()) { face_editor_.primary(); return; }
-    if (file_picker_.is_open()) { file_picker_.activate(); return; }
     if (osk_active_) { osk_activate(); return; }
+    if (overlay_ && overlay_->is_open()) {
+        overlay_->activate();
+        if (!overlay_->is_open()) {       // commit may close it
+            overlay_ = nullptr;
+            emit_detents();               // restore the level's knob detents
+        }
+        return;
+    }
     if (!open_ || stack_.empty()) return;
-    auto& items = stack_.back().items;
-    if (cursor_ >= static_cast<int>(items.size())) return;
-    auto& item = items[cursor_];
+    const LevelView items{stack_.back()};
+    if (cursor_ >= items.size()) return;
+    const auto& item = items[cursor_];
 
     switch (item.type) {
     case MenuItemType::SUBMENU:
@@ -517,81 +504,27 @@ void MenuSystem::select() {
         }
         break;
 
-    case MenuItemType::COLOR_PICKER:
-        if (!in_edit_mode_) {
-            if (item.color.get_color) {
-                auto [r, g, b] = item.color.get_color();
-                edit_r_ = static_cast<float>(r);
-                edit_g_ = static_cast<float>(g);
-                edit_b_ = static_cast<float>(b);
-            } else {
-                edit_r_ = edit_g_ = edit_b_ = 128.f;
-            }
-            orig_r_ = edit_r_; orig_g_ = edit_g_; orig_b_ = edit_b_;  // snapshot for cancel
-            edit_channel_    = 0;
-            in_channel_edit_ = false;
-            in_edit_mode_    = true;
-            emit_detents_override(5);   // R, G, B, Hex, RGB
-        } else if (!in_channel_edit_) {
-            if (edit_channel_ >= 3) {
-                // Hex / RGB rows → open the on-screen keyboard for text entry.
-                // Capture the set_color callback by value so it survives while
-                // the keyboard is up; the commit parses the typed value, updates
-                // the working channels, and applies the colour live.
-                auto setc = item.color.set_color;
-                // On a valid parse: apply, finalise (so a later "back" doesn't
-                // revert it via the orig snapshot), and leave edit mode. On a
-                // bad parse: keep the picker open so the user can retry.
-                auto commit_typed = [this, setc](int r, int g, int b){
-                    edit_r_ = (float)r; edit_g_ = (float)g; edit_b_ = (float)b;
-                    orig_r_ = edit_r_;  orig_g_ = edit_g_;  orig_b_ = edit_b_;
-                    if (setc) setc((uint8_t)r, (uint8_t)g, (uint8_t)b);
-                    in_channel_edit_ = false;
-                    in_edit_mode_    = false;
-                    emit_detents();
-                };
-                char cur[24];
-                if (edit_channel_ == 3) {
-                    std::snprintf(cur, sizeof(cur), "%02X%02X%02X",
-                                  static_cast<int>(edit_r_),
-                                  static_cast<int>(edit_g_),
-                                  static_cast<int>(edit_b_));
-                    open_keyboard("Hex Color (RRGGBB)", cur,
-                        [commit_typed](const std::string& s){
-                            int r, g, b;
-                            if (cp_parse_hex(s, r, g, b)) commit_typed(r, g, b);
-                        });
-                } else {
-                    std::snprintf(cur, sizeof(cur), "%d,%d,%d",
-                                  static_cast<int>(edit_r_),
-                                  static_cast<int>(edit_g_),
-                                  static_cast<int>(edit_b_));
-                    open_keyboard("Color R,G,B (0-255)", cur,
-                        [commit_typed](const std::string& s){
-                            int r, g, b;
-                            if (cp_parse_rgb(s, r, g, b)) commit_typed(r, g, b);
-                        });
-                }
-            } else {
-                in_channel_edit_ = true;
-                emit_detents_override(256);
-            }
-        } else {
-            in_channel_edit_ = false;
-            edit_channel_    = (edit_channel_ + 1) % 3;
-            if (edit_channel_ == 0) {
-                if (item.color.set_color)
-                    item.color.set_color(
-                        static_cast<uint8_t>(edit_r_),
-                        static_cast<uint8_t>(edit_g_),
-                        static_cast<uint8_t>(edit_b_));
-                in_edit_mode_ = false;
-                emit_detents();
-            } else {
-                emit_detents_override(5);
-            }
+    case MenuItemType::COLOR_PICKER: {
+        // Open the unified picker overlay, seeded from the item's current
+        // colour. set_color is wired as the live on_change; typed entry goes
+        // through the on-screen keyboard.
+        uint8_t r = 128, g = 128, b = 128;
+        if (item.color.get_color) {
+            auto [cr, cg, cb] = item.color.get_color();
+            r = cr; g = cg; b = cb;
         }
+        color_picker_.set_detent_callback(
+            [this](int n){ emit_detents_override(n); });
+        color_picker_.open(item_label(item), r, g, b,
+            item.color.set_color,
+            [this](std::string t, std::string initial,
+                   std::function<void(const std::string&)> on_commit){
+                open_keyboard(std::move(t), std::move(initial),
+                              std::move(on_commit));
+            });
+        overlay_ = &color_picker_;
         break;
+    }
 
     case MenuItemType::NOTIF_LOG:
         if (item.notif_log.queue) {
@@ -611,9 +544,9 @@ void MenuSystem::select() {
 
 void MenuSystem::secondary() {
     if (!open_ || stack_.empty() || in_edit_mode_) return;
-    auto& items = stack_.back().items;
-    if (cursor_ < 0 || cursor_ >= static_cast<int>(items.size())) return;
-    auto& item = items[cursor_];
+    const LevelView items{stack_.back()};
+    if (cursor_ < 0 || cursor_ >= items.size()) return;
+    const auto& item = items[cursor_];
     if (!item.secondary_children.empty()) {
         push_level(item.secondary_children,
                    item.context_panel_title, item.context_panel_draw);
@@ -625,34 +558,24 @@ void MenuSystem::secondary() {
 // ── back ──────────────────────────────────────────────────────────────────────
 
 void MenuSystem::back() {
-    if (face_editor_.is_open()) { face_editor_.back(); return; }
-    if (file_picker_.is_open()) { file_picker_.back(); return; }
     if (osk_active_) { osk_backspace(); return; }
-    if (!stack_.empty() && cursor_ < static_cast<int>(stack_.back().items.size())) {
-        auto& item = stack_.back().items[cursor_];
-
-        if (in_channel_edit_) {
-            // Restore original color, reset working copies, exit channel-edit
-            if (item.color.set_color)
-                item.color.set_color(static_cast<uint8_t>(orig_r_),
-                                     static_cast<uint8_t>(orig_g_),
-                                     static_cast<uint8_t>(orig_b_));
-            edit_r_ = orig_r_; edit_g_ = orig_g_; edit_b_ = orig_b_;
-            in_channel_edit_ = false;
-            emit_detents_override(3);
-            return;
+    if (overlay_ && overlay_->is_open()) {
+        overlay_->back();
+        if (!overlay_->is_open()) {       // back may close it
+            overlay_ = nullptr;
+            emit_detents();               // restore the level's knob detents
         }
+        return;
+    }
+    if (!stack_.empty() && cursor_ < stack_.back().size()) {
+        const auto& item = stack_.back().at(cursor_);
+
         if (in_edit_mode_) {
             if (item.type == MenuItemType::SLIDER) {
                 if (item.slider.set_value) item.slider.set_value(orig_float_);
             } else if (item.type == MenuItemType::FACE_PICKER) {
                 if (item.face_picker.set_face)
                     item.face_picker.set_face(static_cast<int>(orig_float_));
-            } else if (item.type == MenuItemType::COLOR_PICKER) {
-                if (item.color.set_color)
-                    item.color.set_color(static_cast<uint8_t>(orig_r_),
-                                         static_cast<uint8_t>(orig_g_),
-                                         static_cast<uint8_t>(orig_b_));
             }
             in_edit_mode_ = false;
             emit_detents();
@@ -667,20 +590,21 @@ void MenuSystem::back() {
 const std::string& MenuSystem::current_label() const {
     static std::string empty;
     if (stack_.empty()) return empty;
-    const auto& items = stack_.back().items;
-    if (cursor_ < static_cast<int>(items.size()))
+    const LevelView items{stack_.back()};
+    if (cursor_ < items.size())
         return items[cursor_].label;
     return empty;
 }
 
 bool MenuSystem::editing_value() const {
+    // Color-picker overlay with an armed field: the knob/Up adjusts a value.
+    if (color_picker_.adjusting()) return true;
     if (!in_edit_mode_ || stack_.empty()) return false;
-    const auto& items = stack_.back().items;
-    if (cursor_ < 0 || cursor_ >= static_cast<int>(items.size())) return false;
+    const LevelView items{stack_.back()};
+    if (cursor_ < 0 || cursor_ >= items.size()) return false;
     switch (items[cursor_].type) {
         case MenuItemType::SLIDER:       return true;
         case MenuItemType::FACE_PICKER:  return true;
-        case MenuItemType::COLOR_PICKER: return in_channel_edit_;  // only while a channel is being adjusted
         default:                         return false;
     }
 }
@@ -691,7 +615,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
     if (!open_ || stack_.empty()) return;
     s_menu_glow = glow_enabled_;
 
-    const auto& items  = stack_.back().items;
+    const LevelView items{stack_.back()};
     const float item_h = 38.f;
     const float pad_x  = 18.f;
     const float pad_y  = 14.f;
@@ -726,7 +650,6 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         const auto& sel = items[cursor_];
         if (sel.type == MenuItemType::SLIDER)       extra = 30.f;
         if (sel.type == MenuItemType::FACE_PICKER)  extra = 90.f;
-        if (sel.type == MenuItemType::COLOR_PICKER) extra = 152.f;
         if (sel.type == MenuItemType::NOTIF_LOG)    extra = 200.f;
     }
 
@@ -847,6 +770,9 @@ void MenuSystem::draw(int screen_w, int screen_h) {
 
     int vi = -1;        // running index among visible items
     int drawn = 0;      // rows actually emitted this frame
+    int clicked = -1;   // mouse-click select, deferred until after the loop —
+                        // select() can push/pop stack_, which frees `items`
+                        // while this loop is still iterating it
     for (int i = 0; i < static_cast<int>(items.size()); i++) {
         const auto& item = items[i];
         if (item.visible_fn && !item.visible_fn()) continue;
@@ -862,15 +788,12 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         if (selected && in_edit_mode_) {
             if (item.type == MenuItemType::SLIDER)       row_h = item_h + 25.f;
             if (item.type == MenuItemType::FACE_PICKER)  row_h = item_h + 85.f;
-            if (item.type == MenuItemType::COLOR_PICKER) row_h = item_h + 151.f;
             if (item.type == MenuItemType::NOTIF_LOG)    row_h = item_h + 195.f;
         }
 
         char id[32]; snprintf(id, sizeof(id), "##item%d", i);
-        if (ImGui::Selectable(id, selected, 0, ImVec2(0.f, row_h))) {
-            cursor_ = i;
-            select();
-        }
+        if (ImGui::Selectable(id, selected, 0, ImVec2(0.f, row_h)))
+            clicked = i;
 
         const ImVec2 rmin = ImGui::GetItemRectMin();
         const ImVec2 rmax = ImGui::GetItemRectMax();
@@ -1014,93 +937,21 @@ void MenuSystem::draw(int screen_w, int screen_h) {
             }
 
         // ── COLOR_PICKER ──────────────────────────────────────────────────────
+        // Just a label + live swatch; selecting opens the full-screen picker.
         } else if (item.type == MenuItemType::COLOR_PICKER) {
-            bool editing = selected && in_edit_mode_;
-
             draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
-            if (!editing) {
-                float sw_x = rmax.x - 36.f;
-                float sw_y = ty;
-                uint8_t pr = 128, pg = 128, pb = 128;
-                if (item.color.get_color) {
-                    auto [r, g, b] = item.color.get_color();
-                    pr = r; pg = g; pb = b;
-                }
-                dl->AddRectFilled({sw_x, sw_y}, {sw_x + 28.f, sw_y + 14.f},
-                                  IM_COL32(pr, pg, pb, 255), 2.f);
-                dl->AddRect({sw_x, sw_y}, {sw_x + 28.f, sw_y + 14.f},
-                            menu_with_alpha(accent_color_, 140), 2.f);
-            } else {
-                const float ch_vals[3] = { edit_r_, edit_g_, edit_b_ };
-                const char* ch_names[3] = { "R", "G", "B" };
-                const ImU32 ch_cols[3]  = {
-                    IM_COL32(220, 60,  60,  200),
-                    IM_COL32(60,  200, 60,  200),
-                    IM_COL32(60,  80,  220, 200),
-                };
-                float bx = rmin.x + 4.f;
-                float bw = (rmax.x - rmin.x) - 56.f;
-
-                for (int c = 0; c < 3; c++) {
-                    float by     = rmin.y + item_h + static_cast<float>(c) * 28.f;
-                    float fill_c = ch_vals[c] / 255.f;
-                    bool  is_sel    = (c == edit_channel_);
-                    bool  is_active = is_sel && in_channel_edit_;
-                    ImU32 text_col  = is_sel ? IM_COL32(255, 255, 255, 255)
-                                             : IM_COL32(140, 170, 160, 200);
-                    dl->AddText({bx, by + 5.f}, text_col, ch_names[c]);
-                    float rx = bx + 16.f, rw = bw - 16.f;
-                    dl->AddRectFilled({rx, by + 4.f}, {rx + rw, by + 16.f},
-                                      menu_with_alpha(accent_color_, 50), 2.f);
-                    ImU32 fill_col = is_active
-                        ? (ch_cols[c] & 0x00FFFFFFu) | 0xFF000000u
-                        : ch_cols[c];
-                    dl->AddRectFilled({rx, by + 4.f}, {rx + rw * fill_c, by + 16.f},
-                                      fill_col);
-                    if (is_sel)
-                        dl->AddRect({rx - 1.f, by + 3.f}, {rx + rw + 1.f, by + 17.f},
-                                    menu_with_alpha(accent_color_, 200), 2.f);
-                    char cv[8]; snprintf(cv, sizeof(cv), "%.0f", ch_vals[c]);
-                    ImVec2 vsz = ImGui::CalcTextSize(cv);
-                    dl->AddText({rmax.x - vsz.x - 6.f, by + 4.f}, text_col, cv);
-                }
-
-                // Text-entry rows: HEX / RGB — select to open the keyboard.
-                char trow_val[2][24];
-                snprintf(trow_val[0], sizeof(trow_val[0]), "%02X%02X%02X",
-                         static_cast<int>(edit_r_), static_cast<int>(edit_g_),
-                         static_cast<int>(edit_b_));
-                snprintf(trow_val[1], sizeof(trow_val[1]), "%d,%d,%d",
-                         static_cast<int>(edit_r_), static_cast<int>(edit_g_),
-                         static_cast<int>(edit_b_));
-                const char* trow_name[2] = { "HEX", "RGB" };
-                for (int t = 0; t < 2; t++) {
-                    float by      = rmin.y + item_h + static_cast<float>(3 + t) * 28.f;
-                    bool  is_sel  = (edit_channel_ == 3 + t);
-                    ImU32 tcol    = is_sel ? IM_COL32(255, 255, 255, 255)
-                                           : IM_COL32(140, 170, 160, 200);
-                    dl->AddText({bx, by + 5.f}, tcol, trow_name[t]);
-                    dl->AddText({bx + 40.f, by + 5.f}, tcol, trow_val[t]);
-                    if (is_sel)
-                        dl->AddRect({bx - 1.f, by + 3.f}, {rmax.x - 6.f, by + 17.f},
-                                    menu_with_alpha(accent_color_, 200), 2.f);
-                }
-
-                float hint_y = rmin.y + item_h + 5 * 28.f + 2.f;
-                const char* hint = !in_channel_edit_
-                    ? "knob=row  \xC2\xB7  select=edit/type  \xC2\xB7  back=cancel"
-                    : "knob adjusts  \xC2\xB7  select=next  \xC2\xB7  back=cancel";
-                dl->AddText({bx, hint_y}, menu_with_alpha(accent_color_, 180), hint);
-
-                float sw_y = hint_y + 16.f;
-                dl->AddRectFilled({bx, sw_y}, {bx + 52.f, sw_y + 16.f},
-                                  IM_COL32(static_cast<uint8_t>(edit_r_),
-                                           static_cast<uint8_t>(edit_g_),
-                                           static_cast<uint8_t>(edit_b_), 255), 3.f);
-                dl->AddRect({bx, sw_y}, {bx + 52.f, sw_y + 16.f},
-                            menu_with_alpha(accent_color_, 150), 3.f);
+            float sw_x = rmax.x - 36.f;
+            float sw_y = ty;
+            uint8_t pr = 128, pg = 128, pb = 128;
+            if (item.color.get_color) {
+                auto [r, g, b] = item.color.get_color();
+                pr = r; pg = g; pb = b;
             }
+            dl->AddRectFilled({sw_x, sw_y}, {sw_x + 28.f, sw_y + 14.f},
+                              IM_COL32(pr, pg, pb, 255), 2.f);
+            dl->AddRect({sw_x, sw_y}, {sw_x + 28.f, sw_y + 14.f},
+                        menu_with_alpha(accent_color_, 140), 2.f);
 
         // ── NOTIF_LOG ─────────────────────────────────────────────────────────
         } else if (item.type == MenuItemType::NOTIF_LOG) {
@@ -1199,6 +1050,11 @@ void MenuSystem::draw(int screen_w, int screen_h) {
         // Thin bottom separator
         dl->AddLine({rmin.x - pad_x, rmax.y - 1.f},
                     {rmax.x + pad_x, rmax.y - 1.f}, COL_SEP_EFF, 1.f);
+    }
+
+    if (clicked >= 0) {
+        cursor_ = clicked;
+        select();
     }
 
     // ── Scroll chevrons ──────────────────────────────────────────────────────
@@ -1335,9 +1191,11 @@ void MenuSystem::draw_context_panel(const Level& lvl,
 // ── draw_fullscreen (deep menu) ─────────────────────────────────────────────────
 
 void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
-    // Also render when only the on-screen keyboard is up (it takes over the
-    // screen below), so text entry works from the corner/radial quick menu too.
-    if ((!deep_open_ && !osk_active_) || stack_.empty()) return;
+    // Also render when only the on-screen keyboard or an overlay (e.g. the
+    // color picker opened from the quick menu) is up — they take over the
+    // screen below, so they work from the corner/radial quick menu too.
+    const bool overlay_open = overlay_ && overlay_->is_open();
+    if ((!deep_open_ && !osk_active_ && !overlay_open) || stack_.empty()) return;
     s_menu_glow = glow_enabled_;
 
     const float W = static_cast<float>(screen_w);
@@ -1373,76 +1231,15 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
         return;
     }
 
-    // Face editor overlays the deep menu. Drawn ahead of the picker so a
-    // background "Edit…" doesn't hide while the picker is open (the cases
-    // are mutually exclusive in practice, but the order keeps it
-    // deterministic). Keyboard shortcuts are sampled from ImGui state here
-    // so the editor can react to S / Z / X / Y / [ / ] without separate
-    // input plumbing — same pattern the file picker leans on.
-    if (face_editor_.is_open()) {
-        // Vertical cursor motion already comes in through menu.navigate()
-        // when the deep menu is open (route in MenuSystem::navigate forwards
-        // to face_editor_.cursor_step). Horizontal cursor + tool/palette
-        // shortcuts are editor-only and not in the menu's input set, so we
-        // poll them directly here.
-        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  face_editor_.cursor_step(-1, 0);
-        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) face_editor_.cursor_step(+1, 0);
-        if (ImGui::IsKeyPressed(ImGuiKey_Space))      face_editor_.primary();
-        if (ImGui::IsKeyPressed(ImGuiKey_X))          face_editor_.secondary();
-        if (ImGui::IsKeyPressed(ImGuiKey_Y) ||
-            ImGui::IsKeyPressed(ImGuiKey_M))          face_editor_.tertiary();
-        if (ImGui::IsKeyPressed(ImGuiKey_Z))          face_editor_.undo();
-        if (ImGui::IsKeyPressed(ImGuiKey_V))          face_editor_.preview();
-        if (ImGui::IsKeyPressed(ImGuiKey_T))          face_editor_.toggle_live();
-        if (ImGui::IsKeyPressed(ImGuiKey_S))          face_editor_.save();
-        // Direct tool selection. Number keys 1-6 map to the six tools in
-        // declaration order (Pencil/Eraser/Bucket/Eyedrop/Line/Rect); the
-        // letter shortcuts (P/E/B/I/L/R) are kept as mnemonics. The deep
-        // menu's number-key handlers and main's camera-PiP toggles are
-        // both gated by is_face_editor_open(), so 1-6 are exclusive here.
-        if (ImGui::IsKeyPressed(ImGuiKey_1))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
-        if (ImGui::IsKeyPressed(ImGuiKey_2))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
-        if (ImGui::IsKeyPressed(ImGuiKey_3))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);
-        if (ImGui::IsKeyPressed(ImGuiKey_4))          face_editor_.set_tool(menu::FaceEditor::Tool::Eyedrop);
-        if (ImGui::IsKeyPressed(ImGuiKey_5))          face_editor_.set_tool(menu::FaceEditor::Tool::Line);
-        if (ImGui::IsKeyPressed(ImGuiKey_6))          face_editor_.set_tool(menu::FaceEditor::Tool::Rect);
-        if (ImGui::IsKeyPressed(ImGuiKey_7))          face_editor_.set_tool(menu::FaceEditor::Tool::EyeBox);
-        if (ImGui::IsKeyPressed(ImGuiKey_P))          face_editor_.set_tool(menu::FaceEditor::Tool::Pencil);
-        if (ImGui::IsKeyPressed(ImGuiKey_E))          face_editor_.set_tool(menu::FaceEditor::Tool::Eraser);
-        if (ImGui::IsKeyPressed(ImGuiKey_B))          face_editor_.set_tool(menu::FaceEditor::Tool::Bucket);
-        if (ImGui::IsKeyPressed(ImGuiKey_I))          face_editor_.set_tool(menu::FaceEditor::Tool::Eyedrop);
-        if (ImGui::IsKeyPressed(ImGuiKey_L))          face_editor_.set_tool(menu::FaceEditor::Tool::Line);
-        if (ImGui::IsKeyPressed(ImGuiKey_R))          face_editor_.set_tool(menu::FaceEditor::Tool::Rect);
-        // Brush size — Minus shrinks, Equals/Plus grows. Clamped 0..2 by
-        // the setter itself, so we just pass current ± 1.
-        if (ImGui::IsKeyPressed(ImGuiKey_Minus) ||
-            ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract))
-            face_editor_.set_brush_size(face_editor_.brush_size() - 1);
-        if (ImGui::IsKeyPressed(ImGuiKey_Equal) ||
-            ImGui::IsKeyPressed(ImGuiKey_KeypadAdd))
-            face_editor_.set_brush_size(face_editor_.brush_size() + 1);
-        if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))  face_editor_.cycle_palette(-1);
-        if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) face_editor_.cycle_palette(+1);
-        // Press EDGE fires primary() exactly once; holding the button paints a
-        // drag stroke (freehand brushes only). Using IsMouseDown for the
-        // primary action re-fired it every frame, which corrupted the two-step
-        // tools (Line / Rect / Eye Region) — a single click would set then
-        // immediately clear the anchor.
-        const ImVec2 mp = ImGui::GetMousePos();
-        if      (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) face_editor_.mouse_down(mp.x, mp.y);
-        else if (ImGui::IsMouseDown   (ImGuiMouseButton_Left)) face_editor_.mouse_drag(mp.x, mp.y);
-        else                                                   face_editor_.mouse_move(mp.x, mp.y);
-
-        face_editor_.draw(dl, font, fs, W, H, accent_color_);
-        ImGui::End();
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(1);
-        return;
-    }
-
-    // File picker overlays the deep menu, same as OSK.
-    if (file_picker_.is_open()) {
-        file_picker_.draw(dl, font, fs, W, H, accent_color_);
+    // Active overlay (file picker / face editor / color picker) replaces the
+    // deep-menu body. Each overlay polls its own extra ImGui keys inside its
+    // draw() (the face editor's tool shortcuts, mouse painting, …).
+    if (overlay_open) {
+        overlay_->draw(dl, font, fs, W, H, accent_color_);
+        if (!overlay_->is_open()) {   // a polled key / mouse click closed it
+            overlay_ = nullptr;
+            emit_detents();           // restore the level's knob detents
+        }
         ImGui::End();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(1);
@@ -1492,11 +1289,11 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
     const float split_x = pmin.x + (pmax.x - pmin.x) * 0.42f;
     dl->AddLine({ split_x, cy0 }, { split_x, cy1 }, menu_with_alpha(accent_color_, 60), 1.f);
 
-    const auto& items = stack_.back().items;
+    const LevelView items{stack_.back()};
 
     // Keep the cursor on a visible item.
     {
-        int n = static_cast<int>(items.size());
+        int n = items.size();
         if (n > 0 && cursor_ < n) {
             const auto& cur = items[cursor_];
             if (cur.visible_fn && !cur.visible_fn()) {
@@ -1661,42 +1458,6 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             ImVec2 vsz = font->CalcTextSizeA(fs * 1.1f, FLT_MAX, 0.f, vb);
             dl->AddText(font, fs * 1.1f, { rx1 - vsz.x, by - fs * 1.1f - 2.f },
                         IM_COL32(255, 255, 255, 255), vb);
-        } else if (editing && sel.type == MenuItemType::COLOR_PICKER) {
-            const float chv[3] = { edit_r_, edit_g_, edit_b_ };
-            const char* chn[3] = { "R", "G", "B" };
-            const ImU32 chc[3] = { IM_COL32(220,60,60,220), IM_COL32(60,200,60,220), IM_COL32(60,80,220,220) };
-            for (int c = 0; c < 3; ++c) {
-                float by = ey + 6.f + c * 30.f;
-                bool is_sel = (c == edit_channel_);
-                dl->AddText(font, fs, { rx0, by }, is_sel ? IM_COL32(255,255,255,255) : IM_COL32(150,160,170,200), chn[c]);
-                float bx = rx0 + 22.f, bw = (rx1 - bx) - 48.f;
-                dl->AddRectFilled({ bx, by + 2.f }, { bx + bw, by + fs }, menu_with_alpha(accent_color_, 50), 2.f);
-                dl->AddRectFilled({ bx, by + 2.f }, { bx + bw * (chv[c] / 255.f), by + fs }, chc[c], 2.f);
-                if (is_sel) dl->AddRect({ bx - 1.f, by + 1.f }, { bx + bw + 1.f, by + fs + 1.f }, menu_with_alpha(accent_color_, 220), 2.f, 0, 1.5f);
-                char cv[8]; std::snprintf(cv, sizeof(cv), "%.0f", chv[c]);
-                dl->AddText(font, fs, { rx1 - 40.f, by }, IM_COL32(220,225,230,220), cv);
-            }
-            // Text-entry rows: HEX / RGB — select to type a value via the keyboard.
-            char tval[2][24];
-            std::snprintf(tval[0], sizeof(tval[0]), "%02X%02X%02X",
-                          (int)edit_r_, (int)edit_g_, (int)edit_b_);
-            std::snprintf(tval[1], sizeof(tval[1]), "%d,%d,%d",
-                          (int)edit_r_, (int)edit_g_, (int)edit_b_);
-            const char* tnm[2] = { "HEX", "RGB" };
-            for (int t = 0; t < 2; ++t) {
-                float by = ey + 6.f + (3 + t) * 30.f;
-                bool is_sel = (edit_channel_ == 3 + t);
-                ImU32 tc = is_sel ? IM_COL32(255,255,255,255) : IM_COL32(150,160,170,200);
-                dl->AddText(font, fs, { rx0, by }, tc, tnm[t]);
-                dl->AddText(font, fs, { rx0 + 50.f, by }, tc, tval[t]);
-                if (is_sel)
-                    dl->AddRect({ rx0 - 1.f, by - 1.f }, { rx1 - 6.f, by + fs + 1.f },
-                                menu_with_alpha(accent_color_, 220), 2.f, 0, 1.5f);
-            }
-            dl->AddText(font, fs * 0.9f, { rx0, ey + 6.f + 5 * 30.f },
-                        menu_with_alpha(accent_color_, 170),
-                        in_channel_edit_ ? "knob adjusts value"
-                                         : "knob = row  \xC2\xB7  select = edit / type");
         } else if (editing && sel.type == MenuItemType::FACE_PICKER) {
             int n = sel.face_picker.face_count;
             int cur = static_cast<int>(edit_float_);
@@ -1950,7 +1711,9 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
     };
     auto stroke_sector = [&](float r0, float r1, float a0, float a1, ImU32 col, float th) {
         int seg = std::max(2, static_cast<int>(std::ceil((a1 - a0) / 0.10f)));
-        std::vector<ImVec2> pts;
+        // Reused across wedges/frames — this runs per wedge per frame.
+        static thread_local std::vector<ImVec2> pts;
+        pts.clear();
         for (int i = 0; i <= seg; ++i) pts.push_back(PR(a0 + (a1 - a0) * (float)i / seg, r1));
         for (int i = 0; i <= seg; ++i) pts.push_back(PR(a1 - (a1 - a0) * (float)i / seg, r0));
         dl->AddPolyline(pts.data(), (int)pts.size(), col, ImDrawFlags_Closed, th);
@@ -2001,8 +1764,8 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
         const int   sel_idx = active ? cursor_ : lvl.cursor;
 
         std::vector<int> vis;
-        for (int i = 0; i < static_cast<int>(lvl.items.size()); ++i)
-            if (!lvl.items[i].visible_fn || lvl.items[i].visible_fn()) vis.push_back(i);
+        for (int i = 0; i < lvl.size(); ++i)
+            if (!lvl.at(i).visible_fn || lvl.at(i).visible_fn()) vis.push_back(i);
         const int N = static_cast<int>(vis.size());
         if (N == 0) continue;
 
@@ -2032,7 +1795,7 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
         }
 
         for (int k = 0; k < N; ++k) {
-            const MenuItem& it = lvl.items[vis[k]];
+            const MenuItem& it = lvl.at(vis[k]);
             const bool primary = (vis[k] == sel_idx);
             float ac = focus_angle + (static_cast<float>(k) - anim_sel) * step;
             float a0 = ac - step * 0.5f + wedge_gap * 0.5f;
@@ -2082,8 +1845,8 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
     // Selecting Zoom/Focus opens a half-height outer ring: Up/Down adjust the value,
     // Enter confirms, Left returns. Shown as an arc gauge + the live value.
     if (in_edit_mode_ && !stack_.empty()) {
-        const auto& items = stack_.back().items;
-        if (cursor_ >= 0 && cursor_ < static_cast<int>(items.size())) {
+        const LevelView items{stack_.back()};
+        if (cursor_ >= 0 && cursor_ < items.size()) {
             const MenuItem& it = items[cursor_];
             const bool is_val = (it.type == MenuItemType::SLIDER ||
                                  it.type == MenuItemType::FACE_PICKER);

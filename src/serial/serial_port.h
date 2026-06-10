@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,7 +24,8 @@ public:
     // Register callback invoked for each valid inbound frame.
     void set_frame_callback(FrameCallback cb) { callback_ = std::move(cb); }
 
-    // Send a framed packet.
+    // Send a framed packet. Safe to call from multiple threads — the write is
+    // serialized so concurrent senders can't interleave frame bytes.
     bool send(uint8_t cmd, const uint8_t* payload = nullptr, uint8_t len = 0);
 
     const std::string& device() const { return device_; }
@@ -36,5 +38,6 @@ private:
     int               fd_ = -1;
     std::atomic<bool> running_ { false };
     std::thread       thread_;
+    std::mutex        write_mtx_;
     FrameCallback     callback_;
 };

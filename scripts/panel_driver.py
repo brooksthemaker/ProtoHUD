@@ -14,7 +14,8 @@ Shared-memory format (matches src/serial/shm_frame_reader.h / ShmPusherOutput):
 
 Usage: panel_driver.py [--canvas-w 128] [--canvas-h 32]
                        [--panel-w 64] [--panel-h 32] [--chain 2] [--parallel 1]
-                       [--pinout adafruit_bonnet] [--shm /dev/shm/protoface_frame]
+                       [--pinout adafruit_bonnet] [--order auto]
+                       [--shm /dev/shm/protoface_frame]
 """
 
 import argparse
@@ -39,6 +40,20 @@ PINOUTS = {
     'active3_bgr':         piomatter.Pinout.Active3BGR,
 }
 
+# Channel-order overrides: which SOURCE channel feeds each of the panel's
+# R, G, B inputs. 'auto' keeps the per-pinout default below (Active-3 takes
+# a (G,B,R) rotate, the Adafruit bonnet straight RGB). Panels/bonnets with
+# odd wiring pick whichever order makes the colors look right — red/green
+# swapped is usually 'grb', red/blue swapped 'bgr'.
+ORDERS = {
+    'rgb': [0, 1, 2],
+    'rbg': [0, 2, 1],
+    'grb': [1, 0, 2],
+    'gbr': [1, 2, 0],
+    'brg': [2, 0, 1],
+    'bgr': [2, 1, 0],
+}
+
 
 def addr_lines(panel_h: int) -> int:
     return (panel_h // 2).bit_length() - 1
@@ -56,6 +71,9 @@ def main():
                     help='HUB75 bonnet wiring: adafruit_bonnet (single-connector '
                          'Adafruit bonnet/HAT, default) or active3 (triple-connector); '
                          '*_bgr swaps red/blue')
+    ap.add_argument('--order', default='auto', choices=['auto'] + sorted(ORDERS),
+                    help='panel color-channel order; auto = per-pinout default, '
+                         'or force rgb/rbg/grb/gbr/brg/bgr')
     ap.add_argument('--shm', default='/dev/shm/protoface_frame')
     ap.add_argument('--fps', type=float, default=60.0, help='poll rate cap')
     args = ap.parse_args()
@@ -64,7 +82,7 @@ def main():
     size = 1 + W * H * 3
     print(f"[panel_driver] starting: canvas {W}x{H}, panel {args.panel_w}x{args.panel_h}, "
           f"chain {args.chain}, parallel {args.parallel}, pinout {args.pinout}, "
-          f"shm {args.shm}", flush=True)
+          f"order {args.order}, shm {args.shm}", flush=True)
 
     # Piomatter geometry depends on the bonnet. The Active-3 board drives parallel
     # chains that share address lines, so it needs the multilane mapper. The
@@ -87,6 +105,8 @@ def main():
         geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
                                       rotation=piomatter.Orientation.Normal)
         chan = [0, 1, 2]    # straight RGB; switch to *_bgr pinout if red/blue swap
+    if args.order != 'auto':
+        chan = ORDERS[args.order]   # explicit channel order beats the pinout default
     fb = np.zeros((height, width, 3), dtype=np.uint8)
     matrix = piomatter.PioMatter(colorspace=piomatter.Colorspace.RGB888Packed,
                                  pinout=PINOUTS[args.pinout],
