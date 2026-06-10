@@ -127,8 +127,11 @@ private:
     gl::Fbo      rt_left_;
     gl::Fbo      rt_right_;
 
-    // Blit program: composites eye FBO textures to the main framebuffer
-    GLuint blit_prog_ = 0;
+    // Blit program: composites eye FBO textures to the main framebuffer.
+    // Uniform locations cached at link — composite() runs per frame.
+    GLuint blit_prog_     = 0;
+    GLint  blit_loc_tex_  = -1;
+    GLint  blit_loc_rect_ = -1;
     GLuint quad_vbo_  = 0;
 
     GlassStateChangedCb   state_cb_;

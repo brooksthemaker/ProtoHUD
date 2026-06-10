@@ -183,6 +183,12 @@ bool XRDisplay::create_blit_program() {
     GLuint vs_s = gl::compile_shader(GL_VERTEX_SHADER,   vs);
     GLuint fs_s = gl::compile_shader(GL_FRAGMENT_SHADER, fs);
     blit_prog_  = gl::link_program(vs_s, fs_s);
+    if (blit_prog_) {
+        // Cache once — composite() runs every frame and string lookups in the
+        // hottest path are pure waste (post_process.cpp already does this).
+        blit_loc_tex_  = glGetUniformLocation(blit_prog_, "u_tex");
+        blit_loc_rect_ = glGetUniformLocation(blit_prog_, "u_rect");
+    }
     return blit_prog_ != 0;
 }
 
@@ -197,7 +203,7 @@ void XRDisplay::composite() {
 
     glUseProgram(blit_prog_);
     glActiveTexture(GL_TEXTURE0);
-    glUniform1i(glGetUniformLocation(blit_prog_, "u_tex"), 0);
+    glUniform1i(blit_loc_tex_, 0);
 
     gl::bind_quad(quad_vbo_);
 
@@ -207,11 +213,11 @@ void XRDisplay::composite() {
     // both cameras are squeezed into 960×1080 each — useful for verifying that
     // both camera feeds are alive without the glasses attached.
     glBindTexture(GL_TEXTURE_2D, rt_left_.tex);
-    glUniform4f(glGetUniformLocation(blit_prog_, "u_rect"), -1.f, -1.f, 0.f, 1.f);
+    glUniform4f(blit_loc_rect_, -1.f, -1.f, 0.f, 1.f);
     gl::draw_quad();
 
     glBindTexture(GL_TEXTURE_2D, rt_right_.tex);
-    glUniform4f(glGetUniformLocation(blit_prog_, "u_rect"),  0.f, -1.f, 1.f, 1.f);
+    glUniform4f(blit_loc_rect_,  0.f, -1.f, 1.f, 1.f);
     gl::draw_quad();
 
     gl::unbind_quad();
@@ -239,10 +245,10 @@ void XRDisplay::composite_single(GLuint src_tex, CamSingleAnchor anchor) {
 
     glUseProgram(blit_prog_);
     glActiveTexture(GL_TEXTURE0);
-    glUniform1i(glGetUniformLocation(blit_prog_, "u_tex"), 0);
+    glUniform1i(blit_loc_tex_, 0);
     gl::bind_quad(quad_vbo_);
     glBindTexture(GL_TEXTURE_2D, src_tex);
-    glUniform4f(glGetUniformLocation(blit_prog_, "u_rect"),
+    glUniform4f(blit_loc_rect_,
                 rects[i][0], rects[i][1], rects[i][2], rects[i][3]);
     gl::draw_quad();
     gl::unbind_quad();
