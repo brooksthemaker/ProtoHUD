@@ -53,6 +53,12 @@ nlohmann::json GlitchConfig::to_json() const {
 GlitchConfig GlitchConfig::from_json(const nlohmann::json& j) {
     GlitchConfig c;
     if (!j.is_object()) return c;
+    // Optional named starting point; any explicit keys below override it.
+    if (j.contains("preset") && j["preset"].is_string()) {
+        const std::string name = j["preset"].get<std::string>();
+        for (const auto& [pn, pc] : presets())
+            if (pn == name) { c = pc; break; }
+    }
     c.enabled       = j.value("enabled",       c.enabled);
     c.intensity     = j.value("intensity",     c.intensity);
     c.burst_rate    = j.value("burst_rate",    c.burst_rate);
@@ -67,6 +73,63 @@ GlitchConfig GlitchConfig::from_json(const nlohmann::json& j) {
     c.region_desync = j.value("region_desync", c.region_desync);
     c.expr_flicker  = j.value("expr_flicker",  c.expr_flicker);
     return c;
+}
+
+const std::vector<std::pair<std::string, GlitchConfig>>& GlitchConfig::presets() {
+    static const std::vector<std::pair<std::string, GlitchConfig>> kPresets = [] {
+        std::vector<std::pair<std::string, GlitchConfig>> v;
+        auto add = [&](const char* name, auto fill) {
+            GlitchConfig c;
+            c.enabled = true;
+            // Presets start from all-zero components so each look is exactly
+            // what it sets, not the struct defaults plus extras.
+            c.chromatic = c.tearing = c.blocks = c.bitcrush = 0.0;
+            c.dropout = c.datamosh = c.region_desync = c.expr_flicker = 0.0;
+            fill(c);
+            v.emplace_back(name, c);
+        };
+
+        // Analog tape: tracking tears + colour fringing, frequent gentle bursts.
+        add("vhs", [](GlitchConfig& c) {
+            c.intensity = 0.8;  c.burst_rate = 0.8;
+            c.burst_min = 0.10; c.burst_max = 0.40;
+            c.chromatic = 0.5;  c.tearing = 0.7;
+            c.dropout = 0.25;   c.bitcrush = 0.15;
+        });
+        // Compression rot: frozen-frame smear + shuffled macroblocks.
+        add("datamosh", [](GlitchConfig& c) {
+            c.intensity = 1.0;  c.burst_rate = 0.3;
+            c.burst_min = 0.30; c.burst_max = 0.80;
+            c.datamosh = 0.9;   c.blocks = 0.6;  c.chromatic = 0.2;
+        });
+        // Dying feed: heavy dropout bars and crushed colour, sparse hard hits.
+        add("signal_loss", [](GlitchConfig& c) {
+            c.intensity = 1.2;  c.burst_rate = 0.2;
+            c.burst_min = 0.20; c.burst_max = 0.60;
+            c.dropout = 0.9;    c.tearing = 0.5;  c.bitcrush = 0.4;
+        });
+        // Possessed: wrong-expression flashes + the face's halves desyncing.
+        add("haunted", [](GlitchConfig& c) {
+            c.intensity = 1.0;  c.burst_rate = 0.25;
+            c.burst_min = 0.15; c.burst_max = 0.50;
+            c.expr_flicker = 0.8; c.region_desync = 0.6; c.chromatic = 0.3;
+        });
+        // Ambient flavour: barely-there fringing and slips, never distracting.
+        add("subtle", [](GlitchConfig& c) {
+            c.intensity = 0.5;  c.burst_rate = 0.5;
+            c.burst_min = 0.06; c.burst_max = 0.20;
+            c.chromatic = 0.35; c.tearing = 0.3;
+        });
+        // Total corruption: everything at once, constant-on (no bursts).
+        add("meltdown", [](GlitchConfig& c) {
+            c.intensity = 1.0;  c.burst_rate = 0.0;
+            c.chromatic = 0.6;  c.tearing = 0.7;  c.blocks = 0.5;
+            c.bitcrush = 0.4;   c.dropout = 0.4;  c.datamosh = 0.5;
+            c.region_desync = 0.5; c.expr_flicker = 0.5;
+        });
+        return v;
+    }();
+    return kPresets;
 }
 
 GlitchEffect::GlitchEffect()
