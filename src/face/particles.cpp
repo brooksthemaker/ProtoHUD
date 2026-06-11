@@ -668,8 +668,11 @@ private:
 
 // ── Lightning ──────────────────────────────────────────────────────────────────
 // Jagged bolts that flash and fade, with random forked branches. "rate" ≈
-// strikes/sec; "branches" (0..1) sets fork density. With "arc": true it becomes
-// continuous crackling electrical arcs between drifting points ("count" arcs).
+// strikes/sec; "branches" (0..1) sets fork density. "origin": "edge" (default)
+// strikes from the directional spawn edge and travels the configured
+// direction; "random" strikes from anywhere on the canvas in a random
+// direction with varied length. With "arc": true it becomes continuous
+// crackling electrical arcs between drifting points ("count" arcs).
 class LightningEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
@@ -756,15 +759,28 @@ private:
         if (timer_ > 0) return;
         const double rate = std::max(0.05, jnum(cfg_, "rate", 1.0) * intensity_);
         timer_ = frand(rng_, 0.4, 1.6) / rate;
-        double dx, dy; direction_unit(dx, dy, 90.0);   // default fall = down
         Bolt b;
         b.max_life = b.life = frand(rng_, 0.10, 0.22);
         const Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{180, 210, 255};
         b.r = col.r; b.g = col.g; b.b = col.b;
-        double sx, sy; direction_spawn_point(0.0, 90.0, sx, sy);
         const double L = std::max(w_, h_) * 1.4;
-        const cv::Point a((int)sx, (int)sy);
-        const cv::Point e((int)(sx + dx * L), (int)(sy + dy * L));
+        cv::Point a, e;
+        if (cfg_.value("origin", std::string("edge")) == "random") {
+            // Random origin: each strike starts anywhere on the canvas and
+            // travels a random direction, with varied length so interior
+            // strikes read as localized discharges (cv::line clips whatever
+            // runs off the edge).
+            a = rand_point();
+            const double ang  = frand(rng_, 0.0, 2.0 * CV_PI);
+            const double blen = L * frand(rng_, 0.45, 1.0);
+            e = cv::Point((int)std::lround(a.x + std::cos(ang) * blen),
+                          (int)std::lround(a.y + std::sin(ang) * blen));
+        } else {
+            double dx, dy; direction_unit(dx, dy, 90.0);   // default fall = down
+            double sx, sy; direction_spawn_point(0.0, 90.0, sx, sy);
+            a = cv::Point((int)sx, (int)sy);
+            e = cv::Point((int)(sx + dx * L), (int)(sy + dy * L));
+        }
         build_strokes(a, e, irand(rng_, 8, 14), jnum(cfg_, "jitter", 6.0),
                       jnum(cfg_, "branches", 0.35), b.strokes, 0);
         bolts_.push_back(std::move(b));

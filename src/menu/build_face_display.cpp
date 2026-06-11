@@ -131,8 +131,11 @@ struct LayerCfg {
     float pitch_fill = 0.0f;
     int   bubbles = 0;
     std::string bubble_mode = "rise";
-    // "lightning" extras: arc mode (crackling arcs vs falling bolts) + fork density.
+    // "lightning" extras: arc mode (crackling arcs vs falling bolts), fork
+    // density, and random origin (bolts strike from anywhere instead of the
+    // directional edge; bolt mode only).
     bool  arc = false;
+    bool  random_origin = false;
     float branches = 0.35f;
     std::string blend = "add";     // "add" | "normal" | "multiply" | "screen"
     // Motion reactivity (opt-in): drives the layer's direction from head
@@ -1032,6 +1035,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             if (L.effect == "lightning") {
                 layer["branches"] = L.branches;
                 if (L.arc) layer["arc"] = true;
+                if (L.random_origin) layer["origin"] = "random";
             }
             out["layers"].push_back(layer);
         }
@@ -1068,6 +1072,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.bubbles = jl.value("bubbles", 0);
             L.bubble_mode = jl.value("bubble_mode", std::string("rise"));
             L.arc = jl.value("arc", false);
+            L.random_origin = jl.value("origin", std::string("edge")) == "random";
             L.branches = jl.value("branches", 0.35f);
         }
     };
@@ -1218,11 +1223,23 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 m.visible_fn = [L]{ return L->effect == "water" && L->bubbles > 0; };
                 return m;
             })(),
-            // Lightning extras — arc mode + fork density (lightning only).
+            // Lightning extras — arc mode, random origin + fork density
+            // (lightning only).
             ([&]{
                 MenuItem t = toggle("Arc Mode",
                     [L]{ return L->arc; }, [L](bool v){ L->arc = v; });
                 t.visible_fn = [L]{ return L->effect == "lightning"; };
+                return t;
+            })(),
+            ([&]{
+                MenuItem t = with_desc(toggle("Random Origin",
+                    [L]{ return L->random_origin; },
+                    [L](bool v){ L->random_origin = v; }),
+                    "Bolts strike from random points on the canvas in random "
+                    "directions, instead of always falling from the "
+                    "directional edge. Bolt mode only — arcs always jump "
+                    "between the panel edges.");
+                t.visible_fn = [L]{ return L->effect == "lightning" && !L->arc; };
                 return t;
             })(),
             ([&]{
