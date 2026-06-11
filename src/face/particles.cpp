@@ -133,6 +133,9 @@ public:
     virtual ~BaseEffect() = default;
     virtual void update(double dt) = 0;
     virtual cv::Mat render() = 0;   // CV_8UC4
+    // "Refraction" hint: how strongly the backdrop face should glow back through
+    // this layer (water overrides). 0 = opaque overlay like every other effect.
+    virtual double face_glow() const { return 0.0; }
 
     // Latest IMU / audio state, pushed each frame by the owning ParticleSystem.
     // Effects read it through count()/direction_unit() when the cfg opts in.
@@ -1054,17 +1057,27 @@ public:
         tilt_smooth_  += (motion_.roll_deg  - tilt_smooth_)  * rate;
         pitch_smooth_ += (motion_.pitch_deg - pitch_smooth_) * rate;
 
-        // Sloshing as a damped spring: slosh_x_ is the extra height (px) the
-        // fluid piles up at the right wall; it overshoots and settles like a
-        // real liquid. Driven by quick tilts, yaw rate and linear accel.
+        // Sloshing as a damped spring on BOTH axes: slosh_x_ is the height (px)
+        // the fluid piles up at a side wall (head roll), slosh_y_ is the vertical
+        // bob from nodding (head pitch). Both overshoot and settle like a real
+        // liquid. "slosh" (≈6 nominal) scales how hard tilts drive the fluid.
+        const double sloshg = jnum(cfg_, "slosh", 6.0) / 6.0;   // drive gain (0=still)
         const double k = 34.0 * (1.0 - 0.45 * v);     // stiffness → slosh frequency
         const double c = 5.0 + 14.0 * v;              // damping → thicker settles faster
-        const double drive = (motion_.roll_deg - tilt_smooth_) * 0.9
-                           + motion_.yaw_rate * 0.025
-                           + (motion_.accel_g - 1.0) * 7.0;
-        const double accel = -k * slosh_x_ - c * slosh_v_ + drive * (h_ * 0.02);
-        slosh_v_ += accel * dt;
+        const double drive_x = ((motion_.roll_deg - tilt_smooth_) * 0.9
+                              + motion_.yaw_rate * 0.025
+                              + (motion_.accel_g - 1.0) * 7.0) * sloshg;
+        const double accel_x = -k * slosh_x_ - c * slosh_v_ + drive_x * (h_ * 0.02);
+        slosh_v_ += accel_x * dt;
         slosh_x_  = std::clamp(slosh_x_ + slosh_v_ * dt, -h_ * 0.5, h_ * 0.5);
+
+        // Vertical slosh: quick pitch (nod) and fore/aft accel pump the level up
+        // and down before it settles — the y-axis counterpart to the roll lean.
+        const double drive_y = ((motion_.pitch_deg - pitch_smooth_) * 0.9
+                              + (motion_.accel_g - 1.0) * 5.0) * sloshg;
+        const double accel_y = -k * slosh_y_ - c * slosh_vy_ + drive_y * (h_ * 0.02);
+        slosh_vy_ += accel_y * dt;
+        slosh_y_   = std::clamp(slosh_y_ + slosh_vy_ * dt, -h_ * 0.5, h_ * 0.5);
 
         phase_ += jnum(cfg_, "wave_speed", 2.0) * (1.0 - 0.6 * v) * dt;   // travelling ripple
         // Surface chop scales with how hard it's sloshing, plus a faint idle ripple.
@@ -1092,7 +1105,9 @@ public:
                 Color col = sample_grad(cols, depth);
                 // Specular sheen: lighten the first few px under the surface so it
                 // catches the light like a real meniscus, fading with depth.
-                const double sheen = std::exp(-std::max(0.0, Y - sy) / 2.2) * 0.55;
+                // "sheen" scales the glint (mercury shiny, lava matte).
+                const double sheen = std::exp(-std::max(0.0, Y - sy) / 2.2)
+                                   * std::clamp(jnum(cfg_, "sheen", 0.55), 0.0, 1.0);
                 col.r = (int)std::lround(col.r + (255 - col.r) * sheen);
                 col.g = (int)std::lround(col.g + (255 - col.g) * sheen);
                 col.b = (int)std::lround(col.b + (255 - col.b) * sheen);
@@ -1102,6 +1117,10 @@ public:
         }
         render_bubbles(c, cols, (int)(alpha * 255.0));
         return c;
+    }
+    // How strongly the face should glow back through the liquid (0 = opaque).
+    double face_glow() const override {
+        return std::clamp(jnum(cfg_, "face_glow", 0.0), 0.0, 1.0);
     }
 private:
     // Effective fill fraction — base level shifted by smoothed pitch (look
@@ -1114,7 +1133,8 @@ private:
     // Local surface row at local column lx, computed in canvas space (so the
     // tank is continuous across panels) then shifted into this panel's frame.
     double surface_y_local(double lx) const {
-        const double base  = ch_ * (1.0 - level_eff());
+        // Resting level (+ static pitch fill), bobbed by the vertical slosh.
+        const double base  = ch_ * (1.0 - level_eff()) + slosh_y_;
         const double ccx   = cw_ * 0.5;
         const double half  = std::max(1.0, cw_ * 0.5);
         const double waven = jnum(cfg_, "wave_count", 2.0);
@@ -1215,7 +1235,8 @@ private:
     }
     double phase_ = 0.0, amp_ = 0.0;
     double tilt_smooth_ = 0.0, pitch_smooth_ = 0.0;
-    double slosh_x_ = 0.0, slosh_v_ = 0.0;   // damped-spring slosh (lean px + velocity)
+    double slosh_x_ = 0.0, slosh_v_  = 0.0;  // roll lean (px) + velocity
+    double slosh_y_ = 0.0, slosh_vy_ = 0.0;  // pitch bob (px) + velocity
     bool   tilt_init_ = false;
     std::vector<Particle> bubbles_;
 };
@@ -1502,12 +1523,12 @@ const std::map<std::string, json>& presets() {
             {"effect":"embers","count":12,"colors":[[180,220,255],[200,240,255]],"speed_min":20,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
             {"effect":"rings","count":1,"colors":[[0,200,255]],"speed_min":10,"speed_max":15,"max_radius":15,"blend":"add"}]},
           "rain": {"effect":"rain","count":35,"colors":[[120,150,220],[150,180,255]],"speed_min":45,"speed_max":70,"drift_x":1.5,"blend":"add"},
-          "water": {"effect":"water","level":0.42,"alpha":0.85,"slosh":6,"wave_count":2,"wave_speed":2.0,"pitch_fill":0.25,"bubbles":8,"bubble_mode":"rise","colors":[[120,220,255],[0,110,210],[0,40,120]],"blend":"normal"},
-          "lava": {"effect":"water","level":0.36,"alpha":0.95,"slosh":4,"wave_count":2,"wave_speed":1.3,"viscosity":0.6,"colors":[[255,230,120],[255,90,0],[150,20,0]],"blend":"normal"},
-          "toxic": {"effect":"water","level":0.40,"alpha":0.9,"slosh":7,"wave_count":3,"wave_speed":2.4,"bubbles":12,"bubble_mode":"rise","colors":[[210,255,120],[60,200,0],[15,110,0]],"blend":"normal"},
-          "ocean": {"effect":"water","level":0.52,"alpha":0.85,"slosh":8,"wave_count":3,"wave_speed":1.8,"colors":[[90,235,225],[0,130,170],[0,40,90]],"blend":"normal"},
-          "plasma_fluid": {"effect":"water","level":0.40,"alpha":0.9,"slosh":6,"wave_count":2,"colors":[[255,130,255],[150,0,200],[40,0,80]],"blend":"normal"},
-          "mercury": {"effect":"water","level":0.36,"alpha":0.96,"slosh":3,"wave_count":2,"viscosity":0.7,"colors":[[235,240,250],[120,130,150],[55,60,75]],"blend":"normal"},
+          "water": {"effect":"water","level":0.42,"alpha":0.85,"slosh":6,"wave_count":2,"wave_speed":2.0,"pitch_fill":0.30,"sheen":0.55,"face_glow":0.55,"bubbles":8,"bubble_mode":"rise","colors":[[120,220,255],[0,110,210],[0,40,120]],"blend":"normal"},
+          "lava": {"effect":"water","level":0.36,"alpha":0.95,"slosh":4,"wave_count":2,"wave_speed":1.3,"viscosity":0.6,"pitch_fill":0.20,"sheen":0.20,"face_glow":0.30,"meniscus":1.0,"colors":[[255,230,120],[255,90,0],[150,20,0]],"blend":"normal"},
+          "toxic": {"effect":"water","level":0.40,"alpha":0.9,"slosh":7,"wave_count":3,"wave_speed":2.4,"pitch_fill":0.30,"sheen":0.5,"face_glow":0.6,"bubbles":12,"bubble_mode":"rise","colors":[[210,255,120],[60,200,0],[15,110,0]],"blend":"normal"},
+          "ocean": {"effect":"water","level":0.52,"alpha":0.85,"slosh":8,"wave_count":3,"wave_speed":1.8,"pitch_fill":0.35,"sheen":0.5,"face_glow":0.45,"colors":[[90,235,225],[0,130,170],[0,40,90]],"blend":"normal"},
+          "plasma_fluid": {"effect":"water","level":0.40,"alpha":0.9,"slosh":6,"wave_count":2,"pitch_fill":0.30,"sheen":0.6,"face_glow":0.7,"colors":[[255,130,255],[150,0,200],[40,0,80]],"blend":"normal"},
+          "mercury": {"effect":"water","level":0.36,"alpha":0.96,"slosh":3,"wave_count":2,"viscosity":0.7,"pitch_fill":0.15,"sheen":0.9,"face_glow":0.12,"colors":[[235,240,250],[120,130,150],[55,60,75]],"blend":"normal"},
           "thunderstorm": {"layers":[
             {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":55,"speed_max":80,"drift_x":3.0,"blend":"add"},
             {"effect":"lightning","rate":0.7,"branches":0.45,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},
@@ -1600,6 +1621,7 @@ struct ParticleLayer {
     }
     void update(double dt) { if (effect) effect->update(dt); }
     cv::Mat render()       { return effect ? effect->render() : cv::Mat(); }
+    double  face_glow() const { return effect ? effect->face_glow() : 0.0; }
     void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
     void set_audio(double level)          { if (effect) effect->set_audio(level); }
     void set_canvas_geometry(int cw, int ch, int ox, int oy) {
@@ -1691,6 +1713,7 @@ ParticleFrame ParticleSystem::render() {
         if (frame.empty()) continue;
         has = true;
         if (layer.blend != Blend::Add) all_add = false;
+        result.face_glow = std::max(result.face_glow, layer.face_glow());
 
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {

@@ -28,6 +28,9 @@ struct ParticleFrame {
     bool    has   = false;       // false when there are no active layers
     cv::Mat rgba;                // CV_8UC4 (RGBA), valid when has
     Blend   blend = Blend::Add;  // overall blend hint (add unless a layer is normal)
+    // Max "refraction" hint across layers (water): how strongly the backdrop
+    // face should glow back through the layer. 0 for ordinary effects.
+    double  face_glow = 0.0;
 };
 
 class ParticleSystem {
