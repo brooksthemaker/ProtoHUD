@@ -1,0 +1,39 @@
+name: protocol-check
+
+# ProtoHUD's full application target links a vendored aarch64-only libglasses.so
+# and needs the Raspberry Pi stack (libcamera, EGL/GLES, OpenCV, imgui, ...), so
+# it can't be built on a standard x86_64 GitHub runner. This workflow instead
+# compile-checks the device-protocol layer — the shared wire format and serial
+# framing that every external device (SmartKnob, Teensy, LoRa, ...) depends on.
+# These translation units are self-contained (std + POSIX headers only), so a
+# break here means a real regression in the cross-device contract, independent
+# of the Pi-specific graphics/camera code.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile serial framing (serial_port.cpp)
+        run: g++ -std=c++17 -Wall -Wextra -c src/serial/serial_port.cpp -o /tmp/serial_port.o
+
+      - name: Compile-check the wire protocol header (protocols.h)
+        run: |
+          cat > /tmp/proto_check.cpp <<'EOF'
+          #include "protocols.h"
+          // Exercise the builder + CRC so the header is fully instantiated.
+          int main() {
+              uint8_t buf[PROTO_MAX_FRAME];
+              KnobButtonPayload p{ KnobButton::ENCODER, KnobButtonEvent::PRESS };
+              size_t n = proto_build(buf, KnobCmd::BUTTON_EVENT,
+                                     reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+              return proto_crc8(buf + 2, n - 3) == buf[n - 1] ? 0 : 1;
+          }
+          EOF
+          g++ -std=c++17 -Wall -Wextra -Isrc /tmp/proto_check.cpp -o /tmp/proto_check
+          /tmp/proto_check
