@@ -2701,10 +2701,12 @@ int main(int argc, char* argv[]) {
 
     // Auto-discover serial ports by USB VID:PID when configured paths are absent.
     // Teensy 4.1: VID=0x16C0, PID=0x0483.  LoRa CH340: VID=0x1A86, PID=0x7523.
-    // SmartKnob ESP32-S3 DevKitC-1 UART port: CH341 VID=0x1A86, PID=0x7522.
+    // SmartKnob: native USB CDC from the ESP32-S3 (TinyUSB OTG), VID=0x303A,
+    // PID=0x1001. NOT the DevKitC-1's CH341 UART bridge (1A86:7522) — that port
+    // carries no protocol traffic since the firmware's Serial is the native USB CDC.
     teensy_port = resolve_serial_port(teensy_port, 0x16C0, 0x0483);
     lora_port   = resolve_serial_port(lora_port,   0x1A86, 0x7523);
-    knob_port   = resolve_serial_port(knob_port,   0x1A86, 0x7522);
+    knob_port   = resolve_serial_port(knob_port,   0x303A, 0x1001);
 
     TeensyController     teensy  (teensy_port,   baud, state);
     ProtoFaceController  protoface_ctrl;
