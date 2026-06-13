@@ -14,23 +14,25 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 4. [Quick Start](#quick-start)
 5. [Post-Install Health Check](#post-install-health-check)
 6. [Building Manually](#building-manually)
-7. [Camera Resolution](#camera-resolution)
-8. [Camera Focus Control](#camera-focus-control)
-9. [Camera Rotation & Multi-Cam Layout](#camera-rotation--multi-cam-layout)
-10. [Night Vision (Exposure & Shutter)](#night-vision-exposure--shutter)
-11. [GPIO Buttons](#gpio-buttons)
-12. [USB Camera Picture-in-Picture](#usb-camera-picture-in-picture)
-13. [Android Mirror](#android-mirror)
-14. [Phone Integration (KDE Connect)](#phone-integration-kde-connect)
-15. [Overlay Position & Size](#overlay-position--size)
-16. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
-17. [Audio Routing](#audio-routing)
-18. [HUD Layout](#hud-layout)
-19. [BNO055 (Recommended IMU)](#bno055-recommended-imu)
-20. [Onboard Compass (MPU-9250 / GY-9250)](#onboard-compass-mpu-9250--gy-9250)
-21. [HUB75 Panel Layouts](#hub75-panel-layouts)
-22. [Configuration Reference](#configuration-reference)
-23. [Troubleshooting](#troubleshooting)
+7. [Uninstalling](#uninstalling)
+8. [Camera Resolution](#camera-resolution)
+9. [Camera Focus Control](#camera-focus-control)
+10. [Camera Rotation & Multi-Cam Layout](#camera-rotation--multi-cam-layout)
+11. [Night Vision (Exposure & Shutter)](#night-vision-exposure--shutter)
+12. [GPIO Buttons](#gpio-buttons)
+13. [USB Camera Picture-in-Picture](#usb-camera-picture-in-picture)
+14. [Android Mirror](#android-mirror)
+15. [Phone Integration (KDE Connect)](#phone-integration-kde-connect)
+16. [Overlay Position & Size](#overlay-position--size)
+17. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
+18. [Audio Routing](#audio-routing)
+19. [HUD Layout](#hud-layout)
+20. [BNO055 (Recommended IMU)](#bno055-recommended-imu)
+21. [Onboard Compass (MPU-9250 / GY-9250)](#onboard-compass-mpu-9250--gy-9250)
+22. [HUB75 Panel Layouts](#hub75-panel-layouts)
+23. [Configuration Reference](#configuration-reference)
+24. [Troubleshooting](#troubleshooting)
+25. [Project Structure](#project-structure)
 
 ---
 
@@ -344,16 +346,26 @@ chmod +x scripts/install.sh
 
 The installer runs 11 steps:
 1. **Preflight** — checks OS, arch, and sudo availability; caches credentials once
-2. **Packages** — apt dependencies (GLFW, GLES, libcamera, OpenCV, libgpiod, ALSA, v4l2loopback-dkms, adb)
-3. **RP2350 audio** — checks for RP2350 USB audio device on `hw:CARD=HelmetAudio6Mic`
-4. **Boot config** — sets `gpu_mem=256`, `camera_auto_detect=1` in `/boot/config.txt`
-5. **udev** — stable `/dev/teensy`, `/dev/smartknob`, `/dev/lora` symlinks
+2. **Packages** — apt dependencies (GLFW, GLES, libcamera, OpenCV, libgpiod, ALSA, v4l2loopback-dkms, adb, i2c-tools, libdbus, and `kdeconnect` unless `KDECONNECT=0`)
+3. **RP2350 audio** — checks for the RP2350 USB audio device (card `HelmetAudio`, VID:PID `1209:b350`)
+4. **Boot config** — sets `gpu_mem=256`, `camera_auto_detect=1`, and `dtparam=i2c_arm=on` in the boot config (`/boot/firmware/config.txt` on Bookworm/Trixie, `/boot/config.txt` on older images)
+5. **udev** — stable `/dev/teensy`, `/dev/smartknob`, `/dev/lora` symlinks + VITURE HID access
 6. **Android** — v4l2loopback module config for Android mirror (`/dev/video4`)
 7. **Groups** — adds current user to `gpio dialout video render audio input`
 8. **Build** — CMake + Ninja (ImGui fetched automatically on first run)
 9. **Libraries** — installs VITURE SDK `.so` files to `/usr/local/lib`
-10. **Service** — optional systemd unit for auto-start
+10. **Service** — optional systemd unit for auto-start, plus a DBus-session drop-in and user-session lingering so the KDE Connect bridge works headless
 11. **Summary** — lists what changed and what still needs a reboot
+
+> The CPU governor is also switched to **performance** at the end of step 10 (and re-applied by the service on each start).
+
+After installing, if you use the **System → Pi Settings** menu (hostname, timezone, power, OTA update) or GPIO-button restart, drop in the narrow sudoers rule so those run without a password prompt:
+
+```bash
+sudo bash scripts/install_sudoers.sh        # grants NOPASSWD for hostnamectl,
+                                             # timedatectl, apt-get, reboot/poweroff,
+                                             # and systemctl {start,stop,restart} protohud
+```
 
 > **scrcpy** is **not** installed by the script — install it separately afterward if you need Android mirror:
 > ```bash
@@ -487,6 +499,48 @@ scripts/build.sh
 ```
 
 Network steps in `update.sh` retry with exponential backoff (2/4/8/16 s).
+
+---
+
+## Uninstalling
+
+`scripts/uninstall.sh` reverses `scripts/install.sh`. By default it removes only
+ProtoHUD's **system integration** and leaves shared things (apt packages, group
+membership, boot-config lines, your `config.json` and saved faces) untouched,
+since other software on the Pi may depend on them. Run it from the project root:
+
+```bash
+chmod +x scripts/uninstall.sh
+./scripts/uninstall.sh                 # remove system integration (prompts first)
+./scripts/uninstall.sh --dry-run       # show what would be removed, change nothing
+./scripts/uninstall.sh --yes           # skip the confirmation prompt
+```
+
+Removed by default:
+
+| Item | Path |
+|------|------|
+| systemd service + DBus drop-in | `/etc/systemd/system/protohud.service{,.d/}` |
+| udev rules | `/etc/udev/rules.d/99-protohud.rules` |
+| v4l2loopback config | `/etc/modprobe.d/v4l2loopback.conf`, `/etc/modules` line |
+| VITURE SDK libraries | `/usr/local/lib/libglasses.so`, `libcarina_vio.so` |
+| sudoers rule | `/etc/sudoers.d/protohud` |
+| CPU governor | reset to `ondemand` |
+| user-session lingering | disabled |
+| convenience symlink | `./protohud` |
+
+Opt-in destructive extras (off unless you pass the flag):
+
+```bash
+./scripts/uninstall.sh --boot          # also revert gpu_mem / camera_auto_detect / i2c lines
+./scripts/uninstall.sh --groups        # also remove you from gpio/dialout/video/render/audio/input
+./scripts/uninstall.sh --build         # also delete build/
+./scripts/uninstall.sh --purge         # all of the above PLUS delete state/ and config/config.json
+./scripts/uninstall.sh --packages      # print the apt packages install.sh added (does NOT remove them)
+```
+
+The script never removes the apt packages or the source tree itself. To delete
+the checkout afterward: `rm -rf ~/ProtoHUD`.
 
 ---
 
@@ -1604,7 +1658,7 @@ cam --list
 eglinfo | grep -i "dma_buf\|image_base"
 ```
 
-Ensure `camera_auto_detect=1` is in `/boot/config.txt`. Reboot after any boot config change.
+Ensure `camera_auto_detect=1` is in the boot config (`/boot/firmware/config.txt` on Bookworm/Trixie, `/boot/config.txt` on older images). Reboot after any boot config change.
 
 ### GPIO buttons not responding
 
@@ -1760,51 +1814,58 @@ ip -br addr show usb0      # should now have a 192.168.42.x address
 ```
 .
 ├── src/
-│   ├── main.cpp                    — init, render loop, menu definition
+│   ├── main.cpp                    — init, render loop, menu wiring
 │   ├── app_state.h                 — shared state structs (mutex-protected)
-│   ├── gl_utils.h                  — GLES2 shader/VBO/FBO helpers
+│   ├── capture.h/.cpp              — frame capture + post-process orchestration
+│   ├── post_process.h/.cpp         — color / sharpen / night-vision pipeline
+│   ├── profile_manager.h/.cpp      — config profiles (save/load named setups)
+│   ├── qr_scanner.h/.cpp           — QR decode + de-duplicated saved-link list
+│   ├── video_recorder.h/.cpp       — HUD/camera capture to disk
+│   ├── crash_reporter.h/.cpp       — crash capture + bug-report writer
+│   ├── splash.h/.cpp               — boot splash
+│   ├── gl_utils.h / gl_async_read.h — GLES2 shader/FBO + async readback helpers
 │   ├── protocols.h                 — serial frame protocol definitions
-│   ├── android/
-│   │   └── android_mirror.h/.cpp  — scrcpy subprocess + V4L2 capture + GL upload
-│   ├── camera/
-│   │   ├── dma_camera.h/.cpp       — zero-copy NV12 libcamera path
-│   │   ├── camera_manager.h/.cpp   — owns both OWLsight + USB cameras
-│   │   ├── v4l2_camera.h/.cpp      — V4L2 USB camera capture
-│   │   └── viture_camera.h/.cpp    — Beast built-in passthrough camera
-│   ├── hud/
-│   │   ├── hud_renderer.h/.cpp     — NanoVG HUD chrome + ImGui menu overlay
-│   │   └── toast_renderer.h/.cpp   — slide-in toast notification overlay (NanoVG)
-│   ├── menu/
-│   │   └── menu_system.h/.cpp      — stack-based ImGui menu
-│   ├── vitrue/
-│   │   ├── xr_display.h/.cpp       — GLFW window, eye FBOs, SBS composite
-│   │   └── timewarp.h/.cpp         — rotational homography warp shader
-│   ├── input/
-│   │   └── gpio_buttons.h/.cpp     — libgpiod v2 button handler
-│   ├── serial/
-│   │   ├── serial_port.h/.cpp          — raw UART helpers
-│   │   ├── face_controller.h           — IFaceController interface + FaceProxy
-│   │   ├── teensy_controller.h/.cpp    — ProtoTracer USB serial backend
-│   │   ├── protoface_controller.h/.cpp — Protoface Unix socket backend
-│   │   ├── shm_frame_reader.h/.cpp     — /dev/shm/protoface_frame → GL texture
-│   │   ├── lora_radio.h/.cpp
-│   │   └── smartknob.h/.cpp
-│   ├── sensor/
-│   │   └── mpu9250.h/.cpp          — MPU-9250 I2C backup compass (50 Hz heading)
-│   └── audio/
-│       └── audio_engine.h/.cpp     — ALSA USB capture → gain → playback routing
-├── assets/shaders/
-│   ├── nv12.vs / nv12.fs           — NV12→RGB camera shader (GLSL ES)
-│   └── timewarp.vs / timewarp.fs   — homography warp shader
-├── config/config.json
-├── overlays/cm5-6mic.dts           — 6-ch I2S DT overlay (boot config; audio handled by RP2350)
-├── hardware/carrier-board/         — CM5 carrier board: level-shifting design, BOM, requirements
+│   ├── android/                    — scrcpy subprocess + V4L2 capture + GL upload
+│   ├── camera/                     — libcamera (DMA NV12), V4L2 USB, VITURE passthrough
+│   ├── face/                       — native face renderer: GIFs, materials, glitch,
+│   │                                 particles, HUB75 / MAX7219 / NeoPixel / shm outputs
+│   ├── hud/                        — NanoVG HUD chrome, toasts, backgrounds, icon cache
+│   ├── input/                      — GPIO buttons, gamepad, coprocessor + wireless input
+│   ├── integrations/               — KDE Connect bridge + phone inbox
+│   ├── menu/                       — stack-based ImGui menu (build_*.cpp per tab,
+│   │                                 face editor, color/file pickers)
+│   ├── net/                        — Wi-Fi / Bluetooth / ping / weather monitors
+│   ├── sensor/                     — BNO055, MPU-9250 compass, MPR121 boop, light sensor
+│   ├── serial/                     — UART, Teensy / Protoface face backends, LoRa, SmartKnob
+│   ├── sys/                        — system + scheduler monitors, fan control, GPIO pinmap
+│   ├── audio/                      — ALSA USB capture → gain → routing; voice analyzer
+│   └── vitrue/                     — GLFW window, eye FBOs, SBS composite, timewarp warp
+├── assets/                         — GLSL shaders, HUD icons, background images
+├── config/
+│   ├── config.example.json         — tracked defaults reference
+│   └── config.json                 — your live settings (gitignored, written on exit)
+├── overlays/cm5-6mic.dts           — 6-ch I2S DT overlay (audio handled by RP2350)
+├── firmware/                       — Teensy audio, button coprocessor (Pico), MP3 player sources
+├── hardware/carrier-board/         — CM5 carrier board: design, BOM, GPIO map, power tree
+├── lora_bridge/                    — RAK4631 LoRa firmware / bridge
+├── scheduler_daemon/               — optional calendar/event scheduler (Python)
 ├── vendor/viture/                  — VITURE XR SDK (pre-built aarch64 .so)
 ├── Protoface/                      — git submodule: HUB75 LED face daemon
 └── scripts/
     ├── install.sh                  — one-shot CM5 installer (11 steps)
+    ├── uninstall.sh                — reverses install.sh (system integration; --purge for all)
+    ├── install_deps.sh             — build dependencies only (no system config)
+    ├── install_sudoers.sh          — narrow NOPASSWD rule for the Pi Settings menu
     ├── check.sh                    — post-reboot health check
-    └── run.sh                      — launch wrapper with startup diagnostics
+    ├── build.sh                    — CMake + Ninja release build
+    ├── run.sh                      — launch wrapper with startup diagnostics
+    ├── restart.sh                  — start/stop/restart the running instance
+    ├── update.sh                   — pull latest + rebuild (records a rollback point)
+    ├── rollback.sh                 — return to the last known-good build
+    ├── watchdog.sh                 — relaunch ProtoHUD if it dies
+    ├── merge_config.py             — merge new config defaults into config.json
+    ├── panel_driver.py             — HUB75 panel driver (Protoface output)
+    └── kdeconnect_commands.py      — KDE Connect helper commands
 ```
 
 ---
