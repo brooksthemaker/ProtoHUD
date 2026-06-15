@@ -2701,10 +2701,14 @@ int main(int argc, char* argv[]) {
 
     // Auto-discover serial ports by USB VID:PID when configured paths are absent.
     // Teensy 4.1: VID=0x16C0, PID=0x0483.  LoRa CH340: VID=0x1A86, PID=0x7523.
-    // SmartKnob ESP32-S3 DevKitC-1 UART port: CH341 VID=0x1A86, PID=0x7522.
+    // SmartKnob: the firmware uses the ESP32-S3 NATIVE USB-CDC port (build flag
+    // ARDUINO_USB_MODE=1), so it enumerates as Espressif VID=0x303A, PID=0x1001
+    // on a /dev/ttyACM node — NOT the CH341 UART bridge (0x1A86) the board also
+    // exposes. If the PID varies by core version, set smartknob.port explicitly
+    // to a /dev/serial/by-id/... path instead.
     teensy_port = resolve_serial_port(teensy_port, 0x16C0, 0x0483);
     lora_port   = resolve_serial_port(lora_port,   0x1A86, 0x7523);
-    knob_port   = resolve_serial_port(knob_port,   0x1A86, 0x7522);
+    knob_port   = resolve_serial_port(knob_port,   0x303A, 0x1001);
 
     TeensyController     teensy  (teensy_port,   baud, state);
     ProtoFaceController  protoface_ctrl;
@@ -3775,6 +3779,10 @@ int main(int argc, char* argv[]) {
 
     menu.set_detent_callback([&knob, &menu](int count) {
         knob.set_detents(count);
+        // Menus wrap (MenuSystem::navigate uses % n), so the knob must stay
+        // free-spinning — keep it unbounded (max <= min). set_range() with real
+        // endstops is for non-wrapping ranges (e.g. a 0-100 slider), not menus.
+        knob.set_range(/*min*/0, /*max*/0, /*spacing_deg*/count ? 360 / count : 0);
         int depth = menu.menu_depth();
         uint8_t amp = 200, freq = 80, strength = 150;
         if      (depth >= 3) { amp = 150; freq = 60; strength = 100; }
@@ -3860,13 +3868,13 @@ int main(int argc, char* argv[]) {
     }); });
 
     knob.on_status([&state](uint8_t status, uint8_t param) {
-        if      (status == 0x01) {
+        if      (status == KnobStatus::READY) {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.health.knob_ready = true;
             std::cout << "[knob] ready\n";
         }
-        else if (status == 0x02) std::cout << "[knob] entering sleep\n";
-        else if (status == 0x03) std::cout << "[knob] woke up reason=" << (int)param << "\n";
+        else if (status == KnobStatus::ENTERING_SLEEP) std::cout << "[knob] entering sleep\n";
+        else if (status == KnobStatus::WOKE_UP)        std::cout << "[knob] woke up reason=" << (int)param << "\n";
     });
 
     knob.on_button([&](uint8_t btn, uint8_t ev) { post_input([&, btn, ev]{

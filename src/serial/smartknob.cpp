@@ -62,8 +62,14 @@ void SmartKnob::set_sleep_timeout(uint16_t seconds) {
 }
 
 void SmartKnob::set_haptic(uint8_t amplitude, uint8_t frequency, uint8_t detent_strength) {
-    uint8_t buf[3] = { amplitude, frequency, detent_strength };
-    port_.send(KnobCmd::SET_HAPTIC, buf, 3);
+    KnobSetHapticPayload h { amplitude, frequency, detent_strength };
+    port_.send(KnobCmd::SET_HAPTIC, reinterpret_cast<const uint8_t*>(&h), sizeof(h));
+}
+
+void SmartKnob::set_range(int16_t min_pos, int16_t max_pos,
+                          uint8_t spacing_deg, int16_t start_pos) {
+    KnobSetRangePayload r { spacing_deg, min_pos, max_pos, start_pos };
+    port_.send(KnobCmd::SET_RANGE, reinterpret_cast<const uint8_t*>(&r), sizeof(r));
 }
 
 float SmartKnob::event_age_ms() const {
@@ -124,18 +130,14 @@ void SmartKnob::on_frame(uint8_t cmd, const uint8_t* payload, uint8_t len) {
 
         if (button_cb_) button_cb_(p.button_id, p.event_type);
 
-    } else if (cmd == 0x01) {  // STATUS_READY (len=0, no position payload)
-        {
+    } else if (cmd == KnobCmd::STATUS && len >= sizeof(KnobStatusPayload)) {
+        KnobStatusPayload p {};
+        std::memcpy(&p, payload, sizeof(p));
+
+        if (p.code == KnobStatus::READY) {
             std::lock_guard<std::mutex> lk(state_.mtx);
             state_.health.knob_ready = true;
         }
-        if (status_cb_) status_cb_(0x01, 0);
-
-    } else if (cmd == 0x02) {  // STATUS_ENTERING_SLEEP
-        if (status_cb_) status_cb_(0x02, 0);
-
-    } else if (cmd == 0x03) {  // STATUS_WOKE_UP
-        uint8_t reason = (len >= 1) ? payload[0] : 0;
-        if (status_cb_) status_cb_(0x03, reason);
+        if (status_cb_) status_cb_(p.code, p.reason);
     }
 }
