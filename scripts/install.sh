@@ -453,6 +453,23 @@ ok "Build complete: ${BUILD_DIR}/protohud"
 ln -sf "${BUILD_DIR}/protohud" "${PROJECT_ROOT}/protohud"
 ok "Symlink created: ${PROJECT_ROOT}/protohud → build/protohud"
 
+# Seed config/config.json from the tracked example on first install. The
+# systemd service and run.sh launch with an explicit config/config.json path,
+# and the binary only auto-falls-back to config.example.json when launched with
+# NO argument — so without this seed a fresh install would run on built-in
+# defaults and ignore the shipped example. Never overwrites existing user edits;
+# config.example.json stays the pristine reference (and is what git tracks).
+CFG_EXAMPLE="${PROJECT_ROOT}/config/config.example.json"
+CFG_USER="${PROJECT_ROOT}/config/config.json"
+if [[ -f "${CFG_USER}" ]]; then
+    info "Config already present: ${CFG_USER} (left untouched)"
+elif [[ -f "${CFG_EXAMPLE}" ]]; then
+    cp "${CFG_EXAMPLE}" "${CFG_USER}"
+    ok "Seeded ${CFG_USER} from config.example.json — edit it to match your hardware"
+else
+    warn "No config.example.json found — ProtoHUD will start on built-in defaults"
+fi
+
 # ── VITURE XR SDK libraries ───────────────────────────────────────────────────
 section "9 / 11  VITURE XR SDK libraries"
 

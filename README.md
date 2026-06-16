@@ -14,23 +14,24 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 4. [Quick Start](#quick-start)
 5. [Post-Install Health Check](#post-install-health-check)
 6. [Building Manually](#building-manually)
-7. [Camera Resolution](#camera-resolution)
-8. [Camera Focus Control](#camera-focus-control)
-9. [Camera Rotation & Multi-Cam Layout](#camera-rotation--multi-cam-layout)
-10. [Night Vision (Exposure & Shutter)](#night-vision-exposure--shutter)
-11. [GPIO Buttons](#gpio-buttons)
-12. [USB Camera Picture-in-Picture](#usb-camera-picture-in-picture)
-13. [Android Mirror](#android-mirror)
-14. [Phone Integration (KDE Connect)](#phone-integration-kde-connect)
-15. [Overlay Position & Size](#overlay-position--size)
-16. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
-17. [Audio Routing](#audio-routing)
-18. [HUD Layout](#hud-layout)
-19. [BNO055 (Recommended IMU)](#bno055-recommended-imu)
-20. [Onboard Compass (MPU-9250 / GY-9250)](#onboard-compass-mpu-9250--gy-9250)
-21. [HUB75 Panel Layouts](#hub75-panel-layouts)
-22. [Configuration Reference](#configuration-reference)
-23. [Troubleshooting](#troubleshooting)
+7. [Uninstalling](#uninstalling)
+8. [Camera Resolution](#camera-resolution)
+9. [Camera Focus Control](#camera-focus-control)
+10. [Camera Rotation & Multi-Cam Layout](#camera-rotation--multi-cam-layout)
+11. [Night Vision (Exposure & Shutter)](#night-vision-exposure--shutter)
+12. [GPIO Buttons](#gpio-buttons)
+13. [USB Camera Picture-in-Picture](#usb-camera-picture-in-picture)
+14. [Android Mirror](#android-mirror)
+15. [Phone Integration (KDE Connect)](#phone-integration-kde-connect)
+16. [Overlay Position & Size](#overlay-position--size)
+17. [SmartKnob Menu Navigation](#smartknob-menu-navigation)
+18. [Audio Routing](#audio-routing)
+19. [HUD Layout](#hud-layout)
+20. [BNO055 (Recommended IMU)](#bno055-recommended-imu)
+21. [Onboard Compass (MPU-9250 / GY-9250)](#onboard-compass-mpu-9250--gy-9250)
+22. [HUB75 Panel Layouts](#hub75-panel-layouts)
+23. [Configuration Reference](#configuration-reference)
+24. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -346,11 +347,11 @@ The installer runs 11 steps:
 1. **Preflight** — checks OS, arch, and sudo availability; caches credentials once
 2. **Packages** — apt dependencies (GLFW, GLES, libcamera, OpenCV, libgpiod, ALSA, v4l2loopback-dkms, adb)
 3. **RP2350 audio** — checks for RP2350 USB audio device on `hw:CARD=HelmetAudio6Mic`
-4. **Boot config** — sets `gpu_mem=256`, `camera_auto_detect=1` in `/boot/config.txt`
+4. **Boot config** — sets `gpu_mem=256`, `camera_auto_detect=1`, `dtparam=i2c_arm=on` in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images)
 5. **udev** — stable `/dev/teensy`, `/dev/smartknob`, `/dev/lora` symlinks
 6. **Android** — v4l2loopback module config for Android mirror (`/dev/video4`)
 7. **Groups** — adds current user to `gpio dialout video render audio input`
-8. **Build** — CMake + Ninja (ImGui fetched automatically on first run)
+8. **Build** — CMake + Ninja (ImGui fetched automatically on first run); also seeds `config/config.json` from `config.example.json` on first install
 9. **Libraries** — installs VITURE SDK `.so` files to `/usr/local/lib`
 10. **Service** — optional systemd unit for auto-start
 11. **Summary** — lists what changed and what still needs a reboot
@@ -380,6 +381,13 @@ And launch ProtoHUD:
 ./scripts/run.sh                  # same, with startup diagnostics printed
 ./scripts/run.sh /path/to/alt.json  # explicit config path
 ```
+
+> **Your settings live in `config/config.json`.** The installer seeds it from
+> `config.example.json` on first run; thereafter it's yours to edit and is
+> git-ignored, so a `git pull` never clobbers it. `config.example.json` stays the
+> tracked reference of every key with inline `_note` docs — diff against it after
+> an update to see new options. Most settings are also editable live from the
+> in-HUD menu, which writes back to `config.json` on exit.
 
 ---
 
@@ -487,6 +495,42 @@ scripts/build.sh
 ```
 
 Network steps in `update.sh` retry with exponential backoff (2/4/8/16 s).
+
+---
+
+## Uninstalling
+
+`scripts/uninstall.sh` reverses `scripts/install.sh`. By default it removes only
+ProtoHUD-specific artifacts and leaves shared system settings alone:
+
+```bash
+./scripts/uninstall.sh            # remove ProtoHUD's own files (prompts once)
+./scripts/uninstall.sh --dry-run  # print exactly what would be removed, change nothing
+./scripts/uninstall.sh --purge    # also offer to revert boot config + lingering
+./scripts/uninstall.sh --yes      # skip the confirmation prompt
+```
+
+What it removes (default mode):
+
+- the `protohud.service` systemd unit + its DBus drop-in (stopped & disabled first)
+- `/etc/udev/rules.d/99-protohud.rules` (and reloads udev)
+- `/etc/sudoers.d/protohud`
+- `/etc/modprobe.d/v4l2loopback.conf` and the `v4l2loopback` line in `/etc/modules`
+- the VITURE SDK `.so` files in `/usr/local/lib` — **only** if they byte-match this
+  repo's copies (it won't clobber another app's library of the same name)
+- the `./protohud` symlink, and the `build/` directory (asks first)
+- resets the CPU governor to `ondemand`
+
+What it deliberately leaves alone (use `--purge` to review these interactively):
+
+- **Boot-config lines** (`gpu_mem`, `camera_auto_detect`, `dtparam=i2c_arm`) — other
+  software or the desktop may rely on them
+- **apt packages** — shared with the rest of the system; the only ProtoHUD-only one
+  is `v4l2loopback-dkms` (`sudo apt-get autoremove --purge v4l2loopback-dkms`)
+- **Group membership** and **user-session lingering**
+- **`config/config.json`** and your profiles/calibration — your settings survive
+
+The source tree itself is never touched; delete it with `rm -rf ~/ProtoHUD` when done.
 
 ---
 
@@ -1191,6 +1235,8 @@ Options: **Auto (BNO055 > MPU9250 > Viture)** · **BNO055** · **MPU‑9250** ·
 
 The chip publishes uncalibrated heading on power-up. Wave the helmet in a figure-8 a few times — calibration status updates per axis and Auto will commit to BNO055 once `calib_sys ≥ 2`. If you want it immediately regardless of calibration, force **BNO055** explicitly.
 
+**Restart IMU Sensor** (also under `HUD → Compass`) tears down and re-initialises the chip without restarting ProtoHUD — the row label shows `[connected]` / `[offline]` and a toast reports the result. Use it when the sensor wasn't powered or ready at boot: the BNO055 needs ~1 s after power-on before it answers (the UART variant especially), and a sensor brought up late would otherwise stay offline until the next launch. The startup path already waits out that window and retries, so this is the manual nudge for the late-power case (or after re-seating wiring while the HUD is running).
+
 ---
 
 ## Onboard Compass (MPU-9250 / GY-9250)
@@ -1580,9 +1626,20 @@ Legacy single-block configs (`cfg["protoface"]["hub75"]`) migrate to `hub75_layo
 | `adafruit_bonnet` *(default)* | Single-connector **Adafruit RGB Matrix Bonnet / HAT** | One output; panels daisy-chained (serpentine for multi-row). Plain `Geometry(width, height, n_addr_lines)` |
 | `active3` | Triple-connector **Active-3** board | Up to 3 parallel chains sharing address lines via the multilane mapper |
 
-Append `_bgr` (e.g. `adafruit_bonnet_bgr`) if red and blue come out swapped.
-
 > **Single connector = one chain.** The Adafruit bonnet has a single HUB75 output, so `parallel` collapses to 1 (multi-row builds are wired **serpentine** and the geometry stacks them by height). The Active-3 board is the only one that drives genuine parallel lanes. The `arrangement` / `panel_count` you set above feed the driver's `--chain`/`--parallel` automatically, so just pick the layout and the right `pinout`.
+
+### Color order
+
+If your panels show the wrong colors — red and green swapped, red and blue swapped, etc. — set the channel order instead of editing wiring. Menu trail: **Face Display → Protoface → Hardware → Color Order**. Selecting an option restarts the panel driver so the change applies within a second or two; cycle through until the colors are right.
+
+| Option | Use when |
+|--------|----------|
+| `Auto (board default)` *(default)* | the pinout's native order (straight RGB on the Adafruit bonnet; the `(G,B,R)` rotate on `active3`) |
+| `GRB` | **red and green are swapped** (the most common case) |
+| `BGR` | red and blue are swapped |
+| `RGB` / `RBG` / `GBR` / `BRG` | any other permutation — try them until correct |
+
+Stored per HUB75 layout as `color_order` (so different builds can differ) and also settable directly in config. This supersedes the older `_bgr` pinout suffix — `Auto` + `Color Order` covers every channel permutation, not just red/blue.
 
 ### Pixel editor extras (MAX7219 / RGB matrix)
 
@@ -1673,6 +1730,16 @@ sudo apt-get install libglfw3-dev
 export PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
 ```
 
+### Build fails: `gpiod_line_settings`/`gpiod_chip_open` errors in `src/input/`
+
+The GPIO input code uses the **libgpiod v2** API. Bookworm and Trixie ship libgpiod 2.x, but older Bullseye ships 1.6 (v1 API), where `gpiod_line_settings`, `gpiod_line_config`, `GPIOD_LINE_EDGE_BOTH`, etc. don't exist and `gpio_buttons.cpp` / `gpio_inputs.cpp` fail to compile. Check the version:
+
+```bash
+pkg-config --modversion libgpiod    # need >= 2.0
+```
+
+Fix by moving to a Bookworm/Trixie image (recommended), or backport libgpiod 2.x. (This is also the one expected failure when building in a Bullseye-era CI/container — every other translation unit compiles.)
+
 ### Android mirror: "V4L2 sink /dev/video4 not ready"
 
 ```bash
@@ -1716,8 +1783,9 @@ ln -sf build/protohud ~/ProtoHUD/protohud
 sudo i2cdetect -y 1   # must show 28 (or 29 if ADR jumper closed)
 ```
 
-- **Empty grid** → wiring / power / mode problem (see [BNO055 wiring & gotchas](#bno055-recommended-imu)). `i2c_arm=on` in `/boot/firmware/config.txt` must be set (the install script handles this).
+- **Empty grid** → wiring / power / mode problem (see [BNO055 wiring & gotchas](#bno055-recommended-imu)). `i2c_arm=on` in `/boot/firmware/config.txt` must be set (the install script handles this). In **UART** mode the chip won't appear on `i2cdetect` at all — that's expected; probe the serial port instead.
 - **`28` present but the HUD doesn't pick it up** → confirm the `"bno055"` block is in your **live** `~/protohud/config/config.json` (not just `config.example.json`). `grep -A6 '"bno055"' ~/protohud/config/config.json` should print the block.
+- **Sensor wasn't powered/ready at boot** → the BNO055 needs ~1 s after power-on before it responds, so a sensor that powers up late comes up offline. ProtoHUD now waits out that window and retries at startup, but if it still shows offline, trigger **HUD → Compass → Restart IMU Sensor** — it re-runs the full init without restarting ProtoHUD and toasts the result. No need to restart the app or reboot.
 - **Chip detected and config loaded but heading frozen** → check `HUD → Compass → IMU Source`. If it's set to **Auto** and the chip is still warming up its calibration, force **BNO055** to bypass the freshness gate.
 
 ### KDE Connect bridge can't see the phone
