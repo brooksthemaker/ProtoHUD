@@ -17,6 +17,9 @@
 
 #include <cstdint>
 #include <random>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <opencv2/core.hpp>
 #include <nlohmann/json.hpp>
@@ -44,6 +47,11 @@ struct GlitchConfig {
 
     nlohmann::json to_json() const;
     static GlitchConfig from_json(const nlohmann::json& j);
+
+    // Curated looks, in menu order. Each preset is a complete config (with
+    // enabled = true) — applying one overwrites every variable, after which
+    // the individual sliders tweak from there.
+    static const std::vector<std::pair<std::string, GlitchConfig>>& presets();
 };
 
 class GlitchEffect {

@@ -70,6 +70,10 @@ public:
 
     bool start();
     void stop();
+    // Tear down and re-init the chip (re-runs the power-on settle + CHIP_ID
+    // poll). Wired to a menu action so a sensor that wasn't ready at boot can
+    // be brought up without restarting ProtoHUD. Returns true on success.
+    bool restart();
     bool connected() const { return running_.load(); }
 
     // Live tuning from the menu — picked up next poll cycle.
