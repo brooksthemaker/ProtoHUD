@@ -429,6 +429,36 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
                 "Best when calibration reads 3/3 — rotate the head through "
                 "several orientations and a figure-8 for the magnetometer.");
         }(),
+        [&]() -> MenuItem {
+            // Re-init the BNO055 without restarting ProtoHUD — for a sensor
+            // that wasn't powered/ready at boot (the chip needs ≥1 s after
+            // power-on before it talks). restart() stops + joins the poll
+            // thread and sleeps through the settle window, so it must NOT run
+            // on the render thread — hand it to a detached worker.
+            MenuItem m = leaf("Restart IMU Sensor", [bno055, state_ptr]{
+                if (!bno055) return;
+                std::thread([bno055, state_ptr]{
+                    const bool ok = bno055->restart();
+                    if (!state_ptr) return;
+                    Notification n; n.type = NotifType::App;
+                    n.title = ok ? "IMU sensor connected" : "IMU sensor not found";
+                    n.body  = ok ? "BNO055 re-initialised and streaming."
+                                 : "No response — check wiring/power, then retry.";
+                    n.auto_dismiss_s = 5.f;
+                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                    state_ptr->notifs.push(std::move(n));
+                }).detach();
+            });
+            m.label_fn = [bno055]{
+                return std::string("Restart IMU Sensor  [") +
+                       (bno055 && bno055->connected() ? "connected" : "offline") + "]";
+            };
+            return with_desc(std::move(m),
+                "Tear down and re-initialise the BNO055. Use when the sensor "
+                "wasn't ready at boot — the chip needs about a second after "
+                "power-on before it responds, so a sensor powered late comes "
+                "up offline until you trigger this. No ProtoHUD restart needed.");
+        }(),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },

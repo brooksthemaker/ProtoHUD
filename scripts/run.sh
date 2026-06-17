@@ -23,4 +23,12 @@ for grp in video dialout; do
 done
 
 CONFIG="${1:-${ROOT}/config/config.json}"
+# Seed config.json from the tracked example on first run so the explicit path
+# resolves (the binary only auto-falls-back to the example when launched with
+# no argument). Never clobbers existing edits.
+if [ ! -f "${CONFIG}" ] && [ "${CONFIG}" = "${ROOT}/config/config.json" ] \
+   && [ -f "${ROOT}/config/config.example.json" ]; then
+    cp "${ROOT}/config/config.example.json" "${CONFIG}"
+    echo "First run: seeded ${CONFIG} from config.example.json"
+fi
 exec "${BIN}" "${CONFIG}"

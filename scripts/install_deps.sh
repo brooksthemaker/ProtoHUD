@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Install all build dependencies for ProtoHUD on CM5 (Raspberry Pi OS Bullseye 64-bit).
-# Tested on: Raspberry Pi OS Bullseye (Debian 11) aarch64
+# Install all build dependencies for ProtoHUD on CM5 (aarch64).
+# Tested on: Raspberry Pi OS Bookworm (Debian 12) / Debian Trixie aarch64.
 #
 # This script is a lightweight alternative to install.sh — it installs only the
 # build-time libraries without configuring overlays, services, or boot config.
-# For a full system setup run scripts/install.sh instead.
+# For a full system setup (udev, groups, service, boot config) run
+# scripts/install.sh instead, and scripts/uninstall.sh to reverse it.
 set -euo pipefail
 
 sudo apt-get update
@@ -27,7 +28,9 @@ sudo apt-get install -y libopencv-dev
 # nlohmann-json (header-only, CMake target: nlohmann_json::nlohmann_json)
 sudo apt-get install -y nlohmann-json3-dev
 
-# libgpiod v1.6 (GPIO button input — Bullseye ships 1.6.x, v1 API)
+# libgpiod v2 (GPIO button input — code uses the v2 API; Bookworm/Trixie ship 2.x).
+# On older Bullseye (libgpiod 1.6) the GPIO input TUs won't compile — upgrade the
+# OS or backport libgpiod 2.x.
 sudo apt-get install -y libgpiod-dev
 
 # ALSA (audio routing: capture from RP2350 USB Audio, playback to output device)
