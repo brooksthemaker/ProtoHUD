@@ -29,6 +29,12 @@ public:
     void set_sleep_timeout(uint16_t seconds);
     void set_haptic(uint8_t amplitude, uint8_t frequency, uint8_t detent_strength);
 
+    // Configure detent-index endstops (Scott-style bounded rotation). The knob
+    // refuses to turn past [min_pos, max_pos]. Pass max_pos <= min_pos for
+    // free-spinning / unbounded rotation. spacing_deg/start_pos are advisory.
+    void set_range(int16_t min_pos, int16_t max_pos,
+                   uint8_t spacing_deg = 0, int16_t start_pos = 0);
+
     void on_move  (KnobMoveCallback cb)   { move_cb_   = std::move(cb); }
     void on_wake  (KnobWakeCallback cb)   { wake_cb_   = std::move(cb); }
     void on_status(KnobStatusCallback cb) { status_cb_ = std::move(cb); }
