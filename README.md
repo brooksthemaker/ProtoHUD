@@ -496,6 +496,13 @@ scripts/build.sh
 
 Network steps in `update.sh` retry with exponential backoff (2/4/8/16 s).
 
+**Update speed.** Rebuilds are tuned to be fast: `update.sh` **skips the build
+entirely** when a pull changed no buildable files (docs/config/Python/script-only
+updates apply instantly), and the build uses **ccache** (object-file cache) and
+the **mold** linker automatically when present — both installed by `install.sh`
+and detected by CMake, with a clean fallback if they're missing. A precompiled
+header cuts full-rebuild time after a shared header changes.
+
 ---
 
 ## Uninstalling

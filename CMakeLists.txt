@@ -13,6 +13,45 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O2")
 set(CMAKE_CXX_FLAGS_DEBUG   "-g -DDEBUG")
 
+# ── Build-speed tuning ────────────────────────────────────────────────────────
+# All optional — each degrades gracefully when the tool isn't installed, so the
+# build still works on a bare system. scripts/install.sh installs ccache + mold.
+
+# ccache: cache object files so re-pulls, branch switches and reverts reuse
+# unchanged compiles instead of recompiling. The biggest win for OTA updates.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_C_COMPILER_LAUNCHER   "${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    message(STATUS "ccache enabled: ${CCACHE_PROGRAM}")
+endif()
+
+# Faster linker: the final binary relinks on EVERY build, so a quicker linker
+# (mold, then lld) shaves real time off each update. check_linker_flag verifies
+# the toolchain actually accepts the flag before using it, so an old GCC that
+# can't drive mold just falls back to the default linker.
+include(CheckLinkerFlag)
+set(_have_fast_linker FALSE)
+find_program(MOLD_PROGRAM mold)
+if(MOLD_PROGRAM)
+    check_linker_flag(CXX "-fuse-ld=mold" _LINK_MOLD_OK)
+    if(_LINK_MOLD_OK)
+        add_link_options("-fuse-ld=mold")
+        set(_have_fast_linker TRUE)
+        message(STATUS "Using mold linker: ${MOLD_PROGRAM}")
+    endif()
+endif()
+if(NOT _have_fast_linker)
+    find_program(LLD_PROGRAM ld.lld)
+    if(LLD_PROGRAM)
+        check_linker_flag(CXX "-fuse-ld=lld" _LINK_LLD_OK)
+        if(_LINK_LLD_OK)
+            add_link_options("-fuse-ld=lld")
+            message(STATUS "Using lld linker: ${LLD_PROGRAM}")
+        endif()
+    endif()
+endif()
+
 # ── Git hash compile definition ───────────────────────────────────────────────
 
 execute_process(
@@ -313,6 +352,26 @@ target_compile_definitions(protohud PRIVATE
 set_target_properties(protohud PROPERTIES
     BUILD_RPATH   "${VITURE_LIB_DIR}"
     INSTALL_RPATH "\$ORIGIN/../lib"
+)
+
+# ── Precompiled header ────────────────────────────────────────────────────────
+# Every TU drags in these stable, heavy headers; compiling them once instead of
+# re-parsing per file is a big chunk of full-rebuild time (the common case after
+# a pull touches a shared project header). Deliberately limited to third-party /
+# STL headers — project headers churn and would just keep invalidating the PCH.
+target_precompile_headers(protohud PRIVATE
+    <algorithm>
+    <atomic>
+    <chrono>
+    <cstdint>
+    <functional>
+    <memory>
+    <mutex>
+    <string>
+    <thread>
+    <vector>
+    <nlohmann/json.hpp>
+    <imgui.h>
 )
 
 # ── Assets & Config ────────────────────────────────────────���──────────────────
