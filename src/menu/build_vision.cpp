@@ -11,6 +11,8 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 #include <chrono>
 #include <cfloat>
 #include <cmath>
@@ -329,6 +331,30 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         bool&                           awb_flag,
         CameraResolutionState&          res_st)
     {
+        // Helpers for the extended controls: a radio-list submenu bound to a
+        // DmaCamera int setter/getter, and a slider bound to a float one. Menu
+        // values match libcamera's enum numbers so they pass straight through.
+        auto enum_sub = [cam_ptr](std::vector<std::pair<std::string,int>> opts,
+                                  std::function<void(DmaCamera*,int)> set,
+                                  std::function<int(DmaCamera*)>      get) {
+            std::vector<MenuItem> v;
+            for (auto& o : opts) {
+                int val = o.second;
+                v.push_back(leaf_sel(o.first,
+                    [cam_ptr, set, val]{ if (auto* c = cam_ptr()) set(c, val); },
+                    [cam_ptr, get, val]{ auto* c = cam_ptr(); return c && get(c) == val; }));
+            }
+            return v;
+        };
+        auto fslider = [cam_ptr](std::string lbl, float mn, float mx, float st,
+                                 std::string unit,
+                                 std::function<void(DmaCamera*,float)> set,
+                                 std::function<float(DmaCamera*)>      get) {
+            return slider(std::move(lbl), mn, mx, st, std::move(unit),
+                [cam_ptr, get]{ auto* c = cam_ptr(); return c ? get(c) : 0.f; },
+                [cam_ptr, set](float v){ if (auto* c = cam_ptr()) set(c, v); });
+        };
+
         std::vector<MenuItem> fm = {
             leaf_sel("Manual", [cameras, cam_ptr, &focus_st]{
                 focus_st.mode = CameraFocusState::Mode::MANUAL;
@@ -353,6 +379,16 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 }),
         };
 
+        // AF range/speed live alongside the focus mode (PDAF sensors only).
+        fm.push_back(submenu("AF Range", enum_sub(
+            {{"Normal", 0}, {"Macro", 1}, {"Full", 2}},
+            [](DmaCamera* c, int v){ c->set_af_range(v); },
+            [](DmaCamera* c){ return c->af_range(); })));
+        fm.push_back(submenu("AF Speed", enum_sub(
+            {{"Normal", 0}, {"Fast", 1}},
+            [](DmaCamera* c, int v){ c->set_af_speed(v); },
+            [](DmaCamera* c){ return c->af_speed(); })));
+
         std::vector<MenuItem> wbm;
         wbm.push_back(toggle("Auto WB",
             [&awb_flag]{ return awb_flag; },
@@ -360,6 +396,13 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 awb_flag = v;
                 if (auto* c = cam_ptr()) c->set_awb_enable(v);
             }));
+        // Preset illuminant modes (ISP picks the gains) — alt to the manual
+        // Kelvin presets below.
+        wbm.push_back(submenu("AWB Mode", enum_sub(
+            {{"Auto", 0}, {"Daylight", 5}, {"Cloudy", 6}, {"Incandescent", 1},
+             {"Tungsten", 2}, {"Fluorescent", 3}, {"Indoor", 4}},
+            [](DmaCamera* c, int v){ c->set_awb_mode(v); },
+            [](DmaCamera* c){ return c->awb_mode(); })));
         for (const auto& p : WB_PRESETS)
             wbm.push_back(leaf(p.label, [cam_ptr, k = p.k]{
                 if (auto* c = cam_ptr()) c->set_colour_temp(k);
@@ -441,9 +484,66 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         resm.push_back(std::move(res_status));
         for (auto& r : res_rows) resm.push_back(std::move(r));
 
+        // ── Exposure (AE tuning + manual gain) ────────────────────────────────
+        std::vector<MenuItem> expm = {
+            submenu("Metering", enum_sub(
+                {{"Centre-Weighted", 0}, {"Spot", 1}, {"Matrix", 2}},
+                [](DmaCamera* c, int v){ c->set_ae_metering(v); },
+                [](DmaCamera* c){ return c->ae_metering(); })),
+            submenu("Constraint", enum_sub(
+                {{"Normal", 0}, {"Highlight", 1}, {"Shadows", 2}},
+                [](DmaCamera* c, int v){ c->set_ae_constraint(v); },
+                [](DmaCamera* c){ return c->ae_constraint(); })),
+            submenu("Exposure Profile", enum_sub(
+                {{"Normal", 0}, {"Short", 1}, {"Long", 2}},
+                [](DmaCamera* c, int v){ c->set_ae_exposure_mode(v); },
+                [](DmaCamera* c){ return c->ae_exposure_mode(); })),
+            submenu("Anti-Flicker", enum_sub(
+                {{"Off", 0}, {"Auto", 1}, {"50 Hz", 2}, {"60 Hz", 3}},
+                [](DmaCamera* c, int v){ c->set_flicker_mode(v); },
+                [](DmaCamera* c){ return c->flicker_mode(); })),
+            with_desc(fslider("Manual Gain", 0.f, 16.f, 0.5f, "x",
+                [](DmaCamera* c, float v){ c->set_analogue_gain(v); },
+                [](DmaCamera* c){ return c->analogue_gain_target(); }),
+                "Manual sensor (analogue) gain. 0 = leave on auto. Takes effect "
+                "with auto-exposure off (set a manual Shutter Speed)."),
+        };
+
+        // ── Image (ISP tuning) ────────────────────────────────────────────────
+        std::vector<MenuItem> imgm = {
+            fslider("Brightness", -1.f, 1.f, 0.1f, "",
+                [](DmaCamera* c, float v){ c->set_brightness(v); },
+                [](DmaCamera* c){ return c->brightness(); }),
+            fslider("Contrast", 0.f, 2.f, 0.1f, "",
+                [](DmaCamera* c, float v){ c->set_contrast(v); },
+                [](DmaCamera* c){ return c->contrast(); }),
+            fslider("Saturation", 0.f, 2.f, 0.1f, "",
+                [](DmaCamera* c, float v){ c->set_saturation(v); },
+                [](DmaCamera* c){ return c->saturation(); }),
+            fslider("Sharpness", 0.f, 2.f, 0.1f, "",
+                [](DmaCamera* c, float v){ c->set_sharpness(v); },
+                [](DmaCamera* c){ return c->sharpness(); }),
+            submenu("Noise Reduction", enum_sub(
+                {{"Off", 0}, {"Fast", 1}, {"High Quality", 2}, {"Minimal", 3}},
+                [](DmaCamera* c, int v){ c->set_noise_reduction(v); },
+                [](DmaCamera* c){ return c->noise_reduction(); })),
+        };
+
+        // ── HDR (on-sensor; IMX708 / Camera Module 3) ─────────────────────────
+        auto hdrm = enum_sub(
+            {{"Off", 0}, {"Single Exposure", 3}, {"Multi Exposure", 2}, {"Night", 4}},
+            [](DmaCamera* c, int v){ c->set_hdr_mode(v); },
+            [](DmaCamera* c){ return c->hdr_mode(); });
+
         return std::vector<MenuItem>{
             submenu("Focus",          std::move(fm)),
+            submenu("Exposure",       std::move(expm)),
             submenu("White Balance",  std::move(wbm)),
+            submenu("Image",          std::move(imgm)),
+            with_desc(submenu("HDR",  std::move(hdrm)),
+                "On-sensor HDR (IMX708 / Camera Module 3). Needs a recent "
+                "libcamera that exposes HdrMode at runtime; on sensors that "
+                "don't, the options are a no-op."),
             submenu("Rotation",       std::move(rm)),
             with_desc(submenu("Resolution", std::move(resm)),
                 "Set THIS camera's capture resolution from the modes the sensor "
