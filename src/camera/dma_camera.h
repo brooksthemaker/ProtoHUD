@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -60,6 +61,16 @@ public:
         int         rotation_deg = 0;
     };
 
+    // A capture mode the sensor actually supports, as reported by libcamera.
+    // max_fps is 0 when unknown — the simple path leaves it 0 and lets libcamera
+    // clamp the requested rate; a future "probe each mode's FrameDurationLimits"
+    // pass can fill it in without changing this struct or supported_modes().
+    struct Mode {
+        int width   = 0;
+        int height  = 0;
+        int max_fps = 0;   // 0 = unknown (not yet probed)
+    };
+
     DmaCamera();
     ~DmaCamera();
 
@@ -98,8 +109,23 @@ public:
     bool  is_ok()           const { return ok_; }
     int   width()           const { return cfg_.width; }
     int   height()          const { return cfg_.height; }
+    int   fps()             const { return cfg_.fps; }
     const std::string& model_name() const { return cfg_.model_name; }
     float analogue_gain()   const { return last_analogue_gain_.load(); }
+
+    // Measured capture rate, derived from the per-frame FrameDuration metadata
+    // (0 until the first frame completes). Lets the menu show the real fps the
+    // sensor settled on rather than the requested target.
+    float measured_fps()    const {
+        int64_t us = last_frame_dur_us_.load();
+        return us > 0 ? 1.0e6f / static_cast<float>(us) : 0.0f;
+    }
+
+    // Resolutions this sensor reports for the negotiated pixel format, captured
+    // once during init(). Empty if init() hasn't run / the sensor reported none.
+    // Sorted largest-area first. Each DmaCamera is one physical sensor, so this
+    // is inherently per-camera.
+    const std::vector<Mode>& supported_modes() const { return modes_; }
 
     // Display rotation (0, 90, 180, 270 — snapped). Live-tunable from any
     // thread; the next draw() picks up the change via an atomic read.
@@ -199,6 +225,10 @@ private:
     std::atomic<int>   last_af_state_      { 0 };        // AfState enum value
     std::atomic<float> last_lens_pos_      { 0.0f };     // LensPosition diopters
     std::atomic<float> last_analogue_gain_ { 1.0f };     // AnalogueGain (1.0 = ISO100 equiv)
+    std::atomic<int64_t> last_frame_dur_us_ { 0 };       // FrameDuration µs (0 = no frame yet)
+
+    // Sensor-reported capture modes for the negotiated format (filled in init()).
+    std::vector<Mode> modes_;
 
     Config cfg_;
     bool   ok_ = false;

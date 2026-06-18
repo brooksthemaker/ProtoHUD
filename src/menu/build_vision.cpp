@@ -276,7 +276,9 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 if (!cameras) return;
                 if (cameras->set_resolution(w, h, fps)) {
                     std::lock_guard<std::mutex> lk(state.mtx);
-                    state.camera_resolution = { w, h, fps };
+                    // "Both eyes" shortcut — keep both per-eye states in sync.
+                    state.camera_resolution       = { w, h, fps };
+                    state.camera_resolution_right = { w, h, fps };
                 }
             },
             [&state, w = p.w, h = p.h]{ return state.camera_resolution.width == w && state.camera_resolution.height == h; }
@@ -324,7 +326,8 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     auto make_cam_menu = [&](
         std::function<DmaCamera*()>     cam_ptr,
         CameraFocusState&               focus_st,
-        bool&                           awb_flag)
+        bool&                           awb_flag,
+        CameraResolutionState&          res_st)
     {
         std::vector<MenuItem> fm = {
             leaf_sel("Manual", [cameras, cam_ptr, &focus_st]{
@@ -377,19 +380,86 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
             rot_item("270\xc2\xb0 (Counterclockwise)", 270),
         };
 
+        // Resolution — built LIVE from this sensor's own reported modes, so any
+        // CSI camera shows valid options instead of a fixed preset list (the
+        // cause of "pick 1440p, nothing changes" on sensors that lack it).
+        // Selecting a mode requests the current target fps; libcamera clamps to
+        // what the sensor can do at that size, and the Current row shows the
+        // real measured fps. Per-camera, so each eye is set independently.
+        MenuItem res_status;
+        res_status.type     = MenuItemType::LEAF;
+        res_status.label    = "Current";
+        res_status.label_fn = [cam_ptr]{
+            auto* c = cam_ptr();
+            if (!c) return std::string("Current: (camera offline)");
+            char b[64];
+            snprintf(b, sizeof(b), "Current: %d x %d  @ %.0f fps",
+                     c->width(), c->height(), c->measured_fps());
+            return std::string(b);
+        };
+        res_status.action = []{};   // informational row
+
+        auto res_rows = make_dynamic_rows(16,
+            [cam_ptr]{ auto* c = cam_ptr();
+                       return c ? static_cast<int>(c->supported_modes().size()) : 0; },
+            [cam_ptr, &res_st, &state](int i) {
+                MenuItem m;
+                m.type     = MenuItemType::LEAF;
+                m.label    = "mode";
+                m.label_fn = [cam_ptr, i]{
+                    auto* c = cam_ptr(); if (!c) return std::string();
+                    const auto& ms = c->supported_modes();
+                    if (i >= static_cast<int>(ms.size())) return std::string();
+                    char b[32];
+                    snprintf(b, sizeof(b), "%d x %d", ms[i].width, ms[i].height);
+                    return std::string(b);
+                };
+                m.get_state = [cam_ptr, i]{
+                    auto* c = cam_ptr(); if (!c) return false;
+                    const auto& ms = c->supported_modes();
+                    return i < static_cast<int>(ms.size())
+                        && c->width()  == ms[i].width
+                        && c->height() == ms[i].height;
+                };
+                m.action = [cam_ptr, &res_st, &state, i]{
+                    auto* c = cam_ptr(); if (!c) return;
+                    const auto& ms = c->supported_modes();
+                    if (i >= static_cast<int>(ms.size())) return;
+                    // reconfigure() runs on the render thread (menu actions do),
+                    // matching how the global preset calls set_resolution().
+                    if (c->reconfigure(ms[i].width, ms[i].height, c->fps())) {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        res_st.width  = c->width();
+                        res_st.height = c->height();
+                        res_st.fps    = c->fps();
+                    }
+                };
+                return m;
+            });
+
+        std::vector<MenuItem> resm;
+        resm.push_back(std::move(res_status));
+        for (auto& r : res_rows) resm.push_back(std::move(r));
+
         return std::vector<MenuItem>{
             submenu("Focus",          std::move(fm)),
             submenu("White Balance",  std::move(wbm)),
             submenu("Rotation",       std::move(rm)),
+            with_desc(submenu("Resolution", std::move(resm)),
+                "Set THIS camera's capture resolution from the modes the sensor "
+                "actually reports. fps follows the camera's limit at that size; "
+                "the Current row shows the real measured rate."),
         };
     };
 
     auto left_cam_menu  = make_cam_menu(
         [cameras]{ return cameras ? cameras->owl_left()  : nullptr; },
-        state.focus_left,  state.night_vision.csi_awb_left);
+        state.focus_left,  state.night_vision.csi_awb_left,
+        state.camera_resolution);
     auto right_cam_menu = make_cam_menu(
         [cameras]{ return cameras ? cameras->owl_right() : nullptr; },
-        state.focus_right, state.night_vision.csi_awb_right);
+        state.focus_right, state.night_vision.csi_awb_right,
+        state.camera_resolution_right);
 
     // ── Digital zoom presets (both eyes together) ─────────────────────────────
     struct ZoomPreset { const char* label; float zoom; };

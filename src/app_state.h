@@ -866,7 +866,8 @@ struct AppState {
     LightSquintConfig    light_squint;
     VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;
-    CameraResolutionState camera_resolution;
+    CameraResolutionState camera_resolution;        // left / primary eye
+    CameraResolutionState camera_resolution_right;   // right eye (set independently)
     ZoomCropState        zoom_left, zoom_right;
     MirrorCropState      mirror_crop;
     CamSingleState       cam_single;

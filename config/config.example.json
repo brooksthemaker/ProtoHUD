@@ -407,12 +407,7 @@
     "fourcc": "mp4v",
     "camera": "left"
   },
-  "resolution": {
-    "_note": "Persisted OWLsight resolution. Overrides cameras.owlsight_left/right width/height/fps on startup. fps set to match display.target_fps (90) for lowest latency; libcamera clamps to the sensor's achievable rate.",
-    "width":  1280,
-    "height":  800,
-    "fps":      90
-  },
+  "_resolution_note": "Capture resolution is per-camera — set cameras.owlsight_left/right width/height/fps independently (Menu > Cameras > Left/Right Camera > Resolution, populated live from the modes each sensor reports). fps is a best-effort target; libcamera clamps to the sensor's achievable rate at the chosen size. A legacy top-level 'resolution' block that forced both eyes equal is still honoured on load for old configs but is retired on the next save.",
   "qr": {
     "_note": "Persisted QR scan state. scan_main=OWLsight cameras, scan_usb=USB cameras.",
     "scan_main": false,

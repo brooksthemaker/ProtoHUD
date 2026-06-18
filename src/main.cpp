@@ -1318,7 +1318,10 @@ int main(int argc, char* argv[]) {
         owl_right.fps          = jr.value("fps",      60);
         owl_right.rotation_deg = jr.value("rotation_deg", 0);
     }
-    // Override both eyes from the persisted resolution section (set by in-app preset menu)
+    // Back-compat: older builds persisted a single top-level "resolution" block
+    // that forced BOTH eyes to one value. Newer builds save per-eye under
+    // owlsight_left/right and drop this block on save, so this only fires for
+    // configs written before per-camera resolution existed.
     if (cfg.contains("resolution")) {
         const auto& jres = cfg["resolution"];
         int w   = jres.value("width",  owl_left.width);
@@ -2118,10 +2121,13 @@ int main(int argc, char* argv[]) {
     if (!splash_cfg.image_path.empty() && splash_cfg.image_path[0] != '/')
         splash_cfg.image_path = res(splash_cfg.image_path);
 
-    // Seed resolution state from whatever the OWLsight config says
-    state.camera_resolution.width  = owl_left.width;
-    state.camera_resolution.height = owl_left.height;
-    state.camera_resolution.fps    = owl_left.fps;
+    // Seed per-eye resolution state from whatever each OWLsight config says
+    state.camera_resolution.width        = owl_left.width;
+    state.camera_resolution.height       = owl_left.height;
+    state.camera_resolution.fps          = owl_left.fps;
+    state.camera_resolution_right.width  = owl_right.width;
+    state.camera_resolution_right.height = owl_right.height;
+    state.camera_resolution_right.fps    = owl_right.fps;
 
     // ── Audio engine ──────────────────────────────────────────────────────────
 
@@ -4775,9 +4781,17 @@ int main(int argc, char* argv[]) {
             cfg["weather"]["interval_min"] = wc.interval_min;
         }
 
-        cfg["resolution"]["width"]  = state.camera_resolution.width;
-        cfg["resolution"]["height"] = state.camera_resolution.height;
-        cfg["resolution"]["fps"]    = state.camera_resolution.fps;
+        // Per-eye resolution lives under each camera's own block now. The legacy
+        // top-level "resolution" block (which forced BOTH eyes to one value) is
+        // retired on save so independent per-eye settings persist; the loader
+        // still honours it for back-compat with configs from older builds.
+        cfg["cameras"]["owlsight_left"]["width"]   = state.camera_resolution.width;
+        cfg["cameras"]["owlsight_left"]["height"]  = state.camera_resolution.height;
+        cfg["cameras"]["owlsight_left"]["fps"]     = state.camera_resolution.fps;
+        cfg["cameras"]["owlsight_right"]["width"]  = state.camera_resolution_right.width;
+        cfg["cameras"]["owlsight_right"]["height"] = state.camera_resolution_right.height;
+        cfg["cameras"]["owlsight_right"]["fps"]    = state.camera_resolution_right.fps;
+        cfg.erase("resolution");
 
         // Persist CSI display rotation so the in-app setting survives a
         // restart (rotation_deg lives next to the camera-id/width/height/fps
@@ -5712,6 +5726,7 @@ int main(int argc, char* argv[]) {
             snap.bt_devices         = state.bt_devices;
             snap.serial_metrics     = state.serial_metrics;
             snap.camera_resolution  = state.camera_resolution;
+            snap.camera_resolution_right = state.camera_resolution_right;
             snap.zoom_left          = state.zoom_left;
             snap.zoom_right         = state.zoom_right;
             snap.theater_mode       = state.theater_mode;
@@ -5898,8 +5913,11 @@ int main(int argc, char* argv[]) {
         // the camera's native aspect ratio. Black bars are filled by glClear().
         auto make_theater_vp = [&snap](int fw, int fh, bool right_eye) -> std::array<int,4> {
             using TA = AppState::TheaterAnchor;
-            float cam_ar  = (float)snap.camera_resolution.width
-                          / snap.camera_resolution.height;
+            // Each eye preserves its OWN camera aspect ratio (the eyes can run
+            // different resolutions now).
+            const auto& cam_res = right_eye ? snap.camera_resolution_right
+                                            : snap.camera_resolution;
+            float cam_ar  = (float)cam_res.width / cam_res.height;
             float disp_ar = (float)fw / fh;
             int vp_w, vp_h, vp_x, vp_y;
             if (cam_ar < disp_ar) {   // pillarbox: black left/right

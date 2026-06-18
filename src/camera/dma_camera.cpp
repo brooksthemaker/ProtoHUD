@@ -8,6 +8,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
+#include <algorithm>
 #include <iostream>
 #include <cstring>
 #include <chrono>
@@ -176,9 +177,34 @@ bool DmaCamera::configure_camera() {
     stream_ = sc.stream();
     stride_ = sc.stride;
 
+    // ── Enumerate the sensor's supported resolutions for this format ──────────
+    // Captured once so the menu can offer the camera's REAL modes instead of a
+    // fixed preset list (the cause of "pick 1440p, nothing changes" on sensors
+    // that don't support it). sizes() is the discrete set libcamera reports for
+    // the negotiated pixel format; sorted largest-area first for stable order.
+    // max_fps is left 0 here (the in-depth path can probe FrameDurationLimits
+    // per mode later); selecting a mode requests a target fps and libcamera
+    // clamps it to what the sensor can do at that size.
+    modes_.clear();
+    try {
+        for (const auto& s : sc.formats().sizes(sc.pixelFormat))
+            modes_.push_back({ static_cast<int>(s.width),
+                               static_cast<int>(s.height), 0 });
+        std::sort(modes_.begin(), modes_.end(),
+                  [](const Mode& a, const Mode& b){
+                      return static_cast<long>(a.width) * a.height
+                           > static_cast<long>(b.width) * b.height;
+                  });
+        modes_.erase(std::unique(modes_.begin(), modes_.end(),
+                     [](const Mode& a, const Mode& b){
+                         return a.width == b.width && a.height == b.height;
+                     }), modes_.end());
+    } catch (...) {}
+
     std::cout << "[dma] camera " << cfg_.libcamera_id
               << " configured: " << cfg_.width << "×" << cfg_.height
-              << " stride=" << stride_ << " fps=" << cfg_.fps << "\n";
+              << " stride=" << stride_ << " fps=" << cfg_.fps
+              << " (" << modes_.size() << " modes reported)\n";
     return true;
 }
 
@@ -381,6 +407,8 @@ void DmaCamera::on_request_complete(Request* req) {
             last_lens_pos_.store(meta.get(controls::LensPosition).value_or(0.0f));
         if (camCtrls.count(&controls::AnalogueGain))
             last_analogue_gain_.store(meta.get(controls::AnalogueGain).value_or(1.0f));
+        // Real per-frame duration (µs) → drives measured_fps() in the menu.
+        last_frame_dur_us_.store(meta.get(controls::FrameDuration).value_or(0));
     } catch (...) {}
 
     auto it = req_to_slot_.find(req);
