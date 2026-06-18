@@ -365,16 +365,36 @@ bool CameraManager::draw_tex_fullscreen(GLuint tex) const {
 
 // ── Resolution hot-swap ────────────────────────────────────────────────────────
 
+// Re-init at a new resolution instead of an in-place reconfigure(). The Pi ISP
+// (libpisp) throws "BackEnd::finalise: TDN output not enabled when TDN enabled"
+// on a live reconfigure and aborts; a full teardown + fresh configure (the boot
+// path, via reinit_owls) sidesteps it. owl_*_cfg_ is the source init_owls reads,
+// so updating it then reinit-ing brings the camera(s) up at the new size.
 bool CameraManager::set_resolution(int width, int height, int fps) {
-    bool ok = true;
-    if (owl_left_)  ok &= owl_left_->reconfigure(width, height, fps);
-    if (owl_right_) ok &= owl_right_->reconfigure(width, height, fps);
-    if (ok)
-        std::cout << "[cam] resolution set to " << width << "×" << height
-                  << " @" << fps << "fps\n";
-    else
-        std::cerr << "[cam] one or both cameras failed resolution change\n";
-    return ok;
+    owl_left_cfg_.width   = owl_right_cfg_.width  = width;
+    owl_left_cfg_.height  = owl_right_cfg_.height = height;
+    owl_left_cfg_.fps     = owl_right_cfg_.fps    = fps;
+    std::cout << "[cam] resolution → " << width << "×" << height
+              << " @" << fps << "fps (re-init both eyes)\n";
+    return reinit_owls();
+}
+
+bool CameraManager::set_owl_left_resolution(int width, int height, int fps) {
+    owl_left_cfg_.width  = width;
+    owl_left_cfg_.height = height;
+    owl_left_cfg_.fps    = fps;
+    std::cout << "[cam] left resolution → " << width << "×" << height
+              << " @" << fps << "fps (re-init)\n";
+    return reinit_owls();
+}
+
+bool CameraManager::set_owl_right_resolution(int width, int height, int fps) {
+    owl_right_cfg_.width  = width;
+    owl_right_cfg_.height = height;
+    owl_right_cfg_.fps    = fps;
+    std::cout << "[cam] right resolution → " << width << "×" << height
+              << " @" << fps << "fps (re-init)\n";
+    return reinit_owls();
 }
 
 // ── USB camera capture thread ─────────────────────────────────────────────────

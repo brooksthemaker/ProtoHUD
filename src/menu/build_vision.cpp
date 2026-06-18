@@ -326,10 +326,11 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     };
 
     auto make_cam_menu = [&](
-        std::function<DmaCamera*()>     cam_ptr,
-        CameraFocusState&               focus_st,
-        bool&                           awb_flag,
-        CameraResolutionState&          res_st)
+        std::function<DmaCamera*()>            cam_ptr,
+        CameraFocusState&                      focus_st,
+        bool&                                  awb_flag,
+        CameraResolutionState&                 res_st,
+        std::function<bool(int,int,int)>       apply_res)  // re-init at new w/h/fps
     {
         // Helpers for the extended controls: a radio-list submenu bound to a
         // DmaCamera int setter/getter, and a slider bound to a float one. Menu
@@ -464,17 +465,20 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                         && c->width()  == ms[i].width
                         && c->height() == ms[i].height;
                 };
-                m.action = [cam_ptr, &res_st, &state, i]{
-                    auto* c = cam_ptr(); if (!c) return;
+                m.action = [cam_ptr, apply_res, &res_st, &state, i]{
+                    auto* c = cam_ptr(); if (!c || !apply_res) return;
                     const auto& ms = c->supported_modes();
                     if (i >= static_cast<int>(ms.size())) return;
-                    // reconfigure() runs on the render thread (menu actions do),
-                    // matching how the global preset calls set_resolution().
-                    if (c->reconfigure(ms[i].width, ms[i].height, c->fps())) {
+                    // Read the target BEFORE applying — apply_res re-inits the
+                    // camera (clean configure; avoids the libpisp TDN crash an
+                    // in-place reconfigure causes), which DESTROYS this DmaCamera.
+                    const int w = ms[i].width, h = ms[i].height, fps = c->fps();
+                    if (apply_res(w, h, fps)) {
+                        auto* nc = cam_ptr();            // re-fetch the new camera
                         std::lock_guard<std::mutex> lk(state.mtx);
-                        res_st.width  = c->width();
-                        res_st.height = c->height();
-                        res_st.fps    = c->fps();
+                        res_st.width  = nc ? nc->width()  : w;
+                        res_st.height = nc ? nc->height() : h;
+                        res_st.fps    = nc ? nc->fps()    : fps;
                     }
                 };
                 return m;
@@ -555,11 +559,15 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     auto left_cam_menu  = make_cam_menu(
         [cameras]{ return cameras ? cameras->owl_left()  : nullptr; },
         state.focus_left,  state.night_vision.csi_awb_left,
-        state.camera_resolution);
+        state.camera_resolution,
+        [cameras](int w, int h, int fps){
+            return cameras ? cameras->set_owl_left_resolution(w, h, fps) : false; });
     auto right_cam_menu = make_cam_menu(
         [cameras]{ return cameras ? cameras->owl_right() : nullptr; },
         state.focus_right, state.night_vision.csi_awb_right,
-        state.camera_resolution_right);
+        state.camera_resolution_right,
+        [cameras](int w, int h, int fps){
+            return cameras ? cameras->set_owl_right_resolution(w, h, fps) : false; });
 
     // ── Digital zoom presets (both eyes together) ─────────────────────────────
     struct ZoomPreset { const char* label; float zoom; };

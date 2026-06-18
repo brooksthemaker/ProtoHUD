@@ -93,10 +93,15 @@ public:
     bool get_usb3(GLuint& out);
 
     // ── Resolution hot-swap ───────────────────────────────────────────────────
-    // Reconfigures both OWLsight cameras to the given resolution and fps.
-    // Returns true only if both cameras succeeded (or only one is present).
-    // Must be called from the render thread.
-    bool set_resolution(int width, int height, int fps);
+    // Changes the OWLsight capture resolution/fps by re-initialising the
+    // camera(s) at the new size — a clean release + fresh configure, the same
+    // path used at boot. NOT an in-place libcamera reconfigure: on the Pi ISP
+    // that throws "BackEnd::finalise: TDN output not enabled" (libpisp) and
+    // aborts the process. Per-eye variants change only one camera's config.
+    // Must be called from the render thread (DmaCamera::init needs the GL ctx).
+    bool set_resolution(int width, int height, int fps);          // both eyes
+    bool set_owl_left_resolution(int width, int height, int fps);
+    bool set_owl_right_resolution(int width, int height, int fps);
 
     int current_width()  const { return owl_left_  ? owl_left_->width()  :
                                         owl_right_ ? owl_right_->width()  : 0; }

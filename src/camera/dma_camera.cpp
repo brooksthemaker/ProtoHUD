@@ -187,9 +187,36 @@ bool DmaCamera::configure_camera() {
     // clamps it to what the sensor can do at that size.
     modes_.clear();
     try {
-        for (const auto& s : sc.formats().sizes(sc.pixelFormat))
-            modes_.push_back({ static_cast<int>(s.width),
-                               static_cast<int>(s.height), 0 });
+        const auto& sf  = sc.formats();
+        auto discrete   = sf.sizes(sc.pixelFormat);
+        if (!discrete.empty()) {
+            for (const auto& s : discrete)
+                modes_.push_back({ static_cast<int>(s.width),
+                                   static_cast<int>(s.height), 0 });
+        } else {
+            // The Raspberry Pi ISP pipeline reports a CONTINUOUS size range, not
+            // a discrete list, so sizes() is empty. Offer the standard
+            // resolutions that fall inside [min,max] (honouring the step), plus
+            // the sensor's native max — that's what makes per-camera options show.
+            const auto rng = sf.range(sc.pixelFormat);
+            const int minw = static_cast<int>(rng.min.width);
+            const int minh = static_cast<int>(rng.min.height);
+            const int maxw = static_cast<int>(rng.max.width);
+            const int maxh = static_cast<int>(rng.max.height);
+            const int hs   = rng.hStep > 0 ? static_cast<int>(rng.hStep) : 2;
+            const int vs   = rng.vStep > 0 ? static_cast<int>(rng.vStep) : 2;
+            static const int kCand[][2] = {
+                {640,480}, {1280,720}, {1280,800}, {1456,1088}, {1536,864},
+                {1920,1080}, {2304,1296}, {2560,1440}, {3840,2160},
+            };
+            auto fits = [&](int w, int h){
+                return w >= minw && w <= maxw && h >= minh && h <= maxh
+                    && (w - minw) % hs == 0 && (h - minh) % vs == 0;
+            };
+            for (const auto& c : kCand)
+                if (fits(c[0], c[1])) modes_.push_back({ c[0], c[1], 0 });
+            if (maxw > 0 && maxh > 0) modes_.push_back({ maxw, maxh, 0 }); // native
+        }
         std::sort(modes_.begin(), modes_.end(),
                   [](const Mode& a, const Mode& b){
                       return static_cast<long>(a.width) * a.height
