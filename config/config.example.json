@@ -25,7 +25,15 @@
       "fps": 90,
       "rotation_deg": 0,
       "flip_h": false,
-      "flip_v": false
+      "flip_v": false,
+      "_controls_note": "Per-eye AF/AE/WB/ISP/HDR controls, set from Menu > Cameras > Left/Right Camera and saved here automatically. Values match libcamera enums. af_range:0 Normal/1 Macro/2 Full · af_speed:0 Normal/1 Fast · gain:0=auto else manual analogue gain · ae_metering:0 Centre/1 Spot/2 Matrix · ae_constraint:0 Normal/1 Highlight/2 Shadows · ae_exposure_mode:0 Normal/1 Short/2 Long · flicker:0 Off/1 Auto/2 50Hz/3 60Hz · awb_mode:0 Auto/1 Incandescent/2 Tungsten/3 Fluorescent/4 Indoor/5 Daylight/6 Cloudy · brightness:-1..1 · contrast/saturation/sharpness:0..2 · noise_reduction:0 Off/1 Fast/2 HQ/3 Minimal · hdr:0 Off/2 Multi/3 Single/4 Night (IMX708 + recent libcamera). Omit the block to keep neutral defaults.",
+      "controls": {
+        "af_range": 0, "af_speed": 0, "gain": 0.0,
+        "ae_metering": 0, "ae_constraint": 0, "ae_exposure_mode": 0, "flicker": 0,
+        "awb_mode": 0,
+        "brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "sharpness": 1.0,
+        "noise_reduction": 0, "hdr": 0
+      }
     },
     "owlsight_right": {
       "libcamera_id": 1,
@@ -35,7 +43,14 @@
       "fps": 90,
       "rotation_deg": 0,
       "flip_h": false,
-      "flip_v": false
+      "flip_v": false,
+      "controls": {
+        "af_range": 0, "af_speed": 0, "gain": 0.0,
+        "ae_metering": 0, "ae_constraint": 0, "ae_exposure_mode": 0, "flicker": 0,
+        "awb_mode": 0,
+        "brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "sharpness": 1.0,
+        "noise_reduction": 0, "hdr": 0
+      }
     },
     "usb_cam_1": {
       "device": "/dev/video17",

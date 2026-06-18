@@ -228,6 +228,86 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
     }
 }
 
+// ── Per-CSI-camera control persistence ────────────────────────────────────────
+// The menu writes AF/AE/WB/ISP/HDR controls straight onto the DmaCamera. These
+// helpers carry them through config: parse_* (config → state) and apply_* (state
+// → camera) run at startup; read_* (camera → state) + write_* (state → config)
+// run on save. State is the canonical persisted copy so a value survives even
+// when the camera is briefly absent.
+static void parse_cam_controls(const json& j, CameraControlsState& s) {
+    if (!j.is_object() || !j.contains("controls") || !j["controls"].is_object()) return;
+    const auto& c = j["controls"];
+    s.af_range        = c.value("af_range",         s.af_range);
+    s.af_speed        = c.value("af_speed",         s.af_speed);
+    s.gain            = c.value("gain",             s.gain);
+    s.ae_metering     = c.value("ae_metering",      s.ae_metering);
+    s.ae_constraint   = c.value("ae_constraint",    s.ae_constraint);
+    s.ae_exp_mode     = c.value("ae_exposure_mode", s.ae_exp_mode);
+    s.flicker         = c.value("flicker",          s.flicker);
+    s.awb_mode        = c.value("awb_mode",         s.awb_mode);
+    s.brightness      = c.value("brightness",       s.brightness);
+    s.contrast        = c.value("contrast",         s.contrast);
+    s.saturation      = c.value("saturation",       s.saturation);
+    s.sharpness       = c.value("sharpness",        s.sharpness);
+    s.noise_reduction = c.value("noise_reduction",  s.noise_reduction);
+    s.hdr             = c.value("hdr",              s.hdr);
+}
+
+static void write_cam_controls(json& j, const CameraControlsState& s) {
+    j["af_range"]         = s.af_range;
+    j["af_speed"]         = s.af_speed;
+    j["gain"]             = s.gain;
+    j["ae_metering"]      = s.ae_metering;
+    j["ae_constraint"]    = s.ae_constraint;
+    j["ae_exposure_mode"] = s.ae_exp_mode;
+    j["flicker"]          = s.flicker;
+    j["awb_mode"]         = s.awb_mode;
+    j["brightness"]       = s.brightness;
+    j["contrast"]         = s.contrast;
+    j["saturation"]       = s.saturation;
+    j["sharpness"]        = s.sharpness;
+    j["noise_reduction"]  = s.noise_reduction;
+    j["hdr"]              = s.hdr;
+}
+
+static void apply_cam_controls(DmaCamera* c, const CameraControlsState& s) {
+    if (!c) return;
+    c->set_af_range(s.af_range);
+    c->set_af_speed(s.af_speed);
+    if (s.gain > 0.0f) c->set_analogue_gain(s.gain);
+    c->set_ae_metering(s.ae_metering);
+    c->set_ae_constraint(s.ae_constraint);
+    c->set_ae_exposure_mode(s.ae_exp_mode);
+    c->set_flicker_mode(s.flicker);
+    // Only push a WB preset if one was actually chosen — set_awb_mode forces
+    // AWB on, which would override manual WB; default Auto (0) leaves it be.
+    if (s.awb_mode > 0) c->set_awb_mode(s.awb_mode);
+    c->set_brightness(s.brightness);
+    c->set_contrast(s.contrast);
+    c->set_saturation(s.saturation);
+    c->set_sharpness(s.sharpness);
+    c->set_noise_reduction(s.noise_reduction);
+    c->set_hdr_mode(s.hdr);
+}
+
+static void read_cam_controls(DmaCamera* c, CameraControlsState& s) {
+    if (!c) return;   // camera absent → keep the last-known (loaded) values
+    s.af_range        = c->af_range();
+    s.af_speed        = c->af_speed();
+    s.gain            = c->analogue_gain_target();
+    s.ae_metering     = c->ae_metering();
+    s.ae_constraint   = c->ae_constraint();
+    s.ae_exp_mode     = c->ae_exposure_mode();
+    s.flicker         = c->flicker_mode();
+    s.awb_mode        = c->awb_mode();
+    s.brightness      = c->brightness();
+    s.contrast        = c->contrast();
+    s.saturation      = c->saturation();
+    s.sharpness       = c->sharpness();
+    s.noise_reduction = c->noise_reduction();
+    s.hdr             = c->hdr_mode();
+}
+
 // Launch the panel_driver.py piomatter shim as a detached child. Used at
 // startup AND from the menu's backend hot-swap when switching back to HUB75.
 // fork()+setsid() (instead of `system("... &")`) so SIGINT to the parent
@@ -1308,6 +1388,7 @@ int main(int argc, char* argv[]) {
         owl_left.height       = jl.value("height",  800);
         owl_left.fps          = jl.value("fps",      60);
         owl_left.rotation_deg = jl.value("rotation_deg", 0);
+        parse_cam_controls(jl, state.camera_controls_left);
     }
     if (jcam.contains("owlsight_right")) {
         auto& jr               = jcam["owlsight_right"];
@@ -1317,6 +1398,7 @@ int main(int argc, char* argv[]) {
         owl_right.height       = jr.value("height",  800);
         owl_right.fps          = jr.value("fps",      60);
         owl_right.rotation_deg = jr.value("rotation_deg", 0);
+        parse_cam_controls(jr, state.camera_controls_right);
     }
     // Back-compat: older builds persisted a single top-level "resolution" block
     // that forced BOTH eyes to one value. Newer builds save per-eye under
@@ -2674,6 +2756,12 @@ int main(int argc, char* argv[]) {
         if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
         std::cout << "[main] autofocus on startup\n";
     }
+
+    // Re-apply persisted per-eye AF/AE/WB/ISP/HDR controls now the cameras are
+    // running (the setters queue onto the next request). Done after the startup
+    // autofocus so a saved manual focus mode isn't immediately overridden.
+    apply_cam_controls(cameras.owl_left(),  state.camera_controls_left);
+    apply_cam_controls(cameras.owl_right(), state.camera_controls_right);
 
     // ── Beast built-in passthrough camera ────────────────────────────────────
 
@@ -4798,6 +4886,14 @@ int main(int argc, char* argv[]) {
         // block where the user already finds the rest of the per-eye config).
         cfg["cameras"]["owlsight_left"]["rotation_deg"]  = cameras.owl_left_rotation();
         cfg["cameras"]["owlsight_right"]["rotation_deg"] = cameras.owl_right_rotation();
+
+        // Per-eye AF/AE/WB/ISP/HDR controls. Refresh state from the live cameras
+        // (no-op if a camera is absent — the loaded values are kept), then write
+        // them under each camera's "controls" block.
+        read_cam_controls(cameras.owl_left(),  state.camera_controls_left);
+        read_cam_controls(cameras.owl_right(), state.camera_controls_right);
+        write_cam_controls(cfg["cameras"]["owlsight_left"]["controls"],  state.camera_controls_left);
+        write_cam_controls(cfg["cameras"]["owlsight_right"]["controls"], state.camera_controls_right);
 
         auto eye_src_str = [](EyeSource s) -> const char* {
             switch (s) {

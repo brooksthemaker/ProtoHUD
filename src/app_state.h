@@ -239,6 +239,26 @@ struct CameraResolutionState {
     int fps    = 60;
 };
 
+// Per-CSI-camera libcamera control state, persisted to config and re-applied at
+// startup. Defaults are the libcamera/ISP neutral values. Mirrors the cur_*
+// values DmaCamera tracks; the menu writes to the camera, save reads them back.
+struct CameraControlsState {
+    int   af_range        = 0;     // 0 Normal, 1 Macro, 2 Full
+    int   af_speed        = 0;     // 0 Normal, 1 Fast
+    float gain            = 0.0f;  // manual AnalogueGain; 0 = auto
+    int   ae_metering     = 0;     // 0 Centre, 1 Spot, 2 Matrix
+    int   ae_constraint   = 0;     // 0 Normal, 1 Highlight, 2 Shadows
+    int   ae_exp_mode     = 0;     // 0 Normal, 1 Short, 2 Long
+    int   flicker         = 0;     // 0 Off, 1 Auto, 2 50 Hz, 3 60 Hz
+    int   awb_mode        = 0;     // 0 Auto … 6 Cloudy (libcamera AwbMode)
+    float brightness      = 0.0f;  // -1 .. 1
+    float contrast        = 1.0f;  //  0 .. 2
+    float saturation      = 1.0f;  //  0 .. 2
+    float sharpness       = 1.0f;  //  0 .. 2
+    int   noise_reduction = 0;     // 0 Off,1 Fast,2 HQ,3 Minimal
+    int   hdr             = 0;     // libcamera HdrMode (0 Off,2 Multi,3 Single,4 Night)
+};
+
 // Digital zoom / crop for OWLsight cameras.
 // zoom=1.0 → full frame (identity). zoom>1.0 → crops to 1/zoom of the frame.
 // center_x / center_y are normalized (0.0–1.0) screen-space coordinates.
@@ -868,6 +888,8 @@ struct AppState {
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;        // left / primary eye
     CameraResolutionState camera_resolution_right;   // right eye (set independently)
+    CameraControlsState   camera_controls_left;      // per-eye AF/AE/WB/ISP/HDR
+    CameraControlsState   camera_controls_right;
     ZoomCropState        zoom_left, zoom_right;
     MirrorCropState      mirror_crop;
     CamSingleState       cam_single;
