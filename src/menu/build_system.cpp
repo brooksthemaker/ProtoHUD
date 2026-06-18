@@ -1756,6 +1756,13 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         std::string sel_log;                // cached git log for the highlighted branch
         bool        rollback_avail = false; // state/update/last_good.env exists
         std::string rollback_target;        // "hash on branch" for the label
+        // Live progress while an update is applying. Fed by a monitor thread that
+        // tails /tmp/protohud-update.log (the detached update.sh writes there).
+        bool        updating   = false;     // an apply/build is in flight
+        std::string phase;                  // "Fetching" / "Building" / "Restarting" …
+        int         build_done = 0;         // ninja [done/total]
+        int         build_total = 0;
+        std::string last_line;              // most recent log line (for detail)
     };
     auto upd = std::make_shared<UpdaterState>();
     {
@@ -1895,9 +1902,10 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
     // Apply a branch via update.sh <branch> --restart, detached so the build +
     // restart survive ProtoHUD being killed during the restart step.
     auto upd_apply = [upd, push_notif](const std::string& branch){
-        std::string root; bool busy;
-        { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; busy = upd->busy; }
-        if (busy || root.empty() || branch.empty()) return;
+        std::string root; bool busy, updating;
+        { std::lock_guard<std::mutex> lk(upd->mtx);
+          root = upd->root; busy = upd->busy; updating = upd->updating; }
+        if (busy || updating || root.empty() || branch.empty()) return;
         const std::string sp = root + "/scripts/update.sh";
         // setsid + bash -c '"$0" "$1" --restart' keeps the script in its own
         // session; $0/$1 carry the (quoted) script path + branch so neither
@@ -1905,11 +1913,93 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         const std::string cmd =
             "setsid bash -c '\"$0\" \"$1\" --restart' '" + sp + "' '" + branch +
             "' </dev/null >/tmp/protohud-update.log 2>&1 &";
+        { std::lock_guard<std::mutex> lk(upd->mtx);
+          upd->updating = true; upd->phase = "Starting\xe2\x80\xa6";
+          upd->build_done = 0; upd->build_total = 0; upd->last_line.clear();
+          upd->status = "Update starting\xe2\x80\xa6"; }
+        // Clear any stale log first so the monitor can't read a previous run's
+        // output (e.g. an old ERROR line) before update.sh truncates it.
+        if (FILE* f = ::fopen("/tmp/protohud-update.log", "w")) ::fclose(f);
         std::system(cmd.c_str());
         push_notif(NotifType::App, "Update started",
-                   "Pulling " + branch + " and rebuilding. The HUD restarts when "
-                   "the build succeeds, and stays up if it fails. Log: "
-                   "/tmp/protohud-update.log", 0.f);
+                   "Pulling " + branch + " and rebuilding. Progress shows under "
+                   "Updates \xe2\x86\x92 Update Status; the HUD restarts when the build "
+                   "succeeds. Log: /tmp/protohud-update.log", 0.f);
+
+        // Monitor thread: tail the update log and surface phase + build %. The
+        // build runs BEFORE the restart, so this HUD is alive to show it; on a
+        // successful build the restart kills us and the thread dies with it. On
+        // failure update.sh exits without restarting, which we detect here.
+        std::thread([upd, push_notif]{
+            const char* logp = "/tmp/protohud-update.log";
+            for (int i = 0; i < 8000; ++i) {                 // ~60 min safety cap
+                { std::lock_guard<std::mutex> lk(upd->mtx); if (!upd->updating) break; }
+
+                std::string tail;
+                if (FILE* f = ::fopen(logp, "rb")) {
+                    ::fseek(f, 0, SEEK_END);
+                    long sz = ::ftell(f);
+                    long want = sz > 16384 ? 16384 : (sz < 0 ? 0 : sz);
+                    if (want > 0) {
+                        ::fseek(f, sz - want, SEEK_SET);
+                        tail.resize(static_cast<size_t>(want));
+                        size_t rd = ::fread(&tail[0], 1, static_cast<size_t>(want), f);
+                        tail.resize(rd);
+                    }
+                    ::fclose(f);
+                }
+
+                std::string phase, last_line;
+                int bd = 0, bt = 0;
+                bool failed = false;
+                size_t pos = 0;
+                while (pos < tail.size()) {
+                    size_t nl = tail.find('\n', pos);
+                    if (nl == std::string::npos) nl = tail.size();
+                    std::string ln = tail.substr(pos, nl - pos);
+                    pos = nl + 1;
+                    if (ln.empty()) continue;
+                    last_line = ln;
+                    // ninja progress: "[<done>/<total>] …"
+                    if (ln[0] == '[') {
+                        int d = 0, t = 0;
+                        if (std::sscanf(ln.c_str(), "[%d/%d]", &d, &t) == 2 && t > 0) {
+                            bd = d; bt = t; phase = "Building";
+                        }
+                    }
+                    // update.sh phase markers (it prefixes "[protohud-update]")
+                    if (ln.find("[protohud-update]") != std::string::npos) {
+                        if (ln.find("ERROR") != std::string::npos ||
+                            ln.find("failed") != std::string::npos)            { phase = "Failed"; failed = true; }
+                        else if (ln.find("stopping current") != std::string::npos ||
+                                 ln.find("starting updated") != std::string::npos) phase = "Restarting";
+                        else if (ln.find("building") != std::string::npos)        phase = "Building";
+                        else if (ln.find("updating branch") != std::string::npos ||
+                                 ln.find("now at") != std::string::npos)          phase = "Fetching";
+                    }
+                }
+
+                { std::lock_guard<std::mutex> lk(upd->mtx);
+                  if (!phase.empty()) upd->phase = phase;
+                  if (bt > 0) { upd->build_done = bd; upd->build_total = bt; }
+                  if (!last_line.empty()) upd->last_line = last_line;
+                  if (bt > 0)
+                      upd->status = "Building " + std::to_string(bd * 100 / bt) + "%  ("
+                                  + std::to_string(bd) + "/" + std::to_string(bt) + ")";
+                  else if (!phase.empty())
+                      upd->status = phase + "\xe2\x80\xa6";
+                }
+
+                if (failed) {
+                    { std::lock_guard<std::mutex> lk(upd->mtx); upd->updating = false; }
+                    push_notif(NotifType::App, "Update failed",
+                               "Build failed \xe2\x80\x94 staying on the current build. "
+                               "See /tmp/protohud-update.log", 8.f);
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(450));
+            }
+        }).detach();
     };
 
     // Roll back to the recorded known-good build via the standalone script.
@@ -1941,7 +2031,6 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         };
         updates_menu.push_back(with_panel(std::move(cur), "Update Status",
             [upd](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-                (void)sz;
                 ImFont* font = ImGui::GetFont();
                 const float fs = ImGui::GetFontSize();
                 std::lock_guard<std::mutex> lk(upd->mtx);
@@ -1961,6 +2050,37 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                      IM_COL32(200, 210, 220, 220), 0.85f);
                 line(upd->status, upd->behind > 0 ? IM_COL32(120, 220, 140, 235)
                                                   : IM_COL32(200, 210, 220, 220), 0.85f);
+
+                // ── Live update progress ─────────────────────────────────────
+                if (upd->updating) {
+                    y += fs * 0.5f;
+                    line(upd->phase.empty() ? "Working\xe2\x80\xa6" : upd->phase,
+                         IM_COL32(120, 200, 255, 255), 0.95f);
+                    if (upd->build_total > 0) {
+                        float frac = static_cast<float>(upd->build_done) /
+                                     static_cast<float>(upd->build_total);
+                        if (frac < 0.f) frac = 0.f; if (frac > 1.f) frac = 1.f;
+                        const float barw = (sz.x > 16.f ? sz.x - 8.f : 220.f);
+                        const float bh   = fs * 0.8f;
+                        const float bx = o.x, by = y;
+                        dl->AddRect({bx, by}, {bx + barw, by + bh},
+                                    IM_COL32(120, 130, 140, 200), 2.f);
+                        dl->AddRectFilled({bx + 1, by + 1},
+                                          {bx + 1 + (barw - 2) * frac, by + bh - 1},
+                                          IM_COL32(90, 180, 120, 235), 2.f);
+                        y += bh + fs * 0.35f;
+                        char pc[40];
+                        snprintf(pc, sizeof(pc), "%d%%   (%d/%d)",
+                                 static_cast<int>(frac * 100.f),
+                                 upd->build_done, upd->build_total);
+                        line(pc, IM_COL32(210, 230, 240, 235), 0.8f);
+                    }
+                    if (!upd->last_line.empty()) {
+                        std::string ll = upd->last_line;
+                        if (ll.size() > 46) ll = ll.substr(0, 46) + "\xe2\x80\xa6";
+                        line(ll, IM_COL32(150, 160, 170, 200), 0.72f);
+                    }
+                }
             }));
 
         // Check for Updates (the only network action).
