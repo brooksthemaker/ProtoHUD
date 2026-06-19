@@ -301,6 +301,52 @@ void CameraManager::init_owls() {
 // boot without rebooting the whole system.
 bool CameraManager::reinit_owls() {
     std::cout << "[cam] reinit OWLsight cameras…\n";
+
+    // Snapshot each eye's live runtime settings so the rebuilt cameras keep them
+    // (rebuilding a DmaCamera from scratch otherwise drops rotation + all the
+    // AF/AE/WB/ISP/HDR controls back to defaults — e.g. changing one eye's
+    // resolution would reset the other eye's rotation). The live DmaCamera is the
+    // source of truth here; the menu writes straight to it.
+    struct OwlSnap {
+        bool  have = false;
+        int   rot = 0, af_range = 0, af_speed = 0, ae_met = 0, ae_con = 0,
+              ae_exp = 0, flicker = 0, awb = 0, nr = 0, hdr = 0;
+        float gain = 0, bright = 0, contrast = 1, sat = 1, sharp = 1;
+    };
+    auto grab = [](DmaCamera* c) -> OwlSnap {
+        OwlSnap s;
+        if (!c) return s;
+        s.have     = true;
+        s.rot      = c->rotation();
+        s.af_range = c->af_range();    s.af_speed = c->af_speed();
+        s.gain     = c->analogue_gain_target();
+        s.ae_met   = c->ae_metering(); s.ae_con   = c->ae_constraint();
+        s.ae_exp   = c->ae_exposure_mode(); s.flicker = c->flicker_mode();
+        s.awb      = c->awb_mode();
+        s.bright   = c->brightness();  s.contrast = c->contrast();
+        s.sat      = c->saturation();  s.sharp    = c->sharpness();
+        s.nr       = c->noise_reduction(); s.hdr   = c->hdr_mode();
+        return s;
+    };
+    auto put = [](DmaCamera* c, const OwlSnap& s) {
+        if (!c || !s.have) return;
+        // rotation is applied at init() via the config; restore the rest here.
+        c->set_af_range(s.af_range);   c->set_af_speed(s.af_speed);
+        if (s.gain > 0.f) c->set_analogue_gain(s.gain);
+        c->set_ae_metering(s.ae_met);  c->set_ae_constraint(s.ae_con);
+        c->set_ae_exposure_mode(s.ae_exp); c->set_flicker_mode(s.flicker);
+        if (s.awb > 0) c->set_awb_mode(s.awb);
+        c->set_brightness(s.bright);   c->set_contrast(s.contrast);
+        c->set_saturation(s.sat);      c->set_sharpness(s.sharp);
+        c->set_noise_reduction(s.nr);  c->set_hdr_mode(s.hdr);
+    };
+
+    OwlSnap snapL = grab(owl_left_.get());
+    OwlSnap snapR = grab(owl_right_.get());
+    // Rotation rides in via the config (DmaCamera::init applies cfg.rotation_deg).
+    if (snapL.have) owl_left_cfg_.rotation_deg  = snapL.rot;
+    if (snapR.have) owl_right_cfg_.rotation_deg = snapR.rot;
+
     owl_left_.reset();
     owl_right_.reset();
     if (lcam_mgr_) { lcam_mgr_->stop(); lcam_mgr_.reset(); }
@@ -312,6 +358,11 @@ bool CameraManager::reinit_owls() {
         return false;
     }
     init_owls();
+
+    // Re-apply the snapshotted controls to the freshly-built cameras.
+    put(owl_left_.get(),  snapL);
+    put(owl_right_.get(), snapR);
+
     const bool ok = owl_left_ok() || owl_right_ok();
     std::cout << "[cam] reinit done: left=" << (owl_left_ok() ? "ok" : "—")
               << " right=" << (owl_right_ok() ? "ok" : "—") << "\n";
