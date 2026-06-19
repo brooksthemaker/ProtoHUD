@@ -456,8 +456,12 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                     auto* c = cam_ptr(); if (!c) return std::string();
                     const auto& ms = c->supported_modes();
                     if (i >= static_cast<int>(ms.size())) return std::string();
-                    char b[32];
-                    snprintf(b, sizeof(b), "%d x %d", ms[i].width, ms[i].height);
+                    char b[48];
+                    if (ms[i].max_fps > 0)
+                        snprintf(b, sizeof(b), "%d x %d  @ %d fps",
+                                 ms[i].width, ms[i].height, ms[i].max_fps);
+                    else
+                        snprintf(b, sizeof(b), "%d x %d", ms[i].width, ms[i].height);
                     return std::string(b);
                 };
                 m.get_state = [cam_ptr, i]{
@@ -474,7 +478,10 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                     // Read the target BEFORE applying — apply_res re-inits the
                     // camera (clean configure; avoids the libpisp TDN crash an
                     // in-place reconfigure causes), which DESTROYS this DmaCamera.
-                    const int w = ms[i].width, h = ms[i].height, fps = c->fps();
+                    // Request the mode's probed max fps so it runs at its best
+                    // rate (fall back to the current target if unknown).
+                    const int w = ms[i].width, h = ms[i].height;
+                    const int fps = ms[i].max_fps > 0 ? ms[i].max_fps : c->fps();
                     if (apply_res(w, h, fps)) {
                         auto* nc = cam_ptr();            // re-fetch the new camera
                         std::lock_guard<std::mutex> lk(state.mtx);

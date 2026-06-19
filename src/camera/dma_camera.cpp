@@ -228,6 +228,43 @@ bool DmaCamera::configure_camera() {
                      }), modes_.end());
     } catch (...) {}
 
+    // ── Probe each mode's max fps ─────────────────────────────────────────────
+    // Configure the camera at each size and read the shortest frame duration the
+    // FrameDurationLimits control allows → max fps (this is the figure
+    // `rpicam-hello --list-cameras` prints). We do NOT start streaming, so the
+    // libpisp "TDN" abort (a streaming-time bug) isn't triggered. Afterwards we
+    // restore the real target configuration before buffers are allocated.
+    // Bounded so a sensor with a long discrete-mode list doesn't stall startup.
+    if (!modes_.empty()) {
+        const PixelFormat pf = cam_cfg_->at(0).pixelFormat;
+        int probed = 0;
+        for (auto& m : modes_) {
+            if (probed >= 40) break;
+            ++probed;
+            try {
+                auto pc = camera_->generateConfiguration({ StreamRole::Viewfinder });
+                if (!pc || pc->empty()) continue;
+                auto& psc = pc->at(0);
+                psc.pixelFormat = pf;
+                psc.size = { static_cast<unsigned>(m.width),
+                             static_cast<unsigned>(m.height) };
+                if (pc->validate() == CameraConfiguration::Invalid) continue;
+                if (camera_->configure(pc.get()) != 0) continue;
+                const auto& cim = camera_->controls();
+                if (cim.count(&controls::FrameDurationLimits)) {
+                    int64_t min_dur =
+                        cim.at(&controls::FrameDurationLimits).min().get<int64_t>();
+                    if (min_dur > 0)
+                        m.max_fps = static_cast<int>((1000000LL + min_dur / 2) / min_dur);
+                }
+            } catch (...) {}
+        }
+        // Restore the configuration we actually want to run.
+        camera_->configure(cam_cfg_.get());
+        stream_ = cam_cfg_->at(0).stream();
+        stride_ = cam_cfg_->at(0).stride;
+    }
+
     std::cout << "[dma] camera " << cfg_.libcamera_id
               << " configured: " << cfg_.width << "×" << cfg_.height
               << " stride=" << stride_ << " fps=" << cfg_.fps
