@@ -5392,12 +5392,12 @@ int main(int argc, char* argv[]) {
             if (menu.is_deep_open()) menu.close_deep();
             else { menu.close(); menu.open_deep(); }
         }
-        // Per-camera autofocus: F = Left camera, G = Right camera.
-        if (key_pressed(ImGuiKey_F)) {
+        // Per-camera autofocus: [ = Left camera, ] = Right camera.
+        if (key_pressed(ImGuiKey_LeftBracket)) {
             if (cameras.owl_left()) cameras.owl_left()->start_autofocus();
             state.focus_left.mode = CameraFocusState::Mode::AUTO;
         }
-        if (key_pressed(ImGuiKey_G)) {
+        if (key_pressed(ImGuiKey_RightBracket)) {
             if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
             state.focus_right.mode = CameraFocusState::Mode::AUTO;
         }
