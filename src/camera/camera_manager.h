@@ -159,6 +159,10 @@ public:
     // from the render thread (DmaCamera::init needs the GL context current).
     // Returns true if at least one CSI camera came up.
     bool reinit_owls();
+    // Re-init ONE eye against the existing libcamera manager (the other eye keeps
+    // running). Used for per-eye resolution so a change to one camera doesn't
+    // blank the other. left=true → owl_left_, else owl_right_.
+    bool reinit_owl_eye(bool left);
 
     // ── Status ────────────────────────────────────────────────────────────────
     bool owl_left_ok()  const { return owl_left_  && owl_left_->is_ok();  }

@@ -152,6 +152,7 @@ public:
     int   height()          const { return cfg_.height; }
     int   fps()             const { return cfg_.fps; }
     const std::string& model_name() const { return cfg_.model_name; }
+    const std::string& camera_id()  const { return cfg_.camera_id; }
     float analogue_gain()   const { return last_analogue_gain_.load(); }
 
     // Measured capture rate, derived from the per-frame FrameDuration metadata

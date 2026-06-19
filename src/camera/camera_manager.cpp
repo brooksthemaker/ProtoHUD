@@ -384,8 +384,8 @@ bool CameraManager::set_owl_left_resolution(int width, int height, int fps) {
     owl_left_cfg_.height = height;
     owl_left_cfg_.fps    = fps;
     std::cout << "[cam] left resolution → " << width << "×" << height
-              << " @" << fps << "fps (re-init)\n";
-    return reinit_owls();
+              << " @" << fps << "fps (re-init left only)\n";
+    return reinit_owl_eye(/*left=*/true);
 }
 
 bool CameraManager::set_owl_right_resolution(int width, int height, int fps) {
@@ -393,8 +393,63 @@ bool CameraManager::set_owl_right_resolution(int width, int height, int fps) {
     owl_right_cfg_.height = height;
     owl_right_cfg_.fps    = fps;
     std::cout << "[cam] right resolution → " << width << "×" << height
-              << " @" << fps << "fps (re-init)\n";
-    return reinit_owls();
+              << " @" << fps << "fps (re-init right only)\n";
+    return reinit_owl_eye(/*left=*/false);
+}
+
+// Re-init ONE eye, reusing the shared libcamera manager so the OTHER eye keeps
+// running untouched. The changed camera is fully released and re-acquired +
+// configured fresh (not an in-place reconfigure), which avoids the libpisp TDN
+// abort. The two OWLsight cameras are independent ISP devices, so this is safe.
+bool CameraManager::reinit_owl_eye(bool left) {
+    if (!lcam_mgr_) return false;
+    auto& slot           = left ? owl_left_     : owl_right_;
+    auto& other          = left ? owl_right_    : owl_left_;
+    const CamConfig& cfg = left ? owl_left_cfg_ : owl_right_cfg_;
+
+    // Note the id the OTHER eye holds so we never re-acquire its camera.
+    const std::string other_id = other ? other->camera_id() : std::string();
+
+    slot.reset();   // release just this eye (its DmaCamera frees the camera)
+
+    auto cams = lcam_mgr_->cameras();
+    std::string id;
+    if (!cfg.model_name.empty()) {            // model + index match
+        int m = 0;
+        for (auto& c : cams) {
+            try {
+                auto md = c->properties().get(libcamera::properties::Model);
+                if (md && *md == cfg.model_name) {
+                    if (m == cfg.libcamera_id) { if (c->id() != other_id) id = c->id(); break; }
+                    ++m;
+                }
+            } catch (...) {}
+        }
+    }
+    if (id.empty() && cfg.libcamera_id >= 0 &&
+        cfg.libcamera_id < static_cast<int>(cams.size())) {
+        const std::string cand = cams[cfg.libcamera_id]->id();
+        if (cand != other_id) id = cand;
+    }
+    if (id.empty())                            // fallback: any camera the other eye isn't using
+        for (auto& c : cams) if (c->id() != other_id) { id = c->id(); break; }
+    if (id.empty()) {
+        std::cerr << "[cam] reinit " << (left ? "left" : "right")
+                  << ": no camera resolved\n";
+        return false;
+    }
+
+    DmaCamera::Config dc { cfg.libcamera_id, cfg.model_name, id,
+                           cfg.width, cfg.height, cfg.fps, cfg.rotation_deg };
+    slot = std::make_unique<DmaCamera>();
+    if (!slot->init(lcam_mgr_.get(), dc, nv12_vs_.c_str(), nv12_fs_.c_str())) {
+        std::cerr << "[cam] reinit " << (left ? "left" : "right") << " init failed\n";
+        slot.reset();
+        return false;
+    }
+    std::cout << "[cam] reinit " << (left ? "left" : "right") << " ok ("
+              << cfg.width << "×" << cfg.height << " @" << cfg.fps << "fps)\n";
+    return true;
 }
 
 // ── USB camera capture thread ─────────────────────────────────────────────────
