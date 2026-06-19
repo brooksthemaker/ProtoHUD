@@ -6225,6 +6225,62 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ── Full-resolution still capture (reinit to max → settle → grab) ──────
+        // Briefly switches that camera to its largest sensor mode, lets it settle
+        // a few frames, grabs a CPU NV12 frame as a JPEG, then restores the live
+        // resolution. Both eyes blank during the re-inits (a few seconds) — it's
+        // a deliberate "take a photo" action.
+        {
+            static int  fr_state  = 0;     // 0 idle, 1 settling
+            static int  fr_eye    = 0;     // 1 left, 2 right
+            static int  fr_settle = 0;
+            static CameraResolutionState fr_saved;
+            int req = 0;
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              req = state.fullres_capture_req; state.fullres_capture_req = 0; }
+
+            if (fr_state == 0 && req != 0) {
+                DmaCamera* c = (req == 2) ? cameras.owl_right() : cameras.owl_left();
+                if (c && !c->supported_modes().empty()) {
+                    fr_eye          = req;
+                    fr_saved.width  = c->width();
+                    fr_saved.height = c->height();
+                    fr_saved.fps    = c->fps();
+                    const auto& mx  = c->supported_modes().front();   // largest (sorted)
+                    const int   fps = mx.max_fps > 0 ? mx.max_fps : c->fps();
+                    { Notification n; n.type = NotifType::App;
+                      n.title = "Capturing full-res photo\xE2\x80\xA6";
+                      n.body  = std::to_string(mx.width) + "\xC3\x97" + std::to_string(mx.height);
+                      n.auto_dismiss_s = 5.f;
+                      std::lock_guard<std::mutex> lk(state.mtx); state.notifs.push(std::move(n)); }
+                    if (req == 2) cameras.set_owl_right_resolution(mx.width, mx.height, fps);
+                    else          cameras.set_owl_left_resolution (mx.width, mx.height, fps);
+                    fr_settle = 8;     // let AE/AWB settle on the new mode
+                    fr_state  = 1;
+                }
+            } else if (fr_state == 1) {
+                if (--fr_settle <= 0) {
+                    DmaCamera* c = (fr_eye == 2) ? cameras.owl_right() : cameras.owl_left();
+                    std::filesystem::create_directories(cfg_photo_dir);
+                    const auto epoch = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    std::string path = cfg_photo_dir + "/protohud_fullres_" +
+                        std::string(fr_eye == 2 ? "right" : "left") + "_" +
+                        std::to_string(epoch) + ".jpg";
+                    const bool ok = c && c->grab_still(path);
+                    // Restore the live resolution.
+                    if (fr_eye == 2) cameras.set_owl_right_resolution(fr_saved.width, fr_saved.height, fr_saved.fps);
+                    else             cameras.set_owl_left_resolution (fr_saved.width, fr_saved.height, fr_saved.fps);
+                    { Notification n; n.type = NotifType::App;
+                      n.title = ok ? "Full-res photo saved" : "Full-res capture failed";
+                      n.body  = ok ? path : std::string("see log");
+                      n.auto_dismiss_s = 6.f;
+                      std::lock_guard<std::mutex> lk(state.mtx); state.notifs.push(std::move(n)); }
+                    fr_state = 0;
+                }
+            }
+        }
+
         // ── Video recording ───────────────────────────────────────────────────
         // Same clean eye-FBO source as photos; encodes on a worker thread.
         video_recorder.tick(xr, state, cfg_video);

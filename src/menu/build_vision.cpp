@@ -332,7 +332,8 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         CameraResolutionState&                 res_st,
         std::function<bool(int,int,int)>       apply_res,  // re-init at new w/h/fps
         EyeSource*                             eye_src,    // this eye's background source
-        ZoomCropState*                         zoom_st)    // this eye's digital zoom
+        ZoomCropState*                         zoom_st,    // this eye's digital zoom
+        int                                    eye_num)    // 1 = left, 2 = right
     {
         // Helpers for the extended controls: a radio-list submenu bound to a
         // DmaCamera int setter/getter, and a slider bound to a float one. Menu
@@ -609,6 +610,13 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 "don't, the options are a no-op."),
             submenu("Zoom",   std::move(zoomm)),
             submenu("Source", std::move(srcm)),
+            with_desc(leaf("Capture Photo (Full Res)", [&state, eye_num]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.fullres_capture_req = eye_num;
+                }),
+                "Take a full-sensor-resolution JPEG from THIS camera. Briefly "
+                "switches it to its max mode (both eyes blank a few seconds), "
+                "grabs one frame, then restores the live resolution."),
         };
     };
 
@@ -618,14 +626,14 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         state.camera_resolution,
         [cameras](int w, int h, int fps){
             return cameras ? cameras->set_owl_left_resolution(w, h, fps) : false; },
-        left_eye_src,  &state.zoom_left);
+        left_eye_src,  &state.zoom_left,  /*eye_num=*/1);
     auto right_cam_menu = make_cam_menu(
         [cameras]{ return cameras ? cameras->owl_right() : nullptr; },
         state.focus_right, state.night_vision.csi_awb_right,
         state.camera_resolution_right,
         [cameras](int w, int h, int fps){
             return cameras ? cameras->set_owl_right_resolution(w, h, fps) : false; },
-        right_eye_src, &state.zoom_right);
+        right_eye_src, &state.zoom_right, /*eye_num=*/2);
 
     // ── Digital zoom presets (both eyes together) ─────────────────────────────
     struct ZoomPreset { const char* label; float zoom; };

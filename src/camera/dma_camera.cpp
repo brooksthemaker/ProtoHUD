@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <iostream>
 #include <cstring>
+#include <sys/mman.h>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <chrono>
 #include <thread>
 #include <vector>
@@ -997,4 +1000,71 @@ void DmaCamera::set_noise_reduction(int mode) {
 void DmaCamera::set_hdr_mode(int mode) {
     if (!camera_) return;
     cur_hdr_.store(mode); pending_hdr_.store(mode);
+}
+
+// ── Full-resolution still grab (CPU NV12 → JPEG) ──────────────────────────────
+bool DmaCamera::grab_still(const std::string& path) {
+    if (fmt_drm_ != DRM_FORMAT_NV12) {
+        std::cerr << "[dma] grab_still: only NV12 supported\n";
+        return false;
+    }
+    // Latest complete frame buffer (held briefly under the handoff lock).
+    FrameBuffer* buf = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(handoff_mtx_);
+        int s = (ready_slot_ >= 0) ? ready_slot_ : render_slot_;
+        if (s >= 0 && s < static_cast<int>(slots_.size())) buf = slots_[s].buffer;
+    }
+    if (!buf) { std::cerr << "[dma] grab_still: no frame ready\n"; return false; }
+
+    const int w = cfg_.width, h = cfg_.height, stride = stride_;
+    if (w <= 0 || h <= 0 || stride < w) return false;
+
+    const auto& planes = buf->planes();
+    if (planes.empty()) return false;
+
+    const int   fd0  = planes[0].fd.get();
+    const size_t len0 = static_cast<size_t>(planes[0].offset) + planes[0].length;
+    void* base0 = ::mmap(nullptr, len0, PROT_READ, MAP_SHARED, fd0, 0);
+    if (base0 == MAP_FAILED) { std::cerr << "[dma] grab_still: mmap Y failed\n"; return false; }
+
+    const uint8_t* y_ptr = static_cast<const uint8_t*>(base0) + planes[0].offset;
+    const uint8_t* uv_ptr = nullptr;
+    void*  base1 = nullptr;  size_t len1 = 0;
+    if (planes.size() >= 2) {
+        const int fd1 = planes[1].fd.get();
+        if (fd1 == fd0) {
+            uv_ptr = static_cast<const uint8_t*>(base0) + planes[1].offset;
+        } else {
+            len1  = static_cast<size_t>(planes[1].offset) + planes[1].length;
+            base1 = ::mmap(nullptr, len1, PROT_READ, MAP_SHARED, fd1, 0);
+            if (base1 == MAP_FAILED) { ::munmap(base0, len0); return false; }
+            uv_ptr = static_cast<const uint8_t*>(base1) + planes[1].offset;
+        }
+    } else {
+        // Single-plane NV12: UV directly follows Y.
+        uv_ptr = y_ptr + static_cast<size_t>(stride) * h;
+    }
+
+    bool ok = false;
+    try {
+        // Repack into a tightly-packed NV12 (drops row stride padding) so OpenCV
+        // can convert it: h rows of Y then h/2 rows of interleaved UV, step = w.
+        cv::Mat nv12(h + h / 2, w, CV_8UC1);
+        for (int r = 0; r < h; ++r)
+            std::memcpy(nv12.ptr(r), y_ptr + static_cast<size_t>(r) * stride, w);
+        for (int r = 0; r < h / 2; ++r)
+            std::memcpy(nv12.ptr(h + r), uv_ptr + static_cast<size_t>(r) * stride, w);
+
+        cv::Mat bgr;
+        cv::cvtColor(nv12, bgr, cv::COLOR_YUV2BGR_NV12);
+        ok = cv::imwrite(path, bgr, { cv::IMWRITE_JPEG_QUALITY, 92 });
+    } catch (const std::exception& e) {
+        std::cerr << "[dma] grab_still: " << e.what() << "\n";
+    }
+
+    ::munmap(base0, len0);
+    if (base1) ::munmap(base1, len1);
+    if (ok) std::cout << "[dma] grab_still: saved " << w << "×" << h << " → " << path << "\n";
+    return ok;
 }

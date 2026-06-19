@@ -822,6 +822,9 @@ struct AppState {
     // Photo capture: set by menu or GPIO long-press; consumed by the render thread.
     CaptureRequest capture_request = CaptureRequest::None;
     int            capture_burst   = 0;  // extra stereo shots to take after the current one
+    // Full-resolution still capture request: 0 = none, 1 = left, 2 = right.
+    // Serviced on the render thread (reinit camera to max res, grab, reinit back).
+    int            fullres_capture_req = 0;
 
     // Video recording: video_request is posted by input/toast handlers and consumed
     // by the render thread's VideoRecorder; video_recording/paused are status mirrors

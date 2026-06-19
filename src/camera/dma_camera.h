@@ -153,6 +153,12 @@ public:
     int   fps()             const { return cfg_.fps; }
     const std::string& model_name() const { return cfg_.model_name; }
     const std::string& camera_id()  const { return cfg_.camera_id; }
+
+    // Save the current full-resolution frame to `path` as a JPEG, by mapping the
+    // libcamera NV12 buffer on the CPU and converting via OpenCV (so it works at
+    // full sensor res without a huge GPU FBO). Render thread, NV12 only. Returns
+    // false if there's no frame / the format isn't NV12.
+    bool grab_still(const std::string& path);
     float analogue_gain()   const { return last_analogue_gain_.load(); }
 
     // Measured capture rate, derived from the per-frame FrameDuration metadata
