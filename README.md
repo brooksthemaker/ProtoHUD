@@ -472,6 +472,8 @@ Keyboard shortcuts while running:
 | `Alt+1`…`Alt+9`, `Alt+0` | Play GIF on the active backend (auto-releases to the face after 5 s; restarts on each press) |
 | `[` | Autofocus the **Left** camera |
 | `]` | Autofocus the **Right** camera |
+| `9` / `0` | Manual focus the **Left** camera (near / far) |
+| `-` / `=` | Manual focus the **Right** camera (near / far) |
 | `Esc` | Quit |
 | `Ctrl+Q` / `Ctrl+K` | Force-kill the process immediately |
 

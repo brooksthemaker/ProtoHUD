@@ -5583,23 +5583,28 @@ int main(int argc, char* argv[]) {
                  glfwGetKey(win, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS ||
                  glfwGetKey(win, GLFW_KEY_LEFT_ALT)  == GLFW_PRESS ||
                  glfwGetKey(win, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
-            // 0: toggle manual/auto focus
-            if (edge(0, GLFW_KEY_0) && !menu.is_open() && !face_mod) {
-                bool go_manual = (state.focus_left.mode != CameraFocusState::Mode::MANUAL);
-                if (go_manual) {
-                    if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
-                    if (cameras.owl_right()) cameras.owl_right()->stop_autofocus();
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    state.focus_left.mode  = CameraFocusState::Mode::MANUAL;
-                    state.focus_right.mode = CameraFocusState::Mode::MANUAL;
-                } else {
-                    if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
-                    if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    state.focus_left.mode  = CameraFocusState::Mode::AUTO;
-                    state.focus_right.mode = CameraFocusState::Mode::AUTO;
-                }
-            }
+            // ── Manual per-camera focus ───────────────────────────────────────
+            //   9 / 0  → LEFT camera  (near / far)
+            //   - / =  → RIGHT camera (near / far)
+            // Nudging puts that camera into MANUAL focus so the position sticks.
+            constexpr int FOCUS_STEP = 20;
+            auto nudge_focus = [&](DmaCamera* c, CameraFocusState& f, int delta){
+                if (!c) return;
+                int pos = std::clamp(c->get_focus_position() + delta, 0, 1000);
+                c->stop_autofocus();
+                c->set_focus_position(pos);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                f.mode = CameraFocusState::Mode::MANUAL;
+                f.focus_position = pos;
+            };
+            if (edge(1, GLFW_KEY_9)     && !menu.is_open() && !face_mod)
+                nudge_focus(cameras.owl_left(),  state.focus_left,  -FOCUS_STEP);
+            if (edge(0, GLFW_KEY_0)     && !menu.is_open() && !face_mod)
+                nudge_focus(cameras.owl_left(),  state.focus_left,  +FOCUS_STEP);
+            if (edge(5, GLFW_KEY_MINUS) && !menu.is_open() && !face_mod)
+                nudge_focus(cameras.owl_right(), state.focus_right, -FOCUS_STEP);
+            if (edge(6, GLFW_KEY_EQUAL) && !menu.is_open() && !face_mod)
+                nudge_focus(cameras.owl_right(), state.focus_right, +FOCUS_STEP);
             // 4: autofocus both cameras
             if (edge(4, GLFW_KEY_4) && !face_mod) {
                 if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
@@ -5607,18 +5612,6 @@ int main(int argc, char* argv[]) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.focus_left.mode  = CameraFocusState::Mode::AUTO;
                 state.focus_right.mode = CameraFocusState::Mode::AUTO;
-            }
-            // - / = : manual focus step (near / far)
-            constexpr int FOCUS_STEP = 20;
-            if (edge(5, GLFW_KEY_MINUS) && cameras.owl_left()) {
-                int pos = std::max(0, cameras.owl_left()->get_focus_position() - FOCUS_STEP);
-                cameras.owl_left()->set_focus_position(pos);
-                if (cameras.owl_right()) cameras.owl_right()->set_focus_position(pos);
-            }
-            if (edge(6, GLFW_KEY_EQUAL) && cameras.owl_left()) {
-                int pos = std::min(1000, cameras.owl_left()->get_focus_position() + FOCUS_STEP);
-                cameras.owl_left()->set_focus_position(pos);
-                if (cameras.owl_right()) cameras.owl_right()->set_focus_position(pos);
             }
             // 1/2/3 — toggle USB cam PiP;  Shift+1/2/3 — trigger autofocus on that cam
             {
