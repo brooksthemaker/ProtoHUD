@@ -446,7 +446,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         auto res_rows = make_dynamic_rows(16,
             [cam_ptr]{ auto* c = cam_ptr();
                        return c ? static_cast<int>(c->supported_modes().size()) : 0; },
-            [cam_ptr, &res_st, &state](int i) {
+            [cam_ptr, apply_res, &res_st, &state](int i) {
                 MenuItem m;
                 m.type     = MenuItemType::LEAF;
                 m.label    = "mode";
