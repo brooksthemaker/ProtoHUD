@@ -6140,6 +6140,10 @@ int main(int argc, char* argv[]) {
                         drew = snap.cameras_swapped
                             ? cameras.draw_owl_right(snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y)
                             : cameras.draw_owl_left (snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
+                    else if (left_eye_src == EyeSource::CSI_LEFT)   // explicit Cam 0
+                        drew = cameras.draw_owl_left (snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
+                    else if (left_eye_src == EyeSource::CSI_RIGHT)  // explicit Cam 1
+                        drew = cameras.draw_owl_right(snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
                     else
                         drew = cameras.draw_tex_fullscreen(usb_tex_for(left_eye_src));
                 }
@@ -6175,6 +6179,10 @@ int main(int argc, char* argv[]) {
                         drew = snap.cameras_swapped
                             ? cameras.draw_owl_left (snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y)
                             : cameras.draw_owl_right(snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+                    else if (right_eye_src == EyeSource::CSI_LEFT)   // explicit Cam 0
+                        drew = cameras.draw_owl_left (snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+                    else if (right_eye_src == EyeSource::CSI_RIGHT)  // explicit Cam 1
+                        drew = cameras.draw_owl_right(snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
                     else
                         drew = cameras.draw_tex_fullscreen(usb_tex_for(right_eye_src));
                 }
