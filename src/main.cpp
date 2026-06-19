@@ -5190,6 +5190,33 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ── Re-apply AppState-held camera settings after any CSI re-init ──────
+        // reinit_owls() rebuilds the DmaCameras. Rotation + the AF/AE/WB/ISP/HDR
+        // controls are restored inside it, but focus mode/position and the
+        // AWB-enable toggle live in AppState, so re-apply those whenever a
+        // rebuild happened (resolution change, CSI auto-retry, manual reinit).
+        {
+            static uint32_t last_owl_gen = cameras.reinit_generation();
+            const uint32_t gen = cameras.reinit_generation();
+            if (gen != last_owl_gen) {
+                last_owl_gen = gen;
+                auto reapply = [](DmaCamera* c, const CameraFocusState& f, bool awb_auto){
+                    if (!c) return;
+                    if (f.mode == CameraFocusState::Mode::AUTO) {
+                        c->start_autofocus();
+                    } else {                         // MANUAL / SLAVE → fixed lens
+                        c->stop_autofocus();
+                        c->set_focus_position(f.focus_position);
+                    }
+                    c->set_awb_enable(awb_auto);
+                };
+                reapply(cameras.owl_left(),  state.focus_left,
+                        state.night_vision.csi_awb_left);
+                reapply(cameras.owl_right(), state.focus_right,
+                        state.night_vision.csi_awb_right);
+            }
+        }
+
         // ── Start frame: tick HUD state + begin ImGui for input/menu ─────────
         hud.set_dt(dt);
         hud.begin_menu_frame();

@@ -363,6 +363,8 @@ bool CameraManager::reinit_owls() {
     put(owl_left_.get(),  snapL);
     put(owl_right_.get(), snapR);
 
+    ++reinit_gen_;   // signal the render loop to re-apply AppState-held settings
+
     const bool ok = owl_left_ok() || owl_right_ok();
     std::cout << "[cam] reinit done: left=" << (owl_left_ok() ? "ok" : "—")
               << " right=" << (owl_right_ok() ? "ok" : "—") << "\n";

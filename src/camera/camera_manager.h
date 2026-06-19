@@ -160,6 +160,11 @@ public:
     // Returns true if at least one CSI camera came up.
     bool reinit_owls();
 
+    // Bumped every time the OWLsight cameras are rebuilt (reinit_owls). The
+    // render loop watches this to re-apply AppState-held settings the rebuilt
+    // cameras don't keep on their own (focus mode/position, AWB-enable toggle).
+    uint32_t reinit_generation() const { return reinit_gen_; }
+
     // ── Status ────────────────────────────────────────────────────────────────
     bool owl_left_ok()  const { return owl_left_  && owl_left_->is_ok();  }
     bool owl_right_ok() const { return owl_right_ && owl_right_->is_ok(); }
@@ -255,6 +260,7 @@ private:
     std::unique_ptr<DmaCamera> owl_right_;
     // Stored so reinit_owls() can re-run the enumeration + init.
     CamConfig    owl_left_cfg_, owl_right_cfg_;
+    uint32_t     reinit_gen_ = 0;   // ++ on each reinit_owls(); see reinit_generation()
     std::string  nv12_vs_, nv12_fs_;
     void init_owls();   // (re)resolve + (re)create the two DmaCameras from the stored cfgs
 
