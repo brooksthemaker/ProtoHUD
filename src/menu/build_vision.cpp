@@ -330,7 +330,9 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         CameraFocusState&                      focus_st,
         bool&                                  awb_flag,
         CameraResolutionState&                 res_st,
-        std::function<bool(int,int,int)>       apply_res)  // re-init at new w/h/fps
+        std::function<bool(int,int,int)>       apply_res,  // re-init at new w/h/fps
+        EyeSource*                             eye_src,    // this eye's background source
+        ZoomCropState*                         zoom_st)    // this eye's digital zoom
     {
         // Helpers for the extended controls: a radio-list submenu bound to a
         // DmaCamera int setter/getter, and a slider bound to a float one. Menu
@@ -539,20 +541,67 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
             [](DmaCamera* c, int v){ c->set_hdr_mode(v); },
             [](DmaCamera* c){ return c->hdr_mode(); });
 
+        // ── Image Adjustments (White Balance + Exposure + ISP image) ──────────
+        std::vector<MenuItem> imageadj;
+        imageadj.push_back(submenu("White Balance", std::move(wbm)));
+        imageadj.push_back(submenu("Exposure",      std::move(expm)));
+        for (auto& it : imgm) imageadj.push_back(std::move(it));
+
+        // ── Zoom (this eye's digital zoom + crop centre) ──────────────────────
+        struct ZLvl { const char* l; float z; };
+        static const ZLvl kZoom[] = {
+            {"1.0\xC3\x97 (Full)", 1.0f}, {"1.25\xC3\x97", 1.25f},
+            {"1.5\xC3\x97", 1.5f}, {"2.0\xC3\x97", 2.0f}, {"3.0\xC3\x97", 3.0f} };
+        std::vector<MenuItem> zlvl;
+        for (const auto& zp : kZoom)
+            zlvl.push_back(live(leaf_sel(zp.l,
+                [zoom_st, z = zp.z]{ if (zoom_st) zoom_st->zoom = z; },
+                [zoom_st, z = zp.z]{ return zoom_st && zoom_st->zoom == z; })));
+        struct ZCtr { const char* l; float cx, cy; };
+        static const ZCtr kCtr[] = {
+            {"Center", 0.5f, 0.5f}, {"Top", 0.5f, 0.25f}, {"Bottom", 0.5f, 0.75f},
+            {"Left", 0.25f, 0.5f}, {"Right", 0.75f, 0.5f} };
+        std::vector<MenuItem> zctr;
+        for (const auto& cp : kCtr)
+            zctr.push_back(live(leaf_sel(cp.l,
+                [zoom_st, cx = cp.cx, cy = cp.cy]{
+                    if (zoom_st) { zoom_st->center_x = cx; zoom_st->center_y = cy; } },
+                [zoom_st, cx = cp.cx, cy = cp.cy]{
+                    return zoom_st && zoom_st->center_x == cx && zoom_st->center_y == cy; })));
+        std::vector<MenuItem> zoomm = {
+            submenu("Zoom Level",  std::move(zlvl)),
+            submenu("Crop Center", std::move(zctr)),
+            leaf("Reset Zoom", [zoom_st]{ if (zoom_st) *zoom_st = ZoomCropState{}; }),
+        };
+
+        // ── Source (this eye's background camera) ─────────────────────────────
+        auto src_row = [eye_src](const char* lbl, EyeSource v) {
+            return leaf_sel(lbl, [eye_src, v]{ if (eye_src) *eye_src = v; },
+                                 [eye_src, v]{ return eye_src && *eye_src == v; });
+        };
+        std::vector<MenuItem> srcm = {
+            src_row("CSI Camera", EyeSource::CSI),
+            src_row("CSI Cam 0",  EyeSource::CSI_LEFT),
+            src_row("CSI Cam 1",  EyeSource::CSI_RIGHT),
+            src_row("USB Cam 1",  EyeSource::USB1),
+            src_row("USB Cam 2",  EyeSource::USB2),
+            src_row("USB Cam 3",  EyeSource::USB3),
+        };
+
         return std::vector<MenuItem>{
             submenu("Focus",          std::move(fm)),
-            submenu("Exposure",       std::move(expm)),
-            submenu("White Balance",  std::move(wbm)),
-            submenu("Image",          std::move(imgm)),
-            with_desc(submenu("HDR",  std::move(hdrm)),
-                "On-sensor HDR (IMX708 / Camera Module 3). Needs a recent "
-                "libcamera that exposes HdrMode at runtime; on sensors that "
-                "don't, the options are a no-op."),
-            submenu("Rotation",       std::move(rm)),
             with_desc(submenu("Resolution", std::move(resm)),
                 "Set THIS camera's capture resolution from the modes the sensor "
                 "actually reports. fps follows the camera's limit at that size; "
                 "the Current row shows the real measured rate."),
+            submenu("Rotation",          std::move(rm)),
+            submenu("Image Adjustments", std::move(imageadj)),
+            with_desc(submenu("HDR",  std::move(hdrm)),
+                "On-sensor HDR (IMX708 / Camera Module 3). Needs a recent "
+                "libcamera that exposes HdrMode at runtime; on sensors that "
+                "don't, the options are a no-op."),
+            submenu("Zoom",   std::move(zoomm)),
+            submenu("Source", std::move(srcm)),
         };
     };
 
@@ -561,13 +610,15 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         state.focus_left,  state.night_vision.csi_awb_left,
         state.camera_resolution,
         [cameras](int w, int h, int fps){
-            return cameras ? cameras->set_owl_left_resolution(w, h, fps) : false; });
+            return cameras ? cameras->set_owl_left_resolution(w, h, fps) : false; },
+        left_eye_src,  &state.zoom_left);
     auto right_cam_menu = make_cam_menu(
         [cameras]{ return cameras ? cameras->owl_right() : nullptr; },
         state.focus_right, state.night_vision.csi_awb_right,
         state.camera_resolution_right,
         [cameras](int w, int h, int fps){
-            return cameras ? cameras->set_owl_right_resolution(w, h, fps) : false; });
+            return cameras ? cameras->set_owl_right_resolution(w, h, fps) : false; },
+        right_eye_src, &state.zoom_right);
 
     // ── Digital zoom presets (both eyes together) ─────────────────────────────
     struct ZoomPreset { const char* label; float zoom; };
@@ -888,22 +939,10 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
     // Build per-camera submenu labels from the configured model names.  When both
     // cameras share a model (e.g. default OWLsight pair) disambiguate with #1/#2
     // plus an eye hint; otherwise show "<Model> (Left/Right)".
-    auto cam_label = [](std::string model, const char* eye, const char* index) {
-        if (model.empty()) model = "Owlsight";
-        std::string out = std::move(model);
-        if (index) { out += " #"; out += index; }
-        out += " (";
-        out += eye;
-        out += ")";
-        return out;
-    };
-    std::string left_model  = cameras ? cameras->owl_left_model()  : std::string();
-    std::string right_model = cameras ? cameras->owl_right_model() : std::string();
-    std::string left_norm   = left_model.empty()  ? "Owlsight" : left_model;
-    std::string right_norm  = right_model.empty() ? "Owlsight" : right_model;
-    const bool same_model   = (left_norm == right_norm);
-    std::string left_label  = cam_label(left_model,  "Left",  same_model ? "1" : nullptr);
-    std::string right_label = cam_label(right_model, "Right", same_model ? "2" : nullptr);
+    // The two CSI cameras are referred to as "Left Camera" / "Right Camera"
+    // throughout the UI (regardless of sensor model).
+    const std::string left_label  = "Left Camera";
+    const std::string right_label = "Right Camera";
 
     // ── Multi-Cam layout ─────────────────────────────────────────────────────
     // Each eye shows a top + bottom image (full-width, stacked); the two eyes use
@@ -948,69 +987,13 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 "Which camera fills the bottom half of the RIGHT eye (default USB 2)."));
     }
 
-    std::vector<MenuItem> main_cameras_menu = {
-        submenu("Left Eye Source",  make_eye_source_menu(left_eye_src)),
-        submenu("Right Eye Source", make_eye_source_menu(right_eye_src)),
+    // ── "Other Options" — everything that isn't a per-camera setting ──────────
+    std::vector<MenuItem> other_options = {
         with_desc(submenu("Multi-Cam Layout", std::move(multicam_menu)),
             "Each eye stacks a top + bottom camera (full width); the two eyes use "
             "independent sources, so side-by-side shows four distinct feeds with no "
             "duplicates. Each of the four slots picks any CSI or USB camera. Set CSI "
             "rotation to 90\xc2\xb0 under Left/Right Camera > Rotation if needed."),
-        with_panel(
-            with_desc(submenu("Raw View", std::move(raw_view_menu)),
-                "Pass the camera feed straight through. Toggle Enable to show it; "
-                "Position places each eye. The preview at right shows it live."),
-            "Raw View Preview", eye_pos_preview),
-        menu_shared::swap_cameras_toggle(state),
-        with_panel(
-            submenu("Resolution", std::move(resolution_presets)),
-            "Camera Resolution",
-            [&state, menu_sys_pp]
-            (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-                (void)sz;
-                const ImU32 accent = (menu_sys_pp && *menu_sys_pp)
-                    ? (*menu_sys_pp)->accent_color()
-                    : IM_COL32(255, 255, 255, 255);
-                int w = state.camera_resolution.width;
-                int h = state.camera_resolution.height;
-                if (w <= 0 || h <= 0) { w = 1280; h = 800; }
-                float ar = float(w) / float(h);
-
-                char buf[64];
-                snprintf(buf, sizeof(buf), "%d x %d", w, h);
-                dl->AddText({ o.x, o.y }, IM_COL32(255, 255, 255, 235), buf);
-                snprintf(buf, sizeof(buf), "Aspect: %.2f:1 (~%s)",
-                         ar,
-                         (ar > 1.74f && ar < 1.80f) ? "16:9"
-                         : (ar > 1.30f && ar < 1.36f) ? "4:3"
-                         : (ar > 1.58f && ar < 1.62f) ? "16:10"
-                         : "custom");
-                dl->AddText({ o.x, o.y + 18.f }, IM_COL32(200, 200, 200, 220), buf);
-
-                // Hint list — common Raspberry Pi camera modules grouped by AR.
-                const float lh = 14.f;
-                ImVec2 p{ o.x, o.y + 44.f };
-                dl->AddText(p, (accent & 0x00FFFFFFu) | (200u << 24),
-                            "PI CAMERA NATIVE AR");
-                p.y += lh + 2.f;
-                struct Row { const char* ar; const char* mods; };
-                static const Row rows[] = {
-                    { "4:3",  "IMX219 v2, IMX477 HQ, IMX708 v3 (bin)" },
-                    { "16:9", "IMX477 HQ, IMX708 v3 (native)" },
-                    { "1:1",  "IMX296, IMX290 (crop)" },
-                };
-                for (auto& r : rows) {
-                    char line[96];
-                    snprintf(line, sizeof(line), "%-5s  %s", r.ar, r.mods);
-                    dl->AddText(p, IM_COL32(190, 190, 190, 200), line);
-                    p.y += lh;
-                }
-            }),
-        with_panel(
-            with_desc(submenu("Digital Zoom", std::move(zoom_menu)),
-                  "Magnify both eyes equally and choose where the crop is centered. "
-                  "Higher zoom shows less of the scene at greater detail. Preview at right."),
-            "Digital Zoom Preview", digital_zoom_preview),
         with_panel(
             with_desc(submenu("Mirror Crop", std::move(mirror_crop_menu)),
                 "Zoom and pan each eye inward (nose-side crop) for a monocular/assistive "
@@ -1036,8 +1019,6 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                     case CropVertical::Bottom: crop_y0 = 1.0f - crop_h;        break;
                 }
                 const float bias = state.mirror_crop.inner_bias;  // 0.0 – 0.40
-                // Left eye crop biased toward the right (nose); right eye crop
-                // biased toward the left.  bias=0 → centered.
                 auto crop_x0 = [&](bool right) {
                     float cx = right ? (0.5f - bias) : (0.5f + bias);
                     return cx - crop_w * 0.5f;
@@ -1069,25 +1050,33 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 }
             }),
         with_panel(
-            with_desc(submenu("Single Camera", std::move(single_cam_menu)),
+            with_desc(submenu("Single Camera View", std::move(single_cam_menu)),
                 "Show ONE camera filling a region of the screen (full, or a half) instead "
                 "of the stereo pair. Choose the camera and anchor; preview at right."),
             "Single Camera Preview", single_cam_preview),
-        submenu(left_label,         std::move(left_cam_menu)),
-        submenu(right_label,        std::move(right_cam_menu)),
-        // Recover a CSI sensor that came up dark/wedged at boot without a
-        // full reboot: tears down + re-enumerates + restarts both cameras.
+        submenu("Low-Light Options",   std::move(nv_menu)),
+        submenu("Multi-Cam Autofocus", std::move(af_both_menu)),
+        with_panel(
+            with_desc(submenu("Raw View", std::move(raw_view_menu)),
+                "Pass the camera feed straight through. Toggle Enable to show it; "
+                "Position places each eye. The preview at right shows it live."),
+            "Raw View Preview", eye_pos_preview),
+        menu_shared::swap_cameras_toggle(state),
         with_desc(menu_shared::reinit_csi_leaf(cameras, state,
                                                "Reinitialize CSI Cameras",
                                                /*live_status_label=*/true),
-            "Re-enumerate and restart the CSI (OWLsight) cameras \xE2\x80\x94 recovers an "
+            "Re-enumerate and restart the CSI cameras \xE2\x80\x94 recovers an "
             "eye that came up dark/wedged at boot, without rebooting. Briefly blacks "
             "both feeds while it re-acquires."),
-        submenu("Low-Light Mode",   std::move(nv_menu)),
-        submenu("Autofocus Both",   std::move(af_both_menu)),
         submenu("Capture Photo",    std::move(capture_menu)),
         submenu("Record Video",     std::move(video_menu)),
         submenu("QR Scan",          std::move(qr_menu)),
+    };
+
+    std::vector<MenuItem> main_cameras_menu = {
+        submenu(left_label,        std::move(left_cam_menu)),
+        submenu(right_label,       std::move(right_cam_menu)),
+        submenu("Other Options",   std::move(other_options)),
     };
 
     // Schematic preview of where / how big / which orientation the PiP sits on
