@@ -228,6 +228,86 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
     }
 }
 
+// ── Per-CSI-camera control persistence ────────────────────────────────────────
+// The menu writes AF/AE/WB/ISP/HDR controls straight onto the DmaCamera. These
+// helpers carry them through config: parse_* (config → state) and apply_* (state
+// → camera) run at startup; read_* (camera → state) + write_* (state → config)
+// run on save. State is the canonical persisted copy so a value survives even
+// when the camera is briefly absent.
+static void parse_cam_controls(const json& j, CameraControlsState& s) {
+    if (!j.is_object() || !j.contains("controls") || !j["controls"].is_object()) return;
+    const auto& c = j["controls"];
+    s.af_range        = c.value("af_range",         s.af_range);
+    s.af_speed        = c.value("af_speed",         s.af_speed);
+    s.gain            = c.value("gain",             s.gain);
+    s.ae_metering     = c.value("ae_metering",      s.ae_metering);
+    s.ae_constraint   = c.value("ae_constraint",    s.ae_constraint);
+    s.ae_exp_mode     = c.value("ae_exposure_mode", s.ae_exp_mode);
+    s.flicker         = c.value("flicker",          s.flicker);
+    s.awb_mode        = c.value("awb_mode",         s.awb_mode);
+    s.brightness      = c.value("brightness",       s.brightness);
+    s.contrast        = c.value("contrast",         s.contrast);
+    s.saturation      = c.value("saturation",       s.saturation);
+    s.sharpness       = c.value("sharpness",        s.sharpness);
+    s.noise_reduction = c.value("noise_reduction",  s.noise_reduction);
+    s.hdr             = c.value("hdr",              s.hdr);
+}
+
+static void write_cam_controls(json& j, const CameraControlsState& s) {
+    j["af_range"]         = s.af_range;
+    j["af_speed"]         = s.af_speed;
+    j["gain"]             = s.gain;
+    j["ae_metering"]      = s.ae_metering;
+    j["ae_constraint"]    = s.ae_constraint;
+    j["ae_exposure_mode"] = s.ae_exp_mode;
+    j["flicker"]          = s.flicker;
+    j["awb_mode"]         = s.awb_mode;
+    j["brightness"]       = s.brightness;
+    j["contrast"]         = s.contrast;
+    j["saturation"]       = s.saturation;
+    j["sharpness"]        = s.sharpness;
+    j["noise_reduction"]  = s.noise_reduction;
+    j["hdr"]              = s.hdr;
+}
+
+static void apply_cam_controls(DmaCamera* c, const CameraControlsState& s) {
+    if (!c) return;
+    c->set_af_range(s.af_range);
+    c->set_af_speed(s.af_speed);
+    if (s.gain > 0.0f) c->set_analogue_gain(s.gain);
+    c->set_ae_metering(s.ae_metering);
+    c->set_ae_constraint(s.ae_constraint);
+    c->set_ae_exposure_mode(s.ae_exp_mode);
+    c->set_flicker_mode(s.flicker);
+    // Only push a WB preset if one was actually chosen — set_awb_mode forces
+    // AWB on, which would override manual WB; default Auto (0) leaves it be.
+    if (s.awb_mode > 0) c->set_awb_mode(s.awb_mode);
+    c->set_brightness(s.brightness);
+    c->set_contrast(s.contrast);
+    c->set_saturation(s.saturation);
+    c->set_sharpness(s.sharpness);
+    c->set_noise_reduction(s.noise_reduction);
+    c->set_hdr_mode(s.hdr);
+}
+
+static void read_cam_controls(DmaCamera* c, CameraControlsState& s) {
+    if (!c) return;   // camera absent → keep the last-known (loaded) values
+    s.af_range        = c->af_range();
+    s.af_speed        = c->af_speed();
+    s.gain            = c->analogue_gain_target();
+    s.ae_metering     = c->ae_metering();
+    s.ae_constraint   = c->ae_constraint();
+    s.ae_exp_mode     = c->ae_exposure_mode();
+    s.flicker         = c->flicker_mode();
+    s.awb_mode        = c->awb_mode();
+    s.brightness      = c->brightness();
+    s.contrast        = c->contrast();
+    s.saturation      = c->saturation();
+    s.sharpness       = c->sharpness();
+    s.noise_reduction = c->noise_reduction();
+    s.hdr             = c->hdr_mode();
+}
+
 // Launch the panel_driver.py piomatter shim as a detached child. Used at
 // startup AND from the menu's backend hot-swap when switching back to HUB75.
 // fork()+setsid() (instead of `system("... &")`) so SIGINT to the parent
@@ -1308,6 +1388,7 @@ int main(int argc, char* argv[]) {
         owl_left.height       = jl.value("height",  800);
         owl_left.fps          = jl.value("fps",      60);
         owl_left.rotation_deg = jl.value("rotation_deg", 0);
+        parse_cam_controls(jl, state.camera_controls_left);
     }
     if (jcam.contains("owlsight_right")) {
         auto& jr               = jcam["owlsight_right"];
@@ -1317,8 +1398,12 @@ int main(int argc, char* argv[]) {
         owl_right.height       = jr.value("height",  800);
         owl_right.fps          = jr.value("fps",      60);
         owl_right.rotation_deg = jr.value("rotation_deg", 0);
+        parse_cam_controls(jr, state.camera_controls_right);
     }
-    // Override both eyes from the persisted resolution section (set by in-app preset menu)
+    // Back-compat: older builds persisted a single top-level "resolution" block
+    // that forced BOTH eyes to one value. Newer builds save per-eye under
+    // owlsight_left/right and drop this block on save, so this only fires for
+    // configs written before per-camera resolution existed.
     if (cfg.contains("resolution")) {
         const auto& jres = cfg["resolution"];
         int w   = jres.value("width",  owl_left.width);
@@ -2118,10 +2203,13 @@ int main(int argc, char* argv[]) {
     if (!splash_cfg.image_path.empty() && splash_cfg.image_path[0] != '/')
         splash_cfg.image_path = res(splash_cfg.image_path);
 
-    // Seed resolution state from whatever the OWLsight config says
-    state.camera_resolution.width  = owl_left.width;
-    state.camera_resolution.height = owl_left.height;
-    state.camera_resolution.fps    = owl_left.fps;
+    // Seed per-eye resolution state from whatever each OWLsight config says
+    state.camera_resolution.width        = owl_left.width;
+    state.camera_resolution.height       = owl_left.height;
+    state.camera_resolution.fps          = owl_left.fps;
+    state.camera_resolution_right.width  = owl_right.width;
+    state.camera_resolution_right.height = owl_right.height;
+    state.camera_resolution_right.fps    = owl_right.fps;
 
     // ── Audio engine ──────────────────────────────────────────────────────────
 
@@ -2668,6 +2756,12 @@ int main(int argc, char* argv[]) {
         if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
         std::cout << "[main] autofocus on startup\n";
     }
+
+    // Re-apply persisted per-eye AF/AE/WB/ISP/HDR controls now the cameras are
+    // running (the setters queue onto the next request). Done after the startup
+    // autofocus so a saved manual focus mode isn't immediately overridden.
+    apply_cam_controls(cameras.owl_left(),  state.camera_controls_left);
+    apply_cam_controls(cameras.owl_right(), state.camera_controls_right);
 
     // ── Beast built-in passthrough camera ────────────────────────────────────
 
@@ -4775,15 +4869,31 @@ int main(int argc, char* argv[]) {
             cfg["weather"]["interval_min"] = wc.interval_min;
         }
 
-        cfg["resolution"]["width"]  = state.camera_resolution.width;
-        cfg["resolution"]["height"] = state.camera_resolution.height;
-        cfg["resolution"]["fps"]    = state.camera_resolution.fps;
+        // Per-eye resolution lives under each camera's own block now. The legacy
+        // top-level "resolution" block (which forced BOTH eyes to one value) is
+        // retired on save so independent per-eye settings persist; the loader
+        // still honours it for back-compat with configs from older builds.
+        cfg["cameras"]["owlsight_left"]["width"]   = state.camera_resolution.width;
+        cfg["cameras"]["owlsight_left"]["height"]  = state.camera_resolution.height;
+        cfg["cameras"]["owlsight_left"]["fps"]     = state.camera_resolution.fps;
+        cfg["cameras"]["owlsight_right"]["width"]  = state.camera_resolution_right.width;
+        cfg["cameras"]["owlsight_right"]["height"] = state.camera_resolution_right.height;
+        cfg["cameras"]["owlsight_right"]["fps"]    = state.camera_resolution_right.fps;
+        cfg.erase("resolution");
 
         // Persist CSI display rotation so the in-app setting survives a
         // restart (rotation_deg lives next to the camera-id/width/height/fps
         // block where the user already finds the rest of the per-eye config).
         cfg["cameras"]["owlsight_left"]["rotation_deg"]  = cameras.owl_left_rotation();
         cfg["cameras"]["owlsight_right"]["rotation_deg"] = cameras.owl_right_rotation();
+
+        // Per-eye AF/AE/WB/ISP/HDR controls. Refresh state from the live cameras
+        // (no-op if a camera is absent — the loaded values are kept), then write
+        // them under each camera's "controls" block.
+        read_cam_controls(cameras.owl_left(),  state.camera_controls_left);
+        read_cam_controls(cameras.owl_right(), state.camera_controls_right);
+        write_cam_controls(cfg["cameras"]["owlsight_left"]["controls"],  state.camera_controls_left);
+        write_cam_controls(cfg["cameras"]["owlsight_right"]["controls"], state.camera_controls_right);
 
         auto eye_src_str = [](EyeSource s) -> const char* {
             switch (s) {
@@ -5080,6 +5190,33 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ── Re-apply AppState-held camera settings after any CSI re-init ──────
+        // reinit_owls() rebuilds the DmaCameras. Rotation + the AF/AE/WB/ISP/HDR
+        // controls are restored inside it, but focus mode/position and the
+        // AWB-enable toggle live in AppState, so re-apply those whenever a
+        // rebuild happened (resolution change, CSI auto-retry, manual reinit).
+        {
+            static uint32_t last_owl_gen = cameras.reinit_generation();
+            const uint32_t gen = cameras.reinit_generation();
+            if (gen != last_owl_gen) {
+                last_owl_gen = gen;
+                auto reapply = [](DmaCamera* c, const CameraFocusState& f, bool awb_auto){
+                    if (!c) return;
+                    if (f.mode == CameraFocusState::Mode::AUTO) {
+                        c->start_autofocus();
+                    } else {                         // MANUAL / SLAVE → fixed lens
+                        c->stop_autofocus();
+                        c->set_focus_position(f.focus_position);
+                    }
+                    c->set_awb_enable(awb_auto);
+                };
+                reapply(cameras.owl_left(),  state.focus_left,
+                        state.night_vision.csi_awb_left);
+                reapply(cameras.owl_right(), state.focus_right,
+                        state.night_vision.csi_awb_right);
+            }
+        }
+
         // ── Start frame: tick HUD state + begin ImGui for input/menu ─────────
         hud.set_dt(dt);
         hud.begin_menu_frame();
@@ -5254,6 +5391,15 @@ int main(int argc, char* argv[]) {
         if (key_pressed(ImGuiKey_F1)) {
             if (menu.is_deep_open()) menu.close_deep();
             else { menu.close(); menu.open_deep(); }
+        }
+        // Per-camera autofocus: [ = Left camera, ] = Right camera.
+        if (key_pressed(ImGuiKey_LeftBracket)) {
+            if (cameras.owl_left()) cameras.owl_left()->start_autofocus();
+            state.focus_left.mode = CameraFocusState::Mode::AUTO;
+        }
+        if (key_pressed(ImGuiKey_RightBracket)) {
+            if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+            state.focus_right.mode = CameraFocusState::Mode::AUTO;
         }
         // Modal alarm/timer popup disabled — toasts handle notification display.
         // if (hud.popup_active()) {
@@ -5437,23 +5583,28 @@ int main(int argc, char* argv[]) {
                  glfwGetKey(win, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS ||
                  glfwGetKey(win, GLFW_KEY_LEFT_ALT)  == GLFW_PRESS ||
                  glfwGetKey(win, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
-            // 0: toggle manual/auto focus
-            if (edge(0, GLFW_KEY_0) && !menu.is_open() && !face_mod) {
-                bool go_manual = (state.focus_left.mode != CameraFocusState::Mode::MANUAL);
-                if (go_manual) {
-                    if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
-                    if (cameras.owl_right()) cameras.owl_right()->stop_autofocus();
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    state.focus_left.mode  = CameraFocusState::Mode::MANUAL;
-                    state.focus_right.mode = CameraFocusState::Mode::MANUAL;
-                } else {
-                    if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
-                    if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    state.focus_left.mode  = CameraFocusState::Mode::AUTO;
-                    state.focus_right.mode = CameraFocusState::Mode::AUTO;
-                }
-            }
+            // ── Manual per-camera focus ───────────────────────────────────────
+            //   9 / 0  → LEFT camera  (near / far)
+            //   - / =  → RIGHT camera (near / far)
+            // Nudging puts that camera into MANUAL focus so the position sticks.
+            constexpr int FOCUS_STEP = 20;
+            auto nudge_focus = [&](DmaCamera* c, CameraFocusState& f, int delta){
+                if (!c) return;
+                int pos = std::clamp(c->get_focus_position() + delta, 0, 1000);
+                c->stop_autofocus();
+                c->set_focus_position(pos);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                f.mode = CameraFocusState::Mode::MANUAL;
+                f.focus_position = pos;
+            };
+            if (edge(1, GLFW_KEY_9)     && !menu.is_open() && !face_mod)
+                nudge_focus(cameras.owl_left(),  state.focus_left,  -FOCUS_STEP);
+            if (edge(0, GLFW_KEY_0)     && !menu.is_open() && !face_mod)
+                nudge_focus(cameras.owl_left(),  state.focus_left,  +FOCUS_STEP);
+            if (edge(5, GLFW_KEY_MINUS) && !menu.is_open() && !face_mod)
+                nudge_focus(cameras.owl_right(), state.focus_right, -FOCUS_STEP);
+            if (edge(6, GLFW_KEY_EQUAL) && !menu.is_open() && !face_mod)
+                nudge_focus(cameras.owl_right(), state.focus_right, +FOCUS_STEP);
             // 4: autofocus both cameras
             if (edge(4, GLFW_KEY_4) && !face_mod) {
                 if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
@@ -5461,18 +5612,6 @@ int main(int argc, char* argv[]) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.focus_left.mode  = CameraFocusState::Mode::AUTO;
                 state.focus_right.mode = CameraFocusState::Mode::AUTO;
-            }
-            // - / = : manual focus step (near / far)
-            constexpr int FOCUS_STEP = 20;
-            if (edge(5, GLFW_KEY_MINUS) && cameras.owl_left()) {
-                int pos = std::max(0, cameras.owl_left()->get_focus_position() - FOCUS_STEP);
-                cameras.owl_left()->set_focus_position(pos);
-                if (cameras.owl_right()) cameras.owl_right()->set_focus_position(pos);
-            }
-            if (edge(6, GLFW_KEY_EQUAL) && cameras.owl_left()) {
-                int pos = std::min(1000, cameras.owl_left()->get_focus_position() + FOCUS_STEP);
-                cameras.owl_left()->set_focus_position(pos);
-                if (cameras.owl_right()) cameras.owl_right()->set_focus_position(pos);
             }
             // 1/2/3 — toggle USB cam PiP;  Shift+1/2/3 — trigger autofocus on that cam
             {
@@ -5712,6 +5851,7 @@ int main(int argc, char* argv[]) {
             snap.bt_devices         = state.bt_devices;
             snap.serial_metrics     = state.serial_metrics;
             snap.camera_resolution  = state.camera_resolution;
+            snap.camera_resolution_right = state.camera_resolution_right;
             snap.zoom_left          = state.zoom_left;
             snap.zoom_right         = state.zoom_right;
             snap.theater_mode       = state.theater_mode;
@@ -5898,8 +6038,11 @@ int main(int argc, char* argv[]) {
         // the camera's native aspect ratio. Black bars are filled by glClear().
         auto make_theater_vp = [&snap](int fw, int fh, bool right_eye) -> std::array<int,4> {
             using TA = AppState::TheaterAnchor;
-            float cam_ar  = (float)snap.camera_resolution.width
-                          / snap.camera_resolution.height;
+            // Each eye preserves its OWN camera aspect ratio (the eyes can run
+            // different resolutions now).
+            const auto& cam_res = right_eye ? snap.camera_resolution_right
+                                            : snap.camera_resolution;
+            float cam_ar  = (float)cam_res.width / cam_res.height;
             float disp_ar = (float)fw / fh;
             int vp_w, vp_h, vp_x, vp_y;
             if (cam_ar < disp_ar) {   // pillarbox: black left/right
@@ -5999,6 +6142,10 @@ int main(int argc, char* argv[]) {
                         drew = snap.cameras_swapped
                             ? cameras.draw_owl_right(snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y)
                             : cameras.draw_owl_left (snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
+                    else if (left_eye_src == EyeSource::CSI_LEFT)   // explicit Cam 0
+                        drew = cameras.draw_owl_left (snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
+                    else if (left_eye_src == EyeSource::CSI_RIGHT)  // explicit Cam 1
+                        drew = cameras.draw_owl_right(snap.zoom_left.zoom, snap.zoom_left.center_x, snap.zoom_left.center_y);
                     else
                         drew = cameras.draw_tex_fullscreen(usb_tex_for(left_eye_src));
                 }
@@ -6034,6 +6181,10 @@ int main(int argc, char* argv[]) {
                         drew = snap.cameras_swapped
                             ? cameras.draw_owl_left (snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y)
                             : cameras.draw_owl_right(snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+                    else if (right_eye_src == EyeSource::CSI_LEFT)   // explicit Cam 0
+                        drew = cameras.draw_owl_left (snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
+                    else if (right_eye_src == EyeSource::CSI_RIGHT)  // explicit Cam 1
+                        drew = cameras.draw_owl_right(snap.zoom_right.zoom, snap.zoom_right.center_x, snap.zoom_right.center_y);
                     else
                         drew = cameras.draw_tex_fullscreen(usb_tex_for(right_eye_src));
                 }
@@ -6071,6 +6222,62 @@ int main(int argc, char* argv[]) {
             if (state.capture_burst > 0) {
                 --state.capture_burst;
                 state.capture_request = CaptureRequest::Stereo;
+            }
+        }
+
+        // ── Full-resolution still capture (reinit to max → settle → grab) ──────
+        // Briefly switches that camera to its largest sensor mode, lets it settle
+        // a few frames, grabs a CPU NV12 frame as a JPEG, then restores the live
+        // resolution. Both eyes blank during the re-inits (a few seconds) — it's
+        // a deliberate "take a photo" action.
+        {
+            static int  fr_state  = 0;     // 0 idle, 1 settling
+            static int  fr_eye    = 0;     // 1 left, 2 right
+            static int  fr_settle = 0;
+            static CameraResolutionState fr_saved;
+            int req = 0;
+            { std::lock_guard<std::mutex> lk(state.mtx);
+              req = state.fullres_capture_req; state.fullres_capture_req = 0; }
+
+            if (fr_state == 0 && req != 0) {
+                DmaCamera* c = (req == 2) ? cameras.owl_right() : cameras.owl_left();
+                if (c && !c->supported_modes().empty()) {
+                    fr_eye          = req;
+                    fr_saved.width  = c->width();
+                    fr_saved.height = c->height();
+                    fr_saved.fps    = c->fps();
+                    const auto& mx  = c->supported_modes().front();   // largest (sorted)
+                    const int   fps = mx.max_fps > 0 ? mx.max_fps : c->fps();
+                    { Notification n; n.type = NotifType::App;
+                      n.title = "Capturing full-res photo\xE2\x80\xA6";
+                      n.body  = std::to_string(mx.width) + "\xC3\x97" + std::to_string(mx.height);
+                      n.auto_dismiss_s = 5.f;
+                      std::lock_guard<std::mutex> lk(state.mtx); state.notifs.push(std::move(n)); }
+                    if (req == 2) cameras.set_owl_right_resolution(mx.width, mx.height, fps);
+                    else          cameras.set_owl_left_resolution (mx.width, mx.height, fps);
+                    fr_settle = 8;     // let AE/AWB settle on the new mode
+                    fr_state  = 1;
+                }
+            } else if (fr_state == 1) {
+                if (--fr_settle <= 0) {
+                    DmaCamera* c = (fr_eye == 2) ? cameras.owl_right() : cameras.owl_left();
+                    std::filesystem::create_directories(cfg_photo_dir);
+                    const auto epoch = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    std::string path = cfg_photo_dir + "/protohud_fullres_" +
+                        std::string(fr_eye == 2 ? "right" : "left") + "_" +
+                        std::to_string(epoch) + ".jpg";
+                    const bool ok = c && c->grab_still(path);
+                    // Restore the live resolution.
+                    if (fr_eye == 2) cameras.set_owl_right_resolution(fr_saved.width, fr_saved.height, fr_saved.fps);
+                    else             cameras.set_owl_left_resolution (fr_saved.width, fr_saved.height, fr_saved.fps);
+                    { Notification n; n.type = NotifType::App;
+                      n.title = ok ? "Full-res photo saved" : "Full-res capture failed";
+                      n.body  = ok ? path : std::string("see log");
+                      n.auto_dismiss_s = 6.f;
+                      std::lock_guard<std::mutex> lk(state.mtx); state.notifs.push(std::move(n)); }
+                    fr_state = 0;
+                }
             }
         }
 

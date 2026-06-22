@@ -80,6 +80,8 @@ PKGS=(
     # Build tools
     cmake ninja-build pkg-config git curl
     device-tree-compiler       # dtc — compiles .dts → .dtbo
+    ccache                     # caches object files → much faster OTA rebuilds
+    mold                       # fast linker (CMake auto-uses it when present)
 
     # GLES2/EGL (handled separately — GLFW3 has its own fallback below)
     # Trixie uses libgl-dev/libgles-dev/libegl-dev; Bookworm/Bullseye use the

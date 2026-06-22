@@ -1,6 +1,7 @@
 #include "camera_manager.h"
 #include "qr_scanner.h"
 #include "../gl_utils.h"
+#include "../gl_async_read.h"   // GLES3 PBO entry points + gl::have_es3()
 
 #include <libcamera/libcamera.h>
 #include <opencv2/imgproc.hpp>
@@ -301,6 +302,52 @@ void CameraManager::init_owls() {
 // boot without rebooting the whole system.
 bool CameraManager::reinit_owls() {
     std::cout << "[cam] reinit OWLsight cameras…\n";
+
+    // Snapshot each eye's live runtime settings so the rebuilt cameras keep them
+    // (rebuilding a DmaCamera from scratch otherwise drops rotation + all the
+    // AF/AE/WB/ISP/HDR controls back to defaults — e.g. changing one eye's
+    // resolution would reset the other eye's rotation). The live DmaCamera is the
+    // source of truth here; the menu writes straight to it.
+    struct OwlSnap {
+        bool  have = false;
+        int   rot = 0, af_range = 0, af_speed = 0, ae_met = 0, ae_con = 0,
+              ae_exp = 0, flicker = 0, awb = 0, nr = 0, hdr = 0;
+        float gain = 0, bright = 0, contrast = 1, sat = 1, sharp = 1;
+    };
+    auto grab = [](DmaCamera* c) -> OwlSnap {
+        OwlSnap s;
+        if (!c) return s;
+        s.have     = true;
+        s.rot      = c->rotation();
+        s.af_range = c->af_range();    s.af_speed = c->af_speed();
+        s.gain     = c->analogue_gain_target();
+        s.ae_met   = c->ae_metering(); s.ae_con   = c->ae_constraint();
+        s.ae_exp   = c->ae_exposure_mode(); s.flicker = c->flicker_mode();
+        s.awb      = c->awb_mode();
+        s.bright   = c->brightness();  s.contrast = c->contrast();
+        s.sat      = c->saturation();  s.sharp    = c->sharpness();
+        s.nr       = c->noise_reduction(); s.hdr   = c->hdr_mode();
+        return s;
+    };
+    auto put = [](DmaCamera* c, const OwlSnap& s) {
+        if (!c || !s.have) return;
+        // rotation is applied at init() via the config; restore the rest here.
+        c->set_af_range(s.af_range);   c->set_af_speed(s.af_speed);
+        if (s.gain > 0.f) c->set_analogue_gain(s.gain);
+        c->set_ae_metering(s.ae_met);  c->set_ae_constraint(s.ae_con);
+        c->set_ae_exposure_mode(s.ae_exp); c->set_flicker_mode(s.flicker);
+        if (s.awb > 0) c->set_awb_mode(s.awb);
+        c->set_brightness(s.bright);   c->set_contrast(s.contrast);
+        c->set_saturation(s.sat);      c->set_sharpness(s.sharp);
+        c->set_noise_reduction(s.nr);  c->set_hdr_mode(s.hdr);
+    };
+
+    OwlSnap snapL = grab(owl_left_.get());
+    OwlSnap snapR = grab(owl_right_.get());
+    // Rotation rides in via the config (DmaCamera::init applies cfg.rotation_deg).
+    if (snapL.have) owl_left_cfg_.rotation_deg  = snapL.rot;
+    if (snapR.have) owl_right_cfg_.rotation_deg = snapR.rot;
+
     owl_left_.reset();
     owl_right_.reset();
     if (lcam_mgr_) { lcam_mgr_->stop(); lcam_mgr_.reset(); }
@@ -312,6 +359,13 @@ bool CameraManager::reinit_owls() {
         return false;
     }
     init_owls();
+
+    // Re-apply the snapshotted controls to the freshly-built cameras.
+    put(owl_left_.get(),  snapL);
+    put(owl_right_.get(), snapR);
+
+    ++reinit_gen_;   // signal the render loop to re-apply AppState-held settings
+
     const bool ok = owl_left_ok() || owl_right_ok();
     std::cout << "[cam] reinit done: left=" << (owl_left_ok() ? "ok" : "—")
               << " right=" << (owl_right_ok() ? "ok" : "—") << "\n";
@@ -365,16 +419,43 @@ bool CameraManager::draw_tex_fullscreen(GLuint tex) const {
 
 // ── Resolution hot-swap ────────────────────────────────────────────────────────
 
+// Re-init at a new resolution instead of an in-place reconfigure(). The Pi ISP
+// (libpisp) throws "BackEnd::finalise: TDN output not enabled when TDN enabled"
+// on a live reconfigure and aborts; a full teardown + fresh configure (the boot
+// path, via reinit_owls) sidesteps it. owl_*_cfg_ is the source init_owls reads,
+// so updating it then reinit-ing brings the camera(s) up at the new size.
 bool CameraManager::set_resolution(int width, int height, int fps) {
-    bool ok = true;
-    if (owl_left_)  ok &= owl_left_->reconfigure(width, height, fps);
-    if (owl_right_) ok &= owl_right_->reconfigure(width, height, fps);
-    if (ok)
-        std::cout << "[cam] resolution set to " << width << "×" << height
-                  << " @" << fps << "fps\n";
-    else
-        std::cerr << "[cam] one or both cameras failed resolution change\n";
-    return ok;
+    owl_left_cfg_.width   = owl_right_cfg_.width  = width;
+    owl_left_cfg_.height  = owl_right_cfg_.height = height;
+    owl_left_cfg_.fps     = owl_right_cfg_.fps    = fps;
+    std::cout << "[cam] resolution → " << width << "×" << height
+              << " @" << fps << "fps (re-init both eyes)\n";
+    return reinit_owls();
+}
+
+bool CameraManager::set_owl_left_resolution(int width, int height, int fps) {
+    owl_left_cfg_.width  = width;
+    owl_left_cfg_.height = height;
+    owl_left_cfg_.fps    = fps;
+    std::cout << "[cam] left resolution → " << width << "×" << height
+              << " @" << fps << "fps (re-init)\n";
+    // NOTE: must reset the WHOLE manager (both eyes), not just this camera.
+    // Re-acquiring a single camera on the live manager does NOT clear libpisp's
+    // temporal-denoise state, so it re-throws "BackEnd::finalise: TDN output not
+    // enabled" and aborts (confirmed on the imx708). reinit_owls() recreates the
+    // CameraManager, which is the only thing that clears it. The OTHER eye keeps
+    // its own config (owl_*_cfg_), so resolutions stay independent — both just
+    // blip while re-initialising.
+    return reinit_owls();
+}
+
+bool CameraManager::set_owl_right_resolution(int width, int height, int fps) {
+    owl_right_cfg_.width  = width;
+    owl_right_cfg_.height = height;
+    owl_right_cfg_.fps    = fps;
+    std::cout << "[cam] right resolution → " << width << "×" << height
+              << " @" << fps << "fps (re-init)\n";
+    return reinit_owls();   // see set_owl_left_resolution — full reset required
 }
 
 // ── USB camera capture thread ─────────────────────────────────────────────────
@@ -596,30 +677,82 @@ void CameraManager::close_usb3() {
 // ── USB texture upload (render thread) ────────────────────────────────────────
 // Creates or reallocates the GL texture if dimensions changed, then uploads pixels.
 
-void CameraManager::upload_texture(GLuint& tex, int w, int h,
-                                   const unsigned char* rgba,
-                                   int& prev_w, int& prev_h) {
-    if (tex == 0) {
-        glGenTextures(1, &tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
+void CameraManager::upload_texture(TexSlot& s, int w, int h) {
+    const size_t bytes = static_cast<size_t>(w) * h * 4;
+    if (w <= 0 || h <= 0 || s.upbuf.size() < bytes) return;
+
+    if (s.tex == 0) {
+        glGenTextures(1, &s.tex);
+        glBindTexture(GL_TEXTURE_2D, s.tex);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     } else {
-        glBindTexture(GL_TEXTURE_2D, tex);
+        glBindTexture(GL_TEXTURE_2D, s.tex);
+    }
+    const bool resized = (w != s.tex_w || h != s.tex_h);
+
+    // Push `src` straight from client memory. The driver must consume all
+    // `bytes` before returning (and may stall on the texture's prior use) —
+    // the old, slow path, kept as the ES2 fallback and for map failures.
+    auto client_upload = [&](const uint8_t* src) {
+        if (resized) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, src);
+            s.tex_w = w; s.tex_h = h;
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
+                            GL_RGBA, GL_UNSIGNED_BYTE, src);
+        }
+    };
+
+    if (!gl::have_es3()) {                       // ES2: no PBOs available
+        client_upload(s.upbuf.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return;
     }
 
-    if (w != prev_w || h != prev_h) {
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
-                     GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-        prev_w = w; prev_h = h;
+    // ES3 fast path: copy into an orphaned pixel-unpack buffer, then issue the
+    // texture upload *from* the PBO — the transfer is scheduled GPU-side and the
+    // call returns without draining the pipeline. Orphaning (glBufferData NULL)
+    // plus an unsynchronised map means the memcpy never waits on the prior DMA.
+    if (s.pbo == 0) glGenBuffers(1, &s.pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, s.pbo);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(bytes),
+                 nullptr, GL_STREAM_DRAW);
+    void* p = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0,
+                               static_cast<GLsizeiptr>(bytes),
+                               GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT |
+                               GL_MAP_UNSYNCHRONIZED_BIT);
+    if (p) {
+        std::memcpy(p, s.upbuf.data(), bytes);
+        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+        client_upload(nullptr);                  // offset 0 into the bound PBO
     } else {
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
-                        GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0); // map failed — go synchronous
+        client_upload(s.upbuf.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return;
     }
-
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// Swap the freshest captured pixels out from under the slot lock, then upload
+// them outside the lock so the GL work never blocks the capture thread.
+bool CameraManager::upload_usb_slot(TexSlot& s, GLuint& out) {
+    int w, h;
+    {
+        std::lock_guard<std::mutex> lk(s.mtx);
+        if (!s.dirty || s.buf.empty()) { out = s.tex; return false; }
+        std::swap(s.buf, s.upbuf);   // take ownership; capture refills s.buf next
+        w = s.w; h = s.h;
+        s.dirty = false;
+    }
+    upload_texture(s, w, h);
+    out = s.tex;
+    return true;
 }
 
 // ── USB camera scan/reconnect ──────────────────────────────────────────────────
@@ -734,32 +867,6 @@ void CameraManager::set_usb1_ctrl(uint32_t id, int32_t val) { v4l2_set_ctrl(usb1
 void CameraManager::set_usb2_ctrl(uint32_t id, int32_t val) { v4l2_set_ctrl(usb2_cfg_.device, id, val); }
 void CameraManager::set_usb3_ctrl(uint32_t id, int32_t val) { v4l2_set_ctrl(usb3_cfg_.device, id, val); }
 
-bool CameraManager::get_usb1(GLuint& out) {
-    std::lock_guard<std::mutex> lk(usb1_slot_.mtx);
-    if (!usb1_slot_.dirty || usb1_slot_.buf.empty()) { out = usb1_slot_.tex; return false; }
-    upload_texture(usb1_slot_.tex, usb1_slot_.w, usb1_slot_.h, usb1_slot_.buf.data(),
-                   usb1_slot_.tex_w, usb1_slot_.tex_h);
-    usb1_slot_.dirty = false;
-    out = usb1_slot_.tex;
-    return true;
-}
-
-bool CameraManager::get_usb2(GLuint& out) {
-    std::lock_guard<std::mutex> lk(usb2_slot_.mtx);
-    if (!usb2_slot_.dirty || usb2_slot_.buf.empty()) { out = usb2_slot_.tex; return false; }
-    upload_texture(usb2_slot_.tex, usb2_slot_.w, usb2_slot_.h, usb2_slot_.buf.data(),
-                   usb2_slot_.tex_w, usb2_slot_.tex_h);
-    usb2_slot_.dirty = false;
-    out = usb2_slot_.tex;
-    return true;
-}
-
-bool CameraManager::get_usb3(GLuint& out) {
-    std::lock_guard<std::mutex> lk(usb3_slot_.mtx);
-    if (!usb3_slot_.dirty || usb3_slot_.buf.empty()) { out = usb3_slot_.tex; return false; }
-    upload_texture(usb3_slot_.tex, usb3_slot_.w, usb3_slot_.h, usb3_slot_.buf.data(),
-                   usb3_slot_.tex_w, usb3_slot_.tex_h);
-    usb3_slot_.dirty = false;
-    out = usb3_slot_.tex;
-    return true;
-}
+bool CameraManager::get_usb1(GLuint& out) { return upload_usb_slot(usb1_slot_, out); }
+bool CameraManager::get_usb2(GLuint& out) { return upload_usb_slot(usb2_slot_, out); }
+bool CameraManager::get_usb3(GLuint& out) { return upload_usb_slot(usb3_slot_, out); }
