@@ -239,13 +239,6 @@ private:
     void usb_capture_thread(int cam);
     void start_usb_threads();   // (re)spawn any camera thread that isn't running
     void stop_usb_threads();    // clear running_ and join all three
-    // Render-thread USB upload. upload_usb_slot() swaps the freshest pixels out
-    // from under the slot lock (so the GL work never blocks the capture thread),
-    // then upload_texture() pushes them to the GL texture — via an orphaned PBO
-    // (async DMA, no pipeline stall) on ES3, or a synchronous client-pointer
-    // upload on ES2. Both run on the render thread only.
-    bool upload_usb_slot(TexSlot& s, GLuint& out);
-    void upload_texture (TexSlot& s, int w, int h);
     // Stop the capture thread, probe video devices, restart thread.
     bool scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
                   UsbCamConfig& cfg,
@@ -297,6 +290,14 @@ private:
         std::vector<uint8_t> upbuf;       // pixels swapped out of buf for upload
     };
     TexSlot usb1_slot_, usb2_slot_, usb3_slot_;
+
+    // Render-thread USB upload. upload_usb_slot() swaps the freshest pixels out
+    // from under the slot lock (so the GL work never blocks the capture thread),
+    // then upload_texture() pushes them to the GL texture — via an orphaned PBO
+    // (async DMA, no pipeline stall) on ES3, or a synchronous client-pointer
+    // upload on ES2. Both run on the render thread only.
+    bool upload_usb_slot(TexSlot& s, GLuint& out);
+    void upload_texture (TexSlot& s, int w, int h);
 
     std::atomic<float> usb1_brightness_ { 1.0f };
     std::atomic<float> usb2_brightness_ { 1.0f };
