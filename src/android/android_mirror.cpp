@@ -56,11 +56,21 @@ void AndroidMirror::stop() {
     connected_ = false;
 }
 
+// Both flags below are scrcpy spawn arguments, so a live mirror must be
+// restarted to pick them up. start() blocks up to ~12s, so kick it off the
+// caller's thread.
 void AndroidMirror::set_turn_screen_off(bool v) {
     if (cfg_.turn_screen_off == v) return;
     cfg_.turn_screen_off = v;
-    // The flag is a scrcpy spawn argument, so a live mirror must be restarted to
-    // pick it up. start() blocks up to ~12s, so kick it off the caller's thread.
+    if (running_) {
+        stop();
+        std::thread([this]{ start(); }).detach();
+    }
+}
+
+void AndroidMirror::set_new_display(bool v) {
+    if (cfg_.new_display == v) return;
+    cfg_.new_display = v;
     if (running_) {
         stop();
         std::thread([this]{ start(); }).detach();
@@ -116,7 +126,7 @@ void AndroidMirror::capture_loop() {
 bool AndroidMirror::spawn_scrcpy() {
 #ifdef __unix__
     // Build scrcpy argv. All char arrays live on the stack until execvp() in the child.
-    char max_size_arg[32], v4l2_arg[64], fps_arg[32];
+    char max_size_arg[32], v4l2_arg[64], fps_arg[32], newdisp_arg[64], startapp_arg[128];
     snprintf(max_size_arg, sizeof(max_size_arg), "--max-size=%d",  cfg_.max_size);
     snprintf(v4l2_arg,    sizeof(v4l2_arg),    "--v4l2-sink=%s",  cfg_.v4l2_sink.c_str());
     snprintf(fps_arg,     sizeof(fps_arg),     "--max-fps=%d",    cfg_.fps);
@@ -127,20 +137,39 @@ bool AndroidMirror::spawn_scrcpy() {
         "--no-playback",   // don't open a preview window (scrcpy 2.x+)
         "--video-codec=h264",
     };
-    if (cfg_.turn_screen_off) {
-        // Blacking out the phone needs control enabled (scrcpy sends a power
-        // command), so we DON'T pass --no-control here; ProtoHUD never injects
-        // input, so the mirror stays read-only in practice. --stay-awake is
-        // valid now control is on and keeps the device from sleeping (which
-        // would freeze the stream) while its screen is dark.
-        args.push_back("--turn-screen-off");
-        args.push_back("--stay-awake");
-    } else {
-        // Read-only mirror, phone display stays lit. NOTE: --stay-awake is
-        // rejected here ("Cannot request to stay awake if control is disabled")
-        // and would make scrcpy exit before streaming — so don't add it.
+
+    // Control must be enabled to create a virtual display / launch an app, or to
+    // send the screen-off power command. ProtoHUD never injects input, so the
+    // mirror stays read-only in practice; --no-control is only safe in plain mode.
+    const bool need_control = cfg_.new_display || cfg_.turn_screen_off;
+    if (!need_control) {
+        // NOTE: with --no-control, --stay-awake/--turn-screen-off are rejected
+        // ("...if control is disabled") and scrcpy exits before streaming.
         args.push_back("--no-control");
     }
+
+    if (cfg_.new_display) {
+        // Stream a separate virtual display (e.g. a maps app) instead of the
+        // phone's own screen, which stays free/lockable. Needs Android 14+.
+        if (!cfg_.new_display_size.empty()) {
+            snprintf(newdisp_arg, sizeof(newdisp_arg), "--new-display=%s",
+                     cfg_.new_display_size.c_str());
+            args.push_back(newdisp_arg);
+        } else {
+            args.push_back("--new-display");
+        }
+        if (!cfg_.start_app.empty()) {
+            snprintf(startapp_arg, sizeof(startapp_arg), "--start-app=%s",
+                     cfg_.start_app.c_str());
+            args.push_back(startapp_arg);
+        }
+        args.push_back("--stay-awake");   // keep the virtual display alive
+    } else if (cfg_.turn_screen_off) {
+        // Black out the phone's screen while still streaming it to the HUD.
+        args.push_back("--turn-screen-off");
+        args.push_back("--stay-awake");   // don't let the dark device sleep
+    }
+
     args.push_back(max_size_arg);
     args.push_back(v4l2_arg);
     args.push_back(fps_arg);
