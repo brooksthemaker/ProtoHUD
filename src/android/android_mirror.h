@@ -99,6 +99,15 @@ private:
     void capture_new_display_id();   // parse scrcpy log for the virtual display id
     bool preflight_sink(std::string& reason) const;  // v4l2 sink exists & not busy
 
+    // Rotation following (plain-mirror mode only). The watcher thread polls the
+    // device's display orientation and, on a change, asks the capture thread to
+    // restart the scrcpy→v4l2 pipeline so the sink renegotiates the new WxH (it
+    // can't be resized mid-stream). All cap_/scrcpy mutation stays on the capture
+    // thread, so the watcher only ever flips an atomic — no cross-thread teardown.
+    void rotation_watch_loop();
+    void restart_pipeline_for_rotation();   // capture-thread side of the restart
+    int  read_device_rotation() const;       // adb display orientation, -1 on error
+
     AndroidMirrorConfig cfg_;
     pid_t               scrcpy_pid_ = -1;
     std::atomic<int>    display_id_ { -1 };  // scrcpy virtual display id (new-display mode)
@@ -115,9 +124,12 @@ private:
 
     cv::VideoCapture  cap_;
     std::thread       thread_;
+    std::thread        rotation_thread_;  // polls device orientation (plain mode)
     std::mutex         life_mtx_;    // serialises start()/stop() so rapid toggles
                                      // never spawn overlapping scrcpy instances
     std::atomic<bool>  running_      { false };
     std::atomic<bool>  connected_   { false };
+    std::atomic<bool>  restart_req_ { false };  // watcher → capture thread: re-spawn
+    std::atomic<int>   last_rotation_{ -1 };     // last seen device orientation
     std::atomic<float> frame_aspect_{ 9.f / 16.f };
 };

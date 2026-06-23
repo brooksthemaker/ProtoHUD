@@ -115,15 +115,25 @@ bool AndroidMirror::start() {
                 cap_.get(cv::CAP_PROP_FRAME_HEIGHT), fc, cap_.get(cv::CAP_PROP_CONVERT_RGB));
     }
 
-    running_ = true;
-    thread_  = std::thread(&AndroidMirror::capture_loop, this);
+    running_     = true;
+    restart_req_ = false;
+    thread_      = std::thread(&AndroidMirror::capture_loop, this);
+
+    // Follow device rotation in plain-mirror mode. In new-display mode the phone's
+    // physical orientation is irrelevant to the virtual display (and restarting
+    // would tear down the launched app), so we don't watch there.
+    if (!cfg_.new_display) {
+        last_rotation_   = -1;   // re-seeded on first poll
+        rotation_thread_ = std::thread(&AndroidMirror::rotation_watch_loop, this);
+    }
     return true;
 }
 
 void AndroidMirror::stop() {
     std::lock_guard<std::mutex> lk(life_mtx_);  // serialise with start()/restarts
     running_ = false;
-    if (thread_.joinable()) thread_.join();
+    if (rotation_thread_.joinable()) rotation_thread_.join();
+    if (thread_.joinable())          thread_.join();
     cap_.release();
     kill_scrcpy();
     connected_ = false;
@@ -243,6 +253,14 @@ void AndroidMirror::capture_loop() {
     int fail_streak = 0;
     bool logged_dims = false;
     while (running_) {
+        // Device rotated → renegotiate the v4l2 sink at the new dimensions. Done
+        // here (not on the watcher thread) so cap_/scrcpy stay single-threaded.
+        if (restart_req_.exchange(false)) {
+            restart_pipeline_for_rotation();
+            fail_streak = 0;
+            logged_dims = false;   // re-log dims at the new orientation
+            continue;
+        }
         if (!cap_.read(frame) || frame.empty()) {
             connected_ = false;
             if (++fail_streak > 50) {
@@ -282,6 +300,84 @@ void AndroidMirror::capture_loop() {
     }
 }
 
+// ── Rotation following ─────────────────────────────────────────────────────────
+
+// Read the device's display orientation (0/1/2/3) via adb. dumpsys display's
+// mCurrentOrientation tracks the *applied* screen rotation (user_rotation and
+// the window mRotation proved unreliable on the SM-S928U / Android 16). Returns
+// -1 on any error so a transient adb hiccup never looks like a rotation.
+int AndroidMirror::read_device_rotation() const {
+    std::string cmd = "adb ";
+    if (!cfg_.adb_serial.empty()) cmd += "-s " + cfg_.adb_serial + " ";
+    cmd += "shell dumpsys display 2>/dev/null | "
+           "grep -m1 -oE 'mCurrentOrientation=[0-9]'";
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return -1;
+    char buf[64] = {0};
+    int  rot     = -1;
+    if (fgets(buf, sizeof(buf), p)) {
+        const char* eq = strrchr(buf, '=');
+        if (eq) rot = atoi(eq + 1);
+    }
+    pclose(p);
+    return rot;
+}
+
+// Watcher thread (plain-mirror mode): poll the device orientation ~1 Hz and, when
+// it changes, ask the capture thread to restart the pipeline. Never touches cap_
+// or scrcpy itself — only flips restart_req_ — so there is no teardown race with
+// start()/stop(). Sleeps in short chunks so stop() stays responsive.
+void AndroidMirror::rotation_watch_loop() {
+    while (running_) {
+        for (int i = 0; i < 5 && running_; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (!running_) break;
+
+        const int rot = read_device_rotation();
+        if (rot < 0) continue;                    // adb hiccup — ignore
+        if (last_rotation_ < 0) { last_rotation_ = rot; continue; }  // seed
+        if (rot != last_rotation_) {
+            fprintf(stderr, "[android] device rotation %d -> %d, restarting capture\n",
+                    last_rotation_.load(), rot);
+            last_rotation_ = rot;
+            restart_req_   = true;
+        }
+    }
+}
+
+// Capture-thread side of a rotation restart: drop the consumer, respawn scrcpy
+// (which re-locks to the now-current orientation and re-creates the v4l2 sink at
+// the new WxH), then reopen. Bails early if stop() flips running_ mid-restart so
+// teardown can't be stalled for the full reopen window.
+void AndroidMirror::restart_pipeline_for_rotation() {
+    cap_.release();
+    kill_scrcpy();
+    if (!spawn_scrcpy()) {
+        fprintf(stderr, "[android] rotation restart: scrcpy respawn failed\n");
+        connected_ = false;
+        return;
+    }
+    bool opened = false;
+    for (int attempt = 0; attempt < 24 && running_; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (cap_.open(cfg_.v4l2_sink, cv::CAP_V4L2) && cap_.isOpened()) {
+            opened = true;
+            break;
+        }
+        cap_.release();
+    }
+    if (!opened) {
+        if (running_)
+            fprintf(stderr, "[android] rotation restart: sink %s not ready\n",
+                    cfg_.v4l2_sink.c_str());
+        connected_ = false;
+        return;
+    }
+    cap_.set(cv::CAP_PROP_CONVERT_RGB, 1.0);
+    fprintf(stderr, "[android] rotation restart: reopened %.0fx%.0f\n",
+            cap_.get(cv::CAP_PROP_FRAME_WIDTH), cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
+}
+
 // ── scrcpy process management ─────────────────────────────────────────────────
 
 bool AndroidMirror::spawn_scrcpy() {
@@ -295,12 +391,23 @@ bool AndroidMirror::spawn_scrcpy() {
     std::vector<const char*> args = {
         "scrcpy",
         "--no-audio",      // audio is handled by the spatial audio engine
-        "--no-playback",   // scrcpy's documented headless-v4l2 flag: feeds the
-                           // v4l2 sink without rendering. NOTE: on scrcpy 3.x this
-                           //  still opens a blank "logo" window; --no-window hides
-                           //  it but stops frames reaching the sink on 3.3.4, so we
-                           //  keep --no-playback and live with the window for now.
+        "--no-playback",   // feed the v4l2 sink without decoding/playing locally.
+        "--no-window",     // and don't open scrcpy's own window — otherwise every
+                           // (re)spawn pops a window over the HUD and steals input
+                           // focus, which the rotation restarts made constant. An
+                           // earlier note claimed --no-window stopped v4l2 frames on
+                           // 3.3.4; that no longer reproduces with the sink reloaded
+                           // exclusive_caps=1 — verified frames still reach OpenCV.
         "--video-codec=h264",
+        // Lock the capture orientation. The v4l2loopback sink fixes its WxH when
+        // scrcpy starts and a consumer (OpenCV) is reading; it can't be resized
+        // mid-stream. Without a lock, rotating the phone makes scrcpy push the new
+        // orientation's frames into the old-sized sink, which breaks the feed.
+        // '@' = lock to whatever orientation the device is in at *this* start, so
+        // mid-stream rotation can't corrupt the feed. To actually follow rotation
+        // the watcher thread restarts the pipeline (see rotation_watch_loop), and
+        // the fresh scrcpy then locks to the new orientation.
+        "--capture-orientation=@",
     };
 
     // Control must be enabled to create a virtual display / launch an app, or to
