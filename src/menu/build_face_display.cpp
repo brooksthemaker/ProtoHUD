@@ -81,6 +81,7 @@
 #include "face/eye_animations.h"
 #include "face/gif_player.h"
 #include "face/native_face_controller.h"
+#include "face/demo_mode.h"
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
@@ -369,6 +370,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     std::shared_ptr<std::function<void()>> coproc_reload = ctx.coproc_reload;
     std::shared_ptr<std::function<std::string()>> coproc_status = ctx.coproc_status;
     face::GlitchConfig* pf_glitch_p = ctx.pf_glitch_p;
+    face::DemoMode*     pf_demo     = ctx.pf_demo;
 
     // GIF slot machinery shared with the Files tab — constructed in
     // build_menu() around one preview state. gif_leaf is build-phase only.
@@ -2398,7 +2400,99 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         pf_preview_menu.push_back(std::move(view_it));
     }
 
+    // ── Demo Mode — cycle colours / effects / emotions to show the face off ──
+    // A thin driver over the active face backend (see face/demo_mode.*). The
+    // toggles below mutate its live config; every change is persisted under
+    // cfg["protoface"]["demo"] so it survives a restart. reconfigure() lets a
+    // track / sequence change take effect mid-run.
+    MenuItem pf_demo_item;
+    {
+        if (!pf_demo) {
+            pf_demo_item = leaf("Demo Mode", []{});
+            pf_demo_item.visible_fn = []{ return false; };
+        } else {
+            auto* D = pf_demo;
+            auto persist = [D, cfg_root]{
+                if (cfg_root) (*cfg_root)["protoface"]["demo"] = D->save_config();
+            };
+            using Seq = face::DemoMode::Sequence;
+            std::vector<MenuItem> seq_items;
+            struct SeqOpt { const char* label; Seq value; };
+            const SeqOpt seqs[] = {
+                {"Showcase (curated combos)", Seq::Showcase},
+                {"Tour (one axis at a time)", Seq::Tour},
+                {"Shuffle (random)",          Seq::Shuffle},
+            };
+            for (const auto& so : seqs) {
+                const Seq sv = so.value;
+                seq_items.push_back(leaf_sel(so.label,
+                    [D, sv, persist]{ D->config().sequence = sv; D->reconfigure(); persist(); },
+                    [D, sv]{ return D->config().sequence == sv; }));
+            }
+
+            auto track_toggle = [D, persist](const char* lbl, bool face::DemoMode::Config::* m,
+                                             const char* desc) {
+                return with_desc(toggle(lbl,
+                    [D, m]{ return D->config().*m; },
+                    [D, m, persist](bool v){ D->config().*m = v; D->reconfigure(); persist(); }),
+                    desc);
+            };
+
+            std::vector<MenuItem> demo_items;
+            demo_items.push_back(with_desc(toggle("Run Demo",
+                [D]{ return D->running(); },
+                [D](bool v){ if (v) D->start(); else D->stop(); }),
+                "Start cycling the current face through colours, effects and "
+                "emotions. Turning it off restores the look you had set."));
+            demo_items.push_back(with_desc(submenu("Sequence", std::move(seq_items)),
+                "Showcase steps through hand-picked expression+effect+colour "
+                "combos; Tour marches through every option one axis at a time; "
+                "Shuffle picks at random."));
+            demo_items.push_back(track_toggle("Cycle Colors",
+                &face::DemoMode::Config::cycle_palettes,
+                "Include the material colours / gradients in the cycle."));
+            demo_items.push_back(track_toggle("Cycle Effects",
+                &face::DemoMode::Config::cycle_effects,
+                "Include the particle effects in the cycle."));
+            demo_items.push_back(track_toggle("Cycle Expressions",
+                &face::DemoMode::Config::cycle_expressions,
+                "Include the face emotions in the cycle (only those present in "
+                "the active face folder)."));
+            demo_items.push_back(track_toggle("Cycle Brightness",
+                &face::DemoMode::Config::cycle_brightness,
+                "Also sweep panel brightness through a few levels (Tour/Shuffle)."));
+            demo_items.push_back(with_desc(slider("Step Time", 1.0f, 12.0f, 0.5f, "s",
+                [D]{ return static_cast<float>(D->config().dwell_s); },
+                [D, persist](float v){ D->config().dwell_s = v; persist(); }),
+                "How long each step is held before advancing."));
+            demo_items.push_back(with_desc(toggle("Attract Mode",
+                [D]{ return D->config().attract_enabled; },
+                [D, persist](bool v){ D->config().attract_enabled = v; persist(); }),
+                "Auto-start the demo after a period of inactivity (kiosk / "
+                "attract loop). Any interaction hands the face back to you."));
+            MenuItem idle_sl = with_desc(slider("Attract Idle", 15.f, 600.f, 5.f, "s",
+                [D]{ return static_cast<float>(D->config().attract_idle_s); },
+                [D, persist](float v){ D->config().attract_idle_s = v; persist(); }),
+                "Idle time before Attract Mode starts the demo.");
+            idle_sl.visible_fn = [D]{ return D->config().attract_enabled; };
+            demo_items.push_back(std::move(idle_sl));
+
+            pf_demo_item = with_desc(submenu("Demo Mode", std::move(demo_items)),
+                "Show the face off: cycle the current face through colours, "
+                "effects and emotions, hands-free. Pick a sequence, choose which "
+                "tracks to cycle, and optionally auto-start it when idle.");
+            // Live label so the parent row reads "Demo Mode (running)".
+            pf_demo_item.label_fn = [D]{
+                return std::string("Demo Mode") + (D->running() ? " (running)" : "");
+            };
+            // Same backend gate as the other Protoface look controls (the demo
+            // drives the palette/effect path that the hub75/daemon backend uses).
+            pf_demo_item.visible_fn = visible_for_hub75;
+        }
+    }
+
     std::vector<MenuItem> protoface_inner_menu = {
+        std::move(pf_demo_item),
         gated(submenu("Effects",        std::move(pf_effects)),  visible_for_hub75),
         gated(submenu("Material Color", std::move(pf_palette)),  visible_for_hub75),
         // Face PNGs (per-expression slots, mouth shapes, boop reactions)

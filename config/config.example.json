@@ -227,6 +227,17 @@
       "size": 0.15,
       "view": 0,
       "_view_values": "0 = whole face | 1 = left half | 2 = right half"
+    },
+    "demo": {
+      "_about": "Demo / attract mode (Face Display > Protoface > Demo Mode). Takes the current face and cycles it through colours, effects and emotions hands-free. sequence: 'showcase' (curated combos) | 'tour' (one axis at a time) | 'shuffle' (random). cycle_* pick which axes are cycled. dwell_s is the hold per step. attract_enabled auto-starts the demo after attract_idle_s seconds of inactivity (any interaction hands the face back). Also bindable to a button via the 'face_demo_toggle' GPIO function.",
+      "sequence": "showcase",
+      "cycle_palettes": true,
+      "cycle_effects": true,
+      "cycle_expressions": true,
+      "cycle_brightness": false,
+      "dwell_s": 3.5,
+      "attract_enabled": false,
+      "attract_idle_s": 90.0
     }
   },
   "scheduler": {

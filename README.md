@@ -697,7 +697,7 @@ bias and polarity are configurable per pin. Configure it all in-HUD under
 `cam_zoom_out`, `nv_toggle`, `theater_toggle`, `xr_recenter`.
 
 **Face browse / look:** `face_next`, `face_prev`, `material_next`, `effect_next`,
-`face_bright_up`, `face_bright_down`, `face_restart`.
+`face_bright_up`, `face_bright_down`, `face_restart`, `face_demo_toggle`.
 
 > `system_restart` runs `scripts/restart.sh`; `system_shutdown` calls
 > `poweroff` (needs the sudoers rule from `scripts/install_sudoers.sh`).

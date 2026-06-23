@@ -75,6 +75,7 @@
 #include "face/eye_animations.h"
 #include "face/gif_player.h"
 #include "face/native_face_controller.h"
+#include "face/demo_mode.h"
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
@@ -3505,6 +3506,15 @@ int main(int argc, char* argv[]) {
     auto pf_live_tick = std::make_shared<std::function<void()>>();
     bool sched_link_pushed = false;   // one-shot guard for "send scheduler link on startup"
 
+    // Protoface demo / attract mode (cycles colours, effects, emotions over the
+    // current face). Drives the active backend through face_proxy; ticked from
+    // the render loop and toggled from the menu / a GPIO binding. Config lives
+    // under cfg["protoface"]["demo"].
+    face::DemoMode demo(&face_proxy, &state);
+    if (cfg.contains("protoface") && cfg["protoface"].is_object()
+        && cfg["protoface"].contains("demo"))
+        demo.load_config(cfg["protoface"]["demo"]);
+
     MenuBuildContext menu_ctx;
     menu_ctx.teensy  = &face_proxy;
     menu_ctx.xr      = &xr;
@@ -3600,6 +3610,7 @@ int main(int argc, char* argv[]) {
         if (native_ctrl) native_ctrl->set_expression_effects(v);
     };
     menu_ctx.pf_expr_effects_p = &pf_expr_effects;
+    menu_ctx.pf_demo = &demo;
     menu_ctx.pf_live_tick = pf_live_tick;
     menu_ctx.cfg_root = &cfg;
     // USB camera preview wiring
@@ -3665,13 +3676,16 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lk(input_events_mtx);
         input_events.push_back(std::move(fn));
     };
-    auto drain_input_events = [&input_events_mtx, &input_events]{
+    // Returns true when at least one event was processed (used as an activity
+    // signal for the demo/attract idle timer).
+    auto drain_input_events = [&input_events_mtx, &input_events]() -> bool {
         std::deque<std::function<void()>> ev;
         {
             std::lock_guard<std::mutex> lk(input_events_mtx);
             ev.swap(input_events);
         }
         for (auto& fn : ev) fn();
+        return !ev.empty();
     };
 
     // Wire wireless controller callbacks now that menu exists. Callbacks fire
@@ -4060,6 +4074,7 @@ int main(int argc, char* argv[]) {
             face_proxy.set_effect(static_cast<uint8_t>(id));
         } break;
         case F::FaceRestart:    face_proxy.restart(); break;
+        case F::FaceDemoToggle: demo.toggle(); break;
         case F::None: default: break;
         }
     };
@@ -4998,7 +5013,7 @@ int main(int argc, char* argv[]) {
         // ── Drain marshalled input (knob / wireless / GPIO / coproc / FIFO) ──
         // Reader threads only enqueue; their menu/toast/pip actions run here,
         // on the render thread, before anything draws this frame.
-        drain_input_events();
+        const bool had_input = drain_input_events();
 
         // ── Feed IMU motion to the face (motion-reactive particle layers) ─────
         // Snapshot under the lock, then push without it (face_proxy locks its
@@ -5022,6 +5037,11 @@ int main(int argc, char* argv[]) {
         // Effects Live Preview — re-apply the builder spec on change (no-op
         // unless the user enabled Live Preview in Face > Effects > Custom).
         if (pf_live_tick && *pf_live_tick) (*pf_live_tick)();
+
+        // Protoface demo / attract mode. user-active = real input this frame or
+        // the menu being open; that resets the attract idle timer and yields a
+        // self-started attract run back to the user.
+        demo.tick(dt, had_input || menu.is_open());
 
         // Scheduler "send link on startup": once both the daemon's URL and the
         // phone are ready, push the web link over KDE Connect exactly once.

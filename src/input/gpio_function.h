@@ -31,6 +31,8 @@ enum class GpioFunc : int {
     // Face browse + look adjust (cycle expression/material/effect, nudge brightness,
     // reboot the face daemon).
     FaceNext, FacePrev, MaterialNext, FaceBrightUp, FaceBrightDown, EffectNext, FaceRestart,
+    // Toggle the Protoface demo / attract mode (cycle colours, effects, emotions).
+    FaceDemoToggle,
     Count
 };
 
@@ -88,6 +90,7 @@ inline const char* gpio_func_name(GpioFunc f) {
     case GpioFunc::FaceBrightDown:    return "Face: Brightness Down";
     case GpioFunc::EffectNext:        return "Face: Next Effect";
     case GpioFunc::FaceRestart:       return "Face: Reboot ProtoFace";
+    case GpioFunc::FaceDemoToggle:    return "Face: Demo Mode Toggle";
     default:                        return "?";
     }
 }
@@ -146,6 +149,7 @@ inline const char* gpio_func_id(GpioFunc f) {
     case GpioFunc::FaceBrightDown:    return "face_bright_down";
     case GpioFunc::EffectNext:        return "effect_next";
     case GpioFunc::FaceRestart:       return "face_restart";
+    case GpioFunc::FaceDemoToggle:    return "face_demo_toggle";
     default:                        return "none";
     }
 }

@@ -47,7 +47,7 @@ namespace accessory    { class AccessoryLeds; }
 namespace sys          { class FanController; }
 namespace input        { struct GpioPinCfg; }
 namespace integrations { class KdeConnectBridge; }
-namespace face         { struct GlitchConfig; }
+namespace face         { struct GlitchConfig; class DemoMode; }
 
 // HUB75 panel layout state. Lives here (not main.cpp) because both the menu
 // (HUB75 Layout editor) and main's renderer-rebuild path use it.
@@ -373,6 +373,10 @@ struct MenuBuildContext {
     // Glitch post-effect config (null on non-native backends). The menu
     // mutates it in place and re-pushes via pf_anim_push().
     face::GlitchConfig* pf_glitch_p = nullptr;
+    // Protoface demo / attract mode driver (cycles colours, effects, emotions).
+    // Owned by main; the Demo Mode submenu reads/writes its config and toggles
+    // it. Null when no face backend is active.
+    face::DemoMode* pf_demo = nullptr;
 
     // ── Build-phase shared fragments ──────────────────────────────────────────
     // NOT caller-supplied: set by build_menu() before the tab builders run
