@@ -153,7 +153,7 @@
   },
   "inputs": {
     "coprocessor": {
-      "_about": "OPTIONAL button/switch coprocessor (RP2350/RP2040). When enabled, an external MCU debounces the switches and streams presses to the Pi, dispatched through the same functions as the GPIO map above. Never required — leave disabled to use on-board GPIO only. Toggle live in System > GPIO Buttons > Button Coprocessor. See docs/coprocessor-input.md.",
+      "_about": "OPTIONAL companion MCU (RP2350 / Pico 2 W, 'proto-coproc'). When enabled it debounces the switches AND (v2) can be the I²C master for the boop/IMU/light sensors, streaming decoded values to the Pi (see 'sensors' below); a phase-3 build also drives MAX7219 panels. Buttons dispatch through the same functions as the GPIO map above. Never required — leave disabled to use on-board GPIO + direct sensors. Toggle live in System > GPIO Buttons > Button Coprocessor. See docs/coprocessor-input.md.",
       "enabled": false,
       "transport": "usb_serial",
       "_transport_note": "'usb_serial' (USB CDC, default) or 'i2c' (specified but not implemented in v1).",
@@ -166,6 +166,13 @@
       "replace_local_gpio": false,
       "_replace_note": "false = additive (GPIO slots + coproc both fire). true = coproc is the only button source (local GPIO poller is not started).",
       "heartbeat_timeout_ms": 2000,
+      "sensors": {
+        "_about": "Aggregator mode (proto-coproc v2): when a flag is true, the RP2350 is the I²C master for that chip and streams DECODED values to the CM5, which routes them into the same compass/boop/light-squint paths and SKIPS its own driver (don't wire that chip to the Pi's I²C bus too — two masters contend). The CM5 still applies declination/offset and the squint logic live. Leave all false to keep sensors on the Pi directly.",
+        "imu_bno": false,
+        "imu_mpu": false,
+        "boop": false,
+        "light": false
+      },
       "buttons": [
         { "id": 0, "short": "menu_select", "long": "menu_back" },
         { "id": 1, "short": "menu_open",   "long": "system_restart" },

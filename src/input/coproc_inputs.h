@@ -22,12 +22,15 @@
 // actions) needs to know where the press came from.
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "gpio_function.h"
+#include "../../firmware/proto_link/coproc_proto.h"   // shared wire contract (v2)
 
 namespace input {
 
@@ -64,7 +67,22 @@ struct CoprocConfig {
     // Heartbeat: if no PING/event seen within this window, mark offline (and,
     // if replace_local_gpio, optionally fall back — see docs).
     int         heartbeat_timeout_ms = 2000;
+
+    // ── Sensor ownership (v2 aggregator) ────────────────────────────────────
+    // When the coproc is the I²C master for a sensor, the CM5 must NOT also
+    // start its own driver for that chip (two masters on one bus = contention).
+    // These flags are config-declared (deterministic — no startup race waiting
+    // for the HELLO caps) and main.cpp uses them to SKIP the local driver and
+    // route the coproc's decoded stream into the same AppState sinks instead.
+    // The runtime caps() (from HELLO) are advisory: a mismatch is logged.
+    bool        provides_imu_bno = false;
+    bool        provides_imu_mpu = false;
+    bool        provides_boop    = false;
+    bool        provides_light   = false;
+    bool        provides_panels  = false;
 };
+
+namespace cp = coproc_proto;
 
 // Mirrors GpioInputs' lifecycle so main.cpp treats them the same way.
 class CoprocInputs {
@@ -76,17 +94,43 @@ public:
     void shutdown();
     bool connected() const { return connected_.load(); }   // surfaced to HUD status
 
+    // Capability bitmask advertised in the coproc's HELLO line (coproc_proto::Caps).
+    // 0 until the first HELLO. Advisory — gating uses the config provides_* flags.
+    uint16_t caps() const { return caps_.load(); }
+
+    // ── Telemetry sinks (v2) ────────────────────────────────────────────────
+    // Set by main.cpp to route decoded sensor frames into the SAME AppState
+    // updates the on-board drivers feed. Called on the reader thread — keep the
+    // handlers cheap and lock AppState::mtx like the existing driver callbacks.
+    void on_bno  (std::function<void(const cp::BnoPayload&)>   fn) { on_bno_   = std::move(fn); }
+    void on_mpu  (std::function<void(const cp::MpuPayload&)>   fn) { on_mpu_   = std::move(fn); }
+    void on_boop (std::function<void(const cp::BoopPayload&)>  fn) { on_boop_  = std::move(fn); }
+    void on_light(std::function<void(const cp::LightPayload&)> fn) { on_light_ = std::move(fn); }
+
 private:
     void reader_loop();                       // transport read + reconnect loop
-    void on_line(const std::string& line);    // parse one framed message → dispatch
+    void process_byte(uint8_t c);             // dual-mode demux: 0xAA→frame, else ASCII
+    void ascii_byte(uint8_t c);               // accumulate v1 ASCII line → on_line
+    void on_line(const std::string& line);    // parse one ASCII line (HELLO/PING/BTN)
+    void on_frame(uint8_t cmd, const uint8_t* payload, uint16_t len);  // v2 binary frame
     void handle_button(int id, bool is_long); // map id→GpioFunc, call dispatch_
+    void parse_hello_caps(const std::string& line);   // pull caps= bitmask from HELLO
 
     CoprocConfig                  cfg_;
     std::function<void(GpioFunc)> dispatch_;
+    std::function<void(const cp::BnoPayload&)>   on_bno_;
+    std::function<void(const cp::MpuPayload&)>   on_mpu_;
+    std::function<void(const cp::BoopPayload&)>  on_boop_;
+    std::function<void(const cp::LightPayload&)> on_light_;
     std::atomic<bool>             running_{false};
     std::atomic<bool>             connected_{false};
+    std::atomic<uint16_t>         caps_{0};
     std::thread                   thread_;
     int                           fd_ = -1;   // serial or i2c fd
+
+    // Reader-thread parse state (single-threaded; no lock needed).
+    std::string          line_buf_;   // ASCII accumulator (v1 lines)
+    std::vector<uint8_t> frame_;       // binary frame in progress (starts at 0xAA)
 };
 
 } // namespace input

@@ -67,7 +67,6 @@ void CoprocInputs::shutdown() {
 
 void CoprocInputs::reader_loop() {
     using clock = std::chrono::steady_clock;
-    std::string buf;
     auto last_rx = clock::now();
 
     while (running_.load()) {
@@ -90,7 +89,8 @@ void CoprocInputs::reader_loop() {
                 tio.c_cc[VTIME] = 0;
                 tcsetattr(fd_, TCSANOW, &tio);
             }
-            buf.clear();
+            line_buf_.clear();
+            frame_.clear();
             last_rx = clock::now();
         }
 
@@ -110,16 +110,8 @@ void CoprocInputs::reader_loop() {
             const ssize_t n = ::read(fd_, chunk, sizeof chunk);
             if (n > 0) {
                 last_rx = clock::now();
-                for (ssize_t i = 0; i < n; ++i) {
-                    const char c = chunk[i];
-                    if (c == '\n' || c == '\r') {
-                        if (!buf.empty()) { on_line(buf); buf.clear(); }
-                    } else if (buf.size() < kMaxLine) {
-                        buf.push_back(c);
-                    } else {
-                        buf.clear();   // overflow → resync on next newline
-                    }
-                }
+                for (ssize_t i = 0; i < n; ++i)
+                    process_byte(static_cast<uint8_t>(chunk[i]));
             } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
                 ::close(fd_); fd_ = -1; connected_.store(false);
                 continue;
@@ -132,6 +124,88 @@ void CoprocInputs::reader_loop() {
             clock::now() - last_rx).count();
         if (idle > cfg_.heartbeat_timeout_ms) connected_.store(false);
     }
+}
+
+// Dual-mode demux: a 0xAA byte begins a v2 binary frame; anything else feeds the
+// v1 ASCII line accumulator. HELLO/PING stay ASCII for board detection + the
+// heartbeat, so both protocol generations share one stream.
+void CoprocInputs::process_byte(uint8_t c) {
+    if (!frame_.empty()) {                       // mid-frame
+        frame_.push_back(c);
+        if (frame_.size() == 2 && frame_[1] != cp::MAGIC1) {
+            // 0xAA wasn't a frame start after all — drop it, re-handle this byte.
+            const uint8_t b = c;
+            frame_.clear();
+            process_byte(b);
+            return;
+        }
+        if (frame_.size() >= cp::WIRE_HEADER) {
+            const uint16_t len = static_cast<uint16_t>(frame_[3]) |
+                                 (static_cast<uint16_t>(frame_[4]) << 8);
+            if (len > cp::MAX_PAYLOAD) { frame_.clear(); return; }   // garbage → resync
+            const size_t total = cp::WIRE_HEADER + len + cp::CRC_LEN;
+            if (frame_.size() == total) {
+                const uint16_t want = cp::crc16(&frame_[2],
+                                                static_cast<uint16_t>(3 + len));
+                const uint16_t got  = static_cast<uint16_t>(frame_[cp::WIRE_HEADER + len]) |
+                                      (static_cast<uint16_t>(frame_[cp::WIRE_HEADER + len + 1]) << 8);
+                if (want == got)
+                    on_frame(frame_[2], &frame_[cp::WIRE_HEADER], len);
+                frame_.clear();
+            }
+        }
+        return;
+    }
+    if (c == cp::MAGIC0) { frame_.push_back(c); return; }
+    ascii_byte(c);
+}
+
+void CoprocInputs::ascii_byte(uint8_t c) {
+    if (c == '\n' || c == '\r') {
+        if (!line_buf_.empty()) { on_line(line_buf_); line_buf_.clear(); }
+    } else if (line_buf_.size() < kMaxLine) {
+        line_buf_.push_back(static_cast<char>(c));
+    } else {
+        line_buf_.clear();   // overflow → resync on next newline
+    }
+}
+
+// Decode one validated v2 frame and route it. Payloads are memcpy'd out of the
+// (unaligned) frame buffer into the packed structs before use.
+void CoprocInputs::on_frame(uint8_t cmd, const uint8_t* payload, uint16_t len) {
+    connected_.store(true);
+    auto take = [&](void* dst, size_t sz) -> bool {
+        if (len < sz) return false;
+        std::memcpy(dst, payload, sz);
+        return true;
+    };
+    switch (cmd) {
+        case cp::RSP_IMU_BNO: { cp::BnoPayload p;   if (take(&p, sizeof p) && on_bno_)   on_bno_(p);   break; }
+        case cp::RSP_IMU_MPU: { cp::MpuPayload p;   if (take(&p, sizeof p) && on_mpu_)   on_mpu_(p);   break; }
+        case cp::RSP_BOOP:    { cp::BoopPayload p;  if (take(&p, sizeof p) && on_boop_)  on_boop_(p);  break; }
+        case cp::RSP_LIGHT:   { cp::LightPayload p; if (take(&p, sizeof p) && on_light_) on_light_(p); break; }
+        case cp::RSP_BTN:     { cp::BtnPayload p;   if (take(&p, sizeof p)) handle_button(p.id, p.kind == cp::BTN_LONG); break; }
+        case cp::RSP_STATUS:  { cp::StatusPayload p; if (take(&p, sizeof p)) caps_.store(p.caps); break; }
+        default: break;   // unknown cmd → ignore (forward-compatible)
+    }
+}
+
+// "HELLO proto-coproc v2 caps=buttons,imu_bno,... n_btn=8 n_chain=2"
+void CoprocInputs::parse_hello_caps(const std::string& line) {
+    const auto pos = line.find("caps=");
+    if (pos == std::string::npos) return;
+    size_t s = pos + 5;
+    size_t e = line.find(' ', s);
+    const std::string list = line.substr(s, e == std::string::npos ? std::string::npos : e - s);
+    uint16_t caps = 0;
+    auto has = [&](const char* tok){ return list.find(tok) != std::string::npos; };
+    if (has("buttons")) caps |= cp::CAP_BUTTONS;
+    if (has("imu_bno")) caps |= cp::CAP_IMU_BNO;
+    if (has("imu_mpu")) caps |= cp::CAP_IMU_MPU;
+    if (has("boop"))    caps |= cp::CAP_BOOP;
+    if (has("light"))   caps |= cp::CAP_LIGHT;
+    if (has("panels"))  caps |= cp::CAP_PANELS;
+    caps_.store(caps);
 }
 
 void CoprocInputs::on_line(const std::string& line) {
@@ -161,6 +235,7 @@ void CoprocInputs::on_line(const std::string& line) {
     }
     if (cmd == "HELLO") {
         connected_.store(true);
+        parse_hello_caps(line);
         std::cout << "[coproc] " << line << "\n";
         return;
     }

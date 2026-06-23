@@ -156,3 +156,45 @@ surface `connected()`.
    [`../firmware/button_coproc/README.md`](../firmware/button_coproc/README.md).
 
 Example config lives in `config/config.example.json` under `inputs.coprocessor`.
+
+## v2 — sensor aggregator + (later) panel driver
+
+The companion can do more than buttons. In **v2** the same RP2350 ("proto-coproc")
+optionally becomes the **I²C master for the boop / IMU / light sensors** and
+streams *decoded* values to the CM5 (the "aggregator" model), and a later phase
+adds driving MAX7219 panels from CM5-pushed frames.
+
+**Wire format.** v2 adds a binary frame alongside the v1 ASCII lines, sharing one
+stream: a `0xAA 0x55` magic starts a framed message `[MAGIC][CMD][LEN][PAYLOAD]
+[CRC16]`; anything else is a v1 ASCII line. `HELLO` and `PING` stay ASCII, so old
+hosts still detect the board. The contract lives in one shared header,
+[`../firmware/proto_link/coproc_proto.h`](../firmware/proto_link/coproc_proto.h),
+included by **both** the firmware and `src/input/coproc_inputs.cpp`.
+
+`HELLO` advertises capabilities:
+`HELLO proto-coproc v2 caps=buttons,imu_bno,imu_mpu,boop,light,panels n_btn=4 n_chain=2`
+
+**Aggregator model.** The MCU runs the device drivers and sends decoded telemetry
+(`RSP_IMU_BNO`, `RSP_IMU_MPU`, `RSP_BOOP`, `RSP_LIGHT`). The CM5 keeps the
+*meaning*: it applies declination/offset, the BothCheeks coalesce window, the
+dark→bright squint detector, and routes everything into the same `AppState`
+sinks the on-board drivers feed (`imu_bno`/`imu_mpu`/`imu_data`, `trigger_boop`,
+light-squint). **Don't wire a chip to both the Pi and the coproc** — two I²C
+masters on one bus contend.
+
+**Ownership / fallback.** `inputs.coprocessor.sensors.{imu_bno,imu_mpu,boop,light}`
+declares which chips the coproc owns. `main.cpp` reads these to **skip starting
+the local driver** for an owned chip and route the coproc stream instead. It's
+config-declared (not raced against the runtime `HELLO` caps), so startup is
+deterministic; the runtime caps are advisory.
+
+**Firmware.** `firmware/button_coproc/` now polls the sensors on `Wire1` (pins in
+`include/config.h`) and emits frames; register sequences are ported 1:1 from the
+CM5 drivers in `src/sensor/*.cpp`.
+
+**Known follow-ups (phase 2.x / 3):**
+- Non-default IMU **axis-remap** presets and BNO055 **hard-iron calibration** over
+  the coproc path (default mounting works now; the host applies declination/offset).
+- **BothCheeks** coalescing for coproc boop edges (snout/left/right work now).
+- **MAX7219 panel** driving (`CMD_PANEL_FRAME`, two SPI chains) — pins are already
+  reserved in `include/config.h`.

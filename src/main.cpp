@@ -1417,6 +1417,28 @@ int main(int argc, char* argv[]) {
     hud_cfg.glow_intensity        = jval(jhud, "glow_intensity",       1.0f);
     hud_cfg.hud_flip_vertical     = jval(jhud, "flip_vertical",        false);
 
+    // ── Coprocessor sensor ownership (aggregator) ────────────────────────────
+    // When inputs.coprocessor.sensors.<x> is true, the RP2350 is the I²C master
+    // for that chip and streams decoded values; the CM5 must NOT start its own
+    // driver (two masters on one bus = contention). Parsed early so the sensor
+    // .start() calls below can be skipped. The decoded stream is routed into the
+    // same AppState sinks where the coproc object is wired (see further down).
+    bool coproc_has_imu_bno = false, coproc_has_imu_mpu = false,
+         coproc_has_boop    = false, coproc_has_light   = false;
+    if (cfg.contains("inputs") && cfg["inputs"].is_object() &&
+        cfg["inputs"].contains("coprocessor") &&
+        cfg["inputs"]["coprocessor"].is_object()) {
+        const json& jcp = cfg["inputs"]["coprocessor"];
+        if (jcp.value("enabled", false) &&
+            jcp.contains("sensors") && jcp["sensors"].is_object()) {
+            const json& js = jcp["sensors"];
+            coproc_has_imu_bno = js.value("imu_bno", false);
+            coproc_has_imu_mpu = js.value("imu_mpu", false);
+            coproc_has_boop    = js.value("boop",    false);
+            coproc_has_light   = js.value("light",   false);
+        }
+    }
+
     Mpu9250::Config mpu_cfg;
     if (cfg.contains("mpu9250")) {
         auto& jm = cfg["mpu9250"];
@@ -2230,7 +2252,9 @@ int main(int argc, char* argv[]) {
         prev_us = now_us;
     });
 
-    if (!mpu9250.start() && mpu_cfg.enabled)
+    if (coproc_has_imu_mpu)
+        std::cout << "[main] MPU-9250 owned by coprocessor (local driver skipped)\n";
+    else if (!mpu9250.start() && mpu_cfg.enabled)
         std::cerr << "[main] MPU-9250 backup compass unavailable\n";
 
     // ── BNO055 (Adafruit 9-DOF absolute orientation) ─────────────────────────
@@ -2279,7 +2303,9 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.notifs.push(std::move(n));
     });
-    if (!bno055.start() && bno_cfg.enabled)
+    if (coproc_has_imu_bno)
+        std::cout << "[main] BNO055 owned by coprocessor (local driver skipped)\n";
+    else if (!bno055.start() && bno_cfg.enabled)
         std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
 
     // ── Boop sensor ──────────────────────────────────────────────────────────
@@ -2399,7 +2425,9 @@ int main(int argc, char* argv[]) {
         flash_zone(z);
     };
     boop_sensor.on_boop(fire_boop);
-    if (boop_cfg.enabled && !boop_sensor.start())
+    if (coproc_has_boop)
+        std::cout << "[main] boop (MPR121) owned by coprocessor (local driver skipped)\n";
+    else if (boop_cfg.enabled && !boop_sensor.start())
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
     boop_sensor_ptr = &boop_sensor;   // expose for the menu's live tuning
 
@@ -2434,7 +2462,9 @@ int main(int argc, char* argv[]) {
         double last_squint_t = -1.0e9;
     };
     auto light_edge = std::make_shared<LightEdgeState>();
-    light_sensor.set_lux_callback([light_edge, &state, &face_proxy](float lux) {
+    // Named so the coprocessor's RSP_LIGHT stream can reuse the exact same
+    // dark→bright squint edge detector when the coproc owns the BH1750.
+    auto light_apply = [light_edge, &state, &face_proxy](float lux) {
         const double now = std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         // Snapshot the config so a mid-callback menu edit can't tear strings.
@@ -2458,8 +2488,11 @@ int main(int argc, char* argv[]) {
         light_edge->last_dark_t   = -1.0;   // consume the edge
         if (!c.expression.empty())
             face_proxy.trigger_boop(c.expression, c.duration_s);
-    });
-    if (light_cfg.enabled && !light_sensor.start())
+    };
+    light_sensor.set_lux_callback(light_apply);
+    if (coproc_has_light)
+        std::cout << "[main] light (BH1750) owned by coprocessor (local driver skipped)\n";
+    else if (light_cfg.enabled && !light_sensor.start())
         std::cerr << "[main] light sensor unavailable\n";
 
     // ── Dev/debug monitors ────────────────────────────────────────────────────
@@ -3442,6 +3475,12 @@ int main(int argc, char* argv[]) {
         coproc_cfg.replace_local_gpio = jval(jc, "replace_local_gpio", false);
         coproc_cfg.heartbeat_timeout_ms =
             jval(jc, "heartbeat_timeout_ms", coproc_cfg.heartbeat_timeout_ms);
+        // Sensor ownership (mirrors the early-parsed flags used to gate the local
+        // drivers). The coproc routes its decoded stream into the same sinks.
+        coproc_cfg.provides_imu_bno = coproc_has_imu_bno;
+        coproc_cfg.provides_imu_mpu = coproc_has_imu_mpu;
+        coproc_cfg.provides_boop    = coproc_has_boop;
+        coproc_cfg.provides_light   = coproc_has_light;
         if (jc.contains("buttons") && jc["buttons"].is_array()) {
             for (const auto& jb : jc["buttons"]) {
                 if (!jb.is_object()) continue;
@@ -4113,13 +4152,78 @@ int main(int argc, char* argv[]) {
     // ── Button coprocessor source (optional, opt-in) ─────────────────────────
     // Shares gpio_dispatch with the GPIO poller. Reload rebuilds it on a menu
     // toggle; status surfaces the link state to the GPIO Buttons menu.
+    // Route the coprocessor's decoded sensor stream (v2 aggregator) into the
+    // SAME AppState sinks the on-board drivers feed, so the HUD compass / boop
+    // reactions / light-squint behave identically no matter where the data came
+    // from. The firmware ships RAW values; we apply declination/offset here (the
+    // menu-tunable bits stay live on the CM5). Non-default IMU axis-remap, BNO
+    // hard-iron calibration and BothCheeks coalescing over the coproc path are
+    // follow-ups; the default mounting works today.
+    auto wire_coproc_sensors = [&](input::CoprocInputs* ci) {
+        if (!ci) return;
+        auto wrap360 = [](float h){ while (h < 0.f) h += 360.f; while (h >= 360.f) h -= 360.f; return h; };
+        ci->on_bno([&state, &bno_cfg, wrap360](const input::cp::BnoPayload& p) {
+            const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const float heading = wrap360(p.euler[0] + bno_cfg.declination_deg + bno_cfg.heading_offset);
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.imu_bno.heading_deg = heading;
+            state.imu_bno.last_us     = now_us;
+            state.imu_bno.calibrated  = (p.calib_sys >= 2);
+            auto& d = state.imu_data;
+            d.bno_ok = true;
+            d.bno_calib_sys = p.calib_sys; d.bno_calib_gyro = p.calib_gyro;
+            d.bno_calib_accel = p.calib_accel; d.bno_calib_mag = p.calib_mag;
+            for (int i = 0; i < 3; ++i) {
+                d.bno_accel_g[i]  = p.accel_g[i];
+                d.bno_gyro_dps[i] = p.gyro_dps[i];
+                d.bno_mag_ut[i]   = p.mag_ut[i];
+                d.bno_euler[i]    = p.euler[i];
+            }
+        });
+        ci->on_mpu([&state, &mpu_cfg, wrap360](const input::cp::MpuPayload& p) {
+            const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const float heading = wrap360(p.heading_deg + mpu_cfg.declination_deg + mpu_cfg.heading_offset);
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.health.mpu9250_ok = true;
+            // Same circular low-pass the on-board driver applies (alpha 0.1).
+            constexpr float kA = 0.1f, kD2R = 3.14159265f / 180.f;
+            const float prev = state.imu_mpu.heading_deg;
+            const float fs = std::sin(prev*kD2R) + kA*(std::sin(heading*kD2R) - std::sin(prev*kD2R));
+            const float fc = std::cos(prev*kD2R) + kA*(std::cos(heading*kD2R) - std::cos(prev*kD2R));
+            float filt = std::atan2(fs, fc) / kD2R; if (filt < 0.f) filt += 360.f;
+            state.imu_mpu.heading_deg = filt;
+            state.imu_mpu.last_us     = now_us;
+            state.imu_mpu.calibrated  = true;
+            auto& d = state.imu_data;
+            d.mpu_ok = true;
+            for (int i = 0; i < 3; ++i) {
+                d.accel_g[i] = p.accel_g[i]; d.gyro_dps[i] = p.gyro_dps[i]; d.mag_ut[i] = p.mag_ut[i];
+            }
+            d.temp_c = p.temp_c; d.mpu_heading = heading;
+        });
+        ci->on_boop([&fire_boop](const input::cp::BoopPayload& p) {
+            if (p.edge != input::cp::BOOP_PRESS) return;   // act on rising edge
+            switch (p.zone) {
+                case input::cp::BOOP_SNOUT: fire_boop(sensor::BoopSensor::Zone::Snout);      break;
+                case input::cp::BOOP_LEFT:  fire_boop(sensor::BoopSensor::Zone::LeftCheek);  break;
+                case input::cp::BOOP_RIGHT: fire_boop(sensor::BoopSensor::Zone::RightCheek); break;
+                default: break;
+            }
+        });
+        ci->on_light([light_apply](const input::cp::LightPayload& p) { light_apply(p.lux); });
+    };
+
     auto coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+    wire_coproc_sensors(coproc_inputs.get());
     if (coproc_cfg.enabled && !coproc_inputs->init())
         std::cerr << "[main] button coprocessor init failed (transport unavailable)\n";
 
     *coproc_reload = [&]{
         coproc_inputs.reset();
         coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+        wire_coproc_sensors(coproc_inputs.get());
         if (coproc_cfg.enabled && !coproc_inputs->init())
             std::cerr << "[main] coprocessor reload: init failed (transport unavailable)\n";
         // Re-evaluate the local poller — replace-mode may have just changed
