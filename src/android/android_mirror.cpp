@@ -249,11 +249,11 @@ bool AndroidMirror::spawn_scrcpy() {
     std::vector<const char*> args = {
         "scrcpy",
         "--no-audio",      // audio is handled by the spatial audio engine
-        "--no-window",     // headless: feed the v4l2 sink with no GUI window.
-                           // (--no-playback leaves the window open but blank —
-                           //  that's the stray "scrcpy logo" window.) --no-window
-                           //  implies --no-video-playback but NOT --no-control,
-                           //  so new-display/start-app/turn-screen-off still work.
+        "--no-playback",   // scrcpy's documented headless-v4l2 flag: feeds the
+                           // v4l2 sink without rendering. NOTE: on scrcpy 3.x this
+                           //  still opens a blank "logo" window; --no-window hides
+                           //  it but stops frames reaching the sink on 3.3.4, so we
+                           //  keep --no-playback and live with the window for now.
         "--video-codec=h264",
     };
 
