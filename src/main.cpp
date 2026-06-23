@@ -1959,6 +1959,16 @@ int main(int argc, char* argv[]) {
         and_cfg.new_display      = jval(jand, "new_display", false);
         and_cfg.new_display_size = jand.value("new_display_size", std::string(""));
         and_cfg.start_app        = jand.value("start_app", std::string(""));
+        and_cfg.nav_uri_template = jand.value("nav_uri_template", and_cfg.nav_uri_template);
+        if (jand.contains("destinations") && jand["destinations"].is_array()) {
+            for (auto& d : jand["destinations"]) {
+                AndroidMirrorConfig::NavDestination nd;
+                nd.name  = d.value("name",  std::string(""));
+                nd.query = d.value("query", std::string(""));
+                if (!nd.name.empty() && !nd.query.empty())
+                    and_cfg.destinations.push_back(std::move(nd));
+            }
+        }
         android_overlay_cfg.size = jval(jand, "overlay_size", 0.40f);
         if (jand.contains("anchor_x")) {
             android_overlay_cfg.anchor_x = jval(jand, "anchor_x", 0.0f);

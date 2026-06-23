@@ -28,6 +28,13 @@ struct AndroidMirrorConfig {
     bool        new_display      = false;
     std::string new_display_size;            // e.g. "1080x2400" or "1920x1080/280"; empty = device default
     std::string start_app;                   // app to launch, e.g. "org.organicmaps" or "?maps" (fuzzy)
+
+    // Preset-destination navigation: selecting one fires an intent at the
+    // mirrored display so the maps app jumps to turn-by-turn — no HUD touch
+    // needed. {q} in the template is replaced with the URL-encoded query.
+    struct NavDestination { std::string name; std::string query; };
+    std::vector<NavDestination> destinations;
+    std::string nav_uri_template = "google.navigation:q={q}";  // Organic Maps: "geo:0,0?q={q}"
 };
 
 // Mirrors an Android device into a GL texture via scrcpy → V4L2 loopback → OpenCV.
@@ -69,6 +76,14 @@ public:
     bool  new_display_enabled() const { return cfg_.new_display; }
     void  set_new_display(bool v);
 
+    // Preset-destination navigation. navigate_to() fires a maps intent at the
+    // mirrored display (the virtual display in new-display mode, else the phone's
+    // main display). Run off the render thread. destinations() feeds the menu.
+    bool  navigate_to(const std::string& query);
+    const std::vector<AndroidMirrorConfig::NavDestination>& destinations() const {
+        return cfg_.destinations;
+    }
+
     // Render-thread only: upload latest frame to a GL texture.
     // Returns true if a new frame was uploaded. out is always set to
     // the current texture ID (0 until the first frame arrives).
@@ -81,9 +96,11 @@ private:
     bool spawn_scrcpy();
     void kill_scrcpy();
     void upload_texture(GLuint& tex, int w, int h, const uint8_t* rgba);
+    void capture_new_display_id();   // parse scrcpy log for the virtual display id
 
     AndroidMirrorConfig cfg_;
     pid_t               scrcpy_pid_ = -1;
+    std::atomic<int>    display_id_ { -1 };  // scrcpy virtual display id (new-display mode)
 
     // Shared between capture thread (writer) and render thread (reader).
     struct TexSlot {

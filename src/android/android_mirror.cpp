@@ -2,6 +2,10 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cctype>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -43,6 +47,10 @@ bool AndroidMirror::start() {
         return false;
     }
 
+    // In virtual-display mode, learn which display id scrcpy created so
+    // navigate_to() can target it.
+    if (cfg_.new_display) capture_new_display_id();
+
     running_ = true;
     thread_  = std::thread(&AndroidMirror::capture_loop, this);
     return true;
@@ -75,6 +83,82 @@ void AndroidMirror::set_new_display(bool v) {
         stop();
         std::thread([this]{ start(); }).detach();
     }
+}
+
+// ── Preset-destination navigation ─────────────────────────────────────────────
+
+// scrcpy logs the virtual display it creates, e.g.
+//   "INFO: New display: 1080x2400/280 (id=2)"
+// Parse the last such "...display... id=N" line from the scrcpy log.
+void AndroidMirror::capture_new_display_id() {
+    display_id_ = -1;
+    FILE* f = fopen("/tmp/protohud-scrcpy.log", "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        const char* p = strstr(line, "id=");
+        if (p && strstr(line, "display")) {
+            int id = atoi(p + 3);
+            if (id >= 0) display_id_ = id;
+        }
+    }
+    fclose(f);
+    if (display_id_ >= 0)
+        fprintf(stderr, "[android] virtual display id=%d\n", display_id_.load());
+    else
+        fprintf(stderr, "[android] could not determine virtual display id "
+                        "(navigation will target the main display)\n");
+}
+
+static std::string url_encode(const std::string& s) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+            out.push_back(static_cast<char>(c));
+        else { out.push_back('%'); out.push_back(hex[c >> 4]); out.push_back(hex[c & 0xF]); }
+    }
+    return out;
+}
+
+bool AndroidMirror::navigate_to(const std::string& query) {
+#ifdef __unix__
+    if (query.empty()) return false;
+
+    // Substitute {q} in the URI template with the URL-encoded destination.
+    std::string uri = cfg_.nav_uri_template;
+    const std::string enc = url_encode(query);
+    for (size_t p; (p = uri.find("{q}")) != std::string::npos; )
+        uri.replace(p, 3, enc);
+
+    const int did = display_id_.load();
+    const std::string disp = std::to_string(did);
+    const bool to_virtual = cfg_.new_display && did >= 0;
+
+    // adb [-s serial] shell am start [--display N] -a VIEW -d <uri>
+    std::vector<const char*> args = { "adb" };
+    if (!cfg_.adb_serial.empty()) { args.push_back("-s"); args.push_back(cfg_.adb_serial.c_str()); }
+    args.push_back("shell"); args.push_back("am"); args.push_back("start");
+    if (to_virtual) { args.push_back("--display"); args.push_back(disp.c_str()); }
+    args.push_back("-a"); args.push_back("android.intent.action.VIEW");
+    args.push_back("-d"); args.push_back(uri.c_str());
+    args.push_back(nullptr);
+
+    pid_t pid = fork();
+    if (pid < 0) { perror("[android] fork(adb)"); return false; }
+    if (pid == 0) {
+        freopen("/tmp/protohud-scrcpy.log", "a", stderr);  // append intent output
+        dup2(STDERR_FILENO, STDOUT_FILENO);
+        execvp("adb", const_cast<char* const*>(args.data()));
+        _exit(127);
+    }
+    waitpid(pid, nullptr, 0);  // adb returns promptly
+    fprintf(stderr, "[android] navigate_to '%s' -> %s (display=%d)\n",
+            query.c_str(), uri.c_str(), to_virtual ? did : -1);
+    return true;
+#else
+    (void)query; return false;
+#endif
 }
 
 bool AndroidMirror::get_frame(GLuint& out) {
