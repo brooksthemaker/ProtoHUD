@@ -1955,6 +1955,7 @@ int main(int argc, char* argv[]) {
         and_cfg.adb_serial = jand.value("adb_serial",std::string(""));
         and_cfg.max_size   = jval(jand, "max_size",   1080);
         and_cfg.fps        = jval(jand, "fps",         30);
+        and_cfg.turn_screen_off = jval(jand, "turn_screen_off", false);
         android_overlay_cfg.size = jval(jand, "overlay_size", 0.40f);
         if (jand.contains("anchor_x")) {
             android_overlay_cfg.anchor_x = jval(jand, "anchor_x", 0.0f);

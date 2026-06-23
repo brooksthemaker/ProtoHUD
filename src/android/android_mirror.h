@@ -15,6 +15,11 @@ struct AndroidMirrorConfig {
     std::string adb_serial;                       // empty = first connected USB device
     int         max_size        = 1080;           // scrcpy --max-size (longest dimension, px)
     int         fps             = 30;             // scrcpy --max-fps
+    // Black out the phone's own display while mirroring (scrcpy --turn-screen-off).
+    // Requires scrcpy control to be enabled, so when this is on the mirror runs
+    // *with* control (ProtoHUD never injects input, so it's still read-only in
+    // practice); when off, the mirror runs --no-control and the phone stays lit.
+    bool        turn_screen_off = false;
 };
 
 // Mirrors an Android device into a GL texture via scrcpy → V4L2 loopback → OpenCV.
@@ -45,6 +50,11 @@ public:
     bool  is_connected()  const { return connected_; }
     // Aspect ratio (w/h) of the live frame; 9/16 until first frame arrives.
     float frame_aspect()  const { return frame_aspect_.load(); }
+
+    // Blacking out the phone display. Changing it while running restarts scrcpy
+    // (the flag is a spawn argument). Callable from any non-render thread.
+    bool  turn_screen_off() const { return cfg_.turn_screen_off; }
+    void  set_turn_screen_off(bool v);
 
     // Render-thread only: upload latest frame to a GL texture.
     // Returns true if a new frame was uploaded. out is always set to

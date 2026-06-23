@@ -56,6 +56,17 @@ void AndroidMirror::stop() {
     connected_ = false;
 }
 
+void AndroidMirror::set_turn_screen_off(bool v) {
+    if (cfg_.turn_screen_off == v) return;
+    cfg_.turn_screen_off = v;
+    // The flag is a scrcpy spawn argument, so a live mirror must be restarted to
+    // pick it up. start() blocks up to ~12s, so kick it off the caller's thread.
+    if (running_) {
+        stop();
+        std::thread([this]{ start(); }).detach();
+    }
+}
+
 bool AndroidMirror::get_frame(GLuint& out) {
     std::lock_guard<std::mutex> lk(slot_.mtx);
     out = slot_.tex;
@@ -113,16 +124,26 @@ bool AndroidMirror::spawn_scrcpy() {
     std::vector<const char*> args = {
         "scrcpy",
         "--no-audio",      // audio is handled by the spatial audio engine
-        "--no-control",    // read-only mirror; disables touch/input injection
         "--no-playback",   // don't open a preview window (scrcpy 2.x+)
-        // NOTE: no --stay-awake — scrcpy rejects it when --no-control is set
-        // ("Cannot request to stay awake if control is disabled") and exits
-        // before streaming, so the loopback never gets a producer.
         "--video-codec=h264",
-        max_size_arg,
-        v4l2_arg,
-        fps_arg,
     };
+    if (cfg_.turn_screen_off) {
+        // Blacking out the phone needs control enabled (scrcpy sends a power
+        // command), so we DON'T pass --no-control here; ProtoHUD never injects
+        // input, so the mirror stays read-only in practice. --stay-awake is
+        // valid now control is on and keeps the device from sleeping (which
+        // would freeze the stream) while its screen is dark.
+        args.push_back("--turn-screen-off");
+        args.push_back("--stay-awake");
+    } else {
+        // Read-only mirror, phone display stays lit. NOTE: --stay-awake is
+        // rejected here ("Cannot request to stay awake if control is disabled")
+        // and would make scrcpy exit before streaming — so don't add it.
+        args.push_back("--no-control");
+    }
+    args.push_back(max_size_arg);
+    args.push_back(v4l2_arg);
+    args.push_back(fps_arg);
     if (!cfg_.adb_serial.empty()) {
         args.push_back("--serial");
         args.push_back(cfg_.adb_serial.c_str());

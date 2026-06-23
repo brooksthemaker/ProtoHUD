@@ -1547,6 +1547,9 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 if (v) std::thread([android_mirror]{ android_mirror->start(); }).detach();
                 else   android_mirror->stop();
             }),
+        toggle("Black Out Phone Screen",
+            [android_mirror]{ return android_mirror->turn_screen_off(); },
+            [android_mirror](bool v){ android_mirror->set_turn_screen_off(v); }),
         toggle("Show Overlay",
             [android_overlay]{ return *android_overlay; },
             [android_overlay](bool v){ *android_overlay = v; }),
