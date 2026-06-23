@@ -42,7 +42,11 @@ static bool is_usb_capture_device(const std::string& path, std::string* info_out
                        driver == "bcm2835-isp"   ||
                        driver == "pispbe"         ||
                        driver.find("pisp") != std::string::npos);
-        ok = (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) && !is_isp;
+        // Block v4l2loopback nodes (driver "v4l2 loopback"): the Android-mirror
+        // sink (/dev/video4) is a loopback, and a USB scan grabbing it steals the
+        // stream from scrcpy / the mirror. Loopbacks are never real USB cameras.
+        bool is_loopback = (driver.find("loopback") != std::string::npos);
+        ok = (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) && !is_isp && !is_loopback;
     }
     close(fd);
     return ok;

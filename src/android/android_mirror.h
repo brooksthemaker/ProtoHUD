@@ -15,6 +15,26 @@ struct AndroidMirrorConfig {
     std::string adb_serial;                       // empty = first connected USB device
     int         max_size        = 1080;           // scrcpy --max-size (longest dimension, px)
     int         fps             = 30;             // scrcpy --max-fps
+    // Black out the phone's own display while mirroring (scrcpy --turn-screen-off).
+    // Requires scrcpy control to be enabled, so when this is on the mirror runs
+    // *with* control (ProtoHUD never injects input, so it's still read-only in
+    // practice); when off, the mirror runs --no-control and the phone stays lit.
+    bool        turn_screen_off = false;
+    // Stream a separate *virtual* display (scrcpy --new-display) instead of the
+    // phone's own screen — launch a dedicated app (e.g. a maps app) on it and
+    // mirror that, leaving the phone's real screen free/lockable. Needs
+    // Android 14+ on the device. Implies control on (to create the display and
+    // launch the app); ProtoHUD still injects no input.
+    bool        new_display      = false;
+    std::string new_display_size;            // e.g. "1080x2400" or "1920x1080/280"; empty = device default
+    std::string start_app;                   // app to launch, e.g. "org.organicmaps" or "?maps" (fuzzy)
+
+    // Preset-destination navigation: selecting one fires an intent at the
+    // mirrored display so the maps app jumps to turn-by-turn — no HUD touch
+    // needed. {q} in the template is replaced with the URL-encoded query.
+    struct NavDestination { std::string name; std::string query; };
+    std::vector<NavDestination> destinations;
+    std::string nav_uri_template = "google.navigation:q={q}";  // Organic Maps: "geo:0,0?q={q}"
 };
 
 // Mirrors an Android device into a GL texture via scrcpy → V4L2 loopback → OpenCV.
@@ -46,6 +66,24 @@ public:
     // Aspect ratio (w/h) of the live frame; 9/16 until first frame arrives.
     float frame_aspect()  const { return frame_aspect_.load(); }
 
+    // Blacking out the phone display. Changing it while running restarts scrcpy
+    // (the flag is a spawn argument). Callable from any non-render thread.
+    bool  turn_screen_off() const { return cfg_.turn_screen_off; }
+    void  set_turn_screen_off(bool v);
+
+    // Virtual-display ("maps display") mode — streams cfg_.start_app on its own
+    // display instead of the phone's screen. Restarts scrcpy when toggled.
+    bool  new_display_enabled() const { return cfg_.new_display; }
+    void  set_new_display(bool v);
+
+    // Preset-destination navigation. navigate_to() fires a maps intent at the
+    // mirrored display (the virtual display in new-display mode, else the phone's
+    // main display). Run off the render thread. destinations() feeds the menu.
+    bool  navigate_to(const std::string& query);
+    const std::vector<AndroidMirrorConfig::NavDestination>& destinations() const {
+        return cfg_.destinations;
+    }
+
     // Render-thread only: upload latest frame to a GL texture.
     // Returns true if a new frame was uploaded. out is always set to
     // the current texture ID (0 until the first frame arrives).
@@ -58,9 +96,12 @@ private:
     bool spawn_scrcpy();
     void kill_scrcpy();
     void upload_texture(GLuint& tex, int w, int h, const uint8_t* rgba);
+    void capture_new_display_id();   // parse scrcpy log for the virtual display id
+    bool preflight_sink(std::string& reason) const;  // v4l2 sink exists & not busy
 
     AndroidMirrorConfig cfg_;
     pid_t               scrcpy_pid_ = -1;
+    std::atomic<int>    display_id_ { -1 };  // scrcpy virtual display id (new-display mode)
 
     // Shared between capture thread (writer) and render thread (reader).
     struct TexSlot {
@@ -74,6 +115,8 @@ private:
 
     cv::VideoCapture  cap_;
     std::thread       thread_;
+    std::mutex         life_mtx_;    // serialises start()/stop() so rapid toggles
+                                     // never spawn overlapping scrcpy instances
     std::atomic<bool>  running_      { false };
     std::atomic<bool>  connected_   { false };
     std::atomic<float> frame_aspect_{ 9.f / 16.f };
