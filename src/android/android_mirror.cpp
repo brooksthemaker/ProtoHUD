@@ -12,7 +12,10 @@
 #include <opencv2/imgproc.hpp>
 
 #ifdef __unix__
+#  include <cerrno>
+#  include <fcntl.h>
 #  include <signal.h>
+#  include <sys/stat.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
 #endif
@@ -21,8 +24,50 @@ AndroidMirror::AndroidMirror(const AndroidMirrorConfig& cfg) : cfg_(cfg) {}
 
 AndroidMirror::~AndroidMirror() { stop(); }
 
+// Verify the v4l2 sink exists and isn't already held before we spawn scrcpy, so
+// a missing module or a stale handle yields a precise message instead of the
+// vague "not ready after 12s".
+bool AndroidMirror::preflight_sink(std::string& reason) const {
+#ifdef __unix__
+    struct stat st;
+    if (stat(cfg_.v4l2_sink.c_str(), &st) != 0) {
+        reason = cfg_.v4l2_sink + " does not exist — is v4l2loopback loaded? "
+                 "(sudo modprobe v4l2loopback video_nr=N card_label=AndroidMirror "
+                 "exclusive_caps=1)";
+        return false;
+    }
+    if (!S_ISCHR(st.st_mode)) {
+        reason = cfg_.v4l2_sink + " is not a character (video) device";
+        return false;
+    }
+    // With exclusive_caps=1 a second producer gets EBUSY — that's the stale-handle
+    // case. Probe by opening for output, then immediately release it.
+    int fd = ::open(cfg_.v4l2_sink.c_str(), O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        if (errno == EBUSY)
+            reason = cfg_.v4l2_sink + " is busy — another process holds it (stale "
+                     "scrcpy?). Free it with: sudo fuser -k " + cfg_.v4l2_sink;
+        else
+            reason = "cannot open " + cfg_.v4l2_sink + ": " + strerror(errno);
+        return false;
+    }
+    ::close(fd);
+    return true;
+#else
+    (void)reason; return true;
+#endif
+}
+
 bool AndroidMirror::start() {
+    std::lock_guard<std::mutex> lk(life_mtx_);  // serialise with stop()/restarts
     if (running_) return true;
+    kill_scrcpy();   // reap any scrcpy we still own before spawning another
+
+    std::string why;
+    if (!preflight_sink(why)) {
+        fprintf(stderr, "[android] %s\n", why.c_str());
+        return false;
+    }
     if (!spawn_scrcpy()) return false;
 
     // scrcpy needs time to push its server, start the phone's encoder, and begin
@@ -76,6 +121,7 @@ bool AndroidMirror::start() {
 }
 
 void AndroidMirror::stop() {
+    std::lock_guard<std::mutex> lk(life_mtx_);  // serialise with start()/restarts
     running_ = false;
     if (thread_.joinable()) thread_.join();
     cap_.release();
@@ -302,6 +348,10 @@ bool AndroidMirror::spawn_scrcpy() {
     if (pid < 0) { perror("[android] fork"); return false; }
 
     if (pid == 0) {
+        // Own process group so kill_scrcpy() can signal scrcpy *and* its children
+        // (adb server, on-device server) as a unit — a plain SIGTERM to the client
+        // left those holding the v4l2 device, which is how stale handles piled up.
+        setpgid(0, 0);
         // Child: capture scrcpy's output to a log so failures are diagnosable
         // (it was /dev/null, which hid every error). scrcpy logs to stderr; fold
         // stdout into the same file. Inspect with: cat /tmp/protohud-scrcpy.log
@@ -310,6 +360,7 @@ bool AndroidMirror::spawn_scrcpy() {
         execvp("scrcpy", const_cast<char* const*>(args.data()));
         _exit(127); // execvp only returns on failure
     }
+    setpgid(pid, pid);   // also set in parent to avoid a fork/exec race
 
     scrcpy_pid_ = pid;
     return true;
@@ -322,7 +373,18 @@ bool AndroidMirror::spawn_scrcpy() {
 void AndroidMirror::kill_scrcpy() {
 #ifdef __unix__
     if (scrcpy_pid_ <= 0) return;
-    ::kill(scrcpy_pid_, SIGTERM);
+    // Signal the whole process group (scrcpy + adb/server children), then
+    // escalate to SIGKILL if it doesn't exit within ~2s so nothing keeps the
+    // v4l2 sink open.
+    ::kill(-scrcpy_pid_, SIGTERM);
+    for (int i = 0; i < 20; ++i) {
+        if (waitpid(scrcpy_pid_, nullptr, WNOHANG) == scrcpy_pid_) {
+            scrcpy_pid_ = -1;
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ::kill(-scrcpy_pid_, SIGKILL);
     waitpid(scrcpy_pid_, nullptr, 0);
     scrcpy_pid_ = -1;
 #endif

@@ -97,6 +97,7 @@ private:
     void kill_scrcpy();
     void upload_texture(GLuint& tex, int w, int h, const uint8_t* rgba);
     void capture_new_display_id();   // parse scrcpy log for the virtual display id
+    bool preflight_sink(std::string& reason) const;  // v4l2 sink exists & not busy
 
     AndroidMirrorConfig cfg_;
     pid_t               scrcpy_pid_ = -1;
@@ -114,6 +115,8 @@ private:
 
     cv::VideoCapture  cap_;
     std::thread       thread_;
+    std::mutex         life_mtx_;    // serialises start()/stop() so rapid toggles
+                                     // never spawn overlapping scrcpy instances
     std::atomic<bool>  running_      { false };
     std::atomic<bool>  connected_   { false };
     std::atomic<float> frame_aspect_{ 9.f / 16.f };
