@@ -21,12 +21,23 @@ bool AndroidMirror::start() {
     if (running_) return true;
     if (!spawn_scrcpy()) return false;
 
-    // Give scrcpy time to negotiate ADB and create the V4L2 device node.
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-
-    cap_.open(cfg_.v4l2_sink, cv::CAP_V4L2);
-    if (!cap_.isOpened()) {
-        fprintf(stderr, "[android] V4L2 sink %s not ready — is v4l2loopback loaded?\n",
+    // scrcpy needs time to push its server, start the phone's encoder, and begin
+    // streaming into the loopback. With v4l2loopback exclusive_caps=1 the capture
+    // interface doesn't even appear until a producer is streaming — so poll the
+    // open (up to ~12 s) instead of a single fixed-delay attempt, which raced
+    // scrcpy's startup and failed with "can't be used to capture".
+    bool opened = false;
+    for (int attempt = 0; attempt < 24; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (cap_.open(cfg_.v4l2_sink, cv::CAP_V4L2) && cap_.isOpened()) {
+            opened = true;
+            break;
+        }
+        cap_.release();
+    }
+    if (!opened) {
+        fprintf(stderr, "[android] V4L2 sink %s not ready after ~12s — is scrcpy producing "
+                        "frames? check /tmp/protohud-scrcpy.log; is v4l2loopback loaded?\n",
                 cfg_.v4l2_sink.c_str());
         kill_scrcpy();
         return false;
