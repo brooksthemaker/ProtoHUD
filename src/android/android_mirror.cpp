@@ -51,6 +51,25 @@ bool AndroidMirror::start() {
     // navigate_to() can target it.
     if (cfg_.new_display) capture_new_display_id();
 
+    // Force the V4L2 backend to hand us converted BGR. When OpenCV can't
+    // negotiate scrcpy's pixel format it leaves CONVERT_RGB off and returns the
+    // raw (often YUV) buffer, which cvtColor then mangles into static.
+    cap_.set(cv::CAP_PROP_CONVERT_RGB, 1.0);
+
+    // Log the negotiated V4L2 format so a "static / wrong-size" feed can be
+    // diagnosed (a square-ish noisy image usually means OpenCV is reading the
+    // scrcpy buffer in a pixel format it can't convert).
+    {
+        const int   fcc = static_cast<int>(cap_.get(cv::CAP_PROP_FOURCC));
+        const char  fc[5] = { static_cast<char>(fcc & 0xFF),
+                              static_cast<char>((fcc >> 8) & 0xFF),
+                              static_cast<char>((fcc >> 16) & 0xFF),
+                              static_cast<char>((fcc >> 24) & 0xFF), 0 };
+        fprintf(stderr, "[android] v4l2 %s opened: %.0fx%.0f fourcc='%s' convert_rgb=%.0f\n",
+                cfg_.v4l2_sink.c_str(), cap_.get(cv::CAP_PROP_FRAME_WIDTH),
+                cap_.get(cv::CAP_PROP_FRAME_HEIGHT), fc, cap_.get(cv::CAP_PROP_CONVERT_RGB));
+    }
+
     running_ = true;
     thread_  = std::thread(&AndroidMirror::capture_loop, this);
     return true;
@@ -176,6 +195,7 @@ bool AndroidMirror::get_frame(GLuint& out) {
 void AndroidMirror::capture_loop() {
     cv::Mat frame, rgba;
     int fail_streak = 0;
+    bool logged_dims = false;
     while (running_) {
         if (!cap_.read(frame) || frame.empty()) {
             connected_ = false;
@@ -183,8 +203,10 @@ void AndroidMirror::capture_loop() {
                 // ~5 s of failures — reopen the v4l2 device in case scrcpy restarted
                 cap_.release();
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                cap_.open(cfg_.v4l2_sink, cv::CAP_V4L2);
+                if (cap_.open(cfg_.v4l2_sink, cv::CAP_V4L2))
+                    cap_.set(cv::CAP_PROP_CONVERT_RGB, 1.0);
                 fail_streak = 0;
+                logged_dims = false;   // re-log dims after a reconnect
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
@@ -192,9 +214,18 @@ void AndroidMirror::capture_loop() {
         }
         fail_streak = 0;
         connected_  = true;
+        if (!logged_dims) {
+            fprintf(stderr, "[android] first frame: %dx%d channels=%d type=%d\n",
+                    frame.cols, frame.rows, frame.channels(), frame.type());
+            logged_dims = true;
+        }
         if (frame.cols > 0 && frame.rows > 0)
             frame_aspect_.store(static_cast<float>(frame.cols) / static_cast<float>(frame.rows));
-        cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);
+        switch (frame.channels()) {
+            case 4:  cv::cvtColor(frame, rgba, cv::COLOR_BGRA2RGBA); break;
+            case 1:  cv::cvtColor(frame, rgba, cv::COLOR_GRAY2RGBA); break;
+            default: cv::cvtColor(frame, rgba, cv::COLOR_BGR2RGBA);  break;
+        }
         {
             std::lock_guard<std::mutex> lk(slot_.mtx);
             slot_.w     = rgba.cols;
@@ -218,7 +249,11 @@ bool AndroidMirror::spawn_scrcpy() {
     std::vector<const char*> args = {
         "scrcpy",
         "--no-audio",      // audio is handled by the spatial audio engine
-        "--no-playback",   // don't open a preview window (scrcpy 2.x+)
+        "--no-window",     // headless: feed the v4l2 sink with no GUI window.
+                           // (--no-playback leaves the window open but blank —
+                           //  that's the stray "scrcpy logo" window.) --no-window
+                           //  implies --no-video-playback but NOT --no-control,
+                           //  so new-display/start-app/turn-screen-off still work.
         "--video-codec=h264",
     };
 
