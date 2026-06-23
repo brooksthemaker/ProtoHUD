@@ -120,9 +120,11 @@ bool AndroidMirror::spawn_scrcpy() {
     if (pid < 0) { perror("[android] fork"); return false; }
 
     if (pid == 0) {
-        // Child: redirect output to /dev/null, then exec scrcpy.
-        freopen("/dev/null", "w", stdout);
-        freopen("/dev/null", "w", stderr);
+        // Child: capture scrcpy's output to a log so failures are diagnosable
+        // (it was /dev/null, which hid every error). scrcpy logs to stderr; fold
+        // stdout into the same file. Inspect with: cat /tmp/protohud-scrcpy.log
+        freopen("/tmp/protohud-scrcpy.log", "w", stderr);
+        dup2(STDERR_FILENO, STDOUT_FILENO);
         execvp("scrcpy", const_cast<char* const*>(args.data()));
         _exit(127); // execvp only returns on failure
     }
