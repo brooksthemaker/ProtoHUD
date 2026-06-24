@@ -1570,6 +1570,24 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
             [android_overlay](bool v){ *android_overlay = v; }),
         submenu("Position", make_position_items(android_cfg)),
         make_size_slider("Size", android_cfg),
+        // Pin the overlay in space (head-locked): it stays fixed in the world as
+        // you look around, driven by the VITURE head IMU. Enabling also recenters
+        // it in front of you. Invert toggles fix a mirrored IMU axis on-device.
+        submenu("Pin In Space", std::vector<MenuItem>{
+            toggle("Pinned",
+                [android_cfg]{ return android_cfg->world_locked; },
+                [android_cfg](bool v){
+                    android_cfg->world_locked = v;
+                    if (v) android_cfg->recenter_request = true;
+                }),
+            leaf("Recenter Here", [android_cfg]{ android_cfg->recenter_request = true; }),
+            toggle("Invert Yaw",
+                [android_cfg]{ return android_cfg->lock_invert_yaw; },
+                [android_cfg](bool v){ android_cfg->lock_invert_yaw = v; }),
+            toggle("Invert Pitch",
+                [android_cfg]{ return android_cfg->lock_invert_pitch; },
+                [android_cfg](bool v){ android_cfg->lock_invert_pitch = v; }),
+        }),
     };
 
     // ── Vision Assist (post-processing depth cues) ────────────────────────────

@@ -142,7 +142,9 @@ public:
     // Build Android mirror overlay (ImGui pass).
     void draw_android_overlay(unsigned int tex, int w, int h,
                               bool active, bool connecting, const OverlayConfig& cfg,
-                              float frame_aspect = 9.f / 16.f);
+                              float frame_aspect = 9.f / 16.f,
+                              const ImuPose& head_pose = {}, float fx = 1920.f,
+                              float fy = 1920.f);
 
     // Draw floating panel preview (ImGui pass). Positioned like the camera PiPs:
     // anchor_x/anchor_y are screen fractions (0=left/top .. 1=right/bottom),

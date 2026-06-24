@@ -6423,12 +6423,21 @@ int main(int argc, char* argv[]) {
             menu_dup = true;
         }
 
+        // Pinned-in-space ("world-lock") overlay: when a recenter is requested,
+        // capture the current head pose as the forward anchor. Then feed the live
+        // head pose + display focal lengths so the overlay tracks as you look around.
+        if (android_overlay_cfg.recenter_request) {
+            android_overlay_cfg.lock_yaw   = snap.imu_pose.yaw;
+            android_overlay_cfg.lock_pitch = snap.imu_pose.pitch;
+            android_overlay_cfg.recenter_request = false;
+        }
         hud.draw_android_overlay(tex_android,
                                   xr.eye_width(), xr.eye_height(),
                                   android_overlay_active,
                                   android_mirror.is_running() && !android_mirror.is_connected(),
                                   android_overlay_cfg,
-                                  android_mirror.frame_aspect());
+                                  android_mirror.frame_aspect(),
+                                  snap.imu_pose, K.fx, K.fy);
 
         // Protoface LED preview (top-right corner, above popups). Source
         // depends on backend: HUB75 + daemon mode go through the shm reader

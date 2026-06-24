@@ -52,6 +52,18 @@ struct OverlayConfig {
     float    size     = 0.25f;  // fraction of screen height
     enum class Rotation { Landscape = 0, Portrait, LandscapeFlipped, PortraitFlipped };
     Rotation rotation = Rotation::Landscape;
+
+    // World-lock ("pin in space"): when enabled the overlay is positioned by the
+    // head IMU (AppState::imu_pose) instead of anchor_x/anchor_y, so it appears
+    // fixed in space as you look around. lock_yaw/lock_pitch are the forward
+    // direction captured when pinned; recenter_request asks the render loop to
+    // re-capture the current head pose. lock_invert_* correct a mirrored IMU axis.
+    bool  world_locked       = false;
+    bool  recenter_request   = false;
+    float lock_yaw           = 0.f;
+    float lock_pitch         = 0.f;
+    bool  lock_invert_yaw    = false;
+    bool  lock_invert_pitch  = false;
 };
 
 // ── Sub-states ────────────────────────────────────────────────────────────────
