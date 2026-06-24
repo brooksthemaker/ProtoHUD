@@ -4,38 +4,11 @@
 
 // ── Frame format ──────────────────────────────────────────────────────────────
 //   [SYNC_A][SYNC_B][CMD][LEN][...PAYLOAD...][CRC8]
-//   SYNC_A = 0xAA, SYNC_B = 0x55
-//   LEN = payload byte count (0-255)
-//   CRC8 covers CMD+LEN+PAYLOAD
-
-static constexpr uint8_t PROTO_SYNC_A = 0xAA;
-static constexpr uint8_t PROTO_SYNC_B = 0x55;
-static constexpr size_t  PROTO_HEADER_LEN = 4;  // SYNC_A SYNC_B CMD LEN
-static constexpr size_t  PROTO_MAX_PAYLOAD = 255;
-static constexpr size_t  PROTO_MAX_FRAME = PROTO_HEADER_LEN + PROTO_MAX_PAYLOAD + 1;
-
-inline uint8_t proto_crc8(const uint8_t* data, size_t len) {
-    uint8_t crc = 0;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int b = 0; b < 8; b++)
-            crc = (crc & 0x80) ? ((crc << 1) ^ 0x07) : (crc << 1);
-    }
-    return crc;
-}
-
-// Build a frame into buf (must be >= PROTO_MAX_FRAME bytes).
-// Returns total frame length.
-inline size_t proto_build(uint8_t* buf, uint8_t cmd,
-                          const uint8_t* payload, uint8_t len) {
-    buf[0] = PROTO_SYNC_A;
-    buf[1] = PROTO_SYNC_B;
-    buf[2] = cmd;
-    buf[3] = len;
-    if (len && payload) __builtin_memcpy(buf + 4, payload, len);
-    buf[4 + len] = proto_crc8(buf + 2, 2 + len);
-    return 5 + len;
-}
+// The wire frame and its helpers (proto_crc8 / proto_build) are defined ONCE in
+// the shared protocol headers vendored from the Smart-Knob-Redux repo, so the
+// knob firmware and ProtoHUD can never disagree about the transport. Every
+// serial device here (Teensy/LoRa/SmartKnob/wireless) shares this same frame.
+#include "../vendor/smart-knob/include/proto_frame.h"
 
 // ── Teensy (Prototracer) ──────────────────────────────────────────────────────
 
@@ -118,53 +91,11 @@ struct LoRaNodeInfoHeader {
 #pragma pack(pop)
 
 // ── SmartKnob (ESP32-S3) ──────────────────────────────────────────────────────
-
-namespace KnobCmd {
-    // ESP32 → CM5 (legacy position/events)
-    static constexpr uint8_t POSITION_UPDATE = 0x01;  // see KnobPositionPayload
-    static constexpr uint8_t WAKE_EVENT      = 0x02;  // no payload
-    static constexpr uint8_t SLEEP_EVENT     = 0x03;  // no payload
-    static constexpr uint8_t BUTTON_EVENT    = 0x04;  // see KnobButtonPayload
-
-    // ESP32 → CM5 (status messages from binary protocol)
-    static constexpr uint8_t STATUS_READY         = 0x01;  // motor calibration complete
-    static constexpr uint8_t STATUS_ENTERING_SLEEP= 0x02;  // entering low-power mode
-    static constexpr uint8_t STATUS_WOKE_UP       = 0x03;  // woke from sleep (param: 0=rotation, 1=command)
-
-    // CM5 → ESP32
-    static constexpr uint8_t SET_DETENTS     = 0x81;  // count(1) positions[count*2 bytes, int16 each]
-    static constexpr uint8_t WAKE_DEVICE     = 0x82;  // no payload
-    static constexpr uint8_t SET_SLEEP_TMO   = 0x83;  // timeout_s(2, uint16)
-    static constexpr uint8_t SET_RANGE       = 0x84;  // spacing_deg(1) min_pos(2) max_pos(2) start_pos(2)
-    static constexpr uint8_t SET_HAPTIC      = 0x85;  // amplitude(1) frequency(1) detent_strength(1)
-}
-
-// Button IDs (matching firmware BTN_* constants)
-namespace KnobButton {
-    static constexpr uint8_t ENCODER = 0;  // encoder push-switch
-    static constexpr uint8_t BACK    = 1;  // dedicated back button
-    static constexpr uint8_t EXTRA   = 2;  // optional extra button
-}
-// Button event types
-namespace KnobButtonEvent {
-    static constexpr uint8_t PRESS      = 0;
-    static constexpr uint8_t LONG_PRESS = 1;
-    static constexpr uint8_t RELEASE    = 2;
-    static constexpr uint8_t DOUBLE_TAP = 3;
-}
-
-#pragma pack(push, 1)
-struct KnobPositionPayload {
-    int8_t   direction;      // -1, 0, +1
-    uint16_t velocity_rpm10; // RPM * 10
-    int16_t  detent_index;   // current selected detent (-1 if between)
-    int32_t  angle_milli;    // absolute angle in millidegrees
-};
-struct KnobButtonPayload {
-    uint8_t button_id;    // KnobButton:: constant
-    uint8_t event_type;   // KnobButtonEvent:: constant
-};
-#pragma pack(pop)
+// Opcodes (KnobCmd::*), button/status enums, and payload structs are the single
+// source of truth, vendored from the Smart-Knob-Redux firmware repo. Editing the
+// knob protocol means editing vendor/smart-knob/include/knob_protocol.h and
+// bumping the submodule — the two ends can no longer silently drift.
+#include "../vendor/smart-knob/include/knob_protocol.h"
 
 // ── Wireless Controller (ESP32-C3 USB-serial bridge + ESP-NOW peer) ───────────
 // Frame format: same as all other serial devices — [0xAA][0x55][CMD][LEN][...][CRC8]

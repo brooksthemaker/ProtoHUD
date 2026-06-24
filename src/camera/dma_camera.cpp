@@ -8,8 +8,12 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
+#include <algorithm>
 #include <iostream>
 #include <cstring>
+#include <sys/mman.h>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <chrono>
 #include <thread>
 #include <vector>
@@ -176,9 +180,98 @@ bool DmaCamera::configure_camera() {
     stream_ = sc.stream();
     stride_ = sc.stride;
 
+    // ── Enumerate the sensor's supported resolutions for this format ──────────
+    // Captured once so the menu can offer the camera's REAL modes instead of a
+    // fixed preset list (the cause of "pick 1440p, nothing changes" on sensors
+    // that don't support it). sizes() is the discrete set libcamera reports for
+    // the negotiated pixel format; sorted largest-area first for stable order.
+    // max_fps is left 0 here (the in-depth path can probe FrameDurationLimits
+    // per mode later); selecting a mode requests a target fps and libcamera
+    // clamps it to what the sensor can do at that size.
+    modes_.clear();
+    try {
+        const auto& sf  = sc.formats();
+        auto discrete   = sf.sizes(sc.pixelFormat);
+        if (!discrete.empty()) {
+            for (const auto& s : discrete)
+                modes_.push_back({ static_cast<int>(s.width),
+                                   static_cast<int>(s.height), 0 });
+        } else {
+            // The Raspberry Pi ISP pipeline reports a CONTINUOUS size range, not
+            // a discrete list, so sizes() is empty. Offer the standard
+            // resolutions that fall inside [min,max] (honouring the step), plus
+            // the sensor's native max — that's what makes per-camera options show.
+            const auto rng = sf.range(sc.pixelFormat);
+            const int minw = static_cast<int>(rng.min.width);
+            const int minh = static_cast<int>(rng.min.height);
+            const int maxw = static_cast<int>(rng.max.width);
+            const int maxh = static_cast<int>(rng.max.height);
+            const int hs   = rng.hStep > 0 ? static_cast<int>(rng.hStep) : 2;
+            const int vs   = rng.vStep > 0 ? static_cast<int>(rng.vStep) : 2;
+            static const int kCand[][2] = {
+                {640,480}, {1280,720}, {1280,800}, {1456,1088}, {1536,864},
+                {1920,1080}, {2304,1296}, {2560,1440}, {3840,2160},
+            };
+            auto fits = [&](int w, int h){
+                return w >= minw && w <= maxw && h >= minh && h <= maxh
+                    && (w - minw) % hs == 0 && (h - minh) % vs == 0;
+            };
+            for (const auto& c : kCand)
+                if (fits(c[0], c[1])) modes_.push_back({ c[0], c[1], 0 });
+            if (maxw > 0 && maxh > 0) modes_.push_back({ maxw, maxh, 0 }); // native
+        }
+        std::sort(modes_.begin(), modes_.end(),
+                  [](const Mode& a, const Mode& b){
+                      return static_cast<long>(a.width) * a.height
+                           > static_cast<long>(b.width) * b.height;
+                  });
+        modes_.erase(std::unique(modes_.begin(), modes_.end(),
+                     [](const Mode& a, const Mode& b){
+                         return a.width == b.width && a.height == b.height;
+                     }), modes_.end());
+    } catch (...) {}
+
+    // ── Probe each mode's max fps ─────────────────────────────────────────────
+    // Configure the camera at each size and read the shortest frame duration the
+    // FrameDurationLimits control allows → max fps (this is the figure
+    // `rpicam-hello --list-cameras` prints). We do NOT start streaming, so the
+    // libpisp "TDN" abort (a streaming-time bug) isn't triggered. Afterwards we
+    // restore the real target configuration before buffers are allocated.
+    // Bounded so a sensor with a long discrete-mode list doesn't stall startup.
+    if (!modes_.empty()) {
+        const PixelFormat pf = cam_cfg_->at(0).pixelFormat;
+        int probed = 0;
+        for (auto& m : modes_) {
+            if (probed >= 40) break;
+            ++probed;
+            try {
+                auto pc = camera_->generateConfiguration({ StreamRole::Viewfinder });
+                if (!pc || pc->empty()) continue;
+                auto& psc = pc->at(0);
+                psc.pixelFormat = pf;
+                psc.size = { static_cast<unsigned>(m.width),
+                             static_cast<unsigned>(m.height) };
+                if (pc->validate() == CameraConfiguration::Invalid) continue;
+                if (camera_->configure(pc.get()) != 0) continue;
+                const auto& cim = camera_->controls();
+                if (cim.count(&controls::FrameDurationLimits)) {
+                    int64_t min_dur =
+                        cim.at(&controls::FrameDurationLimits).min().get<int64_t>();
+                    if (min_dur > 0)
+                        m.max_fps = static_cast<int>((1000000LL + min_dur / 2) / min_dur);
+                }
+            } catch (...) {}
+        }
+        // Restore the configuration we actually want to run.
+        camera_->configure(cam_cfg_.get());
+        stream_ = cam_cfg_->at(0).stream();
+        stride_ = cam_cfg_->at(0).stride;
+    }
+
     std::cout << "[dma] camera " << cfg_.libcamera_id
               << " configured: " << cfg_.width << "×" << cfg_.height
-              << " stride=" << stride_ << " fps=" << cfg_.fps << "\n";
+              << " stride=" << stride_ << " fps=" << cfg_.fps
+              << " (" << modes_.size() << " modes reported)\n";
     return true;
 }
 
@@ -381,6 +474,8 @@ void DmaCamera::on_request_complete(Request* req) {
             last_lens_pos_.store(meta.get(controls::LensPosition).value_or(0.0f));
         if (camCtrls.count(&controls::AnalogueGain))
             last_analogue_gain_.store(meta.get(controls::AnalogueGain).value_or(1.0f));
+        // Real per-frame duration (µs) → drives measured_fps() in the menu.
+        last_frame_dur_us_.store(meta.get(controls::FrameDuration).value_or(0));
     } catch (...) {}
 
     auto it = req_to_slot_.find(req);
@@ -686,6 +781,68 @@ void DmaCamera::apply_pending_controls(ControlList& ctrls) {
         float gains[2] = { rg, bg };
         ctrls.set(controls::ColourGains, Span<const float, 2>(gains));
     }
+
+    // ── Extended controls ─────────────────────────────────────────────────────
+    // Menu values are chosen to match libcamera's enum numeric values, so each
+    // is forwarded straight through. count() guards mean a sensor that lacks a
+    // control silently ignores it rather than erroring.
+    const auto& cc = camera_->controls();
+
+    int afr = pending_af_range_.exchange(-1);
+    if (afr >= 0 && cc.count(&controls::AfRange)) ctrls.set(controls::AfRange, afr);
+
+    int afs = pending_af_speed_.exchange(-1);
+    if (afs >= 0 && cc.count(&controls::AfSpeed)) ctrls.set(controls::AfSpeed, afs);
+
+    float ag = pending_gain_.exchange(-1.0f);
+    if (ag > 0.0f && cc.count(&controls::AnalogueGain)) ctrls.set(controls::AnalogueGain, ag);
+
+    int aem = pending_ae_metering_.exchange(-1);
+    if (aem >= 0 && cc.count(&controls::AeMeteringMode)) ctrls.set(controls::AeMeteringMode, aem);
+
+    int aecn = pending_ae_constraint_.exchange(-1);
+    if (aecn >= 0 && cc.count(&controls::AeConstraintMode)) ctrls.set(controls::AeConstraintMode, aecn);
+
+    int aex = pending_ae_exp_mode_.exchange(-1);
+    if (aex >= 0 && cc.count(&controls::AeExposureMode)) ctrls.set(controls::AeExposureMode, aex);
+
+    int fl = pending_flicker_.exchange(-1);
+    if (fl >= 0 && cc.count(&controls::AeFlickerMode)) {
+        // libcamera AeFlickerMode: 0 Off, 1 Manual, 2 Auto. Menu: 0 Off, 1 Auto,
+        // 2 = 50 Hz, 3 = 60 Hz → Manual + an explicit period (µs).
+        if (fl == 0)      ctrls.set(controls::AeFlickerMode, 0);   // Off
+        else if (fl == 1) ctrls.set(controls::AeFlickerMode, 2);   // Auto
+        else {
+            ctrls.set(controls::AeFlickerMode, 1);                 // Manual
+            if (cc.count(&controls::AeFlickerPeriod))
+                ctrls.set(controls::AeFlickerPeriod, fl == 2 ? 10000 : 8333); // 50/60 Hz
+        }
+    }
+
+    int awbm = pending_awb_mode_.exchange(-1);
+    if (awbm >= 0 && cc.count(&controls::AwbMode)) {
+        if (cc.count(&controls::AwbEnable)) ctrls.set(controls::AwbEnable, true);
+        ctrls.set(controls::AwbMode, awbm);
+    }
+
+    float br = pending_brightness_.exchange(-9999.0f);
+    if (br > -9998.0f && cc.count(&controls::Brightness)) ctrls.set(controls::Brightness, br);
+
+    float ct = pending_contrast_.exchange(-1.0f);
+    if (ct >= 0.0f && cc.count(&controls::Contrast)) ctrls.set(controls::Contrast, ct);
+
+    float sa = pending_saturation_.exchange(-1.0f);
+    if (sa >= 0.0f && cc.count(&controls::Saturation)) ctrls.set(controls::Saturation, sa);
+
+    float sp = pending_sharpness_.exchange(-1.0f);
+    if (sp >= 0.0f && cc.count(&controls::Sharpness)) ctrls.set(controls::Sharpness, sp);
+
+    int nr = pending_nr_.exchange(-1);
+    if (nr >= 0 && cc.count(&controls::draft::NoiseReductionMode))
+        ctrls.set(controls::draft::NoiseReductionMode, nr);
+
+    int hdr = pending_hdr_.exchange(-1);
+    if (hdr >= 0 && cc.count(&controls::HdrMode)) ctrls.set(controls::HdrMode, hdr);
 }
 
 void DmaCamera::start_autofocus() {
@@ -782,4 +939,132 @@ void DmaCamera::set_colour_temp(int kelvin) {
             return;
         }
     }
+}
+
+// ── Extended controls ─────────────────────────────────────────────────────────
+// Each setter records the value for the menu (cur_*) and queues it for the next
+// request (pending_*). apply_pending_controls() guards each by controls().count()
+// so a sensor that lacks a given control simply ignores it.
+void DmaCamera::set_af_range(int range) {
+    if (!camera_) return;
+    cur_af_range_.store(range); pending_af_range_.store(range);
+}
+void DmaCamera::set_af_speed(int speed) {
+    if (!camera_) return;
+    cur_af_speed_.store(speed); pending_af_speed_.store(speed);
+}
+void DmaCamera::set_analogue_gain(float gain) {
+    if (!camera_) return;
+    cur_gain_.store(gain); pending_gain_.store(gain);
+}
+void DmaCamera::set_ae_metering(int mode) {
+    if (!camera_) return;
+    cur_ae_metering_.store(mode); pending_ae_metering_.store(mode);
+}
+void DmaCamera::set_ae_constraint(int mode) {
+    if (!camera_) return;
+    cur_ae_constraint_.store(mode); pending_ae_constraint_.store(mode);
+}
+void DmaCamera::set_ae_exposure_mode(int mode) {
+    if (!camera_) return;
+    cur_ae_exp_mode_.store(mode); pending_ae_exp_mode_.store(mode);
+}
+void DmaCamera::set_flicker_mode(int mode) {
+    if (!camera_) return;
+    cur_flicker_.store(mode); pending_flicker_.store(mode);
+}
+void DmaCamera::set_awb_mode(int mode) {
+    if (!camera_) return;
+    cur_awb_mode_.store(mode); pending_awb_mode_.store(mode);
+}
+void DmaCamera::set_brightness(float v) {
+    if (!camera_) return;
+    cur_brightness_.store(v); pending_brightness_.store(v);
+}
+void DmaCamera::set_contrast(float v) {
+    if (!camera_) return;
+    cur_contrast_.store(v); pending_contrast_.store(v);
+}
+void DmaCamera::set_saturation(float v) {
+    if (!camera_) return;
+    cur_saturation_.store(v); pending_saturation_.store(v);
+}
+void DmaCamera::set_sharpness(float v) {
+    if (!camera_) return;
+    cur_sharpness_.store(v); pending_sharpness_.store(v);
+}
+void DmaCamera::set_noise_reduction(int mode) {
+    if (!camera_) return;
+    cur_nr_.store(mode); pending_nr_.store(mode);
+}
+void DmaCamera::set_hdr_mode(int mode) {
+    if (!camera_) return;
+    cur_hdr_.store(mode); pending_hdr_.store(mode);
+}
+
+// ── Full-resolution still grab (CPU NV12 → JPEG) ──────────────────────────────
+bool DmaCamera::grab_still(const std::string& path) {
+    if (fmt_drm_ != DRM_FORMAT_NV12) {
+        std::cerr << "[dma] grab_still: only NV12 supported\n";
+        return false;
+    }
+    // Latest complete frame buffer (held briefly under the handoff lock).
+    FrameBuffer* buf = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(handoff_mtx_);
+        int s = (ready_slot_ >= 0) ? ready_slot_ : render_slot_;
+        if (s >= 0 && s < static_cast<int>(slots_.size())) buf = slots_[s].buffer;
+    }
+    if (!buf) { std::cerr << "[dma] grab_still: no frame ready\n"; return false; }
+
+    const int w = cfg_.width, h = cfg_.height, stride = stride_;
+    if (w <= 0 || h <= 0 || stride < w) return false;
+
+    const auto& planes = buf->planes();
+    if (planes.empty()) return false;
+
+    const int   fd0  = planes[0].fd.get();
+    const size_t len0 = static_cast<size_t>(planes[0].offset) + planes[0].length;
+    void* base0 = ::mmap(nullptr, len0, PROT_READ, MAP_SHARED, fd0, 0);
+    if (base0 == MAP_FAILED) { std::cerr << "[dma] grab_still: mmap Y failed\n"; return false; }
+
+    const uint8_t* y_ptr = static_cast<const uint8_t*>(base0) + planes[0].offset;
+    const uint8_t* uv_ptr = nullptr;
+    void*  base1 = nullptr;  size_t len1 = 0;
+    if (planes.size() >= 2) {
+        const int fd1 = planes[1].fd.get();
+        if (fd1 == fd0) {
+            uv_ptr = static_cast<const uint8_t*>(base0) + planes[1].offset;
+        } else {
+            len1  = static_cast<size_t>(planes[1].offset) + planes[1].length;
+            base1 = ::mmap(nullptr, len1, PROT_READ, MAP_SHARED, fd1, 0);
+            if (base1 == MAP_FAILED) { ::munmap(base0, len0); return false; }
+            uv_ptr = static_cast<const uint8_t*>(base1) + planes[1].offset;
+        }
+    } else {
+        // Single-plane NV12: UV directly follows Y.
+        uv_ptr = y_ptr + static_cast<size_t>(stride) * h;
+    }
+
+    bool ok = false;
+    try {
+        // Repack into a tightly-packed NV12 (drops row stride padding) so OpenCV
+        // can convert it: h rows of Y then h/2 rows of interleaved UV, step = w.
+        cv::Mat nv12(h + h / 2, w, CV_8UC1);
+        for (int r = 0; r < h; ++r)
+            std::memcpy(nv12.ptr(r), y_ptr + static_cast<size_t>(r) * stride, w);
+        for (int r = 0; r < h / 2; ++r)
+            std::memcpy(nv12.ptr(h + r), uv_ptr + static_cast<size_t>(r) * stride, w);
+
+        cv::Mat bgr;
+        cv::cvtColor(nv12, bgr, cv::COLOR_YUV2BGR_NV12);
+        ok = cv::imwrite(path, bgr, { cv::IMWRITE_JPEG_QUALITY, 92 });
+    } catch (const std::exception& e) {
+        std::cerr << "[dma] grab_still: " << e.what() << "\n";
+    }
+
+    ::munmap(base0, len0);
+    if (base1) ::munmap(base1, len1);
+    if (ok) std::cout << "[dma] grab_still: saved " << w << "×" << h << " → " << path << "\n";
+    return ok;
 }

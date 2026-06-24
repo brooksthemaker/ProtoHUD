@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -60,6 +61,16 @@ public:
         int         rotation_deg = 0;
     };
 
+    // A capture mode the sensor actually supports, as reported by libcamera.
+    // max_fps is 0 when unknown — the simple path leaves it 0 and lets libcamera
+    // clamp the requested rate; a future "probe each mode's FrameDurationLimits"
+    // pass can fill it in without changing this struct or supported_modes().
+    struct Mode {
+        int width   = 0;
+        int height  = 0;
+        int max_fps = 0;   // 0 = unknown (not yet probed)
+    };
+
     DmaCamera();
     ~DmaCamera();
 
@@ -95,11 +106,74 @@ public:
     void set_colour_gains(float rg, float bg);     // raw ISP gains (typically 0.5–4.0)
     void set_colour_temp(int kelvin);              // maps 2800–7500 K → ColourGains LUT
 
+    // ── Autofocus tuning (PDAF sensors: IMX708 / Arducam 16MP / 64MP) ──────────
+    void set_af_range(int range);   // 0 Normal, 1 Macro, 2 Full
+    void set_af_speed(int speed);   // 0 Normal, 1 Fast
+    int  af_range() const { return cur_af_range_.load(); }
+    int  af_speed() const { return cur_af_speed_.load(); }
+
+    // ── Auto-exposure tuning ──────────────────────────────────────────────────
+    void  set_analogue_gain(float gain);   // manual sensor gain (>=1.0); <=0 → auto
+    void  set_ae_metering(int mode);       // 0 Centre-weighted, 1 Spot, 2 Matrix
+    void  set_ae_constraint(int mode);     // 0 Normal, 1 Highlight, 2 Shadows
+    void  set_ae_exposure_mode(int mode);  // 0 Normal, 1 Short, 2 Long
+    void  set_flicker_mode(int mode);      // 0 Off, 1 Auto, 2 50 Hz, 3 60 Hz
+    float analogue_gain_target() const { return cur_gain_.load(); }
+    int   ae_metering()    const { return cur_ae_metering_.load(); }
+    int   ae_constraint()  const { return cur_ae_constraint_.load(); }
+    int   ae_exposure_mode() const { return cur_ae_exp_mode_.load(); }
+    int   flicker_mode()   const { return cur_flicker_.load(); }
+
+    // ── White-balance preset modes (alternative to manual gains / Kelvin) ──────
+    void set_awb_mode(int mode);    // 0 Auto,1 Incandescent,2 Tungsten,3 Fluorescent,
+                                    // 4 Indoor,5 Daylight,6 Cloudy (matches libcamera)
+    int  awb_mode() const { return cur_awb_mode_.load(); }
+
+    // ── ISP image tuning ──────────────────────────────────────────────────────
+    void  set_brightness(float v);         // -1.0 .. 1.0  (0 = neutral)
+    void  set_contrast(float v);           //  0.0 .. 2.0  (1 = neutral)
+    void  set_saturation(float v);         //  0.0 .. 2.0  (1 = neutral, 0 = mono)
+    void  set_sharpness(float v);          //  0.0 .. 2.0  (1 = neutral)
+    void  set_noise_reduction(int mode);   // 0 Off,1 Fast,2 High Quality,3 Minimal
+    float brightness() const { return cur_brightness_.load(); }
+    float contrast()   const { return cur_contrast_.load(); }
+    float saturation() const { return cur_saturation_.load(); }
+    float sharpness()  const { return cur_sharpness_.load(); }
+    int   noise_reduction() const { return cur_nr_.load(); }
+
+    // ── On-sensor HDR (IMX708 — Camera Module 3 / Arducam Hawkeye) ─────────────
+    // Values match libcamera HdrMode: 0 Off, 2 MultiExposure, 3 SingleExposure,
+    // 4 Night. Needs a recent libcamera that exposes HdrMode as a runtime control.
+    void set_hdr_mode(int mode);
+    int  hdr_mode() const { return cur_hdr_.load(); }
+
     bool  is_ok()           const { return ok_; }
     int   width()           const { return cfg_.width; }
     int   height()          const { return cfg_.height; }
+    int   fps()             const { return cfg_.fps; }
     const std::string& model_name() const { return cfg_.model_name; }
+    const std::string& camera_id()  const { return cfg_.camera_id; }
+
+    // Save the current full-resolution frame to `path` as a JPEG, by mapping the
+    // libcamera NV12 buffer on the CPU and converting via OpenCV (so it works at
+    // full sensor res without a huge GPU FBO). Render thread, NV12 only. Returns
+    // false if there's no frame / the format isn't NV12.
+    bool grab_still(const std::string& path);
     float analogue_gain()   const { return last_analogue_gain_.load(); }
+
+    // Measured capture rate, derived from the per-frame FrameDuration metadata
+    // (0 until the first frame completes). Lets the menu show the real fps the
+    // sensor settled on rather than the requested target.
+    float measured_fps()    const {
+        int64_t us = last_frame_dur_us_.load();
+        return us > 0 ? 1.0e6f / static_cast<float>(us) : 0.0f;
+    }
+
+    // Resolutions this sensor reports for the negotiated pixel format, captured
+    // once during init(). Empty if init() hasn't run / the sensor reported none.
+    // Sorted largest-area first. Each DmaCamera is one physical sensor, so this
+    // is inherently per-camera.
+    const std::vector<Mode>& supported_modes() const { return modes_; }
 
     // Display rotation (0, 90, 180, 270 — snapped). Live-tunable from any
     // thread; the next draw() picks up the change via an atomic read.
@@ -195,10 +269,51 @@ private:
     std::atomic<float> pending_rg_gain_    { -1.0f };    // ColourGains R, -1 = no-op
     std::atomic<float> pending_bg_gain_    { -1.0f };    // ColourGains B, -1 = no-op
 
+    // Extended controls (AF tuning / AE tuning / WB mode / ISP image / HDR).
+    // pending_* sentinels: ints -1 = no-op; floats -1.0f (or -9999.0f where the
+    // valid range includes negatives, i.e. Brightness). Applied + reset in
+    // apply_pending_controls(); each is guarded there by controls().count().
+    std::atomic<int>   pending_af_range_     { -1 };
+    std::atomic<int>   pending_af_speed_     { -1 };
+    std::atomic<float> pending_gain_         { -1.0f };   // AnalogueGain, <=0 = no-op
+    std::atomic<int>   pending_ae_metering_  { -1 };
+    std::atomic<int>   pending_ae_constraint_{ -1 };
+    std::atomic<int>   pending_ae_exp_mode_  { -1 };
+    std::atomic<int>   pending_flicker_      { -1 };
+    std::atomic<int>   pending_awb_mode_     { -1 };
+    std::atomic<float> pending_brightness_   { -9999.0f }; // valid range incl. negatives
+    std::atomic<float> pending_contrast_     { -1.0f };
+    std::atomic<float> pending_saturation_   { -1.0f };
+    std::atomic<float> pending_sharpness_    { -1.0f };
+    std::atomic<int>   pending_nr_           { -1 };
+    std::atomic<int>   pending_hdr_          { -1 };
+
+    // Last-requested values, so the menu can show the active option / slider
+    // position (pending_* are one-shot and reset after apply). Seeded to the
+    // libcamera/ISP neutral defaults.
+    std::atomic<int>   cur_af_range_     { 0 };
+    std::atomic<int>   cur_af_speed_     { 0 };
+    std::atomic<float> cur_gain_         { 0.0f };   // 0 = auto
+    std::atomic<int>   cur_ae_metering_  { 0 };
+    std::atomic<int>   cur_ae_constraint_{ 0 };
+    std::atomic<int>   cur_ae_exp_mode_  { 0 };
+    std::atomic<int>   cur_flicker_      { 0 };
+    std::atomic<int>   cur_awb_mode_     { 0 };
+    std::atomic<float> cur_brightness_   { 0.0f };
+    std::atomic<float> cur_contrast_     { 1.0f };
+    std::atomic<float> cur_saturation_   { 1.0f };
+    std::atomic<float> cur_sharpness_    { 1.0f };
+    std::atomic<int>   cur_nr_           { 0 };
+    std::atomic<int>   cur_hdr_          { 0 };
+
     // ── Latest camera metadata (written by capture thread via atomics) ────────
     std::atomic<int>   last_af_state_      { 0 };        // AfState enum value
     std::atomic<float> last_lens_pos_      { 0.0f };     // LensPosition diopters
     std::atomic<float> last_analogue_gain_ { 1.0f };     // AnalogueGain (1.0 = ISO100 equiv)
+    std::atomic<int64_t> last_frame_dur_us_ { 0 };       // FrameDuration µs (0 = no frame yet)
+
+    // Sensor-reported capture modes for the negotiated format (filled in init()).
+    std::vector<Mode> modes_;
 
     Config cfg_;
     bool   ok_ = false;

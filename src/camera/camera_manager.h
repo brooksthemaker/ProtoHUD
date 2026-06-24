@@ -93,10 +93,15 @@ public:
     bool get_usb3(GLuint& out);
 
     // ── Resolution hot-swap ───────────────────────────────────────────────────
-    // Reconfigures both OWLsight cameras to the given resolution and fps.
-    // Returns true only if both cameras succeeded (or only one is present).
-    // Must be called from the render thread.
-    bool set_resolution(int width, int height, int fps);
+    // Changes the OWLsight capture resolution/fps by re-initialising the
+    // camera(s) at the new size — a clean release + fresh configure, the same
+    // path used at boot. NOT an in-place libcamera reconfigure: on the Pi ISP
+    // that throws "BackEnd::finalise: TDN output not enabled" (libpisp) and
+    // aborts the process. Per-eye variants change only one camera's config.
+    // Must be called from the render thread (DmaCamera::init needs the GL ctx).
+    bool set_resolution(int width, int height, int fps);          // both eyes
+    bool set_owl_left_resolution(int width, int height, int fps);
+    bool set_owl_right_resolution(int width, int height, int fps);
 
     int current_width()  const { return owl_left_  ? owl_left_->width()  :
                                         owl_right_ ? owl_right_->width()  : 0; }
@@ -154,6 +159,11 @@ public:
     // from the render thread (DmaCamera::init needs the GL context current).
     // Returns true if at least one CSI camera came up.
     bool reinit_owls();
+
+    // Bumped every time the OWLsight cameras are rebuilt (reinit_owls). The
+    // render loop watches this to re-apply AppState-held settings the rebuilt
+    // cameras don't keep on their own (focus mode/position, AWB-enable toggle).
+    uint32_t reinit_generation() const { return reinit_gen_; }
 
     // ── Status ────────────────────────────────────────────────────────────────
     bool owl_left_ok()  const { return owl_left_  && owl_left_->is_ok();  }
@@ -229,9 +239,6 @@ private:
     void usb_capture_thread(int cam);
     void start_usb_threads();   // (re)spawn any camera thread that isn't running
     void stop_usb_threads();    // clear running_ and join all three
-    // Upload pixel data to a GL texture; creates/reallocates as needed.
-    void upload_texture(GLuint& tex, int w, int h, const unsigned char* rgba,
-                        int& prev_w, int& prev_h);
     // Stop the capture thread, probe video devices, restart thread.
     bool scan_usb(cv::VideoCapture& cap, std::atomic<bool>& ok,
                   UsbCamConfig& cfg,
@@ -250,6 +257,7 @@ private:
     std::unique_ptr<DmaCamera> owl_right_;
     // Stored so reinit_owls() can re-run the enumeration + init.
     CamConfig    owl_left_cfg_, owl_right_cfg_;
+    uint32_t     reinit_gen_ = 0;   // ++ on each reinit_owls(); see reinit_generation()
     std::string  nv12_vs_, nv12_fs_;
     void init_owls();   // (re)resolve + (re)create the two DmaCameras from the stored cfgs
 
@@ -277,8 +285,19 @@ private:
         std::vector<uint8_t> buf;
         int                 w = 0, h = 0;
         bool                dirty = false;
+        // Render-thread-only async-upload state (never touched under mtx):
+        GLuint               pbo = 0;     // pixel-unpack buffer for async DMA
+        std::vector<uint8_t> upbuf;       // pixels swapped out of buf for upload
     };
     TexSlot usb1_slot_, usb2_slot_, usb3_slot_;
+
+    // Render-thread USB upload. upload_usb_slot() swaps the freshest pixels out
+    // from under the slot lock (so the GL work never blocks the capture thread),
+    // then upload_texture() pushes them to the GL texture — via an orphaned PBO
+    // (async DMA, no pipeline stall) on ES3, or a synchronous client-pointer
+    // upload on ES2. Both run on the render thread only.
+    bool upload_usb_slot(TexSlot& s, GLuint& out);
+    void upload_texture (TexSlot& s, int w, int h);
 
     std::atomic<float> usb1_brightness_ { 1.0f };
     std::atomic<float> usb2_brightness_ { 1.0f };

@@ -207,8 +207,20 @@ bool Bno055::uart_read_regs(uint8_t reg, uint8_t* buf, size_t len) {
 }
 
 bool Bno055::init_chip_locked() {
+    // Wait out the chip's power-on window before the first read. The datasheet
+    // POR time is ~650 ms and the UART variant can need ≥1 s; reading CHIP_ID
+    // any sooner returns nothing (or garbage) and used to abort init outright.
+    // Poll CHIP_ID for up to ~2 s — a chip that's already up answers on the
+    // first try (no added delay after a normal boot), one that was just powered
+    // simply settles first.
     uint8_t id = 0;
-    if (!read_regs(REG_CHIP_ID, &id, 1) || id != CHIP_ID_BNO055) {
+    bool found = false;
+    for (int i = 0; i < 20; ++i) {                 // ~2 s total
+        if (read_regs(REG_CHIP_ID, &id, 1) && id == CHIP_ID_BNO055) { found = true; break; }
+        if (is_uart()) uart_flush_input();         // drop any partial/boot bytes
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!found) {
         std::cerr << "[bno055] CHIP_ID mismatch on "
                   << (is_uart() ? cfg_.uart_device : cfg_.i2c_bus)
                   << " (got 0x" << std::hex << static_cast<int>(id)
@@ -300,7 +312,14 @@ bool Bno055::start() {
     if (!cfg_.enabled) return false;
     if (running_.load()) return true;
     if (!open_bus()) return false;
-    if (!init_chip_locked()) {
+    // Retry the whole init a few times — covers a chip still mid-reset when the
+    // CHIP_ID poll window expires (e.g. a fresh power cycle right at launch).
+    bool inited = false;
+    for (int attempt = 0; attempt < 3 && !inited; ++attempt) {
+        if (init_chip_locked()) { inited = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    if (!inited) {
         close_bus();
         return false;
     }
@@ -320,6 +339,16 @@ void Bno055::stop() {
         write_reg(REG_OPR_MODE, OPR_MODE_CONFIG);
         close_bus();
     }
+}
+
+// Full teardown + re-init: closes the bus, re-opens it, and runs the settle +
+// CHIP_ID poll again. Lets the menu kick a sensor that wasn't powered/ready at
+// boot (the BNO055 needs ≥1 s after power-on before it talks) without
+// restarting ProtoHUD. Returns true if the chip came back up.
+bool Bno055::restart() {
+    stop();
+    if (!cfg_.enabled) return false;
+    return start();
 }
 
 void Bno055::poll_loop() {

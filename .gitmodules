@@ -1,3 +1,7 @@
 [submodule "Protoface"]
 	path = Protoface
 	url = https://github.com/brooksthemaker/ProtoFace.git
+[submodule "vendor/smart-knob"]
+	path = vendor/smart-knob
+	url = https://github.com/brooksthemaker/Smart-Knob-Redux.git
+	branch = claude/esp32-protohud-communication-ptpst6

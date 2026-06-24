@@ -32,7 +32,6 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 22. [HUB75 Panel Layouts](#hub75-panel-layouts)
 23. [Configuration Reference](#configuration-reference)
 24. [Troubleshooting](#troubleshooting)
-25. [Project Structure](#project-structure)
 
 ---
 
@@ -346,26 +345,16 @@ chmod +x scripts/install.sh
 
 The installer runs 11 steps:
 1. **Preflight** — checks OS, arch, and sudo availability; caches credentials once
-2. **Packages** — apt dependencies (GLFW, GLES, libcamera, OpenCV, libgpiod, ALSA, v4l2loopback-dkms, adb, i2c-tools, libdbus, and `kdeconnect` unless `KDECONNECT=0`)
-3. **RP2350 audio** — checks for the RP2350 USB audio device (card `HelmetAudio`, VID:PID `1209:b350`)
-4. **Boot config** — sets `gpu_mem=256`, `camera_auto_detect=1`, and `dtparam=i2c_arm=on` in the boot config (`/boot/firmware/config.txt` on Bookworm/Trixie, `/boot/config.txt` on older images)
-5. **udev** — stable `/dev/teensy`, `/dev/smartknob`, `/dev/lora` symlinks + VITURE HID access
+2. **Packages** — apt dependencies (GLFW, GLES, libcamera, OpenCV, libgpiod, ALSA, v4l2loopback-dkms, adb)
+3. **RP2350 audio** — checks for RP2350 USB audio device on `hw:CARD=HelmetAudio6Mic`
+4. **Boot config** — sets `gpu_mem=256`, `camera_auto_detect=1`, `dtparam=i2c_arm=on` in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images)
+5. **udev** — stable `/dev/teensy`, `/dev/smartknob`, `/dev/lora` symlinks
 6. **Android** — v4l2loopback module config for Android mirror (`/dev/video4`)
 7. **Groups** — adds current user to `gpio dialout video render audio input`
-8. **Build** — CMake + Ninja (ImGui fetched automatically on first run)
+8. **Build** — CMake + Ninja (ImGui fetched automatically on first run); also seeds `config/config.json` from `config.example.json` on first install
 9. **Libraries** — installs VITURE SDK `.so` files to `/usr/local/lib`
-10. **Service** — optional systemd unit for auto-start, plus a DBus-session drop-in and user-session lingering so the KDE Connect bridge works headless
+10. **Service** — optional systemd unit for auto-start
 11. **Summary** — lists what changed and what still needs a reboot
-
-> The CPU governor is also switched to **performance** at the end of step 10 (and re-applied by the service on each start).
-
-After installing, if you use the **System → Pi Settings** menu (hostname, timezone, power, OTA update) or GPIO-button restart, drop in the narrow sudoers rule so those run without a password prompt:
-
-```bash
-sudo bash scripts/install_sudoers.sh        # grants NOPASSWD for hostnamectl,
-                                             # timedatectl, apt-get, reboot/poweroff,
-                                             # and systemctl {start,stop,restart} protohud
-```
 
 > **scrcpy** is **not** installed by the script — install it separately afterward if you need Android mirror:
 > ```bash
@@ -392,6 +381,13 @@ And launch ProtoHUD:
 ./scripts/run.sh                  # same, with startup diagnostics printed
 ./scripts/run.sh /path/to/alt.json  # explicit config path
 ```
+
+> **Your settings live in `config/config.json`.** The installer seeds it from
+> `config.example.json` on first run; thereafter it's yours to edit and is
+> git-ignored, so a `git pull` never clobbers it. `config.example.json` stays the
+> tracked reference of every key with inline `_note` docs — diff against it after
+> an update to see new options. Most settings are also editable live from the
+> in-HUD menu, which writes back to `config.json` on exit.
 
 ---
 
@@ -474,6 +470,10 @@ Keyboard shortcuts while running:
 | `Backspace` | Go back one menu level |
 | `Ctrl+1`…`Ctrl+9`, `Ctrl+0` | Switch face / expression on the active backend (1→first … 0→tenth) |
 | `Alt+1`…`Alt+9`, `Alt+0` | Play GIF on the active backend (auto-releases to the face after 5 s; restarts on each press) |
+| `[` | Autofocus the **Left** camera |
+| `]` | Autofocus the **Right** camera |
+| `9` / `0` | Manual focus the **Left** camera (near / far) |
+| `-` / `=` | Manual focus the **Right** camera (near / far) |
 | `Esc` | Quit |
 | `Ctrl+Q` / `Ctrl+K` | Force-kill the process immediately |
 
@@ -500,47 +500,48 @@ scripts/build.sh
 
 Network steps in `update.sh` retry with exponential backoff (2/4/8/16 s).
 
+**Update speed.** Rebuilds are tuned to be fast: `update.sh` **skips the build
+entirely** when a pull changed no buildable files (docs/config/Python/script-only
+updates apply instantly), and the build uses **ccache** (object-file cache) and
+the **mold** linker automatically when present — both installed by `install.sh`
+and detected by CMake, with a clean fallback if they're missing. A precompiled
+header cuts full-rebuild time after a shared header changes.
+
 ---
 
 ## Uninstalling
 
 `scripts/uninstall.sh` reverses `scripts/install.sh`. By default it removes only
-ProtoHUD's **system integration** and leaves shared things (apt packages, group
-membership, boot-config lines, your `config.json` and saved faces) untouched,
-since other software on the Pi may depend on them. Run it from the project root:
+ProtoHUD-specific artifacts and leaves shared system settings alone:
 
 ```bash
-chmod +x scripts/uninstall.sh
-./scripts/uninstall.sh                 # remove system integration (prompts first)
-./scripts/uninstall.sh --dry-run       # show what would be removed, change nothing
-./scripts/uninstall.sh --yes           # skip the confirmation prompt
+./scripts/uninstall.sh            # remove ProtoHUD's own files (prompts once)
+./scripts/uninstall.sh --dry-run  # print exactly what would be removed, change nothing
+./scripts/uninstall.sh --purge    # also offer to revert boot config + lingering
+./scripts/uninstall.sh --yes      # skip the confirmation prompt
 ```
 
-Removed by default:
+What it removes (default mode):
 
-| Item | Path |
-|------|------|
-| systemd service + DBus drop-in | `/etc/systemd/system/protohud.service{,.d/}` |
-| udev rules | `/etc/udev/rules.d/99-protohud.rules` |
-| v4l2loopback config | `/etc/modprobe.d/v4l2loopback.conf`, `/etc/modules` line |
-| VITURE SDK libraries | `/usr/local/lib/libglasses.so`, `libcarina_vio.so` |
-| sudoers rule | `/etc/sudoers.d/protohud` |
-| CPU governor | reset to `ondemand` |
-| user-session lingering | disabled |
-| convenience symlink | `./protohud` |
+- the `protohud.service` systemd unit + its DBus drop-in (stopped & disabled first)
+- `/etc/udev/rules.d/99-protohud.rules` (and reloads udev)
+- `/etc/sudoers.d/protohud`
+- `/etc/modprobe.d/v4l2loopback.conf` and the `v4l2loopback` line in `/etc/modules`
+- the VITURE SDK `.so` files in `/usr/local/lib` — **only** if they byte-match this
+  repo's copies (it won't clobber another app's library of the same name)
+- the `./protohud` symlink, and the `build/` directory (asks first)
+- resets the CPU governor to `ondemand`
 
-Opt-in destructive extras (off unless you pass the flag):
+What it deliberately leaves alone (use `--purge` to review these interactively):
 
-```bash
-./scripts/uninstall.sh --boot          # also revert gpu_mem / camera_auto_detect / i2c lines
-./scripts/uninstall.sh --groups        # also remove you from gpio/dialout/video/render/audio/input
-./scripts/uninstall.sh --build         # also delete build/
-./scripts/uninstall.sh --purge         # all of the above PLUS delete state/ and config/config.json
-./scripts/uninstall.sh --packages      # print the apt packages install.sh added (does NOT remove them)
-```
+- **Boot-config lines** (`gpu_mem`, `camera_auto_detect`, `dtparam=i2c_arm`) — other
+  software or the desktop may rely on them
+- **apt packages** — shared with the rest of the system; the only ProtoHUD-only one
+  is `v4l2loopback-dkms` (`sudo apt-get autoremove --purge v4l2loopback-dkms`)
+- **Group membership** and **user-session lingering**
+- **`config/config.json`** and your profiles/calibration — your settings survive
 
-The script never removes the apt packages or the source tree itself. To delete
-the checkout afterward: `rm -rf ~/ProtoHUD`.
+The source tree itself is never touched; delete it with `rm -rf ~/ProtoHUD` when done.
 
 ---
 
@@ -1245,6 +1246,8 @@ Options: **Auto (BNO055 > MPU9250 > Viture)** · **BNO055** · **MPU‑9250** ·
 
 The chip publishes uncalibrated heading on power-up. Wave the helmet in a figure-8 a few times — calibration status updates per axis and Auto will commit to BNO055 once `calib_sys ≥ 2`. If you want it immediately regardless of calibration, force **BNO055** explicitly.
 
+**Restart IMU Sensor** (also under `HUD → Compass`) tears down and re-initialises the chip without restarting ProtoHUD — the row label shows `[connected]` / `[offline]` and a toast reports the result. Use it when the sensor wasn't powered or ready at boot: the BNO055 needs ~1 s after power-on before it answers (the UART variant especially), and a sensor brought up late would otherwise stay offline until the next launch. The startup path already waits out that window and retries, so this is the manual nudge for the late-power case (or after re-seating wiring while the HUD is running).
+
 ---
 
 ## Onboard Compass (MPU-9250 / GY-9250)
@@ -1634,9 +1637,20 @@ Legacy single-block configs (`cfg["protoface"]["hub75"]`) migrate to `hub75_layo
 | `adafruit_bonnet` *(default)* | Single-connector **Adafruit RGB Matrix Bonnet / HAT** | One output; panels daisy-chained (serpentine for multi-row). Plain `Geometry(width, height, n_addr_lines)` |
 | `active3` | Triple-connector **Active-3** board | Up to 3 parallel chains sharing address lines via the multilane mapper |
 
-Append `_bgr` (e.g. `adafruit_bonnet_bgr`) if red and blue come out swapped.
-
 > **Single connector = one chain.** The Adafruit bonnet has a single HUB75 output, so `parallel` collapses to 1 (multi-row builds are wired **serpentine** and the geometry stacks them by height). The Active-3 board is the only one that drives genuine parallel lanes. The `arrangement` / `panel_count` you set above feed the driver's `--chain`/`--parallel` automatically, so just pick the layout and the right `pinout`.
+
+### Color order
+
+If your panels show the wrong colors — red and green swapped, red and blue swapped, etc. — set the channel order instead of editing wiring. Menu trail: **Face Display → Protoface → Hardware → Color Order**. Selecting an option restarts the panel driver so the change applies within a second or two; cycle through until the colors are right.
+
+| Option | Use when |
+|--------|----------|
+| `Auto (board default)` *(default)* | the pinout's native order (straight RGB on the Adafruit bonnet; the `(G,B,R)` rotate on `active3`) |
+| `GRB` | **red and green are swapped** (the most common case) |
+| `BGR` | red and blue are swapped |
+| `RGB` / `RBG` / `GBR` / `BRG` | any other permutation — try them until correct |
+
+Stored per HUB75 layout as `color_order` (so different builds can differ) and also settable directly in config. This supersedes the older `_bgr` pinout suffix — `Auto` + `Color Order` covers every channel permutation, not just red/blue.
 
 ### Pixel editor extras (MAX7219 / RGB matrix)
 
@@ -1658,7 +1672,7 @@ cam --list
 eglinfo | grep -i "dma_buf\|image_base"
 ```
 
-Ensure `camera_auto_detect=1` is in the boot config (`/boot/firmware/config.txt` on Bookworm/Trixie, `/boot/config.txt` on older images). Reboot after any boot config change.
+Ensure `camera_auto_detect=1` is in `/boot/config.txt`. Reboot after any boot config change.
 
 ### GPIO buttons not responding
 
@@ -1727,6 +1741,16 @@ sudo apt-get install libglfw3-dev
 export PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
 ```
 
+### Build fails: `gpiod_line_settings`/`gpiod_chip_open` errors in `src/input/`
+
+The GPIO input code uses the **libgpiod v2** API. Bookworm and Trixie ship libgpiod 2.x, but older Bullseye ships 1.6 (v1 API), where `gpiod_line_settings`, `gpiod_line_config`, `GPIOD_LINE_EDGE_BOTH`, etc. don't exist and `gpio_buttons.cpp` / `gpio_inputs.cpp` fail to compile. Check the version:
+
+```bash
+pkg-config --modversion libgpiod    # need >= 2.0
+```
+
+Fix by moving to a Bookworm/Trixie image (recommended), or backport libgpiod 2.x. (This is also the one expected failure when building in a Bullseye-era CI/container — every other translation unit compiles.)
+
 ### Android mirror: "V4L2 sink /dev/video4 not ready"
 
 ```bash
@@ -1770,8 +1794,9 @@ ln -sf build/protohud ~/ProtoHUD/protohud
 sudo i2cdetect -y 1   # must show 28 (or 29 if ADR jumper closed)
 ```
 
-- **Empty grid** → wiring / power / mode problem (see [BNO055 wiring & gotchas](#bno055-recommended-imu)). `i2c_arm=on` in `/boot/firmware/config.txt` must be set (the install script handles this).
+- **Empty grid** → wiring / power / mode problem (see [BNO055 wiring & gotchas](#bno055-recommended-imu)). `i2c_arm=on` in `/boot/firmware/config.txt` must be set (the install script handles this). In **UART** mode the chip won't appear on `i2cdetect` at all — that's expected; probe the serial port instead.
 - **`28` present but the HUD doesn't pick it up** → confirm the `"bno055"` block is in your **live** `~/protohud/config/config.json` (not just `config.example.json`). `grep -A6 '"bno055"' ~/protohud/config/config.json` should print the block.
+- **Sensor wasn't powered/ready at boot** → the BNO055 needs ~1 s after power-on before it responds, so a sensor that powers up late comes up offline. ProtoHUD now waits out that window and retries at startup, but if it still shows offline, trigger **HUD → Compass → Restart IMU Sensor** — it re-runs the full init without restarting ProtoHUD and toasts the result. No need to restart the app or reboot.
 - **Chip detected and config loaded but heading frozen** → check `HUD → Compass → IMU Source`. If it's set to **Auto** and the chip is still warming up its calibration, force **BNO055** to bypass the freshness gate.
 
 ### KDE Connect bridge can't see the phone
@@ -1814,58 +1839,51 @@ ip -br addr show usb0      # should now have a 192.168.42.x address
 ```
 .
 ├── src/
-│   ├── main.cpp                    — init, render loop, menu wiring
+│   ├── main.cpp                    — init, render loop, menu definition
 │   ├── app_state.h                 — shared state structs (mutex-protected)
-│   ├── capture.h/.cpp              — frame capture + post-process orchestration
-│   ├── post_process.h/.cpp         — color / sharpen / night-vision pipeline
-│   ├── profile_manager.h/.cpp      — config profiles (save/load named setups)
-│   ├── qr_scanner.h/.cpp           — QR decode + de-duplicated saved-link list
-│   ├── video_recorder.h/.cpp       — HUD/camera capture to disk
-│   ├── crash_reporter.h/.cpp       — crash capture + bug-report writer
-│   ├── splash.h/.cpp               — boot splash
-│   ├── gl_utils.h / gl_async_read.h — GLES2 shader/FBO + async readback helpers
+│   ├── gl_utils.h                  — GLES2 shader/VBO/FBO helpers
 │   ├── protocols.h                 — serial frame protocol definitions
-│   ├── android/                    — scrcpy subprocess + V4L2 capture + GL upload
-│   ├── camera/                     — libcamera (DMA NV12), V4L2 USB, VITURE passthrough
-│   ├── face/                       — native face renderer: GIFs, materials, glitch,
-│   │                                 particles, HUB75 / MAX7219 / NeoPixel / shm outputs
-│   ├── hud/                        — NanoVG HUD chrome, toasts, backgrounds, icon cache
-│   ├── input/                      — GPIO buttons, gamepad, coprocessor + wireless input
-│   ├── integrations/               — KDE Connect bridge + phone inbox
-│   ├── menu/                       — stack-based ImGui menu (build_*.cpp per tab,
-│   │                                 face editor, color/file pickers)
-│   ├── net/                        — Wi-Fi / Bluetooth / ping / weather monitors
-│   ├── sensor/                     — BNO055, MPU-9250 compass, MPR121 boop, light sensor
-│   ├── serial/                     — UART, Teensy / Protoface face backends, LoRa, SmartKnob
-│   ├── sys/                        — system + scheduler monitors, fan control, GPIO pinmap
-│   ├── audio/                      — ALSA USB capture → gain → routing; voice analyzer
-│   └── vitrue/                     — GLFW window, eye FBOs, SBS composite, timewarp warp
-├── assets/                         — GLSL shaders, HUD icons, background images
-├── config/
-│   ├── config.example.json         — tracked defaults reference
-│   └── config.json                 — your live settings (gitignored, written on exit)
-├── overlays/cm5-6mic.dts           — 6-ch I2S DT overlay (audio handled by RP2350)
-├── firmware/                       — Teensy audio, button coprocessor (Pico), MP3 player sources
-├── hardware/carrier-board/         — CM5 carrier board: design, BOM, GPIO map, power tree
-├── lora_bridge/                    — RAK4631 LoRa firmware / bridge
-├── scheduler_daemon/               — optional calendar/event scheduler (Python)
+│   ├── android/
+│   │   └── android_mirror.h/.cpp  — scrcpy subprocess + V4L2 capture + GL upload
+│   ├── camera/
+│   │   ├── dma_camera.h/.cpp       — zero-copy NV12 libcamera path
+│   │   ├── camera_manager.h/.cpp   — owns both OWLsight + USB cameras
+│   │   ├── v4l2_camera.h/.cpp      — V4L2 USB camera capture
+│   │   └── viture_camera.h/.cpp    — Beast built-in passthrough camera
+│   ├── hud/
+│   │   ├── hud_renderer.h/.cpp     — NanoVG HUD chrome + ImGui menu overlay
+│   │   └── toast_renderer.h/.cpp   — slide-in toast notification overlay (NanoVG)
+│   ├── menu/
+│   │   └── menu_system.h/.cpp      — stack-based ImGui menu
+│   ├── vitrue/
+│   │   ├── xr_display.h/.cpp       — GLFW window, eye FBOs, SBS composite
+│   │   └── timewarp.h/.cpp         — rotational homography warp shader
+│   ├── input/
+│   │   └── gpio_buttons.h/.cpp     — libgpiod v2 button handler
+│   ├── serial/
+│   │   ├── serial_port.h/.cpp          — raw UART helpers
+│   │   ├── face_controller.h           — IFaceController interface + FaceProxy
+│   │   ├── teensy_controller.h/.cpp    — ProtoTracer USB serial backend
+│   │   ├── protoface_controller.h/.cpp — Protoface Unix socket backend
+│   │   ├── shm_frame_reader.h/.cpp     — /dev/shm/protoface_frame → GL texture
+│   │   ├── lora_radio.h/.cpp
+│   │   └── smartknob.h/.cpp
+│   ├── sensor/
+│   │   └── mpu9250.h/.cpp          — MPU-9250 I2C backup compass (50 Hz heading)
+│   └── audio/
+│       └── audio_engine.h/.cpp     — ALSA USB capture → gain → playback routing
+├── assets/shaders/
+│   ├── nv12.vs / nv12.fs           — NV12→RGB camera shader (GLSL ES)
+│   └── timewarp.vs / timewarp.fs   — homography warp shader
+├── config/config.json
+├── overlays/cm5-6mic.dts           — 6-ch I2S DT overlay (boot config; audio handled by RP2350)
+├── hardware/carrier-board/         — CM5 carrier board: level-shifting design, BOM, requirements
 ├── vendor/viture/                  — VITURE XR SDK (pre-built aarch64 .so)
 ├── Protoface/                      — git submodule: HUB75 LED face daemon
 └── scripts/
     ├── install.sh                  — one-shot CM5 installer (11 steps)
-    ├── uninstall.sh                — reverses install.sh (system integration; --purge for all)
-    ├── install_deps.sh             — build dependencies only (no system config)
-    ├── install_sudoers.sh          — narrow NOPASSWD rule for the Pi Settings menu
     ├── check.sh                    — post-reboot health check
-    ├── build.sh                    — CMake + Ninja release build
-    ├── run.sh                      — launch wrapper with startup diagnostics
-    ├── restart.sh                  — start/stop/restart the running instance
-    ├── update.sh                   — pull latest + rebuild (records a rollback point)
-    ├── rollback.sh                 — return to the last known-good build
-    ├── watchdog.sh                 — relaunch ProtoHUD if it dies
-    ├── merge_config.py             — merge new config defaults into config.json
-    ├── panel_driver.py             — HUB75 panel driver (Protoface output)
-    └── kdeconnect_commands.py      — KDE Connect helper commands
+    └── run.sh                      — launch wrapper with startup diagnostics
 ```
 
 ---

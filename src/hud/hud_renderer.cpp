@@ -2058,8 +2058,14 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
 
     const float sw     = static_cast<float>(w);
     const float sh     = static_cast<float>(h);
-    const float ov_h   = sh * cfg.size;
-    const float ov_w   = ov_h * frame_aspect;
+    // Pin the *longest* edge to cfg.size·screen-height so the overlay keeps a
+    // constant footprint across device rotation. If we pinned height alone, the
+    // long phone edge moves from height (portrait) to width (landscape) and the
+    // box balloons sideways. In portrait the long edge is the height, so this is
+    // identical to the old behaviour; in landscape it pins the width instead.
+    const float long_px = sh * cfg.size;
+    const float ov_w    = (frame_aspect >= 1.f) ? long_px : long_px * frame_aspect;
+    const float ov_h    = (frame_aspect >= 1.f) ? long_px / frame_aspect : long_px;
     const float margin = static_cast<float>(cfg_.compass_height);
     const auto  pos    = overlay_origin(cfg, sw, sh, ov_w, ov_h, margin);
 

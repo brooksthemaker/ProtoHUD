@@ -123,6 +123,20 @@ record_history() {
 }
 record_history
 
+# Skip the (expensive) rebuild when the update changed no buildable files.
+# Docs / config / Python / shell-only updates don't need a recompile, so they
+# can apply near-instantly. Source, shader or build-system changes still build.
+if [ "${DO_BUILD}" = "1" ] && [ "${BEFORE_COMMIT}" != "unknown" ] \
+   && [ "${BEFORE_COMMIT}" != "${AFTER_COMMIT}" ]; then
+    if git diff --name-only "${BEFORE_COMMIT}" "${AFTER_COMMIT}" 2>/dev/null \
+         | grep -qiE '\.(c|cc|cpp|cxx|h|hpp|hh|inc|glsl|vert|frag|vs|fs)$|(^|/)CMakeLists\.txt$|\.cmake$'; then
+        log "source changed — rebuild needed"
+    else
+        log "no buildable files changed (${BEFORE_COMMIT:0:9}..${AFTER_COMMIT:0:9}) — skipping rebuild"
+        DO_BUILD=0
+    fi
+fi
+
 # Merge any new config defaults shipped with this update into the user's
 # config.json (existing values always win). See scripts/merge_config.py.
 merge_config() {
