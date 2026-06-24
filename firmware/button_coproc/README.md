@@ -23,7 +23,7 @@ Pi → MCU (optional): `PONG` (heartbeat ack). The Pi maps `<id>` → function v
 ## Buildable firmware: [`pico/`](pico/)
 
 A complete PlatformIO project (RP2350 / **Raspberry Pi Pico 2 W**, earlephilhower
-`arduino-pico` core — same toolchain as `firmware/mp3_player/pico`):
+`arduino-pico` core):
 
 ```
 pico/
