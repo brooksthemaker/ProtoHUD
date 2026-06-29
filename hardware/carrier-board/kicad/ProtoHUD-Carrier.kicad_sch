@@ -67,7 +67,7 @@
   (sheet (at 185.40 57.40) (size 60 25) (fields_autoplaced)
     (stroke (width 0.1524) (type solid)) (fill (color 0 0 0 0.0000))
     (uuid b12d177a-080c-49c4-8372-6cdd7e6e9f72)
-    (property "Sheetname" "10. USB Hub" (at 185.40 56.70 0) (effects (font (size 1.27 1.27)) (justify left bottom)))
+    (property "Sheetname" "10. USB 3.1 Hub (VL817)" (at 185.40 56.70 0) (effects (font (size 1.27 1.27)) (justify left bottom)))
     (property "Sheetfile" "usb.kicad_sch" (at 185.40 83.20 0) (effects (font (size 1.27 1.27)) (justify left top)))
   )
   (sheet (at 185.40 89.40) (size 60 25) (fields_autoplaced)

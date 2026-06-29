@@ -50,12 +50,14 @@ serviceability, or telemetry but can be cut for a v1.
 - **R4.1** **RP2354B** (QFN-80, 48 GPIO, 2 MB on-package flash) with a
   **12 MHz crystal** + load caps (required for USB) and decoupling/core-regulator
   parts per the RP2350 hardware design guide.
-- **R4.2** RP2354B enumerates to the CM5 as a **USB-CDC ACM** device through the
-  onboard hub (M11), extending the `coproc_inputs` protocol
+- **R4.2** RP2354B enumerates to the CM5 as a **USB-CDC ACM** device on a
+  **dedicated CM5 USB host port** (the CM5's 2nd USB 3.0 port, USB 2.0 lanes —
+  **not** through the on-board hub, which is now full of external USB-C ports),
+  extending the `coproc_inputs` protocol
   ([`../../docs/coprocessor-input.md`](../../docs/coprocessor-input.md)).
-- **R4.3** **Two programming paths:** (a) in-system over the CM5-hub USB
-  (BOOTSEL/UF2), and (b) a **standalone USB-C port** (J12) selected by a
-  **USB selector SW1** that disconnects the RP2354B's USB pair from the hub.
+- **R4.3** **Two programming paths:** (a) in-system over the dedicated CM5 USB
+  port (BOOTSEL/UF2), and (b) a **standalone USB-C port** (J12) selected by a
+  **USB selector SW1** that steers the RP2354B's USB pair between the two.
 - **R4.4** **BOOTSEL** button, **RUN/reset** button, and an **SWD header**
   (SWCLK/SWDIO/GND/3V3) for debug-probe flashing.
 - **R4.5** USB selector = DPDT slide switch (full-speed-adequate) or a
@@ -98,11 +100,19 @@ serviceability, or telemetry but can be cut for a v1.
   CSI eyes (`csi_expected: 2`).
 
 ### M11 — USB peripheral stack
-- **R11.1** **Onboard USB 2.0 hub** (e.g. USB2514B/USB2517) consolidating the
-  RP2354B (CDC), **RP2350 helmet audio (UAC2)**, **smart knob (ACM)**, **LoRa
-  RAK4631 (ACM)**, **VITURE glasses**, and USB cameras behind the CM5's USB.
-- **R11.2** Account for CM5's native USB count; dedicate one CM5 host port to the
-  phone uplink (J11) separate from the hub.
+- **R11.1** **Onboard USB 3.1 Gen1 hub** (VIA **VL817**, 4-port, 5 Gbps) on one
+  CM5 **USB 3.0** port. Four **USB-C** downstream ports (J40–J43, SuperSpeed)
+  carry **RP2350 helmet audio (UAC2)**, **smart knob (ACM)**, **LoRa RAK4631
+  (ACM)**, **VITURE glasses**, and USB cameras. All ports are USB 2.0
+  backward-compatible. Strap-configured (no firmware/EEPROM).
+- **R11.1a** Downstream USB-C ports are **host/DFP**: CC **Rp pull-ups** (56 kΩ
+  to 5 V), per-port **VBUS current limit** (PTC or load switch) off `+5V`,
+  ESD on D+/D- and SS pairs, and **AC-coupling caps on every SS TX pair** at the
+  transmitter. One SS lane is wired (works in one USB-C orientation); full SS
+  flip needs a per-port 2:1 mux (optional/DNP). USB 2.0 works in both orientations.
+- **R11.2** CM5 exposes **2× USB 3.0 + 1× USB 2.0**. Allocation: USB3 #0 → hub
+  upstream; USB3 #1 → **RP2354B CDC** (off-hub, via SW1); USB2 → **phone uplink
+  J11**. The RP2354B is no longer behind the hub (R4.2).
 
 ### M12 — Provisioning
 - **R12.1** **nRPIBOOT** jumper/header + a USB device port so the CM5 eMMC can be

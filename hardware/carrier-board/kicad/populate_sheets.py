@@ -199,13 +199,39 @@ SYM_SW1   = box_symbol("Connector:USB_Selector", "SW", "USB sel (DPDT/mux)",
     [("1","COM_D+","bidirectional"),("2","COM_D-","bidirectional")],
     [("3","A_D+","bidirectional"),("4","A_D-","bidirectional"),
      ("5","B_D+","bidirectional"),("6","B_D-","bidirectional")], width=25.4)
-SYM_HUB   = box_symbol("Interface_USB:USB2514B", "U", "USB2514B",
+# VL817 — 4-port USB 3.1 Gen1 (5 Gbps) hub. Condensed symbol: mnemonic pin
+# "numbers" expose only the carrier nets (real QFN-68 pads are a layout task).
+SYM_HUB3  = box_symbol("Interface_USB:VL817", "U", "VL817-Q7",
     [("UP_DP","UP_D+","bidirectional"),("UP_DM","UP_D-","bidirectional"),
-     ("VDD","VDD","power_in"),("GND","GND","power_in"),("XI","XTAL","input")],
+     ("UP_SSRXP","UP_SSRX+","bidirectional"),("UP_SSRXM","UP_SSRX-","bidirectional"),
+     ("UP_SSTXP","UP_SSTX+","bidirectional"),("UP_SSTXM","UP_SSTX-","bidirectional"),
+     ("VBUS_DET","VBUS_DET","input"),("RESETB","~{RESET}","input"),
+     ("SELFPWR","SELF_PWR","input"),("XI","XI","input"),("XO","XO","output"),
+     ("VDD5","VDD5","power_in"),("VDD33","VDD33","power_out"),
+     ("VDD12","VDD12","power_out"),("GND","GND","power_in")],
     [("DP1","P1_D+","bidirectional"),("DM1","P1_D-","bidirectional"),
+     ("SSTXP1","P1_SSTX+","bidirectional"),("SSTXM1","P1_SSTX-","bidirectional"),
+     ("SSRXP1","P1_SSRX+","bidirectional"),("SSRXM1","P1_SSRX-","bidirectional"),
      ("DP2","P2_D+","bidirectional"),("DM2","P2_D-","bidirectional"),
+     ("SSTXP2","P2_SSTX+","bidirectional"),("SSTXM2","P2_SSTX-","bidirectional"),
+     ("SSRXP2","P2_SSRX+","bidirectional"),("SSRXM2","P2_SSRX-","bidirectional"),
      ("DP3","P3_D+","bidirectional"),("DM3","P3_D-","bidirectional"),
-     ("DP4","P4_D+","bidirectional"),("DM4","P4_D-","bidirectional")], width=30.48)
+     ("SSTXP3","P3_SSTX+","bidirectional"),("SSTXM3","P3_SSTX-","bidirectional"),
+     ("SSRXP3","P3_SSRX+","bidirectional"),("SSRXM3","P3_SSRX-","bidirectional"),
+     ("DP4","P4_D+","bidirectional"),("DM4","P4_D-","bidirectional"),
+     ("SSTXP4","P4_SSTX+","bidirectional"),("SSTXM4","P4_SSTX-","bidirectional"),
+     ("SSRXP4","P4_SSRX+","bidirectional"),("SSRXM4","P4_SSRX-","bidirectional")],
+    width=33.02)
+# USB-C 3.1 receptacle (downstream / host-facing). Condensed: VBUS/GND/CC/D±
+# + one SuperSpeed lane (TX1/RX1). Full flip needs A/B-side D± bonded at the
+# footprint + a per-port 2:1 SS mux for orientation 2 (see usb sheet note).
+SYM_USBC3 = box_symbol("Connector:USB_C_Receptacle_USB3.1", "J", "USB_C_3.1",
+    [("A4","VBUS","power_in"),("A1","GND","power_in"),
+     ("A5","CC1","bidirectional"),("B5","CC2","bidirectional"),
+     ("A6","D+","bidirectional"),("A7","D-","bidirectional"),
+     ("A2","SSTX1+","bidirectional"),("A3","SSTX1-","bidirectional"),
+     ("B11","SSRX1+","bidirectional"),("B10","SSRX1-","bidirectional")],
+    [], width=20.32)
 
 # RP2354B — condensed: only pins the carrier uses.
 SYM_RP = box_symbol("MCU_RaspberryPi:RP2354B", "U", "RP2354B",
@@ -233,7 +259,14 @@ SYM_CM5 = box_symbol("Module:RaspberryPi_CM5", "U", "CM5 (2x DF40-100)",
     [("5V","+5V","power_in"),("3V3","+3V3","power_out"),("GND","GND","power_in"),
      ("CSI0","CSI0 (MIPI)","output"),("CSI1","CSI1 (MIPI)","output"),
      ("HDMI0","HDMI0","output"),("HDMI1","HDMI1","output"),
-     ("USB_DP","USB_D+","bidirectional"),("USB_DM","USB_D-","bidirectional"),
+     # USB3.0 port #0 -> VL817 hub upstream (USB2 pair + SuperSpeed)
+     ("USB_DP","USB0_D+","bidirectional"),("USB_DM","USB0_D-","bidirectional"),
+     ("USB_SSTXP","USB0_SSTX+","bidirectional"),("USB_SSTXM","USB0_SSTX-","bidirectional"),
+     ("USB_SSRXP","USB0_SSRX+","bidirectional"),("USB_SSRXM","USB0_SSRX-","bidirectional"),
+     # USB3.0 port #1 -> RP2354B (off-hub, uses USB2 pair only)
+     ("RPUSB_DP","USB1_D+ (RP)","bidirectional"),("RPUSB_DM","USB1_D- (RP)","bidirectional"),
+     # USB2.0 port -> backpack phone uplink (J11)
+     ("USB2_DP","USB2_D+ (bp)","bidirectional"),("USB2_DM","USB2_D- (bp)","bidirectional"),
      ("BCM7","BCM7 RP_RUN","output"),("BCM8","BCM8 RP_BOOTSEL","output"),
      ("BCM18","BCM18 FAN1","output"),("BCM19","BCM19 FAN2","output")],
     [("BCM4","BCM4 OE","output"),("BCM5","BCM5 R1","output"),("BCM6","BCM6 B1","output"),
@@ -291,9 +324,17 @@ def sh_cm5():
     nets += [at_pin(cm,"5V",110,90,"+5V","power"), at_pin(cm,"3V3",110,90,"+3V3","power"),
              at_pin(cm,"GND",110,90,"GND","power")]
     for p,net in [("CSI0","CSI0"),("CSI1","CSI1"),("HDMI0","HDMI0"),("HDMI1","HDMI1"),
-                  ("USB_DP","CM5_USB_DP"),("USB_DM","CM5_USB_DM"),
+                  ("USB_DP","CM5_USB_DP"),("USB_DM","CM5_USB_DM"),       # USB3 p#0 USB2 -> hub
+                  ("USB_SSRXP","CM5_SSRX_P"),("USB_SSRXM","CM5_SSRX_M"), # hub TX -> CM5 RX (caps at hub)
+                  ("RPUSB_DP","CM5_RPUSB_DP"),("RPUSB_DM","CM5_RPUSB_DM"),# USB3 p#1 USB2 -> RP2354B
+                  ("USB2_DP","CM5_USB2_DP"),("USB2_DM","CM5_USB2_DM"),   # USB2 port -> backpack J11
                   ("BCM7","RP_RUN"),("BCM8","RP_BOOTSEL"),("BCM18","FAN1_G"),("BCM19","FAN2_G")]:
         nets.append(at_pin(cm,p,110,90,net,"global"))
+    # USB3 upstream TX pair: AC-coupling caps belong at the transmitter (CM5).
+    # CM5 SSTX -> C -> CM5_SSTX_* (link net) -> hub UP_SSRX.
+    items.append(instance(SYM_C,"C5","100n",55,40)); nets+=[at_pin(SYM_C,"1",55,40,"CM5_SSTX_PI","local"),at_pin(SYM_C,"2",55,40,"CM5_SSTX_P","global")]
+    items.append(instance(SYM_C,"C6","100n",70,40)); nets+=[at_pin(SYM_C,"1",70,40,"CM5_SSTX_MI","local"),at_pin(SYM_C,"2",70,40,"CM5_SSTX_M","global")]
+    nets += [at_pin(cm,"USB_SSTXP",110,90,"CM5_SSTX_PI","local"), at_pin(cm,"USB_SSTXM",110,90,"CM5_SSTX_MI","local")]
     hub = {"BCM4":"GPIO4","BCM5":"GPIO5","BCM6":"GPIO6","BCM12":"GPIO12","BCM13":"GPIO13",
            "BCM16":"GPIO16","BCM17":"GPIO17","BCM20":"GPIO20","BCM21":"GPIO21","BCM22":"GPIO22",
            "BCM23":"GPIO23","BCM24":"GPIO24","BCM26":"GPIO26","BCM27":"GPIO27"}
@@ -349,7 +390,7 @@ def sh_rp2354_io():
     items, nets, doc = [], [], [
         "4. RP2354B I/O MCU — USB-CDC to CM5 via hub.  See RP2354-IO.md.",
         "Condensed symbol (QFN-80). GP nets are global labels to other sheets.",
-        "USB pair -> SW1 selector -> hub (A) / J12 USB-C (B). 12MHz xtal, SWD, BOOTSEL.",
+        "USB pair -> SW1 selector -> CM5 USB3 port#1 (A, off-hub) / J12 USB-C (B). 12MHz xtal, SWD, BOOTSEL.",
     ]
     items.append(instance(SYM_RP, "U5", "RP2354B", 110, 100, ref_dy=-46))
     rp = SYM_RP
@@ -371,7 +412,7 @@ def sh_rp2354_io():
     # SW1 selector + J12 USB-C + ESD
     items.append(instance(SYM_SW1,"SW1","USB sel",170,70,ref_dy=-12))
     nets += [at_pin(SYM_SW1,"1",170,70,"RP_USB_DP","global"), at_pin(SYM_SW1,"2",170,70,"RP_USB_DM","global"),
-             at_pin(SYM_SW1,"3",170,70,"HUB_RP_DP","global"), at_pin(SYM_SW1,"4",170,70,"HUB_RP_DM","global"),
+             at_pin(SYM_SW1,"3",170,70,"CM5_RPUSB_DP","global"), at_pin(SYM_SW1,"4",170,70,"CM5_RPUSB_DM","global"),
              at_pin(SYM_SW1,"5",170,70,"J12_DP","local"), at_pin(SYM_SW1,"6",170,70,"J12_DM","local")]
     items.append(instance(SYM_USBC,"J12","USB-C prog",200,110,ref_dy=-14))
     nets += [at_pin(SYM_USBC,"A6",200,110,"J12_DP","local"), at_pin(SYM_USBC,"A7",200,110,"J12_DM","local"),
@@ -481,24 +522,74 @@ def sh_buttons():
 
 def sh_usb():
     items, nets, doc = [], [], [
-        "10. USB hub — CM5 upstream -> 4 downstream (RP2354B via SW1, RP2350 audio,",
-        "knob, LoRa, VITURE, cams).  J11 = backpack phone uplink (separate CM5 port).",
+        "10. USB 3.1 hub — VL817 (4-port, 5 Gbps / Gen1).  CM5 USB3 port#0 upstream",
+        "-> 4x USB-C downstream (J40..J43, SuperSpeed).  RP2354B is OFF-hub (CM5 USB3",
+        "port#1 via SW1).  J11 backpack = CM5 USB2 port.  SS TX pairs have AC caps;",
+        "USB-C ports are HOST/DFP -> CC Rp pull-ups; per-port VBUS PTC from +5V.",
+        "NOTE: one SS lane wired (TX1/RX1) -> USB3 in one C orientation; full flip",
+        "needs a per-port 2:1 SS mux (DNP option).  USB2 D+/- works both ways.",
     ]
-    items.append(instance(SYM_HUB,"U7","USB2514B",100,95,ref_dy=-20))
-    nets += [at_pin(SYM_HUB,"VDD",100,95,"+3V3_RP","power"), at_pin(SYM_HUB,"GND",100,95,"GND","power"),
-             at_pin(SYM_HUB,"UP_DP",100,95,"CM5_USB_DP","global"), at_pin(SYM_HUB,"UP_DM",100,95,"CM5_USB_DM","global")]
-    # downstream port 1 -> RP2354B (via SW1 hub side)
-    nets += [at_pin(SYM_HUB,"DP1",100,95,"HUB_RP_DP","global"), at_pin(SYM_HUB,"DM1",100,95,"HUB_RP_DM","global")]
-    downs=[("DP2","DM2","J40","RP2350 audio"),("DP3","DM3","J41","knob/LoRa"),("DP4","DM4","J42","VITURE/cam")]
-    for dp,dm,ref,val in downs:
-        J = conn(4); x=160+downs.index((dp,dm,ref,val))*22
-        items.append(instance(J,ref,val,x,80,ref_dy=-12))
-        nets += [at_pin(J,"1",x,80,"+5V","power"), at_pin(J,"2",x,80,dm,"local"),
-                 at_pin(J,"3",x,80,dp,"local"), at_pin(J,"4",x,80,"GND","power")]
-        nets += [at_pin(SYM_HUB,dp,100,95,dp,"local"), at_pin(SYM_HUB,dm,100,95,dm,"local")]
-    J11 = conn(4); items.append(instance(J11,"J11","backpack uplink",60,150,ref_dy=-12))
-    nets += [at_pin(J11,"1",60,150,"+5V","power"), at_pin(J11,"2",60,150,"CM5_USB_DM","global"),
-             at_pin(J11,"3",60,150,"CM5_USB_DP","global"), at_pin(J11,"4",60,150,"GND","power")]
+    hub = SYM_HUB3
+    items.append(instance(hub,"U7","VL817-Q7",95,100,ref_dy=-34))
+    # Power: 5 V in. VDD33/VDD12 are internal-regulator OUTPUTS -> decouple only
+    # (keeps the hub off the RP2354B's local +3V3_RP rail).
+    nets += [at_pin(hub,"VDD5",95,100,"+5V","power"), at_pin(hub,"GND",95,100,"GND","power")]
+    items.append(instance(SYM_C,"C70","1uF",30,150));  nets+=[at_pin(SYM_C,"1",30,150,"VDD33_HUB","local"),at_pin(SYM_C,"2",30,150,"GND","power")]
+    items.append(instance(SYM_C,"C71","1uF",42,150));  nets+=[at_pin(SYM_C,"1",42,150,"VDD12_HUB","local"),at_pin(SYM_C,"2",42,150,"GND","power")]
+    items.append(instance(SYM_C,"C72","100n",54,150)); nets+=[at_pin(SYM_C,"1",54,150,"+5V","power"),at_pin(SYM_C,"2",54,150,"GND","power")]
+    nets += [at_pin(hub,"VDD33",95,100,"VDD33_HUB","local"), at_pin(hub,"VDD12",95,100,"VDD12_HUB","local")]
+    # 25 MHz crystal + load caps
+    items.append(instance(SYM_XTAL,"Y2","25MHz",40,62))
+    nets += [at_pin(SYM_XTAL,"1",40,62,"HUB_XI","local"), at_pin(SYM_XTAL,"2",40,62,"HUB_XO","local")]
+    nets += [at_pin(hub,"XI",95,100,"HUB_XI","local"), at_pin(hub,"XO",95,100,"HUB_XO","local")]
+    items.append(instance(SYM_C,"C73","18p",28,74)); nets+=[at_pin(SYM_C,"1",28,74,"HUB_XI","local"),at_pin(SYM_C,"2",28,74,"GND","power")]
+    items.append(instance(SYM_C,"C74","18p",52,74)); nets+=[at_pin(SYM_C,"1",52,74,"HUB_XO","local"),at_pin(SYM_C,"2",52,74,"GND","power")]
+    # Reset RC + self-power strap + VBUS-detect (host present = carrier powered)
+    items.append(instance(SYM_R,"R70","10k",30,40)); nets+=[at_pin(SYM_R,"1",30,40,"VDD33_HUB","local"),at_pin(SYM_R,"2",30,40,"HUB_RST","local")]
+    items.append(instance(SYM_C,"C75","100n",42,40)); nets+=[at_pin(SYM_C,"1",42,40,"HUB_RST","local"),at_pin(SYM_C,"2",42,40,"GND","power")]
+    items.append(instance(SYM_R,"R71","10k",58,40)); nets+=[at_pin(SYM_R,"1",58,40,"VDD33_HUB","local"),at_pin(SYM_R,"2",58,40,"HUB_SELF","local")]
+    nets += [at_pin(hub,"RESETB",95,100,"HUB_RST","local"), at_pin(hub,"SELFPWR",95,100,"HUB_SELF","local"),
+             at_pin(hub,"VBUS_DET",95,100,"+5V","power")]
+    # --- Upstream: CM5 USB3 port#0 ---
+    # USB2 pair direct; SS RX from CM5 (TX caps live at CM5); SS TX to CM5 via caps here.
+    nets += [at_pin(hub,"UP_DP",95,100,"CM5_USB_DP","global"), at_pin(hub,"UP_DM",95,100,"CM5_USB_DM","global"),
+             at_pin(hub,"UP_SSRXP",95,100,"CM5_SSTX_P","global"), at_pin(hub,"UP_SSRXM",95,100,"CM5_SSTX_M","global")]
+    items.append(instance(SYM_C,"C76","100n",150,38)); nets+=[at_pin(SYM_C,"1",150,38,"UP_TX_PI","local"),at_pin(SYM_C,"2",150,38,"CM5_SSRX_P","global")]
+    items.append(instance(SYM_C,"C77","100n",162,38)); nets+=[at_pin(SYM_C,"1",162,38,"UP_TX_MI","local"),at_pin(SYM_C,"2",162,38,"CM5_SSRX_M","global")]
+    nets += [at_pin(hub,"UP_SSTXP",95,100,"UP_TX_PI","local"), at_pin(hub,"UP_SSTXM",95,100,"UP_TX_MI","local")]
+    # --- 4 downstream USB-C ports ---
+    for i,(n,ref) in enumerate([("1","J40"),("2","J41"),("3","J42"),("4","J43")]):
+        x = 150 + i*32; ytx = 62
+        # hub TX -> AC caps (at transmitter) -> connector TX1
+        items.append(instance(SYM_C,f"C8{i}a","100n",x,ytx));   nets+=[at_pin(SYM_C,"1",x,ytx,f"P{n}_TXPI","local"),at_pin(SYM_C,"2",x,ytx,f"P{n}_TXP","local")]
+        items.append(instance(SYM_C,f"C8{i}b","100n",x+9,ytx)); nets+=[at_pin(SYM_C,"1",x+9,ytx,f"P{n}_TXMI","local"),at_pin(SYM_C,"2",x+9,ytx,f"P{n}_TXM","local")]
+        nets += [at_pin(hub,f"SSTXP{n}",95,100,f"P{n}_TXPI","local"), at_pin(hub,f"SSTXM{n}",95,100,f"P{n}_TXMI","local")]
+        # hub RX <- connector RX1 (device TX caps are in the cable peer); USB2 D+/-
+        nets += [at_pin(hub,f"SSRXP{n}",95,100,f"P{n}_RXP","local"), at_pin(hub,f"SSRXM{n}",95,100,f"P{n}_RXM","local"),
+                 at_pin(hub,f"DP{n}",95,100,f"P{n}_DP","local"), at_pin(hub,f"DM{n}",95,100,f"P{n}_DM","local")]
+        # USB-C receptacle
+        J = SYM_USBC3; jx = x+2; jy = 120
+        items.append(instance(J,ref,f"USB-C P{n}",jx,jy,ref_dy=-30))
+        nets += [at_pin(J,"A1",jx,jy,"GND","power"),
+                 at_pin(J,"A6",jx,jy,f"P{n}_DP","local"), at_pin(J,"A7",jx,jy,f"P{n}_DM","local"),
+                 at_pin(J,"A2",jx,jy,f"P{n}_TXP","local"), at_pin(J,"A3",jx,jy,f"P{n}_TXM","local"),
+                 at_pin(J,"B11",jx,jy,f"P{n}_RXP","local"), at_pin(J,"B10",jx,jy,f"P{n}_RXM","local")]
+        # VBUS via per-port PTC from +5V (self-powered hub)
+        items.append(instance(SYM_FUSE,f"F{4+i}","PTC 1A",jx,jy-22))
+        nets += [at_pin(SYM_FUSE,"1",jx,jy-22,"+5V","power"), at_pin(SYM_FUSE,"2",jx,jy-22,f"P{n}_VBUS","local"),
+                 at_pin(J,"A4",jx,jy,f"P{n}_VBUS","local")]
+        # CC Rp pull-ups (DFP, default USB current): 56k to +5V
+        items.append(instance(SYM_R,f"R8{i}a","56k",jx-7,jy+24)); nets+=[at_pin(SYM_R,"1",jx-7,jy+24,f"P{n}_VBUS","local"),at_pin(SYM_R,"2",jx-7,jy+24,f"P{n}_CC1","local")]
+        items.append(instance(SYM_R,f"R8{i}b","56k",jx+7,jy+24)); nets+=[at_pin(SYM_R,"1",jx+7,jy+24,f"P{n}_VBUS","local"),at_pin(SYM_R,"2",jx+7,jy+24,f"P{n}_CC2","local")]
+        nets += [at_pin(J,"A5",jx,jy,f"P{n}_CC1","local"), at_pin(J,"B5",jx,jy,f"P{n}_CC2","local")]
+        # USB2 D+/- ESD array (SS ESD = TPD4EUSB30 at layout, see BOM)
+        items.append(instance(SYM_ESD,f"U{20+i}","USBLC6-2",jx,jy+38))
+        nets += [at_pin(SYM_ESD,"1",jx,jy+38,f"P{n}_DP","local"), at_pin(SYM_ESD,"3",jx,jy+38,f"P{n}_DM","local"),
+                 at_pin(SYM_ESD,"2",jx,jy+38,"GND","power"), at_pin(SYM_ESD,"5",jx,jy+38,f"P{n}_VBUS","local")]
+    # Backpack uplink — its own CM5 USB2 port
+    J11 = conn(4); items.append(instance(J11,"J11","backpack uplink",30,175,ref_dy=-12))
+    nets += [at_pin(J11,"1",30,175,"+5V","power"), at_pin(J11,"2",30,175,"CM5_USB2_DM","global"),
+             at_pin(J11,"3",30,175,"CM5_USB2_DP","global"), at_pin(J11,"4",30,175,"GND","power")]
     return doc, items, nets
 
 def sh_cameras():
@@ -526,7 +617,7 @@ TITLES = {
     "rp2354_io":"4. RP2354B I/O MCU","rp2354_face":"5. MAX7219 Buffer (RP2354B)",
     "leds":"6. WS2812 LEDs (RP2354B)","sensors_i2c":"7. Sensors I2C (RP2354B)",
     "servos":"8. Servos (RP2354B)","gpio_buttons":"9. Buttons / Boop (RP2354B)",
-    "usb":"10. USB Hub","cameras_display":"11. Cameras + Display (CM5)",
+    "usb":"10. USB 3.1 Hub (VL817)","cameras_display":"11. Cameras + Display (CM5)",
 }
 
 # ── emit ─────────────────────────────────────────────────────────────────────

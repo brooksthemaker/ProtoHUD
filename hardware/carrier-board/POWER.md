@@ -74,8 +74,16 @@ flowchart TB
 | Load | Typical | Peak | Notes |
 |------|--------:|-----:|-------|
 | CM5 (cameras, HDMI, render) | 3–4 A | ~5 A | RPi spec: 5 V/5 A PSU |
-| USB stack (audio/knob/LoRa/VITURE/cams) | 0.5–1 A | ~1.5 A | per-port limited |
-| **Subtotal** | **~4–5 A** | **~6.5 A** | |
+| USB 3.1 hub (VL817) silicon | ~0.2 A | ~0.3 A | from `+5V`; internal 3.3/1.2 V regs (not on `+3V3_RP`) |
+| USB downstream (4× USB-C) | 0.5–1 A | up to 4 A | **VBUS from board `+5V`, per-port PTC ~1 A** — not from CM5's USB current switch |
+| **Subtotal** | **~4–5 A** | **~6.5 A+** | size `+5V` for the port budget you actually populate |
+
+> **USB-C port power.** The CM5's own USB 3.0 ports are limited to ~1.2 A
+> *combined* — too little for 4 downstream ports. So the hub is **self-powered**:
+> each USB-C VBUS is fed from the board `+5V` rail through its own resettable fuse
+> (PTC) or a load switch (e.g. TPS2553, which adds true current limit + fault
+> flag). Budget `+5V` for the number of ports you expect to draw power
+> simultaneously (4 × ~0.9 A ≈ 3.6 A worst case for bus-powered peripherals).
 
 ### HUB75 panels (the big one)
 Per 64×32 P2.5 panel @ 5 V:

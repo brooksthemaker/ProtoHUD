@@ -34,13 +34,14 @@ Two generators:
 | 7 | `sensors_i2c.kicad_sch`  ✅ | RP2354B | I²C0 pull-ups, J5, SENS_INT, expanders | [`../IO-EXPANSION.md`](../IO-EXPANSION.md) |
 | 8 | `servos.kicad_sch`  ✅ | RP2354B | J20–J27 servo headers, +V_SERVO rail (SRV1..8) | [`../RP2354-IO.md`](../RP2354-IO.md) |
 | 9 | `gpio_buttons.kicad_sch`  ✅ | RP2354B | J6 buttons/boop (BTN1..10) | [`../CONNECTORS.md`](../CONNECTORS.md) |
-| 10 | `usb.kicad_sch`  ✅ | CM5 | hub, J9 downstream (RP2354B/RP2350/…), J11 uplink | [`../CONNECTORS.md`](../CONNECTORS.md) |
+| 10 | `usb.kicad_sch`  ✅ | CM5 | **VL817 USB 3.1 hub** (U7) → 4× USB-C downstream (J40–J43, SuperSpeed); J11 uplink | [`../CONNECTORS.md`](../CONNECTORS.md) |
 | 11 | `cameras_display.kicad_sch`  ✅ | CM5 | J7/J8 CSI, J10 HDMI | [`../CONNECTORS.md`](../CONNECTORS.md) |
 
 All 11 are populated (✅) — symbols placed, nets labelled. Cross-sheet nets are
 **global labels** (rails `+5V`/`+5V_PANEL`/`+5V_LED`/`+V_SERVO`/`+3V3_RP`/`GND`,
-the `GPIOxx` HUB75 group, `MX_*`/`LED*_DAT`/`SRV*`/`BTN*`, `*_USB_*`), so blocks
-connect without manual sheet-pin plumbing.
+the `GPIOxx` HUB75 group, `MX_*`/`LED*_DAT`/`SRV*`/`BTN*`, and the USB nets
+(`CM5_USB_*`, `CM5_SSTX_*`/`CM5_SSRX_*` SuperSpeed, `CM5_RPUSB_*`,
+`CM5_USB2_*`)), so blocks connect without manual sheet-pin plumbing.
 
 ## Review / finishing workflow
 

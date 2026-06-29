@@ -37,8 +37,8 @@ flowchart TB
 
     %% ===================== RP2354B brain =====================
     RP["RP2354B I/O coprocessor<br/>48 GPIO · 2 MB flash · PIO/PWM<br/>GPIO = 3.3 V CMOS"]:::rp
-    CM5 == "USB 2.0 host" ==> HUBIC
-    HUBIC == "USB-CDC" ==> RP
+    CM5 == "USB3 #0 · 5 Gbps host" ==> HUBIC
+    CM5 == "USB3 #1 · USB-CDC (off-hub)" ==> RP
 
     subgraph SHIFT2["3.3 V → 5 V (RP2354B side)"]
         MBUF["U10 · 74AHCT245 @ 5 V<br/>MAX7219 DIN/CLK/CS"]:::shift
@@ -66,7 +66,7 @@ flowchart TB
     %% ---- RP2354B programming ----
     USEL{{"SW1 · USB selector"}}:::sel
     RP -. "DP/DM" .-> USEL
-    USEL -. "A: hub→CM5" .-> HUBIC
+    USEL -. "A: → CM5 USB3 #1" .-> CM5
     USEL -. "B: standalone" .-> UPROG["J12 · USB-C program port"]:::usb
 
     %% ---- CM5 cameras / display / USB stack ----
@@ -75,7 +75,7 @@ flowchart TB
 
     subgraph USB["USB stack (onboard hub)"]
         direction TB
-        HUBIC["J9 · USB 2.0 hub"]:::usb
+        HUBIC["U7 · VL817 USB 3.1 hub<br/>4× USB-C (J40–J43, 5 Gbps)"]:::usb
         RP2350["RP2350 helmet audio<br/>(UAC2: 6-mic beamform/NR/DOA)"]:::usb
         KNOB["Smart knob"]:::usb
         LORA["LoRa RAK4631"]:::usb
@@ -118,11 +118,12 @@ flowchart TB
 | J5 | I²C0 sensors | RP2354B | SDA, SCL, 3.3 V, GND, INT | 3.3 V |
 | J6 | buttons / boop | RP2354B | GPIO×n, 3.3 V, GND | 3.3 V |
 | J7/J8 | CSI cameras | CM5 | 22-pin 0.5 mm FFC | MIPI |
-| J9 | USB hub uplink | CM5 | USB 2.0 → RP2354B / RP2350 audio / knob / LoRa / VITURE / cams | USB |
+| U7 / J40–J43 | USB 3.1 hub (VL817) + 4× USB-C | CM5 | upstream = CM5 USB3 #0; downstream = RP2350 audio / knob / LoRa / VITURE / cams | USB 3.1 Gen1 |
 | J10 | HDMI | CM5 | 2× HDMI out | — |
+| J11 | backpack phone uplink | CM5 | dedicated CM5 USB 2.0 port | USB 2.0 |
 | J12 | USB-C program port | RP2354B | standalone flash (via SW1) | USB |
 | J20–J27 | servo headers ×8 | RP2354B | SIG, +V_SERVO, GND | 5–6 V pwr / 3.3 V sig |
-| SW1 | USB selector | RP2354B | routes RP2354B USB → hub **or** J12 | — |
+| SW1 | USB selector | RP2354B | routes RP2354B USB → **dedicated CM5 port** or J12 | — |
 
 > Servo headers are eight standard 3-pin connectors (24 positions); only the 8
 > signals are unique — V+ and GND are the shared servo rail.
