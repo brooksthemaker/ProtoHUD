@@ -85,12 +85,13 @@ SHEETS = [
         "Nets: BTN1..10 = GP28..GP37, +3V3_RP, GND.",
         "Wire switches to GND (active_low); internal pull-ups in firmware.",
     ]),
-    ("usb", "10. USB Hub", [
-        "USB — in-helmet hub + RP2354B uplink + backpack uplink",
-        "Parts: USB2514B/2517 hub, J9 downstream (RP2354B via SW1 / RP2350 audio /",
-        "  knob / LoRa / VITURE / cams), J11 backpack USB uplink (phone->CM5),",
-        "  USBLC6 ESD on data pairs.",
-        "Nets: CM5 USB D+/D-, VBUS.  RP2354B is a hub downstream device (SW1 pos A).",
+    ("usb", "10. USB 3.1 Hub (VL817)", [
+        "USB 3.1 Gen1 hub (VL817, 4-port) + backpack uplink",
+        "Parts: VL817 hub (U7), 4x USB-C downstream J40-J43 (SuperSpeed), 25MHz xtal,",
+        "  per-port CC Rp 56k / VBUS PTC / USBLC6 ESD, SS AC-coupling caps,",
+        "  J11 backpack USB uplink (phone->CM5 USB2 port).",
+        "Nets: CM5 USB3 #0 = upstream (USB2 + SSTX/SSRX). RP2354B is OFF-hub (CM5",
+        "  USB3 #1 via SW1 pos A). Downstream Pn_D+/-, Pn_SSTX/SSRX, Pn_VBUS/CC.",
     ]),
     ("cameras_display", "11. Cameras + Display (CM5)", [
         "CSI CAMERAS + HDMI — CM5 side",

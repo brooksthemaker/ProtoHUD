@@ -174,22 +174,37 @@ wrong). Functional groups carried:
 
 ---
 
-## J9 — USB hub uplink (+ downstream)  ·  USB 2.0  ·  brain: **CM5**
+## U7 / J40–J43 — USB 3.1 hub + downstream USB-C  ·  USB 3.1 Gen1 (5 Gbps)  ·  brain: **CM5**
 
-One uplink from a CM5 USB host port; downstream ports feed the peripheral stack.
-**Unchanged**, but note the **RP2354B is now a hub downstream device** (USB-CDC).
-Each port is standard USB 2.0:
+The on-board hub is a **VIA VL817** 4-port **USB 3.1 Gen1** hub (replaces the old
+USB 2.0 USB2514B). Its **upstream** is one CM5 **USB 3.0** port (SuperSpeed +
+USB 2.0); its **four downstream ports are USB-C receptacles J40–J43**, each
+SuperSpeed-capable and USB 2.0 backward-compatible. The peripheral stack
+(RP2350 audio, smart knob, LoRa, VITURE, USB cams) plugs into these.
 
-| Pin | Signal | Notes |
-|----:|--------|-------|
-| 1 | VBUS (+5V) | from CM5 5 V, current-limited per port |
-| 2 | D− | 90 Ω differential, length-matched |
-| 3 | D+ | |
-| 4 | GND | |
+**Upstream link (CM5 USB3 port #0 ⇄ U7):** USB 2.0 pair `CM5_USB_DP/DM` +
+SuperSpeed `CM5_SSTX_±` (CM5→hub) and `CM5_SSRX_±` (hub→CM5). AC-coupling caps
+sit at each transmitter (CM5 side for SSTX, hub side for SSRX).
 
-> Downstream behind the onboard hub (USB2514B, REQ N1): **RP2354B (USB-CDC)**,
-> RP2350 helmet audio, smart knob, LoRa RAK4631, VITURE, USB cams. The RP2354B
-> reaches the hub only when **SW1** is in position A (see SW1 / J12).
+**Each downstream USB-C port (host / DFP) — key pads:**
+
+| Pad | Signal | Net | Notes |
+|----:|--------|-----|-------|
+| A4/B4/A9/B9 | VBUS | `Pn_VBUS` | from `+5V` via per-port PTC (F4–F7), ~1 A |
+| A1/B1/A12/B12 | GND | GND | |
+| A5 / B5 | CC1 / CC2 | `Pn_CC1/2` | **Rp pull-ups 56 kΩ → 5 V** (host advertises default current) |
+| A6/B6 · A7/B7 | D+ / D− | `Pn_DP/DM` | USB 2.0; bond A&B sides at the footprint for flip; 90 Ω diff |
+| A2/A3 | SSTX1 ± | `Pn_TXP/M` | hub TX → port (via AC caps); 90 Ω diff, 85 Ω SS pair |
+| B11/B10 | SSRX1 ± | `Pn_RXP/M` | port → hub RX |
+
+> **SS orientation:** one SuperSpeed lane (TX1/RX1) is wired, so **USB 3.x works
+> in one USB-C orientation**; USB 2.0 works either way. For full SS flip add a
+> per-port 2:1 SS mux (optional/DNP). ESD: USBLC6-2 on D+/D-, SS TVS array on the
+> SS pair.
+
+> **RP2354B is no longer behind this hub.** It now has its **own** CM5 USB host
+> port (the CM5's 2nd USB 3.0 port, USB 2.0 lanes) via **SW1 position A** — see
+> SW1 / J12. This frees all four hub ports for external USB-C.
 
 ---
 
@@ -233,7 +248,7 @@ Dir is RP2354B-relative.
 
 | Pin | Signal | Net | Dir | Notes |
 |----:|--------|-----|-----|-------|
-| 1 | D+ | `RP_DP` | BIDIR | via SW1 (mux/switch); shared with hub path |
+| 1 | D+ | `RP_DP` | BIDIR | via SW1 (mux/switch); shared with the dedicated CM5-port path |
 | 2 | D− | `RP_DM` | BIDIR | via SW1; 90 Ω differential |
 | 3 | VBUS (+5V) | — | — | **host-present sense only — isolated.** Do **not** back-feed onto carrier/hub |
 | 4 | GND | — | PWR | |

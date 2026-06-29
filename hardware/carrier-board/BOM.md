@@ -72,14 +72,33 @@ The level-shift buffer (U11) is listed once under **RP2354B level shifting**
 | # | Part | Example P/N | Qty | Req | Notes |
 |---|------|-------------|-----|-----|-------|
 | 25 | CSI FFC connector, 22-pin 0.5 mm | flip-lock | 2 | M7.1 | Two CSI eyes |
-| 26 | USB host connectors / headers | USB-A / JST | as needed | M8.1 | RP2350 audio, knob, LoRa, VITURE, USB cams |
+| 26 | Downstream USB-C receptacles | USB 3.1 (full-feature, 24-pin) | 4 | M8.1 / N1 | **J40–J43** · the 4 hub ports (SuperSpeed). Peripherals (RP2350 audio, knob, LoRa, VITURE, USB cams) plug in here |
 | 27 | nRPIBOOT jumper + USB port | header + micro/USB-C | 1 | M9.1 | eMMC flashing |
+
+## USB 3.1 hub (VL817) — CM5 side
+
+Replaces the former USB 2.0 hub. VL817 is a 4-port **USB 3.1 Gen1 (5 Gbps)**
+hub; pin-strap configured (no firmware/EEPROM required). Upstream = one CM5
+**USB 3.0** port (SuperSpeed + USB 2.0). All four downstream ports are USB-C
+(item 26). See [`CONNECTORS.md`](CONNECTORS.md) and the `kicad/usb.kicad_sch` sheet.
+
+| # | Part | Example P/N | Qty | Req | Notes |
+|---|------|-------------|-----|-----|-------|
+| 26a | USB 3.1 Gen1 4-port hub | **VIA VL817-Q7** (QFN-68) | 1 | N1 | **U7** · strap-config; integrated 3.3/1.2 V regulators (off `+5V`, not `+3V3_RP`) |
+| 26b | Hub crystal + load caps | 25 MHz + 2× 18 pF | 1 | N1 | Y2 · check VL817 CL spec for cap value |
+| 26c | Hub decoupling | 1 µF (VDD33/VDD12) + 0.1 µF | several | N1 | VDD33/VDD12 are internal-reg outputs — decouple, don't drive |
+| 26d | Reset / strap resistors | 10 kΩ + 0.1 µF | 3 | N1 | RESET RC, SELF_PWR strap |
+| 26e | SuperSpeed AC-coupling caps | 0.1 µF 0402 | 10 | N1 | 2 per TX pair (upstream + 4 ports); place at the transmitter |
+| 26f | CC pull-ups (Rp, DFP) | 56 kΩ 1% | 8 | N1 | 2 per USB-C port; advertise default USB current (host side) |
+| 26g | Per-port VBUS PTC | resettable fuse ~1 A | 4 | N1 | F4–F7 · current-limit each port (or use a TPS2553 load switch) |
+| 26h | USB2 ESD array | USBLC6-2SC6 | 4 | N1 | U20–U23 · on each port's D+/D- |
+| 26i | SuperSpeed ESD array | TPD4EUSB30 / equiv | 4 | N1 | on each port's active SS pair (layout-time) |
 
 ## Nice-to-have add-ons
 
 | # | Part | Example P/N | Qty | Req | Notes |
 |---|------|-------------|-----|-----|-------|
-| 28 | USB 2.0 hub controller | USB2514B / USB2517 | 1 | N1 | Consolidate USB peripherals |
+| 28 | USB hub controller | *moved → "USB 3.1 hub (VL817)" section (item 26a)* | — | N1 | Now USB 3.1 Gen1 (VL817), core to the design |
 | 29 | Current-sense monitors | INA219 / INA260 | 1–4 | N2 | Per-rail telemetry to HUD |
 | 30 | e-Fuse | TPS259x | 1–4 | N3 | Latch-off short protection |
 | 31 | RTC coin-cell holder + cell | CR1220 + holder | 1 | N4 | CM5 onboard RTC backup |
@@ -136,13 +155,15 @@ high). Servos and I²C sensors stay 3.3 V-native.
 
 ## USB selector / programming (RP2354B)
 
-RP2350 has one USB pair — shared between the CM5 hub (CDC link) and a standalone
-program port via the SW1 selector. See
+RP2350 has one USB pair — shared between a **dedicated CM5 USB host port** (the
+CDC link; SW1 position A) and a standalone program port (J12; position B) via the
+SW1 selector. The RP2354B no longer hangs off the on-board hub — it connects
+directly to the CM5's second USB 3.0 port (USB 2.0 lanes). See
 [`RP2354-IO.md`](RP2354-IO.md#usb-selector-cm5-hub--standalone-port).
 
 | # | Part | Example P/N | Qty | Req | Notes |
 |---|------|-------------|-----|-----|-------|
-| 57 | USB 2.0 selector — **option A** | DPDT slide switch (**SW1**) | 1 | M-RP | manual D+/D− steer; fine for full-speed USB |
+| 57 | USB 2.0 selector — **option A** | DPDT slide switch (**SW1**) | 1 | M-RP | manual D+/D− steer (CM5 port ⇄ J12); fine for full-speed USB |
 | 57b | USB 2.0 selector — **option B** | TS3USB221A mux | 1 | M-RP | alt to SW1 · cleaner electronic switching (pick one) |
 | 58 | Standalone USB-C receptacle | USB 2.0 Type-C | 1 | M-RP | **J12** · isolated program port (VBUS sense only, do not back-feed) |
 | 59 | USB ESD protection | USBLC6-2 | 1 | M-RP | on the RP2354B `RP_DP/RP_DM` pair |

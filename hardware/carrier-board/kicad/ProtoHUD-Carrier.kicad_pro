@@ -22,7 +22,7 @@
       ["aa17a73e-e56b-4b1f-a092-064b3bde23cb", "7. Sensors I2C (RP2354B)"],
       ["a1b2c3d4-0003-4aaa-9bbb-000000000008", "8. Servos (RP2354B)"],
       ["4d61ad14-7947-4b5f-b9ac-ea72b52475d0", "9. Buttons / Boop (RP2354B)"],
-      ["b12d177a-080c-49c4-8372-6cdd7e6e9f72", "10. USB Hub"],
+      ["b12d177a-080c-49c4-8372-6cdd7e6e9f72", "10. USB 3.1 Hub (VL817)"],
       ["c814e905-b80c-42d1-beeb-925e48192849", "11. Cameras + Display (CM5)"]
     ],
   "text_variables": {}

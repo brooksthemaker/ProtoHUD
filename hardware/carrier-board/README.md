@@ -10,7 +10,8 @@ architecture:
   backend, and **servos** — talking to the CM5 as a **USB-CDC** device.
 
 The USB peripheral stack (RP2350 helmet audio, smart knob, LoRa, VITURE glasses)
-hangs off an onboard USB hub.
+hangs off an onboard **USB 3.1 Gen1 hub (VL817)** with **4 USB-C** downstream
+ports. The RP2354B has its own dedicated CM5 USB port (it is not behind the hub).
 
 This folder is documentation only — there are no board files here yet (a KiCad
 schematic is being populated in [`kicad/`](kicad/)). It captures **what the
@@ -46,7 +47,7 @@ the right buffers on the right brain:
 | Servos ×8 | PWM | **RP2354B** | accepts 3.3 V | Direct; own 5–6 V power rail |
 | Buttons / boop | switches | **RP2354B** | 3.3 V | Direct (pull-ups + optional ESD) |
 | CSI | 2× cameras | **CM5** | MIPI | 22-pin FFC connectors |
-| USB | RP2350 audio, knob, LoRa, VITURE, RP2354B | **CM5** | USB 2.0 | Onboard hub |
+| USB | RP2350 audio, knob, LoRa, VITURE, cams | **CM5** | USB 3.1 Gen1 | Onboard **VL817** hub → 4× USB-C (J40–J43). RP2354B on its own CM5 port |
 
 > Driving HUB75 at 3.3 V is the classic "panels dark / flickery / wrong colors"
 > failure: a panel's logic-high threshold is ≈ 0.7 × 5 V ≈ 3.5 V, *above* the
