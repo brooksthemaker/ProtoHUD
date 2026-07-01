@@ -60,10 +60,39 @@ freedom for a custom PCB, more parallel chains, or the library's finer tuning.
        "gpio_slowdown": 2,             // tune per board
        "pwm_bits": 11,
        "rp1_pio": 1,                    // Pi 5: 0=RIO (fast), 1=PIO (low CPU)
-       "pixel_mapper": ""               // e.g. "U-mapper;Rotate:180"
+       "pixel_mapper": "",              // e.g. "U-mapper;Rotate:180"
+       "camera_mode": false,            // flicker-free preset (see below)
+       "camera_refresh_hz": 100,        // refresh cap used while camera_mode is on
+       "brightness": 100,               // 0..100 (perceptual, CIE1931)
+       "pwm_lsb_ns": 0,                 // advanced: 0 = library default
+       "pwm_dither_bits": 0,            // advanced: temporal dithering, 0 = off
+       "limit_refresh_hz": 0            // advanced: cap Hz, 0 = uncapped
      }
    }
    ```
+
+## Camera Mode (flicker-free capture)
+
+HUB75 panels are PWM-multiplexed, so a phone/camera often catches dark scan bands
+or flicker even when the face looks fine to the eye. **Camera Mode** is a preset
+that fixes the common causes:
+
+- **Caps the refresh** at `camera_refresh_hz` (default 100) so the panel's refresh
+  no longer beats against the camera's shutter → no rolling bands.
+- **Enables temporal dithering** (≥2 bits) for smoother low-brightness gradients
+  on video.
+
+Toggle it live at **Face Display → Hardware → Camera Mode** (the entry only
+appears when `driver` is `hzeller`), or set `camera_mode: true` in config. It
+relaunches the panel driver to apply, exactly like the Color Order fix.
+
+For **true** flicker-free (not just camera-friendly), also do the one-wire
+hardware-PWM mod and set `hw_mapping` to `adafruit-hat-pwm`. Camera Mode's
+software caps help regardless of the mod.
+
+While Camera Mode is on it overrides `limit_refresh_hz` (with `camera_refresh_hz`)
+and forces dithering; turn it off to drive the raw `limit_refresh_hz` /
+`pwm_dither_bits` / `pwm_lsb_ns` knobs directly.
 
 ## How the two paths share code
 

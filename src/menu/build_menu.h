@@ -77,6 +77,16 @@ struct PfHub75Layout {
     int         pwm_bits        = 11;             // hzeller: colour depth 1..11
     int         rp1_pio         = 1;              // hzeller Pi5: 0=RIO (fast, higher CPU), 1=PIO (low CPU)
     std::string pixel_mapper    = "";             // hzeller: e.g. "U-mapper;Rotate:180"
+    // Camera-friendly / flicker-free preset (hzeller only). When camera_mode is
+    // on, the launcher caps refresh at camera_refresh_hz and enables temporal
+    // dithering so the face doesn't band on video. The raw knobs below are for
+    // fine control and apply when camera_mode is off.
+    bool        camera_mode      = false;
+    int         camera_refresh_hz = 100;          // refresh cap used while camera_mode is on
+    int         brightness       = 100;           // hzeller: 0..100 (perceptual, CIE1931)
+    int         pwm_lsb_ns       = 0;             // hzeller: 0 = library default
+    int         pwm_dither_bits  = 0;             // hzeller: temporal dithering (0 = off)
+    int         limit_refresh_hz = 0;             // hzeller: cap refresh Hz (0 = uncapped)
     std::string panel_size_per[4] = {"", "", "", ""};
     // Nudge stores each panel's CENTRE as an offset from the canvas centre
     // (in canvas pixels). Default = auto-placed by apply_defaults() per

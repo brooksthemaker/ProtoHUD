@@ -327,7 +327,10 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                                    const std::string& hw_mapping = "adafruit-hat",
                                    int gpio_slowdown = 2, int pwm_bits = 11,
                                    int rp1_pio = 1,
-                                   const std::string& pixel_mapper = "") {
+                                   const std::string& pixel_mapper = "",
+                                   bool camera_mode = false, int camera_refresh_hz = 100,
+                                   int brightness = 100, int pwm_lsb_ns = 0,
+                                   int pwm_dither_bits = 0, int limit_refresh_hz = 0) {
     std::string drv = bin_dir + "/../scripts/panel_driver.py";
     // Validate host-side — an unknown value would hit the driver's argparse
     // choices and exit, leaving the panels dark with only a log to explain.
@@ -345,6 +348,15 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
     std::string gs  = std::to_string(gpio_slowdown);
     std::string pb  = std::to_string(pwm_bits);
     std::string rp  = std::to_string(rp1_pio);
+    // Camera mode caps the refresh and forces temporal dithering (>=2 bits) so
+    // the panels don't band on video; otherwise the raw knobs apply as-is.
+    int eff_limit  = camera_mode ? camera_refresh_hz : limit_refresh_hz;
+    int eff_dither = camera_mode ? (pwm_dither_bits > 0 ? pwm_dither_bits : 2)
+                                 : pwm_dither_bits;
+    std::string br  = std::to_string(brightness);
+    std::string lsb = std::to_string(pwm_lsb_ns);
+    std::string dth = std::to_string(eff_dither);
+    std::string lim = std::to_string(eff_limit);
     // Stop any existing driver and WAIT for it to actually exit before
     // relaunching. piomatter (RP1 PIO + DMA + /dev/mem) can't be initialised
     // by two processes at once, so an immediate relaunch races the dying
@@ -382,6 +394,10 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                "--pwm-bits", pb.c_str(),
                "--rp1-pio", rp.c_str(),
                "--pixel-mapper", pixel_mapper.c_str(),
+               "--brightness", br.c_str(),
+               "--pwm-lsb-ns", lsb.c_str(),
+               "--pwm-dither-bits", dth.c_str(),
+               "--limit-refresh", lim.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }
@@ -1806,6 +1822,12 @@ int main(int argc, char* argv[]) {
             L.pwm_bits      = jval(jh, "pwm_bits",      L.pwm_bits);
             L.rp1_pio       = jval(jh, "rp1_pio",       L.rp1_pio);
             L.pixel_mapper  = jh.value("pixel_mapper",  L.pixel_mapper);
+            L.camera_mode       = jval(jh, "camera_mode",       L.camera_mode);
+            L.camera_refresh_hz = jval(jh, "camera_refresh_hz", L.camera_refresh_hz);
+            L.brightness        = jval(jh, "brightness",        L.brightness);
+            L.pwm_lsb_ns        = jval(jh, "pwm_lsb_ns",        L.pwm_lsb_ns);
+            L.pwm_dither_bits   = jval(jh, "pwm_dither_bits",   L.pwm_dither_bits);
+            L.limit_refresh_hz  = jval(jh, "limit_refresh_hz",  L.limit_refresh_hz);
             if (jh.contains("panel_size_per") && jh["panel_size_per"].is_array())
                 for (size_t i = 0; i < jh["panel_size_per"].size() && i < 4; ++i)
                     if (jh["panel_size_per"][i].is_string())
@@ -2969,7 +2991,10 @@ int main(int argc, char* argv[]) {
                                    pf_hub75.color_order, pf_hub75.driver,
                                    pf_hub75.hw_mapping, pf_hub75.gpio_slowdown,
                                    pf_hub75.pwm_bits, pf_hub75.rp1_pio,
-                                   pf_hub75.pixel_mapper);
+                                   pf_hub75.pixel_mapper, pf_hub75.camera_mode,
+                                   pf_hub75.camera_refresh_hz, pf_hub75.brightness,
+                                   pf_hub75.pwm_lsb_ns, pf_hub75.pwm_dither_bits,
+                                   pf_hub75.limit_refresh_hz);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -3232,7 +3257,10 @@ int main(int argc, char* argv[]) {
                                    pf_hub75.color_order, pf_hub75.driver,
                                    pf_hub75.hw_mapping, pf_hub75.gpio_slowdown,
                                    pf_hub75.pwm_bits, pf_hub75.rp1_pio,
-                                   pf_hub75.pixel_mapper);
+                                   pf_hub75.pixel_mapper, pf_hub75.camera_mode,
+                                   pf_hub75.camera_refresh_hz, pf_hub75.brightness,
+                                   pf_hub75.pwm_lsb_ns, pf_hub75.pwm_dither_bits,
+                                   pf_hub75.limit_refresh_hz);
         }
     };
 
@@ -3769,7 +3797,9 @@ int main(int argc, char* argv[]) {
             native_ctrl->canvas_height(), gpw, gph, gchain, gpar,
             pf_hub75.pinout, pf_hub75.color_order, pf_hub75.driver,
             pf_hub75.hw_mapping, pf_hub75.gpio_slowdown, pf_hub75.pwm_bits,
-            pf_hub75.rp1_pio, pf_hub75.pixel_mapper);
+            pf_hub75.rp1_pio, pf_hub75.pixel_mapper, pf_hub75.camera_mode,
+            pf_hub75.camera_refresh_hz, pf_hub75.brightness, pf_hub75.pwm_lsb_ns,
+            pf_hub75.pwm_dither_bits, pf_hub75.limit_refresh_hz);
         Notification n; n.type = NotifType::App;
         n.title = "Panel driver restarted";
         n.body  = "If panels stay dark, check /tmp/panel_driver.log";
@@ -4724,6 +4754,12 @@ int main(int argc, char* argv[]) {
             jh["pwm_bits"]         = L.pwm_bits;
             jh["rp1_pio"]          = L.rp1_pio;
             jh["pixel_mapper"]     = L.pixel_mapper;
+            jh["camera_mode"]       = L.camera_mode;
+            jh["camera_refresh_hz"] = L.camera_refresh_hz;
+            jh["brightness"]        = L.brightness;
+            jh["pwm_lsb_ns"]        = L.pwm_lsb_ns;
+            jh["pwm_dither_bits"]   = L.pwm_dither_bits;
+            jh["limit_refresh_hz"]  = L.limit_refresh_hz;
             jh["panel_size_per"]   = json::array({L.panel_size_per[0], L.panel_size_per[1],
                                                   L.panel_size_per[2], L.panel_size_per[3]});
             jh["defaults_applied"] = L.defaults_applied;

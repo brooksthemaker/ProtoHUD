@@ -243,7 +243,16 @@
       "rp1_pio": 1,
       "_rp1_pio_note": "[hzeller only] Pi 5 RP1 backend: 0 = RIO (fast, higher CPU), 1 = PIO (very low CPU).",
       "pixel_mapper": "",
-      "_pixel_mapper_note": "[hzeller only] Optional pixel remap, e.g. 'U-mapper', 'Rotate:180', 'Mirror:H' (semicolon-separated to chain)."
+      "_pixel_mapper_note": "[hzeller only] Optional pixel remap, e.g. 'U-mapper', 'Rotate:180', 'Mirror:H' (semicolon-separated to chain).",
+      "camera_mode": false,
+      "_camera_mode_note": "[hzeller only] Flicker-free/camera-friendly preset: caps the refresh at camera_refresh_hz and forces temporal dithering so the face doesn't band on video. For true flicker-free also set hw_mapping to 'adafruit-hat-pwm' (one solder jumper). Toggle live in Face Display > Hardware > Camera Mode.",
+      "camera_refresh_hz": 100,
+      "brightness": 100,
+      "_brightness_note": "[hzeller only] Panel brightness 0..100 (perceptual, CIE1931).",
+      "pwm_lsb_ns": 0,
+      "pwm_dither_bits": 0,
+      "limit_refresh_hz": 0,
+      "_refresh_tuning_note": "[hzeller only] Advanced: pwm_lsb_ns (0=library default), pwm_dither_bits (temporal dithering, 0=off), limit_refresh_hz (cap Hz, 0=uncapped). While camera_mode is on it overrides limit_refresh_hz (with camera_refresh_hz) and dithering (>=2 bits)."
     },
     "preview": {
       "anchor_x": 1.0,

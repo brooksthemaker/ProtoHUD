@@ -1924,6 +1924,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     // ±32 px to compensate for tiny mounting offsets between physical panels.
     MenuItem pf_hub75_layout_item;
     MenuItem pf_color_order_item;
+    MenuItem pf_camera_mode_item;
     if (pf_hub75_p) {
         auto* H = pf_hub75_p;
         // String picker that also reapplies the auto-placed centre offsets
@@ -2242,6 +2243,24 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 return pf_backend_p && *pf_backend_p == "hub75";
             };
         }
+        {
+            // Camera Mode (hzeller only): caps the refresh + enables temporal
+            // dithering so the face doesn't band/flicker on video. Applies by
+            // relaunching the panel driver, same as Color Order.
+            auto restart = pf_restart_renderer;
+            pf_camera_mode_item = with_desc(
+                toggle("Camera Mode (flicker-free)",
+                    [H]{ return H->camera_mode; },
+                    [H, restart](bool v){ H->camera_mode = v; if (restart) restart(); }),
+                "hzeller driver only: caps the panel refresh (camera_refresh_hz) "
+                "and turns on temporal dithering so the face doesn't band or "
+                "flicker when filmed. For true flicker-free, also set hw_mapping "
+                "to 'adafruit-hat-pwm' (one solder jumper). Restarts the panel "
+                "driver so it applies immediately.");
+            pf_camera_mode_item.visible_fn = [pf_backend_p, H]{
+                return pf_backend_p && *pf_backend_p == "hub75" && H->driver == "hzeller";
+            };
+        }
         for (auto& it : nudge_items) hub_items.push_back(std::move(it));
         hub_items.push_back(with_desc(
             leaf("Reset All Positions",
@@ -2280,6 +2299,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     };
     // HUB75 panel wiring fix-up — hidden on other backends.
     if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_color_order_item));
+    if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_camera_mode_item));
     if (pf_restart_renderer) {
         pf_hardware_menu.push_back(with_desc(
             menu_shared::restart_face_renderer_leaf(pf_restart_renderer,

@@ -135,6 +135,8 @@ def build_hzeller(args) -> Backend:
         o.pixel_mapper_config   = args.pixel_mapper
     if args.pwm_lsb_ns > 0:
         o.pwm_lsb_nanoseconds   = args.pwm_lsb_ns
+    if args.pwm_dither_bits > 0:
+        o.pwm_dither_bits       = args.pwm_dither_bits
     if args.limit_refresh > 0:
         o.limit_refresh_rate_hz = args.limit_refresh
     if args.multiplexing >= 0:
@@ -191,6 +193,7 @@ def main():
     ap.add_argument('--pixel-mapper', default='', help='[hzeller] e.g. "U-mapper;Rotate:180"')
     ap.add_argument('--brightness', type=int, default=100, help='[hzeller] 0..100')
     ap.add_argument('--pwm-lsb-ns', type=int, default=0, help='[hzeller] 0=library default')
+    ap.add_argument('--pwm-dither-bits', type=int, default=0, help='[hzeller] temporal dither (0=off)')
     ap.add_argument('--limit-refresh', type=int, default=0, help='[hzeller] cap Hz; 0=off')
     ap.add_argument('--multiplexing', type=int, default=-1, help='[hzeller] -1=default')
     ap.add_argument('--row-addr-type', type=int, default=-1, help='[hzeller] -1=default')
