@@ -68,6 +68,15 @@ struct PfHub75Layout {
     // swapped is usually fixed by "grb", red/blue by "bgr"). Passed to
     // panel_driver.py as --order; applied on driver (re)launch.
     std::string color_order     = "auto";
+    // Panel driver backend: "piomatter" (default; Adafruit RP1 PIO, fixed
+    // pinouts) or "hzeller" (rpi-rgb-led-matrix; custom pin mappings + Pi 5 RP1
+    // backends). The fields below apply only when driver == "hzeller".
+    std::string driver          = "piomatter";
+    std::string hw_mapping      = "adafruit-hat"; // hzeller: regular/adafruit-hat/adafruit-hat-pwm/compute-module/<custom>
+    int         gpio_slowdown   = 2;              // hzeller: GPIO write delay (tune per-Pi)
+    int         pwm_bits        = 11;             // hzeller: colour depth 1..11
+    int         rp1_pio         = 1;              // hzeller Pi5: 0=RIO (fast, higher CPU), 1=PIO (low CPU)
+    std::string pixel_mapper    = "";             // hzeller: e.g. "U-mapper;Rotate:180"
     std::string panel_size_per[4] = {"", "", "", ""};
     // Nudge stores each panel's CENTRE as an offset from the canvas centre
     // (in canvas pixels). Default = auto-placed by apply_defaults() per

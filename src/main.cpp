@@ -322,7 +322,12 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                                    int panel_w = 64, int panel_h = 32,
                                    int chain = 2, int parallel = 1,
                                    const std::string& pinout = "adafruit_bonnet",
-                                   const std::string& color_order = "auto") {
+                                   const std::string& color_order = "auto",
+                                   const std::string& driver = "piomatter",
+                                   const std::string& hw_mapping = "adafruit-hat",
+                                   int gpio_slowdown = 2, int pwm_bits = 11,
+                                   int rp1_pio = 1,
+                                   const std::string& pixel_mapper = "") {
     std::string drv = bin_dir + "/../scripts/panel_driver.py";
     // Validate host-side — an unknown value would hit the driver's argparse
     // choices and exit, leaving the panels dark with only a log to explain.
@@ -330,12 +335,16 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
     std::string order = "auto";
     for (const char* o : kOrders)
         if (color_order == o) { order = color_order; break; }
+    std::string drv_backend = (driver == "hzeller") ? "hzeller" : "piomatter";
     std::string cw  = std::to_string(canvas_w);
     std::string chh = std::to_string(canvas_h);
     std::string pw  = std::to_string(panel_w);
     std::string ph  = std::to_string(panel_h);
     std::string ch  = std::to_string(chain);
     std::string par = std::to_string(parallel);
+    std::string gs  = std::to_string(gpio_slowdown);
+    std::string pb  = std::to_string(pwm_bits);
+    std::string rp  = std::to_string(rp1_pio);
     // Stop any existing driver and WAIT for it to actually exit before
     // relaunching. piomatter (RP1 PIO + DMA + /dev/mem) can't be initialised
     // by two processes at once, so an immediate relaunch races the dying
@@ -367,11 +376,18 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                "--chain", ch.c_str(), "--parallel", par.c_str(),
                "--pinout", pinout.c_str(),
                "--order", order.c_str(),
+               "--driver", drv_backend.c_str(),
+               "--hw-mapping", hw_mapping.c_str(),
+               "--gpio-slowdown", gs.c_str(),
+               "--pwm-bits", pb.c_str(),
+               "--rp1-pio", rp.c_str(),
+               "--pixel-mapper", pixel_mapper.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }
     std::cout << "[main] launched panel_driver.py pid=" << pid
-              << " (" << drv << ", canvas " << cw << "x" << chh
+              << " (" << drv << ", driver " << drv_backend
+              << ", canvas " << cw << "x" << chh
               << ", panel " << pw << "x" << ph
               << ", chain " << ch << ", parallel " << par << ")\n";
 }
@@ -1784,6 +1800,12 @@ int main(int argc, char* argv[]) {
             L.panel_count = jval(jh, "panel_count", L.panel_count);
             L.pinout      = jh.value("pinout",      L.pinout);
             L.color_order = jh.value("color_order", L.color_order);
+            L.driver        = jh.value("driver",        L.driver);
+            L.hw_mapping    = jh.value("hw_mapping",    L.hw_mapping);
+            L.gpio_slowdown = jval(jh, "gpio_slowdown", L.gpio_slowdown);
+            L.pwm_bits      = jval(jh, "pwm_bits",      L.pwm_bits);
+            L.rp1_pio       = jval(jh, "rp1_pio",       L.rp1_pio);
+            L.pixel_mapper  = jh.value("pixel_mapper",  L.pixel_mapper);
             if (jh.contains("panel_size_per") && jh["panel_size_per"].is_array())
                 for (size_t i = 0; i < jh["panel_size_per"].size() && i < 4; ++i)
                     if (jh["panel_size_per"][i].is_string())
@@ -2944,7 +2966,10 @@ int main(int argc, char* argv[]) {
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
                                    gpw, gph, gchain, gpar, pf_hub75.pinout,
-                                   pf_hub75.color_order);
+                                   pf_hub75.color_order, pf_hub75.driver,
+                                   pf_hub75.hw_mapping, pf_hub75.gpio_slowdown,
+                                   pf_hub75.pwm_bits, pf_hub75.rp1_pio,
+                                   pf_hub75.pixel_mapper);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -3204,7 +3229,10 @@ int main(int argc, char* argv[]) {
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
                                    gpw, gph, gchain, gpar, pf_hub75.pinout,
-                                   pf_hub75.color_order);
+                                   pf_hub75.color_order, pf_hub75.driver,
+                                   pf_hub75.hw_mapping, pf_hub75.gpio_slowdown,
+                                   pf_hub75.pwm_bits, pf_hub75.rp1_pio,
+                                   pf_hub75.pixel_mapper);
         }
     };
 
@@ -3739,7 +3767,9 @@ int main(int argc, char* argv[]) {
         // to release the PIO/DMA, then relaunches (see its comment).
         pf_launch_panel_driver(bin_dir, native_ctrl->canvas_width(),
             native_ctrl->canvas_height(), gpw, gph, gchain, gpar,
-            pf_hub75.pinout, pf_hub75.color_order);
+            pf_hub75.pinout, pf_hub75.color_order, pf_hub75.driver,
+            pf_hub75.hw_mapping, pf_hub75.gpio_slowdown, pf_hub75.pwm_bits,
+            pf_hub75.rp1_pio, pf_hub75.pixel_mapper);
         Notification n; n.type = NotifType::App;
         n.title = "Panel driver restarted";
         n.body  = "If panels stay dark, check /tmp/panel_driver.log";
@@ -4688,6 +4718,12 @@ int main(int argc, char* argv[]) {
             jh["panel_count"]      = L.panel_count;
             jh["pinout"]           = L.pinout;
             jh["color_order"]      = L.color_order;
+            jh["driver"]           = L.driver;
+            jh["hw_mapping"]       = L.hw_mapping;
+            jh["gpio_slowdown"]    = L.gpio_slowdown;
+            jh["pwm_bits"]         = L.pwm_bits;
+            jh["rp1_pio"]          = L.rp1_pio;
+            jh["pixel_mapper"]     = L.pixel_mapper;
             jh["panel_size_per"]   = json::array({L.panel_size_per[0], L.panel_size_per[1],
                                                   L.panel_size_per[2], L.panel_size_per[3]});
             jh["defaults_applied"] = L.defaults_applied;
