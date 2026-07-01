@@ -394,6 +394,26 @@
     "_uart_device_note": "Serial port for transport:'uart'. Pi hardware UART = /dev/ttyAMA0 (or your RP1 dtoverlay port). USB-UART adapter = its /dev/ttyUSB* — but prefer the stable by-id path so it survives replug/enumeration order, e.g. /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_XXXX-if00-port0 (run `ls -l /dev/serial/by-id/` to find yours). A CP2102 adapter shares its USB VID:PID with the SmartKnob, so the by-id path (keyed on the adapter's serial) avoids a /dev/ttyUSBn mix-up.",
     "uart_baud": 115200
   },
+  "bno086": {
+    "_about": "BNO086 (CEVA BNO08x family) 9-DOF sensor over I2C, using the vendored CEVA SH-2 library (vendor/sh2). Provides a magnetometer-referenced heading with NO yaw drift, and (with head_tracking) an AR/VR-stabilized quaternion for head tracking. Set imu_source to 'bno086' (or leave 'auto' — BNO086 is preferred over BNO055 when present). Wired to CM5 40-pin: SDA=GPIO2(pin3), SCL=GPIO3(pin5), VCC=3.3V, GND, plus INT and RST to any spare GPIO.",
+    "enabled": false,
+    "i2c_bus": "/dev/i2c-1",
+    "i2c_addr": 74,
+    "_i2c_addr_note": "74 = 0x4A (default). Use 75 (0x4B) if the SA0/ADR pin is tied high.",
+    "gpiochip": "/dev/gpiochip0",
+    "int_line": -1,
+    "_int_line_note": "GPIO line offset (BCM number on the Pi) of the BNO086 INT/data-ready pin (active-low). Strongly recommended for I2C. -1 = no INT wired (driver polls the bus each service tick).",
+    "rst_line": -1,
+    "_rst_line_note": "GPIO line offset of the BNO086 RST pin (active-low). -1 = no hardware reset (the driver just waits for the hub to boot).",
+    "report_interval_us": 10000,
+    "_report_interval_note": "Orientation report period in microseconds. 10000 = 100 Hz.",
+    "declination_deg": 0.0,
+    "heading_offset": 0.0,
+    "heading_invert": false,
+    "_heading_invert_note": "Flip yaw->heading direction if the compass turns the wrong way for your mounting.",
+    "head_tracking": false,
+    "_head_tracking_note": "When true, the BNO086's roll/pitch/yaw also drive the imu_pose head-tracking path (timewarp + pin-in-space), taking over from the VITURE glasses' built-in IMU. Recenter/tare from Compass > Recenter Head Tracking."
+  },
   "post_process": {
     "edge_enabled": false,
     "edge_strength": 1.0,

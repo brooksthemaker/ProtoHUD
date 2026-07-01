@@ -262,6 +262,7 @@ set(SOURCES
     src/post_process.cpp
     src/sensor/mpu9250.cpp
     src/sensor/bno055.cpp
+    src/sensor/bno08x.cpp
     src/sensor/mpr121_boop_sensor.cpp
     src/sensor/light_sensor.cpp
     src/accessory/led_strip.cpp
@@ -284,10 +285,18 @@ set(SOURCES
     src/hud/toast_renderer.cpp
 )
 
+# ── CEVA SH-2 library (vendored, Apache-2.0) — BNO086/BNO08x driver backend ──
+# Plain C sources; built as a small static lib and linked into ProtoHUD. The
+# src/sensor/bno08x.cpp driver provides the I2C + INT/RST HAL around it.
+file(GLOB SH2_SOURCES "${CMAKE_SOURCE_DIR}/vendor/sh2/*.c")
+add_library(sh2 STATIC ${SH2_SOURCES})
+target_include_directories(sh2 PUBLIC "${CMAKE_SOURCE_DIR}/vendor/sh2")
+
 add_executable(protohud ${SOURCES})
 
 target_include_directories(protohud PRIVATE
     src/
+    ${CMAKE_SOURCE_DIR}/vendor/sh2
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
     ${stb_SOURCE_DIR}
@@ -308,6 +317,7 @@ target_include_directories(protohud PRIVATE
 target_link_libraries(protohud PRIVATE
     imgui
     nanovg
+    sh2
     qrcodegen_cpp
     glasses
     protoface_native

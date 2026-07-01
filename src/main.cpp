@@ -48,6 +48,7 @@
 #include "post_process.h"
 #include "sensor/mpu9250.h"
 #include "sensor/bno055.h"
+#include "sensor/bno08x.h"
 #include "sensor/light_sensor.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
@@ -210,6 +211,7 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
         return slot.last_us > 0 && (now_us - slot.last_us) < kStaleUs;
     };
     switch (s.imu_source) {
+    case AppState::ImuSource::Bno08x:  return s.imu_bno08x.heading_deg;
     case AppState::ImuSource::Bno055:  return s.imu_bno.heading_deg;
     case AppState::ImuSource::Mpu9250: return s.imu_mpu.heading_deg;
     case AppState::ImuSource::Viture:  return s.imu_viture.heading_deg;
@@ -217,10 +219,13 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
     case AppState::ImuSource::Auto:
     default:
         // Best fresh source wins. If nothing's fresh, hold the most recent
-        // value rather than snapping to zero.
+        // value rather than snapping to zero. BNO086 (mag-referenced, no yaw
+        // drift) is preferred over the BNO055 when present.
+        if (fresh(s.imu_bno08x))             return s.imu_bno08x.heading_deg;
         if (fresh(s.imu_bno))                return s.imu_bno   .heading_deg;
         if (fresh(s.imu_mpu))                return s.imu_mpu   .heading_deg;
         if (fresh(s.imu_viture))             return s.imu_viture.heading_deg;
+        if (s.imu_bno08x.last_us > 0)        return s.imu_bno08x.heading_deg;
         if (s.imu_bno   .last_us > 0)        return s.imu_bno   .heading_deg;
         if (s.imu_mpu   .last_us > 0)        return s.imu_mpu   .heading_deg;
         if (s.imu_viture.last_us > 0)        return s.imu_viture.heading_deg;
@@ -1573,13 +1578,34 @@ int main(int argc, char* argv[]) {
     bno_cfg.calib_path =
         (fs::path(cfg_path).parent_path() / "bno055_calib.bin").string();
 
+    // BNO086 (SH-2, over I2C). Magnetometer-referenced heading (no yaw drift)
+    // plus, when head_tracking is on, roll/pitch/yaw for the imu_pose head
+    // tracking path. INT/RST GPIO offsets are optional (INT-less falls back to
+    // bus polling; RST-less skips the hardware reset).
+    Bno08x::Config bno08x_cfg;
+    if (cfg.contains("bno086")) {
+        auto& jb = cfg["bno086"];
+        bno08x_cfg.enabled            = jval(jb, "enabled",            false);
+        bno08x_cfg.i2c_bus            = jb.value("i2c_bus", std::string("/dev/i2c-1"));
+        bno08x_cfg.i2c_addr           = jval(jb, "i2c_addr",           0x4A);
+        bno08x_cfg.gpiochip           = jb.value("gpiochip", std::string("/dev/gpiochip0"));
+        bno08x_cfg.int_line           = jval(jb, "int_line",           -1);
+        bno08x_cfg.rst_line           = jval(jb, "rst_line",           -1);
+        bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 10000);
+        bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
+        bno08x_cfg.heading_offset     = jval(jb, "heading_offset",     0.0f);
+        bno08x_cfg.heading_invert     = jval(jb, "heading_invert",     false);
+        bno08x_cfg.head_tracking      = jval(jb, "head_tracking",      false);
+    }
+
     // IMU source selector — replaces the old "Viture always wins, MPU is
     // backup" hardcoded priority. "auto" picks the best fresh source per
     // frame (BNO055 > MPU9250 > Viture); explicit choices force that
     // source even if others are connected.
     if (cfg.contains("imu_source")) {
         const std::string s = cfg.value("imu_source", std::string("auto"));
-        if      (s == "bno055" || s == "bno")     state.imu_source = AppState::ImuSource::Bno055;
+        if      (s == "bno086" || s == "bno08x")  state.imu_source = AppState::ImuSource::Bno08x;
+        else if (s == "bno055" || s == "bno")     state.imu_source = AppState::ImuSource::Bno055;
         else if (s == "mpu9250" || s == "mpu")    state.imu_source = AppState::ImuSource::Mpu9250;
         else if (s == "viture"  || s == "xr")     state.imu_source = AppState::ImuSource::Viture;
         else if (s == "none"    || s == "off")    state.imu_source = AppState::ImuSource::None;
@@ -2286,13 +2312,17 @@ int main(int argc, char* argv[]) {
     // IMU → compass heading + spatial audio head tracking
     // Timestamp lets the MPU-9250 backup detect when the XR glasses go offline.
     std::atomic<int64_t> last_xr_imu_us { 0 };
+    // When a BNO086 is the head-tracking source it owns imu_pose; the VITURE
+    // callback then only publishes its heading (below), not the pose, so the
+    // two IMUs don't fight over the head orientation.
+    std::atomic<bool> bno08x_owns_pose { false };
 
-    xr.on_imu_pose([&state, &last_xr_imu_us](float roll, float pitch, float yaw) {
+    xr.on_imu_pose([&state, &last_xr_imu_us, &bno08x_owns_pose](float roll, float pitch, float yaw) {
         int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         last_xr_imu_us = now_us;
         std::lock_guard<std::mutex> lk(state.mtx);
-        state.imu_pose = { roll, pitch, yaw };
+        if (!bno08x_owns_pose.load()) state.imu_pose = { roll, pitch, yaw };
 
         // Publish to the IMU bus so the heading picker can consider Viture
         // alongside the dedicated IMU sensors. Invert applied here so the
@@ -2426,6 +2456,34 @@ int main(int argc, char* argv[]) {
     });
     if (!bno055.start() && bno_cfg.enabled)
         std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
+
+    // ── BNO086 (SH-2, I2C) ───────────────────────────────────────────────────
+    // Mag-referenced heading → imu_bno08x (compass), and when head_tracking is
+    // enabled, roll/pitch/yaw → imu_pose (the head-tracking path), taking over
+    // pose ownership from the VITURE IMU.
+    Bno08x bno086(bno08x_cfg);
+    bno086.set_heading_callback([&state](float heading) {
+        int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.imu_bno08x.heading_deg = heading;
+        state.imu_bno08x.last_us     = now_us;
+        state.imu_bno08x.calibrated  = true;
+    });
+    bno086.set_orientation_callback([&state](float roll, float pitch, float yaw) {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.imu_pose = { roll, pitch, yaw };   // owns pose while head_tracking on
+    });
+    bno086.set_sample_callback([&state](const Bno08x::Sample& s) {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        auto& d = state.imu_data;
+        d.xr_roll = s.euler_deg[0]; d.xr_pitch = s.euler_deg[1]; d.xr_yaw = s.euler_deg[2];
+    });
+    if (bno086.start()) {
+        bno08x_owns_pose.store(bno08x_cfg.head_tracking);
+    } else if (bno08x_cfg.enabled) {
+        std::cerr << "[main] BNO086 IMU unavailable\n";
+    }
 
     // ── Boop sensor ──────────────────────────────────────────────────────────
     // Polls on its own thread; the on_boop callback fires from there and
@@ -3695,6 +3753,7 @@ int main(int argc, char* argv[]) {
     menu_ctx.menu_sys_pp = &menu_ptr;
     menu_ctx.mpu9250 = &mpu9250;
     menu_ctx.bno055  = &bno055;
+    menu_ctx.bno08x  = &bno086;
     menu_ctx.gif_names = &gif_names;
     menu_ctx.bt_mon = &bt_mon;
     menu_ctx.sys_panel_active   = &sys_panel_active;
@@ -5057,6 +5116,7 @@ int main(int argc, char* argv[]) {
         {
             const char* s = "auto";
             switch (state.imu_source) {
+            case AppState::ImuSource::Bno08x:  s = "bno086";  break;
             case AppState::ImuSource::Bno055:  s = "bno055";  break;
             case AppState::ImuSource::Mpu9250: s = "mpu9250"; break;
             case AppState::ImuSource::Viture:  s = "viture";  break;

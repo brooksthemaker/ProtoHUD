@@ -35,6 +35,7 @@ class AudioEngine;
 class AndroidMirror;
 class Mpu9250;
 class Bno055;
+class Bno08x;
 class BtMonitor;
 class ProfileManager;
 class BackgroundLibrary;
@@ -238,6 +239,7 @@ struct MenuBuildContext {
     MenuSystem**     menu_sys_pp = nullptr;
     Mpu9250*         mpu9250 = nullptr;
     Bno055*          bno055  = nullptr;
+    Bno08x*          bno08x  = nullptr;
     const std::vector<std::string>* gif_names = nullptr;
     BtMonitor*       bt_mon = nullptr;
     bool*            sys_panel_active   = nullptr;
