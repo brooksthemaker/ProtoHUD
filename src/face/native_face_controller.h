@@ -51,6 +51,12 @@ public:
     // Used by the Layered Effects builder in the menu so the user isn't
     // limited to the canned effect_id mapping.
     void set_effect_json(const nlohmann::json& spec);
+    // Read back the effect currently applied to the panels (the running
+    // particle spec, restored from protoface_state.json at boot). Lets the
+    // menu's Layered builder seed its editable fields from what's actually
+    // rendering instead of showing empty defaults. Returns "none" if no panel
+    // has a particle system yet.
+    nlohmann::json get_effect_json() const;
     void set_face(uint8_t face_id) override;
     void play_gif(uint8_t gif_id) override;
     void set_brightness(uint8_t value) override;

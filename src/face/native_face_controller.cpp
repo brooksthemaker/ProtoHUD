@@ -488,6 +488,13 @@ void NativeFaceController::set_effect_json(const nlohmann::json& spec) {
     write_state_file(snap);
 }
 
+nlohmann::json NativeFaceController::get_effect_json() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_)
+        if (pn.particles) return pn.particles_spec;
+    return nlohmann::json("none");
+}
+
 void NativeFaceController::set_face(uint8_t face_id) {
     std::unique_lock<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)

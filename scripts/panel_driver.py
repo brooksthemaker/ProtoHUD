@@ -3,19 +3,18 @@
 Minimal HUB75 frame-pusher for ProtoHUD's native face renderer.
 
 ProtoHUD renders the LED face in C++ and writes the canvas to a shared-memory
-segment (ShmPusherOutput). This shim only reads that segment and pushes each new
-frame to the panels via Adafruit Piomatter — the proven driver path — so no
-Python rendering daemon is needed. ProtoHUD launches this when its panel output
-mode is "shm".
+segment (ShmPusherOutput). This shim reads that segment and pushes each new frame
+to the panels via Adafruit Piomatter (the RP1 PIO library) — no extra system
+setup. ProtoHUD launches this when its panel output mode is "shm".
+
+Camera Mode: with --camera-mode, the panel is driven with extra temporal
+dithering / bit planes so the face reads cleanly on video (less banding/flicker).
+piomatter's PIO+DMA refresh is already hardware-stable; this just tunes the
+brightness/dither tradeoff. It's a "tune and test" knob, not a guaranteed fix.
 
 Shared-memory format (matches src/serial/shm_frame_reader.h / ShmPusherOutput):
     byte 0      uint8 sequence counter (wraps at 256)
     bytes 1..N  W*H RGB, row-major (R G B ...)
-
-Usage: panel_driver.py [--canvas-w 128] [--canvas-h 32]
-                       [--panel-w 64] [--panel-h 32] [--chain 2] [--parallel 1]
-                       [--pinout adafruit_bonnet] [--order auto]
-                       [--shm /dev/shm/protoface_frame]
 """
 
 import argparse
@@ -40,18 +39,12 @@ PINOUTS = {
     'active3_bgr':         piomatter.Pinout.Active3BGR,
 }
 
-# Channel-order overrides: which SOURCE channel feeds each of the panel's
-# R, G, B inputs. 'auto' keeps the per-pinout default below (Active-3 takes
-# a (G,B,R) rotate, the Adafruit bonnet straight RGB). Panels/bonnets with
-# odd wiring pick whichever order makes the colors look right — red/green
-# swapped is usually 'grb', red/blue swapped 'bgr'.
+# Channel-order overrides: which SOURCE channel feeds each of the panel's R, G, B
+# inputs. Applied in numpy, so piomatter's own channel order stays straight RGB
+# and the swap lives in one place. red/green swapped is usually 'grb', red/blue 'bgr'.
 ORDERS = {
-    'rgb': [0, 1, 2],
-    'rbg': [0, 2, 1],
-    'grb': [1, 0, 2],
-    'gbr': [1, 2, 0],
-    'brg': [2, 0, 1],
-    'bgr': [2, 1, 0],
+    'rgb': [0, 1, 2], 'rbg': [0, 2, 1], 'grb': [1, 0, 2],
+    'gbr': [1, 2, 0], 'brg': [2, 0, 1], 'bgr': [2, 1, 0],
 }
 
 
@@ -74,6 +67,13 @@ def main():
     ap.add_argument('--order', default='auto', choices=['auto'] + sorted(ORDERS),
                     help='panel color-channel order; auto = per-pinout default, '
                          'or force rgb/rbg/grb/gbr/brg/bgr')
+    # Camera Mode: extra temporal dithering / bit planes for clean on-camera output.
+    ap.add_argument('--camera-mode', type=int, default=0,
+                    help='1 = camera-friendly planes (more temporal dithering)')
+    ap.add_argument('--camera-planes', type=int, default=10,
+                    help='PWM bit planes used in camera mode')
+    ap.add_argument('--camera-temporal-planes', type=int, default=8,
+                    help='temporal-dither planes used in camera mode')
     ap.add_argument('--shm', default='/dev/shm/protoface_frame')
     ap.add_argument('--fps', type=float, default=60.0, help='poll rate cap')
     args = ap.parse_args()
@@ -82,14 +82,13 @@ def main():
     size = 1 + W * H * 3
     print(f"[panel_driver] starting: canvas {W}x{H}, panel {args.panel_w}x{args.panel_h}, "
           f"chain {args.chain}, parallel {args.parallel}, pinout {args.pinout}, "
-          f"order {args.order}, shm {args.shm}", flush=True)
+          f"order {args.order}, camera_mode {args.camera_mode}, shm {args.shm}", flush=True)
 
     # Piomatter geometry depends on the bonnet. The Active-3 board drives parallel
     # chains that share address lines, so it needs the multilane mapper. The
-    # single-connector Adafruit bonnet has one output with the panels daisy-
-    # chained (serpentine for multi-row), so it uses a plain geometry whose
-    # width/height are the physical canvas dimensions.
-    n_addr  = addr_lines(args.panel_h)
+    # single-connector Adafruit bonnet has one daisy-chained output, so it uses a
+    # plain geometry whose width/height are the physical canvas dimensions.
+    n_addr = addr_lines(args.panel_h)
     if args.pinout.startswith('active3'):
         n_lanes  = 2 * args.parallel
         width    = args.panel_w * args.chain
@@ -98,15 +97,25 @@ def main():
         geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
                                       n_planes=10, n_temporal_planes=4,
                                       map=pixelmap, n_lanes=n_lanes)
-        chan = [1, 2, 0]    # Active-3 panels display R->G->B rotated; resend (G,B,R)
+        chan = [1, 2, 0]      # Active-3 panels display R->G->B rotated; resend (G,B,R)
     else:
         width    = args.panel_w * args.chain
         height   = args.panel_h * args.parallel
-        geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
-                                      rotation=piomatter.Orientation.Normal)
-        chan = [0, 1, 2]    # straight RGB; switch to *_bgr pinout if red/blue swap
+        if args.camera_mode:
+            # More temporal dithering + explicit bit planes smooths the panel on
+            # video (piomatter's PIO refresh is already stable; this tunes the
+            # brightness/dither tradeoff). Falls back to library defaults when off.
+            geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
+                                          n_planes=args.camera_planes,
+                                          n_temporal_planes=args.camera_temporal_planes,
+                                          rotation=piomatter.Orientation.Normal)
+        else:
+            geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
+                                          rotation=piomatter.Orientation.Normal)
+        chan = [0, 1, 2]      # straight RGB; switch to *_bgr pinout if red/blue swap
     if args.order != 'auto':
         chan = ORDERS[args.order]   # explicit channel order beats the pinout default
+
     fb = np.zeros((height, width, 3), dtype=np.uint8)
     matrix = piomatter.PioMatter(colorspace=piomatter.Colorspace.RGB888Packed,
                                  pinout=PINOUTS[args.pinout],
@@ -115,14 +124,13 @@ def main():
 
     # The renderer should hand us a canvas that exactly matches the physical
     # framebuffer (ProtoHUD derives --panel-*/--chain/--parallel from the same
-    # layout that sizes the canvas). If they ever disagree — e.g. a mixed
-    # per-panel-size layout that can't be a uniform chain — copy the overlapping
-    # region instead of letting the blit raise and kill the driver (which leaves
-    # the panels dark). Warn once so the mismatch is visible in the log.
+    # layout that sizes the canvas). If they disagree — e.g. a mixed per-panel-size
+    # layout that isn't a uniform chain — copy the overlapping region instead of
+    # letting the blit raise and kill the driver (panels would go dark). Warn once.
     if (H, W) != (height, width):
         print(f"[panel_driver] WARNING: canvas {W}x{H} != framebuffer "
-              f"{width}x{height}; copying overlap {min(W, width)}x"
-              f"{min(H, height)}", flush=True)
+              f"{width}x{height}; copying overlap {min(W, width)}x{min(H, height)}",
+              flush=True)
     copy_h, copy_w = min(H, height), min(W, width)
 
     # Wait for ProtoHUD to create the shm segment.
@@ -148,8 +156,6 @@ def main():
                 last_seq = seq
                 buf = np.frombuffer(mm, dtype=np.uint8, count=W * H * 3, offset=1)
                 frame = buf.reshape((H, W, 3))
-                # Channel order is per-bonnet (see chan above): Active-3 needs a
-                # (G,B,R) rotate; the Adafruit bonnet takes straight RGB.
                 fb[:copy_h, :copy_w] = frame[:copy_h, :copy_w, chan]
                 matrix.show()
             time.sleep(period)

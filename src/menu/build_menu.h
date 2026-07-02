@@ -35,6 +35,7 @@ class AudioEngine;
 class AndroidMirror;
 class Mpu9250;
 class Bno055;
+class Bno08x;
 class BtMonitor;
 class ProfileManager;
 class BackgroundLibrary;
@@ -68,6 +69,12 @@ struct PfHub75Layout {
     // swapped is usually fixed by "grb", red/blue by "bgr"). Passed to
     // panel_driver.py as --order; applied on driver (re)launch.
     std::string color_order     = "auto";
+    // Camera-friendly mode (piomatter): drives the panel with extra temporal
+    // dithering / bit planes so the face reads cleanly on video (less banding).
+    // A "tune and test" knob — piomatter's PIO refresh is already stable.
+    bool        camera_mode            = false;
+    int         camera_planes          = 10;  // PWM bit planes in camera mode
+    int         camera_temporal_planes = 8;   // temporal-dither planes in camera mode
     std::string panel_size_per[4] = {"", "", "", ""};
     // Nudge stores each panel's CENTRE as an offset from the canvas centre
     // (in canvas pixels). Default = auto-placed by apply_defaults() per
@@ -219,6 +226,7 @@ struct MenuBuildContext {
     MenuSystem**     menu_sys_pp = nullptr;
     Mpu9250*         mpu9250 = nullptr;
     Bno055*          bno055  = nullptr;
+    Bno08x*          bno08x  = nullptr;
     const std::vector<std::string>* gif_names = nullptr;
     BtMonitor*       bt_mon = nullptr;
     bool*            sys_panel_active   = nullptr;
@@ -320,6 +328,11 @@ struct MenuBuildContext {
     // the effect_id mapping. Used by the Layered Effects builder so the
     // user can compose multi-layer particle configs at runtime.
     std::function<void(const nlohmann::json&)> pf_set_effect_json;
+    // Reads back the renderer's current particle spec (the effect actually
+    // running, restored from protoface_state.json at boot). Lets the Layered
+    // builder seed its editable fields from what's live instead of showing
+    // empty default layers. Null on non-native backends.
+    std::function<nlohmann::json()> pf_get_effect_json;
     // Toggle expression-coupled effects (mood preset follows the face) and
     // the config-backed flag the menu reads. Null on non-native backends.
     std::function<void(bool)> pf_set_expr_effects;

@@ -350,6 +350,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     double* pf_preview_duration_p = ctx.pf_preview_duration_p;
     std::function<void()> pf_anim_push = ctx.pf_anim_push;
     std::function<void(const nlohmann::json&)> pf_set_effect_json = ctx.pf_set_effect_json;
+    std::function<nlohmann::json()> pf_get_effect_json = ctx.pf_get_effect_json;
     std::function<void(bool)> pf_set_expr_effects = ctx.pf_set_expr_effects;
     bool* pf_expr_effects_p = ctx.pf_expr_effects_p;
     std::shared_ptr<std::function<void()>> pf_live_tick = ctx.pf_live_tick;
@@ -1076,6 +1077,28 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.branches = jl.value("branches", 0.35f);
         }
     };
+
+    // Seed the layered builder from the effect that's actually running, once,
+    // the first time the Face menu is built (i.e. at boot). The renderer
+    // restores the last-used effect from protoface_state.json, but pf_layered
+    // is a static default-constructed struct, so without this the Custom page
+    // shows empty layers even though the panels are already rendering that
+    // effect. Guarded by a static flag so later menu rebuilds never stomp the
+    // user's in-progress edits, and gated on a real {"layers":[...]} spec so a
+    // single-effect / "none" running spec can't blank the builder's defaults.
+    {
+        static bool pf_layered_seeded = false;
+        if (!pf_layered_seeded) {
+            pf_layered_seeded = true;
+            if (pf_get_effect_json) {
+                nlohmann::json running = pf_get_effect_json();
+                if (running.is_object() && running.contains("layers")
+                    && running["layers"].is_array()
+                    && !running["layers"].empty())
+                    load_layered_spec(running);
+            }
+        }
+    }
 
     // Live Preview — when on, edits in the builder/effect-settings apply
     // continuously. ParticleSystem::set_effect updates params in place when the
@@ -1943,6 +1966,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     // ±32 px to compensate for tiny mounting offsets between physical panels.
     MenuItem pf_hub75_layout_item;
     MenuItem pf_color_order_item;
+    MenuItem pf_camera_mode_item;
     if (pf_hub75_p) {
         auto* H = pf_hub75_p;
         // String picker that also reapplies the auto-placed centre offsets
@@ -2261,6 +2285,24 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 return pf_backend_p && *pf_backend_p == "hub75";
             };
         }
+        {
+            // Camera Mode (piomatter): drives the panels with extra temporal
+            // dithering / bit planes so the face reads cleanly on video (less
+            // banding/flicker). Relaunches the panel driver, same as Color Order.
+            auto restart = pf_restart_renderer;
+            pf_camera_mode_item = with_desc(
+                toggle("Camera Mode (flicker-free)",
+                    [H]{ return H->camera_mode; },
+                    [H, restart](bool v){ H->camera_mode = v; if (restart) restart(); }),
+                "Drives the HUB75 panels with extra temporal dithering / bit "
+                "planes so the face doesn't band or flicker when filmed. A "
+                "tune-and-test knob (piomatter's PIO refresh is already stable); "
+                "fine-tune camera_planes / camera_temporal_planes in config if "
+                "needed. Restarts the panel driver so it applies immediately.");
+            pf_camera_mode_item.visible_fn = [pf_backend_p]{
+                return pf_backend_p && *pf_backend_p == "hub75";
+            };
+        }
         for (auto& it : nudge_items) hub_items.push_back(std::move(it));
         hub_items.push_back(with_desc(
             leaf("Reset All Positions",
@@ -2299,6 +2341,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     };
     // HUB75 panel wiring fix-up — hidden on other backends.
     if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_color_order_item));
+    if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_camera_mode_item));
     if (pf_restart_renderer) {
         pf_hardware_menu.push_back(with_desc(
             menu_shared::restart_face_renderer_leaf(pf_restart_renderer,

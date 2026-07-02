@@ -772,11 +772,12 @@ struct AppState {
     // its own ImuSlot below; pick_imu_heading(state, now_us) in main.cpp
     // chooses the active one per frame based on this enum + slot freshness.
     enum class ImuSource : uint8_t {
-        Auto    = 0,   // best fresh source in priority order: BNO055 > MPU9250 > Viture
+        Auto    = 0,   // best fresh source in priority order: BNO08x > BNO055 > MPU9250 > Viture
         Bno055  = 1,
         Mpu9250 = 2,
         Viture  = 3,
         None    = 4,   // hold last value, ignore live updates
+        Bno08x  = 5,   // BNO086 (SH-2), mag-referenced heading + head tracking
     };
     ImuSource imu_source = ImuSource::Auto;
 
@@ -788,6 +789,7 @@ struct AppState {
     ImuSlot imu_bno;
     ImuSlot imu_mpu;
     ImuSlot imu_viture;
+    ImuSlot imu_bno08x;   // BNO086 heading slot (mag-referenced)
 
     // Legacy HUD chrome (edge/corner indicators: compass tape, health sides, face
     // indicator, corner clock/timer, LoRa message list). Off = show only the new
