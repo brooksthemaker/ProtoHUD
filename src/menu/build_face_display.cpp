@@ -1925,6 +1925,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     MenuItem pf_hub75_layout_item;
     MenuItem pf_color_order_item;
     MenuItem pf_camera_mode_item;
+    MenuItem pf_driver_item;
     if (pf_hub75_p) {
         auto* H = pf_hub75_p;
         // String picker that also reapplies the auto-placed centre offsets
@@ -2244,6 +2245,38 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             };
         }
         {
+            // Panel driver backend selector: piomatter (default, fixed pinouts)
+            // vs hzeller (custom pin mappings + Camera Mode). Switching relaunches
+            // the panel driver with the new --driver; the hzeller-only options
+            // (e.g. Camera Mode) appear/hide with the choice.
+            auto restart = pf_restart_renderer;
+            auto driver_pick = [H, restart](const char* lbl, const char* v) {
+                return leaf_sel(lbl,
+                    [H, restart, v]{ H->driver = v; if (restart) restart(); },
+                    [H, v]{ return H->driver == v; });
+            };
+            std::vector<MenuItem> driver_items = {
+                driver_pick("piomatter (default)", "piomatter"),
+                driver_pick("hzeller (custom pins, Camera Mode)", "hzeller"),
+            };
+            pf_driver_item = with_desc(
+                submenu("Panel Driver", std::move(driver_items)),
+                "Which HUB75 driver clocks the panels. 'piomatter' (default) is "
+                "the Adafruit RP1 PIO library: fixed pinouts, no extra setup. "
+                "'hzeller' (rpi-rgb-led-matrix) enables custom pin mappings, up "
+                "to 6 parallel chains, and Camera Mode (flicker-free capture) - "
+                "but needs the rgbmatrix + Pillow packages, onboard sound "
+                "disabled, and root (see docs/hub75-hzeller.md). Selecting "
+                "relaunches the panel driver; if hzeller isn't installed the "
+                "panels go dark - check /tmp/panel_driver.log.");
+            pf_driver_item.label_fn = [H]{
+                return std::string("Panel Driver  (") + H->driver + ")";
+            };
+            pf_driver_item.visible_fn = [pf_backend_p]{
+                return pf_backend_p && *pf_backend_p == "hub75";
+            };
+        }
+        {
             // Camera Mode (hzeller only): caps the refresh + enables temporal
             // dithering so the face doesn't band/flicker on video. Applies by
             // relaunching the panel driver, same as Color Order.
@@ -2298,6 +2331,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                   "Persists to config.json so the next launch starts here."),
     };
     // HUB75 panel wiring fix-up — hidden on other backends.
+    if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_driver_item));
     if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_color_order_item));
     if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_camera_mode_item));
     if (pf_restart_renderer) {
