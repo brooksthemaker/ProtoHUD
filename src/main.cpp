@@ -48,6 +48,7 @@
 #include "post_process.h"
 #include "sensor/mpu9250.h"
 #include "sensor/bno055.h"
+#include "sensor/bno08x.h"
 #include "sensor/light_sensor.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
@@ -210,6 +211,7 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
         return slot.last_us > 0 && (now_us - slot.last_us) < kStaleUs;
     };
     switch (s.imu_source) {
+    case AppState::ImuSource::Bno08x:  return s.imu_bno08x.heading_deg;
     case AppState::ImuSource::Bno055:  return s.imu_bno.heading_deg;
     case AppState::ImuSource::Mpu9250: return s.imu_mpu.heading_deg;
     case AppState::ImuSource::Viture:  return s.imu_viture.heading_deg;
@@ -217,10 +219,13 @@ static float pick_imu_heading(const AppState& s, int64_t now_us) {
     case AppState::ImuSource::Auto:
     default:
         // Best fresh source wins. If nothing's fresh, hold the most recent
-        // value rather than snapping to zero.
+        // value rather than snapping to zero. BNO086 (mag-referenced, no yaw
+        // drift) is preferred over the BNO055 when present.
+        if (fresh(s.imu_bno08x))             return s.imu_bno08x.heading_deg;
         if (fresh(s.imu_bno))                return s.imu_bno   .heading_deg;
         if (fresh(s.imu_mpu))                return s.imu_mpu   .heading_deg;
         if (fresh(s.imu_viture))             return s.imu_viture.heading_deg;
+        if (s.imu_bno08x.last_us > 0)        return s.imu_bno08x.heading_deg;
         if (s.imu_bno   .last_us > 0)        return s.imu_bno   .heading_deg;
         if (s.imu_mpu   .last_us > 0)        return s.imu_mpu   .heading_deg;
         if (s.imu_viture.last_us > 0)        return s.imu_viture.heading_deg;
@@ -322,7 +327,15 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                                    int panel_w = 64, int panel_h = 32,
                                    int chain = 2, int parallel = 1,
                                    const std::string& pinout = "adafruit_bonnet",
-                                   const std::string& color_order = "auto") {
+                                   const std::string& color_order = "auto",
+                                   const std::string& driver = "piomatter",
+                                   const std::string& hw_mapping = "adafruit-hat",
+                                   int gpio_slowdown = 2, int pwm_bits = 11,
+                                   int rp1_pio = 1,
+                                   const std::string& pixel_mapper = "",
+                                   bool camera_mode = false, int camera_refresh_hz = 100,
+                                   int brightness = 100, int pwm_lsb_ns = 0,
+                                   int pwm_dither_bits = 0, int limit_refresh_hz = 0) {
     std::string drv = bin_dir + "/../scripts/panel_driver.py";
     // Validate host-side — an unknown value would hit the driver's argparse
     // choices and exit, leaving the panels dark with only a log to explain.
@@ -330,12 +343,25 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
     std::string order = "auto";
     for (const char* o : kOrders)
         if (color_order == o) { order = color_order; break; }
+    std::string drv_backend = (driver == "hzeller") ? "hzeller" : "piomatter";
     std::string cw  = std::to_string(canvas_w);
     std::string chh = std::to_string(canvas_h);
     std::string pw  = std::to_string(panel_w);
     std::string ph  = std::to_string(panel_h);
     std::string ch  = std::to_string(chain);
     std::string par = std::to_string(parallel);
+    std::string gs  = std::to_string(gpio_slowdown);
+    std::string pb  = std::to_string(pwm_bits);
+    std::string rp  = std::to_string(rp1_pio);
+    // Camera mode caps the refresh and forces temporal dithering (>=2 bits) so
+    // the panels don't band on video; otherwise the raw knobs apply as-is.
+    int eff_limit  = camera_mode ? camera_refresh_hz : limit_refresh_hz;
+    int eff_dither = camera_mode ? (pwm_dither_bits > 0 ? pwm_dither_bits : 2)
+                                 : pwm_dither_bits;
+    std::string br  = std::to_string(brightness);
+    std::string lsb = std::to_string(pwm_lsb_ns);
+    std::string dth = std::to_string(eff_dither);
+    std::string lim = std::to_string(eff_limit);
     // Stop any existing driver and WAIT for it to actually exit before
     // relaunching. piomatter (RP1 PIO + DMA + /dev/mem) can't be initialised
     // by two processes at once, so an immediate relaunch races the dying
@@ -367,11 +393,22 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                "--chain", ch.c_str(), "--parallel", par.c_str(),
                "--pinout", pinout.c_str(),
                "--order", order.c_str(),
+               "--driver", drv_backend.c_str(),
+               "--hw-mapping", hw_mapping.c_str(),
+               "--gpio-slowdown", gs.c_str(),
+               "--pwm-bits", pb.c_str(),
+               "--rp1-pio", rp.c_str(),
+               "--pixel-mapper", pixel_mapper.c_str(),
+               "--brightness", br.c_str(),
+               "--pwm-lsb-ns", lsb.c_str(),
+               "--pwm-dither-bits", dth.c_str(),
+               "--limit-refresh", lim.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }
     std::cout << "[main] launched panel_driver.py pid=" << pid
-              << " (" << drv << ", canvas " << cw << "x" << chh
+              << " (" << drv << ", driver " << drv_backend
+              << ", canvas " << cw << "x" << chh
               << ", panel " << pw << "x" << ph
               << ", chain " << ch << ", parallel " << par << ")\n";
 }
@@ -1541,13 +1578,34 @@ int main(int argc, char* argv[]) {
     bno_cfg.calib_path =
         (fs::path(cfg_path).parent_path() / "bno055_calib.bin").string();
 
+    // BNO086 (SH-2, over I2C). Magnetometer-referenced heading (no yaw drift)
+    // plus, when head_tracking is on, roll/pitch/yaw for the imu_pose head
+    // tracking path. INT/RST GPIO offsets are optional (INT-less falls back to
+    // bus polling; RST-less skips the hardware reset).
+    Bno08x::Config bno08x_cfg;
+    if (cfg.contains("bno086")) {
+        auto& jb = cfg["bno086"];
+        bno08x_cfg.enabled            = jval(jb, "enabled",            false);
+        bno08x_cfg.i2c_bus            = jb.value("i2c_bus", std::string("/dev/i2c-1"));
+        bno08x_cfg.i2c_addr           = jval(jb, "i2c_addr",           0x4A);
+        bno08x_cfg.gpiochip           = jb.value("gpiochip", std::string("/dev/gpiochip0"));
+        bno08x_cfg.int_line           = jval(jb, "int_line",           -1);
+        bno08x_cfg.rst_line           = jval(jb, "rst_line",           -1);
+        bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 10000);
+        bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
+        bno08x_cfg.heading_offset     = jval(jb, "heading_offset",     0.0f);
+        bno08x_cfg.heading_invert     = jval(jb, "heading_invert",     false);
+        bno08x_cfg.head_tracking      = jval(jb, "head_tracking",      false);
+    }
+
     // IMU source selector — replaces the old "Viture always wins, MPU is
     // backup" hardcoded priority. "auto" picks the best fresh source per
     // frame (BNO055 > MPU9250 > Viture); explicit choices force that
     // source even if others are connected.
     if (cfg.contains("imu_source")) {
         const std::string s = cfg.value("imu_source", std::string("auto"));
-        if      (s == "bno055" || s == "bno")     state.imu_source = AppState::ImuSource::Bno055;
+        if      (s == "bno086" || s == "bno08x")  state.imu_source = AppState::ImuSource::Bno08x;
+        else if (s == "bno055" || s == "bno")     state.imu_source = AppState::ImuSource::Bno055;
         else if (s == "mpu9250" || s == "mpu")    state.imu_source = AppState::ImuSource::Mpu9250;
         else if (s == "viture"  || s == "xr")     state.imu_source = AppState::ImuSource::Viture;
         else if (s == "none"    || s == "off")    state.imu_source = AppState::ImuSource::None;
@@ -1784,6 +1842,18 @@ int main(int argc, char* argv[]) {
             L.panel_count = jval(jh, "panel_count", L.panel_count);
             L.pinout      = jh.value("pinout",      L.pinout);
             L.color_order = jh.value("color_order", L.color_order);
+            L.driver        = jh.value("driver",        L.driver);
+            L.hw_mapping    = jh.value("hw_mapping",    L.hw_mapping);
+            L.gpio_slowdown = jval(jh, "gpio_slowdown", L.gpio_slowdown);
+            L.pwm_bits      = jval(jh, "pwm_bits",      L.pwm_bits);
+            L.rp1_pio       = jval(jh, "rp1_pio",       L.rp1_pio);
+            L.pixel_mapper  = jh.value("pixel_mapper",  L.pixel_mapper);
+            L.camera_mode       = jval(jh, "camera_mode",       L.camera_mode);
+            L.camera_refresh_hz = jval(jh, "camera_refresh_hz", L.camera_refresh_hz);
+            L.brightness        = jval(jh, "brightness",        L.brightness);
+            L.pwm_lsb_ns        = jval(jh, "pwm_lsb_ns",        L.pwm_lsb_ns);
+            L.pwm_dither_bits   = jval(jh, "pwm_dither_bits",   L.pwm_dither_bits);
+            L.limit_refresh_hz  = jval(jh, "limit_refresh_hz",  L.limit_refresh_hz);
             if (jh.contains("panel_size_per") && jh["panel_size_per"].is_array())
                 for (size_t i = 0; i < jh["panel_size_per"].size() && i < 4; ++i)
                     if (jh["panel_size_per"][i].is_string())
@@ -2242,13 +2312,17 @@ int main(int argc, char* argv[]) {
     // IMU → compass heading + spatial audio head tracking
     // Timestamp lets the MPU-9250 backup detect when the XR glasses go offline.
     std::atomic<int64_t> last_xr_imu_us { 0 };
+    // When a BNO086 is the head-tracking source it owns imu_pose; the VITURE
+    // callback then only publishes its heading (below), not the pose, so the
+    // two IMUs don't fight over the head orientation.
+    std::atomic<bool> bno08x_owns_pose { false };
 
-    xr.on_imu_pose([&state, &last_xr_imu_us](float roll, float pitch, float yaw) {
+    xr.on_imu_pose([&state, &last_xr_imu_us, &bno08x_owns_pose](float roll, float pitch, float yaw) {
         int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         last_xr_imu_us = now_us;
         std::lock_guard<std::mutex> lk(state.mtx);
-        state.imu_pose = { roll, pitch, yaw };
+        if (!bno08x_owns_pose.load()) state.imu_pose = { roll, pitch, yaw };
 
         // Publish to the IMU bus so the heading picker can consider Viture
         // alongside the dedicated IMU sensors. Invert applied here so the
@@ -2382,6 +2456,34 @@ int main(int argc, char* argv[]) {
     });
     if (!bno055.start() && bno_cfg.enabled)
         std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
+
+    // ── BNO086 (SH-2, I2C) ───────────────────────────────────────────────────
+    // Mag-referenced heading → imu_bno08x (compass), and when head_tracking is
+    // enabled, roll/pitch/yaw → imu_pose (the head-tracking path), taking over
+    // pose ownership from the VITURE IMU.
+    Bno08x bno086(bno08x_cfg);
+    bno086.set_heading_callback([&state](float heading) {
+        int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.imu_bno08x.heading_deg = heading;
+        state.imu_bno08x.last_us     = now_us;
+        state.imu_bno08x.calibrated  = true;
+    });
+    bno086.set_orientation_callback([&state](float roll, float pitch, float yaw) {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.imu_pose = { roll, pitch, yaw };   // owns pose while head_tracking on
+    });
+    bno086.set_sample_callback([&state](const Bno08x::Sample& s) {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        auto& d = state.imu_data;
+        d.xr_roll = s.euler_deg[0]; d.xr_pitch = s.euler_deg[1]; d.xr_yaw = s.euler_deg[2];
+    });
+    if (bno086.start()) {
+        bno08x_owns_pose.store(bno08x_cfg.head_tracking);
+    } else if (bno08x_cfg.enabled) {
+        std::cerr << "[main] BNO086 IMU unavailable\n";
+    }
 
     // ── Boop sensor ──────────────────────────────────────────────────────────
     // Polls on its own thread; the on_boop callback fires from there and
@@ -2944,7 +3046,13 @@ int main(int argc, char* argv[]) {
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
                                    gpw, gph, gchain, gpar, pf_hub75.pinout,
-                                   pf_hub75.color_order);
+                                   pf_hub75.color_order, pf_hub75.driver,
+                                   pf_hub75.hw_mapping, pf_hub75.gpio_slowdown,
+                                   pf_hub75.pwm_bits, pf_hub75.rp1_pio,
+                                   pf_hub75.pixel_mapper, pf_hub75.camera_mode,
+                                   pf_hub75.camera_refresh_hz, pf_hub75.brightness,
+                                   pf_hub75.pwm_lsb_ns, pf_hub75.pwm_dither_bits,
+                                   pf_hub75.limit_refresh_hz);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -3204,7 +3312,13 @@ int main(int argc, char* argv[]) {
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
             pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
                                    gpw, gph, gchain, gpar, pf_hub75.pinout,
-                                   pf_hub75.color_order);
+                                   pf_hub75.color_order, pf_hub75.driver,
+                                   pf_hub75.hw_mapping, pf_hub75.gpio_slowdown,
+                                   pf_hub75.pwm_bits, pf_hub75.rp1_pio,
+                                   pf_hub75.pixel_mapper, pf_hub75.camera_mode,
+                                   pf_hub75.camera_refresh_hz, pf_hub75.brightness,
+                                   pf_hub75.pwm_lsb_ns, pf_hub75.pwm_dither_bits,
+                                   pf_hub75.limit_refresh_hz);
         }
     };
 
@@ -3639,6 +3753,7 @@ int main(int argc, char* argv[]) {
     menu_ctx.menu_sys_pp = &menu_ptr;
     menu_ctx.mpu9250 = &mpu9250;
     menu_ctx.bno055  = &bno055;
+    menu_ctx.bno08x  = &bno086;
     menu_ctx.gif_names = &gif_names;
     menu_ctx.bt_mon = &bt_mon;
     menu_ctx.sys_panel_active   = &sys_panel_active;
@@ -3739,7 +3854,11 @@ int main(int argc, char* argv[]) {
         // to release the PIO/DMA, then relaunches (see its comment).
         pf_launch_panel_driver(bin_dir, native_ctrl->canvas_width(),
             native_ctrl->canvas_height(), gpw, gph, gchain, gpar,
-            pf_hub75.pinout, pf_hub75.color_order);
+            pf_hub75.pinout, pf_hub75.color_order, pf_hub75.driver,
+            pf_hub75.hw_mapping, pf_hub75.gpio_slowdown, pf_hub75.pwm_bits,
+            pf_hub75.rp1_pio, pf_hub75.pixel_mapper, pf_hub75.camera_mode,
+            pf_hub75.camera_refresh_hz, pf_hub75.brightness, pf_hub75.pwm_lsb_ns,
+            pf_hub75.pwm_dither_bits, pf_hub75.limit_refresh_hz);
         Notification n; n.type = NotifType::App;
         n.title = "Panel driver restarted";
         n.body  = "If panels stay dark, check /tmp/panel_driver.log";
@@ -4688,6 +4807,18 @@ int main(int argc, char* argv[]) {
             jh["panel_count"]      = L.panel_count;
             jh["pinout"]           = L.pinout;
             jh["color_order"]      = L.color_order;
+            jh["driver"]           = L.driver;
+            jh["hw_mapping"]       = L.hw_mapping;
+            jh["gpio_slowdown"]    = L.gpio_slowdown;
+            jh["pwm_bits"]         = L.pwm_bits;
+            jh["rp1_pio"]          = L.rp1_pio;
+            jh["pixel_mapper"]     = L.pixel_mapper;
+            jh["camera_mode"]       = L.camera_mode;
+            jh["camera_refresh_hz"] = L.camera_refresh_hz;
+            jh["brightness"]        = L.brightness;
+            jh["pwm_lsb_ns"]        = L.pwm_lsb_ns;
+            jh["pwm_dither_bits"]   = L.pwm_dither_bits;
+            jh["limit_refresh_hz"]  = L.limit_refresh_hz;
             jh["panel_size_per"]   = json::array({L.panel_size_per[0], L.panel_size_per[1],
                                                   L.panel_size_per[2], L.panel_size_per[3]});
             jh["defaults_applied"] = L.defaults_applied;
@@ -4985,6 +5116,7 @@ int main(int argc, char* argv[]) {
         {
             const char* s = "auto";
             switch (state.imu_source) {
+            case AppState::ImuSource::Bno08x:  s = "bno086";  break;
             case AppState::ImuSource::Bno055:  s = "bno055";  break;
             case AppState::ImuSource::Mpu9250: s = "mpu9250"; break;
             case AppState::ImuSource::Viture:  s = "viture";  break;

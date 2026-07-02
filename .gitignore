@@ -52,6 +52,10 @@ config/config.json
 # scripts/update.sh (see scripts/rollback.sh). Never committed.
 state/
 
+# Python bytecode (version/arch-specific — never commit).
+__pycache__/
+*.pyc
+
 # Scheduler daemon — secrets and runtime artifacts (never commit OAuth creds).
 scheduler_daemon/client_secret.json
 scheduler_daemon/token.json

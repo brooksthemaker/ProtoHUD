@@ -35,6 +35,7 @@ class AudioEngine;
 class AndroidMirror;
 class Mpu9250;
 class Bno055;
+class Bno08x;
 class BtMonitor;
 class ProfileManager;
 class BackgroundLibrary;
@@ -68,6 +69,25 @@ struct PfHub75Layout {
     // swapped is usually fixed by "grb", red/blue by "bgr"). Passed to
     // panel_driver.py as --order; applied on driver (re)launch.
     std::string color_order     = "auto";
+    // Panel driver backend: "piomatter" (default; Adafruit RP1 PIO, fixed
+    // pinouts) or "hzeller" (rpi-rgb-led-matrix; custom pin mappings + Pi 5 RP1
+    // backends). The fields below apply only when driver == "hzeller".
+    std::string driver          = "piomatter";
+    std::string hw_mapping      = "adafruit-hat"; // hzeller: regular/adafruit-hat/adafruit-hat-pwm/compute-module/<custom>
+    int         gpio_slowdown   = 2;              // hzeller: GPIO write delay (tune per-Pi)
+    int         pwm_bits        = 11;             // hzeller: colour depth 1..11
+    int         rp1_pio         = 1;              // hzeller Pi5: 0=RIO (fast, higher CPU), 1=PIO (low CPU)
+    std::string pixel_mapper    = "";             // hzeller: e.g. "U-mapper;Rotate:180"
+    // Camera-friendly / flicker-free preset (hzeller only). When camera_mode is
+    // on, the launcher caps refresh at camera_refresh_hz and enables temporal
+    // dithering so the face doesn't band on video. The raw knobs below are for
+    // fine control and apply when camera_mode is off.
+    bool        camera_mode      = false;
+    int         camera_refresh_hz = 100;          // refresh cap used while camera_mode is on
+    int         brightness       = 100;           // hzeller: 0..100 (perceptual, CIE1931)
+    int         pwm_lsb_ns       = 0;             // hzeller: 0 = library default
+    int         pwm_dither_bits  = 0;             // hzeller: temporal dithering (0 = off)
+    int         limit_refresh_hz = 0;             // hzeller: cap refresh Hz (0 = uncapped)
     std::string panel_size_per[4] = {"", "", "", ""};
     // Nudge stores each panel's CENTRE as an offset from the canvas centre
     // (in canvas pixels). Default = auto-placed by apply_defaults() per
@@ -219,6 +239,7 @@ struct MenuBuildContext {
     MenuSystem**     menu_sys_pp = nullptr;
     Mpu9250*         mpu9250 = nullptr;
     Bno055*          bno055  = nullptr;
+    Bno08x*          bno08x  = nullptr;
     const std::vector<std::string>* gif_names = nullptr;
     BtMonitor*       bt_mon = nullptr;
     bool*            sys_panel_active   = nullptr;

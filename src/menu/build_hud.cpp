@@ -52,6 +52,7 @@
 #include "post_process.h"
 #include "sensor/mpu9250.h"
 #include "sensor/bno055.h"
+#include "sensor/bno08x.h"
 #include "sensor/light_sensor.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
@@ -390,7 +391,9 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
     // to a specific one forces it even if others are also publishing.
     struct ImuSourceOpt { const char* label; AppState::ImuSource value; };
     const ImuSourceOpt imu_source_opts[] = {
-        { "Auto (BNO055 > MPU9250 > Viture)", AppState::ImuSource::Auto    },
+        { "Auto (BNO086 > BNO055 > MPU9250 > Viture)", AppState::ImuSource::Auto },
+        { "BNO086 (SH-2, mag-referenced, no drift)",
+                                              AppState::ImuSource::Bno08x  },
         { "BNO055 (Adafruit 9-DOF, on-chip fusion)",
                                               AppState::ImuSource::Bno055  },
         { "MPU-9250 (I\xc2\xb2""C compass)",  AppState::ImuSource::Mpu9250 },
@@ -411,9 +414,21 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [&state](bool v){ state.compass_tape = v; }),
         with_desc(submenu("IMU Source", std::move(imu_source_menu)),
                   "Which sensor drives the HUD compass. Auto walks "
-                  "BNO055 > MPU9250 > Viture and picks the highest-priority "
-                  "fresh source each frame; explicit choices force their "
-                  "source even if stale."),
+                  "BNO086 > BNO055 > MPU9250 > Viture and picks the "
+                  "highest-priority fresh source each frame; explicit choices "
+                  "force their source even if stale."),
+        [&]() -> MenuItem {
+            // BNO086 head-tracking recenter: tare the sensor so the direction
+            // you're facing becomes "forward" for pin-in-space / the compass.
+            Bno08x* b = ctx.bno08x;
+            MenuItem m = with_desc(
+                leaf("Recenter Head Tracking", [b]{ if (b) b->recenter(false); }),
+                "Tare the BNO086 so your current facing becomes forward "
+                "(zeroes heading/yaw). Use after mounting or if the view has "
+                "drifted off-centre.");
+            m.visible_fn = [b]{ return b && b->connected(); };
+            return m;
+        }(),
         submenu("IMU Axis",            std::move(imu_axis_menu)),
         [&]() -> MenuItem {
             MenuItem m = leaf("Save IMU Calibration",
