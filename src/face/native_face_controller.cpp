@@ -1095,6 +1095,14 @@ void NativeFaceController::set_mouth_shape(const std::string& shape) {
         if (pn.state) pn.state->set_mouth_shape(shape);
 }
 
+void NativeFaceController::set_mouth_blendshapes(const std::vector<float>& weights,
+                                                 float confidence) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_mouth_blendshapes(weights, confidence);
+    // Transient — no persistence on every tracker frame.
+}
+
 std::vector<cv::Rect> NativeFaceController::led_covered_regions() const {
     std::lock_guard<std::mutex> lk(state_mtx_);
     if (!output_) return {};
