@@ -341,7 +341,9 @@ void NativeFaceController::render_thread() {
                     } else {
                         face_layer = gframe;
                     }
-                } else if (!cfg_.effects_enabled || !pn.material) {
+                } else if (!cfg_.effects_enabled || !pn.material || face_colors_.load()) {
+                    // Own-colors path: draw the face's RGBA art verbatim (also the
+                    // effects-disabled / no-material fallback).
                     face_layer = pn.loader->get_frame(*pn.state);
                     glitch_flicker(pn.loader.get(), pn.state.get(), face_layer);
                 } else {
@@ -565,6 +567,10 @@ void NativeFaceController::set_palette(uint8_t palette_id) {
 }
 
 void NativeFaceController::set_menu_item(uint8_t menu_index, uint8_t value) {
+    if (menu_index == 9) {         // 9 = ProtoHUD face-colour pass-through (native only)
+        face_colors_.store(value != 0);
+        return;
+    }
     if (menu_index != 8) return;   // 8 = material colour preset (matches Protoface)
     std::unique_lock<std::mutex> lk(state_mtx_);
     apply_material_all(preset_material(value));

@@ -143,6 +143,11 @@ public:
     // to every self-rendered panel and persist it. Used by the Material Color
     // gradient editor for live preview.
     void set_material_spec(const std::string& spec);
+    // Face color pass-through: when true, draw the face's own RGBA art verbatim
+    // (color faces); when false the selected material tints the face (default).
+    // Also drives the editor's Color vs Mono canvas at open time (see main.cpp).
+    void set_face_colors(bool on) { face_colors_.store(on); }
+    bool face_colors() const      { return face_colors_.load(); }
     // Live "glitch" post-effect config — corrupts the composited face (chromatic
     // split, tearing, blocks, bitcrush, dropout, datamosh, region desync, and an
     // occasional wrong-expression flash). Read by the render thread each frame.
@@ -247,6 +252,7 @@ private:
 
     std::thread        thread_;
     std::atomic<bool>  running_{false};
+    std::atomic<bool>  face_colors_{false};   // draw art's own RGB vs material override
 
     // Per-frame drive inputs written by other threads (audio thread, IMU
     // pump) at high rate. Atomics instead of state_mtx_: the render thread

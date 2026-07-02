@@ -1808,6 +1808,7 @@ int main(int argc, char* argv[]) {
         pf_mode          = jpf.value("mode", std::string("daemon"));
         pf_launch_driver = jval(jpf, "panel_driver", true);
         pf_backend       = jpf.value("backend", std::string("hub75"));
+        state.face.face_colors = jval(jpf, "face_colors", false);
         if (jpf.contains("layout") && jpf["layout"].is_object()) {
             auto& jl = jpf["layout"];
             pf_eye_layout   = jl.value("eye",   pf_eye_layout);
@@ -2992,6 +2993,7 @@ int main(int argc, char* argv[]) {
             rc, pf_build_panel_output(cfg, rc,
                                       pf_eye_layout, pf_mouth_layout, pf_nose_layout,
                                       &pf_hub75));
+        native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->start();
         // Push the user's saved animation tunables into every panel's
         // FaceState. The defaults in FaceState/FaceCfg apply otherwise.
@@ -3260,6 +3262,7 @@ int main(int argc, char* argv[]) {
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, std::move(new_output));
         active_face = native_ctrl.get();
+        native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->start();
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
@@ -3373,9 +3376,12 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Color canvas for the always-RGB WS2812 matrix, or whenever face-colour
+        // pass-through is on (so HUB75 faces can be drawn in colour too).
         const menu::FaceEditor::Mode mode =
-            (pf_backend == "rgb_matrix") ? menu::FaceEditor::Mode::Color
-                                         : menu::FaceEditor::Mode::Mono;
+            (pf_backend == "rgb_matrix" || state.face.face_colors)
+                ? menu::FaceEditor::Mode::Color
+                : menu::FaceEditor::Mode::Mono;
 
         char title[96];
         std::snprintf(title, sizeof(title),
@@ -4755,6 +4761,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["mode"]                = pf_mode;
         cfg["protoface"]["backend"]             = pf_backend;
         cfg["protoface"]["autostart"]           = pf_autostart;
+        cfg["protoface"]["face_colors"]         = state.face.face_colors;
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
         cfg["protoface"]["layout"]["nose"]      = pf_nose_layout;

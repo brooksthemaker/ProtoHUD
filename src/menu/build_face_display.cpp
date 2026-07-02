@@ -1660,6 +1660,25 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     // Color (solid) picker and the Custom Gradient editor below.
     std::vector<MenuItem> pf_palette;
     {
+        // Face-colour pass-through: draw each expression's own RGB art instead of
+        // tinting it with the material. Also switches the face editor to its colour
+        // canvas so HUB75 faces can be drawn in colour. HUB75/native backend only.
+        MenuItem t = with_desc(
+            toggle("Use Drawn Colors",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx); return state.face.face_colors; },
+                [teensy, &state](bool v){
+                    teensy->set_menu_item(9, v ? 1 : 0);   // 9 = native face-colour pass-through
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.face.face_colors = v;
+                }),
+            "Show each expression's own drawn colours instead of overriding them "
+            "with the Material Color below, and turn on the editor's colour canvas "
+            "so faces can be drawn in colour. GIFs already show their own colours; "
+            "particles/background still use the material.");
+        t.visible_fn = [pf_backend_p]{ return pf_backend_p && *pf_backend_p == "hub75"; };
+        pf_palette.push_back(std::move(t));
+    }
+    {
         struct PFMat { const char* label; uint8_t idx; };
         const PFMat pf_mats[] = {
             // Solids

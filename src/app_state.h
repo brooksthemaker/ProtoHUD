@@ -74,6 +74,7 @@ struct FaceState {
     bool     playing_gif  = false;
     bool     connected    = false;
     bool     hud_control  = false;  // true = HUD has taken manual control; false = Teensy autonomous
+    bool     face_colors  = false;  // true = draw the face's own RGB art; false = material override
 };
 
 struct LoRaNode {
