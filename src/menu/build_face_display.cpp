@@ -379,6 +379,41 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     auto gif_leaf = ctx.gif_leaf;
     MenuContextPanelDraw draw_gif_preview = ctx.draw_gif_preview;
 
+    // Live effect preview for the Effects context panel: shows the actual
+    // rendered face canvas (face + material + effects). With Live Preview on,
+    // highlighting an effect applies it to the real face, so this previews it.
+    auto live_face_frame = ctx.live_face_frame;
+    struct EffectPreview { GLuint tex = 0; };
+    auto eff_preview = std::make_shared<EffectPreview>();
+    MenuContextPanelDraw draw_effect_preview =
+        [eff_preview, live_face_frame](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            EffectPreview& ep = *eff_preview;
+            // 2:1 thumbnail (HUB75 panel-pair aspect), centred.
+            const float pw = std::min(sz.x * 0.9f, sz.y * 2.0f);
+            const float ph = pw * 0.5f;
+            const float px = o.x + (sz.x - pw) * 0.5f;
+            const float py = o.y + (sz.y - ph) * 0.5f;
+            dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10, 16, 22, 190));
+            cv::Mat rgb;
+            if (live_face_frame && live_face_frame(rgb) && !rgb.empty() &&
+                rgb.type() == CV_8UC3 && rgb.isContinuous()) {
+                if (ep.tex == 0) {
+                    glGenTextures(1, &ep.tex);
+                    glBindTexture(GL_TEXTURE_2D, ep.tex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                glBindTexture(GL_TEXTURE_2D, ep.tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, rgb.cols, rgb.rows, 0,
+                             GL_RGB, GL_UNSIGNED_BYTE, rgb.data);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(ep.tex)),
+                             {px, py}, {px + pw, py + ph});
+            }
+        };
+
     // ── Face effects ──────────────────────────────────────────────────────────
     std::vector<MenuItem> effects;
     for (uint8_t id = 0; id < 10; id++) {
@@ -1101,9 +1136,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     }
 
     // Live Preview — when on, edits in the builder/effect-settings apply
-    // continuously. ParticleSystem::set_effect updates params in place when the
-    // layer structure is unchanged, so tweaks don't reset the particle sim.
-    auto pf_live = std::make_shared<bool>(false);
+    // continuously (and highlighting an effect applies it live, so the Effects
+    // context-panel preview shows it). ParticleSystem::set_effect updates params
+    // in place when the layer structure is unchanged, so tweaks don't reset the
+    // particle sim. Default ON.
+    auto pf_live = std::make_shared<bool>(true);
     auto live_apply = [pf_live, build_layered_spec, pf_set_effect_json]{
         if (*pf_live && pf_set_effect_json) pf_set_effect_json(build_layered_spec());
     };
@@ -2478,7 +2515,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     }
 
     std::vector<MenuItem> protoface_inner_menu = {
-        gated(submenu("Effects",        std::move(pf_effects)),  visible_for_hub75),
+        gated(with_panel(submenu("Effects", std::move(pf_effects)),
+                         "Effect Preview", draw_effect_preview), visible_for_hub75),
         gated(submenu("Material Color", std::move(pf_palette)),  visible_for_hub75),
         // Face PNGs (per-expression slots, mouth shapes, boop reactions)
         // live here under Protoface rather than the generic Files menu —
