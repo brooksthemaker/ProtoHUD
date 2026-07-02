@@ -26,6 +26,7 @@
 #include "menu/menu_system.h"
 
 // Forward declarations — the context only holds pointers to these.
+namespace cv { class Mat; }
 class IFaceController;
 class XRDisplay;
 class CameraManager;
@@ -411,6 +412,9 @@ struct MenuBuildContext {
     MenuContextPanelDraw draw_gif_preview;          // animated slot preview panel
     std::function<MenuItem(uint8_t)> gif_leaf;      // play/import leaf for slot i
     std::function<MenuItem(uint8_t)> gif_slot_row;  // Files management row for slot i
+    // Live rendered face canvas (CV_8UC3 RGB, face + material + effects) for the
+    // Effects context-panel preview. Returns false until the first frame exists.
+    std::function<bool(cv::Mat&)> live_face_frame;
 };
 
 // Builds the full deep-menu tree (six top-level tabs) and, when

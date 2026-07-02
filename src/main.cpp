@@ -3701,6 +3701,12 @@ int main(int argc, char* argv[]) {
 
     MenuBuildContext menu_ctx;
     menu_ctx.teensy  = &face_proxy;
+    // Live rendered face canvas (face + material + effects) for the Effects
+    // context-panel preview. Reads the current native_ctrl each call so it keeps
+    // working across backend swaps; empty on the Teensy/daemon backends.
+    menu_ctx.live_face_frame = [&native_ctrl](cv::Mat& out) -> bool {
+        return native_ctrl && native_ctrl->latest_frame(out);
+    };
     menu_ctx.xr      = &xr;
     menu_ctx.cameras = &cameras;
     menu_ctx.lora    = &lora;
