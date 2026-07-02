@@ -12,6 +12,13 @@
 > menu that drives the stack with no hardware. Authoring guide:
 > `docs/mouth-blendshape-faces.md`. Still pending: the UART `MouthTracker`
 > receiver (Phase 2), the Pi Zero 2 W service (Phase 3), and polish (Phase 4).
+>
+> **Demo tool (CM5, no hardware):** `coproc/mouth_tracker/demo.py` runs the real
+> MediaPipe FaceLandmarker on a USB/CSI camera and shows a preview window — live
+> mesh + blendshape bars, plus a render of the actual `blend_*` mouth when
+> pointed at a face folder with art. Its tracking core (`tracker.py`,
+> `one_euro.py`, `mouth_blendshapes.py`) is what the Zero 2 W service will reuse.
+> Runs on aarch64 (CM5 / Zero 2 W); **not** the ARMv6 Pi Zero 1.3.
 
 ---
 

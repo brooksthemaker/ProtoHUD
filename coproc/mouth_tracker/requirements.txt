@@ -1,0 +1,7 @@
+# Mouth tracker demo + Pi Zero 2 W service.
+# aarch64 only (CM5 / Zero 2 W). Not the ARMv6 Pi Zero 1.3.
+mediapipe>=0.10.9
+opencv-python>=4.8
+numpy>=1.24
+# CSI camera path (optional): install via apt, not pip, on Raspberry Pi OS:
+#   sudo apt install python3-picamera2
