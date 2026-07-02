@@ -1,5 +1,6 @@
 #include "hud_renderer.h"
 #include "../serial/shm_frame_reader.h"
+#include "head_lock.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -2051,7 +2052,9 @@ void HudRenderer::draw_pip(unsigned int /*tex*/, const char* /*label*/,
 void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
                                         bool active, bool connecting,
                                         const OverlayConfig& cfg,
-                                        float frame_aspect) {
+                                        float frame_aspect,
+                                        const ImuPose& head_pose,
+                                        float fx, float fy) {
     if (!active) return;
 
     ImGui::SetCurrentContext(ctx_);
@@ -2067,7 +2070,17 @@ void HudRenderer::draw_android_overlay(unsigned int tex, int w, int h,
     const float ov_w    = (frame_aspect >= 1.f) ? long_px : long_px * frame_aspect;
     const float ov_h    = (frame_aspect >= 1.f) ? long_px / frame_aspect : long_px;
     const float margin = static_cast<float>(cfg_.compass_height);
-    const auto  pos    = overlay_origin(cfg, sw, sh, ov_w, ov_h, margin);
+    ImVec2 pos;
+    if (cfg.world_locked) {
+        // Pinned in space: position by the head IMU instead of the screen anchor.
+        const ImVec2 off = headlock::screen_offset(
+            head_pose.yaw, head_pose.pitch, cfg.lock_yaw, cfg.lock_pitch,
+            fx, fy, cfg.lock_invert_yaw, cfg.lock_invert_pitch);
+        pos = ImVec2(sw * 0.5f - ov_w * 0.5f + off.x,
+                     sh * 0.5f - ov_h * 0.5f + off.y);
+    } else {
+        pos = overlay_origin(cfg, sw, sh, ov_w, ov_h, margin);
+    }
 
     ImGui::SetNextWindowPos ({0.f, 0.f});
     ImGui::SetNextWindowSize({sw,  sh });
