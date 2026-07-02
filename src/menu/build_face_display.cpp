@@ -350,6 +350,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     double* pf_preview_duration_p = ctx.pf_preview_duration_p;
     std::function<void()> pf_anim_push = ctx.pf_anim_push;
     std::function<void(const nlohmann::json&)> pf_set_effect_json = ctx.pf_set_effect_json;
+    std::function<nlohmann::json()> pf_get_effect_json = ctx.pf_get_effect_json;
     std::function<void(bool)> pf_set_expr_effects = ctx.pf_set_expr_effects;
     bool* pf_expr_effects_p = ctx.pf_expr_effects_p;
     std::shared_ptr<std::function<void()>> pf_live_tick = ctx.pf_live_tick;
@@ -1076,6 +1077,28 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.branches = jl.value("branches", 0.35f);
         }
     };
+
+    // Seed the layered builder from the effect that's actually running, once,
+    // the first time the Face menu is built (i.e. at boot). The renderer
+    // restores the last-used effect from protoface_state.json, but pf_layered
+    // is a static default-constructed struct, so without this the Custom page
+    // shows empty layers even though the panels are already rendering that
+    // effect. Guarded by a static flag so later menu rebuilds never stomp the
+    // user's in-progress edits, and gated on a real {"layers":[...]} spec so a
+    // single-effect / "none" running spec can't blank the builder's defaults.
+    {
+        static bool pf_layered_seeded = false;
+        if (!pf_layered_seeded) {
+            pf_layered_seeded = true;
+            if (pf_get_effect_json) {
+                nlohmann::json running = pf_get_effect_json();
+                if (running.is_object() && running.contains("layers")
+                    && running["layers"].is_array()
+                    && !running["layers"].empty())
+                    load_layered_spec(running);
+            }
+        }
+    }
 
     // Live Preview — when on, edits in the builder/effect-settings apply
     // continuously. ParticleSystem::set_effect updates params in place when the

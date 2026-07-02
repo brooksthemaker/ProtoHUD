@@ -341,6 +341,11 @@ struct MenuBuildContext {
     // the effect_id mapping. Used by the Layered Effects builder so the
     // user can compose multi-layer particle configs at runtime.
     std::function<void(const nlohmann::json&)> pf_set_effect_json;
+    // Reads back the renderer's current particle spec (the effect actually
+    // running, restored from protoface_state.json at boot). Lets the Layered
+    // builder seed its editable fields from what's live instead of showing
+    // empty default layers. Null on non-native backends.
+    std::function<nlohmann::json()> pf_get_effect_json;
     // Toggle expression-coupled effects (mood preset follows the face) and
     // the config-backed flag the menu reads. Null on non-native backends.
     std::function<void(bool)> pf_set_expr_effects;

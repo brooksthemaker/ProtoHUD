@@ -3823,6 +3823,9 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_set_effect_json = [&](const nlohmann::json& spec){
         if (native_ctrl) native_ctrl->set_effect_json(spec);
     };
+    menu_ctx.pf_get_effect_json = [&]() -> nlohmann::json {
+        return native_ctrl ? native_ctrl->get_effect_json() : nlohmann::json();
+    };
     menu_ctx.pf_set_expr_effects = [&](bool v){
         if (native_ctrl) native_ctrl->set_expression_effects(v);
     };
