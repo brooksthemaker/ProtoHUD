@@ -74,8 +74,15 @@ def build_commands(root: str, fifo: str, include_fifo: bool):
     return cmds
 
 
+# Stable, deterministic UUID per command name (uuid5) so re-running / re-importing
+# is idempotent (same keys every time) and the committed kdeconnect_commands.json
+# is reproducible. KDE Connect keys commands by this UUID.
+def _cmd_uuid(name: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "protohud:kdeconnect:" + name))
+
+
 def to_json_map(cmds):
-    return {("{%s}" % uuid.uuid4()): {"name": n, "command": c} for n, c in cmds}
+    return {("{%s}" % _cmd_uuid(n)): {"name": n, "command": c} for n, c in cmds}
 
 
 def merge_into_config(path: pathlib.Path, new_map: dict) -> bool:
@@ -114,10 +121,20 @@ def main():
     ap.add_argument("--no-fifo", action="store_true", help="system commands only")
     ap.add_argument("--print", dest="just_print", action="store_true",
                     help="print the JSON map and exit (write nothing)")
+    ap.add_argument("--json", metavar="PATH",
+                    help="write the importable JSON map to PATH and exit — point "
+                         "KDE Connect's desktop 'Import' at it (see scripts/"
+                         "kdeconnect_commands.json for a ready-made default)")
     args = ap.parse_args()
 
     cmds = build_commands(args.root, args.fifo, include_fifo=not args.no_fifo)
     cmd_map = to_json_map(cmds)
+
+    if args.json:
+        pathlib.Path(args.json).write_text(json.dumps(cmd_map, indent=2) + "\n")
+        print(f"[ok] wrote {len(cmd_map)} commands to {args.json}")
+        print("Import it via KDE Connect desktop settings > device > Run commands > Import.")
+        return
 
     if args.just_print:
         print(json.dumps(cmd_map, indent=2))

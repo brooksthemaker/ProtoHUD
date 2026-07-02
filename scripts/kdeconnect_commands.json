@@ -1,0 +1,118 @@
+{
+  "{efb40e5c-bc5f-5a00-ba63-a805ace4d796}": {
+    "name": "Restart ProtoHUD",
+    "command": "~/protohud/scripts/restart.sh"
+  },
+  "{b2baeedc-82cc-5cc7-a59c-9a1a6364b05d}": {
+    "name": "Update & Restart",
+    "command": "~/protohud/scripts/update.sh --restart"
+  },
+  "{5427862b-ef1b-5409-82b1-f545ca7f46f1}": {
+    "name": "Rollback Update",
+    "command": "~/protohud/scripts/rollback.sh --restart"
+  },
+  "{2ba52262-fb23-56d8-b46a-7e73c84a718a}": {
+    "name": "Reboot Pi",
+    "command": "sudo reboot"
+  },
+  "{a660f168-1ac9-549d-a380-a882f921efe9}": {
+    "name": "Shut Down",
+    "command": "sudo poweroff"
+  },
+  "{68b1c1cb-3de1-55bf-9452-8f78869ceef1}": {
+    "name": "Open/Close Menu",
+    "command": "echo menu_open > /run/protohud/cmd"
+  },
+  "{f3086af9-0f78-52e7-a791-5112d84ab55c}": {
+    "name": "Menu Select",
+    "command": "echo menu_select > /run/protohud/cmd"
+  },
+  "{90cdfd65-a453-5312-820d-31abbc9db2fa}": {
+    "name": "Menu Back",
+    "command": "echo menu_back > /run/protohud/cmd"
+  },
+  "{4f5e9f26-d299-5acd-ba50-deb6c9c12aca}": {
+    "name": "Capture Photo L",
+    "command": "echo cam_capture_left > /run/protohud/cmd"
+  },
+  "{3bca0eb4-3ea7-53c5-8a05-7938d62105f1}": {
+    "name": "Capture Photo R",
+    "command": "echo cam_capture_right > /run/protohud/cmd"
+  },
+  "{e8a5ee4f-19f1-5d29-9c0c-8e71074981c2}": {
+    "name": "Autofocus L",
+    "command": "echo cam_af_left > /run/protohud/cmd"
+  },
+  "{3a783bc4-db75-5efd-a959-4f14ba5728f8}": {
+    "name": "Autofocus R",
+    "command": "echo cam_af_right > /run/protohud/cmd"
+  },
+  "{a1f528ca-9c66-562a-a4ad-832e513c1d76}": {
+    "name": "Swap Cameras",
+    "command": "echo cam_swap > /run/protohud/cmd"
+  },
+  "{010d1566-2b5b-5ca7-a118-7bd80d339798}": {
+    "name": "Ring My Phone",
+    "command": "echo phone_ring > /run/protohud/cmd"
+  },
+  "{34ce9186-d446-5d14-9956-8bddf4eba5e6}": {
+    "name": "Boop: Snout",
+    "command": "echo boop_snout > /run/protohud/cmd"
+  },
+  "{c02e8101-9615-5e25-844b-c4b949ffb9d3}": {
+    "name": "Boop: Both",
+    "command": "echo boop_both > /run/protohud/cmd"
+  },
+  "{8c919834-d38e-572f-a509-b5c3b537fb07}": {
+    "name": "Capture Stereo",
+    "command": "echo cam_capture_stereo > /run/protohud/cmd"
+  },
+  "{58823b1b-9584-5ab6-94d7-56f7d4b25bde}": {
+    "name": "Record Toggle",
+    "command": "echo rec_toggle > /run/protohud/cmd"
+  },
+  "{ee02b10f-ef70-5391-91fe-a71104ec2c14}": {
+    "name": "Night Vision",
+    "command": "echo nv_toggle > /run/protohud/cmd"
+  },
+  "{96acc98e-2b37-5f8f-a898-591a2a134c5d}": {
+    "name": "Zoom In",
+    "command": "echo cam_zoom_in > /run/protohud/cmd"
+  },
+  "{a650ddea-c385-5c2e-a621-9895b6abcf4e}": {
+    "name": "Zoom Out",
+    "command": "echo cam_zoom_out > /run/protohud/cmd"
+  },
+  "{42c8f3fe-856c-5516-bf01-d3ed0aaebdc0}": {
+    "name": "Theater Mode",
+    "command": "echo theater_toggle > /run/protohud/cmd"
+  },
+  "{7711d372-9874-52dd-aa1b-09de11eb3a35}": {
+    "name": "Recenter Display",
+    "command": "echo xr_recenter > /run/protohud/cmd"
+  },
+  "{3d3e00f1-5c55-5faf-adc8-9f2a635fabe0}": {
+    "name": "Next Expression",
+    "command": "echo face_next > /run/protohud/cmd"
+  },
+  "{cc7b041e-d427-5ffc-8738-8d65dd0411a1}": {
+    "name": "Next Material",
+    "command": "echo material_next > /run/protohud/cmd"
+  },
+  "{d7a7552a-1380-5542-a203-7e043fc086ba}": {
+    "name": "Next Effect",
+    "command": "echo effect_next > /run/protohud/cmd"
+  },
+  "{acd55299-c04b-5b74-a212-75f2a5399409}": {
+    "name": "Face Brighter",
+    "command": "echo face_bright_up > /run/protohud/cmd"
+  },
+  "{7b25ca76-ccdc-5f1c-81a6-d91b6033abdf}": {
+    "name": "Face Dimmer",
+    "command": "echo face_bright_down > /run/protohud/cmd"
+  },
+  "{fdbac9fc-50a2-55e8-8ced-e7a5d020f9e8}": {
+    "name": "Reboot Face",
+    "command": "echo face_restart > /run/protohud/cmd"
+  }
+}

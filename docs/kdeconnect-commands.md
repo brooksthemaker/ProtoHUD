@@ -73,6 +73,27 @@ It installs:
   Record Toggle, Night Vision, Zoom In/Out, Theater Mode, Recenter Display,
   Next Expression, Next Material, Next Effect, Face Brighter/Dimmer, Reboot Face.
 
+### Or just import the ready-made file
+
+If the script can't reach your config (headless box, different user, or you'd
+rather use the **KDE Connect desktop app**), a pre-built list ships in the repo:
+
+**`scripts/kdeconnect_commands.json`** — 29 commands, ready to import.
+
+In the KDE Connect desktop app: **Configure → your device → Run commands →
+Import**, then point it at `scripts/kdeconnect_commands.json`. The phone picks
+them up on the next reconnect.
+
+The committed file assumes ProtoHUD lives at `~/protohud` and the FIFO is at
+`/run/protohud/cmd`. If your paths differ, regenerate it (stable keys, so
+re-importing just updates in place):
+
+```bash
+python3 scripts/kdeconnect_commands.py \
+  --root /opt/protohud --fifo /run/protohud/cmd \
+  --json scripts/kdeconnect_commands.json
+```
+
 ## 3. Pi → phone bits (already in the menu)
 
 - **Communications → Phone (KDE Connect) → Export to Phone → Send Last Capture** —
