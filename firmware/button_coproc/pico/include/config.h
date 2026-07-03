@@ -29,3 +29,38 @@ static constexpr bool     kEmitDownUp   = false;
 
 static_assert(sizeof(kButtonPins) == sizeof(kLedPins),
               "kButtonPins and kLedPins must have the same number of entries");
+
+// ── Voice changer (optional, runs on core1) ──────────────────────────────────
+// Real-time mic → effect → speaker, on the SECOND core so button debounce on
+// core0 is never disturbed. Signal path (see docs/voice-changer.md):
+//   electret mic → MAX9814 preamp/AGC → RP2350 ADC → DSP (core1) → I2S → TLV320
+//   DAC3100 → speaker.  The loop is paced by the I2S output clock, so the ADC
+//   input and DAC output stay sample-locked with no drift.
+// Set kVoiceEnabled=false to build a plain button coprocessor (nothing below is
+// used, no extra libraries needed).
+static constexpr bool     kVoiceEnabled = false;   // flip to true once wired
+
+// Analog mic input: MAX9814 OUT → an ADC-capable pin (GP26/27/28 = ADC0/1/2).
+static constexpr uint8_t  kMicAdcPin    = 26;      // ADC0
+
+// I2S out to the TLV320DAC3100. BCLK and LRCLK/WS must be CONSECUTIVE GPIOs
+// (WS = BCLK+1 automatically); DIN is independent. Keep these clear of the
+// button pins above.
+static constexpr uint8_t  kI2sBclkPin   = 16;      // → TLV320 BCLK (WS = GP17)
+static constexpr uint8_t  kI2sDoutPin   = 18;      // → TLV320 DIN
+
+// I2C control for the TLV320 (register init). Remapped OFF the earlephilhower
+// default GP4/GP5 — those are two of the button pins.
+static constexpr uint8_t  kDacSdaPin    = 20;
+static constexpr uint8_t  kDacSclPin    = 21;
+static constexpr int8_t   kDacResetPin  = 22;      // -1 if the board's RST is tied high
+static constexpr uint8_t  kDacI2cAddr   = 0x18;    // TLV320DAC3100 default
+
+static constexpr uint32_t kSampleRate   = 16000;   // voice band; low latency
+
+// Optional LOCAL control so the changer works standalone (no Pi): a button id
+// (index into kButtonPins) that toggles voice on a SHORT press / cycles the
+// effect. -1 = disabled (control only over the serial protocol). These are
+// handled on core0 IN ADDITION to being reported to the Pi.
+static constexpr int8_t   kVoiceToggleBtn = -1;
+static constexpr int8_t   kVoiceCycleBtn  = -1;

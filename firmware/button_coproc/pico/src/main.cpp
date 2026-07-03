@@ -21,6 +21,9 @@
 
 #include <Arduino.h>
 #include "config.h"
+#ifdef VOICE_CHANGER
+#include "voice.h"   // optional core1 voice changer (build with -DVOICE_CHANGER)
+#endif
 
 namespace {
 
@@ -66,7 +69,15 @@ void poll_button(size_t i, uint32_t now) {
             if (kEmitDownUp) emit("BTN", i, "DOWN");
         } else {                                              // released (rising)
             if (kEmitDownUp) emit("BTN", i, "UP");
-            if (!b.long_fired) emit("BTN", i, "SHORT");       // released before LONG
+            if (!b.long_fired) {
+                emit("BTN", i, "SHORT");                      // released before LONG
+#ifdef VOICE_CHANGER
+                // Standalone control: toggle/cycle the voice changer locally so
+                // it works without the Pi (the SHORT is still reported above).
+                if (static_cast<int>(i) == kVoiceToggleBtn) voice_local_toggle();
+                if (static_cast<int>(i) == kVoiceCycleBtn)  voice_local_cycle();
+#endif
+            }
         }
         return;
     }
@@ -80,6 +91,9 @@ void poll_button(size_t i, uint32_t now) {
 
 // Parse one inbound line from the Pi. Everything optional / forward-compatible.
 void handle_line(const String& line) {
+#ifdef VOICE_CHANGER
+    if (voice_handle_command(line)) return;   // VOICE/FX/PITCH/MIX/PARAM
+#endif
     if (line.startsWith("CFG long_ms=")) {
         long v = line.substring(12).toInt();
         if (v >= 100 && v <= 5000) g_long_ms = static_cast<uint32_t>(v);
@@ -143,3 +157,9 @@ void loop() {
 
     drain_input();
 }
+
+#ifdef VOICE_CHANGER
+// Core1 runs the voice changer independently of the button/protocol loop above.
+void setup1() { voice_setup(); }
+void loop1()  { voice_service(); }
+#endif

@@ -49,6 +49,14 @@ and `LED <id> <0|1>` (drive a switch backlight) from the Pi.
 Other RP2040/RP2350 boards work too — swap `board` in `platformio.ini`
 (`rpipico2`, `rpipicow`, `rpipico`).
 
+## Optional: real-time voice changer (core1)
+
+The same Pico can run a real-time **voice changer** on its second core (mic →
+effect → speaker via a TLV320DAC3100), leaving the button/protocol loop on core0
+untouched. Build the `rpipico2w_voice` env and see
+[`docs/voice-changer.md`](../../docs/voice-changer.md) for wiring, bring-up, and
+the control protocol (`VOICE` / `FX` / `PITCH` / `MIX` / `PARAM`).
+
 ## USB identity (stable serial path)
 
 `platformio.ini` sets the USB manufacturer/product so udev exposes a stable
