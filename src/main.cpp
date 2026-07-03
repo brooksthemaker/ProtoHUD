@@ -1810,6 +1810,7 @@ int main(int argc, char* argv[]) {
         pf_backend       = jpf.value("backend", std::string("hub75"));
         state.face.face_colors = jval(jpf, "face_colors", false);
         state.face.pride_sharp = jval(jpf, "pride_sharp", true);
+        state.face.pride_angle = jval(jpf, "pride_angle", 90);
         if (jpf.contains("layout") && jpf["layout"].is_object()) {
             auto& jl = jpf["layout"];
             pf_eye_layout   = jl.value("eye",   pf_eye_layout);
@@ -3001,6 +3002,7 @@ int main(int argc, char* argv[]) {
                                       &pf_hub75));
         native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
+        native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
         native_ctrl->start();
         // Push the user's saved animation tunables into every panel's
         // FaceState. The defaults in FaceState/FaceCfg apply otherwise.
@@ -3271,6 +3273,7 @@ int main(int argc, char* argv[]) {
         active_face = native_ctrl.get();
         native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
+        native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
         native_ctrl->start();
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
@@ -4777,6 +4780,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["autostart"]           = pf_autostart;
         cfg["protoface"]["face_colors"]         = state.face.face_colors;
         cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
+        cfg["protoface"]["pride_angle"]         = state.face.pride_angle;
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
         cfg["protoface"]["layout"]["nose"]      = pf_nose_layout;

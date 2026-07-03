@@ -192,9 +192,9 @@ private:
     void        write_state_file(const std::string& json_text) const; // tmp+rename; call WITHOUT the lock
     void load_state();                                  // overlay saved look at startup
     static std::string preset_material(int idx);
-    // preset_material(idx), then apply the "sharp bands" preference: pride flags
-    // (idx 22-33) render as hard-edged stripes when pride_sharp_ is set, smooth
-    // blends otherwise. Non-pride presets are returned unchanged.
+    // preset_material(idx), then apply the pride-flag preferences: idx 22-33
+    // render as hard-edged stripes when pride_sharp_ is set (smooth otherwise)
+    // and rotated to pride_angle_ degrees. Non-pride presets are returned as-is.
     std::string material_for_index(int idx) const;
 
     RenderConfig                 cfg_;
@@ -258,6 +258,7 @@ private:
     std::atomic<bool>  running_{false};
     std::atomic<bool>  face_colors_{false};   // draw art's own RGB vs material override
     std::atomic<bool>  pride_sharp_{true};    // pride flags: hard bands vs smooth blend
+    std::atomic<int>   pride_angle_{90};      // pride flag stripe rotation, degrees
 
     // Per-frame drive inputs written by other threads (audio thread, IMU
     // pump) at high rate. Atomics instead of state_mtx_: the render thread

@@ -560,12 +560,19 @@ void NativeFaceController::set_brightness(uint8_t value) {
 
 std::string NativeFaceController::material_for_index(int idx) const {
     std::string spec = preset_material(idx);
-    // Pride flags (22-33) are stored as smooth vertical gradients; when the
-    // "sharp bands" preference is on, swap the mode to banded so the stripes are
-    // hard-edged and distinct instead of blended.
-    if (idx >= 22 && idx <= 33 && pride_sharp_.load()) {
-        const auto p = spec.find(":s:");
-        if (p != std::string::npos) spec.replace(p, 3, ":b:");
+    if (idx >= 22 && idx <= 33) {
+        // Pride flags (22-33) are stored as smooth vertical gradients
+        // ("gradient:v:s:0:…"). Apply the live rotation and sharp-bands
+        // preferences before handing the spec to the renderer.
+        static const std::string kPrefix = "gradient:v:";
+        if (spec.rfind(kPrefix, 0) == 0) {
+            const int ang = ((pride_angle_.load() % 360) + 360) % 360;
+            spec = "gradient:a" + std::to_string(ang) + ":" + spec.substr(kPrefix.size());
+        }
+        if (pride_sharp_.load()) {
+            const auto p = spec.find(":s:");   // swap smooth → banded for distinct stripes
+            if (p != std::string::npos) spec.replace(p, 3, ":b:");
+        }
     }
     return spec;
 }
@@ -585,6 +592,10 @@ void NativeFaceController::set_menu_item(uint8_t menu_index, uint8_t value) {
     }
     if (menu_index == 10) {        // 10 = pride "sharp bands" preference (native only)
         pride_sharp_.store(value != 0);
+        return;                    // menu re-applies the current preset via item 8
+    }
+    if (menu_index == 11) {        // 11 = pride stripe rotation, in 15° units (native only)
+        pride_angle_.store((static_cast<int>(value) * 15) % 360);
         return;                    // menu re-applies the current preset via item 8
     }
     if (menu_index != 8) return;   // 8 = material colour preset (matches Protoface)
