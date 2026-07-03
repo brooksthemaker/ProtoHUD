@@ -57,36 +57,49 @@ cv::Mat TextureMaterial::get_frame() {
 
 GradientMaterial::GradientMaterial(std::vector<cv::Vec3b> colors,
                                    int width, int height,
-                                   bool horizontal, bool smooth, double speed)
+                                   bool horizontal, bool smooth, double speed,
+                                   bool mirror)
     : w_(width), h_(height), horizontal_(horizontal), speed_(speed) {
     if (colors.empty()) colors.push_back(cv::Vec3b(0, 220, 180));  // teal fallback
-    const int N = static_cast<int>(colors.size());
-    const int L = std::max(1, horizontal ? width : height);
+    const int N    = static_cast<int>(colors.size());
+    const int span = std::max(1, horizontal ? width : height);
+    // Ramp resolution: the whole axis normally, or just the half when mirroring
+    // (the other half is the reflection, built below).
+    const int L = mirror ? (span + 1) / 2 : span;
 
-    // 1-D cyclic colour ramp along the scroll axis: N segments, segment i goes
-    // colors[i] → colors[(i+1)%N] so position L wraps back to position 0.
+    // 1-D colour ramp along the scroll axis. Non-mirror: N cyclic segments,
+    // segment i goes colors[i] → colors[(i+1)%N] so position L wraps back to 0
+    // (a scroll stays seamless). Mirror: non-cyclic, colors[0] at the edge (p=0)
+    // → colors[N-1] at the centre (p=L-1), so no wrap-around seam at the fold.
     std::vector<cv::Vec3b> axis(static_cast<size_t>(L));
     for (int p = 0; p < L; ++p) {
-        const double f   = static_cast<double>(p) / L * N;   // 0 .. N
+        const double f   = mirror ? (L <= 1 ? 0.0
+                                            : static_cast<double>(p) / (L - 1) * (N - 1))
+                                  : static_cast<double>(p) / L * N;
         const int    seg = std::min(N - 1, static_cast<int>(f));
         if (!smooth || N == 1) {
             axis[p] = colors[seg];
         } else {
             const double local = f - seg;                    // 0 .. 1 in segment
             const cv::Vec3b& a = colors[seg];
-            const cv::Vec3b& b = colors[(seg + 1) % N];
+            const cv::Vec3b& b = mirror ? colors[std::min(N - 1, seg + 1)]
+                                        : colors[(seg + 1) % N];
             for (int c = 0; c < 3; ++c)
                 axis[p][c] = static_cast<uint8_t>(
                     a[c] * (1.0 - local) + b[c] * local + 0.5);
         }
     }
 
-    // Broadcast the ramp across the perpendicular axis.
+    // Broadcast the ramp across the perpendicular axis. When mirroring, fold the
+    // coordinate about the axis centre (min(p, span-1-p)) so both halves reflect.
     base_ = cv::Mat(height, width, CV_8UC3);
     for (int y = 0; y < height; ++y) {
         cv::Vec3b* row = base_.ptr<cv::Vec3b>(y);
-        for (int x = 0; x < width; ++x)
-            row[x] = horizontal ? axis[x % L] : axis[y % L];
+        for (int x = 0; x < width; ++x) {
+            const int p   = horizontal ? x : y;
+            const int idx = mirror ? std::min(p, span - 1 - p) : (p % L);
+            row[x] = axis[idx];
+        }
     }
 }
 
@@ -125,8 +138,9 @@ std::shared_ptr<BaseMaterial> load_material(
     double scroll_x, double scroll_y, const std::string& materials_dir) {
 
     // gradient:<dir>:<mode>:<speed>:<RRGGBB>-<RRGGBB>-...
-    //   dir  = h | v     mode = s (smooth) | b (banded)     speed = px/s (int)
-    // e.g. "gradient:h:s:20:00DCB4-0064FF-B41EDC"
+    //   dir  = h | v | hm | vm   (…m = mirror the ramp about the axis centre)
+    //   mode = s (smooth) | b (banded)          speed = px/s (int)
+    // e.g. "gradient:hm:s:20:00DCB4-0064FF-B41EDC"
     if (name.rfind("gradient:", 0) == 0) {
         std::vector<std::string> parts;     // dir, mode, speed, hexlist
         size_t start = 9;                   // after "gradient:"
@@ -140,7 +154,9 @@ std::shared_ptr<BaseMaterial> load_material(
         }
         const std::string hexlist = start <= name.size() ? name.substr(start)
                                                           : std::string();
-        const bool horizontal = parts.empty() || parts[0] != "v";
+        const std::string dir  = parts.empty() ? std::string("h") : parts[0];
+        const bool horizontal  = dir.empty() || dir[0] != 'v';
+        const bool mirror      = dir.size() >= 2 && dir[1] == 'm';   // "hm" / "vm"
         const bool smooth      = parts.size() < 2 || parts[1] != "b";
         const double speed     = parts.size() < 3 ? 0.0 : std::atof(parts[2].c_str());
 
@@ -162,7 +178,7 @@ std::shared_ptr<BaseMaterial> load_material(
             cs = dash + 1;
         }
         return std::make_shared<GradientMaterial>(std::move(colors), width, height,
-                                                  horizontal, smooth, speed);
+                                                  horizontal, smooth, speed, mirror);
     }
 
     if (name.rfind("solid:", 0) == 0) {

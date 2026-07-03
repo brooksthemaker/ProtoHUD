@@ -1750,6 +1750,23 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             { "Genderqueer", 31 }, { "Aromantic",   32 }, { "Intersex",    33 },
         };
         std::vector<MenuItem> pride_items;
+        // Hard-edged distinct stripes vs a smooth blend, for every flag below.
+        pride_items.push_back(with_desc(
+            toggle("Sharp Bands",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx); return state.face.pride_sharp; },
+                [teensy, &state](bool v){
+                    teensy->set_menu_item(10, v ? 1 : 0);   // 10 = native pride sharp-bands
+                    uint8_t idx;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        state.face.pride_sharp = v;
+                        idx = state.face.material_color;
+                    }
+                    // Re-apply the current flag so the change shows immediately.
+                    if (idx >= 22 && idx <= 33) teensy->set_menu_item(8, idx);
+                }),
+            "Draw each flag as hard-edged distinct stripes (real-flag look) "
+            "instead of a smooth blend between colours."));
         for (const auto& f : pf_pride)
             pride_items.push_back(leaf_sel(f.label,
                 [teensy, idx = f.idx, &state]{
@@ -1813,6 +1830,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         grad_items.push_back(toggle("Smooth Blend",
             [G]{ return G->smooth; },
             [G, apply_grad](bool v){ G->smooth = v; apply_grad(); }));
+
+        grad_items.push_back(with_desc(toggle("Mirror at Center",
+            [G]{ return G->mirror; },
+            [G, apply_grad](bool v){ G->mirror = v; apply_grad(); }),
+            "Reflect the gradient about the centre so both halves match, instead "
+            "of stretching one continuous ramp across the face."));
 
         std::vector<MenuItem> gdir_items = {
             leaf_sel("Horizontal",

@@ -1809,6 +1809,7 @@ int main(int argc, char* argv[]) {
         pf_launch_driver = jval(jpf, "panel_driver", true);
         pf_backend       = jpf.value("backend", std::string("hub75"));
         state.face.face_colors = jval(jpf, "face_colors", false);
+        state.face.pride_sharp = jval(jpf, "pride_sharp", true);
         if (jpf.contains("layout") && jpf["layout"].is_object()) {
             auto& jl = jpf["layout"];
             pf_eye_layout   = jl.value("eye",   pf_eye_layout);
@@ -1876,6 +1877,7 @@ int main(int argc, char* argv[]) {
             pf_gradient.smooth    = jval(jg, "smooth", pf_gradient.smooth);
             pf_gradient.direction = jg.value("direction", pf_gradient.direction);
             pf_gradient.speed     = jval(jg, "speed", pf_gradient.speed);
+            pf_gradient.mirror    = jval(jg, "mirror", pf_gradient.mirror);
             if (jg.contains("colors") && jg["colors"].is_array()) {
                 for (size_t i = 0; i < jg["colors"].size() && i < 6; ++i) {
                     const auto& jc = jg["colors"][i];
@@ -2994,6 +2996,7 @@ int main(int argc, char* argv[]) {
                                       pf_eye_layout, pf_mouth_layout, pf_nose_layout,
                                       &pf_hub75));
         native_ctrl->set_face_colors(state.face.face_colors);
+        native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->start();
         // Push the user's saved animation tunables into every panel's
         // FaceState. The defaults in FaceState/FaceCfg apply otherwise.
@@ -3263,6 +3266,7 @@ int main(int argc, char* argv[]) {
             rc, std::move(new_output));
         active_face = native_ctrl.get();
         native_ctrl->set_face_colors(state.face.face_colors);
+        native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->start();
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
@@ -4768,6 +4772,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["backend"]             = pf_backend;
         cfg["protoface"]["autostart"]           = pf_autostart;
         cfg["protoface"]["face_colors"]         = state.face.face_colors;
+        cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
         cfg["protoface"]["layout"]["nose"]      = pf_nose_layout;
@@ -4817,6 +4822,7 @@ int main(int argc, char* argv[]) {
             jg["smooth"]    = pf_gradient.smooth;
             jg["direction"] = pf_gradient.direction;
             jg["speed"]     = pf_gradient.speed;
+            jg["mirror"]    = pf_gradient.mirror;
             json jcolors = json::array();
             for (int i = 0; i < 6; ++i)
                 jcolors.push_back(json::array({pf_gradient.colors[i][0],

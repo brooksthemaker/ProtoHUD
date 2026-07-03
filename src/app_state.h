@@ -75,6 +75,7 @@ struct FaceState {
     bool     connected    = false;
     bool     hud_control  = false;  // true = HUD has taken manual control; false = Teensy autonomous
     bool     face_colors  = false;  // true = draw the face's own RGB art; false = material override
+    bool     pride_sharp  = true;   // pride flags: hard-edged distinct bands vs smooth blend
 };
 
 struct LoRaNode {
