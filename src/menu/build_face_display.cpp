@@ -1750,6 +1750,40 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             { "Genderqueer", 31 }, { "Aromantic",   32 }, { "Intersex",    33 },
         };
         std::vector<MenuItem> pride_items;
+        // Hard-edged distinct stripes vs a smooth blend, for every flag below.
+        pride_items.push_back(with_desc(
+            toggle("Sharp Bands",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx); return state.face.pride_sharp; },
+                [teensy, &state](bool v){
+                    teensy->set_menu_item(10, v ? 1 : 0);   // 10 = native pride sharp-bands
+                    uint8_t idx;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        state.face.pride_sharp = v;
+                        idx = state.face.material_color;
+                    }
+                    // Re-apply the current flag so the change shows immediately.
+                    if (idx >= 22 && idx <= 33) teensy->set_menu_item(8, idx);
+                }),
+            "Draw each flag as hard-edged distinct stripes (real-flag look) "
+            "instead of a smooth blend between colours."));
+        // Rotate the flag stripes. Passed in 15° units (set_menu_item is a byte).
+        pride_items.push_back(with_desc(
+            slider("Rotation", 0.f, 360.f, 15.f, "\xc2\xb0",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx); return static_cast<float>(state.face.pride_angle); },
+                [teensy, &state](float v){
+                    int ang = (static_cast<int>(v) % 360 + 360) % 360;
+                    teensy->set_menu_item(11, static_cast<uint8_t>(ang / 15));  // 11 = pride rotation
+                    uint8_t idx;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        state.face.pride_angle = ang;
+                        idx = state.face.material_color;
+                    }
+                    if (idx >= 22 && idx <= 33) teensy->set_menu_item(8, idx);  // re-apply live
+                }),
+            "Rotate the flag stripes. 90\xc2\xb0 is the usual vertical stripes; "
+            "0\xc2\xb0 lays them left\xe2\x86\x92right, other values give diagonals."));
         for (const auto& f : pf_pride)
             pride_items.push_back(leaf_sel(f.label,
                 [teensy, idx = f.idx, &state]{
@@ -1814,15 +1848,18 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             [G]{ return G->smooth; },
             [G, apply_grad](bool v){ G->smooth = v; apply_grad(); }));
 
-        std::vector<MenuItem> gdir_items = {
-            leaf_sel("Horizontal",
-                [G, apply_grad]{ G->direction = "horizontal"; apply_grad(); },
-                [G]{ return G->direction != "vertical"; }),
-            leaf_sel("Vertical",
-                [G, apply_grad]{ G->direction = "vertical"; apply_grad(); },
-                [G]{ return G->direction == "vertical"; }),
-        };
-        grad_items.push_back(submenu("Direction", std::move(gdir_items)));
+        grad_items.push_back(with_desc(toggle("Mirror at Center",
+            [G]{ return G->mirror; },
+            [G, apply_grad](bool v){ G->mirror = v; apply_grad(); }),
+            "Reflect the gradient about the centre so both halves match, instead "
+            "of stretching one continuous ramp across the face."));
+
+        grad_items.push_back(with_desc(
+            slider("Rotation", 0.f, 360.f, 15.f, "\xc2\xb0",
+                [G]{ return static_cast<float>(G->angle); },
+                [G, apply_grad](float v){ G->angle = static_cast<int>(v) % 360; apply_grad(); }),
+            "Rotate the gradient direction. 0\xc2\xb0 runs left\xe2\x86\x92right, "
+            "90\xc2\xb0 top\xe2\x86\x92bottom; values in between give diagonals."));
 
         grad_items.push_back(slider("Speed", -60.f, 60.f, 1.f, " px/s",
             [G]{ return static_cast<float>(G->speed); },

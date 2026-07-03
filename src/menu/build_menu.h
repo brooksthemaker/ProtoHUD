@@ -106,15 +106,18 @@ struct PfGradient {
         {{255, 80, 0}},  {{30, 220, 60}}, {{255, 220, 0}},
     }};
     bool        smooth    = true;                    // blend vs hard bands
-    std::string direction = "horizontal";            // horizontal | vertical
+    int         angle     = 0;                        // rotation, degrees (0 = →, 90 = ↓)
     int         speed     = 0;                        // px/s, 0 = static
+    bool        mirror    = true;                     // reflect the ramp about the axis centre
 };
 
 // Build the "gradient:<dir>:<mode>:<speed>:RRGGBB-…" spec face::load_material
-// parses. Clamped to 2..6 stops.
+// parses. Clamped to 2..6 stops. The direction is an angle token "a<deg>", with
+// a trailing 'm' to mirror the ramp about the centre.
 inline std::string pf_gradient_spec(const PfGradient& g) {
-    std::string s = "gradient:";
-    s += (g.direction == "vertical") ? "v" : "h";
+    std::string s = "gradient:a";
+    s += std::to_string(((g.angle % 360) + 360) % 360);
+    if (g.mirror) s += 'm';
     s += ':';
     s += g.smooth ? 's' : 'b';
     s += ':';
