@@ -12,7 +12,7 @@ GPIO — so the coprocessor is never required and can be toggled off in
 
 MCU → Pi:
 ```
-HELLO proto-buttons v1 n=<count>   # once on boot
+HELLO proto-buttons v1 fw=<ver> n=<count>   # once on boot
 BTN <id> SHORT                     # debounced, held < long_ms
 BTN <id> LONG                      # debounced, held >= long_ms (fires once)
 PING                               # heartbeat ~1 Hz

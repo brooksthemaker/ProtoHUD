@@ -66,7 +66,7 @@ implement on the MCU.
 
 **Coprocessor → Pi**
 ```
-HELLO proto-buttons v1 n=8        # on connect: name, version, #buttons
+HELLO proto-buttons v1 fw=1.1.0 n=8   # on connect: name, proto ver, fw ver, #buttons
 BTN <id> DOWN                     # optional raw edges (ignored unless needed)
 BTN <id> UP
 BTN <id> SHORT                    # debounced, held < long_ms
@@ -118,6 +118,26 @@ consecutive (see [voice-changer.md](voice-changer.md)).
 > Treat bytes from the link as **untrusted external input**: bound line length,
 > validate `id` against `n`, never `eval`/format-inject. A flaky cable should
 > degrade to "offline", never crash the reader thread.
+
+## Updating the firmware from the CM5
+
+Because the coprocessor is on USB, the CM5 can reflash it with **no BOOTSEL
+button** — for real code changes (new effect, new command, a fix). Day-to-day
+GPIO role changes don't need this at all; they go through `PINCFG` above.
+
+```bash
+scripts/flash_coproc.sh firmware.uf2     # flash a prebuilt image
+scripts/flash_coproc.sh --build          # build rpipico2w_voice, then flash
+```
+
+How it works: the script does the Arduino **1200-baud touch** on the coproc's
+serial port, which reboots the RP2350 into its UF2 bootloader; then `picotool
+load -x` writes the image and runs it. The firmware reports its version in the
+`HELLO` line (`fw=…`), so you can confirm the update took after it reconnects.
+Requires `picotool` (`sudo apt install picotool`; it may need sudo or a udev
+rule for USB access). ProtoHUD can stay running — the port drops during the
+reset and `CoprocInputs` reconnects afterward. Bump `kFwVersion` in
+`config.h` whenever you change the firmware.
 
 ## Transports
 

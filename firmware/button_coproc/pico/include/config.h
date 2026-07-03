@@ -9,6 +9,10 @@
 
 #include <Arduino.h>
 
+// Firmware version, reported in the HELLO line so the Pi (and the flash script)
+// can confirm an update actually took. Bump it whenever you change the firmware.
+static constexpr const char* kFwVersion = "1.1.0";
+
 // Switches wired between the listed GP pin and GND. We use INPUT_PULLUP, so a
 // pressed switch reads LOW (active-low). Add/remove entries freely — kLedPins
 // must stay the same length.

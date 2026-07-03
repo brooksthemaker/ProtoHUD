@@ -94,7 +94,9 @@ void emit(const char* verb, size_t id, const char* evt) {
 }
 
 void send_hello() {
-    Serial.print("HELLO proto-buttons v1 n=");
+    Serial.print("HELLO proto-buttons v1 fw=");
+    Serial.print(kFwVersion);
+    Serial.print(" n=");
     Serial.println(g_npins);
 }
 
