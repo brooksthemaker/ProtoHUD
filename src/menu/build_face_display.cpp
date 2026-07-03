@@ -1837,15 +1837,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Reflect the gradient about the centre so both halves match, instead "
             "of stretching one continuous ramp across the face."));
 
-        std::vector<MenuItem> gdir_items = {
-            leaf_sel("Horizontal",
-                [G, apply_grad]{ G->direction = "horizontal"; apply_grad(); },
-                [G]{ return G->direction != "vertical"; }),
-            leaf_sel("Vertical",
-                [G, apply_grad]{ G->direction = "vertical"; apply_grad(); },
-                [G]{ return G->direction == "vertical"; }),
-        };
-        grad_items.push_back(submenu("Direction", std::move(gdir_items)));
+        grad_items.push_back(with_desc(
+            slider("Rotation", 0.f, 360.f, 15.f, "\xc2\xb0",
+                [G]{ return static_cast<float>(G->angle); },
+                [G, apply_grad](float v){ G->angle = static_cast<int>(v) % 360; apply_grad(); }),
+            "Rotate the gradient direction. 0\xc2\xb0 runs left\xe2\x86\x92right, "
+            "90\xc2\xb0 top\xe2\x86\x92bottom; values in between give diagonals."));
 
         grad_items.push_back(slider("Speed", -60.f, 60.f, 1.f, " px/s",
             [G]{ return static_cast<float>(G->speed); },

@@ -1875,7 +1875,11 @@ int main(int argc, char* argv[]) {
             auto& jg = jpf["gradient"];
             pf_gradient.count     = std::clamp(jval(jg, "count", pf_gradient.count), 2, 6);
             pf_gradient.smooth    = jval(jg, "smooth", pf_gradient.smooth);
-            pf_gradient.direction = jg.value("direction", pf_gradient.direction);
+            if (jg.contains("angle"))
+                pf_gradient.angle = jval(jg, "angle", pf_gradient.angle);
+            else if (jg.contains("direction"))   // migrate the old horizontal/vertical key
+                pf_gradient.angle = (jg.value("direction", std::string("horizontal")) == "vertical")
+                                    ? 90 : 0;
             pf_gradient.speed     = jval(jg, "speed", pf_gradient.speed);
             pf_gradient.mirror    = jval(jg, "mirror", pf_gradient.mirror);
             if (jg.contains("colors") && jg["colors"].is_array()) {
@@ -4820,7 +4824,7 @@ int main(int argc, char* argv[]) {
             auto& jg = cfg["protoface"]["gradient"];
             jg["count"]     = std::clamp(pf_gradient.count, 2, 6);
             jg["smooth"]    = pf_gradient.smooth;
-            jg["direction"] = pf_gradient.direction;
+            jg["angle"]     = pf_gradient.angle;
             jg["speed"]     = pf_gradient.speed;
             jg["mirror"]    = pf_gradient.mirror;
             json jcolors = json::array();

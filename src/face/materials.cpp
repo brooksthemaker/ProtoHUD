@@ -1,6 +1,7 @@
 #include "materials.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <sys/stat.h>
@@ -55,22 +56,14 @@ cv::Mat TextureMaterial::get_frame() {
 
 // ── Gradient ───────────────────────────────────────────────────────────────────
 
-GradientMaterial::GradientMaterial(std::vector<cv::Vec3b> colors,
-                                   int width, int height,
-                                   bool horizontal, bool smooth, double speed,
-                                   bool mirror)
-    : w_(width), h_(height), horizontal_(horizontal), speed_(speed) {
-    if (colors.empty()) colors.push_back(cv::Vec3b(0, 220, 180));  // teal fallback
-    const int N    = static_cast<int>(colors.size());
-    const int span = std::max(1, horizontal ? width : height);
-    // Ramp resolution: the whole axis normally, or just the half when mirroring
-    // (the other half is the reflection, built below).
-    const int L = mirror ? (span + 1) / 2 : span;
-
-    // 1-D colour ramp along the scroll axis. Non-mirror: N cyclic segments,
-    // segment i goes colors[i] → colors[(i+1)%N] so position L wraps back to 0
-    // (a scroll stays seamless). Mirror: non-cyclic, colors[0] at the edge (p=0)
-    // → colors[N-1] at the centre (p=L-1), so no wrap-around seam at the fold.
+// A 1-D colour ramp of length L. Non-mirror: N cyclic segments, segment i goes
+// colors[i] → colors[(i+1)%N] so position L wraps back to 0 (a scroll stays
+// seamless). Mirror: non-cyclic, colors[0] at p=0 → colors[N-1] at p=L-1, so
+// there is no wrap-around seam where the two reflected halves meet.
+static std::vector<cv::Vec3b> build_ramp(const std::vector<cv::Vec3b>& colors,
+                                         int L, bool smooth, bool mirror) {
+    const int N = static_cast<int>(colors.size());
+    L = std::max(1, L);
     std::vector<cv::Vec3b> axis(static_cast<size_t>(L));
     for (int p = 0; p < L; ++p) {
         const double f   = mirror ? (L <= 1 ? 0.0
@@ -89,15 +82,72 @@ GradientMaterial::GradientMaterial(std::vector<cv::Vec3b> colors,
                     a[c] * (1.0 - local) + b[c] * local + 0.5);
         }
     }
+    return axis;
+}
 
-    // Broadcast the ramp across the perpendicular axis. When mirroring, fold the
-    // coordinate about the axis centre (min(p, span-1-p)) so both halves reflect.
+GradientMaterial::GradientMaterial(std::vector<cv::Vec3b> colors,
+                                   int width, int height,
+                                   double angle_deg, bool smooth, double speed,
+                                   bool mirror)
+    : w_(width), h_(height), speed_(speed) {
+    if (colors.empty()) colors.push_back(cv::Vec3b(0, 220, 180));  // teal fallback
+
+    double ang = std::fmod(angle_deg, 360.0);
+    if (ang < 0.0) ang += 360.0;
+
     base_ = cv::Mat(height, width, CV_8UC3);
+
+    // Axis-aligned fast paths (0° = horizontal, 90° = vertical) keep the exact
+    // edge-to-edge ramp / centre fold used before rotation was added.
+    if (ang == 0.0 || ang == 90.0) {
+        const bool horizontal = (ang == 0.0);
+        horizontal_ = horizontal;
+        const int span = std::max(1, horizontal ? width : height);
+        const int L = mirror ? (span + 1) / 2 : span;
+        const std::vector<cv::Vec3b> axis = build_ramp(colors, L, smooth, mirror);
+        for (int y = 0; y < height; ++y) {
+            cv::Vec3b* row = base_.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < width; ++x) {
+                const int p   = horizontal ? x : y;
+                // Fold about the axis centre when mirroring so both halves reflect.
+                const int idx = mirror ? std::min(p, span - 1 - p) : (p % L);
+                row[x] = axis[idx];
+            }
+        }
+        return;
+    }
+
+    // Arbitrary rotation: project each pixel onto the gradient direction, then
+    // map that 0..1 position along the ramp (folded about the centre if mirror).
+    const double a  = ang * 3.14159265358979323846 / 180.0;
+    const double dx = std::cos(a), dy = std::sin(a);
+    horizontal_ = std::abs(dx) >= std::abs(dy);   // scroll axis for get_frame()
+
+    double pmin = 1e30, pmax = -1e30;
+    const double cx[4] = {0.0, double(width - 1), 0.0,                double(width - 1)};
+    const double cy[4] = {0.0, 0.0,               double(height - 1), double(height - 1)};
+    for (int i = 0; i < 4; ++i) {
+        const double p = cx[i] * dx + cy[i] * dy;
+        pmin = std::min(pmin, p);
+        pmax = std::max(pmax, p);
+    }
+    const double range = std::max(1.0, pmax - pmin);
+    const int L = mirror ? std::max(1, static_cast<int>(std::lround(range / 2.0)) + 1)
+                         : std::max(1, static_cast<int>(std::lround(range))       + 1);
+    const std::vector<cv::Vec3b> axis = build_ramp(colors, L, smooth, mirror);
+
     for (int y = 0; y < height; ++y) {
         cv::Vec3b* row = base_.ptr<cv::Vec3b>(y);
         for (int x = 0; x < width; ++x) {
-            const int p   = horizontal ? x : y;
-            const int idx = mirror ? std::min(p, span - 1 - p) : (p % L);
+            const double t = (x * dx + y * dy - pmin) / range;   // 0..1 along axis
+            int idx;
+            if (mirror) {
+                const double m = 1.0 - std::abs(2.0 * t - 1.0);  // 0 edges → 1 centre
+                idx = std::min(L - 1, std::max(0, static_cast<int>(std::lround(m * (L - 1)))));
+            } else {
+                idx = static_cast<int>(t * L) % L;
+                if (idx < 0) idx += L;
+            }
             row[x] = axis[idx];
         }
     }
@@ -138,9 +188,10 @@ std::shared_ptr<BaseMaterial> load_material(
     double scroll_x, double scroll_y, const std::string& materials_dir) {
 
     // gradient:<dir>:<mode>:<speed>:<RRGGBB>-<RRGGBB>-...
-    //   dir  = h | v | hm | vm   (…m = mirror the ramp about the axis centre)
+    //   dir  = h | v | a<deg>    (…m suffix mirrors the ramp about the centre)
+    //          h = 0°, v = 90°, a<deg> = arbitrary rotation (e.g. a45, a135m)
     //   mode = s (smooth) | b (banded)          speed = px/s (int)
-    // e.g. "gradient:hm:s:20:00DCB4-0064FF-B41EDC"
+    // e.g. "gradient:a45m:s:20:00DCB4-0064FF-B41EDC"
     if (name.rfind("gradient:", 0) == 0) {
         std::vector<std::string> parts;     // dir, mode, speed, hexlist
         size_t start = 9;                   // after "gradient:"
@@ -155,8 +206,12 @@ std::shared_ptr<BaseMaterial> load_material(
         const std::string hexlist = start <= name.size() ? name.substr(start)
                                                           : std::string();
         const std::string dir  = parts.empty() ? std::string("h") : parts[0];
-        const bool horizontal  = dir.empty() || dir[0] != 'v';
-        const bool mirror      = dir.size() >= 2 && dir[1] == 'm';   // "hm" / "vm"
+        const bool mirror      = !dir.empty() && dir.back() == 'm';  // trailing "m"
+        double angle_deg       = 0.0;                                // 'h' / default
+        if (!dir.empty() && (dir[0] == 'a' || dir[0] == 'A'))
+            angle_deg = std::atof(dir.c_str() + 1);                  // "a<deg>[m]"
+        else if (!dir.empty() && (dir[0] == 'v' || dir[0] == 'V'))
+            angle_deg = 90.0;                                        // 'v' / 'vm'
         const bool smooth      = parts.size() < 2 || parts[1] != "b";
         const double speed     = parts.size() < 3 ? 0.0 : std::atof(parts[2].c_str());
 
@@ -178,7 +233,7 @@ std::shared_ptr<BaseMaterial> load_material(
             cs = dash + 1;
         }
         return std::make_shared<GradientMaterial>(std::move(colors), width, height,
-                                                  horizontal, smooth, speed, mirror);
+                                                  angle_deg, smooth, speed, mirror);
     }
 
     if (name.rfind("solid:", 0) == 0) {
