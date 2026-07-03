@@ -3646,6 +3646,21 @@ int main(int argc, char* argv[]) {
                     input::gpio_func_from_id(jb.value("long",  std::string("none")));
             }
         }
+        // Physical pin map (order = button id) pushed to the firmware on connect,
+        // so a switch's GPIO / pull / polarity / backlight is HUD config, not a
+        // reflash. Omit the block to leave the firmware on its config.h defaults.
+        if (jc.contains("pins") && jc["pins"].is_array()) {
+            for (const auto& jp : jc["pins"]) {
+                if (!jp.is_object()) continue;
+                input::CoprocPin p;
+                p.gp         = jval(jp, "gp", -1);
+                if (p.gp < 0) continue;
+                p.pull       = jp.value("pull", std::string("up"));
+                p.active_low = jval(jp, "active_low", true);
+                p.led_gp     = jval(jp, "led_gp", -1);
+                coproc_cfg.pins.push_back(std::move(p));
+            }
+        }
     }
 
     // Command FIFO (optional) — write a GpioFunc id to the FIFO to drive ProtoHUD

@@ -186,7 +186,13 @@
         { "id": 1, "short": "menu_open",   "long": "system_restart" },
         { "id": 2, "short": "boop_snout",  "long": "none" }
       ],
-      "_buttons_note": "Maps the coprocessor's button ids to functions (same function ids as gpio.pins). The MCU reports 'button N, short/long'; the Pi decides what N means, so remapping stays here."
+      "_buttons_note": "Maps the coprocessor's button ids to functions (same function ids as gpio.pins). The MCU reports 'button N, short/long'; the Pi decides what N means, so remapping stays here.",
+      "_pins_note": "OPTIONAL physical pin map, pushed to the firmware over PINCFG on connect so a switch's GPIO / pull / polarity / backlight is set here — no firmware reflash. Array order = button id (row 0 = id 0, matching 'buttons' above). gp = RP2350 GPIO; pull = up|down|none; active_low true = a switch to GND; led_gp = optional backlight GPIO (-1 = none). Omit the whole block to leave the firmware on its compiled-in config.h defaults. Constraints the firmware/UI enforce: valid GP 0-29, no pin used twice, and (for the voice changer) mic on GP26-28 + I2S BCLK/WS consecutive.",
+      "pins": [
+        { "gp": 2, "pull": "up", "active_low": true, "led_gp": -1 },
+        { "gp": 3, "pull": "up", "active_low": true, "led_gp": -1 },
+        { "gp": 4, "pull": "up", "active_low": true, "led_gp": -1 }
+      ]
     },
     "command_fifo": {
       "_about": "OPTIONAL local command pipe. When enabled, writing a GpioFunc id line to the FIFO drives ProtoHUD through the same functions as the GPIO map — e.g. a KDE Connect 'Run Command' doing `echo menu_open > /run/protohud/cmd`. Untrusted input: unknown ids are ignored. See docs/kdeconnect-commands.md and scripts/kdeconnect_commands.py.",

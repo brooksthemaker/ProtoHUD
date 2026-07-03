@@ -79,11 +79,41 @@ PING                              # heartbeat, ~1 Hz
 PONG                              # ack heartbeat
 CFG long_ms=600                   # push the long-press threshold
 LED <id> <0|1>                    # drive a switch backlight, if wired
+PINCFG CLR                        # begin a new pin map (see below)
+PINCFG BTN <gp> <pull> <alow>     # append a button; its index = its id
+PINCFG LED <id> <gp>              # backlight GPIO for a button
+PINCFG APPLY                      # re-init pinModes + re-HELLO with the new count
 ```
 
 Parsing rules: one message per line; **ignore any malformed/unknown line**
 (forward-compatible); a press is only the `SHORT`/`LONG` events (DOWN/UP are
 advisory). If no line arrives within `heartbeat_timeout_ms`, mark **offline**.
+
+### Runtime pin map (`PINCFG`) — change GPIO roles without a reflash
+
+The firmware is "dumb about pins" the same way it's dumb about meaning: it boots
+on the `config.h` defaults, and if the HUD config has an
+`inputs.coprocessor.pins` array the Pi **pushes it on every connect** (right
+after `HELLO`), so which GPIO is a button, its pull (`up|down|none`), its
+polarity (`active_low`), and its backlight are all HUD config — **no firmware
+rebuild to move a switch**. Reflash only for actual code changes (new effect,
+new command, bug fix).
+
+```jsonc
+"inputs": { "coprocessor": {
+  "pins": [
+    { "gp": 2, "pull": "up", "active_low": true, "led_gp": -1 },   // id 0
+    { "gp": 3, "pull": "up", "active_low": true, "led_gp": 25 }    // id 1 + backlight
+  ]
+}}
+```
+
+The array order is the button id, so it lines up with the `buttons` map above.
+`pull`/`active_low` map to `INPUT_PULLUP` + active-low by default (a switch to
+GND). The firmware re-`HELLO`s after `PINCFG APPLY`; the Pi pushes only once per
+connection so that doesn't loop. Constraints: valid GP `0–29`, no pin used twice,
+and — with the voice changer — keep the mic on GP26–28 and I2S BCLK/WS
+consecutive (see [voice-changer.md](voice-changer.md)).
 
 > Treat bytes from the link as **untrusted external input**: bound line length,
 > validate `id` against `n`, never `eval`/format-inject. A flaky cable should

@@ -92,6 +92,7 @@ void CoprocInputs::reader_loop() {
             }
             buf.clear();
             last_rx = clock::now();
+            pins_pushed_ = false;   // re-push the pin map on the fresh connection
         }
 
         pollfd pfd{fd_, POLLIN, 0};
@@ -162,6 +163,9 @@ void CoprocInputs::on_line(const std::string& line) {
     if (cmd == "HELLO") {
         connected_.store(true);
         std::cout << "[coproc] " << line << "\n";
+        // Push the configured pin map once per connection. The firmware re-HELLOs
+        // after applying it; pins_pushed_ stops that from looping.
+        if (!pins_pushed_ && !cfg_.pins.empty()) push_pin_config();
         return;
     }
     if (cmd == "PING") {
@@ -170,6 +174,25 @@ void CoprocInputs::on_line(const std::string& line) {
         return;
     }
     // Unknown command → ignore (forward-compatible).
+}
+
+void CoprocInputs::push_pin_config() {
+    if (fd_ < 0) return;
+    std::string msg = "PINCFG CLR\n";
+    for (const CoprocPin& p : cfg_.pins) {
+        if (p.gp < 0) continue;
+        msg += "PINCFG BTN " + std::to_string(p.gp) + " " + p.pull + " " +
+               (p.active_low ? "1" : "0") + "\n";
+    }
+    // LED lines reference the button id (index), so emit them after all BTNs.
+    for (size_t i = 0; i < cfg_.pins.size(); ++i)
+        if (cfg_.pins[i].led_gp >= 0)
+            msg += "PINCFG LED " + std::to_string(i) + " " +
+                   std::to_string(cfg_.pins[i].led_gp) + "\n";
+    msg += "PINCFG APPLY\n";
+    (void)::write(fd_, msg.data(), msg.size());
+    pins_pushed_ = true;
+    std::cout << "[coproc] pushed pin map (" << cfg_.pins.size() << " buttons)\n";
 }
 
 void CoprocInputs::handle_button(int id, bool is_long) {
