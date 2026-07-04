@@ -3509,6 +3509,11 @@ int main(int argc, char* argv[]) {
                 return native_ctrl && native_ctrl->latest_frame(out);
             },
             /* preview_duration_s */ pf_preview_duration_s);
+        // MAX7219 wiring guide: when the face is shown on MAX panels (as the
+        // main backend, or a coproc "section"), hand the editor the chain's
+        // module order so it overlays the DIN→DOUT wiring on the grid.
+        if (pf_max7219.enabled || pf_backend == "max7219")
+            menu_ptr->face_editor().set_wiring_guide(pf_max7219_modules(pf_max7219));
     };
 
     // Now that face_proxy exists, hook the audio engine's per-period
