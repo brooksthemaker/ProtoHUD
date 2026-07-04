@@ -104,6 +104,7 @@ struct PfMax7219Layout {
     std::string chain_order = "serpentine";     // serpentine | row_major (DIN→DOUT walk)
     std::string module_type = "fc16";           // fc16 | generic1088
     std::string mode        = "section";        // section (beside HUB75) | main (the face)
+    std::string content     = "face";           // section content: face (mirror) | symbols
     int         coproc_cs   = 0;                 // → firmware kMaxCsPins[coproc_cs]
     int         intensity   = 6;                 // 0..15
     int         canvas_x    = 0;                 // top-left of the block on the canvas
@@ -351,6 +352,9 @@ struct MenuBuildContext {
     // (and the coproc-driven "section" beside HUB75) takes effect live.
     PfMax7219Layout* pf_max7219_p = nullptr;
     std::function<void()> pf_max7219_apply;
+    // Trigger content on the MAX7219 "section" panels (content:"symbols"). kind =
+    // symbol|text|pattern|clear|next|prev; value = the symbol/pattern/text.
+    std::function<void(const std::string& kind, const std::string& value)> pf_max_content;
     // Face animation tunables — pointers + a "push live" callback that
     // forwards the current values into native_ctrl after a slider/toggle
     // change. Caller owns the slots and the persistence to config.json.

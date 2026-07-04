@@ -84,6 +84,7 @@
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
+#include "face/max_section_content.h"
 #include "face/neopixel_matrix_output.h"
 
 #ifndef GIT_HASH
@@ -2398,6 +2399,42 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 [MX]{ return MX->mode == "main"; }),
         };
         mx_items.push_back(submenu("Mode", std::move(mode_items)));
+
+        // Section content source: mirror the face-canvas region, or show
+        // independent triggerable symbols/text/patterns (the library below).
+        std::vector<MenuItem> content_items = {
+            leaf_sel("Mirror Face Region",
+                [MX]{ MX->content = "face"; },
+                [MX]{ return MX->content != "symbols"; }),
+            leaf_sel("Symbols / Text / Patterns",
+                [MX]{ MX->content = "symbols"; },
+                [MX]{ return MX->content == "symbols"; }),
+        };
+        mx_items.push_back(with_desc(submenu("Content", std::move(content_items)),
+            "What the section panels show: a crop of the face, or independent "
+            "symbols/text/patterns you trigger (Content Library below, a max_* "
+            "button, or `echo max_symbol:heart > /run/protohud/cmd`)."));
+
+        // Content Library — live triggers (need a running section controller).
+        if (ctx.pf_max_content) {
+            auto trig = ctx.pf_max_content;
+            std::vector<MenuItem> sym_items;
+            for (const auto& s : face::max_content::symbol_names())
+                sym_items.push_back(leaf(s, [trig, s]{ trig("symbol", s); }));
+            std::vector<MenuItem> pat_items;
+            for (const auto& p : face::max_content::pattern_names())
+                pat_items.push_back(leaf(p, [trig, p]{ trig("pattern", p); }));
+            std::vector<MenuItem> lib_items;
+            lib_items.push_back(submenu("Symbols", std::move(sym_items)));
+            lib_items.push_back(submenu("Patterns", std::move(pat_items)));
+            lib_items.push_back(leaf("Next Symbol",  [trig]{ trig("next", ""); }));
+            lib_items.push_back(leaf("Prev Symbol",  [trig]{ trig("prev", ""); }));
+            lib_items.push_back(leaf("Clear",        [trig]{ trig("clear", ""); }));
+            mx_items.push_back(with_desc(submenu("Content Library", std::move(lib_items)),
+                "Show a symbol or pattern on the section panels now. Text is set "
+                "over the FIFO (`echo max_text:HELLO > /run/protohud/cmd`). Only "
+                "active when Content = Symbols and the panels are wired + enabled."));
+        }
 
         mx_items.push_back(slider("Rows", 1.f, 8.f, 1.f, "",
             [MX]{ return static_cast<float>(MX->rows.size()); },

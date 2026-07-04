@@ -81,6 +81,8 @@
 #include "face/max7219_panel_output.h"
 #include "face/neopixel_matrix_output.h"
 #include "face/tee_panel_output.h"
+#include "face/max_section_controller.h"
+#include "face/max_section_content.h"
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -1918,6 +1920,7 @@ int main(int argc, char* argv[]) {
             auto& jx = jpf["max7219"];
             pf_max7219.enabled     = jval(jx, "enabled", pf_max7219.enabled);
             pf_max7219.mode        = jx.value("mode",        pf_max7219.mode);
+            pf_max7219.content     = jx.value("content",     pf_max7219.content);
             pf_max7219.chain_order = jx.value("chain_order", pf_max7219.chain_order);
             pf_max7219.module_type = jx.value("module_type", pf_max7219.module_type);
             pf_max7219.coproc_cs   = jval(jx, "coproc_cs", pf_max7219.coproc_cs);
@@ -3856,6 +3859,7 @@ int main(int argc, char* argv[]) {
         auto& jx = cfg["protoface"]["max7219"];
         jx["enabled"]     = pf_max7219.enabled;
         jx["mode"]        = pf_max7219.mode;
+        jx["content"]     = pf_max7219.content;
         jx["chain_order"] = pf_max7219.chain_order;
         jx["module_type"] = pf_max7219.module_type;
         jx["coproc_cs"]   = pf_max7219.coproc_cs;
@@ -3887,6 +3891,18 @@ int main(int argc, char* argv[]) {
             pf_force_rebuild = true;
             swap_backend(pf_backend);
         }
+    };
+    // Declared here (before the menu callback captures it); created later once
+    // coproc_cfg is known. Drives the MAX7219 "section" symbols/text/patterns.
+    std::unique_ptr<face::MaxSectionController> max_section;
+    menu_ctx.pf_max_content = [&](const std::string& kind, const std::string& value) {
+        if (!max_section) return;
+        if      (kind == "symbol")  max_section->set_symbol(value);
+        else if (kind == "text")    max_section->set_text(value);
+        else if (kind == "pattern") max_section->set_pattern(value);
+        else if (kind == "clear")   max_section->clear();
+        else if (kind == "next")    max_section->cycle(+1);
+        else if (kind == "prev")    max_section->cycle(-1);
     };
     menu_ctx.pf_blink_enabled_p = &pf_blink_enabled;
     menu_ctx.pf_blink_min_p     = &pf_blink_min;
@@ -4277,6 +4293,38 @@ int main(int argc, char* argv[]) {
         state.face.material_color = static_cast<uint8_t>(idx);
     };
 
+    // ── MAX7219 "section" content controller (optional) ──────────────────────
+    // When the MAX chain runs beside HUB75 as a symbols/text surface (mode
+    // "section", content "symbols"), a standalone controller drives it over the
+    // coproc SPI bridge, independent of the face. Triggered by the max_* GpioFuncs
+    // below, the MAX Content menu, and `max_symbol:`/`max_text:`/`max_pattern:`
+    // lines on the command FIFO. (max_section is declared earlier with the menu
+    // wiring; created here once coproc_cfg / pf_max7219 are known.)
+    if (pf_max7219.enabled && pf_max7219.mode == "section" &&
+        pf_max7219.content == "symbols") {
+        PfMax7219Layout local = pf_max7219;   // normalise modules to a local origin
+        local.canvas_x = 0; local.canvas_y = 0;
+        const auto mods = pf_max7219_modules(local);
+        int cw = 8, ch = 8;
+        for (const auto& m : mods) { cw = std::max(cw, m[0] + 8); ch = std::max(ch, m[1] + 8); }
+        face::Max7219Chain::Config cc;
+        cc.name          = "max_section";
+        cc.transport     = face::Max7219Chain::Transport::Coproc;
+        cc.coproc_device = coproc_cfg.device;   // same USB link as the buttons
+        cc.coproc_cs     = pf_max7219.coproc_cs;
+        cc.module_type   = (pf_max7219.module_type == "generic1088")
+            ? face::Max7219Chain::ModuleType::Generic1088
+            : face::Max7219Chain::ModuleType::FC16;
+        cc.intensity     = static_cast<uint8_t>(std::clamp(pf_max7219.intensity, 0, 15));
+        for (const auto& m : mods) cc.module_positions.push_back({m[0], m[1]});
+        face::Max7219PanelOutput::Config mo;
+        mo.chains.push_back(std::move(cc));
+        max_section = std::make_unique<face::MaxSectionController>(
+            std::make_unique<face::Max7219PanelOutput>(std::move(mo)), cw, ch);
+        if (!max_section->start())
+            std::cerr << "[main] MAX section content init failed\n";
+    }
+
     auto gpio_apply = [&, restart_script](input::GpioFunc f) {
         using F = input::GpioFunc;
         switch (f) {
@@ -4378,6 +4426,9 @@ int main(int argc, char* argv[]) {
             face_proxy.set_effect(static_cast<uint8_t>(id));
         } break;
         case F::FaceRestart:    face_proxy.restart(); break;
+        case F::MaxNext:  if (max_section) max_section->cycle(+1); break;
+        case F::MaxPrev:  if (max_section) max_section->cycle(-1); break;
+        case F::MaxClear: if (max_section) max_section->clear();   break;
         case F::None: default: break;
         }
     };
@@ -4438,6 +4489,18 @@ int main(int argc, char* argv[]) {
     // ── Command FIFO source (optional) ───────────────────────────────────────
     // Same shared gpio_dispatch — a line written to the FIFO is a GpioFunc id.
     input::CmdFifo cmd_fifo(cmd_fifo_cfg, gpio_dispatch);
+    // Parametric MAX-panel content the GpioFunc enum can't express:
+    //   echo max_symbol:heart  > /run/protohud/cmd
+    //   echo max_text:HELLO    > /run/protohud/cmd
+    //   echo max_pattern:bars  > /run/protohud/cmd
+    cmd_fifo.set_raw_handler([&max_section](const std::string& line) -> bool {
+        if (!max_section) return false;
+        auto pfx = [&](const char* p){ return line.rfind(p, 0) == 0; };
+        if (pfx("max_symbol:"))  { max_section->set_symbol (line.substr(11)); return true; }
+        if (pfx("max_text:"))    { max_section->set_text   (line.substr(9));  return true; }
+        if (pfx("max_pattern:")) { max_section->set_pattern(line.substr(12)); return true; }
+        return false;
+    });
     if (cmd_fifo_cfg.enabled && !cmd_fifo.start())
         std::cerr << "[main] command FIFO init failed (" << cmd_fifo_cfg.path << ")\n";
 

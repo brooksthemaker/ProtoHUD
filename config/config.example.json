@@ -158,7 +158,7 @@
     "effects": { "type": 0, "palette": 0 }
   },
   "gpio": {
-    "_about": "Configurable GPIO switch map. Each entry in 'pins' assigns a BCM pin a short-press and optional long-press function, with pull bias ('up'|'down'|'none') and polarity (active_low=true means a momentary switch wired to GND). Edit in-HUD via System > GPIO Buttons; toggling Enabled applies instantly and 'Apply Changes Now' reloads the poller after slot edits (no relaunch needed). Functions: none, boop_snout, boop_left, boop_right, boop_both, menu_open, menu_select, menu_back, system_restart, system_shutdown, cam_af_left, cam_af_right, cam_pip_left, cam_pip_right, cam_capture_left, cam_capture_right, cam_swap, phone_ring, face_neutral, face_happy, face_angry, face_sad, face_surprised, face_return, material_rainbow, material_pride, material_progress, material_trans, material_bisexual, material_pansexual, material_lesbian, material_nonbinary, material_asexual, material_genderfluid, material_genderqueer, material_aromantic, material_intersex, cam_capture_stereo, rec_toggle, cam_zoom_in, cam_zoom_out, nv_toggle, theater_toggle, xr_recenter, face_next, face_prev, material_next, effect_next, face_bright_up, face_bright_down, face_restart.",
+    "_about": "Configurable GPIO switch map. Each entry in 'pins' assigns a BCM pin a short-press and optional long-press function, with pull bias ('up'|'down'|'none') and polarity (active_low=true means a momentary switch wired to GND). Edit in-HUD via System > GPIO Buttons; toggling Enabled applies instantly and 'Apply Changes Now' reloads the poller after slot edits (no relaunch needed). Functions: none, boop_snout, boop_left, boop_right, boop_both, menu_open, menu_select, menu_back, system_restart, system_shutdown, cam_af_left, cam_af_right, cam_pip_left, cam_pip_right, cam_capture_left, cam_capture_right, cam_swap, phone_ring, face_neutral, face_happy, face_angry, face_sad, face_surprised, face_return, material_rainbow, material_pride, material_progress, material_trans, material_bisexual, material_pansexual, material_lesbian, material_nonbinary, material_asexual, material_genderfluid, material_genderqueer, material_aromantic, material_intersex, cam_capture_stereo, rec_toggle, cam_zoom_in, cam_zoom_out, nv_toggle, theater_toggle, xr_recenter, face_next, face_prev, material_next, effect_next, face_bright_up, face_bright_down, face_restart, max_next, max_prev, max_clear.",
     "enabled": true,
     "pins": [
       { "gpio": 17, "active_low": true, "pull": "up", "short": "menu_select",  "long": "menu_back",      "long_ms": 600  },
@@ -234,6 +234,8 @@
     "max7219": {
       "enabled": false,
       "mode": "section",
+      "content": "face",
+      "_content_note": "section content: 'face' mirrors the face-canvas region; 'symbols' shows independent, triggerable symbols/text/patterns. Trigger via the max_next/max_prev/max_clear GpioFuncs (buttons), the Face Display > MAX7219 Layout > Content Library menu, or the command FIFO: `echo max_symbol:heart > /run/protohud/cmd`, `echo max_text:HELLO > ...`, `echo max_pattern:bars > ...`. Built-in symbols: heart star up down left right check cross smiley note excl dot; patterns: solid border checker bars blank.",
       "chains": [
         {
           "name": "cheek_l",

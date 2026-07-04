@@ -143,8 +143,18 @@ for ragged layouts); just set `transport: "coproc"` + `coproc_cs`. Frames are
 tiny. Power the panels from 5V, not the Pico's 3V3. See
 `config/config.example.json` → `protoface.max7219`.
 
-> This is Phase 1: the section shows whatever face-canvas region the chain
-> covers. Independent symbols/patterns/text with triggers come next.
+**Section content** (`protoface.max7219.content`): `face` mirrors the face-canvas
+region the chain covers; `symbols` shows independent, triggerable content —
+built-in symbols, short text, or patterns — driven by a standalone controller
+over the coproc link. Trigger it three ways:
+
+- **Buttons/menu:** the `max_next` / `max_prev` / `max_clear` GpioFuncs, or
+  Face Display → MAX7219 Layout → **Content Library**.
+- **Command FIFO** (parametric): `echo max_symbol:heart > /run/protohud/cmd`,
+  `echo max_text:HELLO > …`, `echo max_pattern:bars > …`.
+
+Built-in symbols: `heart star up down left right check cross smiley note excl
+dot`; patterns: `solid border checker bars blank`; text uses a built-in 5×7 font.
 
 ## Updating the firmware from the CM5
 

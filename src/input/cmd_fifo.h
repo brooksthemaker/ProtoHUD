@@ -34,11 +34,19 @@ public:
     bool running() const { return running_.load(); }
     const std::string& path() const { return cfg_.path; }
 
+    // Optional handler tried BEFORE the GpioFunc lookup, for parametric commands
+    // the enum can't express — e.g. "max_symbol:heart", "max_text:HELLO". Return
+    // true if the line was consumed (then it's not also dispatched as a GpioFunc).
+    void set_raw_handler(std::function<bool(const std::string&)> h) {
+        raw_handler_ = std::move(h);
+    }
+
 private:
     void reader_loop();
 
     CmdFifoConfig                 cfg_;
     std::function<void(GpioFunc)> dispatch_;
+    std::function<bool(const std::string&)> raw_handler_;
     std::atomic<bool>             running_{false};
     std::thread                   thread_;
     int                           fd_ = -1;
