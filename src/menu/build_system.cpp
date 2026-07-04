@@ -1671,11 +1671,18 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                     "changer. Apply & Reload pushes the map live."));
             }
 
-            gpio_btn_menu.push_back(with_desc(
-                submenu("Button Coprocessor", std::move(coproc_menu)),
-                "Optional external MCU (RP2350/RP2040) that handles button "
-                "debounce and streams presses to the Pi \xE2\x80\x94 frees GPIO "
-                "and offloads timing. See docs/coprocessor-input.md."));
+            // Route the coprocessor controls to the top-level GPIO tab's "RP2350
+            // GPIO Expander" submenu when build_menu asks for it; otherwise keep
+            // them nested under On-Board GPIO Buttons (legacy placement).
+            if (ctx.gpio_expander_out) {
+                for (auto& it : coproc_menu) ctx.gpio_expander_out->push_back(std::move(it));
+            } else {
+                gpio_btn_menu.push_back(with_desc(
+                    submenu("Button Coprocessor", std::move(coproc_menu)),
+                    "Optional external MCU (RP2350/RP2040) that handles button "
+                    "debounce and streams presses to the Pi \xE2\x80\x94 frees GPIO "
+                    "and offloads timing. See docs/coprocessor-input.md."));
+            }
         }
 
         for (int i = 0; i < gpio_slot_count; ++i) {
@@ -2711,11 +2718,16 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
                   "Poll the face controller for a fresh status frame."),
     };
-    // Moved out of Diagnostics per the menu reorg: the GPIO visualizer + buttons
-    // and the cooling-fan controls live under Pi Settings (hardware); Demo Mode
-    // lives under Software (appended at the tail of this block).
-    pi_settings_items.push_back(std::move(gpio_viz_item));
-    pi_settings_items.push_back(std::move(gpio_buttons_item));
+    // The GPIO visualizer + on-board button map now live in the top-level "GPIO"
+    // tab (On-Board GPIO submenu). When build_menu wires gpio_onboard_out, route
+    // them there; otherwise keep the legacy Pi Settings placement.
+    if (ctx.gpio_onboard_out) {
+        ctx.gpio_onboard_out->push_back(std::move(gpio_viz_item));
+        ctx.gpio_onboard_out->push_back(std::move(gpio_buttons_item));
+    } else {
+        pi_settings_items.push_back(std::move(gpio_viz_item));
+        pi_settings_items.push_back(std::move(gpio_buttons_item));
+    }
     // Cooling fans (Pi-driven PWM). Hidden when no FanController is wired.
     pi_settings_items.push_back([&]() -> MenuItem {
             if (!fans || fans->zone_count() == 0) {
@@ -2841,7 +2853,8 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         with_desc(submenu("Connectivity",     std::move(connectivity_menu)),
                   "SSH, Bluetooth and other network/peripheral toggles."),
         with_desc(submenu("Pi Settings",      std::move(pi_settings_items)),
-                  "Hostname, time, storage, GPIO visualizer/buttons and cooling fans."),
+                  "Hostname, time, storage and cooling fans. (GPIO buttons + the "
+                  "pin visualizer moved to the top-level GPIO menu.)"),
         with_desc(submenu("XR Headset (Viture Beast)", std::move(headset_menu)),
                   "Electrochromic transparency, HUD/backlight brightness, recenter, "
                   "gaze lock and 3D side-by-side \xe2\x80\x94 specific to the glasses."),

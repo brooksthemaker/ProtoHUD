@@ -428,10 +428,16 @@ struct MenuBuildContext {
     bool* coproc_enabled_p = nullptr;
     std::shared_ptr<std::function<void()>> coproc_reload;
     std::shared_ptr<std::function<std::string()>> coproc_status;
-    // Live coprocessor config (pins + button maps) for the Pins visualizer/editor
-    // under System > GPIO Buttons > Button Coprocessor. Edited in place, then
-    // persisted to cfg["inputs"]["coprocessor"] and re-pushed via coproc_reload.
+    // Live coprocessor config (pins + button maps) for the Pins visualizer/editor.
+    // Edited in place, then persisted to cfg["inputs"]["coprocessor"] and re-pushed
+    // via coproc_reload.
     input::CoprocConfig* coproc_cfg_p = nullptr;
+    // When set, build_system_menu routes its GPIO items here instead of into the
+    // System menu, so build_menu can assemble the top-level "GPIO" tab:
+    //   gpio_onboard_out  ← Pi 40-pin visualizer + on-board GPIO button map
+    //   gpio_expander_out ← RP2350 coprocessor (enable/status + Pico pin editor)
+    std::vector<MenuItem>* gpio_onboard_out  = nullptr;
+    std::vector<MenuItem>* gpio_expander_out = nullptr;
     // Glitch post-effect config (null on non-native backends). The menu
     // mutates it in place and re-pushes via pf_anim_push().
     face::GlitchConfig* pf_glitch_p = nullptr;
