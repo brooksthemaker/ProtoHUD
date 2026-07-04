@@ -1484,6 +1484,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                 auto gp_label = [pv](int gp) -> std::string {
                     std::string s = "GP" + std::to_string(gp);
                     if (sys::pico_gp_is_adc(pv, gp)) s += "  ADC";
+                    s += std::string("  ") + sys::pico_gp_i2c(gp);   // fixed I2C mux (GP%4)
                     if (const char* r = sys::pico_gp_reserved(pv, gp)) { s += "  ("; s += r; s += ")"; }
                     return s;
                 };

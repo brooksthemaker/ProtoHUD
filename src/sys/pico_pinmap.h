@@ -68,12 +68,12 @@ inline constexpr std::array<PicoPin, 40> kPico2Pins{{
     {26, 20, "GP20", "I2C0 SDA",            CapDigital|CapPwm|CapI2c,        PinKind::Gpio },
     {27, 21, "GP21", "I2C0 SCL",            CapDigital|CapPwm|CapI2c,        PinKind::Gpio },
     {28, -1, "GND",  "",                    CapNone,                         PinKind::Ground },
-    {29, 22, "GP22", "",                    CapDigital|CapPwm,               PinKind::Gpio },
+    {29, 22, "GP22", "I2C1 SDA",            CapDigital|CapPwm|CapI2c,        PinKind::Gpio },
     {30, -1, "RUN",  "reset",               CapNone,                         PinKind::HatId },
     {31, 26, "GP26", "ADC0 / I2C1 SDA",     CapDigital|CapPwm|CapAdc|CapI2c, PinKind::Pwm  },
     {32, 27, "GP27", "ADC1 / I2C1 SCL",     CapDigital|CapPwm|CapAdc|CapI2c, PinKind::Pwm  },
     {33, -1, "AGND", "",                    CapNone,                         PinKind::Ground },
-    {34, 28, "GP28", "ADC2",                CapDigital|CapPwm|CapAdc,        PinKind::Pwm  },
+    {34, 28, "GP28", "ADC2 / I2C0 SDA",     CapDigital|CapPwm|CapAdc|CapI2c, PinKind::Pwm  },
     {35, -1, "ADC_VREF","",                 CapNone,                         PinKind::Power3V3 },
     {36, -1, "3V3(OUT)","",                 CapNone,                         PinKind::Power3V3 },
     {37, -1, "3V3_EN", "",                  CapNone,                         PinKind::Power3V3 },
@@ -149,6 +149,29 @@ inline const char* pico_gp_reserved(PicoVariant v, int gp) {
             break;
     }
     return nullptr;
+}
+
+// ── I²C mux ───────────────────────────────────────────────────────────────────
+// The RP2350 (like the RP2040) has a FIXED I²C pin mux: every GP can do I²C, and
+// which controller + SDA/SCL role is set by GP % 4 — uniform across GP0-47.
+//   %4==0 → I2C0 SDA   %4==1 → I2C0 SCL   %4==2 → I2C1 SDA   %4==3 → I2C1 SCL
+inline int  pico_gp_i2c_instance(int gp) { return (gp & 2) ? 1 : 0; }   // 0 or 1
+inline bool pico_gp_i2c_is_sda(int gp)   { return (gp & 1) == 0; }
+inline const char* pico_gp_i2c(int gp) {
+    if (gp < 0) return "";
+    switch (gp & 3) {
+        case 0:  return "I2C0 SDA";
+        case 1:  return "I2C0 SCL";
+        case 2:  return "I2C1 SDA";
+        default: return "I2C1 SCL";
+    }
+}
+// True if (sda_gp, scl_gp) is a usable bus: same controller, SDA on one, SCL on
+// the other, and two distinct pins.
+inline bool pico_i2c_pair_ok(int sda_gp, int scl_gp) {
+    return sda_gp >= 0 && scl_gp >= 0 && sda_gp != scl_gp &&
+           pico_gp_i2c_instance(sda_gp) == pico_gp_i2c_instance(scl_gp) &&
+           pico_gp_i2c_is_sda(sda_gp) && !pico_gp_i2c_is_sda(scl_gp);
 }
 
 }  // namespace sys
