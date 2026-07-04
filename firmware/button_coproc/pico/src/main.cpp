@@ -24,8 +24,56 @@
 #ifdef VOICE_CHANGER
 #include "voice.h"   // optional core1 voice changer (build with -DVOICE_CHANGER)
 #endif
+#ifdef MAX_BRIDGE
+#include <SPI.h>     // optional MAX7219 USB→SPI bridge (build with -DMAX_BRIDGE)
+#endif
 
 namespace {
+
+#ifdef MAX_BRIDGE
+constexpr size_t kMaxCs = sizeof(kMaxCsPins) / sizeof(kMaxCsPins[0]);
+
+void max_bridge_setup() {
+    SPI1.setSCK(kMaxSpiSck);
+    SPI1.setTX(kMaxSpiTx);
+    SPI1.begin();
+    for (size_t i = 0; i < kMaxCs; ++i) {
+        pinMode(kMaxCsPins[i], OUTPUT);
+        digitalWrite(kMaxCsPins[i], HIGH);   // MAX7219 latches on CS rising edge
+    }
+}
+
+inline int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// "SPI <cs> <hexbytes>" — shift the decoded bytes out SPI1 with kMaxCsPins[cs]
+// held low, then latch. The bytes are already a full MAX7219 chain register
+// write formatted by the host (src/face/max7219_chain.cpp), so we stay dumb.
+void max_bridge_line(const String& line) {
+    int sp = line.indexOf(' ', 4);
+    if (sp < 0) return;
+    const int cs = line.substring(4, sp).toInt();
+    if (cs < 0 || cs >= static_cast<int>(kMaxCs)) return;
+    const int hstart = sp + 1;
+    const int hlen   = line.length() - hstart;
+    if (hlen < 2) return;
+    const uint8_t pin = kMaxCsPins[cs];
+    SPI1.beginTransaction(SPISettings(kMaxSpiHz, MSBFIRST, SPI_MODE0));
+    digitalWrite(pin, LOW);
+    for (int i = 0; i + 1 < hlen; i += 2) {
+        const int hi = hexval(line[hstart + i]);
+        const int lo = hexval(line[hstart + i + 1]);
+        if (hi < 0 || lo < 0) break;
+        SPI1.transfer(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    digitalWrite(pin, HIGH);      // latch into the chips
+    SPI1.endTransaction();
+}
+#endif  // MAX_BRIDGE
 
 // Tunable at runtime via "CFG long_ms=<n>"; starts at the configured default.
 uint32_t g_long_ms = kLongMsInit;
@@ -155,6 +203,9 @@ void poll_button(size_t i, uint32_t now) {
 
 // Parse one inbound line from the Pi. Everything optional / forward-compatible.
 void handle_line(const String& line) {
+#ifdef MAX_BRIDGE
+    if (line.startsWith("SPI ")) { max_bridge_line(line); return; }  // high-rate; first
+#endif
 #ifdef VOICE_CHANGER
     if (voice_handle_command(line)) return;   // VOICE/FX/PITCH/MIX/PARAM
 #endif
@@ -206,7 +257,7 @@ void drain_input() {
         const char c = static_cast<char>(Serial.read());
         if (c == '\n' || c == '\r') {
             if (rx.length()) { handle_line(rx); rx = ""; }
-        } else if (rx.length() < 64) {
+        } else if (rx.length() < 600) {   // SPI <cs> <hex> frames are long
             rx += c;
         } else {
             rx = "";   // overflow → resync on next newline
@@ -220,6 +271,9 @@ void setup() {
     Serial.begin(115200);                       // USB CDC (baud is nominal for CDC)
     load_default_pins();                        // config.h defaults; Pi may re-push
     apply_pins();
+#ifdef MAX_BRIDGE
+    max_bridge_setup();                         // MAX7219 USB→SPI bridge (SPI1)
+#endif
 }
 
 void loop() {

@@ -83,6 +83,7 @@ PINCFG CLR                        # begin a new pin map (see below)
 PINCFG BTN <gp> <pull> <alow>     # append a button; its index = its id
 PINCFG LED <id> <gp>              # backlight GPIO for a button
 PINCFG APPLY                      # re-init pinModes + re-HELLO with the new count
+SPI <cs> <hexbytes>               # MAX7219 relay: shift bytes out SPI1, pulse CS
 ```
 
 Parsing rules: one message per line; **ignore any malformed/unknown line**
@@ -118,6 +119,32 @@ consecutive (see [voice-changer.md](voice-changer.md)).
 > Treat bytes from the link as **untrusted external input**: bound line length,
 > validate `id` against `n`, never `eval`/format-inject. A flaky cable should
 > degrade to "offline", never crash the reader thread.
+
+## Driving MAX7219 panels through the coprocessor
+
+piomatter's PIO ties up most of the CM5's GPIO while the HUB75 face is running,
+so you can't cleanly get SPI on the CM5 for MAX7219 panels at the same time. The
+coprocessor solves it by acting as a **USB→SPI bridge**: ProtoHUD's existing
+`Max7219Chain` already formats the SPI bytes, and with **`transport: "coproc"`**
+it ships them to the Pico as `SPI <cs> <hexbytes>`; the Pico (built with
+`-DMAX_BRIDGE`) shifts them out **SPI1 (DIN=GP11, CLK=GP10)** and pulses
+`kMaxCsPins[cs]` (default **GP13**). So the MAX panels run **alongside** HUB75
+with zero CM5 GPIO.
+
+Two roles, set in `protoface.max7219`:
+
+- **`"mode": "main"`** + `backend: "max7219"` — the MAX chain *is* the face.
+- **`"mode": "section"`** + `"enabled": true` — the MAX chain is an **extra
+  surface** teed beside the HUB75 face (both driven from the same renderer).
+
+Each chain is the usual `cols_chips × rows_chips` grid (or `module_positions`
+for ragged layouts); just set `transport: "coproc"` + `coproc_cs`. Frames are
+~1 bit/pixel and the chips self-refresh, so the load on the link and the Pico is
+tiny. Power the panels from 5V, not the Pico's 3V3. See
+`config/config.example.json` → `protoface.max7219`.
+
+> This is Phase 1: the section shows whatever face-canvas region the chain
+> covers. Independent symbols/patterns/text with triggers come next.
 
 ## Updating the firmware from the CM5
 

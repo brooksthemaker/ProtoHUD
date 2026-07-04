@@ -62,6 +62,19 @@ static constexpr uint8_t  kDacI2cAddr   = 0x18;    // TLV320DAC3100 default
 
 static constexpr uint32_t kSampleRate   = 16000;   // voice band; low latency
 
+// ── MAX7219 SPI bridge (optional; build with -DMAX_BRIDGE) ───────────────────
+// Lets the CM5 drive MAX7219 LED-matrix panels THROUGH this coprocessor: the Pi
+// ships already-formatted SPI bytes as "SPI <cs> <hex>", and we shift them out
+// of hardware SPI1 and pulse the addressed CS/LOAD line. This runs the MAX
+// panels alongside HUB75 with zero CM5 GPIO (piomatter's PIO ties those up).
+// Host side: src/face/max7219_chain.* Transport::Coproc. Pins below are clear of
+// the buttons (GP2-9) and the voice audio (GP16-22, GP26).
+static constexpr uint8_t  kMaxSpiSck   = 10;          // SPI1 SCK → MAX7219 CLK
+static constexpr uint8_t  kMaxSpiTx    = 11;          // SPI1 TX  → MAX7219 DIN
+// CS/LOAD pins, indexed by the <cs> field of the SPI command (one per chain).
+static constexpr uint8_t  kMaxCsPins[] = { 13 };
+static constexpr uint32_t kMaxSpiHz    = 8000000;     // datasheet max ~10 MHz
+
 // Optional LOCAL control so the changer works standalone (no Pi): a button id
 // (index into kButtonPins) that toggles voice on a SHORT press / cycles the
 // effect. -1 = disabled (control only over the serial protocol). These are

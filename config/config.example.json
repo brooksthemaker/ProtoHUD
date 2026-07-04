@@ -230,6 +230,24 @@
     "_continuous_effects_note": "When true, a mirrored 2-eye face renders BOTH eyes independently (the second eye's face is flipped to keep the mirrored look) so canvas-space effects like 'water' form one continuous tank across the visor instead of one eye being a flipped copy. Costs a second face/particle render. Applied at startup.",
     "panel_driver": true,
     "_panel_driver_note": "native mode only: auto-launch scripts/panel_driver.py to drive the HUB75 panels. Set false for preview-only or if you run the driver yourself.",
+    "_max7219_note": "MAX7219 8x8 matrix chains. mode 'main' = MAX is the whole face (set backend:'max7219'); mode 'section' + enabled = MAX runs AS AN EXTRA SURFACE alongside the HUB75 face (teed to both). Each chain: transport 'spidev'|'gpio'|'coproc'. 'coproc' ships the SPI bytes over USB to the RP2350 button/voice coprocessor (firmware built with -DMAX_BRIDGE), which shifts them out its SPI1 (DIN=GP11, CLK=GP10) and pulses coproc_cs -> kMaxCsPins[coproc_cs] (default GP13) - so MAX runs beside HUB75 with zero CM5 GPIO. cols_chips x rows_chips is the grid (canvas_x/y = where on the render canvas it mirrors); module_positions overrides that with per-8x8-module placement for ragged/non-rectangular layouts.",
+    "max7219": {
+      "enabled": false,
+      "mode": "section",
+      "chains": [
+        {
+          "name": "cheek_l",
+          "transport": "coproc",
+          "coproc_device": "/dev/serial/by-id/usb-ProtoHUD_Buttons-if00",
+          "coproc_cs": 0,
+          "cols_chips": 4, "rows_chips": 1,
+          "canvas_x": 0, "canvas_y": 0,
+          "chain_order": "serpentine",
+          "module_type": "fc16",
+          "intensity": 6
+        }
+      ]
+    },
     "_native_about": "native-mode options: assets_dir points at the Protoface checkout holding faces/materials/gifs (default $HOME/protohud/Protoface); panels overrides the default 2-panel mirrored layout.",
     "assets_dir": "",
     "hub75": {

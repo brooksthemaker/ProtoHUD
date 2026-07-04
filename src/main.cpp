@@ -80,6 +80,7 @@
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
 #include "face/neopixel_matrix_output.h"
+#include "face/tee_panel_output.h"
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -427,7 +428,11 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
     const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
     const std::string backend = jpf ? jpf->value("backend", std::string("hub75"))
                                     : std::string("hub75");
-    if (backend == "max7219") {
+    // Build the MAX7219 panel output. Used either as the main face backend
+    // (backend == "max7219") or, in "section" mode, teed beside the HUB75 face
+    // below. A chain with transport "coproc" is driven through the button/voice
+    // coprocessor, so it needs no CM5 GPIO (piomatter's PIO ties those up).
+    auto build_max = [&]() -> std::unique_ptr<face::PanelOutput> {
         face::Max7219PanelOutput::Config mc;
         if (jpf && jpf->contains("max7219")) {
             const auto& jm = (*jpf)["max7219"];
@@ -440,10 +445,13 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
                     face::Max7219Chain::Config cc;
                     cc.name        = jc.value("name",        std::string("chain"));
                     const std::string tr = jc.value("transport", std::string("spidev"));
-                    cc.transport   = (tr == "gpio")
-                        ? face::Max7219Chain::Transport::Gpio
-                        : face::Max7219Chain::Transport::Spidev;
+                    cc.transport   = (tr == "gpio")   ? face::Max7219Chain::Transport::Gpio
+                                   : (tr == "coproc") ? face::Max7219Chain::Transport::Coproc
+                                   :                    face::Max7219Chain::Transport::Spidev;
                     cc.spi_device  = jc.value("spi_device",  std::string("/dev/spidev0.1"));
+                    cc.coproc_device = jc.value("coproc_device",
+                        std::string("/dev/serial/by-id/usb-ProtoHUD_Buttons-if00"));
+                    cc.coproc_cs     = jc.value("coproc_cs", 0);
                     cc.speed_hz    = jc.value("speed_hz",    1'000'000);
                     cc.gpio_chip   = jc.value("gpio_chip",   mc.gpio_chip);
                     cc.gpio_cs_pin = jc.value("gpio_cs_pin", -1);
@@ -502,7 +510,8 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
             }
         }
         return std::make_unique<face::Max7219PanelOutput>(std::move(mc));
-    }
+    };
+    if (backend == "max7219") return build_max();
     if (backend == "rgb_matrix") {
         face::NeoPixelMatrixOutput::Config nc;
         if (jpf && jpf->contains("rgb_matrix")) {
@@ -574,8 +583,23 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
     // stays hidden (legacy daemon-mode behaviour preserved).
     std::vector<face::ShmPusherOutput::Panel> hub75_panels;
     if (hub75) hub75_panels = pf_hub75_panels(*hub75);
-    return std::make_unique<face::ShmPusherOutput>(
+    auto hub75_out = std::make_unique<face::ShmPusherOutput>(
         rc.canvas_w, rc.canvas_h, std::move(hub75_panels));
+
+    // A MAX7219 chain can run as an ADDITIONAL SECTION alongside the HUB75 face
+    // ("max7219": { "enabled": true, "mode": "section", ... }). Over the coproc
+    // transport it needs no CM5 GPIO. Tee the renderer to both outputs.
+    if (jpf && jpf->contains("max7219")) {
+        const auto& jm = (*jpf)["max7219"];
+        if (jm.value("enabled", false) &&
+            jm.value("mode", std::string("main")) == "section") {
+            std::vector<std::unique_ptr<face::PanelOutput>> outs;
+            outs.push_back(std::move(hub75_out));
+            outs.push_back(build_max());
+            return std::make_unique<face::TeePanelOutput>(std::move(outs));
+        }
+    }
+    return hub75_out;
 }
 
 // ── HUB75 panel layout (presets + per-panel nudge) ───────────────────────────
