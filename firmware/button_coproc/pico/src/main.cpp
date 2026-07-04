@@ -239,12 +239,12 @@ void handle_line(const String& line) {
             const int gp = t[2].toInt();
             const uint8_t pull = nt >= 4 ? pull_from(t[3]) : 0;
             const bool    alow = nt >= 5 ? (t[4].toInt() != 0) : true;
-            if (gp >= 0 && gp <= 29 && g_npins < kMaxButtons)
+            if (gp >= 0 && gp <= 47 && g_npins < kMaxButtons)   // RP2350A 0-29, RP2350B 0-47
                 g_pins[g_npins++] = PinCfg{ static_cast<uint8_t>(gp), pull, alow, -1 };
         } else if (sub == "LED" && nt >= 4) {
             const int id = t[2].toInt();
             const int gp = t[3].toInt();
-            if (id >= 0 && id < static_cast<int>(g_npins) && gp >= 0 && gp <= 29)
+            if (id >= 0 && id < static_cast<int>(g_npins) && gp >= 0 && gp <= 47)
                 g_pins[id].led = static_cast<int8_t>(gp);
         }
     }

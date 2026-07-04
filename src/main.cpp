@@ -3684,6 +3684,7 @@ int main(int argc, char* argv[]) {
         cfg["inputs"]["coprocessor"].is_object()) {
         const json& jc = cfg["inputs"]["coprocessor"];
         coproc_cfg.enabled            = jval(jc, "enabled", false);
+        coproc_cfg.variant            = jc.value("variant",   coproc_cfg.variant);
         coproc_cfg.transport          = jc.value("transport", coproc_cfg.transport);
         coproc_cfg.device             = jc.value("device",    coproc_cfg.device);
         coproc_cfg.baud               = jval(jc, "baud",      coproc_cfg.baud);

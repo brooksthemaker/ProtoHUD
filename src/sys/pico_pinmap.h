@@ -88,4 +88,67 @@ inline const PicoPin* pico_pin_for_gp(int gp) {
     return nullptr;
 }
 
+// ── Coprocessor board variants ────────────────────────────────────────────────
+// The pin visualizer/editor adapts to the board the RP2350 coprocessor runs on.
+// RP2350A (Pico 2) exposes GP0-29 with ADC on GP26-28 and gets its real 40-pin
+// header; the RP2350B boards expose GP0-47 with ADC on GP40-47 and get a logical
+// GP grid (their physical layouts differ and aren't needed for logical pin
+// assignment). "Raw" is a board-agnostic GP0-47 view.
+enum class PicoVariant : uint8_t { Rp2350a = 0, PicoPlus2, PicoLipo2XlW, Raw };
+
+inline const char* pico_variant_name(PicoVariant v) {
+    switch (v) {
+        case PicoVariant::Rp2350a:      return "RP2350 (Pico 2)";
+        case PicoVariant::PicoPlus2:    return "Pimoroni Pico Plus 2";
+        case PicoVariant::PicoLipo2XlW: return "Pimoroni Pico LiPo 2 XL W";
+        case PicoVariant::Raw:          return "Raw GPIO (GP0-47)";
+    }
+    return "?";
+}
+inline const char* pico_variant_id(PicoVariant v) {
+    switch (v) {
+        case PicoVariant::PicoPlus2:    return "pico_plus_2";
+        case PicoVariant::PicoLipo2XlW: return "pico_lipo2_xl_w";
+        case PicoVariant::Raw:          return "raw";
+        default:                        return "rp2350a";
+    }
+}
+inline PicoVariant pico_variant_from_id(const std::string& s) {
+    if (s == "pico_plus_2")     return PicoVariant::PicoPlus2;
+    if (s == "pico_lipo2_xl_w") return PicoVariant::PicoLipo2XlW;
+    if (s == "raw")             return PicoVariant::Raw;
+    return PicoVariant::Rp2350a;
+}
+
+// Highest GP number the variant exposes (RP2350A = 29, RP2350B boards + raw = 47).
+inline int pico_variant_max_gp(PicoVariant v) {
+    return v == PicoVariant::Rp2350a ? 29 : 47;
+}
+// ADC-capable GP for the variant (RP2350A: GP26-28; RP2350B: GP40-47).
+inline bool pico_gp_is_adc(PicoVariant v, int gp) {
+    return v == PicoVariant::Rp2350a ? (gp >= 26 && gp <= 28)
+                                     : (gp >= 40 && gp <= 47);
+}
+// Board-reserved GP → onboard-peripheral label, or nullptr if free. These are
+// informational (the editor flags them); several are cuttable on the board.
+inline const char* pico_gp_reserved(PicoVariant v, int gp) {
+    switch (v) {
+        case PicoVariant::Rp2350a:
+            if (gp == 25) return "LED";
+            break;
+        case PicoVariant::PicoPlus2:
+            if (gp == 25) return "LED";
+            if (gp == 45) return "BOOT";
+            break;
+        case PicoVariant::PicoLipo2XlW:
+            if (gp == 30) return "BOOT";
+            if (gp == 43) return "VBAT";     // battery sense (cuttable)
+            if (gp == 47) return "PSRAM";    // (cuttable)
+            break;
+        case PicoVariant::Raw:
+            break;
+    }
+    return nullptr;
+}
+
 }  // namespace sys

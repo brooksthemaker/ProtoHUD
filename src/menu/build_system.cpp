@@ -1477,9 +1477,20 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                 json*                cfgr = ctx.cfg_root;
                 auto                 reloadp = coproc_reload;
 
-                // Role/colour of a GP: button / LED / MAX / free. (Firmware-fixed
-                // voice pins are noted in the description, not auto-detected.)
-                auto role_of = [C, MX](int gp) -> std::pair<std::string, ImU32> {
+                // Board variant drives which GPs exist, which are ADC, and which
+                // are reserved by onboard peripherals.
+                const sys::PicoVariant pv = sys::pico_variant_from_id(C->variant);
+                const int max_gp = sys::pico_variant_max_gp(pv);
+                auto gp_label = [pv](int gp) -> std::string {
+                    std::string s = "GP" + std::to_string(gp);
+                    if (sys::pico_gp_is_adc(pv, gp)) s += "  ADC";
+                    if (const char* r = sys::pico_gp_reserved(pv, gp)) { s += "  ("; s += r; s += ")"; }
+                    return s;
+                };
+
+                // Role/colour of a GP: button / LED / MAX / board-reserved / free.
+                // (Firmware-fixed voice pins are noted in the description.)
+                auto role_of = [C, MX, pv](int gp) -> std::pair<std::string, ImU32> {
                     for (size_t i = 0; i < C->pins.size(); ++i) {
                         if (C->pins[i].gp == gp) {
                             auto it = C->short_map.find(static_cast<int>(i));
@@ -1497,6 +1508,10 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                         if (gp == 11) return { "MAX DIN", IM_COL32(230, 100, 180, 255) };
                         if (gp == 13) return { "MAX CS",  IM_COL32(230, 100, 180, 255) };
                     }
+                    if (const char* r = sys::pico_gp_reserved(pv, gp))
+                        return { std::string(r), IM_COL32(150, 120, 100, 255) };   // board-reserved
+                    if (sys::pico_gp_is_adc(pv, gp))
+                        return { "free (ADC)", IM_COL32(90, 190, 170, 255) };
                     return { "free", IM_COL32(60, 180, 75, 255) };
                 };
                 auto used_elsewhere = [C](int gp, int except_i) {
@@ -1524,6 +1539,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                     C->pins.swap(np); C->short_map.swap(ns); C->long_map.swap(nl);
                     if (cfgr) {
                         json& jc = (*cfgr)["inputs"]["coprocessor"];
+                        jc["variant"] = C->variant;
                         json jpins = json::array(), jbtns = json::array();
                         for (size_t i = 0; i < C->pins.size(); ++i) {
                             const auto& p = C->pins[i];
@@ -1563,13 +1579,13 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                         pin_items.push_back(leaf_sel("(unused)",
                             [C, i, in_range]{ if (in_range()) C->pins[i].gp = -1; },
                             [C, i, in_range]{ return in_range() && C->pins[i].gp < 0; }));
-                        for (const auto& pp : sys::kPico2Pins) {
-                            if (pp.gp < 0 || !(pp.caps & sys::CapDigital)) continue;
-                            const int gp = pp.gp;
-                            MenuItem pm = leaf_sel(std::string(pp.label),
+                        for (int gp = 0; gp <= max_gp; ++gp) {
+                            MenuItem pm = leaf_sel(gp_label(gp),
                                 [C, i, gp, in_range]{ if (in_range()) C->pins[i].gp = gp; },
                                 [C, i, gp, in_range]{ return in_range() && C->pins[i].gp == gp; });
-                            pm.warn_fn = [used_elsewhere, gp, i]{ return used_elsewhere(gp, i); };
+                            // Flag pins already used, or reserved by the board.
+                            pm.warn_fn = [used_elsewhere, gp, i, pv]{
+                                return used_elsewhere(gp, i) || sys::pico_gp_reserved(pv, gp) != nullptr; };
                             pin_items.push_back(std::move(pm));
                         }
                         std::vector<MenuItem> pulls = {
@@ -1587,10 +1603,8 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                         led_items.push_back(leaf_sel("(none)",
                             [C, i, in_range]{ if (in_range()) C->pins[i].led_gp = -1; },
                             [C, i, in_range]{ return in_range() && C->pins[i].led_gp < 0; }));
-                        for (const auto& pp : sys::kPico2Pins) {
-                            if (pp.gp < 0 || !(pp.caps & sys::CapDigital)) continue;
-                            const int gp = pp.gp;
-                            led_items.push_back(leaf_sel(std::string(pp.label),
+                        for (int gp = 0; gp <= max_gp; ++gp) {
+                            led_items.push_back(leaf_sel(gp_label(gp),
                                 [C, i, gp, in_range]{ if (in_range()) C->pins[i].led_gp = gp; },
                                 [C, i, gp, in_range]{ return in_range() && C->pins[i].led_gp == gp; }));
                         }
@@ -1624,6 +1638,27 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                         return m;
                     });
 
+                // Board selector — sets which GPs exist / are ADC / are reserved.
+                auto board_pick = [C, apply_coproc](sys::PicoVariant v) {
+                    return leaf_sel(sys::pico_variant_name(v),
+                        [C, v, apply_coproc]{ C->variant = sys::pico_variant_id(v); apply_coproc(); },
+                        [C, v]{ return sys::pico_variant_from_id(C->variant) == v; });
+                };
+                std::vector<MenuItem> board_items = {
+                    board_pick(sys::PicoVariant::Rp2350a),
+                    board_pick(sys::PicoVariant::PicoPlus2),
+                    board_pick(sys::PicoVariant::PicoLipo2XlW),
+                    board_pick(sys::PicoVariant::Raw),
+                };
+                MenuItem board_item = with_desc(submenu("Board", std::move(board_items)),
+                    "Which RP2350 the coprocessor runs on. RP2350 (Pico 2) exposes "
+                    "GP0-29 (ADC GP26-28); the RP2350B boards expose GP0-47 (ADC "
+                    "GP40-47). Raw is a board-agnostic GP0-47 view. Re-open Pins "
+                    "after changing to see the new range.");
+                board_item.label_fn = [C]{ return std::string("Board:  ") +
+                    sys::pico_variant_name(sys::pico_variant_from_id(C->variant)); };
+                coproc_menu.push_back(std::move(board_item));
+
                 std::vector<MenuItem> pins_menu;
                 pins_menu.push_back(with_desc(leaf("Add Button",
                     [C]{ if (C->pins.size() < 16) C->pins.push_back(input::CoprocPin{}); }),
@@ -1634,41 +1669,57 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                     "Save the pin map + button functions to config and re-push them "
                     "to the coprocessor (reconnects the link). Applies live."));
 
-                // Context-panel visualizer: the Pico 2 header, each pin coloured by
-                // role (green free, blue button, amber LED, pink MAX, palette for
-                // power/ground).
+                // Context-panel visualizer: the Pico 2 physical header, or a logical
+                // GP0-max grid for the RP2350B boards / raw. Each pin coloured by
+                // role (green free, blue button, amber LED, pink MAX, brown reserved).
                 MenuItem pins_item = submenu("Pins", std::move(pins_menu));
-                pins_item.context_panel_title = "RP2350 / Pico 2 Pins";
-                pins_item.context_panel_draw = [role_of](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                pins_item.context_panel_title = "Coprocessor Pins";
+                pins_item.context_panel_draw = [role_of, pv, max_gp](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
                     ImFont* font = ImGui::GetFont();
                     const float fs = ImGui::GetFontSize();
                     dl->AddText(font, fs * 1.05f, {o.x, o.y},
-                                IM_COL32(230, 235, 240, 255), "RP2350 / Pico 2");
+                                IM_COL32(230, 235, 240, 255), sys::pico_variant_name(pv));
                     const float top = o.y + fs * 1.7f;
-                    const int   rows = 20;
-                    const float rh = std::max(9.f, (o.y + sz.y - top - 4.f) / rows);
-                    const float colw = (sz.x - 8.f) * 0.5f;
-                    auto cell = [&](const sys::PicoPin& p, float x, float y) {
-                        ImU32 col; std::string txt;
-                        if (p.gp < 0) { col = sys::pin_kind_color(p.kind); txt = p.label; }
-                        else { auto r = role_of(p.gp);
-                               col = r.second; txt = std::string(p.label) + "  " + r.first; }
-                        dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, col, 2.f);
-                        dl->AddText(font, fs * 0.68f, {x + rh + 2.f, y + (rh - fs * 0.68f) * 0.5f},
-                                    IM_COL32(215, 220, 226, 255), txt.c_str());
-                    };
-                    for (int r = 0; r < rows; ++r) {
-                        cell(sys::kPico2Pins[r],          o.x + 4.f,          top + r * rh);  // pins 1..20
-                        cell(sys::kPico2Pins[39 - r],     o.x + 4.f + colw,   top + r * rh);  // pins 40..21
+                    if (pv == sys::PicoVariant::Rp2350a) {
+                        const int rows = 20;
+                        const float rh = std::max(9.f, (o.y + sz.y - top - 4.f) / rows);
+                        const float colw = (sz.x - 8.f) * 0.5f;
+                        auto cell = [&](const sys::PicoPin& p, float x, float y) {
+                            ImU32 col; std::string txt;
+                            if (p.gp < 0) { col = sys::pin_kind_color(p.kind); txt = p.label; }
+                            else { auto r = role_of(p.gp);
+                                   col = r.second; txt = std::string(p.label) + "  " + r.first; }
+                            dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, col, 2.f);
+                            dl->AddText(font, fs * 0.68f, {x + rh + 2.f, y + (rh - fs * 0.68f) * 0.5f},
+                                        IM_COL32(215, 220, 226, 255), txt.c_str());
+                        };
+                        for (int r = 0; r < rows; ++r) {
+                            cell(sys::kPico2Pins[r],      o.x + 4.f,        top + r * rh);
+                            cell(sys::kPico2Pins[39 - r], o.x + 4.f + colw, top + r * rh);
+                        }
+                    } else {
+                        const int per_col = 16;
+                        const int ncols = (max_gp + per_col) / per_col;
+                        const float rh = std::max(8.f, (o.y + sz.y - top - 4.f) / per_col);
+                        const float colw = (sz.x - 8.f) / std::max(1, ncols);
+                        for (int gp = 0; gp <= max_gp; ++gp) {
+                            const float x = o.x + 4.f + (gp / per_col) * colw;
+                            const float y = top + (gp % per_col) * rh;
+                            auto r = role_of(gp);
+                            char lbl[64]; std::snprintf(lbl, sizeof lbl, "GP%d %s", gp, r.first.c_str());
+                            dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, r.second, 2.f);
+                            dl->AddText(font, fs * 0.6f, {x + rh, y + (rh - fs * 0.6f) * 0.5f},
+                                        IM_COL32(215, 220, 226, 255), lbl);
+                        }
                     }
                 };
                 coproc_menu.push_back(with_desc(std::move(pins_item),
-                    "Visualise + edit the coprocessor's RP2350 pins: each button's "
-                    "GPIO, function, pull, polarity and optional LED. Free pins are "
-                    "green, buttons blue, LEDs amber, MAX7219 pink. Firmware-fixed "
-                    "voice pins (I2S GP16-18, I2C GP20/21, mic GP26) aren't auto-"
-                    "detected \xe2\x80\x94 avoid them if your build runs the voice "
-                    "changer. Apply & Reload pushes the map live."));
+                    "Visualise + edit the coprocessor's pins: each button's GPIO, "
+                    "function, pull, polarity and optional LED. Free pins green, "
+                    "buttons blue, LEDs amber, MAX7219 pink, board-reserved brown. "
+                    "Firmware-fixed voice pins (I2S GP16-18, I2C GP20/21, mic on the "
+                    "board's ADC0) aren't auto-detected \xe2\x80\x94 avoid them if your "
+                    "build runs the voice changer. Apply & Reload pushes the map live."));
             }
 
             // Route the coprocessor controls to the top-level GPIO tab's "RP2350

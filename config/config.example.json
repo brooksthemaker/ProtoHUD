@@ -168,8 +168,10 @@
   },
   "inputs": {
     "coprocessor": {
-      "_about": "OPTIONAL button/switch coprocessor (RP2350/RP2040). When enabled, an external MCU debounces the switches and streams presses to the Pi, dispatched through the same functions as the GPIO map above. Never required — leave disabled to use on-board GPIO only. Toggle live in System > GPIO Buttons > Button Coprocessor. See docs/coprocessor-input.md.",
+      "_about": "OPTIONAL button/switch coprocessor (RP2350/RP2040). When enabled, an external MCU debounces the switches and streams presses to the Pi, dispatched through the same functions as the GPIO map above. Never required — leave disabled to use on-board GPIO only. Edit live in GPIO > RP2350 GPIO Expander. See docs/coprocessor-input.md.",
       "enabled": false,
+      "variant": "rp2350a",
+      "_variant_note": "Coprocessor board, for the pin visualizer/editor only (the firmware doesn't care): 'rp2350a' = Pico 2 (GP0-29, ADC GP26-28, shown as the real 40-pin header); 'pico_plus_2' and 'pico_lipo2_xl_w' = RP2350B boards (GP0-47, ADC GP40-47, shown as a logical GP grid, with each board's reserved pins flagged); 'raw' = board-agnostic GP0-47 view. Pick it in GPIO > RP2350 GPIO Expander > Board.",
       "transport": "usb_serial",
       "_transport_note": "'usb_serial' (USB CDC, default) or 'i2c' (specified but not implemented in v1).",
       "device": "/dev/serial/by-id/usb-ProtoHUD_Buttons-if00",
