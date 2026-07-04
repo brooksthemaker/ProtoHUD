@@ -1811,6 +1811,10 @@ int main(int argc, char* argv[]) {
     std::string pf_hub75_active = "Default";
     // Custom Gradient material editor state (Protoface > Material Color).
     PfGradient pf_gradient;
+    // MAX7219 panel layout editor state (Face Display > MAX7219 Layout). Loaded
+    // from cfg["protoface"]["max7219"] below; pf_max7219_apply serialises it back
+    // (friendly fields + derived chains) and rebuilds the panel output.
+    PfMax7219Layout pf_max7219;
     // Glitch post-effect config — forwarded to the native controller live and
     // persisted to cfg["protoface"]["glitch"]. Tunable via the settings JSON;
     // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
@@ -1908,6 +1912,23 @@ int main(int argc, char* argv[]) {
                             pf_gradient.colors[i][k] =
                                 std::clamp(jc[k].get<int>(), 0, 255);
                 }
+            }
+        }
+        if (jpf.contains("max7219") && jpf["max7219"].is_object()) {
+            auto& jx = jpf["max7219"];
+            pf_max7219.enabled     = jval(jx, "enabled", pf_max7219.enabled);
+            pf_max7219.mode        = jx.value("mode",        pf_max7219.mode);
+            pf_max7219.chain_order = jx.value("chain_order", pf_max7219.chain_order);
+            pf_max7219.module_type = jx.value("module_type", pf_max7219.module_type);
+            pf_max7219.coproc_cs   = jval(jx, "coproc_cs", pf_max7219.coproc_cs);
+            pf_max7219.intensity   = jval(jx, "intensity", pf_max7219.intensity);
+            pf_max7219.canvas_x    = jval(jx, "canvas_x",  pf_max7219.canvas_x);
+            pf_max7219.canvas_y    = jval(jx, "canvas_y",  pf_max7219.canvas_y);
+            if (jx.contains("rows") && jx["rows"].is_array() && !jx["rows"].empty()) {
+                pf_max7219.rows.clear();
+                for (const auto& jr : jx["rows"])
+                    if (jr.is_number()) pf_max7219.rows.push_back(std::clamp(jr.get<int>(), 1, 16));
+                if (pf_max7219.rows.empty()) pf_max7219.rows = {4};
             }
         }
         if (jpf.contains("preview")) {
@@ -3192,10 +3213,15 @@ int main(int argc, char* argv[]) {
     // started/stopped as part of the same handoff: HUB75 needs it, MAX7219
     // doesn't.
     std::vector<std::unique_ptr<face::NativeFaceController>> ctrl_graveyard;
+    // Set by pf_max7219_apply to force a rebuild even when the backend string is
+    // unchanged (a "section" MAX layout edit changes the output while the face
+    // backend stays HUB75).
+    bool pf_force_rebuild = false;
     auto swap_backend = [&](const std::string& new_backend) {
         if (new_backend != "hub75" && new_backend != "max7219" &&
             new_backend != "rgb_matrix") return;
-        if (new_backend == pf_backend) return;
+        if (new_backend == pf_backend && !pf_force_rebuild) return;
+        pf_force_rebuild = false;
         std::cout << "[main] backend hot-swap: " << pf_backend
                   << " -> " << new_backend << "\n";
 
@@ -3817,6 +3843,45 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < pf_hub75.panel_count && i < 4; ++i)
             flips.push_back({pf_hub75.flip_x[i], pf_hub75.flip_y[i]});
         native_ctrl->set_panel_flips(flips);
+    };
+    menu_ctx.pf_max7219_p = &pf_max7219;
+    menu_ctx.pf_max7219_apply = [&]{
+        // Serialise the editor state (friendly fields for reload + a derived
+        // single chain with module_positions for pf_build_panel_output).
+        auto& jx = cfg["protoface"]["max7219"];
+        jx["enabled"]     = pf_max7219.enabled;
+        jx["mode"]        = pf_max7219.mode;
+        jx["chain_order"] = pf_max7219.chain_order;
+        jx["module_type"] = pf_max7219.module_type;
+        jx["coproc_cs"]   = pf_max7219.coproc_cs;
+        jx["intensity"]   = pf_max7219.intensity;
+        jx["canvas_x"]    = pf_max7219.canvas_x;
+        jx["canvas_y"]    = pf_max7219.canvas_y;
+        json jrows = json::array();
+        for (int n : pf_max7219.rows) jrows.push_back(n);
+        jx["rows"] = std::move(jrows);
+        json chain;
+        chain["name"]        = "max_coproc";
+        chain["transport"]   = "coproc";
+        chain["coproc_cs"]   = pf_max7219.coproc_cs;
+        chain["module_type"] = pf_max7219.module_type;
+        chain["intensity"]   = pf_max7219.intensity;
+        json jmp = json::array();
+        for (const auto& m : pf_max7219_modules(pf_max7219))
+            jmp.push_back(json::array({m[0], m[1]}));
+        chain["module_positions"] = jmp;
+        jx["chains"] = json::array({std::move(chain)});
+
+        // Rebuild the output so the change is live. "main" makes MAX the whole
+        // face (backend max7219); "section" keeps the current backend and tees.
+        if (!native_ctrl) return;
+        if (pf_max7219.mode == "main") {
+            pf_force_rebuild = true;
+            swap_backend("max7219");
+        } else {
+            pf_force_rebuild = true;
+            swap_backend(pf_backend);
+        }
     };
     menu_ctx.pf_blink_enabled_p = &pf_blink_enabled;
     menu_ctx.pf_blink_min_p     = &pf_blink_min;

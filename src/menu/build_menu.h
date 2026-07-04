@@ -93,6 +93,40 @@ struct PfHub75Layout {
     bool        defaults_applied = false;
 };
 
+// ── MAX7219 panel layout (editor state) ──────────────────────────────────────
+// Friendly front-end to Max7219Chain's module_positions: a ragged grid of 8×8
+// modules the user builds in Face Display > MAX7219 Layout. rows[r] = how many
+// panels sit in row r (so rows.size() = row count and each row's width is
+// independent). Applied by rebuilding cfg["protoface"]["max7219"] and hot-
+// swapping the panel output. Driven over the coprocessor (transport "coproc").
+struct PfMax7219Layout {
+    std::vector<int> rows { 4 };                // panels per row, in order top→bottom
+    std::string chain_order = "serpentine";     // serpentine | row_major (DIN→DOUT walk)
+    std::string module_type = "fc16";           // fc16 | generic1088
+    std::string mode        = "section";        // section (beside HUB75) | main (the face)
+    int         coproc_cs   = 0;                 // → firmware kMaxCsPins[coproc_cs]
+    int         intensity   = 6;                 // 0..15
+    int         canvas_x    = 0;                 // top-left of the block on the canvas
+    int         canvas_y    = 0;
+    bool        enabled     = false;
+};
+
+// Walk the ragged grid into per-module {x, y} canvas origins in DIN→DOUT (daisy)
+// order — exactly what Max7219Chain::Config::module_positions wants, and what
+// the wiring diagram numbers. Serpentine reverses every other row (boustrophedon)
+// so the physical return wire on each row is short.
+inline std::vector<std::array<int, 2>> pf_max7219_modules(const PfMax7219Layout& L) {
+    std::vector<std::array<int, 2>> mods;
+    for (int r = 0; r < static_cast<int>(L.rows.size()); ++r) {
+        const int n = std::clamp(L.rows[r], 0, 32);
+        for (int c = 0; c < n; ++c) {
+            const int col = (L.chain_order == "serpentine" && (r & 1)) ? (n - 1 - c) : c;
+            mods.push_back({L.canvas_x + col * 8, L.canvas_y + r * 8});
+        }
+    }
+    return mods;
+}
+
 // ── Custom multi-colour gradient material ───────────────────────────────────
 // Editor state for Protoface > Material Color > Custom Gradient. Up to 6 colour
 // stops laid out along the face, smoothly blended or hard-banded, optionally
@@ -311,6 +345,12 @@ struct MenuBuildContext {
     std::map<std::string, PfHub75Layout>* pf_hub75_layouts_p = nullptr;
     std::string* pf_hub75_active_p = nullptr;
     std::function<void()> pf_layout_changed;
+    // MAX7219 panel layout editor (Face Display > MAX7219 Layout). pf_max7219_p
+    // is the working copy; pf_max7219_apply serialises it into
+    // cfg["protoface"]["max7219"] and hot-swaps the panel output so the change
+    // (and the coproc-driven "section" beside HUB75) takes effect live.
+    PfMax7219Layout* pf_max7219_p = nullptr;
+    std::function<void()> pf_max7219_apply;
     // Face animation tunables — pointers + a "push live" callback that
     // forwards the current values into native_ctrl after a slider/toggle
     // change. Caller owns the slots and the persistence to config.json.
