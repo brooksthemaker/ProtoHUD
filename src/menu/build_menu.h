@@ -47,7 +47,7 @@ namespace sensor       { class BoopSensor; }
 namespace audio        { class VoiceAnalyzer; }
 namespace accessory    { class AccessoryLeds; }
 namespace sys          { class FanController; }
-namespace input        { struct GpioPinCfg; }
+namespace input        { struct GpioPinCfg; struct CoprocConfig; }
 namespace integrations { class KdeConnectBridge; }
 namespace face         { struct GlitchConfig; }
 
@@ -428,6 +428,10 @@ struct MenuBuildContext {
     bool* coproc_enabled_p = nullptr;
     std::shared_ptr<std::function<void()>> coproc_reload;
     std::shared_ptr<std::function<std::string()>> coproc_status;
+    // Live coprocessor config (pins + button maps) for the Pins visualizer/editor
+    // under System > GPIO Buttons > Button Coprocessor. Edited in place, then
+    // persisted to cfg["inputs"]["coprocessor"] and re-pushed via coproc_reload.
+    input::CoprocConfig* coproc_cfg_p = nullptr;
     // Glitch post-effect config (null on non-native backends). The menu
     // mutates it in place and re-pushes via pf_anim_push().
     face::GlitchConfig* pf_glitch_p = nullptr;

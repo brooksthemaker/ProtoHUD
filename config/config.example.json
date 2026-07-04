@@ -187,7 +187,7 @@
         { "id": 2, "short": "boop_snout",  "long": "none" }
       ],
       "_buttons_note": "Maps the coprocessor's button ids to functions (same function ids as gpio.pins). The MCU reports 'button N, short/long'; the Pi decides what N means, so remapping stays here.",
-      "_pins_note": "OPTIONAL physical pin map, pushed to the firmware over PINCFG on connect so a switch's GPIO / pull / polarity / backlight is set here — no firmware reflash. Array order = button id (row 0 = id 0, matching 'buttons' above). gp = RP2350 GPIO; pull = up|down|none; active_low true = a switch to GND; led_gp = optional backlight GPIO (-1 = none). Omit the whole block to leave the firmware on its compiled-in config.h defaults. Constraints the firmware/UI enforce: valid GP 0-29, no pin used twice, and (for the voice changer) mic on GP26-28 + I2S BCLK/WS consecutive.",
+      "_pins_note": "OPTIONAL physical pin map, pushed to the firmware over PINCFG on connect so a switch's GPIO / pull / polarity / backlight is set here — no firmware reflash. Array order = button id (row 0 = id 0, matching 'buttons' above). gp = RP2350 GPIO; pull = up|down|none; active_low true = a switch to GND; led_gp = optional backlight GPIO (-1 = none). Edit visually in System > GPIO Buttons > Button Coprocessor > Pins (a Pico 2 pin visualizer + editor: pick free pins, set functions, Apply & Reload pushes it live). Omit the whole block to leave the firmware on its compiled-in config.h defaults. Firmware-fixed voice pins (I2S GP16-18, I2C GP20/21, mic GP26) and MAX7219 pins aren't runtime-remappable — avoid reusing them.",
       "pins": [
         { "gp": 2, "pull": "up", "active_low": true, "led_gp": -1 },
         { "gp": 3, "pull": "up", "active_low": true, "led_gp": -1 },

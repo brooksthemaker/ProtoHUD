@@ -3975,6 +3975,7 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_enabled_p = &coproc_cfg.enabled;
     menu_ctx.coproc_reload = coproc_reload;
     menu_ctx.coproc_status = coproc_status;
+    menu_ctx.coproc_cfg_p  = &coproc_cfg;
     menu_ctx.pf_glitch_p = &pf_glitch;
 
     MenuSystem menu(build_menu(menu_ctx));

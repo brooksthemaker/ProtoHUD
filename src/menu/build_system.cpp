@@ -61,6 +61,8 @@
 #include "sys/system_monitor.h"
 #include "sys/scheduler_monitor.h"
 #include "sys/gpio_pinmap.h"
+#include "sys/pico_pinmap.h"
+#include "input/coproc_inputs.h"
 #include "sys/gpio_input_reader.h"
 #include "net/weather_monitor.h"
 #include "net/wifi_monitor.h"
@@ -1462,9 +1464,213 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                 };
                 coproc_menu.push_back(with_desc(std::move(st),
                     "Connection state reported by the coprocessor link "
-                    "(connected / offline). Button mapping is edited in "
-                    "config.json under inputs.coprocessor.buttons."));
+                    "(connected / offline)."));
             }
+
+            // ── Pins — RP2350 visualizer + editor ────────────────────────────
+            // Shows every Pico 2 pin's role and lets the user map buttons to free
+            // pins with a function, pull and polarity. Edits the live CoprocConfig,
+            // then persists to cfg + re-pushes over PINCFG (coproc_reload).
+            if (ctx.coproc_cfg_p) {
+                input::CoprocConfig* C   = ctx.coproc_cfg_p;
+                PfMax7219Layout*     MX  = ctx.pf_max7219_p;   // MAX-reserved pins
+                json*                cfgr = ctx.cfg_root;
+                auto                 reloadp = coproc_reload;
+
+                // Role/colour of a GP: button / LED / MAX / free. (Firmware-fixed
+                // voice pins are noted in the description, not auto-detected.)
+                auto role_of = [C, MX](int gp) -> std::pair<std::string, ImU32> {
+                    for (size_t i = 0; i < C->pins.size(); ++i) {
+                        if (C->pins[i].gp == gp) {
+                            auto it = C->short_map.find(static_cast<int>(i));
+                            const std::string fn =
+                                (it != C->short_map.end() && it->second != input::GpioFunc::None)
+                                ? input::gpio_func_name(it->second) : "unset";
+                            return { "Btn " + std::to_string(i) + "  " + fn,
+                                     IM_COL32(45, 140, 225, 255) };
+                        }
+                        if (C->pins[i].led_gp == gp)
+                            return { "LED " + std::to_string(i), IM_COL32(240, 200, 70, 255) };
+                    }
+                    if (MX && MX->enabled && (MX->mode == "section" || MX->mode == "main")) {
+                        if (gp == 10) return { "MAX CLK", IM_COL32(230, 100, 180, 255) };
+                        if (gp == 11) return { "MAX DIN", IM_COL32(230, 100, 180, 255) };
+                        if (gp == 13) return { "MAX CS",  IM_COL32(230, 100, 180, 255) };
+                    }
+                    return { "free", IM_COL32(60, 180, 75, 255) };
+                };
+                auto used_elsewhere = [C](int gp, int except_i) {
+                    for (size_t j = 0; j < C->pins.size(); ++j) {
+                        if (static_cast<int>(j) == except_i) continue;
+                        if (C->pins[j].gp == gp || C->pins[j].led_gp == gp) return true;
+                    }
+                    return false;
+                };
+                // Persist + re-push. Compacts out pinless buttons and re-keys the
+                // function maps so the firmware button ids stay contiguous.
+                auto apply_coproc = [C, cfgr, reloadp]{
+                    std::vector<input::CoprocPin> np;
+                    std::map<int, input::GpioFunc> ns, nl;
+                    int nid = 0;
+                    for (size_t i = 0; i < C->pins.size(); ++i) {
+                        if (C->pins[i].gp < 0) continue;
+                        np.push_back(C->pins[i]);
+                        auto s = C->short_map.find(static_cast<int>(i));
+                        auto l = C->long_map.find(static_cast<int>(i));
+                        if (s != C->short_map.end()) ns[nid] = s->second;
+                        if (l != C->long_map.end())  nl[nid] = l->second;
+                        ++nid;
+                    }
+                    C->pins.swap(np); C->short_map.swap(ns); C->long_map.swap(nl);
+                    if (cfgr) {
+                        json& jc = (*cfgr)["inputs"]["coprocessor"];
+                        json jpins = json::array(), jbtns = json::array();
+                        for (size_t i = 0; i < C->pins.size(); ++i) {
+                            const auto& p = C->pins[i];
+                            jpins.push_back(json{{"gp", p.gp}, {"pull", p.pull},
+                                {"active_low", p.active_low}, {"led_gp", p.led_gp}});
+                            auto s = C->short_map.find(static_cast<int>(i));
+                            auto l = C->long_map.find(static_cast<int>(i));
+                            jbtns.push_back(json{{"id", static_cast<int>(i)},
+                                {"short", s != C->short_map.end() ? input::gpio_func_id(s->second) : "none"},
+                                {"long",  l != C->long_map.end()  ? input::gpio_func_id(l->second)  : "none"}});
+                        }
+                        jc["pins"] = std::move(jpins);
+                        jc["buttons"] = std::move(jbtns);
+                    }
+                    if (reloadp && *reloadp) (*reloadp)();
+                };
+
+                // Per-button function picker — by index (safe across reindexing).
+                auto cp_fn_picker = [](input::CoprocConfig* CC, int i, bool is_long) {
+                    std::vector<MenuItem> items;
+                    for (int k = 0; k < input::gpio_func_count(); ++k) {
+                        const auto f = static_cast<input::GpioFunc>(k);
+                        items.push_back(leaf_sel(input::gpio_func_name(f),
+                            [CC, i, is_long, f]{ (is_long ? CC->long_map : CC->short_map)[i] = f; },
+                            [CC, i, is_long, f]{ auto& m = is_long ? CC->long_map : CC->short_map;
+                                auto it = m.find(i); return it != m.end() && it->second == f; }));
+                    }
+                    return items;
+                };
+
+                auto btn_count = [C]{ return static_cast<int>(C->pins.size()); };
+                std::vector<MenuItem> slot_rows = make_dynamic_rows(16, btn_count,
+                    [&](int i) -> MenuItem {
+                        auto in_range = [C, i]{ return i < static_cast<int>(C->pins.size()); };
+                        // Pin picker: (unused) + every digital-capable GP.
+                        std::vector<MenuItem> pin_items;
+                        pin_items.push_back(leaf_sel("(unused)",
+                            [C, i, in_range]{ if (in_range()) C->pins[i].gp = -1; },
+                            [C, i, in_range]{ return in_range() && C->pins[i].gp < 0; }));
+                        for (const auto& pp : sys::kPico2Pins) {
+                            if (pp.gp < 0 || !(pp.caps & sys::CapDigital)) continue;
+                            const int gp = pp.gp;
+                            MenuItem pm = leaf_sel(std::string(pp.label),
+                                [C, i, gp, in_range]{ if (in_range()) C->pins[i].gp = gp; },
+                                [C, i, gp, in_range]{ return in_range() && C->pins[i].gp == gp; });
+                            pm.warn_fn = [used_elsewhere, gp, i]{ return used_elsewhere(gp, i); };
+                            pin_items.push_back(std::move(pm));
+                        }
+                        std::vector<MenuItem> pulls = {
+                            leaf_sel("Pull Up",
+                                [C, i, in_range]{ if (in_range()) C->pins[i].pull = "up"; },
+                                [C, i, in_range]{ return in_range() && C->pins[i].pull == "up"; }),
+                            leaf_sel("Pull Down",
+                                [C, i, in_range]{ if (in_range()) C->pins[i].pull = "down"; },
+                                [C, i, in_range]{ return in_range() && C->pins[i].pull == "down"; }),
+                            leaf_sel("None",
+                                [C, i, in_range]{ if (in_range()) C->pins[i].pull = "none"; },
+                                [C, i, in_range]{ return in_range() && C->pins[i].pull == "none"; }),
+                        };
+                        std::vector<MenuItem> led_items;
+                        led_items.push_back(leaf_sel("(none)",
+                            [C, i, in_range]{ if (in_range()) C->pins[i].led_gp = -1; },
+                            [C, i, in_range]{ return in_range() && C->pins[i].led_gp < 0; }));
+                        for (const auto& pp : sys::kPico2Pins) {
+                            if (pp.gp < 0 || !(pp.caps & sys::CapDigital)) continue;
+                            const int gp = pp.gp;
+                            led_items.push_back(leaf_sel(std::string(pp.label),
+                                [C, i, gp, in_range]{ if (in_range()) C->pins[i].led_gp = gp; },
+                                [C, i, gp, in_range]{ return in_range() && C->pins[i].led_gp == gp; }));
+                        }
+                        std::vector<MenuItem> slot;
+                        slot.push_back(submenu("Pin",         std::move(pin_items)));
+                        slot.push_back(submenu("Short Press", cp_fn_picker(C, i, false)));
+                        slot.push_back(submenu("Long Press",  cp_fn_picker(C, i, true)));
+                        slot.push_back(submenu("Pull",        std::move(pulls)));
+                        slot.push_back(toggle("Active Low",
+                            [C, i, in_range]{ return in_range() && C->pins[i].active_low; },
+                            [C, i, in_range](bool v){ if (in_range()) C->pins[i].active_low = v; }));
+                        slot.push_back(submenu("LED Pin",     std::move(led_items)));
+                        slot.push_back(leaf("Remove This Button",
+                            [C, i, apply_coproc]{
+                                if (i < static_cast<int>(C->pins.size())) C->pins[i].gp = -1;
+                                apply_coproc();   // compacts it out + re-pushes
+                            }));
+                        MenuItem m = submenu("Button", std::move(slot));
+                        m.label_fn = [C, i]() -> std::string {
+                            if (i >= static_cast<int>(C->pins.size())) return "";
+                            const int gp = C->pins[i].gp;
+                            auto it = C->short_map.find(i);
+                            const std::string fn =
+                                (it != C->short_map.end() && it->second != input::GpioFunc::None)
+                                ? input::gpio_func_name(it->second) : "unset";
+                            char b[96];
+                            if (gp < 0) std::snprintf(b, sizeof b, "Btn %d  (no pin)  %s", i, fn.c_str());
+                            else        std::snprintf(b, sizeof b, "Btn %d  GP%d  %s", i, gp, fn.c_str());
+                            return std::string(b);
+                        };
+                        return m;
+                    });
+
+                std::vector<MenuItem> pins_menu;
+                pins_menu.push_back(with_desc(leaf("Add Button",
+                    [C]{ if (C->pins.size() < 16) C->pins.push_back(input::CoprocPin{}); }),
+                    "Append a button slot; open it to pick a free pin + function."));
+                for (auto& r : slot_rows) pins_menu.push_back(std::move(r));
+                pins_menu.push_back(with_desc(leaf("Apply & Reload",
+                    [apply_coproc]{ apply_coproc(); }),
+                    "Save the pin map + button functions to config and re-push them "
+                    "to the coprocessor (reconnects the link). Applies live."));
+
+                // Context-panel visualizer: the Pico 2 header, each pin coloured by
+                // role (green free, blue button, amber LED, pink MAX, palette for
+                // power/ground).
+                MenuItem pins_item = submenu("Pins", std::move(pins_menu));
+                pins_item.context_panel_title = "RP2350 / Pico 2 Pins";
+                pins_item.context_panel_draw = [role_of](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                    ImFont* font = ImGui::GetFont();
+                    const float fs = ImGui::GetFontSize();
+                    dl->AddText(font, fs * 1.05f, {o.x, o.y},
+                                IM_COL32(230, 235, 240, 255), "RP2350 / Pico 2");
+                    const float top = o.y + fs * 1.7f;
+                    const int   rows = 20;
+                    const float rh = std::max(9.f, (o.y + sz.y - top - 4.f) / rows);
+                    const float colw = (sz.x - 8.f) * 0.5f;
+                    auto cell = [&](const sys::PicoPin& p, float x, float y) {
+                        ImU32 col; std::string txt;
+                        if (p.gp < 0) { col = sys::pin_kind_color(p.kind); txt = p.label; }
+                        else { auto r = role_of(p.gp);
+                               col = r.second; txt = std::string(p.label) + "  " + r.first; }
+                        dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, col, 2.f);
+                        dl->AddText(font, fs * 0.68f, {x + rh + 2.f, y + (rh - fs * 0.68f) * 0.5f},
+                                    IM_COL32(215, 220, 226, 255), txt.c_str());
+                    };
+                    for (int r = 0; r < rows; ++r) {
+                        cell(sys::kPico2Pins[r],          o.x + 4.f,          top + r * rh);  // pins 1..20
+                        cell(sys::kPico2Pins[39 - r],     o.x + 4.f + colw,   top + r * rh);  // pins 40..21
+                    }
+                };
+                coproc_menu.push_back(with_desc(std::move(pins_item),
+                    "Visualise + edit the coprocessor's RP2350 pins: each button's "
+                    "GPIO, function, pull, polarity and optional LED. Free pins are "
+                    "green, buttons blue, LEDs amber, MAX7219 pink. Firmware-fixed "
+                    "voice pins (I2S GP16-18, I2C GP20/21, mic GP26) aren't auto-"
+                    "detected \xe2\x80\x94 avoid them if your build runs the voice "
+                    "changer. Apply & Reload pushes the map live."));
+            }
+
             gpio_btn_menu.push_back(with_desc(
                 submenu("Button Coprocessor", std::move(coproc_menu)),
                 "Optional external MCU (RP2350/RP2040) that handles button "
