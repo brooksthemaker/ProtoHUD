@@ -2626,6 +2626,38 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         });
 
     // ── System root: grouped, one screen tall ────────────────────────────────
+    // ── Temperature readout ──────────────────────────────────────────────────
+    // Live rows from state.temps (DS18B20 probes published by sensor::TempSensors).
+    auto temp_count = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                return static_cast<int>(state.temps.size()); };
+    std::vector<MenuItem> temp_rows = make_dynamic_rows(8, temp_count,
+        [&state](int i) -> MenuItem {
+            MenuItem m = leaf("Temp", []{});
+            m.label_fn = [&state, i]() -> std::string {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (i >= static_cast<int>(state.temps.size())) return "";
+                const TempReading& t = state.temps[i];
+                char b[80];
+                if (!t.ok)
+                    std::snprintf(b, sizeof b, "%s:  --", t.label.c_str());
+                else
+                    std::snprintf(b, sizeof b, "%s:  %.1f\xc2\xb0""C%s", t.label.c_str(),
+                                  t.c, t.crit ? "  CRIT" : t.warn ? "  warn" : "");
+                return std::string(b);
+            };
+            m.warn_fn = [&state, i]{ std::lock_guard<std::mutex> lk(state.mtx);
+                return i < static_cast<int>(state.temps.size()) && state.temps[i].warn; };
+            return m;
+        });
+    MenuItem temperature_item = with_desc(
+        submenu("Temperature", std::move(temp_rows)),
+        "Live temperature probes (DS18B20 1-Wire). Rows turn amber/red at the "
+        "warn/crit thresholds. Configure the probe list in cfg[\"temperature\"] "
+        "(ids from `ls /sys/bus/w1/devices/`); a probe file can also drive the "
+        "fan curve via cfg[\"fans\"][\"temp_path\"].");
+    temperature_item.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                            return !state.temps.empty(); };
+
     std::vector<MenuItem> system_menu = {
         with_desc(submenu("Display", std::move(display_menu)),
                   "Fullscreen / frameless window mode and windowed resolution."),
@@ -2643,6 +2675,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                   "Stopwatches, countdowns and one-shot alarms."),
         with_desc(submenu("Diagnostics",        std::move(diagnostics_group_menu)),
                   "Probes, overlays and per-tab tools."),
+        std::move(temperature_item),
         with_desc(submenu("Power",              std::move(power_menu)),
                   "Restart ProtoHUD / ProtoFace, reboot or shut down the Pi."),
     };
