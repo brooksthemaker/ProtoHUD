@@ -125,19 +125,27 @@ Because the coprocessor is on USB, the CM5 can reflash it with **no BOOTSEL
 button** — for real code changes (new effect, new command, a fix). Day-to-day
 GPIO role changes don't need this at all; they go through `PINCFG` above.
 
+One-time setup (installs PlatformIO + picotool + USB permissions):
+
 ```bash
-scripts/flash_coproc.sh firmware.uf2     # flash a prebuilt image
+scripts/install_coproc_tools.sh          # once; log out/in afterward
+```
+
+Then reflash — self-build on the CM5 so it always matches the repo source:
+
+```bash
 scripts/flash_coproc.sh --build          # build rpipico2w_voice, then flash
+scripts/flash_coproc.sh --env rpipico2w --build   # plain (non-voice) build
+scripts/flash_coproc.sh firmware.uf2     # or flash a prebuilt image
 ```
 
 How it works: the script does the Arduino **1200-baud touch** on the coproc's
 serial port, which reboots the RP2350 into its UF2 bootloader; then `picotool
 load -x` writes the image and runs it. The firmware reports its version in the
 `HELLO` line (`fw=…`), so you can confirm the update took after it reconnects.
-Requires `picotool` (`sudo apt install picotool`; it may need sudo or a udev
-rule for USB access). ProtoHUD can stay running — the port drops during the
-reset and `CoprocInputs` reconnects afterward. Bump `kFwVersion` in
-`config.h` whenever you change the firmware.
+ProtoHUD can stay running — the port drops during the reset and `CoprocInputs`
+reconnects afterward. Bump `kFwVersion` in `config.h` whenever you change the
+firmware.
 
 ## Transports
 

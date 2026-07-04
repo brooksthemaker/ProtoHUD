@@ -37,11 +37,12 @@ while [ $# -gt 0 ]; do
 done
 
 command -v picotool >/dev/null 2>&1 || {
-  echo "picotool not found — install it: sudo apt install picotool" >&2; exit 1; }
+  echo "picotool not found — run scripts/install_coproc_tools.sh" >&2; exit 1; }
 
 # Optionally build the UF2 first.
 if [ "$do_build" = 1 ]; then
-  command -v pio >/dev/null 2>&1 || { echo "pio (PlatformIO) not found" >&2; exit 1; }
+  command -v pio >/dev/null 2>&1 || {
+    echo "pio (PlatformIO) not found — run scripts/install_coproc_tools.sh" >&2; exit 1; }
   echo "[build] pio run -e $ENV"
   ( cd "$FW_DIR" && pio run -e "$ENV" )
   uf2="$(ls -t "$FW_DIR/.pio/build/$ENV"/*.uf2 2>/dev/null | head -1 || true)"
