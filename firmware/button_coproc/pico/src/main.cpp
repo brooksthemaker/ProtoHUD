@@ -293,6 +293,8 @@ void handle_line(const String& line) {
 
 void drain_input() {
     static String rx;
+    static bool   rx_reserved = false;
+    if (!rx_reserved) { rx.reserve(600); rx_reserved = true; }  // avoid per-char reallocs on long SPI lines
     while (Serial.available()) {
         const char c = static_cast<char>(Serial.read());
         if (c == '\n' || c == '\r') {

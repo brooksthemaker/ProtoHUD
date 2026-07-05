@@ -72,10 +72,18 @@ inline float tri(float p) { return 1.0f - fabsf(2.0f * p / kGrain - 1.0f); }
 // ── Individual effects: take the current dry sample, return the wet sample ────
 float fx_pitch(float x) {
     g_pbuf[g_wp] = x;
-    const float speed = powf(2.0f, g_voice.pitch_semi / 12.0f);
+    // powf costs 100+ cycles; at 16 kHz per-sample that's real core1 time, so
+    // the semitone→speed curve is cached and recomputed only when PITCH changes.
+    static float cached_semi  = 1e9f;
+    static float cached_speed = 1.0f;
+    const float semi = g_voice.pitch_semi;
+    if (semi != cached_semi) {
+        cached_semi  = semi;
+        cached_speed = powf(2.0f, semi / 12.0f);
+    }
     // step = speed-1: read pointer catches up to the writer for higher pitch.
     // (If pitch direction ends up reversed on your build, negate this.)
-    const float step = speed - 1.0f;
+    const float step = cached_speed - 1.0f;
     const float p2   = fmodf(g_phase + kGrain / 2.0f, kGrain);
     const float out  = tri(g_phase) * samp_at(g_wp - kGrain + g_phase)
                      + tri(p2)      * samp_at(g_wp - kGrain + p2);
