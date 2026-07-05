@@ -351,6 +351,9 @@
     "_min_duty_note": "Fans stall below ~20% duty; this is the floor applied whenever a zone should be moving.",
     "invert": false,
     "temp_path": "/sys/class/thermal/thermal_zone0/temp",
+    "output": "gpio",
+    "_output_note": "'gpio' (default) = software-PWM on the CM5 lines in zones[].gpios. 'coproc' = the RP2350 coprocessor's fan pins (firmware -DPERIPHERAL_HUB, GP14/15 at 25 kHz) — the temp curve and all menu controls stay on the CM5, only resolved duties cross the USB link ('FAN <zone> <duty%>'); zones[].gpios is ignored. With 'coproc', temp_probe may name a coprocessor DS18B20 ROM id (16 hex chars, from its TEMP reports) so the curve follows a helmet probe instead of temp_path.",
+    "temp_probe": "",
     "zones": [
       {
         "name": "Intake",

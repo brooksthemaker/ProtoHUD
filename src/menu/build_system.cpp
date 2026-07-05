@@ -467,10 +467,10 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
         "Visualise + edit the coprocessor's pins: each button's GPIO, "
         "function, pull, polarity and optional LED. Free pins green, "
         "buttons blue, LEDs amber, MAX7219 pink, board-reserved brown. "
-        "Firmware-fixed voice pins (I2S GP16-18, I2C GP20/21, and the mic on "
-        "the board's first ADC pin) aren't auto-detected \xe2\x80\x94 avoid "
-        "them if your build runs the voice changer. Apply & Reload pushes "
-        "the map live."));
+        "Firmware-fixed pins aren't auto-detected \xe2\x80\x94 avoid them per "
+        "your build: voice I2S GP16-18, I2C GP20/21, DAC reset GP22, mic on "
+        "the board's first ADC pin; peripheral hub 1-Wire GP19, fans GP14/15. "
+        "Apply & Reload pushes the map live."));
     return out;
 }
 

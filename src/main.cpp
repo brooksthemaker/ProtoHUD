@@ -1667,8 +1667,9 @@ int main(int argc, char* argv[]) {
     }
     accessory::AccessoryLeds accessory_leds(led_cfg);
 
-    // ── Cooling fans (Pi-driven software-PWM on GPIO) ─────────────────────────
+    // ── Cooling fans (Pi GPIO PWM, or the coprocessor's fan pins) ─────────────
     sys::FanController::Config fan_cfg;
+    std::string fan_temp_probe;   // coproc DS18B20 ROM id driving the curve ("" = temp_path)
     if (cfg.contains("fans") && cfg["fans"].is_object()) {
         const auto& jf = cfg["fans"];
         fan_cfg.enabled    = jval(jf, "enabled", false);
@@ -1677,6 +1678,8 @@ int main(int argc, char* argv[]) {
         fan_cfg.min_duty   = jval(jf, "min_duty", fan_cfg.min_duty);
         fan_cfg.invert     = jval(jf, "invert",   fan_cfg.invert);
         fan_cfg.temp_path  = jf.value("temp_path", fan_cfg.temp_path);
+        fan_cfg.output     = jf.value("output", fan_cfg.output);
+        fan_temp_probe     = jf.value("temp_probe", fan_temp_probe);
         auto parse_zone = [&](const json& jz, const char* defname) {
             sys::FanController::ZoneCfg z;
             z.name = jz.value("name", std::string(defname));
@@ -1704,7 +1707,9 @@ int main(int argc, char* argv[]) {
         }
     }
     sys::FanController cooling_fans(fan_cfg);
-    if (fan_cfg.enabled && !cooling_fans.start())
+    // GPIO-output fans start now; coproc-output fans start later, once the
+    // coprocessor link exists and the duty sink is wired (search "fan duty sink").
+    if (fan_cfg.enabled && fan_cfg.output != "coproc" && !cooling_fans.start())
         std::cerr << "[main] cooling fans unavailable (check fans.gpios / pin conflicts)\n";
 
     // ── Boop sensor (MPR121 capacitive over I²C) ─────────────────────────────
@@ -4474,12 +4479,32 @@ int main(int argc, char* argv[]) {
     // Shares gpio_dispatch with the GPIO poller. Reload rebuilds it on a menu
     // toggle; status surfaces the link state to the GPIO Buttons menu.
     auto coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+
+    // Peripheral-hub wiring (firmware -DPERIPHERAL_HUB): boop pads on the
+    // coprocessor reuse the SAME electrode→zone map as a local MPR121, so the
+    // pads work identically from either board. Edges arrive on the reader
+    // thread; the fire is posted to the input queue like every other source.
+    // (BothCheeks stays derived by the local sensor only — coproc pads fire the
+    // three measured zones.)
+    auto coproc_wire_peripherals = [&]{
+        if (!coproc_inputs) return;
+        coproc_inputs->set_boop_handler([&](int electrode, bool touched){
+            if (!touched) return;
+            for (size_t z = 0; z < 3; ++z)   // Snout / LeftCheek / RightCheek
+                if (boop_cfg.electrode[z] == electrode)
+                    post_input([&fire_boop, z]{
+                        fire_boop(static_cast<sensor::BoopSensor::Zone>(z));
+                    });
+        });
+    };
+    coproc_wire_peripherals();
     if (coproc_cfg.enabled && !coproc_inputs->init())
         std::cerr << "[main] button coprocessor init failed (transport unavailable)\n";
 
     *coproc_reload = [&]{
         coproc_inputs.reset();
         coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+        coproc_wire_peripherals();   // the new instance needs the boop handler too
         if (coproc_cfg.enabled && !coproc_inputs->init())
             std::cerr << "[main] coprocessor reload: init failed (transport unavailable)\n";
         // Re-evaluate the local poller — replace-mode may have just changed
@@ -4491,6 +4516,23 @@ int main(int argc, char* argv[]) {
         if (!coproc_inputs)             return "offline";
         return coproc_inputs->connected() ? "connected" : "offline";
     };
+
+    // Fan duty sink: fans.output == "coproc" keeps the curve/menu logic in
+    // FanController but sends resolved duties to the RP2350's PWM pins instead
+    // of bit-banging CM5 lines. Optionally the curve follows a coprocessor
+    // DS18B20 (fans.temp_probe = its ROM id) instead of a sysfs file.
+    if (fan_cfg.output == "coproc") {
+        cooling_fans.set_duty_sink([&](int zone, double duty){
+            if (coproc_inputs)
+                coproc_inputs->send_fan_duty(zone, static_cast<int>(duty * 100.0 + 0.5));
+        });
+        if (!fan_temp_probe.empty())
+            cooling_fans.set_temp_provider([&, fan_temp_probe](double& c){
+                return coproc_inputs && coproc_inputs->coproc_temp(fan_temp_probe, c);
+            });
+        if (fan_cfg.enabled && !cooling_fans.start())
+            std::cerr << "[main] coproc-output fans failed to start\n";
+    }
 
     // ── Command FIFO source (optional) ───────────────────────────────────────
     // Same shared gpio_dispatch — a line written to the FIFO is a GpioFunc id.

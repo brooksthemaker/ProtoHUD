@@ -22,6 +22,7 @@
 // actions) needs to know where the press came from.
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -107,6 +108,20 @@ public:
     void request_i2c_scan(int sda = -1, int scl = -1);
     std::string i2c_scan_result() const;
 
+    // ── Peripheral hub (firmware built with -DPERIPHERAL_HUB) ────────────────
+    // Boop pads on the coprocessor: "BOOP <electrode> <1|0>" edges call this
+    // handler from the reader thread — post to the input queue inside it.
+    // Set BEFORE init() (or re-set right after a reload's init()).
+    void set_boop_handler(std::function<void(int electrode, bool touched)> fn) {
+        boop_fn_ = std::move(fn);
+    }
+    // Latest DS18B20 reading for a ROM id (16 hex chars, as the firmware
+    // reports it). False when the probe hasn't reported within ~3 periods.
+    bool coproc_temp(const std::string& rom_id, double& c_out) const;
+    // Drive a coprocessor fan zone ("FAN <zone> <duty%>"). Thread-safe: one
+    // whole line per write() call, like every other sender on this link.
+    void send_fan_duty(int zone, int duty_pct);
+
 private:
     void reader_loop();                       // transport read + reconnect loop
     void on_line(const std::string& line);    // parse one framed message → dispatch
@@ -122,6 +137,12 @@ private:
     bool                          pins_pushed_ = false;  // once per connection
     mutable std::mutex            i2c_mtx_;
     std::string                   i2c_result_ = "not scanned";  // last I2CSCAN reply
+
+    // Peripheral hub state (see set_boop_handler / coproc_temp above).
+    std::function<void(int, bool)> boop_fn_;
+    struct TempSample { double c; std::chrono::steady_clock::time_point at; };
+    mutable std::mutex             temp_mtx_;
+    std::map<std::string, TempSample> temps_;   // ROM hex → latest reading
 };
 
 } // namespace input

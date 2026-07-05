@@ -11,7 +11,7 @@
 
 // Firmware version, reported in the HELLO line so the Pi (and the flash script)
 // can confirm an update actually took. Bump it whenever you change the firmware.
-static constexpr const char* kFwVersion = "1.1.0";
+static constexpr const char* kFwVersion = "1.2.0";
 
 // Switches wired between the listed GP pin and GND. We use INPUT_PULLUP, so a
 // pressed switch reads LOW (active-low). Add/remove entries freely — kLedPins
@@ -74,6 +74,21 @@ static constexpr uint8_t  kMaxSpiTx    = 11;          // SPI1 TX  → MAX7219 DI
 // CS/LOAD pins, indexed by the <cs> field of the SPI command (one per chain).
 static constexpr uint8_t  kMaxCsPins[] = { 13 };
 static constexpr uint32_t kMaxSpiHz    = 8000000;     // datasheet max ~10 MHz
+
+// ── Peripheral hub (optional; build with -DPERIPHERAL_HUB) ───────────────────
+// The coprocessor as the helmet's peripheral board: boop pads, temperature
+// probes and fan PWM move here so the CM5's 40-pin header keeps only the HUB75
+// bonnet + IMU. Events go up the same USB link ("BOOP <e> <0|1>", "TEMP <rom>
+// <milli°C>"); the Pi drives fans with "FAN <zone> <duty%>". Pins below stay
+// clear of the buttons (GP2-9), MAX bridge (GP10/11/13) and voice (GP16-18,
+// GP20/21, GP22 reset, GP26).
+static constexpr uint8_t  kMpr121Addr    = 0x5A;      // boop pads, on the shared
+                                                      // I2C0 bus (GP20/21, w/ DAC)
+static constexpr uint8_t  kOneWirePin    = 19;        // DS18B20 bus (4.7k → 3V3)
+static constexpr uint8_t  kFanPins[]     = { 14, 15 };// PWM fan zones (25 kHz)
+static constexpr uint32_t kBoopPollMs    = 33;        // MPR121 touch poll (~30 Hz)
+static constexpr uint32_t kTempPeriodMs  = 2000;      // convert+read cycle
+static constexpr int      kMaxOwDevices  = 8;         // probes on the 1-Wire bus
 
 // Optional LOCAL control so the changer works standalone (no Pi): a button id
 // (index into kButtonPins) that toggles voice on a SHORT press / cycles the

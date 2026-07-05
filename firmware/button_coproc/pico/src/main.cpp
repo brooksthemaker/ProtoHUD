@@ -28,6 +28,9 @@
 #ifdef MAX_BRIDGE
 #include <SPI.h>     // optional MAX7219 USB→SPI bridge (build with -DMAX_BRIDGE)
 #endif
+#ifdef PERIPHERAL_HUB
+#include "peripherals.h"  // boop pads + DS18B20 + fans (build with -DPERIPHERAL_HUB)
+#endif
 
 namespace {
 
@@ -246,6 +249,9 @@ void handle_line(const String& line) {
     if (line.startsWith("SPI ")) { max_bridge_line(line); return; }  // high-rate; first
 #endif
     if (line.startsWith("I2CSCAN")) { i2c_scan(line); return; }
+#ifdef PERIPHERAL_HUB
+    if (periph_handle_command(line)) return;  // FAN <zone> <duty%>
+#endif
 #ifdef VOICE_CHANGER
     if (voice_handle_command(line)) return;   // VOICE/FX/PITCH/MIX/PARAM
 #endif
@@ -316,6 +322,9 @@ void setup() {
 #ifdef MAX_BRIDGE
     max_bridge_setup();                         // MAX7219 USB→SPI bridge (SPI1)
 #endif
+#ifdef PERIPHERAL_HUB
+    periph_setup();                             // boop pads + DS18B20 + fan PWM
+#endif
 }
 
 void loop() {
@@ -338,6 +347,9 @@ void loop() {
     }
 
     drain_input();
+#ifdef PERIPHERAL_HUB
+    periph_service();                           // boop poll · one temp step · fans
+#endif
 }
 
 #ifdef VOICE_CHANGER

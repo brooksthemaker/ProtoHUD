@@ -180,6 +180,28 @@ void CoprocInputs::on_line(const std::string& line) {
         i2c_result_ = (pos < line.size()) ? line.substr(pos) : std::string("none");
         return;
     }
+    if (cmd == "BOOP") {  // "BOOP <electrode> <1|0>" — touch edge from the pads
+        const std::string e_s = next_tok(line, pos);
+        const std::string s_s = next_tok(line, pos);
+        if (e_s.empty() || s_s.empty()) return;
+        int e = -1;
+        try { e = std::stoi(e_s); } catch (...) { return; }
+        if (e < 0 || e > 11) return;
+        connected_.store(true);
+        if (boop_fn_) boop_fn_(e, s_s == "1");
+        return;
+    }
+    if (cmd == "TEMP") {  // "TEMP <rom16hex> <milli°C>" — one DS18B20 reading
+        const std::string id_s = next_tok(line, pos);
+        const std::string m_s  = next_tok(line, pos);
+        if (id_s.empty() || id_s.size() > 20 || m_s.empty()) return;
+        long milli = 0;
+        try { milli = std::stol(m_s); } catch (...) { return; }
+        connected_.store(true);
+        std::lock_guard<std::mutex> lk(temp_mtx_);
+        temps_[id_s] = { milli / 1000.0, std::chrono::steady_clock::now() };
+        return;
+    }
     // Unknown command → ignore (forward-compatible).
 }
 
@@ -215,6 +237,25 @@ void CoprocInputs::request_i2c_scan(int sda, int scl) {
 std::string CoprocInputs::i2c_scan_result() const {
     std::lock_guard<std::mutex> lk(i2c_mtx_);
     return i2c_result_;
+}
+
+bool CoprocInputs::coproc_temp(const std::string& rom_id, double& c_out) const {
+    std::lock_guard<std::mutex> lk(temp_mtx_);
+    const auto it = temps_.find(rom_id);
+    if (it == temps_.end()) return false;
+    // Stale after ~3 firmware periods (probe unplugged / bus fault).
+    if (std::chrono::steady_clock::now() - it->second.at > std::chrono::seconds(8))
+        return false;
+    c_out = it->second.c;
+    return true;
+}
+
+void CoprocInputs::send_fan_duty(int zone, int duty_pct) {
+    if (fd_ < 0 || zone < 0) return;
+    duty_pct = duty_pct < 0 ? 0 : (duty_pct > 100 ? 100 : duty_pct);
+    const std::string msg = "FAN " + std::to_string(zone) + " " +
+                            std::to_string(duty_pct) + "\n";
+    (void)::write(fd_, msg.data(), msg.size());
 }
 
 void CoprocInputs::handle_button(int id, bool is_long) {

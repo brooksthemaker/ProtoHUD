@@ -73,6 +73,8 @@ BTN <id> SHORT                    # debounced, held < long_ms
 BTN <id> LONG                     # debounced, held >= long_ms (fires once)
 PING                              # heartbeat, ~1 Hz
 I2C <hex> <hex> …                 # I2CSCAN reply: addresses that ACKed (or "none")
+BOOP <electrode> <1|0>            # boop-pad touch edge (peripheral hub)
+TEMP <rom16hex> <milli°C>         # one DS18B20 reading per probe per cycle
 ```
 
 **Pi → Coprocessor** (optional, v1 can ignore)
@@ -86,7 +88,29 @@ PINCFG LED <id> <gp>              # backlight GPIO for a button
 PINCFG APPLY                      # re-init pinModes + re-HELLO with the new count
 SPI <cs> <hexbytes>               # MAX7219 relay: shift bytes out SPI1, pulse CS
 I2CSCAN [sda] [scl]               # probe I2C (default GP20/21); replies "I2C …"
+FAN <zone> <duty%>                # hold a fan PWM duty (peripheral hub)
 ```
+
+### Peripheral hub (`-DPERIPHERAL_HUB`) — boop, temps, fans
+
+The target architecture keeps the CM5's 40-pin header for the HUB75 bonnet and
+the IMU only; every other GPIO peripheral hangs off the coprocessor. Building
+the firmware with `-DPERIPHERAL_HUB` (on in the `rpipico2w_voice` env) adds:
+
+- **Boop pads** — an MPR121 on the **shared I2C0 bus** (GP20/21, address 0x5A
+  next to the voice DAC's 0x18 — zero extra pins). Touch edges stream up as
+  `BOOP <electrode> <1|0>`; the Pi maps electrodes → zones with the SAME
+  `boop.zones[].electrode` config a locally-wired MPR121 uses, so the pads work
+  identically from either board (the derived both-cheeks zone stays local-only).
+- **Temperature probes** — DS18B20s on a bit-banged 1-Wire bus (**GP19**, one
+  4.7 kΩ pull-up to 3V3). Probes are auto-enumerated (ROM search, CRC-checked);
+  each reports `TEMP <rom16hex> <milli°C>` every ~2 s. One probe is read per
+  loop pass (≈7 ms) so button debounce never stalls.
+- **Fans** — hardware-PWM zones on **GP14/GP15** (25 kHz). The temperature
+  curve and all menu controls stay in the CM5's FanController; set
+  `fans.output: "coproc"` and it sends resolved duties as `FAN <zone> <duty%>`
+  (re-sent every 5 s so a rebooted coprocessor re-learns them). Optionally
+  `fans.temp_probe: "<rom16hex>"` drives the curve from a coprocessor probe.
 
 **I2C bus test:** `I2CSCAN` (optionally with SDA/SCL GP numbers) makes the
 coprocessor probe 0x08–0x77 on that bus and reply `I2C <hex> …` (or `I2C none`).
