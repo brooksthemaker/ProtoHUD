@@ -947,7 +947,14 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                    "GIF Preview", draw_gif_preview),
         slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
-            [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
+            [teensy, &state](float v){
+                // Write the shared state too — the slider's getter reads it, so
+                // without this every step snapped back to the stale value (and
+                // the setting was lost on restart).
+                teensy->set_brightness(static_cast<uint8_t>(v));
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.brightness = static_cast<uint8_t>(v);
+            }),
         leaf("Release Control", [teensy]{ teensy->release_control(); }),
         leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
         face_picker("Face", 10,
@@ -1700,7 +1707,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
             "Fire","Aurora","Blizzard","Sonar","Plasma","Celebration","Galaxy","Party",
             "Clouds","Nebula","Starfield","Warp","Constellation","Shooting Stars",
-            "Night Sky","Steam",
+            "Night Sky","Steam","Waveform","Matrix","Circuit",
         };
         const uint8_t pf_effect_count =
             static_cast<uint8_t>(sizeof(pf_effect_names) / sizeof(pf_effect_names[0]));
@@ -2770,7 +2777,14 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                          "GIF Preview", draw_gif_preview), visible_for_hub75),
         slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
-            [teensy](float v){ teensy->set_brightness(static_cast<uint8_t>(v)); }),
+            [teensy, &state](float v){
+                // Write the shared state too — the slider's getter reads it, so
+                // without this every step snapped back to the stale value (and
+                // the setting was lost on restart).
+                teensy->set_brightness(static_cast<uint8_t>(v));
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.face.brightness = static_cast<uint8_t>(v);
+            }),
         submenu("Hardware",       std::move(pf_hardware_menu)),
         gated(leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
               visible_for_hub75),

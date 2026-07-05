@@ -4319,7 +4319,7 @@ int main(int argc, char* argv[]) {
         case F::EffectNext: {
             int id;
             { std::lock_guard<std::mutex> lk(state.mtx);
-              id = (state.face.effect_id + 1) % 24;   // pf_effect_names count (None..Steam)
+              id = (state.face.effect_id + 1) % 27;   // pf_effect_names count (None..Circuit)
               state.face.effect_id = static_cast<uint8_t>(id); }
             face_proxy.set_effect(static_cast<uint8_t>(id));
         } break;

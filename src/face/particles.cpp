@@ -537,6 +537,170 @@ public:
     }
 };
 
+// ── Waveform ─────────────────────────────────────────────────────────────────
+// A scrolling audio waveform mirrored about the panel's horizontal centreline —
+// the whole face visibly reacts to speech/music, not just the mouth. Feeds off
+// the mic level the controller already pushes (set_audio); with no signal it
+// settles to a faint idle ripple. cfg: gain, scroll_hz (samples/s), colors.
+
+class WaveformEffect : public BaseEffect {
+public:
+    WaveformEffect(int w, int h, json cfg) : BaseEffect(w, h, std::move(cfg)) {
+        hist_.assign(std::max(2, w_), 0.0);
+    }
+    void update(double dt) override {
+        t_accum_ += dt;
+        idle_ += dt;
+        const double period = 1.0 / std::max(5.0, jnum(cfg_, "scroll_hz", 45.0));
+        while (t_accum_ >= period) {          // push one column per sample tick
+            t_accum_ -= period;
+            const double idle = 0.06 + 0.04 * std::sin(idle_ * 2.1);
+            hist_[head_] = std::max(audio_ * jnum(cfg_, "gain", 1.6), idle);
+            head_ = (head_ + 1) % hist_.size();
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{0, 220, 255};
+        const double mid = h_ / 2.0;
+        for (int x = 0; x < w_; ++x) {
+            const double v = hist_[(head_ + x) % hist_.size()];
+            const int span = std::max(1, (int)std::lround(
+                std::clamp(v, 0.0, 1.0) * (h_ / 2.0 - 1.0) * intensity_));
+            for (int dy = 0; dy < span; ++dy) {
+                const double a = 0.85 * (1.0 - (double)dy / span) + 0.10;
+                draw_pixel(c, x, (int)(mid - 1 - dy), (int)col.r, (int)col.g, (int)col.b,
+                           (int)(a * 255));
+                draw_pixel(c, x, (int)(mid + dy),     (int)col.r, (int)col.g, (int)col.b,
+                           (int)(a * 255));
+            }
+        }
+        return c;
+    }
+private:
+    std::vector<double> hist_;
+    size_t head_ = 0;
+    double t_accum_ = 0.0, idle_ = 0.0;
+};
+
+// ── Matrix ───────────────────────────────────────────────────────────────────
+// Digital "code rain": bright heads racing down with fading trails, one runner
+// per column slot. Direction follows the shared coupling, so with Motion
+// Reactive the code leans with gravity too. cfg: count (runners), speed_min/max,
+// trail, colors (default green-on-white heads).
+
+class MatrixEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const int trail = jint(cfg_, "trail", 7);
+        double dx, dy; direction_unit(dx, dy, 90.0);   // classic: straight down
+        for (auto& p : particles_) {
+            p.x += p.vy * dx * dt;
+            p.y += p.vy * dy * dt;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                return p.x < -trail - 2 || p.x > w_ + trail + 2 ||
+                       p.y < -trail - 2 || p.y > h_ + trail + 2;
+            }), particles_.end());
+        while ((int)particles_.size() < count(std::max(4, w_ / 4))) {
+            Particle p;
+            direction_spawn_point(static_cast<double>(trail + 2), 90.0, p.x, p.y);
+            p.x = std::floor(p.x);                     // lock runners to columns
+            p.vy = pick_speed(cfg_, 10.0, 22.0, rng_);
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{60, 255, 120};
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = 1; p.life = 1; p.max_life = 9999; p.extra = trail;
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        double dx, dy; direction_unit(dx, dy, 90.0);
+        for (auto& p : particles_) {
+            const int trail = (int)p.extra;
+            for (int i = 0; i < trail; ++i) {          // trail fades behind the head
+                const double a = (i == 0) ? 1.0 : 0.75 * (1.0 - (double)i / trail);
+                const int r = (i == 0) ? 210 : (int)p.r;   // whitened head
+                const int g = (i == 0) ? 255 : (int)p.g;
+                const int b = (i == 0) ? 210 : (int)p.b;
+                draw_pixel(c, (int)std::lround(p.x - dx * i),
+                              (int)std::lround(p.y - dy * i), r, g, b, (int)(a * 255));
+            }
+        }
+        return c;
+    }
+};
+
+// ── Circuit ──────────────────────────────────────────────────────────────────
+// Glowing circuit-board traces: dim orthogonal paths etched across the panel
+// with bright pulses travelling along them. Paths regenerate every ~20 s so the
+// board slowly rewires itself. cfg: count (traces), speed (px/s), colors.
+
+class CircuitEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        rebuild_in_ -= dt;
+        if (paths_.empty() || rebuild_in_ <= 0.0) build_paths();
+        const double spd = pick_speed(cfg_, 14.0, 22.0, rng_);
+        for (size_t i = 0; i < pulse_.size(); ++i) {
+            pulse_[i] += spd * dt;
+            if (pulse_[i] >= (double)paths_[i].size())
+                pulse_[i] = 0.0;                       // wrap to the trace start
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{0, 210, 190};
+        for (size_t i = 0; i < paths_.size(); ++i) {
+            const auto& path = paths_[i];
+            for (const auto& pt : path)                // dim etched trace
+                draw_pixel(c, pt.first, pt.second, (int)col.r, (int)col.g, (int)col.b, 34);
+            const int head = (int)pulse_[i];           // bright pulse + short tail
+            for (int t = 0; t < 4; ++t) {
+                const int idx = head - t;
+                if (idx < 0 || idx >= (int)path.size()) continue;
+                const double a = (t == 0) ? 1.0 : 0.6 * (1.0 - t / 4.0);
+                draw_pixel(c, path[idx].first, path[idx].second,
+                           (int)col.r, (int)col.g, (int)col.b, (int)(a * 255));
+            }
+        }
+        return c;
+    }
+private:
+    void build_paths() {
+        paths_.clear();
+        pulse_.clear();
+        const int n = count(5);
+        for (int i = 0; i < n; ++i) {
+            std::vector<std::pair<int,int>> path;
+            int x = (int)frand(rng_, 1, w_ - 2), y = (int)frand(rng_, 1, h_ - 2);
+            bool horiz = frand(rng_, 0, 1) < 0.5;
+            const int segs = 3 + (int)frand(rng_, 0, 3);
+            for (int sIdx = 0; sIdx < segs; ++sIdx) {
+                const int len  = 4 + (int)frand(rng_, 0, 9);
+                const int step = frand(rng_, 0, 1) < 0.5 ? -1 : 1;
+                for (int k = 0; k < len; ++k) {
+                    if (horiz) x += step; else y += step;
+                    if (x < 0 || x >= w_ || y < 0 || y >= h_) break;
+                    path.push_back({x, y});
+                }
+                horiz = !horiz;                        // orthogonal corners
+            }
+            if (path.size() >= 8) {
+                paths_.push_back(std::move(path));
+                pulse_.push_back(frand(rng_, 0, 8));
+            }
+        }
+        rebuild_in_ = 20.0;
+    }
+    std::vector<std::vector<std::pair<int,int>>> paths_;
+    std::vector<double> pulse_;
+    double rebuild_in_ = 0.0;
+};
+
 // ── Fireflies ────────────────────────────────────────────────────────────────
 
 class FirefliesEffect : public BaseEffect {
@@ -1545,6 +1709,9 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "rings")     return std::make_unique<RingsEffect>(w, h, cfg);
     if (name == "rain")      return std::make_unique<RainEffect>(w, h, cfg);
     if (name == "steam")     return std::make_unique<SteamEffect>(w, h, cfg);
+    if (name == "waveform")  return std::make_unique<WaveformEffect>(w, h, cfg);
+    if (name == "matrix")    return std::make_unique<MatrixEffect>(w, h, cfg);
+    if (name == "circuit")   return std::make_unique<CircuitEffect>(w, h, cfg);
     if (name == "fireflies") return std::make_unique<FirefliesEffect>(w, h, cfg);
     if (name == "clouds")    return std::make_unique<CloudsEffect>(w, h, cfg);
     if (name == "lightning") return std::make_unique<LightningEffect>(w, h, cfg);
@@ -1566,6 +1733,13 @@ const std::map<std::string, json>& presets() {
     static const std::map<std::string, json> kPresets = [] {
         const char* kJson = R"JSON({
           "steam": {"effect":"steam","count":16,"blend":"add"},
+          "waveform": {"effect":"waveform","blend":"add"},
+          "matrix": {"effect":"matrix","blend":"add"},
+          "circuit": {"effect":"circuit","count":5,"blend":"add"},
+          "petals": {"effect":"snow","count":14,"colors":[[255,150,180],[255,190,210],[240,120,160]],"speed_min":3.0,"speed_max":6.0,"drift_x":2.5,"blend":"add"},
+          "dizzy": {"layers":[
+            {"effect":"vortex","count":24,"swirl":3.2,"infall":4,"colors":[[255,230,120],[255,255,255],[255,200,80]],"blend":"add"},
+            {"effect":"sparkle","count":5,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.3,"blend":"add"}]},
           "cold_breath": {"effect":"steam","count":10,"colors":[[215,230,245],[235,245,255]],"speed_min":5.0,"speed_max":9.0,"spread_frac":0.12,"blend":"add"},
           "gentle_snow": {"effect":"snow","count":15,"colors":[[200,215,255],[220,235,255]],"speed_min":4.0,"speed_max":7.0,"drift_x":0.8,"blend":"add"},
           "heavy_snow": {"effect":"snow","count":60,"colors":[[240,245,255],[255,255,255]],"speed_min":10.0,"speed_max":18.0,"drift_x":3.0,"blend":"add"},

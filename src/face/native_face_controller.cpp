@@ -48,6 +48,9 @@ nlohmann::json effect_cfg_for_id(int id) {
         case 21: return nlohmann::json{{"preset", "shooting_stars"}};
         case 22: return nlohmann::json{{"preset", "night_sky"}};
         case 23: return std::string("steam");
+        case 24: return std::string("waveform");
+        case 25: return std::string("matrix");
+        case 26: return std::string("circuit");
         default: return std::string("none");
     }
 }
