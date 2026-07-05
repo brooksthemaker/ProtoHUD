@@ -14,6 +14,8 @@
 // added later without touching the callers.
 
 #include <atomic>
+#include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,8 +25,10 @@ struct AppState;
 namespace sensor {
 
 struct TempSensorCfg {
-    std::string type   = "ds18b20";   // ds18b20 (v1); max31865 | i2c (future)
+    std::string type   = "ds18b20";   // ds18b20 | coproc; max31865 | i2c (future)
     std::string id;                   // ds18b20: "28-XXXXXXXX" ("" = first found)
+                                      // coproc:  the probe's ROM id (16 hex chars,
+                                      //          as the coprocessor's TEMP reports it)
     std::string label  = "Temp";
     double      warn_c = 60.0;
     double      crit_c = 75.0;
@@ -49,16 +53,26 @@ public:
     // /sys/bus/w1/devices matching 28-*). For setup / the menu's "detected" list.
     static std::vector<std::string> discover_ds18b20();
 
+    // Source for type "coproc": probes wired to the RP2350 coprocessor, which
+    // streams "TEMP <rom> <milli°C>" over its USB link. main wires this to
+    // CoprocInputs::coproc_temp once the link exists — it may be set (or reset
+    // on a coprocessor reload) AFTER start(); readings for coproc sensors just
+    // report not-ok until then. Return false when the probe has no fresh value.
+    using CoprocRead = std::function<bool(const std::string& id, double& c_out)>;
+    void set_coproc_reader(CoprocRead fn);
+
 private:
     void   loop();
     // °C for one sensor, or NaN on failure. Dispatches on cfg.type.
     double read_one(const TempSensorCfg& s) const;
     double read_ds18b20(const std::string& id) const;
 
-    TempSensorsConfig cfg_;
-    AppState&         state_;
-    std::atomic<bool> running_{false};
-    std::thread       thread_;
+    TempSensorsConfig  cfg_;
+    AppState&          state_;
+    std::atomic<bool>  running_{false};
+    std::thread        thread_;
+    mutable std::mutex reader_mtx_;   // guards coproc_read_ vs the poll thread
+    CoprocRead         coproc_read_;
 };
 
 }  // namespace sensor

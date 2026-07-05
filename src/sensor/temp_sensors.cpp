@@ -68,8 +68,26 @@ double TempSensors::read_ds18b20(const std::string& id) const {
     return std::nan("");
 }
 
+void TempSensors::set_coproc_reader(CoprocRead fn) {
+    std::lock_guard<std::mutex> lk(reader_mtx_);
+    coproc_read_ = std::move(fn);
+}
+
 double TempSensors::read_one(const TempSensorCfg& s) const {
     if (s.type == "ds18b20") return read_ds18b20(s.id);
+    if (s.type == "coproc") {
+        // Probes on the RP2350 coprocessor: reads come from the reader main
+        // wires in once the link exists (copy the fn under the lock so a
+        // reload can swap it while we poll).
+        CoprocRead fn;
+        {
+            std::lock_guard<std::mutex> lk(reader_mtx_);
+            fn = coproc_read_;
+        }
+        double c = 0.0;
+        if (fn && fn(s.id, c)) return c;
+        return std::nan("");
+    }
     // max31865 (PT100 via IIO) / i2c chips slot in here later.
     return std::nan("");
 }
