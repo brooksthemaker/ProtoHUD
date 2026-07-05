@@ -24,6 +24,7 @@
 #include <atomic>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -98,6 +99,14 @@ public:
     void shutdown();
     bool connected() const { return connected_.load(); }   // surfaced to HUD status
 
+    // I²C bus test: ask the coprocessor to probe its I²C lines (default GP20/21,
+    // or the given SDA/SCL) and report which addresses ACK. The reply is captured
+    // asynchronously; poll i2c_scan_result() for the last result ("scanning…",
+    // "none", or a hex address list). A quick connectivity check for the DAC /
+    // any I²C device wired to the coprocessor.
+    void request_i2c_scan(int sda = -1, int scl = -1);
+    std::string i2c_scan_result() const;
+
 private:
     void reader_loop();                       // transport read + reconnect loop
     void on_line(const std::string& line);    // parse one framed message → dispatch
@@ -111,6 +120,8 @@ private:
     std::thread                   thread_;
     int                           fd_ = -1;   // serial or i2c fd
     bool                          pins_pushed_ = false;  // once per connection
+    mutable std::mutex            i2c_mtx_;
+    std::string                   i2c_result_ = "not scanned";  // last I2CSCAN reply
 };
 
 } // namespace input

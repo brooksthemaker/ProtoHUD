@@ -72,6 +72,7 @@ BTN <id> UP
 BTN <id> SHORT                    # debounced, held < long_ms
 BTN <id> LONG                     # debounced, held >= long_ms (fires once)
 PING                              # heartbeat, ~1 Hz
+I2C <hex> <hex> …                 # I2CSCAN reply: addresses that ACKed (or "none")
 ```
 
 **Pi → Coprocessor** (optional, v1 can ignore)
@@ -84,7 +85,15 @@ PINCFG BTN <gp> <pull> <alow>     # append a button; its index = its id
 PINCFG LED <id> <gp>              # backlight GPIO for a button
 PINCFG APPLY                      # re-init pinModes + re-HELLO with the new count
 SPI <cs> <hexbytes>               # MAX7219 relay: shift bytes out SPI1, pulse CS
+I2CSCAN [sda] [scl]               # probe I2C (default GP20/21); replies "I2C …"
 ```
+
+**I2C bus test:** `I2CSCAN` (optionally with SDA/SCL GP numbers) makes the
+coprocessor probe 0x08–0x77 on that bus and reply `I2C <hex> …` (or `I2C none`).
+Handy for confirming the TLV320 DAC (0x18) or any I²C device is wired right.
+Trigger it from **GPIO → RP2350 GPIO Expander → I2C Bus Test → Scan Now**; the
+result shows there. The controller follows the RP2350's fixed mux (GP `%4`), so
+the pins pick I2C0 vs I2C1 automatically.
 
 Parsing rules: one message per line; **ignore any malformed/unknown line**
 (forward-compatible); a press is only the `SHORT`/`LONG` events (DOWN/UP are

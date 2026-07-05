@@ -1467,6 +1467,25 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                     "(connected / offline)."));
             }
 
+            // I²C bus test — scan the coprocessor's I²C lines for devices.
+            if (ctx.coproc_i2c_scan) {
+                std::vector<MenuItem> i2c_menu;
+                i2c_menu.push_back(with_desc(leaf("Scan Now",
+                    [scan = ctx.coproc_i2c_scan]{ if (scan) scan(); }),
+                    "Ask the coprocessor to probe its I2C lines (default GP20/21 = "
+                    "I2C0, the voice DAC bus) and report which 7-bit addresses ACK."));
+                MenuItem res = leaf("Result", []{});
+                res.label_fn = [get = ctx.coproc_i2c_result]{
+                    return std::string("Found: ") + (get ? get() : std::string("n/a"));
+                };
+                i2c_menu.push_back(res);
+                coproc_menu.push_back(with_desc(submenu("I2C Bus Test", std::move(i2c_menu)),
+                    "Test I2C connectivity on the coprocessor \xe2\x80\x94 scan for "
+                    "devices (e.g. the TLV320 DAC at 0x18) and see which hex "
+                    "addresses respond. Scan Now triggers it; Result updates when "
+                    "the coprocessor replies."));
+            }
+
             // ── Pins — RP2350 visualizer + editor ────────────────────────────
             // Shows every Pico 2 pin's role and lets the user map buttons to free
             // pins with a function, pull and polarity. Edits the live CoprocConfig,

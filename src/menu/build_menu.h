@@ -428,6 +428,10 @@ struct MenuBuildContext {
     bool* coproc_enabled_p = nullptr;
     std::shared_ptr<std::function<void()>> coproc_reload;
     std::shared_ptr<std::function<std::string()>> coproc_status;
+    // Coprocessor I²C bus test: trigger a scan of its I²C lines, and read back the
+    // last result (address list / "none" / "scanning…"). See CoprocInputs.
+    std::function<void()>        coproc_i2c_scan;
+    std::function<std::string()> coproc_i2c_result;
     // Live coprocessor config (pins + button maps) for the Pins visualizer/editor.
     // Edited in place, then persisted to cfg["inputs"]["coprocessor"] and re-pushed
     // via coproc_reload.

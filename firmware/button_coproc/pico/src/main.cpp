@@ -20,6 +20,7 @@
 // ignored.
 
 #include <Arduino.h>
+#include <Wire.h>    // I2CSCAN bus test (core lib, no extra dependency)
 #include "config.h"
 #ifdef VOICE_CHANGER
 #include "voice.h"   // optional core1 voice changer (build with -DVOICE_CHANGER)
@@ -167,6 +168,27 @@ uint8_t pull_from(const String& t) {          // "up|down|none" or "0|1|2"
     return 0;                                  // up (default)
 }
 
+// "I2CSCAN [sda] [scl]" — probe 0x08-0x77 on the given GPIOs (default GP20/21,
+// the voice DAC's I2C0 bus) and reply "I2C <hex> <hex> …" (or "I2C none"). The
+// controller follows the RP2350's fixed mux (GP bit 1 set → I2C1). A quick
+// diagnostic; it briefly (re)inits the bus, so avoid hammering it mid-voice.
+void i2c_scan(const String& line) {
+    int sda = 20, scl = 21;
+    String t[3];
+    const int nt = split_ws(line, t, 3);       // t[0]="I2CSCAN"
+    if (nt >= 3) { sda = t[1].toInt(); scl = t[2].toInt(); }
+    TwoWire& w = (sda & 2) ? Wire1 : Wire;     // even bit1 GP → I2C1
+    w.setSDA(sda); w.setSCL(scl); w.setClock(100000); w.begin();
+    Serial.print("I2C");
+    int found = 0;
+    for (int a = 0x08; a <= 0x77; ++a) {
+        w.beginTransmission(static_cast<uint8_t>(a));
+        if (w.endTransmission() == 0) { Serial.print(' '); Serial.print(a, HEX); ++found; }
+    }
+    if (!found) Serial.print(" none");
+    Serial.println();
+}
+
 void poll_button(size_t i, uint32_t now) {
     Button& b = g_btn[i];
     const bool high = (digitalRead(g_pins[i].gp) == HIGH);
@@ -206,6 +228,7 @@ void handle_line(const String& line) {
 #ifdef MAX_BRIDGE
     if (line.startsWith("SPI ")) { max_bridge_line(line); return; }  // high-rate; first
 #endif
+    if (line.startsWith("I2CSCAN")) { i2c_scan(line); return; }
 #ifdef VOICE_CHANGER
     if (voice_handle_command(line)) return;   // VOICE/FX/PITCH/MIX/PARAM
 #endif

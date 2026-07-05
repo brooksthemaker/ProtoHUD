@@ -173,6 +173,13 @@ void CoprocInputs::on_line(const std::string& line) {
         if (fd_ >= 0) { const char* pong = "PONG\n"; (void)::write(fd_, pong, 5); }
         return;
     }
+    if (cmd == "I2C") {   // "I2C <hex> <hex> …" or "I2C none" — I2CSCAN reply
+        connected_.store(true);
+        while (pos < line.size() && line[pos] == ' ') ++pos;
+        std::lock_guard<std::mutex> lk(i2c_mtx_);
+        i2c_result_ = (pos < line.size()) ? line.substr(pos) : std::string("none");
+        return;
+    }
     // Unknown command → ignore (forward-compatible).
 }
 
@@ -193,6 +200,21 @@ void CoprocInputs::push_pin_config() {
     (void)::write(fd_, msg.data(), msg.size());
     pins_pushed_ = true;
     std::cout << "[coproc] pushed pin map (" << cfg_.pins.size() << " buttons)\n";
+}
+
+void CoprocInputs::request_i2c_scan(int sda, int scl) {
+    if (fd_ < 0) return;
+    std::string cmd = "I2CSCAN";
+    if (sda >= 0 && scl >= 0)
+        cmd += " " + std::to_string(sda) + " " + std::to_string(scl);
+    cmd += "\n";
+    { std::lock_guard<std::mutex> lk(i2c_mtx_); i2c_result_ = "scanning…"; }
+    (void)::write(fd_, cmd.data(), cmd.size());
+}
+
+std::string CoprocInputs::i2c_scan_result() const {
+    std::lock_guard<std::mutex> lk(i2c_mtx_);
+    return i2c_result_;
 }
 
 void CoprocInputs::handle_button(int id, bool is_long) {

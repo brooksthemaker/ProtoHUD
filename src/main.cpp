@@ -3977,6 +3977,10 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_reload = coproc_reload;
     menu_ctx.coproc_status = coproc_status;
     menu_ctx.coproc_cfg_p  = &coproc_cfg;
+    menu_ctx.coproc_i2c_scan = [&]{ if (coproc_inputs) coproc_inputs->request_i2c_scan(); };
+    menu_ctx.coproc_i2c_result = [&]() -> std::string {
+        return coproc_inputs ? coproc_inputs->i2c_scan_result() : std::string("n/a");
+    };
     menu_ctx.pf_glitch_p = &pf_glitch;
 
     MenuSystem menu(build_menu(menu_ctx));
