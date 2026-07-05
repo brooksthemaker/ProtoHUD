@@ -47,8 +47,8 @@ struct CoprocPin {
 struct CoprocConfig {
     bool        enabled = false;            // master toggle — false = pure local GPIO
 
-    // Coprocessor board, for the pin visualizer/editor (System > GPIO > RP2350
-    // GPIO Expander): "rp2350a" (Pico 2), "pico_plus_2", "pico_lipo2_xl_w"
+    // Coprocessor board, for the pin visualizer/editor (GPIO > RP2350 GPIO
+    // Expander): "rp2350a" (Pico 2), "pico_plus_2", "pico_lipo2_xl_w"
     // (RP2350B, GP0-47), or "raw" (board-agnostic GP grid). Pins-only — the
     // firmware doesn't care which board it's flashed to.
     std::string variant = "rp2350a";

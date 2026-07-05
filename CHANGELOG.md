@@ -1,5 +1,75 @@
 # ProtoHUD — Changelog
 
+## Week of Jun 30 – Jul 5, 2026
+
+This week: the RP2350 coprocessor grew from a button reader into a full
+peripheral hub (**PR #242**, open), temperature probes arrived (**PR #243**,
+open), and face materials + KDE Connect setup got quality-of-life work
+(**PRs #240–#241**, merged).
+
+---
+
+### 🟡 In progress — PR #242 ("Coprocessor: voice changer, pin map, flashing, MAX7219, GPIO menu")
+
+**Voice changer (RP2350 core1)**
+- Real-time mic → effect → speaker on the coprocessor's second core: analog mic
+  (MAX9814) → ADC → DSP → I2S → TLV320DAC3100, paced off the I2S clock so input
+  and output stay sample-locked.
+- Effects: granular pitch shift (±12 semitones), robot (ring-mod), bitcrush,
+  echo, dry/wet mix. Driven over serial (`VOICE`/`FX`/`PITCH`/`MIX`/`PARAM`) or
+  a local button; built only with `-DVOICE_CHANGER` so the plain button
+  firmware is unchanged.
+
+**Coprocessor as a configurable GPIO expander**
+- Runtime pin map (`PINCFG`): which GPIO is a button, its pull/polarity and
+  backlight LED are HUD config pushed on connect — no reflash to move a switch.
+- New top-level **GPIO** menu (after Face Display) with **On-Board GPIO**
+  (the Pi 40-pin visualizer + button map, moved out of System) and **RP2350
+  GPIO Expander** (enable/status + a Pico pin visualizer/editor: colour-coded
+  roles, free-pin picker, per-button function/pull/polarity/LED, live apply).
+- Board variants: RP2350 (Pico 2), Pimoroni Pico Plus 2, Pico LiPo 2 XL W
+  (RP2350B, GP0-47 with ADC GP40-47 + reserved pins flagged), or a raw GP0-47
+  view. Pin labels carry the fixed I2C mux role (`I2C0/1 SDA/SCL`).
+- `I2CSCAN` bus test: probe the coprocessor's I²C lines from the menu and see
+  which addresses ACK (e.g. the TLV320 at 0x18); invalid pin pairs are rejected
+  before the bus is touched.
+- Flash the coprocessor from the CM5 over USB — no BOOTSEL button:
+  `scripts/flash_coproc.sh` (1200-baud touch + picotool, `--build` self-builds
+  via PlatformIO); `scripts/install_coproc_tools.sh` sets up the toolchain.
+  Firmware reports `fw=<version>` in HELLO so updates are verifiable.
+
+**MAX7219 panels through the coprocessor**
+- The coprocessor doubles as a USB→SPI bridge (`SPI <cs> <hex>`), so MAX7219
+  chains run **alongside** the HUB75 face with zero CM5 GPIO (piomatter's PIO
+  owns those). `Max7219Chain` gained a `coproc` transport; a tee output drives
+  HUB75 + MAX from one renderer (`mode: main` or `section`).
+- In-HUD **MAX7219 Layout** editor: rows, panels-per-row (ragged grids),
+  chain order, brightness — with a live **wiring diagram** (modules numbered
+  DIN→DOUT, chain arrows, coproc pin legend), also overlaid in the face editor.
+- Section content: triggerable symbols / 5×7 text / patterns on the panels,
+  via `max_next`/`max_prev`/`max_clear` buttons, a Content Library menu, or
+  FIFO commands (`max_symbol:heart`, `max_text:HELLO`, `max_pattern:bars`).
+
+### 🟡 In progress — PR #243 ("Temperature sensors")
+- DS18B20 1-Wire probes (many share one GPIO) read ~1 Hz into the HUD state;
+  **System → Temperature** shows live readouts that turn amber/red at
+  per-probe warn/crit thresholds. `fans.temp_path` can point at a probe file
+  so the fan curve follows a helmet temperature instead of the SoC.
+
+### Merged — PR #241 ("Face materials: mirror, rotation, pride bands")
+- Gradient materials mirror at the face's centre (symmetric halves instead of
+  one edge-to-edge ramp); scenic presets mirrored by default.
+- Rotation for gradients (0–360°) on the Custom Gradient **and** the pride
+  flags; pride flags gained a Sharp Bands toggle (hard-edged real-flag stripes
+  vs smooth blends).
+
+### Merged — PR #240 ("KDE Connect commands import JSON")
+- `scripts/kdeconnect_commands.json` ships ready to import in the KDE Connect
+  desktop app (29 commands); the generator gained `--json` and deterministic
+  UUIDs so re-imports update in place.
+
+---
+
 ## Week of May 26 – Jun 4, 2026
 
 Most of this week's new feature work lives on **PR #206** (currently open / in

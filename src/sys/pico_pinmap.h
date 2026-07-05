@@ -1,7 +1,7 @@
 #pragma once
 // ── pico_pinmap.h ─────────────────────────────────────────────────────────────
 // Static Raspberry Pi Pico 2 (RP2350) 40-pin description for the Coprocessor Pin
-// visualizer/editor (System > GPIO Buttons > Button Coprocessor > Pins). Mirrors
+// visualizer/editor (GPIO > RP2350 GPIO Expander > Pins). Mirrors
 // the official Pico pinout — physical pin, GPIO (GP) number, alt-function label,
 // and a capability bitmask the editor uses to offer only functions a pin allows.
 //
