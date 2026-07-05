@@ -403,6 +403,27 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
 // Per-side daisy-chain assignment lives below pf_eye_w / pf_mirror_x (those
 // are defined later in the file). Forward-declare what pf_build_panel_output
 // needs so it can call into the helper without reordering everything else.
+// Map the WeatherMonitor's WMO weather code onto a face effect spec for the
+// Weather Sync feature ("" ≙ null json = no override, show the user's effect).
+// Presets referenced here live in src/face/particles.cpp presets().
+static nlohmann::json weather_effect_spec(int code, bool is_day) {
+    auto preset = [](const char* p) { nlohmann::json j; j["preset"] = p; return j; };
+    if (code == 0 || code == 1)                       // clear / mostly clear
+        return is_day ? nlohmann::json() : preset("night_sky");
+    if (code == 3 || code == 45 || code == 48)        // overcast / fog
+        return nlohmann::json("clouds");
+    if (code == 71 || code == 85)                     // light snow
+        return preset("gentle_snow");
+    if ((code >= 73 && code <= 77) || code == 86)     // moderate-heavy snow
+        return preset("heavy_snow");
+    if (code >= 95 && code <= 99)                     // thunderstorm
+        return preset("thunderstorm");
+    if ((code >= 51 && code <= 67) ||                 // drizzle / rain
+        (code >= 80 && code <= 82))                   // showers
+        return preset("rain");
+    return nlohmann::json();                          // partly cloudy etc. → none
+}
+
 struct PfSideChains {
     std::vector<std::array<int, 2>> left;
     std::vector<std::array<int, 2>> right;
@@ -1787,6 +1808,12 @@ int main(int argc, char* argv[]) {
     std::string pf_hub75_active = "Default";
     // Custom Gradient material editor state (Protoface > Material Color).
     PfGradient pf_gradient;
+    // "Alive" reactive pack (Face > Effects): gravity/slosh-coupled particles
+    // and the ambient weather-driven effect override. weather_fx_resync forces
+    // an immediate re-evaluation when the toggle flips.
+    bool pf_motion_particles = true;
+    bool pf_weather_effects  = false;
+    bool weather_fx_resync   = true;
     // Glitch post-effect config — forwarded to the native controller live and
     // persisted to cfg["protoface"]["glitch"]. Tunable via the settings JSON;
     // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
@@ -1810,6 +1837,8 @@ int main(int argc, char* argv[]) {
         pf_backend       = jpf.value("backend", std::string("hub75"));
         state.face.face_colors = jval(jpf, "face_colors", false);
         state.face.pride_sharp = jval(jpf, "pride_sharp", true);
+        pf_motion_particles    = jval(jpf, "motion_particles", pf_motion_particles);
+        pf_weather_effects     = jval(jpf, "weather_effects",  pf_weather_effects);
         state.face.pride_angle = jval(jpf, "pride_angle", 90);
         if (jpf.contains("layout") && jpf["layout"].is_object()) {
             auto& jl = jpf["layout"];
@@ -2575,6 +2604,9 @@ int main(int argc, char* argv[]) {
             expression = fallback_expr;
         if (expression.empty()) return;
         face_proxy.trigger_boop(expression, duration_s);
+        // Touch feedback on the panels: an expanding ring at the booped zone
+        // (native renderer only; other backends no-op).
+        face_proxy.trigger_boop_ripple(static_cast<int>(z));
 
         // Accessory LED flash feedback (same per-zone mapping for both paths).
         flash_zone(z);
@@ -3002,6 +3034,7 @@ int main(int argc, char* argv[]) {
                                       &pf_hub75));
         native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
+        native_ctrl->set_motion_particles(pf_motion_particles);
         native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
         native_ctrl->start();
         // Push the user's saved animation tunables into every panel's
@@ -3273,6 +3306,7 @@ int main(int argc, char* argv[]) {
         active_face = native_ctrl.get();
         native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
+        native_ctrl->set_motion_particles(pf_motion_particles);
         native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
         native_ctrl->start();
         native_ctrl->set_blink_enabled(pf_blink_enabled);
@@ -3815,6 +3849,16 @@ int main(int argc, char* argv[]) {
         if (native_ctrl) native_ctrl->set_expression_effects(v);
     };
     menu_ctx.pf_expr_effects_p = &pf_expr_effects;
+    menu_ctx.pf_motion_particles_p = &pf_motion_particles;
+    menu_ctx.pf_set_motion_particles = [&](bool v){
+        pf_motion_particles = v;
+        if (native_ctrl) native_ctrl->set_motion_particles(v);
+    };
+    menu_ctx.pf_weather_effects_p = &pf_weather_effects;
+    menu_ctx.pf_set_weather_effects = [&](bool v){
+        pf_weather_effects = v;
+        weather_fx_resync  = true;   // the render loop re-maps immediately
+    };
     menu_ctx.pf_live_tick = pf_live_tick;
     menu_ctx.cfg_root = &cfg;
     // USB camera preview wiring
@@ -4275,7 +4319,7 @@ int main(int argc, char* argv[]) {
         case F::EffectNext: {
             int id;
             { std::lock_guard<std::mutex> lk(state.mtx);
-              id = (state.face.effect_id + 1) % 18;   // pf_effect_names count (None..Nebula)
+              id = (state.face.effect_id + 1) % 24;   // pf_effect_names count (None..Steam)
               state.face.effect_id = static_cast<uint8_t>(id); }
             face_proxy.set_effect(static_cast<uint8_t>(id));
         } break;
@@ -4780,6 +4824,8 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["autostart"]           = pf_autostart;
         cfg["protoface"]["face_colors"]         = state.face.face_colors;
         cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
+        cfg["protoface"]["motion_particles"]    = pf_motion_particles;
+        cfg["protoface"]["weather_effects"]     = pf_weather_effects;
         cfg["protoface"]["pride_angle"]         = state.face.pride_angle;
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
@@ -5222,12 +5268,37 @@ int main(int argc, char* argv[]) {
     // field the HUD reads is reassigned under the lock each frame.
     AppState snap;
 
+    // Weather Sync bookkeeping — re-evaluated every ~60 s (and immediately on
+    // toggle); only pushed to the face when the mapped spec actually changes.
+    auto        weather_fx_last = std::chrono::steady_clock::now() - std::chrono::minutes(2);
+    std::string weather_fx_sent = "null";
+
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);
 
         // Apply a pending window-mode change (Settings > Fullscreen / Frameless).
         if (state.win_mode_dirty.exchange(false))
             xr.apply_window_mode(state.win_fullscreen.load(), state.win_frameless.load());
+
+        // Weather Sync: the face's ambient effect follows real conditions.
+        // Cheap check (a steady_clock compare) every frame; real work ~1/min.
+        if (native_ctrl &&
+            (weather_fx_resync ||
+             std::chrono::steady_clock::now() - weather_fx_last >= std::chrono::seconds(60))) {
+            weather_fx_last   = std::chrono::steady_clock::now();
+            weather_fx_resync = false;
+            nlohmann::json spec;
+            if (pf_weather_effects) {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (state.weather.ok)
+                    spec = weather_effect_spec(state.weather.code, state.weather.is_day);
+            }
+            const std::string key = spec.dump();
+            if (key != weather_fx_sent) {
+                weather_fx_sent = key;
+                native_ctrl->set_weather_effect(spec);
+            }
+        }
         if (state.win_resize_dirty.exchange(false)) {
             const int rw = state.win_resize_w.load(), rh = state.win_resize_h.load();
             if (rw > 0 && rh > 0 && xr.glfw_window())

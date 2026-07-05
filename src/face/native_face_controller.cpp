@@ -47,6 +47,7 @@ nlohmann::json effect_cfg_for_id(int id) {
         case 20: return nlohmann::json{{"preset", "constellation"}};
         case 21: return nlohmann::json{{"preset", "shooting_stars"}};
         case 22: return nlohmann::json{{"preset", "night_sky"}};
+        case 23: return std::string("steam");
         default: return std::string("none");
     }
 }
@@ -133,6 +134,7 @@ void NativeFaceController::build_panels() {
             // Tell canvas-space effects (water) where this panel sits so a
             // multi-panel face renders one continuous field.
             pn.particles->set_canvas_geometry(cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
+            pn.particles->set_motion_reactive(motion_particles_.load());
             pn.particles_spec = fc->particles;
         }
         // GIFs play per physical panel (duplicated on each side) rather than
@@ -1015,10 +1017,17 @@ void NativeFaceController::set_expression_effects(bool enabled) {
     if (enabled) {
         apply_expression_effect_locked(current_expression_);
     } else {
-        // Restore each panel's user-chosen base effect.
+        // Restore each panel's base effect (weather override or user-chosen).
         for (auto& pn : panels_)
-            if (pn.particles) pn.particles->set_effect(pn.particles_spec);
+            if (pn.particles) pn.particles->set_effect(base_particles_locked(pn));
     }
+}
+
+const nlohmann::json& NativeFaceController::base_particles_locked(const Panel& pn) const {
+    // The weather override, while set, IS the base — expression moods layer on
+    // top of it and restore back to it, exactly as they do with the user's own
+    // effect.
+    return weather_spec_.is_null() ? pn.particles_spec : weather_spec_;
 }
 
 void NativeFaceController::apply_expression_effect_locked(const std::string& expr) {
@@ -1031,9 +1040,47 @@ void NativeFaceController::apply_expression_effect_locked(const std::string& exp
             nlohmann::json spec; spec["preset"] = it->second;
             pn.particles->set_effect(spec);     // transient — leaves particles_spec (base) intact
         } else {
-            pn.particles->set_effect(pn.particles_spec);   // neutral/unmapped → base
+            pn.particles->set_effect(base_particles_locked(pn));   // neutral/unmapped → base
         }
     }
+}
+
+void NativeFaceController::set_motion_particles(bool on) {
+    motion_particles_.store(on);
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.particles) pn.particles->set_motion_reactive(on);
+}
+
+void NativeFaceController::set_weather_effect(const nlohmann::json& spec) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    weather_spec_ = (spec.is_null() || (spec.is_string() && spec.get<std::string>().empty()))
+                        ? nlohmann::json() : spec;
+    // Re-resolve what the panels should show now: a mapped expression mood
+    // stays on top; otherwise the new base (weather or user effect) applies.
+    if (expr_effects_) {
+        apply_expression_effect_locked(current_expression_);
+    } else {
+        for (auto& pn : panels_)
+            if (pn.particles) pn.particles->set_effect(base_particles_locked(pn));
+    }
+}
+
+void NativeFaceController::trigger_boop_ripple(int zone) {
+    // Zone → canvas-normalised centre: the snout sits at bottom-centre of the
+    // face, cheeks at the outer thirds. Multi-panel faces share one ring via
+    // the canvas-space centre.
+    struct Pt { double x, y; };
+    static constexpr Pt kZone[3] = { {0.50, 0.92},    // snout
+                                     {0.15, 0.55},    // left cheek
+                                     {0.85, 0.55} };  // right cheek
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    auto fire = [&](const Pt& p) {
+        for (auto& pn : panels_)
+            if (!pn.is_mirror && pn.particles) pn.particles->trigger_ripple(p.x, p.y);
+    };
+    if (zone >= 0 && zone <= 2) fire(kZone[zone]);
+    else if (zone == 3) { fire(kZone[1]); fire(kZone[2]); }   // both cheeks
 }
 
 void NativeFaceController::trigger_boop(const std::string& expression, double duration_s) {

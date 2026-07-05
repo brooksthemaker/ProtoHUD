@@ -353,6 +353,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     std::function<nlohmann::json()> pf_get_effect_json = ctx.pf_get_effect_json;
     std::function<void(bool)> pf_set_expr_effects = ctx.pf_set_expr_effects;
     bool* pf_expr_effects_p = ctx.pf_expr_effects_p;
+    std::function<void(bool)> pf_set_motion_particles = ctx.pf_set_motion_particles;
+    bool* pf_motion_particles_p = ctx.pf_motion_particles_p;
+    std::function<void(bool)> pf_set_weather_effects = ctx.pf_set_weather_effects;
+    bool* pf_weather_effects_p = ctx.pf_weather_effects_p;
     std::shared_ptr<std::function<void()>> pf_live_tick = ctx.pf_live_tick;
     nlohmann::json* cfg_root = ctx.cfg_root;
     GLuint* tex_usb1 = ctx.tex_usb1;
@@ -1668,13 +1672,35 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Auto-swap the particle effect to a mood preset as the face changes "
             "(angry\xe2\x86\x92""fire, happy\xe2\x86\x92""celebration, "
             "sad\xe2\x86\x92""rain, shocked\xe2\x86\x92""galaxy)."));
+    if (pf_motion_particles_p && pf_set_motion_particles)
+        pf_effects.push_back(with_desc(toggle("Motion Reactive",
+            [pf_motion_particles_p]{ return *pf_motion_particles_p; },
+            [pf_motion_particles_p, pf_set_motion_particles, cfg_root](bool v){
+                *pf_motion_particles_p = v; pf_set_motion_particles(v);
+                if (cfg_root) (*cfg_root)["protoface"]["motion_particles"] = v;
+            }),
+            "Couple directional effects to real head motion: rain/snow/steam "
+            "lean with gravity as you tilt and get swept sideways by quick "
+            "turns. Needs an IMU feeding head tracking."));
+    if (pf_weather_effects_p && pf_set_weather_effects)
+        pf_effects.push_back(with_desc(toggle("Weather Sync",
+            [pf_weather_effects_p]{ return *pf_weather_effects_p; },
+            [pf_weather_effects_p, pf_set_weather_effects, cfg_root](bool v){
+                *pf_weather_effects_p = v; pf_set_weather_effects(v);
+                if (cfg_root) (*cfg_root)["protoface"]["weather_effects"] = v;
+            }),
+            "Match the face's ambient effect to the real weather (rain, snow, "
+            "thunderstorm, clouds; a clear night shows the night sky). Uses "
+            "the HUD's weather monitor; your chosen effect returns when it "
+            "clears up. Expression moods still play on top."));
     {
         // Legacy Teensy/ProtoTracer single-effect ids (only meaningful on the
         // Teensy face backend) — tucked into their own page.
         const char* pf_effect_names[] = {
             "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
             "Fire","Aurora","Blizzard","Sonar","Plasma","Celebration","Galaxy","Party",
-            "Clouds","Nebula",
+            "Clouds","Nebula","Starfield","Warp","Constellation","Shooting Stars",
+            "Night Sky","Steam",
         };
         const uint8_t pf_effect_count =
             static_cast<uint8_t>(sizeof(pf_effect_names) / sizeof(pf_effect_names[0]));

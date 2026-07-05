@@ -341,6 +341,13 @@ struct MenuBuildContext {
     // the config-backed flag the menu reads. Null on non-native backends.
     std::function<void(bool)> pf_set_expr_effects;
     bool* pf_expr_effects_p = nullptr;
+    // "Alive" reactive pack toggles (Face > Effects). Motion Reactive couples
+    // directional effects to real gravity/turn-sweep; Weather Sync overrides
+    // the ambient effect from live conditions (mapped in main's render loop).
+    std::function<void(bool)> pf_set_motion_particles;
+    bool* pf_motion_particles_p = nullptr;
+    std::function<void(bool)> pf_set_weather_effects;
+    bool* pf_weather_effects_p = nullptr;
     // Live-preview tick: main calls this each frame; when Live Preview is on
     // it re-applies the builder spec on change. Installed inside build_menu.
     std::shared_ptr<std::function<void()>> pf_live_tick;

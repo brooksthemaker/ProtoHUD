@@ -43,6 +43,15 @@ public:
     void set_effect(const nlohmann::json& cfg);   // replace all layers at runtime
     void set_motion(const MotionInput& m);        // latest IMU state for reactive layers
     void set_audio(double level);                 // mic level [0,1] for audio-reactive layers
+    // Global motion coupling: when on, directional layers that don't set their
+    // own "direction_from" default to the real-gravity mode — precipitation
+    // leans with head roll and sweeps on quick turns. Toggled from the menu.
+    void set_motion_reactive(bool on);
+    // One-shot expanding ring (boop feedback), centred at canvas-normalised
+    // coordinates so a multi-panel face stays continuous. Drawn over the
+    // running effect (or on an empty layer when no effect is active).
+    void trigger_ripple(double cx_norm, double cy_norm,
+                        uint8_t r = 235, uint8_t g = 245, uint8_t b = 255);
     // Where this panel sits in the full logical canvas, so canvas-space effects
     // (e.g. water) render one continuous field across a multi-panel face. Local
     // pixel (lx,ly) maps to canvas (off_x+lx, off_y+ly). Defaults to per-panel.

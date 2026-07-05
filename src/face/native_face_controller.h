@@ -89,6 +89,7 @@ public:
     void        next_expression() override;
     void        prev_expression() override;
     void        trigger_boop(const std::string& expression, double duration_s) override;
+    void        trigger_boop_ripple(int zone) override;   // expanding ring at the zone
     void        play_eye_animation(int type, double speed, double size,
                                    uint8_t r, uint8_t g, uint8_t b,
                                    double duration_s) override;
@@ -102,6 +103,17 @@ public:
     // happy→celebration, sad→rain, shocked→galaxy), restoring the user's chosen
     // base effect for neutral/unmapped expressions and when disabled.
     void        set_expression_effects(bool enabled);
+
+    // Motion-reactive particles: when on, directional effects (rain/snow/
+    // embers/steam/…) default to real-gravity coupling — they lean with head
+    // roll and sweep on quick turns. Forwarded to every panel's ParticleSystem.
+    void        set_motion_particles(bool on);
+
+    // Ambient weather override: an effect spec shown INSTEAD of the user's
+    // base effect while set (expression moods still win on top of it). An
+    // empty/null spec clears it. Driven by Weather Sync in main, which maps
+    // the WeatherMonitor's WMO code onto presets (rain/snow/thunderstorm/…).
+    void        set_weather_effect(const nlohmann::json& spec);
 
     // Face editor support: what the active PanelOutput addresses (so the
     // editor can pick the editable region), and a way to force a face
@@ -183,6 +195,10 @@ private:
     // Apply the mood preset mapped to `expr` (or restore each panel's base
     // particles_spec when neutral/unmapped). Caller holds state_mtx_.
     void apply_expression_effect_locked(const std::string& expr);
+    // The spec the panels return to when no mood override is active: the
+    // weather override while one is set, else the panel's own base effect.
+    // Caller holds state_mtx_.
+    const nlohmann::json& base_particles_locked(const Panel& pn) const;
     void apply_material_all(const std::string& name);   // caller holds state_mtx_
     void cycle_expression(int dir);                     // +1 next / -1 prev; mirrors to all panels
     // Auto-save is split so the file write happens outside state_mtx_ (the
@@ -258,6 +274,8 @@ private:
     std::atomic<bool>  running_{false};
     std::atomic<bool>  face_colors_{false};   // draw art's own RGB vs material override
     std::atomic<bool>  pride_sharp_{true};    // pride flags: hard bands vs smooth blend
+    std::atomic<bool>  motion_particles_{true};  // gravity/slosh coupling for effects
+    nlohmann::json     weather_spec_;         // weather override (guarded by state_mtx_)
     std::atomic<int>   pride_angle_{90};      // pride flag stripe rotation, degrees
 
     // Per-frame drive inputs written by other threads (audio thread, IMU
