@@ -109,6 +109,13 @@ public:
     // roll and sweep on quick turns. Forwarded to every panel's ParticleSystem.
     void        set_motion_particles(bool on);
 
+    // Face Inertia: the whole face slides opposite quick head motion and
+    // springs back with a small overshoot, like it has mass - eyes lag on a
+    // fast turn and bob on a nod. Strength scales the maximum slide
+    // (1.0 = up to ~10% of the panel).
+    void        set_face_inertia(bool on);
+    void        set_face_inertia_strength(double s);
+
     // Ambient override: an effect spec shown INSTEAD of the user's base
     // effect while set (expression moods still win on top of it). An empty/
     // null spec clears it. Driven by the ambient sync in main — Weather Sync
@@ -276,6 +283,13 @@ private:
     std::atomic<bool>  face_colors_{false};   // draw art's own RGB vs material override
     std::atomic<bool>  pride_sharp_{true};    // pride flags: hard bands vs smooth blend
     std::atomic<bool>  motion_particles_{true};  // gravity/slosh coupling for effects
+    std::atomic<bool>   face_inertia_{true};          // whole-face motion slide
+    std::atomic<double> face_inertia_strength_{1.0};  // 0..2 - scales the max slide
+    // Face Inertia spring state - only ever touched by the render thread.
+    double inertia_x_  = 0.0, inertia_y_  = 0.0;  // normalised offset, +-1.5 max
+    double inertia_vx_ = 0.0, inertia_vy_ = 0.0;
+    double inertia_prev_pitch_ = 0.0;
+    bool   inertia_prev_valid_ = false;
     nlohmann::json     ambient_spec_;         // ambient override (guarded by state_mtx_)
     std::atomic<int>   pride_angle_{90};      // pride flag stripe rotation, degrees
 

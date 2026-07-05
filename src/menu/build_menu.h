@@ -346,6 +346,13 @@ struct MenuBuildContext {
     // the ambient effect from live conditions (mapped in main's render loop).
     std::function<void(bool)> pf_set_motion_particles;
     bool* pf_motion_particles_p = nullptr;
+    // Face Inertia - the whole face slides opposite quick head motion and
+    // springs back like it has mass. Strength scales the maximum slide
+    // (1.0 = up to ~10% of the panel).
+    std::function<void(bool)>   pf_set_face_inertia;
+    bool*                       pf_face_inertia_p = nullptr;
+    std::function<void(double)> pf_set_face_inertia_strength;
+    double*                     pf_face_inertia_strength_p = nullptr;
     std::function<void(bool)> pf_set_weather_effects;
     bool* pf_weather_effects_p = nullptr;
     // Temp Effects - ambient frost / heat shimmer driven by the live outdoor

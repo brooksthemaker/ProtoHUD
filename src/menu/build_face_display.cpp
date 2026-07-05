@@ -355,6 +355,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     bool* pf_expr_effects_p = ctx.pf_expr_effects_p;
     std::function<void(bool)> pf_set_motion_particles = ctx.pf_set_motion_particles;
     bool* pf_motion_particles_p = ctx.pf_motion_particles_p;
+    std::function<void(bool)> pf_set_face_inertia = ctx.pf_set_face_inertia;
+    bool* pf_face_inertia_p = ctx.pf_face_inertia_p;
+    std::function<void(double)> pf_set_face_inertia_strength =
+        ctx.pf_set_face_inertia_strength;
+    double* pf_face_inertia_strength_p = ctx.pf_face_inertia_strength_p;
     std::function<void(bool)> pf_set_weather_effects = ctx.pf_set_weather_effects;
     bool* pf_weather_effects_p = ctx.pf_weather_effects_p;
     bool*   pf_temp_effects_p = ctx.pf_temp_effects_p;
@@ -1693,6 +1698,35 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Couple directional effects to real head motion: rain/snow/steam "
             "lean with gravity as you tilt and get swept sideways by quick "
             "turns. Needs an IMU feeding head tracking."));
+    if (pf_face_inertia_p && pf_set_face_inertia) {
+        pf_effects.push_back(with_desc(toggle("Face Inertia",
+            [pf_face_inertia_p]{ return *pf_face_inertia_p; },
+            [pf_face_inertia_p, pf_set_face_inertia, cfg_root](bool v){
+                *pf_face_inertia_p = v; pf_set_face_inertia(v);
+                if (cfg_root) (*cfg_root)["protoface"]["face_inertia"] = v;
+            }),
+            "The whole face slides opposite quick head motion and springs "
+            "back with a small overshoot, like it has mass: eyes lag on a "
+            "fast turn and bob on a nod, then settle. Uses the same IMU "
+            "feed as Motion Reactive."));
+        if (pf_face_inertia_strength_p && pf_set_face_inertia_strength) {
+            MenuItem m = with_desc(slider("Shift Amount", 10.f, 200.f, 10.f, "%",
+                [pf_face_inertia_strength_p]{
+                    return static_cast<float>(*pf_face_inertia_strength_p * 100.0);
+                },
+                [pf_face_inertia_strength_p, pf_set_face_inertia_strength,
+                 cfg_root](float v){
+                    *pf_face_inertia_strength_p = v / 100.0;
+                    pf_set_face_inertia_strength(v / 100.0);
+                    if (cfg_root)
+                        (*cfg_root)["protoface"]["face_inertia_strength"] = v / 100.0;
+                }),
+                "How far the face can slide: 100% is about a tenth of the "
+                "panel width.");
+            m.visible_fn = [pf_face_inertia_p]{ return *pf_face_inertia_p; };
+            pf_effects.push_back(std::move(m));
+        }
+    }
     if (pf_weather_effects_p && pf_set_weather_effects)
         pf_effects.push_back(with_desc(toggle("Weather Sync",
             [pf_weather_effects_p]{ return *pf_weather_effects_p; },

@@ -1814,6 +1814,8 @@ int main(int argc, char* argv[]) {
     // heatwave fill the clear-sky gaps. weather_fx_resync forces an immediate
     // re-evaluation when a toggle flips or a threshold moves.
     bool   pf_motion_particles = true;
+    bool   pf_face_inertia     = true;
+    double pf_face_inertia_strength = 1.0;   // 1.0 = slide up to ~10% of a panel
     bool   pf_weather_effects  = false;
     bool   pf_temp_effects     = false;
     double pf_temp_cold_c      = 5.0;    // frost at/below this (deg C)
@@ -1843,6 +1845,9 @@ int main(int argc, char* argv[]) {
         state.face.face_colors = jval(jpf, "face_colors", false);
         state.face.pride_sharp = jval(jpf, "pride_sharp", true);
         pf_motion_particles    = jval(jpf, "motion_particles", pf_motion_particles);
+        pf_face_inertia        = jval(jpf, "face_inertia",     pf_face_inertia);
+        pf_face_inertia_strength =
+            jval(jpf, "face_inertia_strength", pf_face_inertia_strength);
         pf_weather_effects     = jval(jpf, "weather_effects",  pf_weather_effects);
         pf_temp_effects        = jval(jpf, "temp_effects",      pf_temp_effects);
         pf_temp_cold_c         = jval(jpf, "temp_cold_c",       pf_temp_cold_c);
@@ -3043,6 +3048,8 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->set_motion_particles(pf_motion_particles);
+        native_ctrl->set_face_inertia(pf_face_inertia);
+        native_ctrl->set_face_inertia_strength(pf_face_inertia_strength);
         native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
         native_ctrl->start();
         // Push the user's saved animation tunables into every panel's
@@ -3315,6 +3322,8 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->set_motion_particles(pf_motion_particles);
+        native_ctrl->set_face_inertia(pf_face_inertia);
+        native_ctrl->set_face_inertia_strength(pf_face_inertia_strength);
         native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
         native_ctrl->start();
         native_ctrl->set_blink_enabled(pf_blink_enabled);
@@ -3861,6 +3870,16 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_set_motion_particles = [&](bool v){
         pf_motion_particles = v;
         if (native_ctrl) native_ctrl->set_motion_particles(v);
+    };
+    menu_ctx.pf_face_inertia_p = &pf_face_inertia;
+    menu_ctx.pf_set_face_inertia = [&](bool v){
+        pf_face_inertia = v;
+        if (native_ctrl) native_ctrl->set_face_inertia(v);
+    };
+    menu_ctx.pf_face_inertia_strength_p = &pf_face_inertia_strength;
+    menu_ctx.pf_set_face_inertia_strength = [&](double v){
+        pf_face_inertia_strength = v;
+        if (native_ctrl) native_ctrl->set_face_inertia_strength(v);
     };
     menu_ctx.pf_weather_effects_p = &pf_weather_effects;
     menu_ctx.pf_set_weather_effects = [&](bool v){
@@ -4837,6 +4856,8 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["face_colors"]         = state.face.face_colors;
         cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
         cfg["protoface"]["motion_particles"]    = pf_motion_particles;
+        cfg["protoface"]["face_inertia"]        = pf_face_inertia;
+        cfg["protoface"]["face_inertia_strength"] = pf_face_inertia_strength;
         cfg["protoface"]["weather_effects"]     = pf_weather_effects;
         cfg["protoface"]["temp_effects"]        = pf_temp_effects;
         cfg["protoface"]["temp_cold_c"]         = pf_temp_cold_c;
