@@ -169,15 +169,23 @@ uint8_t pull_from(const String& t) {          // "up|down|none" or "0|1|2"
 }
 
 // "I2CSCAN [sda] [scl]" — probe 0x08-0x77 on the given GPIOs (default GP20/21,
-// the voice DAC's I2C0 bus) and reply "I2C <hex> <hex> …" (or "I2C none"). The
-// controller follows the RP2350's fixed mux (GP bit 1 set → I2C1). A quick
-// diagnostic; it briefly (re)inits the bus, so avoid hammering it mid-voice.
+// the voice DAC's I2C0 bus) and reply "I2C <hex> <hex> …" ("I2C none" if quiet,
+// "I2C err bad-pins" if the pair is invalid). The RP2350's I2C mux is fixed —
+// SDA on even GPs, SCL on odd, controller = GP bit 1 — and we validate BEFORE
+// touching the bus: arduino-pico's setSDA/setSCL assert-halt on a pin the
+// instance can't use, which would freeze buttons/voice/MAX along with the scan.
 void i2c_scan(const String& line) {
     int sda = 20, scl = 21;
     String t[3];
     const int nt = split_ws(line, t, 3);       // t[0]="I2CSCAN"
     if (nt >= 3) { sda = t[1].toInt(); scl = t[2].toInt(); }
-    TwoWire& w = (sda & 2) ? Wire1 : Wire;     // even bit1 GP → I2C1
+    const bool pair_ok = sda >= 0 && sda <= 47 && scl >= 0 && scl <= 47 &&
+                         (sda & 1) == 0 && (scl & 1) == 1 &&   // SDA even, SCL odd
+                         (sda & 2) == (scl & 2);               // same controller
+    if (!pair_ok) { Serial.println("I2C err bad-pins"); return; }
+
+    TwoWire& w = (sda & 2) ? Wire1 : Wire;     // GP bit 1 → I2C1
+    w.end();
     w.setSDA(sda); w.setSCL(scl); w.setClock(100000); w.begin();
     Serial.print("I2C");
     int found = 0;
@@ -187,6 +195,15 @@ void i2c_scan(const String& line) {
     }
     if (!found) Serial.print(" none");
     Serial.println();
+    w.end();
+#ifdef VOICE_CHANGER
+    // Scanning I2C0 borrows the voice DAC's controller (and may have remapped
+    // it); hand it back on its own pins so volume/mute keep working.
+    if (!(sda & 2)) {
+        Wire.setSDA(kDacSdaPin); Wire.setSCL(kDacSclPin);
+        Wire.setClock(100000);   Wire.begin();
+    }
+#endif
 }
 
 void poll_button(size_t i, uint32_t now) {

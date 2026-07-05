@@ -90,6 +90,9 @@ I2CSCAN [sda] [scl]               # probe I2C (default GP20/21); replies "I2C �
 
 **I2C bus test:** `I2CSCAN` (optionally with SDA/SCL GP numbers) makes the
 coprocessor probe 0x08–0x77 on that bus and reply `I2C <hex> …` (or `I2C none`).
+An invalid pair — mixed controllers, or SDA/SCL roles swapped — is rejected with
+`I2C err bad-pins` **before** the bus is touched, and a scan of I2C0 hands the
+bus back to the voice DAC's pins afterwards.
 Handy for confirming the TLV320 DAC (0x18) or any I²C device is wired right.
 Trigger it from **GPIO → RP2350 GPIO Expander → I2C Bus Test → Scan Now**; the
 result shows there. The controller follows the RP2350's fixed mux (GP `%4`), so

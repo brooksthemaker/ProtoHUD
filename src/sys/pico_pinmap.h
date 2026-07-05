@@ -124,6 +124,15 @@ inline PicoVariant pico_variant_from_id(const std::string& s) {
 inline int pico_variant_max_gp(PicoVariant v) {
     return v == PicoVariant::Rp2350a ? 29 : 47;
 }
+// True if the variant actually breaks this GP out to a header the user can wire.
+// The Pico 2 keeps GP23-25 and GP29 internal (regulator / LED / VSYS sense), so
+// they must never be offered as assignable pins; RP2350B boards and the raw view
+// expose the full GP0-47 range.
+inline bool pico_variant_gp_exists(PicoVariant v, int gp) {
+    if (gp < 0 || gp > pico_variant_max_gp(v)) return false;
+    if (v == PicoVariant::Rp2350a) return pico_pin_for_gp(gp) != nullptr;
+    return true;
+}
 // ADC-capable GP for the variant (RP2350A: GP26-28; RP2350B: GP40-47).
 inline bool pico_gp_is_adc(PicoVariant v, int gp) {
     return v == PicoVariant::Rp2350a ? (gp >= 26 && gp <= 28)
