@@ -701,6 +701,108 @@ private:
     double rebuild_in_ = 0.0;
 };
 
+// ── Frost ────────────────────────────────────────────────────────────────────
+// Ice creeping in from the panel edges: pale crystals thickest at the rim,
+// thinning toward the centre, each twinkling slowly as it forms and melts.
+// The temp-reactive ambient sync applies this when it's freezing out. cfg:
+// count, depth_frac (how far in the frost reaches), colors.
+
+class FrostEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        for (auto& p : particles_) { p.extra += dt; p.life -= dt / p.max_life; }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [](const Particle& p){ return p.life <= 0; }), particles_.end());
+        while ((int)particles_.size() < count(40)) {
+            const double depth = jnum(cfg_, "depth_frac", 0.35);
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                         : Color{210, 235, 255};
+            // Edge-biased position: pick a rim side, then bite inward with a
+            // quadratic bias so most crystals hug the border.
+            double u = frand(rng_, 0, 1); u *= u;
+            const double d = u * depth * std::min(w_, h_);
+            Particle p;
+            switch ((int)frand(rng_, 0, 4) & 3) {
+                case 0:  p.x = frand(rng_, 0, w_ - 1); p.y = d;           break;
+                case 1:  p.x = frand(rng_, 0, w_ - 1); p.y = h_ - 1 - d;  break;
+                case 2:  p.x = d;                      p.y = frand(rng_, 0, h_ - 1); break;
+                default: p.x = w_ - 1 - d;             p.y = frand(rng_, 0, h_ - 1); break;
+            }
+            p.life = 1.0; p.max_life = frand(rng_, 3.0, 8.0);   // slow churn
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = pick_size(cfg_, 1, 1, rng_);
+            p.extra = frand(rng_, 0, kTau);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (auto& p : particles_) {
+            // Fade in as the crystal forms, out as it melts; twinkle on top.
+            const double env = std::clamp(std::min((1.0 - p.life) * 6.0,
+                                                   p.life * 6.0), 0.0, 1.0);
+            const double a = env * (0.35 + 0.45 * (0.5 + 0.5 * std::sin(p.extra * 1.7)));
+            draw_particle(c, p, a);
+        }
+        return c;
+    }
+};
+
+// ── Heatwave ─────────────────────────────────────────────────────────────────
+// Heat shimmer: translucent warm streaks rising off the whole face, wavering
+// as they climb — reads as hot air coming off the panels. The temp-reactive
+// ambient sync applies this when it's scorching out. Follows the gravity
+// coupling like steam. cfg: count, speed_min/max, wander, colors.
+
+class HeatwaveEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const double wander = jnum(cfg_, "wander", 8.0);
+        double dx, dy; direction_unit(dx, dy, 270.0);   // rises by default
+        for (auto& p : particles_) {
+            p.extra += dt;
+            p.x += (p.vy * dx + std::sin(p.extra * 3.1 + p.vx) * wander) * dt;
+            p.y += p.vy * dy * dt;
+            p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                return p.life <= 0 || p.y < -5 || p.y > h_ + 5 ||
+                       p.x < -5 || p.x > w_ + 5;
+            }), particles_.end());
+        while ((int)particles_.size() < count(18)) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                         : Color{255, 120, 40};
+            Particle p;
+            p.x = frand(rng_, 0, w_ - 1);
+            p.y = frand(rng_, h_ * 0.4, h_ + 3.0);      // lower half + below
+            p.vx = frand(rng_, 0, kTau);                // waver phase
+            p.vy = pick_speed(cfg_, 5.0, 10.0, rng_);
+            p.max_life = frand(rng_, 1.2, 2.2);
+            p.life = 1.0;
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = 1; p.extra = 0.0;
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        double dx, dy; direction_unit(dx, dy, 270.0);
+        for (auto& p : particles_) {
+            for (int i = 0; i < 3; ++i) {               // short shimmer streak
+                const double a = std::clamp(p.life, 0.0, 1.0) * 0.30 *
+                                 (1.0 - i / 3.0);
+                draw_pixel(c, (int)std::lround(p.x - dx * i),
+                              (int)std::lround(p.y - dy * i),
+                           (int)p.r, (int)p.g, (int)p.b, (int)(a * 255));
+            }
+        }
+        return c;
+    }
+};
+
 // ── Fireflies ────────────────────────────────────────────────────────────────
 
 class FirefliesEffect : public BaseEffect {
@@ -1712,6 +1814,8 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "waveform")  return std::make_unique<WaveformEffect>(w, h, cfg);
     if (name == "matrix")    return std::make_unique<MatrixEffect>(w, h, cfg);
     if (name == "circuit")   return std::make_unique<CircuitEffect>(w, h, cfg);
+    if (name == "frost")     return std::make_unique<FrostEffect>(w, h, cfg);
+    if (name == "heatwave")  return std::make_unique<HeatwaveEffect>(w, h, cfg);
     if (name == "fireflies") return std::make_unique<FirefliesEffect>(w, h, cfg);
     if (name == "clouds")    return std::make_unique<CloudsEffect>(w, h, cfg);
     if (name == "lightning") return std::make_unique<LightningEffect>(w, h, cfg);
@@ -1736,6 +1840,8 @@ const std::map<std::string, json>& presets() {
           "waveform": {"effect":"waveform","blend":"add"},
           "matrix": {"effect":"matrix","blend":"add"},
           "circuit": {"effect":"circuit","count":5,"blend":"add"},
+          "frost": {"effect":"frost","count":44,"blend":"add"},
+          "heatwave": {"effect":"heatwave","count":18,"blend":"add"},
           "petals": {"effect":"snow","count":14,"colors":[[255,150,180],[255,190,210],[240,120,160]],"speed_min":3.0,"speed_max":6.0,"drift_x":2.5,"blend":"add"},
           "dizzy": {"layers":[
             {"effect":"vortex","count":24,"swirl":3.2,"infall":4,"colors":[[255,230,120],[255,255,255],[255,200,80]],"blend":"add"},

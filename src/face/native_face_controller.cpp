@@ -51,6 +51,8 @@ nlohmann::json effect_cfg_for_id(int id) {
         case 24: return std::string("waveform");
         case 25: return std::string("matrix");
         case 26: return std::string("circuit");
+        case 27: return std::string("frost");
+        case 28: return std::string("heatwave");
         default: return std::string("none");
     }
 }
@@ -1027,10 +1029,10 @@ void NativeFaceController::set_expression_effects(bool enabled) {
 }
 
 const nlohmann::json& NativeFaceController::base_particles_locked(const Panel& pn) const {
-    // The weather override, while set, IS the base — expression moods layer on
-    // top of it and restore back to it, exactly as they do with the user's own
-    // effect.
-    return weather_spec_.is_null() ? pn.particles_spec : weather_spec_;
+    // The ambient override (weather / temperature), while set, IS the base —
+    // expression moods layer on top of it and restore back to it, exactly as
+    // they do with the user's own effect.
+    return ambient_spec_.is_null() ? pn.particles_spec : ambient_spec_;
 }
 
 void NativeFaceController::apply_expression_effect_locked(const std::string& expr) {
@@ -1055,9 +1057,9 @@ void NativeFaceController::set_motion_particles(bool on) {
         if (pn.particles) pn.particles->set_motion_reactive(on);
 }
 
-void NativeFaceController::set_weather_effect(const nlohmann::json& spec) {
+void NativeFaceController::set_ambient_effect(const nlohmann::json& spec) {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    weather_spec_ = (spec.is_null() || (spec.is_string() && spec.get<std::string>().empty()))
+    ambient_spec_ = (spec.is_null() || (spec.is_string() && spec.get<std::string>().empty()))
                         ? nlohmann::json() : spec;
     // Re-resolve what the panels should show now: a mapped expression mood
     // stays on top; otherwise the new base (weather or user effect) applies.

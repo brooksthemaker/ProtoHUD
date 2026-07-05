@@ -357,6 +357,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     bool* pf_motion_particles_p = ctx.pf_motion_particles_p;
     std::function<void(bool)> pf_set_weather_effects = ctx.pf_set_weather_effects;
     bool* pf_weather_effects_p = ctx.pf_weather_effects_p;
+    bool*   pf_temp_effects_p = ctx.pf_temp_effects_p;
+    double* pf_temp_cold_p    = ctx.pf_temp_cold_p;
+    double* pf_temp_hot_p     = ctx.pf_temp_hot_p;
+    std::function<void()> pf_ambient_resync = ctx.pf_ambient_resync;
     std::shared_ptr<std::function<void()>> pf_live_tick = ctx.pf_live_tick;
     nlohmann::json* cfg_root = ctx.cfg_root;
     GLuint* tex_usb1 = ctx.tex_usb1;
@@ -1700,6 +1704,42 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "thunderstorm, clouds; a clear night shows the night sky). Uses "
             "the HUD's weather monitor; your chosen effect returns when it "
             "clears up. Expression moods still play on top."));
+    if (pf_temp_effects_p && pf_ambient_resync) {
+        pf_effects.push_back(with_desc(toggle("Temp Effects",
+            [pf_temp_effects_p]{ return *pf_temp_effects_p; },
+            [pf_temp_effects_p, pf_ambient_resync, cfg_root](bool v){
+                *pf_temp_effects_p = v; pf_ambient_resync();
+                if (cfg_root) (*cfg_root)["protoface"]["temp_effects"] = v;
+            }),
+            "Ambient frost crystals when it's freezing outside and rising "
+            "heat shimmer when it's scorching, from the live temperature. "
+            "Weather Sync's precipitation takes priority when both are on; "
+            "the thresholds below are Â°""C."));
+        if (pf_temp_cold_p) {
+            MenuItem m = with_desc(slider("Cold Below", -20.f, 15.f, 1.f,
+                "Â°""C",
+                [pf_temp_cold_p]{ return static_cast<float>(*pf_temp_cold_p); },
+                [pf_temp_cold_p, pf_ambient_resync, cfg_root](float v){
+                    *pf_temp_cold_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["temp_cold_c"] = v;
+                }),
+                "Frost appears at or below this outdoor temperature.");
+            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
+            pf_effects.push_back(std::move(m));
+        }
+        if (pf_temp_hot_p) {
+            MenuItem m = with_desc(slider("Hot Above", 25.f, 50.f, 1.f,
+                "Â°""C",
+                [pf_temp_hot_p]{ return static_cast<float>(*pf_temp_hot_p); },
+                [pf_temp_hot_p, pf_ambient_resync, cfg_root](float v){
+                    *pf_temp_hot_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["temp_hot_c"] = v;
+                }),
+                "Heat shimmer appears at or above this outdoor temperature.");
+            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
+            pf_effects.push_back(std::move(m));
+        }
+    }
     {
         // Legacy Teensy/ProtoTracer single-effect ids (only meaningful on the
         // Teensy face backend) — tucked into their own page.
@@ -1707,7 +1747,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
             "Fire","Aurora","Blizzard","Sonar","Plasma","Celebration","Galaxy","Party",
             "Clouds","Nebula","Starfield","Warp","Constellation","Shooting Stars",
-            "Night Sky","Steam","Waveform","Matrix","Circuit",
+            "Night Sky","Steam","Waveform","Matrix","Circuit","Frost","Heatwave",
         };
         const uint8_t pf_effect_count =
             static_cast<uint8_t>(sizeof(pf_effect_names) / sizeof(pf_effect_names[0]));

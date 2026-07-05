@@ -109,11 +109,12 @@ public:
     // roll and sweep on quick turns. Forwarded to every panel's ParticleSystem.
     void        set_motion_particles(bool on);
 
-    // Ambient weather override: an effect spec shown INSTEAD of the user's
-    // base effect while set (expression moods still win on top of it). An
-    // empty/null spec clears it. Driven by Weather Sync in main, which maps
-    // the WeatherMonitor's WMO code onto presets (rain/snow/thunderstorm/…).
-    void        set_weather_effect(const nlohmann::json& spec);
+    // Ambient override: an effect spec shown INSTEAD of the user's base
+    // effect while set (expression moods still win on top of it). An empty/
+    // null spec clears it. Driven by the ambient sync in main — Weather Sync
+    // (WMO code → rain/snow/thunderstorm/…) and Temp Effects (freezing →
+    // frost, scorching → heatwave) share this one slot.
+    void        set_ambient_effect(const nlohmann::json& spec);
 
     // Face editor support: what the active PanelOutput addresses (so the
     // editor can pick the editable region), and a way to force a face
@@ -275,7 +276,7 @@ private:
     std::atomic<bool>  face_colors_{false};   // draw art's own RGB vs material override
     std::atomic<bool>  pride_sharp_{true};    // pride flags: hard bands vs smooth blend
     std::atomic<bool>  motion_particles_{true};  // gravity/slosh coupling for effects
-    nlohmann::json     weather_spec_;         // weather override (guarded by state_mtx_)
+    nlohmann::json     ambient_spec_;         // ambient override (guarded by state_mtx_)
     std::atomic<int>   pride_angle_{90};      // pride flag stripe rotation, degrees
 
     // Per-frame drive inputs written by other threads (audio thread, IMU

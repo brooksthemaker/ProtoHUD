@@ -348,6 +348,14 @@ struct MenuBuildContext {
     bool* pf_motion_particles_p = nullptr;
     std::function<void(bool)> pf_set_weather_effects;
     bool* pf_weather_effects_p = nullptr;
+    // Temp Effects - ambient frost / heat shimmer driven by the live outdoor
+    // temperature. Thresholds are Celsius. pf_ambient_resync tells main's
+    // render loop to re-map the ambient effect immediately after a toggle or
+    // threshold change (same path Weather Sync uses).
+    bool*   pf_temp_effects_p = nullptr;
+    double* pf_temp_cold_p    = nullptr;
+    double* pf_temp_hot_p     = nullptr;
+    std::function<void()> pf_ambient_resync;
     // Live-preview tick: main calls this each frame; when Live Preview is on
     // it re-applies the builder spec on change. Installed inside build_menu.
     std::shared_ptr<std::function<void()>> pf_live_tick;

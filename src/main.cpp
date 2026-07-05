@@ -1809,11 +1809,16 @@ int main(int argc, char* argv[]) {
     // Custom Gradient material editor state (Protoface > Material Color).
     PfGradient pf_gradient;
     // "Alive" reactive pack (Face > Effects): gravity/slosh-coupled particles
-    // and the ambient weather-driven effect override. weather_fx_resync forces
-    // an immediate re-evaluation when the toggle flips.
-    bool pf_motion_particles = true;
-    bool pf_weather_effects  = false;
-    bool weather_fx_resync   = true;
+    // and the ambient effect override. Weather Sync and Temp Effects share
+    // the controller's single ambient slot - precipitation wins, frost /
+    // heatwave fill the clear-sky gaps. weather_fx_resync forces an immediate
+    // re-evaluation when a toggle flips or a threshold moves.
+    bool   pf_motion_particles = true;
+    bool   pf_weather_effects  = false;
+    bool   pf_temp_effects     = false;
+    double pf_temp_cold_c      = 5.0;    // frost at/below this (deg C)
+    double pf_temp_hot_c       = 45.0;   // heatwave at/above this (deg C)
+    bool   weather_fx_resync   = true;
     // Glitch post-effect config — forwarded to the native controller live and
     // persisted to cfg["protoface"]["glitch"]. Tunable via the settings JSON;
     // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
@@ -1839,6 +1844,9 @@ int main(int argc, char* argv[]) {
         state.face.pride_sharp = jval(jpf, "pride_sharp", true);
         pf_motion_particles    = jval(jpf, "motion_particles", pf_motion_particles);
         pf_weather_effects     = jval(jpf, "weather_effects",  pf_weather_effects);
+        pf_temp_effects        = jval(jpf, "temp_effects",      pf_temp_effects);
+        pf_temp_cold_c         = jval(jpf, "temp_cold_c",       pf_temp_cold_c);
+        pf_temp_hot_c          = jval(jpf, "temp_hot_c",        pf_temp_hot_c);
         state.face.pride_angle = jval(jpf, "pride_angle", 90);
         if (jpf.contains("layout") && jpf["layout"].is_object()) {
             auto& jl = jpf["layout"];
@@ -3859,6 +3867,10 @@ int main(int argc, char* argv[]) {
         pf_weather_effects = v;
         weather_fx_resync  = true;   // the render loop re-maps immediately
     };
+    menu_ctx.pf_temp_effects_p = &pf_temp_effects;
+    menu_ctx.pf_temp_cold_p    = &pf_temp_cold_c;
+    menu_ctx.pf_temp_hot_p     = &pf_temp_hot_c;
+    menu_ctx.pf_ambient_resync = [&]{ weather_fx_resync = true; };
     menu_ctx.pf_live_tick = pf_live_tick;
     menu_ctx.cfg_root = &cfg;
     // USB camera preview wiring
@@ -4319,7 +4331,7 @@ int main(int argc, char* argv[]) {
         case F::EffectNext: {
             int id;
             { std::lock_guard<std::mutex> lk(state.mtx);
-              id = (state.face.effect_id + 1) % 27;   // pf_effect_names count (None..Circuit)
+              id = (state.face.effect_id + 1) % 29;   // pf_effect_names count (None..Heatwave)
               state.face.effect_id = static_cast<uint8_t>(id); }
             face_proxy.set_effect(static_cast<uint8_t>(id));
         } break;
@@ -4826,6 +4838,9 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
         cfg["protoface"]["motion_particles"]    = pf_motion_particles;
         cfg["protoface"]["weather_effects"]     = pf_weather_effects;
+        cfg["protoface"]["temp_effects"]        = pf_temp_effects;
+        cfg["protoface"]["temp_cold_c"]         = pf_temp_cold_c;
+        cfg["protoface"]["temp_hot_c"]          = pf_temp_hot_c;
         cfg["protoface"]["pride_angle"]         = state.face.pride_angle;
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
@@ -5268,8 +5283,9 @@ int main(int argc, char* argv[]) {
     // field the HUD reads is reassigned under the lock each frame.
     AppState snap;
 
-    // Weather Sync bookkeeping — re-evaluated every ~60 s (and immediately on
-    // toggle); only pushed to the face when the mapped spec actually changes.
+    // Ambient-effect bookkeeping (Weather Sync + Temp Effects) — re-evaluated
+    // every ~60 s (and immediately on a toggle/threshold change); only pushed
+    // to the face when the mapped spec actually changes.
     auto        weather_fx_last = std::chrono::steady_clock::now() - std::chrono::minutes(2);
     std::string weather_fx_sent = "null";
 
@@ -5280,23 +5296,38 @@ int main(int argc, char* argv[]) {
         if (state.win_mode_dirty.exchange(false))
             xr.apply_window_mode(state.win_fullscreen.load(), state.win_frameless.load());
 
-        // Weather Sync: the face's ambient effect follows real conditions.
-        // Cheap check (a steady_clock compare) every frame; real work ~1/min.
+        // Ambient sync: the face's ambient effect follows real conditions.
+        // Weather Sync maps precipitation/sky first; when that maps to
+        // nothing, Temp Effects fill the gap (frost when freezing, heat
+        // shimmer when scorching). Cheap check (a steady_clock compare)
+        // every frame; real work ~1/min.
         if (native_ctrl &&
             (weather_fx_resync ||
              std::chrono::steady_clock::now() - weather_fx_last >= std::chrono::seconds(60))) {
             weather_fx_last   = std::chrono::steady_clock::now();
             weather_fx_resync = false;
             nlohmann::json spec;
-            if (pf_weather_effects) {
+            if (pf_weather_effects || pf_temp_effects) {
                 std::lock_guard<std::mutex> lk(state.mtx);
-                if (state.weather.ok)
-                    spec = weather_effect_spec(state.weather.code, state.weather.is_day);
+                if (state.weather.ok) {
+                    if (pf_weather_effects)
+                        spec = weather_effect_spec(state.weather.code,
+                                                   state.weather.is_day);
+                    if (spec.is_null() && pf_temp_effects) {
+                        // WeatherState::temp is in the configured display
+                        // unit; thresholds are Celsius, so convert first.
+                        double t = state.weather.temp;
+                        if (!state.weather_cfg.metric)
+                            t = (t - 32.0) * 5.0 / 9.0;
+                        if      (t <= pf_temp_cold_c) spec = {{"preset", "frost"}};
+                        else if (t >= pf_temp_hot_c)  spec = {{"preset", "heatwave"}};
+                    }
+                }
             }
             const std::string key = spec.dump();
             if (key != weather_fx_sent) {
                 weather_fx_sent = key;
-                native_ctrl->set_weather_effect(spec);
+                native_ctrl->set_ambient_effect(spec);
             }
         }
         if (state.win_resize_dirty.exchange(false)) {
