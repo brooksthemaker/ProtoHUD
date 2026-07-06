@@ -558,9 +558,28 @@ void NativeFaceController::set_brightness(uint8_t value) {
     write_state_file(snap);
 }
 
+std::string NativeFaceController::material_for_index(int idx) const {
+    std::string spec = preset_material(idx);
+    if (idx >= 22 && idx <= 33) {
+        // Pride flags (22-33) are stored as smooth vertical gradients
+        // ("gradient:v:s:0:…"). Apply the live rotation and sharp-bands
+        // preferences before handing the spec to the renderer.
+        static const std::string kPrefix = "gradient:v:";
+        if (spec.rfind(kPrefix, 0) == 0) {
+            const int ang = ((pride_angle_.load() % 360) + 360) % 360;
+            spec = "gradient:a" + std::to_string(ang) + ":" + spec.substr(kPrefix.size());
+        }
+        if (pride_sharp_.load()) {
+            const auto p = spec.find(":s:");   // swap smooth → banded for distinct stripes
+            if (p != std::string::npos) spec.replace(p, 3, ":b:");
+        }
+    }
+    return spec;
+}
+
 void NativeFaceController::set_palette(uint8_t palette_id) {
     std::unique_lock<std::mutex> lk(state_mtx_);
-    apply_material_all(preset_material(palette_id));
+    apply_material_all(material_for_index(palette_id));
     const std::string snap = serialize_state_locked();
     lk.unlock();
     write_state_file(snap);
@@ -571,9 +590,17 @@ void NativeFaceController::set_menu_item(uint8_t menu_index, uint8_t value) {
         face_colors_.store(value != 0);
         return;
     }
+    if (menu_index == 10) {        // 10 = pride "sharp bands" preference (native only)
+        pride_sharp_.store(value != 0);
+        return;                    // menu re-applies the current preset via item 8
+    }
+    if (menu_index == 11) {        // 11 = pride stripe rotation, in 15° units (native only)
+        pride_angle_.store((static_cast<int>(value) * 15) % 360);
+        return;                    // menu re-applies the current preset via item 8
+    }
     if (menu_index != 8) return;   // 8 = material colour preset (matches Protoface)
     std::unique_lock<std::mutex> lk(state_mtx_);
-    apply_material_all(preset_material(value));
+    apply_material_all(material_for_index(value));
     const std::string snap = serialize_state_locked();
     lk.unlock();
     write_state_file(snap);
@@ -700,18 +727,19 @@ std::string NativeFaceController::preset_material(int idx) {
         case 10: return "warm";
         case 11: return "solid:0,0,0";
         // Multi-colour gradient presets (rendered via GradientMaterial — no PNG
-        // asset needed). Smooth horizontal blends, static. Kept in sync with the
-        // pf_mats table in main.cpp's Material Color menu.
-        case 12: return "gradient:h:s:0:FF8C00-FF3D7F-8A2BE2";  // Sunset
-        case 13: return "gradient:h:s:0:00E5FF-0077FF-001F7F";  // Ocean
-        case 14: return "gradient:h:s:0:7CFF6B-1E9E3C-0B3D1A";  // Forest
-        case 15: return "gradient:h:s:0:FFE000-FF7A00-E01E1E";  // Fire
-        case 16: return "gradient:h:s:0:00FFA3-00D0FF-B14BFF";  // Aurora
-        case 17: return "gradient:h:s:0:2A0A0A-C81E00-FF8C00";  // Lava
-        case 18: return "gradient:h:s:0:2B0B5E-7A1EB4-FF4FD8";  // Galaxy
-        case 19: return "gradient:h:s:0:FFB3BA-BAE1FF-BAFFC9";  // Pastel
-        case 20: return "gradient:h:s:0:FF4FA3-FFD24F-4FC3FF";  // Candy
-        case 21: return "gradient:h:s:0:AEFF00-00FFB3-00A3FF";  // Toxic
+        // asset needed). Smooth horizontal blends, static, mirrored about the
+        // vertical centre ("hm") so each side of the face reflects the other.
+        // Kept in sync with the pf_mats table in main.cpp's Material Color menu.
+        case 12: return "gradient:hm:s:0:FF8C00-FF3D7F-8A2BE2";  // Sunset
+        case 13: return "gradient:hm:s:0:00E5FF-0077FF-001F7F";  // Ocean
+        case 14: return "gradient:hm:s:0:7CFF6B-1E9E3C-0B3D1A";  // Forest
+        case 15: return "gradient:hm:s:0:FFE000-FF7A00-E01E1E";  // Fire
+        case 16: return "gradient:hm:s:0:00FFA3-00D0FF-B14BFF";  // Aurora
+        case 17: return "gradient:hm:s:0:2A0A0A-C81E00-FF8C00";  // Lava
+        case 18: return "gradient:hm:s:0:2B0B5E-7A1EB4-FF4FD8";  // Galaxy
+        case 19: return "gradient:hm:s:0:FFB3BA-BAE1FF-BAFFC9";  // Pastel
+        case 20: return "gradient:hm:s:0:FF4FA3-FFD24F-4FC3FF";  // Candy
+        case 21: return "gradient:hm:s:0:AEFF00-00FFB3-00A3FF";  // Toxic
         // ── Pride flags ───────────────────────────────────────────────────────
         // Vertical smooth gradients so the colours stack top→bottom like flag
         // stripes. Kept in sync with the pf_pride table in main.cpp.

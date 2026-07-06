@@ -44,10 +44,18 @@ private:
 // cyclically along one axis (so a scroll wraps seamlessly): smooth = linear
 // blend between adjacent stops; banded = hard equal-width stripes. speed is the
 // scroll rate in px/s along the axis (0 = static, sign = direction).
+//
+// angle_deg rotates the gradient direction (0° = left→right, 90° = top→bottom,
+// anything else = a diagonal). When mirror is set, the ramp fills only half the
+// axis and is reflected about the centre, so the full colour sequence appears
+// symmetrically on each side (outer edges = first colour, centre = last). The
+// ramp is non-cyclic in that case. Used to break a face's material at its
+// centre instead of stretching one continuous ramp edge-to-edge.
 class GradientMaterial : public BaseMaterial {
 public:
     GradientMaterial(std::vector<cv::Vec3b> colors, int width, int height,
-                     bool horizontal, bool smooth, double speed);
+                     double angle_deg, bool smooth, double speed,
+                     bool mirror = false);
     void update(double dt) override { t_ += dt; }
     cv::Mat get_frame() override;
 private:
