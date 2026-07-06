@@ -31,6 +31,8 @@ enum class GpioFunc : int {
     // Face browse + look adjust (cycle expression/material/effect, nudge brightness,
     // reboot the face daemon).
     FaceNext, FacePrev, MaterialNext, FaceBrightUp, FaceBrightDown, EffectNext, FaceRestart,
+    // MAX7219 section-panel content: next/prev built-in symbol, clear.
+    MaxNext, MaxPrev, MaxClear,
     Count
 };
 
@@ -88,6 +90,9 @@ inline const char* gpio_func_name(GpioFunc f) {
     case GpioFunc::FaceBrightDown:    return "Face: Brightness Down";
     case GpioFunc::EffectNext:        return "Face: Next Effect";
     case GpioFunc::FaceRestart:       return "Face: Reboot ProtoFace";
+    case GpioFunc::MaxNext:           return "MAX Panels: Next Symbol";
+    case GpioFunc::MaxPrev:           return "MAX Panels: Prev Symbol";
+    case GpioFunc::MaxClear:          return "MAX Panels: Clear";
     default:                        return "?";
     }
 }
@@ -146,6 +151,9 @@ inline const char* gpio_func_id(GpioFunc f) {
     case GpioFunc::FaceBrightDown:    return "face_bright_down";
     case GpioFunc::EffectNext:        return "effect_next";
     case GpioFunc::FaceRestart:       return "face_restart";
+    case GpioFunc::MaxNext:           return "max_next";
+    case GpioFunc::MaxPrev:           return "max_prev";
+    case GpioFunc::MaxClear:          return "max_clear";
     default:                        return "none";
     }
 }

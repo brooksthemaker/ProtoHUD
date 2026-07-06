@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -41,8 +42,24 @@ public:
         double      min_duty  = 0.20;           // stall floor applied when a zone is on
         bool        invert    = false;          // true if the drive is active-low
         std::string temp_path = "/sys/class/thermal/thermal_zone0/temp";
+        // Where the PWM happens: "gpio" (default — this class bit-bangs CM5
+        // lines) or "coproc" (the RP2350 owns the fan pins; the curve stays
+        // here and resolved duties go out through the duty sink below).
+        std::string output    = "gpio";
         std::vector<ZoneCfg> zones;             // up to kMaxZones
     };
+
+    // output == "coproc": called ~2 Hz per zone with the resolved duty [0,1]
+    // whenever it changes (plus a periodic refresh so a rebooted coprocessor
+    // re-learns it). Set before start(); main wires it to the coproc link.
+    using DutySink = std::function<void(int zone, double duty)>;
+    void set_duty_sink(DutySink sink) { duty_sink_ = std::move(sink); }
+
+    // Optional temperature source that overrides temp_path — lets the curve
+    // follow a probe that lives on the coprocessor instead of a sysfs file.
+    // Returns false to fall back to temp_path. Set before start().
+    using TempProvider = std::function<bool(double& c_out)>;
+    void set_temp_provider(TempProvider fn) { temp_provider_ = std::move(fn); }
 
     explicit FanController(Config cfg);
     ~FanController();
@@ -80,6 +97,7 @@ private:
 
     int    clampz(int z) const { return (z < 0) ? 0 : (z >= nzones_ ? (nzones_ ? nzones_-1 : 0) : z); }
     void   pwm_loop();
+    void   coproc_loop();   // output=="coproc": push duties instead of bit-banging
     double read_temp_c();
     double resolve_duty(const ZoneRT& z) const;   // manual/auto → duty, min_duty floor
     void   apply(uint64_t drive_high);            // honour invert, write the lines
@@ -93,6 +111,8 @@ private:
     std::atomic<bool>   running_ { false };
     std::atomic<double> cur_temp_{ 0.0 };
     std::thread         thread_;
+    DutySink            duty_sink_;      // coproc mode (set before start)
+    TempProvider        temp_provider_;  // optional curve source (set before start)
 };
 
 } // namespace sys

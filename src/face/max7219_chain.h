@@ -39,7 +39,11 @@ public:
     // SPI0). GPIO transport shares DIN+CLK across all chains via a single
     // Max7219GpioBus instance owned by Max7219PanelOutput; the chain itself
     // owns its CS line.
-    enum class Transport : uint8_t { Spidev, Gpio };
+    // Coproc — the bytes are shipped over USB serial to the RP2350 button/voice
+    // coprocessor, which shifts them out its hardware SPI and pulses the CS
+    // (firmware/button_coproc, -DMAX_BRIDGE). Lets MAX panels run alongside a
+    // HUB75 face with no CM5 GPIO, which piomatter's PIO ties up.
+    enum class Transport : uint8_t { Spidev, Gpio, Coproc };
 
     struct Config {
         std::string name;              // "eye_l" / "eye_r" / "nose" / "mouth" …
@@ -48,6 +52,11 @@ public:
         // Spidev transport
         std::string spi_device  = "/dev/spidev0.1";
         int         speed_hz    = 1'000'000;  // datasheet max ≈ 10 MHz
+
+        // Coproc transport — USB serial device of the coprocessor + which CS
+        // index (the <cs> field of the "SPI" command) drives this chain.
+        std::string coproc_device = "/dev/serial/by-id/usb-ProtoHUD_Buttons-if00";
+        int         coproc_cs     = 0;
 
         // GPIO transport — chip device + per-chain CS pin only; DIN/CLK come
         // from the shared bus configured at the Max7219PanelOutput level.
@@ -93,8 +102,11 @@ public:
     bool open();
     void close();
     bool is_open() const {
-        return (cfg_.transport == Transport::Spidev) ? (fd_ >= 0)
-                                                     : cs_line_.is_open();
+        switch (cfg_.transport) {
+            case Transport::Spidev: return fd_ >= 0;
+            case Transport::Coproc: return coproc_fd_ >= 0;
+            default:                return cs_line_.is_open();   // Gpio
+        }
     }
 
     // Convert the configured canvas region to per-chip 8×8 mono bitmaps and
@@ -118,8 +130,9 @@ private:
 
     Config cfg_;
     int    fd_         = -1;          // spidev fd (Spidev transport)
+    int    coproc_fd_  = -1;          // USB serial fd (Coproc transport)
     int    total_chips_ = 0;          // cols_chips × rows_chips
-    std::vector<uint8_t> tx_buf_;     // 2 bytes × total_chips (Spidev path)
+    std::vector<uint8_t> tx_buf_;     // 2 bytes × total_chips (Spidev/Coproc path)
 
     // GPIO transport (when cfg_.transport == Gpio)
     Max7219GpioBus*  gpio_bus_ = nullptr;

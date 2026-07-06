@@ -38,6 +38,17 @@ bool FanController::start() {
     if (running_.load()) return true;
     if (nzones_ == 0) { std::cerr << "[fan] no zones configured\n"; return false; }
 
+    // Coprocessor mode: the RP2350 owns the fan pins; no CM5 GPIO to claim.
+    // The curve/menu logic all stays here — only the PWM output moves.
+    if (cfg_.output == "coproc") {
+        if (!duty_sink_) { std::cerr << "[fan] output=coproc but no duty sink wired\n"; return false; }
+        running_.store(true);
+        thread_ = std::thread(&FanController::coproc_loop, this);
+        std::cout << "[fan] cooling fans active (" << nzones_
+                  << " zone(s) via coprocessor PWM)\n";
+        return true;
+    }
+
     // Flatten all zone GPIOs into one shared line request; remember each zone's
     // bit positions so the PWM thread can drive zones independently.
     std::vector<uint32_t> offsets;
@@ -76,6 +87,8 @@ void FanController::stop() {
     if (lines_.is_open()) {
         apply(0);            // all zones off
         lines_.close();
+    } else if (cfg_.output == "coproc" && duty_sink_) {
+        for (int i = 0; i < nzones_; ++i) duty_sink_(i, 0.0);   // fans off
     }
 }
 
@@ -86,6 +99,12 @@ void FanController::apply(uint64_t drive_high) {
 }
 
 double FanController::read_temp_c() {
+    // Preferred source: an injected provider (e.g. a probe on the coprocessor).
+    if (temp_provider_) {
+        double c = 0.0;
+        if (temp_provider_(c)) return c;
+        // fall through to temp_path when the provider has no reading yet
+    }
     FILE* f = std::fopen(cfg_.temp_path.c_str(), "r");
     if (!f) return cur_temp_.load();
     long milli = 0;
@@ -105,6 +124,32 @@ double FanController::resolve_duty(const ZoneRT& z) const {
     }
     if (duty > 0.001 && duty < cfg_.min_duty) duty = cfg_.min_duty;   // stall floor
     return std::clamp(duty, 0.0, 1.0);
+}
+
+// output == "coproc": the RP2350's hardware PWM holds the duty, so this loop
+// only re-resolves each zone's target ~2 Hz and pushes it when it moves (plus
+// a 5 s heartbeat so a rebooted coprocessor re-learns the duties).
+void FanController::coproc_loop() {
+    using clock = std::chrono::steady_clock;
+    std::array<double, kMaxZones> sent;
+    sent.fill(-1.0);                                  // force the first push
+    auto last_push = clock::now();
+
+    while (running_.load()) {
+        cur_temp_.store(read_temp_c());
+        const bool heartbeat = clock::now() - last_push >= std::chrono::seconds(5);
+        for (int i = 0; i < nzones_; ++i) {
+            const double d = resolve_duty(zones_[i]);
+            zones_[i].cur_duty.store(d);
+            if (heartbeat || std::fabs(d - sent[i]) > 0.01) {
+                duty_sink_(i, d);
+                sent[i] = d;
+            }
+        }
+        if (heartbeat) last_push = clock::now();
+        for (int t = 0; t < 5 && running_.load(); ++t)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 }
 
 void FanController::pwm_loop() {

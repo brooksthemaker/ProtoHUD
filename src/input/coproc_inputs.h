@@ -22,17 +22,37 @@
 // actions) needs to know where the press came from.
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "gpio_function.h"
 
 namespace input {
 
+// One physical switch on the coprocessor. The order in CoprocConfig::pins is the
+// button id (index) the firmware reports, which short_map/long_map then resolve
+// to a GpioFunc. Pushed to the firmware over "PINCFG …" on connect, so the pin
+// ROLES are HUD config — no firmware reflash to move a switch or a backlight.
+struct CoprocPin {
+    int         gp         = -1;       // RP2350 GPIO number
+    std::string pull       = "up";     // up | down | none
+    bool        active_low = true;     // pressed pulls the pin LOW
+    int         led_gp     = -1;       // optional backlight GPIO, -1 = none
+};
+
 struct CoprocConfig {
     bool        enabled = false;            // master toggle — false = pure local GPIO
+
+    // Coprocessor board, for the pin visualizer/editor (GPIO > RP2350 GPIO
+    // Expander): "rp2350a" (Pico 2), "pico_plus_2", "pico_lipo2_xl_w"
+    // (RP2350B, GP0-47), or "raw" (board-agnostic GP grid). Pins-only — the
+    // firmware doesn't care which board it's flashed to.
+    std::string variant = "rp2350a";
 
     // Transport. "usb_serial" (USB CDC/ACM — default, hot-pluggable) or "i2c"
     // (carrier-wired, Pi master + a data-ready IRQ line, frees a USB port).
@@ -61,6 +81,10 @@ struct CoprocConfig {
     std::map<int, GpioFunc> short_map;      // button id → short-press function
     std::map<int, GpioFunc> long_map;       // button id → long-press function
 
+    // Physical pin map pushed to the firmware on connect (order = button id).
+    // Empty = leave the firmware on its compiled-in config.h defaults.
+    std::vector<CoprocPin>  pins;
+
     // Heartbeat: if no PING/event seen within this window, mark offline (and,
     // if replace_local_gpio, optionally fall back — see docs).
     int         heartbeat_timeout_ms = 2000;
@@ -76,10 +100,33 @@ public:
     void shutdown();
     bool connected() const { return connected_.load(); }   // surfaced to HUD status
 
+    // I²C bus test: ask the coprocessor to probe its I²C lines (default GP20/21,
+    // or the given SDA/SCL) and report which addresses ACK. The reply is captured
+    // asynchronously; poll i2c_scan_result() for the last result ("scanning…",
+    // "none", or a hex address list). A quick connectivity check for the DAC /
+    // any I²C device wired to the coprocessor.
+    void request_i2c_scan(int sda = -1, int scl = -1);
+    std::string i2c_scan_result() const;
+
+    // ── Peripheral hub (firmware built with -DPERIPHERAL_HUB) ────────────────
+    // Boop pads on the coprocessor: "BOOP <electrode> <1|0>" edges call this
+    // handler from the reader thread — post to the input queue inside it.
+    // Set BEFORE init() (or re-set right after a reload's init()).
+    void set_boop_handler(std::function<void(int electrode, bool touched)> fn) {
+        boop_fn_ = std::move(fn);
+    }
+    // Latest DS18B20 reading for a ROM id (16 hex chars, as the firmware
+    // reports it). False when the probe hasn't reported within ~3 periods.
+    bool coproc_temp(const std::string& rom_id, double& c_out) const;
+    // Drive a coprocessor fan zone ("FAN <zone> <duty%>"). Thread-safe: one
+    // whole line per write() call, like every other sender on this link.
+    void send_fan_duty(int zone, int duty_pct);
+
 private:
     void reader_loop();                       // transport read + reconnect loop
     void on_line(const std::string& line);    // parse one framed message → dispatch
     void handle_button(int id, bool is_long); // map id→GpioFunc, call dispatch_
+    void push_pin_config();                   // send PINCFG map to the firmware
 
     CoprocConfig                  cfg_;
     std::function<void(GpioFunc)> dispatch_;
@@ -87,6 +134,15 @@ private:
     std::atomic<bool>             connected_{false};
     std::thread                   thread_;
     int                           fd_ = -1;   // serial or i2c fd
+    bool                          pins_pushed_ = false;  // once per connection
+    mutable std::mutex            i2c_mtx_;
+    std::string                   i2c_result_ = "not scanned";  // last I2CSCAN reply
+
+    // Peripheral hub state (see set_boop_handler / coproc_temp above).
+    std::function<void(int, bool)> boop_fn_;
+    struct TempSample { double c; std::chrono::steady_clock::time_point at; };
+    mutable std::mutex             temp_mtx_;
+    std::map<std::string, TempSample> temps_;   // ROM hex → latest reading
 };
 
 } // namespace input
