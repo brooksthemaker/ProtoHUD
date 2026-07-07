@@ -401,9 +401,11 @@ struct MenuBuildContext {
     // by the feed every frame - the menu just mutates it in place.
     double*                     pf_motion_scale_p = nullptr;
     // Guided IMU motion-range calibration (main owns the wizard). start
-    // begins a run (or cancels the active one); status returns a short
-    // progress string for the menu row ("" = idle).
+    // begins a run; while one is active the same call captures the current
+    // pose and advances (press-driven). cancel aborts; status returns a
+    // short progress string for the menu row ("" = idle).
     std::function<void()>        imu_cal_start;
+    std::function<void()>        imu_cal_cancel;
     std::function<std::string()> imu_cal_status;
     std::function<void(bool)> pf_set_weather_effects;
     bool* pf_weather_effects_p = nullptr;

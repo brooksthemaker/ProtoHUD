@@ -1864,8 +1864,8 @@ int main(int argc, char* argv[]) {
     struct MotionCal {
         enum class Step { Idle, Center, Up, Down, Left, Right, Center2 };
         Step   step = Step::Idle;
-        double stable_s = 0.0;                 // how long the head has been still
-        double pr = 0, pp = 0, ph = 0;         // previous roll/pitch/heading
+        bool   advance = false;                // set by the menu row's select;
+                                               // the feed captures + steps on it
         double base_pitch = 0, base_head = 0;  // neutral captured at Center
         double up = 0, down = 0, left = 0, right = 0;   // captured spans (deg)
     };
@@ -4113,20 +4113,26 @@ int main(int argc, char* argv[]) {
             motion_cal = MotionCal{};
             motion_cal.step = MotionCal::Step::Center;
             cal_note("Motion Calibration",
-                     "Hold your head level and look straight ahead...");
+                     "Head level, look straight ahead - then press Select "
+                     "to capture.");
         } else {
+            motion_cal.advance = true;   // capture this pose, move on
+        }
+    };
+    menu_ctx.imu_cal_cancel = [&motion_cal, cal_note]{
+        if (motion_cal.step != MotionCal::Step::Idle) {
             motion_cal = MotionCal{};
             cal_note("Motion Calibration", "Cancelled.");
         }
     };
     menu_ctx.imu_cal_status = [&motion_cal]() -> std::string {
         switch (motion_cal.step) {
-        case MotionCal::Step::Center:  return "hold centre";
-        case MotionCal::Step::Up:      return "look UP";
-        case MotionCal::Step::Down:    return "look DOWN";
-        case MotionCal::Step::Left:    return "look LEFT";
-        case MotionCal::Step::Right:   return "look RIGHT";
-        case MotionCal::Step::Center2: return "back to centre";
+        case MotionCal::Step::Center:  return "centre, then Select";
+        case MotionCal::Step::Up:      return "look UP, then Select";
+        case MotionCal::Step::Down:    return "look DOWN, then Select";
+        case MotionCal::Step::Left:    return "look LEFT, then Select";
+        case MotionCal::Step::Right:   return "look RIGHT, then Select";
+        case MotionCal::Step::Center2: return "centre, then Select";
         default:                       return "";
         }
     };
@@ -5799,73 +5805,57 @@ int main(int argc, char* argv[]) {
                 }
             }
             // ── Motion-range calibration wizard ─────────────────────────
-            // Steps advance automatically when the head has held the pose
-            // still for a moment; uses the same resolved angles as the feed.
-            if (motion_cal.step != MotionCal::Step::Idle) {
+            // Press-driven: each Select on the menu row captures the current
+            // pose and advances (knob press, GPIO menu button or keyboard -
+            // anything that fires the row's action).
+            if (motion_cal.step != MotionCal::Step::Idle && motion_cal.advance) {
                 auto& C = motion_cal;
                 using St = MotionCal::Step;
+                C.advance = false;
                 auto circ = [](double d){ while (d > 180) d -= 360;
                                           while (d < -180) d += 360; return d; };
-                const double ddt = std::clamp(static_cast<double>(dt), 1e-4, 0.1);
-                const bool still =
-                    std::fabs(m_pitch - C.pp) + std::fabs(m_roll - C.pr) < 35.0 * ddt &&
-                    std::fabs(circ(m_head - C.ph)) < 50.0 * ddt;
-                C.pr = m_roll; C.pp = m_pitch; C.ph = m_head;
                 const double dpitch = std::fabs(m_pitch - C.base_pitch);
                 const double dhead  = std::fabs(circ(m_head - C.base_head));
-                auto hold = [&](bool posed, double need) {
-                    C.stable_s = (still && posed) ? C.stable_s + ddt : 0.0;
-                    return C.stable_s >= need;
-                };
                 switch (C.step) {
                 case St::Center:
-                    if (hold(true, 1.0)) {
-                        C.base_pitch = m_pitch; C.base_head = m_head;
-                        C.step = St::Up; C.stable_s = 0;
-                        cal_note("Motion Calibration", "Look UP and hold...");
-                    }
+                    C.base_pitch = m_pitch; C.base_head = m_head;
+                    C.step = St::Up;
+                    cal_note("Motion Calibration",
+                             "Look UP as far as comfortable, then Select.");
                     break;
                 case St::Up:
-                    if (hold(dpitch > 8.0, 0.6)) {
-                        C.up = dpitch; C.step = St::Down; C.stable_s = 0;
-                        cal_note("Motion Calibration", "Look DOWN and hold...");
-                    }
+                    C.up = dpitch; C.step = St::Down;
+                    cal_note("Motion Calibration", "Look DOWN, then Select.");
                     break;
                 case St::Down:
-                    if (hold(dpitch > 8.0, 0.6)) {
-                        C.down = dpitch; C.step = St::Left; C.stable_s = 0;
-                        cal_note("Motion Calibration", "Look LEFT and hold...");
-                    }
+                    C.down = dpitch; C.step = St::Left;
+                    cal_note("Motion Calibration", "Look LEFT, then Select.");
                     break;
                 case St::Left:
-                    if (hold(dhead > 10.0, 0.6)) {
-                        C.left = dhead; C.step = St::Right; C.stable_s = 0;
-                        cal_note("Motion Calibration", "Look RIGHT and hold...");
-                    }
+                    C.left = dhead; C.step = St::Right;
+                    cal_note("Motion Calibration", "Look RIGHT, then Select.");
                     break;
                 case St::Right:
-                    if (hold(dhead > 10.0, 0.6)) {
-                        C.right = dhead; C.step = St::Center2; C.stable_s = 0;
-                        cal_note("Motion Calibration",
-                                 "Back to centre: head level, straight ahead...");
-                    }
+                    C.right = dhead; C.step = St::Center2;
+                    cal_note("Motion Calibration",
+                             "Back to centre - head level, straight ahead - "
+                             "then Select.");
                     break;
-                case St::Center2:
-                    if (hold(dpitch < 6.0 && dhead < 10.0, 1.0)) {
-                        pf_range_pitch = (C.up + C.down) * 0.5;
-                        pf_range_yaw   = (C.left + C.right) * 0.5;
-                        // Straight-ahead + level right now: re-level the
-                        // BNO086 mount too (roll/pitch tare, north kept).
-                        if (bno086.connected()) bno086.level();
-                        char b[96];
-                        snprintf(b, sizeof b,
-                                 "Done. Pitch Â±%.0fÂ°, yaw Â±%.0fÂ° "
-                                 "- face response normalised.",
-                                 pf_range_pitch, pf_range_yaw);
-                        cal_note("Motion Calibration", b);
-                        C = MotionCal{};
-                    }
+                case St::Center2: {
+                    pf_range_pitch = (C.up + C.down) * 0.5;
+                    pf_range_yaw   = (C.left + C.right) * 0.5;
+                    // Straight-ahead + level right now: re-level the BNO086
+                    // mount too (roll/pitch tare, north kept).
+                    if (bno086.connected()) bno086.level();
+                    char b[96];
+                    snprintf(b, sizeof b,
+                             "Done. Pitch \xc2\xb1%.0f\xc2\xb0, yaw \xc2\xb1%.0f\xc2\xb0 "
+                             "- face response normalised.",
+                             pf_range_pitch, pf_range_yaw);
+                    cal_note("Motion Calibration", b);
+                    C = MotionCal{};
                     break;
+                }
                 default: break;
                 }
             }

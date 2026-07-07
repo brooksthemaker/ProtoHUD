@@ -862,21 +862,28 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         imu_menu.push_back(std::move(pt));
     }
     // Guided range calibration: look up/down/left/right, back to centre.
+    // Press-driven: the row's Select starts the run, then captures each pose.
     if (ctx.imu_cal_start) {
         MenuItem m = leaf("Calibrate Motion Range",
                           [fn = ctx.imu_cal_start]{ fn(); });
         m.label_fn = [st = ctx.imu_cal_status]{
             const std::string s = st ? st() : std::string();
             return s.empty() ? std::string("Calibrate Motion Range")
-                             : "Calibrating: " + s;
+                             : "Capture: " + s;
         };
         imu_menu.push_back(with_desc(std::move(m),
-            "Guided setup: hold your head level, then look up, down, left, "
-            "right, and back to centre - each step advances when you hold "
-            "still. Measures your comfortable head range and normalises the "
-            "face-motion response to it (slight tilts stop reading "
-            "exaggerated), and re-levels the mount at the final step. Select "
-            "again mid-run to cancel."));
+            "Guided setup, one Select per pose: straight ahead, up, down, "
+            "left, right, straight ahead again - hold each pose and press "
+            "Select (knob, GPIO menu button or Enter) to capture it. "
+            "Measures your comfortable head range and normalises the "
+            "face-motion response to it, and re-levels the mount at the "
+            "final step."));
+        MenuItem cx = leaf("Cancel Calibration",
+                           [fn = ctx.imu_cal_cancel]{ if (fn) fn(); });
+        cx.visible_fn = [st = ctx.imu_cal_status]{
+            return st && !st().empty();
+        };
+        imu_menu.push_back(std::move(cx));
     }
     imu_menu.push_back(submenu("IMU Axis", std::move(imu_axis_menu)));
     imu_menu.push_back([&]() -> MenuItem {
