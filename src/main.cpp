@@ -2549,9 +2549,24 @@ int main(int argc, char* argv[]) {
         state.imu_pose = { roll, pitch, yaw };   // owns pose while head_tracking on
     });
     bno086.set_sample_callback([&state](const Bno08x::Sample& s) {
+        int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         std::lock_guard<std::mutex> lk(state.mtx);
         auto& d = state.imu_data;
-        d.xr_roll = s.euler_deg[0]; d.xr_pitch = s.euler_deg[1]; d.xr_yaw = s.euler_deg[2];
+        d.b86_ok = true;
+        d.b86_euler[0] = s.euler_deg[0];
+        d.b86_euler[1] = s.euler_deg[1];
+        d.b86_euler[2] = s.euler_deg[2];
+        d.b86_accuracy_deg = s.accuracy_deg;
+        static int64_t prev_us = 0;
+        if (prev_us) {
+            float dms = (now_us - prev_us) / 1000.f;
+            if (dms > 0.f) {
+                float hz = 1000.f / dms;
+                d.b86_rate_hz = (d.b86_rate_hz > 0.f) ? d.b86_rate_hz * 0.9f + hz * 0.1f : hz;
+            }
+        }
+        prev_us = now_us;
     });
     if (bno086.start()) {
         bno08x_owns_pose.store(bno08x_cfg.head_tracking);
@@ -4095,6 +4110,10 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_reload = coproc_reload;
     menu_ctx.coproc_status = coproc_status;
     menu_ctx.coproc_cfg_p  = &coproc_cfg;
+    // Declared here (created further down, after the menu) so the two I2C
+    // lambdas below can capture it by reference — they only run from menu
+    // taps, long after it exists, and null-check regardless.
+    std::unique_ptr<input::CoprocInputs> coproc_inputs;
     menu_ctx.coproc_i2c_scan = [&]{ if (coproc_inputs) coproc_inputs->request_i2c_scan(); };
     menu_ctx.coproc_i2c_result = [&]() -> std::string {
         return coproc_inputs ? coproc_inputs->i2c_scan_result() : std::string("n/a");
@@ -4591,7 +4610,8 @@ int main(int argc, char* argv[]) {
     // ── Button coprocessor source (optional, opt-in) ─────────────────────────
     // Shares gpio_dispatch with the GPIO poller. Reload rebuilds it on a menu
     // toggle; status surfaces the link state to the GPIO Buttons menu.
-    auto coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+    // (Declared above the menu wiring so its I2C-scan lambdas can capture it.)
+    coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
 
     // Peripheral-hub wiring (firmware -DPERIPHERAL_HUB): boop pads on the
     // coprocessor reuse the SAME electrode→zone map as a local MPR121, so the

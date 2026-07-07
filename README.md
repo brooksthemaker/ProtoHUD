@@ -128,7 +128,7 @@ Optional async timewarp warps each eye FBO using the latest IMU pose before comp
 | MPU-9250 / GY-9250 | 9-axis IMU with software AHRS. I²C @ 0x68 | Backup |
 | VITURE built-in IMU | Heading from the glasses themselves when worn | Fallback |
 
-The HUD's **IMU Source** menu (HUD → Compass → IMU Source) lets you force a specific sensor or pick **Auto**, which walks BNO055 → MPU9250 → Viture and snaps to the first source returning fresh samples. See [BNO055 (Recommended IMU)](#bno055-recommended-imu) for wiring and config.
+The **IMU Source** menu (GPIO → On-Board GPIO → IMU → IMU Source) lets you force a specific sensor or pick **Auto**, which walks BNO055 → MPU9250 → Viture and snaps to the first source returning fresh samples. See [BNO055 (Recommended IMU)](#bno055-recommended-imu) for wiring and config.
 
 ### Radio / network / sensors
 
@@ -1243,14 +1243,14 @@ Everything downstream is identical to I²C — on-chip fusion, the same calibrat
 ### Menu trail
 
 ```
-HUD → Compass → IMU Source
+GPIO → On-Board GPIO → IMU → IMU Source
 ```
 
 Options: **Auto (BNO055 > MPU9250 > Viture)** · **BNO055** · **MPU‑9250** · **VITURE glasses** · **None (freeze heading)**.
 
 The chip publishes uncalibrated heading on power-up. Wave the helmet in a figure-8 a few times — calibration status updates per axis and Auto will commit to BNO055 once `calib_sys ≥ 2`. If you want it immediately regardless of calibration, force **BNO055** explicitly.
 
-**Restart IMU Sensor** (also under `HUD → Compass`) tears down and re-initialises the chip without restarting ProtoHUD — the row label shows `[connected]` / `[offline]` and a toast reports the result. Use it when the sensor wasn't powered or ready at boot: the BNO055 needs ~1 s after power-on before it answers (the UART variant especially), and a sensor brought up late would otherwise stay offline until the next launch. The startup path already waits out that window and retries, so this is the manual nudge for the late-power case (or after re-seating wiring while the HUD is running).
+**Restart IMU Sensor** (under `GPIO → On-Board GPIO → IMU`) tears down and re-initialises the chip without restarting ProtoHUD — the row label shows `[connected]` / `[offline]` and a toast reports the result. Use it when the sensor wasn't powered or ready at boot: the BNO055 needs ~1 s after power-on before it answers (the UART variant especially), and a sensor brought up late would otherwise stay offline until the next launch. The startup path already waits out that window and retries, so this is the manual nudge for the late-power case (or after re-seating wiring while the HUD is running).
 
 ---
 
@@ -1800,8 +1800,8 @@ sudo i2cdetect -y 1   # must show 28 (or 29 if ADR jumper closed)
 
 - **Empty grid** → wiring / power / mode problem (see [BNO055 wiring & gotchas](#bno055-recommended-imu)). `i2c_arm=on` in `/boot/firmware/config.txt` must be set (the install script handles this). In **UART** mode the chip won't appear on `i2cdetect` at all — that's expected; probe the serial port instead.
 - **`28` present but the HUD doesn't pick it up** → confirm the `"bno055"` block is in your **live** `~/protohud/config/config.json` (not just `config.example.json`). `grep -A6 '"bno055"' ~/protohud/config/config.json` should print the block.
-- **Sensor wasn't powered/ready at boot** → the BNO055 needs ~1 s after power-on before it responds, so a sensor that powers up late comes up offline. ProtoHUD now waits out that window and retries at startup, but if it still shows offline, trigger **HUD → Compass → Restart IMU Sensor** — it re-runs the full init without restarting ProtoHUD and toasts the result. No need to restart the app or reboot.
-- **Chip detected and config loaded but heading frozen** → check `HUD → Compass → IMU Source`. If it's set to **Auto** and the chip is still warming up its calibration, force **BNO055** to bypass the freshness gate.
+- **Sensor wasn't powered/ready at boot** → the BNO055 needs ~1 s after power-on before it responds, so a sensor that powers up late comes up offline. ProtoHUD now waits out that window and retries at startup, but if it still shows offline, trigger **GPIO → On-Board GPIO → IMU → Restart IMU Sensor** — it re-runs the full init without restarting ProtoHUD and toasts the result. No need to restart the app or reboot.
+- **Chip detected and config loaded but heading frozen** → check `GPIO → On-Board GPIO → IMU → IMU Source`. If it's set to **Auto** and the chip is still warming up its calibration, force **BNO055** to bypass the freshness gate.
 
 ### KDE Connect bridge can't see the phone
 
