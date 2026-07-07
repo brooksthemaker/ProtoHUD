@@ -81,6 +81,7 @@
 #include "face/eye_animations.h"
 #include "face/gif_player.h"
 #include "face/native_face_controller.h"
+#include "face/reaction_engine.h"
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
@@ -168,6 +169,8 @@ constexpr FaceSlot kFaceSlots[] = {
     {"sad",       "Sad"},
     {"surprised", "Surprised"},
     {"squint",    "Squint"},
+    {"sleepy",    "Sleepy"},      // heavy-lidded (drowsy reaction)
+    {"asleep",    "Asleep"},      // eyes closed (sleep reaction, Z's on top)
     {"blink",     "Blink"},
 };
 constexpr int kFaceSlotCount = sizeof(kFaceSlots) / sizeof(kFaceSlots[0]);
@@ -3122,6 +3125,70 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "Scroll a text banner across the face panels (5x7 pixel font, "
                 "tinted, above every layer). Config: cfg[\"protoface\"]"
                 "[\"scroll_text\"].");
+        })(),
+        // Environment / movement reactions (sleepy, wake, ...). The engine
+        // lives in main; this page edits its config and fires test runs.
+        ([&]() -> MenuItem {
+            face::ReactionEngine* R = ctx.reactions;
+            if (!R) { MenuItem e; e.visible_fn = []{ return false; }; return e; }
+            nlohmann::json* cfgr = cfg_root;
+            auto save = [R, cfgr]{
+                if (cfgr) (*cfgr)["reactions"] = R->config().to_json();
+            };
+            std::vector<MenuItem> ri;
+            {
+                MenuItem st = leaf("Status", []{});
+                st.label_fn = [R]{
+                    char b[64];
+                    snprintf(b, sizeof b, "State: %s  (energy %.0f)",
+                             R->activity_name(), R->energy_dps());
+                    return std::string(b);
+                };
+                ri.push_back(with_desc(std::move(st),
+                    "Live activity state from the IMU: awake / drowsy / "
+                    "asleep, with the smoothed motion energy the timers "
+                    "watch (deg/s-equivalent)."));
+            }
+            ri.push_back(with_desc(toggle("Reactions",
+                [R]{ return R->config().enabled; },
+                [R, save](bool v){ auto c = R->config(); c.enabled = v;
+                                   R->set_config(c); save(); }),
+                "Master enable for environment/movement reactions."));
+            ri.push_back(with_desc(toggle("Sleepy / Wake",
+                [R]{ return R->config().sleepy_enabled; },
+                [R, save](bool v){ auto c = R->config(); c.sleepy_enabled = v;
+                                   R->set_config(c); save(); }),
+                "Hold still and the face gets heavy-lidded (slow blinks + "
+                "the 'sleepy' face if the folder has one), then falls asleep "
+                "- eyes closed ('asleep' face) with floating Z's. Any sharp "
+                "head motion snaps it awake with a surprised flash and "
+                "restores everything."));
+            ri.push_back(with_desc(slider("Drowsy After", 30.f, 600.f, 15.f, "s",
+                [R]{ return static_cast<float>(R->config().drowsy_after_s); },
+                [R, save](float v){ auto c = R->config(); c.drowsy_after_s = v;
+                                    R->set_config(c); save(); }),
+                "Seconds of stillness before the heavy-lidded stage."));
+            ri.push_back(with_desc(slider("Sleep After", 60.f, 1800.f, 30.f, "s",
+                [R]{ return static_cast<float>(R->config().sleep_after_s); },
+                [R, save](float v){ auto c = R->config(); c.sleep_after_s = v;
+                                    R->set_config(c); save(); }),
+                "Seconds of stillness before falling asleep (measured from "
+                "the start of stillness, not from drowsy)."));
+            ri.push_back(with_desc(slider("Wake Threshold", 15.f, 120.f, 5.f, "\xc2\xb0/s",
+                [R]{ return static_cast<float>(R->config().wake_dps); },
+                [R, save](float v){ auto c = R->config(); c.wake_dps = v;
+                                    R->set_config(c); save(); }),
+                "How sharp a head motion wakes the face. Lower = lighter "
+                "sleeper."));
+            ri.push_back(with_desc(leaf("Test: Fall Asleep", [R]{ R->force_sleepy(); }),
+                "Preview the sleep look right now (runs drowsy then asleep). "
+                "Move your head - or use Test: Wake - to end it."));
+            ri.push_back(leaf("Test: Wake", [R]{ R->force_wake(); }));
+            return with_desc(submenu("Reactions", std::move(ri)),
+                "The face reacts to the real world: stillness makes it "
+                "drowsy then asleep (floating Z's), sharp motion wakes it. "
+                "The dark-to-bright squint lives under its light-sensor "
+                "config; more reactions land here as they're added.");
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),

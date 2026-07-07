@@ -51,6 +51,7 @@
 #include "sensor/bno08x.h"
 #include "sensor/light_sensor.h"
 #include "sensor/temp_sensors.h"
+#include "face/reaction_engine.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
 #include "sys/fan_controller.h"
@@ -3113,6 +3114,46 @@ int main(int argc, char* argv[]) {
     // would, so the existing preview path and panel_driver.py work unchanged.
     std::unique_ptr<face::NativeFaceController> native_ctrl;
 
+    // ── Reaction engine (environment/movement reactions) ─────────────────────
+    // v1: sleepy/wake from head stillness + the ambient-override ladder (the
+    // weather/temp ambient routes through it; the asleep Z's borrow the slot
+    // and hand it back on wake). Ticked from the render loop by the IMU feed.
+    face::ReactionEngine reactions;
+    if (cfg.contains("reactions"))
+        reactions.set_config(face::ReactionEngine::Config::from_json(cfg["reactions"]));
+    {
+        face::ReactionActions ra;
+        ra.face_exists = [&face_proxy](const std::string& n){
+            return face_proxy.face_image_exists(n);
+        };
+        ra.set_expression = [&face_proxy](const std::string& n){
+            face_proxy.set_face_by_name(n);
+        };
+        ra.current_expression = [&face_proxy]{ return face_proxy.current_expression(); };
+        ra.flash_expression = [&face_proxy](const std::string& n, double d){
+            face_proxy.trigger_boop(n, d);
+        };
+        ra.set_blink = [&native_ctrl](double mn, double mx, double dur){
+            if (native_ctrl) native_ctrl->set_blink_timing(mn, mx, dur);
+        };
+        ra.restore_blink = [&native_ctrl, &pf_blink_min, &pf_blink_max,
+                            &pf_blink_duration]{
+            if (native_ctrl)
+                native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max,
+                                              pf_blink_duration);
+        };
+        ra.set_ambient = [&native_ctrl](const nlohmann::json& spec){
+            if (native_ctrl) native_ctrl->set_ambient_effect(spec);
+        };
+        ra.notify = [&state](const std::string& t, const std::string& b){
+            Notification n; n.type = NotifType::App;
+            n.title = t; n.body = b; n.auto_dismiss_s = 5.f;
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.notifs.push(std::move(n));
+        };
+        reactions.set_actions(std::move(ra));
+    }
+
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
     if (pf_mode == "native") {
         // Ensure NO Protoface daemon co-exists — it would double-write the shm
@@ -4215,6 +4256,7 @@ int main(int argc, char* argv[]) {
         return coproc_inputs ? coproc_inputs->i2c_scan_result() : std::string("n/a");
     };
     menu_ctx.pf_glitch_p = &pf_glitch;
+    menu_ctx.reactions = &reactions;
     menu_ctx.pf_scroll_p = &pf_scroll;
 
     MenuSystem menu(build_menu(menu_ctx));
@@ -5221,6 +5263,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
         cfg["protoface"]["motion_particles"]    = pf_motion_particles;
         cfg["protoface"]["motion_scale"]        = pf_motion_scale;
+        cfg["reactions"] = reactions.config().to_json();
         cfg["protoface"]["motion_range"]["pitch_deg"] = pf_range_pitch;
         cfg["protoface"]["motion_range"]["yaw_deg"]   = pf_range_yaw;
         cfg["protoface"]["face_inertia"]        = pf_face_inertia;
@@ -5716,7 +5759,7 @@ int main(int argc, char* argv[]) {
             const std::string key = spec.dump();
             if (key != weather_fx_sent) {
                 weather_fx_sent = key;
-                native_ctrl->set_ambient_effect(spec);
+                reactions.set_base_ambient(spec);
             }
         }
         if (state.win_resize_dirty.exchange(false)) {
@@ -5747,7 +5790,7 @@ int main(int argc, char* argv[]) {
         // resting gravity, not free-fall.
         {
             double m_head = 0.0, m_yaw = 0.0, m_pitch = 0.0, m_roll = 0.0,
-                   m_accel = 1.0;
+                   m_accel = 1.0, m_gyro_mag = 0.0;
             {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 const auto& d = state.imu_data;
@@ -5779,6 +5822,7 @@ int main(int argc, char* argv[]) {
                 case Src::B86:
                     m_head  = state.imu_bno08x.heading_deg;
                     m_yaw   = d.b86_gyro_dps[2];      // yaw rate about vertical
+                    m_gyro_mag = norm3(d.b86_gyro_dps);
                     m_roll  = d.b86_euler[0];
                     m_pitch = d.b86_euler[1];
                     m_accel = d.b86_aux_ok ? norm3(d.b86_accel_g) : 1.0;
@@ -5786,6 +5830,7 @@ int main(int argc, char* argv[]) {
                 case Src::B55:
                     m_head  = state.imu_bno.heading_deg;
                     m_yaw   = d.bno_gyro_dps[2];
+                    m_gyro_mag = norm3(d.bno_gyro_dps);
                     m_roll  = d.bno_euler[1];
                     m_pitch = d.bno_euler[2];
                     m_accel = d.bno_ok ? norm3(d.bno_accel_g) : 1.0;
@@ -5793,6 +5838,7 @@ int main(int argc, char* argv[]) {
                 case Src::Mpu:
                     m_head  = state.imu_mpu.heading_deg;
                     m_yaw   = d.gyro_dps[2];
+                    m_gyro_mag = norm3(d.gyro_dps);
                     m_accel = d.mpu_ok ? norm3(d.accel_g) : 1.0;
                     break;
                 case Src::Xr:
@@ -5804,6 +5850,12 @@ int main(int argc, char* argv[]) {
                     break;
                 }
             }
+            // Reaction engine: raw (unscaled) motion energy + state machine
+            // tick. Runs even when face motion coupling is off - sleepiness
+            // is about the wearer, not the effect settings.
+            reactions.feed_motion(m_gyro_mag, std::fabs(m_accel - 1.0));
+            reactions.tick(dt);
+
             // ── Motion-range calibration wizard ─────────────────────────
             // Press-driven: each Select on the menu row captures the current
             // pose and advances (knob press, GPIO menu button or keyboard -
