@@ -47,6 +47,13 @@ overlays/*.dtbo
 # Runtime config — written by the app on exit with live settings.
 # config/config.example.json is the tracked defaults reference.
 config/config.json
+# Other app-written runtime state beside it (atomic-save temp file, persisted
+# notification log, native-face state, saved profiles, QR captures).
+config/.config.json
+config/protohud_notifications.json
+config/protoface_state.json
+config/profiles/
+config/qr_codes/
 
 # Updater runtime state — rollback marker + config backups written by
 # scripts/update.sh (see scripts/rollback.sh). Never committed.
