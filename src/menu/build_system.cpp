@@ -3000,6 +3000,28 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                 return i < static_cast<int>(state.temps.size()) && state.temps[i].warn; };
             return m;
         });
+    // BME280 environment rows (hidden until the sensor reports).
+    {
+        auto env_row = [&state](const char* fmt, int which) {
+            MenuItem m = leaf("Env", []{});
+            m.label_fn = [&state, fmt, which]() -> std::string {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (!state.env.ok) return "";
+                const float v = which == 0 ? state.env.temp_c
+                              : which == 1 ? state.env.humidity_pct
+                                           : state.env.pressure_hpa;
+                char b[64];
+                std::snprintf(b, sizeof b, fmt, static_cast<double>(v));
+                return std::string(b);
+            };
+            m.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                     return state.env.ok; };
+            return m;
+        };
+        temp_rows.push_back(env_row("Env Temp:  %.1f\xc2\xb0""C", 0));
+        temp_rows.push_back(env_row("Humidity:  %.0f %%", 1));
+        temp_rows.push_back(env_row("Pressure:  %.1f hPa", 2));
+    }
     MenuItem temperature_item = with_desc(
         submenu("Temperature", std::move(temp_rows)),
         "Live temperature probes (DS18B20 1-Wire). Rows turn amber/red at the "
@@ -3007,7 +3029,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         "(ids from `ls /sys/bus/w1/devices/`); a probe file can also drive the "
         "fan curve via cfg[\"fans\"][\"temp_path\"].");
     temperature_item.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
-                                            return !state.temps.empty(); };
+                                            return !state.temps.empty() || state.env.ok; };
 
     std::vector<MenuItem> system_menu = {
         with_desc(submenu("Display", std::move(display_menu)),

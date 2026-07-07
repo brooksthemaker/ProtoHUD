@@ -357,6 +357,27 @@
     "anchor":    "bottom_left",
     "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
   },
+  "apds9960": {
+    "_about": "APDS-9960 gesture + proximity sensor on I2C 0x39, mounted near the snout for touchless input. Swipes and the proximity 'near' edge map to GPIO function ids (see gpio._about for the full list), so a gesture can do anything a button can. gesture_rotation (0/90/180/270) remaps directions for the module's mounting.",
+    "enabled": false,
+    "i2c_bus": "/dev/i2c-1",
+    "i2c_addr": 57,
+    "poll_hz": 40,
+    "near_threshold": 60,
+    "gesture_rotation": 0,
+    "gesture_up": "effect_next",
+    "gesture_down": "face_return",
+    "gesture_left": "face_prev",
+    "gesture_right": "face_next",
+    "near": "boop_snout"
+  },
+  "bme280": {
+    "_about": "Bosch BME280 environment sensor on I2C (0x76, or 0x77 with SDO high): temperature, humidity and pressure, shown under System > Temperature and available to future reactions.",
+    "enabled": false,
+    "i2c_bus": "/dev/i2c-1",
+    "i2c_addr": 118,
+    "poll_s": 5.0
+  },
   "temperature": {
     "_about": "Temperature probes, read into the HUD/menu (System > Temperature) ~1 Hz and available to warn on. v1 reads DS18B20 1-Wire sensors: wire the data line to a spare GPIO (e.g. BCM 25, clear of the HUB75 bonnet) with a 4.7k pull-up to 3.3V, add `dtoverlay=w1-gpio,gpiopin=25` to /boot/firmware/config.txt, then find each probe id with `ls /sys/bus/w1/devices/` (they look like 28-XXXXXXXXXXXX). Many probes share the one data pin. id:\"\" uses the first probe found. type 'ds18b20' reads the CM5's 1-Wire bus; type 'coproc' reads a probe wired to the RP2350 coprocessor instead (peripheral-hub firmware; id = the 16-hex ROM from its TEMP reports). max31865/PT100 and i2c chips can be added later. A probe also drives the fan curve — point fans.temp_path at its /sys/bus/w1/devices/<id>/temperature file (or use fans.temp_probe for a coproc probe).",
     "enabled": false,

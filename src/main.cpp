@@ -50,6 +50,8 @@
 #include "sensor/bno055.h"
 #include "sensor/bno08x.h"
 #include "sensor/light_sensor.h"
+#include "sensor/apds9960.h"
+#include "sensor/bme280.h"
 #include "sensor/temp_sensors.h"
 #include "face/reaction_engine.h"
 #include "sensor/mpr121_boop_sensor.h"
@@ -4733,6 +4735,66 @@ int main(int argc, char* argv[]) {
     if (local_gpio_wanted() && !gpio_inputs->init())
         std::cerr << "[main] GPIO input map init failed (no pins assigned or chip busy)\n";
 
+    // ── APDS-9960 gesture / proximity sensor (optional) ──────────────────────
+    // Touchless input near the snout. Each gesture (and the proximity "near"
+    // edge) maps to a GPIO function id from config, so a swipe can do
+    // anything a physical button can. Callbacks fire on the sensor thread and
+    // ride the same input queue as every other button source.
+    sensor::Apds9960::Config apds_cfg;
+    input::GpioFunc apds_fn[5] = {                    // up, down, left, right, near
+        input::gpio_func_from_id("effect_next"),
+        input::gpio_func_from_id("face_return"),
+        input::gpio_func_from_id("face_prev"),
+        input::gpio_func_from_id("face_next"),
+        input::gpio_func_from_id("boop_snout"),
+    };
+    if (cfg.contains("apds9960")) {
+        auto& ja = cfg["apds9960"];
+        apds_cfg.enabled          = jval(ja, "enabled",          apds_cfg.enabled);
+        apds_cfg.i2c_bus          = ja.value("i2c_bus",          apds_cfg.i2c_bus);
+        apds_cfg.i2c_addr         = jval(ja, "i2c_addr",         apds_cfg.i2c_addr);
+        apds_cfg.poll_hz          = jval(ja, "poll_hz",          apds_cfg.poll_hz);
+        apds_cfg.near_threshold   = jval(ja, "near_threshold",   apds_cfg.near_threshold);
+        apds_cfg.gesture_rotation = jval(ja, "gesture_rotation", apds_cfg.gesture_rotation);
+        static const char* keys[5] = {"gesture_up", "gesture_down",
+                                      "gesture_left", "gesture_right", "near"};
+        for (int i = 0; i < 5; ++i)
+            if (ja.contains(keys[i]))
+                apds_fn[i] = input::gpio_func_from_id(
+                    ja.value(keys[i], std::string("none")));
+    }
+    sensor::Apds9960 apds(apds_cfg);
+    apds.set_gesture_callback([&gpio_dispatch, &apds_fn](sensor::Apds9960::Gesture g){
+        gpio_dispatch(apds_fn[static_cast<int>(g)]);
+    });
+    apds.set_proximity_callback([&gpio_dispatch, &apds_fn](bool near){
+        if (near) gpio_dispatch(apds_fn[4]);          // fire on approach only
+    });
+    if (apds_cfg.enabled && !apds.start())
+        std::cerr << "[main] APDS-9960 gesture sensor unavailable\n";
+
+    // ── BME280 environment sensor (optional) ─────────────────────────────────
+    // Temperature / humidity / pressure into state.env for the System >
+    // Temperature readout and future reactions (fog breath, storm warning).
+    sensor::Bme280::Config bme_cfg;
+    if (cfg.contains("bme280")) {
+        auto& jb = cfg["bme280"];
+        bme_cfg.enabled  = jval(jb, "enabled",  bme_cfg.enabled);
+        bme_cfg.i2c_bus  = jb.value("i2c_bus",  bme_cfg.i2c_bus);
+        bme_cfg.i2c_addr = jval(jb, "i2c_addr", bme_cfg.i2c_addr);
+        bme_cfg.poll_s   = jval(jb, "poll_s",   bme_cfg.poll_s);
+    }
+    sensor::Bme280 bme280(bme_cfg);
+    bme280.set_callback([&state](const sensor::Bme280::Reading& r){
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.env.ok           = true;
+        state.env.temp_c       = r.temp_c;
+        state.env.humidity_pct = r.humidity_pct;
+        state.env.pressure_hpa = r.pressure_hpa;
+    });
+    if (bme_cfg.enabled && !bme280.start())
+        std::cerr << "[main] BME280 environment sensor unavailable\n";
+
     // Live reload: tear down the poll thread + release the lines, then rebuild
     // from the current slots. Runs on the main thread (a menu action), so the
     // old GpioInputs dtor joins its thread before the new one starts.
@@ -7364,6 +7426,8 @@ int main(int argc, char* argv[]) {
     step("bno055");          bno055.stop();
     step("boop_sensor");     boop_sensor.stop();
     step("light_sensor");    light_sensor.stop();
+    step("apds9960");        apds.stop();
+    step("bme280");          bme280.stop();
     step("accessory_leds");  accessory_leds.stop();
     step("audio");           audio.stop();
     step("android_mirror");  android_mirror.stop();

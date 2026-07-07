@@ -265,6 +265,8 @@ set(SOURCES
     src/sensor/bno08x.cpp
     src/sensor/mpr121_boop_sensor.cpp
     src/sensor/light_sensor.cpp
+    src/sensor/apds9960.cpp
+    src/sensor/bme280.cpp
     src/sensor/temp_sensors.cpp
     src/accessory/led_strip.cpp
     src/accessory/accessory_leds.cpp

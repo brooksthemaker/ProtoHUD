@@ -785,7 +785,13 @@ struct AppState {
     KnobState    knob;
     AudioState   audio;
 
-    std::vector<TempReading> temps;   // temperature sensors, updated ~1 Hz
+    std::vector<TempReading> temps;
+    // BME280 environment reading (System > Temperature shows these when the
+    // sensor is present). Written by the Bme280 poll thread under mtx.
+    struct EnvReading {
+        bool  ok = false;
+        float temp_c = 0.f, humidity_pct = 0.f, pressure_hpa = 0.f;
+    } env;   // temperature sensors, updated ~1 Hz
 
     std::vector<LoRaNode>    lora_nodes;
     std::deque<LoRaMessage>  lora_messages;
