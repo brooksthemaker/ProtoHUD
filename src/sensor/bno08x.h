@@ -40,6 +40,13 @@ public:
         float       heading_offset     = 0.0f;         // mechanical mount offset (deg)
         bool        heading_invert     = false;        // flip yaw→heading direction if mirrored
         bool        head_tracking      = false;        // also feed imu_pose for head tracking
+        // Manual trim added to the euler outputs (degrees) — fine correction
+        // for residual lean after Set Level, or instead of it for small
+        // mounting angles. Additive on roll/pitch only (yaw already has
+        // heading_offset), so keep it small (< ~15°) — beyond that use Set
+        // Level, which reorients properly in the quaternion domain.
+        float       roll_trim          = 0.0f;
+        float       pitch_trim         = 0.0f;
     };
 
     struct Sample {
@@ -90,6 +97,11 @@ public:
 
     void set_declination_deg(float v) { declination_deg_.store(v); }
     void set_head_tracking(bool v)    { head_tracking_.store(v);   }
+    // Live trim (menu sliders) — applied to roll/pitch on the next sample.
+    void set_trim(float roll_deg, float pitch_deg) {
+        roll_trim_.store(roll_deg);
+        pitch_trim_.store(pitch_deg);
+    }
 
     // Internal — public only so the C HAL/callback trampolines can reach them.
     bool hal_open();
@@ -117,6 +129,8 @@ private:
     double             last_q_[4]      = {1, 0, 0, 0};
     bool               have_q_         = false;
     std::atomic<float> declination_deg_{ 0.f };
+    std::atomic<float> roll_trim_      { 0.f };
+    std::atomic<float> pitch_trim_     { 0.f };
     std::atomic<bool>  head_tracking_  { false };
 
     int i2c_fd_ = -1;

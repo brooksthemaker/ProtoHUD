@@ -1623,6 +1623,8 @@ int main(int argc, char* argv[]) {
         bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
         bno08x_cfg.heading_offset     = jval(jb, "heading_offset",     0.0f);
         bno08x_cfg.heading_invert     = jval(jb, "heading_invert",     false);
+        bno08x_cfg.roll_trim          = jval(jb, "roll_trim",          0.0f);
+        bno08x_cfg.pitch_trim         = jval(jb, "pitch_trim",         0.0f);
         bno08x_cfg.head_tracking      = jval(jb, "head_tracking",      false);
     }
 

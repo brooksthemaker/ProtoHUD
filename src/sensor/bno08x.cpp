@@ -177,6 +177,8 @@ bool Bno08x::start() {
     if (running_.load()) return true;
 
     declination_deg_.store(cfg_.declination_deg);
+    roll_trim_.store(cfg_.roll_trim);
+    pitch_trim_.store(cfg_.pitch_trim);
     head_tracking_.store(cfg_.head_tracking);
 
     g_hal.owner         = this;
@@ -319,8 +321,10 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     // &yaw) here had them swapped, so the compass heading tracked the sensor's
     // ROLL — tilting the head spun the compass while turning moved "R".
     q_to_ypr(qw, qx, qy, qz, &yaw, &pitch, &roll);
-    const float roll_deg  = roll  * kRad2Deg;
-    const float pitch_deg = pitch * kRad2Deg;
+    // Manual trim: small additive corrections for residual lean (menu
+    // sliders / config). Yaw trim is heading_offset below, as before.
+    const float roll_deg  = roll  * kRad2Deg + roll_trim_.load();
+    const float pitch_deg = pitch * kRad2Deg + pitch_trim_.load();
     const float yaw_deg   = yaw   * kRad2Deg;
 
     float heading = (cfg_.heading_invert ? -yaw_deg : yaw_deg)

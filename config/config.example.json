@@ -456,6 +456,9 @@
     "heading_offset": 0.0,
     "heading_invert": false,
     "_heading_invert_note": "Flip yaw->heading direction if the compass turns the wrong way for your mounting.",
+    "roll_trim": 0.0,
+    "pitch_trim": 0.0,
+    "_trim_note": "Manual fine correction (degrees) added to the roll/pitch outputs - live sliders in GPIO > On-Board GPIO > IMU. For residual lean after Set Level; keep small (<15 deg), large mounting angles belong to Set Level's quaternion reorientation.",
     "head_tracking": false,
     "_head_tracking_note": "When true, the BNO086's roll/pitch/yaw also drive the imu_pose head-tracking path (timewarp + pin-in-space), taking over from the VITURE glasses' built-in IMU. Recenter/tare from Compass > Recenter Head Tracking."
   },

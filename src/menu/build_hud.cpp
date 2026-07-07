@@ -825,6 +825,42 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         m.visible_fn = [b]{ return b && b->connected(); };
         return m;
     }());
+    // Manual trim: fine roll/pitch correction on top of Set Level, live and
+    // persisted to cfg["bno086"]. Small additive offsets — big mounting
+    // angles belong to Set Level's quaternion reorientation.
+    {
+        Bno08x* b   = ctx.bno08x;
+        json* cfgr  = ctx.cfg_root;
+        auto  trimv = std::make_shared<std::array<float, 2>>();
+        (*trimv) = {0.f, 0.f};
+        if (cfgr && cfgr->contains("bno086") && (*cfgr)["bno086"].is_object()) {
+            (*trimv)[0] = (*cfgr)["bno086"].value("roll_trim",  0.0f);
+            (*trimv)[1] = (*cfgr)["bno086"].value("pitch_trim", 0.0f);
+        }
+        auto apply = [b, cfgr, trimv]{
+            if (b) b->set_trim((*trimv)[0], (*trimv)[1]);
+            if (cfgr) {
+                (*cfgr)["bno086"]["roll_trim"]  = (*trimv)[0];
+                (*cfgr)["bno086"]["pitch_trim"] = (*trimv)[1];
+            }
+        };
+        MenuItem rt = with_desc(slider("Roll Trim", -15.f, 15.f, 0.5f, "\xc2\xb0",
+            [trimv]{ return (*trimv)[0]; },
+            [trimv, apply](float v){ (*trimv)[0] = v; apply(); }),
+            "Manual fine correction added to the roll output. Nudge until the "
+            "Live Readout RPY 'R' reads 0 with your head level (or effects "
+            "fall straight). Applies live; saved to cfg[\"bno086\"].");
+        rt.visible_fn = [b]{ return b && b->connected(); };
+        imu_menu.push_back(std::move(rt));
+        MenuItem pt = with_desc(slider("Pitch Trim", -15.f, 15.f, 0.5f, "\xc2\xb0",
+            [trimv]{ return (*trimv)[1]; },
+            [trimv, apply](float v){ (*trimv)[1] = v; apply(); }),
+            "Manual fine correction added to the pitch output. Nudge until "
+            "the Live Readout RPY 'P' reads 0 with your head level. Applies "
+            "live; saved to cfg[\"bno086\"].");
+        pt.visible_fn = [b]{ return b && b->connected(); };
+        imu_menu.push_back(std::move(pt));
+    }
     imu_menu.push_back(submenu("IMU Axis", std::move(imu_axis_menu)));
     imu_menu.push_back([&]() -> MenuItem {
         MenuItem m = leaf("Save IMU Calibration",
