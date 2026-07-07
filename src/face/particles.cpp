@@ -714,7 +714,14 @@ public:
         for (auto& p : particles_) { p.extra += dt; p.life -= dt / p.max_life; }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [](const Particle& p){ return p.life <= 0; }), particles_.end());
-        while ((int)particles_.size() < count(40)) {
+        // Frost builds up: the crystal budget ramps from zero to full over
+        // the first form_s seconds (default 5), so it reads as ice forming
+        // rather than appearing fully grown.
+        age_ += dt;
+        const double form_s = std::max(0.1, jnum(cfg_, "form_s", 5.0));
+        const int budget = static_cast<int>(count(40) *
+                                            std::min(1.0, age_ / form_s));
+        while ((int)particles_.size() < budget) {
             const double depth = jnum(cfg_, "depth_frac", 0.35);
             // White/blue ice mix by default (white sparkle, pale ice, deep
             // blue); a "colors" list in the layer cfg still overrides.
@@ -749,15 +756,23 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
+        // Frost sits translucent over the face (~50% by default) so the
+        // expression stays readable underneath; "opacity" in the layer cfg
+        // adjusts it.
+        const double opacity = std::clamp(jnum(cfg_, "opacity", 0.5), 0.0, 1.0);
         for (auto& p : particles_) {
             // Fade in as the crystal forms, out as it melts; twinkle on top.
             const double env = std::clamp(std::min((1.0 - p.life) * 6.0,
                                                    p.life * 6.0), 0.0, 1.0);
-            const double a = env * (0.35 + 0.45 * (0.5 + 0.5 * std::sin(p.extra * 1.7)));
+            const double a = env * (0.35 + 0.45 * (0.5 + 0.5 * std::sin(p.extra * 1.7)))
+                             * opacity;
             draw_particle(c, p, a);
         }
         return c;
     }
+
+private:
+    double age_ = 0.0;   // seconds since the layer started, for the form ramp
 };
 
 // ── Heatwave ─────────────────────────────────────────────────────────────────
