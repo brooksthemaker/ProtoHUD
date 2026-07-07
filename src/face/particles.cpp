@@ -1651,6 +1651,61 @@ private:
     std::vector<Particle> bubbles_;
 };
 
+// ── Snooze ───────────────────────────────────────────────────────────────────
+// Floating Z's: little Z glyphs drift up from the mouth area, swaying as they
+// rise, growing a step and fading out — the classic cartoon sleep marker. The
+// asleep reaction drives this as its ambient effect; also usable standalone.
+// cfg: count (default 3), speed_min/max (rise px/s), colors (default soft blue-white).
+
+class SnoozeEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        for (auto& p : particles_) {
+            p.extra += dt;
+            p.y -= p.vy * dt;                                   // rise
+            p.x += (p.vx * 0.35 + std::sin(p.extra * 1.8) * 2.2) * dt;  // drift + sway
+            p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){ return p.life <= 0 || p.y < -8; }),
+            particles_.end());
+        while ((int)particles_.size() < count(3)) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                         : Color{200, 220, 255};
+            Particle p;
+            // Spawn near the mouth: bottom-centre of the whole canvas, in
+            // canvas space so mirrored panels share the same source.
+            p.x = cw_ * 0.5 + frand(rng_, -cw_ * 0.10, cw_ * 0.10) - ox_;
+            p.y = ch_ * 0.80 + frand(rng_, -2.0, 2.0) - oy_;
+            p.vx = frand(rng_, 2.0, 7.0) * (frand(rng_, 0, 1) < 0.5 ? -1.0 : 1.0);
+            p.vy = pick_speed(cfg_, 4.0, 8.0, rng_);
+            p.max_life = frand(rng_, 2.2, 3.6);
+            p.life = 1.0;
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.extra = frand(rng_, 0, kTau);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (auto& p : particles_) {
+            // Fade in quickly, out slowly; grow one size step mid-flight.
+            const double env = std::clamp(std::min((1.0 - p.life) * 5.0,
+                                                   p.life * 2.5), 0.0, 1.0);
+            const int a = (int)std::lround(env * 230.0);
+            if (a <= 0) continue;
+            const int s = 1 + (p.life < 0.55 ? 1 : 0);          // 1 -> 2 as it rises
+            const int x = (int)p.x, y = (int)p.y, w = 2 * s;
+            const cv::Scalar col(p.r, p.g, p.b, a);
+            cv::line(c, {x, y},         {x + w, y},         col, 1);   // top bar
+            cv::line(c, {x + w, y},     {x, y + w},         col, 1);   // diagonal
+            cv::line(c, {x, y + w},     {x + w, y + w},     col, 1);   // bottom bar
+        }
+        return c;
+    }
+};
+
 // ── Star field (3-D parallax) ────────────────────────────────────────────────
 // Stars stream outward from the full-canvas centre (the origin) toward the
 // panel edges (the far plane). Each star has a fixed world direction (vx/vy in
@@ -1892,6 +1947,7 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "circuit")   return std::make_unique<CircuitEffect>(w, h, cfg);
     if (name == "frost")     return std::make_unique<FrostEffect>(w, h, cfg);
     if (name == "heatwave")  return std::make_unique<HeatwaveEffect>(w, h, cfg);
+    if (name == "snooze")    return std::make_unique<SnoozeEffect>(w, h, cfg);
     if (name == "fireflies") return std::make_unique<FirefliesEffect>(w, h, cfg);
     if (name == "clouds")    return std::make_unique<CloudsEffect>(w, h, cfg);
     if (name == "lightning") return std::make_unique<LightningEffect>(w, h, cfg);
@@ -1918,6 +1974,7 @@ const std::map<std::string, json>& presets() {
           "circuit": {"effect":"circuit","count":5,"blend":"add"},
           "frost": {"effect":"frost","count":44,"blend":"add"},
           "heatwave": {"effect":"heatwave","count":18,"blend":"add"},
+          "snooze": {"effect":"snooze","count":3,"blend":"add"},
           "petals": {"effect":"snow","count":14,"colors":[[255,150,180],[255,190,210],[240,120,160]],"speed_min":3.0,"speed_max":6.0,"drift_x":2.5,"blend":"add"},
           "dizzy": {"layers":[
             {"effect":"vortex","count":24,"swirl":3.2,"infall":4,"colors":[[255,230,120],[255,255,255],[255,200,80]],"blend":"add"},

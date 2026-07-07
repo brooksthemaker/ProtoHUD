@@ -54,6 +54,7 @@ nlohmann::json effect_cfg_for_id(int id) {
         case 26: return std::string("circuit");
         case 27: return std::string("frost");
         case 28: return std::string("heatwave");
+        case 29: return std::string("snooze");
         default: return std::string("none");
     }
 }

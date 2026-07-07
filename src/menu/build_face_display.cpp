@@ -1196,6 +1196,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         // never landed in this list, so Single Effects / the layer editor
         // couldn't reach them.
         "steam", "waveform", "matrix", "circuit", "frost", "heatwave",
+        "snooze",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
@@ -1813,7 +1814,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
             "Fire","Aurora","Blizzard","Sonar","Plasma","Celebration","Galaxy","Party",
             "Clouds","Nebula","Starfield","Warp","Constellation","Shooting Stars",
-            "Night Sky","Steam","Waveform","Matrix","Circuit","Frost","Heatwave",
+            "Night Sky","Steam","Waveform","Matrix","Circuit","Frost","Heatwave","Snooze",
         };
         const uint8_t pf_effect_count =
             static_cast<uint8_t>(sizeof(pf_effect_names) / sizeof(pf_effect_names[0]));
