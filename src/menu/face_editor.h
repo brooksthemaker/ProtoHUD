@@ -16,6 +16,7 @@
 // 0,0,0,0). Color mode (RGB matrix): paint sets the currently selected
 // palette colour.
 
+#include <array>
 #include <functional>
 #include <string>
 #include <vector>
@@ -104,6 +105,13 @@ public:
     void toggle_live();
     bool live_mode() const { return live_mode_; }
 
+    // MAX7219 wiring guide: the chain's 8×8 module top-left canvas positions in
+    // DIN→DOUT (daisy) order. When set, the editor overlays each module's number,
+    // the chain path (arrows), DIN/DOUT markers and the coproc pin legend on the
+    // grid so you can wire the panels to match what you're drawing. Toggle with G.
+    void set_wiring_guide(std::vector<std::array<int, 2>> modules_din_to_dout);
+    void toggle_wiring() { show_wiring_ = !show_wiring_; }
+
     // Full-screen overlay drawn in place of the deep menu while open. Also
     // polls the editor-specific ImGui keys (tools, brush, undo, save, …) and
     // the mouse — they're editor-only, so the polling lives here rather than
@@ -166,6 +174,8 @@ private:
     cv::Rect                  bbox_;             // editable bounding box (union of covered)
     std::vector<cv::Rect>     covered_;          // for the grayed-out display
     std::vector<std::string>  covered_labels_;   // parallel to covered_ (may be empty)
+    std::vector<std::array<int, 2>> wiring_modules_;  // MAX7219 modules, DIN→DOUT
+    bool                      show_wiring_ = false;   // overlay the wiring guide (G)
     int                       mirror_axis_x_ = -1; // canvas col fence used by mirror brush; <0 → bbox centre
 
     // Current cursor in CANVAS coordinates (not bbox-local).

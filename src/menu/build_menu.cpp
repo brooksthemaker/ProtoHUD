@@ -518,8 +518,23 @@ std::vector<MenuItem> build_menu(MenuBuildContext& ctx)
 
     // ── System tab ───────────────────────────────────────────────────────────
     // Built in src/menu/build_system.cpp (consumes ctx.phone_item,
-    // ctx.push_notif and ctx.make_builtin_theme_leaves).
+    // ctx.push_notif and ctx.make_builtin_theme_leaves). We hand it two out-
+    // vectors so it routes its GPIO items here for the top-level "GPIO" tab
+    // (On-Board GPIO + RP2350 GPIO Expander) instead of nesting them in System.
+    std::vector<MenuItem> gpio_onboard, gpio_expander;
+    ctx.gpio_onboard_out  = &gpio_onboard;
+    ctx.gpio_expander_out = &gpio_expander;
     std::vector<MenuItem> system_menu = build_system_menu(ctx);
+    ctx.gpio_onboard_out  = nullptr;
+    ctx.gpio_expander_out = nullptr;
+
+    std::vector<MenuItem> gpio_tab;
+    gpio_tab.push_back(with_desc(submenu("On-Board GPIO", std::move(gpio_onboard)),
+        "The Pi / CM5 40-pin header: pin visualizer and the on-board GPIO button "
+        "map (assign switches to functions, pull, polarity)."));
+    gpio_tab.push_back(with_desc(submenu("RP2350 GPIO Expander", std::move(gpio_expander)),
+        "The optional RP2350 button/voice coprocessor: enable + link status, and "
+        "the Pico 2 pin visualizer/editor. See docs/coprocessor-input.md."));
 
     // ── Quick (corner / radial) menu ─────────────────────────────────────────────
     // Built in src/menu/build_quick.cpp; assigned through quick_out when set.
@@ -535,6 +550,10 @@ std::vector<MenuItem> build_menu(MenuBuildContext& ctx)
         with_desc(submenu("Face Display", std::move(face_display_menu)),
                   "The LED Protoface: expression, color, material, particle effects, "
                   "animations and brightness."),
+        with_desc(submenu("GPIO",         std::move(gpio_tab)),
+                  "Pin assignments: the Pi/CM5 on-board 40-pin header and the "
+                  "optional RP2350 coprocessor pin expander \xe2\x80\x94 each with a "
+                  "visualizer and button/function editor."),
         with_desc(submenu("Files",        std::move(files_menu)),
                   "Import media into Protoface from disk: GIFs and "
                   "landing-page backgrounds. Face / mouth / boop PNGs live "

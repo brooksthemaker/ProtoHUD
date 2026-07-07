@@ -50,6 +50,7 @@
 #include "sensor/bno055.h"
 #include "sensor/bno08x.h"
 #include "sensor/light_sensor.h"
+#include "sensor/temp_sensors.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
 #include "sys/fan_controller.h"
@@ -80,6 +81,9 @@
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
 #include "face/neopixel_matrix_output.h"
+#include "face/tee_panel_output.h"
+#include "face/max_section_controller.h"
+#include "face/max_section_content.h"
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -448,7 +452,11 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
     const json* jpf = cfg.contains("protoface") ? &cfg["protoface"] : nullptr;
     const std::string backend = jpf ? jpf->value("backend", std::string("hub75"))
                                     : std::string("hub75");
-    if (backend == "max7219") {
+    // Build the MAX7219 panel output. Used either as the main face backend
+    // (backend == "max7219") or, in "section" mode, teed beside the HUB75 face
+    // below. A chain with transport "coproc" is driven through the button/voice
+    // coprocessor, so it needs no CM5 GPIO (piomatter's PIO ties those up).
+    auto build_max = [&]() -> std::unique_ptr<face::PanelOutput> {
         face::Max7219PanelOutput::Config mc;
         if (jpf && jpf->contains("max7219")) {
             const auto& jm = (*jpf)["max7219"];
@@ -461,10 +469,13 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
                     face::Max7219Chain::Config cc;
                     cc.name        = jc.value("name",        std::string("chain"));
                     const std::string tr = jc.value("transport", std::string("spidev"));
-                    cc.transport   = (tr == "gpio")
-                        ? face::Max7219Chain::Transport::Gpio
-                        : face::Max7219Chain::Transport::Spidev;
+                    cc.transport   = (tr == "gpio")   ? face::Max7219Chain::Transport::Gpio
+                                   : (tr == "coproc") ? face::Max7219Chain::Transport::Coproc
+                                   :                    face::Max7219Chain::Transport::Spidev;
                     cc.spi_device  = jc.value("spi_device",  std::string("/dev/spidev0.1"));
+                    cc.coproc_device = jc.value("coproc_device",
+                        std::string("/dev/serial/by-id/usb-ProtoHUD_Buttons-if00"));
+                    cc.coproc_cs     = jc.value("coproc_cs", 0);
                     cc.speed_hz    = jc.value("speed_hz",    1'000'000);
                     cc.gpio_chip   = jc.value("gpio_chip",   mc.gpio_chip);
                     cc.gpio_cs_pin = jc.value("gpio_cs_pin", -1);
@@ -523,7 +534,8 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
             }
         }
         return std::make_unique<face::Max7219PanelOutput>(std::move(mc));
-    }
+    };
+    if (backend == "max7219") return build_max();
     if (backend == "rgb_matrix") {
         face::NeoPixelMatrixOutput::Config nc;
         if (jpf && jpf->contains("rgb_matrix")) {
@@ -595,8 +607,23 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
     // stays hidden (legacy daemon-mode behaviour preserved).
     std::vector<face::ShmPusherOutput::Panel> hub75_panels;
     if (hub75) hub75_panels = pf_hub75_panels(*hub75);
-    return std::make_unique<face::ShmPusherOutput>(
+    auto hub75_out = std::make_unique<face::ShmPusherOutput>(
         rc.canvas_w, rc.canvas_h, std::move(hub75_panels));
+
+    // A MAX7219 chain can run as an ADDITIONAL SECTION alongside the HUB75 face
+    // ("max7219": { "enabled": true, "mode": "section", ... }). Over the coproc
+    // transport it needs no CM5 GPIO. Tee the renderer to both outputs.
+    if (jpf && jpf->contains("max7219")) {
+        const auto& jm = (*jpf)["max7219"];
+        if (jm.value("enabled", false) &&
+            jm.value("mode", std::string("main")) == "section") {
+            std::vector<std::unique_ptr<face::PanelOutput>> outs;
+            outs.push_back(std::move(hub75_out));
+            outs.push_back(build_max());
+            return std::make_unique<face::TeePanelOutput>(std::move(outs));
+        }
+    }
+    return hub75_out;
 }
 
 // ── HUB75 panel layout (presets + per-panel nudge) ───────────────────────────
@@ -1662,8 +1689,9 @@ int main(int argc, char* argv[]) {
     }
     accessory::AccessoryLeds accessory_leds(led_cfg);
 
-    // ── Cooling fans (Pi-driven software-PWM on GPIO) ─────────────────────────
+    // ── Cooling fans (Pi GPIO PWM, or the coprocessor's fan pins) ─────────────
     sys::FanController::Config fan_cfg;
+    std::string fan_temp_probe;   // coproc DS18B20 ROM id driving the curve ("" = temp_path)
     if (cfg.contains("fans") && cfg["fans"].is_object()) {
         const auto& jf = cfg["fans"];
         fan_cfg.enabled    = jval(jf, "enabled", false);
@@ -1672,6 +1700,8 @@ int main(int argc, char* argv[]) {
         fan_cfg.min_duty   = jval(jf, "min_duty", fan_cfg.min_duty);
         fan_cfg.invert     = jval(jf, "invert",   fan_cfg.invert);
         fan_cfg.temp_path  = jf.value("temp_path", fan_cfg.temp_path);
+        fan_cfg.output     = jf.value("output", fan_cfg.output);
+        fan_temp_probe     = jf.value("temp_probe", fan_temp_probe);
         auto parse_zone = [&](const json& jz, const char* defname) {
             sys::FanController::ZoneCfg z;
             z.name = jz.value("name", std::string(defname));
@@ -1699,7 +1729,9 @@ int main(int argc, char* argv[]) {
         }
     }
     sys::FanController cooling_fans(fan_cfg);
-    if (fan_cfg.enabled && !cooling_fans.start())
+    // GPIO-output fans start now; coproc-output fans start later, once the
+    // coprocessor link exists and the duty sink is wired (search "fan duty sink").
+    if (fan_cfg.enabled && fan_cfg.output != "coproc" && !cooling_fans.start())
         std::cerr << "[main] cooling fans unavailable (check fans.gpios / pin conflicts)\n";
 
     // ── Boop sensor (MPR121 capacitive over I²C) ─────────────────────────────
@@ -1821,6 +1853,10 @@ int main(int argc, char* argv[]) {
     double pf_temp_cold_c      = 5.0;    // frost at/below this (deg C)
     double pf_temp_hot_c       = 45.0;   // heatwave at/above this (deg C)
     bool   weather_fx_resync   = true;
+    // MAX7219 panel layout editor state (Face Display > MAX7219 Layout). Loaded
+    // from cfg["protoface"]["max7219"] below; pf_max7219_apply serialises it back
+    // (friendly fields + derived chains) and rebuilds the panel output.
+    PfMax7219Layout pf_max7219;
     // Glitch post-effect config — forwarded to the native controller live and
     // persisted to cfg["protoface"]["glitch"]. Tunable via the settings JSON;
     // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
@@ -1933,6 +1969,24 @@ int main(int argc, char* argv[]) {
                             pf_gradient.colors[i][k] =
                                 std::clamp(jc[k].get<int>(), 0, 255);
                 }
+            }
+        }
+        if (jpf.contains("max7219") && jpf["max7219"].is_object()) {
+            auto& jx = jpf["max7219"];
+            pf_max7219.enabled     = jval(jx, "enabled", pf_max7219.enabled);
+            pf_max7219.mode        = jx.value("mode",        pf_max7219.mode);
+            pf_max7219.content     = jx.value("content",     pf_max7219.content);
+            pf_max7219.chain_order = jx.value("chain_order", pf_max7219.chain_order);
+            pf_max7219.module_type = jx.value("module_type", pf_max7219.module_type);
+            pf_max7219.coproc_cs   = jval(jx, "coproc_cs", pf_max7219.coproc_cs);
+            pf_max7219.intensity   = jval(jx, "intensity", pf_max7219.intensity);
+            pf_max7219.canvas_x    = jval(jx, "canvas_x",  pf_max7219.canvas_x);
+            pf_max7219.canvas_y    = jval(jx, "canvas_y",  pf_max7219.canvas_y);
+            if (jx.contains("rows") && jx["rows"].is_array() && !jx["rows"].empty()) {
+                pf_max7219.rows.clear();
+                for (const auto& jr : jx["rows"])
+                    if (jr.is_number()) pf_max7219.rows.push_back(std::clamp(jr.get<int>(), 1, 16));
+                if (pf_max7219.rows.empty()) pf_max7219.rows = {4};
             }
         }
         if (jpf.contains("preview")) {
@@ -2512,6 +2566,32 @@ int main(int argc, char* argv[]) {
     // returns false (no thread spun up) when cfg.enabled is false or the
     // chip isn't present on the bus.
     sensor::Mpr121BoopSensor boop_sensor(boop_cfg);
+
+    // ── Temperature sensors (optional; DS18B20 1-Wire) ───────────────────────
+    // Reads a configured probe list into state.temps ~1 Hz for the HUD, the
+    // System > Temperature menu, and (via a sensor file path) the fan curve.
+    sensor::TempSensorsConfig temp_cfg;
+    if (cfg.contains("temperature") && cfg["temperature"].is_object()) {
+        const auto& jt = cfg["temperature"];
+        temp_cfg.enabled = jval(jt, "enabled", false);
+        temp_cfg.poll_ms = jval(jt, "poll_ms", temp_cfg.poll_ms);
+        if (jt.contains("sensors") && jt["sensors"].is_array()) {
+            for (const auto& js : jt["sensors"]) {
+                if (!js.is_object()) continue;
+                sensor::TempSensorCfg s;
+                s.type   = js.value("type",  s.type);
+                s.id     = js.value("id",    s.id);
+                s.label  = js.value("label", s.label);
+                s.warn_c = jval(js, "warn_c", s.warn_c);
+                s.crit_c = jval(js, "crit_c", s.crit_c);
+                temp_cfg.sensors.push_back(std::move(s));
+            }
+        }
+    }
+    sensor::TempSensors temp_sensors(temp_cfg, state);
+    if (temp_cfg.enabled && !temp_sensors.start())
+        std::cerr << "[main] temperature sensors: none configured\n";
+
     // Canonical boop reaction PNG name per zone. When face_image_exists()
     // confirms a dedicated boop_<zone>.png is authored, we trigger that
     // expression by filename instead of the user's configured fallback —
@@ -3225,10 +3305,15 @@ int main(int argc, char* argv[]) {
     // started/stopped as part of the same handoff: HUB75 needs it, MAX7219
     // doesn't.
     std::vector<std::unique_ptr<face::NativeFaceController>> ctrl_graveyard;
+    // Set by pf_max7219_apply to force a rebuild even when the backend string is
+    // unchanged (a "section" MAX layout edit changes the output while the face
+    // backend stays HUB75).
+    bool pf_force_rebuild = false;
     auto swap_backend = [&](const std::string& new_backend) {
         if (new_backend != "hub75" && new_backend != "max7219" &&
             new_backend != "rgb_matrix") return;
-        if (new_backend == pf_backend) return;
+        if (new_backend == pf_backend && !pf_force_rebuild) return;
+        pf_force_rebuild = false;
         std::cout << "[main] backend hot-swap: " << pf_backend
                   << " -> " << new_backend << "\n";
 
@@ -3521,6 +3606,11 @@ int main(int argc, char* argv[]) {
                 return native_ctrl && native_ctrl->latest_frame(out);
             },
             /* preview_duration_s */ pf_preview_duration_s);
+        // MAX7219 wiring guide: when the face is shown on MAX panels (as the
+        // main backend, or a coproc "section"), hand the editor the chain's
+        // module order so it overlays the DIN→DOUT wiring on the grid.
+        if (pf_max7219.enabled || pf_backend == "max7219")
+            menu_ptr->face_editor().set_wiring_guide(pf_max7219_modules(pf_max7219));
     };
 
     // Now that face_proxy exists, hook the audio engine's per-period
@@ -3688,6 +3778,7 @@ int main(int argc, char* argv[]) {
         cfg["inputs"]["coprocessor"].is_object()) {
         const json& jc = cfg["inputs"]["coprocessor"];
         coproc_cfg.enabled            = jval(jc, "enabled", false);
+        coproc_cfg.variant            = jc.value("variant",   coproc_cfg.variant);
         coproc_cfg.transport          = jc.value("transport", coproc_cfg.transport);
         coproc_cfg.device             = jc.value("device",    coproc_cfg.device);
         coproc_cfg.baud               = jval(jc, "baud",      coproc_cfg.baud);
@@ -3706,6 +3797,21 @@ int main(int argc, char* argv[]) {
                     input::gpio_func_from_id(jb.value("short", std::string("none")));
                 coproc_cfg.long_map[id] =
                     input::gpio_func_from_id(jb.value("long",  std::string("none")));
+            }
+        }
+        // Physical pin map (order = button id) pushed to the firmware on connect,
+        // so a switch's GPIO / pull / polarity / backlight is HUD config, not a
+        // reflash. Omit the block to leave the firmware on its config.h defaults.
+        if (jc.contains("pins") && jc["pins"].is_array()) {
+            for (const auto& jp : jc["pins"]) {
+                if (!jp.is_object()) continue;
+                input::CoprocPin p;
+                p.gp         = jval(jp, "gp", -1);
+                if (p.gp < 0) continue;
+                p.pull       = jp.value("pull", std::string("up"));
+                p.active_low = jval(jp, "active_low", true);
+                p.led_gp     = jval(jp, "led_gp", -1);
+                coproc_cfg.pins.push_back(std::move(p));
             }
         }
     }
@@ -3841,6 +3947,58 @@ int main(int argc, char* argv[]) {
             flips.push_back({pf_hub75.flip_x[i], pf_hub75.flip_y[i]});
         native_ctrl->set_panel_flips(flips);
     };
+    menu_ctx.pf_max7219_p = &pf_max7219;
+    menu_ctx.pf_max7219_apply = [&]{
+        // Serialise the editor state (friendly fields for reload + a derived
+        // single chain with module_positions for pf_build_panel_output).
+        auto& jx = cfg["protoface"]["max7219"];
+        jx["enabled"]     = pf_max7219.enabled;
+        jx["mode"]        = pf_max7219.mode;
+        jx["content"]     = pf_max7219.content;
+        jx["chain_order"] = pf_max7219.chain_order;
+        jx["module_type"] = pf_max7219.module_type;
+        jx["coproc_cs"]   = pf_max7219.coproc_cs;
+        jx["intensity"]   = pf_max7219.intensity;
+        jx["canvas_x"]    = pf_max7219.canvas_x;
+        jx["canvas_y"]    = pf_max7219.canvas_y;
+        json jrows = json::array();
+        for (int n : pf_max7219.rows) jrows.push_back(n);
+        jx["rows"] = std::move(jrows);
+        json chain;
+        chain["name"]        = "max_coproc";
+        chain["transport"]   = "coproc";
+        chain["coproc_cs"]   = pf_max7219.coproc_cs;
+        chain["module_type"] = pf_max7219.module_type;
+        chain["intensity"]   = pf_max7219.intensity;
+        json jmp = json::array();
+        for (const auto& m : pf_max7219_modules(pf_max7219))
+            jmp.push_back(json::array({m[0], m[1]}));
+        chain["module_positions"] = jmp;
+        jx["chains"] = json::array({std::move(chain)});
+
+        // Rebuild the output so the change is live. "main" makes MAX the whole
+        // face (backend max7219); "section" keeps the current backend and tees.
+        if (!native_ctrl) return;
+        if (pf_max7219.mode == "main") {
+            pf_force_rebuild = true;
+            swap_backend("max7219");
+        } else {
+            pf_force_rebuild = true;
+            swap_backend(pf_backend);
+        }
+    };
+    // Declared here (before the menu callback captures it); created later once
+    // coproc_cfg is known. Drives the MAX7219 "section" symbols/text/patterns.
+    std::unique_ptr<face::MaxSectionController> max_section;
+    menu_ctx.pf_max_content = [&](const std::string& kind, const std::string& value) {
+        if (!max_section) return;
+        if      (kind == "symbol")  max_section->set_symbol(value);
+        else if (kind == "text")    max_section->set_text(value);
+        else if (kind == "pattern") max_section->set_pattern(value);
+        else if (kind == "clear")   max_section->clear();
+        else if (kind == "next")    max_section->cycle(+1);
+        else if (kind == "prev")    max_section->cycle(-1);
+    };
     menu_ctx.pf_blink_enabled_p = &pf_blink_enabled;
     menu_ctx.pf_blink_min_p     = &pf_blink_min;
     menu_ctx.pf_blink_max_p     = &pf_blink_max;
@@ -3936,6 +4094,11 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_enabled_p = &coproc_cfg.enabled;
     menu_ctx.coproc_reload = coproc_reload;
     menu_ctx.coproc_status = coproc_status;
+    menu_ctx.coproc_cfg_p  = &coproc_cfg;
+    menu_ctx.coproc_i2c_scan = [&]{ if (coproc_inputs) coproc_inputs->request_i2c_scan(); };
+    menu_ctx.coproc_i2c_result = [&]() -> std::string {
+        return coproc_inputs ? coproc_inputs->i2c_scan_result() : std::string("n/a");
+    };
     menu_ctx.pf_glitch_p = &pf_glitch;
 
     MenuSystem menu(build_menu(menu_ctx));
@@ -4254,6 +4417,38 @@ int main(int argc, char* argv[]) {
         state.face.material_color = static_cast<uint8_t>(idx);
     };
 
+    // ── MAX7219 "section" content controller (optional) ──────────────────────
+    // When the MAX chain runs beside HUB75 as a symbols/text surface (mode
+    // "section", content "symbols"), a standalone controller drives it over the
+    // coproc SPI bridge, independent of the face. Triggered by the max_* GpioFuncs
+    // below, the MAX Content menu, and `max_symbol:`/`max_text:`/`max_pattern:`
+    // lines on the command FIFO. (max_section is declared earlier with the menu
+    // wiring; created here once coproc_cfg / pf_max7219 are known.)
+    if (pf_max7219.enabled && pf_max7219.mode == "section" &&
+        pf_max7219.content == "symbols") {
+        PfMax7219Layout local = pf_max7219;   // normalise modules to a local origin
+        local.canvas_x = 0; local.canvas_y = 0;
+        const auto mods = pf_max7219_modules(local);
+        int cw = 8, ch = 8;
+        for (const auto& m : mods) { cw = std::max(cw, m[0] + 8); ch = std::max(ch, m[1] + 8); }
+        face::Max7219Chain::Config cc;
+        cc.name          = "max_section";
+        cc.transport     = face::Max7219Chain::Transport::Coproc;
+        cc.coproc_device = coproc_cfg.device;   // same USB link as the buttons
+        cc.coproc_cs     = pf_max7219.coproc_cs;
+        cc.module_type   = (pf_max7219.module_type == "generic1088")
+            ? face::Max7219Chain::ModuleType::Generic1088
+            : face::Max7219Chain::ModuleType::FC16;
+        cc.intensity     = static_cast<uint8_t>(std::clamp(pf_max7219.intensity, 0, 15));
+        for (const auto& m : mods) cc.module_positions.push_back({m[0], m[1]});
+        face::Max7219PanelOutput::Config mo;
+        mo.chains.push_back(std::move(cc));
+        max_section = std::make_unique<face::MaxSectionController>(
+            std::make_unique<face::Max7219PanelOutput>(std::move(mo)), cw, ch);
+        if (!max_section->start())
+            std::cerr << "[main] MAX section content init failed\n";
+    }
+
     auto gpio_apply = [&, restart_script](input::GpioFunc f) {
         using F = input::GpioFunc;
         switch (f) {
@@ -4355,6 +4550,9 @@ int main(int argc, char* argv[]) {
             face_proxy.set_effect(static_cast<uint8_t>(id));
         } break;
         case F::FaceRestart:    face_proxy.restart(); break;
+        case F::MaxNext:  if (max_section) max_section->cycle(+1); break;
+        case F::MaxPrev:  if (max_section) max_section->cycle(-1); break;
+        case F::MaxClear: if (max_section) max_section->clear();   break;
         case F::None: default: break;
         }
     };
@@ -4394,12 +4592,32 @@ int main(int argc, char* argv[]) {
     // Shares gpio_dispatch with the GPIO poller. Reload rebuilds it on a menu
     // toggle; status surfaces the link state to the GPIO Buttons menu.
     auto coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+
+    // Peripheral-hub wiring (firmware -DPERIPHERAL_HUB): boop pads on the
+    // coprocessor reuse the SAME electrode→zone map as a local MPR121, so the
+    // pads work identically from either board. Edges arrive on the reader
+    // thread; the fire is posted to the input queue like every other source.
+    // (BothCheeks stays derived by the local sensor only — coproc pads fire the
+    // three measured zones.)
+    auto coproc_wire_peripherals = [&]{
+        if (!coproc_inputs) return;
+        coproc_inputs->set_boop_handler([&](int electrode, bool touched){
+            if (!touched) return;
+            for (size_t z = 0; z < 3; ++z)   // Snout / LeftCheek / RightCheek
+                if (boop_cfg.electrode[z] == electrode)
+                    post_input([&fire_boop, z]{
+                        fire_boop(static_cast<sensor::BoopSensor::Zone>(z));
+                    });
+        });
+    };
+    coproc_wire_peripherals();
     if (coproc_cfg.enabled && !coproc_inputs->init())
         std::cerr << "[main] button coprocessor init failed (transport unavailable)\n";
 
     *coproc_reload = [&]{
         coproc_inputs.reset();
         coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
+        coproc_wire_peripherals();   // the new instance needs the boop handler too
         if (coproc_cfg.enabled && !coproc_inputs->init())
             std::cerr << "[main] coprocessor reload: init failed (transport unavailable)\n";
         // Re-evaluate the local poller — replace-mode may have just changed
@@ -4412,9 +4630,38 @@ int main(int argc, char* argv[]) {
         return coproc_inputs->connected() ? "connected" : "offline";
     };
 
+    // Fan duty sink: fans.output == "coproc" keeps the curve/menu logic in
+    // FanController but sends resolved duties to the RP2350's PWM pins instead
+    // of bit-banging CM5 lines. Optionally the curve follows a coprocessor
+    // DS18B20 (fans.temp_probe = its ROM id) instead of a sysfs file.
+    if (fan_cfg.output == "coproc") {
+        cooling_fans.set_duty_sink([&](int zone, double duty){
+            if (coproc_inputs)
+                coproc_inputs->send_fan_duty(zone, static_cast<int>(duty * 100.0 + 0.5));
+        });
+        if (!fan_temp_probe.empty())
+            cooling_fans.set_temp_provider([&, fan_temp_probe](double& c){
+                return coproc_inputs && coproc_inputs->coproc_temp(fan_temp_probe, c);
+            });
+        if (fan_cfg.enabled && !cooling_fans.start())
+            std::cerr << "[main] coproc-output fans failed to start\n";
+    }
+
     // ── Command FIFO source (optional) ───────────────────────────────────────
     // Same shared gpio_dispatch — a line written to the FIFO is a GpioFunc id.
     input::CmdFifo cmd_fifo(cmd_fifo_cfg, gpio_dispatch);
+    // Parametric MAX-panel content the GpioFunc enum can't express:
+    //   echo max_symbol:heart  > /run/protohud/cmd
+    //   echo max_text:HELLO    > /run/protohud/cmd
+    //   echo max_pattern:bars  > /run/protohud/cmd
+    cmd_fifo.set_raw_handler([&max_section](const std::string& line) -> bool {
+        if (!max_section) return false;
+        auto pfx = [&](const char* p){ return line.rfind(p, 0) == 0; };
+        if (pfx("max_symbol:"))  { max_section->set_symbol (line.substr(11)); return true; }
+        if (pfx("max_text:"))    { max_section->set_text   (line.substr(9));  return true; }
+        if (pfx("max_pattern:")) { max_section->set_pattern(line.substr(12)); return true; }
+        return false;
+    });
     if (cmd_fifo_cfg.enabled && !cmd_fifo.start())
         std::cerr << "[main] command FIFO init failed (" << cmd_fifo_cfg.path << ")\n";
 

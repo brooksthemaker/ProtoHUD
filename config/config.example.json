@@ -158,7 +158,7 @@
     "effects": { "type": 0, "palette": 0 }
   },
   "gpio": {
-    "_about": "Configurable GPIO switch map. Each entry in 'pins' assigns a BCM pin a short-press and optional long-press function, with pull bias ('up'|'down'|'none') and polarity (active_low=true means a momentary switch wired to GND). Edit in-HUD via System > GPIO Buttons; toggling Enabled applies instantly and 'Apply Changes Now' reloads the poller after slot edits (no relaunch needed). Functions: none, boop_snout, boop_left, boop_right, boop_both, menu_open, menu_select, menu_back, system_restart, system_shutdown, cam_af_left, cam_af_right, cam_pip_left, cam_pip_right, cam_capture_left, cam_capture_right, cam_swap, phone_ring, face_neutral, face_happy, face_angry, face_sad, face_surprised, face_return, material_rainbow, material_pride, material_progress, material_trans, material_bisexual, material_pansexual, material_lesbian, material_nonbinary, material_asexual, material_genderfluid, material_genderqueer, material_aromantic, material_intersex, cam_capture_stereo, rec_toggle, cam_zoom_in, cam_zoom_out, nv_toggle, theater_toggle, xr_recenter, face_next, face_prev, material_next, effect_next, face_bright_up, face_bright_down, face_restart.",
+    "_about": "Configurable GPIO switch map. Each entry in 'pins' assigns a BCM pin a short-press and optional long-press function, with pull bias ('up'|'down'|'none') and polarity (active_low=true means a momentary switch wired to GND). Edit in-HUD via GPIO > On-Board GPIO > GPIO Buttons; toggling Enabled applies instantly and 'Apply Changes Now' reloads the poller after slot edits (no relaunch needed). Functions: none, boop_snout, boop_left, boop_right, boop_both, menu_open, menu_select, menu_back, system_restart, system_shutdown, cam_af_left, cam_af_right, cam_pip_left, cam_pip_right, cam_capture_left, cam_capture_right, cam_swap, phone_ring, face_neutral, face_happy, face_angry, face_sad, face_surprised, face_return, material_rainbow, material_pride, material_progress, material_trans, material_bisexual, material_pansexual, material_lesbian, material_nonbinary, material_asexual, material_genderfluid, material_genderqueer, material_aromantic, material_intersex, cam_capture_stereo, rec_toggle, cam_zoom_in, cam_zoom_out, nv_toggle, theater_toggle, xr_recenter, face_next, face_prev, material_next, effect_next, face_bright_up, face_bright_down, face_restart, max_next, max_prev, max_clear.",
     "enabled": true,
     "pins": [
       { "gpio": 17, "active_low": true, "pull": "up", "short": "menu_select",  "long": "menu_back",      "long_ms": 600  },
@@ -168,8 +168,10 @@
   },
   "inputs": {
     "coprocessor": {
-      "_about": "OPTIONAL button/switch coprocessor (RP2350/RP2040). When enabled, an external MCU debounces the switches and streams presses to the Pi, dispatched through the same functions as the GPIO map above. Never required — leave disabled to use on-board GPIO only. Toggle live in System > GPIO Buttons > Button Coprocessor. See docs/coprocessor-input.md.",
+      "_about": "OPTIONAL button/switch coprocessor (RP2350/RP2040). When enabled, an external MCU debounces the switches and streams presses to the Pi, dispatched through the same functions as the GPIO map above. Never required — leave disabled to use on-board GPIO only. Edit live in GPIO > RP2350 GPIO Expander. See docs/coprocessor-input.md.",
       "enabled": false,
+      "variant": "rp2350a",
+      "_variant_note": "Coprocessor board, for the pin visualizer/editor only (the firmware doesn't care): 'rp2350a' = Pico 2 (GP0-29, ADC GP26-28, shown as the real 40-pin header); 'pico_plus_2' and 'pico_lipo2_xl_w' = RP2350B boards (GP0-47, ADC GP40-47, shown as a logical GP grid, with each board's reserved pins flagged); 'raw' = board-agnostic GP0-47 view. Pick it in GPIO > RP2350 GPIO Expander > Board.",
       "transport": "usb_serial",
       "_transport_note": "'usb_serial' (USB CDC, default) or 'i2c' (specified but not implemented in v1).",
       "device": "/dev/serial/by-id/usb-ProtoHUD_Buttons-if00",
@@ -186,7 +188,13 @@
         { "id": 1, "short": "menu_open",   "long": "system_restart" },
         { "id": 2, "short": "boop_snout",  "long": "none" }
       ],
-      "_buttons_note": "Maps the coprocessor's button ids to functions (same function ids as gpio.pins). The MCU reports 'button N, short/long'; the Pi decides what N means, so remapping stays here."
+      "_buttons_note": "Maps the coprocessor's button ids to functions (same function ids as gpio.pins). The MCU reports 'button N, short/long'; the Pi decides what N means, so remapping stays here.",
+      "_pins_note": "OPTIONAL physical pin map, pushed to the firmware over PINCFG on connect so a switch's GPIO / pull / polarity / backlight is set here — no firmware reflash. Array order = button id (row 0 = id 0, matching 'buttons' above). gp = RP2350 GPIO; pull = up|down|none; active_low true = a switch to GND; led_gp = optional backlight GPIO (-1 = none). Edit visually in GPIO > RP2350 GPIO Expander > Pins (a pin visualizer + editor: pick free pins, set functions, Apply & Reload pushes it live). Omit the whole block to leave the firmware on its compiled-in config.h defaults. Firmware-fixed voice pins (I2S GP16-18, I2C GP20/21, mic GP26) and MAX7219 pins aren't runtime-remappable — avoid reusing them.",
+      "pins": [
+        { "gp": 2, "pull": "up", "active_low": true, "led_gp": -1 },
+        { "gp": 3, "pull": "up", "active_low": true, "led_gp": -1 },
+        { "gp": 4, "pull": "up", "active_low": true, "led_gp": -1 }
+      ]
     },
     "command_fifo": {
       "_about": "OPTIONAL local command pipe. When enabled, writing a GpioFunc id line to the FIFO drives ProtoHUD through the same functions as the GPIO map — e.g. a KDE Connect 'Run Command' doing `echo menu_open > /run/protohud/cmd`. Untrusted input: unknown ids are ignored. See docs/kdeconnect-commands.md and scripts/kdeconnect_commands.py.",
@@ -238,6 +246,26 @@
     "_continuous_effects_note": "When true, a mirrored 2-eye face renders BOTH eyes independently (the second eye's face is flipped to keep the mirrored look) so canvas-space effects like 'water' form one continuous tank across the visor instead of one eye being a flipped copy. Costs a second face/particle render. Applied at startup.",
     "panel_driver": true,
     "_panel_driver_note": "native mode only: auto-launch scripts/panel_driver.py to drive the HUB75 panels. Set false for preview-only or if you run the driver yourself.",
+    "_max7219_note": "MAX7219 8x8 matrix chains. mode 'main' = MAX is the whole face (set backend:'max7219'); mode 'section' + enabled = MAX runs AS AN EXTRA SURFACE alongside the HUB75 face (teed to both). Each chain: transport 'spidev'|'gpio'|'coproc'. 'coproc' ships the SPI bytes over USB to the RP2350 button/voice coprocessor (firmware built with -DMAX_BRIDGE), which shifts them out its SPI1 (DIN=GP11, CLK=GP10) and pulses coproc_cs -> kMaxCsPins[coproc_cs] (default GP13) - so MAX runs beside HUB75 with zero CM5 GPIO. cols_chips x rows_chips is the grid (canvas_x/y = where on the render canvas it mirrors); module_positions overrides that with per-8x8-module placement for ragged/non-rectangular layouts.",
+    "max7219": {
+      "enabled": false,
+      "mode": "section",
+      "content": "face",
+      "_content_note": "section content: 'face' mirrors the face-canvas region; 'symbols' shows independent, triggerable symbols/text/patterns. Trigger via the max_next/max_prev/max_clear GpioFuncs (buttons), the Face Display > MAX7219 Layout > Content Library menu, or the command FIFO: `echo max_symbol:heart > /run/protohud/cmd`, `echo max_text:HELLO > ...`, `echo max_pattern:bars > ...`. Built-in symbols: heart star up down left right check cross smiley note excl dot; patterns: solid border checker bars blank.",
+      "chains": [
+        {
+          "name": "cheek_l",
+          "transport": "coproc",
+          "coproc_device": "/dev/serial/by-id/usb-ProtoHUD_Buttons-if00",
+          "coproc_cs": 0,
+          "cols_chips": 4, "rows_chips": 1,
+          "canvas_x": 0, "canvas_y": 0,
+          "chain_order": "serpentine",
+          "module_type": "fc16",
+          "intensity": 6
+        }
+      ]
+    },
     "_native_about": "native-mode options: assets_dir points at the Protoface checkout holding faces/materials/gifs (default $HOME/protohud/Protoface); panels overrides the default 2-panel mirrored layout.",
     "assets_dir": "",
     "hub75": {
@@ -329,6 +357,16 @@
     "anchor":    "bottom_left",
     "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
   },
+  "temperature": {
+    "_about": "Temperature probes, read into the HUD/menu (System > Temperature) ~1 Hz and available to warn on. v1 reads DS18B20 1-Wire sensors: wire the data line to a spare GPIO (e.g. BCM 25, clear of the HUB75 bonnet) with a 4.7k pull-up to 3.3V, add `dtoverlay=w1-gpio,gpiopin=25` to /boot/firmware/config.txt, then find each probe id with `ls /sys/bus/w1/devices/` (they look like 28-XXXXXXXXXXXX). Many probes share the one data pin. id:\"\" uses the first probe found. type 'ds18b20' reads the CM5's 1-Wire bus; type 'coproc' reads a probe wired to the RP2350 coprocessor instead (peripheral-hub firmware; id = the 16-hex ROM from its TEMP reports). max31865/PT100 and i2c chips can be added later. A probe also drives the fan curve — point fans.temp_path at its /sys/bus/w1/devices/<id>/temperature file (or use fans.temp_probe for a coproc probe).",
+    "enabled": false,
+    "poll_ms": 1000,
+    "sensors": [
+      { "type": "ds18b20", "id": "28-000000000001", "label": "Snout",     "warn_c": 40.0, "crit_c": 50.0 },
+      { "type": "ds18b20", "id": "28-000000000002", "label": "Interior",  "warn_c": 42.0, "crit_c": 52.0 },
+      { "type": "ds18b20", "id": "28-000000000003", "label": "Electronics","warn_c": 60.0, "crit_c": 75.0 }
+    ]
+  },
   "fans": {
     "_about": "Pi-driven cooling fans via software PWM on GPIO (drive a 2-pin fan through a MOSFET, or a 4-pin fan's control line). Up to 4 fans grouped into 2 independently-controlled zones. Live controls in System > Cooling Fans. Use pins HUB75 doesn't claim — see hardware/carrier-board/PINMAP.md (e.g. BCM 18/19, and 14/15 if free).",
     "enabled": false,
@@ -337,6 +375,10 @@
     "_min_duty_note": "Fans stall below ~20% duty; this is the floor applied whenever a zone should be moving.",
     "invert": false,
     "temp_path": "/sys/class/thermal/thermal_zone0/temp",
+    "_temp_path_note": "Any milli-°C sysfs file. Default = SoC temp. To ramp fans off a helmet probe instead, point this at a DS18B20 file, e.g. /sys/bus/w1/devices/28-XXXX/temperature (same milli-°C format).",
+    "output": "gpio",
+    "_output_note": "'gpio' (default) = software-PWM on the CM5 lines in zones[].gpios. 'coproc' = the RP2350 coprocessor's fan pins (firmware -DPERIPHERAL_HUB, GP14/15 at 25 kHz) — the temp curve and all menu controls stay on the CM5, only resolved duties cross the USB link ('FAN <zone> <duty%>'); zones[].gpios is ignored. With 'coproc', temp_probe may name a coprocessor DS18B20 ROM id (16 hex chars, from its TEMP reports) so the curve follows a helmet probe instead of temp_path.",
+    "temp_probe": "",
     "zones": [
       {
         "name": "Intake",

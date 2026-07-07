@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <linux/spi/spidev.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include <opencv2/imgproc.hpp>
@@ -60,6 +61,20 @@ bool Max7219Chain::open() {
             close();
             return false;
         }
+    } else if (cfg_.transport == Transport::Coproc) {
+        if (coproc_fd_ >= 0) return true;
+        coproc_fd_ = ::open(cfg_.coproc_device.c_str(), O_WRONLY | O_NOCTTY);
+        if (coproc_fd_ < 0) {
+            std::fprintf(stderr, "[max7219:%s] cannot open coproc %s: %s\n",
+                         cfg_.name.c_str(), cfg_.coproc_device.c_str(),
+                         std::strerror(errno));
+            return false;
+        }
+        termios tio{};
+        if (tcgetattr(coproc_fd_, &tio) == 0) {   // raw: no NL→CRNL mangling
+            cfmakeraw(&tio);
+            tcsetattr(coproc_fd_, TCSANOW, &tio);
+        }
     } else {
         // GPIO transport — the panel output must have given us a bus + a CS
         // pin must be configured. Failure to claim CS leaves cs_line_ closed
@@ -107,6 +122,7 @@ void Max7219Chain::close() {
     for (uint8_t r = 0; r < 8; ++r) write_chain_register(REG_DIGIT_0 + r, zero.data());
     write_chain_register(REG_SHUTDOWN, zero.data());        // bcast 0 → shutdown
     if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
+    if (coproc_fd_ >= 0) { ::close(coproc_fd_); coproc_fd_ = -1; }
     cs_line_.close();
 }
 
@@ -122,6 +138,21 @@ bool Max7219Chain::write_chain_register(uint8_t reg, const uint8_t* per_chip) {
         }
         const ssize_t n = ::write(fd_, tx_buf_.data(), tx_buf_.size());
         return n == static_cast<ssize_t>(tx_buf_.size());
+    }
+
+    if (cfg_.transport == Transport::Coproc) {
+        if (coproc_fd_ < 0) return false;
+        // Same byte order as the spidev path (chip N-1 first … chip 0 last),
+        // then ship it as one "SPI <cs> <hex>" line for the coproc to shift out.
+        uint8_t* dst = tx_buf_.data();
+        for (int i = total_chips_ - 1; i >= 0; --i) { *dst++ = reg; *dst++ = per_chip[i]; }
+        static const char H[] = "0123456789ABCDEF";
+        std::string line = "SPI " + std::to_string(cfg_.coproc_cs) + " ";
+        line.reserve(line.size() + tx_buf_.size() * 2 + 1);
+        for (uint8_t b : tx_buf_) { line.push_back(H[b >> 4]); line.push_back(H[b & 0x0F]); }
+        line.push_back('\n');
+        const ssize_t n = ::write(coproc_fd_, line.data(), line.size());
+        return n == static_cast<ssize_t>(line.size());
     }
 
     // GPIO bit-bang: CS low for the duration of the write; same MSB-first

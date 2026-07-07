@@ -84,6 +84,7 @@
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
+#include "face/max_section_content.h"
 #include "face/neopixel_matrix_output.h"
 
 #ifndef GIT_HASH
@@ -2513,6 +2514,178 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         };
     }
 
+    // ── MAX7219 Layout editor (coproc-driven panels) ─────────────────────────
+    // A ragged grid of 8×8 modules the user builds live: rows, panels per row,
+    // and the daisy-chain order — with a Wiring diagram showing the DIN→DOUT
+    // path and which coprocessor pins to connect. Runs beside HUB75 (Section)
+    // or as the whole face (Main).
+    MenuItem pf_max7219_layout_item;
+    if (ctx.pf_max7219_p) {
+        auto* MX  = ctx.pf_max7219_p;
+        auto  app = ctx.pf_max7219_apply;
+        auto  reapply = [app]{ if (app) app(); };
+
+        // Edits mutate the working copy live (the Wiring diagram updates as you
+        // go); the panels are (re)built only on Enabled and "Apply Layout", since
+        // a rebuild tears down and restarts the renderer — too heavy per slider
+        // tick. Same "applies on a round-trip" model as the HUB75 layout editor.
+        std::vector<MenuItem> mx_items;
+        mx_items.push_back(toggle("Enabled",
+            [MX]{ return MX->enabled; },
+            [MX, reapply](bool v){ MX->enabled = v; reapply(); }));
+
+        std::vector<MenuItem> mode_items = {
+            leaf_sel("Section (beside HUB75)",
+                [MX]{ MX->mode = "section"; },
+                [MX]{ return MX->mode != "main"; }),
+            leaf_sel("Main (the whole face)",
+                [MX]{ MX->mode = "main"; },
+                [MX]{ return MX->mode == "main"; }),
+        };
+        mx_items.push_back(submenu("Mode", std::move(mode_items)));
+
+        // Section content source: mirror the face-canvas region, or show
+        // independent triggerable symbols/text/patterns (the library below).
+        std::vector<MenuItem> content_items = {
+            leaf_sel("Mirror Face Region",
+                [MX]{ MX->content = "face"; },
+                [MX]{ return MX->content != "symbols"; }),
+            leaf_sel("Symbols / Text / Patterns",
+                [MX]{ MX->content = "symbols"; },
+                [MX]{ return MX->content == "symbols"; }),
+        };
+        mx_items.push_back(with_desc(submenu("Content", std::move(content_items)),
+            "What the section panels show: a crop of the face, or independent "
+            "symbols/text/patterns you trigger (Content Library below, a max_* "
+            "button, or `echo max_symbol:heart > /run/protohud/cmd`)."));
+
+        // Content Library — live triggers (need a running section controller).
+        if (ctx.pf_max_content) {
+            auto trig = ctx.pf_max_content;
+            std::vector<MenuItem> sym_items;
+            for (const auto& s : face::max_content::symbol_names())
+                sym_items.push_back(leaf(s, [trig, s]{ trig("symbol", s); }));
+            std::vector<MenuItem> pat_items;
+            for (const auto& p : face::max_content::pattern_names())
+                pat_items.push_back(leaf(p, [trig, p]{ trig("pattern", p); }));
+            std::vector<MenuItem> lib_items;
+            lib_items.push_back(submenu("Symbols", std::move(sym_items)));
+            lib_items.push_back(submenu("Patterns", std::move(pat_items)));
+            lib_items.push_back(leaf("Next Symbol",  [trig]{ trig("next", ""); }));
+            lib_items.push_back(leaf("Prev Symbol",  [trig]{ trig("prev", ""); }));
+            lib_items.push_back(leaf("Clear",        [trig]{ trig("clear", ""); }));
+            mx_items.push_back(with_desc(submenu("Content Library", std::move(lib_items)),
+                "Show a symbol or pattern on the section panels now. Text is set "
+                "over the FIFO (`echo max_text:HELLO > /run/protohud/cmd`). Only "
+                "active when Content = Symbols and the panels are wired + enabled."));
+        }
+
+        mx_items.push_back(slider("Rows", 1.f, 8.f, 1.f, "",
+            [MX]{ return static_cast<float>(MX->rows.size()); },
+            [MX](float v){ MX->rows.resize(std::clamp(static_cast<int>(v), 1, 8), 1); }));
+        for (int r = 0; r < 8; ++r) {
+            MenuItem row = slider("Row " + std::to_string(r + 1) + " panels",
+                1.f, 16.f, 1.f, "",
+                [MX, r]{ return r < static_cast<int>(MX->rows.size())
+                                    ? static_cast<float>(MX->rows[r]) : 1.f; },
+                [MX, r](float v){
+                    if (r < static_cast<int>(MX->rows.size()))
+                        MX->rows[r] = std::clamp(static_cast<int>(v), 1, 16);
+                });
+            row.visible_fn = [MX, r]{ return r < static_cast<int>(MX->rows.size()); };
+            mx_items.push_back(std::move(row));
+        }
+
+        std::vector<MenuItem> order_items = {
+            leaf_sel("Serpentine (zig-zag)",
+                [MX]{ MX->chain_order = "serpentine"; },
+                [MX]{ return MX->chain_order != "row_major"; }),
+            leaf_sel("Row-major (every row L\xe2\x86\x92R)",
+                [MX]{ MX->chain_order = "row_major"; },
+                [MX]{ return MX->chain_order == "row_major"; }),
+        };
+        mx_items.push_back(submenu("Chain Order", std::move(order_items)));
+
+        std::vector<MenuItem> type_items = {
+            leaf_sel("FC16 (4-in-1 boards)",
+                [MX]{ MX->module_type = "fc16"; },
+                [MX]{ return MX->module_type != "generic1088"; }),
+            leaf_sel("Generic 1088AS",
+                [MX]{ MX->module_type = "generic1088"; },
+                [MX]{ return MX->module_type == "generic1088"; }),
+        };
+        mx_items.push_back(submenu("Module Type", std::move(type_items)));
+
+        mx_items.push_back(slider("Brightness", 0.f, 15.f, 1.f, "",
+            [MX]{ return static_cast<float>(MX->intensity); },
+            [MX](float v){ MX->intensity = std::clamp(static_cast<int>(v), 0, 15); }));
+        mx_items.push_back(slider("Coproc CS index", 0.f, 3.f, 1.f, "",
+            [MX]{ return static_cast<float>(MX->coproc_cs); },
+            [MX](float v){ MX->coproc_cs = std::clamp(static_cast<int>(v), 0, 3); }));
+        mx_items.push_back(leaf("Apply Layout", [reapply]{ reapply(); }));
+
+        // Wiring diagram — module grid numbered in DIN→DOUT order, arrows along
+        // the daisy chain, DIN/DOUT markers, and the coproc pin legend.
+        auto wiring = [MX](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            ImFont* font = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            dl->AddText(font, fs * 1.1f, {o.x, o.y},
+                        IM_COL32(230, 235, 240, 255), "MAX7219 Wiring");
+
+            const auto mods = pf_max7219_modules(*MX);
+            const int total = static_cast<int>(mods.size());
+            int maxx = 8, maxy = 8;
+            for (const auto& m : mods) { maxx = std::max(maxx, m[0] + 8); maxy = std::max(maxy, m[1] + 8); }
+            char sub[96];
+            std::snprintf(sub, sizeof(sub), "%d modules   %dx%d px   %s",
+                          total, maxx, maxy, MX->chain_order.c_str());
+            dl->AddText(font, fs * 0.85f, {o.x, o.y + fs * 1.2f},
+                        IM_COL32(170, 180, 190, 220), sub);
+            dl->AddText(font, fs * 0.8f, {o.x, o.y + fs * 2.2f},
+                        IM_COL32(120, 200, 140, 235),
+                        "DIN=GP11  CLK=GP10  CS=GP13  +5V  GND");
+
+            const float top = o.y + fs * 3.4f;
+            const float pad = 8.f;
+            const float aw = std::max(40.f, sz.x - pad * 2.f);
+            const float ah = std::max(40.f, o.y + sz.y - top - pad);
+            if (total == 0 || maxx <= 0 || maxy <= 0) return;
+            const float scale = std::min(aw / maxx, ah / maxy);
+            const float gw = maxx * scale, gh = maxy * scale;
+            const float ox = o.x + (sz.x - gw) * 0.5f;
+            const float oy = top + (ah - gh) * 0.5f;
+
+            std::vector<ImVec2> ctr;
+            ctr.reserve(total);
+            for (int i = 0; i < total; ++i) {
+                const float x0 = ox + mods[i][0] * scale, y0 = oy + mods[i][1] * scale;
+                const float x1 = x0 + 8 * scale,          y1 = y0 + 8 * scale;
+                dl->AddRectFilled({x0, y0}, {x1, y1}, IM_COL32(255, 220, 60, 50));
+                dl->AddRect({x0, y0}, {x1, y1}, IM_COL32(255, 220, 60, 255), 2.f, 0, 1.5f);
+                ctr.push_back({(x0 + x1) * 0.5f, (y0 + y1) * 0.5f});
+                char n[8]; std::snprintf(n, sizeof(n), "%d", i);
+                const ImVec2 tsz = font->CalcTextSizeA(fs * 0.8f, FLT_MAX, 0.f, n);
+                dl->AddText(font, fs * 0.8f,
+                            {ctr[i].x - tsz.x * 0.5f, ctr[i].y - tsz.y * 0.5f},
+                            IM_COL32(235, 240, 245, 255), n);
+            }
+            for (int i = 0; i + 1 < total; ++i)
+                dl->AddLine(ctr[i], ctr[i + 1], IM_COL32(120, 200, 255, 220), 1.5f);
+            dl->AddText(font, fs * 0.8f, {ctr[0].x - 8, ctr[0].y - fs * 1.7f},
+                        IM_COL32(120, 200, 140, 255), "DIN");
+            dl->AddText(font, fs * 0.8f,
+                        {ctr[total - 1].x - 14, ctr[total - 1].y + fs * 0.7f},
+                        IM_COL32(255, 150, 120, 255), "DOUT");
+        };
+
+        pf_max7219_layout_item = with_desc(
+            with_panel(submenu("MAX7219 Layout", std::move(mx_items)), "Wiring", wiring),
+            "Build the MAX7219 panel grid: rows, panels per row, and the daisy-"
+            "chain order. The Wiring panel shows the DIN\xe2\x86\x92DOUT path and "
+            "which coprocessor pins to connect. Runs beside HUB75 (Section) or as "
+            "the whole face (Main). Driven over the coprocessor \xe2\x80\x94 no CM5 GPIO.");
+    }
+
     std::vector<MenuItem> pf_hardware_menu = {
         with_desc(submenu("Backend", std::move(pf_backend_items)),
                   "What LED hardware Protoface paints. Switching tears down "
@@ -2520,6 +2693,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                   "backend; the HUD keeps running through the transition. "
                   "Persists to config.json so the next launch starts here."),
     };
+    if (ctx.pf_max7219_p) pf_hardware_menu.push_back(std::move(pf_max7219_layout_item));
     // HUB75 panel wiring fix-up — hidden on other backends.
     if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_color_order_item));
     if (pf_hub75_p) pf_hardware_menu.push_back(std::move(pf_camera_mode_item));

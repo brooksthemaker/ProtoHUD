@@ -265,6 +265,7 @@ set(SOURCES
     src/sensor/bno08x.cpp
     src/sensor/mpr121_boop_sensor.cpp
     src/sensor/light_sensor.cpp
+    src/sensor/temp_sensors.cpp
     src/accessory/led_strip.cpp
     src/accessory/accessory_leds.cpp
     src/sys/system_monitor.cpp
@@ -404,6 +405,8 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/shm_pusher_output.cpp
     src/face/max7219_chain.cpp
     src/face/max7219_panel_output.cpp
+    src/face/max_section_content.cpp
+    src/face/max_section_controller.cpp
     src/face/neopixel_matrix_chain.cpp
     src/face/neopixel_matrix_output.cpp
     src/face/native_face_controller.cpp

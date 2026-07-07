@@ -749,6 +749,17 @@ enum class VideoCamera  : uint8_t { Left, Right, Both };
 // Mutable fields are updated from serial/camera threads and read by the
 // render thread.  Callers must hold the mutex for any multi-field access.
 
+// One temperature sensor's latest reading (see sensor::TempSensors). Published
+// into AppState::temps; consumed by the HUD, the Temperature menu, and (via a
+// file path) the fan controller.
+struct TempReading {
+    std::string label;
+    double      c    = 0.0;   // °C (valid only when ok)
+    bool        ok   = false; // false = read failed / sensor missing
+    bool        warn = false; // c >= warn threshold
+    bool        crit = false; // c >= crit threshold
+};
+
 struct AppState {
     std::mutex mtx;
 
@@ -756,6 +767,8 @@ struct AppState {
     SystemHealth health;
     KnobState    knob;
     AudioState   audio;
+
+    std::vector<TempReading> temps;   // temperature sensors, updated ~1 Hz
 
     std::vector<LoRaNode>    lora_nodes;
     std::deque<LoRaMessage>  lora_messages;
