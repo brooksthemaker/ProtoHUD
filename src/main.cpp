@@ -50,6 +50,7 @@
 #include "sensor/bno055.h"
 #include "sensor/bno08x.h"
 #include "sensor/light_sensor.h"
+#include "sensor/temp_sensors.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
 #include "sys/fan_controller.h"
@@ -2523,6 +2524,32 @@ int main(int argc, char* argv[]) {
     // returns false (no thread spun up) when cfg.enabled is false or the
     // chip isn't present on the bus.
     sensor::Mpr121BoopSensor boop_sensor(boop_cfg);
+
+    // ── Temperature sensors (optional; DS18B20 1-Wire) ───────────────────────
+    // Reads a configured probe list into state.temps ~1 Hz for the HUD, the
+    // System > Temperature menu, and (via a sensor file path) the fan curve.
+    sensor::TempSensorsConfig temp_cfg;
+    if (cfg.contains("temperature") && cfg["temperature"].is_object()) {
+        const auto& jt = cfg["temperature"];
+        temp_cfg.enabled = jval(jt, "enabled", false);
+        temp_cfg.poll_ms = jval(jt, "poll_ms", temp_cfg.poll_ms);
+        if (jt.contains("sensors") && jt["sensors"].is_array()) {
+            for (const auto& js : jt["sensors"]) {
+                if (!js.is_object()) continue;
+                sensor::TempSensorCfg s;
+                s.type   = js.value("type",  s.type);
+                s.id     = js.value("id",    s.id);
+                s.label  = js.value("label", s.label);
+                s.warn_c = jval(js, "warn_c", s.warn_c);
+                s.crit_c = jval(js, "crit_c", s.crit_c);
+                temp_cfg.sensors.push_back(std::move(s));
+            }
+        }
+    }
+    sensor::TempSensors temp_sensors(temp_cfg, state);
+    if (temp_cfg.enabled && !temp_sensors.start())
+        std::cerr << "[main] temperature sensors: none configured\n";
+
     // Canonical boop reaction PNG name per zone. When face_image_exists()
     // confirms a dedicated boop_<zone>.png is authored, we trigger that
     // expression by filename instead of the user's configured fallback —

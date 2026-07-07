@@ -346,6 +346,16 @@
     "anchor":    "bottom_left",
     "_anchor_values": "top_left | top_center | top_right | bottom_left | bottom_center | bottom_right"
   },
+  "temperature": {
+    "_about": "Temperature probes, read into the HUD/menu (System > Temperature) ~1 Hz and available to warn on. v1 reads DS18B20 1-Wire sensors: wire the data line to a spare GPIO (e.g. BCM 25, clear of the HUB75 bonnet) with a 4.7k pull-up to 3.3V, add `dtoverlay=w1-gpio,gpiopin=25` to /boot/firmware/config.txt, then find each probe id with `ls /sys/bus/w1/devices/` (they look like 28-XXXXXXXXXXXX). Many probes share the one data pin. id:\"\" uses the first probe found. type 'ds18b20' reads the CM5's 1-Wire bus; type 'coproc' reads a probe wired to the RP2350 coprocessor instead (peripheral-hub firmware; id = the 16-hex ROM from its TEMP reports). max31865/PT100 and i2c chips can be added later. A probe also drives the fan curve — point fans.temp_path at its /sys/bus/w1/devices/<id>/temperature file (or use fans.temp_probe for a coproc probe).",
+    "enabled": false,
+    "poll_ms": 1000,
+    "sensors": [
+      { "type": "ds18b20", "id": "28-000000000001", "label": "Snout",     "warn_c": 40.0, "crit_c": 50.0 },
+      { "type": "ds18b20", "id": "28-000000000002", "label": "Interior",  "warn_c": 42.0, "crit_c": 52.0 },
+      { "type": "ds18b20", "id": "28-000000000003", "label": "Electronics","warn_c": 60.0, "crit_c": 75.0 }
+    ]
+  },
   "fans": {
     "_about": "Pi-driven cooling fans via software PWM on GPIO (drive a 2-pin fan through a MOSFET, or a 4-pin fan's control line). Up to 4 fans grouped into 2 independently-controlled zones. Live controls in System > Cooling Fans. Use pins HUB75 doesn't claim — see hardware/carrier-board/PINMAP.md (e.g. BCM 18/19, and 14/15 if free).",
     "enabled": false,
@@ -354,6 +364,7 @@
     "_min_duty_note": "Fans stall below ~20% duty; this is the floor applied whenever a zone should be moving.",
     "invert": false,
     "temp_path": "/sys/class/thermal/thermal_zone0/temp",
+    "_temp_path_note": "Any milli-°C sysfs file. Default = SoC temp. To ramp fans off a helmet probe instead, point this at a DS18B20 file, e.g. /sys/bus/w1/devices/28-XXXX/temperature (same milli-°C format).",
     "output": "gpio",
     "_output_note": "'gpio' (default) = software-PWM on the CM5 lines in zones[].gpios. 'coproc' = the RP2350 coprocessor's fan pins (firmware -DPERIPHERAL_HUB, GP14/15 at 25 kHz) — the temp curve and all menu controls stay on the CM5, only resolved duties cross the USB link ('FAN <zone> <duty%>'); zones[].gpios is ignored. With 'coproc', temp_probe may name a coprocessor DS18B20 ROM id (16 hex chars, from its TEMP reports) so the curve follows a helmet probe instead of temp_path.",
     "temp_probe": "",
