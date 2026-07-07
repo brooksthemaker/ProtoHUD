@@ -1856,6 +1856,31 @@ int main(int argc, char* argv[]) {
     // lower it if slight head tilts feel exaggerated on the panels. The HUD
     // compass reads the IMU slots directly and is never scaled.
     double pf_motion_scale     = 1.0;
+    // Guided motion-range calibration ("look up, down, left, right, then
+    // straight ahead"): measures the wearer's comfortable head range and
+    // normalises the face response to it. Captured spans persist to
+    // cfg["protoface"]["motion_range"]; 0 = uncalibrated (no scaling).
+    // The wizard is ticked from the render loop beside the motion feed.
+    struct MotionCal {
+        enum class Step { Idle, Center, Up, Down, Left, Right, Center2 };
+        Step   step = Step::Idle;
+        double stable_s = 0.0;                 // how long the head has been still
+        double pr = 0, pp = 0, ph = 0;         // previous roll/pitch/heading
+        double base_pitch = 0, base_head = 0;  // neutral captured at Center
+        double up = 0, down = 0, left = 0, right = 0;   // captured spans (deg)
+    };
+    MotionCal motion_cal;
+    double pf_range_pitch = 0.0;   // calibrated half-range, deg (0 = off)
+    double pf_range_yaw   = 0.0;
+    auto cal_note = [&state](std::string title, std::string body) {
+        Notification n;
+        n.type  = NotifType::App;
+        n.title = std::move(title);
+        n.body  = std::move(body);
+        n.auto_dismiss_s = 6.f;
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.notifs.push(std::move(n));
+    };
     bool   pf_face_inertia     = true;
     double pf_face_inertia_strength = 1.0;   // 1.0 = slide up to ~10% of a panel
     bool   pf_weather_effects  = false;
@@ -1896,6 +1921,10 @@ int main(int argc, char* argv[]) {
         state.face.pride_sharp = jval(jpf, "pride_sharp", true);
         pf_motion_particles    = jval(jpf, "motion_particles", pf_motion_particles);
         pf_motion_scale        = jval(jpf, "motion_scale", pf_motion_scale);
+        if (jpf.contains("motion_range") && jpf["motion_range"].is_object()) {
+            pf_range_pitch = jval(jpf["motion_range"], "pitch_deg", 0.0);
+            pf_range_yaw   = jval(jpf["motion_range"], "yaw_deg",   0.0);
+        }
         pf_face_inertia        = jval(jpf, "face_inertia",     pf_face_inertia);
         pf_face_inertia_strength =
             jval(jpf, "face_inertia_strength", pf_face_inertia_strength);
@@ -4079,6 +4108,28 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_expr_effects_p = &pf_expr_effects;
     menu_ctx.pf_motion_particles_p = &pf_motion_particles;
     menu_ctx.pf_motion_scale_p = &pf_motion_scale;
+    menu_ctx.imu_cal_start = [&motion_cal, cal_note]{
+        if (motion_cal.step == MotionCal::Step::Idle) {
+            motion_cal = MotionCal{};
+            motion_cal.step = MotionCal::Step::Center;
+            cal_note("Motion Calibration",
+                     "Hold your head level and look straight ahead...");
+        } else {
+            motion_cal = MotionCal{};
+            cal_note("Motion Calibration", "Cancelled.");
+        }
+    };
+    menu_ctx.imu_cal_status = [&motion_cal]() -> std::string {
+        switch (motion_cal.step) {
+        case MotionCal::Step::Center:  return "hold centre";
+        case MotionCal::Step::Up:      return "look UP";
+        case MotionCal::Step::Down:    return "look DOWN";
+        case MotionCal::Step::Left:    return "look LEFT";
+        case MotionCal::Step::Right:   return "look RIGHT";
+        case MotionCal::Step::Center2: return "back to centre";
+        default:                       return "";
+        }
+    };
     menu_ctx.pf_set_motion_particles = [&](bool v){
         pf_motion_particles = v;
         if (native_ctrl) native_ctrl->set_motion_particles(v);
@@ -5164,6 +5215,8 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
         cfg["protoface"]["motion_particles"]    = pf_motion_particles;
         cfg["protoface"]["motion_scale"]        = pf_motion_scale;
+        cfg["protoface"]["motion_range"]["pitch_deg"] = pf_range_pitch;
+        cfg["protoface"]["motion_range"]["yaw_deg"]   = pf_range_yaw;
         cfg["protoface"]["face_inertia"]        = pf_face_inertia;
         cfg["protoface"]["face_inertia_strength"] = pf_face_inertia_strength;
         cfg["protoface"]["weather_effects"]     = pf_weather_effects;
@@ -5745,12 +5798,96 @@ int main(int argc, char* argv[]) {
                     break;
                 }
             }
+            // ── Motion-range calibration wizard ─────────────────────────
+            // Steps advance automatically when the head has held the pose
+            // still for a moment; uses the same resolved angles as the feed.
+            if (motion_cal.step != MotionCal::Step::Idle) {
+                auto& C = motion_cal;
+                using St = MotionCal::Step;
+                auto circ = [](double d){ while (d > 180) d -= 360;
+                                          while (d < -180) d += 360; return d; };
+                const double ddt = std::clamp(static_cast<double>(dt), 1e-4, 0.1);
+                const bool still =
+                    std::fabs(m_pitch - C.pp) + std::fabs(m_roll - C.pr) < 35.0 * ddt &&
+                    std::fabs(circ(m_head - C.ph)) < 50.0 * ddt;
+                C.pr = m_roll; C.pp = m_pitch; C.ph = m_head;
+                const double dpitch = std::fabs(m_pitch - C.base_pitch);
+                const double dhead  = std::fabs(circ(m_head - C.base_head));
+                auto hold = [&](bool posed, double need) {
+                    C.stable_s = (still && posed) ? C.stable_s + ddt : 0.0;
+                    return C.stable_s >= need;
+                };
+                switch (C.step) {
+                case St::Center:
+                    if (hold(true, 1.0)) {
+                        C.base_pitch = m_pitch; C.base_head = m_head;
+                        C.step = St::Up; C.stable_s = 0;
+                        cal_note("Motion Calibration", "Look UP and hold...");
+                    }
+                    break;
+                case St::Up:
+                    if (hold(dpitch > 8.0, 0.6)) {
+                        C.up = dpitch; C.step = St::Down; C.stable_s = 0;
+                        cal_note("Motion Calibration", "Look DOWN and hold...");
+                    }
+                    break;
+                case St::Down:
+                    if (hold(dpitch > 8.0, 0.6)) {
+                        C.down = dpitch; C.step = St::Left; C.stable_s = 0;
+                        cal_note("Motion Calibration", "Look LEFT and hold...");
+                    }
+                    break;
+                case St::Left:
+                    if (hold(dhead > 10.0, 0.6)) {
+                        C.left = dhead; C.step = St::Right; C.stable_s = 0;
+                        cal_note("Motion Calibration", "Look RIGHT and hold...");
+                    }
+                    break;
+                case St::Right:
+                    if (hold(dhead > 10.0, 0.6)) {
+                        C.right = dhead; C.step = St::Center2; C.stable_s = 0;
+                        cal_note("Motion Calibration",
+                                 "Back to centre: head level, straight ahead...");
+                    }
+                    break;
+                case St::Center2:
+                    if (hold(dpitch < 6.0 && dhead < 10.0, 1.0)) {
+                        pf_range_pitch = (C.up + C.down) * 0.5;
+                        pf_range_yaw   = (C.left + C.right) * 0.5;
+                        // Straight-ahead + level right now: re-level the
+                        // BNO086 mount too (roll/pitch tare, north kept).
+                        if (bno086.connected()) bno086.level();
+                        char b[96];
+                        snprintf(b, sizeof b,
+                                 "Done. Pitch Â±%.0fÂ°, yaw Â±%.0fÂ° "
+                                 "- face response normalised.",
+                                 pf_range_pitch, pf_range_yaw);
+                        cal_note("Motion Calibration", b);
+                        C = MotionCal{};
+                    }
+                    break;
+                default: break;
+                }
+            }
+
+            // Range normalisation (from the wizard): map the wearer's
+            // measured comfortable range onto nominal spans (pitch 25 deg,
+            // yaw 45 deg) so a stiff suit still reaches full expression and
+            // slight angles stop reading exaggerated. Roll shares the pitch
+            // scale (tilt range ~ nod range). 0 = uncalibrated, no scaling.
+            double s_pitch = 1.0, s_yaw = 1.0;
+            if (pf_range_pitch > 4.0)
+                s_pitch = std::clamp(25.0 / pf_range_pitch, 0.4, 3.0);
+            if (pf_range_yaw > 8.0)
+                s_yaw = std::clamp(45.0 / pf_range_yaw, 0.4, 3.0);
             // Global sensitivity mapping (Face Display > Effects > Motion
             // Sensitivity): scale angles/rates before the face sees them.
             // Heading stays raw - it's an absolute bearing, not a response.
             const double ms = pf_motion_scale;
-            face_proxy.set_motion(m_head, m_yaw * ms, m_pitch * ms,
-                                  m_roll * ms, 1.0 + (m_accel - 1.0) * ms);
+            face_proxy.set_motion(m_head, m_yaw * s_yaw * ms,
+                                  m_pitch * s_pitch * ms,
+                                  m_roll * s_pitch * ms,
+                                  1.0 + (m_accel - 1.0) * ms);
         }
 
         // Effects Live Preview — re-apply the builder spec on change (no-op

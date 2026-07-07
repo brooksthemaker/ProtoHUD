@@ -861,6 +861,23 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         pt.visible_fn = [b]{ return b && b->connected(); };
         imu_menu.push_back(std::move(pt));
     }
+    // Guided range calibration: look up/down/left/right, back to centre.
+    if (ctx.imu_cal_start) {
+        MenuItem m = leaf("Calibrate Motion Range",
+                          [fn = ctx.imu_cal_start]{ fn(); });
+        m.label_fn = [st = ctx.imu_cal_status]{
+            const std::string s = st ? st() : std::string();
+            return s.empty() ? std::string("Calibrate Motion Range")
+                             : "Calibrating: " + s;
+        };
+        imu_menu.push_back(with_desc(std::move(m),
+            "Guided setup: hold your head level, then look up, down, left, "
+            "right, and back to centre - each step advances when you hold "
+            "still. Measures your comfortable head range and normalises the "
+            "face-motion response to it (slight tilts stop reading "
+            "exaggerated), and re-levels the mount at the final step. Select "
+            "again mid-run to cancel."));
+    }
     imu_menu.push_back(submenu("IMU Axis", std::move(imu_axis_menu)));
     imu_menu.push_back([&]() -> MenuItem {
         MenuItem m = leaf("Save IMU Calibration",

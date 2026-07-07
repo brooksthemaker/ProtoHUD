@@ -400,6 +400,11 @@ struct MenuBuildContext {
     // Global IMU->face motion sensitivity (see main's pf_motion_scale). Read
     // by the feed every frame - the menu just mutates it in place.
     double*                     pf_motion_scale_p = nullptr;
+    // Guided IMU motion-range calibration (main owns the wizard). start
+    // begins a run (or cancels the active one); status returns a short
+    // progress string for the menu row ("" = idle).
+    std::function<void()>        imu_cal_start;
+    std::function<std::string()> imu_cal_status;
     std::function<void(bool)> pf_set_weather_effects;
     bool* pf_weather_effects_p = nullptr;
     // Temp Effects - ambient frost / heat shimmer driven by the live outdoor
