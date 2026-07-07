@@ -238,8 +238,11 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     const float qy = val.un.arvrStabilizedRV.j;
     const float qz = val.un.arvrStabilizedRV.k;
 
-    float roll, pitch, yaw;                  // radians (euler.c uses atan2/asin)
-    q_to_ypr(qw, qx, qy, qz, &roll, &pitch, &yaw);
+    float yaw, pitch, roll;                  // radians (euler.c uses atan2/asin)
+    // q_to_ypr's out-params are ordered yaw, pitch, roll. Passing (&roll, ...,
+    // &yaw) here had them swapped, so the compass heading tracked the sensor's
+    // ROLL — tilting the head spun the compass while turning moved "R".
+    q_to_ypr(qw, qx, qy, qz, &yaw, &pitch, &roll);
     const float roll_deg  = roll  * kRad2Deg;
     const float pitch_deg = pitch * kRad2Deg;
     const float yaw_deg   = yaw   * kRad2Deg;
