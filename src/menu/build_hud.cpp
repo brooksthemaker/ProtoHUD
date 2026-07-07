@@ -810,6 +810,81 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         m.visible_fn = [b]{ return b && b->connected(); };
         return m;
     }());
+    imu_menu.push_back([&]() -> MenuItem {
+        // Mounting calibration: X|Y tare, persisted on the chip. Kills the
+        // standing roll a rotated mount feeds every absolute-roll consumer
+        // (Motion Reactive lean, Face Inertia rest offset, readout RPY).
+        Bno08x* b = ctx.bno08x;
+        MenuItem m = with_desc(
+            leaf("Set Level (Tare Roll/Pitch)", [b]{ if (b) b->level(); }),
+            "Hold the helmet level and look straight ahead, then select. "
+            "Tares the BNO086's roll/pitch so its mounting orientation reads "
+            "as zero - fixes face effects leaning sideways and Face Inertia "
+            "resting off-centre. Heading/north is untouched. Persisted on "
+            "the chip across power cycles.");
+        m.visible_fn = [b]{ return b && b->connected(); };
+        return m;
+    }());
+    // Manual trim: fine roll/pitch correction on top of Set Level, live and
+    // persisted to cfg["bno086"]. Small additive offsets — big mounting
+    // angles belong to Set Level's quaternion reorientation.
+    {
+        Bno08x* b   = ctx.bno08x;
+        json* cfgr  = ctx.cfg_root;
+        auto  trimv = std::make_shared<std::array<float, 2>>();
+        (*trimv) = {0.f, 0.f};
+        if (cfgr && cfgr->contains("bno086") && (*cfgr)["bno086"].is_object()) {
+            (*trimv)[0] = (*cfgr)["bno086"].value("roll_trim",  0.0f);
+            (*trimv)[1] = (*cfgr)["bno086"].value("pitch_trim", 0.0f);
+        }
+        auto apply = [b, cfgr, trimv]{
+            if (b) b->set_trim((*trimv)[0], (*trimv)[1]);
+            if (cfgr) {
+                (*cfgr)["bno086"]["roll_trim"]  = (*trimv)[0];
+                (*cfgr)["bno086"]["pitch_trim"] = (*trimv)[1];
+            }
+        };
+        MenuItem rt = with_desc(slider("Roll Trim", -15.f, 15.f, 0.5f, "\xc2\xb0",
+            [trimv]{ return (*trimv)[0]; },
+            [trimv, apply](float v){ (*trimv)[0] = v; apply(); }),
+            "Manual fine correction added to the roll output. Nudge until the "
+            "Live Readout RPY 'R' reads 0 with your head level (or effects "
+            "fall straight). Applies live; saved to cfg[\"bno086\"].");
+        rt.visible_fn = [b]{ return b && b->connected(); };
+        imu_menu.push_back(std::move(rt));
+        MenuItem pt = with_desc(slider("Pitch Trim", -15.f, 15.f, 0.5f, "\xc2\xb0",
+            [trimv]{ return (*trimv)[1]; },
+            [trimv, apply](float v){ (*trimv)[1] = v; apply(); }),
+            "Manual fine correction added to the pitch output. Nudge until "
+            "the Live Readout RPY 'P' reads 0 with your head level. Applies "
+            "live; saved to cfg[\"bno086\"].");
+        pt.visible_fn = [b]{ return b && b->connected(); };
+        imu_menu.push_back(std::move(pt));
+    }
+    // Guided range calibration: look up/down/left/right, back to centre.
+    // Press-driven: the row's Select starts the run, then captures each pose.
+    if (ctx.imu_cal_start) {
+        MenuItem m = leaf("Calibrate Motion Range",
+                          [fn = ctx.imu_cal_start]{ fn(); });
+        m.label_fn = [st = ctx.imu_cal_status]{
+            const std::string s = st ? st() : std::string();
+            return s.empty() ? std::string("Calibrate Motion Range")
+                             : "Capture: " + s;
+        };
+        imu_menu.push_back(with_desc(std::move(m),
+            "Guided setup, one Select per pose: straight ahead, up, down, "
+            "left, right, straight ahead again - hold each pose and press "
+            "Select (knob, GPIO menu button or Enter) to capture it. "
+            "Measures your comfortable head range and normalises the "
+            "face-motion response to it, and re-levels the mount at the "
+            "final step."));
+        MenuItem cx = leaf("Cancel Calibration",
+                           [fn = ctx.imu_cal_cancel]{ if (fn) fn(); });
+        cx.visible_fn = [st = ctx.imu_cal_status]{
+            return st && !st().empty();
+        };
+        imu_menu.push_back(std::move(cx));
+    }
     imu_menu.push_back(submenu("IMU Axis", std::move(imu_axis_menu)));
     imu_menu.push_back([&]() -> MenuItem {
         MenuItem m = leaf("Save IMU Calibration",

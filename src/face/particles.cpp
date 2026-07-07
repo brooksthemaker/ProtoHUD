@@ -714,39 +714,67 @@ public:
         for (auto& p : particles_) { p.extra += dt; p.life -= dt / p.max_life; }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [](const Particle& p){ return p.life <= 0; }), particles_.end());
-        while ((int)particles_.size() < count(40)) {
+        // Frost builds up: the crystal budget ramps from zero to full over
+        // the first form_s seconds (default 5), so it reads as ice forming
+        // rather than appearing fully grown.
+        age_ += dt;
+        const double form_s = std::max(0.1, jnum(cfg_, "form_s", 5.0));
+        const int budget = static_cast<int>(count(40) *
+                                            std::min(1.0, age_ / form_s));
+        while ((int)particles_.size() < budget) {
             const double depth = jnum(cfg_, "depth_frac", 0.35);
+            // White/blue ice mix by default (white sparkle, pale ice, deep
+            // blue); a "colors" list in the layer cfg still overrides.
+            static const Color kIce[3] = {
+                {255, 255, 255}, {200, 230, 255}, {120, 180, 255}};
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
-                                         : Color{210, 235, 255};
-            // Edge-biased position: pick a rim side, then bite inward with a
-            // quadratic bias so most crystals hug the border.
+                                         : kIce[(int)frand(rng_, 0, 3) % 3];
+            // Frost forms on the left/right/bottom rim (like a window — no
+            // top edge), heaviest along the bottom, the side runs climbing
+            // up from the bottom corners. Crystals bite inward with a
+            // quadratic bias so most hug the border. include_top:true
+            // restores the old full-rim look.
             double u = frand(rng_, 0, 1); u *= u;
             const double d = u * depth * std::min(w_, h_);
             Particle p;
-            switch ((int)frand(rng_, 0, 4) & 3) {
-                case 0:  p.x = frand(rng_, 0, w_ - 1); p.y = d;           break;
-                case 1:  p.x = frand(rng_, 0, w_ - 1); p.y = h_ - 1 - d;  break;
-                case 2:  p.x = d;                      p.y = frand(rng_, 0, h_ - 1); break;
-                default: p.x = w_ - 1 - d;             p.y = frand(rng_, 0, h_ - 1); break;
+            const double side = frand(rng_, 0, 1);
+            if (cfg_.value("include_top", false) && side < 0.18) {
+                p.x = frand(rng_, 0, w_ - 1);  p.y = d;              // top rim
+            } else if (side < 0.5) {
+                p.x = frand(rng_, 0, w_ - 1);  p.y = h_ - 1 - d;     // bottom
+            } else {
+                double v = frand(rng_, 0, 1); v *= v;                // corner bias
+                p.y = (h_ - 1) * (1.0 - v);
+                p.x = (side < 0.75) ? d : w_ - 1 - d;                // left/right
             }
             p.life = 1.0; p.max_life = frand(rng_, 3.0, 8.0);   // slow churn
             p.r = col.r; p.g = col.g; p.b = col.b;
-            p.size = pick_size(cfg_, 1, 1, rng_);
+            // Mixed 1-2 px crystals (2 px draws as a 3x3 cluster) so the ice
+            // reads chunky; size_min/size_max in the layer cfg still override.
+            p.size = pick_size(cfg_, 1, 2, rng_);
             p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
         }
     }
     cv::Mat render() override {
         cv::Mat c = blank();
+        // Frost sits translucent over the face (~50% by default) so the
+        // expression stays readable underneath; "opacity" in the layer cfg
+        // adjusts it.
+        const double opacity = std::clamp(jnum(cfg_, "opacity", 0.5), 0.0, 1.0);
         for (auto& p : particles_) {
             // Fade in as the crystal forms, out as it melts; twinkle on top.
             const double env = std::clamp(std::min((1.0 - p.life) * 6.0,
                                                    p.life * 6.0), 0.0, 1.0);
-            const double a = env * (0.35 + 0.45 * (0.5 + 0.5 * std::sin(p.extra * 1.7)));
+            const double a = env * (0.35 + 0.45 * (0.5 + 0.5 * std::sin(p.extra * 1.7)))
+                             * opacity;
             draw_particle(c, p, a);
         }
         return c;
     }
+
+private:
+    double age_ = 0.0;   // seconds since the layer started, for the form ramp
 };
 
 // ── Heatwave ─────────────────────────────────────────────────────────────────
@@ -1379,8 +1407,10 @@ public:
     void update(double dt) override {
         if (dt <= 0.0) return;
         dt = std::min(dt, 0.05);   // clamp big frame gaps so the slosh solver stays stable
-        // viscosity 0 = thin/snappy water, 1 = thick/sluggish (lags + resists slosh).
-        const double v = std::clamp(jnum(cfg_, "viscosity", 0.3), 0.0, 1.0);
+        // viscosity 0 = thin/snappy water, 1 = thick/sluggish (lags + resists
+        // slosh). Default 0.15 = plain water: fast waves, long ring-down.
+        // Thick liquids set their own (lava 0.6, mercury 0.7).
+        const double v = std::clamp(jnum(cfg_, "viscosity", 0.15), 0.0, 1.0);
         if (!tilt_init_) {
             tilt_smooth_  = motion_.roll_deg;
             pitch_smooth_ = motion_.pitch_deg;
@@ -1413,11 +1443,11 @@ public:
         slosh_vy_ += accel_y * dt;
         slosh_y_   = std::clamp(slosh_y_ + slosh_vy_ * dt, -h_ * 0.5, h_ * 0.5);
 
-        phase_ += jnum(cfg_, "wave_speed", 2.0) * (1.0 - 0.6 * v) * dt;   // travelling ripple
-        // Surface chop scales with how hard it's sloshing, plus a faint idle ripple.
-        const double target = (0.25 + std::min(2.0, std::fabs(slosh_v_) * 0.06))
-                            * (1.0 - 0.55 * v);
-        amp_ += (target - amp_) * std::min(1.0, dt * 4.0);
+        // Surface dynamics: a 1-D wave-equation heightfield (see
+        // step_heightfield) replaces the old rigid tilt-plane + global sine
+        // chop — waves now propagate, reflect off the side walls (that IS the
+        // slosh) and interfere, so the surface reads as liquid.
+        step_heightfield(dt, v);
 
         update_bubbles(dt);
     }
@@ -1454,7 +1484,10 @@ public:
     }
     // How strongly the face should glow back through the liquid (0 = opaque).
     double face_glow() const override {
-        return std::clamp(jnum(cfg_, "face_glow", 0.0), 0.0, 1.0);
+        // Default ON for liquids: a bare "water" layer (Single Effects) lets
+        // the face shine through at 0.55 like the curated presets do; set
+        // face_glow: 0 in the layer cfg for an opaque liquid.
+        return std::clamp(jnum(cfg_, "face_glow", 0.55), 0.0, 1.0);
     }
 private:
     // Effective fill fraction — base level shifted by smoothed pitch (look
@@ -1468,23 +1501,19 @@ private:
     // tank is continuous across panels) then shifted into this panel's frame.
     double surface_y_local(double lx) const {
         // Resting level (+ static pitch fill), bobbed by the vertical slosh.
-        const double base  = ch_ * (1.0 - level_eff()) + slosh_y_;
-        const double ccx   = cw_ * 0.5;
-        const double half  = std::max(1.0, cw_ * 0.5);
-        const double waven = jnum(cfg_, "wave_count", 2.0);
-        const double gain  = jnum(cfg_, "tilt_gain", 1.0);
-        const double roll  = tilt_smooth_ * gain * kPi / 180.0;
-        const double X     = ox_ + lx;
-        const double dx    = X - ccx;
-        // gravity lean (roll) + dynamic slosh lean (the fluid piled up at a wall)
-        double syc = base - dx * std::tan(std::clamp(roll, -1.2, 1.2))
-                          - slosh_x_ * (dx / half);
-        // Multi-frequency travelling chop — superposed waves read as real water
-        // instead of one cartoony sine. Amplitude follows slosh activity (amp_).
-        const double kf = waven * kTau / std::max(1, cw_);
-        syc += amp_ * (0.60 * std::sin(kf * X        + phase_)
-                     + 0.30 * std::sin(kf * X * 1.7  - phase_ * 1.3 + 1.1)
-                     + 0.22 * std::sin(kf * X * 0.5  + phase_ * 0.6 + 2.3));
+        // The lateral shape (tilt lean, slosh pile-up, chop) all lives in the
+        // heightfield now; sample it with linear interpolation so sub-pixel
+        // columns and bubbles get a smooth surface.
+        const double base = ch_ * (1.0 - level_eff()) + slosh_y_;
+        const double X    = ox_ + lx;
+        double hval = 0.0;
+        if (!hf_.empty()) {
+            const double fx = std::clamp(X, 0.0, (double)(cw_ - 1));
+            const int    x0 = (int)fx;
+            const int    x1 = std::min(x0 + 1, cw_ - 1);
+            hval = hf_[x0] + (hf_[x1] - hf_[x0]) * (fx - x0);
+        }
+        double syc = base + hval;
         // Meniscus: the surface curls up where it meets the container walls.
         const double menisc = jnum(cfg_, "meniscus", 1.5);
         if (menisc > 0.0) {
@@ -1567,7 +1596,54 @@ private:
                  (int)std::lround(v[i].g + (v[i+1].g - v[i].g) * t),
                  (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
     }
-    double phase_ = 0.0, amp_ = 0.0;
+    // 1-D wave-equation surface: per-canvas-column height (px, + = lower)
+    // and vertical velocity. Reflective walls make waves bounce back —
+    // that reflection is the slosh. Forced toward the gravity/slosh tilt
+    // line, with random micro-impulses for idle ripples and churn.
+    std::vector<double> hf_, hv_;
+    void step_heightfield(double dt, double viscosity) {
+        if ((int)hf_.size() != cw_) { hf_.assign(cw_, 0.0); hv_.assign(cw_, 0.0); }
+        // Propagation speed (px/s): wave_speed keeps its old knob meaning
+        // (bigger = livelier surface); thick liquid carries slower waves.
+        const double c      = jnum(cfg_, "wave_speed", 2.0) * 22.0
+                              * (1.0 - 0.55 * viscosity);
+        const double c2     = c * c;
+        const double damp   = 1.2 + 6.0 * viscosity;
+        const double k_pull = 30.0;              // relax toward the tilt line
+        const double ccx    = cw_ * 0.5;
+        const double half   = std::max(1.0, cw_ * 0.5);
+        const double gain   = jnum(cfg_, "tilt_gain", 1.0);
+        const double roll   = std::clamp(tilt_smooth_ * gain * kPi / 180.0, -1.2, 1.2);
+        const double slope  = std::tan(roll);
+        // Idle ripples + churn while sloshing: random micro-impulses that the
+        // wave equation spreads into expanding rings.
+        const double rate = jnum(cfg_, "ripple", 0.8) + std::fabs(slosh_v_) * 0.25;
+        // Sub-step for stability (CFL: c*dts must stay well under 1 px).
+        const int    n   = std::max(1, (int)std::ceil(dt / 0.008));
+        const double dts = dt / n;
+        for (int st = 0; st < n; ++st) {
+            // Expected `rate` drops per second (scaled with tank width):
+            // each pokes a 3-column dip the wave equation spreads outward.
+            if (cw_ > 3 && frand(rng_, 0.0, 1.0) < rate * (cw_ / 64.0) * dts) {
+                const int    x = irand(rng_, 1, cw_ - 3);
+                const double d = frand(rng_, 0.9, 2.2);
+                hf_[x]     -= d;
+                hf_[x + 1] -= d * 0.5;
+                hf_[x > 0 ? x - 1 : 0] -= d * 0.5;
+            }
+            for (int x = 0; x < cw_; ++x) {
+                const double hl  = hf_[x > 0 ? x - 1 : 0];        // reflective
+                const double hr  = hf_[x < cw_ - 1 ? x + 1 : cw_ - 1];
+                const double lap = hl + hr - 2.0 * hf_[x];
+                const double dx  = (x + 0.5) - ccx;
+                const double rest = -dx * slope - slosh_x_ * (dx / half);
+                hv_[x] += (c2 * lap + k_pull * (rest - hf_[x])) * dts
+                          - damp * hv_[x] * dts;
+            }
+            for (int x = 0; x < cw_; ++x)
+                hf_[x] = std::clamp(hf_[x] + hv_[x] * dts, -ch_ * 0.6, ch_ * 0.6);
+        }
+    }
     double tilt_smooth_ = 0.0, pitch_smooth_ = 0.0;
     double slosh_x_ = 0.0, slosh_v_  = 0.0;  // roll lean (px) + velocity
     double slosh_y_ = 0.0, slosh_vy_ = 0.0;  // pitch bob (px) + velocity

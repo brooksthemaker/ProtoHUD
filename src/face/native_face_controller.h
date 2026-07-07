@@ -25,6 +25,7 @@
 #include "face_config.h"
 #include "glitch.h"         // GlitchEffect + GlitchConfig
 #include "panel_output.h"   // PanelOutput + NamedRegion
+#include "scroll_text.h"    // ScrollText + ScrollTextConfig
 
 namespace face {
 
@@ -173,6 +174,12 @@ public:
     // occasional wrong-expression flash). Read by the render thread each frame.
     void set_glitch(const GlitchConfig& cfg);
 
+    // Live scrolling-text banner (see scroll_text.h): a marquee drawn onto the
+    // composited canvas above every layer including glitch, so it spans all
+    // panels and stays legible.
+    void set_scroll_text(const ScrollTextConfig& cfg) { scroll_text_.set_config(cfg); }
+    ScrollTextConfig scroll_text() const              { return scroll_text_.config(); }
+
     // Push a "transient" image for the named expression onto every panel
     // for duration_s seconds. The current image is stashed and restored
     // automatically when the timer expires (or on stop()). Used by the
@@ -271,6 +278,10 @@ private:
     GlitchEffect       glitch_;
     GlitchConfig       glitch_cfg_;
 
+    // Scrolling-text banner. Thread-safe internally (own mutex): tick/render
+    // run on the render thread, set_scroll_text() from menu/config threads.
+    ScrollText         scroll_text_;
+
     // Expression → mood-preset coupling (off by default). expr_effects_ gates
     // it; current_expression_ tracks the latest set face so toggling re-applies
     // correctly. Lives under state_mtx_.
@@ -289,6 +300,11 @@ private:
     double inertia_x_  = 0.0, inertia_y_  = 0.0;  // normalised offset, +-1.5 max
     double inertia_vx_ = 0.0, inertia_vy_ = 0.0;
     double inertia_prev_pitch_ = 0.0;
+    // Slow-tracking roll baseline (tau ~4 s): the spring uses roll RELATIVE to
+    // this so mounting tilt / head posture doesn't park the face off-centre —
+    // a deliberate lean still throws it for a couple of seconds, then the
+    // baseline catches up and the face re-centres.
+    double inertia_roll_base_  = 0.0;
     bool   inertia_prev_valid_ = false;
     nlohmann::json     ambient_spec_;         // ambient override (guarded by state_mtx_)
     std::atomic<int>   pride_angle_{90};      // pride flag stripe rotation, degrees

@@ -2188,20 +2188,32 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         upd_apply_filter();
     };
 
-    // Refresh rollback availability from the marker update.sh writes.
-    auto upd_refresh_rollback = [sh_read, upd]{
+    // Refresh rollback availability from the marker update.sh writes. Parsed
+    // directly (KEY=value lines) — sourcing it through /bin/sh printed
+    // "sh: 1: Bad substitution" (${VAR:0:9} is a bashism; the Pi's sh is
+    // dash) and "( unexpected" (the values used to be written unquoted, so a
+    // date/path with shell metacharacters broke the parser) at every startup.
+    auto upd_refresh_rollback = [upd]{
         std::string root;
         { std::lock_guard<std::mutex> lk(upd->mtx); root = upd->root; }
-        const std::string marker = root + "/state/update/last_good.env";
-        const std::string out = sh_read(
-            ("[ -f '" + marker + "' ] && . '" + marker +
-             "' && printf '%s|%s' \"${LAST_GOOD_COMMIT:0:9}\" \"${LAST_GOOD_BRANCH}\"").c_str());
+        std::string commit, branch;
+        std::ifstream f(root + "/state/update/last_good.env");
+        std::string line;
+        auto strip = [](std::string v) {
+            if (v.size() >= 2 && (v.front() == '"' || v.front() == '\'') &&
+                v.back() == v.front())
+                v = v.substr(1, v.size() - 2);
+            return v;
+        };
+        while (std::getline(f, line)) {
+            if      (line.rfind("LAST_GOOD_COMMIT=", 0) == 0) commit = strip(line.substr(17));
+            else if (line.rfind("LAST_GOOD_BRANCH=", 0) == 0) branch = strip(line.substr(17));
+        }
+        if (commit.size() > 9) commit.resize(9);
         std::lock_guard<std::mutex> lk(upd->mtx);
-        if (out.empty()) { upd->rollback_avail = false; upd->rollback_target.clear(); return; }
-        upd->rollback_avail = true;
-        auto bar = out.find('|');
-        upd->rollback_target = (bar == std::string::npos)
-            ? out : (out.substr(0, bar) + " on " + out.substr(bar + 1));
+        if (commit.empty()) { upd->rollback_avail = false; upd->rollback_target.clear(); return; }
+        upd->rollback_avail  = true;
+        upd->rollback_target = branch.empty() ? commit : (commit + " on " + branch);
     };
 
     // Initial population (local only — never auto-fetches the network).

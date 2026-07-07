@@ -1620,9 +1620,12 @@ int main(int argc, char* argv[]) {
         bno08x_cfg.rst_line           = jval(jb, "rst_line",           -1);
         bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 10000);
         bno08x_cfg.aux_interval_us    = jval(jb, "aux_interval_us",    40000);
+        bno08x_cfg.auto_calibrate     = jval(jb, "auto_calibrate",     true);
         bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
         bno08x_cfg.heading_offset     = jval(jb, "heading_offset",     0.0f);
         bno08x_cfg.heading_invert     = jval(jb, "heading_invert",     false);
+        bno08x_cfg.roll_trim          = jval(jb, "roll_trim",          0.0f);
+        bno08x_cfg.pitch_trim         = jval(jb, "pitch_trim",         0.0f);
         bno08x_cfg.head_tracking      = jval(jb, "head_tracking",      false);
     }
 
@@ -1847,6 +1850,37 @@ int main(int argc, char* argv[]) {
     // heatwave fill the clear-sky gaps. weather_fx_resync forces an immediate
     // re-evaluation when a toggle flips or a threshold moves.
     bool   pf_motion_particles = true;
+    // Global IMU->face motion mapping: scales roll/pitch/yaw-rate (and accel
+    // deviation from 1 g) before they reach the face consumers (Motion
+    // Reactive lean, water tilt/slosh, Face Inertia). 1.0 = raw angles;
+    // lower it if slight head tilts feel exaggerated on the panels. The HUD
+    // compass reads the IMU slots directly and is never scaled.
+    double pf_motion_scale     = 1.0;
+    // Guided motion-range calibration ("look up, down, left, right, then
+    // straight ahead"): measures the wearer's comfortable head range and
+    // normalises the face response to it. Captured spans persist to
+    // cfg["protoface"]["motion_range"]; 0 = uncalibrated (no scaling).
+    // The wizard is ticked from the render loop beside the motion feed.
+    struct MotionCal {
+        enum class Step { Idle, Center, Up, Down, Left, Right, Center2 };
+        Step   step = Step::Idle;
+        bool   advance = false;                // set by the menu row's select;
+                                               // the feed captures + steps on it
+        double base_pitch = 0, base_head = 0;  // neutral captured at Center
+        double up = 0, down = 0, left = 0, right = 0;   // captured spans (deg)
+    };
+    MotionCal motion_cal;
+    double pf_range_pitch = 0.0;   // calibrated half-range, deg (0 = off)
+    double pf_range_yaw   = 0.0;
+    auto cal_note = [&state](std::string title, std::string body) {
+        Notification n;
+        n.type  = NotifType::App;
+        n.title = std::move(title);
+        n.body  = std::move(body);
+        n.auto_dismiss_s = 6.f;
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.notifs.push(std::move(n));
+    };
     bool   pf_face_inertia     = true;
     double pf_face_inertia_strength = 1.0;   // 1.0 = slide up to ~10% of a panel
     bool   pf_weather_effects  = false;
@@ -1863,6 +1897,10 @@ int main(int argc, char* argv[]) {
     // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
     // region_desync, expr_flicker) is an independent variable.
     face::GlitchConfig pf_glitch;
+    // Scrolling-text banner across the face panels (marquee) — forwarded to
+    // the native controller live and persisted to cfg["protoface"]
+    // ["scroll_text"]. See face/scroll_text.h.
+    face::ScrollTextConfig pf_scroll;
     // Face animation tunables — forwarded to every panel's FaceState live
     // and persisted to cfg["protoface"]["animation"] on save.
     bool   pf_blink_enabled   = true;
@@ -1882,6 +1920,11 @@ int main(int argc, char* argv[]) {
         state.face.face_colors = jval(jpf, "face_colors", false);
         state.face.pride_sharp = jval(jpf, "pride_sharp", true);
         pf_motion_particles    = jval(jpf, "motion_particles", pf_motion_particles);
+        pf_motion_scale        = jval(jpf, "motion_scale", pf_motion_scale);
+        if (jpf.contains("motion_range") && jpf["motion_range"].is_object()) {
+            pf_range_pitch = jval(jpf["motion_range"], "pitch_deg", 0.0);
+            pf_range_yaw   = jval(jpf["motion_range"], "yaw_deg",   0.0);
+        }
         pf_face_inertia        = jval(jpf, "face_inertia",     pf_face_inertia);
         pf_face_inertia_strength =
             jval(jpf, "face_inertia_strength", pf_face_inertia_strength);
@@ -1951,6 +1994,8 @@ int main(int argc, char* argv[]) {
         }
         if (jpf.contains("glitch") && jpf["glitch"].is_object())
             pf_glitch = face::GlitchConfig::from_json(jpf["glitch"]);
+        if (jpf.contains("scroll_text") && jpf["scroll_text"].is_object())
+            pf_scroll = face::ScrollTextConfig::from_json(jpf["scroll_text"]);
         if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
             auto& jg = jpf["gradient"];
             pf_gradient.count     = std::clamp(jval(jg, "count", pf_gradient.count), 2, 6);
@@ -3172,6 +3217,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        native_ctrl->set_scroll_text(pf_scroll);
         native_ctrl->set_active_layout_name(pf_hub75_active);
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
         std::cout << "[main] Protoface: native in-process renderer\n";
@@ -3449,6 +3495,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        native_ctrl->set_scroll_text(pf_scroll);
         native_ctrl->set_active_layout_name(pf_hub75_active);
 
         // panel_driver.py choreography. The Python shim is only needed for
@@ -4047,6 +4094,7 @@ int main(int argc, char* argv[]) {
                                       pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        native_ctrl->set_scroll_text(pf_scroll);
     };
     menu_ctx.pf_set_effect_json = [&](const nlohmann::json& spec){
         if (native_ctrl) native_ctrl->set_effect_json(spec);
@@ -4059,6 +4107,35 @@ int main(int argc, char* argv[]) {
     };
     menu_ctx.pf_expr_effects_p = &pf_expr_effects;
     menu_ctx.pf_motion_particles_p = &pf_motion_particles;
+    menu_ctx.pf_motion_scale_p = &pf_motion_scale;
+    menu_ctx.imu_cal_start = [&motion_cal, cal_note]{
+        if (motion_cal.step == MotionCal::Step::Idle) {
+            motion_cal = MotionCal{};
+            motion_cal.step = MotionCal::Step::Center;
+            cal_note("Motion Calibration",
+                     "Head level, look straight ahead - then press Select "
+                     "to capture.");
+        } else {
+            motion_cal.advance = true;   // capture this pose, move on
+        }
+    };
+    menu_ctx.imu_cal_cancel = [&motion_cal, cal_note]{
+        if (motion_cal.step != MotionCal::Step::Idle) {
+            motion_cal = MotionCal{};
+            cal_note("Motion Calibration", "Cancelled.");
+        }
+    };
+    menu_ctx.imu_cal_status = [&motion_cal]() -> std::string {
+        switch (motion_cal.step) {
+        case MotionCal::Step::Center:  return "centre, then Select";
+        case MotionCal::Step::Up:      return "look UP, then Select";
+        case MotionCal::Step::Down:    return "look DOWN, then Select";
+        case MotionCal::Step::Left:    return "look LEFT, then Select";
+        case MotionCal::Step::Right:   return "look RIGHT, then Select";
+        case MotionCal::Step::Center2: return "centre, then Select";
+        default:                       return "";
+        }
+    };
     menu_ctx.pf_set_motion_particles = [&](bool v){
         pf_motion_particles = v;
         if (native_ctrl) native_ctrl->set_motion_particles(v);
@@ -4138,6 +4215,7 @@ int main(int argc, char* argv[]) {
         return coproc_inputs ? coproc_inputs->i2c_scan_result() : std::string("n/a");
     };
     menu_ctx.pf_glitch_p = &pf_glitch;
+    menu_ctx.pf_scroll_p = &pf_scroll;
 
     MenuSystem menu(build_menu(menu_ctx));
     menu_ptr = &menu;
@@ -5142,6 +5220,9 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["face_colors"]         = state.face.face_colors;
         cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
         cfg["protoface"]["motion_particles"]    = pf_motion_particles;
+        cfg["protoface"]["motion_scale"]        = pf_motion_scale;
+        cfg["protoface"]["motion_range"]["pitch_deg"] = pf_range_pitch;
+        cfg["protoface"]["motion_range"]["yaw_deg"]   = pf_range_yaw;
         cfg["protoface"]["face_inertia"]        = pf_face_inertia;
         cfg["protoface"]["face_inertia_strength"] = pf_face_inertia_strength;
         cfg["protoface"]["weather_effects"]     = pf_weather_effects;
@@ -5192,6 +5273,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
         cfg["protoface"]["animation"]["preview_duration_s"] = pf_preview_duration_s;
         cfg["protoface"]["glitch"] = pf_glitch.to_json();
+        cfg["protoface"]["scroll_text"] = pf_scroll.to_json();
         {
             auto& jg = cfg["protoface"]["gradient"];
             jg["count"]     = std::clamp(pf_gradient.count, 2, 6);
@@ -5722,7 +5804,80 @@ int main(int argc, char* argv[]) {
                     break;
                 }
             }
-            face_proxy.set_motion(m_head, m_yaw, m_pitch, m_roll, m_accel);
+            // ── Motion-range calibration wizard ─────────────────────────
+            // Press-driven: each Select on the menu row captures the current
+            // pose and advances (knob press, GPIO menu button or keyboard -
+            // anything that fires the row's action).
+            if (motion_cal.step != MotionCal::Step::Idle && motion_cal.advance) {
+                auto& C = motion_cal;
+                using St = MotionCal::Step;
+                C.advance = false;
+                auto circ = [](double d){ while (d > 180) d -= 360;
+                                          while (d < -180) d += 360; return d; };
+                const double dpitch = std::fabs(m_pitch - C.base_pitch);
+                const double dhead  = std::fabs(circ(m_head - C.base_head));
+                switch (C.step) {
+                case St::Center:
+                    C.base_pitch = m_pitch; C.base_head = m_head;
+                    C.step = St::Up;
+                    cal_note("Motion Calibration",
+                             "Look UP as far as comfortable, then Select.");
+                    break;
+                case St::Up:
+                    C.up = dpitch; C.step = St::Down;
+                    cal_note("Motion Calibration", "Look DOWN, then Select.");
+                    break;
+                case St::Down:
+                    C.down = dpitch; C.step = St::Left;
+                    cal_note("Motion Calibration", "Look LEFT, then Select.");
+                    break;
+                case St::Left:
+                    C.left = dhead; C.step = St::Right;
+                    cal_note("Motion Calibration", "Look RIGHT, then Select.");
+                    break;
+                case St::Right:
+                    C.right = dhead; C.step = St::Center2;
+                    cal_note("Motion Calibration",
+                             "Back to centre - head level, straight ahead - "
+                             "then Select.");
+                    break;
+                case St::Center2: {
+                    pf_range_pitch = (C.up + C.down) * 0.5;
+                    pf_range_yaw   = (C.left + C.right) * 0.5;
+                    // Straight-ahead + level right now: re-level the BNO086
+                    // mount too (roll/pitch tare, north kept).
+                    if (bno086.connected()) bno086.level();
+                    char b[96];
+                    snprintf(b, sizeof b,
+                             "Done. Pitch \xc2\xb1%.0f\xc2\xb0, yaw \xc2\xb1%.0f\xc2\xb0 "
+                             "- face response normalised.",
+                             pf_range_pitch, pf_range_yaw);
+                    cal_note("Motion Calibration", b);
+                    C = MotionCal{};
+                    break;
+                }
+                default: break;
+                }
+            }
+
+            // Range normalisation (from the wizard): map the wearer's
+            // measured comfortable range onto nominal spans (pitch 25 deg,
+            // yaw 45 deg) so a stiff suit still reaches full expression and
+            // slight angles stop reading exaggerated. Roll shares the pitch
+            // scale (tilt range ~ nod range). 0 = uncalibrated, no scaling.
+            double s_pitch = 1.0, s_yaw = 1.0;
+            if (pf_range_pitch > 4.0)
+                s_pitch = std::clamp(25.0 / pf_range_pitch, 0.4, 3.0);
+            if (pf_range_yaw > 8.0)
+                s_yaw = std::clamp(45.0 / pf_range_yaw, 0.4, 3.0);
+            // Global sensitivity mapping (Face Display > Effects > Motion
+            // Sensitivity): scale angles/rates before the face sees them.
+            // Heading stays raw - it's an absolute bearing, not a response.
+            const double ms = pf_motion_scale;
+            face_proxy.set_motion(m_head, m_yaw * s_yaw * ms,
+                                  m_pitch * s_pitch * ms,
+                                  m_roll * s_pitch * ms,
+                                  1.0 + (m_accel - 1.0) * ms);
         }
 
         // Effects Live Preview — re-apply the builder spec on change (no-op

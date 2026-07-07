@@ -126,7 +126,10 @@ struct LayerCfg {
     // Liquid fill fraction for the "water" effect (0..1). Ignored by others.
     float level = 0.4f;
     // Liquid viscosity for "water" (0 = thin/snappy, 1 = thick/sluggish).
-    float viscosity = 0.3f;
+    float viscosity = 0.15f;
+    // How strongly the submerged face glows back through the liquid, tinted
+    // by it (0 = opaque liquid). Water only.
+    float face_glow = 0.55f;
     // "water" extras: pitch shifts the fill level (look down → liquid rises);
     // bubbles count + style ("rise" bubbles in liquid / "drip" droplets above).
     float pitch_fill = 0.0f;
@@ -361,6 +364,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     std::function<void(double)> pf_set_face_inertia_strength =
         ctx.pf_set_face_inertia_strength;
     double* pf_face_inertia_strength_p = ctx.pf_face_inertia_strength_p;
+    double* pf_motion_scale_p = ctx.pf_motion_scale_p;
     std::function<void(bool)> pf_set_weather_effects = ctx.pf_set_weather_effects;
     bool* pf_weather_effects_p = ctx.pf_weather_effects_p;
     bool*   pf_temp_effects_p = ctx.pf_temp_effects_p;
@@ -387,6 +391,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     std::shared_ptr<std::function<void()>> coproc_reload = ctx.coproc_reload;
     std::shared_ptr<std::function<std::string()>> coproc_status = ctx.coproc_status;
     face::GlitchConfig* pf_glitch_p = ctx.pf_glitch_p;
+    face::ScrollTextConfig* pf_scroll_p = ctx.pf_scroll_p;
 
     // GIF slot machinery shared with the Files tab — constructed in
     // build_menu() around one preview state. gif_leaf is build-phase only.
@@ -1084,6 +1089,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 layer["level"]      = L.level;
                 layer["viscosity"]  = L.viscosity;
                 layer["pitch_fill"] = L.pitch_fill;
+                layer["face_glow"]  = L.face_glow;
                 if (L.bubbles > 0) {
                     layer["bubbles"]     = L.bubbles;
                     layer["bubble_mode"] = L.bubble_mode;
@@ -1124,8 +1130,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.direction_from = jl.value("direction_from", std::string("none"));
             L.intensity_from = jl.value("intensity_from", std::string("none"));
             L.level = jl.value("level", 0.4f);
-            L.viscosity = jl.value("viscosity", 0.3f);
+            L.viscosity = jl.value("viscosity", 0.15f);
             L.pitch_fill = jl.value("pitch_fill", 0.0f);
+            L.face_glow = jl.value("face_glow", 0.55f);
             L.bubbles = jl.value("bubbles", 0);
             L.bubble_mode = jl.value("bubble_mode", std::string("rise"));
             L.arc = jl.value("arc", false);
@@ -1185,6 +1192,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         "confetti", "rings", "fireflies", "clouds",
         "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
         "starfield", "warp", "constellation", "shootingstars",
+        // The "alive"-pack primitives shipped in the renderer + presets but
+        // never landed in this list, so Single Effects / the layer editor
+        // couldn't reach them.
+        "steam", "waveform", "matrix", "circuit", "frost", "heatwave",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
@@ -1275,6 +1286,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [L](float v){ L->viscosity = v / 100.f; });
                 vis.visible_fn = [L]{ return L->effect == "water"; };
                 return vis;
+            })(),
+            // Face Glow — water only: the submerged face shines back through
+            // the liquid, tinted by it (eyes read through the water).
+            ([&]{
+                MenuItem fg = slider("Face Glow", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->face_glow * 100.f; },
+                    [L](float v){ L->face_glow = v / 100.f; });
+                fg.visible_fn = [L]{ return L->effect == "water"; };
+                return fg;
             })(),
             // Pitch Fill — water only: head pitch shifts the liquid level.
             ([&]{
@@ -1699,6 +1719,17 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Couple directional effects to real head motion: rain/snow/steam "
             "lean with gravity as you tilt and get swept sideways by quick "
             "turns. Needs an IMU feeding head tracking."));
+    if (pf_motion_scale_p)
+        pf_effects.push_back(with_desc(slider("Motion Sensitivity", 10.f, 200.f, 10.f, "%",
+            [pf_motion_scale_p]{ return static_cast<float>(*pf_motion_scale_p * 100.0); },
+            [pf_motion_scale_p, cfg_root](float v){
+                *pf_motion_scale_p = v / 100.0;
+                if (cfg_root) (*cfg_root)["protoface"]["motion_scale"] = v / 100.0;
+            }),
+            "Maps IMU angles to face response: how strongly head roll/pitch/"
+            "turn rate drive Motion Reactive, water tilt/slosh and Face "
+            "Inertia. 100% = raw angles; drop it if slight tilts feel "
+            "exaggerated on the panels. The HUD compass is never scaled."));
     if (pf_face_inertia_p && pf_set_face_inertia) {
         pf_effects.push_back(with_desc(toggle("Face Inertia",
             [pf_face_inertia_p]{ return *pf_face_inertia_p; },
@@ -3020,6 +3051,76 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "Digital glitch corruption of the face. Master Intensity and Burst "
                 "Rate gate the look (Burst Rate 0 = constant); each component below "
                 "is an independent amount.");
+        })(),
+        // Scrolling text banner — a marquee across every panel, drawn above the
+        // face / effects / glitch so it stays legible.
+        ([&]() -> MenuItem {
+            if (!pf_scroll_p) { MenuItem e; e.visible_fn = []{ return false; }; return e; }
+            face::ScrollTextConfig* S = pf_scroll_p;
+            std::vector<MenuItem> si;
+            si.push_back(with_desc(toggle("Show Text",
+                [S]{ return S->enabled; },
+                [S, pf_anim_push](bool v){ S->enabled = v; if (pf_anim_push) pf_anim_push(); }),
+                "Master enable for the scrolling banner. Off is a true no-op. "
+                "The text, speed and color keep their values while disabled."));
+            {
+                MenuItem t = leaf("Edit Text...", [S, menu_sys_pp, pf_anim_push]{
+                    if (!menu_sys_pp || !*menu_sys_pp) return;
+                    (*menu_sys_pp)->open_keyboard("Scroll Text", S->text,
+                        [S, pf_anim_push](const std::string& v){
+                            S->text = v;
+                            if (!v.empty()) S->enabled = true;
+                            if (pf_anim_push) pf_anim_push();
+                        });
+                });
+                t.label_fn = [S]{
+                    return S->text.empty() ? std::string("Edit Text...")
+                                           : "Text: " + S->text;
+                };
+                si.push_back(with_desc(std::move(t),
+                    "The message to scroll (on-screen keyboard). Committing a "
+                    "non-empty text switches the banner on; glyphs the 5x7 "
+                    "font lacks render blank."));
+            }
+            si.push_back(with_desc(slider("Speed", 4.f, 120.f, 4.f, "px/s",
+                [S]{ return static_cast<float>(S->speed_px_s); },
+                [S, pf_anim_push](float v){ S->speed_px_s = v; if (pf_anim_push) pf_anim_push(); }),
+                "Scroll speed in canvas pixels per second (right to left)."));
+            {
+                std::vector<MenuItem> zi;
+                for (int k = 1; k <= 4; ++k)
+                    zi.push_back(leaf_sel(std::to_string(k) + "x",
+                        [S, k, pf_anim_push]{ S->scale = k; if (pf_anim_push) pf_anim_push(); },
+                        [S, k]{ return S->scale == k; }));
+                si.push_back(with_desc(submenu("Size", std::move(zi)),
+                    "Integer upscale of the 5x7 font. 2x (10x14) reads well "
+                    "across a 32px-tall face; 4x fills most of the panel "
+                    "height."));
+            }
+            {
+                struct C { const char* n; uint8_t r, g, b; };
+                static constexpr C kCols[] = {
+                    {"White", 255,255,255}, {"Amber", 255,160,32},
+                    {"Red",   255, 50, 50}, {"Green",  30,220,60},
+                    {"Cyan",    0,180,255}, {"Purple",180, 30,220},
+                };
+                std::vector<MenuItem> ci;
+                for (const auto& c : kCols)
+                    ci.push_back(leaf_sel(c.n,
+                        [S, c, pf_anim_push]{ S->r = c.r; S->g = c.g; S->b = c.b;
+                                              if (pf_anim_push) pf_anim_push(); },
+                        [S, c]{ return S->r == c.r && S->g == c.g && S->b == c.b; }));
+                si.push_back(submenu("Color", std::move(ci)));
+            }
+            si.push_back(with_desc(toggle("Loop",
+                [S]{ return S->loop; },
+                [S, pf_anim_push](bool v){ S->loop = v; if (pf_anim_push) pf_anim_push(); }),
+                "On: the message wraps around forever. Off: one pass across "
+                "the panels, then the banner switches itself off."));
+            return with_desc(submenu("Scrolling Text", std::move(si)),
+                "Scroll a text banner across the face panels (5x7 pixel font, "
+                "tinted, above every layer). Config: cfg[\"protoface\"]"
+                "[\"scroll_text\"].");
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),

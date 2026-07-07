@@ -57,11 +57,14 @@ record_good() {
             while read -r old; do rm -f "${old}"; done
     fi
 
+    # Values single-quoted so the file stays safely sourceable by any POSIX
+    # sh (rollback.sh sources it) — an unquoted date/path with spaces or
+    # parens breaks dash's parser.
     {
-        echo "LAST_GOOD_COMMIT=${commit}"
-        echo "LAST_GOOD_BRANCH=${branch}"
-        echo "LAST_GOOD_DATE=${ts}"
-        echo "LAST_GOOD_CONFIG=${cfg_backup}"
+        echo "LAST_GOOD_COMMIT='${commit}'"
+        echo "LAST_GOOD_BRANCH='${branch}'"
+        echo "LAST_GOOD_DATE='${ts}'"
+        echo "LAST_GOOD_CONFIG='${cfg_backup}'"
     } > "${state_dir}/last_good.env" 2>/dev/null || true
     log "recorded rollback point: ${commit:0:9} on ${branch}"
 }

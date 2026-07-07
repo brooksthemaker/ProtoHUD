@@ -49,7 +49,7 @@ namespace accessory    { class AccessoryLeds; }
 namespace sys          { class FanController; }
 namespace input        { struct GpioPinCfg; struct CoprocConfig; }
 namespace integrations { class KdeConnectBridge; }
-namespace face         { struct GlitchConfig; }
+namespace face         { struct GlitchConfig; struct ScrollTextConfig; }
 
 // HUB75 panel layout state. Lives here (not main.cpp) because both the menu
 // (HUB75 Layout editor) and main's renderer-rebuild path use it.
@@ -397,6 +397,16 @@ struct MenuBuildContext {
     bool*                       pf_face_inertia_p = nullptr;
     std::function<void(double)> pf_set_face_inertia_strength;
     double*                     pf_face_inertia_strength_p = nullptr;
+    // Global IMU->face motion sensitivity (see main's pf_motion_scale). Read
+    // by the feed every frame - the menu just mutates it in place.
+    double*                     pf_motion_scale_p = nullptr;
+    // Guided IMU motion-range calibration (main owns the wizard). start
+    // begins a run; while one is active the same call captures the current
+    // pose and advances (press-driven). cancel aborts; status returns a
+    // short progress string for the menu row ("" = idle).
+    std::function<void()>        imu_cal_start;
+    std::function<void()>        imu_cal_cancel;
+    std::function<std::string()> imu_cal_status;
     std::function<void(bool)> pf_set_weather_effects;
     bool* pf_weather_effects_p = nullptr;
     // Temp Effects - ambient frost / heat shimmer driven by the live outdoor
@@ -475,6 +485,9 @@ struct MenuBuildContext {
     // Glitch post-effect config (null on non-native backends). The menu
     // mutates it in place and re-pushes via pf_anim_push().
     face::GlitchConfig* pf_glitch_p = nullptr;
+    // Scrolling-text banner config — same contract as pf_glitch_p (mutate in
+    // place, re-push via pf_anim_push()).
+    face::ScrollTextConfig* pf_scroll_p = nullptr;
 
     // ── Build-phase shared fragments ──────────────────────────────────────────
     // NOT caller-supplied: set by build_menu() before the tab builders run

@@ -36,10 +36,19 @@ public:
         int         rst_line           = -1;           // RST offset (active-low); -1 = no hardware reset
         int         report_interval_us = 10000;        // 10 ms = 100 Hz orientation
         int         aux_interval_us    = 40000;        // 25 Hz calibrated accel/gyro/mag
+        bool        auto_calibrate     = true;         // dynamic cal on accel/gyro/mag +
+                                                       // periodic DCD save to chip flash
         float       declination_deg    = 0.0f;         // local magnetic declination (+E/-W)
         float       heading_offset     = 0.0f;         // mechanical mount offset (deg)
         bool        heading_invert     = false;        // flip yaw→heading direction if mirrored
         bool        head_tracking      = false;        // also feed imu_pose for head tracking
+        // Manual trim added to the euler outputs (degrees) — fine correction
+        // for residual lean after Set Level, or instead of it for small
+        // mounting angles. Additive on roll/pitch only (yaw already has
+        // heading_offset), so keep it small (< ~15°) — beyond that use Set
+        // Level, which reorients properly in the quaternion domain.
+        float       roll_trim          = 0.0f;
+        float       pitch_trim         = 0.0f;
     };
 
     struct Sample {
@@ -81,9 +90,20 @@ public:
     // Tare: make the current orientation the new "forward" (yaw only, or all
     // axes). Applied on the service thread. Wired to a menu action / recenter.
     void recenter(bool all_axes = false) { tare_request_.store(all_axes ? 2 : 1); }
+    // Mounting calibration: tare roll/pitch ONLY (X|Y) so the sensor's mount
+    // orientation reads as level, leaving the yaw/north reference untouched,
+    // and persist it on the chip so it survives power cycles. Fixes every
+    // absolute-roll consumer at the source (Motion Reactive lean, Face
+    // Inertia rest offset, the readout's RPY).
+    void level() { tare_request_.store(3); }
 
     void set_declination_deg(float v) { declination_deg_.store(v); }
     void set_head_tracking(bool v)    { head_tracking_.store(v);   }
+    // Live trim (menu sliders) — applied to roll/pitch on the next sample.
+    void set_trim(float roll_deg, float pitch_deg) {
+        roll_trim_.store(roll_deg);
+        pitch_trim_.store(pitch_deg);
+    }
 
     // Internal — public only so the C HAL/callback trampolines can reach them.
     bool hal_open();
@@ -105,8 +125,14 @@ private:
     std::atomic<bool>  running_        { false };
     std::atomic<bool>  ok_             { false };
     std::atomic<bool>  want_reinit_    { false };   // set on device reset → re-enable reports
-    std::atomic<int>   tare_request_   { 0 };       // 0=none, 1=yaw, 2=all axes
+    std::atomic<int>   tare_request_   { 0 };       // 0=none, 1=yaw, 2=all axes, 3=level
+    // Latest sample quaternion (w,x,y,z) for level()'s reorientation math.
+    // Written and read on the service thread only.
+    double             last_q_[4]      = {1, 0, 0, 0};
+    bool               have_q_         = false;
     std::atomic<float> declination_deg_{ 0.f };
+    std::atomic<float> roll_trim_      { 0.f };
+    std::atomic<float> pitch_trim_     { 0.f };
     std::atomic<bool>  head_tracking_  { false };
 
     int i2c_fd_ = -1;

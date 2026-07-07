@@ -169,6 +169,17 @@ bool Bno08x::enable_reports() {
         sh2_setSensorConfig(SH2_MAGNETIC_FIELD_CALIBRATED, &sc) != SH2_OK)
         fprintf(stderr, "[bno086] warning: could not enable accel/gyro/mag reports\n");
 
+    // Auto-calibration: keep the chip's dynamic calibration running on all
+    // three sensors and let it persist the refined calibration (DCD) to its
+    // own flash periodically. The mag then walks itself up to s3 during
+    // normal wear — no figure-8 ritual — and the result survives power
+    // cycles. A final snapshot is also taken on clean shutdown.
+    if (cfg_.auto_calibrate) {
+        if (sh2_setCalConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG) != SH2_OK)
+            fprintf(stderr, "[bno086] warning: could not enable dynamic calibration\n");
+        sh2_setDcdAutoSave(true);
+    }
+
     return rv_ok;
 }
 
@@ -177,6 +188,8 @@ bool Bno08x::start() {
     if (running_.load()) return true;
 
     declination_deg_.store(cfg_.declination_deg);
+    roll_trim_.store(cfg_.roll_trim);
+    pitch_trim_.store(cfg_.pitch_trim);
     head_tracking_.store(cfg_.head_tracking);
 
     g_hal.owner         = this;
@@ -221,13 +234,46 @@ void Bno08x::service_loop() {
         if (want_reinit_.exchange(false))
             enable_reports();                // re-enable reports after a device reset
         int tare = tare_request_.exchange(0);
-        if (tare) {
+        if (tare == 3) {
+            // Level (mounting calibration). TARE_NOW X|Y is silently ignored
+            // by the firmware for rotation-vector bases (roll/pitch are
+            // gravity-referenced) — the first cut of this did nothing. The
+            // supported mechanism is the reorientation quaternion: pick R so
+            // the CURRENT pose reads as yaw-only (out = R * raw), i.e.
+            // R = yawonly(now) * conj(now), then persist (sh2_persistTare
+            // stores the runtime reorientation to flash). Verified against
+            // the vendored euler.c: a pose mounted 30 deg roll / -20 deg
+            // pitch levels to exactly 0/0 with yaw preserved.
+            if (have_q_) {
+                float yw, pt, rl;
+                q_to_ypr(static_cast<float>(last_q_[0]), static_cast<float>(last_q_[1]),
+                         static_cast<float>(last_q_[2]), static_cast<float>(last_q_[3]),
+                         &yw, &pt, &rl);
+                const double th = -static_cast<double>(yw);   // euler.c yaw = -theta_z
+                const double c = std::cos(th * 0.5), s = std::sin(th * 0.5);
+                // conj(now):
+                const double w2 =  last_q_[0], x2 = -last_q_[1],
+                             y2 = -last_q_[2], z2 = -last_q_[3];
+                sh2_Quaternion_t R;                            // (c,0,0,s) * conj(now)
+                R.w = c * w2 - s * z2;
+                R.x = c * x2 - s * y2;
+                R.y = c * y2 + s * x2;
+                R.z = c * z2 + s * w2;
+                sh2_setReorientation(&R);
+                sh2_persistTare();
+            }
+        } else if (tare) {
             const uint8_t axes = (tare == 2) ? (SH2_TARE_X | SH2_TARE_Y | SH2_TARE_Z)
                                              : SH2_TARE_Z;
             sh2_setTareNow(axes, SH2_TARE_BASIS_ROTATION_VECTOR);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    // Snapshot the session's dynamic-calibration refinements to the chip's
+    // flash on the way out (the periodic autosave catches most of it; this
+    // catches the tail). Still on the service thread, link still open —
+    // sh2 blocking ops self-pump SHTP with a timeout, so this can't hang.
+    if (cfg_.auto_calibrate) sh2_saveDcdNow();
 }
 
 // ── event handling ────────────────────────────────────────────────────────────
@@ -280,13 +326,21 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     const float qy = val.un.arvrStabilizedRV.j;
     const float qz = val.un.arvrStabilizedRV.k;
 
+    // Latest pose for level()'s reorientation math. Callbacks fire on the
+    // service thread (sh2_service dispatches synchronously), the same thread
+    // that consumes this in service_loop — no locking needed.
+    last_q_[0] = qw; last_q_[1] = qx; last_q_[2] = qy; last_q_[3] = qz;
+    have_q_ = true;
+
     float yaw, pitch, roll;                  // radians (euler.c uses atan2/asin)
     // q_to_ypr's out-params are ordered yaw, pitch, roll. Passing (&roll, ...,
     // &yaw) here had them swapped, so the compass heading tracked the sensor's
     // ROLL — tilting the head spun the compass while turning moved "R".
     q_to_ypr(qw, qx, qy, qz, &yaw, &pitch, &roll);
-    const float roll_deg  = roll  * kRad2Deg;
-    const float pitch_deg = pitch * kRad2Deg;
+    // Manual trim: small additive corrections for residual lean (menu
+    // sliders / config). Yaw trim is heading_offset below, as before.
+    const float roll_deg  = roll  * kRad2Deg + roll_trim_.load();
+    const float pitch_deg = pitch * kRad2Deg + pitch_trim_.load();
     const float yaw_deg   = yaw   * kRad2Deg;
 
     float heading = (cfg_.heading_invert ? -yaw_deg : yaw_deg)
