@@ -81,8 +81,12 @@ void CmdFifo::reader_loop() {
             const char c = chunk[i];
             if (c == '\n' || c == '\r') {
                 if (!buf.empty()) {
-                    const GpioFunc f = gpio_func_from_id(buf);
-                    if (f != GpioFunc::None && dispatch_) dispatch_(f);
+                    // Parametric commands (e.g. "max_text:HI") get first refusal;
+                    // otherwise resolve the line as a GpioFunc id.
+                    if (!(raw_handler_ && raw_handler_(buf))) {
+                        const GpioFunc f = gpio_func_from_id(buf);
+                        if (f != GpioFunc::None && dispatch_) dispatch_(f);
+                    }
                     buf.clear();
                 }
             } else if (buf.size() < kMaxLine) {

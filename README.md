@@ -37,6 +37,10 @@ Audio capture and all DSP (beamforming, noise suppression, direction-of-arrival)
 
 ## Architecture Overview
 
+> Working on the code? **[docs/development-guide.md](docs/development-guide.md)**
+> explains every subsystem twice (one-liner + detail), how they interact, and
+> has step-by-step recipes for the common modifications.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Raspberry Pi CM5 (aarch64 · Bookworm / Trixie + RPT)                │

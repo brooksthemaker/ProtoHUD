@@ -47,7 +47,7 @@ namespace sensor       { class BoopSensor; }
 namespace audio        { class VoiceAnalyzer; }
 namespace accessory    { class AccessoryLeds; }
 namespace sys          { class FanController; }
-namespace input        { struct GpioPinCfg; }
+namespace input        { struct GpioPinCfg; struct CoprocConfig; }
 namespace integrations { class KdeConnectBridge; }
 namespace face         { struct GlitchConfig; }
 
@@ -92,6 +92,41 @@ struct PfHub75Layout {
     // nudges as "uninitialised" and populate them.
     bool        defaults_applied = false;
 };
+
+// ── MAX7219 panel layout (editor state) ──────────────────────────────────────
+// Friendly front-end to Max7219Chain's module_positions: a ragged grid of 8×8
+// modules the user builds in Face Display > MAX7219 Layout. rows[r] = how many
+// panels sit in row r (so rows.size() = row count and each row's width is
+// independent). Applied by rebuilding cfg["protoface"]["max7219"] and hot-
+// swapping the panel output. Driven over the coprocessor (transport "coproc").
+struct PfMax7219Layout {
+    std::vector<int> rows { 4 };                // panels per row, in order top→bottom
+    std::string chain_order = "serpentine";     // serpentine | row_major (DIN→DOUT walk)
+    std::string module_type = "fc16";           // fc16 | generic1088
+    std::string mode        = "section";        // section (beside HUB75) | main (the face)
+    std::string content     = "face";           // section content: face (mirror) | symbols
+    int         coproc_cs   = 0;                 // → firmware kMaxCsPins[coproc_cs]
+    int         intensity   = 6;                 // 0..15
+    int         canvas_x    = 0;                 // top-left of the block on the canvas
+    int         canvas_y    = 0;
+    bool        enabled     = false;
+};
+
+// Walk the ragged grid into per-module {x, y} canvas origins in DIN→DOUT (daisy)
+// order — exactly what Max7219Chain::Config::module_positions wants, and what
+// the wiring diagram numbers. Serpentine reverses every other row (boustrophedon)
+// so the physical return wire on each row is short.
+inline std::vector<std::array<int, 2>> pf_max7219_modules(const PfMax7219Layout& L) {
+    std::vector<std::array<int, 2>> mods;
+    for (int r = 0; r < static_cast<int>(L.rows.size()); ++r) {
+        const int n = std::clamp(L.rows[r], 0, 32);
+        for (int c = 0; c < n; ++c) {
+            const int col = (L.chain_order == "serpentine" && (r & 1)) ? (n - 1 - c) : c;
+            mods.push_back({L.canvas_x + col * 8, L.canvas_y + r * 8});
+        }
+    }
+    return mods;
+}
 
 // ── Custom multi-colour gradient material ───────────────────────────────────
 // Editor state for Protoface > Material Color > Custom Gradient. Up to 6 colour
@@ -314,6 +349,15 @@ struct MenuBuildContext {
     std::map<std::string, PfHub75Layout>* pf_hub75_layouts_p = nullptr;
     std::string* pf_hub75_active_p = nullptr;
     std::function<void()> pf_layout_changed;
+    // MAX7219 panel layout editor (Face Display > MAX7219 Layout). pf_max7219_p
+    // is the working copy; pf_max7219_apply serialises it into
+    // cfg["protoface"]["max7219"] and hot-swaps the panel output so the change
+    // (and the coproc-driven "section" beside HUB75) takes effect live.
+    PfMax7219Layout* pf_max7219_p = nullptr;
+    std::function<void()> pf_max7219_apply;
+    // Trigger content on the MAX7219 "section" panels (content:"symbols"). kind =
+    // symbol|text|pattern|clear|next|prev; value = the symbol/pattern/text.
+    std::function<void(const std::string& kind, const std::string& value)> pf_max_content;
     // Face animation tunables — pointers + a "push live" callback that
     // forwards the current values into native_ctrl after a slider/toggle
     // change. Caller owns the slots and the persistence to config.json.
@@ -387,6 +431,20 @@ struct MenuBuildContext {
     bool* coproc_enabled_p = nullptr;
     std::shared_ptr<std::function<void()>> coproc_reload;
     std::shared_ptr<std::function<std::string()>> coproc_status;
+    // Coprocessor I²C bus test: trigger a scan of its I²C lines, and read back the
+    // last result (address list / "none" / "scanning…"). See CoprocInputs.
+    std::function<void()>        coproc_i2c_scan;
+    std::function<std::string()> coproc_i2c_result;
+    // Live coprocessor config (pins + button maps) for the Pins visualizer/editor.
+    // Edited in place, then persisted to cfg["inputs"]["coprocessor"] and re-pushed
+    // via coproc_reload.
+    input::CoprocConfig* coproc_cfg_p = nullptr;
+    // When set, build_system_menu routes its GPIO items here instead of into the
+    // System menu, so build_menu can assemble the top-level "GPIO" tab:
+    //   gpio_onboard_out  ← Pi 40-pin visualizer + on-board GPIO button map
+    //   gpio_expander_out ← RP2350 coprocessor (enable/status + Pico pin editor)
+    std::vector<MenuItem>* gpio_onboard_out  = nullptr;
+    std::vector<MenuItem>* gpio_expander_out = nullptr;
     // Glitch post-effect config (null on non-native backends). The menu
     // mutates it in place and re-pushes via pf_anim_push().
     face::GlitchConfig* pf_glitch_p = nullptr;

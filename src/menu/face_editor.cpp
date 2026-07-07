@@ -55,6 +55,8 @@ void FaceEditor::open(std::string title,
     covered_         = std::move(covered_regions);
     covered_labels_  = std::move(covered_labels);
     if (covered_labels_.size() != covered_.size()) covered_labels_.assign(covered_.size(), "");
+    wiring_modules_.clear();   // caller re-supplies via set_wiring_guide() for MAX
+    show_wiring_ = false;
     mirror_axis_x_   = mirror_axis_x;
     eye_polys_       = std::move(eye_polys);
     eye_pts_.clear();
@@ -444,6 +446,11 @@ void FaceEditor::toggle_live() {
         on_preview_(canvas_, std::max(1.5, preview_duration_s_));
 }
 
+void FaceEditor::set_wiring_guide(std::vector<std::array<int, 2>> modules) {
+    wiring_modules_ = std::move(modules);
+    show_wiring_ = !wiring_modules_.empty();   // on by default when there's a chain
+}
+
 void FaceEditor::undo() {
     if (!open_) return;
     // Z while a shape anchor is set just cancels it (no canvas change to
@@ -506,6 +513,7 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     if (ImGui::IsKeyPressed(ImGuiKey_Z))          undo();
     if (ImGui::IsKeyPressed(ImGuiKey_V))          preview();
     if (ImGui::IsKeyPressed(ImGuiKey_T))          toggle_live();
+    if (ImGui::IsKeyPressed(ImGuiKey_G))          toggle_wiring();
     if (ImGui::IsKeyPressed(ImGuiKey_S))          save();
     // Direct tool selection. Number keys 1-6 map to the six tools in
     // declaration order (Pencil/Eraser/Bucket/Eyedrop/Line/Rect); the
@@ -723,6 +731,42 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                               {tx + ts.x + 3.f, ty + ts.y + 1.f},
                               label_bg, 2.f);
             dl->AddText(font, label_fs, {tx, ty}, label_col, lbl.c_str());
+        }
+
+        // MAX7219 wiring guide — number each 8×8 module in DIN→DOUT (daisy)
+        // order, trace the chain with arrows, mark DIN/DOUT, and show which
+        // coprocessor pins to connect. Toggle with G. Same canvas→screen
+        // transform as the zone boxes (module centre = top-left + 4px).
+        if (show_wiring_ && !wiring_modules_.empty()) {
+            const int total = static_cast<int>(wiring_modules_.size());
+            auto mod_ctr = [&](int i) -> ImVec2 {
+                return { grid_origin_x_ + (wiring_modules_[i][0] - bbox_.x + 4) * cell_size_,
+                         grid_origin_y_ + (wiring_modules_[i][1] - bbox_.y + 4) * cell_size_ };
+            };
+            const ImU32 arr_col = IM_COL32(120, 200, 255, 230);
+            const ImU32 num_bg  = IM_COL32(0, 0, 0, 160);
+            const ImU32 num_col = IM_COL32(235, 240, 245, 255);
+            const float num_fs  = std::max(9.f, fs * 0.6f);
+            for (int i = 0; i + 1 < total; ++i)
+                dl->AddLine(mod_ctr(i), mod_ctr(i + 1), arr_col, 2.f);
+            for (int i = 0; i < total; ++i) {
+                const ImVec2 c = mod_ctr(i);
+                char n[8]; std::snprintf(n, sizeof(n), "%d", i);
+                const ImVec2 ts = font->CalcTextSizeA(num_fs, FLT_MAX, 0.f, n);
+                dl->AddRectFilled({c.x - ts.x * 0.5f - 2.f, c.y - ts.y * 0.5f - 1.f},
+                                  {c.x + ts.x * 0.5f + 2.f, c.y + ts.y * 0.5f + 1.f},
+                                  num_bg, 2.f);
+                dl->AddText(font, num_fs, {c.x - ts.x * 0.5f, c.y - ts.y * 0.5f}, num_col, n);
+            }
+            const ImVec2 d0 = mod_ctr(0);
+            dl->AddText(font, num_fs, {d0.x - 6.f, d0.y - num_fs - 6.f},
+                        IM_COL32(120, 200, 140, 255), "DIN");
+            const ImVec2 dn = mod_ctr(total - 1);
+            dl->AddText(font, num_fs, {dn.x - 14.f, dn.y + 4.f},
+                        IM_COL32(255, 150, 120, 255), "DOUT");
+            dl->AddText(font, num_fs, {grid_origin_x_ + 4.f, grid_origin_y_ + 4.f},
+                        IM_COL32(120, 200, 140, 235),
+                        "wire: DIN=GP11 CLK=GP10 CS=GP13 +5V GND   (G: hide)");
         }
 
         // Existing eye-region polygons (where a blink replaces the open eye).

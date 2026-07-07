@@ -61,6 +61,8 @@
 #include "sys/system_monitor.h"
 #include "sys/scheduler_monitor.h"
 #include "sys/gpio_pinmap.h"
+#include "sys/pico_pinmap.h"
+#include "input/coproc_inputs.h"
 #include "sys/gpio_input_reader.h"
 #include "net/weather_monitor.h"
 #include "net/wifi_monitor.h"
@@ -129,6 +131,347 @@ static void run_i2c_scan(AppState* sp) {
     std::lock_guard<std::mutex> lk(sp->mtx);
     sp->i2c_scan_results = std::move(found);
     sp->i2c_scan_busy    = false;
+}
+
+// ── RP2350 GPIO Expander menu (button coprocessor) ────────────────────────────
+// Everything under GPIO > RP2350 GPIO Expander: link enable + status, the I2C
+// bus test, the Board picker, and the Pins visualizer/editor. Kept as one
+// self-contained builder so it can be changed without touching the on-board
+// GPIO code — build_system_menu only routes the result (ctx.gpio_expander_out).
+//
+// Live-variant design: which GPs exist / are ADC / are board-reserved is read
+// from the config's `variant` AT DISPLAY TIME (label_fn / visible_fn / the
+// context-panel draw), so switching Board re-shapes the picker and the diagram
+// immediately — no menu rebuild, no restart. Edits mutate the live CoprocConfig
+// in place; apply_coproc persists them to cfg["inputs"]["coprocessor"] and
+// re-pushes the PINCFG map to the firmware (Apply & Reload / Board / Remove).
+static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
+{
+    // Matches the firmware's kMaxButtons (PINCFG table size).
+    constexpr int kMaxCoprocButtons = 16;
+
+    std::vector<MenuItem> out;
+    bool* enabled_p = ctx.coproc_enabled_p;
+    auto  reload    = ctx.coproc_reload;   // shared_ptr<function<void()>>
+    auto  status    = ctx.coproc_status;   // shared_ptr<function<string()>>
+
+    out.push_back(with_desc(toggle("Enabled",
+        [enabled_p]{ return enabled_p && *enabled_p; },
+        [enabled_p, reload](bool v){
+            if (enabled_p) *enabled_p = v;
+            if (reload && *reload) (*reload)();
+        }),
+        "Use an external button coprocessor (USB/I\xC2\xB2""C). Applies "
+        "immediately. On-board GPIO stays active too unless "
+        "replace_local_gpio is set in config.json."));
+
+    if (status) {
+        MenuItem st = leaf("Status", []{});
+        st.label_fn = [status]{
+            return std::string("Status: ") +
+                   (*status ? (*status)() : std::string("n/a"));
+        };
+        out.push_back(with_desc(std::move(st),
+            "Connection state reported by the coprocessor link "
+            "(connected / offline)."));
+    }
+
+    // I²C bus test — scan the coprocessor's I²C lines for devices.
+    if (ctx.coproc_i2c_scan) {
+        std::vector<MenuItem> i2c_menu;
+        i2c_menu.push_back(with_desc(leaf("Scan Now",
+            [scan = ctx.coproc_i2c_scan]{ if (scan) scan(); }),
+            "Ask the coprocessor to probe its I2C lines (default GP20/21 = "
+            "I2C0, the voice DAC bus) and report which 7-bit addresses ACK."));
+        MenuItem res = leaf("Result", []{});
+        res.label_fn = [get = ctx.coproc_i2c_result]{
+            return std::string("Found: ") + (get ? get() : std::string("n/a"));
+        };
+        i2c_menu.push_back(with_desc(std::move(res),
+            "Hex addresses that ACKed on the last scan (18 = the TLV320 DAC), "
+            "or 'none' / 'err bad-pins'."));
+        out.push_back(with_desc(submenu("I2C Bus Test", std::move(i2c_menu)),
+            "Test I2C connectivity on the coprocessor \xe2\x80\x94 scan for "
+            "devices (e.g. the TLV320 DAC at 0x18) and see which hex "
+            "addresses respond. Scan Now triggers it; Result updates when "
+            "the coprocessor replies."));
+    }
+
+    if (!ctx.coproc_cfg_p) return out;    // the Pins editor needs the live config
+
+    input::CoprocConfig* C    = ctx.coproc_cfg_p;
+    PfMax7219Layout*     MX   = ctx.pf_max7219_p;   // MAX bridge pin roles
+    json*                cfgr = ctx.cfg_root;
+
+    // Board variant, read live everywhere below so the Board picker takes
+    // effect immediately.
+    auto variant = [C]{ return sys::pico_variant_from_id(C->variant); };
+
+    // "GP26  ADC  I2C1 SDA  (LED)" — everything a user needs to judge a pin,
+    // in one label. The I2C role comes from the RP2350's fixed mux (GP % 4).
+    auto gp_label = [variant](int gp) -> std::string {
+        std::string s = "GP" + std::to_string(gp);
+        if (sys::pico_gp_is_adc(variant(), gp)) s += "  ADC";
+        s += std::string("  ") + sys::pico_gp_i2c(gp);
+        if (const char* r = sys::pico_gp_reserved(variant(), gp)) {
+            s += "  ("; s += r; s += ")";
+        }
+        return s;
+    };
+
+    // Role + colour of a GP for the diagram: button / LED / MAX bridge /
+    // board-reserved / free. (The firmware-fixed voice pins aren't visible to
+    // the host, so they're flagged in the submenu description instead.)
+    auto role_of = [C, MX, variant](int gp) -> std::pair<std::string, ImU32> {
+        for (size_t i = 0; i < C->pins.size(); ++i) {
+            if (C->pins[i].gp == gp) {
+                auto it = C->short_map.find(static_cast<int>(i));
+                const std::string fn =
+                    (it != C->short_map.end() && it->second != input::GpioFunc::None)
+                    ? input::gpio_func_name(it->second) : "unset";
+                return { "Btn " + std::to_string(i) + "  " + fn,
+                         IM_COL32(45, 140, 225, 255) };
+            }
+            if (C->pins[i].led_gp == gp)
+                return { "LED " + std::to_string(i), IM_COL32(240, 200, 70, 255) };
+        }
+        if (MX && MX->enabled && (MX->mode == "section" || MX->mode == "main")) {
+            if (gp == 10) return { "MAX CLK", IM_COL32(230, 100, 180, 255) };
+            if (gp == 11) return { "MAX DIN", IM_COL32(230, 100, 180, 255) };
+            if (gp == 13) return { "MAX CS",  IM_COL32(230, 100, 180, 255) };
+        }
+        if (const char* r = sys::pico_gp_reserved(variant(), gp))
+            return { std::string(r), IM_COL32(150, 120, 100, 255) };
+        if (sys::pico_gp_is_adc(variant(), gp))
+            return { "free (ADC)", IM_COL32(90, 190, 170, 255) };
+        return { "free", IM_COL32(60, 180, 75, 255) };
+    };
+
+    auto used_elsewhere = [C](int gp, int except_i) {
+        for (size_t j = 0; j < C->pins.size(); ++j) {
+            if (static_cast<int>(j) == except_i) continue;
+            if (C->pins[j].gp == gp || C->pins[j].led_gp == gp) return true;
+        }
+        return false;
+    };
+
+    // Persist + re-push. Compacts out pinless buttons and re-keys the function
+    // maps so the firmware button ids stay contiguous.
+    auto apply_coproc = [C, cfgr, reload]{
+        std::vector<input::CoprocPin> np;
+        std::map<int, input::GpioFunc> ns, nl;
+        int nid = 0;
+        for (size_t i = 0; i < C->pins.size(); ++i) {
+            if (C->pins[i].gp < 0) continue;
+            np.push_back(C->pins[i]);
+            auto s = C->short_map.find(static_cast<int>(i));
+            auto l = C->long_map.find(static_cast<int>(i));
+            if (s != C->short_map.end()) ns[nid] = s->second;
+            if (l != C->long_map.end())  nl[nid] = l->second;
+            ++nid;
+        }
+        C->pins.swap(np); C->short_map.swap(ns); C->long_map.swap(nl);
+        if (cfgr) {
+            json& jc = (*cfgr)["inputs"]["coprocessor"];
+            jc["variant"] = C->variant;
+            json jpins = json::array(), jbtns = json::array();
+            for (size_t i = 0; i < C->pins.size(); ++i) {
+                const auto& p = C->pins[i];
+                jpins.push_back(json{{"gp", p.gp}, {"pull", p.pull},
+                    {"active_low", p.active_low}, {"led_gp", p.led_gp}});
+                auto s = C->short_map.find(static_cast<int>(i));
+                auto l = C->long_map.find(static_cast<int>(i));
+                jbtns.push_back(json{{"id", static_cast<int>(i)},
+                    {"short", s != C->short_map.end() ? input::gpio_func_id(s->second) : "none"},
+                    {"long",  l != C->long_map.end()  ? input::gpio_func_id(l->second)  : "none"}});
+            }
+            jc["pins"] = std::move(jpins);
+            jc["buttons"] = std::move(jbtns);
+        }
+        if (reload && *reload) (*reload)();
+    };
+
+    // One GP picker page, shared by a slot's Pin and LED Pin submenus (`field`
+    // selects which CoprocPin member it writes). All 48 rows are built once;
+    // visible_fn hides the GPs the current board doesn't break out and label_fn
+    // keeps the ADC / I2C / reserved tags current, so a Board change re-shapes
+    // the picker live.
+    auto gp_picker = [C, variant, gp_label, used_elsewhere](
+            int i, int input::CoprocPin::* field, const char* none_label) {
+        auto in_range = [C, i]{ return i < static_cast<int>(C->pins.size()); };
+        std::vector<MenuItem> items;
+        items.push_back(leaf_sel(none_label,
+            [C, i, field, in_range]{ if (in_range()) C->pins[i].*field = -1; },
+            [C, i, field, in_range]{ return in_range() && C->pins[i].*field < 0; }));
+        for (int gp = 0; gp <= 47; ++gp) {
+            MenuItem pm = leaf_sel(gp_label(gp),
+                [C, i, gp, field, in_range]{ if (in_range()) C->pins[i].*field = gp; },
+                [C, i, gp, field, in_range]{ return in_range() && C->pins[i].*field == gp; });
+            pm.label_fn   = [gp_label, gp]{ return gp_label(gp); };
+            pm.visible_fn = [variant, gp]{ return sys::pico_variant_gp_exists(variant(), gp); };
+            // Flag pins already used by another slot, or reserved by the board.
+            pm.warn_fn = [used_elsewhere, variant, gp, i]{
+                return used_elsewhere(gp, i) ||
+                       sys::pico_gp_reserved(variant(), gp) != nullptr;
+            };
+            items.push_back(std::move(pm));
+        }
+        return items;
+    };
+
+    // Per-button function picker — keyed by slot index (stable across the
+    // compaction apply_coproc does, because rows re-read C->pins[i] live).
+    auto fn_picker = [C](int i, bool is_long) {
+        std::vector<MenuItem> items;
+        for (int k = 0; k < input::gpio_func_count(); ++k) {
+            const auto f = static_cast<input::GpioFunc>(k);
+            items.push_back(leaf_sel(input::gpio_func_name(f),
+                [C, i, is_long, f]{ (is_long ? C->long_map : C->short_map)[i] = f; },
+                [C, i, is_long, f]{ auto& m = is_long ? C->long_map : C->short_map;
+                    auto it = m.find(i); return it != m.end() && it->second == f; }));
+        }
+        return items;
+    };
+
+    // Button slots — one row per configured button, hidden past the live count.
+    auto btn_count = [C]{ return static_cast<int>(C->pins.size()); };
+    std::vector<MenuItem> slot_rows = make_dynamic_rows(kMaxCoprocButtons, btn_count,
+        [&](int i) -> MenuItem {
+            auto in_range = [C, i]{ return i < static_cast<int>(C->pins.size()); };
+            std::vector<MenuItem> pulls = {
+                leaf_sel("Pull Up",
+                    [C, i, in_range]{ if (in_range()) C->pins[i].pull = "up"; },
+                    [C, i, in_range]{ return in_range() && C->pins[i].pull == "up"; }),
+                leaf_sel("Pull Down",
+                    [C, i, in_range]{ if (in_range()) C->pins[i].pull = "down"; },
+                    [C, i, in_range]{ return in_range() && C->pins[i].pull == "down"; }),
+                leaf_sel("None",
+                    [C, i, in_range]{ if (in_range()) C->pins[i].pull = "none"; },
+                    [C, i, in_range]{ return in_range() && C->pins[i].pull == "none"; }),
+            };
+            std::vector<MenuItem> slot;
+            slot.push_back(submenu("Pin",         gp_picker(i, &input::CoprocPin::gp, "(unused)")));
+            slot.push_back(submenu("Short Press", fn_picker(i, false)));
+            slot.push_back(submenu("Long Press",  fn_picker(i, true)));
+            slot.push_back(submenu("Pull",        std::move(pulls)));
+            slot.push_back(toggle("Active Low",
+                [C, i, in_range]{ return in_range() && C->pins[i].active_low; },
+                [C, i, in_range](bool v){ if (in_range()) C->pins[i].active_low = v; }));
+            slot.push_back(submenu("LED Pin",     gp_picker(i, &input::CoprocPin::led_gp, "(none)")));
+            slot.push_back(leaf("Remove This Button",
+                [C, i, apply_coproc]{
+                    if (i < static_cast<int>(C->pins.size())) C->pins[i].gp = -1;
+                    apply_coproc();   // compacts it out + re-pushes
+                }));
+            MenuItem m = submenu("Button", std::move(slot));
+            m.label_fn = [C, i]() -> std::string {
+                if (i >= static_cast<int>(C->pins.size())) return "";
+                const int gp = C->pins[i].gp;
+                auto it = C->short_map.find(i);
+                const std::string fn =
+                    (it != C->short_map.end() && it->second != input::GpioFunc::None)
+                    ? input::gpio_func_name(it->second) : "unset";
+                char b[96];
+                if (gp < 0) std::snprintf(b, sizeof b, "Btn %d  (no pin)  %s", i, fn.c_str());
+                else        std::snprintf(b, sizeof b, "Btn %d  GP%d  %s", i, gp, fn.c_str());
+                return std::string(b);
+            };
+            return m;
+        });
+
+    // Board selector — which RP2350 the coprocessor runs on.
+    auto board_pick = [C, apply_coproc](sys::PicoVariant v) {
+        return leaf_sel(sys::pico_variant_name(v),
+            [C, v, apply_coproc]{ C->variant = sys::pico_variant_id(v); apply_coproc(); },
+            [C, v]{ return sys::pico_variant_from_id(C->variant) == v; });
+    };
+    std::vector<MenuItem> board_items = {
+        board_pick(sys::PicoVariant::Rp2350a),
+        board_pick(sys::PicoVariant::PicoPlus2),
+        board_pick(sys::PicoVariant::PicoLipo2XlW),
+        board_pick(sys::PicoVariant::Raw),
+    };
+    MenuItem board_item = with_desc(submenu("Board", std::move(board_items)),
+        "Which RP2350 board the coprocessor runs on. RP2350 (Pico 2) breaks out "
+        "GP0-22 + GP26-28 (ADC GP26-28); the RP2350B boards expose GP0-47 (ADC "
+        "GP40-47) with their onboard-reserved pins flagged. Raw is a "
+        "board-agnostic GP0-47 view. Takes effect immediately \xe2\x80\x94 the "
+        "Pins picker and diagram follow it.");
+    board_item.label_fn = [C]{ return std::string("Board:  ") +
+        sys::pico_variant_name(sys::pico_variant_from_id(C->variant)); };
+    out.push_back(std::move(board_item));
+
+    std::vector<MenuItem> pins_menu;
+    pins_menu.push_back(with_desc(leaf("Add Button",
+        [C]{ if (static_cast<int>(C->pins.size()) < kMaxCoprocButtons)
+                 C->pins.push_back(input::CoprocPin{}); }),
+        "Append a button slot; open it to pick a free pin + function."));
+    for (auto& r : slot_rows) pins_menu.push_back(std::move(r));
+    pins_menu.push_back(with_desc(leaf("Apply & Reload",
+        [apply_coproc]{ apply_coproc(); }),
+        "Save the pin map + button functions to config and re-push them "
+        "to the coprocessor (reconnects the link). Applies live."));
+
+    // Context-panel visualizer: the Pico 2 physical header, or a logical GP
+    // grid for the RP2350B boards / raw. Reads the variant live, so it follows
+    // the Board picker. Colours: free green, button blue, LED amber, MAX pink,
+    // board-reserved brown, power/ground per the shared header palette.
+    MenuItem pins_item = submenu("Pins", std::move(pins_menu));
+    pins_item.context_panel_title = "Coprocessor Pins";
+    pins_item.context_panel_draw = [role_of, variant](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+        const sys::PicoVariant pv = variant();
+        ImFont* font = ImGui::GetFont();
+        const float fs = ImGui::GetFontSize();
+        dl->AddText(font, fs * 1.05f, {o.x, o.y},
+                    IM_COL32(230, 235, 240, 255), sys::pico_variant_name(pv));
+        const float top = o.y + fs * 1.7f;
+        if (pv == sys::PicoVariant::Rp2350a) {
+            // Physical Pico 2 header: 2 columns × 20 pins (1-20 down the left,
+            // 40-21 down the right, matching the board held USB-up).
+            const int rows = 20;
+            const float rh = std::max(9.f, (o.y + sz.y - top - 4.f) / rows);
+            const float colw = (sz.x - 8.f) * 0.5f;
+            auto cell = [&](const sys::PicoPin& p, float x, float y) {
+                ImU32 col; std::string txt;
+                if (p.gp < 0) { col = sys::pin_kind_color(p.kind); txt = p.label; }
+                else { auto r = role_of(p.gp);
+                       col = r.second; txt = std::string(p.label) + "  " + r.first; }
+                dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, col, 2.f);
+                dl->AddText(font, fs * 0.68f, {x + rh + 2.f, y + (rh - fs * 0.68f) * 0.5f},
+                            IM_COL32(215, 220, 226, 255), txt.c_str());
+            };
+            for (int r = 0; r < rows; ++r) {
+                cell(sys::kPico2Pins[r],      o.x + 4.f,        top + r * rh);
+                cell(sys::kPico2Pins[39 - r], o.x + 4.f + colw, top + r * rh);
+            }
+        } else {
+            // Logical GP grid (physical layouts differ per RP2350B board and
+            // aren't needed for logical pin assignment).
+            const int max_gp  = sys::pico_variant_max_gp(pv);
+            const int per_col = 16;
+            const int ncols   = (max_gp + per_col) / per_col;
+            const float rh   = std::max(8.f, (o.y + sz.y - top - 4.f) / per_col);
+            const float colw = (sz.x - 8.f) / std::max(1, ncols);
+            for (int gp = 0; gp <= max_gp; ++gp) {
+                const float x = o.x + 4.f + (gp / per_col) * colw;
+                const float y = top + (gp % per_col) * rh;
+                auto r = role_of(gp);
+                char lbl[64]; std::snprintf(lbl, sizeof lbl, "GP%d %s", gp, r.first.c_str());
+                dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, r.second, 2.f);
+                dl->AddText(font, fs * 0.6f, {x + rh, y + (rh - fs * 0.6f) * 0.5f},
+                            IM_COL32(215, 220, 226, 255), lbl);
+            }
+        }
+    };
+    out.push_back(with_desc(std::move(pins_item),
+        "Visualise + edit the coprocessor's pins: each button's GPIO, "
+        "function, pull, polarity and optional LED. Free pins green, "
+        "buttons blue, LEDs amber, MAX7219 pink, board-reserved brown. "
+        "Firmware-fixed pins aren't auto-detected \xe2\x80\x94 avoid them per "
+        "your build: voice I2S GP16-18, I2C GP20/21, DAC reset GP22, mic on "
+        "the board's first ADC pin; peripheral hub 1-Wire GP19, fans GP14/15. "
+        "Apply & Reload pushes the map live."));
+    return out;
 }
 
 std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
@@ -1405,6 +1748,18 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
     };
 
     // ── GPIO Buttons (configurable pin → function map) ────────────────────────
+    // ── RP2350 GPIO Expander (button coprocessor) ────────────────────────────
+    // Built by build_coproc_expander_menu (file scope, above) so it's fully
+    // independent of the on-board GPIO map. Routed to the top-level GPIO tab
+    // when build_menu wires gpio_expander_out; otherwise it lands under the
+    // GPIO Buttons submenu below (legacy placement).
+    std::vector<MenuItem> coproc_menu;
+    if (coproc_enabled_p) coproc_menu = build_coproc_expander_menu(ctx);
+    if (ctx.gpio_expander_out && !coproc_menu.empty()) {
+        for (auto& it : coproc_menu) ctx.gpio_expander_out->push_back(std::move(it));
+        coproc_menu.clear();
+    }
+
     // One submenu per assignable slot: BCM pin, short/long-press function, pull
     // bias, polarity, and long-press threshold. Edits the live gpio_pins array;
     // persisted to cfg["gpio"]["pins"] and applied on the next launch.
@@ -1439,32 +1794,11 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                 "Rebuild the GPIO poller from the current slots so pin / "
                 "function / pull / polarity edits take effect right away."));
 
-        // Optional button/switch coprocessor (RP2350/RP2040). When enabled, an
-        // external MCU debounces the switches and streams presses to the Pi,
-        // dispatched through the same functions as the GPIO slots above. The
-        // slots stay live unless replace_local_gpio is set in config.
-        if (coproc_enabled_p) {
-            std::vector<MenuItem> coproc_menu;
-            coproc_menu.push_back(with_desc(toggle("Enabled",
-                [coproc_enabled_p]{ return *coproc_enabled_p; },
-                [coproc_enabled_p, coproc_reload](bool v){
-                    *coproc_enabled_p = v;
-                    if (coproc_reload && *coproc_reload) (*coproc_reload)();
-                }),
-                "Use an external button coprocessor (USB/I\xC2\xB2""C). Applies "
-                "immediately. GPIO slots above stay active too unless "
-                "replace_local_gpio is set in config.json."));
-            if (coproc_status) {
-                MenuItem st = leaf("Status", []{});
-                st.label_fn = [coproc_status]{
-                    return std::string("Status: ") +
-                           (*coproc_status ? (*coproc_status)() : std::string("n/a"));
-                };
-                coproc_menu.push_back(with_desc(std::move(st),
-                    "Connection state reported by the coprocessor link "
-                    "(connected / offline). Button mapping is edited in "
-                    "config.json under inputs.coprocessor.buttons."));
-            }
+        // RP2350 GPIO Expander fallback: when build_menu didn't wire the GPIO
+        // tab, nest the expander controls (built near the top of this function)
+        // here instead. Normally coproc_menu was already routed to
+        // ctx.gpio_expander_out and this is empty.
+        if (!coproc_menu.empty()) {
             gpio_btn_menu.push_back(with_desc(
                 submenu("Button Coprocessor", std::move(coproc_menu)),
                 "Optional external MCU (RP2350/RP2040) that handles button "
@@ -2505,11 +2839,16 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         with_desc(leaf("Request Status", [teensy]{ teensy->request_status(); }),
                   "Poll the face controller for a fresh status frame."),
     };
-    // Moved out of Diagnostics per the menu reorg: the GPIO visualizer + buttons
-    // and the cooling-fan controls live under Pi Settings (hardware); Demo Mode
-    // lives under Software (appended at the tail of this block).
-    pi_settings_items.push_back(std::move(gpio_viz_item));
-    pi_settings_items.push_back(std::move(gpio_buttons_item));
+    // The GPIO visualizer + on-board button map now live in the top-level "GPIO"
+    // tab (On-Board GPIO submenu). When build_menu wires gpio_onboard_out, route
+    // them there; otherwise keep the legacy Pi Settings placement.
+    if (ctx.gpio_onboard_out) {
+        ctx.gpio_onboard_out->push_back(std::move(gpio_viz_item));
+        ctx.gpio_onboard_out->push_back(std::move(gpio_buttons_item));
+    } else {
+        pi_settings_items.push_back(std::move(gpio_viz_item));
+        pi_settings_items.push_back(std::move(gpio_buttons_item));
+    }
     // Cooling fans (Pi-driven PWM). Hidden when no FanController is wired.
     pi_settings_items.push_back([&]() -> MenuItem {
             if (!fans || fans->zone_count() == 0) {
@@ -2667,7 +3006,8 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         with_desc(submenu("Connectivity",     std::move(connectivity_menu)),
                   "SSH, Bluetooth and other network/peripheral toggles."),
         with_desc(submenu("Pi Settings",      std::move(pi_settings_items)),
-                  "Hostname, time, storage, GPIO visualizer/buttons and cooling fans."),
+                  "Hostname, time, storage and cooling fans. (GPIO buttons + the "
+                  "pin visualizer moved to the top-level GPIO menu.)"),
         with_desc(submenu("XR Headset (Viture Beast)", std::move(headset_menu)),
                   "Electrochromic transparency, HUD/backlight brightness, recenter, "
                   "gaze lock and 3D side-by-side \xe2\x80\x94 specific to the glasses."),

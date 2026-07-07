@@ -1,6 +1,6 @@
 #pragma once
 // ── gpio_input_reader.h ───────────────────────────────────────────────────────
-// Lightweight read-only GPIO snapshot helper for the System > GPIO Visualizer.
+// Lightweight read-only GPIO snapshot helper for the GPIO > On-Board GPIO > GPIO Visualizer.
 // Opens /dev/gpiochip0, attempts to claim each requested BCM offset as an
 // input line, and exposes a per-frame read() that returns the current logic
 // level. Lines already claimed by another consumer (SPI driver, piomatter,
