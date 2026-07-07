@@ -141,6 +141,9 @@ public:
     // Effects read it through count()/direction_unit() when the cfg opts in.
     void set_motion(const MotionInput& m) { motion_ = m; }
     void set_audio(double level) { audio_ = level; }
+    // Global default for direction coupling (see direction_unit): layers with
+    // no explicit "direction_from" behave as "gravity" while this is on.
+    void set_motion_reactive(bool on) { motion_reactive_ = on; }
     // Swap in new params without recreating the effect — keeps the live particle
     // sim (and motion/audio/canvas state) so menu edits preview without resetting.
     void set_cfg(json cfg) { cfg_ = std::move(cfg); intensity_ = jnum(cfg_, "intensity", 1.0); }
@@ -177,13 +180,24 @@ protected:
         double deg = jnum(cfg_, "direction_deg", default_deg);
         // Motion coupling (opt-in): "heading" locks the angle to the compass,
         // "yaw" drifts it as you turn, "tilt" skews it like gravity when you
-        // roll your head. "motion_gain" scales the response.
-        const std::string from = cfg_.value("direction_from", std::string("none"));
+        // roll your head, "gravity" combines lean + turn-sweep (and is the
+        // default for every directional layer while the global Motion Reactive
+        // toggle is on). "motion_gain" scales the response.
+        const std::string from = cfg_.value("direction_from",
+            std::string(motion_reactive_ ? "gravity" : "none"));
         if (from != "none") {
             const double gain = jnum(cfg_, "motion_gain", 1.0);
             if (from == "heading")   deg  = motion_.heading_deg;
             else if (from == "yaw")  deg += motion_.yaw_rate * 0.5 * gain;
             else if (from == "tilt") deg += motion_.roll_deg * 2.0 * gain;
+            else if (from == "gravity") {
+                // Real-gravity feel: rain/snow lean with head roll and get
+                // swept sideways by fast turns, clamped so precipitation
+                // never flows uphill.
+                const double delta = (motion_.roll_deg * 1.6 +
+                                      motion_.yaw_rate * 0.35) * gain;
+                deg += std::clamp(delta, -75.0, 75.0);
+            }
         }
         deg += jnum(cfg_, "direction_offset_deg", 0.0);
         const double rad = deg * kPi / 180.0;
@@ -222,6 +236,7 @@ protected:
     std::vector<Particle> particles_;
     MotionInput motion_{};
     double audio_ = 0.0;
+    bool motion_reactive_ = false;
 };
 
 // ── Sparkle ──────────────────────────────────────────────────────────────────
@@ -463,6 +478,325 @@ public:
                 int iy = (int)p.y - i;
                 double alpha = (1.0 - (double)i / length) * 0.9;
                 draw_dot(c, ix, iy, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
+            }
+        }
+        return c;
+    }
+};
+
+// ── Steam ────────────────────────────────────────────────────────────────────
+// Wisps rising from the snout (bottom-centre of the panel): spawned in a
+// narrow band, drifting upward with a sideways waver, growing and fading as
+// they cool. With motion-reactive gravity on, the plume leans as the head
+// tilts. cfg: count, speed_min/max, spread_frac (emitter width as a fraction
+// of the panel), wander (sideways waver px/s), colors.
+
+class SteamEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const double wander = jnum(cfg_, "wander", 6.0);
+        double dx, dy; direction_unit(dx, dy, 270.0);   // default straight up
+        for (auto& p : particles_) {
+            p.extra += dt;
+            p.x += (p.vy * dx + std::sin(p.extra * 2.2 + p.vx) * wander) * dt;
+            p.y += p.vy * dy * dt;
+            p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                return p.life <= 0 || p.y < -4 || p.y > h_ + 4 ||
+                       p.x < -4 || p.x > w_ + 4;
+            }), particles_.end());
+        while ((int)particles_.size() < count(14)) {
+            const double spread = jnum(cfg_, "spread_frac", 0.20) * w_;
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                         : Color{205, 208, 215};
+            Particle p;
+            p.x = w_ * 0.5 + frand(rng_, -spread, spread);
+            p.y = frand(rng_, h_ - 2.0, h_ + 2.0);        // the snout line
+            p.vx = frand(rng_, 0, kTau);                  // waver phase
+            p.vy = pick_speed(cfg_, 7.0, 13.0, rng_);
+            p.max_life = frand(rng_, 0.9, 1.8);
+            p.life = 1.0;
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = pick_size(cfg_, 1, 2, rng_);
+            p.extra = 0.0;
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (auto& p : particles_) {
+            // Grow as it rises, fade as it cools.
+            const int size = p.size + ((1.0 - p.life) > 0.5 ? 1 : 0);
+            draw_dot(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b,
+                     std::clamp(p.life, 0.0, 1.0) * 0.55, size);
+        }
+        return c;
+    }
+};
+
+// ── Waveform ─────────────────────────────────────────────────────────────────
+// A scrolling audio waveform mirrored about the panel's horizontal centreline —
+// the whole face visibly reacts to speech/music, not just the mouth. Feeds off
+// the mic level the controller already pushes (set_audio); with no signal it
+// settles to a faint idle ripple. cfg: gain, scroll_hz (samples/s), colors.
+
+class WaveformEffect : public BaseEffect {
+public:
+    WaveformEffect(int w, int h, json cfg) : BaseEffect(w, h, std::move(cfg)) {
+        hist_.assign(std::max(2, w_), 0.0);
+    }
+    void update(double dt) override {
+        t_accum_ += dt;
+        idle_ += dt;
+        const double period = 1.0 / std::max(5.0, jnum(cfg_, "scroll_hz", 45.0));
+        while (t_accum_ >= period) {          // push one column per sample tick
+            t_accum_ -= period;
+            const double idle = 0.06 + 0.04 * std::sin(idle_ * 2.1);
+            hist_[head_] = std::max(audio_ * jnum(cfg_, "gain", 1.6), idle);
+            head_ = (head_ + 1) % hist_.size();
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{0, 220, 255};
+        const double mid = h_ / 2.0;
+        for (int x = 0; x < w_; ++x) {
+            const double v = hist_[(head_ + x) % hist_.size()];
+            const int span = std::max(1, (int)std::lround(
+                std::clamp(v, 0.0, 1.0) * (h_ / 2.0 - 1.0) * intensity_));
+            for (int dy = 0; dy < span; ++dy) {
+                const double a = 0.85 * (1.0 - (double)dy / span) + 0.10;
+                draw_pixel(c, x, (int)(mid - 1 - dy), (int)col.r, (int)col.g, (int)col.b,
+                           (int)(a * 255));
+                draw_pixel(c, x, (int)(mid + dy),     (int)col.r, (int)col.g, (int)col.b,
+                           (int)(a * 255));
+            }
+        }
+        return c;
+    }
+private:
+    std::vector<double> hist_;
+    size_t head_ = 0;
+    double t_accum_ = 0.0, idle_ = 0.0;
+};
+
+// ── Matrix ───────────────────────────────────────────────────────────────────
+// Digital "code rain": bright heads racing down with fading trails, one runner
+// per column slot. Direction follows the shared coupling, so with Motion
+// Reactive the code leans with gravity too. cfg: count (runners), speed_min/max,
+// trail, colors (default green-on-white heads).
+
+class MatrixEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const int trail = jint(cfg_, "trail", 7);
+        double dx, dy; direction_unit(dx, dy, 90.0);   // classic: straight down
+        for (auto& p : particles_) {
+            p.x += p.vy * dx * dt;
+            p.y += p.vy * dy * dt;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                return p.x < -trail - 2 || p.x > w_ + trail + 2 ||
+                       p.y < -trail - 2 || p.y > h_ + trail + 2;
+            }), particles_.end());
+        while ((int)particles_.size() < count(std::max(4, w_ / 4))) {
+            Particle p;
+            direction_spawn_point(static_cast<double>(trail + 2), 90.0, p.x, p.y);
+            p.x = std::floor(p.x);                     // lock runners to columns
+            p.vy = pick_speed(cfg_, 10.0, 22.0, rng_);
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{60, 255, 120};
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = 1; p.life = 1; p.max_life = 9999; p.extra = trail;
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        double dx, dy; direction_unit(dx, dy, 90.0);
+        for (auto& p : particles_) {
+            const int trail = (int)p.extra;
+            for (int i = 0; i < trail; ++i) {          // trail fades behind the head
+                const double a = (i == 0) ? 1.0 : 0.75 * (1.0 - (double)i / trail);
+                const int r = (i == 0) ? 210 : (int)p.r;   // whitened head
+                const int g = (i == 0) ? 255 : (int)p.g;
+                const int b = (i == 0) ? 210 : (int)p.b;
+                draw_pixel(c, (int)std::lround(p.x - dx * i),
+                              (int)std::lround(p.y - dy * i), r, g, b, (int)(a * 255));
+            }
+        }
+        return c;
+    }
+};
+
+// ── Circuit ──────────────────────────────────────────────────────────────────
+// Glowing circuit-board traces: dim orthogonal paths etched across the panel
+// with bright pulses travelling along them. Paths regenerate every ~20 s so the
+// board slowly rewires itself. cfg: count (traces), speed (px/s), colors.
+
+class CircuitEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        rebuild_in_ -= dt;
+        if (paths_.empty() || rebuild_in_ <= 0.0) build_paths();
+        const double spd = pick_speed(cfg_, 14.0, 22.0, rng_);
+        for (size_t i = 0; i < pulse_.size(); ++i) {
+            pulse_[i] += spd * dt;
+            if (pulse_[i] >= (double)paths_[i].size())
+                pulse_[i] = 0.0;                       // wrap to the trace start
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{0, 210, 190};
+        for (size_t i = 0; i < paths_.size(); ++i) {
+            const auto& path = paths_[i];
+            for (const auto& pt : path)                // dim etched trace
+                draw_pixel(c, pt.first, pt.second, (int)col.r, (int)col.g, (int)col.b, 34);
+            const int head = (int)pulse_[i];           // bright pulse + short tail
+            for (int t = 0; t < 4; ++t) {
+                const int idx = head - t;
+                if (idx < 0 || idx >= (int)path.size()) continue;
+                const double a = (t == 0) ? 1.0 : 0.6 * (1.0 - t / 4.0);
+                draw_pixel(c, path[idx].first, path[idx].second,
+                           (int)col.r, (int)col.g, (int)col.b, (int)(a * 255));
+            }
+        }
+        return c;
+    }
+private:
+    void build_paths() {
+        paths_.clear();
+        pulse_.clear();
+        const int n = count(5);
+        for (int i = 0; i < n; ++i) {
+            std::vector<std::pair<int,int>> path;
+            int x = (int)frand(rng_, 1, w_ - 2), y = (int)frand(rng_, 1, h_ - 2);
+            bool horiz = frand(rng_, 0, 1) < 0.5;
+            const int segs = 3 + (int)frand(rng_, 0, 3);
+            for (int sIdx = 0; sIdx < segs; ++sIdx) {
+                const int len  = 4 + (int)frand(rng_, 0, 9);
+                const int step = frand(rng_, 0, 1) < 0.5 ? -1 : 1;
+                for (int k = 0; k < len; ++k) {
+                    if (horiz) x += step; else y += step;
+                    if (x < 0 || x >= w_ || y < 0 || y >= h_) break;
+                    path.push_back({x, y});
+                }
+                horiz = !horiz;                        // orthogonal corners
+            }
+            if (path.size() >= 8) {
+                paths_.push_back(std::move(path));
+                pulse_.push_back(frand(rng_, 0, 8));
+            }
+        }
+        rebuild_in_ = 20.0;
+    }
+    std::vector<std::vector<std::pair<int,int>>> paths_;
+    std::vector<double> pulse_;
+    double rebuild_in_ = 0.0;
+};
+
+// ── Frost ────────────────────────────────────────────────────────────────────
+// Ice creeping in from the panel edges: pale crystals thickest at the rim,
+// thinning toward the centre, each twinkling slowly as it forms and melts.
+// The temp-reactive ambient sync applies this when it's freezing out. cfg:
+// count, depth_frac (how far in the frost reaches), colors.
+
+class FrostEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        for (auto& p : particles_) { p.extra += dt; p.life -= dt / p.max_life; }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [](const Particle& p){ return p.life <= 0; }), particles_.end());
+        while ((int)particles_.size() < count(40)) {
+            const double depth = jnum(cfg_, "depth_frac", 0.35);
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                         : Color{210, 235, 255};
+            // Edge-biased position: pick a rim side, then bite inward with a
+            // quadratic bias so most crystals hug the border.
+            double u = frand(rng_, 0, 1); u *= u;
+            const double d = u * depth * std::min(w_, h_);
+            Particle p;
+            switch ((int)frand(rng_, 0, 4) & 3) {
+                case 0:  p.x = frand(rng_, 0, w_ - 1); p.y = d;           break;
+                case 1:  p.x = frand(rng_, 0, w_ - 1); p.y = h_ - 1 - d;  break;
+                case 2:  p.x = d;                      p.y = frand(rng_, 0, h_ - 1); break;
+                default: p.x = w_ - 1 - d;             p.y = frand(rng_, 0, h_ - 1); break;
+            }
+            p.life = 1.0; p.max_life = frand(rng_, 3.0, 8.0);   // slow churn
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = pick_size(cfg_, 1, 1, rng_);
+            p.extra = frand(rng_, 0, kTau);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (auto& p : particles_) {
+            // Fade in as the crystal forms, out as it melts; twinkle on top.
+            const double env = std::clamp(std::min((1.0 - p.life) * 6.0,
+                                                   p.life * 6.0), 0.0, 1.0);
+            const double a = env * (0.35 + 0.45 * (0.5 + 0.5 * std::sin(p.extra * 1.7)));
+            draw_particle(c, p, a);
+        }
+        return c;
+    }
+};
+
+// ── Heatwave ─────────────────────────────────────────────────────────────────
+// Heat shimmer: translucent warm streaks rising off the whole face, wavering
+// as they climb — reads as hot air coming off the panels. The temp-reactive
+// ambient sync applies this when it's scorching out. Follows the gravity
+// coupling like steam. cfg: count, speed_min/max, wander, colors.
+
+class HeatwaveEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        const double wander = jnum(cfg_, "wander", 8.0);
+        double dx, dy; direction_unit(dx, dy, 270.0);   // rises by default
+        for (auto& p : particles_) {
+            p.extra += dt;
+            p.x += (p.vy * dx + std::sin(p.extra * 3.1 + p.vx) * wander) * dt;
+            p.y += p.vy * dy * dt;
+            p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){
+                return p.life <= 0 || p.y < -5 || p.y > h_ + 5 ||
+                       p.x < -5 || p.x > w_ + 5;
+            }), particles_.end());
+        while ((int)particles_.size() < count(18)) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                         : Color{255, 120, 40};
+            Particle p;
+            p.x = frand(rng_, 0, w_ - 1);
+            p.y = frand(rng_, h_ * 0.4, h_ + 3.0);      // lower half + below
+            p.vx = frand(rng_, 0, kTau);                // waver phase
+            p.vy = pick_speed(cfg_, 5.0, 10.0, rng_);
+            p.max_life = frand(rng_, 1.2, 2.2);
+            p.life = 1.0;
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = 1; p.extra = 0.0;
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        double dx, dy; direction_unit(dx, dy, 270.0);
+        for (auto& p : particles_) {
+            for (int i = 0; i < 3; ++i) {               // short shimmer streak
+                const double a = std::clamp(p.life, 0.0, 1.0) * 0.30 *
+                                 (1.0 - i / 3.0);
+                draw_pixel(c, (int)std::lround(p.x - dx * i),
+                              (int)std::lround(p.y - dy * i),
+                           (int)p.r, (int)p.g, (int)p.b, (int)(a * 255));
             }
         }
         return c;
@@ -1476,6 +1810,12 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "confetti")  return std::make_unique<ConfettiEffect>(w, h, cfg);
     if (name == "rings")     return std::make_unique<RingsEffect>(w, h, cfg);
     if (name == "rain")      return std::make_unique<RainEffect>(w, h, cfg);
+    if (name == "steam")     return std::make_unique<SteamEffect>(w, h, cfg);
+    if (name == "waveform")  return std::make_unique<WaveformEffect>(w, h, cfg);
+    if (name == "matrix")    return std::make_unique<MatrixEffect>(w, h, cfg);
+    if (name == "circuit")   return std::make_unique<CircuitEffect>(w, h, cfg);
+    if (name == "frost")     return std::make_unique<FrostEffect>(w, h, cfg);
+    if (name == "heatwave")  return std::make_unique<HeatwaveEffect>(w, h, cfg);
     if (name == "fireflies") return std::make_unique<FirefliesEffect>(w, h, cfg);
     if (name == "clouds")    return std::make_unique<CloudsEffect>(w, h, cfg);
     if (name == "lightning") return std::make_unique<LightningEffect>(w, h, cfg);
@@ -1496,6 +1836,17 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
 const std::map<std::string, json>& presets() {
     static const std::map<std::string, json> kPresets = [] {
         const char* kJson = R"JSON({
+          "steam": {"effect":"steam","count":16,"blend":"add"},
+          "waveform": {"effect":"waveform","blend":"add"},
+          "matrix": {"effect":"matrix","blend":"add"},
+          "circuit": {"effect":"circuit","count":5,"blend":"add"},
+          "frost": {"effect":"frost","count":44,"blend":"add"},
+          "heatwave": {"effect":"heatwave","count":18,"blend":"add"},
+          "petals": {"effect":"snow","count":14,"colors":[[255,150,180],[255,190,210],[240,120,160]],"speed_min":3.0,"speed_max":6.0,"drift_x":2.5,"blend":"add"},
+          "dizzy": {"layers":[
+            {"effect":"vortex","count":24,"swirl":3.2,"infall":4,"colors":[[255,230,120],[255,255,255],[255,200,80]],"blend":"add"},
+            {"effect":"sparkle","count":5,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.3,"blend":"add"}]},
+          "cold_breath": {"effect":"steam","count":10,"colors":[[215,230,245],[235,245,255]],"speed_min":5.0,"speed_max":9.0,"spread_frac":0.12,"blend":"add"},
           "gentle_snow": {"effect":"snow","count":15,"colors":[[200,215,255],[220,235,255]],"speed_min":4.0,"speed_max":7.0,"drift_x":0.8,"blend":"add"},
           "heavy_snow": {"effect":"snow","count":60,"colors":[[240,245,255],[255,255,255]],"speed_min":10.0,"speed_max":18.0,"drift_x":3.0,"blend":"add"},
           "campfire": {"effect":"embers","count":40,"colors":[[255,80,10],[255,100,20]],"speed_min":14.0,"speed_max":22.0,"spread":0.6,"blend":"add"},
@@ -1624,6 +1975,7 @@ struct ParticleLayer {
     double  face_glow() const { return effect ? effect->face_glow() : 0.0; }
     void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
     void set_audio(double level)          { if (effect) effect->set_audio(level); }
+    void set_motion_reactive(bool on)     { if (effect) effect->set_motion_reactive(on); }
     void set_canvas_geometry(int cw, int ch, int ox, int oy) {
         if (effect) effect->set_canvas_geometry(cw, ch, ox, oy);
     }
@@ -1644,6 +1996,17 @@ struct ParticleSystem::Impl {
     MotionInput motion{};   // latest IMU state, re-applied to rebuilt layers
     double audio = 0.0;     // latest mic level, re-applied to rebuilt layers
     int cw, ch, ox = 0, oy = 0;   // canvas geometry, re-applied to rebuilt layers
+    bool motion_reactive = false; // global gravity default, re-applied on rebuilds
+
+    // Transient boop ripples — expanding rings drawn over whatever the layers
+    // produce, independent of the configured effect. Centre is stored in
+    // canvas-normalised coords so a multi-panel face shows one shared ring.
+    struct Ripple {
+        double  cxn, cyn;
+        double  age = 0.0, max_age = 0.9;
+        uint8_t r, g, b;
+    };
+    std::vector<Ripple> ripples;
 
     void build(const json& cfg) {
         layers.clear();
@@ -1652,6 +2015,7 @@ struct ParticleSystem::Impl {
             layers.emplace_back(lc, w, h);
             layers.back().set_motion(motion);
             layers.back().set_audio(audio);
+            layers.back().set_motion_reactive(motion_reactive);
             layers.back().set_canvas_geometry(cw, ch, ox, oy);
         }
     }
@@ -1696,13 +2060,29 @@ void ParticleSystem::set_audio(double level) {
     for (auto& l : impl_->layers) l.set_audio(level);
 }
 
+void ParticleSystem::set_motion_reactive(bool on) {
+    impl_->motion_reactive = on;
+    for (auto& l : impl_->layers) l.set_motion_reactive(on);
+}
+
+void ParticleSystem::trigger_ripple(double cx_norm, double cy_norm,
+                                    uint8_t r, uint8_t g, uint8_t b) {
+    if (impl_->ripples.size() >= 6)                      // rapid boops: cap, drop oldest
+        impl_->ripples.erase(impl_->ripples.begin());
+    impl_->ripples.push_back({cx_norm, cy_norm, 0.0, 0.9, r, g, b});
+}
+
 void ParticleSystem::update(double dt) {
     for (auto& l : impl_->layers) l.update(dt);
+    for (auto& rp : impl_->ripples) rp.age += dt;
+    impl_->ripples.erase(std::remove_if(impl_->ripples.begin(), impl_->ripples.end(),
+        [](const Impl::Ripple& rp){ return rp.age >= rp.max_age; }),
+        impl_->ripples.end());
 }
 
 ParticleFrame ParticleSystem::render() {
     ParticleFrame result;
-    if (impl_->layers.empty()) return result;
+    if (impl_->layers.empty() && impl_->ripples.empty()) return result;
 
     const int w = impl_->w, h = impl_->h;
     cv::Mat outf(h, w, CV_32FC4, cv::Scalar(0, 0, 0, 0));   // R,G,B,A on a 0..255 scale
@@ -1732,18 +2112,42 @@ ParticleFrame ParticleSystem::render() {
                 }
             }
     }
-    if (!has) return result;
+    if (!has && impl_->ripples.empty()) return result;
 
-    cv::Mat rgba(h, w, CV_8UC4);
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            const cv::Vec4f& o = outf.at<cv::Vec4f>(y, x);
-            cv::Vec4b& d = rgba.at<cv::Vec4b>(y, x);
-            d[0] = cv::saturate_cast<uchar>(o[0]);
-            d[1] = cv::saturate_cast<uchar>(o[1]);
-            d[2] = cv::saturate_cast<uchar>(o[2]);
-            d[3] = cv::saturate_cast<uchar>(o[3]);
+    cv::Mat rgba;
+    if (has) {
+        rgba.create(h, w, CV_8UC4);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const cv::Vec4f& o = outf.at<cv::Vec4f>(y, x);
+                cv::Vec4b& d = rgba.at<cv::Vec4b>(y, x);
+                d[0] = cv::saturate_cast<uchar>(o[0]);
+                d[1] = cv::saturate_cast<uchar>(o[1]);
+                d[2] = cv::saturate_cast<uchar>(o[2]);
+                d[3] = cv::saturate_cast<uchar>(o[3]);
+            }
+    } else {
+        rgba = cv::Mat::zeros(h, w, CV_8UC4);   // ripples on an empty layer
+    }
+
+    // Boop ripples on top: an expanding ring per touch, fading as it grows.
+    // Radius scales with the full canvas so multi-panel faces share one ring;
+    // the centre is canvas-normalised and shifted into this panel's space.
+    for (const auto& rp : impl_->ripples) {
+        const double t  = rp.age / rp.max_age;
+        const double cx = rp.cxn * impl_->cw - impl_->ox;
+        const double cy = rp.cyn * impl_->ch - impl_->oy;
+        const double radius = 1.5 + t * 0.8 * std::max(impl_->cw, impl_->ch);
+        const int    a     = static_cast<int>((1.0 - t) * 220.0);
+        const int    steps = std::max(24, static_cast<int>(radius * 7));
+        for (int i = 0; i < steps; ++i) {
+            const double ang = kTau * i / steps;
+            draw_pixel(rgba,
+                       static_cast<int>(std::lround(cx + std::cos(ang) * radius)),
+                       static_cast<int>(std::lround(cy + std::sin(ang) * radius)),
+                       rp.r, rp.g, rp.b, a);
         }
+    }
 
     result.has = true;
     result.rgba = rgba;

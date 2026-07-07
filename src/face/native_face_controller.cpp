@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -47,6 +48,12 @@ nlohmann::json effect_cfg_for_id(int id) {
         case 20: return nlohmann::json{{"preset", "constellation"}};
         case 21: return nlohmann::json{{"preset", "shooting_stars"}};
         case 22: return nlohmann::json{{"preset", "night_sky"}};
+        case 23: return std::string("steam");
+        case 24: return std::string("waveform");
+        case 25: return std::string("matrix");
+        case 26: return std::string("circuit");
+        case 27: return std::string("frost");
+        case 28: return std::string("heatwave");
         default: return std::string("none");
     }
 }
@@ -133,6 +140,7 @@ void NativeFaceController::build_panels() {
             // Tell canvas-space effects (water) where this panel sits so a
             // multi-panel face renders one continuous field.
             pn.particles->set_canvas_geometry(cfg_.canvas_w, cfg_.canvas_h, pc.x, pc.y);
+            pn.particles->set_motion_reactive(motion_particles_.load());
             pn.particles_spec = fc->particles;
         }
         // GIFs play per physical panel (duplicated on each side) rather than
@@ -201,6 +209,17 @@ void NativeFaceController::stop() {
     if (output_) output_->close();   // blank the panels on shutdown
 }
 
+// Slide a layer by (dx, dy) pixels inside its own frame, filling the exposed
+// border with zeros (transparent for RGBA). Used by Face Inertia.
+static cv::Mat shift_layer(const cv::Mat& src, int dx, int dy) {
+    cv::Mat out = cv::Mat::zeros(src.size(), src.type());
+    const int w = src.cols - std::abs(dx), h = src.rows - std::abs(dy);
+    if (w <= 0 || h <= 0) return out;
+    src(cv::Rect(std::max(0, -dx), std::max(0, -dy), w, h))
+        .copyTo(out(cv::Rect(std::max(0, dx), std::max(0, dy), w, h)));
+    return out;
+}
+
 void NativeFaceController::render_thread() {
     using clock = std::chrono::steady_clock;
     const double target_dt = 1.0 / std::max(1, cfg_.fps);
@@ -217,6 +236,10 @@ void NativeFaceController::render_thread() {
                                   cfg_.background[2]));
         {
             std::lock_guard<std::mutex> lk(state_mtx_);
+
+            // Face Inertia: normalised whole-face offset for this tick,
+            // converted to pixels per panel in the render loop below.
+            double inertia_ox = 0.0, inertia_oy = 0.0;
 
             // Forward the latest cross-thread drive inputs (stored lock-free by
             // set_audio_drive / set_motion so the audio and IMU threads never
@@ -236,6 +259,39 @@ void NativeFaceController::render_thread() {
                         pn.particles->set_audio(vol);
                         pn.particles->set_motion(mi);
                     }
+                }
+
+                // Face Inertia: spring the whole-face offset toward a target
+                // thrown by the current motion. Turn sweep and sustained roll
+                // throw it sideways; nod rate and vertical g-spikes bob it.
+                // Under-damped (zeta 0.5, omega 12 rad/s) so it settles in
+                // ~0.5 s with one visible spring-back overshoot; semi-implicit
+                // Euler stays stable even on a 100 ms frame hiccup.
+                if (face_inertia_.load(std::memory_order_relaxed)) {
+                    double pitch_rate = 0.0;
+                    if (inertia_prev_valid_ && dt > 1e-4)
+                        pitch_rate = (mi.pitch_deg - inertia_prev_pitch_) / dt;
+                    inertia_prev_pitch_ = mi.pitch_deg;
+                    inertia_prev_valid_ = true;
+                    const double tx = std::clamp(-mi.yaw_rate * 0.010
+                                                 - mi.roll_deg * 0.012, -1.0, 1.0);
+                    const double ty = std::clamp(pitch_rate * 0.010
+                                                 + (mi.accel_g - 1.0) * 0.8, -1.0, 1.0);
+                    const double w = 12.0, z = 0.5;
+                    auto spring = [&](double& x, double& v, double target){
+                        v += (w * w * (target - x) - 2.0 * z * w * v) * dt;
+                        x += v * dt;
+                        x  = std::clamp(x, -1.5, 1.5);
+                    };
+                    spring(inertia_x_, inertia_vx_, tx);
+                    spring(inertia_y_, inertia_vy_, ty);
+                    const double s =
+                        face_inertia_strength_.load(std::memory_order_relaxed);
+                    inertia_ox = std::clamp(inertia_x_ * s, -1.5, 1.5);
+                    inertia_oy = std::clamp(inertia_y_ * s, -1.5, 1.5);
+                } else {
+                    inertia_x_ = inertia_y_ = inertia_vx_ = inertia_vy_ = 0.0;
+                    inertia_prev_valid_ = false;
                 }
             }
 
@@ -351,6 +407,17 @@ void NativeFaceController::render_thread() {
                     cv::Mat face_rgba = pn.loader->get_frame(*pn.state);
                     glitch_flicker(pn.loader.get(), pn.state.get(), face_rgba);
                     face_layer = apply_material(face_rgba, mat);
+                }
+
+                // Face Inertia: slide the whole face layer by the sprung
+                // offset (exposed border fills transparent, so the background
+                // shows through). Applied before the mirror flip so mirrored
+                // eye panels move symmetrically.
+                if (!face_layer.empty() && (inertia_ox != 0.0 || inertia_oy != 0.0)) {
+                    const int dx = static_cast<int>(std::lround(inertia_ox * pc.w * 0.10));
+                    const int dy = static_cast<int>(std::lround(inertia_oy * pc.h * 0.12));
+                    if (dx != 0 || dy != 0)
+                        face_layer = shift_layer(face_layer, dx, dy);
                 }
 
                 // continuous_effects un-mirror: flip just the face/GIF layer so
@@ -1015,10 +1082,17 @@ void NativeFaceController::set_expression_effects(bool enabled) {
     if (enabled) {
         apply_expression_effect_locked(current_expression_);
     } else {
-        // Restore each panel's user-chosen base effect.
+        // Restore each panel's base effect (weather override or user-chosen).
         for (auto& pn : panels_)
-            if (pn.particles) pn.particles->set_effect(pn.particles_spec);
+            if (pn.particles) pn.particles->set_effect(base_particles_locked(pn));
     }
+}
+
+const nlohmann::json& NativeFaceController::base_particles_locked(const Panel& pn) const {
+    // The ambient override (weather / temperature), while set, IS the base —
+    // expression moods layer on top of it and restore back to it, exactly as
+    // they do with the user's own effect.
+    return ambient_spec_.is_null() ? pn.particles_spec : ambient_spec_;
 }
 
 void NativeFaceController::apply_expression_effect_locked(const std::string& expr) {
@@ -1031,9 +1105,55 @@ void NativeFaceController::apply_expression_effect_locked(const std::string& exp
             nlohmann::json spec; spec["preset"] = it->second;
             pn.particles->set_effect(spec);     // transient — leaves particles_spec (base) intact
         } else {
-            pn.particles->set_effect(pn.particles_spec);   // neutral/unmapped → base
+            pn.particles->set_effect(base_particles_locked(pn));   // neutral/unmapped → base
         }
     }
+}
+
+void NativeFaceController::set_motion_particles(bool on) {
+    motion_particles_.store(on);
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.particles) pn.particles->set_motion_reactive(on);
+}
+
+void NativeFaceController::set_face_inertia(bool on) {
+    face_inertia_.store(on);
+}
+
+void NativeFaceController::set_face_inertia_strength(double s) {
+    face_inertia_strength_.store(std::clamp(s, 0.0, 2.0));
+}
+
+void NativeFaceController::set_ambient_effect(const nlohmann::json& spec) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    ambient_spec_ = (spec.is_null() || (spec.is_string() && spec.get<std::string>().empty()))
+                        ? nlohmann::json() : spec;
+    // Re-resolve what the panels should show now: a mapped expression mood
+    // stays on top; otherwise the new base (weather or user effect) applies.
+    if (expr_effects_) {
+        apply_expression_effect_locked(current_expression_);
+    } else {
+        for (auto& pn : panels_)
+            if (pn.particles) pn.particles->set_effect(base_particles_locked(pn));
+    }
+}
+
+void NativeFaceController::trigger_boop_ripple(int zone) {
+    // Zone → canvas-normalised centre: the snout sits at bottom-centre of the
+    // face, cheeks at the outer thirds. Multi-panel faces share one ring via
+    // the canvas-space centre.
+    struct Pt { double x, y; };
+    static constexpr Pt kZone[3] = { {0.50, 0.92},    // snout
+                                     {0.15, 0.55},    // left cheek
+                                     {0.85, 0.55} };  // right cheek
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    auto fire = [&](const Pt& p) {
+        for (auto& pn : panels_)
+            if (!pn.is_mirror && pn.particles) pn.particles->trigger_ripple(p.x, p.y);
+    };
+    if (zone >= 0 && zone <= 2) fire(kZone[zone]);
+    else if (zone == 3) { fire(kZone[1]); fire(kZone[2]); }   // both cheeks
 }
 
 void NativeFaceController::trigger_boop(const std::string& expression, double duration_s) {

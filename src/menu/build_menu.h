@@ -385,6 +385,28 @@ struct MenuBuildContext {
     // the config-backed flag the menu reads. Null on non-native backends.
     std::function<void(bool)> pf_set_expr_effects;
     bool* pf_expr_effects_p = nullptr;
+    // "Alive" reactive pack toggles (Face > Effects). Motion Reactive couples
+    // directional effects to real gravity/turn-sweep; Weather Sync overrides
+    // the ambient effect from live conditions (mapped in main's render loop).
+    std::function<void(bool)> pf_set_motion_particles;
+    bool* pf_motion_particles_p = nullptr;
+    // Face Inertia - the whole face slides opposite quick head motion and
+    // springs back like it has mass. Strength scales the maximum slide
+    // (1.0 = up to ~10% of the panel).
+    std::function<void(bool)>   pf_set_face_inertia;
+    bool*                       pf_face_inertia_p = nullptr;
+    std::function<void(double)> pf_set_face_inertia_strength;
+    double*                     pf_face_inertia_strength_p = nullptr;
+    std::function<void(bool)> pf_set_weather_effects;
+    bool* pf_weather_effects_p = nullptr;
+    // Temp Effects - ambient frost / heat shimmer driven by the live outdoor
+    // temperature. Thresholds are Celsius. pf_ambient_resync tells main's
+    // render loop to re-map the ambient effect immediately after a toggle or
+    // threshold change (same path Weather Sync uses).
+    bool*   pf_temp_effects_p = nullptr;
+    double* pf_temp_cold_p    = nullptr;
+    double* pf_temp_hot_p     = nullptr;
+    std::function<void()> pf_ambient_resync;
     // Live-preview tick: main calls this each frame; when Live Preview is on
     // it re-applies the builder spec on change. Installed inside build_menu.
     std::shared_ptr<std::function<void()>> pf_live_tick;
