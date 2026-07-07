@@ -119,12 +119,12 @@ static void run_i2c_scan(AppState* sp) {
     std::vector<uint8_t> found;
     int fd = open(bus.c_str(), O_RDWR);
     if (fd >= 0) {
-        for (int addr = 0x08; addr <= 0x77; ++addr) {
-            if (ioctl(fd, I2C_SLAVE, addr) < 0) continue;
-            uint8_t buf = 0;
-            if (read(fd, &buf, 1) >= 0 || (errno != ENODEV && errno != ENXIO))
+        // i2cdetect-style ACK probe. The old read()-based test counted any
+        // errno but ENODEV/ENXIO as present, but a NACK on the Pi surfaces
+        // as EREMOTEIO — every address scanned as occupied.
+        for (int addr = 0x08; addr <= 0x77; ++addr)
+            if (menu_shared::i2c_probe_addr(fd, addr))
                 found.push_back(static_cast<uint8_t>(addr));
-        }
         close(fd);
     }
 

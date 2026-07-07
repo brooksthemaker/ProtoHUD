@@ -157,7 +157,19 @@ bool Bno08x::enable_reports() {
     sc.reportInterval_us = static_cast<uint32_t>(cfg_.report_interval_us);
     // ARVR-stabilized rotation vector: magnetometer-referenced (absolute heading,
     // no yaw drift) AND AR/VR-jitter-stabilized (good for head tracking).
-    return sh2_setSensorConfig(SH2_ARVR_STABILIZED_RV, &sc) == SH2_OK;
+    const bool rv_ok = sh2_setSensorConfig(SH2_ARVR_STABILIZED_RV, &sc) == SH2_OK;
+
+    // Calibrated accel / gyro / mag at the slower aux rate, for the IMU
+    // readout and interference diagnosis (the mag report's status byte is the
+    // magnetometer calibration quality the fused heading depends on). These
+    // are best-effort — losing them costs debug rows, not the compass.
+    sc.reportInterval_us = static_cast<uint32_t>(cfg_.aux_interval_us);
+    if (sh2_setSensorConfig(SH2_ACCELEROMETER, &sc)             != SH2_OK ||
+        sh2_setSensorConfig(SH2_GYROSCOPE_CALIBRATED, &sc)      != SH2_OK ||
+        sh2_setSensorConfig(SH2_MAGNETIC_FIELD_CALIBRATED, &sc) != SH2_OK)
+        fprintf(stderr, "[bno086] warning: could not enable accel/gyro/mag reports\n");
+
+    return rv_ok;
 }
 
 bool Bno08x::start() {
@@ -230,6 +242,36 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     sh2_SensorValue_t val{};
     if (sh2_decodeSensorEvent(&val, static_cast<sh2_SensorEvent_t*>(sh2_sensor_event)) != SH2_OK)
         return;
+
+    // Aux reports (calibrated accel / gyro / mag) — forward and return.
+    if (aux_cb_) {
+        AuxSample a;
+        a.status = val.status;
+        switch (val.sensorId) {
+        case SH2_ACCELEROMETER:
+            a.kind = AuxSample::Kind::Accel;
+            a.v[0] = val.un.accelerometer.x;
+            a.v[1] = val.un.accelerometer.y;
+            a.v[2] = val.un.accelerometer.z;
+            aux_cb_(a);
+            return;
+        case SH2_GYROSCOPE_CALIBRATED:
+            a.kind = AuxSample::Kind::Gyro;
+            a.v[0] = val.un.gyroscope.x;
+            a.v[1] = val.un.gyroscope.y;
+            a.v[2] = val.un.gyroscope.z;
+            aux_cb_(a);
+            return;
+        case SH2_MAGNETIC_FIELD_CALIBRATED:
+            a.kind = AuxSample::Kind::Mag;
+            a.v[0] = val.un.magneticField.x;
+            a.v[1] = val.un.magneticField.y;
+            a.v[2] = val.un.magneticField.z;
+            aux_cb_(a);
+            return;
+        default: break;
+        }
+    }
     if (val.sensorId != SH2_ARVR_STABILIZED_RV)
         return;
 
@@ -238,8 +280,11 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     const float qy = val.un.arvrStabilizedRV.j;
     const float qz = val.un.arvrStabilizedRV.k;
 
-    float roll, pitch, yaw;                  // radians (euler.c uses atan2/asin)
-    q_to_ypr(qw, qx, qy, qz, &roll, &pitch, &yaw);
+    float yaw, pitch, roll;                  // radians (euler.c uses atan2/asin)
+    // q_to_ypr's out-params are ordered yaw, pitch, roll. Passing (&roll, ...,
+    // &yaw) here had them swapped, so the compass heading tracked the sensor's
+    // ROLL — tilting the head spun the compass while turning moved "R".
+    q_to_ypr(qw, qx, qy, qz, &yaw, &pitch, &roll);
     const float roll_deg  = roll  * kRad2Deg;
     const float pitch_deg = pitch * kRad2Deg;
     const float yaw_deg   = yaw   * kRad2Deg;

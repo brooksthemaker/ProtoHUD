@@ -1619,6 +1619,7 @@ int main(int argc, char* argv[]) {
         bno08x_cfg.int_line           = jval(jb, "int_line",           -1);
         bno08x_cfg.rst_line           = jval(jb, "rst_line",           -1);
         bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 10000);
+        bno08x_cfg.aux_interval_us    = jval(jb, "aux_interval_us",    40000);
         bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
         bno08x_cfg.heading_offset     = jval(jb, "heading_offset",     0.0f);
         bno08x_cfg.heading_invert     = jval(jb, "heading_invert",     false);
@@ -2547,6 +2548,24 @@ int main(int argc, char* argv[]) {
     bno086.set_orientation_callback([&state](float roll, float pitch, float yaw) {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.imu_pose = { roll, pitch, yaw };   // owns pose while head_tracking on
+    });
+    bno086.set_aux_callback([&state](const Bno08x::AuxSample& a) {
+        constexpr float kG = 9.80665f, kRad2Deg = 57.2957795f;
+        std::lock_guard<std::mutex> lk(state.mtx);
+        auto& d = state.imu_data;
+        d.b86_aux_ok = true;
+        switch (a.kind) {
+        case Bno08x::AuxSample::Kind::Accel:
+            for (int i = 0; i < 3; ++i) d.b86_accel_g[i] = a.v[i] / kG;
+            break;
+        case Bno08x::AuxSample::Kind::Gyro:
+            for (int i = 0; i < 3; ++i) d.b86_gyro_dps[i] = a.v[i] * kRad2Deg;
+            break;
+        case Bno08x::AuxSample::Kind::Mag:
+            for (int i = 0; i < 3; ++i) d.b86_mag_ut[i] = a.v[i];
+            d.b86_mag_acc = a.status;
+            break;
+        }
     });
     bno086.set_sample_callback([&state](const Bno08x::Sample& s) {
         int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -5637,18 +5656,71 @@ int main(int argc, char* argv[]) {
         // ── Feed IMU motion to the face (motion-reactive particle layers) ─────
         // Snapshot under the lock, then push without it (face_proxy locks its
         // own mutex). No-op unless a Protoface particle layer opted into motion.
+        // The source follows state.imu_source — the SAME sensor that drives the
+        // HUD compass (Auto walks BNO086 > BNO055 > MPU9250 > Viture by
+        // freshness), so the face and the compass never disagree about which
+        // head they're attached to. Per source we take what it publishes:
+        // MPU-9250 has no euler (no lean), Viture has no gyro/accel (yaw sweep
+        // and bob stay quiet). Accel defaults to 1 g so stillness reads as
+        // resting gravity, not free-fall.
         {
-            double m_head, m_yaw, m_pitch, m_roll, m_accel;
+            double m_head = 0.0, m_yaw = 0.0, m_pitch = 0.0, m_roll = 0.0,
+                   m_accel = 1.0;
             {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 const auto& d = state.imu_data;
-                m_head  = state.imu_bno.heading_deg;
-                m_yaw   = d.bno_gyro_dps[2];          // yaw rate about vertical
-                m_roll  = d.bno_euler[1];
-                m_pitch = d.bno_euler[2];
-                m_accel = std::sqrt(d.bno_accel_g[0]*d.bno_accel_g[0] +
-                                    d.bno_accel_g[1]*d.bno_accel_g[1] +
-                                    d.bno_accel_g[2]*d.bno_accel_g[2]);
+                const int64_t now_us =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                auto fresh = [now_us](const AppState::ImuSlot& s) {
+                    return s.last_us > 0 && (now_us - s.last_us) < 2'000'000;
+                };
+                auto norm3 = [](const float v[3]) {
+                    return std::sqrt(double(v[0])*v[0] + double(v[1])*v[1] +
+                                     double(v[2])*v[2]);
+                };
+                enum class Src { B86, B55, Mpu, Xr, None } src = Src::None;
+                switch (state.imu_source) {
+                case AppState::ImuSource::Bno08x:  src = Src::B86; break;
+                case AppState::ImuSource::Bno055:  src = Src::B55; break;
+                case AppState::ImuSource::Mpu9250: src = Src::Mpu; break;
+                case AppState::ImuSource::Viture:  src = Src::Xr;  break;
+                case AppState::ImuSource::None:    src = Src::None; break;
+                case AppState::ImuSource::Auto:
+                    if      (fresh(state.imu_bno08x)) src = Src::B86;
+                    else if (fresh(state.imu_bno))    src = Src::B55;
+                    else if (fresh(state.imu_mpu))    src = Src::Mpu;
+                    else if (fresh(state.imu_viture)) src = Src::Xr;
+                    break;
+                }
+                switch (src) {
+                case Src::B86:
+                    m_head  = state.imu_bno08x.heading_deg;
+                    m_yaw   = d.b86_gyro_dps[2];      // yaw rate about vertical
+                    m_roll  = d.b86_euler[0];
+                    m_pitch = d.b86_euler[1];
+                    m_accel = d.b86_aux_ok ? norm3(d.b86_accel_g) : 1.0;
+                    break;
+                case Src::B55:
+                    m_head  = state.imu_bno.heading_deg;
+                    m_yaw   = d.bno_gyro_dps[2];
+                    m_roll  = d.bno_euler[1];
+                    m_pitch = d.bno_euler[2];
+                    m_accel = d.bno_ok ? norm3(d.bno_accel_g) : 1.0;
+                    break;
+                case Src::Mpu:
+                    m_head  = state.imu_mpu.heading_deg;
+                    m_yaw   = d.gyro_dps[2];
+                    m_accel = d.mpu_ok ? norm3(d.accel_g) : 1.0;
+                    break;
+                case Src::Xr:
+                    m_head  = state.imu_viture.heading_deg;
+                    m_roll  = d.xr_roll;
+                    m_pitch = d.xr_pitch;
+                    break;
+                case Src::None:
+                    break;
+                }
             }
             face_proxy.set_motion(m_head, m_yaw, m_pitch, m_roll, m_accel);
         }

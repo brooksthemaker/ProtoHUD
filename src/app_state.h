@@ -342,6 +342,15 @@ struct ImuData {
     float b86_euler[3]     = {0.f, 0.f, 0.f};  // roll, pitch, yaw (deg)
     float b86_accuracy_deg = 0.f;              // rotation-vector accuracy estimate
     float b86_rate_hz      = 0.f;              // measured sample rate (EMA)
+    // Calibrated 9-axis readout (BNO086 aux reports, ~25 Hz). b86_mag_acc is
+    // the SH-2 magnetometer calibration quality 0..3 — the fused heading is
+    // only trustworthy from 2 up; a mag vector that jumps near the panels or
+    // fans is magnetic interference the quaternion hides.
+    bool    b86_aux_ok       = false;
+    float   b86_accel_g[3]   = {0.f, 0.f, 0.f};
+    float   b86_gyro_dps[3]  = {0.f, 0.f, 0.f};
+    float   b86_mag_ut[3]    = {0.f, 0.f, 0.f};
+    uint8_t b86_mag_acc      = 0;
 };
 
 // ── Map overlay ───────────────────────────────────────────────────────────────

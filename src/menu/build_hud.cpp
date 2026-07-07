@@ -478,14 +478,24 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             return std::string(b);
         }));
 
-        imu_readout.push_back(ro("BNO086", [state_ptr, b86, now_us, fresh]{
+        // The SH-2 open can't tell a silent address from a live chip (binding
+        // an I2C address always succeeds), so "driver up + no samples" is the
+        // signature of a wrong i2c_addr or missing INT — say so, with the
+        // address the driver is actually talking to.
+        const int b86_cfg_addr =
+            (ctx.cfg_root && ctx.cfg_root->contains("bno086") &&
+             (*ctx.cfg_root)["bno086"].is_object())
+                ? (*ctx.cfg_root)["bno086"].value("i2c_addr", 0x4A) : 0x4A;
+        imu_readout.push_back(ro("BNO086", [state_ptr, b86, b86_cfg_addr, now_us, fresh]{
             std::lock_guard<std::mutex> lk(state_ptr->mtx);
             const auto& d = state_ptr->imu_data;
             char b[80];
             if (!d.b86_ok)
-                snprintf(b, sizeof b, "BNO086:  %s",
-                         b86 && b86->connected() ? "linked, no samples"
-                                                 : "no data");
+                snprintf(b, sizeof b,
+                         b86 && b86->connected()
+                             ? "BNO086:  no samples at 0x%02X - addr/INT?"
+                             : "BNO086:  driver off (cfg 0x%02X)",
+                         b86_cfg_addr);
             else
                 snprintf(b, sizeof b, "BNO086:  %.1f\xc2\xb0  \xc2\xb1%.1f\xc2\xb0  %.0f Hz%s",
                          static_cast<double>(state_ptr->imu_bno08x.heading_deg),
@@ -504,6 +514,49 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
                      static_cast<double>(d.b86_euler[2]));
             return std::string(b);
         }));
+        imu_readout.push_back(ro("B86 Acc", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Acc %6.2f %6.2f %6.2f g",
+                     static_cast<double>(d.b86_accel_g[0]),
+                     static_cast<double>(d.b86_accel_g[1]),
+                     static_cast<double>(d.b86_accel_g[2]));
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("B86 Gyr", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Gyr %6.0f %6.0f %6.0f d/s",
+                     static_cast<double>(d.b86_gyro_dps[0]),
+                     static_cast<double>(d.b86_gyro_dps[1]),
+                     static_cast<double>(d.b86_gyro_dps[2]));
+            return std::string(b);
+        }));
+        // Mag row carries the SH-2 magnetometer calibration quality (s0..s3):
+        // the fused heading only earns trust from s2 up, and a vector that
+        // jumps near the panels/fans is magnetic interference the quaternion
+        // hides. Amber below s2.
+        {
+            MenuItem m = ro("B86 Mag", [state_ptr]{
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                const auto& d = state_ptr->imu_data;
+                char b[64];
+                snprintf(b, sizeof b, "  Mag %6.0f %6.0f %6.0f uT  s%d",
+                         static_cast<double>(d.b86_mag_ut[0]),
+                         static_cast<double>(d.b86_mag_ut[1]),
+                         static_cast<double>(d.b86_mag_ut[2]),
+                         d.b86_mag_acc);
+                return std::string(b);
+            });
+            m.warn_fn = [state_ptr]{
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                const auto& d = state_ptr->imu_data;
+                return d.b86_aux_ok && d.b86_mag_acc < 2;
+            };
+            imu_readout.push_back(std::move(m));
+        }
 
         imu_readout.push_back(ro("BNO055", [state_ptr, now_us, fresh]{
             std::lock_guard<std::mutex> lk(state_ptr->mtx);
@@ -652,13 +705,14 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         struct ImuScan {
             std::mutex m;
             bool busy = false, ran = false;
-            int  found[3] = {-1, -1, -1};   // detected addr per chip, -1 = none
+            int  found[3]    = {-1, -1, -1};   // detected addr per chip, -1 = none
+            int  cfg_addr[3] = {-1, -1, -1};   // addr the config points the driver at
         };
-        struct ImuChip { const char* name; const char* cfg_key; int addr[2]; };
+        struct ImuChip { const char* name; const char* cfg_key; int addr[2]; int def_addr; };
         static constexpr ImuChip kChips[3] = {
-            { "BNO086",   "bno086",  {0x4A, 0x4B} },
-            { "BNO055",   "bno055",  {0x28, 0x29} },
-            { "MPU-9250", "mpu9250", {0x68, 0x69} },
+            { "BNO086",   "bno086",  {0x4A, 0x4B}, 0x4A },
+            { "BNO055",   "bno055",  {0x28, 0x29}, 0x28 },
+            { "MPU-9250", "mpu9250", {0x68, 0x69}, 0x68 },
         };
         auto scan = std::make_shared<ImuScan>();
         json* cfg_root = ctx.cfg_root;
@@ -668,33 +722,36 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
                 if (scan->busy) return;
                 scan->busy = true;
             }
-            // Each chip is probed on its configured bus (default /dev/i2c-1).
+            // Each chip is probed on its configured bus (default /dev/i2c-1);
+            // also note the address the config points the driver at, so the
+            // result row can flag a wired-vs-configured mismatch.
             std::array<std::string, 3> buses;
+            std::array<int, 3> cfg_addr;
             for (int i = 0; i < 3; ++i) {
-                buses[i] = "/dev/i2c-1";
+                buses[i]    = "/dev/i2c-1";
+                cfg_addr[i] = kChips[i].def_addr;
                 if (cfg_root && cfg_root->contains(kChips[i].cfg_key) &&
-                    (*cfg_root)[kChips[i].cfg_key].is_object())
-                    buses[i] = (*cfg_root)[kChips[i].cfg_key]
-                                   .value("i2c_bus", std::string("/dev/i2c-1"));
+                    (*cfg_root)[kChips[i].cfg_key].is_object()) {
+                    const auto& jc = (*cfg_root)[kChips[i].cfg_key];
+                    buses[i]    = jc.value("i2c_bus", std::string("/dev/i2c-1"));
+                    cfg_addr[i] = jc.value(i == 2 ? "mpu_addr" : "i2c_addr",
+                                           kChips[i].def_addr);
+                }
             }
-            std::thread([scan, buses]{
+            std::thread([scan, buses, cfg_addr]{
                 int found[3] = {-1, -1, -1};
                 for (int i = 0; i < 3; ++i) {
                     int fd = open(buses[i].c_str(), O_RDWR);
                     if (fd < 0) continue;
-                    for (int a : kChips[i].addr) {
-                        if (ioctl(fd, I2C_SLAVE, a) < 0) continue;
-                        uint8_t byte = 0;
-                        if (read(fd, &byte, 1) >= 0 ||
-                            (errno != ENODEV && errno != ENXIO)) {
-                            found[i] = a;
-                            break;
-                        }
-                    }
+                    for (int a : kChips[i].addr)
+                        if (menu_shared::i2c_probe_addr(fd, a)) { found[i] = a; break; }
                     close(fd);
                 }
                 std::lock_guard<std::mutex> lk(scan->m);
-                for (int i = 0; i < 3; ++i) scan->found[i] = found[i];
+                for (int i = 0; i < 3; ++i) {
+                    scan->found[i]    = found[i];
+                    scan->cfg_addr[i] = cfg_addr[i];
+                }
                 scan->busy = false;
                 scan->ran  = true;
             }).detach();
@@ -714,15 +771,25 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             MenuItem r = leaf(kChips[i].name, []{});
             r.label_fn = [scan, i]{
                 std::lock_guard<std::mutex> lk(scan->m);
-                char b[48];
+                char b[64];
                 if (scan->busy)
                     snprintf(b, sizeof b, "  %s:  scanning...", kChips[i].name);
                 else if (scan->found[i] < 0)
                     snprintf(b, sizeof b, "  %s:  not found", kChips[i].name);
+                else if (scan->found[i] != scan->cfg_addr[i])
+                    // Wired at one address, driver configured for another —
+                    // the "connected but silent" trap. Point at the fix.
+                    snprintf(b, sizeof b, "  %s:  0x%02X but config says 0x%02X!",
+                             kChips[i].name, scan->found[i], scan->cfg_addr[i]);
                 else
                     snprintf(b, sizeof b, "  %s:  found at 0x%02X",
                              kChips[i].name, scan->found[i]);
                 return std::string(b);
+            };
+            r.warn_fn = [scan, i]{
+                std::lock_guard<std::mutex> lk(scan->m);
+                return scan->ran && scan->found[i] >= 0 &&
+                       scan->found[i] != scan->cfg_addr[i];
             };
             r.visible_fn = [scan]{
                 std::lock_guard<std::mutex> lk(scan->m);

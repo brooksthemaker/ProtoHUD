@@ -85,4 +85,14 @@ MenuItem restart_face_renderer_leaf(std::function<void()> restart,
 std::function<void()> ring_phone_action(integrations::KdeConnectBridge* kdc,
                                         AppState& state);
 
+// i2cdetect-style presence probe of one address on an already-open bus fd.
+// A plain read() misreports on the Pi: a NACK comes back as EREMOTEIO, which
+// the old "any errno but ENODEV/ENXIO means present" test counted as found —
+// every address probed as occupied. This issues the same SMBus transactions
+// i2cdetect does (quick-write for most addresses; read-byte in the
+// EEPROM/RTC ranges where a stray quick-write can corrupt state) and only
+// trusts an ACKed transfer. Used by the IMU scan and the Diagnostics
+// full-bus scanner.
+bool i2c_probe_addr(int fd, int addr);
+
 } // namespace menu_shared
