@@ -408,72 +408,81 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [&state, v]{ return state.imu_source == v; }));
     }
 
-    std::vector<MenuItem> compass_menu = {
-        toggle("Compass Tape",
-            [&state]{ return state.compass_tape; },
-            [&state](bool v){ state.compass_tape = v; }),
+    // ── IMU hardware group ──────────────────────────────────────────────────
+    // Source picker, head-tracking recenter, axis mapping, calibration and
+    // sensor restart — the head-mounted IMU devices themselves. Routed to the
+    // GPIO tab's On-Board GPIO section via ctx.imu_out when build_menu wires
+    // it (the chips hang off the 40-pin header's I²C pins); otherwise nests
+    // here under Compass as before.
+    std::vector<MenuItem> imu_menu;
+    imu_menu.push_back(
         with_desc(submenu("IMU Source", std::move(imu_source_menu)),
                   "Which sensor drives the HUD compass. Auto walks "
                   "BNO086 > BNO055 > MPU9250 > Viture and picks the "
                   "highest-priority fresh source each frame; explicit choices "
-                  "force their source even if stale."),
-        [&]() -> MenuItem {
-            // BNO086 head-tracking recenter: tare the sensor so the direction
-            // you're facing becomes "forward" for pin-in-space / the compass.
-            Bno08x* b = ctx.bno08x;
-            MenuItem m = with_desc(
-                leaf("Recenter Head Tracking", [b]{ if (b) b->recenter(false); }),
-                "Tare the BNO086 so your current facing becomes forward "
-                "(zeroes heading/yaw). Use after mounting or if the view has "
-                "drifted off-centre.");
-            m.visible_fn = [b]{ return b && b->connected(); };
-            return m;
-        }(),
-        submenu("IMU Axis",            std::move(imu_axis_menu)),
-        [&]() -> MenuItem {
-            MenuItem m = leaf("Save IMU Calibration",
-                [bno055]{ if (bno055) bno055->request_calibration_save(); });
-            m.label_fn = [bno055]{
-                const int s = bno055 ? bno055->calib_sys() : 0;
-                return std::string("Save IMU Calibration  [sys ") +
-                       std::to_string(s) + "/3]";
-            };
-            m.visible_fn = [bno055]{ return bno055 && bno055->connected(); };
-            return with_desc(std::move(m),
-                "Store the BNO055's current calibration so it loads on boot. "
-                "Best when calibration reads 3/3 — rotate the head through "
-                "several orientations and a figure-8 for the magnetometer.");
-        }(),
-        [&]() -> MenuItem {
-            // Re-init the BNO055 without restarting ProtoHUD — for a sensor
-            // that wasn't powered/ready at boot (the chip needs ≥1 s after
-            // power-on before it talks). restart() stops + joins the poll
-            // thread and sleeps through the settle window, so it must NOT run
-            // on the render thread — hand it to a detached worker.
-            MenuItem m = leaf("Restart IMU Sensor", [bno055, state_ptr]{
-                if (!bno055) return;
-                std::thread([bno055, state_ptr]{
-                    const bool ok = bno055->restart();
-                    if (!state_ptr) return;
-                    Notification n; n.type = NotifType::App;
-                    n.title = ok ? "IMU sensor connected" : "IMU sensor not found";
-                    n.body  = ok ? "BNO055 re-initialised and streaming."
-                                 : "No response — check wiring/power, then retry.";
-                    n.auto_dismiss_s = 5.f;
-                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
-                    state_ptr->notifs.push(std::move(n));
-                }).detach();
-            });
-            m.label_fn = [bno055]{
-                return std::string("Restart IMU Sensor  [") +
-                       (bno055 && bno055->connected() ? "connected" : "offline") + "]";
-            };
-            return with_desc(std::move(m),
-                "Tear down and re-initialise the BNO055. Use when the sensor "
-                "wasn't ready at boot — the chip needs about a second after "
-                "power-on before it responds, so a sensor powered late comes "
-                "up offline until you trigger this. No ProtoHUD restart needed.");
-        }(),
+                  "force their source even if stale."));
+    imu_menu.push_back([&]() -> MenuItem {
+        // BNO086 head-tracking recenter: tare the sensor so the direction
+        // you're facing becomes "forward" for pin-in-space / the compass.
+        Bno08x* b = ctx.bno08x;
+        MenuItem m = with_desc(
+            leaf("Recenter Head Tracking", [b]{ if (b) b->recenter(false); }),
+            "Tare the BNO086 so your current facing becomes forward "
+            "(zeroes heading/yaw). Use after mounting or if the view has "
+            "drifted off-centre.");
+        m.visible_fn = [b]{ return b && b->connected(); };
+        return m;
+    }());
+    imu_menu.push_back(submenu("IMU Axis", std::move(imu_axis_menu)));
+    imu_menu.push_back([&]() -> MenuItem {
+        MenuItem m = leaf("Save IMU Calibration",
+            [bno055]{ if (bno055) bno055->request_calibration_save(); });
+        m.label_fn = [bno055]{
+            const int s = bno055 ? bno055->calib_sys() : 0;
+            return std::string("Save IMU Calibration  [sys ") +
+                   std::to_string(s) + "/3]";
+        };
+        m.visible_fn = [bno055]{ return bno055 && bno055->connected(); };
+        return with_desc(std::move(m),
+            "Store the BNO055's current calibration so it loads on boot. "
+            "Best when calibration reads 3/3 — rotate the head through "
+            "several orientations and a figure-8 for the magnetometer.");
+    }());
+    imu_menu.push_back([&]() -> MenuItem {
+        // Re-init the BNO055 without restarting ProtoHUD — for a sensor
+        // that wasn't powered/ready at boot (the chip needs ≥1 s after
+        // power-on before it talks). restart() stops + joins the poll
+        // thread and sleeps through the settle window, so it must NOT run
+        // on the render thread — hand it to a detached worker.
+        MenuItem m = leaf("Restart IMU Sensor", [bno055, state_ptr]{
+            if (!bno055) return;
+            std::thread([bno055, state_ptr]{
+                const bool ok = bno055->restart();
+                if (!state_ptr) return;
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "IMU sensor connected" : "IMU sensor not found";
+                n.body  = ok ? "BNO055 re-initialised and streaming."
+                             : "No response — check wiring/power, then retry.";
+                n.auto_dismiss_s = 5.f;
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                state_ptr->notifs.push(std::move(n));
+            }).detach();
+        });
+        m.label_fn = [bno055]{
+            return std::string("Restart IMU Sensor  [") +
+                   (bno055 && bno055->connected() ? "connected" : "offline") + "]";
+        };
+        return with_desc(std::move(m),
+            "Tear down and re-initialise the BNO055. Use when the sensor "
+            "wasn't ready at boot — the chip needs about a second after "
+            "power-on before it responds, so a sensor powered late comes "
+            "up offline until you trigger this. No ProtoHUD restart needed.");
+    }());
+
+    std::vector<MenuItem> compass_menu = {
+        toggle("Compass Tape",
+            [&state]{ return state.compass_tape; },
+            [&state](bool v){ state.compass_tape = v; }),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
@@ -483,6 +492,19 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_height); },
             [hud_cfg](float v){ hud_cfg->compass_height = static_cast<int>(v); }),
     };
+    if (ctx.imu_out) {
+        ctx.imu_out->push_back(with_desc(submenu("IMU", std::move(imu_menu)),
+            "Head-tracking IMU hardware on the 40-pin header's I\xc2\xb2""C bus: "
+            "pick which sensor drives the compass (BNO086 / BNO055 / MPU-9250 / "
+            "Viture), recenter head tracking, remap axes, save calibration or "
+            "restart the sensor."));
+    } else {
+        // No GPIO tab wired — keep the IMU items under Compass, after the
+        // Compass Tape toggle, as before.
+        compass_menu.insert(compass_menu.begin() + 1,
+                            std::make_move_iterator(imu_menu.begin()),
+                            std::make_move_iterator(imu_menu.end()));
+    }
 
     // ── Color Options ─────────────────────────────────────────────────────────
 
