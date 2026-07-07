@@ -35,6 +35,7 @@ public:
         int         int_line           = -1;           // INT offset (data-ready, active-low); -1 = poll the bus
         int         rst_line           = -1;           // RST offset (active-low); -1 = no hardware reset
         int         report_interval_us = 10000;        // 10 ms = 100 Hz orientation
+        int         aux_interval_us    = 40000;        // 25 Hz calibrated accel/gyro/mag
         float       declination_deg    = 0.0f;         // local magnetic declination (+E/-W)
         float       heading_offset     = 0.0f;         // mechanical mount offset (deg)
         bool        heading_invert     = false;        // flip yaw→heading direction if mirrored
@@ -49,12 +50,25 @@ public:
         uint8_t status        = 0;             // SH-2 status byte (accuracy bits 1..0)
     };
 
+    // Calibrated accel / gyro / mag, streamed alongside the rotation vector at
+    // the (slower) aux rate. One event per report; `kind` says which block of
+    // `v` is fresh. `status` is the SH-2 accuracy for THAT sensor (0 unreliable
+    // .. 3 high) — for Mag it's the magnetometer calibration quality, the
+    // number that tells you whether the fused heading can be trusted.
+    struct AuxSample {
+        enum class Kind : uint8_t { Accel, Gyro, Mag } kind = Kind::Accel;
+        float   v[3]   = {0, 0, 0};   // Accel: m/s²   Gyro: rad/s   Mag: µT
+        uint8_t status = 0;
+    };
+
     explicit Bno08x(const Config& cfg);
     ~Bno08x();
 
     using HeadingCallback     = std::function<void(float heading_deg)>;
     using OrientationCallback = std::function<void(float roll, float pitch, float yaw)>;
     using SampleCallback      = std::function<void(const Sample&)>;
+    using AuxCallback         = std::function<void(const AuxSample&)>;
+    void set_aux_callback(AuxCallback cb)                 { aux_cb_    = std::move(cb); }
     void set_heading_callback(HeadingCallback cb)         { cb_        = std::move(cb); }
     void set_orientation_callback(OrientationCallback cb) { orient_cb_ = std::move(cb); }
     void set_sample_callback(SampleCallback cb)           { samp_cb_   = std::move(cb); }
@@ -102,4 +116,5 @@ private:
     HeadingCallback     cb_;
     OrientationCallback orient_cb_;
     SampleCallback      samp_cb_;
+    AuxCallback         aux_cb_;
 };

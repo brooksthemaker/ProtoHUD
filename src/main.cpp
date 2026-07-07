@@ -1598,6 +1598,7 @@ int main(int argc, char* argv[]) {
         bno08x_cfg.int_line           = jval(jb, "int_line",           -1);
         bno08x_cfg.rst_line           = jval(jb, "rst_line",           -1);
         bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 10000);
+        bno08x_cfg.aux_interval_us    = jval(jb, "aux_interval_us",    40000);
         bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
         bno08x_cfg.heading_offset     = jval(jb, "heading_offset",     0.0f);
         bno08x_cfg.heading_invert     = jval(jb, "heading_invert",     false);
@@ -2505,6 +2506,24 @@ int main(int argc, char* argv[]) {
     bno086.set_orientation_callback([&state](float roll, float pitch, float yaw) {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.imu_pose = { roll, pitch, yaw };   // owns pose while head_tracking on
+    });
+    bno086.set_aux_callback([&state](const Bno08x::AuxSample& a) {
+        constexpr float kG = 9.80665f, kRad2Deg = 57.2957795f;
+        std::lock_guard<std::mutex> lk(state.mtx);
+        auto& d = state.imu_data;
+        d.b86_aux_ok = true;
+        switch (a.kind) {
+        case Bno08x::AuxSample::Kind::Accel:
+            for (int i = 0; i < 3; ++i) d.b86_accel_g[i] = a.v[i] / kG;
+            break;
+        case Bno08x::AuxSample::Kind::Gyro:
+            for (int i = 0; i < 3; ++i) d.b86_gyro_dps[i] = a.v[i] * kRad2Deg;
+            break;
+        case Bno08x::AuxSample::Kind::Mag:
+            for (int i = 0; i < 3; ++i) d.b86_mag_ut[i] = a.v[i];
+            d.b86_mag_acc = a.status;
+            break;
+        }
     });
     bno086.set_sample_callback([&state](const Bno08x::Sample& s) {
         int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(

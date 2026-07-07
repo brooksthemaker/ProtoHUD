@@ -514,6 +514,49 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
                      static_cast<double>(d.b86_euler[2]));
             return std::string(b);
         }));
+        imu_readout.push_back(ro("B86 Acc", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Acc %6.2f %6.2f %6.2f g",
+                     static_cast<double>(d.b86_accel_g[0]),
+                     static_cast<double>(d.b86_accel_g[1]),
+                     static_cast<double>(d.b86_accel_g[2]));
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("B86 Gyr", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Gyr %6.0f %6.0f %6.0f d/s",
+                     static_cast<double>(d.b86_gyro_dps[0]),
+                     static_cast<double>(d.b86_gyro_dps[1]),
+                     static_cast<double>(d.b86_gyro_dps[2]));
+            return std::string(b);
+        }));
+        // Mag row carries the SH-2 magnetometer calibration quality (s0..s3):
+        // the fused heading only earns trust from s2 up, and a vector that
+        // jumps near the panels/fans is magnetic interference the quaternion
+        // hides. Amber below s2.
+        {
+            MenuItem m = ro("B86 Mag", [state_ptr]{
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                const auto& d = state_ptr->imu_data;
+                char b[64];
+                snprintf(b, sizeof b, "  Mag %6.0f %6.0f %6.0f uT  s%d",
+                         static_cast<double>(d.b86_mag_ut[0]),
+                         static_cast<double>(d.b86_mag_ut[1]),
+                         static_cast<double>(d.b86_mag_ut[2]),
+                         d.b86_mag_acc);
+                return std::string(b);
+            });
+            m.warn_fn = [state_ptr]{
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                const auto& d = state_ptr->imu_data;
+                return d.b86_aux_ok && d.b86_mag_acc < 2;
+            };
+            imu_readout.push_back(std::move(m));
+        }
 
         imu_readout.push_back(ro("BNO055", [state_ptr, now_us, fresh]{
             std::lock_guard<std::mutex> lk(state_ptr->mtx);

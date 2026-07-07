@@ -439,6 +439,8 @@
     "_rst_line_note": "GPIO line offset of the BNO086 RST pin (active-low). -1 = no hardware reset (the driver just waits for the hub to boot).",
     "report_interval_us": 10000,
     "_report_interval_note": "Orientation report period in microseconds. 10000 = 100 Hz.",
+    "aux_interval_us": 40000,
+    "_aux_interval_note": "Period of the calibrated accel/gyro/mag side reports shown in GPIO > On-Board GPIO > IMU > Live Readout. 40000 = 25 Hz. The Mag row's s0-s3 is the magnetometer calibration quality the fused heading depends on.",
     "declination_deg": 0.0,
     "heading_offset": 0.0,
     "heading_invert": false,
