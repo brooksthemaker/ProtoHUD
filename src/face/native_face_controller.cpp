@@ -272,9 +272,20 @@ void NativeFaceController::render_thread() {
                     if (inertia_prev_valid_ && dt > 1e-4)
                         pitch_rate = (mi.pitch_deg - inertia_prev_pitch_) / dt;
                     inertia_prev_pitch_ = mi.pitch_deg;
+                    // Roll enters relative to a slow baseline (tau 4 s), not
+                    // as the absolute angle: the IMU's roll is gravity-
+                    // referenced, so mounting tilt / natural head posture
+                    // would otherwise shift the spring's equilibrium and park
+                    // the face off-centre (scaled up by Shift Amount). A lean
+                    // still sweeps the face sideways; hold the lean and the
+                    // baseline catches up, re-centring the face.
+                    if (!inertia_prev_valid_) inertia_roll_base_ = mi.roll_deg;
+                    inertia_roll_base_ +=
+                        (mi.roll_deg - inertia_roll_base_) * std::min(1.0, dt / 4.0);
+                    const double roll_rel = mi.roll_deg - inertia_roll_base_;
                     inertia_prev_valid_ = true;
                     const double tx = std::clamp(-mi.yaw_rate * 0.010
-                                                 - mi.roll_deg * 0.012, -1.0, 1.0);
+                                                 - roll_rel * 0.012, -1.0, 1.0);
                     const double ty = std::clamp(pitch_rate * 0.010
                                                  + (mi.accel_g - 1.0) * 0.8, -1.0, 1.0);
                     const double w = 12.0, z = 0.5;

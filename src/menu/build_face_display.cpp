@@ -1186,6 +1186,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         "confetti", "rings", "fireflies", "clouds",
         "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
         "starfield", "warp", "constellation", "shootingstars",
+        // The "alive"-pack primitives shipped in the renderer + presets but
+        // never landed in this list, so Single Effects / the layer editor
+        // couldn't reach them.
+        "steam", "waveform", "matrix", "circuit", "frost", "heatwave",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
