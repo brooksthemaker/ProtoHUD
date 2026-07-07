@@ -9,6 +9,10 @@
 #include <mutex>
 #include <utility>
 
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+#include <sys/ioctl.h>
+
 #include "camera/camera_manager.h"
 #include "integrations/kdeconnect_bridge.h"
 #include "menu/item_factories.h"
@@ -205,6 +209,23 @@ std::function<void()> ring_phone_action(integrations::KdeConnectBridge* kdc,
         n.auto_dismiss_s = 4.f;
         state.notifs.push(std::move(n));
     };
+}
+
+bool i2c_probe_addr(int fd, int addr) {
+    if (ioctl(fd, I2C_SLAVE, addr) < 0) return false;
+    union i2c_smbus_data data{};
+    i2c_smbus_ioctl_data args{};
+    if ((addr >= 0x30 && addr <= 0x37) || (addr >= 0x50 && addr <= 0x5F)) {
+        args.read_write = I2C_SMBUS_READ;    // read-byte: safe for EEPROMs/RTCs
+        args.size       = I2C_SMBUS_BYTE;
+        args.data       = &data;
+    } else {
+        args.read_write = I2C_SMBUS_WRITE;   // quick-write: a bare addr+W ACK
+        args.size       = I2C_SMBUS_QUICK;
+        args.data       = nullptr;
+    }
+    args.command = 0;
+    return ioctl(fd, I2C_SMBUS, &args) >= 0;
 }
 
 } // namespace menu_shared
