@@ -303,6 +303,7 @@ void NativeFaceController::render_thread() {
             // Advance the glitch burst envelope once per frame so every panel
             // (and both eyes) corrupts identically this tick.
             glitch_.tick(dt, glitch_cfg_);
+            scroll_text_.tick(dt);
 
             // Expire any transient face overlays whose deadline has passed —
             // restore the original expression image to the loader and drop
@@ -495,6 +496,10 @@ void NativeFaceController::render_thread() {
             // Glitch post-effect: corrupt the fully-composited face canvas in a
             // single pass so it reads as one signal glitch across the whole face.
             if (glitch_cfg_.enabled) glitch_.apply(canvas, glitch_cfg_);
+
+            // Scrolling-text banner: above everything (including glitch) so it
+            // stays legible; spans the whole canvas, mirrored halves included.
+            scroll_text_.render(canvas);
         }
 
         {

@@ -25,6 +25,7 @@
 #include "face_config.h"
 #include "glitch.h"         // GlitchEffect + GlitchConfig
 #include "panel_output.h"   // PanelOutput + NamedRegion
+#include "scroll_text.h"    // ScrollText + ScrollTextConfig
 
 namespace face {
 
@@ -173,6 +174,12 @@ public:
     // occasional wrong-expression flash). Read by the render thread each frame.
     void set_glitch(const GlitchConfig& cfg);
 
+    // Live scrolling-text banner (see scroll_text.h): a marquee drawn onto the
+    // composited canvas above every layer including glitch, so it spans all
+    // panels and stays legible.
+    void set_scroll_text(const ScrollTextConfig& cfg) { scroll_text_.set_config(cfg); }
+    ScrollTextConfig scroll_text() const              { return scroll_text_.config(); }
+
     // Push a "transient" image for the named expression onto every panel
     // for duration_s seconds. The current image is stashed and restored
     // automatically when the timer expires (or on stop()). Used by the
@@ -270,6 +277,10 @@ private:
     // thread; glitch_cfg_ is written by set_glitch() under state_mtx_.
     GlitchEffect       glitch_;
     GlitchConfig       glitch_cfg_;
+
+    // Scrolling-text banner. Thread-safe internally (own mutex): tick/render
+    // run on the render thread, set_scroll_text() from menu/config threads.
+    ScrollText         scroll_text_;
 
     // Expression → mood-preset coupling (off by default). expr_effects_ gates
     // it; current_expression_ tracks the latest set face so toggling re-applies

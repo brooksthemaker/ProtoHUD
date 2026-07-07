@@ -400,6 +400,7 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/face_loader.cpp
     src/face/particles.cpp
     src/face/glitch.cpp
+    src/face/scroll_text.cpp
     src/face/gif_player.cpp
     src/face/eye_animations.cpp
     src/face/shm_pusher_output.cpp

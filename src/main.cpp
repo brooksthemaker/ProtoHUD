@@ -1863,6 +1863,10 @@ int main(int argc, char* argv[]) {
     // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
     // region_desync, expr_flicker) is an independent variable.
     face::GlitchConfig pf_glitch;
+    // Scrolling-text banner across the face panels (marquee) — forwarded to
+    // the native controller live and persisted to cfg["protoface"]
+    // ["scroll_text"]. See face/scroll_text.h.
+    face::ScrollTextConfig pf_scroll;
     // Face animation tunables — forwarded to every panel's FaceState live
     // and persisted to cfg["protoface"]["animation"] on save.
     bool   pf_blink_enabled   = true;
@@ -1951,6 +1955,8 @@ int main(int argc, char* argv[]) {
         }
         if (jpf.contains("glitch") && jpf["glitch"].is_object())
             pf_glitch = face::GlitchConfig::from_json(jpf["glitch"]);
+        if (jpf.contains("scroll_text") && jpf["scroll_text"].is_object())
+            pf_scroll = face::ScrollTextConfig::from_json(jpf["scroll_text"]);
         if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
             auto& jg = jpf["gradient"];
             pf_gradient.count     = std::clamp(jval(jg, "count", pf_gradient.count), 2, 6);
@@ -3172,6 +3178,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        native_ctrl->set_scroll_text(pf_scroll);
         native_ctrl->set_active_layout_name(pf_hub75_active);
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
         std::cout << "[main] Protoface: native in-process renderer\n";
@@ -3449,6 +3456,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        native_ctrl->set_scroll_text(pf_scroll);
         native_ctrl->set_active_layout_name(pf_hub75_active);
 
         // panel_driver.py choreography. The Python shim is only needed for
@@ -4047,6 +4055,7 @@ int main(int argc, char* argv[]) {
                                       pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        native_ctrl->set_scroll_text(pf_scroll);
     };
     menu_ctx.pf_set_effect_json = [&](const nlohmann::json& spec){
         if (native_ctrl) native_ctrl->set_effect_json(spec);
@@ -4138,6 +4147,7 @@ int main(int argc, char* argv[]) {
         return coproc_inputs ? coproc_inputs->i2c_scan_result() : std::string("n/a");
     };
     menu_ctx.pf_glitch_p = &pf_glitch;
+    menu_ctx.pf_scroll_p = &pf_scroll;
 
     MenuSystem menu(build_menu(menu_ctx));
     menu_ptr = &menu;
@@ -5192,6 +5202,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
         cfg["protoface"]["animation"]["preview_duration_s"] = pf_preview_duration_s;
         cfg["protoface"]["glitch"] = pf_glitch.to_json();
+        cfg["protoface"]["scroll_text"] = pf_scroll.to_json();
         {
             auto& jg = cfg["protoface"]["gradient"];
             jg["count"]     = std::clamp(pf_gradient.count, 2, 6);
