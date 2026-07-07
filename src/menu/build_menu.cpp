@@ -507,7 +507,13 @@ std::vector<MenuItem> build_menu(MenuBuildContext& ctx)
 
     // ── HUD tab ──────────────────────────────────────────────────────────────
     // Built in src/menu/build_hud.cpp (uses ctx.make_builtin_theme_leaves).
+    // imu_out captures the IMU group (source picker, recenter, axis map,
+    // calibration, restart) for the GPIO tab's On-Board GPIO section below —
+    // the IMU chips live on the 40-pin header's I²C bus.
+    std::vector<MenuItem> imu_items;
+    ctx.imu_out = &imu_items;
     std::vector<MenuItem> hud_menu = build_hud_menu(ctx);
+    ctx.imu_out = nullptr;
 
     // (System tab sections moved to src/menu/build_system.cpp.)
 
@@ -528,10 +534,16 @@ std::vector<MenuItem> build_menu(MenuBuildContext& ctx)
     ctx.gpio_onboard_out  = nullptr;
     ctx.gpio_expander_out = nullptr;
 
+    // The HUD builder handed us the IMU group above — it belongs with the
+    // on-board header (the sensors sit on its I²C pins), after the pin
+    // visualizer and button map.
+    for (auto& it : imu_items) gpio_onboard.push_back(std::move(it));
+
     std::vector<MenuItem> gpio_tab;
     gpio_tab.push_back(with_desc(submenu("On-Board GPIO", std::move(gpio_onboard)),
-        "The Pi / CM5 40-pin header: pin visualizer and the on-board GPIO button "
-        "map (assign switches to functions, pull, polarity)."));
+        "The Pi / CM5 40-pin header: pin visualizer, the on-board GPIO button "
+        "map (assign switches to functions, pull, polarity), and the "
+        "head-tracking IMU sensors on its I\xc2\xb2""C bus."));
     gpio_tab.push_back(with_desc(submenu("RP2350 GPIO Expander", std::move(gpio_expander)),
         "The optional RP2350 button/voice coprocessor: enable + link status, and "
         "the Pico 2 pin visualizer/editor. See docs/coprocessor-input.md."));
