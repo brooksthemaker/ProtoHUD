@@ -1407,8 +1407,10 @@ public:
     void update(double dt) override {
         if (dt <= 0.0) return;
         dt = std::min(dt, 0.05);   // clamp big frame gaps so the slosh solver stays stable
-        // viscosity 0 = thin/snappy water, 1 = thick/sluggish (lags + resists slosh).
-        const double v = std::clamp(jnum(cfg_, "viscosity", 0.3), 0.0, 1.0);
+        // viscosity 0 = thin/snappy water, 1 = thick/sluggish (lags + resists
+        // slosh). Default 0.15 = plain water: fast waves, long ring-down.
+        // Thick liquids set their own (lava 0.6, mercury 0.7).
+        const double v = std::clamp(jnum(cfg_, "viscosity", 0.15), 0.0, 1.0);
         if (!tilt_init_) {
             tilt_smooth_  = motion_.roll_deg;
             pitch_smooth_ = motion_.pitch_deg;
