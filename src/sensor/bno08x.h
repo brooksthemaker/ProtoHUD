@@ -36,6 +36,8 @@ public:
         int         rst_line           = -1;           // RST offset (active-low); -1 = no hardware reset
         int         report_interval_us = 10000;        // 10 ms = 100 Hz orientation
         int         aux_interval_us    = 40000;        // 25 Hz calibrated accel/gyro/mag
+        bool        auto_calibrate     = true;         // dynamic cal on accel/gyro/mag +
+                                                       // periodic DCD save to chip flash
         float       declination_deg    = 0.0f;         // local magnetic declination (+E/-W)
         float       heading_offset     = 0.0f;         // mechanical mount offset (deg)
         bool        heading_invert     = false;        // flip yaw→heading direction if mirrored

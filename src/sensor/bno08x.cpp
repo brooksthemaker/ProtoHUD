@@ -169,6 +169,17 @@ bool Bno08x::enable_reports() {
         sh2_setSensorConfig(SH2_MAGNETIC_FIELD_CALIBRATED, &sc) != SH2_OK)
         fprintf(stderr, "[bno086] warning: could not enable accel/gyro/mag reports\n");
 
+    // Auto-calibration: keep the chip's dynamic calibration running on all
+    // three sensors and let it persist the refined calibration (DCD) to its
+    // own flash periodically. The mag then walks itself up to s3 during
+    // normal wear — no figure-8 ritual — and the result survives power
+    // cycles. A final snapshot is also taken on clean shutdown.
+    if (cfg_.auto_calibrate) {
+        if (sh2_setCalConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG) != SH2_OK)
+            fprintf(stderr, "[bno086] warning: could not enable dynamic calibration\n");
+        sh2_setDcdAutoSave(true);
+    }
+
     return rv_ok;
 }
 
@@ -258,6 +269,11 @@ void Bno08x::service_loop() {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    // Snapshot the session's dynamic-calibration refinements to the chip's
+    // flash on the way out (the periodic autosave catches most of it; this
+    // catches the tail). Still on the service thread, link still open —
+    // sh2 blocking ops self-pump SHTP with a timeout, so this can't hang.
+    if (cfg_.auto_calibrate) sh2_saveDcdNow();
 }
 
 // ── event handling ────────────────────────────────────────────────────────────

@@ -1620,6 +1620,7 @@ int main(int argc, char* argv[]) {
         bno08x_cfg.rst_line           = jval(jb, "rst_line",           -1);
         bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 10000);
         bno08x_cfg.aux_interval_us    = jval(jb, "aux_interval_us",    40000);
+        bno08x_cfg.auto_calibrate     = jval(jb, "auto_calibrate",     true);
         bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
         bno08x_cfg.heading_offset     = jval(jb, "heading_offset",     0.0f);
         bno08x_cfg.heading_invert     = jval(jb, "heading_invert",     false);

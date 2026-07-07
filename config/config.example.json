@@ -451,6 +451,8 @@
     "report_interval_us": 10000,
     "_report_interval_note": "Orientation report period in microseconds. 10000 = 100 Hz.",
     "aux_interval_us": 40000,
+    "auto_calibrate": true,
+    "_auto_calibrate_note": "Keep the chip's dynamic calibration running on accel/gyro/mag and let it persist the refined calibration to its own flash automatically (plus a snapshot on clean shutdown). The mag walks itself up to s3 during normal wear - no figure-8 ritual - and it survives power cycles.",
     "_aux_interval_note": "Period of the calibrated accel/gyro/mag side reports shown in GPIO > On-Board GPIO > IMU > Live Readout. 40000 = 25 Hz. The Mag row's s0-s3 is the magnetometer calibration quality the fused heading depends on.",
     "declination_deg": 0.0,
     "heading_offset": 0.0,
