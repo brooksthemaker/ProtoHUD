@@ -749,7 +749,9 @@ public:
             }
             p.life = 1.0; p.max_life = frand(rng_, 3.0, 8.0);   // slow churn
             p.r = col.r; p.g = col.g; p.b = col.b;
-            p.size = pick_size(cfg_, 1, 1, rng_);
+            // Mixed 1-2 px crystals (2 px draws as a 3x3 cluster) so the ice
+            // reads chunky; size_min/size_max in the layer cfg still override.
+            p.size = pick_size(cfg_, 1, 2, rng_);
             p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
         }
@@ -1439,11 +1441,11 @@ public:
         slosh_vy_ += accel_y * dt;
         slosh_y_   = std::clamp(slosh_y_ + slosh_vy_ * dt, -h_ * 0.5, h_ * 0.5);
 
-        phase_ += jnum(cfg_, "wave_speed", 2.0) * (1.0 - 0.6 * v) * dt;   // travelling ripple
-        // Surface chop scales with how hard it's sloshing, plus a faint idle ripple.
-        const double target = (0.25 + std::min(2.0, std::fabs(slosh_v_) * 0.06))
-                            * (1.0 - 0.55 * v);
-        amp_ += (target - amp_) * std::min(1.0, dt * 4.0);
+        // Surface dynamics: a 1-D wave-equation heightfield (see
+        // step_heightfield) replaces the old rigid tilt-plane + global sine
+        // chop — waves now propagate, reflect off the side walls (that IS the
+        // slosh) and interfere, so the surface reads as liquid.
+        step_heightfield(dt, v);
 
         update_bubbles(dt);
     }
@@ -1494,23 +1496,19 @@ private:
     // tank is continuous across panels) then shifted into this panel's frame.
     double surface_y_local(double lx) const {
         // Resting level (+ static pitch fill), bobbed by the vertical slosh.
-        const double base  = ch_ * (1.0 - level_eff()) + slosh_y_;
-        const double ccx   = cw_ * 0.5;
-        const double half  = std::max(1.0, cw_ * 0.5);
-        const double waven = jnum(cfg_, "wave_count", 2.0);
-        const double gain  = jnum(cfg_, "tilt_gain", 1.0);
-        const double roll  = tilt_smooth_ * gain * kPi / 180.0;
-        const double X     = ox_ + lx;
-        const double dx    = X - ccx;
-        // gravity lean (roll) + dynamic slosh lean (the fluid piled up at a wall)
-        double syc = base - dx * std::tan(std::clamp(roll, -1.2, 1.2))
-                          - slosh_x_ * (dx / half);
-        // Multi-frequency travelling chop — superposed waves read as real water
-        // instead of one cartoony sine. Amplitude follows slosh activity (amp_).
-        const double kf = waven * kTau / std::max(1, cw_);
-        syc += amp_ * (0.60 * std::sin(kf * X        + phase_)
-                     + 0.30 * std::sin(kf * X * 1.7  - phase_ * 1.3 + 1.1)
-                     + 0.22 * std::sin(kf * X * 0.5  + phase_ * 0.6 + 2.3));
+        // The lateral shape (tilt lean, slosh pile-up, chop) all lives in the
+        // heightfield now; sample it with linear interpolation so sub-pixel
+        // columns and bubbles get a smooth surface.
+        const double base = ch_ * (1.0 - level_eff()) + slosh_y_;
+        const double X    = ox_ + lx;
+        double hval = 0.0;
+        if (!hf_.empty()) {
+            const double fx = std::clamp(X, 0.0, (double)(cw_ - 1));
+            const int    x0 = (int)fx;
+            const int    x1 = std::min(x0 + 1, cw_ - 1);
+            hval = hf_[x0] + (hf_[x1] - hf_[x0]) * (fx - x0);
+        }
+        double syc = base + hval;
         // Meniscus: the surface curls up where it meets the container walls.
         const double menisc = jnum(cfg_, "meniscus", 1.5);
         if (menisc > 0.0) {
@@ -1593,7 +1591,54 @@ private:
                  (int)std::lround(v[i].g + (v[i+1].g - v[i].g) * t),
                  (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
     }
-    double phase_ = 0.0, amp_ = 0.0;
+    // 1-D wave-equation surface: per-canvas-column height (px, + = lower)
+    // and vertical velocity. Reflective walls make waves bounce back —
+    // that reflection is the slosh. Forced toward the gravity/slosh tilt
+    // line, with random micro-impulses for idle ripples and churn.
+    std::vector<double> hf_, hv_;
+    void step_heightfield(double dt, double viscosity) {
+        if ((int)hf_.size() != cw_) { hf_.assign(cw_, 0.0); hv_.assign(cw_, 0.0); }
+        // Propagation speed (px/s): wave_speed keeps its old knob meaning
+        // (bigger = livelier surface); thick liquid carries slower waves.
+        const double c      = jnum(cfg_, "wave_speed", 2.0) * 22.0
+                              * (1.0 - 0.55 * viscosity);
+        const double c2     = c * c;
+        const double damp   = 1.2 + 6.0 * viscosity;
+        const double k_pull = 30.0;              // relax toward the tilt line
+        const double ccx    = cw_ * 0.5;
+        const double half   = std::max(1.0, cw_ * 0.5);
+        const double gain   = jnum(cfg_, "tilt_gain", 1.0);
+        const double roll   = std::clamp(tilt_smooth_ * gain * kPi / 180.0, -1.2, 1.2);
+        const double slope  = std::tan(roll);
+        // Idle ripples + churn while sloshing: random micro-impulses that the
+        // wave equation spreads into expanding rings.
+        const double rate = jnum(cfg_, "ripple", 0.8) + std::fabs(slosh_v_) * 0.25;
+        // Sub-step for stability (CFL: c*dts must stay well under 1 px).
+        const int    n   = std::max(1, (int)std::ceil(dt / 0.008));
+        const double dts = dt / n;
+        for (int st = 0; st < n; ++st) {
+            // Expected `rate` drops per second (scaled with tank width):
+            // each pokes a 3-column dip the wave equation spreads outward.
+            if (cw_ > 3 && frand(rng_, 0.0, 1.0) < rate * (cw_ / 64.0) * dts) {
+                const int    x = irand(rng_, 1, cw_ - 3);
+                const double d = frand(rng_, 0.9, 2.2);
+                hf_[x]     -= d;
+                hf_[x + 1] -= d * 0.5;
+                hf_[x > 0 ? x - 1 : 0] -= d * 0.5;
+            }
+            for (int x = 0; x < cw_; ++x) {
+                const double hl  = hf_[x > 0 ? x - 1 : 0];        // reflective
+                const double hr  = hf_[x < cw_ - 1 ? x + 1 : cw_ - 1];
+                const double lap = hl + hr - 2.0 * hf_[x];
+                const double dx  = (x + 0.5) - ccx;
+                const double rest = -dx * slope - slosh_x_ * (dx / half);
+                hv_[x] += (c2 * lap + k_pull * (rest - hf_[x])) * dts
+                          - damp * hv_[x] * dts;
+            }
+            for (int x = 0; x < cw_; ++x)
+                hf_[x] = std::clamp(hf_[x] + hv_[x] * dts, -ch_ * 0.6, ch_ * 0.6);
+        }
+    }
     double tilt_smooth_ = 0.0, pitch_smooth_ = 0.0;
     double slosh_x_ = 0.0, slosh_v_  = 0.0;  // roll lean (px) + velocity
     double slosh_y_ = 0.0, slosh_vy_ = 0.0;  // pitch bob (px) + velocity
