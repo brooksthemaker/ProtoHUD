@@ -364,6 +364,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     std::function<void(double)> pf_set_face_inertia_strength =
         ctx.pf_set_face_inertia_strength;
     double* pf_face_inertia_strength_p = ctx.pf_face_inertia_strength_p;
+    double* pf_motion_scale_p = ctx.pf_motion_scale_p;
     std::function<void(bool)> pf_set_weather_effects = ctx.pf_set_weather_effects;
     bool* pf_weather_effects_p = ctx.pf_weather_effects_p;
     bool*   pf_temp_effects_p = ctx.pf_temp_effects_p;
@@ -1718,6 +1719,17 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Couple directional effects to real head motion: rain/snow/steam "
             "lean with gravity as you tilt and get swept sideways by quick "
             "turns. Needs an IMU feeding head tracking."));
+    if (pf_motion_scale_p)
+        pf_effects.push_back(with_desc(slider("Motion Sensitivity", 10.f, 200.f, 10.f, "%",
+            [pf_motion_scale_p]{ return static_cast<float>(*pf_motion_scale_p * 100.0); },
+            [pf_motion_scale_p, cfg_root](float v){
+                *pf_motion_scale_p = v / 100.0;
+                if (cfg_root) (*cfg_root)["protoface"]["motion_scale"] = v / 100.0;
+            }),
+            "Maps IMU angles to face response: how strongly head roll/pitch/"
+            "turn rate drive Motion Reactive, water tilt/slosh and Face "
+            "Inertia. 100% = raw angles; drop it if slight tilts feel "
+            "exaggerated on the panels. The HUD compass is never scaled."));
     if (pf_face_inertia_p && pf_set_face_inertia) {
         pf_effects.push_back(with_desc(toggle("Face Inertia",
             [pf_face_inertia_p]{ return *pf_face_inertia_p; },

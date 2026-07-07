@@ -397,6 +397,9 @@ struct MenuBuildContext {
     bool*                       pf_face_inertia_p = nullptr;
     std::function<void(double)> pf_set_face_inertia_strength;
     double*                     pf_face_inertia_strength_p = nullptr;
+    // Global IMU->face motion sensitivity (see main's pf_motion_scale). Read
+    // by the feed every frame - the menu just mutates it in place.
+    double*                     pf_motion_scale_p = nullptr;
     std::function<void(bool)> pf_set_weather_effects;
     bool* pf_weather_effects_p = nullptr;
     // Temp Effects - ambient frost / heat shimmer driven by the live outdoor

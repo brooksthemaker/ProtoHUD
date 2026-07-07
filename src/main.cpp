@@ -1850,6 +1850,12 @@ int main(int argc, char* argv[]) {
     // heatwave fill the clear-sky gaps. weather_fx_resync forces an immediate
     // re-evaluation when a toggle flips or a threshold moves.
     bool   pf_motion_particles = true;
+    // Global IMU->face motion mapping: scales roll/pitch/yaw-rate (and accel
+    // deviation from 1 g) before they reach the face consumers (Motion
+    // Reactive lean, water tilt/slosh, Face Inertia). 1.0 = raw angles;
+    // lower it if slight head tilts feel exaggerated on the panels. The HUD
+    // compass reads the IMU slots directly and is never scaled.
+    double pf_motion_scale     = 1.0;
     bool   pf_face_inertia     = true;
     double pf_face_inertia_strength = 1.0;   // 1.0 = slide up to ~10% of a panel
     bool   pf_weather_effects  = false;
@@ -1889,6 +1895,7 @@ int main(int argc, char* argv[]) {
         state.face.face_colors = jval(jpf, "face_colors", false);
         state.face.pride_sharp = jval(jpf, "pride_sharp", true);
         pf_motion_particles    = jval(jpf, "motion_particles", pf_motion_particles);
+        pf_motion_scale        = jval(jpf, "motion_scale", pf_motion_scale);
         pf_face_inertia        = jval(jpf, "face_inertia",     pf_face_inertia);
         pf_face_inertia_strength =
             jval(jpf, "face_inertia_strength", pf_face_inertia_strength);
@@ -4071,6 +4078,7 @@ int main(int argc, char* argv[]) {
     };
     menu_ctx.pf_expr_effects_p = &pf_expr_effects;
     menu_ctx.pf_motion_particles_p = &pf_motion_particles;
+    menu_ctx.pf_motion_scale_p = &pf_motion_scale;
     menu_ctx.pf_set_motion_particles = [&](bool v){
         pf_motion_particles = v;
         if (native_ctrl) native_ctrl->set_motion_particles(v);
@@ -5155,6 +5163,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["face_colors"]         = state.face.face_colors;
         cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
         cfg["protoface"]["motion_particles"]    = pf_motion_particles;
+        cfg["protoface"]["motion_scale"]        = pf_motion_scale;
         cfg["protoface"]["face_inertia"]        = pf_face_inertia;
         cfg["protoface"]["face_inertia_strength"] = pf_face_inertia_strength;
         cfg["protoface"]["weather_effects"]     = pf_weather_effects;
@@ -5736,7 +5745,12 @@ int main(int argc, char* argv[]) {
                     break;
                 }
             }
-            face_proxy.set_motion(m_head, m_yaw, m_pitch, m_roll, m_accel);
+            // Global sensitivity mapping (Face Display > Effects > Motion
+            // Sensitivity): scale angles/rates before the face sees them.
+            // Heading stays raw - it's an absolute bearing, not a response.
+            const double ms = pf_motion_scale;
+            face_proxy.set_motion(m_head, m_yaw * ms, m_pitch * ms,
+                                  m_roll * ms, 1.0 + (m_accel - 1.0) * ms);
         }
 
         // Effects Live Preview — re-apply the builder spec on change (no-op
