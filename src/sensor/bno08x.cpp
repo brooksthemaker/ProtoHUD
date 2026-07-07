@@ -222,9 +222,13 @@ void Bno08x::service_loop() {
             enable_reports();                // re-enable reports after a device reset
         int tare = tare_request_.exchange(0);
         if (tare) {
-            const uint8_t axes = (tare == 2) ? (SH2_TARE_X | SH2_TARE_Y | SH2_TARE_Z)
+            const uint8_t axes = (tare == 3) ? (SH2_TARE_X | SH2_TARE_Y)
+                               : (tare == 2) ? (SH2_TARE_X | SH2_TARE_Y | SH2_TARE_Z)
                                              : SH2_TARE_Z;
             sh2_setTareNow(axes, SH2_TARE_BASIS_ROTATION_VECTOR);
+            // Level (mounting calibration) is a deliberate one-off — persist
+            // it on the chip. Recenter stays session-only (frequent action).
+            if (tare == 3) sh2_persistTare();
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }

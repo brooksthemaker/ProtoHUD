@@ -810,6 +810,21 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         m.visible_fn = [b]{ return b && b->connected(); };
         return m;
     }());
+    imu_menu.push_back([&]() -> MenuItem {
+        // Mounting calibration: X|Y tare, persisted on the chip. Kills the
+        // standing roll a rotated mount feeds every absolute-roll consumer
+        // (Motion Reactive lean, Face Inertia rest offset, readout RPY).
+        Bno08x* b = ctx.bno08x;
+        MenuItem m = with_desc(
+            leaf("Set Level (Tare Roll/Pitch)", [b]{ if (b) b->level(); }),
+            "Hold the helmet level and look straight ahead, then select. "
+            "Tares the BNO086's roll/pitch so its mounting orientation reads "
+            "as zero - fixes face effects leaning sideways and Face Inertia "
+            "resting off-centre. Heading/north is untouched. Persisted on "
+            "the chip across power cycles.");
+        m.visible_fn = [b]{ return b && b->connected(); };
+        return m;
+    }());
     imu_menu.push_back(submenu("IMU Axis", std::move(imu_axis_menu)));
     imu_menu.push_back([&]() -> MenuItem {
         MenuItem m = leaf("Save IMU Calibration",

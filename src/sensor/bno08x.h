@@ -81,6 +81,12 @@ public:
     // Tare: make the current orientation the new "forward" (yaw only, or all
     // axes). Applied on the service thread. Wired to a menu action / recenter.
     void recenter(bool all_axes = false) { tare_request_.store(all_axes ? 2 : 1); }
+    // Mounting calibration: tare roll/pitch ONLY (X|Y) so the sensor's mount
+    // orientation reads as level, leaving the yaw/north reference untouched,
+    // and persist it on the chip so it survives power cycles. Fixes every
+    // absolute-roll consumer at the source (Motion Reactive lean, Face
+    // Inertia rest offset, the readout's RPY).
+    void level() { tare_request_.store(3); }
 
     void set_declination_deg(float v) { declination_deg_.store(v); }
     void set_head_tracking(bool v)    { head_tracking_.store(v);   }
