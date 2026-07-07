@@ -111,7 +111,11 @@ private:
     std::atomic<bool>  running_        { false };
     std::atomic<bool>  ok_             { false };
     std::atomic<bool>  want_reinit_    { false };   // set on device reset → re-enable reports
-    std::atomic<int>   tare_request_   { 0 };       // 0=none, 1=yaw, 2=all axes
+    std::atomic<int>   tare_request_   { 0 };       // 0=none, 1=yaw, 2=all axes, 3=level
+    // Latest sample quaternion (w,x,y,z) for level()'s reorientation math.
+    // Written and read on the service thread only.
+    double             last_q_[4]      = {1, 0, 0, 0};
+    bool               have_q_         = false;
     std::atomic<float> declination_deg_{ 0.f };
     std::atomic<bool>  head_tracking_  { false };
 
