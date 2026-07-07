@@ -1484,7 +1484,10 @@ public:
     }
     // How strongly the face should glow back through the liquid (0 = opaque).
     double face_glow() const override {
-        return std::clamp(jnum(cfg_, "face_glow", 0.0), 0.0, 1.0);
+        // Default ON for liquids: a bare "water" layer (Single Effects) lets
+        // the face shine through at 0.55 like the curated presets do; set
+        // face_glow: 0 in the layer cfg for an opaque liquid.
+        return std::clamp(jnum(cfg_, "face_glow", 0.55), 0.0, 1.0);
     }
 private:
     // Effective fill fraction — base level shifted by smoothed pitch (look

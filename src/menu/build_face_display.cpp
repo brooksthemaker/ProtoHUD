@@ -126,7 +126,10 @@ struct LayerCfg {
     // Liquid fill fraction for the "water" effect (0..1). Ignored by others.
     float level = 0.4f;
     // Liquid viscosity for "water" (0 = thin/snappy, 1 = thick/sluggish).
-    float viscosity = 0.3f;
+    float viscosity = 0.15f;
+    // How strongly the submerged face glows back through the liquid, tinted
+    // by it (0 = opaque liquid). Water only.
+    float face_glow = 0.55f;
     // "water" extras: pitch shifts the fill level (look down → liquid rises);
     // bubbles count + style ("rise" bubbles in liquid / "drip" droplets above).
     float pitch_fill = 0.0f;
@@ -1085,6 +1088,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 layer["level"]      = L.level;
                 layer["viscosity"]  = L.viscosity;
                 layer["pitch_fill"] = L.pitch_fill;
+                layer["face_glow"]  = L.face_glow;
                 if (L.bubbles > 0) {
                     layer["bubbles"]     = L.bubbles;
                     layer["bubble_mode"] = L.bubble_mode;
@@ -1125,8 +1129,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.direction_from = jl.value("direction_from", std::string("none"));
             L.intensity_from = jl.value("intensity_from", std::string("none"));
             L.level = jl.value("level", 0.4f);
-            L.viscosity = jl.value("viscosity", 0.3f);
+            L.viscosity = jl.value("viscosity", 0.15f);
             L.pitch_fill = jl.value("pitch_fill", 0.0f);
+            L.face_glow = jl.value("face_glow", 0.55f);
             L.bubbles = jl.value("bubbles", 0);
             L.bubble_mode = jl.value("bubble_mode", std::string("rise"));
             L.arc = jl.value("arc", false);
@@ -1280,6 +1285,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [L](float v){ L->viscosity = v / 100.f; });
                 vis.visible_fn = [L]{ return L->effect == "water"; };
                 return vis;
+            })(),
+            // Face Glow — water only: the submerged face shines back through
+            // the liquid, tinted by it (eyes read through the water).
+            ([&]{
+                MenuItem fg = slider("Face Glow", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->face_glow * 100.f; },
+                    [L](float v){ L->face_glow = v / 100.f; });
+                fg.visible_fn = [L]{ return L->effect == "water"; };
+                return fg;
             })(),
             // Pitch Fill — water only: head pitch shifts the liquid level.
             ([&]{
