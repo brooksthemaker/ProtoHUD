@@ -334,6 +334,14 @@ struct ImuData {
     uint8_t bno_calib_gyro  = 0;
     uint8_t bno_calib_accel = 0;
     uint8_t bno_calib_mag   = 0;
+
+    // BNO086 (SH-2 rotation vector) — dedicated fields so its samples no
+    // longer overwrite the VITURE xr_* rows above (both used to write there;
+    // last writer won). Heading lives in the imu_bno08x ImuSlot.
+    bool  b86_ok           = false;
+    float b86_euler[3]     = {0.f, 0.f, 0.f};  // roll, pitch, yaw (deg)
+    float b86_accuracy_deg = 0.f;              // rotation-vector accuracy estimate
+    float b86_rate_hz      = 0.f;              // measured sample rate (EMA)
 };
 
 // ── Map overlay ───────────────────────────────────────────────────────────────

@@ -467,6 +467,11 @@ struct MenuBuildContext {
     //   gpio_expander_out ← RP2350 coprocessor (enable/status + Pico pin editor)
     std::vector<MenuItem>* gpio_onboard_out  = nullptr;
     std::vector<MenuItem>* gpio_expander_out = nullptr;
+    // When set, build_hud_menu routes its IMU group (source picker, recenter,
+    // axis map, calibration, restart) here instead of nesting it under
+    // HUD > Compass, so build_menu can place it in the On-Board GPIO section
+    // (the IMU chips hang off the 40-pin header's I²C pins).
+    std::vector<MenuItem>* imu_out = nullptr;
     // Glitch post-effect config (null on non-native backends). The menu
     // mutates it in place and re-pushes via pf_anim_push().
     face::GlitchConfig* pf_glitch_p = nullptr;

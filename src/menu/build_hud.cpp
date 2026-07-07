@@ -408,72 +408,391 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [&state, v]{ return state.imu_source == v; }));
     }
 
-    std::vector<MenuItem> compass_menu = {
-        toggle("Compass Tape",
-            [&state]{ return state.compass_tape; },
-            [&state](bool v){ state.compass_tape = v; }),
+    // ── IMU hardware group ──────────────────────────────────────────────────
+    // Source picker, head-tracking recenter, axis mapping, calibration and
+    // sensor restart — the head-mounted IMU devices themselves. Routed to the
+    // GPIO tab's On-Board GPIO section via ctx.imu_out when build_menu wires
+    // it (the chips hang off the 40-pin header's I²C pins); otherwise nests
+    // here under Compass as before.
+    std::vector<MenuItem> imu_menu;
+    imu_menu.push_back(
         with_desc(submenu("IMU Source", std::move(imu_source_menu)),
                   "Which sensor drives the HUD compass. Auto walks "
                   "BNO086 > BNO055 > MPU9250 > Viture and picks the "
                   "highest-priority fresh source each frame; explicit choices "
-                  "force their source even if stale."),
-        [&]() -> MenuItem {
-            // BNO086 head-tracking recenter: tare the sensor so the direction
-            // you're facing becomes "forward" for pin-in-space / the compass.
-            Bno08x* b = ctx.bno08x;
-            MenuItem m = with_desc(
-                leaf("Recenter Head Tracking", [b]{ if (b) b->recenter(false); }),
-                "Tare the BNO086 so your current facing becomes forward "
-                "(zeroes heading/yaw). Use after mounting or if the view has "
-                "drifted off-centre.");
-            m.visible_fn = [b]{ return b && b->connected(); };
+                  "force their source even if stale."));
+
+    // ── Live readout ─────────────────────────────────────────────────────────
+    // Every output the IMUs publish, as live rows: per-source heading, euler
+    // angles, raw accel/gyro/mag, calibration and sample rates. Reads
+    // state.imu_data + the heading slots — the same feeds the debug overlay
+    // uses. Values hold their last reading when a sensor goes quiet; the
+    // status rows flag it.
+    {
+        auto ro = [](const char* name, std::function<std::string()> fn) {
+            MenuItem m = leaf(name, []{});
+            m.label_fn = std::move(fn);
             return m;
-        }(),
-        submenu("IMU Axis",            std::move(imu_axis_menu)),
-        [&]() -> MenuItem {
-            MenuItem m = leaf("Save IMU Calibration",
-                [bno055]{ if (bno055) bno055->request_calibration_save(); });
-            m.label_fn = [bno055]{
-                const int s = bno055 ? bno055->calib_sys() : 0;
-                return std::string("Save IMU Calibration  [sys ") +
-                       std::to_string(s) + "/3]";
+        };
+        auto now_us = []{
+            return std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
+        // Matches pick_imu_heading's freshness window in main.cpp.
+        auto fresh = [](const AppState::ImuSlot& s, int64_t now) {
+            return s.last_us > 0 && (now - s.last_us) < 2'000'000;
+        };
+        Bno08x* b86 = ctx.bno08x;
+        std::vector<MenuItem> imu_readout;
+
+        imu_readout.push_back(ro("Driving", [state_ptr, now_us, fresh]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const AppState& s = *state_ptr;
+            const int64_t now = now_us();
+            // Mirror pick_imu_heading (main.cpp): resolve which slot drives
+            // the compass this frame and show its heading. The smoothed
+            // frozen value for None lives on the render thread only.
+            const char* n = nullptr;
+            float h = 0.f;
+            switch (s.imu_source) {
+            case AppState::ImuSource::Bno08x:  n = "BNO086";   h = s.imu_bno08x.heading_deg; break;
+            case AppState::ImuSource::Bno055:  n = "BNO055";   h = s.imu_bno.heading_deg;    break;
+            case AppState::ImuSource::Mpu9250: n = "MPU-9250"; h = s.imu_mpu.heading_deg;    break;
+            case AppState::ImuSource::Viture:  n = "VITURE";   h = s.imu_viture.heading_deg; break;
+            case AppState::ImuSource::None:    break;
+            case AppState::ImuSource::Auto:
+                if      (fresh(s.imu_bno08x, now)) { n = "auto: BNO086";   h = s.imu_bno08x.heading_deg; }
+                else if (fresh(s.imu_bno,    now)) { n = "auto: BNO055";   h = s.imu_bno.heading_deg;    }
+                else if (fresh(s.imu_mpu,    now)) { n = "auto: MPU-9250"; h = s.imu_mpu.heading_deg;    }
+                else if (fresh(s.imu_viture, now)) { n = "auto: VITURE";   h = s.imu_viture.heading_deg; }
+                break;
+            }
+            char b[64];
+            if (!n)
+                snprintf(b, sizeof b, "Driving: %s",
+                         s.imu_source == AppState::ImuSource::None
+                             ? "none (heading held)" : "auto: none fresh");
+            else
+                snprintf(b, sizeof b, "Driving: %s  %.1f\xc2\xb0", n,
+                         static_cast<double>(h));
+            return std::string(b);
+        }));
+
+        imu_readout.push_back(ro("BNO086", [state_ptr, b86, now_us, fresh]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[80];
+            if (!d.b86_ok)
+                snprintf(b, sizeof b, "BNO086:  %s",
+                         b86 && b86->connected() ? "linked, no samples"
+                                                 : "no data");
+            else
+                snprintf(b, sizeof b, "BNO086:  %.1f\xc2\xb0  \xc2\xb1%.1f\xc2\xb0  %.0f Hz%s",
+                         static_cast<double>(state_ptr->imu_bno08x.heading_deg),
+                         static_cast<double>(d.b86_accuracy_deg),
+                         static_cast<double>(d.b86_rate_hz),
+                         fresh(state_ptr->imu_bno08x, now_us()) ? "" : "  STALE");
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("B86 RPY", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  RPY %7.1f %7.1f %7.1f",
+                     static_cast<double>(d.b86_euler[0]),
+                     static_cast<double>(d.b86_euler[1]),
+                     static_cast<double>(d.b86_euler[2]));
+            return std::string(b);
+        }));
+
+        imu_readout.push_back(ro("BNO055", [state_ptr, now_us, fresh]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[80];
+            if (!d.bno_ok)
+                snprintf(b, sizeof b, "BNO055:  no data");
+            else
+                snprintf(b, sizeof b, "BNO055:  %.1f\xc2\xb0  cal %d/3%s",
+                         static_cast<double>(state_ptr->imu_bno.heading_deg),
+                         d.bno_calib_sys,
+                         fresh(state_ptr->imu_bno, now_us()) ? "" : "  STALE");
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("B55 HRP", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  HRP %7.1f %7.1f %7.1f",
+                     static_cast<double>(d.bno_euler[0]),
+                     static_cast<double>(d.bno_euler[1]),
+                     static_cast<double>(d.bno_euler[2]));
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("B55 Acc", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Acc %6.2f %6.2f %6.2f g",
+                     static_cast<double>(d.bno_accel_g[0]),
+                     static_cast<double>(d.bno_accel_g[1]),
+                     static_cast<double>(d.bno_accel_g[2]));
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("B55 Gyr", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Gyr %6.0f %6.0f %6.0f d/s",
+                     static_cast<double>(d.bno_gyro_dps[0]),
+                     static_cast<double>(d.bno_gyro_dps[1]),
+                     static_cast<double>(d.bno_gyro_dps[2]));
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("B55 Mag", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Mag %6.0f %6.0f %6.0f uT",
+                     static_cast<double>(d.bno_mag_ut[0]),
+                     static_cast<double>(d.bno_mag_ut[1]),
+                     static_cast<double>(d.bno_mag_ut[2]));
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("B55 Cal", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Cal sys%d gyr%d acc%d mag%d",
+                     d.bno_calib_sys, d.bno_calib_gyro,
+                     d.bno_calib_accel, d.bno_calib_mag);
+            return std::string(b);
+        }));
+
+        imu_readout.push_back(ro("MPU-9250", [state_ptr, now_us, fresh]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[80];
+            if (!d.mpu_ok)
+                snprintf(b, sizeof b, "MPU-9250:  no data");
+            else
+                snprintf(b, sizeof b, "MPU-9250:  %.1f\xc2\xb0  %.0f Hz  %.1f C%s",
+                         static_cast<double>(state_ptr->imu_mpu.heading_deg),
+                         static_cast<double>(d.mpu_rate_hz),
+                         static_cast<double>(d.temp_c),
+                         fresh(state_ptr->imu_mpu, now_us()) ? "" : "  STALE");
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("MPU Acc", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Acc %6.2f %6.2f %6.2f g",
+                     static_cast<double>(d.accel_g[0]),
+                     static_cast<double>(d.accel_g[1]),
+                     static_cast<double>(d.accel_g[2]));
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("MPU Gyr", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Gyr %6.0f %6.0f %6.0f d/s",
+                     static_cast<double>(d.gyro_dps[0]),
+                     static_cast<double>(d.gyro_dps[1]),
+                     static_cast<double>(d.gyro_dps[2]));
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("MPU Mag", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  Mag %6.0f %6.0f %6.0f uT",
+                     static_cast<double>(d.mag_ut[0]),
+                     static_cast<double>(d.mag_ut[1]),
+                     static_cast<double>(d.mag_ut[2]));
+            return std::string(b);
+        }));
+
+        imu_readout.push_back(ro("VITURE", [state_ptr, now_us, fresh]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[80];
+            if (!d.xr_active)
+                snprintf(b, sizeof b, "VITURE:  no data");
+            else
+                snprintf(b, sizeof b, "VITURE:  %.1f\xc2\xb0  %.0f Hz%s",
+                         static_cast<double>(state_ptr->imu_viture.heading_deg),
+                         static_cast<double>(d.xr_rate_hz),
+                         fresh(state_ptr->imu_viture, now_us()) ? "" : "  STALE");
+            return std::string(b);
+        }));
+        imu_readout.push_back(ro("XR RPY", [state_ptr]{
+            std::lock_guard<std::mutex> lk(state_ptr->mtx);
+            const auto& d = state_ptr->imu_data;
+            char b[64];
+            snprintf(b, sizeof b, "  RPY %7.1f %7.1f %7.1f",
+                     static_cast<double>(d.xr_roll),
+                     static_cast<double>(d.xr_pitch),
+                     static_cast<double>(d.xr_yaw));
+            return std::string(b);
+        }));
+
+        imu_menu.push_back(with_desc(submenu("Live Readout", std::move(imu_readout)),
+            "Every value the IMUs publish, live: the heading each source "
+            "reports, euler angles, raw accel/gyro/mag, calibration state, "
+            "die temperature and sample rates. STALE = no update for 2 s "
+            "(the freshness window the Auto source picker uses)."));
+    }
+
+    // ── I2C scan ─────────────────────────────────────────────────────────────
+    // Probe the buses for the IMU chips at their known addresses, off the
+    // render thread (same probe the System > Diagnostics full-bus scan uses).
+    // Result rows appear under the scan action once it has run.
+    {
+        struct ImuScan {
+            std::mutex m;
+            bool busy = false, ran = false;
+            int  found[3] = {-1, -1, -1};   // detected addr per chip, -1 = none
+        };
+        struct ImuChip { const char* name; const char* cfg_key; int addr[2]; };
+        static constexpr ImuChip kChips[3] = {
+            { "BNO086",   "bno086",  {0x4A, 0x4B} },
+            { "BNO055",   "bno055",  {0x28, 0x29} },
+            { "MPU-9250", "mpu9250", {0x68, 0x69} },
+        };
+        auto scan = std::make_shared<ImuScan>();
+        json* cfg_root = ctx.cfg_root;
+        MenuItem sc = leaf("Scan I2C for IMUs", [scan, cfg_root]{
+            {
+                std::lock_guard<std::mutex> lk(scan->m);
+                if (scan->busy) return;
+                scan->busy = true;
+            }
+            // Each chip is probed on its configured bus (default /dev/i2c-1).
+            std::array<std::string, 3> buses;
+            for (int i = 0; i < 3; ++i) {
+                buses[i] = "/dev/i2c-1";
+                if (cfg_root && cfg_root->contains(kChips[i].cfg_key) &&
+                    (*cfg_root)[kChips[i].cfg_key].is_object())
+                    buses[i] = (*cfg_root)[kChips[i].cfg_key]
+                                   .value("i2c_bus", std::string("/dev/i2c-1"));
+            }
+            std::thread([scan, buses]{
+                int found[3] = {-1, -1, -1};
+                for (int i = 0; i < 3; ++i) {
+                    int fd = open(buses[i].c_str(), O_RDWR);
+                    if (fd < 0) continue;
+                    for (int a : kChips[i].addr) {
+                        if (ioctl(fd, I2C_SLAVE, a) < 0) continue;
+                        uint8_t byte = 0;
+                        if (read(fd, &byte, 1) >= 0 ||
+                            (errno != ENODEV && errno != ENXIO)) {
+                            found[i] = a;
+                            break;
+                        }
+                    }
+                    close(fd);
+                }
+                std::lock_guard<std::mutex> lk(scan->m);
+                for (int i = 0; i < 3; ++i) scan->found[i] = found[i];
+                scan->busy = false;
+                scan->ran  = true;
+            }).detach();
+        });
+        sc.label_fn = [scan]{
+            std::lock_guard<std::mutex> lk(scan->m);
+            return std::string(scan->busy ? "Scanning..."
+                                          : "Scan I\xc2\xb2""C for IMUs");
+        };
+        imu_menu.push_back(with_desc(std::move(sc),
+            "Probe the I\xc2\xb2""C bus for the IMU chips at their known "
+            "addresses (BNO086 0x4A/0x4B, BNO055 0x28/0x29, MPU-9250 "
+            "0x68/0x69), each on its configured bus. Answers \"is it wired "
+            "and powered?\" separately from whether its driver is running. "
+            "A BNO055 on the UART transport won't show here."));
+        for (int i = 0; i < 3; ++i) {
+            MenuItem r = leaf(kChips[i].name, []{});
+            r.label_fn = [scan, i]{
+                std::lock_guard<std::mutex> lk(scan->m);
+                char b[48];
+                if (scan->busy)
+                    snprintf(b, sizeof b, "  %s:  scanning...", kChips[i].name);
+                else if (scan->found[i] < 0)
+                    snprintf(b, sizeof b, "  %s:  not found", kChips[i].name);
+                else
+                    snprintf(b, sizeof b, "  %s:  found at 0x%02X",
+                             kChips[i].name, scan->found[i]);
+                return std::string(b);
             };
-            m.visible_fn = [bno055]{ return bno055 && bno055->connected(); };
-            return with_desc(std::move(m),
-                "Store the BNO055's current calibration so it loads on boot. "
-                "Best when calibration reads 3/3 — rotate the head through "
-                "several orientations and a figure-8 for the magnetometer.");
-        }(),
-        [&]() -> MenuItem {
-            // Re-init the BNO055 without restarting ProtoHUD — for a sensor
-            // that wasn't powered/ready at boot (the chip needs ≥1 s after
-            // power-on before it talks). restart() stops + joins the poll
-            // thread and sleeps through the settle window, so it must NOT run
-            // on the render thread — hand it to a detached worker.
-            MenuItem m = leaf("Restart IMU Sensor", [bno055, state_ptr]{
-                if (!bno055) return;
-                std::thread([bno055, state_ptr]{
-                    const bool ok = bno055->restart();
-                    if (!state_ptr) return;
-                    Notification n; n.type = NotifType::App;
-                    n.title = ok ? "IMU sensor connected" : "IMU sensor not found";
-                    n.body  = ok ? "BNO055 re-initialised and streaming."
-                                 : "No response — check wiring/power, then retry.";
-                    n.auto_dismiss_s = 5.f;
-                    std::lock_guard<std::mutex> lk(state_ptr->mtx);
-                    state_ptr->notifs.push(std::move(n));
-                }).detach();
-            });
-            m.label_fn = [bno055]{
-                return std::string("Restart IMU Sensor  [") +
-                       (bno055 && bno055->connected() ? "connected" : "offline") + "]";
+            r.visible_fn = [scan]{
+                std::lock_guard<std::mutex> lk(scan->m);
+                return scan->ran || scan->busy;
             };
-            return with_desc(std::move(m),
-                "Tear down and re-initialise the BNO055. Use when the sensor "
-                "wasn't ready at boot — the chip needs about a second after "
-                "power-on before it responds, so a sensor powered late comes "
-                "up offline until you trigger this. No ProtoHUD restart needed.");
-        }(),
+            imu_menu.push_back(std::move(r));
+        }
+    }
+    imu_menu.push_back([&]() -> MenuItem {
+        // BNO086 head-tracking recenter: tare the sensor so the direction
+        // you're facing becomes "forward" for pin-in-space / the compass.
+        Bno08x* b = ctx.bno08x;
+        MenuItem m = with_desc(
+            leaf("Recenter Head Tracking", [b]{ if (b) b->recenter(false); }),
+            "Tare the BNO086 so your current facing becomes forward "
+            "(zeroes heading/yaw). Use after mounting or if the view has "
+            "drifted off-centre.");
+        m.visible_fn = [b]{ return b && b->connected(); };
+        return m;
+    }());
+    imu_menu.push_back(submenu("IMU Axis", std::move(imu_axis_menu)));
+    imu_menu.push_back([&]() -> MenuItem {
+        MenuItem m = leaf("Save IMU Calibration",
+            [bno055]{ if (bno055) bno055->request_calibration_save(); });
+        m.label_fn = [bno055]{
+            const int s = bno055 ? bno055->calib_sys() : 0;
+            return std::string("Save IMU Calibration  [sys ") +
+                   std::to_string(s) + "/3]";
+        };
+        m.visible_fn = [bno055]{ return bno055 && bno055->connected(); };
+        return with_desc(std::move(m),
+            "Store the BNO055's current calibration so it loads on boot. "
+            "Best when calibration reads 3/3 — rotate the head through "
+            "several orientations and a figure-8 for the magnetometer.");
+    }());
+    imu_menu.push_back([&]() -> MenuItem {
+        // Re-init the BNO055 without restarting ProtoHUD — for a sensor
+        // that wasn't powered/ready at boot (the chip needs ≥1 s after
+        // power-on before it talks). restart() stops + joins the poll
+        // thread and sleeps through the settle window, so it must NOT run
+        // on the render thread — hand it to a detached worker.
+        MenuItem m = leaf("Restart IMU Sensor", [bno055, state_ptr]{
+            if (!bno055) return;
+            std::thread([bno055, state_ptr]{
+                const bool ok = bno055->restart();
+                if (!state_ptr) return;
+                Notification n; n.type = NotifType::App;
+                n.title = ok ? "IMU sensor connected" : "IMU sensor not found";
+                n.body  = ok ? "BNO055 re-initialised and streaming."
+                             : "No response — check wiring/power, then retry.";
+                n.auto_dismiss_s = 5.f;
+                std::lock_guard<std::mutex> lk(state_ptr->mtx);
+                state_ptr->notifs.push(std::move(n));
+            }).detach();
+        });
+        m.label_fn = [bno055]{
+            return std::string("Restart IMU Sensor  [") +
+                   (bno055 && bno055->connected() ? "connected" : "offline") + "]";
+        };
+        return with_desc(std::move(m),
+            "Tear down and re-initialise the BNO055. Use when the sensor "
+            "wasn't ready at boot — the chip needs about a second after "
+            "power-on before it responds, so a sensor powered late comes "
+            "up offline until you trigger this. No ProtoHUD restart needed.");
+    }());
+
+    std::vector<MenuItem> compass_menu = {
+        toggle("Compass Tape",
+            [&state]{ return state.compass_tape; },
+            [&state](bool v){ state.compass_tape = v; }),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
@@ -483,6 +802,19 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_height); },
             [hud_cfg](float v){ hud_cfg->compass_height = static_cast<int>(v); }),
     };
+    if (ctx.imu_out) {
+        ctx.imu_out->push_back(with_desc(submenu("IMU", std::move(imu_menu)),
+            "Head-tracking IMU hardware on the 40-pin header's I\xc2\xb2""C bus: "
+            "pick which sensor drives the compass (BNO086 / BNO055 / MPU-9250 / "
+            "Viture), recenter head tracking, remap axes, save calibration or "
+            "restart the sensor."));
+    } else {
+        // No GPIO tab wired — keep the IMU items under Compass, after the
+        // Compass Tape toggle, as before.
+        compass_menu.insert(compass_menu.begin() + 1,
+                            std::make_move_iterator(imu_menu.begin()),
+                            std::make_move_iterator(imu_menu.end()));
+    }
 
     // ── Color Options ─────────────────────────────────────────────────────────
 
