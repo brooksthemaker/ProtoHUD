@@ -716,18 +716,29 @@ public:
             [](const Particle& p){ return p.life <= 0; }), particles_.end());
         while ((int)particles_.size() < count(40)) {
             const double depth = jnum(cfg_, "depth_frac", 0.35);
+            // White/blue ice mix by default (white sparkle, pale ice, deep
+            // blue); a "colors" list in the layer cfg still overrides.
+            static const Color kIce[3] = {
+                {255, 255, 255}, {200, 230, 255}, {120, 180, 255}};
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
-                                         : Color{210, 235, 255};
-            // Edge-biased position: pick a rim side, then bite inward with a
-            // quadratic bias so most crystals hug the border.
+                                         : kIce[(int)frand(rng_, 0, 3) % 3];
+            // Frost forms on the left/right/bottom rim (like a window — no
+            // top edge), heaviest along the bottom, the side runs climbing
+            // up from the bottom corners. Crystals bite inward with a
+            // quadratic bias so most hug the border. include_top:true
+            // restores the old full-rim look.
             double u = frand(rng_, 0, 1); u *= u;
             const double d = u * depth * std::min(w_, h_);
             Particle p;
-            switch ((int)frand(rng_, 0, 4) & 3) {
-                case 0:  p.x = frand(rng_, 0, w_ - 1); p.y = d;           break;
-                case 1:  p.x = frand(rng_, 0, w_ - 1); p.y = h_ - 1 - d;  break;
-                case 2:  p.x = d;                      p.y = frand(rng_, 0, h_ - 1); break;
-                default: p.x = w_ - 1 - d;             p.y = frand(rng_, 0, h_ - 1); break;
+            const double side = frand(rng_, 0, 1);
+            if (cfg_.value("include_top", false) && side < 0.18) {
+                p.x = frand(rng_, 0, w_ - 1);  p.y = d;              // top rim
+            } else if (side < 0.5) {
+                p.x = frand(rng_, 0, w_ - 1);  p.y = h_ - 1 - d;     // bottom
+            } else {
+                double v = frand(rng_, 0, 1); v *= v;                // corner bias
+                p.y = (h_ - 1) * (1.0 - v);
+                p.x = (side < 0.75) ? d : w_ - 1 - d;                // left/right
             }
             p.life = 1.0; p.max_life = frand(rng_, 3.0, 8.0);   // slow churn
             p.r = col.r; p.g = col.g; p.b = col.b;
