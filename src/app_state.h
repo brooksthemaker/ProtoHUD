@@ -803,6 +803,18 @@ struct AppState {
     bool  compass_bg_enabled = true;
     bool  compass_tape       = true;   // the top-of-screen compass tape
 
+    // Fighter-style attitude indicator overlay (HUD > Attitude Indicator).
+    // Reads the calibrated head-tracking pose (imu_pose), so the PIT/YAW/ROL
+    // readouts match the IMU Live Readout — a debug/alignment aid as much as
+    // an instrument. Colors follow the HUD line color (glow_base).
+    struct AttitudeIndicatorCfg {
+        bool  enabled = false;
+        bool  full    = true;    // full: pitch ladder + bank arc + frame arcs;
+                                 // off = minimal (waterline + horizon + readouts)
+        float size    = 0.60f;   // indicator diameter as a fraction of screen height
+    };
+    AttitudeIndicatorCfg attitude;
+
     // ── IMU source selection ────────────────────────────────────────────────
     // The HUD has three possible heading sources at runtime: the BNO055
     // (best — on-chip 9-DOF fusion), the MPU9250 (compass with software

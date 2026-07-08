@@ -2183,6 +2183,12 @@ int main(int argc, char* argv[]) {
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
     state.legacy_hud          = jhud.value("legacy_hud", true);
+    if (jhud.contains("attitude_indicator") && jhud["attitude_indicator"].is_object()) {
+        const auto& ja = jhud["attitude_indicator"];
+        state.attitude.enabled = ja.value("enabled", false);
+        state.attitude.full    = ja.value("full", true);
+        state.attitude.size    = std::clamp(ja.value("size", 0.60f), 0.30f, 0.95f);
+    }
     state.skip_landing        = jval(cfg.contains("landing") ? cfg["landing"] : json::object(),
                                      "skip", false);
     state.expanded_show_debug = jhud.value("expanded_show_debug", false);
@@ -5207,6 +5213,9 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
         cfg["hud"]["legacy_hud"]          = state.legacy_hud;
+        cfg["hud"]["attitude_indicator"]["enabled"] = state.attitude.enabled;
+        cfg["hud"]["attitude_indicator"]["full"]    = state.attitude.full;
+        cfg["hud"]["attitude_indicator"]["size"]    = state.attitude.size;
         cfg["landing"]["skip"]            = state.skip_landing;
         cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
         cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
@@ -6682,6 +6691,7 @@ int main(int argc, char* argv[]) {
             snap.compass_heading    = state.compass_heading;
             snap.compass_bg_enabled = state.compass_bg_enabled;
             snap.compass_tape       = state.compass_tape;
+            snap.attitude           = state.attitude;
             snap.legacy_hud         = state.legacy_hud;
             snap.imu_pose           = state.imu_pose;
             snap.focus_left         = state.focus_left;

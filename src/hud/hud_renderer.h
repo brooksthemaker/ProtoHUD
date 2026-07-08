@@ -202,6 +202,8 @@ private:
                             float ox, float oy, float pw, float ph);
     void draw_compass_tape (NVGcontext* vg, const AppState& s,
                             float ox, float oy, float tw, float th);
+    void draw_attitude_indicator(NVGcontext* vg, const AppState& s,
+                            float fw, float fh);
     void draw_timer_alarm_indicator(NVGcontext* vg, const AppState& s,
                             float fw, float fh);
     void draw_fps_nvg      (NVGcontext* vg, const AppState& snap, float fw, float fh);

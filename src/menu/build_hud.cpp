@@ -1621,9 +1621,34 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         legacy_hud_menu.push_back(std::move(comp));
     }
 
+    // ── Attitude Indicator ────────────────────────────────────────────────────
+    // Fighter-style ADI overlay fed by the calibrated head-tracking pose; the
+    // PIT/YAW/ROL readouts match GPIO > On-Board GPIO > IMU > Live Readout.
+    std::vector<MenuItem> attitude_menu = {
+        with_desc(toggle("Enable",
+            [&state]{ return state.attitude.enabled; },
+            [&state](bool v){ state.attitude.enabled = v; }),
+            "Overlay a fighter-style attitude indicator at screen center: "
+            "pitch ladder and horizon roll with your head behind a fixed "
+            "winged waterline symbol, with live PIT / YAW / ROL readouts "
+            "that match the IMU Live Readout \xe2\x80\x94 handy for checking "
+            "calibration, trim and Set Level in the field."),
+        with_desc(toggle("Full Style",
+            [&state]{ return state.attitude.full; },
+            [&state](bool v){ state.attitude.full = v; }),
+            "ON: full instrument \xe2\x80\x94 pitch ladder, bank arc with "
+            "needle, frame arcs. OFF: minimal \xe2\x80\x94 just the horizon, "
+            "waterline symbol and readouts."),
+        with_desc(slider("Size", 0.30f, 0.95f, 0.05f, "",
+            [&state]{ return state.attitude.size; },
+            [&state](float v){ state.attitude.size = v; }),
+            "Indicator diameter as a fraction of the screen height."),
+    };
+
     std::vector<MenuItem> hud_menu = {
         submenu("Mini-Map Module",  std::move(mini_map_menu)),
         submenu("Info-Panel Module",std::move(info_panel_menu)),
+        submenu("Attitude Indicator", std::move(attitude_menu)),
         submenu("Location",         std::move(location_menu)),
         submenu("Clock",            std::move(clock_menu)),
         submenu("Color",            std::move(color_options_menu)),

@@ -398,6 +398,8 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     // The expanded map can optionally hide the info panel (its data is in the sidebar).
     if (!(s.map_overlay.expanded && s.expanded_hide_info))
         draw_info_panel(nvg_, s, fw, fh);
+    if (s.attitude.enabled)
+        draw_attitude_indicator(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
 
     // Legacy HUD chrome (edge/corner indicators). The minimap + info panel above
@@ -2735,6 +2737,202 @@ void HudRenderer::draw_lora_messages(NVGcontext* vg, const AppState& s,
         py += 16.f;
         nvg_glow_text(vg, ox + 8.f, py, msg.text.c_str(), !msg.read);
         py += 22.f;
+    }
+}
+
+// ── Attitude indicator ────────────────────────────────────────────────────────
+// Fighter-style ADI overlay, centered on screen: earth-fixed pitch ladder +
+// horizon rotate with roll behind a fixed winged waterline symbol; a bank arc
+// rides the top and bare PIT / YAW / ROL readouts sit inside the lower half.
+// Pose comes from s.imu_pose — the calibrated head-tracking euler (post
+// Set Level / trim, pre motion-sensitivity scaling), so the numbers match the
+// GPIO > IMU Live Readout exactly. Lines follow the HUD Borders & Lines color.
+
+// Stroke a line whose alpha fades from a0 (x0,y0) to a1 (x1,y1).
+static void adi_fade_line(NVGcontext* vg, float x0, float y0, float x1, float y1,
+                          ImU32 col, uint8_t a0, uint8_t a1, float w) {
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, x0, y0);
+    nvgLineTo(vg, x1, y1);
+    nvgStrokePaint(vg, nvgLinearGradient(vg, x0, y0, x1, y1,
+                                         nvg_col_a(col, a0), nvg_col_a(col, a1)));
+    nvgStrokeWidth(vg, w);
+    nvgStroke(vg);
+}
+
+void HudRenderer::draw_attitude_indicator(NVGcontext* vg, const AppState& s,
+                                          float fw, float fh) {
+    const float cx = fw * 0.5f, cy = fh * 0.5f;
+    const float R  = std::clamp(s.attitude.size, 0.30f, 0.95f) * fh * 0.45f;
+    const bool  full = s.attitude.full;
+
+    const float roll  = s.imu_pose.roll;
+    const float pitch = s.imu_pose.pitch;
+    const float yaw   = s.imu_pose.yaw;
+    const ImU32 lc    = col_.glow_base;                    // Borders & Lines color
+    // Level lock: within 2° of level on both axes the waterline brightens.
+    const bool  locked = std::fabs(roll) < 2.f && std::fabs(pitch) < 2.f;
+    constexpr float kDeg2Rad = 3.14159265f / 180.f;
+    const float px_per_deg = R / 30.f;                     // ladder scale: 10° = R/3
+
+    // ── Earth-fixed group: horizon + pitch ladder, rotated opposite the bank.
+    // (If a mounted unit shows the horizon tilting WITH the head instead of
+    // against it, flip the sign here.)
+    nvgSave(vg);
+    nvgTranslate(vg, cx, cy);
+    nvgRotate(vg, -roll * kDeg2Rad);
+
+    // Horizon line, fading toward both ends, brighter when locked level.
+    {
+        const float hy = pitch * px_per_deg;
+        const float hw = R * 0.95f;
+        if (std::fabs(hy) < R) {
+            const uint8_t ah = locked ? 235 : 170;
+            adi_fade_line(vg, -hw, hy, 0.f, hy, lc, 0, ah, locked ? 2.2f : 1.6f);
+            adi_fade_line(vg,  hw, hy, 0.f, hy, lc, 0, ah, locked ? 2.2f : 1.6f);
+        }
+    }
+
+    // Pitch ladder (Full): rungs every 10° within reach, chevron caps bent
+    // toward the horizon, nose-down rungs fragmented (dashed) per convention.
+    if (full) {
+        nvg_set_font_mono(std::max(9.f, R * 0.10f));
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        for (int deg = -60; deg <= 60; deg += 10) {
+            if (deg == 0) continue;
+            const float y = (pitch - static_cast<float>(deg)) * px_per_deg;
+            if (std::fabs(y) > R * 0.78f) continue;
+            const float half = R * (0.30f - 0.04f * (std::abs(deg) / 30.f));
+            const float cap  = R * 0.05f * (deg > 0 ? 1.f : -1.f);  // bend toward horizon
+            const uint8_t a  = 150;
+            if (deg > 0) {
+                adi_fade_line(vg, -half, y, -R * 0.10f, y, lc, 60, a, 1.4f);
+                adi_fade_line(vg,  half, y,  R * 0.10f, y, lc, 60, a, 1.4f);
+            } else {
+                // fragmented nose-down rungs: two dashes per side
+                const float x1 = R * 0.10f, x2 = half * 0.55f, x3 = half;
+                for (float sgn : {-1.f, 1.f}) {
+                    adi_fade_line(vg, sgn * x3, y, sgn * x2, y, lc, 60, a, 1.4f);
+                    adi_fade_line(vg, sgn * (x2 * 0.82f), y, sgn * x1, y, lc, a, a, 1.4f);
+                }
+            }
+            // chevron caps at the outboard ends
+            for (float sgn : {-1.f, 1.f}) {
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, sgn * half, y);
+                nvgLineTo(vg, sgn * half, y + cap);
+                nvgStrokeColor(vg, nvg_col_a(lc, a));
+                nvgStrokeWidth(vg, 1.4f);
+                nvgStroke(vg);
+            }
+            // rung value at the left cap
+            char lb[8]; snprintf(lb, sizeof(lb), "%d", std::abs(deg));
+            nvgFillColor(vg, nvg_col_a(lc, 130));
+            nvgText(vg, -half - R * 0.14f, y, lb, nullptr);
+        }
+    }
+    nvgRestore(vg);
+
+    // ── Fixed winged waterline symbol (the "airplane"): fading wings, an
+    // inverted vee at center, and a center dot. Brightens on level lock.
+    {
+        const uint8_t aw = locked ? 255 : 200;
+        const float win = R * 0.16f, wout = R * 0.52f, vee = R * 0.07f;
+        adi_fade_line(vg, cx - wout, cy, cx - win, cy, lc, 40, aw, 2.4f);
+        adi_fade_line(vg, cx + wout, cy, cx + win, cy, lc, 40, aw, 2.4f);
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx - win, cy);
+        nvgLineTo(vg, cx - win * 0.5f, cy + vee);
+        nvgLineTo(vg, cx, cy);
+        nvgLineTo(vg, cx + win * 0.5f, cy + vee);
+        nvgLineTo(vg, cx + win, cy);
+        nvgStrokeColor(vg, nvg_col_a(lc, aw));
+        nvgStrokeWidth(vg, 2.2f);
+        nvgStroke(vg);
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx, cy, locked ? 2.4f : 1.8f);
+        nvgFillColor(vg, nvg_col_a(lc, aw));
+        nvgFill(vg);
+    }
+
+    // ── Bank arc (Full): segmented tick arc across the top, a double-chevron
+    // needle at the current bank and a diamond marking wings-level.
+    if (full) {
+        const float ar = R * 0.92f;
+        static constexpr int kTicks[] = { -60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60 };
+        for (int t : kTicks) {
+            const float a  = (-90.f + t) * kDeg2Rad;           // 0 = straight up
+            const float ca = std::cos(a), sa = std::sin(a);
+            const bool major = (t % 30) == 0;
+            const float len  = major ? R * 0.07f : R * 0.045f;
+            adi_fade_line(vg, cx + ca * ar, cy + sa * ar,
+                          cx + ca * (ar + len), cy + sa * (ar + len),
+                          lc, 200, 90, major ? 1.8f : 1.2f);
+        }
+        // wings-level diamond at the arc apex
+        {
+            const float dy = cy - ar - R * 0.10f, dsz = R * 0.030f;
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, cx, dy - dsz); nvgLineTo(vg, cx + dsz, dy);
+            nvgLineTo(vg, cx, dy + dsz); nvgLineTo(vg, cx - dsz, dy);
+            nvgClosePath(vg);
+            nvgStrokeColor(vg, nvg_col_a(lc, 170));
+            nvgStrokeWidth(vg, 1.4f);
+            nvgStroke(vg);
+        }
+        // bank needle: double chevron just inside the arc at -roll
+        {
+            const float a  = (-90.f - roll) * kDeg2Rad;
+            const float ca = std::cos(a), sa = std::sin(a);
+            const float na = a + 90.f * kDeg2Rad;              // tangent direction
+            const float tx = std::cos(na), ty = std::sin(na);
+            const float wspan = R * 0.035f;
+            for (int i = 0; i < 2; ++i) {
+                const float rr = ar - R * (0.035f + 0.045f * i);
+                const float tipx = cx + ca * (rr + R * 0.035f),
+                            tipy = cy + sa * (rr + R * 0.035f);
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, cx + ca * rr + tx * wspan, cy + sa * rr + ty * wspan);
+                nvgLineTo(vg, tipx, tipy);
+                nvgLineTo(vg, cx + ca * rr - tx * wspan, cy + sa * rr - ty * wspan);
+                nvgStrokeColor(vg, nvg_col_a(lc, i == 0 ? 240 : 140));
+                nvgStrokeWidth(vg, 1.8f);
+                nvgStroke(vg);
+            }
+        }
+        // decorative frame arcs at the sides
+        for (float sgn : {-1.f, 1.f}) {
+            nvgBeginPath(vg);
+            const float a0 = (sgn < 0 ? 150.f : -30.f) * kDeg2Rad;
+            nvgArc(vg, cx, cy, R * 1.02f, a0, a0 + 60.f * kDeg2Rad, NVG_CW);
+            nvgStrokeColor(vg, nvg_col_a(lc, 60));
+            nvgStrokeWidth(vg, 1.2f);
+            nvgStroke(vg);
+        }
+    }
+
+    // ── Readouts: bare mono text inside the lower hemisphere. PIT left,
+    // ROL right, YAW centered a step lower — fixed-width so digits don't
+    // jitter, matching the IMU Live Readout values.
+    {
+        nvg_set_font_mono(std::max(10.f, R * 0.115f));
+        char pb[24], rb[24], yb[24];
+        snprintf(pb, sizeof(pb), "PIT %+06.1f", static_cast<double>(pitch));
+        snprintf(rb, sizeof(rb), "ROL %+06.1f", static_cast<double>(roll));
+        snprintf(yb, sizeof(yb), "YAW %+07.1f", static_cast<double>(yaw));
+        const float ry = cy + R * 0.68f, yy = cy + R * 0.84f;
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvg_text_outline(vg, cx - R * 0.62f, ry, pb);
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvgText(vg, cx - R * 0.62f, ry, pb, nullptr);
+        nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+        nvg_text_outline(vg, cx + R * 0.62f, ry, rb);
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvgText(vg, cx + R * 0.62f, ry, rb, nullptr);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvg_text_outline(vg, cx, yy, yb);
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvgText(vg, cx, yy, yb, nullptr);
     }
 }
 
