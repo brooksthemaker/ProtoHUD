@@ -2640,8 +2640,7 @@ int main(int argc, char* argv[]) {
         prev_us = now_us;
     });
 
-    if (!mpu9250.start() && mpu_cfg.enabled)
-        std::cerr << "[main] MPU-9250 backup compass unavailable\n";
+    // (started with the other IMUs on the imu_boot_thread below)
 
     // ── BNO055 (Adafruit 9-DOF absolute orientation) ─────────────────────────
     // On-chip sensor fusion in NDOF mode — reports a calibrated absolute
@@ -2689,8 +2688,7 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.notifs.push(std::move(n));
     });
-    if (!bno055.start() && bno_cfg.enabled)
-        std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
+    // (started with the other IMUs on the imu_boot_thread below)
 
     // ── BNO086 (SH-2, I2C) ───────────────────────────────────────────────────
     // Mag-referenced heading → imu_bno08x (compass), and when head_tracking is
@@ -2747,11 +2745,30 @@ int main(int argc, char* argv[]) {
         }
         prev_us = now_us;
     });
-    if (bno086.start()) {
-        bno08x_owns_pose.store(bno08x_cfg.head_tracking);
-    } else if (bno08x_cfg.enabled) {
-        std::cerr << "[main] BNO086 IMU unavailable\n";
-    }
+    // ── IMU bring-up, off the boot path ───────────────────────────────────────
+    // All three IMU starts block: the BNO055 polls CHIP_ID for up to 2 s (and
+    // used to retry to ~6.6 s when the chip isn't fitted), the BNO086 spends
+    // ~0.5-1 s on SHTP handshake, the MPU-9250 a few register round-trips.
+    // Callbacks are all registered above, and every consumer (compass picker,
+    // face motion feed, menu rows, attitude indicator) already tolerates a
+    // sensor that isn't up yet — so start them on an owned worker and let the
+    // HUD come up meanwhile. Joined in the shutdown sequence before the
+    // sensors are stopped.
+    std::thread imu_boot_thread([&mpu9250, &bno055, &bno086, &bno08x_owns_pose,
+                                 mpu_en = mpu_cfg.enabled, bno_en = bno_cfg.enabled,
+                                 b86_en = bno08x_cfg.enabled,
+                                 b86_ht = bno08x_cfg.head_tracking]{
+        if (!mpu9250.start() && mpu_en)
+            std::cerr << "[main] MPU-9250 backup compass unavailable\n";
+        if (!bno055.start() && bno_en)
+            std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
+        if (bno086.start()) {
+            bno08x_owns_pose.store(b86_ht);
+        } else if (b86_en) {
+            std::cerr << "[main] BNO086 IMU unavailable\n";
+        }
+        std::cerr << "[boot] IMU bring-up complete (background)\n";
+    });
 
     // ── Boop sensor ──────────────────────────────────────────────────────────
     // Polls on its own thread; the on_boop callback fires from there and
@@ -7721,6 +7738,7 @@ int main(int argc, char* argv[]) {
     step("sched_mon");       sched_mon.stop();
     step("weather_mon");     weather_mon.stop();
     step("sys_mon");         sys_mon.stop();
+    step("imu boot join");   if (imu_boot_thread.joinable()) imu_boot_thread.join();
     step("mpu9250");         mpu9250.stop();
     step("bno055");          bno055.stop();
     step("boop_sensor");     boop_sensor.stop();

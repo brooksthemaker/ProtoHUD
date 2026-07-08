@@ -206,7 +206,7 @@ bool Bno055::uart_read_regs(uint8_t reg, uint8_t* buf, size_t len) {
     return false;
 }
 
-bool Bno055::init_chip_locked() {
+bool Bno055::init_chip_locked(bool* any_ack) {
     // Wait out the chip's power-on window before the first read. The datasheet
     // POR time is ~650 ms and the UART variant can need ≥1 s; reading CHIP_ID
     // any sooner returns nothing (or garbage) and used to abort init outright.
@@ -215,8 +215,12 @@ bool Bno055::init_chip_locked() {
     // simply settles first.
     uint8_t id = 0;
     bool found = false;
+    if (any_ack) *any_ack = false;
     for (int i = 0; i < 20; ++i) {                 // ~2 s total
-        if (read_regs(REG_CHIP_ID, &id, 1) && id == CHIP_ID_BNO055) { found = true; break; }
+        if (read_regs(REG_CHIP_ID, &id, 1)) {
+            if (any_ack) *any_ack = true;          // something answered the address
+            if (id == CHIP_ID_BNO055) { found = true; break; }
+        }
         if (is_uart()) uart_flush_input();         // drop any partial/boot bytes
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -311,12 +315,30 @@ bool Bno055::save_calibration() {
 bool Bno055::start() {
     if (!cfg_.enabled) return false;
     if (running_.load()) return true;
+    // Serialize concurrent starts (boot worker vs the menu's Restart leaf —
+    // both run on background threads). Losing caller just reports "not up".
+    bool expected = false;
+    if (!starting_.compare_exchange_strong(expected, true)) return false;
+    struct Unbusy {
+        std::atomic<bool>& f;
+        ~Unbusy() { f.store(false); }
+    } unbusy{ starting_ };
     if (!open_bus()) return false;
     // Retry the whole init a few times — covers a chip still mid-reset when the
     // CHIP_ID poll window expires (e.g. a fresh power cycle right at launch).
+    // If the address never ACKed at all during the 2 s window there is no
+    // chip there (POR is ~650 ms, well inside the window) — skip the retries
+    // instead of burning ~6.6 s on an absent sensor.
     bool inited = false;
     for (int attempt = 0; attempt < 3 && !inited; ++attempt) {
-        if (init_chip_locked()) { inited = true; break; }
+        bool any_ack = false;
+        if (init_chip_locked(&any_ack)) { inited = true; break; }
+        if (!any_ack) {
+            std::cerr << "[bno055] no response at "
+                      << (is_uart() ? cfg_.uart_device : cfg_.i2c_bus)
+                      << " — not retrying (sensor absent?)\n";
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     if (!inited) {

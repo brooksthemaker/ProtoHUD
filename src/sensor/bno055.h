@@ -102,7 +102,10 @@ private:
     bool open_uart();
     void close_bus();
     bool is_uart() const { return cfg_.transport == "uart"; }
-    bool init_chip_locked();
+    // any_ack (optional) reports whether the chip responded to ANY CHIP_ID
+    // read during the poll window — false means nothing is at the address,
+    // so retrying the whole init is pointless (see start()).
+    bool init_chip_locked(bool* any_ack = nullptr);
     bool write_reg(uint8_t reg, uint8_t val);
     bool read_regs(uint8_t reg, uint8_t* buf, size_t len);
     // BNO055 serial register protocol (used when transport == "uart").
@@ -127,6 +130,7 @@ private:
     std::function<void(const Sample&)>    samp_cb_;
 
     std::atomic<bool>    running_         { false };
+    std::atomic<bool>    starting_        { false };   // serializes concurrent start()
     std::atomic<float>   declination_deg_ { 0.f };
     std::atomic<float>   heading_offset_  { 0.f };
     std::atomic<int>     heading_axes_    { 0   };
