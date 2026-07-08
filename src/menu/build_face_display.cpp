@@ -136,7 +136,7 @@ struct LayerCfg {
     float face_glow = 0.55f;
     // "water" extras: pitch shifts the fill level (look down → liquid rises);
     // bubbles count + style ("rise" bubbles in liquid / "drip" droplets above).
-    float pitch_fill = 0.0f;
+    float pitch_fill = 0.3f;
     int   bubbles = 0;
     std::string bubble_mode = "rise";
     // "lightning" extras: arc mode (crackling arcs vs falling bolts), fork
@@ -1139,7 +1139,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.level = jl.value("level", 0.4f);
             L.alpha = jl.value("alpha", 0.85f);
             L.viscosity = jl.value("viscosity", 0.15f);
-            L.pitch_fill = jl.value("pitch_fill", 0.0f);
+            L.pitch_fill = jl.value("pitch_fill", 0.3f);
             L.face_glow = jl.value("face_glow", 0.55f);
             L.bubbles = jl.value("bubbles", 0);
             L.bubble_mode = jl.value("bubble_mode", std::string("rise"));
