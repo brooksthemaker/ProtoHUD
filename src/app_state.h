@@ -815,6 +815,8 @@ struct AppState {
         bool  per_eye = true;    // one instrument per SBS eye half (3D glasses);
                                  // off = a single instrument centered on the window
         float text_scale = 1.0f; // readout / label font multiplier
+        float smooth  = 0.5f;    // 0 = raw sensor, 1 = heavy speed-adaptive
+                                 // smoothing (One-Euro-style; jumps snap through)
     };
     AttitudeIndicatorCfg attitude;
     // Pose shown by the attitude indicator: resolved each frame from the

@@ -1624,7 +1624,7 @@ int main(int argc, char* argv[]) {
         bno08x_cfg.gpiochip           = jb.value("gpiochip", std::string("/dev/gpiochip0"));
         bno08x_cfg.int_line           = jval(jb, "int_line",           -1);
         bno08x_cfg.rst_line           = jval(jb, "rst_line",           -1);
-        bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 10000);
+        bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 5000);
         bno08x_cfg.aux_interval_us    = jval(jb, "aux_interval_us",    40000);
         bno08x_cfg.auto_calibrate     = jval(jb, "auto_calibrate",     true);
         bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
@@ -2193,6 +2193,7 @@ int main(int argc, char* argv[]) {
             state.attitude.size       = std::clamp(ja.value("size", 0.60f), 0.30f, 0.95f);
             state.attitude.per_eye    = ja.value("per_eye", true);
             state.attitude.text_scale = std::clamp(ja.value("text_scale", 1.0f), 0.5f, 2.0f);
+            state.attitude.smooth     = std::clamp(ja.value("smooth", 0.5f), 0.0f, 1.0f);
         } catch (const nlohmann::json::exception& e) {
             std::cerr << "[main] hud.attitude_indicator config ignored: " << e.what() << "\n";
             state.attitude = {};
@@ -5232,6 +5233,7 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["attitude_indicator"]["size"]       = state.attitude.size;
         cfg["hud"]["attitude_indicator"]["per_eye"]    = state.attitude.per_eye;
         cfg["hud"]["attitude_indicator"]["text_scale"] = state.attitude.text_scale;
+        cfg["hud"]["attitude_indicator"]["smooth"]     = state.attitude.smooth;
         cfg["landing"]["skip"]            = state.skip_landing;
         cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
         cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
@@ -5944,25 +5946,63 @@ int main(int argc, char* argv[]) {
                 // the Live Readout) even when bno08x.head_tracking is off and
                 // nothing is feeding imu_pose. MPU-9250 publishes no fused
                 // euler — heading stands in for yaw; unknown axes stay level.
+                ImuPose ap{};
                 switch (src) {
                 case Src::B86:
-                    state.attitude_pose = { d.b86_euler[0], d.b86_euler[1],
-                                            d.b86_euler[2] };
+                    ap = { d.b86_euler[0], d.b86_euler[1], d.b86_euler[2] };
                     break;
                 case Src::B55:
-                    state.attitude_pose = { d.bno_euler[1], d.bno_euler[2],
-                                            d.bno_euler[0] };
+                    ap = { d.bno_euler[1], d.bno_euler[2], d.bno_euler[0] };
                     break;
                 case Src::Mpu:
-                    state.attitude_pose = { 0.f, 0.f, state.imu_mpu.heading_deg };
+                    ap = { 0.f, 0.f, state.imu_mpu.heading_deg };
                     break;
                 case Src::Xr:
-                    state.attitude_pose = { d.xr_roll, d.xr_pitch, d.xr_yaw };
+                    ap = { d.xr_roll, d.xr_pitch, d.xr_yaw };
                     break;
                 case Src::None:
-                    state.attitude_pose = state.imu_pose;   // hold the head-track pose
+                    ap = state.imu_pose;                    // hold the head-track pose
                     break;
                 }
+                // Speed-adaptive smoothing (One-Euro style): calm the sensor
+                // jitter while still tracking fast head motion — the cutoff
+                // opens with angular speed, and jumps >25° (tare / recenter /
+                // source switch) snap through instead of gliding. Runs on the
+                // render thread only; wrap-aware for roll/yaw.
+                struct AngleSmooth {
+                    double y = 0, dy = 0; bool init = false;
+                    static double circ(double v) {
+                        while (v > 180.0) v -= 360.0;
+                        while (v < -180.0) v += 360.0;
+                        return v;
+                    }
+                    float step(float x, double dt_s, double fc_min, bool wrap) {
+                        const double diff = wrap ? circ(x - y) : (x - y);
+                        if (!init || std::fabs(diff) > 25.0) {
+                            y = x; dy = 0.0; init = true;
+                            return static_cast<float>(y);
+                        }
+                        const double dts = std::clamp(dt_s, 1e-3, 0.1);
+                        dy += (1.0 - std::exp(-2.0 * M_PI * 1.0 * dts)) *
+                              (diff / dts - dy);
+                        const double fc = fc_min + 0.15 * std::fabs(dy);
+                        y += (1.0 - std::exp(-2.0 * M_PI * fc * dts)) * diff;
+                        if (wrap) y = circ(y);
+                        return static_cast<float>(y);
+                    }
+                };
+                static AngleSmooth s_att_r, s_att_p, s_att_y;
+                const float sm = std::clamp(state.attitude.smooth, 0.f, 1.f);
+                if (sm > 0.001f) {
+                    // slider 0→raw; 1→0.3 Hz floor (very calm when still)
+                    const double fc_min = 0.3 + (1.0 - sm) * 4.7;
+                    ap.roll  = s_att_r.step(ap.roll,  dt, fc_min, true);
+                    ap.pitch = s_att_p.step(ap.pitch, dt, fc_min, false);
+                    ap.yaw   = s_att_y.step(ap.yaw,   dt, fc_min, true);
+                } else {
+                    s_att_r.init = s_att_p.init = s_att_y.init = false;
+                }
+                state.attitude_pose = ap;
             }
             // Reaction engine: raw (unscaled) motion energy + state machine
             // tick. Runs even when face motion coupling is off - sleepiness

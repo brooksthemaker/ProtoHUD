@@ -1653,6 +1653,13 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [&state]{ return state.attitude.text_scale; },
             [&state](float v){ state.attitude.text_scale = v; }),
             "Scales the PIT / YAW / ROL readouts and pitch-ladder numbers."),
+        with_desc(slider("Smoothing", 0.0f, 1.0f, 0.05f, "",
+            [&state]{ return state.attitude.smooth; },
+            [&state](float v){ state.attitude.smooth = v; }),
+            "Speed-adaptive filter on the displayed pose: calms sensor "
+            "jitter while your head is still but opens up during fast "
+            "motion, so it stays responsive. Big jumps (tare / recenter) "
+            "snap through instantly. 0 = raw sensor data."),
     };
 
     std::vector<MenuItem> hud_menu = {

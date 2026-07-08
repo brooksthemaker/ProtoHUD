@@ -147,7 +147,9 @@
       "full": true,
       "size": 0.6,
       "per_eye": true,
-      "text_scale": 1.0
+      "text_scale": 1.0,
+      "smooth": 0.5,
+      "_smooth_note": "Speed-adaptive pose filter: 0 = raw sensor, 1 = heaviest smoothing when still. Fast motion and tare jumps always track instantly."
     },
     "compass_height_px": 80,
     "compass_bottom_margin_px": 20,
@@ -479,8 +481,8 @@
     "_int_line_note": "GPIO line offset (BCM number on the Pi) of the BNO086 INT/data-ready pin (active-low). Strongly recommended for I2C. -1 = no INT wired (driver polls the bus each service tick).",
     "rst_line": -1,
     "_rst_line_note": "GPIO line offset of the BNO086 RST pin (active-low). -1 = no hardware reset (the driver just waits for the hub to boot).",
-    "report_interval_us": 10000,
-    "_report_interval_note": "Orientation report period in microseconds. 10000 = 100 Hz.",
+    "report_interval_us": 5000,
+    "_report_interval_note": "Orientation report period in microseconds. 5000 = 200 Hz (default), 10000 = 100 Hz.",
     "aux_interval_us": 40000,
     "auto_calibrate": true,
     "_auto_calibrate_note": "Keep the chip's dynamic calibration running on accel/gyro/mag and let it persist the refined calibration to its own flash automatically (plus a snapshot on clean shutdown). The mag walks itself up to s3 during normal wear - no figure-8 ritual - and it survives power cycles.",

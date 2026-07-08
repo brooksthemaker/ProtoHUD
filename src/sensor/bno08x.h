@@ -34,7 +34,7 @@ public:
         std::string gpiochip           = "/dev/gpiochip0";
         int         int_line           = -1;           // INT offset (data-ready, active-low); -1 = poll the bus
         int         rst_line           = -1;           // RST offset (active-low); -1 = no hardware reset
-        int         report_interval_us = 10000;        // 10 ms = 100 Hz orientation
+        int         report_interval_us = 5000;         // 5 ms = 200 Hz orientation
         int         aux_interval_us    = 40000;        // 25 Hz calibrated accel/gyro/mag
         bool        auto_calibrate     = true;         // dynamic cal on accel/gyro/mag +
                                                        // periodic DCD save to chip flash
