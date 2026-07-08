@@ -6487,6 +6487,13 @@ int main(int argc, char* argv[]) {
             if (menu.is_deep_open()) menu.close_deep();
             else { menu.close(); menu.open_deep(); }
         }
+        // F3 jumps straight to System > Software > Updates (the in-HUD
+        // updater) - check for new commits / update / roll back.
+        if (key_pressed(ImGuiKey_F3)) {
+            menu.close();
+            menu.close_deep();
+            menu.open_deep_at({"System", "Software", "Updates"});
+        }
         // Per-camera autofocus: [ = Left camera, ] = Right camera.
         if (key_pressed(ImGuiKey_LeftBracket)) {
             if (cameras.owl_left()) cameras.owl_left()->start_autofocus();
