@@ -606,7 +606,7 @@
     "image":         "",
     "logo_size_px":  104,
     "show_ring":     true,
-    "min_display_s": 2.0,
+    "min_display_s": 0.5,
     "title":         "PROTOHUD",
     "subtitle":      "XR HUD System"
   }

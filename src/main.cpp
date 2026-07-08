@@ -1301,6 +1301,20 @@ static void render_eye_fbo(gl::Fbo& fbo,
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
+    // Boot-phase timing: one line per phase so a journal shows exactly where
+    // startup time goes ([boot] <phase> +<phase ms> total <ms>).
+    const auto boot_t0  = std::chrono::steady_clock::now();
+    auto boot_last      = boot_t0;
+    auto boot_mark = [&boot_t0, &boot_last](const char* phase) {
+        const auto now = std::chrono::steady_clock::now();
+        auto ms = [](std::chrono::steady_clock::duration d) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+        };
+        std::cerr << "[boot] " << phase << "  +" << ms(now - boot_last)
+                  << "ms  total " << ms(now - boot_t0) << "ms\n";
+        boot_last = now;
+    };
+
     // Writing to a socket/pipe whose peer has gone away (Protoface restarted, a
     // serial device unplugged, etc.) must not kill the whole HUD — ignore SIGPIPE
     // and handle the -1/EPIPE return at each call site.
@@ -2522,11 +2536,13 @@ int main(int argc, char* argv[]) {
     // XRDisplay calls glfwInit() + glfwCreateWindow() and establishes the EGL
     // GLES2 context. Everything else must come after this.
 
+    boot_mark("config + services");
     XRDisplay xr(xr_cfg);
     if (!xr.init()) {
         std::cerr << "[main] XR display init failed\n";
         return 1;
     }
+    boot_mark("xr display + GL context");
 
     // IMU → compass heading + spatial audio head tracking
     // Timestamp lets the MPU-9250 backup detect when the XR glasses go offline.
@@ -3142,6 +3158,7 @@ int main(int argc, char* argv[]) {
         state.health.cam_usb2      = cameras.usb2_ok();
         state.health.cam_usb3      = cameras.usb3_ok();
     }
+    boot_mark("cameras (CSI; USB opens continue in background)");
 
     // CSI boot auto-retry: a sensor that comes up wedged at boot leaves one eye
     // dark until a reboot. Attempt reinit_owls() a few times early on (from the
@@ -3885,6 +3902,7 @@ int main(int argc, char* argv[]) {
     term::PtyTerminal terminal(term_cfg);
     g_term = &terminal;
 
+    boot_mark("serial + sensors + face");
     splash_frame("Building menu...", 0.75f);
 
     // ── Menu system ───────────────────────────────────────────────────────────
@@ -5098,6 +5116,7 @@ int main(int argc, char* argv[]) {
 
     teensy.request_status();
 
+    boot_mark("menu + wiring");
     // ── Splash hold ───────────────────────────────────────────────────────────
     // Keep splash visible until minimum display time elapses, then show "Ready"
     // for a brief moment so the animation completes cleanly.
@@ -5920,6 +5939,10 @@ int main(int argc, char* argv[]) {
     std::string weather_fx_sent = "null";
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
+        {
+            static bool s_first_frame = true;
+            if (s_first_frame) { s_first_frame = false; boot_mark("first frame"); }
+        }
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);
 
         // Apply a pending window-mode change (Settings > Fullscreen / Frameless).

@@ -319,6 +319,12 @@ private:
     // new reopen is launched and in shutdown(), so the thread can never
     // outlive *this (a detached thread here was a use-after-free on exit).
     std::thread       usb_open_threads_[3];
+    // Boot-path USB bring-up (opens + rescue auto-scan) — one-shot worker so
+    // startup never blocks on V4L2 negotiation or the frame-read probing of
+    // missing devices. Aborted + joined in shutdown().
+    std::thread       usb_boot_thread_;
+    std::atomic<bool> usb_boot_abort_ { false };
+    void usb_boot_open();
 
     QrScanner*        qr_scanner_  { nullptr };
     std::atomic<bool> qr_scan_usb_ { false };
