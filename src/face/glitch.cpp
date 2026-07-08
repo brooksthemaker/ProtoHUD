@@ -176,7 +176,13 @@ void GlitchEffect::tick(double dt, const GlitchConfig& cfg) {
 void GlitchEffect::apply(cv::Mat& rgb, const GlitchConfig& cfg) {
     if (rgb.empty() || rgb.type() != CV_8UC3) return;
     const double s = env_ * cfg.intensity;
-    if (s <= 1e-3) { rgb.copyTo(prev_); return; }
+    // prev_ only feeds the datamosh smear — skip the full-canvas copy (and
+    // drop the stale buffer) whenever datamosh can't consume it.
+    if (s <= 1e-3) {
+        if (cfg.datamosh > 0.0) rgb.copyTo(prev_);
+        else                    prev_.release();
+        return;
+    }
 
     const int W = rgb.cols, H = rgb.rows;
 
@@ -270,7 +276,7 @@ void GlitchEffect::apply(cv::Mat& rgb, const GlitchConfig& cfg) {
         cv::addWeighted(prev_, a, rgb, 1.0 - a, 0.0, rgb);
     }
     if (cfg.datamosh > 0.0) clean.copyTo(prev_);
-    else                    rgb.copyTo(prev_);
+    else                    prev_.release();
 }
 
 } // namespace face

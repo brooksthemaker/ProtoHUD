@@ -129,7 +129,9 @@ public:
         : w_(w), h_(h), cw_(w), ch_(h), cfg_(std::move(cfg)),
           intensity_(jnum(cfg_, "intensity", 1.0)),
           rng_(static_cast<uint32_t>(
-              std::chrono::steady_clock::now().time_since_epoch().count())) {}
+              std::chrono::steady_clock::now().time_since_epoch().count())) {
+        shape_rect_ = cfg_.value("shape", std::string("dot")) == "rect";
+    }
     virtual ~BaseEffect() = default;
     virtual void update(double dt) = 0;
     virtual cv::Mat render() = 0;   // CV_8UC4
@@ -146,7 +148,11 @@ public:
     void set_motion_reactive(bool on) { motion_reactive_ = on; }
     // Swap in new params without recreating the effect — keeps the live particle
     // sim (and motion/audio/canvas state) so menu edits preview without resetting.
-    void set_cfg(json cfg) { cfg_ = std::move(cfg); intensity_ = jnum(cfg_, "intensity", 1.0); }
+    void set_cfg(json cfg) {
+        cfg_ = std::move(cfg);
+        intensity_  = jnum(cfg_, "intensity", 1.0);
+        shape_rect_ = cfg_.value("shape", std::string("dot")) == "rect";
+    }
     void set_canvas_geometry(int cw, int ch, int ox, int oy) {
         cw_ = cw; ch_ = ch; ox_ = ox; oy_ = oy;
     }
@@ -167,11 +173,18 @@ protected:
         return std::max(1, static_cast<int>(jnum(cfg_, "count", def) * scale));
     }
     void draw_particle(cv::Mat& c, const Particle& p, double alpha) {
-        std::string shape = cfg_.value("shape", std::string("dot"));
-        if (shape == "rect") draw_rect(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
-        else                 draw_dot (c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
+        if (shape_rect_) draw_rect(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
+        else             draw_dot (c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
     }
-    cv::Mat blank() const { return cv::Mat::zeros(h_, w_, CV_8UC4); }
+    // Reusable per-effect canvas: render() consumes the returned frame within
+    // the same tick, so handing out a shallow header over one persistent
+    // buffer avoids an alloc + zero-fill per layer per frame.
+    cv::Mat blank() {
+        if (scratch_.rows != h_ || scratch_.cols != w_ || scratch_.type() != CV_8UC4)
+            scratch_.create(h_, w_, CV_8UC4);
+        scratch_.setTo(cv::Scalar(0, 0, 0, 0));
+        return scratch_;
+    }
     // Direction unit vector for directional effects (snow / rain / embers /
     // confetti / clouds). Convention: 0° = right, 90° = down, 180° = left,
     // 270° = up (screen-space, +Y down). default_deg lets each effect keep
@@ -237,6 +250,8 @@ protected:
     MotionInput motion_{};
     double audio_ = 0.0;
     bool motion_reactive_ = false;
+    bool shape_rect_ = false;         // "shape" resolved once per cfg change
+    cv::Mat scratch_;                 // blank() backing buffer, reused each frame
 };
 
 // ── Sparkle ──────────────────────────────────────────────────────────────────
@@ -910,25 +925,28 @@ public:
     }
 
     cv::Mat render() override {
-        cv::Mat acc(h_, w_, CV_32FC4, cv::Scalar(0, 0, 0, 0));
+        if (acc_.rows != h_ || acc_.cols != w_ || acc_.type() != CV_32FC4)
+            acc_.create(h_, w_, CV_32FC4);
+        acc_.setTo(cv::Scalar(0, 0, 0, 0));
         double softness = std::clamp(jnum(cfg_, "softness", 0.6), 0.0, 1.0);
         double power = 1.0 + (1.0 - softness) * 2.0;
-        std::vector<const Clump*> order;
-        for (auto& c : clumps_) order.push_back(&c);
-        std::sort(order.begin(), order.end(),
+        order_.clear();
+        for (auto& c : clumps_) order_.push_back(&c);
+        std::sort(order_.begin(), order_.end(),
                   [](const Clump* a, const Clump* b){ return a->size > b->size; });
-        for (const Clump* c : order) draw_clump(acc, *c, power);
+        for (const Clump* c : order_) draw_clump(acc_, *c, power);
 
-        cv::Mat out(h_, w_, CV_8UC4);
-        for (int y = 0; y < h_; ++y)
+        cv::Mat out = blank();
+        for (int y = 0; y < h_; ++y) {
+            const cv::Vec4f* a = acc_.ptr<cv::Vec4f>(y);
+            cv::Vec4b*       o = out.ptr<cv::Vec4b>(y);
             for (int x = 0; x < w_; ++x) {
-                const cv::Vec4f& a = acc.at<cv::Vec4f>(y, x);
-                cv::Vec4b& o = out.at<cv::Vec4b>(y, x);
-                o[0] = cv::saturate_cast<uchar>(a[0]);
-                o[1] = cv::saturate_cast<uchar>(a[1]);
-                o[2] = cv::saturate_cast<uchar>(a[2]);
-                o[3] = cv::saturate_cast<uchar>(a[3] * 255.0f);
+                o[x][0] = cv::saturate_cast<uchar>(a[x][0]);
+                o[x][1] = cv::saturate_cast<uchar>(a[x][1]);
+                o[x][2] = cv::saturate_cast<uchar>(a[x][2]);
+                o[x][3] = cv::saturate_cast<uchar>(a[x][3] * 255.0f);
             }
+        }
         return out;
     }
 
@@ -1029,6 +1047,8 @@ private:
     }
 
     std::vector<Clump> clumps_;
+    cv::Mat acc_;                          // float accumulator, reused each frame
+    std::vector<const Clump*> order_;      // draw order scratch, reused each frame
 };
 
 // ── Lightning ──────────────────────────────────────────────────────────────────
@@ -1455,6 +1475,7 @@ public:
         cv::Mat c = blank();
         const std::vector<Color> cols = read_colors();
         const double alpha = std::clamp(jnum(cfg_, "alpha", 0.85), 0.0, 1.0);
+        const double sheen_k = std::clamp(jnum(cfg_, "sheen", 0.55), 0.0, 1.0);
         const double bottom = ch_ - 1;                 // canvas-space deepest row
         for (int lx = 0; lx < w_; ++lx) {
             const double sy = surface_y_local(lx) + oy_;    // canvas-space surface (float)
@@ -1470,8 +1491,7 @@ public:
                 // Specular sheen: lighten the first few px under the surface so it
                 // catches the light like a real meniscus, fading with depth.
                 // "sheen" scales the glint (mercury shiny, lava matte).
-                const double sheen = std::exp(-std::max(0.0, Y - sy) / 2.2)
-                                   * std::clamp(jnum(cfg_, "sheen", 0.55), 0.0, 1.0);
+                const double sheen = std::exp(-std::max(0.0, Y - sy) / 2.2) * sheen_k;
                 col.r = (int)std::lround(col.r + (255 - col.r) * sheen);
                 col.g = (int)std::lround(col.g + (255 - col.g) * sheen);
                 col.b = (int)std::lround(col.b + (255 - col.b) * sheen);
@@ -2141,6 +2161,10 @@ struct ParticleSystem::Impl {
     };
     std::vector<Ripple> ripples;
 
+    // render() scratch buffers, reused across frames (see render for the
+    // aliasing contract on rgba8).
+    cv::Mat outf, framef, rgba8;
+
     void build(const json& cfg) {
         layers.clear();
         json resolved = resolve_cfg(cfg);
@@ -2218,7 +2242,13 @@ ParticleFrame ParticleSystem::render() {
     if (impl_->layers.empty() && impl_->ripples.empty()) return result;
 
     const int w = impl_->w, h = impl_->h;
-    cv::Mat outf(h, w, CV_32FC4, cv::Scalar(0, 0, 0, 0));   // R,G,B,A on a 0..255 scale
+    // Scratch mats live on the Impl and are reused every frame — the returned
+    // ParticleFrame is consumed within the same render tick (composite +
+    // face-glow), so handing out a shallow header over impl_->rgba8 is safe.
+    cv::Mat& outf = impl_->outf;                 // R,G,B,A on a 0..255 scale
+    if (outf.rows != h || outf.cols != w || outf.type() != CV_32FC4)
+        outf.create(h, w, CV_32FC4);
+    outf.setTo(cv::Scalar(0, 0, 0, 0));
     bool has = false, all_add = true;
 
     for (auto& layer : impl_->layers) {
@@ -2228,39 +2258,35 @@ ParticleFrame ParticleSystem::render() {
         if (layer.blend != Blend::Add) all_add = false;
         result.face_glow = std::max(result.face_glow, layer.face_glow());
 
-        for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x) {
-                const cv::Vec4b& s = frame.at<cv::Vec4b>(y, x);
-                cv::Vec4f& o = outf.at<cv::Vec4f>(y, x);
-                if (layer.blend == Blend::Add) {
-                    o[0] += s[0]; o[1] += s[1]; o[2] += s[2]; o[3] += s[3];
-                } else {
-                    float sa = s[3] / 255.f, da = o[3] / 255.f;
+        if (layer.blend == Blend::Add) {
+            // Vectorized accumulate: uchar layer → float, summed in one pass.
+            frame.convertTo(impl_->framef, CV_32F);
+            cv::add(outf, impl_->framef, outf);
+        } else {
+            for (int y = 0; y < h; ++y) {
+                const cv::Vec4b* s = frame.ptr<cv::Vec4b>(y);
+                cv::Vec4f*       o = outf.ptr<cv::Vec4f>(y);
+                for (int x = 0; x < w; ++x) {
+                    float sa = s[x][3] / 255.f, da = o[x][3] / 255.f;
                     float oa = sa + da * (1.f - sa);
                     float safe = oa > 0.f ? oa : 1.f;
-                    o[0] = (s[0] * sa + o[0] * da * (1.f - sa)) / safe;
-                    o[1] = (s[1] * sa + o[1] * da * (1.f - sa)) / safe;
-                    o[2] = (s[2] * sa + o[2] * da * (1.f - sa)) / safe;
-                    o[3] = oa * 255.f;
+                    o[x][0] = (s[x][0] * sa + o[x][0] * da * (1.f - sa)) / safe;
+                    o[x][1] = (s[x][1] * sa + o[x][1] * da * (1.f - sa)) / safe;
+                    o[x][2] = (s[x][2] * sa + o[x][2] * da * (1.f - sa)) / safe;
+                    o[x][3] = oa * 255.f;
                 }
             }
+        }
     }
     if (!has && impl_->ripples.empty()) return result;
 
-    cv::Mat rgba;
+    cv::Mat& rgba = impl_->rgba8;
     if (has) {
-        rgba.create(h, w, CV_8UC4);
-        for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x) {
-                const cv::Vec4f& o = outf.at<cv::Vec4f>(y, x);
-                cv::Vec4b& d = rgba.at<cv::Vec4b>(y, x);
-                d[0] = cv::saturate_cast<uchar>(o[0]);
-                d[1] = cv::saturate_cast<uchar>(o[1]);
-                d[2] = cv::saturate_cast<uchar>(o[2]);
-                d[3] = cv::saturate_cast<uchar>(o[3]);
-            }
+        outf.convertTo(rgba, CV_8U);             // saturating, same as the old loop
     } else {
-        rgba = cv::Mat::zeros(h, w, CV_8UC4);   // ripples on an empty layer
+        if (rgba.rows != h || rgba.cols != w || rgba.type() != CV_8UC4)
+            rgba.create(h, w, CV_8UC4);
+        rgba.setTo(cv::Scalar(0, 0, 0, 0));      // ripples on an empty layer
     }
 
     // Boop ripples on top: an expanding ring per touch, fading as it grows.

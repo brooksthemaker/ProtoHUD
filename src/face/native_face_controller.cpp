@@ -74,16 +74,21 @@ void apply_face_glow(cv::Mat& rgb, const cv::Mat& face_rgba,
     if (s <= 0.f) return;
 
     // Glow source: the submerged face in its own colours, weighted by
-    // face alpha × liquid coverage.
-    cv::Mat src = cv::Mat::zeros(rgb.size(), CV_32FC3);
+    // face alpha × liquid coverage. Scratch mats are thread_local — this runs
+    // only on the controller's render worker — so no per-frame allocations.
+    static thread_local cv::Mat src, halo;
+    if (src.size() != rgb.size() || src.type() != CV_32FC3)
+        src.create(rgb.size(), CV_32FC3);
+    src.setTo(cv::Scalar(0, 0, 0));
     bool any = false;
     for (int y = 0; y < rgb.rows; ++y) {
+        const cv::Vec4b* f = face_rgba.ptr<cv::Vec4b>(y);
+        const cv::Vec4b* w = water_rgba.ptr<cv::Vec4b>(y);
+        cv::Vec3f*       sr = src.ptr<cv::Vec3f>(y);
         for (int x = 0; x < rgb.cols; ++x) {
-            const cv::Vec4b& f = face_rgba.at<cv::Vec4b>(y, x);
-            const cv::Vec4b& w = water_rgba.at<cv::Vec4b>(y, x);
-            const float k = (w[3] / 255.f) * (f[3] / 255.f);
+            const float k = (w[x][3] / 255.f) * (f[x][3] / 255.f);
             if (k <= 0.f) continue;
-            src.at<cv::Vec3f>(y, x) = cv::Vec3f(f[0] * k, f[1] * k, f[2] * k);
+            sr[x] = cv::Vec3f(f[x][0] * k, f[x][1] * k, f[x][2] * k);
             any = true;
         }
     }
@@ -93,7 +98,6 @@ void apply_face_glow(cv::Mat& rgb, const cv::Mat& face_rgba,
     // the surrounding liquid. Kernel scales with the panel so the bleed
     // reads the same on 64x32 and 128x64.
     const int ks = std::max(7, (std::min(rgb.cols, rgb.rows) / 3) | 1);
-    cv::Mat halo;
     cv::GaussianBlur(src, halo, cv::Size(ks, ks), ks * 0.45);
 
     // Composite: a lifted core (the face itself) plus the soft halo, both in
@@ -101,16 +105,16 @@ void apply_face_glow(cv::Mat& rgb, const cv::Mat& face_rgba,
     // glows blue-ish around a warm face instead of washing grey; the core/halo
     // split keeps mid strengths luminous without saturating to white.
     for (int y = 0; y < rgb.rows; ++y) {
+        const cv::Vec3f* c = src.ptr<cv::Vec3f>(y);
+        const cv::Vec3f* hh = halo.ptr<cv::Vec3f>(y);
+        const cv::Vec4b* w = water_rgba.ptr<cv::Vec4b>(y);
+        cv::Vec3b*       o = rgb.ptr<cv::Vec3b>(y);
         for (int x = 0; x < rgb.cols; ++x) {
-            const cv::Vec3f& c = src.at<cv::Vec3f>(y, x);
-            const cv::Vec3f& h = halo.at<cv::Vec3f>(y, x);
-            const cv::Vec4b& w = water_rgba.at<cv::Vec4b>(y, x);
-            if (w[3] == 0) continue;                       // glow stays in the liquid
-            cv::Vec3b& o = rgb.at<cv::Vec3b>(y, x);
+            if (w[x][3] == 0) continue;                    // glow stays in the liquid
             for (int ch = 0; ch < 3; ++ch) {
-                const float tint = 0.6f + 0.4f * (w[ch] / 255.f);
-                const float add  = (c[ch] * 0.8f + h[ch] * 2.6f) * tint * s;
-                if (add > 0.f) o[ch] = cv::saturate_cast<uchar>(o[ch] + add);
+                const float tint = 0.6f + 0.4f * (w[x][ch] / 255.f);
+                const float add  = (c[x][ch] * 0.8f + hh[x][ch] * 2.6f) * tint * s;
+                if (add > 0.f) o[x][ch] = cv::saturate_cast<uchar>(o[x][ch] + add);
             }
         }
     }

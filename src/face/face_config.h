@@ -61,7 +61,10 @@ struct PanelCfg {
 struct RenderConfig {
     int                  canvas_w   = 128;
     int                  canvas_h   = 32;
-    int                  fps        = 30;
+    // 60 fps halves the visible motion step vs the old 30 — affordable now
+    // that the compositor reuses its buffers instead of allocating per frame.
+    // Override with protoface.fps in config.json.
+    int                  fps        = 60;
     std::array<uint8_t,3> background = {0, 0, 0};   // RGB
     std::string          faces_dir     = "faces";
     std::string          materials_dir = "materials";

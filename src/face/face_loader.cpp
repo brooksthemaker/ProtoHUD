@@ -248,24 +248,24 @@ void FaceLoader::load() {
     if (cfg.contains("mouth"))     mouth_     = parse_region(cfg["mouth"]);
 }
 
-cv::Mat FaceLoader::blend_region(const cv::Mat& base, const cv::Mat& overlay,
-                                 const Region& region, double t) const {
-    cv::Mat out = base.clone();
+void FaceLoader::blend_region(cv::Mat& frame, const cv::Mat& overlay,
+                              const Region& region, double t) const {
+    // In-place: frame is already the caller's private working copy, so only
+    // the region ROI is touched — no full-panel clone per blended region.
     int x  = region.x, y = region.y;
     int x2 = std::min(x + region.w, w_), y2 = std::min(y + region.h, h_);
     x = std::max(0, x); y = std::max(0, y);
-    if (x2 <= x || y2 <= y) return out;
+    if (x2 <= x || y2 <= y) return;
     cv::Rect roi(x, y, x2 - x, y2 - y);
-    if (!region.mask.empty() && region.mask.size() == base.size()) {
+    if (!region.mask.empty() && region.mask.size() == frame.size()) {
         // Polygon region: blend the whole ROI, then copy back only the pixels
         // inside the stencil so a non-rectangular eye shape is honoured.
         cv::Mat blended;
-        cv::addWeighted(base(roi), 1.0 - t, overlay(roi), t, 0.0, blended);
-        blended.copyTo(out(roi), region.mask(roi));
-        return out;
+        cv::addWeighted(frame(roi), 1.0 - t, overlay(roi), t, 0.0, blended);
+        blended.copyTo(frame(roi), region.mask(roi));
+        return;
     }
-    cv::addWeighted(base(roi), 1.0 - t, overlay(roi), t, 0.0, out(roi));
-    return out;
+    cv::addWeighted(frame(roi), 1.0 - t, overlay(roi), t, 0.0, frame(roi));
 }
 
 cv::Mat FaceLoader::get_frame(const FaceState& state) {
@@ -298,8 +298,8 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
             // closes) while the mouth/nose outside the boxes are untouched.
             // Used in both single- and multi-panel mode whenever eye regions
             // are defined — the boxes are mapped to this panel's slice above.
-            if (eye_left_.set)  frame = blend_region(frame, blink_, eye_left_,  bw);
-            if (eye_right_.set) frame = blend_region(frame, blink_, eye_right_, bw);
+            if (eye_left_.set)  blend_region(frame, blink_, eye_left_,  bw);
+            if (eye_right_.set) blend_region(frame, blink_, eye_right_, bw);
         } else {
             // No eye regions defined → fall back to a whole-face alpha
             // composite of the blink canvas over the face using the blink
@@ -334,7 +334,7 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
         if (it == mouth_shapes_.end())
             it = mouth_shapes_.find("mouth_open");   // fallback to AH
         if (it != mouth_shapes_.end() && !it->second.empty())
-            frame = blend_region(frame, it->second, mouth_, mo);
+            blend_region(frame, it->second, mouth_, mo);
     }
 
     // 4. Wiggle + gyro sub-pixel shift (edge-clamped, no wrap).
