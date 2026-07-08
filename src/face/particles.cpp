@@ -725,71 +725,183 @@ private:
 class FrostEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
+
     void update(double dt) override {
+        ensure_field();
+        age_ += dt;
+        // Fixed-step growth with a FIXED-SEED rng: every panel instance of
+        // the same canvas computes an identical field, so the sheet stays
+        // continuous across panel seams.
+        const double form_s = std::max(0.1, jnum(cfg_, "form_s", 5.0));
+        const float  rate   = static_cast<float>(
+            kStep * (5.0 / form_s) * std::max(0.05, intensity_));
+        acc_ += dt;
+        int guard = 0;
+        while (acc_ >= kStep && guard++ < 8) { acc_ -= kStep; step_field(rate); }
+        if (acc_ >= kStep) acc_ = 0.0;               // stalled frame: drop debt
+
+        // Sparkle glints riding the frozen area (panel-local, cosmetic).
         for (auto& p : particles_) { p.extra += dt; p.life -= dt / p.max_life; }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [](const Particle& p){ return p.life <= 0; }), particles_.end());
-        // Frost builds up: the crystal budget ramps from zero to full over
-        // the first form_s seconds (default 5), so it reads as ice forming
-        // rather than appearing fully grown.
-        age_ += dt;
-        const double form_s = std::max(0.1, jnum(cfg_, "form_s", 5.0));
-        const int budget = static_cast<int>(count(40) *
-                                            std::min(1.0, age_ / form_s));
-        while ((int)particles_.size() < budget) {
-            const double depth = jnum(cfg_, "depth_frac", 0.35);
-            // White/blue ice mix by default (white sparkle, pale ice, deep
-            // blue); a "colors" list in the layer cfg still overrides.
-            static const Color kIce[3] = {
-                {255, 255, 255}, {200, 230, 255}, {120, 180, 255}};
-            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
-                                         : kIce[(int)frand(rng_, 0, 3) % 3];
-            // Frost forms on the left/right/bottom rim (like a window — no
-            // top edge), heaviest along the bottom, the side runs climbing
-            // up from the bottom corners. Crystals bite inward with a
-            // quadratic bias so most hug the border. include_top:true
-            // restores the old full-rim look.
-            double u = frand(rng_, 0, 1); u *= u;
-            const double d = u * depth * std::min(w_, h_);
-            Particle p;
-            const double side = frand(rng_, 0, 1);
-            if (cfg_.value("include_top", false) && side < 0.18) {
-                p.x = frand(rng_, 0, w_ - 1);  p.y = d;              // top rim
-            } else if (side < 0.5) {
-                p.x = frand(rng_, 0, w_ - 1);  p.y = h_ - 1 - d;     // bottom
-            } else {
-                double v = frand(rng_, 0, 1); v *= v;                // corner bias
-                p.y = (h_ - 1) * (1.0 - v);
-                p.x = (side < 0.75) ? d : w_ - 1 - d;                // left/right
-            }
-            p.life = 1.0; p.max_life = frand(rng_, 3.0, 8.0);   // slow churn
-            p.r = col.r; p.g = col.g; p.b = col.b;
-            // Mixed 1-2 px crystals (2 px draws as a 3x3 cluster) so the ice
-            // reads chunky; size_min/size_max in the layer cfg still override.
-            p.size = pick_size(cfg_, 1, 2, rng_);
+        const int want = count(8);
+        int tries = 0;
+        while ((int)particles_.size() < want && tries++ < want * 4) {
+            const int lx = irand(rng_, 0, w_ - 1), ly = irand(rng_, 0, h_ - 1);
+            if (cell(lx + ox_, ly + oy_) < 0.45f) continue;    // only on solid frost
+            Particle p; p.x = lx; p.y = ly;
+            p.life = 1.0; p.max_life = frand(rng_, 0.5, 1.4);
+            p.r = 255; p.g = 255; p.b = 255; p.size = 1;
             p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
         }
     }
+
     cv::Mat render() override {
         cv::Mat c = blank();
-        // Frost sits translucent over the face (~50% by default) so the
-        // expression stays readable underneath; "opacity" in the layer cfg
-        // adjusts it.
+        // Translucent over the face (~50% by default) so the expression stays
+        // readable underneath; "opacity" in the layer cfg adjusts it.
         const double opacity = std::clamp(jnum(cfg_, "opacity", 0.5), 0.0, 1.0);
+        // White/blue ice mix by default (white sparkle, pale ice, deep blue);
+        // a "colors" list in the layer cfg still overrides.
+        static const Color kIce[3] = {
+            {255, 255, 255}, {200, 230, 255}, {120, 180, 255}};
+        std::vector<Color> cols;
+        if (has_colors(cfg_)) {
+            const auto it = cfg_.find("colors");
+            if (it != cfg_.end() && it->is_array())
+                for (const auto& jc : *it)
+                    if (jc.is_array() && jc.size() >= 3)
+                        cols.push_back({jc[0].get<int>(), jc[1].get<int>(),
+                                        jc[2].get<int>()});
+        }
+        const bool custom = !cols.empty();
+        const double tsh = age_ * 1.4;
+        for (int ly = 0; ly < h_; ++ly) {
+            for (int lx = 0; lx < w_; ++lx) {
+                const int gx = lx + ox_, gy = ly + oy_;
+                const float f = cell(gx, gy);
+                if (f < 0.04f) continue;
+                const float h1 = hash01(gx, gy);
+                Color col = custom
+                    ? cols[(size_t)(h1 * cols.size()) % cols.size()]
+                    : kIce[h1 < 0.28f ? 0 : (h1 < 0.68f ? 1 : 2)];
+                // Growing front reads whiter/brighter — crystalline tips —
+                // and settles into the body tint as the cell fills in.
+                const float tip = std::clamp((0.55f - f) * 2.2f, 0.f, 1.f);
+                const int r = col.r + (int)((255 - col.r) * tip);
+                const int g = col.g + (int)((255 - col.g) * tip);
+                const int b = col.b + (int)((255 - col.b) * tip);
+                const double shimmer =
+                    0.82 + 0.18 * std::sin(tsh + h1 * kTau * 4.0);
+                const double a = opacity * std::min(1.0, f * 1.15) * shimmer;
+                draw_pixel(c, lx, ly, r, g, b, (int)std::lround(a * 255.0));
+            }
+        }
+        // Glints on top: brief white twinkles on the solid sheet.
         for (auto& p : particles_) {
-            // Fade in as the crystal forms, out as it melts; twinkle on top.
             const double env = std::clamp(std::min((1.0 - p.life) * 6.0,
                                                    p.life * 6.0), 0.0, 1.0);
-            const double a = env * (0.35 + 0.45 * (0.5 + 0.5 * std::sin(p.extra * 1.7)))
-                             * opacity;
-            draw_particle(c, p, a);
+            draw_particle(c, p, env * (0.4 + 0.6 * (0.5 + 0.5 * std::sin(p.extra * 9.0)))
+                              * opacity);
         }
         return c;
     }
 
 private:
-    double age_ = 0.0;   // seconds since the layer started, for the form ramp
+    static constexpr double kStep = 1.0 / 30.0;   // fixed growth timestep
+
+    float cell(int gx, int gy) const {
+        if (gx < 0 || gx >= cw_ || gy < 0 || gy >= ch_ || field_.empty()) return 0.f;
+        return field_[(size_t)gy * cw_ + gx];
+    }
+    // Deterministic per-cell hash — shared "crystal grain" across panels.
+    static float hash01(int x, int y) {
+        uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return ((h >> 16) & 0xFFFF) / 65535.f;
+    }
+
+    // (Re)build the field + reach mask when geometry or shaping cfg changes.
+    void ensure_field() {
+        const bool   top   = cfg_.value("include_top", false);
+        const double reach = std::clamp(
+            jnum(cfg_, "reach", jnum(cfg_, "depth_frac", 0.32)), 0.05, 0.9);
+        if ((int)field_.size() == cw_ * ch_ && top == mask_top_ &&
+            std::fabs(reach - mask_reach_) < 1e-6)
+            return;
+        mask_top_ = top; mask_reach_ = reach;
+        const int W = cw_, H = ch_;
+        field_.assign((size_t)W * H, 0.f);
+        mask_.assign((size_t)W * H, 0.f);
+        grain_.assign((size_t)W * H, 0.f);
+        det_rng_.seed(0x1CEF7057u);
+        acc_ = 0.0; age_ = 0.0;
+        const float reach_px = (float)(reach * std::min(W, H));
+        // Corners where two enabled edges meet: bottom pair always; the top
+        // pair only when the top rim is on.
+        const int ncorner = top ? 4 : 2;
+        const float cxs[4] = { 0.f, (float)(W - 1), 0.f, (float)(W - 1) };
+        const float cys[4] = { (float)(H - 1), (float)(H - 1), 0.f, 0.f };
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                float de = std::min({ (float)x, (float)(W - 1 - x),
+                                      (float)(H - 1 - y),
+                                      top ? (float)y : 1e9f });
+                float dc = 1e9f;
+                for (int i = 0; i < ncorner; ++i)
+                    dc = std::min(dc, std::hypot(x - cxs[i], y - cys[i]));
+                // Frost bites ~reach_px in from the rim, nearly twice that in
+                // the corners — the classic curved corner wedge.
+                const float rl = reach_px *
+                    (0.75f + 1.15f * std::exp(-dc / (reach_px * 1.2f)));
+                const float m = std::clamp(1.f - de / std::max(1.f, rl), 0.f, 1.f);
+                mask_[(size_t)y * W + x] = std::pow(m, 0.7f);
+                // Static per-cell heterogeneity: fast lanes become the
+                // fingers that race ahead of the front, slow cells the gaps.
+                const float g = hash01(x * 3 + 1, y * 5 + 2);
+                grain_[(size_t)y * W + x] = 0.15f + 0.85f * g * g;
+            }
+        }
+    }
+
+    // One growth step: rim cells self-seed; interior cells accrete only next
+    // to existing frost, at a rate shaped by the reach mask and the grain.
+    void step_field(float rate) {
+        const int W = cw_, H = ch_;
+        // Alternate scan direction so in-place neighbor reads don't give the
+        // front a fixed directional bias.
+        const bool rev = (step_n_++ & 1) != 0;
+        for (int yy = 0; yy < H; ++yy) {
+            const int y = rev ? H - 1 - yy : yy;
+            for (int xx = 0; xx < W; ++xx) {
+                const int x = rev ? W - 1 - xx : xx;
+                const size_t i = (size_t)y * W + x;
+                const float m = mask_[i];
+                if (m <= 0.f) continue;
+                float& f = field_[i];
+                if (f >= 1.f) continue;
+                float sup = (m >= 0.999f) ? 0.6f : 0.f;   // rim self-seeds
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (!dx && !dy) continue;
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+                        sup = std::max(sup, field_[(size_t)ny * W + nx]);
+                    }
+                if (sup <= 0.05f) continue;
+                f = std::min(1.f, f + rate * m * sup * grain_[i] *
+                                      (float)frand(det_rng_, 0.6, 1.4));
+            }
+        }
+    }
+
+    double age_ = 0.0, acc_ = 0.0;
+    uint32_t step_n_ = 0;
+    bool   mask_top_   = false;
+    double mask_reach_ = -1.0;
+    std::vector<float> field_, mask_, grain_;   // canvas-space growth state
+    std::mt19937 det_rng_{0x1CEF7057u};         // shared fixed seed (see update)
 };
 
 // ── Heatwave ─────────────────────────────────────────────────────────────────
