@@ -267,7 +267,10 @@ void Bno08x::service_loop() {
                                              : SH2_TARE_Z;
             sh2_setTareNow(axes, SH2_TARE_BASIS_ROTATION_VECTOR);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // 3 ms poll ≈ 330 Hz — comfortably above the ~175 reports/s the chip
+        // produces (100 Hz orientation + 3×25 Hz aux) while cutting the empty
+        // SHTP header reads a 1 ms poll burned ~90% of its I2C traffic on.
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
     }
     // Snapshot the session's dynamic-calibration refinements to the chip's
     // flash on the way out (the periodic autosave catches most of it; this

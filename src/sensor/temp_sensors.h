@@ -73,6 +73,9 @@ private:
     std::thread        thread_;
     mutable std::mutex reader_mtx_;   // guards coproc_read_ vs the poll thread
     CoprocRead         coproc_read_;
+    // Auto-discovered DS18B20 id (empty-id sensors). Poll-thread only; cleared
+    // on read failure so a re-plugged probe is found again.
+    mutable std::string ds18b20_cached_;
 };
 
 }  // namespace sensor

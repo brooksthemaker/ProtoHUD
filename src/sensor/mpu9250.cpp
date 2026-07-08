@@ -251,12 +251,15 @@ void Mpu9250::sensor_thread_fn() {
                         if (mz > cal_max_z_) cal_max_z_ = mz;
                     }
 
-                    // ── Read accelerometer ────────────────────────────────────
-                    uint8_t araw[6] = {};
-                    read_regs(i2c_fd_, cfg_.mpu_addr, MPU_ACCEL_XOUT_H, araw, 6);
-                    int16_t ax = (int16_t)((araw[0] << 8) | araw[1]);
-                    int16_t ay = (int16_t)((araw[2] << 8) | araw[3]);
-                    int16_t az = (int16_t)((araw[4] << 8) | araw[5]);
+                    // ── Read accel + temp + gyro in one burst ─────────────────
+                    // 0x3B..0x48 is one contiguous register block (accel 6,
+                    // temp 2, gyro 6): a single 14-byte transaction replaces
+                    // the three separate reads (3 ioctl+write+read triples).
+                    uint8_t mraw[14] = {};
+                    read_regs(i2c_fd_, cfg_.mpu_addr, MPU_ACCEL_XOUT_H, mraw, 14);
+                    int16_t ax = (int16_t)((mraw[0] << 8) | mraw[1]);
+                    int16_t ay = (int16_t)((mraw[2] << 8) | mraw[3]);
+                    int16_t az = (int16_t)((mraw[4] << 8) | mraw[5]);
 
                     float heading = compute_heading(mx, my, mz, ax, ay, az);
 
@@ -270,29 +273,23 @@ void Mpu9250::sensor_thread_fn() {
                         s.accel_g[1] = ay / 16384.0f;
                         s.accel_g[2] = az / 16384.0f;
 
+                        // Die temperature: T(°C) = raw/333.87 + 21.0
+                        int16_t t = (int16_t)((mraw[6] << 8) | mraw[7]);
+                        s.temp_c = t / 333.87f + 21.0f;
+
                         // Gyro ±250 °/s → 131 LSB/(°/s)
-                        uint8_t graw[6] = {};
-                        if (read_regs(i2c_fd_, cfg_.mpu_addr, MPU_GYRO_XOUT_H, graw, 6)) {
-                            int16_t gx = (int16_t)((graw[0] << 8) | graw[1]);
-                            int16_t gy = (int16_t)((graw[2] << 8) | graw[3]);
-                            int16_t gz = (int16_t)((graw[4] << 8) | graw[5]);
-                            s.gyro_dps[0] = gx / 131.0f;
-                            s.gyro_dps[1] = gy / 131.0f;
-                            s.gyro_dps[2] = gz / 131.0f;
-                        }
+                        int16_t gx = (int16_t)((mraw[8]  << 8) | mraw[9]);
+                        int16_t gy = (int16_t)((mraw[10] << 8) | mraw[11]);
+                        int16_t gz = (int16_t)((mraw[12] << 8) | mraw[13]);
+                        s.gyro_dps[0] = gx / 131.0f;
+                        s.gyro_dps[1] = gy / 131.0f;
+                        s.gyro_dps[2] = gz / 131.0f;
 
                         // AK8963 16-bit mode → 0.15 µT/LSB (mx/my/mz are
                         // sensitivity-adjusted, hard-iron-corrected counts)
                         s.mag_ut[0] = mx * 0.15f;
                         s.mag_ut[1] = my * 0.15f;
                         s.mag_ut[2] = mz * 0.15f;
-
-                        // Die temperature: T(°C) = raw/333.87 + 21.0
-                        uint8_t traw[2] = {};
-                        if (read_regs(i2c_fd_, cfg_.mpu_addr, MPU_TEMP_OUT_H, traw, 2)) {
-                            int16_t t = (int16_t)((traw[0] << 8) | traw[1]);
-                            s.temp_c = t / 333.87f + 21.0f;
-                        }
 
                         s.heading_deg = heading;
                         sample_cb_(s);
