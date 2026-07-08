@@ -43,6 +43,20 @@ int irand(std::mt19937& rng, int lo, int hi) {
 
 struct Color { int r = 255, g = 255, b = 255; };
 
+// Linear multi-stop gradient across a color list, f in [0,1] (water depth
+// shading, frost density shading).
+Color sample_grad(const std::vector<Color>& v, double f) {
+    if (v.size() == 1) return v[0];
+    f = std::clamp(f, 0.0, 1.0);
+    const double pos = f * (v.size() - 1);
+    const int i = (int)pos;
+    if (i >= (int)v.size() - 1) return v.back();
+    const double t = pos - i;
+    return { (int)std::lround(v[i].r + (v[i+1].r - v[i].r) * t),
+             (int)std::lround(v[i].g + (v[i+1].g - v[i].g) * t),
+             (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
+}
+
 Color pick_color(const json& cfg, std::mt19937& rng) {
     auto it = cfg.find("colors");
     if (it != cfg.end() && it->is_array() && !it->empty()) {
@@ -762,20 +776,22 @@ public:
         // Translucent over the face (~50% by default) so the expression stays
         // readable underneath; "opacity" in the layer cfg adjusts it.
         const double opacity = std::clamp(jnum(cfg_, "opacity", 0.5), 0.0, 1.0);
-        // White/blue ice mix by default (white sparkle, pale ice, deep blue);
-        // a "colors" list in the layer cfg still overrides.
-        static const Color kIce[3] = {
-            {255, 255, 255}, {200, 230, 255}, {120, 180, 255}};
-        std::vector<Color> cols;
+        // Density drives a double gradient: color runs white feathery tips →
+        // pale ice → deep blue solid rim, and alpha fades with the same
+        // density, so the sheet dissolves smoothly into the clear center.
+        // A "colors" list in the layer cfg overrides the ramp (first entry =
+        // thin inner ice, last = dense rim).
+        std::vector<Color> grad;
         if (has_colors(cfg_)) {
             const auto it = cfg_.find("colors");
             if (it != cfg_.end() && it->is_array())
                 for (const auto& jc : *it)
                     if (jc.is_array() && jc.size() >= 3)
-                        cols.push_back({jc[0].get<int>(), jc[1].get<int>(),
+                        grad.push_back({jc[0].get<int>(), jc[1].get<int>(),
                                         jc[2].get<int>()});
         }
-        const bool custom = !cols.empty();
+        if (grad.empty())
+            grad = { {255, 255, 255}, {200, 230, 255}, {120, 180, 255} };
         const double tsh = age_ * 1.4;
         for (int ly = 0; ly < h_; ++ly) {
             for (int lx = 0; lx < w_; ++lx) {
@@ -783,18 +799,16 @@ public:
                 const float f = cell(gx, gy);
                 if (f < 0.04f) continue;
                 const float h1 = hash01(gx, gy);
-                Color col = custom
-                    ? cols[(size_t)(h1 * cols.size()) % cols.size()]
-                    : kIce[h1 < 0.28f ? 0 : (h1 < 0.68f ? 1 : 2)];
-                // Growing front reads whiter/brighter — crystalline tips —
-                // and settles into the body tint as the cell fills in.
-                const float tip = std::clamp((0.55f - f) * 2.2f, 0.f, 1.f);
-                const int r = col.r + (int)((255 - col.r) * tip);
-                const int g = col.g + (int)((255 - col.g) * tip);
-                const int b = col.b + (int)((255 - col.b) * tip);
+                const Color col = sample_grad(grad, f);
+                // Per-cell grain brightness keeps crystal texture in the sheet
+                // so the gradient doesn't read airbrushed-flat.
+                const float vb = 0.88f + 0.24f * h1;
+                const int r = std::min(255, (int)(col.r * vb));
+                const int g = std::min(255, (int)(col.g * vb));
+                const int b = std::min(255, (int)(col.b * vb));
                 const double shimmer =
-                    0.82 + 0.18 * std::sin(tsh + h1 * kTau * 4.0);
-                const double a = opacity * std::min(1.0, f * 1.15) * shimmer;
+                    0.85 + 0.15 * std::sin(tsh + h1 * kTau * 4.0);
+                const double a = opacity * std::pow((double)f, 0.9) * shimmer;
                 draw_pixel(c, lx, ly, r, g, b, (int)std::lround(a * 255.0));
             }
         }
@@ -880,7 +894,12 @@ private:
                 const float m = mask_[i];
                 if (m <= 0.f) continue;
                 float& f = field_[i];
-                if (f >= 1.f) continue;
+                // The mask is the density CEILING, not just a rate: cells can
+                // only fill to it, so the finished sheet is a gradient —
+                // solid ice at the rim thinning continuously to nothing at
+                // the inner reach limit (thin inner ice also renders in the
+                // whiter tip tint, like real feathered frost).
+                if (f >= m) continue;
                 float sup = (m >= 0.999f) ? 0.6f : 0.f;   // rim self-seeds
                 for (int dy = -1; dy <= 1; ++dy)
                     for (int dx = -1; dx <= 1; ++dx) {
@@ -890,8 +909,8 @@ private:
                         sup = std::max(sup, field_[(size_t)ny * W + nx]);
                     }
                 if (sup <= 0.05f) continue;
-                f = std::min(1.f, f + rate * m * sup * grain_[i] *
-                                      (float)frand(det_rng_, 0.6, 1.4));
+                f = std::min(m, f + rate * m * sup * grain_[i] *
+                                     (float)frand(det_rng_, 0.6, 1.4));
             }
         }
     }
@@ -1716,17 +1735,6 @@ private:
         }
         if (v.empty()) { v.push_back({120, 220, 255}); v.push_back({0, 80, 200}); }
         return v;
-    }
-    static Color sample_grad(const std::vector<Color>& v, double f) {
-        if (v.size() == 1) return v[0];
-        f = std::clamp(f, 0.0, 1.0);
-        const double pos = f * (v.size() - 1);
-        const int i = (int)pos;
-        if (i >= (int)v.size() - 1) return v.back();
-        const double t = pos - i;
-        return { (int)std::lround(v[i].r + (v[i+1].r - v[i].r) * t),
-                 (int)std::lround(v[i].g + (v[i+1].g - v[i].g) * t),
-                 (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
     }
     // 1-D wave-equation surface: per-canvas-column height (px, + = lower)
     // and vertical velocity. Reflective walls make waves bounce back —
