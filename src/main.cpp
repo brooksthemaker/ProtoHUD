@@ -6482,17 +6482,31 @@ int main(int argc, char* argv[]) {
             if (menu.is_open()) menu.close();
             else                menu.open();
         }
-        // F1 toggles the full-screen "deep menu".
-        if (key_pressed(ImGuiKey_F1)) {
-            if (menu.is_deep_open()) menu.close_deep();
-            else { menu.close(); menu.open_deep(); }
-        }
-        // F3 jumps straight to System > Software > Updates (the in-HUD
-        // updater) - check for new commits / update / roll back.
-        if (key_pressed(ImGuiKey_F3)) {
-            menu.close();
-            menu.close_deep();
-            menu.open_deep_at({"System", "Software", "Updates"});
+        // F-row = the deep menu's tab bar: F1..Fn open the full-screen menu
+        // directly on main page n (Vision, HUD, Face Display, GPIO, Files,
+        // Communications, System, ...), pressing the ACTIVE tab's key again
+        // closes it (keeps F1's old toggle feel). The key after the last tab
+        // jumps to System > Software > Updates - always the last F key.
+        // (F10 is reserved: floating-terminal focus release.)
+        {
+            const int ntabs = menu.deep_tab_count();
+            const int nkeys = std::min(ntabs + 1, 9);   // F1..F9; F10 reserved
+            for (int i = 0; i < nkeys; ++i) {
+                if (!key_pressed(static_cast<ImGuiKey>(ImGuiKey_F1 + i)))
+                    continue;
+                if (i == ntabs) {                       // one past the tabs
+                    menu.close();
+                    menu.close_deep();
+                    menu.open_deep_at({"System", "Software", "Updates"});
+                } else if (menu.is_deep_open() && menu.deep_tab_index() == i) {
+                    menu.close_deep();                  // same key again = close
+                } else {
+                    menu.close();
+                    menu.close_deep();
+                    menu.open_deep_tab(i);
+                }
+                break;
+            }
         }
         // Per-camera autofocus: [ = Left camera, ] = Right camera.
         if (key_pressed(ImGuiKey_LeftBracket)) {
