@@ -132,8 +132,17 @@ public:
     // ── Peripheral TEST verbs (pre-assigned pins; see firmware config.h) ─────
     // Servo test channel: 0-180 degrees, or -1 = off/detach ("SERVO ch off").
     void send_servo(int ch, int deg);
-    // WS2812 test zone: solid fill ("LEDZ r g b [count]"); 0/0/0 = off.
+    // Addressable LED zone (WS2812 or APA102, firmware config.h picks):
+    // solid fill ("LEDZ r g b [count]"); 0/0/0 = off.
     void send_led_zone(int r, int g, int b, int count = -1);
+    // Local pattern, animated on the MCU (USB stays idle):
+    // 0 off, 1 solid, 2 rainbow, 3 chase, 4 breathe.
+    void send_led_pattern(int mode, int r, int g, int b, int speed);
+    // Software brightness 0-255 (APA102 also maps to its 5-bit global).
+    void send_led_brightness(int b);
+    // Per-pixel frame for custom panels: rgb = 3 bytes/pixel, chunked into
+    // "LEDF <start> <hex>" lines + "LEDSHOW". Future accessory-content hook.
+    void send_led_frame(const uint8_t* rgb, int count);
     // One-shot ADC report: request, then poll adc_result() for
     // "ch0 <mV>mV  ch1 <mV>mV  ch2 <mV>mV".
     void request_adc();

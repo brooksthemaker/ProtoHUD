@@ -90,7 +90,11 @@ SPI <cs> <hexbytes>               # MAX7219 relay: shift bytes out SPI1, pulse C
 I2CSCAN [sda] [scl]               # probe I2C (default GP20/21); replies "I2C …"
 FAN <zone> <duty%>                # hold a fan PWM duty (peripheral hub)
 SERVO <ch> <deg|off>              # drive a test servo channel (GP6-9, ch 0-3)
-LEDZ <r> <g> <b> [count]          # fill the WS2812 test zone (GP22); 0 0 0 = off
+LEDZ <r> <g> <b> [count]          # solid-fill the addressable LED zone; 0 0 0 = off
+LEDP <mode> [r g b] [speed]       # MCU-local pattern: 0 off 1 solid 2 rainbow 3 chase 4 breathe
+LEDB <0-255>                      # LED zone brightness (APA102: also its 5-bit global)
+LEDF <start> <hexRRGGBB...>       # write per-pixel frame data from index start (chunkable)
+LEDSHOW                           # latch the assembled LEDF frame to the LEDs
 ADCREAD                           # one-shot ADC report; replies "ADC <ch> <raw> <mv>" x3
 ```
 

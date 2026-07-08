@@ -116,12 +116,22 @@ static constexpr uint32_t kTouchDebounceMs = 30;
 // supply (never the Pico's 3V3), grounds common.
 static constexpr int8_t  kServoPins[4]    = { 6, 7, 8, 9 };
 
-// Addressable-LED (WS2812/NeoPixel) TEST zone (planned: 4 zones on the
-// carrier). Level-shift GP22 to 5 V for long/strict strips; short strips
-// usually accept 3.3 V data. Driven by "LEDZ <r> <g> <b> [count]".
-// GP22 doubles as the voice DAC reset — with voice enabled, move or skip.
-static constexpr int8_t  kLedZonePin      = 22;
-static constexpr uint16_t kLedZoneCount   = 16;    // default strip length
+// Digital addressable LED TEST zone (planned: 4 zones on the carrier) —
+// a strip OR a custom panel (a panel is just a strip in serpentine order;
+// the Pi does the 2-D mapping). Two supported LED families:
+//   0 = WS2812/NeoPixel — 1 wire (data), strict 800 kHz timing (PIO handles it)
+//   1 = APA102/DotStar  — 2 wires (data+clock), timing-free: immune to
+//       interrupt jitter and refreshes fast enough for POV/spinning use
+// Level-shift the data (and clock) line to 5 V for long or strict strips;
+// short runs usually accept 3.3 V. Verbs: LEDZ (solid), LEDP (pattern),
+// LEDB (brightness), LEDF/LEDSHOW (per-pixel frames from the Pi).
+// GP22 doubles as the voice DAC reset; the APA102 clock (GP28) doubles as
+// ADC ch2 — with voice enabled move/skip, with APA102 you lose that ADC ch.
+static constexpr uint8_t  kLedZoneType    = 0;     // 0 = WS2812, 1 = APA102
+static constexpr int8_t   kLedZonePin     = 22;    // data
+static constexpr int8_t   kLedZoneClkPin  = 28;    // APA102 clock (WS2812: unused)
+static constexpr uint16_t kLedZoneCount   = 16;    // strip/panel pixel count
+static constexpr uint16_t kLedZoneMax     = 300;   // hard cap (frame buffer size)
 
 // ADC TEST inputs (planned: flex sensors / pots / battery sense). GP26-28 =
 // ADC0-2; read on demand with "ADCREAD" -> "ADC <ch> <raw> <mv>" x3.

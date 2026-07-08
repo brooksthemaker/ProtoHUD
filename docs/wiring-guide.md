@@ -176,7 +176,7 @@ from **GPIO → RP2350 GPIO Expander → Peripheral Test**:
 | Feature | Pins | Verb | Notes |
 |---|---|---|---|
 | Servos ×4 | GP6–GP9 | `SERVO <ch> <deg\|off>` | shared with buttons 4–7: the slot becomes a servo on its first command (until reboot). Servo V+ from an external 5–6 V rail, grounds common — never the Pico's 3V3. |
-| WS2812 zone | GP22 | `LEDZ <r> <g> <b> [n]` | level-shift for long/strict strips; default length in `config.h` (`kLedZoneCount`) |
+| Addressable LED zone | GP22 data (+GP28 clock for APA102) | `LEDZ` solid · `LEDP` patterns · `LEDB` brightness · `LEDF`/`LEDSHOW` per-pixel frames | WS2812/NeoPixel (1-wire) or APA102/DotStar (2-wire, timing-free — POV-fast) — pick in `config.h` (`kLedZoneType`). Strips or custom panels (a panel = a serpentine strip; the Pi does the 2-D mapping via `LEDF`). Level-shift data/clock for long runs; APA102 clock costs ADC ch2. |
 | ADC ×3 | GP26–GP28 | `ADCREAD` → `ADC <ch> <raw> <mv>` | flex sensors / pots / battery divider; GP26 doubles as the voice mic |
 
 ### 3.7 Temperature probes — DS18B20

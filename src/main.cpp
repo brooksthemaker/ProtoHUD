@@ -4435,6 +4435,12 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_led_zone = [&](int r, int g, int b, int n) {
         if (coproc_inputs) coproc_inputs->send_led_zone(r, g, b, n);
     };
+    menu_ctx.coproc_led_pattern = [&](int mode, int r, int g, int b, int speed) {
+        if (coproc_inputs) coproc_inputs->send_led_pattern(mode, r, g, b, speed);
+    };
+    menu_ctx.coproc_led_bright = [&](int b) {
+        if (coproc_inputs) coproc_inputs->send_led_brightness(b);
+    };
     menu_ctx.coproc_adc_read = [&]{ if (coproc_inputs) coproc_inputs->request_adc(); };
     menu_ctx.coproc_adc_result = [&]() -> std::string {
         return coproc_inputs ? coproc_inputs->adc_result() : std::string("n/a");

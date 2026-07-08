@@ -5,6 +5,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -295,6 +296,45 @@ void CoprocInputs::send_led_zone(int r, int g, int b, int count) {
     if (count > 0) msg += " " + std::to_string(count > 300 ? 300 : count);
     msg += "\n";
     (void)::write(fd_, msg.data(), msg.size());
+}
+
+void CoprocInputs::send_led_pattern(int mode, int r, int g, int b, int speed) {
+    if (fd_ < 0) return;
+    auto c8 = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
+    const std::string msg = "LEDP " + std::to_string(mode < 0 ? 0 : (mode > 4 ? 4 : mode)) +
+        " " + std::to_string(c8(r)) + " " + std::to_string(c8(g)) + " " +
+        std::to_string(c8(b)) + " " + std::to_string(speed < 1 ? 50 : c8(speed)) + "\n";
+    (void)::write(fd_, msg.data(), msg.size());
+}
+
+void CoprocInputs::send_led_brightness(int b) {
+    if (fd_ < 0) return;
+    const std::string msg = "LEDB " +
+        std::to_string(b < 0 ? 0 : (b > 255 ? 255 : b)) + "\n";
+    (void)::write(fd_, msg.data(), msg.size());
+}
+
+void CoprocInputs::send_led_frame(const uint8_t* rgb, int count) {
+    if (fd_ < 0 || !rgb || count <= 0) return;
+    if (count > 300) count = 300;
+    static const char* kHex = "0123456789ABCDEF";
+    // ~80 pixels per line keeps each write well under the firmware's 600-char
+    // rx buffer; LEDSHOW latches the assembled frame atomically.
+    for (int start = 0; start < count; start += 80) {
+        const int n = std::min(80, count - start);
+        std::string msg = "LEDF " + std::to_string(start) + " ";
+        msg.reserve(msg.size() + n * 6 + 1);
+        for (int i = 0; i < n; ++i)
+            for (int ch = 0; ch < 3; ++ch) {
+                const uint8_t v = rgb[(start + i) * 3 + ch];
+                msg += kHex[v >> 4];
+                msg += kHex[v & 0xF];
+            }
+        msg += "\n";
+        (void)::write(fd_, msg.data(), msg.size());
+    }
+    const char* show = "LEDSHOW\n";
+    (void)::write(fd_, show, 8);
 }
 
 void CoprocInputs::request_adc() {

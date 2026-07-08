@@ -474,6 +474,8 @@ struct MenuBuildContext {
     // servos, WS2812 zone, ADC). Null when not wired.
     std::function<void(int, int)>           coproc_servo;      // ch, deg (-1 = off)
     std::function<void(int, int, int, int)> coproc_led_zone;   // r,g,b,count(-1=default)
+    std::function<void(int, int, int, int, int)> coproc_led_pattern; // mode,r,g,b,speed
+    std::function<void(int)>                coproc_led_bright; // 0-255
     std::function<void()>                   coproc_adc_read;
     std::function<std::string()>            coproc_adc_result;
     // Live coprocessor config (pins + button maps) for the Pins visualizer/editor.

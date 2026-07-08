@@ -218,18 +218,37 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
         pt.push_back(with_desc(leaf("All Servos Off",
             [sv = ctx.coproc_servo]{ if (sv) for (int c = 0; c < 4; ++c) sv(c, -1); }),
             "Detach all four test channels (stops holding torque)."));
-        if (ctx.coproc_led_zone) {
-            struct Sw { const char* name; int r, g, b; };
-            static constexpr Sw kSw[] = {
-                { "LED Zone: Off",   0,   0,   0 }, { "LED Zone: White", 255, 255, 255 },
-                { "LED Zone: Red", 255,   0,   0 }, { "LED Zone: Green",   0, 255,   0 },
-                { "LED Zone: Blue",  0,   0, 255 },
+        if (ctx.coproc_led_pattern) {
+            // Addressable LED zone (WS2812/NeoPixel or APA102/DotStar — the
+            // firmware's config.h picks the family): local patterns animated
+            // on the MCU, so the USB link stays idle.
+            struct Pat { const char* name; int mode, r, g, b; };
+            static constexpr Pat kPat[] = {
+                { "LEDs: Off",           0,   0,   0,   0 },
+                { "LEDs: Solid White",   1, 255, 255, 255 },
+                { "LEDs: Solid Theme",   1,   0, 220, 180 },
+                { "LEDs: Rainbow",       2,   0,   0,   0 },
+                { "LEDs: Chase",         3,   0, 220, 180 },
+                { "LEDs: Breathe",       4,   0, 220, 180 },
             };
-            for (const auto& sw : kSw)
-                pt.push_back(with_desc(leaf(sw.name,
-                    [lz = ctx.coproc_led_zone, sw]{ if (lz) lz(sw.r, sw.g, sw.b, -1); }),
-                    "Fill the WS2812 test strip on GP22 (level-shift for long "
-                    "strips; strip length set in firmware config.h)."));
+            for (const auto& pat : kPat)
+                pt.push_back(with_desc(leaf(pat.name,
+                    [lp = ctx.coproc_led_pattern, pat]{
+                        if (lp) lp(pat.mode, pat.r, pat.g, pat.b, 50);
+                    }),
+                    "Drive the addressable LED test zone: data GP22 (+clock "
+                    "GP28 for APA102/DotStar). WS2812 vs APA102, strip/panel "
+                    "length and layout live in the firmware's config.h."));
+            if (ctx.coproc_led_bright) {
+                auto bri = std::make_shared<float>(100.f);
+                pt.push_back(with_desc(slider("LED Brightness", 5.f, 100.f, 5.f, "%",
+                    [bri]{ return *bri; },
+                    [bri, lb = ctx.coproc_led_bright](float v){
+                        *bri = v; if (lb) lb((int)(v * 2.55f));
+                    }),
+                    "Software brightness for the LED zone (APA102 also maps "
+                    "it onto the chip's 5-bit global for extra headroom)."));
+            }
         }
         if (ctx.coproc_adc_read) {
             pt.push_back(with_desc(leaf("Read ADC Now",

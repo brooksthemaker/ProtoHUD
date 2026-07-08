@@ -36,6 +36,13 @@
 
 namespace {
 
+inline int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 #ifdef MAX_BRIDGE
 constexpr size_t kMaxCs = sizeof(kMaxCsPins) / sizeof(kMaxCsPins[0]);
 
@@ -47,13 +54,6 @@ void max_bridge_setup() {
         pinMode(kMaxCsPins[i], OUTPUT);
         digitalWrite(kMaxCsPins[i], HIGH);   // MAX7219 latches on CS rising edge
     }
-}
-
-inline int hexval(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
 }
 
 // "SPI <cs> <hexbytes>" — shift the decoded bytes out SPI1 with kMaxCsPins[cs]
@@ -131,8 +131,115 @@ Touch g_touch[6];
 Servo g_servo[4];
 bool  g_servo_on[4] = {};
 
-// WS2812 test zone — constructed lazily on the first LEDZ command.
-Adafruit_NeoPixel* g_ledz = nullptr;
+// ── Digital addressable LED zone (WS2812/NeoPixel or APA102/DotStar) ─────────
+// One frame buffer + two output paths. WS2812 goes through Adafruit_NeoPixel
+// (PIO timing); APA102 is bit-banged — its protocol is clocked, so bit-banging
+// is timing-free and needs no library. Patterns animate locally (~30 fps) so
+// the USB link stays idle; LEDF/LEDSHOW lets the Pi stream arbitrary frames
+// for custom panels instead.
+Adafruit_NeoPixel* g_ledz = nullptr;          // WS2812 backend (lazy)
+uint8_t  g_led_px[kLedZoneMax][3];            // frame buffer, RGB
+uint16_t g_led_n      = kLedZoneCount;
+uint8_t  g_led_bright = 255;                  // software brightness 0-255
+uint8_t  g_led_mode   = 0;                    // 0 off, 1 solid, 2 rainbow, 3 chase, 4 breathe
+uint8_t  g_led_r = 255, g_led_g = 255, g_led_b = 255;
+uint8_t  g_led_speed  = 50;                   // pattern speed 1-255
+uint32_t g_led_last   = 0;                    // last pattern tick
+float    g_led_phase  = 0.f;
+bool     g_led_dirty  = false;                // LEDF wrote pixels; LEDSHOW latches
+
+void led_show() {
+    if (kLedZonePin < 0) return;
+    if (kLedZoneType == 0) {
+        if (!g_ledz || g_ledz->numPixels() != g_led_n) {
+            delete g_ledz;
+            g_ledz = new Adafruit_NeoPixel(g_led_n, kLedZonePin, NEO_GRB + NEO_KHZ800);
+            g_ledz->begin();
+        }
+        for (uint16_t i = 0; i < g_led_n; ++i)
+            g_ledz->setPixelColor(i, g_ledz->Color(
+                (uint16_t)g_led_px[i][0] * g_led_bright / 255,
+                (uint16_t)g_led_px[i][1] * g_led_bright / 255,
+                (uint16_t)g_led_px[i][2] * g_led_bright / 255));
+        g_ledz->show();
+    } else {
+        // APA102: 32-bit start frame, per-LED 0xE0|global(5b) B G R, end clocks.
+        static bool init = false;
+        if (!init) {
+            pinMode(kLedZonePin, OUTPUT);
+            pinMode(kLedZoneClkPin, OUTPUT);
+            digitalWrite(kLedZoneClkPin, LOW);
+            init = true;
+        }
+        auto out = [](uint8_t byte) {
+            for (int bit = 7; bit >= 0; --bit) {
+                digitalWrite(kLedZonePin, (byte >> bit) & 1);
+                digitalWrite(kLedZoneClkPin, HIGH);
+                digitalWrite(kLedZoneClkPin, LOW);
+            }
+        };
+        for (int i = 0; i < 4; ++i) out(0x00);                    // start frame
+        const uint8_t g5 = 0xE0 | (uint8_t)((g_led_bright >> 3) & 0x1F);
+        for (uint16_t i = 0; i < g_led_n; ++i) {
+            out(g5);
+            out(g_led_px[i][2]);   // B
+            out(g_led_px[i][1]);   // G
+            out(g_led_px[i][0]);   // R
+        }
+        for (uint16_t i = 0; i < (g_led_n + 15) / 16 + 1; ++i) out(0x00);  // end
+    }
+}
+
+void led_fill(uint8_t r, uint8_t g, uint8_t b) {
+    for (uint16_t i = 0; i < g_led_n; ++i) {
+        g_led_px[i][0] = r; g_led_px[i][1] = g; g_led_px[i][2] = b;
+    }
+}
+
+// Local pattern animation (~30 fps), driven from loop(). Runs standalone —
+// the Pi only sends mode changes.
+void led_service(uint32_t now) {
+    if (kLedZonePin < 0 || g_led_mode < 2) return;
+    if (now - g_led_last < 33) return;
+    g_led_last = now;
+    g_led_phase += g_led_speed / 255.f * 0.25f;
+    if (g_led_phase >= 1.f) g_led_phase -= 1.f;
+    if (g_led_mode == 2) {                                        // rainbow
+        for (uint16_t i = 0; i < g_led_n; ++i) {
+            const float h = g_led_phase + (float)i / g_led_n;
+            const float hh = (h - (int)h) * 6.f;
+            const int   sec = (int)hh;
+            const uint8_t f = (uint8_t)((hh - sec) * 255);
+            uint8_t r = 0, g = 0, b = 0;
+            switch (sec % 6) {
+                case 0: r = 255;     g = f;       b = 0;       break;
+                case 1: r = 255 - f; g = 255;     b = 0;       break;
+                case 2: r = 0;       g = 255;     b = f;       break;
+                case 3: r = 0;       g = 255 - f; b = 255;     break;
+                case 4: r = f;       g = 0;       b = 255;     break;
+                default: r = 255;    g = 0;       b = 255 - f; break;
+            }
+            g_led_px[i][0] = r; g_led_px[i][1] = g; g_led_px[i][2] = b;
+        }
+    } else if (g_led_mode == 3) {                                 // chase
+        led_fill(g_led_r / 10, g_led_g / 10, g_led_b / 10);
+        const int head = (int)(g_led_phase * g_led_n);
+        for (int t = 0; t < 4; ++t) {
+            const int i = (head - t + g_led_n) % g_led_n;
+            const uint8_t k = 255 - t * 60;
+            g_led_px[i][0] = (uint16_t)g_led_r * k / 255;
+            g_led_px[i][1] = (uint16_t)g_led_g * k / 255;
+            g_led_px[i][2] = (uint16_t)g_led_b * k / 255;
+        }
+    } else if (g_led_mode == 4) {                                 // breathe
+        const float t = g_led_phase < 0.5f ? g_led_phase * 2.f
+                                           : (1.f - g_led_phase) * 2.f;
+        const uint8_t k = (uint8_t)(20 + t * 235);
+        led_fill((uint16_t)g_led_r * k / 255, (uint16_t)g_led_g * k / 255,
+                 (uint16_t)g_led_b * k / 255);
+    }
+    led_show();
+}
 
 void touch_setup() {
     for (size_t i = 0; i < 6; ++i)
@@ -180,23 +287,69 @@ bool gp_claimed_by_servo(uint8_t gp) {
     return false;
 }
 
-// "LEDZ <r> <g> <b> [count]" — fill the test strip with one color (0 0 0 = off).
+// "LEDZ <r> <g> <b> [count]" — solid fill (0 0 0 = off; stops any pattern).
 void ledz_line(const String& line) {
     if (kLedZonePin < 0) return;
     String t[5];
     const int nt = split_ws(line, t, 5);
     if (nt < 4) return;
-    const int r = constrain(t[1].toInt(), 0, 255);
-    const int g = constrain(t[2].toInt(), 0, 255);
-    const int b = constrain(t[3].toInt(), 0, 255);
-    const int n = (nt >= 5) ? constrain(t[4].toInt(), 1, 300) : kLedZoneCount;
-    if (!g_ledz || g_ledz->numPixels() != (uint16_t)n) {
-        delete g_ledz;
-        g_ledz = new Adafruit_NeoPixel(n, kLedZonePin, NEO_GRB + NEO_KHZ800);
-        g_ledz->begin();
+    const uint8_t r = constrain(t[1].toInt(), 0, 255);
+    const uint8_t g = constrain(t[2].toInt(), 0, 255);
+    const uint8_t b = constrain(t[3].toInt(), 0, 255);
+    if (nt >= 5) g_led_n = constrain(t[4].toInt(), 1, (int)kLedZoneMax);
+    g_led_mode = (r || g || b) ? 1 : 0;
+    led_fill(r, g, b);
+    led_show();
+}
+
+// "LEDP <mode> [r g b] [speed]" — local pattern: 0 off, 1 solid, 2 rainbow,
+// 3 chase, 4 breathe. Animates on the MCU so the USB link stays idle.
+void ledp_line(const String& line) {
+    if (kLedZonePin < 0) return;
+    String t[7];
+    const int nt = split_ws(line, t, 7);
+    if (nt < 2) return;
+    g_led_mode = constrain(t[1].toInt(), 0, 4);
+    if (nt >= 5) {
+        g_led_r = constrain(t[2].toInt(), 0, 255);
+        g_led_g = constrain(t[3].toInt(), 0, 255);
+        g_led_b = constrain(t[4].toInt(), 0, 255);
     }
-    for (int i = 0; i < n; ++i) g_ledz->setPixelColor(i, g_ledz->Color(r, g, b));
-    g_ledz->show();
+    if (nt >= 6) g_led_speed = constrain(t[5].toInt(), 1, 255);
+    if (g_led_mode == 0) { led_fill(0, 0, 0); led_show(); }
+    if (g_led_mode == 1) { led_fill(g_led_r, g_led_g, g_led_b); led_show(); }
+}
+
+// "LEDB <0-255>" — software brightness (APA102 also maps it to the 5-bit
+// per-LED global, keeping PWM resolution).
+void ledb_line(const String& line) {
+    String t[2];
+    if (split_ws(line, t, 2) < 2) return;
+    g_led_bright = constrain(t[1].toInt(), 0, 255);
+    led_show();
+}
+
+// Per-pixel streaming for CUSTOM PANELS / Pi-driven content:
+//   "LEDF <start> <hexRRGGBB...>"  write pixels from index start (chunkable)
+//   "LEDSHOW"                      latch the assembled frame to the LEDs
+void ledf_line(const String& line) {
+    int sp = line.indexOf(' ', 5);
+    if (sp < 0) return;
+    int idx = line.substring(5, sp).toInt();
+    const int hstart = sp + 1;
+    for (int i = hstart; i + 5 < (int)line.length() && idx < (int)g_led_n; i += 6, ++idx) {
+        int v[6];
+        bool ok = true;
+        for (int k = 0; k < 6; ++k) { v[k] = hexval(line[i + k]); if (v[k] < 0) ok = false; }
+        if (!ok) break;
+        if (idx >= 0) {
+            g_led_px[idx][0] = (uint8_t)((v[0] << 4) | v[1]);
+            g_led_px[idx][1] = (uint8_t)((v[2] << 4) | v[3]);
+            g_led_px[idx][2] = (uint8_t)((v[4] << 4) | v[5]);
+        }
+    }
+    g_led_mode = 5;                     // frame-streamed: stop local patterns
+    g_led_dirty = true;
 }
 
 // "ADCREAD" — one-shot report of the three test ADC channels.
@@ -349,6 +502,10 @@ void handle_line(const String& line) {
     if (line.startsWith("I2CSCAN")) { i2c_scan(line); return; }
     if (line.startsWith("SERVO "))  { servo_line(line); return; }
     if (line.startsWith("LEDZ "))   { ledz_line(line);  return; }
+    if (line.startsWith("LEDP "))   { ledp_line(line);  return; }
+    if (line.startsWith("LEDB "))   { ledb_line(line);  return; }
+    if (line.startsWith("LEDF "))   { ledf_line(line);  return; }
+    if (line == "LEDSHOW")          { if (g_led_dirty) { led_show(); g_led_dirty = false; } return; }
     if (line == "ADCREAD")          { adc_read();       return; }
 #ifdef PERIPHERAL_HUB
     if (periph_handle_command(line)) return;  // FAN <zone> <duty%>
@@ -453,6 +610,7 @@ void loop() {
     }
 
     drain_input();
+    led_service(now);                           // local LED patterns (~30 fps)
 #ifdef PERIPHERAL_HUB
     periph_service();                           // boop poll · one temp step · fans
 #endif
