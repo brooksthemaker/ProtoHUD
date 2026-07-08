@@ -24,6 +24,7 @@
 
 #include "app_state.h"
 #include "android/android_mirror.h"
+#include "term/pty_terminal.h"
 #include "camera/camera_manager.h"
 #include "camera/viture_camera.h"
 #include "input/gpio_buttons.h"
@@ -104,6 +105,70 @@
 #include <linux/i2c-dev.h>
 
 using json = nlohmann::json;
+
+// ── Floating-window terminal keyboard routing ─────────────────────────────────
+// Installed after ImGui's GLFW callbacks (hud.load) and chained behind ours:
+// while the floating terminal has keyboard focus, keys and chars go into the
+// pty and nothing else sees them (the polled hotkey block also checks the
+// focus flag). F10 always releases focus so a keyboard-only user can't get
+// stuck; the knob menu never reads the keyboard, so it keeps working too.
+static term::PtyTerminal*   g_term = nullptr;
+static std::atomic<bool>    g_term_focus{ false };
+static std::atomic<bool>    g_term_focus_release{ false };   // F10 → applied in the loop
+static GLFWcharfun          g_prev_char_cb = nullptr;
+static GLFWkeyfun           g_prev_key_cb  = nullptr;
+
+static void term_char_cb(GLFWwindow* w, unsigned int cp) {
+    if (g_term_focus.load() && g_term) {
+        char u[4]; int n = 0;                              // UTF-8 encode
+        if      (cp < 0x80)    u[n++] = (char)cp;
+        else if (cp < 0x800)  { u[n++] = (char)(0xC0 | (cp >> 6));
+                                u[n++] = (char)(0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000){ u[n++] = (char)(0xE0 | (cp >> 12));
+                                u[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                u[n++] = (char)(0x80 | (cp & 0x3F)); }
+        else                  { u[n++] = (char)(0xF0 | (cp >> 18));
+                                u[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                                u[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                u[n++] = (char)(0x80 | (cp & 0x3F)); }
+        g_term->write_input(u, (size_t)n);
+        return;
+    }
+    if (g_prev_char_cb) g_prev_char_cb(w, cp);
+}
+
+static void term_key_cb(GLFWwindow* w, int key, int sc, int action, int mods) {
+    if (g_term_focus.load() && g_term) {
+        if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+            if (key == GLFW_KEY_F10) { g_term_focus_release.store(true); return; }
+            const char* seq = nullptr;
+            switch (key) {
+            case GLFW_KEY_ENTER: case GLFW_KEY_KP_ENTER: seq = "\r";      break;
+            case GLFW_KEY_BACKSPACE:                     seq = "\x7f";    break;
+            case GLFW_KEY_TAB:                           seq = "\t";      break;
+            case GLFW_KEY_ESCAPE:                        seq = "\x1b";    break;
+            case GLFW_KEY_UP:                            seq = "\x1b[A";  break;
+            case GLFW_KEY_DOWN:                          seq = "\x1b[B";  break;
+            case GLFW_KEY_RIGHT:                         seq = "\x1b[C";  break;
+            case GLFW_KEY_LEFT:                          seq = "\x1b[D";  break;
+            case GLFW_KEY_HOME:                          seq = "\x1b[H";  break;
+            case GLFW_KEY_END:                           seq = "\x1b[F";  break;
+            case GLFW_KEY_PAGE_UP:                       seq = "\x1b[5~"; break;
+            case GLFW_KEY_PAGE_DOWN:                     seq = "\x1b[6~"; break;
+            case GLFW_KEY_DELETE:                        seq = "\x1b[3~"; break;
+            default: break;
+            }
+            if (seq) { g_term->write_input(seq, strlen(seq)); return; }
+            if ((mods & GLFW_MOD_CONTROL) && key >= GLFW_KEY_A && key <= GLFW_KEY_Z) {
+                const char c = (char)(key - GLFW_KEY_A + 1);   // Ctrl+C → 0x03 …
+                g_term->write_input(&c, 1);
+                return;
+            }
+        }
+        return;      // swallow everything else (incl. releases) while focused
+    }
+    if (g_prev_key_cb) g_prev_key_cb(w, key, sc, action, mods);
+}
 
 // ── Serial port auto-discovery ────────────────────────────────────────────────
 // Tries the configured path first; if it doesn't exist, scans up to 8 nodes
@@ -2203,7 +2268,12 @@ int main(int argc, char* argv[]) {
                                      "skip", false);
     const json jdisp2 = cfg.contains("display") && cfg["display"].is_object()
                       ? cfg["display"] : json::object();
-    state.info_pin.fov_deg = std::clamp(jval(jdisp2, "fov_deg", 43.0f), 20.f, 90.f);
+    state.float_win.fov_deg = std::clamp(jval(jdisp2, "fov_deg", 43.0f), 20.f, 90.f);
+    if (jhud.contains("float_window") && jhud["float_window"].is_object()) {
+        const auto& jfw = jhud["float_window"];
+        state.float_win.content   = std::clamp(jfw.value("content", 0), 0, 1);
+        state.float_win.width_deg = std::clamp(jfw.value("width_deg", 30.0f), 10.f, 60.f);
+    }
     // Timewarp pose prediction horizon (ms). Covers pose age + render +
     // scan-out; 0 disables extrapolation.
     const float tw_predict_ms =
@@ -3020,6 +3090,13 @@ int main(int argc, char* argv[]) {
     }
     HudRenderer hud(hud_cfg, hud_col);
     hud.load(xr.glfw_window());
+    {
+        // Terminal keyboard hooks — AFTER hud.load so ImGui's GLFW callbacks
+        // are already installed and can be chained behind ours.
+        GLFWwindow* win = static_cast<GLFWwindow*>(xr.glfw_window());
+        g_prev_key_cb  = glfwSetKeyCallback(win, term_key_cb);
+        g_prev_char_cb = glfwSetCharCallback(win, term_char_cb);
+    }
     hud.set_icon_dir(res("assets/icons"));
 
     // ── Splash screen ─────────────────────────────────────────────────────────
@@ -3794,6 +3871,20 @@ int main(int argc, char* argv[]) {
         android_overlay_active = true;
     }
 
+    // ── Floating-window terminal (pty shell) ─────────────────────────────────
+    // Spawned lazily the first time the floating window shows Terminal
+    // content; the keyboard routes into it while Keyboard Focus is on (see
+    // the GLFW callbacks near the top of this file).
+    term::PtyTerminal::Config term_cfg;
+    if (cfg.contains("terminal") && cfg["terminal"].is_object()) {
+        const auto& jt = cfg["terminal"];
+        term_cfg.shell = jt.value("shell", std::string());
+        term_cfg.cols  = jt.value("cols", 80);
+        term_cfg.rows  = jt.value("rows", 24);
+    }
+    term::PtyTerminal terminal(term_cfg);
+    g_term = &terminal;
+
     splash_frame("Building menu...", 0.75f);
 
     // ── Menu system ───────────────────────────────────────────────────────────
@@ -4204,6 +4295,11 @@ int main(int argc, char* argv[]) {
         case MotionCal::Step::Center2: return "centre, then Select";
         default:                       return "";
         }
+    };
+    menu_ctx.term_restart = [&terminal]{
+        // Fresh shell for the floating window: tear down whatever is left
+        // (a dead pty after `exit`, or a wedged session) and respawn.
+        std::thread([&terminal]{ terminal.stop(); terminal.start(); }).detach();
     };
     menu_ctx.pf_set_motion_particles = [&](bool v){
         pf_motion_particles = v;
@@ -5241,7 +5337,9 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["attitude_indicator"]["per_eye"]    = state.attitude.per_eye;
         cfg["hud"]["attitude_indicator"]["text_scale"] = state.attitude.text_scale;
         cfg["hud"]["attitude_indicator"]["smooth"]     = state.attitude.smooth;
-        cfg["display"]["fov_deg"]                      = state.info_pin.fov_deg;
+        cfg["display"]["fov_deg"]                      = state.float_win.fov_deg;
+        cfg["hud"]["float_window"]["content"]          = state.float_win.content;
+        cfg["hud"]["float_window"]["width_deg"]        = state.float_win.width_deg;
         cfg["landing"]["skip"]            = state.skip_landing;
         cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
         cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
@@ -6508,6 +6606,25 @@ int main(int argc, char* argv[]) {
         if (want3) cameras.get_usb3(tex_usb3);
         android_mirror.get_frame(tex_android);
 
+        // ── Floating-window terminal lifecycle + keyboard focus ──────────────
+        {
+            const bool want_term = snap.float_win.enabled &&
+                                   snap.float_win.content == 0;
+            // Spawn the shell on the rising edge of "window shows terminal"
+            // (NOT whenever it isn't running — typing `exit` must not respawn
+            // an endless chain; the menu's Restart Terminal re-spawns by hand).
+            static bool s_prev_want_term = false;
+            if (want_term && !s_prev_want_term && !terminal.running())
+                terminal.start();
+            s_prev_want_term = want_term;
+            if (g_term_focus_release.exchange(false)) {      // F10 pressed
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.float_win.focus_keys = false;
+            }
+            g_term_focus.store(want_term && terminal.running() &&
+                               snap.float_win.focus_keys);
+        }
+
         // PiP toggle state (pip_left_active / pip_right_active) is now flipped
         // directly by the GPIO dispatch (Camera: PiP toggle), so there's no
         // per-frame button-hold polling here anymore.
@@ -6528,7 +6645,10 @@ int main(int argc, char* argv[]) {
             const bool editor_owns_kb = menu.is_face_editor_open();
             auto edge = [&](int n, int glfw_key) -> bool {
                 bool now = (glfwGetKey(win, glfw_key) == GLFW_PRESS);
-                bool fired = now && !prev_key[n] && !editor_owns_kb;
+                // Suppressed while the face editor or the floating terminal
+                // owns the keyboard (still tracked so releases stay fresh).
+                bool fired = now && !prev_key[n] && !editor_owns_kb &&
+                             !g_term_focus.load();
                 prev_key[n] = now;
                 return fired;
             };
@@ -6781,7 +6901,7 @@ int main(int argc, char* argv[]) {
             snap.compass_tape       = state.compass_tape;
             snap.attitude           = state.attitude;
             snap.attitude_pose      = state.attitude_pose;
-            snap.info_pin           = state.info_pin;
+            snap.float_win          = state.float_win;
             snap.legacy_hud         = state.legacy_hud;
             snap.imu_pose           = state.imu_pose;
             snap.focus_left         = state.focus_left;
@@ -7367,6 +7487,9 @@ int main(int argc, char* argv[]) {
                                    tex_usb3, p3 && preview != 3, pip_overlay_cfg3,
                                    xr.display_width(), xr.display_height());
             hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
+            hud.draw_float_window(snap, xr.display_width(), xr.display_height(),
+                                  tex_android, android_mirror.frame_aspect(),
+                                  &terminal);
             {
                 // Toasts draw from (and mark read/dismissed on) the LIVE queue
                 // while worker threads push into it — hold the lock for the
@@ -7583,6 +7706,8 @@ int main(int argc, char* argv[]) {
     step("bme280");          bme280.stop();
     step("accessory_leds");  accessory_leds.stop();
     step("audio");           audio.stop();
+    step("terminal");        g_term_focus.store(false); g_term = nullptr;
+                             terminal.stop();
     step("android_mirror");  android_mirror.stop();
     step("hud");             hud.unload();
     step("beast_cam");       beast_cam.stop();

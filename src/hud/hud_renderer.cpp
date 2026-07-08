@@ -1,5 +1,6 @@
 #include "hud_renderer.h"
 #include "../serial/shm_frame_reader.h"
+#include "../term/pty_terminal.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -396,10 +397,8 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
 
     draw_map_overlay(nvg_, s, fw, fh);
     // The expanded map can optionally hide the info panel (its data is in the sidebar).
-    if (!(s.map_overlay.expanded && s.expanded_hide_info)) {
-        if (s.info_pin.pinned) draw_info_panel_pinned(nvg_, s, fw, fh);
-        else                   draw_info_panel(nvg_, s, fw, fh);
-    }
+    if (!(s.map_overlay.expanded && s.expanded_hide_info))
+        draw_info_panel(nvg_, s, fw, fh);
     if (s.attitude.enabled)
         draw_attitude_indicator(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
@@ -1060,41 +1059,188 @@ static void draw_status_glyph(NVGcontext* vg, StatusGlyph g,
 // A configurable region (mirroring the minimap on the opposite side) that auto-
 // cycles through glanceable widgets: analog clock, notifications, schedule, weather.
 // Drawn once per frame (mono overlay), so the dwell timer ticks here safely.
-// World-pinned info panel: draw the panel once per SBS eye half in eye-local
-// coordinates, offset by the angular delta between the pin anchor and the
-// current head pose (attitude_pose — the selected IMU's calibrated euler)
-// and counter-rotated by head roll about the view center, so the panel holds
-// its place in the world as the head moves. Small-angle reprojection —
-// exact enough inside the glasses' FOV; fov_deg calibrates deg → px (if the
-// panel slides as you turn, adjust HUD > Info-Panel Module > Display FOV).
-void HudRenderer::draw_info_panel_pinned(NVGcontext* vg, const AppState& s,
-                                         float fw, float fh) {
+// ── Floating window ───────────────────────────────────────────────────────────
+// A world-pinned frame hosting real content: the pty terminal or the Android
+// mirror. Drawn once per SBS eye half, offset by the angular delta between
+// the pin anchor and the current head pose (attitude_pose) and counter-
+// rotated by head roll, so it holds its place in the world and stays level.
+// fov_deg calibrates deg → px: if the window slides as you turn, adjust
+// HUD > Floating Window > Display FOV. Head right → window slides left;
+// look up → it slides down (flip the signs here if a mount reverses one).
+
+// 16-color ANSI palette + [16] default fg / [17] default bg (transparent).
+static const uint8_t kTermPal[17][3] = {
+    { 40,  42,  46}, {205,  80,  72}, { 80, 200,  90}, {200, 180,  60},
+    { 80, 130, 240}, {190,  90, 210}, { 60, 190, 200}, {200, 205, 210},
+    {110, 115, 120}, {240, 110, 100}, {120, 240, 130}, {240, 220, 100},
+    {120, 170, 255}, {225, 130, 245}, {100, 225, 235}, {245, 248, 250},
+    {210, 235, 225},
+};
+
+void HudRenderer::draw_float_window(const AppState& s, int w, int h,
+                                    unsigned int mirror_tex, float mirror_aspect,
+                                    const term::PtyTerminal* terminal) {
+    if (!nvg_ || !s.float_win.enabled || !s.float_win.pinned) return;
+    NVGcontext* vg = nvg_;
+    const float fw = (float)w, fh = (float)h;
     const float eye_w = fw * 0.5f;
-    const float ppd   = eye_w / std::clamp(s.info_pin.fov_deg, 20.f, 90.f);
+    const float ppd   = eye_w / std::clamp(s.float_win.fov_deg, 20.f, 90.f);
     auto circ = [](float d) {
         while (d > 180.f) d -= 360.f;
         while (d < -180.f) d += 360.f;
         return d;
     };
-    // Head right → the world (and the pinned panel) slides left; look up →
-    // it slides down. If a mounting reverses an axis, flip the sign here.
-    const float dyaw = circ(s.attitude_pose.yaw - s.info_pin.yaw);
+    const float dyaw = circ(s.attitude_pose.yaw - s.float_win.yaw);
     if (std::fabs(dyaw) > 100.f) return;                 // roughly behind you
     const float dx = -dyaw * ppd;
-    const float dy = (s.attitude_pose.pitch - s.info_pin.pitch) * ppd;
+    const float dy = (s.attitude_pose.pitch - s.float_win.pitch) * ppd;
     const float roll_rad = s.attitude_pose.roll * 3.14159265f / 180.f;
+    const float wpx = std::clamp(s.float_win.width_deg, 10.f, 60.f) * ppd;
+    const bool  is_term = (s.float_win.content == 0);
+
+    // Terminal grid snapshot (copied out under the terminal's lock).
+    term::TermSnapshot ts;
+    if (is_term && terminal) terminal->snapshot(ts);
+
+    // Content-driven height + terminal font metrics.
+    float hpx = wpx * 0.62f;
+    float cell_w = 0.f, line_h = 0.f, font_px = 0.f, pad = 0.f;
+    if (is_term && ts.cols > 0) {
+        pad     = wpx * 0.015f;
+        cell_w  = (wpx - 2.f * pad) / (float)ts.cols;
+        // Calibrate the mono font so one glyph advance == one cell.
+        nvg_set_font_mono(20.f);
+        const float adv20 = nvgTextBounds(vg, 0, 0, "M", nullptr, nullptr);
+        font_px = adv20 > 0.f ? 20.f * cell_w / adv20 : cell_w * 1.8f;
+        line_h  = font_px * 1.25f;
+        hpx     = line_h * (float)ts.rows + 2.f * pad;
+    } else if (!is_term) {
+        const float aspect = (mirror_aspect > 0.05f) ? mirror_aspect : 0.56f;
+        hpx = wpx / aspect;
+    }
+
     for (int eye = 0; eye < 2; ++eye) {
         const float ox = eye * eye_w;
         nvgSave(vg);
-        // Keep the shifted panel inside this eye's half. (The panel's own
-        // circular widget clip replaces this scissor for its interior, but
-        // that clip is bounded to the widget disc, so cross-seam bleed is
-        // at most the sliver of a disc crossing the edge.)
-        nvgIntersectScissor(vg, ox, 0.f, eye_w, fh);
+        nvgIntersectScissor(vg, ox, 0.f, eye_w, fh);     // stay in this eye
         nvgTranslate(vg, ox + eye_w * 0.5f, fh * 0.5f);  // eye center
         nvgRotate(vg, -roll_rad);                        // stay world-level
-        nvgTranslate(vg, dx - eye_w * 0.5f, dy - fh * 0.5f);
-        draw_info_panel(vg, s, eye_w, fh);               // eye-local layout
+        nvgTranslate(vg, dx, dy);                        // window center
+
+        const float x0 = -wpx * 0.5f, y0 = -hpx * 0.5f;
+
+        // Frame: dark card + theme border (brighter when keys are captured).
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x0, y0, wpx, hpx, wpx * 0.012f);
+        nvgFillColor(vg, nvgRGBA(8, 10, 14, 235));
+        nvgFill(vg);
+        const bool kb = is_term && s.float_win.focus_keys;
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x0, y0, wpx, hpx, wpx * 0.012f);
+        nvgStrokeColor(vg, nvg_col_a(col_.glow_base, kb ? 235 : 110));
+        nvgStrokeWidth(vg, kb ? 2.4f : 1.4f);
+        nvgStroke(vg);
+        if (kb) {
+            nvg_set_font_mono(std::max(9.f, font_px * 0.8f));
+            nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
+            nvgFillColor(vg, nvg_col_a(col_.glow_base, 200));
+            nvgText(vg, x0 + wpx, y0 - 3.f, "KEYS \xe2\x86\x92 TERMINAL (F10 releases)", nullptr);
+        }
+
+        if (is_term && ts.cols > 0) {
+            const float tx = x0 + pad, ty = y0 + pad;
+            nvg_set_font_mono(font_px);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            char run[224];
+            for (int row = 0; row < ts.rows; ++row) {
+                const term::TermCell* cells = &ts.cells[(size_t)row * ts.cols];
+                const float ry = ty + row * line_h;
+                // Background runs (non-default bg only).
+                for (int c0 = 0; c0 < ts.cols; ) {
+                    const uint8_t bg = (cells[c0].attr & 2) ? cells[c0].fg
+                                                            : cells[c0].bg;
+                    int c1 = c0 + 1;
+                    while (c1 < ts.cols) {
+                        const uint8_t b2 = (cells[c1].attr & 2) ? cells[c1].fg
+                                                                : cells[c1].bg;
+                        if (b2 != bg) break;
+                        ++c1;
+                    }
+                    if (bg < 17) {
+                        nvgBeginPath(vg);
+                        nvgRect(vg, tx + c0 * cell_w, ry, (c1 - c0) * cell_w, line_h);
+                        nvgFillColor(vg, nvgRGBA(kTermPal[bg][0], kTermPal[bg][1],
+                                                 kTermPal[bg][2], 235));
+                        nvgFill(vg);
+                    }
+                    c0 = c1;
+                }
+                // Text runs (same fg+attr batched into one nvgText).
+                for (int c0 = 0; c0 < ts.cols; ) {
+                    const uint8_t fg = cells[c0].fg, at = cells[c0].attr;
+                    int c1 = c0, n = 0;
+                    bool blank = true;
+                    while (c1 < ts.cols && cells[c1].fg == fg &&
+                           cells[c1].attr == at && n < (int)sizeof(run) - 1) {
+                        if (cells[c1].ch != ' ') blank = false;
+                        run[n++] = cells[c1].ch;
+                        ++c1;
+                    }
+                    if (!blank) {
+                        run[n] = 0;
+                        uint8_t ci = (at & 2) ? ((cells[c0].bg < 17) ? cells[c0].bg : 0)
+                                              : fg;
+                        if ((at & 1) && ci < 8) ci = (uint8_t)(ci + 8);  // bold → bright
+                        nvgFillColor(vg, nvgRGBA(kTermPal[std::min<int>(ci, 16)][0],
+                                                 kTermPal[std::min<int>(ci, 16)][1],
+                                                 kTermPal[std::min<int>(ci, 16)][2], 255));
+                        nvgText(vg, tx + c0 * cell_w, ry, run, nullptr);
+                    }
+                    c0 = c1;
+                }
+            }
+            // Cursor block.
+            if (ts.running && ts.cursor_visible &&
+                ts.cur_x >= 0 && ts.cur_x < ts.cols &&
+                ts.cur_y >= 0 && ts.cur_y < ts.rows) {
+                nvgBeginPath(vg);
+                nvgRect(vg, tx + ts.cur_x * cell_w, ty + ts.cur_y * line_h,
+                        cell_w, line_h);
+                nvgFillColor(vg, nvgRGBA(230, 245, 240, 130));
+                nvgFill(vg);
+            }
+            if (!ts.running) {
+                nvg_set_font_mono(std::max(10.f, font_px * 1.1f));
+                nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                nvgFillColor(vg, nvg_col_a(col_.warn, 235));
+                nvgText(vg, 0.f, 0.f,
+                        "[ shell exited \xe2\x80\x94 Restart Terminal in menu ]", nullptr);
+            }
+        } else if (!is_term && mirror_tex) {
+            auto it = pip_nvg_cache_.find(mirror_tex);
+            if (it == pip_nvg_cache_.end()) {
+                int img = nvglCreateImageFromHandleGLES2(vg, mirror_tex, 1280, 720, 0);
+                pip_nvg_cache_[mirror_tex] = img;
+                it = pip_nvg_cache_.find(mirror_tex);
+            }
+            if (it->second >= 0) {
+                const float in = 2.f;
+                NVGpaint p = nvgImagePattern(vg, x0 + in, y0 + in,
+                                             wpx - 2 * in, hpx - 2 * in, 0.f,
+                                             it->second, 1.0f);
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, x0 + in, y0 + in, wpx - 2 * in, hpx - 2 * in,
+                               wpx * 0.010f);
+                nvgFillPaint(vg, p);
+                nvgFill(vg);
+            }
+        } else if (!is_term) {
+            nvg_set_font_mono(std::max(10.f, wpx * 0.02f));
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvg_col_a(col_.text_dim, 220));
+            nvgText(vg, 0.f, 0.f,
+                    "[ phone mirror offline \xe2\x80\x94 enable Android Mirror ]", nullptr);
+        }
         nvgRestore(vg);
     }
 }

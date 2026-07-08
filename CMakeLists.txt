@@ -224,6 +224,7 @@ set_target_properties(glasses PROPERTIES
 set(SOURCES
     src/main.cpp
     src/android/android_mirror.cpp
+    src/term/pty_terminal.cpp
     src/camera/camera_manager.cpp
     src/camera/dma_camera.cpp
     src/camera/viture_camera.cpp
@@ -321,6 +322,7 @@ target_link_libraries(protohud PRIVATE
     imgui
     nanovg
     sh2
+    util
     qrcodegen_cpp
     glasses
     protoface_native

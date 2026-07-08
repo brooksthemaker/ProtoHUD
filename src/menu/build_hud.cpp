@@ -1547,29 +1547,6 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
     };
     std::vector<MenuItem> info_panel_menu = {
         // (Always visible for now — enable is forced on in apply_hud_dock, like the minimap.)
-        with_desc(toggle("Pin In Space",
-            [&state]{ return state.info_pin.pinned; },
-            [&state](bool v){
-                if (v) {
-                    // Capture the current head pose as the world anchor.
-                    state.info_pin.yaw   = state.attitude_pose.yaw;
-                    state.info_pin.pitch = state.attitude_pose.pitch;
-                }
-                state.info_pin.pinned = v;
-            }),
-            "Pin the info panel where you're looking RIGHT NOW: it stays "
-            "put in the world as you turn your head (drawn per eye, level "
-            "with the horizon) instead of riding along head-locked. Uses "
-            "the selected IMU's head pose. Toggle off to bring it back "
-            "on-screen."),
-        with_desc(slider("Display FOV", 25.f, 75.f, 1.f, "\xc2\xb0",
-            [&state]{ return state.info_pin.fov_deg; },
-            [&state](float v){ state.info_pin.fov_deg = v; }),
-            "Per-eye horizontal field of view of the glasses — calibrates "
-            "how far pinned content moves per degree of head turn. Pin the "
-            "panel, turn your head slowly: if the panel slides WITH your "
-            "head, raise this; if it overshoots against you, lower it. "
-            "~43\xc2\xb0 for VITURE One/Pro."),
         slider("Cycle Seconds", 2.f, 30.f, 1.f, "s",
             [&state]{ return state.info_panel.cycle_sec; },
             [&state](float v){ state.info_panel.cycle_sec = v; }),
@@ -1723,9 +1700,83 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             "snap through instantly. 0 = raw sensor data."),
     };
 
+    // ── Floating Window ───────────────────────────────────────────────────────
+    // World-pinned frame hosting real content: the pty terminal (a live shell
+    // rendered by the HUD) or the Android mirror (phone browser/apps).
+    std::vector<MenuItem> float_win_menu = {
+        with_desc(toggle("Show Window",
+            [&state]{ return state.float_win.enabled; },
+            [&state](bool v){
+                if (v && !state.float_win.pinned) {
+                    state.float_win.yaw    = state.attitude_pose.yaw;
+                    state.float_win.pitch  = state.attitude_pose.pitch;
+                    state.float_win.pinned = true;
+                }
+                state.float_win.enabled = v;
+                if (!v) state.float_win.focus_keys = false;
+            }),
+            "Show a window pinned in space where you're looking — it holds "
+            "its place in the world (drawn per eye, level with the horizon) "
+            "as you move your head. Content comes from the row below."),
+        with_desc(leaf("Pin Here", [&state]{
+                state.float_win.yaw    = state.attitude_pose.yaw;
+                state.float_win.pitch  = state.attitude_pose.pitch;
+                state.float_win.pinned = true;
+            }),
+            "Re-anchor the window to where you're looking right now."),
+        [&state]() -> MenuItem {
+            MenuItem m = leaf("Content", [&state]{
+                state.float_win.content = (state.float_win.content + 1) % 2;
+            });
+            m.label_fn = [&state]{
+                return std::string("Content: ") +
+                       (state.float_win.content == 0 ? "Terminal" : "Phone Mirror");
+            };
+            return with_desc(std::move(m),
+                "Terminal: a real shell on the Pi, rendered by the HUD (pair "
+                "a keyboard and flip Keyboard Focus on to type). Phone "
+                "Mirror: the Android Mirror feed — open a browser on the "
+                "phone and pin it in space.");
+        }(),
+        with_desc(slider("Width", 10.f, 60.f, 2.f, "\xc2\xb0",
+            [&state]{ return state.float_win.width_deg; },
+            [&state](float v){ state.float_win.width_deg = v; }),
+            "Angular width of the window in degrees of your view."),
+        [&state]() -> MenuItem {
+            MenuItem m = with_desc(toggle("Keyboard Focus",
+                [&state]{ return state.float_win.focus_keys; },
+                [&state](bool v){ state.float_win.focus_keys = v; }),
+                "Route the paired keyboard into the terminal. While on, HUD "
+                "hotkeys are suppressed — press F10 (or toggle this off with "
+                "the knob) to take the keyboard back.");
+            m.visible_fn = [&state]{
+                return state.float_win.enabled && state.float_win.content == 0;
+            };
+            return m;
+        }(),
+        [&ctx, &state]() -> MenuItem {
+            MenuItem m = leaf("Restart Terminal", [fn = ctx.term_restart]{
+                if (fn) fn();
+            });
+            m.visible_fn = [&state]{ return state.float_win.content == 0; };
+            return with_desc(std::move(m),
+                "Spawn a fresh shell — use after typing `exit` or if the "
+                "session wedges.");
+        }(),
+        with_desc(slider("Display FOV", 25.f, 75.f, 1.f, "\xc2\xb0",
+            [&state]{ return state.float_win.fov_deg; },
+            [&state](float v){ state.float_win.fov_deg = v; }),
+            "Per-eye horizontal field of view of the glasses — calibrates "
+            "how far pinned content moves per degree of head turn. Pin the "
+            "window, turn your head slowly: if it slides WITH your head, "
+            "raise this; if it overshoots against you, lower it. ~43\xc2\xb0 "
+            "for VITURE One/Pro."),
+    };
+
     std::vector<MenuItem> hud_menu = {
         submenu("Mini-Map Module",  std::move(mini_map_menu)),
         submenu("Info-Panel Module",std::move(info_panel_menu)),
+        submenu("Floating Window",  std::move(float_win_menu)),
         submenu("Attitude Indicator", std::move(attitude_menu)),
         submenu("Location",         std::move(location_menu)),
         submenu("Clock",            std::move(clock_menu)),

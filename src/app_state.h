@@ -825,19 +825,25 @@ struct AppState {
     // bno08x.head_tracking owns imu_pose.
     ImuPose attitude_pose;
 
-    // World-pinned info panel (HUD > Info-Panel Module > Pin In Space).
-    // Pinning captures the head yaw/pitch; every frame the panel is drawn
-    // per SBS eye, offset by the angular delta from attitude_pose and
-    // counter-rolled, so it holds its place in the world as the head moves.
-    // fov_deg is the per-eye horizontal FOV used to convert deg → px
-    // (persisted; pinned state itself is runtime-only).
-    struct SpacePin {
-        bool  pinned  = false;
-        float yaw     = 0.f;     // anchor head pose at pin time (deg)
-        float pitch   = 0.f;
-        float fov_deg = 43.f;    // per-eye horizontal FOV of the glasses
+    // Floating window pinned in space (HUD > Floating Window): a world-locked
+    // frame hosting real content — a shell in a pty (Terminal) or the Android
+    // mirror (phone browser/apps). Pinning captures the head yaw/pitch;
+    // every frame the window is drawn per SBS eye, offset by the angular
+    // delta from attitude_pose and counter-rolled so it stays level and holds
+    // its place in the world. fov_deg is the per-eye horizontal FOV used to
+    // convert deg → px. The head-locked HUD (info panel, minimap) is
+    // unaffected.
+    struct FloatWin {
+        bool  enabled    = false;   // window shown (runtime)
+        bool  pinned     = false;   // anchor captured (runtime)
+        float yaw        = 0.f;     // anchor head pose at pin time (deg)
+        float pitch      = 0.f;
+        int   content    = 0;       // 0 = terminal, 1 = phone mirror
+        float width_deg  = 30.f;    // angular width of the window (persisted)
+        bool  focus_keys = false;   // route the keyboard into the terminal
+        float fov_deg    = 43.f;    // per-eye horizontal FOV (persisted)
     };
-    SpacePin info_pin;
+    FloatWin float_win;
 
     // ── IMU source selection ────────────────────────────────────────────────
     // The HUD has three possible heading sources at runtime: the BNO055

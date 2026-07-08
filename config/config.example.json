@@ -140,8 +140,19 @@
     "use_beast_camera": true,
     "enable_imu": true
   },
-  "_display_extras_note": "display.fov_deg = per-eye horizontal FOV (deg), used to reproject world-pinned HUD content (HUD > Info-Panel Module > Pin In Space / Display FOV). display.timewarp_predict_ms = how far ahead (ms) the timewarp extrapolates the head pose toward display time; 12 covers typical pose age + scan-out, 0 disables prediction.",
+  "_display_extras_note": "display.fov_deg = per-eye horizontal FOV (deg), used to reproject world-pinned HUD content (HUD > Floating Window). display.timewarp_predict_ms = how far ahead (ms) the timewarp extrapolates the head pose toward display time; 12 covers typical pose age + scan-out, 0 disables prediction.",
+  "terminal": {
+    "_note": "Floating-window terminal (HUD > Floating Window > Content: Terminal): a real shell in a pty rendered by the HUD. shell empty = $SHELL (fallback /bin/bash).",
+    "shell": "",
+    "cols": 80,
+    "rows": 24
+  },
   "hud": {
+    "float_window": {
+      "_note": "World-pinned floating window (HUD > Floating Window). content 0 = terminal, 1 = phone mirror; width_deg = angular width. Show/pin/keyboard focus are runtime toggles in the menu.",
+      "content": 0,
+      "width_deg": 30.0
+    },
     "attitude_indicator": {
       "_note": "Fighter-style attitude indicator overlay (HUD > Attitude Indicator). Reads the calibrated euler of the selected IMU source, so PIT/YAW/ROL match the IMU Live Readout. full=false shows just horizon + waterline + readouts; size is the diameter as a fraction of screen height; per_eye=true draws one instrument per SBS eye half (false = single, centered - for 2D/mirror modes); text_scale multiplies the readout fonts.",
       "enabled": false,

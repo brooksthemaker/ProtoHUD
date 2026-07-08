@@ -407,6 +407,9 @@ struct MenuBuildContext {
     std::function<void()>        imu_cal_start;
     std::function<void()>        imu_cal_cancel;
     std::function<std::string()> imu_cal_status;
+    // Floating-window terminal: spawn a fresh shell (HUD > Floating Window >
+    // Restart Terminal). Main owns the PtyTerminal.
+    std::function<void()>        term_restart;
     std::function<void(bool)> pf_set_weather_effects;
     bool* pf_weather_effects_p = nullptr;
     // Temp Effects - ambient frost / heat shimmer driven by the live outdoor
