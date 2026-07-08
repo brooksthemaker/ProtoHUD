@@ -396,8 +396,10 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
 
     draw_map_overlay(nvg_, s, fw, fh);
     // The expanded map can optionally hide the info panel (its data is in the sidebar).
-    if (!(s.map_overlay.expanded && s.expanded_hide_info))
-        draw_info_panel(nvg_, s, fw, fh);
+    if (!(s.map_overlay.expanded && s.expanded_hide_info)) {
+        if (s.info_pin.pinned) draw_info_panel_pinned(nvg_, s, fw, fh);
+        else                   draw_info_panel(nvg_, s, fw, fh);
+    }
     if (s.attitude.enabled)
         draw_attitude_indicator(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
@@ -1058,6 +1060,45 @@ static void draw_status_glyph(NVGcontext* vg, StatusGlyph g,
 // A configurable region (mirroring the minimap on the opposite side) that auto-
 // cycles through glanceable widgets: analog clock, notifications, schedule, weather.
 // Drawn once per frame (mono overlay), so the dwell timer ticks here safely.
+// World-pinned info panel: draw the panel once per SBS eye half in eye-local
+// coordinates, offset by the angular delta between the pin anchor and the
+// current head pose (attitude_pose — the selected IMU's calibrated euler)
+// and counter-rotated by head roll about the view center, so the panel holds
+// its place in the world as the head moves. Small-angle reprojection —
+// exact enough inside the glasses' FOV; fov_deg calibrates deg → px (if the
+// panel slides as you turn, adjust HUD > Info-Panel Module > Display FOV).
+void HudRenderer::draw_info_panel_pinned(NVGcontext* vg, const AppState& s,
+                                         float fw, float fh) {
+    const float eye_w = fw * 0.5f;
+    const float ppd   = eye_w / std::clamp(s.info_pin.fov_deg, 20.f, 90.f);
+    auto circ = [](float d) {
+        while (d > 180.f) d -= 360.f;
+        while (d < -180.f) d += 360.f;
+        return d;
+    };
+    // Head right → the world (and the pinned panel) slides left; look up →
+    // it slides down. If a mounting reverses an axis, flip the sign here.
+    const float dyaw = circ(s.attitude_pose.yaw - s.info_pin.yaw);
+    if (std::fabs(dyaw) > 100.f) return;                 // roughly behind you
+    const float dx = -dyaw * ppd;
+    const float dy = (s.attitude_pose.pitch - s.info_pin.pitch) * ppd;
+    const float roll_rad = s.attitude_pose.roll * 3.14159265f / 180.f;
+    for (int eye = 0; eye < 2; ++eye) {
+        const float ox = eye * eye_w;
+        nvgSave(vg);
+        // Keep the shifted panel inside this eye's half. (The panel's own
+        // circular widget clip replaces this scissor for its interior, but
+        // that clip is bounded to the widget disc, so cross-seam bleed is
+        // at most the sliver of a disc crossing the edge.)
+        nvgIntersectScissor(vg, ox, 0.f, eye_w, fh);
+        nvgTranslate(vg, ox + eye_w * 0.5f, fh * 0.5f);  // eye center
+        nvgRotate(vg, -roll_rad);                        // stay world-level
+        nvgTranslate(vg, dx - eye_w * 0.5f, dy - fh * 0.5f);
+        draw_info_panel(vg, s, eye_w, fh);               // eye-local layout
+        nvgRestore(vg);
+    }
+}
+
 void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, float fh) {
     const InfoPanelConfig& cfg = s.info_panel;
     if (!cfg.enabled) return;

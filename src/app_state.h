@@ -825,6 +825,20 @@ struct AppState {
     // bno08x.head_tracking owns imu_pose.
     ImuPose attitude_pose;
 
+    // World-pinned info panel (HUD > Info-Panel Module > Pin In Space).
+    // Pinning captures the head yaw/pitch; every frame the panel is drawn
+    // per SBS eye, offset by the angular delta from attitude_pose and
+    // counter-rolled, so it holds its place in the world as the head moves.
+    // fov_deg is the per-eye horizontal FOV used to convert deg → px
+    // (persisted; pinned state itself is runtime-only).
+    struct SpacePin {
+        bool  pinned  = false;
+        float yaw     = 0.f;     // anchor head pose at pin time (deg)
+        float pitch   = 0.f;
+        float fov_deg = 43.f;    // per-eye horizontal FOV of the glasses
+    };
+    SpacePin info_pin;
+
     // ── IMU source selection ────────────────────────────────────────────────
     // The HUD has three possible heading sources at runtime: the BNO055
     // (best — on-chip 9-DOF fusion), the MPU9250 (compass with software

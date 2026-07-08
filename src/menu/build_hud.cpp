@@ -1547,6 +1547,29 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
     };
     std::vector<MenuItem> info_panel_menu = {
         // (Always visible for now — enable is forced on in apply_hud_dock, like the minimap.)
+        with_desc(toggle("Pin In Space",
+            [&state]{ return state.info_pin.pinned; },
+            [&state](bool v){
+                if (v) {
+                    // Capture the current head pose as the world anchor.
+                    state.info_pin.yaw   = state.attitude_pose.yaw;
+                    state.info_pin.pitch = state.attitude_pose.pitch;
+                }
+                state.info_pin.pinned = v;
+            }),
+            "Pin the info panel where you're looking RIGHT NOW: it stays "
+            "put in the world as you turn your head (drawn per eye, level "
+            "with the horizon) instead of riding along head-locked. Uses "
+            "the selected IMU's head pose. Toggle off to bring it back "
+            "on-screen."),
+        with_desc(slider("Display FOV", 25.f, 75.f, 1.f, "\xc2\xb0",
+            [&state]{ return state.info_pin.fov_deg; },
+            [&state](float v){ state.info_pin.fov_deg = v; }),
+            "Per-eye horizontal field of view of the glasses — calibrates "
+            "how far pinned content moves per degree of head turn. Pin the "
+            "panel, turn your head slowly: if the panel slides WITH your "
+            "head, raise this; if it overshoots against you, lower it. "
+            "~43\xc2\xb0 for VITURE One/Pro."),
         slider("Cycle Seconds", 2.f, 30.f, 1.f, "s",
             [&state]{ return state.info_panel.cycle_sec; },
             [&state](float v){ state.info_panel.cycle_sec = v; }),

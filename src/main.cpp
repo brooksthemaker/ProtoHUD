@@ -2201,6 +2201,13 @@ int main(int argc, char* argv[]) {
     }
     state.skip_landing        = jval(cfg.contains("landing") ? cfg["landing"] : json::object(),
                                      "skip", false);
+    const json jdisp2 = cfg.contains("display") && cfg["display"].is_object()
+                      ? cfg["display"] : json::object();
+    state.info_pin.fov_deg = std::clamp(jval(jdisp2, "fov_deg", 43.0f), 20.f, 90.f);
+    // Timewarp pose prediction horizon (ms). Covers pose age + render +
+    // scan-out; 0 disables extrapolation.
+    const float tw_predict_ms =
+        std::clamp(jval(jdisp2, "timewarp_predict_ms", 12.0f), 0.f, 50.f);
     state.expanded_show_debug = jhud.value("expanded_show_debug", false);
     state.expanded_hide_info  = jhud.value("expanded_hide_info", false);
     state.scheduler_lead_min  = sched_lead_min;   // loaded above, applied now that state exists
@@ -5234,6 +5241,7 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["attitude_indicator"]["per_eye"]    = state.attitude.per_eye;
         cfg["hud"]["attitude_indicator"]["text_scale"] = state.attitude.text_scale;
         cfg["hud"]["attitude_indicator"]["smooth"]     = state.attitude.smooth;
+        cfg["display"]["fov_deg"]                      = state.info_pin.fov_deg;
         cfg["landing"]["skip"]            = state.skip_landing;
         cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
         cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
@@ -6773,6 +6781,7 @@ int main(int argc, char* argv[]) {
             snap.compass_tape       = state.compass_tape;
             snap.attitude           = state.attitude;
             snap.attitude_pose      = state.attitude_pose;
+            snap.info_pin           = state.info_pin;
             snap.legacy_hud         = state.legacy_hud;
             snap.imu_pose           = state.imu_pose;
             snap.focus_left         = state.focus_left;
@@ -7268,7 +7277,47 @@ int main(int argc, char* argv[]) {
         }
 
         // ── Composite or timewarp ─────────────────────────────────────────────
-        ImuPose current_pose = xr.get_latest_imu_pose();
+        // Freshest pose from the SAME source begin_frame recorded — the
+        // BNO086 when it owns head tracking, else the glasses IMU. (Mixing
+        // sources gave the warp deltas from two different references.)
+        ImuPose current_pose;
+        if (bno08x_owns_pose.load()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            current_pose = state.imu_pose;
+        } else {
+            current_pose = xr.get_latest_imu_pose();
+        }
+        // Predict the warp pose forward to display time (pose age + render +
+        // scan-out): angular velocity estimated from consecutive warp poses
+        // (EMA-smoothed, clamped) and extrapolated by timewarp_predict_ms.
+        // Cuts warp error from head_speed × pose_age to roughly sensor noise.
+        if (tw_predict_ms > 0.f) {
+            static ImuPose s_tw_prev{};
+            static bool    s_tw_have = false;
+            static double  s_tw_t    = 0.0;
+            static float   s_vr = 0.f, s_vp = 0.f, s_vy = 0.f;
+            const double now_s = glfwGetTime();
+            auto circ = [](float d) {
+                while (d > 180.f) d -= 360.f;
+                while (d < -180.f) d += 360.f;
+                return d;
+            };
+            if (s_tw_have) {
+                const double dts = now_s - s_tw_t;
+                if (dts > 0.0005 && dts < 0.1) {
+                    const float a = 0.5f;   // velocity EMA — calm the estimate
+                    s_vr += a * (circ(current_pose.roll  - s_tw_prev.roll)  / (float)dts - s_vr);
+                    s_vp += a * (circ(current_pose.pitch - s_tw_prev.pitch) / (float)dts - s_vp);
+                    s_vy += a * (circ(current_pose.yaw   - s_tw_prev.yaw)   / (float)dts - s_vy);
+                }
+            }
+            s_tw_prev = current_pose; s_tw_t = now_s; s_tw_have = true;
+            auto cv = [](float v) { return std::clamp(v, -500.f, 500.f); };
+            const float ps = tw_predict_ms * 0.001f;
+            current_pose.roll  += cv(s_vr) * ps;
+            current_pose.pitch += cv(s_vp) * ps;
+            current_pose.yaw   += cv(s_vy) * ps;
+        }
 
         if (snap.cam_single.enabled) {
             // Single-camera fill: draw one eye's (post-processed) feed to an

@@ -211,6 +211,7 @@ private:
     void draw_fps_nvg      (NVGcontext* vg, const AppState& snap, float fw, float fh);
     void draw_map_overlay  (NVGcontext* vg, const AppState& s, float fw, float fh);
     void draw_info_panel   (NVGcontext* vg, const AppState& s, float fw, float fh);
+    void draw_info_panel_pinned(NVGcontext* vg, const AppState& s, float fw, float fh);
     void draw_compass_ring (NVGcontext* vg, const AppState& s,
                             float cx, float cy, float radius, bool bold = false);
     void draw_map_expanded (NVGcontext* vg, const AppState& s, float fw, float fh);
