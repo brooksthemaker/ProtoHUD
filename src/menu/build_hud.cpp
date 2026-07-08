@@ -1643,6 +1643,16 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [&state]{ return state.attitude.size; },
             [&state](float v){ state.attitude.size = v; }),
             "Indicator diameter as a fraction of the screen height."),
+        with_desc(toggle("One Per Eye",
+            [&state]{ return state.attitude.per_eye; },
+            [&state](bool v){ state.attitude.per_eye = v; }),
+            "ON: draw one instrument per SBS eye half so 3D glasses fuse a "
+            "single centered instrument. OFF: one instrument centered on the "
+            "whole window \xe2\x80\x94 use for 2D / mirror display modes."),
+        with_desc(slider("Text Size", 0.5f, 2.0f, 0.1f, "x",
+            [&state]{ return state.attitude.text_scale; },
+            [&state](float v){ state.attitude.text_scale = v; }),
+            "Scales the PIT / YAW / ROL readouts and pitch-ladder numbers."),
     };
 
     std::vector<MenuItem> hud_menu = {

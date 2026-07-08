@@ -812,8 +812,16 @@ struct AppState {
         bool  full    = true;    // full: pitch ladder + bank arc + frame arcs;
                                  // off = minimal (waterline + horizon + readouts)
         float size    = 0.60f;   // indicator diameter as a fraction of screen height
+        bool  per_eye = true;    // one instrument per SBS eye half (3D glasses);
+                                 // off = a single instrument centered on the window
+        float text_scale = 1.0f; // readout / label font multiplier
     };
     AttitudeIndicatorCfg attitude;
+    // Pose shown by the attitude indicator: resolved each frame from the
+    // SELECTED IMU source (same switch as the face motion feed and compass),
+    // so it animates and matches the IMU Live Readout regardless of whether
+    // bno08x.head_tracking owns imu_pose.
+    ImuPose attitude_pose;
 
     // ── IMU source selection ────────────────────────────────────────────────
     // The HUD has three possible heading sources at runtime: the BNO055

@@ -2744,9 +2744,10 @@ void HudRenderer::draw_lora_messages(NVGcontext* vg, const AppState& s,
 // Fighter-style ADI overlay, centered on screen: earth-fixed pitch ladder +
 // horizon rotate with roll behind a fixed winged waterline symbol; a bank arc
 // rides the top and bare PIT / YAW / ROL readouts sit inside the lower half.
-// Pose comes from s.imu_pose — the calibrated head-tracking euler (post
-// Set Level / trim, pre motion-sensitivity scaling), so the numbers match the
-// GPIO > IMU Live Readout exactly. Lines follow the HUD Borders & Lines color.
+// Pose comes from s.attitude_pose — the calibrated euler of the SELECTED IMU
+// source (post Set Level / trim, pre motion-sensitivity scaling), resolved
+// per frame beside the face motion feed in main.cpp, so the numbers match
+// the GPIO > IMU Live Readout. Lines follow the HUD Borders & Lines color.
 
 // Stroke a line whose alpha fades from a0 (x0,y0) to a1 (x1,y1).
 static void adi_fade_line(NVGcontext* vg, float x0, float y0, float x1, float y1,
@@ -2762,15 +2763,19 @@ static void adi_fade_line(NVGcontext* vg, float x0, float y0, float x1, float y1
 
 void HudRenderer::draw_attitude_indicator(NVGcontext* vg, const AppState& s,
                                           float fw, float fh) {
-    // SBS framebuffer: the NVG overlay spans BOTH eye halves, so a single
-    // screen-centered draw would sit exactly on the eye seam and show up as
-    // a half-instrument at the edge of each eye. Like draw_fps_nvg, render
-    // once per eye half so the glasses fuse it into one centered instrument.
+    // SBS framebuffer: the NVG overlay spans BOTH eye halves. Per Eye draws
+    // one instrument per half (like draw_fps_nvg) so 3D glasses fuse a single
+    // centered instrument; with it off, one instrument sits at the window
+    // center — right for 2D/mirror display modes.
     const float eye_w = fw * 0.5f;
     const float R = std::clamp(s.attitude.size, 0.30f, 0.95f)
                   * std::min(eye_w, fh) * 0.45f;
-    for (int eye = 0; eye < 2; ++eye)
-        draw_attitude_eye(vg, s, eye * eye_w + eye_w * 0.5f, fh * 0.5f, R);
+    if (s.attitude.per_eye) {
+        for (int eye = 0; eye < 2; ++eye)
+            draw_attitude_eye(vg, s, eye * eye_w + eye_w * 0.5f, fh * 0.5f, R);
+    } else {
+        draw_attitude_eye(vg, s, fw * 0.5f, fh * 0.5f, R);
+    }
 }
 
 void HudRenderer::draw_attitude_eye(NVGcontext* vg, const AppState& s,
@@ -2778,11 +2783,14 @@ void HudRenderer::draw_attitude_eye(NVGcontext* vg, const AppState& s,
     const bool  full = s.attitude.full;
 
     // Defensive: a mid-tare sensor reset can briefly emit garbage — never
-    // hand NaN/Inf to NanoVG paths.
+    // hand NaN/Inf to NanoVG paths. attitude_pose is resolved per frame from
+    // the selected IMU source (see the motion feed in main.cpp), so it
+    // animates even when bno08x.head_tracking isn't feeding imu_pose.
     auto fin = [](float v) { return std::isfinite(v) ? v : 0.f; };
-    const float roll  = fin(s.imu_pose.roll);
-    const float pitch = fin(s.imu_pose.pitch);
-    const float yaw   = fin(s.imu_pose.yaw);
+    const float roll  = fin(s.attitude_pose.roll);
+    const float pitch = fin(s.attitude_pose.pitch);
+    const float yaw   = fin(s.attitude_pose.yaw);
+    const float ts    = std::clamp(s.attitude.text_scale, 0.5f, 2.0f);
     const ImU32 lc    = col_.glow_base;                    // Borders & Lines color
     // Level lock: within 2° of level on both axes the waterline brightens.
     const bool  locked = std::fabs(roll) < 2.f && std::fabs(pitch) < 2.f;
@@ -2810,7 +2818,7 @@ void HudRenderer::draw_attitude_eye(NVGcontext* vg, const AppState& s,
     // Pitch ladder (Full): rungs every 10° within reach, chevron caps bent
     // toward the horizon, nose-down rungs fragmented (dashed) per convention.
     if (full) {
-        nvg_set_font_mono(std::max(9.f, R * 0.10f));
+        nvg_set_font_mono(std::max(9.f, R * 0.10f * ts));
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
         for (int deg = -60; deg <= 60; deg += 10) {
             if (deg == 0) continue;
@@ -2929,7 +2937,7 @@ void HudRenderer::draw_attitude_eye(NVGcontext* vg, const AppState& s,
     // ROL right, YAW centered a step lower — fixed-width so digits don't
     // jitter, matching the IMU Live Readout values.
     {
-        nvg_set_font_mono(std::max(10.f, R * 0.115f));
+        nvg_set_font_mono(std::max(10.f, R * 0.115f * ts));
         char pb[24], rb[24], yb[24];
         snprintf(pb, sizeof(pb), "PIT %+06.1f", static_cast<double>(pitch));
         snprintf(rb, sizeof(rb), "ROL %+06.1f", static_cast<double>(roll));

@@ -2185,9 +2185,11 @@ int main(int argc, char* argv[]) {
     state.legacy_hud          = jhud.value("legacy_hud", true);
     if (jhud.contains("attitude_indicator") && jhud["attitude_indicator"].is_object()) {
         const auto& ja = jhud["attitude_indicator"];
-        state.attitude.enabled = ja.value("enabled", false);
-        state.attitude.full    = ja.value("full", true);
-        state.attitude.size    = std::clamp(ja.value("size", 0.60f), 0.30f, 0.95f);
+        state.attitude.enabled    = ja.value("enabled", false);
+        state.attitude.full       = ja.value("full", true);
+        state.attitude.size       = std::clamp(ja.value("size", 0.60f), 0.30f, 0.95f);
+        state.attitude.per_eye    = ja.value("per_eye", true);
+        state.attitude.text_scale = std::clamp(ja.value("text_scale", 1.0f), 0.5f, 2.0f);
     }
     state.skip_landing        = jval(cfg.contains("landing") ? cfg["landing"] : json::object(),
                                      "skip", false);
@@ -5213,9 +5215,11 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
         cfg["hud"]["legacy_hud"]          = state.legacy_hud;
-        cfg["hud"]["attitude_indicator"]["enabled"] = state.attitude.enabled;
-        cfg["hud"]["attitude_indicator"]["full"]    = state.attitude.full;
-        cfg["hud"]["attitude_indicator"]["size"]    = state.attitude.size;
+        cfg["hud"]["attitude_indicator"]["enabled"]    = state.attitude.enabled;
+        cfg["hud"]["attitude_indicator"]["full"]       = state.attitude.full;
+        cfg["hud"]["attitude_indicator"]["size"]       = state.attitude.size;
+        cfg["hud"]["attitude_indicator"]["per_eye"]    = state.attitude.per_eye;
+        cfg["hud"]["attitude_indicator"]["text_scale"] = state.attitude.text_scale;
         cfg["landing"]["skip"]            = state.skip_landing;
         cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
         cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
@@ -5921,6 +5925,30 @@ int main(int argc, char* argv[]) {
                     m_pitch = d.xr_pitch;
                     break;
                 case Src::None:
+                    break;
+                }
+                // Attitude-indicator pose: full euler from the SAME selected
+                // source, unscaled, so the instrument animates (and matches
+                // the Live Readout) even when bno08x.head_tracking is off and
+                // nothing is feeding imu_pose. MPU-9250 publishes no fused
+                // euler — heading stands in for yaw; unknown axes stay level.
+                switch (src) {
+                case Src::B86:
+                    state.attitude_pose = { d.b86_euler[0], d.b86_euler[1],
+                                            d.b86_euler[2] };
+                    break;
+                case Src::B55:
+                    state.attitude_pose = { d.bno_euler[1], d.bno_euler[2],
+                                            d.bno_euler[0] };
+                    break;
+                case Src::Mpu:
+                    state.attitude_pose = { 0.f, 0.f, state.imu_mpu.heading_deg };
+                    break;
+                case Src::Xr:
+                    state.attitude_pose = { d.xr_roll, d.xr_pitch, d.xr_yaw };
+                    break;
+                case Src::None:
+                    state.attitude_pose = state.imu_pose;   // hold the head-track pose
                     break;
                 }
             }
@@ -6692,6 +6720,7 @@ int main(int argc, char* argv[]) {
             snap.compass_bg_enabled = state.compass_bg_enabled;
             snap.compass_tape       = state.compass_tape;
             snap.attitude           = state.attitude;
+            snap.attitude_pose      = state.attitude_pose;
             snap.legacy_hud         = state.legacy_hud;
             snap.imu_pose           = state.imu_pose;
             snap.focus_left         = state.focus_left;

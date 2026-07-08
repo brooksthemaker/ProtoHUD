@@ -142,10 +142,12 @@
   },
   "hud": {
     "attitude_indicator": {
-      "_note": "Fighter-style attitude indicator overlay (HUD > Attitude Indicator). Reads the calibrated head-tracking pose, so PIT/YAW/ROL match the IMU Live Readout. full=false shows just horizon + waterline + readouts; size is the diameter as a fraction of screen height.",
+      "_note": "Fighter-style attitude indicator overlay (HUD > Attitude Indicator). Reads the calibrated euler of the selected IMU source, so PIT/YAW/ROL match the IMU Live Readout. full=false shows just horizon + waterline + readouts; size is the diameter as a fraction of screen height; per_eye=true draws one instrument per SBS eye half (false = single, centered - for 2D/mirror modes); text_scale multiplies the readout fonts.",
       "enabled": false,
       "full": true,
-      "size": 0.6
+      "size": 0.6,
+      "per_eye": true,
+      "text_scale": 1.0
     },
     "compass_height_px": 80,
     "compass_bottom_margin_px": 20,
