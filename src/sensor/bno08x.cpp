@@ -240,10 +240,21 @@ void Bno08x::service_loop() {
             // gravity-referenced) — the first cut of this did nothing. The
             // supported mechanism is the reorientation quaternion: pick R so
             // the CURRENT pose reads as yaw-only (out = R * raw), i.e.
-            // R = yawonly(now) * conj(now), then persist (sh2_persistTare
-            // stores the runtime reorientation to flash). Verified against
-            // the vendored euler.c: a pose mounted 30 deg roll / -20 deg
-            // pitch levels to exactly 0/0 with yaw preserved.
+            // R = yawonly(now) * conj(now).
+            //
+            // FIELD FIX: hardware showed roll/pitch flipping SIGN on each
+            // press (+30 -> -30 -> +30 ...) instead of zeroing. That is the
+            // signature of the firmware applying the commanded quaternion
+            // TWICE (R*R*now = tilt mirrored, and the next press computes a
+            // mirrored correction that flips it back — also why the water
+            // effect swapped pooling sides on every tare). So command
+            // sqrt(R) — half the rotation about the same axis — which lands
+            // exactly level under double application, is idempotent on
+            // repeat presses, and on a unit that applies it once still
+            // converges by halving the error each press. Sim-verified with
+            // the vendored euler.c (scratch harness level_half.c): 30 roll /
+            // -20 pitch / 40 yaw -> 0 / 0 / 40 with the old code's double
+            // application reproducing the observed sign flip.
             if (have_q_) {
                 float yw, pt, rl;
                 q_to_ypr(static_cast<float>(last_q_[0]), static_cast<float>(last_q_[1]),
@@ -259,6 +270,14 @@ void Bno08x::service_loop() {
                 R.x = c * x2 - s * y2;
                 R.y = c * y2 + s * x2;
                 R.z = c * z2 + s * w2;
+                // sqrt(R): normalize(R + identity) halves the rotation angle.
+                // (R.w ~ -1 would be a 180 deg mount correction with no unique
+                // half — fall back to R as-is rather than divide by ~0.)
+                const double hw = R.w + 1.0;
+                const double hn = std::sqrt(hw * hw + R.x * R.x + R.y * R.y + R.z * R.z);
+                if (hn > 1e-6) {
+                    R.w = hw / hn; R.x /= hn; R.y /= hn; R.z /= hn;
+                }
                 sh2_setReorientation(&R);
                 sh2_persistTare();
             }
