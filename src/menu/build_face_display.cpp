@@ -131,6 +131,9 @@ struct LayerCfg {
     float alpha = 0.85f;
     // Liquid viscosity for "water" (0 = thin/snappy, 1 = thick/sluggish).
     float viscosity = 0.15f;
+    // How strongly head motion excites waves (surface-continuity injection +
+    // jolt splashes + turn swish). 0 = the old rigid glide. Water only.
+    float wave_gain = 1.0f;
     // How strongly the submerged face glows back through the liquid, tinted
     // by it (0 = opaque liquid). Water only.
     float face_glow = 0.55f;
@@ -1095,6 +1098,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 layer["level"]      = L.level;
                 layer["alpha"]      = L.alpha;
                 layer["viscosity"]  = L.viscosity;
+                layer["wave_gain"]  = L.wave_gain;
                 layer["pitch_fill"] = L.pitch_fill;
                 layer["face_glow"]  = L.face_glow;
                 if (L.bubbles > 0) {
@@ -1139,6 +1143,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.level = jl.value("level", 0.4f);
             L.alpha = jl.value("alpha", 0.85f);
             L.viscosity = jl.value("viscosity", 0.15f);
+            L.wave_gain = jl.value("wave_gain", 1.0f);
             L.pitch_fill = jl.value("pitch_fill", 0.3f);
             L.face_glow = jl.value("face_glow", 0.55f);
             L.bubbles = jl.value("bubbles", 0);
@@ -1304,6 +1309,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [L](float v){ L->viscosity = v / 100.f; });
                 vis.visible_fn = [L]{ return L->effect == "water"; };
                 return vis;
+            })(),
+            // Waves — water only: how strongly head motion excites the
+            // surface (tilt slosh waves, jolt splashes, turn swish).
+            ([&]{
+                MenuItem wv = slider("Waves", 0.f, 200.f, 10.f, "%",
+                    [L]{ return L->wave_gain * 100.f; },
+                    [L](float v){ L->wave_gain = v / 100.f; });
+                wv.visible_fn = [L]{ return L->effect == "water"; };
+                return wv;
             })(),
             // Face Glow — water only: the submerged face shines back through
             // the liquid, tinted by it (eyes read through the water).

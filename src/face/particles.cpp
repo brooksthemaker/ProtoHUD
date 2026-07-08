@@ -1597,8 +1597,11 @@ public:
         // Container geometry: a volume-conserving rest surface (see
         // compute_rest) — the liquid pivots around the fill line as the head
         // tilts, pools corner-to-corner at high tilt and leaves the high side
-        // dry, like water in a real tank. The wave field rides on top.
+        // dry, like water in a real tank. The wave field rides on top, and
+        // rest-surface motion is injected into it (surface continuity), so
+        // every head movement makes real traveling waves.
         compute_rest();
+        inject_impulses(dt);
 
         // Surface dynamics: a 1-D wave-equation heightfield (see
         // step_heightfield) replaces the old rigid tilt-plane + global sine
@@ -1782,8 +1785,60 @@ private:
             ((sum / cw_) < m ? lo : hi) = o;
         }
         const double o = 0.5 * (lo + hi);
-        for (int x = 0; x < cw_; ++x)
-            rest_px_[x] = std::clamp(o + ((x + 0.5) - ccx) * s, 0.0, H);
+        // Surface continuity: the rest surface just moved (head motion), but
+        // real liquid doesn't teleport — inject the difference into the wave
+        // field so the ABSOLUTE surface stays where it was and sloshes its
+        // way to the new rest. Both surfaces hold the same volume, so the
+        // injection sums to ~zero and conservation is exact. wave_gain
+        // scales how much of the motion becomes waves (0 = old glide).
+        const double wgain = std::clamp(jnum(cfg_, "wave_gain", 1.0), 0.0, 2.0);
+        const bool   inject = wgain > 0.0 && (int)hf_.size() == cw_ && rest_init_;
+        for (int x = 0; x < cw_; ++x) {
+            const double nr = std::clamp(o + ((x + 0.5) - ccx) * s, 0.0, H);
+            if (inject) {
+                // 1.35: slight inertial overshoot — the free surface doesn't
+                // just stay put, it swings past, like real liquid.
+                const double d = std::clamp((rest_px_[x] - nr) * wgain * 1.35,
+                                            -H * 0.5, H * 0.5);
+                hf_[x] = std::clamp(hf_[x] + d, -nr, H - nr);
+            }
+            rest_px_[x] = nr;
+        }
+        rest_init_ = true;
+    }
+
+    // Impulse wave sources: vertical jolts splash the whole surface,
+    // fast turns push a traveling wave off the trailing wall.
+    void inject_impulses(double dt) {
+        if (hf_.empty() || rest_px_.empty()) return;
+        const double wgain = std::clamp(jnum(cfg_, "wave_gain", 1.0), 0.0, 2.0);
+        if (wgain <= 0.0) return;
+        // Jolt splash: g-deviation beyond ~0.12 g rains random dips, more and
+        // deeper the harder the hit (jump, landing, headbang).
+        const double jolt = std::fabs(motion_.accel_g - 1.0);
+        if (jolt > 0.12 && cw_ > 4) {
+            const double amt = std::min(jolt - 0.12, 0.8) * wgain;
+            const int n = 1 + (int)(amt * 6.0 * (cw_ / 64.0) * std::min(1.0, dt * 60.0));
+            for (int i = 0; i < n; ++i) {
+                const int x = irand(rng_, 1, cw_ - 2);
+                if (rest_px_[x] < 1.0) continue;               // dry side
+                const double d = frand(rng_, 0.8, 2.4) * (0.5 + amt);
+                hf_[x] -= d; hf_[x - 1] -= d * 0.5; hf_[x + 1] -= d * 0.5;
+            }
+        }
+        // Turn swish: a quick yaw sweep drags the liquid — velocity impulse
+        // at the trailing wall becomes a wave that travels across the tank.
+        const double yr = motion_.yaw_rate;
+        if (std::fabs(yr) > 50.0 && (int)hv_.size() == cw_ && cw_ > 6) {
+            const double push = std::clamp((std::fabs(yr) - 50.0) / 300.0, 0.0, 1.0)
+                                * 140.0 * wgain * dt;
+            const int wall = (yr > 0) ? 0 : cw_ - 1;
+            const int dir  = (yr > 0) ? 1 : -1;
+            for (int i = 0; i < 8 && i < cw_; ++i) {
+                const int x = wall + dir * i;
+                if (rest_px_[x] > 1.0) hv_[x] += push * (1.0 - i * 0.11);
+            }
+        }
     }
 
     void step_heightfield(double dt, double viscosity) {
@@ -1794,8 +1849,10 @@ private:
         const double c      = jnum(cfg_, "wave_speed", 2.0) * 22.0
                               * (1.0 - 0.55 * viscosity);
         const double c2     = c * c;
-        const double damp   = 1.2 + 6.0 * viscosity;
-        const double k_pull = 30.0;              // relax the deviation to zero
+        const double damp   = 1.0 + 6.0 * viscosity;
+        // Relaxation toward rest: soft enough that motion-injected waves
+        // survive to travel and reflect (that IS the slosh) before settling.
+        const double k_pull = 14.0;
         const double H      = (double)ch_;
         // Idle ripples + churn while sloshing: random micro-impulses that the
         // wave equation spreads into expanding rings.
@@ -1838,6 +1895,7 @@ private:
     double slosh_x_ = 0.0, slosh_v_  = 0.0;  // roll lean (px) + velocity
     double slosh_y_ = 0.0, slosh_vy_ = 0.0;  // pitch bob (px) + velocity
     bool   tilt_init_ = false;
+    bool   rest_init_ = false;               // first compute_rest done (no inject)
     std::vector<double> rest_px_;            // volume-conserving rest surface
     std::vector<Particle> bubbles_;
 };
