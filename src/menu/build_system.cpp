@@ -858,7 +858,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         std::map<int, std::vector<std::string>> claimants;
         std::map<int, int>                      spi_speed_hz;   // BCM → bus speed (for MOSI lines)
     };
-    auto gpio_pin_claims = [cfg_root, gpio_pins_p, gpio_slot_count]() -> PinClaims {
+    auto gpio_pin_claims_uncached = [cfg_root, gpio_pins_p, gpio_slot_count]() -> PinClaims {
         PinClaims pc;
         if (!cfg_root) return pc;
         const json& cfg = *cfg_root;
@@ -958,6 +958,20 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         }
         return pc;
     };
+    // Per-frame memo: the full-config walk above is invoked from label_fn /
+    // warn_fn / panel draws — up to 40× per frame on the pin-picker page —
+    // and its result only changes when the config changes. Cache it for the
+    // duration of one ImGui frame (config edits land next frame, invisible).
+    struct PinClaimsCache { int frame = -1; PinClaims pc; };
+    auto pin_claims_cache = std::make_shared<PinClaimsCache>();
+    auto gpio_pin_claims = [gpio_pin_claims_uncached, pin_claims_cache]() -> const PinClaims& {
+        const int f = ImGui::GetFrameCount();
+        if (pin_claims_cache->frame != f) {
+            pin_claims_cache->pc    = gpio_pin_claims_uncached();
+            pin_claims_cache->frame = f;
+        }
+        return pin_claims_cache->pc;
+    };
 
     // I²C peripheral list for the SDA/SCL hover tooltip. (addr, label).
     auto i2c_peripherals = [cfg_root]() -> std::vector<std::pair<int, std::string>> {
@@ -1050,7 +1064,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         return [gpio_pin_claims, i2c_peripherals, user_notes, rail_currents_mA,
                 gpvz_draw]
                (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-            const PinClaims claims = gpio_pin_claims();
+            const PinClaims& claims = gpio_pin_claims();
             const auto i2c         = i2c_peripherals();
             const auto notes       = user_notes();
             const auto [ma3, ma5]  = rail_currents_mA();
@@ -1378,7 +1392,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
     // simplicity (no menu picker for the location).
     auto export_pinout = [gpio_pin_claims, i2c_peripherals,
                           user_notes, rail_currents_mA]() {
-        const PinClaims pc       = gpio_pin_claims();
+        const PinClaims& pc      = gpio_pin_claims();
         const auto      i2c      = i2c_peripherals();
         const auto      notes    = user_notes();
         const auto [ma3, ma5]    = rail_currents_mA();
@@ -1505,7 +1519,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
     auto gpio_hw_claimants = [gpio_pin_claims](int bcm) -> std::vector<std::string> {
         std::vector<std::string> out;
         if (bcm < 0) return out;
-        PinClaims pc = gpio_pin_claims();
+        const PinClaims& pc = gpio_pin_claims();
         auto it = pc.claimants.find(bcm);
         if (it != pc.claimants.end())
             for (const auto& who : it->second)

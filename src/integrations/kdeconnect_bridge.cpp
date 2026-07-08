@@ -834,6 +834,12 @@ void KdeConnectBridge::worker() {
     };
 
     // Now-playing snapshot from the phone's media session (mprisremote plugin).
+    // Each property fetch is a blocking DBus round-trip, so while nothing is
+    // playing only isPlaying is re-checked and the last-known metadata is
+    // kept — the full title/artist/album/volume sweep resumes on any playing
+    // transition (which also covers track metadata on play).
+    bool        media_prev_playing = false;
+    MediaStatus media_prev;
     auto poll_media = [&]() {
         if (current_dev_id.empty()) return;
         const std::string mp =
@@ -845,15 +851,27 @@ void KdeConnectBridge::worker() {
         m.has_player = !m.player.empty();
         if (m.has_player) {
             m.playing = call_get_bool_prop(conn, mp.c_str(), kMprisIface, "isPlaying", false);
-            m.title   = call_get_str_prop(conn, mp.c_str(), kMprisIface, "title");
-            m.artist  = call_get_str_prop(conn, mp.c_str(), kMprisIface, "artist");
-            m.album   = call_get_str_prop(conn, mp.c_str(), kMprisIface, "album");
-            m.volume  = call_get_int_prop(conn, mp.c_str(), kMprisIface, "volume", -1);
-            if (m.title.empty()) {   // some versions only fill nowPlaying
-                std::string np = call_get_str_prop(conn, mp.c_str(), kMprisIface, "nowPlaying");
-                if (!np.empty()) m.title = np;
+            const bool same_ctx = !media_prev_playing && media_prev.has_player &&
+                                  media_prev.player == m.player;
+            if (!m.playing && !media_prev_playing && same_ctx) {
+                // Idle and unchanged — reuse the cached metadata.
+                m.title  = media_prev.title;
+                m.artist = media_prev.artist;
+                m.album  = media_prev.album;
+                m.volume = media_prev.volume;
+            } else {
+                m.title   = call_get_str_prop(conn, mp.c_str(), kMprisIface, "title");
+                m.artist  = call_get_str_prop(conn, mp.c_str(), kMprisIface, "artist");
+                m.album   = call_get_str_prop(conn, mp.c_str(), kMprisIface, "album");
+                m.volume  = call_get_int_prop(conn, mp.c_str(), kMprisIface, "volume", -1);
+                if (m.title.empty()) {   // some versions only fill nowPlaying
+                    std::string np = call_get_str_prop(conn, mp.c_str(), kMprisIface, "nowPlaying");
+                    if (!np.empty()) m.title = np;
+                }
             }
         }
+        media_prev_playing = m.playing;
+        media_prev         = m;
         std::lock_guard<std::mutex> lk(snap_mtx_);
         media_ = std::move(m);
     };

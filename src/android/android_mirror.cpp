@@ -237,12 +237,21 @@ bool AndroidMirror::navigate_to(const std::string& query) {
 }
 
 bool AndroidMirror::get_frame(GLuint& out) {
-    std::lock_guard<std::mutex> lk(slot_.mtx);
+    int w = 0, h = 0;
+    {
+        // Lock covers only the buffer swap — the GL upload happens outside it
+        // so the capture thread never blocks on a texture upload. The swapped-
+        // out buffer is recycled by the capture thread's next assign().
+        std::lock_guard<std::mutex> lk(slot_.mtx);
+        out = slot_.tex;
+        if (!slot_.dirty || slot_.buf.empty()) return false;
+        upload_buf_.swap(slot_.buf);
+        w = slot_.w;
+        h = slot_.h;
+        slot_.dirty = false;
+    }
+    upload_texture(slot_.tex, w, h, upload_buf_.data());   // tex: render thread only
     out = slot_.tex;
-    if (!slot_.dirty || slot_.buf.empty()) return false;
-    upload_texture(slot_.tex, slot_.w, slot_.h, slot_.buf.data());
-    out       = slot_.tex;
-    slot_.dirty = false;
     return true;
 }
 
@@ -507,12 +516,21 @@ void AndroidMirror::upload_texture(GLuint& tex, int w, int h, const uint8_t* rgb
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        slot_.tex_w = w;
-        slot_.tex_h = h;
     } else {
         glBindTexture(GL_TEXTURE_2D, tex);
     }
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    // Reallocate GPU storage only when the mirror resolution changes (device
+    // rotation); otherwise sub-image into the existing texture — a full
+    // glTexImage2D per frame reallocated ~10 MB of texture storage at up to
+    // 60 fps and could stall on the texture's prior use.
+    if (w != slot_.tex_w || h != slot_.tex_h) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        slot_.tex_w = w;
+        slot_.tex_h = h;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
+                        GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    }
     glBindTexture(GL_TEXTURE_2D, 0);
 }

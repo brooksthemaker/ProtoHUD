@@ -1153,10 +1153,13 @@ struct KeyRepeat {
 // ── GPIO poll (sysfs) ─────────────────────────────────────────────────────────
 // Called from main loop ~1 Hz. Reads each monitored pin via sysfs export path.
 static void poll_gpio_states(AppState& state) {
-    // Export unexported pins and read values
+    // Export + direction are one-time setup per pin — doing them on every poll
+    // cost 2 extra open/write/close triples per pin per second. Setup is
+    // retried whenever the value read fails (e.g. something unexported it).
+    static std::set<int> s_ready;
     for (auto& ps : state.gpio_states) {
-        // Try export (idempotent — ignore EBUSY)
-        {
+        if (!s_ready.count(ps.pin)) {
+            // Try export (idempotent — ignore EBUSY)
             int efd = open("/sys/class/gpio/export", O_WRONLY);
             if (efd >= 0) {
                 char buf[16];
@@ -1164,9 +1167,7 @@ static void poll_gpio_states(AppState& state) {
                 (void)write(efd, buf, n);
                 close(efd);
             }
-        }
-        // Set direction to "in" (idempotent)
-        {
+            // Set direction to "in"
             char path[64];
             snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", ps.pin);
             int dfd = open(path, O_WRONLY);
@@ -1174,6 +1175,7 @@ static void poll_gpio_states(AppState& state) {
                 (void)write(dfd, "in", 2);
                 close(dfd);
             }
+            s_ready.insert(ps.pin);
         }
         // Read value
         {
@@ -1187,6 +1189,7 @@ static void poll_gpio_states(AppState& state) {
                 close(vfd);
             } else {
                 ps.value = -1;
+                s_ready.erase(ps.pin);   // redo setup next poll
             }
         }
     }
@@ -6676,8 +6679,6 @@ int main(int argc, char* argv[]) {
             snap.health          = state.health;
             snap.knob            = state.knob;
             snap.audio           = state.audio;
-            snap.lora_nodes      = state.lora_nodes;
-            snap.lora_messages   = state.lora_messages;
             snap.compass_heading    = state.compass_heading;
             snap.compass_bg_enabled = state.compass_bg_enabled;
             snap.compass_tape       = state.compass_tape;
@@ -6689,7 +6690,6 @@ int main(int argc, char* argv[]) {
             snap.clock_cfg          = state.clock_cfg;
             snap.pp_cfg             = state.pp_cfg;
             snap.timer_alarm        = state.timer_alarm;
-            snap.scheduler_events   = state.scheduler_events;
             snap.scheduler_status   = state.scheduler_status;
             snap.scheduler_lead_min = state.scheduler_lead_min;
             snap.effects_cfg        = state.effects_cfg;
@@ -6705,7 +6705,6 @@ int main(int argc, char* argv[]) {
             snap.wifi               = state.wifi;
             snap.ping               = state.ping;
             snap.ssh                = state.ssh;
-            snap.bt_devices         = state.bt_devices;
             snap.serial_metrics     = state.serial_metrics;
             snap.camera_resolution  = state.camera_resolution;
             snap.camera_resolution_right = state.camera_resolution_right;
@@ -6719,13 +6718,27 @@ int main(int argc, char* argv[]) {
             snap.capture_request    = state.capture_request;
             snap.qr_scan_main       = state.qr_scan_main;
             snap.qr_scan_usb        = state.qr_scan_usb;
-            snap.notifs             = state.notifs;
-            snap.i2c_scan_results   = state.i2c_scan_results;
             snap.i2c_scan_busy      = state.i2c_scan_busy;
             snap.i2c_scan_bus       = state.i2c_scan_bus;
-            snap.gpio_states        = state.gpio_states;
-            memcpy(snap.lora_node_colors, state.lora_node_colors,
-                   sizeof(state.lora_node_colors));
+
+            // Heavy containers (deques/vectors of strings, std::function
+            // callbacks) change at ~1 Hz at most but their copy-assignments
+            // dominated this lock's hold time at 60+ fps. They only feed HUD
+            // widgets, so refresh them at 10 Hz — toasts draw from the LIVE
+            // queue below and stay instant.
+            static auto s_heavy_next = std::chrono::steady_clock::time_point{};
+            if (const auto now_hc = std::chrono::steady_clock::now(); now_hc >= s_heavy_next) {
+                s_heavy_next = now_hc + std::chrono::milliseconds(100);
+                snap.lora_nodes         = state.lora_nodes;
+                snap.lora_messages      = state.lora_messages;
+                snap.scheduler_events   = state.scheduler_events;
+                snap.bt_devices         = state.bt_devices;
+                snap.notifs             = state.notifs;
+                snap.i2c_scan_results   = state.i2c_scan_results;
+                snap.gpio_states        = state.gpio_states;
+                memcpy(snap.lora_node_colors, state.lora_node_colors,
+                       sizeof(state.lora_node_colors));
+            }
         }
 
         // ── Perf readout (TEMPORARY) — once/second fps so the post-process win

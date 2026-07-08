@@ -32,22 +32,38 @@ static std::string fmt_time(time_t t) {
     return buf;
 }
 
+// fmt_clock/fmt_date cache the formatted string per second — they're hit from
+// several per-frame draw sites but the text changes at most once a second, so
+// the localtime+strftime pair doesn't need to run 60+ times between changes.
+// (Render thread only, hence the bare statics.)
 static std::string fmt_clock(bool h24, bool seconds) {
+    static time_t s_at = 0; static bool s_h24 = false, s_sec = false;
+    static std::string s_out;
     time_t now = time(nullptr);
-    struct tm* t = localtime(&now);
-    char buf[32];
-    const char* fmt = h24 ? (seconds ? "%H:%M:%S" : "%H:%M")
-                           : (seconds ? "%I:%M:%S %p" : "%I:%M %p");
-    strftime(buf, sizeof(buf), fmt, t);
-    return buf;
+    if (now != s_at || h24 != s_h24 || seconds != s_sec) {
+        s_at = now; s_h24 = h24; s_sec = seconds;
+        struct tm* t = localtime(&now);
+        char buf[32];
+        const char* fmt = h24 ? (seconds ? "%H:%M:%S" : "%H:%M")
+                               : (seconds ? "%I:%M:%S %p" : "%I:%M %p");
+        strftime(buf, sizeof(buf), fmt, t);
+        s_out = buf;
+    }
+    return s_out;
 }
 
 static std::string fmt_date() {
+    static time_t s_at = 0;
+    static std::string s_out;
     time_t now = time(nullptr);
-    struct tm* t = localtime(&now);
-    char buf[32];
-    strftime(buf, sizeof(buf), "%a %b %d", t);
-    return buf;
+    if (now != s_at) {
+        s_at = now;
+        struct tm* t = localtime(&now);
+        char buf[32];
+        strftime(buf, sizeof(buf), "%a %b %d", t);
+        s_out = buf;
+    }
+    return s_out;
 }
 
 static std::string fmt_countdown(time_t end) {
@@ -1215,24 +1231,39 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         // right). Newest app first; App-type groups key on the sender/app name
         // (KDE Connect sets the title to the app), others on their kind.
         struct Grp { std::string key, icon; int total = 0, unread = 0; };
-        std::vector<Grp> groups;
+        // The grouping only changes when a notification arrives / is read /
+        // dismissed, but this draw runs every frame the widget is visible —
+        // rebuild the (string-allocating) group list only when a cheap
+        // integer signature over the queue changes. Render thread only.
+        static std::vector<Grp> groups;
+        static uint64_t s_sig = ~0ull;
+        uint64_t sig = 1469598103934665603ull;                  // FNV offset
         for (const auto& nt : s.notifs.items) {
-            if (nt.dismissed) continue;
-            std::string key;
-            switch (nt.type) {
-                case NotifType::App:
-                    key = !nt.title.empty() ? nt.title
-                        : (!nt.icon.empty() ? nt.icon : std::string("App")); break;
-                case NotifType::Alarm: key = "Alarms"; break;
-                case NotifType::Timer: key = "Timers"; break;
-                case NotifType::LoRa:  key = "LoRa";   break;
+            sig ^= nt.id ^ (uint64_t(nt.read) << 32) ^ (uint64_t(nt.dismissed) << 33)
+                 ^ (uint64_t(nt.type) << 34);
+            sig *= 1099511628211ull;                            // FNV prime
+        }
+        if (sig != s_sig) {
+            s_sig = sig;
+            groups.clear();
+            for (const auto& nt : s.notifs.items) {
+                if (nt.dismissed) continue;
+                std::string key;
+                switch (nt.type) {
+                    case NotifType::App:
+                        key = !nt.title.empty() ? nt.title
+                            : (!nt.icon.empty() ? nt.icon : std::string("App")); break;
+                    case NotifType::Alarm: key = "Alarms"; break;
+                    case NotifType::Timer: key = "Timers"; break;
+                    case NotifType::LoRa:  key = "LoRa";   break;
+                }
+                const std::string icon = !nt.icon.empty()
+                    ? nt.icon : std::string(notif_type_icon(nt.type));
+                Grp* g = nullptr;
+                for (auto& e : groups) if (e.key == key) { g = &e; break; }
+                if (!g) { groups.push_back({ key, icon, 0, 0 }); g = &groups.back(); }
+                g->total++; if (!nt.read) g->unread++;
             }
-            const std::string icon = !nt.icon.empty()
-                ? nt.icon : std::string(notif_type_icon(nt.type));
-            Grp* g = nullptr;
-            for (auto& e : groups) if (e.key == key) { g = &e; break; }
-            if (!g) { groups.push_back({ key, icon, 0, 0 }); g = &groups.back(); }
-            g->total++; if (!nt.read) g->unread++;
         }
 
         if (groups.empty()) {
