@@ -81,6 +81,13 @@ struct CoprocConfig {
     std::map<int, GpioFunc> short_map;      // button id → short-press function
     std::map<int, GpioFunc> long_map;       // button id → long-press function
 
+    // TTP223 touch-pad map (firmware "BOOP <idx> <1|0>" from the pre-assigned
+    // touch pins). Pads whose index matches a boop ZONE electrode fire that
+    // zone (snout/cheek behavior); any pad mapped here ALSO fires this
+    // GpioFunc on touch-down — so up to 6 pads can be boop zones, extra
+    // buttons, or both. Unmapped, un-zoned pads do nothing.
+    std::map<int, GpioFunc> touch_map;      // touch pad idx → function
+
     // Physical pin map pushed to the firmware on connect (order = button id).
     // Empty = leave the firmware on its compiled-in config.h defaults.
     std::vector<CoprocPin>  pins;
@@ -122,6 +129,16 @@ public:
     // whole line per write() call, like every other sender on this link.
     void send_fan_duty(int zone, int duty_pct);
 
+    // ── Peripheral TEST verbs (pre-assigned pins; see firmware config.h) ─────
+    // Servo test channel: 0-180 degrees, or -1 = off/detach ("SERVO ch off").
+    void send_servo(int ch, int deg);
+    // WS2812 test zone: solid fill ("LEDZ r g b [count]"); 0/0/0 = off.
+    void send_led_zone(int r, int g, int b, int count = -1);
+    // One-shot ADC report: request, then poll adc_result() for
+    // "ch0 <mV>mV  ch1 <mV>mV  ch2 <mV>mV".
+    void request_adc();
+    std::string adc_result() const;
+
 private:
     void reader_loop();                       // transport read + reconnect loop
     void on_line(const std::string& line);    // parse one framed message → dispatch
@@ -137,6 +154,8 @@ private:
     bool                          pins_pushed_ = false;  // once per connection
     mutable std::mutex            i2c_mtx_;
     std::string                   i2c_result_ = "not scanned";  // last I2CSCAN reply
+    mutable std::mutex            adc_mtx_;
+    int                           adc_mv_[3] = { -1, -1, -1 };  // last ADC replies
 
     // Peripheral hub state (see set_boop_handler / coproc_temp above).
     std::function<void(int, bool)> boop_fn_;

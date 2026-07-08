@@ -197,6 +197,60 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
             "the coprocessor replies."));
     }
 
+    // Peripheral Test — exercise the pre-assigned test pins (servos GP6-9,
+    // WS2812 zone GP22, ADC GP26-28, TTP223 touch GP0/1/12/16/17/18; see
+    // firmware/button_coproc/pico/include/config.h).
+    if (ctx.coproc_servo) {
+        std::vector<MenuItem> pt;
+        for (int ch = 0; ch < 4; ++ch) {
+            auto pos = std::make_shared<float>(90.f);
+            char nm[16]; snprintf(nm, sizeof(nm), "Servo %d", ch + 1);
+            pt.push_back(with_desc(slider(nm, 0.f, 180.f, 5.f, "\xc2\xb0",
+                [pos]{ return *pos; },
+                [pos, ch, sv = ctx.coproc_servo](float v){
+                    *pos = v; if (sv) sv(ch, (int)v);
+                }),
+                "Drive the test servo live (GP6-9 = channels 1-4). The GPIO "
+                "doubles as a button slot: it becomes a servo on the first "
+                "command and stays one until the coprocessor reboots. Servo "
+                "V+ must come from an external 5-6 V supply, grounds common."));
+        }
+        pt.push_back(with_desc(leaf("All Servos Off",
+            [sv = ctx.coproc_servo]{ if (sv) for (int c = 0; c < 4; ++c) sv(c, -1); }),
+            "Detach all four test channels (stops holding torque)."));
+        if (ctx.coproc_led_zone) {
+            struct Sw { const char* name; int r, g, b; };
+            static constexpr Sw kSw[] = {
+                { "LED Zone: Off",   0,   0,   0 }, { "LED Zone: White", 255, 255, 255 },
+                { "LED Zone: Red", 255,   0,   0 }, { "LED Zone: Green",   0, 255,   0 },
+                { "LED Zone: Blue",  0,   0, 255 },
+            };
+            for (const auto& sw : kSw)
+                pt.push_back(with_desc(leaf(sw.name,
+                    [lz = ctx.coproc_led_zone, sw]{ if (lz) lz(sw.r, sw.g, sw.b, -1); }),
+                    "Fill the WS2812 test strip on GP22 (level-shift for long "
+                    "strips; strip length set in firmware config.h)."));
+        }
+        if (ctx.coproc_adc_read) {
+            pt.push_back(with_desc(leaf("Read ADC Now",
+                [rd = ctx.coproc_adc_read]{ if (rd) rd(); }),
+                "One-shot reading of the three test ADC inputs "
+                "(GP26/27/28 = ch0-2, 0-3300 mV)."));
+            MenuItem ar = leaf("ADC", []{});
+            ar.label_fn = [get = ctx.coproc_adc_result]{
+                return std::string("ADC: ") + (get ? get() : std::string("n/a"));
+            };
+            pt.push_back(with_desc(std::move(ar),
+                "Millivolts per channel from the last Read ADC Now."));
+        }
+        out.push_back(with_desc(submenu("Peripheral Test", std::move(pt)),
+            "Exercise the pre-assigned test pins for the planned peripherals: "
+            "4 servo channels (GP6-9), a WS2812 LED zone (GP22) and 3 ADC "
+            "inputs (GP26-28). TTP223 touch pads (GP0/1/12/16/17/18) test "
+            "themselves \xe2\x80\x94 touching one fires its boop zone / "
+            "mapped function. See docs/wiring-guide.md."));
+    }
+
     if (!ctx.coproc_cfg_p) return out;    // the Pins editor needs the live config
 
     input::CoprocConfig* C    = ctx.coproc_cfg_p;

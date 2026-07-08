@@ -21,6 +21,8 @@
 
 #include <Arduino.h>
 #include <Wire.h>    // I2CSCAN bus test (core lib, no extra dependency)
+#include <Servo.h>   // servo TEST channels (bundled with arduino-pico)
+#include <Adafruit_NeoPixel.h>   // WS2812 TEST zone (see platformio.ini)
 #include "config.h"
 #ifdef VOICE_CHANGER
 #include "voice.h"   // optional core1 voice changer (build with -DVOICE_CHANGER)
@@ -111,6 +113,102 @@ Button   g_btn[kMaxButtons];
 
 uint32_t g_last_ping = 0;
 bool     g_was_connected = false;   // tracks the USB CDC (DTR) edge for re-HELLO
+
+int split_ws(const String& s, String* out, int maxn);   // defined below
+
+// ── Peripheral TEST state (pre-assigned pins — see config.h) ─────────────────
+// TTP223 touch pads: plain GPIO, always compiled. Debounced edges stream up as
+// "BOOP <idx> <1|0>" so the Pi-side zone/function mapping is transport-agnostic.
+struct Touch {
+    bool stable = false;      // debounced touched state
+    bool raw    = false;
+    uint32_t edge_ms = 0;
+};
+Touch g_touch[6];
+
+// Servo test channels — attach lazily on the first SERVO command; a servo pin
+// shared with a button silently retires that button until reboot/APPLY.
+Servo g_servo[4];
+bool  g_servo_on[4] = {};
+
+// WS2812 test zone — constructed lazily on the first LEDZ command.
+Adafruit_NeoPixel* g_ledz = nullptr;
+
+void touch_setup() {
+    for (size_t i = 0; i < 6; ++i)
+        if (kTouchPins[i] >= 0)
+            pinMode(kTouchPins[i], kTouchActiveHigh ? INPUT_PULLDOWN : INPUT_PULLUP);
+}
+
+void poll_touch(uint32_t now) {
+    for (size_t i = 0; i < 6; ++i) {
+        if (kTouchPins[i] < 0) continue;
+        Touch& t = g_touch[i];
+        const bool high = (digitalRead(kTouchPins[i]) == HIGH);
+        const bool raw  = kTouchActiveHigh ? high : !high;     // true = touched
+        if (raw != t.raw) { t.raw = raw; t.edge_ms = now; }
+        if ((now - t.edge_ms) < kTouchDebounceMs) continue;
+        if (raw != t.stable) {
+            t.stable = raw;
+            Serial.print("BOOP "); Serial.print(i);
+            Serial.println(raw ? " 1" : " 0");
+        }
+    }
+}
+
+// "SERVO <ch> <0-180 | off>" — drive a test servo. Attaching claims the pin
+// from the button scanner (see poll loop guard).
+void servo_line(const String& line) {
+    String t[3];
+    if (split_ws(line, t, 3) < 3) return;
+    const int ch = t[1].toInt();
+    if (ch < 0 || ch >= 4 || kServoPins[ch] < 0) return;
+    if (t[2] == "off") {
+        if (g_servo_on[ch]) g_servo[ch].detach();
+        // pin stays retired from button duty until reboot/APPLY (predictable)
+        return;
+    }
+    const int deg = constrain(t[2].toInt(), 0, 180);
+    if (!g_servo_on[ch]) { g_servo[ch].attach(kServoPins[ch]); g_servo_on[ch] = true; }
+    g_servo[ch].write(deg);
+}
+
+// True while any servo channel has claimed this GPIO — the button poller skips it.
+bool gp_claimed_by_servo(uint8_t gp) {
+    for (int ch = 0; ch < 4; ++ch)
+        if (g_servo_on[ch] && kServoPins[ch] == (int8_t)gp) return true;
+    return false;
+}
+
+// "LEDZ <r> <g> <b> [count]" — fill the test strip with one color (0 0 0 = off).
+void ledz_line(const String& line) {
+    if (kLedZonePin < 0) return;
+    String t[5];
+    const int nt = split_ws(line, t, 5);
+    if (nt < 4) return;
+    const int r = constrain(t[1].toInt(), 0, 255);
+    const int g = constrain(t[2].toInt(), 0, 255);
+    const int b = constrain(t[3].toInt(), 0, 255);
+    const int n = (nt >= 5) ? constrain(t[4].toInt(), 1, 300) : kLedZoneCount;
+    if (!g_ledz || g_ledz->numPixels() != (uint16_t)n) {
+        delete g_ledz;
+        g_ledz = new Adafruit_NeoPixel(n, kLedZonePin, NEO_GRB + NEO_KHZ800);
+        g_ledz->begin();
+    }
+    for (int i = 0; i < n; ++i) g_ledz->setPixelColor(i, g_ledz->Color(r, g, b));
+    g_ledz->show();
+}
+
+// "ADCREAD" — one-shot report of the three test ADC channels.
+void adc_read() {
+    analogReadResolution(12);
+    for (int ch = 0; ch < 3; ++ch) {
+        const int raw = analogRead(kAdcPins[ch]);
+        const long mv = (long)raw * 3300 / 4095;
+        Serial.print("ADC "); Serial.print(ch); Serial.print(' ');
+        Serial.print(raw);    Serial.print(' '); Serial.println(mv);
+    }
+}
 
 // Seed the live map from config.h's compiled-in defaults.
 void load_default_pins() {
@@ -249,6 +347,9 @@ void handle_line(const String& line) {
     if (line.startsWith("SPI ")) { max_bridge_line(line); return; }  // high-rate; first
 #endif
     if (line.startsWith("I2CSCAN")) { i2c_scan(line); return; }
+    if (line.startsWith("SERVO "))  { servo_line(line); return; }
+    if (line.startsWith("LEDZ "))   { ledz_line(line);  return; }
+    if (line == "ADCREAD")          { adc_read();       return; }
 #ifdef PERIPHERAL_HUB
     if (periph_handle_command(line)) return;  // FAN <zone> <duty%>
 #endif
@@ -319,6 +420,7 @@ void setup() {
     Serial.begin(115200);                       // USB CDC (baud is nominal for CDC)
     load_default_pins();                        // config.h defaults; Pi may re-push
     apply_pins();
+    touch_setup();                              // TTP223 test pads (config.h)
 #ifdef MAX_BRIDGE
     max_bridge_setup();                         // MAX7219 USB→SPI bridge (SPI1)
 #endif
@@ -339,7 +441,11 @@ void loop() {
     }
     g_was_connected = connected;
 
-    for (size_t i = 0; i < g_npins; ++i) poll_button(i, now);
+    for (size_t i = 0; i < g_npins; ++i) {
+        if (gp_claimed_by_servo(g_pins[i].gp)) continue;   // slot became a servo
+        poll_button(i, now);
+    }
+    poll_touch(now);
 
     if (connected && (now - g_last_ping) >= kPingMs) {
         g_last_ping = now;

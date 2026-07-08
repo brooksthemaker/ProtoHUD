@@ -180,7 +180,7 @@ void CoprocInputs::on_line(const std::string& line) {
         i2c_result_ = (pos < line.size()) ? line.substr(pos) : std::string("none");
         return;
     }
-    if (cmd == "BOOP") {  // "BOOP <electrode> <1|0>" — touch edge from the pads
+    if (cmd == "BOOP") {  // "BOOP <electrode> <1|0>" — touch edge (MPR121 or TTP223)
         const std::string e_s = next_tok(line, pos);
         const std::string s_s = next_tok(line, pos);
         if (e_s.empty() || s_s.empty()) return;
@@ -188,7 +188,28 @@ void CoprocInputs::on_line(const std::string& line) {
         try { e = std::stoi(e_s); } catch (...) { return; }
         if (e < 0 || e > 11) return;
         connected_.store(true);
-        if (boop_fn_) boop_fn_(e, s_s == "1");
+        const bool touched = (s_s == "1");
+        if (boop_fn_) boop_fn_(e, touched);
+        // Touch pads can double as buttons: fire the mapped function on the
+        // touch-down edge (release does nothing, like a SHORT press).
+        if (touched) {
+            const auto it = cfg_.touch_map.find(e);
+            if (it != cfg_.touch_map.end() && it->second != GpioFunc::None && dispatch_)
+                dispatch_(it->second);
+        }
+        return;
+    }
+    if (cmd == "ADC") {   // "ADC <ch> <raw> <mv>" — ADCREAD reply, one per channel
+        const std::string c_s = next_tok(line, pos);
+        (void)next_tok(line, pos);                     // raw counts (unused here)
+        const std::string m_s = next_tok(line, pos);
+        if (c_s.empty() || m_s.empty()) return;
+        int ch = -1; long mv = -1;
+        try { ch = std::stoi(c_s); mv = std::stol(m_s); } catch (...) { return; }
+        if (ch < 0 || ch > 2 || mv < 0 || mv > 5000) return;
+        connected_.store(true);
+        std::lock_guard<std::mutex> lk(adc_mtx_);
+        adc_mv_[ch] = static_cast<int>(mv);
         return;
     }
     if (cmd == "TEMP") {  // "TEMP <rom16hex> <milli°C>" — one DS18B20 reading
@@ -256,6 +277,44 @@ void CoprocInputs::send_fan_duty(int zone, int duty_pct) {
     const std::string msg = "FAN " + std::to_string(zone) + " " +
                             std::to_string(duty_pct) + "\n";
     (void)::write(fd_, msg.data(), msg.size());
+}
+
+void CoprocInputs::send_servo(int ch, int deg) {
+    if (fd_ < 0 || ch < 0 || ch > 3) return;
+    const std::string msg = "SERVO " + std::to_string(ch) + " " +
+        (deg < 0 ? std::string("off")
+                 : std::to_string(deg > 180 ? 180 : deg)) + "\n";
+    (void)::write(fd_, msg.data(), msg.size());
+}
+
+void CoprocInputs::send_led_zone(int r, int g, int b, int count) {
+    if (fd_ < 0) return;
+    auto c8 = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
+    std::string msg = "LEDZ " + std::to_string(c8(r)) + " " +
+                      std::to_string(c8(g)) + " " + std::to_string(c8(b));
+    if (count > 0) msg += " " + std::to_string(count > 300 ? 300 : count);
+    msg += "\n";
+    (void)::write(fd_, msg.data(), msg.size());
+}
+
+void CoprocInputs::request_adc() {
+    if (fd_ < 0) return;
+    { std::lock_guard<std::mutex> lk(adc_mtx_); adc_mv_[0] = adc_mv_[1] = adc_mv_[2] = -1; }
+    const char* cmd = "ADCREAD\n";
+    (void)::write(fd_, cmd, 8);
+}
+
+std::string CoprocInputs::adc_result() const {
+    std::lock_guard<std::mutex> lk(adc_mtx_);
+    if (adc_mv_[0] < 0 && adc_mv_[1] < 0 && adc_mv_[2] < 0) return "no reading";
+    std::string out;
+    for (int ch = 0; ch < 3; ++ch) {
+        if (ch) out += "  ";
+        out += "ch" + std::to_string(ch) + " ";
+        out += adc_mv_[ch] < 0 ? std::string("--")
+                               : std::to_string(adc_mv_[ch]) + "mV";
+    }
+    return out;
 }
 
 void CoprocInputs::handle_button(int id, bool is_long) {

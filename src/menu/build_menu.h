@@ -470,6 +470,12 @@ struct MenuBuildContext {
     // last result (address list / "none" / "scanning…"). See CoprocInputs.
     std::function<void()>        coproc_i2c_scan;
     std::function<std::string()> coproc_i2c_result;
+    // Peripheral TEST verbs (pre-assigned test pins on the coprocessor —
+    // servos, WS2812 zone, ADC). Null when not wired.
+    std::function<void(int, int)>           coproc_servo;      // ch, deg (-1 = off)
+    std::function<void(int, int, int, int)> coproc_led_zone;   // r,g,b,count(-1=default)
+    std::function<void()>                   coproc_adc_read;
+    std::function<std::string()>            coproc_adc_result;
     // Live coprocessor config (pins + button maps) for the Pins visualizer/editor.
     // Edited in place, then persisted to cfg["inputs"]["coprocessor"] and re-pushed
     // via coproc_reload.

@@ -4075,6 +4075,19 @@ int main(int argc, char* argv[]) {
                     input::gpio_func_from_id(jb.value("long",  std::string("none")));
             }
         }
+        // TTP223 touch pads (firmware's pre-assigned touch pins, indices 0-5):
+        // map a pad index to any GpioFunc, fired on touch-down. Pads whose
+        // index matches a boop-zone electrode ALSO fire that zone (both work).
+        if (jc.contains("touch") && jc["touch"].is_object()) {
+            for (const auto& [k, v] : jc["touch"].items()) {
+                try {
+                    const int idx = std::stoi(k);
+                    if (idx >= 0 && idx <= 5 && v.is_string())
+                        coproc_cfg.touch_map[idx] =
+                            input::gpio_func_from_id(v.get<std::string>());
+                } catch (...) {}
+            }
+        }
         // Physical pin map (order = button id) pushed to the firmware on connect,
         // so a switch's GPIO / pull / polarity / backlight is HUD config, not a
         // reflash. Omit the block to leave the firmware on its config.h defaults.
@@ -4413,6 +4426,18 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_i2c_scan = [&]{ if (coproc_inputs) coproc_inputs->request_i2c_scan(); };
     menu_ctx.coproc_i2c_result = [&]() -> std::string {
         return coproc_inputs ? coproc_inputs->i2c_scan_result() : std::string("n/a");
+    };
+    // Peripheral Test verbs (servos / WS2812 zone / ADC on the pre-assigned
+    // test pins — GPIO > RP2350 GPIO Expander > Peripheral Test).
+    menu_ctx.coproc_servo = [&](int ch, int deg) {
+        if (coproc_inputs) coproc_inputs->send_servo(ch, deg);
+    };
+    menu_ctx.coproc_led_zone = [&](int r, int g, int b, int n) {
+        if (coproc_inputs) coproc_inputs->send_led_zone(r, g, b, n);
+    };
+    menu_ctx.coproc_adc_read = [&]{ if (coproc_inputs) coproc_inputs->request_adc(); };
+    menu_ctx.coproc_adc_result = [&]() -> std::string {
+        return coproc_inputs ? coproc_inputs->adc_result() : std::string("n/a");
     };
     menu_ctx.pf_glitch_p = &pf_glitch;
     menu_ctx.reactions = &reactions;

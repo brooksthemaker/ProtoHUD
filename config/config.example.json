@@ -199,6 +199,8 @@
       "device": "/dev/serial/by-id/usb-ProtoHUD_Buttons-if00",
       "_device_note": "Use a stable /dev/serial/by-id/... path matched on the coprocessor's USB serial string — NOT /dev/ttyACMn, which races with the Teensy/SmartKnob/RAK4631.",
       "baud": 115200,
+      "touch": {},
+      "_touch_note": "TTP223 touch pads on the coprocessor's pre-assigned touch pins (indices 0-5 = GP0/GP1/GP12/GP16/GP17/GP18; see firmware config.h). A pad whose INDEX matches a boop-zone electrode (inputs.boop) fires that zone; a pad mapped here fires the named function on touch-down (both can apply). Example: { \"3\": \"face_next\", \"4\": \"effect_next\", \"5\": \"menu_open\" }.",
       "i2c_bus": "/dev/i2c-1",
       "i2c_addr": 66,
       "irq_gpio": -1,

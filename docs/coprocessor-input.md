@@ -89,6 +89,9 @@ PINCFG APPLY                      # re-init pinModes + re-HELLO with the new cou
 SPI <cs> <hexbytes>               # MAX7219 relay: shift bytes out SPI1, pulse CS
 I2CSCAN [sda] [scl]               # probe I2C (default GP20/21); replies "I2C …"
 FAN <zone> <duty%>                # hold a fan PWM duty (peripheral hub)
+SERVO <ch> <deg|off>              # drive a test servo channel (GP6-9, ch 0-3)
+LEDZ <r> <g> <b> [count]          # fill the WS2812 test zone (GP22); 0 0 0 = off
+ADCREAD                           # one-shot ADC report; replies "ADC <ch> <raw> <mv>" x3
 ```
 
 ### Peripheral hub (`-DPERIPHERAL_HUB`) — boop, temps, fans
