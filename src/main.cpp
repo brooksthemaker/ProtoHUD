@@ -2184,12 +2184,19 @@ int main(int argc, char* argv[]) {
     state.compass_tape        = jhud.value("compass_tape", true);
     state.legacy_hud          = jhud.value("legacy_hud", true);
     if (jhud.contains("attitude_indicator") && jhud["attitude_indicator"].is_object()) {
-        const auto& ja = jhud["attitude_indicator"];
-        state.attitude.enabled    = ja.value("enabled", false);
-        state.attitude.full       = ja.value("full", true);
-        state.attitude.size       = std::clamp(ja.value("size", 0.60f), 0.30f, 0.95f);
-        state.attitude.per_eye    = ja.value("per_eye", true);
-        state.attitude.text_scale = std::clamp(ja.value("text_scale", 1.0f), 0.5f, 2.0f);
+        // .value() throws on a key present with the wrong type (e.g. a quoted
+        // number from a hand edit) — a bad entry shouldn't kill startup.
+        try {
+            const auto& ja = jhud["attitude_indicator"];
+            state.attitude.enabled    = ja.value("enabled", false);
+            state.attitude.full       = ja.value("full", true);
+            state.attitude.size       = std::clamp(ja.value("size", 0.60f), 0.30f, 0.95f);
+            state.attitude.per_eye    = ja.value("per_eye", true);
+            state.attitude.text_scale = std::clamp(ja.value("text_scale", 1.0f), 0.5f, 2.0f);
+        } catch (const nlohmann::json::exception& e) {
+            std::cerr << "[main] hud.attitude_indicator config ignored: " << e.what() << "\n";
+            state.attitude = {};
+        }
     }
     state.skip_landing        = jval(cfg.contains("landing") ? cfg["landing"] : json::object(),
                                      "skip", false);
@@ -5215,6 +5222,11 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
         cfg["hud"]["legacy_hud"]          = state.legacy_hud;
+        // A hand-edited config could hold attitude_indicator as a non-object;
+        // operator[] on it would then throw out of the save path. Reset first.
+        if (cfg["hud"].contains("attitude_indicator") &&
+            !cfg["hud"]["attitude_indicator"].is_object())
+            cfg["hud"].erase("attitude_indicator");
         cfg["hud"]["attitude_indicator"]["enabled"]    = state.attitude.enabled;
         cfg["hud"]["attitude_indicator"]["full"]       = state.attitude.full;
         cfg["hud"]["attitude_indicator"]["size"]       = state.attitude.size;

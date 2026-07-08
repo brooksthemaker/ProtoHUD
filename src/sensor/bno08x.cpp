@@ -348,6 +348,13 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     const float qy = val.un.arvrStabilizedRV.j;
     const float qz = val.un.arvrStabilizedRV.k;
 
+    // Reject degenerate quaternions at the source: around a tare / persist /
+    // hub reset the in-flight report can decode to a non-unit quaternion, and
+    // q_to_ypr's asin() then returns NaN — which would flow into everything
+    // downstream (attitude indicator, water slosh, face inertia, timewarp).
+    const float qn = qw * qw + qx * qx + qy * qy + qz * qz;
+    if (!std::isfinite(qn) || qn < 0.25f || qn > 4.0f) return;
+
     // Latest pose for level()'s reorientation math. Callbacks fire on the
     // service thread (sh2_service dispatches synchronously), the same thread
     // that consumes this in service_loop — no locking needed.
@@ -359,6 +366,8 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     // &yaw) here had them swapped, so the compass heading tracked the sensor's
     // ROLL — tilting the head spun the compass while turning moved "R".
     q_to_ypr(qw, qx, qy, qz, &yaw, &pitch, &roll);
+    if (!std::isfinite(yaw) || !std::isfinite(pitch) || !std::isfinite(roll))
+        return;                              // |asin arg| > 1 on a noisy sample
     // Manual trim: small additive corrections for residual lean (menu
     // sliders / config). Yaw trim is heading_offset below, as before.
     const float roll_deg  = roll  * kRad2Deg + roll_trim_.load();
