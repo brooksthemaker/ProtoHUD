@@ -98,6 +98,8 @@ public:
     void        set_motion(double heading_deg, double yaw_rate, double pitch_deg,
                            double roll_deg, double accel_g) override;
     void        set_mouth_shape(const std::string& shape) override;
+    void        set_mouth_blendshapes(const std::vector<float>& weights,
+                                      float confidence) override;
 
     // Expression-coupled effects: when enabled, the active particle effect is
     // swapped to a mood preset as the face expression changes (angry→fire,

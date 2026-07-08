@@ -10,6 +10,8 @@
 #include <vector>
 #include <opencv2/core.hpp>
 
+#include "mouth_blendshapes.h"
+
 namespace face {
 
 class FaceState;   // fwd
@@ -62,6 +64,15 @@ private:
     cv::Mat load_img(const std::string& path) const;
     cv::Mat blend_region(const cv::Mat& base, const cv::Mat& overlay,
                          const Region& region, double t) const;
+    // Alpha-over composite of overlay onto base, in place, clipped to region,
+    // with effective alpha = overlay_alpha * weight. Unlike blend_region's
+    // cross-fade this never washes out the base where the overlay is
+    // transparent, so several layers can be stacked (blendshape mouth).
+    void blend_over_region(cv::Mat& base, const cv::Mat& overlay,
+                           const Region& region, double weight) const;
+    // Region that clips a blendshape layer for the given side (Left/Right
+    // prefer mouth_left_/mouth_right_ when set, else fall back to mouth_).
+    const Region& region_for_side(MouthSide side) const;
 
     std::string folder_;
     int w_, h_;
@@ -88,7 +99,11 @@ private:
     // Viseme overlays keyed by stem (mouth_open / mouth_small / mouth_smile /
     // mouth_round). All optional — missing entries fall back to mouth_open.
     std::map<std::string, cv::Mat> mouth_shapes_;
+    // Optical blendshape layers keyed by face::MouthBlendshapeDef::stem. All
+    // optional — a missing layer contributes nothing to the stack.
+    std::map<std::string, cv::Mat> blend_layers_;
     Region   eye_left_, eye_right_, mouth_;
+    Region   mouth_left_, mouth_right_;   // optional per-side clip regions
 };
 
 } // namespace face

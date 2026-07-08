@@ -174,6 +174,17 @@ struct VoiceMouthConfig {
     float  viseme_small_max_hz = 2000.f;
 };
 
+// Manual driver for the optical mouth blendshape stack — exercises the render
+// path (FaceState::set_mouth_blendshapes → FaceLoader stack) with no Pi Zero
+// tracker attached. The future MouthTracker UART module replaces this as the
+// live source. weights are indexed by face::mouth_blendshapes(); sized lazily
+// when the menu is built.
+struct MouthTrackerTestConfig {
+    bool               enabled    = false;   // push weights at confidence below
+    float              confidence = 1.0f;    // [0,1]; 0 = renderer uses audio path
+    std::vector<float> weights;              // [0,1] per blendshape, contract order
+};
+
 // One boop-sensor zone's user-visible behaviour. The sensor reports zone
 // touches (no expression knowledge); main.cpp's on_boop callback reads this
 // to call IFaceController::trigger_boop with the per-zone expression. Indexed
@@ -923,6 +934,7 @@ struct AppState {
     float                boop_coalesce_window_s = 0.10f;
     LightSquintConfig    light_squint;
     VoiceMouthConfig     voice_mouth;
+    MouthTrackerTestConfig mouth_test;
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;        // left / primary eye
     CameraResolutionState camera_resolution_right;   // right eye (set independently)

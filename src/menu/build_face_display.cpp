@@ -78,6 +78,7 @@
 #include "profile_manager.h"
 #include "face/face_config.h"
 #include "face/face_image.h"
+#include "face/mouth_blendshapes.h"
 #include "face/eye_animations.h"
 #include "face/gif_player.h"
 #include "face/native_face_controller.h"
@@ -3549,6 +3550,63 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                   "Mic-driven mouth_open. FFT-based: speech-band RMS feeds an "
                   "envelope follower whose output drives face::set_audio() each "
                   "audio period (~5 ms)."));
+
+    // ── Mouth Tracker (Test) ─────────────────────────────────────────────────
+    // Manual driver for the optical mouth blendshape stack — proves the render
+    // path (set_mouth_blendshapes → FaceLoader stack) with no Pi Zero attached.
+    // The future MouthTracker UART module replaces these sliders as the live
+    // source. teensy is the active FaceProxy; only the native backend honours
+    // the blendshape stack (others no-op).
+    {
+        const size_t nbs = face::mouth_blendshape_count();
+        if (state.mouth_test.weights.size() != nbs)
+            state.mouth_test.weights.assign(nbs, 0.f);
+
+        // Push the current test vector to the face. When disabled, confidence 0
+        // makes the renderer fall back to the audio-driven mouth path.
+        auto push_mouth_test = [teensy, &state]() {
+            if (!teensy) return;
+            const float conf = state.mouth_test.enabled ? state.mouth_test.confidence : 0.f;
+            teensy->set_mouth_blendshapes(state.mouth_test.weights, conf);
+        };
+
+        std::vector<MenuItem> mt_menu = {
+            with_desc(toggle("Enabled",
+                [&state]{ return state.mouth_test.enabled; },
+                [&state, push_mouth_test](bool v){
+                    state.mouth_test.enabled = v;
+                    push_mouth_test();
+                }),
+                "Drive the mouth from these sliders instead of the mic. Turn "
+                "off to release the mouth back to the Voice (audio) path."),
+            with_desc(slider("Confidence", 0.f, 1.f, 0.05f, "",
+                [&state]{ return state.mouth_test.confidence; },
+                [&state, push_mouth_test](float v){
+                    state.mouth_test.confidence = v;
+                    push_mouth_test();
+                }),
+                "Global tracking confidence. Scales every layer; mirrors what "
+                "the real tracker sends per frame."),
+        };
+        const auto& defs = face::mouth_blendshapes();
+        for (size_t i = 0; i < defs.size(); ++i) {
+            mt_menu.push_back(slider(defs[i].coeff, 0.f, 1.f, 0.05f, "",
+                [&state, i]{
+                    return i < state.mouth_test.weights.size()
+                               ? state.mouth_test.weights[i] : 0.f;
+                },
+                [&state, i, push_mouth_test](float v){
+                    if (i < state.mouth_test.weights.size())
+                        state.mouth_test.weights[i] = v;
+                    push_mouth_test();
+                }));
+        }
+        face_display_menu.push_back(
+            with_desc(submenu("Mouth Tracker (Test)", std::move(mt_menu)),
+                      "Manual blendshape sliders to exercise the asymmetric "
+                      "mouth stack with no Pi Zero tracker. Needs blend_*.png "
+                      "layers in the active face folder to show."));
+    }
 
     // ── Accessory LEDs (cheekhubs + fins) ────────────────────────────────────
     // Per-zone pattern / color / breathe rate live in the AccessoryLeds
