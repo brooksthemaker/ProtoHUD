@@ -126,6 +126,9 @@ struct LayerCfg {
     float direction_deg = -1.f;
     // Liquid fill fraction for the "water" effect (0..1). Ignored by others.
     float level = 0.4f;
+    // Liquid opacity for "water" (0 = fully transparent, 1 = solid). The face
+    // and background read through the liquid as this drops.
+    float alpha = 0.85f;
     // Liquid viscosity for "water" (0 = thin/snappy, 1 = thick/sluggish).
     float viscosity = 0.15f;
     // How strongly the submerged face glows back through the liquid, tinted
@@ -1090,6 +1093,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 layer["intensity_from"] = L.intensity_from;
             if (L.effect == "water") {
                 layer["level"]      = L.level;
+                layer["alpha"]      = L.alpha;
                 layer["viscosity"]  = L.viscosity;
                 layer["pitch_fill"] = L.pitch_fill;
                 layer["face_glow"]  = L.face_glow;
@@ -1133,6 +1137,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.direction_from = jl.value("direction_from", std::string("none"));
             L.intensity_from = jl.value("intensity_from", std::string("none"));
             L.level = jl.value("level", 0.4f);
+            L.alpha = jl.value("alpha", 0.85f);
             L.viscosity = jl.value("viscosity", 0.15f);
             L.pitch_fill = jl.value("pitch_fill", 0.0f);
             L.face_glow = jl.value("face_glow", 0.55f);
@@ -1282,6 +1287,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [L](float v){ L->level = v / 100.f; });
                 lvl.visible_fn = [L]{ return L->effect == "water"; };
                 return lvl;
+            })(),
+            // Opacity — water only: how solid the liquid reads. Lower = more
+            // transparent, the face and background show through more.
+            ([&]{
+                MenuItem op = slider("Opacity", 10.f, 100.f, 5.f, "%",
+                    [L]{ return L->alpha * 100.f; },
+                    [L](float v){ L->alpha = v / 100.f; });
+                op.visible_fn = [L]{ return L->effect == "water"; };
+                return op;
             })(),
             // Viscosity — only for "water": higher = slower, resists sloshing.
             ([&]{
