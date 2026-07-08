@@ -85,6 +85,7 @@
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
 #include "face/neopixel_matrix_output.h"
+#include "face/led_panel_output.h"
 #include "face/tee_panel_output.h"
 #include "face/max_section_controller.h"
 #include "face/max_section_content.h"
@@ -668,6 +669,36 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
             }
         }
         return std::make_unique<face::NeoPixelMatrixOutput>(std::move(nc));
+    }
+    if (backend == "led_panels") {
+        // Large custom face panels: APA102/SK9822 chains on CM5 hardware SPI
+        // with per-LED canvas mappings (up to ~2000 LEDs per panel). See
+        // docs/led-face-panels.md for the scale math and mapping format.
+        face::LedPanelOutput::Config lc;
+        if (jpf && jpf->contains("led_panels")) {
+            const auto& jl = (*jpf)["led_panels"];
+            if (jl.contains("chains") && jl["chains"].is_array()) {
+                for (const auto& jc : jl["chains"]) {
+                    face::LedPanelChain::Config cc;
+                    cc.name          = jc.value("name",       std::string("panel"));
+                    cc.spi_device    = jc.value("spi_device", std::string("/dev/spidev0.0"));
+                    cc.speed_hz      = jc.value("speed_hz",   12'000'000);
+                    cc.map_file      = jc.value("map_file",   std::string());
+                    cc.cols          = jc.value("cols",       0);
+                    cc.rows          = jc.value("rows",       0);
+                    cc.canvas_x      = jc.value("canvas_x",   0);
+                    cc.canvas_y      = jc.value("canvas_y",   0);
+                    cc.pitch         = jc.value("pitch",      1);
+                    cc.serpentine    = jc.value("serpentine", true);
+                    cc.brightness    = static_cast<uint8_t>(
+                        std::clamp(jc.value("brightness", 64), 0, 255));
+                    cc.global_5bit   = jc.value("global_5bit", 31);
+                    cc.power_limit_a = jc.value("power_limit_a", 8.0);
+                    lc.chains.push_back(std::move(cc));
+                }
+            }
+        }
+        return std::make_unique<face::LedPanelOutput>(std::move(lc));
     }
     // HUB75 / daemon path — pass the layout-derived panel inventory through
     // so the in-HUD face editor knows which regions to outline. When the

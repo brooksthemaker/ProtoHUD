@@ -247,6 +247,11 @@
     "_about": "Protoface LED face. mode 'daemon' (default) talks to the Python daemon over socket+shm; mode 'native' renders the face in-process in ProtoHUD (no daemon) and writes the same /dev/shm frame, so the preview and scripts/panel_driver.py work unchanged. autostart (daemon mode) launches the daemon on boot. preview is the on-glasses panel-preview placement (persisted on exit).",
     "mode": "daemon",
     "_mode_values": "daemon | native",
+    "_backend_note": "protoface.backend picks the native face hardware: 'hub75' (default), 'max7219', 'rgb_matrix' (WS2812 8x8 modules), or 'led_panels' (large custom APA102/SK9822 panels on CM5 SPI - see docs/led-face-panels.md).",
+    "led_panels": {
+      "_note": "Custom face panels built from APA102/SK9822 (DotStar) LEDs, up to ~2000 LEDs per panel, driven from CM5 hardware SPI at 60+ fps. Each chain = one panel on its own spidev (or chain two panels on one bus). Per-LED layout comes from map_file (JSON {\"leds\": [[x,y], ...]} in canvas pixels, chain order) or the cols/rows grid generator for rectangular prototypes. power_limit_a caps the frame's estimated current in software - set it to what the panel's 5V injection wiring actually supports.",
+      "chains": []
+    },
     "autostart": true,
     "fps": 60,
     "_fps_note": "Native-mode face render rate. 60 keeps IMU-driven face motion (inertia, water slosh, particles) smooth; drop to 30 to save CPU on a loaded system.",

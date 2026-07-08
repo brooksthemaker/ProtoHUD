@@ -415,6 +415,7 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/max_section_controller.cpp
     src/face/neopixel_matrix_chain.cpp
     src/face/neopixel_matrix_output.cpp
+    src/face/led_panel_output.cpp
     src/face/native_face_controller.cpp
 )
 target_include_directories(protoface_native PRIVATE
