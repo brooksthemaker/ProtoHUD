@@ -2762,13 +2762,27 @@ static void adi_fade_line(NVGcontext* vg, float x0, float y0, float x1, float y1
 
 void HudRenderer::draw_attitude_indicator(NVGcontext* vg, const AppState& s,
                                           float fw, float fh) {
-    const float cx = fw * 0.5f, cy = fh * 0.5f;
-    const float R  = std::clamp(s.attitude.size, 0.30f, 0.95f) * fh * 0.45f;
+    // SBS framebuffer: the NVG overlay spans BOTH eye halves, so a single
+    // screen-centered draw would sit exactly on the eye seam and show up as
+    // a half-instrument at the edge of each eye. Like draw_fps_nvg, render
+    // once per eye half so the glasses fuse it into one centered instrument.
+    const float eye_w = fw * 0.5f;
+    const float R = std::clamp(s.attitude.size, 0.30f, 0.95f)
+                  * std::min(eye_w, fh) * 0.45f;
+    for (int eye = 0; eye < 2; ++eye)
+        draw_attitude_eye(vg, s, eye * eye_w + eye_w * 0.5f, fh * 0.5f, R);
+}
+
+void HudRenderer::draw_attitude_eye(NVGcontext* vg, const AppState& s,
+                                    float cx, float cy, float R) {
     const bool  full = s.attitude.full;
 
-    const float roll  = s.imu_pose.roll;
-    const float pitch = s.imu_pose.pitch;
-    const float yaw   = s.imu_pose.yaw;
+    // Defensive: a mid-tare sensor reset can briefly emit garbage — never
+    // hand NaN/Inf to NanoVG paths.
+    auto fin = [](float v) { return std::isfinite(v) ? v : 0.f; };
+    const float roll  = fin(s.imu_pose.roll);
+    const float pitch = fin(s.imu_pose.pitch);
+    const float yaw   = fin(s.imu_pose.yaw);
     const ImU32 lc    = col_.glow_base;                    // Borders & Lines color
     // Level lock: within 2° of level on both axes the waterline brightens.
     const bool  locked = std::fabs(roll) < 2.f && std::fabs(pitch) < 2.f;

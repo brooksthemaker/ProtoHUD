@@ -204,6 +204,8 @@ private:
                             float ox, float oy, float tw, float th);
     void draw_attitude_indicator(NVGcontext* vg, const AppState& s,
                             float fw, float fh);
+    void draw_attitude_eye (NVGcontext* vg, const AppState& s,
+                            float cx, float cy, float R);
     void draw_timer_alarm_indicator(NVGcontext* vg, const AppState& s,
                             float fw, float fh);
     void draw_fps_nvg      (NVGcontext* vg, const AppState& snap, float fw, float fh);
