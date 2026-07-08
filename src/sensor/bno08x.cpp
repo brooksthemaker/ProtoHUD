@@ -374,6 +374,8 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     const float roll_deg  = roll  * kRad2Deg + roll_trim_.load();
     const float pitch_deg = pitch * kRad2Deg + pitch_trim_.load();
     const float yaw_deg   = yaw   * kRad2Deg;
+    last_roll_deg_.store(roll_deg);      // zero_here() captures these
+    last_pitch_deg_.store(pitch_deg);
 
     float heading = (cfg_.heading_invert ? -yaw_deg : yaw_deg)
                     + cfg_.heading_offset + declination_deg_.load();

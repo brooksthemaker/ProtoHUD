@@ -844,6 +844,44 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
                 (*cfgr)["bno086"]["pitch_trim"] = (*trimv)[1];
             }
         };
+        // Software tare: capture whatever the sensor reads RIGHT NOW as the
+        // new roll/pitch zero by folding it into the trim offsets — catches
+        // whatever residual the chip-side Set Level leaves behind.
+        {
+            MenuItem zh = with_desc(leaf("Zero Here (Software Tare)",
+                [b, cfgr, trimv]{
+                    if (!b) return;
+                    const auto [r, p] = b->zero_here();
+                    (*trimv)[0] = r; (*trimv)[1] = p;
+                    if (cfgr) {
+                        (*cfgr)["bno086"]["roll_trim"]  = r;
+                        (*cfgr)["bno086"]["pitch_trim"] = p;
+                    }
+                }),
+                "Hold the pose you want to call level, then select: the "
+                "CURRENT roll/pitch become zero in software, no matter what "
+                "the chip-side tare did. The exact offsets land on the "
+                "Roll/Pitch Trim sliders below (review or fine-tune there) "
+                "and save with the config. Heading is untouched.");
+            zh.label_fn = [trimv]{
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Zero Here (Software Tare)  [%+.1f/%+.1f\xc2\xb0]",
+                         (double)(*trimv)[0], (double)(*trimv)[1]);
+                return std::string(buf);
+            };
+            zh.visible_fn = [b]{ return b && b->connected(); };
+            imu_menu.push_back(std::move(zh));
+
+            MenuItem rz = with_desc(leaf("Reset Software Tare / Trim",
+                [trimv, apply]{ (*trimv)[0] = 0.f; (*trimv)[1] = 0.f; apply(); }),
+                "Clears the software tare and both trim sliders back to 0\xc2\xb0 "
+                "so the output is the chip's own (hardware-tared) reading.");
+            rz.visible_fn = [b, trimv]{
+                return b && b->connected() &&
+                       ((*trimv)[0] != 0.f || (*trimv)[1] != 0.f);
+            };
+            imu_menu.push_back(std::move(rz));
+        }
         MenuItem rt = with_desc(slider("Roll Trim", -15.f, 15.f, 0.5f, "\xc2\xb0",
             [trimv]{ return (*trimv)[0]; },
             [trimv, apply](float v){ (*trimv)[0] = v; apply(); }),
