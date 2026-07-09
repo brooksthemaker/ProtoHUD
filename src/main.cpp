@@ -6898,8 +6898,13 @@ int main(int argc, char* argv[]) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.float_win.focus_keys = false;
             }
+            // Never capture the keyboard while the deep menu (or its OSK)
+            // is up — the fullscreen menu would sit on top eating every
+            // keystroke into the pty with no keyboard way out. Focus
+            // resumes automatically when the menu closes.
             g_term_focus.store(want_term && terminal.running() &&
-                               snap.float_win.focus_keys);
+                               snap.float_win.focus_keys &&
+                               !menu.is_deep_open());
         }
 
         // PiP toggle state (pip_left_active / pip_right_active) is now flipped

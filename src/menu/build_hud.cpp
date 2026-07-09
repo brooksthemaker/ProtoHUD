@@ -1742,13 +1742,22 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [&state]{ return state.float_win.width_deg; },
             [&state](float v){ state.float_win.width_deg = v; }),
             "Angular width of the window in degrees of your view."),
-        [&state]() -> MenuItem {
+        [&state, menu_sys_pp]() -> MenuItem {
             MenuItem m = with_desc(toggle("Keyboard Focus",
                 [&state]{ return state.float_win.focus_keys; },
-                [&state](bool v){ state.float_win.focus_keys = v; }),
-                "Route the paired keyboard into the terminal. While on, HUD "
-                "hotkeys are suppressed — press F10 (or toggle this off with "
-                "the knob) to take the keyboard back.");
+                [&state, menu_sys_pp](bool v){
+                    state.float_win.focus_keys = v;
+                    // Land in the terminal, not a menu that now ignores the
+                    // keyboard: capture only starts once the deep menu is
+                    // closed (it also auto-suspends while any menu is open),
+                    // so close it on the way in.
+                    if (v && menu_sys_pp && *menu_sys_pp)
+                        (*menu_sys_pp)->close_deep();
+                }),
+                "Route the paired keyboard into the terminal (closes this "
+                "menu). While on, HUD hotkeys are suppressed — press F10 to "
+                "take the keyboard back, or reopen the menu with the knob "
+                "(capture pauses while a menu is open).");
             m.visible_fn = [&state]{
                 return state.float_win.enabled && state.float_win.content == 0;
             };
