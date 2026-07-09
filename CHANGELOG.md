@@ -1,5 +1,92 @@
 # ProtoHUD — Changelog
 
+## Week of Jul 6 – Jul 9, 2026
+
+This week: the reactions/sensors branch merged (**PR #249**), and the Face
+Display menu got a ground-up redesign around per-expression styling and a
+trigger-recipe system (**PR #250**, open), plus a pick-and-place → LED-map
+converter for the custom APA102 panels, faster compass/attitude response, and
+a floating-terminal keyboard fix.
+
+---
+
+### 🟢 Merged — PR #249 ("reactions, sensors, attitude indicator, led_panels")
+
+- **Reactions engine** (IMU-stillness Awake→Drowsy→Asleep with a snap-awake
+  motion spike), **attitude indicator** with speed-adaptive smoothing, the
+  Set-Level fix, frost/water physics rewrites, an efficiency pass, faster boot,
+  the floating terminal/mirror window, F-row deep-menu shortcuts, coprocessor
+  test pins with TTP223 boops, and the **`led_panels`** face backend (custom
+  APA102/SK9822 panels driven straight from CM5 SPI — up to ~2000 LEDs/panel).
+
+### 🟡 In progress — PR #250 ("Face Display redesign + per-expression styles, custom expressions, trigger recipes")
+
+**Faces and Expressions — one list, edited in place**
+- The Face Display menu is now four groups: **Base Settings**, **Faces and
+  Expressions**, **Accessory LEDs**, **Gifs and Text**. The ProtoTracer/Teensy
+  source picker is hidden by default (`protoface.show_prototracer` restores it;
+  wiring intact).
+- **Expressions** is a single list of built-in slots *and* custom slots (5
+  seeded + **Add Expression…**, up to 24). A custom expression borrows a
+  built-in's PNG for art and adds its own name + style. Everything edits in
+  place as normal menu levels — no pop-up editor — so the Face Preview panel
+  stays visible while styling.
+
+**Per-expression styling (universal)**
+- Every expression — built-in or custom — can carry its own **Material**,
+  **Effect**, and **Glitch**, overriding the inherited **Default Style** (the
+  former top-level Material Color / Effects / Glitch) only while it's showing.
+  A three-layer resolver (default → expression style → override slot) re-runs
+  on every face switch, so restore is automatic.
+- Material: inherit / presets / Pride / Custom Color. Effect: inherit / None /
+  Single / Premade / your saved Custom presets. Glitch: inherit / Off / preset.
+- Persisted as `protoface.expression_styles`.
+
+**Trigger recipes**
+- Replaces single-event triggers with *event × count within a window, WHILE
+  conditions hold* — uniform for every expression, keyed by stem or
+  `custom_<slot>` in `protoface.expression_triggers`.
+- Events: boop zones, APDS swipes, head shake, gets-bright / gets-dark
+  (edge-detected, hysteresis). Conditions: head tilt L/R past an angle, light
+  above/below a threshold, moving/still.
+- **Nose boop ×5 → angry** and **left cheek while tilted left → curious** are
+  each one recipe. Most-specific recipe wins; counting boops keep the default
+  reaction and only the firing boop is claimed; hold time per expression
+  (0 = latch). `ExpressionDirector` reworked around Rule snapshots + per-recipe
+  accumulators + a conditions feed.
+
+**On-screen keyboard**
+- A symbols page (`?123`/`ABC`), a real in-string text caret (Up focuses the
+  field; Left/Right move the caret), and a per-field character counter that
+  reddens near the limit.
+
+**Accessory LEDs**
+- New **Blush** zone (cheek boops flash it), **Chase** and **Sparkle**
+  patterns, per-zone brightness on top of the chain master, and **Follow Face**
+  (a zone tracks the face canvas's mean lit colour, ~5 Hz, driver-agnostic).
+
+**Custom LED panels — map generator**
+- `scripts/pnp_to_ledmap.py`: a pick-and-place CSV → `led_panels` `map_file`
+  converter. Designator order = chain order; KiCad/Altium/JLC header tolerance;
+  `--pitch-px`/`--px-per-mm`/`--fit` scaling; auto X-mirror for bottom-layer
+  assemblies; `--reverse` for designators numbered against the wiring; a
+  chain-order preview SVG. Validated against a real 571-LED top/bottom pair.
+
+**Fixes**
+- **Compass** now uses the same speed-adaptive filter as the attitude
+  indicator (was a fixed 350 ms lag) — near-raw during a turn, calm at rest;
+  the attitude filter reacts sooner and its slider range was widened.
+- **Floating terminal**: enabling Keyboard Focus closes the deep menu, and key
+  capture is suspended while any menu is open — no more being trapped in the
+  terminal with an open menu that ignores the keyboard (F10 still releases).
+
+**Docs**
+- New [`docs/face-expressions.md`](docs/face-expressions.md) (Expressions /
+  styling / triggers); `docs/led-face-panels.md` gains the pick-and-place
+  converter section; `CAPABILITIES.md` §9/§11 refreshed.
+
+---
+
 ## Week of Jun 30 – Jul 5, 2026
 
 This week: the RP2350 coprocessor grew from a button reader into a full
