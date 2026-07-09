@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <deque>
+#include <map>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -972,8 +973,13 @@ struct AppState {
     float                boop_coalesce_window_s = 0.10f;
     // User-created custom expressions (see face/custom_expression.h). Seeded
     // with kInitialCustomSlots empty slots when the config key is absent;
-    // "Add Another..." appends up to kMaxCustomExpressions. Guarded by mtx.
+    // "Add Expression..." appends up to kMaxCustomExpressions. Guarded by mtx.
     std::vector<face::CustomExpression> custom_expressions;
+    // Trigger recipes per expression, keyed by built-in stem ("happy") or
+    // custom slot key ("custom_3") — uniform for every expression. Evaluated
+    // by ExpressionDirector; persisted as protoface.expression_triggers.
+    // Guarded by mtx.
+    std::map<std::string, face::TriggerSet> expression_triggers;
     LightSquintConfig    light_squint;
     VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;

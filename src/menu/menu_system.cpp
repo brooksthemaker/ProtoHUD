@@ -439,45 +439,6 @@ void MenuSystem::close_face_editor() {
     if (overlay_ == &face_editor_) overlay_ = nullptr;
 }
 
-// ── Expression editor ─────────────────────────────────────────────────────────
-
-void MenuSystem::open_expression_editor(
-        std::string title,
-        menu::ExpressionEditor::Mode mode,
-        face::CustomExpression initial,
-        std::vector<std::pair<std::string, std::string>> base_faces,
-        std::vector<std::pair<std::string, std::string>> materials,
-        std::vector<std::pair<std::string, nlohmann::json>> effects,
-        menu::ExpressionEditor::CommitFn on_commit,
-        menu::ExpressionEditor::CancelFn on_cancel,
-        menu::ExpressionEditor::PreviewFn on_preview) {
-    // Mutually-exclusive overlays — bring others down first.
-    if (osk_active_)              close_keyboard();
-    if (file_picker_.is_open())   file_picker_.cancel();
-    if (color_picker_.is_open())  color_picker_.close();
-    if (face_editor_.is_open())   face_editor_.back();
-    expression_editor_.set_detent_callback(
-        [this](int n){ emit_detents_override(n); });
-    expression_editor_.open(std::move(title), mode, std::move(initial),
-                            std::move(base_faces), std::move(materials),
-                            std::move(effects),
-                            std::move(on_commit), std::move(on_cancel),
-                            std::move(on_preview),
-        [this](std::string t, std::string initial_text,
-               std::function<void(const std::string&)> on_commit_kb){
-            open_keyboard(std::move(t), std::move(initial_text),
-                          std::move(on_commit_kb));
-        });
-    overlay_ = &expression_editor_;
-}
-
-void MenuSystem::close_expression_editor() {
-    // back() disarms first if a row is armed; a second call cancels out.
-    for (int i = 0; i < 2 && expression_editor_.is_open(); ++i)
-        expression_editor_.back();
-    if (overlay_ == &expression_editor_) overlay_ = nullptr;
-}
-
 void MenuSystem::emit_detents() {
     if (detent_cb_ && !stack_.empty()) {
         const LevelView items{stack_.back()};

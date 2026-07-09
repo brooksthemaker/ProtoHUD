@@ -2139,6 +2139,13 @@ int main(int argc, char* argv[]) {
                     break;
             }
         }
+        if (jpf.contains("expression_triggers") && jpf["expression_triggers"].is_object()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (auto it = jpf["expression_triggers"].begin();
+                 it != jpf["expression_triggers"].end(); ++it)
+                state.expression_triggers[it.key()] =
+                    face::TriggerSet::from_json(it.value());
+        }
         if (jpf.contains("scroll_text") && jpf["scroll_text"].is_object())
             pf_scroll = face::ScrollTextConfig::from_json(jpf["scroll_text"]);
         if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
@@ -2907,9 +2914,35 @@ int main(int argc, char* argv[]) {
         };
         expr_director.set_actions(std::move(da));
     }
-    auto customs_snapshot = [&state]{
+    // Latest ambient lux for the director's light events/conditions
+    // (written by the light-sensor callback thread; -1 = no reading yet).
+    auto last_lux = std::make_shared<std::atomic<float>>(-1.f);
+    // Rules snapshot for the director: every expression key with recipes,
+    // resolved to what activation shows (custom slots carry name/base/style;
+    // built-ins activate their own stem and style via the resolver).
+    auto rules_snapshot = [&state]{
+        std::vector<face::ExpressionDirector::Rule> rules;
         std::lock_guard<std::mutex> lk(state.mtx);
-        return state.custom_expressions;
+        for (const auto& [key, ts] : state.expression_triggers) {
+            if (!ts.any()) continue;
+            face::ExpressionDirector::Rule r;
+            r.key = key; r.hold_s = ts.hold_s; r.recipes = ts.recipes;
+            if (key.rfind("custom_", 0) == 0) {
+                const int idx = std::atoi(key.c_str() + 7);
+                if (idx < 0 || idx >= (int)state.custom_expressions.size()) continue;
+                const auto& cx = state.custom_expressions[idx];
+                if (!cx.used) continue;
+                r.name = cx.name;
+                r.base_expression = cx.base_expression;
+                r.has_style = true;
+                r.style = cx.style;
+            } else {
+                r.name = key;
+                r.base_expression = key;
+            }
+            rules.push_back(std::move(r));
+        }
+        return rules;
     };
 
     // Per-zone rapid-boop tracking for the animated-eyes easter egg. Touched
@@ -2951,9 +2984,10 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    // Boop precedence: rapid-boop animated-eyes easter egg → custom
-    // expression bound to the zone → default boop reaction.
-    auto fire_boop = [&face_proxy, &state, &expr_director, customs_snapshot,
+    // Boop precedence: rapid-boop animated-eyes easter egg → a FIRING
+    // trigger recipe (counting boops still get the default reaction as
+    // feedback) → default boop reaction.
+    auto fire_boop = [&face_proxy, &state, &expr_director, rules_snapshot,
                       boop_face_stem,
                       eye_now, flash_zone, eye_last, eye_run, eye_mtx]
                      (sensor::BoopSensor::Zone z) {
@@ -2997,10 +3031,11 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(*eye_mtx);
             (*eye_run)[zi] = 0;
         }
-        // A custom expression bound to this zone claims the boop: it shows
-        // its own face + style (with its own hold), so the default reaction
-        // is suppressed. LED feedback still fires.
-        if (expr_director.on_boop(static_cast<int>(z), customs_snapshot())) {
+        // A recipe firing on this boop claims it: the director shows its
+        // expression (with its own hold), so the default reaction is
+        // suppressed. Intermediate counting boops fall through — the normal
+        // reaction is the per-boop feedback on the way to e.g. "×5 → angry".
+        if (expr_director.on_boop(static_cast<int>(z), rules_snapshot())) {
             face_proxy.trigger_boop_ripple(static_cast<int>(z));
             flash_zone(z);
             return;
@@ -3060,10 +3095,10 @@ int main(int argc, char* argv[]) {
     };
     auto light_edge = std::make_shared<LightEdgeState>();
     light_sensor.set_lux_callback([light_edge, &state, &face_proxy,
-                                   &expr_director, customs_snapshot](float lux) {
-        // Custom-expression light triggers see every sample (their own
-        // hysteresis lives in the director), independent of the squint gate.
-        expr_director.on_lux(lux, customs_snapshot());
+                                   last_lux](float lux) {
+        // Publish for the director's light events/conditions (it edge-detects
+        // in its tick), independent of the squint gate below.
+        last_lux->store(lux);
         const double now = std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         // Snapshot the config so a mid-callback menu edit can't tear strings.
@@ -3402,8 +3437,11 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.notifs.push(std::move(n));
         };
-        ra.motion_event = [&expr_director, customs_snapshot](const char* ev){
-            expr_director.on_motion(ev, customs_snapshot());
+        ra.motion_event = [&expr_director, rules_snapshot](const char* ev){
+            // Shake is a recipe event; stillness is a WHILE-condition (fed
+            // via set_conditions), so only the spike routes through here.
+            if (std::string_view(ev) == "shake")
+                expr_director.on_shake(rules_snapshot());
         };
         reactions.set_actions(std::move(ra));
     }
@@ -5075,11 +5113,11 @@ int main(int argc, char* argv[]) {
     }
     sensor::Apds9960 apds(apds_cfg);
     apds.set_gesture_callback([&gpio_dispatch, &apds_fn,
-                               &expr_director, customs_snapshot](sensor::Apds9960::Gesture g){
+                               &expr_director, rules_snapshot](sensor::Apds9960::Gesture g){
         static const char* kGestureNames[] = { "up", "down", "left", "right" };
         const int gi = static_cast<int>(g);
         if (gi >= 0 && gi < 4)
-            expr_director.on_gesture(kGestureNames[gi], customs_snapshot());
+            expr_director.on_gesture(kGestureNames[gi], rules_snapshot());
         gpio_dispatch(apds_fn[gi]);
     });
     apds.set_proximity_callback([&gpio_dispatch, &apds_fn](bool near){
@@ -5721,9 +5759,13 @@ int main(int argc, char* argv[]) {
         }
         {
             nlohmann::json jc = nlohmann::json::array();
+            nlohmann::json jt = nlohmann::json::object();
             std::lock_guard<std::mutex> lk(state.mtx);
             for (const auto& cx : state.custom_expressions) jc.push_back(cx.to_json());
-            cfg["protoface"]["custom_expressions"] = std::move(jc);
+            for (const auto& [key, ts] : state.expression_triggers)
+                if (ts.any()) jt[key] = ts.to_json();
+            cfg["protoface"]["custom_expressions"]  = std::move(jc);
+            cfg["protoface"]["expression_triggers"] = std::move(jt);
         }
         cfg["protoface"]["scroll_text"] = pf_scroll.to_json();
         {
@@ -6335,7 +6377,13 @@ int main(int argc, char* argv[]) {
             // is about the wearer, not the effect settings.
             reactions.feed_motion(m_gyro_mag, std::fabs(m_accel - 1.0));
             reactions.tick(dt);
-            expr_director.tick(dt);
+            // Recipe WHILE-conditions: head roll from the attitude pose,
+            // latest ambient lux, and "moving" = smoothed motion energy above
+            // twice the reactions calm threshold.
+            expr_director.set_conditions(
+                state.attitude_pose.roll, last_lux->load(),
+                reactions.energy_dps() > reactions.config().calm_dps * 2.0);
+            expr_director.tick(dt, rules_snapshot());
 
             // Follow-face feed for accessory LED zones: mean color of the lit
             // face pixels, sampled a few times a second — cheap, and works

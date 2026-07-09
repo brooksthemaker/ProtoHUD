@@ -11,7 +11,6 @@
 #include "file_picker.h"
 #include "face_editor.h"
 #include "color_picker.h"
-#include "expression_editor.h"
 
 // ── Item types ────────────────────────────────────────────────────────────────
 
@@ -326,21 +325,6 @@ public:
     void close_face_editor();
     bool is_face_editor_open() const { return face_editor_.is_open(); }
 
-    // ── Expression editor ───────────────────────────────────────────────────────
-    // Full-screen expression style/custom-expression editor (see
-    // expression_editor.h). Same overlay routing as the color picker; the
-    // on-screen keyboard hook and knob detents are wired here.
-    void open_expression_editor(std::string title,
-                                menu::ExpressionEditor::Mode mode,
-                                face::CustomExpression initial,
-                                std::vector<std::pair<std::string, std::string>> base_faces,
-                                std::vector<std::pair<std::string, std::string>> materials,
-                                std::vector<std::pair<std::string, nlohmann::json>> effects,
-                                menu::ExpressionEditor::CommitFn on_commit,
-                                menu::ExpressionEditor::CancelFn on_cancel = {},
-                                menu::ExpressionEditor::PreviewFn on_preview = {});
-    void close_expression_editor();
-    bool is_expression_editor_open() const { return expression_editor_.is_open(); }
     menu::FaceEditor& face_editor() { return face_editor_; }
 
     // ── Color picker ────────────────────────────────────────────────────────────
@@ -439,8 +423,6 @@ private:
     // Unified color picker overlay — opened by any COLOR_PICKER item.
     menu::ColorPicker color_picker_;
 
-    // Expression editor overlay — style + custom-expression editing.
-    menu::ExpressionEditor expression_editor_;
 
     // Active full-screen overlay (one of the members above), or nullptr.
     // navigate/select/back/draw_fullscreen dispatch through this instead of
