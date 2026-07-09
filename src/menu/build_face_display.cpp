@@ -3760,10 +3760,19 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     take_into(default_style_items, protoface_inner_menu, "Material Color");
     take_into(default_style_items, protoface_inner_menu, "Effects");
     take_into(default_style_items, protoface_inner_menu, "Glitch");
+    // Live face preview beside Default Style: the composited canvas (face +
+    // material + effect + glitch) so material/glitch changes show while you
+    // pick, the same panel the Effects builder already uses. Attached to each
+    // child too so the preview stays up when you descend into Material/Glitch.
+    for (auto& it : default_style_items) {
+        it.context_panel_title = "Face Preview";
+        it.context_panel_draw  = draw_effect_preview;
+    }
 
     take_into(faces_items, protoface_inner_menu, "Expressions");
-    faces_items.push_back(with_desc(
+    faces_items.push_back(with_desc(with_panel(
         submenu("Default Style", std::move(default_style_items)),
+        "Face Preview", draw_effect_preview),
         "The look every expression inherits — material color, particle "
         "effects, glitch — unless the expression's own Style overrides it."));
     take_into(faces_items, protoface_inner_menu, "Animations");
