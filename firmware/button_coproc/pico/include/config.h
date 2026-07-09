@@ -11,7 +11,7 @@
 
 // Firmware version, reported in the HELLO line so the Pi (and the flash script)
 // can confirm an update actually took. Bump it whenever you change the firmware.
-static constexpr const char* kFwVersion = "1.2.0";
+static constexpr const char* kFwVersion = "1.3.0";
 
 // Switches wired between the listed GP pin and GND. We use INPUT_PULLUP, so a
 // pressed switch reads LOW (active-low). Add/remove entries freely — kLedPins
@@ -89,6 +89,54 @@ static constexpr uint8_t  kFanPins[]     = { 14, 15 };// PWM fan zones (25 kHz)
 static constexpr uint32_t kBoopPollMs    = 33;        // MPR121 touch poll (~30 Hz)
 static constexpr uint32_t kTempPeriodMs  = 2000;      // convert+read cycle
 static constexpr int      kMaxOwDevices  = 8;         // probes on the 1-Wire bus
+
+// ── Pre-assigned TEST pins (planned-feature bring-up) ────────────────────────
+// Touch pads, servos, an addressable-LED zone and the ADC inputs get fixed
+// test pins so the planned peripherals can be wired and exercised NOW (menu:
+// GPIO > RP2350 GPIO Expander > Peripheral Test). All of these coexist with
+// the defaults above; the sharing rules are spelled out per block.
+
+// TTP223 capacitive touch pads (boop sensors), up to 6. Each module's OUT pin
+// goes to the listed GP; VCC=3V3, GND=GND. Stock TTP223 boards are ACTIVE-HIGH
+// momentary (solder-jumper variants can invert/latch — set the polarity flag
+// to match). Touch edges stream up as "BOOP <idx> <1|0>", so the Pi maps them
+// exactly like MPR121 electrodes: give the boop zones these INDICES (0-5) in
+// the boop config, and/or map extra pads to any GpioFunc via
+// inputs.coprocessor.touch. -1 disables a slot.
+// NOTE: pads 3-5 (GP16/17/18) share the OPTIONAL voice-changer I2S pins —
+// with kVoiceEnabled/VOICE_CHANGER on, wire at most pads 0-2.
+static constexpr int8_t  kTouchPins[6]    = { 0, 1, 12, 16, 17, 18 };
+static constexpr bool    kTouchActiveHigh = true;   // stock TTP223 = high on touch
+static constexpr uint32_t kTouchDebounceMs = 30;
+
+// Servo TEST channels (planned RP2354B carrier feature: 8 channels; 4 here).
+// SHARED with buttons 4-7 (GP6-9): a slot converts from button to servo the
+// FIRST time the Pi commands it ("SERVO <ch> <deg>"), and stays a servo until
+// reboot / PINCFG APPLY. Wire signal to GP, servo V+ to an EXTERNAL 5-6 V
+// supply (never the Pico's 3V3), grounds common.
+static constexpr int8_t  kServoPins[4]    = { 6, 7, 8, 9 };
+
+// Digital addressable LED TEST zone (planned: 4 zones on the carrier) —
+// a strip OR a custom panel (a panel is just a strip in serpentine order;
+// the Pi does the 2-D mapping). Two supported LED families:
+//   0 = WS2812/NeoPixel — 1 wire (data), strict 800 kHz timing (PIO handles it)
+//   1 = APA102/DotStar  — 2 wires (data+clock), timing-free: immune to
+//       interrupt jitter and refreshes fast enough for POV/spinning use
+// Level-shift the data (and clock) line to 5 V for long or strict strips;
+// short runs usually accept 3.3 V. Verbs: LEDZ (solid), LEDP (pattern),
+// LEDB (brightness), LEDF/LEDSHOW (per-pixel frames from the Pi).
+// GP22 doubles as the voice DAC reset; the APA102 clock (GP28) doubles as
+// ADC ch2 — with voice enabled move/skip, with APA102 you lose that ADC ch.
+static constexpr uint8_t  kLedZoneType    = 0;     // 0 = WS2812, 1 = APA102
+static constexpr int8_t   kLedZonePin     = 22;    // data
+static constexpr int8_t   kLedZoneClkPin  = 28;    // APA102 clock (WS2812: unused)
+static constexpr uint16_t kLedZoneCount   = 16;    // strip/panel pixel count
+static constexpr uint16_t kLedZoneMax     = 300;   // hard cap (frame buffer size)
+
+// ADC TEST inputs (planned: flex sensors / pots / battery sense). GP26-28 =
+// ADC0-2; read on demand with "ADCREAD" -> "ADC <ch> <raw> <mv>" x3.
+// GP26 doubles as the voice mic input - with voice enabled ch0 reads the mic.
+static constexpr uint8_t kAdcPins[3]      = { 26, 27, 28 };
 
 // Optional LOCAL control so the changer works standalone (no Pi): a button id
 // (index into kButtonPins) that toggles voice on a SHORT press / cycles the

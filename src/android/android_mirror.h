@@ -114,13 +114,17 @@ private:
 
     // Shared between capture thread (writer) and render thread (reader).
     struct TexSlot {
-        GLuint               tex   = 0;
-        int                  tex_w = 0, tex_h = 0;
-        std::mutex           mtx;
+        GLuint               tex   = 0;   // render thread only
+        int                  tex_w = 0, tex_h = 0;   // render thread only
+        std::mutex           mtx;         // guards buf/w/h/dirty
         std::vector<uint8_t> buf;
         int                  w = 0, h = 0;
         bool                 dirty = false;
     } slot_;
+    // Render-thread staging buffer: get_frame() swaps slot_.buf into this under
+    // the lock, then does the GL upload outside it, so the capture thread never
+    // blocks on a texture upload (and the freed buffer is recycled by assign).
+    std::vector<uint8_t> upload_buf_;
 
     cv::VideoCapture  cap_;
     std::thread       thread_;

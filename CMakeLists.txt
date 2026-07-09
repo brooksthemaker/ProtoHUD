@@ -224,6 +224,7 @@ set_target_properties(glasses PROPERTIES
 set(SOURCES
     src/main.cpp
     src/android/android_mirror.cpp
+    src/term/pty_terminal.cpp
     src/camera/camera_manager.cpp
     src/camera/dma_camera.cpp
     src/camera/viture_camera.cpp
@@ -265,6 +266,8 @@ set(SOURCES
     src/sensor/bno08x.cpp
     src/sensor/mpr121_boop_sensor.cpp
     src/sensor/light_sensor.cpp
+    src/sensor/apds9960.cpp
+    src/sensor/bme280.cpp
     src/sensor/temp_sensors.cpp
     src/accessory/led_strip.cpp
     src/accessory/accessory_leds.cpp
@@ -319,6 +322,7 @@ target_link_libraries(protohud PRIVATE
     imgui
     nanovg
     sh2
+    util
     qrcodegen_cpp
     glasses
     protoface_native
@@ -401,6 +405,7 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/particles.cpp
     src/face/glitch.cpp
     src/face/scroll_text.cpp
+    src/face/reaction_engine.cpp
     src/face/gif_player.cpp
     src/face/eye_animations.cpp
     src/face/shm_pusher_output.cpp
@@ -410,6 +415,7 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/max_section_controller.cpp
     src/face/neopixel_matrix_chain.cpp
     src/face/neopixel_matrix_output.cpp
+    src/face/led_panel_output.cpp
     src/face/native_face_controller.cpp
 )
 target_include_directories(protoface_native PRIVATE

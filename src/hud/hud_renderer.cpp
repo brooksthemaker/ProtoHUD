@@ -1,5 +1,6 @@
 #include "hud_renderer.h"
 #include "../serial/shm_frame_reader.h"
+#include "../term/pty_terminal.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -32,22 +33,38 @@ static std::string fmt_time(time_t t) {
     return buf;
 }
 
+// fmt_clock/fmt_date cache the formatted string per second — they're hit from
+// several per-frame draw sites but the text changes at most once a second, so
+// the localtime+strftime pair doesn't need to run 60+ times between changes.
+// (Render thread only, hence the bare statics.)
 static std::string fmt_clock(bool h24, bool seconds) {
+    static time_t s_at = 0; static bool s_h24 = false, s_sec = false;
+    static std::string s_out;
     time_t now = time(nullptr);
-    struct tm* t = localtime(&now);
-    char buf[32];
-    const char* fmt = h24 ? (seconds ? "%H:%M:%S" : "%H:%M")
-                           : (seconds ? "%I:%M:%S %p" : "%I:%M %p");
-    strftime(buf, sizeof(buf), fmt, t);
-    return buf;
+    if (now != s_at || h24 != s_h24 || seconds != s_sec) {
+        s_at = now; s_h24 = h24; s_sec = seconds;
+        struct tm* t = localtime(&now);
+        char buf[32];
+        const char* fmt = h24 ? (seconds ? "%H:%M:%S" : "%H:%M")
+                               : (seconds ? "%I:%M:%S %p" : "%I:%M %p");
+        strftime(buf, sizeof(buf), fmt, t);
+        s_out = buf;
+    }
+    return s_out;
 }
 
 static std::string fmt_date() {
+    static time_t s_at = 0;
+    static std::string s_out;
     time_t now = time(nullptr);
-    struct tm* t = localtime(&now);
-    char buf[32];
-    strftime(buf, sizeof(buf), "%a %b %d", t);
-    return buf;
+    if (now != s_at) {
+        s_at = now;
+        struct tm* t = localtime(&now);
+        char buf[32];
+        strftime(buf, sizeof(buf), "%a %b %d", t);
+        s_out = buf;
+    }
+    return s_out;
 }
 
 static std::string fmt_countdown(time_t end) {
@@ -382,6 +399,8 @@ void HudRenderer::draw_hud_frame(const AppState& s, int w, int h, bool show_fps)
     // The expanded map can optionally hide the info panel (its data is in the sidebar).
     if (!(s.map_overlay.expanded && s.expanded_hide_info))
         draw_info_panel(nvg_, s, fw, fh);
+    if (s.attitude.enabled)
+        draw_attitude_indicator(nvg_, s, fw, fh);
     fx_update(nvg_, s, fw, fh, frame_dt_);
 
     // Legacy HUD chrome (edge/corner indicators). The minimap + info panel above
@@ -1040,6 +1059,192 @@ static void draw_status_glyph(NVGcontext* vg, StatusGlyph g,
 // A configurable region (mirroring the minimap on the opposite side) that auto-
 // cycles through glanceable widgets: analog clock, notifications, schedule, weather.
 // Drawn once per frame (mono overlay), so the dwell timer ticks here safely.
+// ── Floating window ───────────────────────────────────────────────────────────
+// A world-pinned frame hosting real content: the pty terminal or the Android
+// mirror. Drawn once per SBS eye half, offset by the angular delta between
+// the pin anchor and the current head pose (attitude_pose) and counter-
+// rotated by head roll, so it holds its place in the world and stays level.
+// fov_deg calibrates deg → px: if the window slides as you turn, adjust
+// HUD > Floating Window > Display FOV. Head right → window slides left;
+// look up → it slides down (flip the signs here if a mount reverses one).
+
+// 16-color ANSI palette + [16] default fg / [17] default bg (transparent).
+static const uint8_t kTermPal[17][3] = {
+    { 40,  42,  46}, {205,  80,  72}, { 80, 200,  90}, {200, 180,  60},
+    { 80, 130, 240}, {190,  90, 210}, { 60, 190, 200}, {200, 205, 210},
+    {110, 115, 120}, {240, 110, 100}, {120, 240, 130}, {240, 220, 100},
+    {120, 170, 255}, {225, 130, 245}, {100, 225, 235}, {245, 248, 250},
+    {210, 235, 225},
+};
+
+void HudRenderer::draw_float_window(const AppState& s, int w, int h,
+                                    unsigned int mirror_tex, float mirror_aspect,
+                                    const term::PtyTerminal* terminal) {
+    if (!nvg_ || !s.float_win.enabled || !s.float_win.pinned) return;
+    NVGcontext* vg = nvg_;
+    const float fw = (float)w, fh = (float)h;
+    const float eye_w = fw * 0.5f;
+    const float ppd   = eye_w / std::clamp(s.float_win.fov_deg, 20.f, 90.f);
+    auto circ = [](float d) {
+        while (d > 180.f) d -= 360.f;
+        while (d < -180.f) d += 360.f;
+        return d;
+    };
+    const float dyaw = circ(s.attitude_pose.yaw - s.float_win.yaw);
+    if (std::fabs(dyaw) > 100.f) return;                 // roughly behind you
+    const float dx = -dyaw * ppd;
+    const float dy = (s.attitude_pose.pitch - s.float_win.pitch) * ppd;
+    const float roll_rad = s.attitude_pose.roll * 3.14159265f / 180.f;
+    const float wpx = std::clamp(s.float_win.width_deg, 10.f, 60.f) * ppd;
+    const bool  is_term = (s.float_win.content == 0);
+
+    // Terminal grid snapshot (copied out under the terminal's lock).
+    term::TermSnapshot ts;
+    if (is_term && terminal) terminal->snapshot(ts);
+
+    // Content-driven height + terminal font metrics.
+    float hpx = wpx * 0.62f;
+    float cell_w = 0.f, line_h = 0.f, font_px = 0.f, pad = 0.f;
+    if (is_term && ts.cols > 0) {
+        pad     = wpx * 0.015f;
+        cell_w  = (wpx - 2.f * pad) / (float)ts.cols;
+        // Calibrate the mono font so one glyph advance == one cell.
+        nvg_set_font_mono(20.f);
+        const float adv20 = nvgTextBounds(vg, 0, 0, "M", nullptr, nullptr);
+        font_px = adv20 > 0.f ? 20.f * cell_w / adv20 : cell_w * 1.8f;
+        line_h  = font_px * 1.25f;
+        hpx     = line_h * (float)ts.rows + 2.f * pad;
+    } else if (!is_term) {
+        const float aspect = (mirror_aspect > 0.05f) ? mirror_aspect : 0.56f;
+        hpx = wpx / aspect;
+    }
+
+    for (int eye = 0; eye < 2; ++eye) {
+        const float ox = eye * eye_w;
+        nvgSave(vg);
+        nvgIntersectScissor(vg, ox, 0.f, eye_w, fh);     // stay in this eye
+        nvgTranslate(vg, ox + eye_w * 0.5f, fh * 0.5f);  // eye center
+        nvgRotate(vg, -roll_rad);                        // stay world-level
+        nvgTranslate(vg, dx, dy);                        // window center
+
+        const float x0 = -wpx * 0.5f, y0 = -hpx * 0.5f;
+
+        // Frame: dark card + theme border (brighter when keys are captured).
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x0, y0, wpx, hpx, wpx * 0.012f);
+        nvgFillColor(vg, nvgRGBA(8, 10, 14, 235));
+        nvgFill(vg);
+        const bool kb = is_term && s.float_win.focus_keys;
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x0, y0, wpx, hpx, wpx * 0.012f);
+        nvgStrokeColor(vg, nvg_col_a(col_.glow_base, kb ? 235 : 110));
+        nvgStrokeWidth(vg, kb ? 2.4f : 1.4f);
+        nvgStroke(vg);
+        if (kb) {
+            nvg_set_font_mono(std::max(9.f, font_px * 0.8f));
+            nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
+            nvgFillColor(vg, nvg_col_a(col_.glow_base, 200));
+            nvgText(vg, x0 + wpx, y0 - 3.f, "KEYS \xe2\x86\x92 TERMINAL (F10 releases)", nullptr);
+        }
+
+        if (is_term && ts.cols > 0) {
+            const float tx = x0 + pad, ty = y0 + pad;
+            nvg_set_font_mono(font_px);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            char run[224];
+            for (int row = 0; row < ts.rows; ++row) {
+                const term::TermCell* cells = &ts.cells[(size_t)row * ts.cols];
+                const float ry = ty + row * line_h;
+                // Background runs (non-default bg only).
+                for (int c0 = 0; c0 < ts.cols; ) {
+                    const uint8_t bg = (cells[c0].attr & 2) ? cells[c0].fg
+                                                            : cells[c0].bg;
+                    int c1 = c0 + 1;
+                    while (c1 < ts.cols) {
+                        const uint8_t b2 = (cells[c1].attr & 2) ? cells[c1].fg
+                                                                : cells[c1].bg;
+                        if (b2 != bg) break;
+                        ++c1;
+                    }
+                    if (bg < 17) {
+                        nvgBeginPath(vg);
+                        nvgRect(vg, tx + c0 * cell_w, ry, (c1 - c0) * cell_w, line_h);
+                        nvgFillColor(vg, nvgRGBA(kTermPal[bg][0], kTermPal[bg][1],
+                                                 kTermPal[bg][2], 235));
+                        nvgFill(vg);
+                    }
+                    c0 = c1;
+                }
+                // Text runs (same fg+attr batched into one nvgText).
+                for (int c0 = 0; c0 < ts.cols; ) {
+                    const uint8_t fg = cells[c0].fg, at = cells[c0].attr;
+                    int c1 = c0, n = 0;
+                    bool blank = true;
+                    while (c1 < ts.cols && cells[c1].fg == fg &&
+                           cells[c1].attr == at && n < (int)sizeof(run) - 1) {
+                        if (cells[c1].ch != ' ') blank = false;
+                        run[n++] = cells[c1].ch;
+                        ++c1;
+                    }
+                    if (!blank) {
+                        run[n] = 0;
+                        uint8_t ci = (at & 2) ? ((cells[c0].bg < 17) ? cells[c0].bg : 0)
+                                              : fg;
+                        if ((at & 1) && ci < 8) ci = (uint8_t)(ci + 8);  // bold → bright
+                        nvgFillColor(vg, nvgRGBA(kTermPal[std::min<int>(ci, 16)][0],
+                                                 kTermPal[std::min<int>(ci, 16)][1],
+                                                 kTermPal[std::min<int>(ci, 16)][2], 255));
+                        nvgText(vg, tx + c0 * cell_w, ry, run, nullptr);
+                    }
+                    c0 = c1;
+                }
+            }
+            // Cursor block.
+            if (ts.running && ts.cursor_visible &&
+                ts.cur_x >= 0 && ts.cur_x < ts.cols &&
+                ts.cur_y >= 0 && ts.cur_y < ts.rows) {
+                nvgBeginPath(vg);
+                nvgRect(vg, tx + ts.cur_x * cell_w, ty + ts.cur_y * line_h,
+                        cell_w, line_h);
+                nvgFillColor(vg, nvgRGBA(230, 245, 240, 130));
+                nvgFill(vg);
+            }
+            if (!ts.running) {
+                nvg_set_font_mono(std::max(10.f, font_px * 1.1f));
+                nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                nvgFillColor(vg, nvg_col_a(col_.warn, 235));
+                nvgText(vg, 0.f, 0.f,
+                        "[ shell exited \xe2\x80\x94 Restart Terminal in menu ]", nullptr);
+            }
+        } else if (!is_term && mirror_tex) {
+            auto it = pip_nvg_cache_.find(mirror_tex);
+            if (it == pip_nvg_cache_.end()) {
+                int img = nvglCreateImageFromHandleGLES2(vg, mirror_tex, 1280, 720, 0);
+                pip_nvg_cache_[mirror_tex] = img;
+                it = pip_nvg_cache_.find(mirror_tex);
+            }
+            if (it->second >= 0) {
+                const float in = 2.f;
+                NVGpaint p = nvgImagePattern(vg, x0 + in, y0 + in,
+                                             wpx - 2 * in, hpx - 2 * in, 0.f,
+                                             it->second, 1.0f);
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, x0 + in, y0 + in, wpx - 2 * in, hpx - 2 * in,
+                               wpx * 0.010f);
+                nvgFillPaint(vg, p);
+                nvgFill(vg);
+            }
+        } else if (!is_term) {
+            nvg_set_font_mono(std::max(10.f, wpx * 0.02f));
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvg_col_a(col_.text_dim, 220));
+            nvgText(vg, 0.f, 0.f,
+                    "[ phone mirror offline \xe2\x80\x94 enable Android Mirror ]", nullptr);
+        }
+        nvgRestore(vg);
+    }
+}
+
 void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, float fh) {
     const InfoPanelConfig& cfg = s.info_panel;
     if (!cfg.enabled) return;
@@ -1215,24 +1420,39 @@ void HudRenderer::draw_info_panel(NVGcontext* vg, const AppState& s, float fw, f
         // right). Newest app first; App-type groups key on the sender/app name
         // (KDE Connect sets the title to the app), others on their kind.
         struct Grp { std::string key, icon; int total = 0, unread = 0; };
-        std::vector<Grp> groups;
+        // The grouping only changes when a notification arrives / is read /
+        // dismissed, but this draw runs every frame the widget is visible —
+        // rebuild the (string-allocating) group list only when a cheap
+        // integer signature over the queue changes. Render thread only.
+        static std::vector<Grp> groups;
+        static uint64_t s_sig = ~0ull;
+        uint64_t sig = 1469598103934665603ull;                  // FNV offset
         for (const auto& nt : s.notifs.items) {
-            if (nt.dismissed) continue;
-            std::string key;
-            switch (nt.type) {
-                case NotifType::App:
-                    key = !nt.title.empty() ? nt.title
-                        : (!nt.icon.empty() ? nt.icon : std::string("App")); break;
-                case NotifType::Alarm: key = "Alarms"; break;
-                case NotifType::Timer: key = "Timers"; break;
-                case NotifType::LoRa:  key = "LoRa";   break;
+            sig ^= nt.id ^ (uint64_t(nt.read) << 32) ^ (uint64_t(nt.dismissed) << 33)
+                 ^ (uint64_t(nt.type) << 34);
+            sig *= 1099511628211ull;                            // FNV prime
+        }
+        if (sig != s_sig) {
+            s_sig = sig;
+            groups.clear();
+            for (const auto& nt : s.notifs.items) {
+                if (nt.dismissed) continue;
+                std::string key;
+                switch (nt.type) {
+                    case NotifType::App:
+                        key = !nt.title.empty() ? nt.title
+                            : (!nt.icon.empty() ? nt.icon : std::string("App")); break;
+                    case NotifType::Alarm: key = "Alarms"; break;
+                    case NotifType::Timer: key = "Timers"; break;
+                    case NotifType::LoRa:  key = "LoRa";   break;
+                }
+                const std::string icon = !nt.icon.empty()
+                    ? nt.icon : std::string(notif_type_icon(nt.type));
+                Grp* g = nullptr;
+                for (auto& e : groups) if (e.key == key) { g = &e; break; }
+                if (!g) { groups.push_back({ key, icon, 0, 0 }); g = &groups.back(); }
+                g->total++; if (!nt.read) g->unread++;
             }
-            const std::string icon = !nt.icon.empty()
-                ? nt.icon : std::string(notif_type_icon(nt.type));
-            Grp* g = nullptr;
-            for (auto& e : groups) if (e.key == key) { g = &e; break; }
-            if (!g) { groups.push_back({ key, icon, 0, 0 }); g = &groups.back(); }
-            g->total++; if (!nt.read) g->unread++;
         }
 
         if (groups.empty()) {
@@ -2704,6 +2924,224 @@ void HudRenderer::draw_lora_messages(NVGcontext* vg, const AppState& s,
         py += 16.f;
         nvg_glow_text(vg, ox + 8.f, py, msg.text.c_str(), !msg.read);
         py += 22.f;
+    }
+}
+
+// ── Attitude indicator ────────────────────────────────────────────────────────
+// Fighter-style ADI overlay, centered on screen: earth-fixed pitch ladder +
+// horizon rotate with roll behind a fixed winged waterline symbol; a bank arc
+// rides the top and bare PIT / YAW / ROL readouts sit inside the lower half.
+// Pose comes from s.attitude_pose — the calibrated euler of the SELECTED IMU
+// source (post Set Level / trim, pre motion-sensitivity scaling), resolved
+// per frame beside the face motion feed in main.cpp, so the numbers match
+// the GPIO > IMU Live Readout. Lines follow the HUD Borders & Lines color.
+
+// Stroke a line whose alpha fades from a0 (x0,y0) to a1 (x1,y1).
+static void adi_fade_line(NVGcontext* vg, float x0, float y0, float x1, float y1,
+                          ImU32 col, uint8_t a0, uint8_t a1, float w) {
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, x0, y0);
+    nvgLineTo(vg, x1, y1);
+    nvgStrokePaint(vg, nvgLinearGradient(vg, x0, y0, x1, y1,
+                                         nvg_col_a(col, a0), nvg_col_a(col, a1)));
+    nvgStrokeWidth(vg, w);
+    nvgStroke(vg);
+}
+
+void HudRenderer::draw_attitude_indicator(NVGcontext* vg, const AppState& s,
+                                          float fw, float fh) {
+    // SBS framebuffer: the NVG overlay spans BOTH eye halves. Per Eye draws
+    // one instrument per half (like draw_fps_nvg) so 3D glasses fuse a single
+    // centered instrument; with it off, one instrument sits at the window
+    // center — right for 2D/mirror display modes.
+    const float eye_w = fw * 0.5f;
+    const float R = std::clamp(s.attitude.size, 0.30f, 0.95f)
+                  * std::min(eye_w, fh) * 0.45f;
+    if (s.attitude.per_eye) {
+        for (int eye = 0; eye < 2; ++eye)
+            draw_attitude_eye(vg, s, eye * eye_w + eye_w * 0.5f, fh * 0.5f, R);
+    } else {
+        draw_attitude_eye(vg, s, fw * 0.5f, fh * 0.5f, R);
+    }
+}
+
+void HudRenderer::draw_attitude_eye(NVGcontext* vg, const AppState& s,
+                                    float cx, float cy, float R) {
+    const bool  full = s.attitude.full;
+
+    // Defensive: a mid-tare sensor reset can briefly emit garbage — never
+    // hand NaN/Inf to NanoVG paths. attitude_pose is resolved per frame from
+    // the selected IMU source (see the motion feed in main.cpp), so it
+    // animates even when bno08x.head_tracking isn't feeding imu_pose.
+    auto fin = [](float v) { return std::isfinite(v) ? v : 0.f; };
+    const float roll  = fin(s.attitude_pose.roll);
+    const float pitch = fin(s.attitude_pose.pitch);
+    const float yaw   = fin(s.attitude_pose.yaw);
+    const float ts    = std::clamp(s.attitude.text_scale, 0.5f, 2.0f);
+    const ImU32 lc    = col_.glow_base;                    // Borders & Lines color
+    // Level lock: within 2° of level on both axes the waterline brightens.
+    const bool  locked = std::fabs(roll) < 2.f && std::fabs(pitch) < 2.f;
+    constexpr float kDeg2Rad = 3.14159265f / 180.f;
+    const float px_per_deg = R / 30.f;                     // ladder scale: 10° = R/3
+
+    // ── Earth-fixed group: horizon + pitch ladder, rotated opposite the bank.
+    // (If a mounted unit shows the horizon tilting WITH the head instead of
+    // against it, flip the sign here.)
+    nvgSave(vg);
+    nvgTranslate(vg, cx, cy);
+    nvgRotate(vg, -roll * kDeg2Rad);
+
+    // Horizon line, fading toward both ends, brighter when locked level.
+    {
+        const float hy = pitch * px_per_deg;
+        const float hw = R * 0.95f;
+        if (std::fabs(hy) < R) {
+            const uint8_t ah = locked ? 235 : 170;
+            adi_fade_line(vg, -hw, hy, 0.f, hy, lc, 0, ah, locked ? 2.2f : 1.6f);
+            adi_fade_line(vg,  hw, hy, 0.f, hy, lc, 0, ah, locked ? 2.2f : 1.6f);
+        }
+    }
+
+    // Pitch ladder (Full): rungs every 10° within reach, chevron caps bent
+    // toward the horizon, nose-down rungs fragmented (dashed) per convention.
+    if (full) {
+        nvg_set_font_mono(std::max(9.f, R * 0.10f * ts));
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        for (int deg = -60; deg <= 60; deg += 10) {
+            if (deg == 0) continue;
+            const float y = (pitch - static_cast<float>(deg)) * px_per_deg;
+            if (std::fabs(y) > R * 0.78f) continue;
+            const float half = R * (0.30f - 0.04f * (std::abs(deg) / 30.f));
+            const float cap  = R * 0.05f * (deg > 0 ? 1.f : -1.f);  // bend toward horizon
+            const uint8_t a  = 150;
+            if (deg > 0) {
+                adi_fade_line(vg, -half, y, -R * 0.10f, y, lc, 60, a, 1.4f);
+                adi_fade_line(vg,  half, y,  R * 0.10f, y, lc, 60, a, 1.4f);
+            } else {
+                // fragmented nose-down rungs: two dashes per side
+                const float x1 = R * 0.10f, x2 = half * 0.55f, x3 = half;
+                for (float sgn : {-1.f, 1.f}) {
+                    adi_fade_line(vg, sgn * x3, y, sgn * x2, y, lc, 60, a, 1.4f);
+                    adi_fade_line(vg, sgn * (x2 * 0.82f), y, sgn * x1, y, lc, a, a, 1.4f);
+                }
+            }
+            // chevron caps at the outboard ends
+            for (float sgn : {-1.f, 1.f}) {
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, sgn * half, y);
+                nvgLineTo(vg, sgn * half, y + cap);
+                nvgStrokeColor(vg, nvg_col_a(lc, a));
+                nvgStrokeWidth(vg, 1.4f);
+                nvgStroke(vg);
+            }
+            // rung value at the left cap
+            char lb[8]; snprintf(lb, sizeof(lb), "%d", std::abs(deg));
+            nvgFillColor(vg, nvg_col_a(lc, 130));
+            nvgText(vg, -half - R * 0.14f, y, lb, nullptr);
+        }
+    }
+    nvgRestore(vg);
+
+    // ── Fixed winged waterline symbol (the "airplane"): fading wings, an
+    // inverted vee at center, and a center dot. Brightens on level lock.
+    {
+        const uint8_t aw = locked ? 255 : 200;
+        const float win = R * 0.16f, wout = R * 0.52f, vee = R * 0.07f;
+        adi_fade_line(vg, cx - wout, cy, cx - win, cy, lc, 40, aw, 2.4f);
+        adi_fade_line(vg, cx + wout, cy, cx + win, cy, lc, 40, aw, 2.4f);
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx - win, cy);
+        nvgLineTo(vg, cx - win * 0.5f, cy + vee);
+        nvgLineTo(vg, cx, cy);
+        nvgLineTo(vg, cx + win * 0.5f, cy + vee);
+        nvgLineTo(vg, cx + win, cy);
+        nvgStrokeColor(vg, nvg_col_a(lc, aw));
+        nvgStrokeWidth(vg, 2.2f);
+        nvgStroke(vg);
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx, cy, locked ? 2.4f : 1.8f);
+        nvgFillColor(vg, nvg_col_a(lc, aw));
+        nvgFill(vg);
+    }
+
+    // ── Bank arc (Full): segmented tick arc across the top, a double-chevron
+    // needle at the current bank and a diamond marking wings-level.
+    if (full) {
+        const float ar = R * 0.92f;
+        static constexpr int kTicks[] = { -60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60 };
+        for (int t : kTicks) {
+            const float a  = (-90.f + t) * kDeg2Rad;           // 0 = straight up
+            const float ca = std::cos(a), sa = std::sin(a);
+            const bool major = (t % 30) == 0;
+            const float len  = major ? R * 0.07f : R * 0.045f;
+            adi_fade_line(vg, cx + ca * ar, cy + sa * ar,
+                          cx + ca * (ar + len), cy + sa * (ar + len),
+                          lc, 200, 90, major ? 1.8f : 1.2f);
+        }
+        // wings-level diamond at the arc apex
+        {
+            const float dy = cy - ar - R * 0.10f, dsz = R * 0.030f;
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, cx, dy - dsz); nvgLineTo(vg, cx + dsz, dy);
+            nvgLineTo(vg, cx, dy + dsz); nvgLineTo(vg, cx - dsz, dy);
+            nvgClosePath(vg);
+            nvgStrokeColor(vg, nvg_col_a(lc, 170));
+            nvgStrokeWidth(vg, 1.4f);
+            nvgStroke(vg);
+        }
+        // bank needle: double chevron just inside the arc at -roll
+        {
+            const float a  = (-90.f - roll) * kDeg2Rad;
+            const float ca = std::cos(a), sa = std::sin(a);
+            const float na = a + 90.f * kDeg2Rad;              // tangent direction
+            const float tx = std::cos(na), ty = std::sin(na);
+            const float wspan = R * 0.035f;
+            for (int i = 0; i < 2; ++i) {
+                const float rr = ar - R * (0.035f + 0.045f * i);
+                const float tipx = cx + ca * (rr + R * 0.035f),
+                            tipy = cy + sa * (rr + R * 0.035f);
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, cx + ca * rr + tx * wspan, cy + sa * rr + ty * wspan);
+                nvgLineTo(vg, tipx, tipy);
+                nvgLineTo(vg, cx + ca * rr - tx * wspan, cy + sa * rr - ty * wspan);
+                nvgStrokeColor(vg, nvg_col_a(lc, i == 0 ? 240 : 140));
+                nvgStrokeWidth(vg, 1.8f);
+                nvgStroke(vg);
+            }
+        }
+        // decorative frame arcs at the sides
+        for (float sgn : {-1.f, 1.f}) {
+            nvgBeginPath(vg);
+            const float a0 = (sgn < 0 ? 150.f : -30.f) * kDeg2Rad;
+            nvgArc(vg, cx, cy, R * 1.02f, a0, a0 + 60.f * kDeg2Rad, NVG_CW);
+            nvgStrokeColor(vg, nvg_col_a(lc, 60));
+            nvgStrokeWidth(vg, 1.2f);
+            nvgStroke(vg);
+        }
+    }
+
+    // ── Readouts: bare mono text inside the lower hemisphere. PIT left,
+    // ROL right, YAW centered a step lower — fixed-width so digits don't
+    // jitter, matching the IMU Live Readout values.
+    {
+        nvg_set_font_mono(std::max(10.f, R * 0.115f * ts));
+        char pb[24], rb[24], yb[24];
+        snprintf(pb, sizeof(pb), "PIT %+06.1f", static_cast<double>(pitch));
+        snprintf(rb, sizeof(rb), "ROL %+06.1f", static_cast<double>(roll));
+        snprintf(yb, sizeof(yb), "YAW %+07.1f", static_cast<double>(yaw));
+        const float ry = cy + R * 0.68f, yy = cy + R * 0.84f;
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvg_text_outline(vg, cx - R * 0.62f, ry, pb);
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvgText(vg, cx - R * 0.62f, ry, pb, nullptr);
+        nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+        nvg_text_outline(vg, cx + R * 0.62f, ry, rb);
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvgText(vg, cx + R * 0.62f, ry, rb, nullptr);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvg_text_outline(vg, cx, yy, yb);
+        nvgFillColor(vg, nvg_col(col_.text_fill));
+        nvgText(vg, cx, yy, yb, nullptr);
     }
 }
 

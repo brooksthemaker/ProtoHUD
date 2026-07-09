@@ -146,57 +146,18 @@ bool CameraManager::init(const CamConfig& left, const CamConfig& right,
     usb3_auto_brightness_        = usb3.auto_brightness;
     usb3_auto_brightness_target_ = usb3.auto_brightness_target;
 
-    // Scan /dev/video0-63 and list non-ISP capture nodes
-    std::cerr << "[cam] USB cameras found:\n";
-    bool found_any = false;
-    for (int i = 0; i <= 63; i++) {
-        std::string d = "/dev/video" + std::to_string(i);
-        std::string info;
-        if (access(d.c_str(), F_OK) == 0 && is_usb_capture_device(d, &info)) {
-            std::cerr << "  " << d << "  (" << info << ")\n";
-            found_any = true;
-        }
-    }
-    if (!found_any) std::cerr << "  (none — are USB cameras plugged in?)\n";
+    // USB bring-up moved OFF the boot path: each open_v4l2 is a blocking
+    // V4L2 negotiation (hundreds of ms), and the rescue auto-scan frame-reads
+    // candidate nodes — seconds per node when a configured camera is missing.
+    // A one-shot worker (usb_boot_open) does all of it while the render loop
+    // is already up; it shares the capture threads' per-camera mutexes, so
+    // the hotplug/reconnect machinery is unaffected.
+    usb_boot_thread_ = std::thread(&CameraManager::usb_boot_open, this);
 
-    usb1_ok_ = !usb1.device.empty() && open_v4l2(usb_cap1_, usb1, "usb1");
-    usb2_ok_ = !usb2.device.empty() && open_v4l2(usb_cap2_, usb2, "usb2");
-    usb3_ok_ = !usb3.device.empty() && open_v4l2(usb_cap3_, usb3, "usb3");
-
-    // Auto-scan: if a camera failed to open with the configured path, probe all
-    // /dev/video* nodes (before the capture thread starts) to find a working one.
-    auto startup_scan = [&](cv::VideoCapture& cap, std::atomic<bool>& ok_flag,
-                             UsbCamConfig& cfg, const char* name,
-                             std::initializer_list<std::string> skip_paths) {
-        if (ok_flag) return;
-        std::cerr << "[cam] " << name << ": auto-scanning for a camera...\n";
-        for (int dev = 0; dev < 64; dev++) {
-            std::string path = "/dev/video" + std::to_string(dev);
-            bool skip = false;
-            for (const auto& s : skip_paths) if (!s.empty() && path == s) { skip = true; break; }
-            if (skip) continue;
-            if (!is_usb_capture_device(path)) continue;
-            UsbCamConfig try_cfg = cfg;
-            try_cfg.device = path;
-            if (open_v4l2(cap, try_cfg, name)) {
-                cv::Mat f;
-                if (cap.read(f) && !f.empty()) {
-                    cfg.device = path;
-                    ok_flag = true;
-                    std::cerr << "[cam] " << name << ": found at " << path << "\n";
-                    return;
-                }
-                cap.release();
-            }
-        }
-        std::cerr << "[cam] " << name << ": auto-scan found no working camera\n";
-    };
-    startup_scan(usb_cap1_, usb1_ok_, usb1_cfg_, "usb1", {});
-    startup_scan(usb_cap2_, usb2_ok_, usb2_cfg_, "usb2", {usb1_cfg_.device});
-    startup_scan(usb_cap3_, usb3_ok_, usb3_cfg_, "usb3", {usb1_cfg_.device, usb2_cfg_.device});
-
-    // Start thread whenever USB devices are configured so open/close can work
-    // later even if the cameras were not available at startup.
+    // Start capture threads whenever USB devices are configured so open/close
+    // can work later even if the cameras were not available at startup.
+    // (Threads already tolerate a not-yet-open capture — same as a hotplug
+    // gap — and the boot worker fills the captures in behind them.)
     if (!usb1.device.empty() || !usb2.device.empty() || !usb3.device.empty()) {
         start_usb_threads();
     }
@@ -377,7 +338,12 @@ bool CameraManager::reinit_owls() {
 }
 
 void CameraManager::shutdown() {
-    // Join any background reopen from reassign_usbN first — open_v4l2 can
+    // Stop the boot-path USB worker first — it checks the abort flag between
+    // every open/probe, so this returns within one V4L2 call at worst.
+    usb_boot_abort_.store(true);
+    if (usb_boot_thread_.joinable()) usb_boot_thread_.join();
+
+    // Join any background reopen from reassign_usbN — open_v4l2 can
     // block for seconds and must not touch members after we tear down.
     for (auto& t : usb_open_threads_)
         if (t.joinable()) t.join();
@@ -463,6 +429,87 @@ bool CameraManager::set_owl_right_resolution(int width, int height, int fps) {
 }
 
 // ── USB camera capture thread ─────────────────────────────────────────────────
+
+// Boot-path USB bring-up, off the main thread (see init). Order per slot:
+// open the configured device; if that fails (or nothing was configured),
+// rescue-scan /dev/video* with a frame-read validation. All capture access
+// happens under the same per-camera mutexes the capture threads use, and
+// the whole pass aborts promptly on shutdown.
+void CameraManager::usb_boot_open() {
+    // Informational: list non-ISP capture nodes once.
+    std::cerr << "[cam] USB cameras found:\n";
+    bool found_any = false;
+    for (int i = 0; i <= 63 && !usb_boot_abort_.load(); i++) {
+        std::string d = "/dev/video" + std::to_string(i);
+        std::string info;
+        if (access(d.c_str(), F_OK) == 0 && is_usb_capture_device(d, &info)) {
+            std::cerr << "  " << d << "  (" << info << ")\n";
+            found_any = true;
+        }
+    }
+    if (!found_any) std::cerr << "  (none — are USB cameras plugged in?)\n";
+
+    struct Slot {
+        cv::VideoCapture*  cap;
+        std::mutex*        mtx;
+        std::atomic<bool>* ok;
+        UsbCamConfig*      cfg;
+        const char*        name;
+    };
+    Slot slots[3] = {
+        { &usb_cap1_, &usb1_cap_mtx_, &usb1_ok_, &usb1_cfg_, "usb1" },
+        { &usb_cap2_, &usb2_cap_mtx_, &usb2_ok_, &usb2_cfg_, "usb2" },
+        { &usb_cap3_, &usb3_cap_mtx_, &usb3_ok_, &usb3_cfg_, "usb3" },
+    };
+
+    // Configured devices first (cheap when present).
+    for (auto& s : slots) {
+        if (usb_boot_abort_.load()) return;
+        std::lock_guard<std::mutex> lk(*s.mtx);
+        if (!s.cfg->device.empty() && !s.cap->isOpened())
+            *s.ok = open_v4l2(*s.cap, *s.cfg, s.name);
+    }
+
+    // Rescue auto-scan for anything still closed (sequential, so earlier
+    // slots' claimed paths are visible to later ones).
+    for (int i = 0; i < 3; ++i) {
+        auto& s = slots[i];
+        if (s.ok->load() || usb_boot_abort_.load()) continue;
+        std::cerr << "[cam] " << s.name << ": auto-scanning for a camera...\n";
+        bool found = false;
+        for (int dev = 0; dev < 64 && !usb_boot_abort_.load(); dev++) {
+            std::string path = "/dev/video" + std::to_string(dev);
+            bool skip = false;
+            for (int j = 0; j < 3; ++j)
+                if (j != i && !slots[j].cfg->device.empty() &&
+                    path == slots[j].cfg->device) { skip = true; break; }
+            if (skip) continue;
+            if (!is_usb_capture_device(path)) continue;
+            std::lock_guard<std::mutex> lk(*s.mtx);
+            UsbCamConfig try_cfg = *s.cfg;
+            try_cfg.device = path;
+            if (open_v4l2(*s.cap, try_cfg, s.name)) {
+                cv::Mat f;
+                if (s.cap->read(f) && !f.empty()) {
+                    s.cfg->device = path;
+                    *s.ok = true;
+                    std::cerr << "[cam] " << s.name << ": found at " << path << "\n";
+                    found = true;
+                    break;
+                }
+                s.cap->release();
+            }
+        }
+        if (!found && !usb_boot_abort_.load())
+            std::cerr << "[cam] " << s.name << ": auto-scan found no working camera\n";
+    }
+
+    // A rescue scan can populate a slot that had nothing configured, in which
+    // case init() didn't start the capture threads — start them now
+    // (idempotent: joinable threads are left alone).
+    if ((usb1_ok_ || usb2_ok_ || usb3_ok_) && !running_.load())
+        start_usb_threads();
+}
 
 void CameraManager::start_usb_threads() {
     running_ = true;

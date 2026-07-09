@@ -8,7 +8,7 @@ struct SplashConfig {
     std::string image_path;           // PNG path; empty = procedural hexagon mark
     float       logo_size_px  = 104.f;// Longest side of the logo in pixels
     bool        show_ring     = true; // Hide the spinning dot ring (useful for large logos)
-    float       min_display_s = 2.0f;
+    float       min_display_s = 0.5f;   // floor AFTER init completes - keep small
     std::string title         = "PROTOHUD";
     std::string subtitle      = "XR HUD System";
 };

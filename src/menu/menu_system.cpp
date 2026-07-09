@@ -204,6 +204,32 @@ void MenuSystem::open_deep() {
     load_tab(0);
 }
 
+void MenuSystem::open_deep_at(const std::vector<std::string>& path) {
+    // Open the full-screen menu directly on a nested page (hotkey jumps,
+    // e.g. F3 -> {"System","Software","Updates"}). path[0] picks the tab,
+    // the rest descend matching SUBMENU rows by their static label; an
+    // unmatched segment just stops at the deepest page that did match.
+    open_deep();
+    if (!deep_open_ || path.empty()) return;
+    for (size_t t = 0; t < deep_tabs_.size(); ++t)
+        if (deep_tabs_[t].first == path[0]) { load_tab(static_cast<int>(t)); break; }
+    const std::vector<MenuItem>* items = deep_tabs_[tab_index_].second;
+    for (size_t d = 1; d < path.size() && items; ++d) {
+        const std::vector<MenuItem>* next = nullptr;
+        for (const auto& it : *items) {
+            if (it.type == MenuItemType::SUBMENU && !it.children.empty() &&
+                it.label == path[d]) {
+                if (it.action) it.action();   // same "on enter" hook select() runs
+                push_level(it.children, it.context_panel_title,
+                           it.context_panel_draw);
+                next = &it.children;
+                break;
+            }
+        }
+        items = next;
+    }
+}
+
 void MenuSystem::close_deep() {
     deep_open_    = false;
     open_         = false;

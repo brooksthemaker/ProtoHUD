@@ -193,10 +193,18 @@ void Mpr121BoopSensor::poll_loop() {
         // Snapshot live coalesce window + Both enable once per tick.
         double coalesce_s = 0.0;
         bool   both_enabled = false;
+        bool   zone_enabled[3] = {};
+        int8_t zone_electrode[3] = {};
         {
+            // One snapshot of the per-zone config for this whole tick — the
+            // zone loop below used to re-lock per zone (5 lock cycles/tick).
             std::lock_guard<std::mutex> lk(bus_mtx_);
             coalesce_s   = cfg_.coalesce_window_s;
             both_enabled = cfg_.zone_enabled[static_cast<size_t>(Zone::BothCheeks)];
+            for (uint8_t zi = 0; zi < static_cast<uint8_t>(Zone::BothCheeks); ++zi) {
+                zone_enabled[zi]   = cfg_.zone_enabled[zi];
+                zone_electrode[zi] = cfg_.electrode[zi];
+            }
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -213,13 +221,8 @@ void Mpr121BoopSensor::poll_loop() {
         // Walk the directly-measured zones (Snout, LeftCheek, RightCheek).
         // BothCheeks is derived — it only fires from the coalescer below.
         for (uint8_t zi = 0; zi < static_cast<uint8_t>(Zone::BothCheeks); ++zi) {
-            bool   enabled;
-            int8_t electrode;
-            {
-                std::lock_guard<std::mutex> lk(bus_mtx_);
-                enabled   = cfg_.zone_enabled[zi];
-                electrode = cfg_.electrode[zi];
-            }
+            const bool   enabled   = zone_enabled[zi];
+            const int8_t electrode = zone_electrode[zi];
             if (!enabled || electrode < 0 || electrode > 11) {
                 last_touched_[zi] = false;
                 continue;

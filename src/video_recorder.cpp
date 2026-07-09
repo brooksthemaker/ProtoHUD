@@ -359,13 +359,20 @@ void VideoRecorder::tick(XRDisplay& xr, AppState& state, const VideoConfig& cfg)
         }
     }
 
-    // 4. Keep the live timer toast current.
+    // 4. Keep the live timer toast current. The mm:ss text only changes once
+    // a second, so skip the lock + queue scan + string rebuild in between.
     {
-        std::lock_guard<std::mutex> lk(state.mtx);
-        for (auto& n : state.notifs.items) {
-            if (n.id != d.toast_id) continue;
-            n.body = (d.paused ? "PAUSED  " : "REC  ") + fmt_mmss(d.elapsed());
-            break;
+        static int s_last_shown = -1;
+        static bool s_last_paused = false;
+        const int secs = static_cast<int>(d.elapsed());
+        if (secs != s_last_shown || d.paused != s_last_paused) {
+            s_last_shown = secs; s_last_paused = d.paused;
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (auto& n : state.notifs.items) {
+                if (n.id != d.toast_id) continue;
+                n.body = (d.paused ? "PAUSED  " : "REC  ") + fmt_mmss(d.elapsed());
+                break;
+            }
         }
     }
 }

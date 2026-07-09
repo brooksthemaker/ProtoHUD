@@ -81,6 +81,7 @@
 #include "face/eye_animations.h"
 #include "face/gif_player.h"
 #include "face/native_face_controller.h"
+#include "face/reaction_engine.h"
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
@@ -125,14 +126,20 @@ struct LayerCfg {
     float direction_deg = -1.f;
     // Liquid fill fraction for the "water" effect (0..1). Ignored by others.
     float level = 0.4f;
+    // Liquid opacity for "water" (0 = fully transparent, 1 = solid). The face
+    // and background read through the liquid as this drops.
+    float alpha = 0.85f;
     // Liquid viscosity for "water" (0 = thin/snappy, 1 = thick/sluggish).
     float viscosity = 0.15f;
+    // How strongly head motion excites waves (surface-continuity injection +
+    // jolt splashes + turn swish). 0 = the old rigid glide. Water only.
+    float wave_gain = 1.0f;
     // How strongly the submerged face glows back through the liquid, tinted
     // by it (0 = opaque liquid). Water only.
     float face_glow = 0.55f;
     // "water" extras: pitch shifts the fill level (look down → liquid rises);
     // bubbles count + style ("rise" bubbles in liquid / "drip" droplets above).
-    float pitch_fill = 0.0f;
+    float pitch_fill = 0.3f;
     int   bubbles = 0;
     std::string bubble_mode = "rise";
     // "lightning" extras: arc mode (crackling arcs vs falling bolts), fork
@@ -168,6 +175,8 @@ constexpr FaceSlot kFaceSlots[] = {
     {"sad",       "Sad"},
     {"surprised", "Surprised"},
     {"squint",    "Squint"},
+    {"sleepy",    "Sleepy"},      // heavy-lidded (drowsy reaction)
+    {"asleep",    "Asleep"},      // eyes closed (sleep reaction, Z's on top)
     {"blink",     "Blink"},
 };
 constexpr int kFaceSlotCount = sizeof(kFaceSlots) / sizeof(kFaceSlots[0]);
@@ -1087,7 +1096,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 layer["intensity_from"] = L.intensity_from;
             if (L.effect == "water") {
                 layer["level"]      = L.level;
+                layer["alpha"]      = L.alpha;
                 layer["viscosity"]  = L.viscosity;
+                layer["wave_gain"]  = L.wave_gain;
                 layer["pitch_fill"] = L.pitch_fill;
                 layer["face_glow"]  = L.face_glow;
                 if (L.bubbles > 0) {
@@ -1130,8 +1141,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.direction_from = jl.value("direction_from", std::string("none"));
             L.intensity_from = jl.value("intensity_from", std::string("none"));
             L.level = jl.value("level", 0.4f);
+            L.alpha = jl.value("alpha", 0.85f);
             L.viscosity = jl.value("viscosity", 0.15f);
-            L.pitch_fill = jl.value("pitch_fill", 0.0f);
+            L.wave_gain = jl.value("wave_gain", 1.0f);
+            L.pitch_fill = jl.value("pitch_fill", 0.3f);
             L.face_glow = jl.value("face_glow", 0.55f);
             L.bubbles = jl.value("bubbles", 0);
             L.bubble_mode = jl.value("bubble_mode", std::string("rise"));
@@ -1196,6 +1209,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         // never landed in this list, so Single Effects / the layer editor
         // couldn't reach them.
         "steam", "waveform", "matrix", "circuit", "frost", "heatwave",
+        "snooze",
     };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
@@ -1279,6 +1293,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 lvl.visible_fn = [L]{ return L->effect == "water"; };
                 return lvl;
             })(),
+            // Opacity — water only: how solid the liquid reads. Lower = more
+            // transparent, the face and background show through more.
+            ([&]{
+                MenuItem op = slider("Opacity", 10.f, 100.f, 5.f, "%",
+                    [L]{ return L->alpha * 100.f; },
+                    [L](float v){ L->alpha = v / 100.f; });
+                op.visible_fn = [L]{ return L->effect == "water"; };
+                return op;
+            })(),
             // Viscosity — only for "water": higher = slower, resists sloshing.
             ([&]{
                 MenuItem vis = slider("Viscosity", 0.f, 100.f, 5.f, "%",
@@ -1286,6 +1309,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [L](float v){ L->viscosity = v / 100.f; });
                 vis.visible_fn = [L]{ return L->effect == "water"; };
                 return vis;
+            })(),
+            // Waves — water only: how strongly head motion excites the
+            // surface (tilt slosh waves, jolt splashes, turn swish).
+            ([&]{
+                MenuItem wv = slider("Waves", 0.f, 200.f, 10.f, "%",
+                    [L]{ return L->wave_gain * 100.f; },
+                    [L](float v){ L->wave_gain = v / 100.f; });
+                wv.visible_fn = [L]{ return L->effect == "water"; };
+                return wv;
             })(),
             // Face Glow — water only: the submerged face shines back through
             // the liquid, tinted by it (eyes read through the water).
@@ -1813,7 +1845,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "None","Sparkle","Embers","Rain","Snow","Confetti","Rings","Fireflies",
             "Fire","Aurora","Blizzard","Sonar","Plasma","Celebration","Galaxy","Party",
             "Clouds","Nebula","Starfield","Warp","Constellation","Shooting Stars",
-            "Night Sky","Steam","Waveform","Matrix","Circuit","Frost","Heatwave",
+            "Night Sky","Steam","Waveform","Matrix","Circuit","Frost","Heatwave","Snooze",
         };
         const uint8_t pf_effect_count =
             static_cast<uint8_t>(sizeof(pf_effect_names) / sizeof(pf_effect_names[0]));
@@ -3121,6 +3153,70 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "Scroll a text banner across the face panels (5x7 pixel font, "
                 "tinted, above every layer). Config: cfg[\"protoface\"]"
                 "[\"scroll_text\"].");
+        })(),
+        // Environment / movement reactions (sleepy, wake, ...). The engine
+        // lives in main; this page edits its config and fires test runs.
+        ([&]() -> MenuItem {
+            face::ReactionEngine* R = ctx.reactions;
+            if (!R) { MenuItem e; e.visible_fn = []{ return false; }; return e; }
+            nlohmann::json* cfgr = cfg_root;
+            auto save = [R, cfgr]{
+                if (cfgr) (*cfgr)["reactions"] = R->config().to_json();
+            };
+            std::vector<MenuItem> ri;
+            {
+                MenuItem st = leaf("Status", []{});
+                st.label_fn = [R]{
+                    char b[64];
+                    snprintf(b, sizeof b, "State: %s  (energy %.0f)",
+                             R->activity_name(), R->energy_dps());
+                    return std::string(b);
+                };
+                ri.push_back(with_desc(std::move(st),
+                    "Live activity state from the IMU: awake / drowsy / "
+                    "asleep, with the smoothed motion energy the timers "
+                    "watch (deg/s-equivalent)."));
+            }
+            ri.push_back(with_desc(toggle("Reactions",
+                [R]{ return R->config().enabled; },
+                [R, save](bool v){ auto c = R->config(); c.enabled = v;
+                                   R->set_config(c); save(); }),
+                "Master enable for environment/movement reactions."));
+            ri.push_back(with_desc(toggle("Sleepy / Wake",
+                [R]{ return R->config().sleepy_enabled; },
+                [R, save](bool v){ auto c = R->config(); c.sleepy_enabled = v;
+                                   R->set_config(c); save(); }),
+                "Hold still and the face gets heavy-lidded (slow blinks + "
+                "the 'sleepy' face if the folder has one), then falls asleep "
+                "- eyes closed ('asleep' face) with floating Z's. Any sharp "
+                "head motion snaps it awake with a surprised flash and "
+                "restores everything."));
+            ri.push_back(with_desc(slider("Drowsy After", 30.f, 600.f, 15.f, "s",
+                [R]{ return static_cast<float>(R->config().drowsy_after_s); },
+                [R, save](float v){ auto c = R->config(); c.drowsy_after_s = v;
+                                    R->set_config(c); save(); }),
+                "Seconds of stillness before the heavy-lidded stage."));
+            ri.push_back(with_desc(slider("Sleep After", 60.f, 1800.f, 30.f, "s",
+                [R]{ return static_cast<float>(R->config().sleep_after_s); },
+                [R, save](float v){ auto c = R->config(); c.sleep_after_s = v;
+                                    R->set_config(c); save(); }),
+                "Seconds of stillness before falling asleep (measured from "
+                "the start of stillness, not from drowsy)."));
+            ri.push_back(with_desc(slider("Wake Threshold", 15.f, 120.f, 5.f, "\xc2\xb0/s",
+                [R]{ return static_cast<float>(R->config().wake_dps); },
+                [R, save](float v){ auto c = R->config(); c.wake_dps = v;
+                                    R->set_config(c); save(); }),
+                "How sharp a head motion wakes the face. Lower = lighter "
+                "sleeper."));
+            ri.push_back(with_desc(leaf("Test: Fall Asleep", [R]{ R->force_sleepy(); }),
+                "Preview the sleep look right now (runs drowsy then asleep). "
+                "Move your head - or use Test: Wake - to end it."));
+            ri.push_back(leaf("Test: Wake", [R]{ R->force_wake(); }));
+            return with_desc(submenu("Reactions", std::move(ri)),
+                "The face reacts to the real world: stillness makes it "
+                "drowsy then asleep (floating Z's), sharp motion wakes it. "
+                "The dark-to-bright squint lives under its light-sensor "
+                "config; more reactions land here as they're added.");
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),

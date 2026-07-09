@@ -24,6 +24,7 @@
 
 #include "app_state.h"
 #include "android/android_mirror.h"
+#include "term/pty_terminal.h"
 #include "camera/camera_manager.h"
 #include "camera/viture_camera.h"
 #include "input/gpio_buttons.h"
@@ -50,7 +51,10 @@
 #include "sensor/bno055.h"
 #include "sensor/bno08x.h"
 #include "sensor/light_sensor.h"
+#include "sensor/apds9960.h"
+#include "sensor/bme280.h"
 #include "sensor/temp_sensors.h"
+#include "face/reaction_engine.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
 #include "sys/fan_controller.h"
@@ -81,6 +85,7 @@
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
 #include "face/neopixel_matrix_output.h"
+#include "face/led_panel_output.h"
 #include "face/tee_panel_output.h"
 #include "face/max_section_controller.h"
 #include "face/max_section_content.h"
@@ -101,6 +106,70 @@
 #include <linux/i2c-dev.h>
 
 using json = nlohmann::json;
+
+// ── Floating-window terminal keyboard routing ─────────────────────────────────
+// Installed after ImGui's GLFW callbacks (hud.load) and chained behind ours:
+// while the floating terminal has keyboard focus, keys and chars go into the
+// pty and nothing else sees them (the polled hotkey block also checks the
+// focus flag). F10 always releases focus so a keyboard-only user can't get
+// stuck; the knob menu never reads the keyboard, so it keeps working too.
+static term::PtyTerminal*   g_term = nullptr;
+static std::atomic<bool>    g_term_focus{ false };
+static std::atomic<bool>    g_term_focus_release{ false };   // F10 → applied in the loop
+static GLFWcharfun          g_prev_char_cb = nullptr;
+static GLFWkeyfun           g_prev_key_cb  = nullptr;
+
+static void term_char_cb(GLFWwindow* w, unsigned int cp) {
+    if (g_term_focus.load() && g_term) {
+        char u[4]; int n = 0;                              // UTF-8 encode
+        if      (cp < 0x80)    u[n++] = (char)cp;
+        else if (cp < 0x800)  { u[n++] = (char)(0xC0 | (cp >> 6));
+                                u[n++] = (char)(0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000){ u[n++] = (char)(0xE0 | (cp >> 12));
+                                u[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                u[n++] = (char)(0x80 | (cp & 0x3F)); }
+        else                  { u[n++] = (char)(0xF0 | (cp >> 18));
+                                u[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                                u[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                u[n++] = (char)(0x80 | (cp & 0x3F)); }
+        g_term->write_input(u, (size_t)n);
+        return;
+    }
+    if (g_prev_char_cb) g_prev_char_cb(w, cp);
+}
+
+static void term_key_cb(GLFWwindow* w, int key, int sc, int action, int mods) {
+    if (g_term_focus.load() && g_term) {
+        if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+            if (key == GLFW_KEY_F10) { g_term_focus_release.store(true); return; }
+            const char* seq = nullptr;
+            switch (key) {
+            case GLFW_KEY_ENTER: case GLFW_KEY_KP_ENTER: seq = "\r";      break;
+            case GLFW_KEY_BACKSPACE:                     seq = "\x7f";    break;
+            case GLFW_KEY_TAB:                           seq = "\t";      break;
+            case GLFW_KEY_ESCAPE:                        seq = "\x1b";    break;
+            case GLFW_KEY_UP:                            seq = "\x1b[A";  break;
+            case GLFW_KEY_DOWN:                          seq = "\x1b[B";  break;
+            case GLFW_KEY_RIGHT:                         seq = "\x1b[C";  break;
+            case GLFW_KEY_LEFT:                          seq = "\x1b[D";  break;
+            case GLFW_KEY_HOME:                          seq = "\x1b[H";  break;
+            case GLFW_KEY_END:                           seq = "\x1b[F";  break;
+            case GLFW_KEY_PAGE_UP:                       seq = "\x1b[5~"; break;
+            case GLFW_KEY_PAGE_DOWN:                     seq = "\x1b[6~"; break;
+            case GLFW_KEY_DELETE:                        seq = "\x1b[3~"; break;
+            default: break;
+            }
+            if (seq) { g_term->write_input(seq, strlen(seq)); return; }
+            if ((mods & GLFW_MOD_CONTROL) && key >= GLFW_KEY_A && key <= GLFW_KEY_Z) {
+                const char c = (char)(key - GLFW_KEY_A + 1);   // Ctrl+C → 0x03 …
+                g_term->write_input(&c, 1);
+                return;
+            }
+        }
+        return;      // swallow everything else (incl. releases) while focused
+    }
+    if (g_prev_key_cb) g_prev_key_cb(w, key, sc, action, mods);
+}
 
 // ── Serial port auto-discovery ────────────────────────────────────────────────
 // Tries the configured path first; if it doesn't exist, scans up to 8 nodes
@@ -600,6 +669,36 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
             }
         }
         return std::make_unique<face::NeoPixelMatrixOutput>(std::move(nc));
+    }
+    if (backend == "led_panels") {
+        // Large custom face panels: APA102/SK9822 chains on CM5 hardware SPI
+        // with per-LED canvas mappings (up to ~2000 LEDs per panel). See
+        // docs/led-face-panels.md for the scale math and mapping format.
+        face::LedPanelOutput::Config lc;
+        if (jpf && jpf->contains("led_panels")) {
+            const auto& jl = (*jpf)["led_panels"];
+            if (jl.contains("chains") && jl["chains"].is_array()) {
+                for (const auto& jc : jl["chains"]) {
+                    face::LedPanelChain::Config cc;
+                    cc.name          = jc.value("name",       std::string("panel"));
+                    cc.spi_device    = jc.value("spi_device", std::string("/dev/spidev0.0"));
+                    cc.speed_hz      = jc.value("speed_hz",   12'000'000);
+                    cc.map_file      = jc.value("map_file",   std::string());
+                    cc.cols          = jc.value("cols",       0);
+                    cc.rows          = jc.value("rows",       0);
+                    cc.canvas_x      = jc.value("canvas_x",   0);
+                    cc.canvas_y      = jc.value("canvas_y",   0);
+                    cc.pitch         = jc.value("pitch",      1);
+                    cc.serpentine    = jc.value("serpentine", true);
+                    cc.brightness    = static_cast<uint8_t>(
+                        std::clamp(jc.value("brightness", 64), 0, 255));
+                    cc.global_5bit   = jc.value("global_5bit", 31);
+                    cc.power_limit_a = jc.value("power_limit_a", 8.0);
+                    lc.chains.push_back(std::move(cc));
+                }
+            }
+        }
+        return std::make_unique<face::LedPanelOutput>(std::move(lc));
     }
     // HUB75 / daemon path — pass the layout-derived panel inventory through
     // so the in-HUD face editor knows which regions to outline. When the
@@ -1150,10 +1249,13 @@ struct KeyRepeat {
 // ── GPIO poll (sysfs) ─────────────────────────────────────────────────────────
 // Called from main loop ~1 Hz. Reads each monitored pin via sysfs export path.
 static void poll_gpio_states(AppState& state) {
-    // Export unexported pins and read values
+    // Export + direction are one-time setup per pin — doing them on every poll
+    // cost 2 extra open/write/close triples per pin per second. Setup is
+    // retried whenever the value read fails (e.g. something unexported it).
+    static std::set<int> s_ready;
     for (auto& ps : state.gpio_states) {
-        // Try export (idempotent — ignore EBUSY)
-        {
+        if (!s_ready.count(ps.pin)) {
+            // Try export (idempotent — ignore EBUSY)
             int efd = open("/sys/class/gpio/export", O_WRONLY);
             if (efd >= 0) {
                 char buf[16];
@@ -1161,9 +1263,7 @@ static void poll_gpio_states(AppState& state) {
                 (void)write(efd, buf, n);
                 close(efd);
             }
-        }
-        // Set direction to "in" (idempotent)
-        {
+            // Set direction to "in"
             char path[64];
             snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", ps.pin);
             int dfd = open(path, O_WRONLY);
@@ -1171,6 +1271,7 @@ static void poll_gpio_states(AppState& state) {
                 (void)write(dfd, "in", 2);
                 close(dfd);
             }
+            s_ready.insert(ps.pin);
         }
         // Read value
         {
@@ -1184,6 +1285,7 @@ static void poll_gpio_states(AppState& state) {
                 close(vfd);
             } else {
                 ps.value = -1;
+                s_ready.erase(ps.pin);   // redo setup next poll
             }
         }
     }
@@ -1230,6 +1332,20 @@ static void render_eye_fbo(gl::Fbo& fbo,
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
+    // Boot-phase timing: one line per phase so a journal shows exactly where
+    // startup time goes ([boot] <phase> +<phase ms> total <ms>).
+    const auto boot_t0  = std::chrono::steady_clock::now();
+    auto boot_last      = boot_t0;
+    auto boot_mark = [&boot_t0, &boot_last](const char* phase) {
+        const auto now = std::chrono::steady_clock::now();
+        auto ms = [](std::chrono::steady_clock::duration d) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+        };
+        std::cerr << "[boot] " << phase << "  +" << ms(now - boot_last)
+                  << "ms  total " << ms(now - boot_t0) << "ms\n";
+        boot_last = now;
+    };
+
     // Writing to a socket/pipe whose peer has gone away (Protoface restarted, a
     // serial device unplugged, etc.) must not kill the whole HUD — ignore SIGPIPE
     // and handle the -1/EPIPE return at each call site.
@@ -1618,7 +1734,7 @@ int main(int argc, char* argv[]) {
         bno08x_cfg.gpiochip           = jb.value("gpiochip", std::string("/dev/gpiochip0"));
         bno08x_cfg.int_line           = jval(jb, "int_line",           -1);
         bno08x_cfg.rst_line           = jval(jb, "rst_line",           -1);
-        bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 10000);
+        bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 5000);
         bno08x_cfg.aux_interval_us    = jval(jb, "aux_interval_us",    40000);
         bno08x_cfg.auto_calibrate     = jval(jb, "auto_calibrate",     true);
         bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
@@ -2177,8 +2293,36 @@ int main(int argc, char* argv[]) {
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
     state.legacy_hud          = jhud.value("legacy_hud", true);
+    if (jhud.contains("attitude_indicator") && jhud["attitude_indicator"].is_object()) {
+        // .value() throws on a key present with the wrong type (e.g. a quoted
+        // number from a hand edit) — a bad entry shouldn't kill startup.
+        try {
+            const auto& ja = jhud["attitude_indicator"];
+            state.attitude.enabled    = ja.value("enabled", false);
+            state.attitude.full       = ja.value("full", true);
+            state.attitude.size       = std::clamp(ja.value("size", 0.60f), 0.30f, 0.95f);
+            state.attitude.per_eye    = ja.value("per_eye", true);
+            state.attitude.text_scale = std::clamp(ja.value("text_scale", 1.0f), 0.5f, 2.0f);
+            state.attitude.smooth     = std::clamp(ja.value("smooth", 0.5f), 0.0f, 1.0f);
+        } catch (const nlohmann::json::exception& e) {
+            std::cerr << "[main] hud.attitude_indicator config ignored: " << e.what() << "\n";
+            state.attitude = {};
+        }
+    }
     state.skip_landing        = jval(cfg.contains("landing") ? cfg["landing"] : json::object(),
                                      "skip", false);
+    const json jdisp2 = cfg.contains("display") && cfg["display"].is_object()
+                      ? cfg["display"] : json::object();
+    state.float_win.fov_deg = std::clamp(jval(jdisp2, "fov_deg", 43.0f), 20.f, 90.f);
+    if (jhud.contains("float_window") && jhud["float_window"].is_object()) {
+        const auto& jfw = jhud["float_window"];
+        state.float_win.content   = std::clamp(jfw.value("content", 0), 0, 1);
+        state.float_win.width_deg = std::clamp(jfw.value("width_deg", 30.0f), 10.f, 60.f);
+    }
+    // Timewarp pose prediction horizon (ms). Covers pose age + render +
+    // scan-out; 0 disables extrapolation.
+    const float tw_predict_ms =
+        std::clamp(jval(jdisp2, "timewarp_predict_ms", 12.0f), 0.f, 50.f);
     state.expanded_show_debug = jhud.value("expanded_show_debug", false);
     state.expanded_hide_info  = jhud.value("expanded_hide_info", false);
     state.scheduler_lead_min  = sched_lead_min;   // loaded above, applied now that state exists
@@ -2423,11 +2567,13 @@ int main(int argc, char* argv[]) {
     // XRDisplay calls glfwInit() + glfwCreateWindow() and establishes the EGL
     // GLES2 context. Everything else must come after this.
 
+    boot_mark("config + services");
     XRDisplay xr(xr_cfg);
     if (!xr.init()) {
         std::cerr << "[main] XR display init failed\n";
         return 1;
     }
+    boot_mark("xr display + GL context");
 
     // IMU → compass heading + spatial audio head tracking
     // Timestamp lets the MPU-9250 backup detect when the XR glasses go offline.
@@ -2525,8 +2671,7 @@ int main(int argc, char* argv[]) {
         prev_us = now_us;
     });
 
-    if (!mpu9250.start() && mpu_cfg.enabled)
-        std::cerr << "[main] MPU-9250 backup compass unavailable\n";
+    // (started with the other IMUs on the imu_boot_thread below)
 
     // ── BNO055 (Adafruit 9-DOF absolute orientation) ─────────────────────────
     // On-chip sensor fusion in NDOF mode — reports a calibrated absolute
@@ -2574,8 +2719,7 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.notifs.push(std::move(n));
     });
-    if (!bno055.start() && bno_cfg.enabled)
-        std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
+    // (started with the other IMUs on the imu_boot_thread below)
 
     // ── BNO086 (SH-2, I2C) ───────────────────────────────────────────────────
     // Mag-referenced heading → imu_bno08x (compass), and when head_tracking is
@@ -2632,11 +2776,30 @@ int main(int argc, char* argv[]) {
         }
         prev_us = now_us;
     });
-    if (bno086.start()) {
-        bno08x_owns_pose.store(bno08x_cfg.head_tracking);
-    } else if (bno08x_cfg.enabled) {
-        std::cerr << "[main] BNO086 IMU unavailable\n";
-    }
+    // ── IMU bring-up, off the boot path ───────────────────────────────────────
+    // All three IMU starts block: the BNO055 polls CHIP_ID for up to 2 s (and
+    // used to retry to ~6.6 s when the chip isn't fitted), the BNO086 spends
+    // ~0.5-1 s on SHTP handshake, the MPU-9250 a few register round-trips.
+    // Callbacks are all registered above, and every consumer (compass picker,
+    // face motion feed, menu rows, attitude indicator) already tolerates a
+    // sensor that isn't up yet — so start them on an owned worker and let the
+    // HUD come up meanwhile. Joined in the shutdown sequence before the
+    // sensors are stopped.
+    std::thread imu_boot_thread([&mpu9250, &bno055, &bno086, &bno08x_owns_pose,
+                                 mpu_en = mpu_cfg.enabled, bno_en = bno_cfg.enabled,
+                                 b86_en = bno08x_cfg.enabled,
+                                 b86_ht = bno08x_cfg.head_tracking]{
+        if (!mpu9250.start() && mpu_en)
+            std::cerr << "[main] MPU-9250 backup compass unavailable\n";
+        if (!bno055.start() && bno_en)
+            std::cerr << "[main] BNO055 9-DOF IMU unavailable\n";
+        if (bno086.start()) {
+            bno08x_owns_pose.store(b86_ht);
+        } else if (b86_en) {
+            std::cerr << "[main] BNO086 IMU unavailable\n";
+        }
+        std::cerr << "[boot] IMU bring-up complete (background)\n";
+    });
 
     // ── Boop sensor ──────────────────────────────────────────────────────────
     // Polls on its own thread; the on_boop callback fires from there and
@@ -2991,6 +3154,13 @@ int main(int argc, char* argv[]) {
     }
     HudRenderer hud(hud_cfg, hud_col);
     hud.load(xr.glfw_window());
+    {
+        // Terminal keyboard hooks — AFTER hud.load so ImGui's GLFW callbacks
+        // are already installed and can be chained behind ours.
+        GLFWwindow* win = static_cast<GLFWwindow*>(xr.glfw_window());
+        g_prev_key_cb  = glfwSetKeyCallback(win, term_key_cb);
+        g_prev_char_cb = glfwSetCharCallback(win, term_char_cb);
+    }
     hud.set_icon_dir(res("assets/icons"));
 
     // ── Splash screen ─────────────────────────────────────────────────────────
@@ -3036,6 +3206,7 @@ int main(int argc, char* argv[]) {
         state.health.cam_usb2      = cameras.usb2_ok();
         state.health.cam_usb3      = cameras.usb3_ok();
     }
+    boot_mark("cameras (CSI; USB opens continue in background)");
 
     // CSI boot auto-retry: a sensor that comes up wedged at boot leaves one eye
     // dark until a reboot. Attempt reinit_owls() a few times early on (from the
@@ -3112,6 +3283,46 @@ int main(int argc, char* argv[]) {
     // renders the LED face in C++ and writes the same /dev/shm frame the daemon
     // would, so the existing preview path and panel_driver.py work unchanged.
     std::unique_ptr<face::NativeFaceController> native_ctrl;
+
+    // ── Reaction engine (environment/movement reactions) ─────────────────────
+    // v1: sleepy/wake from head stillness + the ambient-override ladder (the
+    // weather/temp ambient routes through it; the asleep Z's borrow the slot
+    // and hand it back on wake). Ticked from the render loop by the IMU feed.
+    face::ReactionEngine reactions;
+    if (cfg.contains("reactions"))
+        reactions.set_config(face::ReactionEngine::Config::from_json(cfg["reactions"]));
+    {
+        face::ReactionActions ra;
+        ra.face_exists = [&face_proxy](const std::string& n){
+            return face_proxy.face_image_exists(n);
+        };
+        ra.set_expression = [&face_proxy](const std::string& n){
+            face_proxy.set_face_by_name(n);
+        };
+        ra.current_expression = [&face_proxy]{ return face_proxy.current_expression(); };
+        ra.flash_expression = [&face_proxy](const std::string& n, double d){
+            face_proxy.trigger_boop(n, d);
+        };
+        ra.set_blink = [&native_ctrl](double mn, double mx, double dur){
+            if (native_ctrl) native_ctrl->set_blink_timing(mn, mx, dur);
+        };
+        ra.restore_blink = [&native_ctrl, &pf_blink_min, &pf_blink_max,
+                            &pf_blink_duration]{
+            if (native_ctrl)
+                native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max,
+                                              pf_blink_duration);
+        };
+        ra.set_ambient = [&native_ctrl](const nlohmann::json& spec){
+            if (native_ctrl) native_ctrl->set_ambient_effect(spec);
+        };
+        ra.notify = [&state](const std::string& t, const std::string& b){
+            Notification n; n.type = NotifType::App;
+            n.title = t; n.body = b; n.auto_dismiss_s = 5.f;
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.notifs.push(std::move(n));
+        };
+        reactions.set_actions(std::move(ra));
+    }
 
     if (!teensy.start()) std::cerr << "[main] Teensy not available on " << teensy_port << "\n";
     if (pf_mode == "native") {
@@ -3725,6 +3936,21 @@ int main(int argc, char* argv[]) {
         android_overlay_active = true;
     }
 
+    // ── Floating-window terminal (pty shell) ─────────────────────────────────
+    // Spawned lazily the first time the floating window shows Terminal
+    // content; the keyboard routes into it while Keyboard Focus is on (see
+    // the GLFW callbacks near the top of this file).
+    term::PtyTerminal::Config term_cfg;
+    if (cfg.contains("terminal") && cfg["terminal"].is_object()) {
+        const auto& jt = cfg["terminal"];
+        term_cfg.shell = jt.value("shell", std::string());
+        term_cfg.cols  = jt.value("cols", 80);
+        term_cfg.rows  = jt.value("rows", 24);
+    }
+    term::PtyTerminal terminal(term_cfg);
+    g_term = &terminal;
+
+    boot_mark("serial + sensors + face");
     splash_frame("Building menu...", 0.75f);
 
     // ── Menu system ───────────────────────────────────────────────────────────
@@ -3878,6 +4104,19 @@ int main(int argc, char* argv[]) {
                     input::gpio_func_from_id(jb.value("short", std::string("none")));
                 coproc_cfg.long_map[id] =
                     input::gpio_func_from_id(jb.value("long",  std::string("none")));
+            }
+        }
+        // TTP223 touch pads (firmware's pre-assigned touch pins, indices 0-5):
+        // map a pad index to any GpioFunc, fired on touch-down. Pads whose
+        // index matches a boop-zone electrode ALSO fire that zone (both work).
+        if (jc.contains("touch") && jc["touch"].is_object()) {
+            for (const auto& [k, v] : jc["touch"].items()) {
+                try {
+                    const int idx = std::stoi(k);
+                    if (idx >= 0 && idx <= 5 && v.is_string())
+                        coproc_cfg.touch_map[idx] =
+                            input::gpio_func_from_id(v.get<std::string>());
+                } catch (...) {}
             }
         }
         // Physical pin map (order = button id) pushed to the firmware on connect,
@@ -4136,6 +4375,11 @@ int main(int argc, char* argv[]) {
         default:                       return "";
         }
     };
+    menu_ctx.term_restart = [&terminal]{
+        // Fresh shell for the floating window: tear down whatever is left
+        // (a dead pty after `exit`, or a wedged session) and respawn.
+        std::thread([&terminal]{ terminal.stop(); terminal.start(); }).detach();
+    };
     menu_ctx.pf_set_motion_particles = [&](bool v){
         pf_motion_particles = v;
         if (native_ctrl) native_ctrl->set_motion_particles(v);
@@ -4214,7 +4458,26 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_i2c_result = [&]() -> std::string {
         return coproc_inputs ? coproc_inputs->i2c_scan_result() : std::string("n/a");
     };
+    // Peripheral Test verbs (servos / WS2812 zone / ADC on the pre-assigned
+    // test pins — GPIO > RP2350 GPIO Expander > Peripheral Test).
+    menu_ctx.coproc_servo = [&](int ch, int deg) {
+        if (coproc_inputs) coproc_inputs->send_servo(ch, deg);
+    };
+    menu_ctx.coproc_led_zone = [&](int r, int g, int b, int n) {
+        if (coproc_inputs) coproc_inputs->send_led_zone(r, g, b, n);
+    };
+    menu_ctx.coproc_led_pattern = [&](int mode, int r, int g, int b, int speed) {
+        if (coproc_inputs) coproc_inputs->send_led_pattern(mode, r, g, b, speed);
+    };
+    menu_ctx.coproc_led_bright = [&](int b) {
+        if (coproc_inputs) coproc_inputs->send_led_brightness(b);
+    };
+    menu_ctx.coproc_adc_read = [&]{ if (coproc_inputs) coproc_inputs->request_adc(); };
+    menu_ctx.coproc_adc_result = [&]() -> std::string {
+        return coproc_inputs ? coproc_inputs->adc_result() : std::string("n/a");
+    };
     menu_ctx.pf_glitch_p = &pf_glitch;
+    menu_ctx.reactions = &reactions;
     menu_ctx.pf_scroll_p = &pf_scroll;
 
     MenuSystem menu(build_menu(menu_ctx));
@@ -4691,6 +4954,66 @@ int main(int argc, char* argv[]) {
     if (local_gpio_wanted() && !gpio_inputs->init())
         std::cerr << "[main] GPIO input map init failed (no pins assigned or chip busy)\n";
 
+    // ── APDS-9960 gesture / proximity sensor (optional) ──────────────────────
+    // Touchless input near the snout. Each gesture (and the proximity "near"
+    // edge) maps to a GPIO function id from config, so a swipe can do
+    // anything a physical button can. Callbacks fire on the sensor thread and
+    // ride the same input queue as every other button source.
+    sensor::Apds9960::Config apds_cfg;
+    input::GpioFunc apds_fn[5] = {                    // up, down, left, right, near
+        input::gpio_func_from_id("effect_next"),
+        input::gpio_func_from_id("face_return"),
+        input::gpio_func_from_id("face_prev"),
+        input::gpio_func_from_id("face_next"),
+        input::gpio_func_from_id("boop_snout"),
+    };
+    if (cfg.contains("apds9960")) {
+        auto& ja = cfg["apds9960"];
+        apds_cfg.enabled          = jval(ja, "enabled",          apds_cfg.enabled);
+        apds_cfg.i2c_bus          = ja.value("i2c_bus",          apds_cfg.i2c_bus);
+        apds_cfg.i2c_addr         = jval(ja, "i2c_addr",         apds_cfg.i2c_addr);
+        apds_cfg.poll_hz          = jval(ja, "poll_hz",          apds_cfg.poll_hz);
+        apds_cfg.near_threshold   = jval(ja, "near_threshold",   apds_cfg.near_threshold);
+        apds_cfg.gesture_rotation = jval(ja, "gesture_rotation", apds_cfg.gesture_rotation);
+        static const char* keys[5] = {"gesture_up", "gesture_down",
+                                      "gesture_left", "gesture_right", "near"};
+        for (int i = 0; i < 5; ++i)
+            if (ja.contains(keys[i]))
+                apds_fn[i] = input::gpio_func_from_id(
+                    ja.value(keys[i], std::string("none")));
+    }
+    sensor::Apds9960 apds(apds_cfg);
+    apds.set_gesture_callback([&gpio_dispatch, &apds_fn](sensor::Apds9960::Gesture g){
+        gpio_dispatch(apds_fn[static_cast<int>(g)]);
+    });
+    apds.set_proximity_callback([&gpio_dispatch, &apds_fn](bool near){
+        if (near) gpio_dispatch(apds_fn[4]);          // fire on approach only
+    });
+    if (apds_cfg.enabled && !apds.start())
+        std::cerr << "[main] APDS-9960 gesture sensor unavailable\n";
+
+    // ── BME280 environment sensor (optional) ─────────────────────────────────
+    // Temperature / humidity / pressure into state.env for the System >
+    // Temperature readout and future reactions (fog breath, storm warning).
+    sensor::Bme280::Config bme_cfg;
+    if (cfg.contains("bme280")) {
+        auto& jb = cfg["bme280"];
+        bme_cfg.enabled  = jval(jb, "enabled",  bme_cfg.enabled);
+        bme_cfg.i2c_bus  = jb.value("i2c_bus",  bme_cfg.i2c_bus);
+        bme_cfg.i2c_addr = jval(jb, "i2c_addr", bme_cfg.i2c_addr);
+        bme_cfg.poll_s   = jval(jb, "poll_s",   bme_cfg.poll_s);
+    }
+    sensor::Bme280 bme280(bme_cfg);
+    bme280.set_callback([&state](const sensor::Bme280::Reading& r){
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.env.ok           = true;
+        state.env.temp_c       = r.temp_c;
+        state.env.humidity_pct = r.humidity_pct;
+        state.env.pressure_hpa = r.pressure_hpa;
+    });
+    if (bme_cfg.enabled && !bme280.start())
+        std::cerr << "[main] BME280 environment sensor unavailable\n";
+
     // Live reload: tear down the poll thread + release the lines, then rebuild
     // from the current slots. Runs on the main thread (a menu action), so the
     // old GpioInputs dtor joins its thread before the new one starts.
@@ -4872,6 +5195,7 @@ int main(int argc, char* argv[]) {
 
     teensy.request_status();
 
+    boot_mark("menu + wiring");
     // ── Splash hold ───────────────────────────────────────────────────────────
     // Keep splash visible until minimum display time elapses, then show "Ready"
     // for a brief moment so the animation completes cleanly.
@@ -5100,6 +5424,20 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
         cfg["hud"]["legacy_hud"]          = state.legacy_hud;
+        // A hand-edited config could hold attitude_indicator as a non-object;
+        // operator[] on it would then throw out of the save path. Reset first.
+        if (cfg["hud"].contains("attitude_indicator") &&
+            !cfg["hud"]["attitude_indicator"].is_object())
+            cfg["hud"].erase("attitude_indicator");
+        cfg["hud"]["attitude_indicator"]["enabled"]    = state.attitude.enabled;
+        cfg["hud"]["attitude_indicator"]["full"]       = state.attitude.full;
+        cfg["hud"]["attitude_indicator"]["size"]       = state.attitude.size;
+        cfg["hud"]["attitude_indicator"]["per_eye"]    = state.attitude.per_eye;
+        cfg["hud"]["attitude_indicator"]["text_scale"] = state.attitude.text_scale;
+        cfg["hud"]["attitude_indicator"]["smooth"]     = state.attitude.smooth;
+        cfg["display"]["fov_deg"]                      = state.float_win.fov_deg;
+        cfg["hud"]["float_window"]["content"]          = state.float_win.content;
+        cfg["hud"]["float_window"]["width_deg"]        = state.float_win.width_deg;
         cfg["landing"]["skip"]            = state.skip_landing;
         cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
         cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
@@ -5221,6 +5559,7 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["pride_sharp"]         = state.face.pride_sharp;
         cfg["protoface"]["motion_particles"]    = pf_motion_particles;
         cfg["protoface"]["motion_scale"]        = pf_motion_scale;
+        cfg["reactions"] = reactions.config().to_json();
         cfg["protoface"]["motion_range"]["pitch_deg"] = pf_range_pitch;
         cfg["protoface"]["motion_range"]["yaw_deg"]   = pf_range_yaw;
         cfg["protoface"]["face_inertia"]        = pf_face_inertia;
@@ -5679,6 +6018,10 @@ int main(int argc, char* argv[]) {
     std::string weather_fx_sent = "null";
 
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
+        {
+            static bool s_first_frame = true;
+            if (s_first_frame) { s_first_frame = false; boot_mark("first frame"); }
+        }
         wd_heartbeat.fetch_add(1, std::memory_order_relaxed);
 
         // Apply a pending window-mode change (Settings > Fullscreen / Frameless).
@@ -5716,7 +6059,7 @@ int main(int argc, char* argv[]) {
             const std::string key = spec.dump();
             if (key != weather_fx_sent) {
                 weather_fx_sent = key;
-                native_ctrl->set_ambient_effect(spec);
+                reactions.set_base_ambient(spec);
             }
         }
         if (state.win_resize_dirty.exchange(false)) {
@@ -5747,7 +6090,7 @@ int main(int argc, char* argv[]) {
         // resting gravity, not free-fall.
         {
             double m_head = 0.0, m_yaw = 0.0, m_pitch = 0.0, m_roll = 0.0,
-                   m_accel = 1.0;
+                   m_accel = 1.0, m_gyro_mag = 0.0;
             {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 const auto& d = state.imu_data;
@@ -5779,6 +6122,7 @@ int main(int argc, char* argv[]) {
                 case Src::B86:
                     m_head  = state.imu_bno08x.heading_deg;
                     m_yaw   = d.b86_gyro_dps[2];      // yaw rate about vertical
+                    m_gyro_mag = norm3(d.b86_gyro_dps);
                     m_roll  = d.b86_euler[0];
                     m_pitch = d.b86_euler[1];
                     m_accel = d.b86_aux_ok ? norm3(d.b86_accel_g) : 1.0;
@@ -5786,6 +6130,7 @@ int main(int argc, char* argv[]) {
                 case Src::B55:
                     m_head  = state.imu_bno.heading_deg;
                     m_yaw   = d.bno_gyro_dps[2];
+                    m_gyro_mag = norm3(d.bno_gyro_dps);
                     m_roll  = d.bno_euler[1];
                     m_pitch = d.bno_euler[2];
                     m_accel = d.bno_ok ? norm3(d.bno_accel_g) : 1.0;
@@ -5793,6 +6138,7 @@ int main(int argc, char* argv[]) {
                 case Src::Mpu:
                     m_head  = state.imu_mpu.heading_deg;
                     m_yaw   = d.gyro_dps[2];
+                    m_gyro_mag = norm3(d.gyro_dps);
                     m_accel = d.mpu_ok ? norm3(d.accel_g) : 1.0;
                     break;
                 case Src::Xr:
@@ -5803,7 +6149,75 @@ int main(int argc, char* argv[]) {
                 case Src::None:
                     break;
                 }
+                // Attitude-indicator pose: full euler from the SAME selected
+                // source, unscaled, so the instrument animates (and matches
+                // the Live Readout) even when bno08x.head_tracking is off and
+                // nothing is feeding imu_pose. MPU-9250 publishes no fused
+                // euler — heading stands in for yaw; unknown axes stay level.
+                ImuPose ap{};
+                switch (src) {
+                case Src::B86:
+                    ap = { d.b86_euler[0], d.b86_euler[1], d.b86_euler[2] };
+                    break;
+                case Src::B55:
+                    ap = { d.bno_euler[1], d.bno_euler[2], d.bno_euler[0] };
+                    break;
+                case Src::Mpu:
+                    ap = { 0.f, 0.f, state.imu_mpu.heading_deg };
+                    break;
+                case Src::Xr:
+                    ap = { d.xr_roll, d.xr_pitch, d.xr_yaw };
+                    break;
+                case Src::None:
+                    ap = state.imu_pose;                    // hold the head-track pose
+                    break;
+                }
+                // Speed-adaptive smoothing (One-Euro style): calm the sensor
+                // jitter while still tracking fast head motion — the cutoff
+                // opens with angular speed, and jumps >25° (tare / recenter /
+                // source switch) snap through instead of gliding. Runs on the
+                // render thread only; wrap-aware for roll/yaw.
+                struct AngleSmooth {
+                    double y = 0, dy = 0; bool init = false;
+                    static double circ(double v) {
+                        while (v > 180.0) v -= 360.0;
+                        while (v < -180.0) v += 360.0;
+                        return v;
+                    }
+                    float step(float x, double dt_s, double fc_min, bool wrap) {
+                        const double diff = wrap ? circ(x - y) : (x - y);
+                        if (!init || std::fabs(diff) > 25.0) {
+                            y = x; dy = 0.0; init = true;
+                            return static_cast<float>(y);
+                        }
+                        const double dts = std::clamp(dt_s, 1e-3, 0.1);
+                        dy += (1.0 - std::exp(-2.0 * M_PI * 1.0 * dts)) *
+                              (diff / dts - dy);
+                        const double fc = fc_min + 0.15 * std::fabs(dy);
+                        y += (1.0 - std::exp(-2.0 * M_PI * fc * dts)) * diff;
+                        if (wrap) y = circ(y);
+                        return static_cast<float>(y);
+                    }
+                };
+                static AngleSmooth s_att_r, s_att_p, s_att_y;
+                const float sm = std::clamp(state.attitude.smooth, 0.f, 1.f);
+                if (sm > 0.001f) {
+                    // slider 0→raw; 1→0.3 Hz floor (very calm when still)
+                    const double fc_min = 0.3 + (1.0 - sm) * 4.7;
+                    ap.roll  = s_att_r.step(ap.roll,  dt, fc_min, true);
+                    ap.pitch = s_att_p.step(ap.pitch, dt, fc_min, false);
+                    ap.yaw   = s_att_y.step(ap.yaw,   dt, fc_min, true);
+                } else {
+                    s_att_r.init = s_att_p.init = s_att_y.init = false;
+                }
+                state.attitude_pose = ap;
             }
+            // Reaction engine: raw (unscaled) motion energy + state machine
+            // tick. Runs even when face motion coupling is off - sleepiness
+            // is about the wearer, not the effect settings.
+            reactions.feed_motion(m_gyro_mag, std::fabs(m_accel - 1.0));
+            reactions.tick(dt);
+
             // ── Motion-range calibration wizard ─────────────────────────
             // Press-driven: each Select on the menu row captures the current
             // pose and advances (knob press, GPIO menu button or keyboard -
@@ -6130,10 +6544,31 @@ int main(int argc, char* argv[]) {
             if (menu.is_open()) menu.close();
             else                menu.open();
         }
-        // F1 toggles the full-screen "deep menu".
-        if (key_pressed(ImGuiKey_F1)) {
-            if (menu.is_deep_open()) menu.close_deep();
-            else { menu.close(); menu.open_deep(); }
+        // F-row = the deep menu's tab bar: F1..Fn open the full-screen menu
+        // directly on main page n (Vision, HUD, Face Display, GPIO, Files,
+        // Communications, System, ...), pressing the ACTIVE tab's key again
+        // closes it (keeps F1's old toggle feel). The key after the last tab
+        // jumps to System > Software > Updates - always the last F key.
+        // (F10 is reserved: floating-terminal focus release.)
+        {
+            const int ntabs = menu.deep_tab_count();
+            const int nkeys = std::min(ntabs + 1, 9);   // F1..F9; F10 reserved
+            for (int i = 0; i < nkeys; ++i) {
+                if (!key_pressed(static_cast<ImGuiKey>(ImGuiKey_F1 + i)))
+                    continue;
+                if (i == ntabs) {                       // one past the tabs
+                    menu.close();
+                    menu.close_deep();
+                    menu.open_deep_at({"System", "Software", "Updates"});
+                } else if (menu.is_deep_open() && menu.deep_tab_index() == i) {
+                    menu.close_deep();                  // same key again = close
+                } else {
+                    menu.close();
+                    menu.close_deep();
+                    menu.open_deep_tab(i);
+                }
+                break;
+            }
         }
         // Per-camera autofocus: [ = Left camera, ] = Right camera.
         if (key_pressed(ImGuiKey_LeftBracket)) {
@@ -6294,6 +6729,25 @@ int main(int argc, char* argv[]) {
         if (want3) cameras.get_usb3(tex_usb3);
         android_mirror.get_frame(tex_android);
 
+        // ── Floating-window terminal lifecycle + keyboard focus ──────────────
+        {
+            const bool want_term = snap.float_win.enabled &&
+                                   snap.float_win.content == 0;
+            // Spawn the shell on the rising edge of "window shows terminal"
+            // (NOT whenever it isn't running — typing `exit` must not respawn
+            // an endless chain; the menu's Restart Terminal re-spawns by hand).
+            static bool s_prev_want_term = false;
+            if (want_term && !s_prev_want_term && !terminal.running())
+                terminal.start();
+            s_prev_want_term = want_term;
+            if (g_term_focus_release.exchange(false)) {      // F10 pressed
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.float_win.focus_keys = false;
+            }
+            g_term_focus.store(want_term && terminal.running() &&
+                               snap.float_win.focus_keys);
+        }
+
         // PiP toggle state (pip_left_active / pip_right_active) is now flipped
         // directly by the GPIO dispatch (Camera: PiP toggle), so there's no
         // per-frame button-hold polling here anymore.
@@ -6314,7 +6768,10 @@ int main(int argc, char* argv[]) {
             const bool editor_owns_kb = menu.is_face_editor_open();
             auto edge = [&](int n, int glfw_key) -> bool {
                 bool now = (glfwGetKey(win, glfw_key) == GLFW_PRESS);
-                bool fired = now && !prev_key[n] && !editor_owns_kb;
+                // Suppressed while the face editor or the floating terminal
+                // owns the keyboard (still tracked so releases stay fresh).
+                bool fired = now && !prev_key[n] && !editor_owns_kb &&
+                             !g_term_focus.load();
                 prev_key[n] = now;
                 return fired;
             };
@@ -6562,11 +7019,12 @@ int main(int argc, char* argv[]) {
             snap.health          = state.health;
             snap.knob            = state.knob;
             snap.audio           = state.audio;
-            snap.lora_nodes      = state.lora_nodes;
-            snap.lora_messages   = state.lora_messages;
             snap.compass_heading    = state.compass_heading;
             snap.compass_bg_enabled = state.compass_bg_enabled;
             snap.compass_tape       = state.compass_tape;
+            snap.attitude           = state.attitude;
+            snap.attitude_pose      = state.attitude_pose;
+            snap.float_win          = state.float_win;
             snap.legacy_hud         = state.legacy_hud;
             snap.imu_pose           = state.imu_pose;
             snap.focus_left         = state.focus_left;
@@ -6575,7 +7033,6 @@ int main(int argc, char* argv[]) {
             snap.clock_cfg          = state.clock_cfg;
             snap.pp_cfg             = state.pp_cfg;
             snap.timer_alarm        = state.timer_alarm;
-            snap.scheduler_events   = state.scheduler_events;
             snap.scheduler_status   = state.scheduler_status;
             snap.scheduler_lead_min = state.scheduler_lead_min;
             snap.effects_cfg        = state.effects_cfg;
@@ -6591,7 +7048,6 @@ int main(int argc, char* argv[]) {
             snap.wifi               = state.wifi;
             snap.ping               = state.ping;
             snap.ssh                = state.ssh;
-            snap.bt_devices         = state.bt_devices;
             snap.serial_metrics     = state.serial_metrics;
             snap.camera_resolution  = state.camera_resolution;
             snap.camera_resolution_right = state.camera_resolution_right;
@@ -6605,13 +7061,27 @@ int main(int argc, char* argv[]) {
             snap.capture_request    = state.capture_request;
             snap.qr_scan_main       = state.qr_scan_main;
             snap.qr_scan_usb        = state.qr_scan_usb;
-            snap.notifs             = state.notifs;
-            snap.i2c_scan_results   = state.i2c_scan_results;
             snap.i2c_scan_busy      = state.i2c_scan_busy;
             snap.i2c_scan_bus       = state.i2c_scan_bus;
-            snap.gpio_states        = state.gpio_states;
-            memcpy(snap.lora_node_colors, state.lora_node_colors,
-                   sizeof(state.lora_node_colors));
+
+            // Heavy containers (deques/vectors of strings, std::function
+            // callbacks) change at ~1 Hz at most but their copy-assignments
+            // dominated this lock's hold time at 60+ fps. They only feed HUD
+            // widgets, so refresh them at 10 Hz — toasts draw from the LIVE
+            // queue below and stay instant.
+            static auto s_heavy_next = std::chrono::steady_clock::time_point{};
+            if (const auto now_hc = std::chrono::steady_clock::now(); now_hc >= s_heavy_next) {
+                s_heavy_next = now_hc + std::chrono::milliseconds(100);
+                snap.lora_nodes         = state.lora_nodes;
+                snap.lora_messages      = state.lora_messages;
+                snap.scheduler_events   = state.scheduler_events;
+                snap.bt_devices         = state.bt_devices;
+                snap.notifs             = state.notifs;
+                snap.i2c_scan_results   = state.i2c_scan_results;
+                snap.gpio_states        = state.gpio_states;
+                memcpy(snap.lora_node_colors, state.lora_node_colors,
+                       sizeof(state.lora_node_colors));
+            }
         }
 
         // ── Perf readout (TEMPORARY) — once/second fps so the post-process win
@@ -7050,7 +7520,47 @@ int main(int argc, char* argv[]) {
         }
 
         // ── Composite or timewarp ─────────────────────────────────────────────
-        ImuPose current_pose = xr.get_latest_imu_pose();
+        // Freshest pose from the SAME source begin_frame recorded — the
+        // BNO086 when it owns head tracking, else the glasses IMU. (Mixing
+        // sources gave the warp deltas from two different references.)
+        ImuPose current_pose;
+        if (bno08x_owns_pose.load()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            current_pose = state.imu_pose;
+        } else {
+            current_pose = xr.get_latest_imu_pose();
+        }
+        // Predict the warp pose forward to display time (pose age + render +
+        // scan-out): angular velocity estimated from consecutive warp poses
+        // (EMA-smoothed, clamped) and extrapolated by timewarp_predict_ms.
+        // Cuts warp error from head_speed × pose_age to roughly sensor noise.
+        if (tw_predict_ms > 0.f) {
+            static ImuPose s_tw_prev{};
+            static bool    s_tw_have = false;
+            static double  s_tw_t    = 0.0;
+            static float   s_vr = 0.f, s_vp = 0.f, s_vy = 0.f;
+            const double now_s = glfwGetTime();
+            auto circ = [](float d) {
+                while (d > 180.f) d -= 360.f;
+                while (d < -180.f) d += 360.f;
+                return d;
+            };
+            if (s_tw_have) {
+                const double dts = now_s - s_tw_t;
+                if (dts > 0.0005 && dts < 0.1) {
+                    const float a = 0.5f;   // velocity EMA — calm the estimate
+                    s_vr += a * (circ(current_pose.roll  - s_tw_prev.roll)  / (float)dts - s_vr);
+                    s_vp += a * (circ(current_pose.pitch - s_tw_prev.pitch) / (float)dts - s_vp);
+                    s_vy += a * (circ(current_pose.yaw   - s_tw_prev.yaw)   / (float)dts - s_vy);
+                }
+            }
+            s_tw_prev = current_pose; s_tw_t = now_s; s_tw_have = true;
+            auto cv = [](float v) { return std::clamp(v, -500.f, 500.f); };
+            const float ps = tw_predict_ms * 0.001f;
+            current_pose.roll  += cv(s_vr) * ps;
+            current_pose.pitch += cv(s_vp) * ps;
+            current_pose.yaw   += cv(s_vy) * ps;
+        }
 
         if (snap.cam_single.enabled) {
             // Single-camera fill: draw one eye's (post-processed) feed to an
@@ -7100,6 +7610,9 @@ int main(int argc, char* argv[]) {
                                    tex_usb3, p3 && preview != 3, pip_overlay_cfg3,
                                    xr.display_width(), xr.display_height());
             hud.draw_hud_frame(snap, xr.display_width(), xr.display_height(), fps_overlay_active);
+            hud.draw_float_window(snap, xr.display_width(), xr.display_height(),
+                                  tex_android, android_mirror.frame_aspect(),
+                                  &terminal);
             {
                 // Toasts draw from (and mark read/dismissed on) the LIVE queue
                 // while worker threads push into it — hold the lock for the
@@ -7308,12 +7821,17 @@ int main(int argc, char* argv[]) {
     step("sched_mon");       sched_mon.stop();
     step("weather_mon");     weather_mon.stop();
     step("sys_mon");         sys_mon.stop();
+    step("imu boot join");   if (imu_boot_thread.joinable()) imu_boot_thread.join();
     step("mpu9250");         mpu9250.stop();
     step("bno055");          bno055.stop();
     step("boop_sensor");     boop_sensor.stop();
     step("light_sensor");    light_sensor.stop();
+    step("apds9960");        apds.stop();
+    step("bme280");          bme280.stop();
     step("accessory_leds");  accessory_leds.stop();
     step("audio");           audio.stop();
+    step("terminal");        g_term_focus.store(false); g_term = nullptr;
+                             terminal.stop();
     step("android_mirror");  android_mirror.stop();
     step("hud");             hud.unload();
     step("beast_cam");       beast_cam.stop();

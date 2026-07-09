@@ -60,8 +60,8 @@ private:
     // Load a face PNG sized to this panel: crops our slice when the PNG is
     // authored at canvas size (multi-panel), else resizes the whole image.
     cv::Mat load_img(const std::string& path) const;
-    cv::Mat blend_region(const cv::Mat& base, const cv::Mat& overlay,
-                         const Region& region, double t) const;
+    void blend_region(cv::Mat& frame, const cv::Mat& overlay,
+                      const Region& region, double t) const;
 
     std::string folder_;
     int w_, h_;

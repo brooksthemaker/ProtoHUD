@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <functional>
+#include <utility>
 #include <string>
 #include <thread>
 #include <cstdint>
@@ -34,7 +35,7 @@ public:
         std::string gpiochip           = "/dev/gpiochip0";
         int         int_line           = -1;           // INT offset (data-ready, active-low); -1 = poll the bus
         int         rst_line           = -1;           // RST offset (active-low); -1 = no hardware reset
-        int         report_interval_us = 10000;        // 10 ms = 100 Hz orientation
+        int         report_interval_us = 5000;         // 5 ms = 200 Hz orientation
         int         aux_interval_us    = 40000;        // 25 Hz calibrated accel/gyro/mag
         bool        auto_calibrate     = true;         // dynamic cal on accel/gyro/mag +
                                                        // periodic DCD save to chip flash
@@ -104,6 +105,19 @@ public:
         roll_trim_.store(roll_deg);
         pitch_trim_.store(pitch_deg);
     }
+    // Software tare: fold the CURRENT (post-trim) roll/pitch into the trim
+    // offsets so this exact pose reads 0/0 from the next sample on — pure
+    // software, independent of whatever the chip's hardware tare (level())
+    // did or didn't achieve. Returns {roll_trim, pitch_trim} so the caller
+    // can persist them / reflect them on the trim sliders. Undo by setting
+    // the trims back to zero.
+    std::pair<float, float> zero_here() {
+        const float r = roll_trim_.load()  - last_roll_deg_.load();
+        const float p = pitch_trim_.load() - last_pitch_deg_.load();
+        roll_trim_.store(r);
+        pitch_trim_.store(p);
+        return { r, p };
+    }
 
     // Internal — public only so the C HAL/callback trampolines can reach them.
     bool hal_open();
@@ -133,6 +147,9 @@ private:
     std::atomic<float> declination_deg_{ 0.f };
     std::atomic<float> roll_trim_      { 0.f };
     std::atomic<float> pitch_trim_     { 0.f };
+    // Latest published (post-trim) euler, for zero_here()'s capture.
+    std::atomic<float> last_roll_deg_  { 0.f };
+    std::atomic<float> last_pitch_deg_ { 0.f };
     std::atomic<bool>  head_tracking_  { false };
 
     int i2c_fd_ = -1;

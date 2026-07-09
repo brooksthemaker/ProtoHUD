@@ -254,6 +254,15 @@ public:
     // ── Deep (full-screen) menu ─────────────────────────────────────────────────
     bool is_deep_open() const { return deep_open_; }
     void open_deep();           // build tabs, show full-screen menu
+    // Open the deep menu directly on a nested page: path[0] = tab label,
+    // the rest = SUBMENU labels to descend (e.g. {"System","Software",
+    // "Updates"}). Stops at the deepest matching page.
+    void open_deep_at(const std::vector<std::string>& path);
+    // F-row tab jumps: tab metadata + open-on-tab. deep_tab_count() builds
+    // the tab list on first use (cheap after that).
+    int  deep_tab_count()       { build_deep_tabs(); return static_cast<int>(deep_tabs_.size()); }
+    int  deep_tab_index() const { return tab_index_; }
+    void open_deep_tab(int idx) { open_deep(); if (deep_open_) load_tab(idx); }
     void close_deep();          // hide full-screen menu
     void next_tab();            // switch to the next/prev top-level tab (at tab base only)
     void prev_tab();

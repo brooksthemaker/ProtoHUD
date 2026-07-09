@@ -139,6 +139,46 @@ Zero extra GPIOs — it rides the existing I2C0 wires. Map electrodes → zones 
 `boop.zones[].electrode` (same config as a CM5-local MPR121). Keep electrode
 wires short; they're capacitive antennas.
 
+### 3.6b Boop pads — TTP223 touch modules (preferred, up to 6)
+
+Each TTP223 module is a self-contained capacitive touch switch with a plain
+digital output — no shared I2C bus, no electrode tuning, and each pad can sit
+right where it's mounted with only 3 wires. The firmware pre-assigns 6 inputs:
+
+| Pad idx | RP2350 | Notes |
+|--------:|--------|-------|
+| 0 | GP0 | |
+| 1 | GP1 | |
+| 2 | GP12 | |
+| 3 | GP16 | shared with optional voice-changer I2S — voice build: pads 0–2 only |
+| 4 | GP17 | " |
+| 5 | GP18 | " |
+
+Per module: VCC → 3V3, GND → GND, I/O (OUT) → the listed GP. Stock modules are
+**active-high momentary**; if you solder the A/B jumpers for inverted/latching
+output, flip `kTouchActiveHigh` in `include/config.h`.
+
+Touch edges stream up as `BOOP <idx> <1|0>` — the SAME verb as MPR121
+electrodes — so the Pi config works two ways (both can apply to one pad):
+
+- **Boop zones**: set `boop.zones[].electrode` to the pad INDEX (0–5) and the
+  pad behaves exactly like an MPR121 electrode (snout/cheek zones, coalescing,
+  reactions).
+- **Extra buttons**: map any pad to any function in
+  `inputs.coprocessor.touch`, e.g. `{ "3": "face_next", "4": "effect_next" }`
+  — fired on touch-down.
+
+### 3.7 Pre-assigned TEST pins (planned peripherals)
+
+Fixed pins for bring-up of the planned carrier-board peripherals, exercised
+from **GPIO → RP2350 GPIO Expander → Peripheral Test**:
+
+| Feature | Pins | Verb | Notes |
+|---|---|---|---|
+| Servos ×4 | GP6–GP9 | `SERVO <ch> <deg\|off>` | shared with buttons 4–7: the slot becomes a servo on its first command (until reboot). Servo V+ from an external 5–6 V rail, grounds common — never the Pico's 3V3. |
+| Addressable LED zone | GP22 data (+GP28 clock for APA102) | `LEDZ` solid · `LEDP` patterns · `LEDB` brightness · `LEDF`/`LEDSHOW` per-pixel frames | WS2812/NeoPixel (1-wire) or APA102/DotStar (2-wire, timing-free — POV-fast) — pick in `config.h` (`kLedZoneType`). Strips or custom panels (a panel = a serpentine strip; the Pi does the 2-D mapping via `LEDF`). Level-shift data/clock for long runs; APA102 clock costs ADC ch2. |
+| ADC ×3 | GP26–GP28 | `ADCREAD` → `ADC <ch> <raw> <mv>` | flex sensors / pots / battery divider; GP26 doubles as the voice mic |
+
 ### 3.7 Temperature probes — DS18B20
 
 ```

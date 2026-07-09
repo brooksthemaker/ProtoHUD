@@ -844,6 +844,44 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
                 (*cfgr)["bno086"]["pitch_trim"] = (*trimv)[1];
             }
         };
+        // Software tare: capture whatever the sensor reads RIGHT NOW as the
+        // new roll/pitch zero by folding it into the trim offsets — catches
+        // whatever residual the chip-side Set Level leaves behind.
+        {
+            MenuItem zh = with_desc(leaf("Zero Here (Software Tare)",
+                [b, cfgr, trimv]{
+                    if (!b) return;
+                    const auto [r, p] = b->zero_here();
+                    (*trimv)[0] = r; (*trimv)[1] = p;
+                    if (cfgr) {
+                        (*cfgr)["bno086"]["roll_trim"]  = r;
+                        (*cfgr)["bno086"]["pitch_trim"] = p;
+                    }
+                }),
+                "Hold the pose you want to call level, then select: the "
+                "CURRENT roll/pitch become zero in software, no matter what "
+                "the chip-side tare did. The exact offsets land on the "
+                "Roll/Pitch Trim sliders below (review or fine-tune there) "
+                "and save with the config. Heading is untouched.");
+            zh.label_fn = [trimv]{
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Zero Here (Software Tare)  [%+.1f/%+.1f\xc2\xb0]",
+                         (double)(*trimv)[0], (double)(*trimv)[1]);
+                return std::string(buf);
+            };
+            zh.visible_fn = [b]{ return b && b->connected(); };
+            imu_menu.push_back(std::move(zh));
+
+            MenuItem rz = with_desc(leaf("Reset Software Tare / Trim",
+                [trimv, apply]{ (*trimv)[0] = 0.f; (*trimv)[1] = 0.f; apply(); }),
+                "Clears the software tare and both trim sliders back to 0\xc2\xb0 "
+                "so the output is the chip's own (hardware-tared) reading.");
+            rz.visible_fn = [b, trimv]{
+                return b && b->connected() &&
+                       ((*trimv)[0] != 0.f || (*trimv)[1] != 0.f);
+            };
+            imu_menu.push_back(std::move(rz));
+        }
         MenuItem rt = with_desc(slider("Roll Trim", -15.f, 15.f, 0.5f, "\xc2\xb0",
             [trimv]{ return (*trimv)[0]; },
             [trimv, apply](float v){ (*trimv)[0] = v; apply(); }),
@@ -1621,9 +1659,125 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         legacy_hud_menu.push_back(std::move(comp));
     }
 
+    // ── Attitude Indicator ────────────────────────────────────────────────────
+    // Fighter-style ADI overlay fed by the calibrated head-tracking pose; the
+    // PIT/YAW/ROL readouts match GPIO > On-Board GPIO > IMU > Live Readout.
+    std::vector<MenuItem> attitude_menu = {
+        with_desc(toggle("Enable",
+            [&state]{ return state.attitude.enabled; },
+            [&state](bool v){ state.attitude.enabled = v; }),
+            "Overlay a fighter-style attitude indicator at screen center: "
+            "pitch ladder and horizon roll with your head behind a fixed "
+            "winged waterline symbol, with live PIT / YAW / ROL readouts "
+            "that match the IMU Live Readout \xe2\x80\x94 handy for checking "
+            "calibration, trim and Set Level in the field."),
+        with_desc(toggle("Full Style",
+            [&state]{ return state.attitude.full; },
+            [&state](bool v){ state.attitude.full = v; }),
+            "ON: full instrument \xe2\x80\x94 pitch ladder, bank arc with "
+            "needle, frame arcs. OFF: minimal \xe2\x80\x94 just the horizon, "
+            "waterline symbol and readouts."),
+        with_desc(slider("Size", 0.30f, 0.95f, 0.05f, "",
+            [&state]{ return state.attitude.size; },
+            [&state](float v){ state.attitude.size = v; }),
+            "Indicator diameter as a fraction of the screen height."),
+        with_desc(toggle("One Per Eye",
+            [&state]{ return state.attitude.per_eye; },
+            [&state](bool v){ state.attitude.per_eye = v; }),
+            "ON: draw one instrument per SBS eye half so 3D glasses fuse a "
+            "single centered instrument. OFF: one instrument centered on the "
+            "whole window \xe2\x80\x94 use for 2D / mirror display modes."),
+        with_desc(slider("Text Size", 0.5f, 2.0f, 0.1f, "x",
+            [&state]{ return state.attitude.text_scale; },
+            [&state](float v){ state.attitude.text_scale = v; }),
+            "Scales the PIT / YAW / ROL readouts and pitch-ladder numbers."),
+        with_desc(slider("Smoothing", 0.0f, 1.0f, 0.05f, "",
+            [&state]{ return state.attitude.smooth; },
+            [&state](float v){ state.attitude.smooth = v; }),
+            "Speed-adaptive filter on the displayed pose: calms sensor "
+            "jitter while your head is still but opens up during fast "
+            "motion, so it stays responsive. Big jumps (tare / recenter) "
+            "snap through instantly. 0 = raw sensor data."),
+    };
+
+    // ── Floating Window ───────────────────────────────────────────────────────
+    // World-pinned frame hosting real content: the pty terminal (a live shell
+    // rendered by the HUD) or the Android mirror (phone browser/apps).
+    std::vector<MenuItem> float_win_menu = {
+        with_desc(toggle("Show Window",
+            [&state]{ return state.float_win.enabled; },
+            [&state](bool v){
+                if (v && !state.float_win.pinned) {
+                    state.float_win.yaw    = state.attitude_pose.yaw;
+                    state.float_win.pitch  = state.attitude_pose.pitch;
+                    state.float_win.pinned = true;
+                }
+                state.float_win.enabled = v;
+                if (!v) state.float_win.focus_keys = false;
+            }),
+            "Show a window pinned in space where you're looking — it holds "
+            "its place in the world (drawn per eye, level with the horizon) "
+            "as you move your head. Content comes from the row below."),
+        with_desc(leaf("Pin Here", [&state]{
+                state.float_win.yaw    = state.attitude_pose.yaw;
+                state.float_win.pitch  = state.attitude_pose.pitch;
+                state.float_win.pinned = true;
+            }),
+            "Re-anchor the window to where you're looking right now."),
+        [&state]() -> MenuItem {
+            MenuItem m = leaf("Content", [&state]{
+                state.float_win.content = (state.float_win.content + 1) % 2;
+            });
+            m.label_fn = [&state]{
+                return std::string("Content: ") +
+                       (state.float_win.content == 0 ? "Terminal" : "Phone Mirror");
+            };
+            return with_desc(std::move(m),
+                "Terminal: a real shell on the Pi, rendered by the HUD (pair "
+                "a keyboard and flip Keyboard Focus on to type). Phone "
+                "Mirror: the Android Mirror feed — open a browser on the "
+                "phone and pin it in space.");
+        }(),
+        with_desc(slider("Width", 10.f, 60.f, 2.f, "\xc2\xb0",
+            [&state]{ return state.float_win.width_deg; },
+            [&state](float v){ state.float_win.width_deg = v; }),
+            "Angular width of the window in degrees of your view."),
+        [&state]() -> MenuItem {
+            MenuItem m = with_desc(toggle("Keyboard Focus",
+                [&state]{ return state.float_win.focus_keys; },
+                [&state](bool v){ state.float_win.focus_keys = v; }),
+                "Route the paired keyboard into the terminal. While on, HUD "
+                "hotkeys are suppressed — press F10 (or toggle this off with "
+                "the knob) to take the keyboard back.");
+            m.visible_fn = [&state]{
+                return state.float_win.enabled && state.float_win.content == 0;
+            };
+            return m;
+        }(),
+        [&ctx, &state]() -> MenuItem {
+            MenuItem m = leaf("Restart Terminal", [fn = ctx.term_restart]{
+                if (fn) fn();
+            });
+            m.visible_fn = [&state]{ return state.float_win.content == 0; };
+            return with_desc(std::move(m),
+                "Spawn a fresh shell — use after typing `exit` or if the "
+                "session wedges.");
+        }(),
+        with_desc(slider("Display FOV", 25.f, 75.f, 1.f, "\xc2\xb0",
+            [&state]{ return state.float_win.fov_deg; },
+            [&state](float v){ state.float_win.fov_deg = v; }),
+            "Per-eye horizontal field of view of the glasses — calibrates "
+            "how far pinned content moves per degree of head turn. Pin the "
+            "window, turn your head slowly: if it slides WITH your head, "
+            "raise this; if it overshoots against you, lower it. ~43\xc2\xb0 "
+            "for VITURE One/Pro."),
+    };
+
     std::vector<MenuItem> hud_menu = {
         submenu("Mini-Map Module",  std::move(mini_map_menu)),
         submenu("Info-Panel Module",std::move(info_panel_menu)),
+        submenu("Floating Window",  std::move(float_win_menu)),
+        submenu("Attitude Indicator", std::move(attitude_menu)),
         submenu("Location",         std::move(location_menu)),
         submenu("Clock",            std::move(clock_menu)),
         submenu("Color",            std::move(color_options_menu)),

@@ -43,6 +43,20 @@ int irand(std::mt19937& rng, int lo, int hi) {
 
 struct Color { int r = 255, g = 255, b = 255; };
 
+// Linear multi-stop gradient across a color list, f in [0,1] (water depth
+// shading, frost density shading).
+Color sample_grad(const std::vector<Color>& v, double f) {
+    if (v.size() == 1) return v[0];
+    f = std::clamp(f, 0.0, 1.0);
+    const double pos = f * (v.size() - 1);
+    const int i = (int)pos;
+    if (i >= (int)v.size() - 1) return v.back();
+    const double t = pos - i;
+    return { (int)std::lround(v[i].r + (v[i+1].r - v[i].r) * t),
+             (int)std::lround(v[i].g + (v[i+1].g - v[i].g) * t),
+             (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
+}
+
 Color pick_color(const json& cfg, std::mt19937& rng) {
     auto it = cfg.find("colors");
     if (it != cfg.end() && it->is_array() && !it->empty()) {
@@ -129,7 +143,9 @@ public:
         : w_(w), h_(h), cw_(w), ch_(h), cfg_(std::move(cfg)),
           intensity_(jnum(cfg_, "intensity", 1.0)),
           rng_(static_cast<uint32_t>(
-              std::chrono::steady_clock::now().time_since_epoch().count())) {}
+              std::chrono::steady_clock::now().time_since_epoch().count())) {
+        shape_rect_ = cfg_.value("shape", std::string("dot")) == "rect";
+    }
     virtual ~BaseEffect() = default;
     virtual void update(double dt) = 0;
     virtual cv::Mat render() = 0;   // CV_8UC4
@@ -146,7 +162,11 @@ public:
     void set_motion_reactive(bool on) { motion_reactive_ = on; }
     // Swap in new params without recreating the effect — keeps the live particle
     // sim (and motion/audio/canvas state) so menu edits preview without resetting.
-    void set_cfg(json cfg) { cfg_ = std::move(cfg); intensity_ = jnum(cfg_, "intensity", 1.0); }
+    void set_cfg(json cfg) {
+        cfg_ = std::move(cfg);
+        intensity_  = jnum(cfg_, "intensity", 1.0);
+        shape_rect_ = cfg_.value("shape", std::string("dot")) == "rect";
+    }
     void set_canvas_geometry(int cw, int ch, int ox, int oy) {
         cw_ = cw; ch_ = ch; ox_ = ox; oy_ = oy;
     }
@@ -167,11 +187,18 @@ protected:
         return std::max(1, static_cast<int>(jnum(cfg_, "count", def) * scale));
     }
     void draw_particle(cv::Mat& c, const Particle& p, double alpha) {
-        std::string shape = cfg_.value("shape", std::string("dot"));
-        if (shape == "rect") draw_rect(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
-        else                 draw_dot (c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
+        if (shape_rect_) draw_rect(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
+        else             draw_dot (c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
     }
-    cv::Mat blank() const { return cv::Mat::zeros(h_, w_, CV_8UC4); }
+    // Reusable per-effect canvas: render() consumes the returned frame within
+    // the same tick, so handing out a shallow header over one persistent
+    // buffer avoids an alloc + zero-fill per layer per frame.
+    cv::Mat blank() {
+        if (scratch_.rows != h_ || scratch_.cols != w_ || scratch_.type() != CV_8UC4)
+            scratch_.create(h_, w_, CV_8UC4);
+        scratch_.setTo(cv::Scalar(0, 0, 0, 0));
+        return scratch_;
+    }
     // Direction unit vector for directional effects (snow / rain / embers /
     // confetti / clouds). Convention: 0° = right, 90° = down, 180° = left,
     // 270° = up (screen-space, +Y down). default_deg lets each effect keep
@@ -237,6 +264,8 @@ protected:
     MotionInput motion_{};
     double audio_ = 0.0;
     bool motion_reactive_ = false;
+    bool shape_rect_ = false;         // "shape" resolved once per cfg change
+    cv::Mat scratch_;                 // blank() backing buffer, reused each frame
 };
 
 // ── Sparkle ──────────────────────────────────────────────────────────────────
@@ -710,71 +739,188 @@ private:
 class FrostEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
+
     void update(double dt) override {
+        ensure_field();
+        age_ += dt;
+        // Fixed-step growth with a FIXED-SEED rng: every panel instance of
+        // the same canvas computes an identical field, so the sheet stays
+        // continuous across panel seams.
+        const double form_s = std::max(0.1, jnum(cfg_, "form_s", 5.0));
+        const float  rate   = static_cast<float>(
+            kStep * (5.0 / form_s) * std::max(0.05, intensity_));
+        acc_ += dt;
+        int guard = 0;
+        while (acc_ >= kStep && guard++ < 8) { acc_ -= kStep; step_field(rate); }
+        if (acc_ >= kStep) acc_ = 0.0;               // stalled frame: drop debt
+
+        // Sparkle glints riding the frozen area (panel-local, cosmetic).
         for (auto& p : particles_) { p.extra += dt; p.life -= dt / p.max_life; }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [](const Particle& p){ return p.life <= 0; }), particles_.end());
-        // Frost builds up: the crystal budget ramps from zero to full over
-        // the first form_s seconds (default 5), so it reads as ice forming
-        // rather than appearing fully grown.
-        age_ += dt;
-        const double form_s = std::max(0.1, jnum(cfg_, "form_s", 5.0));
-        const int budget = static_cast<int>(count(40) *
-                                            std::min(1.0, age_ / form_s));
-        while ((int)particles_.size() < budget) {
-            const double depth = jnum(cfg_, "depth_frac", 0.35);
-            // White/blue ice mix by default (white sparkle, pale ice, deep
-            // blue); a "colors" list in the layer cfg still overrides.
-            static const Color kIce[3] = {
-                {255, 255, 255}, {200, 230, 255}, {120, 180, 255}};
-            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
-                                         : kIce[(int)frand(rng_, 0, 3) % 3];
-            // Frost forms on the left/right/bottom rim (like a window — no
-            // top edge), heaviest along the bottom, the side runs climbing
-            // up from the bottom corners. Crystals bite inward with a
-            // quadratic bias so most hug the border. include_top:true
-            // restores the old full-rim look.
-            double u = frand(rng_, 0, 1); u *= u;
-            const double d = u * depth * std::min(w_, h_);
-            Particle p;
-            const double side = frand(rng_, 0, 1);
-            if (cfg_.value("include_top", false) && side < 0.18) {
-                p.x = frand(rng_, 0, w_ - 1);  p.y = d;              // top rim
-            } else if (side < 0.5) {
-                p.x = frand(rng_, 0, w_ - 1);  p.y = h_ - 1 - d;     // bottom
-            } else {
-                double v = frand(rng_, 0, 1); v *= v;                // corner bias
-                p.y = (h_ - 1) * (1.0 - v);
-                p.x = (side < 0.75) ? d : w_ - 1 - d;                // left/right
-            }
-            p.life = 1.0; p.max_life = frand(rng_, 3.0, 8.0);   // slow churn
-            p.r = col.r; p.g = col.g; p.b = col.b;
-            // Mixed 1-2 px crystals (2 px draws as a 3x3 cluster) so the ice
-            // reads chunky; size_min/size_max in the layer cfg still override.
-            p.size = pick_size(cfg_, 1, 2, rng_);
+        const int want = count(8);
+        int tries = 0;
+        while ((int)particles_.size() < want && tries++ < want * 4) {
+            const int lx = irand(rng_, 0, w_ - 1), ly = irand(rng_, 0, h_ - 1);
+            if (cell(lx + ox_, ly + oy_) < 0.45f) continue;    // only on solid frost
+            Particle p; p.x = lx; p.y = ly;
+            p.life = 1.0; p.max_life = frand(rng_, 0.5, 1.4);
+            p.r = 255; p.g = 255; p.b = 255; p.size = 1;
             p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
         }
     }
+
     cv::Mat render() override {
         cv::Mat c = blank();
-        // Frost sits translucent over the face (~50% by default) so the
-        // expression stays readable underneath; "opacity" in the layer cfg
-        // adjusts it.
+        // Translucent over the face (~50% by default) so the expression stays
+        // readable underneath; "opacity" in the layer cfg adjusts it.
         const double opacity = std::clamp(jnum(cfg_, "opacity", 0.5), 0.0, 1.0);
+        // Density drives a double gradient: color runs white feathery tips →
+        // pale ice → deep blue solid rim, and alpha fades with the same
+        // density, so the sheet dissolves smoothly into the clear center.
+        // A "colors" list in the layer cfg overrides the ramp (first entry =
+        // thin inner ice, last = dense rim).
+        std::vector<Color> grad;
+        if (has_colors(cfg_)) {
+            const auto it = cfg_.find("colors");
+            if (it != cfg_.end() && it->is_array())
+                for (const auto& jc : *it)
+                    if (jc.is_array() && jc.size() >= 3)
+                        grad.push_back({jc[0].get<int>(), jc[1].get<int>(),
+                                        jc[2].get<int>()});
+        }
+        if (grad.empty())
+            grad = { {255, 255, 255}, {200, 230, 255}, {120, 180, 255} };
+        const double tsh = age_ * 1.4;
+        for (int ly = 0; ly < h_; ++ly) {
+            for (int lx = 0; lx < w_; ++lx) {
+                const int gx = lx + ox_, gy = ly + oy_;
+                const float f = cell(gx, gy);
+                if (f < 0.04f) continue;
+                const float h1 = hash01(gx, gy);
+                const Color col = sample_grad(grad, f);
+                // Per-cell grain brightness keeps crystal texture in the sheet
+                // so the gradient doesn't read airbrushed-flat.
+                const float vb = 0.88f + 0.24f * h1;
+                const int r = std::min(255, (int)(col.r * vb));
+                const int g = std::min(255, (int)(col.g * vb));
+                const int b = std::min(255, (int)(col.b * vb));
+                const double shimmer =
+                    0.85 + 0.15 * std::sin(tsh + h1 * kTau * 4.0);
+                const double a = opacity * std::pow((double)f, 0.9) * shimmer;
+                draw_pixel(c, lx, ly, r, g, b, (int)std::lround(a * 255.0));
+            }
+        }
+        // Glints on top: brief white twinkles on the solid sheet.
         for (auto& p : particles_) {
-            // Fade in as the crystal forms, out as it melts; twinkle on top.
             const double env = std::clamp(std::min((1.0 - p.life) * 6.0,
                                                    p.life * 6.0), 0.0, 1.0);
-            const double a = env * (0.35 + 0.45 * (0.5 + 0.5 * std::sin(p.extra * 1.7)))
-                             * opacity;
-            draw_particle(c, p, a);
+            draw_particle(c, p, env * (0.4 + 0.6 * (0.5 + 0.5 * std::sin(p.extra * 9.0)))
+                              * opacity);
         }
         return c;
     }
 
 private:
-    double age_ = 0.0;   // seconds since the layer started, for the form ramp
+    static constexpr double kStep = 1.0 / 30.0;   // fixed growth timestep
+
+    float cell(int gx, int gy) const {
+        if (gx < 0 || gx >= cw_ || gy < 0 || gy >= ch_ || field_.empty()) return 0.f;
+        return field_[(size_t)gy * cw_ + gx];
+    }
+    // Deterministic per-cell hash — shared "crystal grain" across panels.
+    static float hash01(int x, int y) {
+        uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return ((h >> 16) & 0xFFFF) / 65535.f;
+    }
+
+    // (Re)build the field + reach mask when geometry or shaping cfg changes.
+    void ensure_field() {
+        const bool   top   = cfg_.value("include_top", false);
+        const double reach = std::clamp(
+            jnum(cfg_, "reach", jnum(cfg_, "depth_frac", 0.32)), 0.05, 0.9);
+        if ((int)field_.size() == cw_ * ch_ && top == mask_top_ &&
+            std::fabs(reach - mask_reach_) < 1e-6)
+            return;
+        mask_top_ = top; mask_reach_ = reach;
+        const int W = cw_, H = ch_;
+        field_.assign((size_t)W * H, 0.f);
+        mask_.assign((size_t)W * H, 0.f);
+        grain_.assign((size_t)W * H, 0.f);
+        det_rng_.seed(0x1CEF7057u);
+        acc_ = 0.0; age_ = 0.0;
+        const float reach_px = (float)(reach * std::min(W, H));
+        // Corners where two enabled edges meet: bottom pair always; the top
+        // pair only when the top rim is on.
+        const int ncorner = top ? 4 : 2;
+        const float cxs[4] = { 0.f, (float)(W - 1), 0.f, (float)(W - 1) };
+        const float cys[4] = { (float)(H - 1), (float)(H - 1), 0.f, 0.f };
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                float de = std::min({ (float)x, (float)(W - 1 - x),
+                                      (float)(H - 1 - y),
+                                      top ? (float)y : 1e9f });
+                float dc = 1e9f;
+                for (int i = 0; i < ncorner; ++i)
+                    dc = std::min(dc, std::hypot(x - cxs[i], y - cys[i]));
+                // Frost bites ~reach_px in from the rim, nearly twice that in
+                // the corners — the classic curved corner wedge.
+                const float rl = reach_px *
+                    (0.75f + 1.15f * std::exp(-dc / (reach_px * 1.2f)));
+                const float m = std::clamp(1.f - de / std::max(1.f, rl), 0.f, 1.f);
+                mask_[(size_t)y * W + x] = std::pow(m, 0.7f);
+                // Static per-cell heterogeneity: fast lanes become the
+                // fingers that race ahead of the front, slow cells the gaps.
+                const float g = hash01(x * 3 + 1, y * 5 + 2);
+                grain_[(size_t)y * W + x] = 0.15f + 0.85f * g * g;
+            }
+        }
+    }
+
+    // One growth step: rim cells self-seed; interior cells accrete only next
+    // to existing frost, at a rate shaped by the reach mask and the grain.
+    void step_field(float rate) {
+        const int W = cw_, H = ch_;
+        // Alternate scan direction so in-place neighbor reads don't give the
+        // front a fixed directional bias.
+        const bool rev = (step_n_++ & 1) != 0;
+        for (int yy = 0; yy < H; ++yy) {
+            const int y = rev ? H - 1 - yy : yy;
+            for (int xx = 0; xx < W; ++xx) {
+                const int x = rev ? W - 1 - xx : xx;
+                const size_t i = (size_t)y * W + x;
+                const float m = mask_[i];
+                if (m <= 0.f) continue;
+                float& f = field_[i];
+                // The mask is the density CEILING, not just a rate: cells can
+                // only fill to it, so the finished sheet is a gradient —
+                // solid ice at the rim thinning continuously to nothing at
+                // the inner reach limit (thin inner ice also renders in the
+                // whiter tip tint, like real feathered frost).
+                if (f >= m) continue;
+                float sup = (m >= 0.999f) ? 0.6f : 0.f;   // rim self-seeds
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (!dx && !dy) continue;
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+                        sup = std::max(sup, field_[(size_t)ny * W + nx]);
+                    }
+                if (sup <= 0.05f) continue;
+                f = std::min(m, f + rate * m * sup * grain_[i] *
+                                     (float)frand(det_rng_, 0.6, 1.4));
+            }
+        }
+    }
+
+    double age_ = 0.0, acc_ = 0.0;
+    uint32_t step_n_ = 0;
+    bool   mask_top_   = false;
+    double mask_reach_ = -1.0;
+    std::vector<float> field_, mask_, grain_;   // canvas-space growth state
+    std::mt19937 det_rng_{0x1CEF7057u};         // shared fixed seed (see update)
 };
 
 // ── Heatwave ─────────────────────────────────────────────────────────────────
@@ -910,25 +1056,28 @@ public:
     }
 
     cv::Mat render() override {
-        cv::Mat acc(h_, w_, CV_32FC4, cv::Scalar(0, 0, 0, 0));
+        if (acc_.rows != h_ || acc_.cols != w_ || acc_.type() != CV_32FC4)
+            acc_.create(h_, w_, CV_32FC4);
+        acc_.setTo(cv::Scalar(0, 0, 0, 0));
         double softness = std::clamp(jnum(cfg_, "softness", 0.6), 0.0, 1.0);
         double power = 1.0 + (1.0 - softness) * 2.0;
-        std::vector<const Clump*> order;
-        for (auto& c : clumps_) order.push_back(&c);
-        std::sort(order.begin(), order.end(),
+        order_.clear();
+        for (auto& c : clumps_) order_.push_back(&c);
+        std::sort(order_.begin(), order_.end(),
                   [](const Clump* a, const Clump* b){ return a->size > b->size; });
-        for (const Clump* c : order) draw_clump(acc, *c, power);
+        for (const Clump* c : order_) draw_clump(acc_, *c, power);
 
-        cv::Mat out(h_, w_, CV_8UC4);
-        for (int y = 0; y < h_; ++y)
+        cv::Mat out = blank();
+        for (int y = 0; y < h_; ++y) {
+            const cv::Vec4f* a = acc_.ptr<cv::Vec4f>(y);
+            cv::Vec4b*       o = out.ptr<cv::Vec4b>(y);
             for (int x = 0; x < w_; ++x) {
-                const cv::Vec4f& a = acc.at<cv::Vec4f>(y, x);
-                cv::Vec4b& o = out.at<cv::Vec4b>(y, x);
-                o[0] = cv::saturate_cast<uchar>(a[0]);
-                o[1] = cv::saturate_cast<uchar>(a[1]);
-                o[2] = cv::saturate_cast<uchar>(a[2]);
-                o[3] = cv::saturate_cast<uchar>(a[3] * 255.0f);
+                o[x][0] = cv::saturate_cast<uchar>(a[x][0]);
+                o[x][1] = cv::saturate_cast<uchar>(a[x][1]);
+                o[x][2] = cv::saturate_cast<uchar>(a[x][2]);
+                o[x][3] = cv::saturate_cast<uchar>(a[x][3] * 255.0f);
             }
+        }
         return out;
     }
 
@@ -1029,6 +1178,8 @@ private:
     }
 
     std::vector<Clump> clumps_;
+    cv::Mat acc_;                          // float accumulator, reused each frame
+    std::vector<const Clump*> order_;      // draw order scratch, reused each frame
 };
 
 // ── Lightning ──────────────────────────────────────────────────────────────────
@@ -1443,6 +1594,15 @@ public:
         slosh_vy_ += accel_y * dt;
         slosh_y_   = std::clamp(slosh_y_ + slosh_vy_ * dt, -h_ * 0.5, h_ * 0.5);
 
+        // Container geometry: a volume-conserving rest surface (see
+        // compute_rest) — the liquid pivots around the fill line as the head
+        // tilts, pools corner-to-corner at high tilt and leaves the high side
+        // dry, like water in a real tank. The wave field rides on top, and
+        // rest-surface motion is injected into it (surface continuity), so
+        // every head movement makes real traveling waves.
+        compute_rest();
+        inject_impulses(dt);
+
         // Surface dynamics: a 1-D wave-equation heightfield (see
         // step_heightfield) replaces the old rigid tilt-plane + global sine
         // chop — waves now propagate, reflect off the side walls (that IS the
@@ -1455,6 +1615,7 @@ public:
         cv::Mat c = blank();
         const std::vector<Color> cols = read_colors();
         const double alpha = std::clamp(jnum(cfg_, "alpha", 0.85), 0.0, 1.0);
+        const double sheen_k = std::clamp(jnum(cfg_, "sheen", 0.55), 0.0, 1.0);
         const double bottom = ch_ - 1;                 // canvas-space deepest row
         for (int lx = 0; lx < w_; ++lx) {
             const double sy = surface_y_local(lx) + oy_;    // canvas-space surface (float)
@@ -1470,8 +1631,7 @@ public:
                 // Specular sheen: lighten the first few px under the surface so it
                 // catches the light like a real meniscus, fading with depth.
                 // "sheen" scales the glint (mercury shiny, lava matte).
-                const double sheen = std::exp(-std::max(0.0, Y - sy) / 2.2)
-                                   * std::clamp(jnum(cfg_, "sheen", 0.55), 0.0, 1.0);
+                const double sheen = std::exp(-std::max(0.0, Y - sy) / 2.2) * sheen_k;
                 col.r = (int)std::lround(col.r + (255 - col.r) * sheen);
                 col.g = (int)std::lround(col.g + (255 - col.g) * sheen);
                 col.b = (int)std::lround(col.b + (255 - col.b) * sheen);
@@ -1494,26 +1654,30 @@ private:
     // down → liquid rises) when pitch_fill is set.
     double level_eff() const {
         return std::clamp(jnum(cfg_, "level", 0.40)
-                          + jnum(cfg_, "pitch_fill", 0.0) * (pitch_smooth_ / 45.0),
+                          // Default ON (0.3): in a 3-D container, pitching
+                          // forward brings the liquid toward you — reads as
+                          // the level rising. pitch_fill: 0 restores flat.
+                          + jnum(cfg_, "pitch_fill", 0.3) * (pitch_smooth_ / 45.0),
                           0.0, 1.0);
     }
     // Local surface row at local column lx, computed in canvas space (so the
     // tank is continuous across panels) then shifted into this panel's frame.
     double surface_y_local(double lx) const {
-        // Resting level (+ static pitch fill), bobbed by the vertical slosh.
-        // The lateral shape (tilt lean, slosh pile-up, chop) all lives in the
-        // heightfield now; sample it with linear interpolation so sub-pixel
+        // Water height above the tank floor = volume-conserving rest surface
+        // + wave deviation, sampled with linear interpolation so sub-pixel
         // columns and bubbles get a smooth surface.
-        const double base = ch_ * (1.0 - level_eff()) + slosh_y_;
-        const double X    = ox_ + lx;
-        double hval = 0.0;
-        if (!hf_.empty()) {
-            const double fx = std::clamp(X, 0.0, (double)(cw_ - 1));
-            const int    x0 = (int)fx;
-            const int    x1 = std::min(x0 + 1, cw_ - 1);
-            hval = hf_[x0] + (hf_[x1] - hf_[x0]) * (fx - x0);
-        }
-        double syc = base + hval;
+        const double X  = ox_ + lx;
+        const double fx = std::clamp(X, 0.0, (double)(cw_ - 1));
+        const int    x0 = (int)fx;
+        const int    x1 = std::min(x0 + 1, cw_ - 1);
+        const double t  = fx - x0;
+        double wh = 0.0;
+        if (!rest_px_.empty())
+            wh += rest_px_[x0] + (rest_px_[x1] - rest_px_[x0]) * t;
+        if (!hf_.empty())
+            wh += hf_[x0] + (hf_[x1] - hf_[x0]) * t;
+        if (wh <= 0.05) return (double)ch_ + 2.0 - oy_;   // dry column
+        double syc = ch_ - wh;
         // Meniscus: the surface curls up where it meets the container walls.
         const double menisc = jnum(cfg_, "meniscus", 1.5);
         if (menisc > 0.0) {
@@ -1585,36 +1749,111 @@ private:
         if (v.empty()) { v.push_back({120, 220, 255}); v.push_back({0, 80, 200}); }
         return v;
     }
-    static Color sample_grad(const std::vector<Color>& v, double f) {
-        if (v.size() == 1) return v[0];
-        f = std::clamp(f, 0.0, 1.0);
-        const double pos = f * (v.size() - 1);
-        const int i = (int)pos;
-        if (i >= (int)v.size() - 1) return v.back();
-        const double t = pos - i;
-        return { (int)std::lround(v[i].r + (v[i+1].r - v[i].r) * t),
-                 (int)std::lround(v[i].g + (v[i+1].g - v[i].g) * t),
-                 (int)std::lround(v[i].b + (v[i+1].b - v[i].b) * t) };
-    }
     // 1-D wave-equation surface: per-canvas-column height (px, + = lower)
     // and vertical velocity. Reflective walls make waves bounce back —
     // that reflection is the slosh. Forced toward the gravity/slosh tilt
     // line, with random micro-impulses for idle ripples and churn.
     std::vector<double> hf_, hv_;
+    // Volume-conserving rest surface — the liquid as a fixed amount of water
+    // in the visor "tank". rest_px_[x] is the resting water HEIGHT above the
+    // tank floor per canvas column. The surface is the tilt plane clipped to
+    // the tank, with its offset bisected until the clipped surface holds the
+    // fill volume: at small tilt it pivots around the fill line (one side up,
+    // other down), at large tilt it pools in the low corner and the high side
+    // runs dry — no artificial slope limit, only the real floor/ceiling.
+    void compute_rest() {
+        if ((int)rest_px_.size() != cw_) rest_px_.assign(cw_, 0.0);
+        const double H    = (double)ch_;
+        const double half = std::max(1.0, cw_ * 0.5);
+        const double ccx  = cw_ * 0.5;
+        const double gain = jnum(cfg_, "tilt_gain", 1.0);
+        const double roll = std::clamp(tilt_smooth_ * gain * kPi / 180.0,
+                                       -1.45, 1.45);      // ±83°: tan stays sane
+        // Static gravity lean + the dynamic slosh pile-up as extra slope.
+        const double s = std::tan(roll) + slosh_x_ / half;
+        // Mean water height: fill level shifted by the vertical (pitch) bob.
+        const double m = std::clamp(level_eff() * H - slosh_y_, 0.0, H);
+        // Bisect the plane offset until the tank-clipped surface holds the
+        // volume (mean == m). Monotonic in o, ~30 rounds ≈ sub-0.001 px.
+        const double span = half * std::fabs(s);
+        double lo = -span - 1.0, hi = H + span + 1.0;
+        for (int it = 0; it < 30; ++it) {
+            const double o = 0.5 * (lo + hi);
+            double sum = 0.0;
+            for (int x = 0; x < cw_; ++x)
+                sum += std::clamp(o + ((x + 0.5) - ccx) * s, 0.0, H);
+            ((sum / cw_) < m ? lo : hi) = o;
+        }
+        const double o = 0.5 * (lo + hi);
+        // Surface continuity: the rest surface just moved (head motion), but
+        // real liquid doesn't teleport — inject the difference into the wave
+        // field so the ABSOLUTE surface stays where it was and sloshes its
+        // way to the new rest. Both surfaces hold the same volume, so the
+        // injection sums to ~zero and conservation is exact. wave_gain
+        // scales how much of the motion becomes waves (0 = old glide).
+        const double wgain = std::clamp(jnum(cfg_, "wave_gain", 1.0), 0.0, 2.0);
+        const bool   inject = wgain > 0.0 && (int)hf_.size() == cw_ && rest_init_;
+        for (int x = 0; x < cw_; ++x) {
+            const double nr = std::clamp(o + ((x + 0.5) - ccx) * s, 0.0, H);
+            if (inject) {
+                // 1.35: slight inertial overshoot — the free surface doesn't
+                // just stay put, it swings past, like real liquid.
+                const double d = std::clamp((rest_px_[x] - nr) * wgain * 1.35,
+                                            -H * 0.5, H * 0.5);
+                hf_[x] = std::clamp(hf_[x] + d, -nr, H - nr);
+            }
+            rest_px_[x] = nr;
+        }
+        rest_init_ = true;
+    }
+
+    // Impulse wave sources: vertical jolts splash the whole surface,
+    // fast turns push a traveling wave off the trailing wall.
+    void inject_impulses(double dt) {
+        if (hf_.empty() || rest_px_.empty()) return;
+        const double wgain = std::clamp(jnum(cfg_, "wave_gain", 1.0), 0.0, 2.0);
+        if (wgain <= 0.0) return;
+        // Jolt splash: g-deviation beyond ~0.12 g rains random dips, more and
+        // deeper the harder the hit (jump, landing, headbang).
+        const double jolt = std::fabs(motion_.accel_g - 1.0);
+        if (jolt > 0.12 && cw_ > 4) {
+            const double amt = std::min(jolt - 0.12, 0.8) * wgain;
+            const int n = 1 + (int)(amt * 6.0 * (cw_ / 64.0) * std::min(1.0, dt * 60.0));
+            for (int i = 0; i < n; ++i) {
+                const int x = irand(rng_, 1, cw_ - 2);
+                if (rest_px_[x] < 1.0) continue;               // dry side
+                const double d = frand(rng_, 0.8, 2.4) * (0.5 + amt);
+                hf_[x] -= d; hf_[x - 1] -= d * 0.5; hf_[x + 1] -= d * 0.5;
+            }
+        }
+        // Turn swish: a quick yaw sweep drags the liquid — velocity impulse
+        // at the trailing wall becomes a wave that travels across the tank.
+        const double yr = motion_.yaw_rate;
+        if (std::fabs(yr) > 50.0 && (int)hv_.size() == cw_ && cw_ > 6) {
+            const double push = std::clamp((std::fabs(yr) - 50.0) / 300.0, 0.0, 1.0)
+                                * 140.0 * wgain * dt;
+            const int wall = (yr > 0) ? 0 : cw_ - 1;
+            const int dir  = (yr > 0) ? 1 : -1;
+            for (int i = 0; i < 8 && i < cw_; ++i) {
+                const int x = wall + dir * i;
+                if (rest_px_[x] > 1.0) hv_[x] += push * (1.0 - i * 0.11);
+            }
+        }
+    }
+
     void step_heightfield(double dt, double viscosity) {
         if ((int)hf_.size() != cw_) { hf_.assign(cw_, 0.0); hv_.assign(cw_, 0.0); }
+        if ((int)rest_px_.size() != cw_) compute_rest();
         // Propagation speed (px/s): wave_speed keeps its old knob meaning
         // (bigger = livelier surface); thick liquid carries slower waves.
         const double c      = jnum(cfg_, "wave_speed", 2.0) * 22.0
                               * (1.0 - 0.55 * viscosity);
         const double c2     = c * c;
-        const double damp   = 1.2 + 6.0 * viscosity;
-        const double k_pull = 30.0;              // relax toward the tilt line
-        const double ccx    = cw_ * 0.5;
-        const double half   = std::max(1.0, cw_ * 0.5);
-        const double gain   = jnum(cfg_, "tilt_gain", 1.0);
-        const double roll   = std::clamp(tilt_smooth_ * gain * kPi / 180.0, -1.2, 1.2);
-        const double slope  = std::tan(roll);
+        const double damp   = 1.0 + 6.0 * viscosity;
+        // Relaxation toward rest: soft enough that motion-injected waves
+        // survive to travel and reflect (that IS the slosh) before settling.
+        const double k_pull = 14.0;
+        const double H      = (double)ch_;
         // Idle ripples + churn while sloshing: random micro-impulses that the
         // wave equation spreads into expanding rings.
         const double rate = jnum(cfg_, "ripple", 0.8) + std::fabs(slosh_v_) * 0.25;
@@ -1624,31 +1863,96 @@ private:
         for (int st = 0; st < n; ++st) {
             // Expected `rate` drops per second (scaled with tank width):
             // each pokes a 3-column dip the wave equation spreads outward.
+            // Only wet columns ripple — no rain on the dry side of the tank.
             if (cw_ > 3 && frand(rng_, 0.0, 1.0) < rate * (cw_ / 64.0) * dts) {
-                const int    x = irand(rng_, 1, cw_ - 3);
-                const double d = frand(rng_, 0.9, 2.2);
-                hf_[x]     -= d;
-                hf_[x + 1] -= d * 0.5;
-                hf_[x > 0 ? x - 1 : 0] -= d * 0.5;
+                const int x = irand(rng_, 1, cw_ - 3);
+                if (rest_px_[x] > 1.0) {
+                    const double d = frand(rng_, 0.9, 2.2);
+                    hf_[x]     -= d;
+                    hf_[x + 1] -= d * 0.5;
+                    hf_[x > 0 ? x - 1 : 0] -= d * 0.5;
+                }
             }
+            // hf_ is the wave DEVIATION from the rest surface (rest is
+            // piecewise-linear, so its Laplacian is ~0 and the wave equation
+            // on the deviation matches the one on the full surface).
             for (int x = 0; x < cw_; ++x) {
                 const double hl  = hf_[x > 0 ? x - 1 : 0];        // reflective
                 const double hr  = hf_[x < cw_ - 1 ? x + 1 : cw_ - 1];
                 const double lap = hl + hr - 2.0 * hf_[x];
-                const double dx  = (x + 0.5) - ccx;
-                const double rest = -dx * slope - slosh_x_ * (dx / half);
-                hv_[x] += (c2 * lap + k_pull * (rest - hf_[x])) * dts
+                hv_[x] += (c2 * lap - k_pull * hf_[x]) * dts
                           - damp * hv_[x] * dts;
             }
+            // The only hard rails are the tank itself: total water height
+            // stays within [floor, ceiling]. (The old ±0.6·H deviation clamp
+            // pinned the surface into flat plateaus past ~17° of roll.)
             for (int x = 0; x < cw_; ++x)
-                hf_[x] = std::clamp(hf_[x] + hv_[x] * dts, -ch_ * 0.6, ch_ * 0.6);
+                hf_[x] = std::clamp(hf_[x] + hv_[x] * dts,
+                                    -rest_px_[x], H - rest_px_[x]);
         }
     }
     double tilt_smooth_ = 0.0, pitch_smooth_ = 0.0;
     double slosh_x_ = 0.0, slosh_v_  = 0.0;  // roll lean (px) + velocity
     double slosh_y_ = 0.0, slosh_vy_ = 0.0;  // pitch bob (px) + velocity
     bool   tilt_init_ = false;
+    bool   rest_init_ = false;               // first compute_rest done (no inject)
+    std::vector<double> rest_px_;            // volume-conserving rest surface
     std::vector<Particle> bubbles_;
+};
+
+// ── Snooze ───────────────────────────────────────────────────────────────────
+// Floating Z's: little Z glyphs drift up from the mouth area, swaying as they
+// rise, growing a step and fading out — the classic cartoon sleep marker. The
+// asleep reaction drives this as its ambient effect; also usable standalone.
+// cfg: count (default 3), speed_min/max (rise px/s), colors (default soft blue-white).
+
+class SnoozeEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        for (auto& p : particles_) {
+            p.extra += dt;
+            p.y -= p.vy * dt;                                   // rise
+            p.x += (p.vx * 0.35 + std::sin(p.extra * 1.8) * 2.2) * dt;  // drift + sway
+            p.life -= dt / p.max_life;
+        }
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [&](const Particle& p){ return p.life <= 0 || p.y < -8; }),
+            particles_.end());
+        while ((int)particles_.size() < count(3)) {
+            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                         : Color{200, 220, 255};
+            Particle p;
+            // Spawn near the mouth: bottom-centre of the whole canvas, in
+            // canvas space so mirrored panels share the same source.
+            p.x = cw_ * 0.5 + frand(rng_, -cw_ * 0.10, cw_ * 0.10) - ox_;
+            p.y = ch_ * 0.80 + frand(rng_, -2.0, 2.0) - oy_;
+            p.vx = frand(rng_, 2.0, 7.0) * (frand(rng_, 0, 1) < 0.5 ? -1.0 : 1.0);
+            p.vy = pick_speed(cfg_, 4.0, 8.0, rng_);
+            p.max_life = frand(rng_, 2.2, 3.6);
+            p.life = 1.0;
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            p.extra = frand(rng_, 0, kTau);
+            particles_.push_back(p);
+        }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        for (auto& p : particles_) {
+            // Fade in quickly, out slowly; grow one size step mid-flight.
+            const double env = std::clamp(std::min((1.0 - p.life) * 5.0,
+                                                   p.life * 2.5), 0.0, 1.0);
+            const int a = (int)std::lround(env * 230.0);
+            if (a <= 0) continue;
+            const int s = 1 + (p.life < 0.55 ? 1 : 0);          // 1 -> 2 as it rises
+            const int x = (int)p.x, y = (int)p.y, w = 2 * s;
+            const cv::Scalar col(p.r, p.g, p.b, a);
+            cv::line(c, {x, y},         {x + w, y},         col, 1);   // top bar
+            cv::line(c, {x + w, y},     {x, y + w},         col, 1);   // diagonal
+            cv::line(c, {x, y + w},     {x + w, y + w},     col, 1);   // bottom bar
+        }
+        return c;
+    }
 };
 
 // ── Star field (3-D parallax) ────────────────────────────────────────────────
@@ -1892,6 +2196,7 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "circuit")   return std::make_unique<CircuitEffect>(w, h, cfg);
     if (name == "frost")     return std::make_unique<FrostEffect>(w, h, cfg);
     if (name == "heatwave")  return std::make_unique<HeatwaveEffect>(w, h, cfg);
+    if (name == "snooze")    return std::make_unique<SnoozeEffect>(w, h, cfg);
     if (name == "fireflies") return std::make_unique<FirefliesEffect>(w, h, cfg);
     if (name == "clouds")    return std::make_unique<CloudsEffect>(w, h, cfg);
     if (name == "lightning") return std::make_unique<LightningEffect>(w, h, cfg);
@@ -1918,6 +2223,7 @@ const std::map<std::string, json>& presets() {
           "circuit": {"effect":"circuit","count":5,"blend":"add"},
           "frost": {"effect":"frost","count":44,"blend":"add"},
           "heatwave": {"effect":"heatwave","count":18,"blend":"add"},
+          "snooze": {"effect":"snooze","count":3,"blend":"add"},
           "petals": {"effect":"snow","count":14,"colors":[[255,150,180],[255,190,210],[240,120,160]],"speed_min":3.0,"speed_max":6.0,"drift_x":2.5,"blend":"add"},
           "dizzy": {"layers":[
             {"effect":"vortex","count":24,"swirl":3.2,"infall":4,"colors":[[255,230,120],[255,255,255],[255,200,80]],"blend":"add"},
@@ -2084,6 +2390,10 @@ struct ParticleSystem::Impl {
     };
     std::vector<Ripple> ripples;
 
+    // render() scratch buffers, reused across frames (see render for the
+    // aliasing contract on rgba8).
+    cv::Mat outf, framef, rgba8;
+
     void build(const json& cfg) {
         layers.clear();
         json resolved = resolve_cfg(cfg);
@@ -2161,7 +2471,13 @@ ParticleFrame ParticleSystem::render() {
     if (impl_->layers.empty() && impl_->ripples.empty()) return result;
 
     const int w = impl_->w, h = impl_->h;
-    cv::Mat outf(h, w, CV_32FC4, cv::Scalar(0, 0, 0, 0));   // R,G,B,A on a 0..255 scale
+    // Scratch mats live on the Impl and are reused every frame — the returned
+    // ParticleFrame is consumed within the same render tick (composite +
+    // face-glow), so handing out a shallow header over impl_->rgba8 is safe.
+    cv::Mat& outf = impl_->outf;                 // R,G,B,A on a 0..255 scale
+    if (outf.rows != h || outf.cols != w || outf.type() != CV_32FC4)
+        outf.create(h, w, CV_32FC4);
+    outf.setTo(cv::Scalar(0, 0, 0, 0));
     bool has = false, all_add = true;
 
     for (auto& layer : impl_->layers) {
@@ -2171,39 +2487,35 @@ ParticleFrame ParticleSystem::render() {
         if (layer.blend != Blend::Add) all_add = false;
         result.face_glow = std::max(result.face_glow, layer.face_glow());
 
-        for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x) {
-                const cv::Vec4b& s = frame.at<cv::Vec4b>(y, x);
-                cv::Vec4f& o = outf.at<cv::Vec4f>(y, x);
-                if (layer.blend == Blend::Add) {
-                    o[0] += s[0]; o[1] += s[1]; o[2] += s[2]; o[3] += s[3];
-                } else {
-                    float sa = s[3] / 255.f, da = o[3] / 255.f;
+        if (layer.blend == Blend::Add) {
+            // Vectorized accumulate: uchar layer → float, summed in one pass.
+            frame.convertTo(impl_->framef, CV_32F);
+            cv::add(outf, impl_->framef, outf);
+        } else {
+            for (int y = 0; y < h; ++y) {
+                const cv::Vec4b* s = frame.ptr<cv::Vec4b>(y);
+                cv::Vec4f*       o = outf.ptr<cv::Vec4f>(y);
+                for (int x = 0; x < w; ++x) {
+                    float sa = s[x][3] / 255.f, da = o[x][3] / 255.f;
                     float oa = sa + da * (1.f - sa);
                     float safe = oa > 0.f ? oa : 1.f;
-                    o[0] = (s[0] * sa + o[0] * da * (1.f - sa)) / safe;
-                    o[1] = (s[1] * sa + o[1] * da * (1.f - sa)) / safe;
-                    o[2] = (s[2] * sa + o[2] * da * (1.f - sa)) / safe;
-                    o[3] = oa * 255.f;
+                    o[x][0] = (s[x][0] * sa + o[x][0] * da * (1.f - sa)) / safe;
+                    o[x][1] = (s[x][1] * sa + o[x][1] * da * (1.f - sa)) / safe;
+                    o[x][2] = (s[x][2] * sa + o[x][2] * da * (1.f - sa)) / safe;
+                    o[x][3] = oa * 255.f;
                 }
             }
+        }
     }
     if (!has && impl_->ripples.empty()) return result;
 
-    cv::Mat rgba;
+    cv::Mat& rgba = impl_->rgba8;
     if (has) {
-        rgba.create(h, w, CV_8UC4);
-        for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x) {
-                const cv::Vec4f& o = outf.at<cv::Vec4f>(y, x);
-                cv::Vec4b& d = rgba.at<cv::Vec4b>(y, x);
-                d[0] = cv::saturate_cast<uchar>(o[0]);
-                d[1] = cv::saturate_cast<uchar>(o[1]);
-                d[2] = cv::saturate_cast<uchar>(o[2]);
-                d[3] = cv::saturate_cast<uchar>(o[3]);
-            }
+        outf.convertTo(rgba, CV_8U);             // saturating, same as the old loop
     } else {
-        rgba = cv::Mat::zeros(h, w, CV_8UC4);   // ripples on an empty layer
+        if (rgba.rows != h || rgba.cols != w || rgba.type() != CV_8UC4)
+            rgba.create(h, w, CV_8UC4);
+        rgba.setTo(cv::Scalar(0, 0, 0, 0));      // ripples on an empty layer
     }
 
     // Boop ripples on top: an expanding ring per touch, fading as it grows.

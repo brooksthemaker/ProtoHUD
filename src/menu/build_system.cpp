@@ -197,6 +197,79 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
             "the coprocessor replies."));
     }
 
+    // Peripheral Test — exercise the pre-assigned test pins (servos GP6-9,
+    // WS2812 zone GP22, ADC GP26-28, TTP223 touch GP0/1/12/16/17/18; see
+    // firmware/button_coproc/pico/include/config.h).
+    if (ctx.coproc_servo) {
+        std::vector<MenuItem> pt;
+        for (int ch = 0; ch < 4; ++ch) {
+            auto pos = std::make_shared<float>(90.f);
+            char nm[16]; snprintf(nm, sizeof(nm), "Servo %d", ch + 1);
+            pt.push_back(with_desc(slider(nm, 0.f, 180.f, 5.f, "\xc2\xb0",
+                [pos]{ return *pos; },
+                [pos, ch, sv = ctx.coproc_servo](float v){
+                    *pos = v; if (sv) sv(ch, (int)v);
+                }),
+                "Drive the test servo live (GP6-9 = channels 1-4). The GPIO "
+                "doubles as a button slot: it becomes a servo on the first "
+                "command and stays one until the coprocessor reboots. Servo "
+                "V+ must come from an external 5-6 V supply, grounds common."));
+        }
+        pt.push_back(with_desc(leaf("All Servos Off",
+            [sv = ctx.coproc_servo]{ if (sv) for (int c = 0; c < 4; ++c) sv(c, -1); }),
+            "Detach all four test channels (stops holding torque)."));
+        if (ctx.coproc_led_pattern) {
+            // Addressable LED zone (WS2812/NeoPixel or APA102/DotStar — the
+            // firmware's config.h picks the family): local patterns animated
+            // on the MCU, so the USB link stays idle.
+            struct Pat { const char* name; int mode, r, g, b; };
+            static constexpr Pat kPat[] = {
+                { "LEDs: Off",           0,   0,   0,   0 },
+                { "LEDs: Solid White",   1, 255, 255, 255 },
+                { "LEDs: Solid Theme",   1,   0, 220, 180 },
+                { "LEDs: Rainbow",       2,   0,   0,   0 },
+                { "LEDs: Chase",         3,   0, 220, 180 },
+                { "LEDs: Breathe",       4,   0, 220, 180 },
+            };
+            for (const auto& pat : kPat)
+                pt.push_back(with_desc(leaf(pat.name,
+                    [lp = ctx.coproc_led_pattern, pat]{
+                        if (lp) lp(pat.mode, pat.r, pat.g, pat.b, 50);
+                    }),
+                    "Drive the addressable LED test zone: data GP22 (+clock "
+                    "GP28 for APA102/DotStar). WS2812 vs APA102, strip/panel "
+                    "length and layout live in the firmware's config.h."));
+            if (ctx.coproc_led_bright) {
+                auto bri = std::make_shared<float>(100.f);
+                pt.push_back(with_desc(slider("LED Brightness", 5.f, 100.f, 5.f, "%",
+                    [bri]{ return *bri; },
+                    [bri, lb = ctx.coproc_led_bright](float v){
+                        *bri = v; if (lb) lb((int)(v * 2.55f));
+                    }),
+                    "Software brightness for the LED zone (APA102 also maps "
+                    "it onto the chip's 5-bit global for extra headroom)."));
+            }
+        }
+        if (ctx.coproc_adc_read) {
+            pt.push_back(with_desc(leaf("Read ADC Now",
+                [rd = ctx.coproc_adc_read]{ if (rd) rd(); }),
+                "One-shot reading of the three test ADC inputs "
+                "(GP26/27/28 = ch0-2, 0-3300 mV)."));
+            MenuItem ar = leaf("ADC", []{});
+            ar.label_fn = [get = ctx.coproc_adc_result]{
+                return std::string("ADC: ") + (get ? get() : std::string("n/a"));
+            };
+            pt.push_back(with_desc(std::move(ar),
+                "Millivolts per channel from the last Read ADC Now."));
+        }
+        out.push_back(with_desc(submenu("Peripheral Test", std::move(pt)),
+            "Exercise the pre-assigned test pins for the planned peripherals: "
+            "4 servo channels (GP6-9), a WS2812 LED zone (GP22) and 3 ADC "
+            "inputs (GP26-28). TTP223 touch pads (GP0/1/12/16/17/18) test "
+            "themselves \xe2\x80\x94 touching one fires its boop zone / "
+            "mapped function. See docs/wiring-guide.md."));
+    }
+
     if (!ctx.coproc_cfg_p) return out;    // the Pins editor needs the live config
 
     input::CoprocConfig* C    = ctx.coproc_cfg_p;
@@ -858,7 +931,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         std::map<int, std::vector<std::string>> claimants;
         std::map<int, int>                      spi_speed_hz;   // BCM → bus speed (for MOSI lines)
     };
-    auto gpio_pin_claims = [cfg_root, gpio_pins_p, gpio_slot_count]() -> PinClaims {
+    auto gpio_pin_claims_uncached = [cfg_root, gpio_pins_p, gpio_slot_count]() -> PinClaims {
         PinClaims pc;
         if (!cfg_root) return pc;
         const json& cfg = *cfg_root;
@@ -958,6 +1031,20 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         }
         return pc;
     };
+    // Per-frame memo: the full-config walk above is invoked from label_fn /
+    // warn_fn / panel draws — up to 40× per frame on the pin-picker page —
+    // and its result only changes when the config changes. Cache it for the
+    // duration of one ImGui frame (config edits land next frame, invisible).
+    struct PinClaimsCache { int frame = -1; PinClaims pc; };
+    auto pin_claims_cache = std::make_shared<PinClaimsCache>();
+    auto gpio_pin_claims = [gpio_pin_claims_uncached, pin_claims_cache]() -> const PinClaims& {
+        const int f = ImGui::GetFrameCount();
+        if (pin_claims_cache->frame != f) {
+            pin_claims_cache->pc    = gpio_pin_claims_uncached();
+            pin_claims_cache->frame = f;
+        }
+        return pin_claims_cache->pc;
+    };
 
     // I²C peripheral list for the SDA/SCL hover tooltip. (addr, label).
     auto i2c_peripherals = [cfg_root]() -> std::vector<std::pair<int, std::string>> {
@@ -1050,7 +1137,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         return [gpio_pin_claims, i2c_peripherals, user_notes, rail_currents_mA,
                 gpvz_draw]
                (ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-            const PinClaims claims = gpio_pin_claims();
+            const PinClaims& claims = gpio_pin_claims();
             const auto i2c         = i2c_peripherals();
             const auto notes       = user_notes();
             const auto [ma3, ma5]  = rail_currents_mA();
@@ -1378,7 +1465,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
     // simplicity (no menu picker for the location).
     auto export_pinout = [gpio_pin_claims, i2c_peripherals,
                           user_notes, rail_currents_mA]() {
-        const PinClaims pc       = gpio_pin_claims();
+        const PinClaims& pc      = gpio_pin_claims();
         const auto      i2c      = i2c_peripherals();
         const auto      notes    = user_notes();
         const auto [ma3, ma5]    = rail_currents_mA();
@@ -1505,7 +1592,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
     auto gpio_hw_claimants = [gpio_pin_claims](int bcm) -> std::vector<std::string> {
         std::vector<std::string> out;
         if (bcm < 0) return out;
-        PinClaims pc = gpio_pin_claims();
+        const PinClaims& pc = gpio_pin_claims();
         auto it = pc.claimants.find(bcm);
         if (it != pc.claimants.end())
             for (const auto& who : it->second)
@@ -3000,6 +3087,28 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
                 return i < static_cast<int>(state.temps.size()) && state.temps[i].warn; };
             return m;
         });
+    // BME280 environment rows (hidden until the sensor reports).
+    {
+        auto env_row = [&state](const char* fmt, int which) {
+            MenuItem m = leaf("Env", []{});
+            m.label_fn = [&state, fmt, which]() -> std::string {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (!state.env.ok) return "";
+                const float v = which == 0 ? state.env.temp_c
+                              : which == 1 ? state.env.humidity_pct
+                                           : state.env.pressure_hpa;
+                char b[64];
+                std::snprintf(b, sizeof b, fmt, static_cast<double>(v));
+                return std::string(b);
+            };
+            m.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                                     return state.env.ok; };
+            return m;
+        };
+        temp_rows.push_back(env_row("Env Temp:  %.1f\xc2\xb0""C", 0));
+        temp_rows.push_back(env_row("Humidity:  %.0f %%", 1));
+        temp_rows.push_back(env_row("Pressure:  %.1f hPa", 2));
+    }
     MenuItem temperature_item = with_desc(
         submenu("Temperature", std::move(temp_rows)),
         "Live temperature probes (DS18B20 1-Wire). Rows turn amber/red at the "
@@ -3007,7 +3116,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         "(ids from `ls /sys/bus/w1/devices/`); a probe file can also drive the "
         "fan curve via cfg[\"fans\"][\"temp_path\"].");
     temperature_item.visible_fn = [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
-                                            return !state.temps.empty(); };
+                                            return !state.temps.empty() || state.env.ok; };
 
     std::vector<MenuItem> system_menu = {
         with_desc(submenu("Display", std::move(display_menu)),

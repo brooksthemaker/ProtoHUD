@@ -49,7 +49,7 @@ namespace accessory    { class AccessoryLeds; }
 namespace sys          { class FanController; }
 namespace input        { struct GpioPinCfg; struct CoprocConfig; }
 namespace integrations { class KdeConnectBridge; }
-namespace face         { struct GlitchConfig; struct ScrollTextConfig; }
+namespace face         { struct GlitchConfig; struct ScrollTextConfig; class ReactionEngine; }
 
 // HUB75 panel layout state. Lives here (not main.cpp) because both the menu
 // (HUB75 Layout editor) and main's renderer-rebuild path use it.
@@ -407,6 +407,9 @@ struct MenuBuildContext {
     std::function<void()>        imu_cal_start;
     std::function<void()>        imu_cal_cancel;
     std::function<std::string()> imu_cal_status;
+    // Floating-window terminal: spawn a fresh shell (HUD > Floating Window >
+    // Restart Terminal). Main owns the PtyTerminal.
+    std::function<void()>        term_restart;
     std::function<void(bool)> pf_set_weather_effects;
     bool* pf_weather_effects_p = nullptr;
     // Temp Effects - ambient frost / heat shimmer driven by the live outdoor
@@ -467,6 +470,14 @@ struct MenuBuildContext {
     // last result (address list / "none" / "scanning…"). See CoprocInputs.
     std::function<void()>        coproc_i2c_scan;
     std::function<std::string()> coproc_i2c_result;
+    // Peripheral TEST verbs (pre-assigned test pins on the coprocessor —
+    // servos, WS2812 zone, ADC). Null when not wired.
+    std::function<void(int, int)>           coproc_servo;      // ch, deg (-1 = off)
+    std::function<void(int, int, int, int)> coproc_led_zone;   // r,g,b,count(-1=default)
+    std::function<void(int, int, int, int, int)> coproc_led_pattern; // mode,r,g,b,speed
+    std::function<void(int)>                coproc_led_bright; // 0-255
+    std::function<void()>                   coproc_adc_read;
+    std::function<std::string()>            coproc_adc_result;
     // Live coprocessor config (pins + button maps) for the Pins visualizer/editor.
     // Edited in place, then persisted to cfg["inputs"]["coprocessor"] and re-pushed
     // via coproc_reload.
@@ -488,6 +499,9 @@ struct MenuBuildContext {
     // Scrolling-text banner config — same contract as pf_glitch_p (mutate in
     // place, re-push via pf_anim_push()).
     face::ScrollTextConfig* pf_scroll_p = nullptr;
+    // Reaction engine (environment/movement reactions; main owns it). The
+    // menu edits its Config via set_config and calls the force_* test hooks.
+    face::ReactionEngine* reactions = nullptr;
 
     // ── Build-phase shared fragments ──────────────────────────────────────────
     // NOT caller-supplied: set by build_menu() before the tab builders run

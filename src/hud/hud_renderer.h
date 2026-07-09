@@ -24,6 +24,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace term { class PtyTerminal; }   // floating-window terminal content
+
 struct HudColors {
     ImU32 primary    = IM_COL32(  0, 220, 180, 220);
     ImU32 accent     = IM_COL32(  0, 180, 255, 255);
@@ -106,6 +108,12 @@ public:
 
     // NanoVG toast pass — separate NVG frame; takes live queue for dismiss mutations.
     void draw_toasts(NotificationQueue& live_q, int w, int h);
+
+    // World-pinned floating window (terminal / phone mirror). Call inside the
+    // NVG overlay frame, after draw_hud_frame. mirror_tex may be 0.
+    void draw_float_window(const AppState& snap, int w, int h,
+                           unsigned int mirror_tex, float mirror_aspect,
+                           const term::PtyTerminal* terminal);
     bool toast_has_focused() const { return toast_renderer_.has_focused_toast(); }
     void toast_navigate(int delta)  { toast_renderer_.navigate(delta); }
     void toast_select(AppState& s)  { toast_renderer_.select(s); }
@@ -202,6 +210,10 @@ private:
                             float ox, float oy, float pw, float ph);
     void draw_compass_tape (NVGcontext* vg, const AppState& s,
                             float ox, float oy, float tw, float th);
+    void draw_attitude_indicator(NVGcontext* vg, const AppState& s,
+                            float fw, float fh);
+    void draw_attitude_eye (NVGcontext* vg, const AppState& s,
+                            float cx, float cy, float R);
     void draw_timer_alarm_indicator(NVGcontext* vg, const AppState& s,
                             float fw, float fh);
     void draw_fps_nvg      (NVGcontext* vg, const AppState& snap, float fw, float fh);

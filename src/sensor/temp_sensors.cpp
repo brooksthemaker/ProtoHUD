@@ -36,12 +36,18 @@ std::vector<std::string> TempSensors::discover_ds18b20() {
 }
 
 double TempSensors::read_ds18b20(const std::string& id) const {
-    // Resolve the device folder: an explicit id, else the first probe on the bus.
+    // Resolve the device folder: an explicit id, else the first probe on the
+    // bus. Discovery walks + sorts the sysfs dir, so the auto-resolved id is
+    // cached (poll-thread only) and re-scanned only when its reads fail.
     std::string dev = id;
-    if (dev.empty()) {
-        const auto found = discover_ds18b20();
-        if (found.empty()) return std::nan("");
-        dev = found.front();
+    const bool auto_resolved = dev.empty();
+    if (auto_resolved) {
+        if (ds18b20_cached_.empty()) {
+            const auto found = discover_ds18b20();
+            if (found.empty()) return std::nan("");
+            ds18b20_cached_ = found.front();
+        }
+        dev = ds18b20_cached_;
     }
     const fs::path base = fs::path(kW1Root) / dev;
 
@@ -65,6 +71,7 @@ double TempSensors::read_ds18b20(const std::string& id) const {
             }
         }
     }
+    if (auto_resolved) ds18b20_cached_.clear();   // probe vanished — re-discover
     return std::nan("");
 }
 

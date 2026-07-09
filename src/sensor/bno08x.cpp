@@ -240,10 +240,21 @@ void Bno08x::service_loop() {
             // gravity-referenced) — the first cut of this did nothing. The
             // supported mechanism is the reorientation quaternion: pick R so
             // the CURRENT pose reads as yaw-only (out = R * raw), i.e.
-            // R = yawonly(now) * conj(now), then persist (sh2_persistTare
-            // stores the runtime reorientation to flash). Verified against
-            // the vendored euler.c: a pose mounted 30 deg roll / -20 deg
-            // pitch levels to exactly 0/0 with yaw preserved.
+            // R = yawonly(now) * conj(now).
+            //
+            // FIELD FIX: hardware showed roll/pitch flipping SIGN on each
+            // press (+30 -> -30 -> +30 ...) instead of zeroing. That is the
+            // signature of the firmware applying the commanded quaternion
+            // TWICE (R*R*now = tilt mirrored, and the next press computes a
+            // mirrored correction that flips it back — also why the water
+            // effect swapped pooling sides on every tare). So command
+            // sqrt(R) — half the rotation about the same axis — which lands
+            // exactly level under double application, is idempotent on
+            // repeat presses, and on a unit that applies it once still
+            // converges by halving the error each press. Sim-verified with
+            // the vendored euler.c (scratch harness level_half.c): 30 roll /
+            // -20 pitch / 40 yaw -> 0 / 0 / 40 with the old code's double
+            // application reproducing the observed sign flip.
             if (have_q_) {
                 float yw, pt, rl;
                 q_to_ypr(static_cast<float>(last_q_[0]), static_cast<float>(last_q_[1]),
@@ -259,6 +270,14 @@ void Bno08x::service_loop() {
                 R.x = c * x2 - s * y2;
                 R.y = c * y2 + s * x2;
                 R.z = c * z2 + s * w2;
+                // sqrt(R): normalize(R + identity) halves the rotation angle.
+                // (R.w ~ -1 would be a 180 deg mount correction with no unique
+                // half — fall back to R as-is rather than divide by ~0.)
+                const double hw = R.w + 1.0;
+                const double hn = std::sqrt(hw * hw + R.x * R.x + R.y * R.y + R.z * R.z);
+                if (hn > 1e-6) {
+                    R.w = hw / hn; R.x /= hn; R.y /= hn; R.z /= hn;
+                }
                 sh2_setReorientation(&R);
                 sh2_persistTare();
             }
@@ -267,7 +286,11 @@ void Bno08x::service_loop() {
                                              : SH2_TARE_Z;
             sh2_setTareNow(axes, SH2_TARE_BASIS_ROTATION_VECTOR);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // Poll at ~2× the orientation report rate (clamped 1-3 ms) — enough
+        // headroom for the aux reports on top without burning the ~90% empty
+        // SHTP header reads a fixed 1 ms poll cost.
+        std::this_thread::sleep_for(std::chrono::microseconds(
+            std::clamp(cfg_.report_interval_us / 2, 1000, 3000)));
     }
     // Snapshot the session's dynamic-calibration refinements to the chip's
     // flash on the way out (the periodic autosave catches most of it; this
@@ -326,6 +349,13 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     const float qy = val.un.arvrStabilizedRV.j;
     const float qz = val.un.arvrStabilizedRV.k;
 
+    // Reject degenerate quaternions at the source: around a tare / persist /
+    // hub reset the in-flight report can decode to a non-unit quaternion, and
+    // q_to_ypr's asin() then returns NaN — which would flow into everything
+    // downstream (attitude indicator, water slosh, face inertia, timewarp).
+    const float qn = qw * qw + qx * qx + qy * qy + qz * qz;
+    if (!std::isfinite(qn) || qn < 0.25f || qn > 4.0f) return;
+
     // Latest pose for level()'s reorientation math. Callbacks fire on the
     // service thread (sh2_service dispatches synchronously), the same thread
     // that consumes this in service_loop — no locking needed.
@@ -337,11 +367,15 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     // &yaw) here had them swapped, so the compass heading tracked the sensor's
     // ROLL — tilting the head spun the compass while turning moved "R".
     q_to_ypr(qw, qx, qy, qz, &yaw, &pitch, &roll);
+    if (!std::isfinite(yaw) || !std::isfinite(pitch) || !std::isfinite(roll))
+        return;                              // |asin arg| > 1 on a noisy sample
     // Manual trim: small additive corrections for residual lean (menu
     // sliders / config). Yaw trim is heading_offset below, as before.
     const float roll_deg  = roll  * kRad2Deg + roll_trim_.load();
     const float pitch_deg = pitch * kRad2Deg + pitch_trim_.load();
     const float yaw_deg   = yaw   * kRad2Deg;
+    last_roll_deg_.store(roll_deg);      // zero_here() captures these
+    last_pitch_deg_.store(pitch_deg);
 
     float heading = (cfg_.heading_invert ? -yaw_deg : yaw_deg)
                     + cfg_.heading_offset + declination_deg_.load();
