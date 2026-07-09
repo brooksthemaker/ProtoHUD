@@ -6304,9 +6304,12 @@ int main(int argc, char* argv[]) {
                             return static_cast<float>(y);
                         }
                         const double dts = std::clamp(dt_s, 1e-3, 0.1);
-                        dy += (1.0 - std::exp(-2.0 * M_PI * 1.0 * dts)) *
+                        // Derivative tracked at 2.5 Hz (was 1.0) so the filter
+                        // notices motion sooner, and a stronger speed term so
+                        // it opens wider once it does.
+                        dy += (1.0 - std::exp(-2.0 * M_PI * 2.5 * dts)) *
                               (diff / dts - dy);
-                        const double fc = fc_min + 0.15 * std::fabs(dy);
+                        const double fc = fc_min + 0.35 * std::fabs(dy);
                         y += (1.0 - std::exp(-2.0 * M_PI * fc * dts)) * diff;
                         if (wrap) y = circ(y);
                         return static_cast<float>(y);
@@ -6315,8 +6318,10 @@ int main(int argc, char* argv[]) {
                 static AngleSmooth s_att_r, s_att_p, s_att_y;
                 const float sm = std::clamp(state.attitude.smooth, 0.f, 1.f);
                 if (sm > 0.001f) {
-                    // slider 0→raw; 1→0.3 Hz floor (very calm when still)
-                    const double fc_min = 0.3 + (1.0 - sm) * 4.7;
+                    // slider 0→~raw (8 Hz); 1→0.6 Hz floor (calm when still).
+                    // The floor only rules at rest — the speed term above
+                    // opens the cutoff as soon as the head actually moves.
+                    const double fc_min = 0.6 + (1.0 - sm) * 7.4;
                     ap.roll  = s_att_r.step(ap.roll,  dt, fc_min, true);
                     ap.pitch = s_att_p.step(ap.pitch, dt, fc_min, false);
                     ap.yaw   = s_att_y.step(ap.yaw,   dt, fc_min, true);
@@ -7273,29 +7278,43 @@ int main(int argc, char* argv[]) {
         }
 
         // Smooth compass heading on the render thread so the rate is constant
-        // and independent of IMU callback frequency.  Circular lerp (sin/cos)
-        // handles the 0/360 wrap.  tau=0.35 s → ~350 ms time constant.
+        // and independent of IMU callback frequency. Speed-adaptive (One-Euro
+        // style, same idea as the attitude indicator): a calm ~0.8 Hz cutoff
+        // eats mag jitter when still, and the cutoff opens with turn rate so
+        // fast heading changes track near-raw instead of gliding behind
+        // (the old fixed tau=0.35 s lagged the needle ~a second per turn).
+        // Wrap-aware; jumps >90° (tare / source switch) snap through.
         {
-            static float    s_smooth  = -1.f;
+            static bool     s_init    = false;
+            static double   s_smooth  = 0.0;
+            static double   s_rate    = 0.0;      // smoothed turn rate, deg/s
             static uint64_t s_last_us = 0;
             auto now_us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count());
             float dt = s_last_us ? (now_us - s_last_us) * 1e-6f : 0.f;
             s_last_us = now_us;
-            float raw = snap.compass_heading;
-            if (s_smooth < 0.f || dt > 1.f) {
+            const double raw = snap.compass_heading;
+            auto circ = [](double v) {
+                while (v > 180.0)  v -= 360.0;
+                while (v < -180.0) v += 360.0;
+                return v;
+            };
+            const double diff = circ(raw - s_smooth);
+            if (!s_init || dt > 1.f || std::fabs(diff) > 90.0) {
                 s_smooth = raw;
+                s_rate   = 0.0;
+                s_init   = true;
             } else {
-                constexpr float kTau = 0.35f;
-                float alpha = 1.f - std::exp(-dt / kTau);
-                constexpr float kD2R = 3.14159265f / 180.f;
-                float fs = std::sin(s_smooth * kD2R) + alpha * (std::sin(raw * kD2R) - std::sin(s_smooth * kD2R));
-                float fc = std::cos(s_smooth * kD2R) + alpha * (std::cos(raw * kD2R) - std::cos(s_smooth * kD2R));
-                s_smooth = std::atan2(fs, fc) / kD2R;
-                if (s_smooth < 0.f) s_smooth += 360.f;
+                const double dts = std::clamp(static_cast<double>(dt), 1e-3, 0.1);
+                s_rate += (1.0 - std::exp(-2.0 * M_PI * 2.5 * dts)) *
+                          (diff / dts - s_rate);
+                const double fc = 0.8 + 0.35 * std::fabs(s_rate);   // Hz
+                s_smooth += (1.0 - std::exp(-2.0 * M_PI * fc * dts)) * diff;
+                while (s_smooth < 0.0)    s_smooth += 360.0;
+                while (s_smooth >= 360.0) s_smooth -= 360.0;
             }
-            snap.compass_heading = s_smooth;
+            snap.compass_heading = static_cast<float>(s_smooth);
         }
 
         // GPIO monitor: poll sysfs ~1 Hz (every ~60 frames at 60 FPS).
