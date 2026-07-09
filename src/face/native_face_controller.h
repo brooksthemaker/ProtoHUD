@@ -174,6 +174,9 @@ public:
     // changes take effect on the next update tick. The menu pushes these
     // when the user adjusts the corresponding slider/toggle.
     void set_blink_enabled(bool enabled);
+    // Hold the eyes shut (asleep) / release them. Uses the blink art at full
+    // weight, so it works without a dedicated closed-eye expression.
+    void set_eyes_closed(bool closed);
     void set_blink_timing(double min_s, double max_s, double duration_s);
     void set_expression_fade(double seconds);
     void set_wiggle(const WiggleCfg& w);

@@ -101,8 +101,10 @@ void ReactionEngine::enter_drowsy() {
     activity_ = Activity::Drowsy;
     if (act_.motion_event) act_.motion_event("still");
     if (act_.current_expression) prev_expression_ = act_.current_expression();
-    // Heavy lids: long, slow blinks.
-    if (act_.set_blink) act_.set_blink(1.5, 3.0, 0.45);
+    // Heavy lids: a few languid slow blinks — a long lid-close (~0.9 s) every
+    // 2–4 s, so it reads as "getting sleepy" rather than a normal blink.
+    if (act_.set_eyes_closed) act_.set_eyes_closed(false);   // in case we bounced back from asleep
+    if (act_.set_blink) act_.set_blink(2.0, 4.0, 0.9);
     if (act_.face_exists && act_.set_expression &&
         act_.face_exists("sleepy"))
         act_.set_expression("sleepy");
@@ -110,11 +112,14 @@ void ReactionEngine::enter_drowsy() {
 
 void ReactionEngine::enter_asleep() {
     activity_ = Activity::Asleep;
-    // Eyes closed: prefer a dedicated asleep face, fall back to sleepy.
+    // Eyes closed: prefer a dedicated asleep face, fall back to sleepy, and
+    // hold the eyes fully shut via the blink so they're closed even if the
+    // sleepy/asleep art doesn't already draw closed eyes.
     if (act_.face_exists && act_.set_expression) {
         if      (act_.face_exists("asleep")) act_.set_expression("asleep");
         else if (act_.face_exists("sleepy")) act_.set_expression("sleepy");
     }
+    if (act_.set_eyes_closed) act_.set_eyes_closed(true);
     // Floating Z's over whatever the face shows, via the override slot.
     override_active_ = true;
     if (act_.set_ambient)
@@ -128,6 +133,7 @@ void ReactionEngine::wake(bool flash) {
     const bool was_asleep = (activity_ == Activity::Asleep);
     activity_ = Activity::Awake;
     still_s_  = 0.0;
+    if (act_.set_eyes_closed) act_.set_eyes_closed(false);   // open the eyes back up
     if (act_.restore_blink) act_.restore_blink();
     if (override_active_) {
         override_active_ = false;

@@ -44,6 +44,11 @@ public:
     // (no eyes closed). Re-enabling resumes the next-blink countdown from
     // the next call to update().
     void set_blink_enabled(bool en)                  { blink_enabled_ = en; if (!en) { blink_phase_ = BlinkPhase::Open; blink_weight_ = 0.0; } }
+    // Hold the eyes fully shut (asleep). Pins the blink at full weight — the
+    // closed-eye look comes from the blink art, so it works even without a
+    // dedicated closed-eye expression PNG. Clearing resumes normal blinking.
+    void set_eyes_closed(bool closed)                { eyes_closed_ = closed; if (closed) { blink_phase_ = BlinkPhase::Closed; blink_weight_ = 1.0; } }
+    bool eyes_closed() const { return eyes_closed_; }
     void set_blink_timing(double min_s, double max_s, double duration_s) {
         blink_min_      = std::max(0.1, min_s);
         blink_max_      = std::max(blink_min_, max_s);
@@ -97,6 +102,7 @@ private:
     double blink_max_      = 7.0;
     double next_blink_     = 3.0;
     bool   blink_enabled_  = true;
+    bool   eyes_closed_    = false;   // asleep: hold the blink fully shut
 
     WiggleCfg wiggle_;
 

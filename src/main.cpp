@@ -3428,6 +3428,9 @@ int main(int argc, char* argv[]) {
                 native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max,
                                               pf_blink_duration);
         };
+        ra.set_eyes_closed = [&native_ctrl](bool closed){
+            if (native_ctrl) native_ctrl->set_eyes_closed(closed);
+        };
         ra.set_ambient = [&native_ctrl](const nlohmann::json& spec){
             if (native_ctrl) native_ctrl->set_ambient_effect(spec);
         };

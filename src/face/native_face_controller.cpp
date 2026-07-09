@@ -1306,6 +1306,12 @@ void NativeFaceController::set_blink_enabled(bool enabled) {
         if (pn.state) pn.state->set_blink_enabled(enabled);
 }
 
+void NativeFaceController::set_eyes_closed(bool closed) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_eyes_closed(closed);
+}
+
 void NativeFaceController::set_blink_timing(double min_s, double max_s, double duration_s) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)

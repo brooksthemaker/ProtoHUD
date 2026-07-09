@@ -31,6 +31,8 @@ struct ReactionActions {
     // Blink cadence override + restore-to-user-config (drowsy = heavy lids).
     std::function<void(double min_s, double max_s, double duration_s)> set_blink;
     std::function<void()>                   restore_blink;
+    // Hold the eyes fully shut (asleep) / release them on wake. Optional.
+    std::function<void(bool)>               set_eyes_closed;
     // Final ambient sink (native_ctrl->set_ambient_effect).
     std::function<void(const nlohmann::json&)> set_ambient;
     // HUD toast.
