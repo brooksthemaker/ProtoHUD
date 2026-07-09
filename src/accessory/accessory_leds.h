@@ -29,14 +29,17 @@ enum class Zone : uint8_t {
     RightCheekhub = 1,
     LeftFin       = 2,
     RightFin      = 3,
+    Blush         = 4,
 };
-constexpr int ZoneCount = 4;
+constexpr int ZoneCount = 5;
 
 enum class Pattern : uint8_t {
     Off     = 0,   // zone stays dark regardless of color
     Solid   = 1,   // fill with (r, g, b)
     Breathe = 2,   // (r, g, b) × half-cosine envelope at breathe_hz
     Level   = 3,   // (r, g, b) × current audio volume (mic-reactive bar)
+    Chase   = 4,   // bright dot + fading tail walking the zone at breathe_hz
+    Sparkle = 5,   // per-pixel random twinkle
 };
 
 struct ZoneConfig {
@@ -45,7 +48,9 @@ struct ZoneConfig {
     int         count = 0;
     Pattern     pattern    = Pattern::Solid;
     uint8_t     r = 0, g = 220, b = 180;        // teal default
-    float       breathe_hz = 0.5f;              // half-cycle per second
+    float       breathe_hz = 0.5f;              // half-cycle / chase-cycle per second
+    uint8_t     zone_brightness = 255;          // per-zone scale on top of global
+    bool        follow_face = false;            // color tracks the face's mean color
 };
 
 class AccessoryLeds {
@@ -73,7 +78,15 @@ public:
     void set_zone_pattern  (Zone, Pattern);
     void set_zone_color    (Zone, uint8_t r, uint8_t g, uint8_t b);
     void set_zone_breathe_hz(Zone, float hz);
+    void set_zone_brightness(Zone, uint8_t b);
+    void set_zone_follow_face(Zone, bool on);
     void set_global_brightness(uint8_t b);
+
+    // Latest face mean color (fed ~5 Hz from the render loop when any zone
+    // has follow_face). Packed 0xRRGGBB in one atomic — no lock.
+    void set_face_color(uint8_t r, uint8_t g, uint8_t b) {
+        face_color_.store((uint32_t(r) << 16) | (uint32_t(g) << 8) | b);
+    }
 
     // Live audio volume in [0, 1] — drives Pattern::Level brightness. Audio
     // thread writes; render thread reads. Atomic, no lock.
@@ -105,6 +118,7 @@ private:
     std::thread       thread_;
 
     std::atomic<float> audio_volume_ { 0.0f };
+    std::atomic<uint32_t> face_color_ { 0x00DCB4 };   // follow-face feed (0xRRGGBB)
 
     // Flash overlay state — paired (start, end) microseconds since steady
     // clock epoch. atomic<int64_t> keeps trigger_flash lock-free.

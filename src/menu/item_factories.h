@@ -170,6 +170,8 @@ struct AssetSlotRowDesc {
     std::function<bool()>        edit_visible;  // capability gate for Edit… (e.g.
                                                 // only backends with LED regions)
     std::optional<MenuItem>      versions;      // pre-built Versions submenu
+    std::function<void()>        style;         // null → no Style… row (per-
+                                                // expression material/effect/glitch)
     std::optional<MenuItem>      copy_from;     // pre-built Copy from… submenu
     std::function<void()>        import_action; // shared by Replace… and Import…
     std::function<void()>        clear;
@@ -198,6 +200,11 @@ inline MenuItem make_asset_slot_row(AssetSlotRowDesc d) {
         MenuItem versions = std::move(*d.versions);
         versions.visible_fn = exists;
         m.children.push_back(std::move(versions));
+    }
+    if (d.style) {
+        MenuItem style_it = leaf("Style...", std::move(d.style));
+        style_it.visible_fn = exists;
+        m.children.push_back(std::move(style_it));
     }
     {
         MenuItem replace = leaf("Replace...", d.import_action);

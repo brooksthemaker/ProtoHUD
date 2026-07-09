@@ -28,6 +28,7 @@
 // Forward declarations — the context only holds pointers to these.
 namespace cv { class Mat; }
 class IFaceController;
+namespace face { class ExpressionDirector; }
 class XRDisplay;
 class CameraManager;
 class LoRaRadio;
@@ -245,6 +246,11 @@ inline std::vector<Entry> list(const std::string& expr_png) {
 // need them. Defaults mirror the old parameter defaults.
 struct MenuBuildContext {
     IFaceController* teensy  = nullptr;
+    // Custom-expression runtime (activation/hold/restore) — face/expression_director.h.
+    face::ExpressionDirector* expr_director = nullptr;
+    // Show the legacy ProtoTracer/Teensy source picker + submenu (hidden by
+    // default since the Face Display redesign; protoface.show_prototracer).
+    bool show_prototracer = false;
     XRDisplay*       xr      = nullptr;
     CameraManager*   cameras = nullptr;
     LoRaRadio*       lora    = nullptr;

@@ -569,8 +569,9 @@ std::vector<MenuItem> build_menu(MenuBuildContext& ctx)
         with_desc(submenu("Files",        std::move(files_menu)),
                   "Import media into Protoface from disk: GIFs and "
                   "landing-page backgrounds. Face / mouth / boop PNGs live "
-                  "under Face Display > Protoface > Faces — they're tied to "
-                  "the active face backend (MAX7219 / RGB matrix)."),
+                  "under Face Display > Faces and Expressions > Face "
+                  "Options — they're tied to the active face backend "
+                  "(MAX7219 / RGB matrix)."),
         with_desc(submenu("Communications", std::move(communications_menu)),
                   "Radio + phone: LoRa team mesh, KDE Connect phone, and the "
                   "notification log."),

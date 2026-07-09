@@ -80,6 +80,7 @@
 #include "face/face_image.h"
 #include "face/eye_animations.h"
 #include "face/gif_player.h"
+#include "face/expression_director.h"
 #include "face/native_face_controller.h"
 #include "face/reaction_engine.h"
 #include "face/panel_output.h"
@@ -690,6 +691,39 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     for (int j = 0; j < kBoopFaceSlotCount; ++j)
         boop_peers.emplace_back(kBoopFaceSlots[j].file_stem, kBoopFaceSlots[j].label);
 
+    // ── Expression-editor vocabularies ───────────────────────────────────────
+    // Shared by the per-slot Style... rows and the Custom Expressions list.
+    // The material/effect preset entries are appended below where those
+    // tables live; rows capture the shared_ptrs and read them at open time.
+    auto style_materials = std::make_shared<std::vector<std::pair<std::string, std::string>>>();
+    style_materials->push_back({ "Default (inherit)", "" });
+    auto style_effects = std::make_shared<std::vector<std::pair<std::string, nlohmann::json>>>();
+    style_effects->push_back({ "Default (inherit)", nlohmann::json() });
+    style_effects->push_back({ "None", nlohmann::json("none") });
+    auto style_base_faces =
+        std::make_shared<std::vector<std::pair<std::string, std::string>>>(face_peers);
+
+    // Open the expression editor in StyleOnly mode on a built-in slot. Live
+    // preview goes through the controller's override slot; commit persists
+    // the style for the expression (empty style = clear).
+    auto open_style_editor = [menu_sys_pp, teensy, style_materials, style_effects](
+            std::string title, const std::string& expr) {
+        if (!menu_sys_pp || !*menu_sys_pp || !teensy) return;
+        face::CustomExpression seed;
+        seed.style = teensy->expression_style(expr);
+        (*menu_sys_pp)->open_expression_editor(std::move(title),
+            menu::ExpressionEditor::Mode::StyleOnly, std::move(seed),
+            {}, *style_materials, *style_effects,
+            [teensy, expr](const face::CustomExpression& cx){
+                teensy->clear_style_override();
+                teensy->set_expression_style(expr, cx.style);
+            },
+            [teensy]{ teensy->clear_style_override(); },
+            [teensy](const face::CustomExpression& cx){
+                teensy->set_style_override(cx.style);
+            });
+    };
+
     auto face_slot_row = [&, face_preview, edit_face, make_versions_submenu](int slot_idx) -> MenuItem {
         const std::string expr  = kFaceSlots[slot_idx].expression;
         const std::string label = kFaceSlots[slot_idx].label;
@@ -716,6 +750,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         versions.description = "Saved versions of this face (named + auto-backups) "
                                "with thumbnails — Make Current to restore one.";
         d.versions = std::move(versions);
+        d.style = [open_style_editor, expr, label]{
+            open_style_editor("Style: " + label, expr);
+        };
 
         d.copy_from = make_copy_from_submenu(teensy, expr, face_peers,
             "Copy another face's PNG into this slot as a "
@@ -1651,6 +1688,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             ensure_obj_path(*cfg_root, {"protoface", "custom_effects"})[name] = spec;
         };
         premade_items.push_back(std::move(it));
+        style_effects->push_back({ name, nlohmann::json{{"preset", name}} });
     }
     *premade_combo = std::string(kPremades[0].name) + "\n" + kPremades[0].combo;  // seed panel
     MenuItem premade_item = submenu("Premade Effects", std::move(premade_items));
@@ -1900,7 +1938,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             { "Aurora", 16 }, { "Lava",   17 }, { "Galaxy",18 }, { "Pastel",19 },
             { "Candy",  20 }, { "Toxic",  21 },
         };
-        for (const auto& m : pf_mats)
+        for (const auto& m : pf_mats) {
             pf_palette.push_back(leaf_sel(m.label,
                 [teensy, idx = m.idx, &state]{
                     teensy->set_menu_item(8, idx);
@@ -1908,6 +1946,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     state.face.material_color = idx;
                 },
                 [&state, idx = m.idx]{ return state.face.material_color == idx; }));
+            style_materials->push_back(
+                { m.label, face::NativeFaceController::preset_material_spec(m.idx) });
+        }
 
         // ── Pride flags ──────────────────────────────────────────────────────
         // Vertical smooth gradients matching each flag's colours (presets 22-33;
@@ -1955,7 +1996,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 }),
             "Rotate the flag stripes. 90\xc2\xb0 is the usual vertical stripes; "
             "0\xc2\xb0 lays them left\xe2\x86\x92right, other values give diagonals."));
-        for (const auto& f : pf_pride)
+        for (const auto& f : pf_pride) {
             pride_items.push_back(leaf_sel(f.label,
                 [teensy, idx = f.idx, &state]{
                     teensy->set_menu_item(8, idx);
@@ -1963,6 +2004,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     state.face.material_color = idx;
                 },
                 [&state, idx = f.idx]{ return state.face.material_color == idx; }));
+            style_materials->push_back(
+                { std::string("Pride: ") + f.label,
+                  face::NativeFaceController::preset_material_spec(f.idx) });
+        }
         pf_palette.push_back(with_desc(submenu("Pride", std::move(pride_items)),
             "Colour gradients matching pride flags (vertical stripes, top \xe2\x86\x92 "
             "bottom). Applies like any other material; persists with your setup."));
@@ -3254,21 +3299,182 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         protoface_inner_menu.push_back(submenu("Panel Preview",
                                                std::move(pf_preview_menu)));
 
-    // ── Face Display root: Source picker (radios) + per-backend submenus ─────
-    // Protoface first (the primary renderer), then the source radios and the
-    // ProtoTracer submenu.
-    std::vector<MenuItem> face_display_menu;
-    if (!protoface_inner_menu.empty())
-        face_display_menu.push_back(submenu("Protoface", std::move(protoface_inner_menu)));
-    if (active_face_pp && teensy_option && fp_option) {
-        face_display_menu.push_back(leaf_sel("Source: Teensy (ProtoTracer)",
+    // ── Custom Expressions ────────────────────────────────────────────────────
+    // User-created expressions: pre-allocated placeholder rows (the menu tree
+    // must not grow while open — see item_factories.h) over the live
+    // state.custom_expressions vector, plus a static Add Another... row that
+    // only mutates AppState.
+    face::ExpressionDirector* expr_director = ctx.expr_director;
+    auto open_custom_editor = [menu_sys_pp, teensy, &state, style_base_faces,
+                               style_materials, style_effects](int idx) {
+        if (!menu_sys_pp || !*menu_sys_pp || !teensy) return;
+        face::CustomExpression seed;
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (idx < 0 || idx >= (int)state.custom_expressions.size()) return;
+            seed = state.custom_expressions[idx];
+        }
+        (*menu_sys_pp)->open_expression_editor("Custom Expression",
+            menu::ExpressionEditor::Mode::Custom, std::move(seed),
+            *style_base_faces, *style_materials, *style_effects,
+            [teensy, &state, idx](const face::CustomExpression& cx){
+                teensy->clear_style_override();
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (idx < (int)state.custom_expressions.size())
+                    state.custom_expressions[idx] = cx;
+            },
+            [teensy]{ teensy->clear_style_override(); },
+            [teensy](const face::CustomExpression& cx){
+                teensy->set_style_override(cx.style);
+            });
+    };
+    auto custom_used = [&state](int i) {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        return i < (int)state.custom_expressions.size() &&
+               state.custom_expressions[i].used;
+    };
+    std::vector<MenuItem> custom_expr_menu = make_dynamic_rows(
+        face::kMaxCustomExpressions,
+        [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            return (int)state.custom_expressions.size();
+        },
+        [&state, expr_director, open_custom_editor, custom_used](int i) -> MenuItem {
+            MenuItem row;
+            row.type  = MenuItemType::SUBMENU;
+            row.label = "Custom " + std::to_string(i + 1);
+            row.label_fn = [&state, i]() -> std::string {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (i < (int)state.custom_expressions.size() &&
+                    state.custom_expressions[i].used &&
+                    !state.custom_expressions[i].name.empty())
+                    return state.custom_expressions[i].name;
+                return "Empty Slot " + std::to_string(i + 1);
+            };
+            row.description = "A user-created expression: base face + its own "
+                              "material/effect/glitch + triggers.";
+            MenuItem act = leaf("Activate", [&state, expr_director, i]{
+                face::CustomExpression cx;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    if (i >= (int)state.custom_expressions.size()) return;
+                    cx = state.custom_expressions[i];
+                }
+                if (expr_director && cx.used) expr_director->activate(cx);
+            });
+            act.visible_fn = [custom_used, i]{ return custom_used(i); };
+            row.children.push_back(std::move(act));
+            MenuItem deact = leaf("Deactivate",
+                [expr_director]{ if (expr_director) expr_director->deactivate(); });
+            deact.visible_fn = [&state, expr_director, i]{
+                if (!expr_director || !expr_director->active()) return false;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                return i < (int)state.custom_expressions.size() &&
+                       expr_director->active_name() ==
+                           state.custom_expressions[i].name;
+            };
+            row.children.push_back(std::move(deact));
+            MenuItem edit = leaf("Edit...", [open_custom_editor, i]{
+                open_custom_editor(i);
+            });
+            edit.label_fn = [custom_used, i]() -> std::string {
+                return custom_used(i) ? "Edit..." : "Set Up...";
+            };
+            row.children.push_back(std::move(edit));
+            MenuItem clr = leaf("Clear", [&state, i]{
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (i < (int)state.custom_expressions.size())
+                    state.custom_expressions[i] = face::CustomExpression{};
+            });
+            clr.visible_fn = [custom_used, i]{ return custom_used(i); };
+            row.children.push_back(std::move(clr));
+            return row;
+        });
+    custom_expr_menu.push_back(with_desc(leaf("Add Another...",
+        [&state, open_custom_editor]{
+            int idx = -1;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if ((int)state.custom_expressions.size() >=
+                    face::kMaxCustomExpressions)
+                    return;
+                state.custom_expressions.emplace_back();
+                idx = (int)state.custom_expressions.size() - 1;
+            }
+            open_custom_editor(idx);
+        }),
+        "Add a new expression slot and open its editor: name, base face, "
+        "material, effect, glitch, and the triggers that activate it."));
+
+    // ── Regroup: split the flat Protoface list into the four top-level
+    // groups. take() moves items out by label; anything unclaimed falls
+    // through to Base Settings so future additions never vanish.
+    auto take = [](std::vector<MenuItem>& v, const char* label)
+            -> std::optional<MenuItem> {
+        for (auto it = v.begin(); it != v.end(); ++it)
+            if (it->label == label) {
+                MenuItem m = std::move(*it);
+                v.erase(it);
+                return m;
+            }
+        return std::nullopt;
+    };
+    auto take_into = [&take](std::vector<MenuItem>& dst,
+                             std::vector<MenuItem>& src, const char* label) {
+        if (auto m = take(src, label)) dst.push_back(std::move(*m));
+    };
+
+    std::vector<MenuItem> base_items, faces_items, media_items;
+
+    take_into(base_items, protoface_inner_menu, "Start Protoface");
+    take_into(base_items, protoface_inner_menu, "Restart Protoface");
+    take_into(base_items, protoface_inner_menu, "Hardware");
+    take_into(base_items, protoface_inner_menu, "Panel Preview");
+    take_into(base_items, protoface_inner_menu, "Brightness");
+    take_into(base_items, protoface_inner_menu, "Save Face Config");
+    take_into(base_items, protoface_inner_menu, "Release Control");
+
+    // Default Style — the old top-level Material Color / Effects / Glitch,
+    // reframed: it's what every expression inherits unless its own Style
+    // (Face Options > slot > Style..., or a custom expression) overrides it.
+    std::vector<MenuItem> default_style_items;
+    take_into(default_style_items, protoface_inner_menu, "Material Color");
+    take_into(default_style_items, protoface_inner_menu, "Effects");
+    take_into(default_style_items, protoface_inner_menu, "Glitch");
+
+    take_into(faces_items, protoface_inner_menu, "Face Options");
+    faces_items.push_back(with_desc(
+        submenu("Custom Expressions", std::move(custom_expr_menu)),
+        "User-created expressions: pick a base face, name it, give it its "
+        "own material/effect/glitch, and choose the triggers that activate "
+        "it (boop pads, gestures, motion, light — or just this menu). "
+        "Starts with five empty slots; Add Another... appends more."));
+    faces_items.push_back(with_desc(
+        submenu("Default Style", std::move(default_style_items)),
+        "The look every expression inherits — material color, particle "
+        "effects, glitch — unless the expression's own Style overrides it."));
+    take_into(faces_items, protoface_inner_menu, "Animations");
+    take_into(faces_items, protoface_inner_menu, "Reactions");
+
+    take_into(media_items, protoface_inner_menu, "GIFs");
+    take_into(media_items, protoface_inner_menu, "Scrolling Text");
+
+    // Anything still in the old flat list falls through to Base Settings.
+    for (auto& m : protoface_inner_menu) base_items.push_back(std::move(m));
+    protoface_inner_menu.clear();
+
+    // ProtoTracer/Teensy source path: hidden since the redesign. The wiring
+    // stays intact — protoface.show_prototracer=true brings the source
+    // radios and the ProtoTracer submenu back (under Base Settings).
+    if (ctx.show_prototracer && active_face_pp && teensy_option && fp_option) {
+        base_items.push_back(leaf_sel("Source: Teensy (ProtoTracer)",
             [active_face_pp, teensy_option]{ *active_face_pp = teensy_option; },
             [active_face_pp, teensy_option]{ return *active_face_pp == teensy_option; }));
-        face_display_menu.push_back(leaf_sel("Source: Protoface",
+        base_items.push_back(leaf_sel("Source: Protoface",
             [active_face_pp, fp_option]{ *active_face_pp = fp_option; },
             [active_face_pp, fp_option]{ return *active_face_pp == fp_option; }));
+        base_items.push_back(submenu("ProtoTracer", std::move(prototracer_inner_menu)));
     }
-    face_display_menu.push_back(submenu("ProtoTracer", std::move(prototracer_inner_menu)));
 
     // ── Boop sensor (Protoface-side reactive behaviour) ──────────────────────
     // One submenu per zone, each with Enabled / Expression / Hold Duration /
@@ -3471,7 +3677,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Cheeks event fires instead. Set to 0 to disable coalescing "
             "(single-side events fire immediately)."),
     };
-    face_display_menu.push_back(
+    faces_items.push_back(
         with_desc(submenu("Boop", std::move(boop_menu)),
                   "Per-zone capacitive-touch reactions. Drives "
                   "Protoface's trigger_boop() — fires the chosen expression "
@@ -3525,7 +3731,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 state.light_squint.cooldown_s = v;
             }),
     };
-    face_display_menu.push_back(
+    faces_items.push_back(
         with_desc(submenu("Light Sensor", std::move(light_menu)),
                   "Triggers a face reaction when the wearer steps from a dim "
                   "area into a bright one. Reads a BH1750 over I²C "
@@ -3640,7 +3846,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             voice_apply_visemes();
         }),
         "Centroid below this is the small-open shape; above, EE (smile)."));
-    face_display_menu.push_back(
+    faces_items.push_back(
         with_desc(submenu("Voice", std::move(voice_menu)),
                   "Mic-driven mouth_open. FFT-based: speech-band RMS feeds an "
                   "envelope follower whose output drives face::set_audio() each "
@@ -3660,6 +3866,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             { "Solid",   accessory::Pattern::Solid   },
             { "Breathe", accessory::Pattern::Breathe },
             { "Level",   accessory::Pattern::Level   },
+            { "Chase",   accessory::Pattern::Chase   },
+            { "Sparkle", accessory::Pattern::Sparkle },
         };
         std::vector<MenuItem> pat_items;
         for (const auto& o : opts) {
@@ -3685,11 +3893,28 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     auto zc = leds->zone(z);
                     return {zc.r, zc.g, zc.b};
                 }),
+            with_desc(slider("Zone Brightness", 0.f, 255.f, 5.f, "",
+                [leds, z]{
+                    return leds ? static_cast<float>(leds->zone(z).zone_brightness)
+                                : 255.f;
+                },
+                [leds, z](float v){
+                    if (leds) leds->set_zone_brightness(z, static_cast<uint8_t>(v));
+                }),
+                "Per-zone brightness, on top of the chain-wide Brightness — "
+                "e.g. keep a subtle blush while the fins run bright."),
+            with_desc(toggle("Follow Face",
+                [leds, z]{ return leds && leds->zone(z).follow_face; },
+                [leds, z](bool v){ if (leds) leds->set_zone_follow_face(z, v); }),
+                "Sync this zone's color to the face: the zone tracks the "
+                "mean color of the lit face pixels (material, gradients, "
+                "GIFs — whatever is rendering), updating a few times a "
+                "second. The zone's own Color is ignored while on."),
             with_desc(slider("Breathe Rate", 0.05f, 5.f, 0.05f, " Hz",
                 [leds, z]{ return leds ? leds->zone(z).breathe_hz : 0.5f; },
                 [leds, z](float v){ if (leds) leds->set_zone_breathe_hz(z, v); }),
-                "How fast the Breathe pattern oscillates. Only meaningful "
-                "when Pattern is Breathe."),
+                "How fast the Breathe pattern oscillates (and the Chase dot "
+                "walks its loop). Meaningful for Breathe and Chase."),
             leaf("Test Flash", [leds, z]{ if (leds) leds->trigger_flash(z, 0.35); }),
         };
         return submenu(std::move(label), std::move(items));
@@ -3702,16 +3927,33 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Master brightness applied to the whole accessory chain at SPI "
             "encode time. WS2812s draw a lot of current at full white — "
             "keep this low (~64) unless you have power injection."),
-        led_zone_menu(accessory::Zone::LeftCheekhub,  "Left Cheekhub"),
-        led_zone_menu(accessory::Zone::RightCheekhub, "Right Cheekhub"),
-        led_zone_menu(accessory::Zone::LeftFin,       "Left Fin"),
-        led_zone_menu(accessory::Zone::RightFin,      "Right Fin"),
+        led_zone_menu(accessory::Zone::LeftCheekhub,  "Cheek Hub Left"),
+        led_zone_menu(accessory::Zone::RightCheekhub, "Cheek Hub Right"),
+        led_zone_menu(accessory::Zone::LeftFin,       "Cheek Fin Left"),
+        led_zone_menu(accessory::Zone::RightFin,      "Cheek Fin Right"),
+        led_zone_menu(accessory::Zone::Blush,         "Blush"),
     };
-    face_display_menu.push_back(
-        with_desc(submenu("LEDs", std::move(led_menu)),
-                  "Accessory WS2812 strip (cheekhubs + fins). Driven via "
-                  "SPI MOSI; boops flash the matching zone, mic volume "
-                  "drives Level zones."));
+
+    // ── Face Display root: the four groups ───────────────────────────────────
+    std::vector<MenuItem> face_display_menu;
+    face_display_menu.push_back(with_desc(
+        submenu("Base Settings", std::move(base_items)),
+        "Hardware selection (face backend), panel preview, brightness, and "
+        "saving the face config."));
+    face_display_menu.push_back(with_desc(
+        submenu("Faces and Expressions", std::move(faces_items)),
+        "Everything about what the face shows: expression art, custom "
+        "expressions, the default style it all inherits, animations, and "
+        "the triggers that switch expressions (boops, reactions, voice, "
+        "light)."));
+    face_display_menu.push_back(with_desc(
+        submenu("Accessory LEDs", std::move(led_menu)),
+        "Accessory LED zones — cheek hubs, cheek fins, blush. Per zone: "
+        "pattern, color or follow-face sync, and brightness; boops flash "
+        "the matching zone."));
+    face_display_menu.push_back(with_desc(
+        submenu("Gifs and Text", std::move(media_items)),
+        "GIF playback slots and the scrolling text banner."));
 
     return face_display_menu;
 }

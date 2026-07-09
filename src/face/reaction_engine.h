@@ -35,6 +35,9 @@ struct ReactionActions {
     std::function<void(const nlohmann::json&)> set_ambient;
     // HUD toast.
     std::function<void(const std::string&, const std::string&)> notify;
+    // Motion-event hook for the custom-expression director: "shake" on a
+    // wake spike, "still" on entering drowsy. Optional.
+    std::function<void(const char*)> motion_event;
 };
 
 class ReactionEngine {
@@ -77,6 +80,7 @@ public:
     void        force_wake();     // as if a motion spike arrived (test)
 
 private:
+    bool spike_armed_ = true;   // motion-spike edge detector (see tick)
     void enter_drowsy();
     void enter_asleep();
     void wake(bool flash);

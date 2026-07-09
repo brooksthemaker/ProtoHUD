@@ -255,6 +255,7 @@ set(SOURCES
     src/menu/file_picker.cpp
     src/menu/face_editor.cpp
     src/menu/color_picker.cpp
+    src/menu/expression_editor.cpp
     src/profile_manager.cpp
     src/vitrue/xr_display.cpp
     src/vitrue/timewarp.cpp
@@ -404,8 +405,10 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/face_loader.cpp
     src/face/particles.cpp
     src/face/glitch.cpp
+    src/face/expression_style.cpp
     src/face/scroll_text.cpp
     src/face/reaction_engine.cpp
+    src/face/expression_director.cpp
     src/face/gif_player.cpp
     src/face/eye_animations.cpp
     src/face/shm_pusher_output.cpp

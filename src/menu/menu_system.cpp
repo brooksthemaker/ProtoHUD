@@ -41,15 +41,23 @@ static const std::string& item_label(const MenuItem& it) {
 
 // On-screen keyboard layout (variable-width rows). Special keys live on the last
 // row. Shared by the input (move/activate) and draw paths so they stay in sync.
-static const std::vector<std::vector<std::string>>& osk_rows() {
-    static const std::vector<std::vector<std::string>> rows = {
+// Page 0 = letters, page 1 = symbols; the ?123/ABC key flips between them.
+static const std::vector<std::vector<std::string>>& osk_rows(int page) {
+    static const std::vector<std::vector<std::string>> letters = {
         {"1","2","3","4","5","6","7","8","9","0",","},
         {"Q","W","E","R","T","Y","U","I","O","P"},
         {"A","S","D","F","G","H","J","K","L"},
         {"Z","X","C","V","B","N","M"},
-        {"SPACE","DEL","SAVE","CANCEL"},
+        {"?123","SPACE","DEL","SAVE","CANCEL"},
     };
-    return rows;
+    static const std::vector<std::vector<std::string>> symbols = {
+        {"!","@","#","$","%","^","&","*","(",")"},
+        {"-","_","+","=","/","\\","|","~","`"},
+        {"[","]","{","}","<",">",";",":"},
+        {"'","\"",".",",","?"},
+        {"ABC","SPACE","DEL","SAVE","CANCEL"},
+    };
+    return page == 1 ? symbols : letters;
 }
 
 // Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
@@ -254,12 +262,16 @@ void MenuSystem::prev_tab() {
 // ── On-screen keyboard ──────────────────────────────────────────────────────────
 
 void MenuSystem::open_keyboard(std::string title, std::string initial,
-                               KeyboardCommit on_commit) {
-    osk_title_  = std::move(title);
-    osk_text_   = std::move(initial);
-    osk_commit_ = std::move(on_commit);
+                               KeyboardCommit on_commit, size_t max_len) {
+    osk_title_   = std::move(title);
+    osk_text_    = std::move(initial);
+    osk_commit_  = std::move(on_commit);
+    osk_max_len_ = std::max<size_t>(1, max_len);
+    if (osk_text_.size() > osk_max_len_) osk_text_.resize(osk_max_len_);
+    osk_caret_  = static_cast<int>(osk_text_.size());
     osk_row_    = 0;
     osk_col_    = 0;
+    osk_page_   = 0;
     osk_active_ = true;
 }
 
@@ -269,11 +281,26 @@ void MenuSystem::close_keyboard() {
     osk_text_.clear();
 }
 
+void MenuSystem::osk_insert(char c) {
+    if (osk_text_.size() >= osk_max_len_) return;
+    osk_caret_ = std::clamp(osk_caret_, 0, static_cast<int>(osk_text_.size()));
+    osk_text_.insert(static_cast<size_t>(osk_caret_), 1, c);
+    ++osk_caret_;
+}
+
 void MenuSystem::osk_move(int dx, int dy) {
     if (!osk_active_) return;
-    const auto& rows = osk_rows();
+    const auto& rows = osk_rows(osk_page_);
     int nrows = static_cast<int>(rows.size());
     if (nrows == 0) return;
+    // Row -1 = the text field: Left/Right move the caret, Down returns to keys.
+    if (osk_row_ == -1) {
+        if (dx) osk_caret_ = std::clamp(osk_caret_ + dx, 0,
+                                        static_cast<int>(osk_text_.size()));
+        if (dy > 0) osk_row_ = 0;
+        return;
+    }
+    if (osk_row_ == 0 && dy < 0) { osk_row_ = -1; return; }   // Up into the field
     osk_row_ = std::clamp(osk_row_ + dy, 0, nrows - 1);
     int ncols = static_cast<int>(rows[osk_row_].size());
     osk_col_ = std::clamp(osk_col_ + dx, 0, std::max(0, ncols - 1));
@@ -281,7 +308,9 @@ void MenuSystem::osk_move(int dx, int dy) {
 
 void MenuSystem::osk_step(int d) {
     if (!osk_active_) return;
-    const auto& rows = osk_rows();
+    const auto& rows = osk_rows(osk_page_);
+    // Knob walks keys only — pull field focus back onto the grid first.
+    if (osk_row_ < 0) { osk_row_ = 0; osk_col_ = 0; return; }
     // Flatten current (row,col) to a linear index, step with wrap, unflatten.
     int flat = 0, total = 0;
     for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
@@ -300,30 +329,39 @@ void MenuSystem::osk_step(int d) {
 
 void MenuSystem::osk_input_char(unsigned int c) {
     if (!osk_active_) return;
-    if (c == ' ' || c == '-' || c == '_' || c == ',' || c == '#' ||
-        std::isalnum(static_cast<int>(c))) {
-        if (osk_text_.size() < 40) osk_text_ += static_cast<char>(c);
-    }
+    if (c >= 0x20 && c <= 0x7E) osk_insert(static_cast<char>(c));
 }
 
 void MenuSystem::osk_activate() {
     if (!osk_active_) return;
-    const auto& rows = osk_rows();
+    if (osk_row_ == -1) return;              // field focus: nothing to press
+    const auto& rows = osk_rows(osk_page_);
     if (osk_row_ < 0 || osk_row_ >= static_cast<int>(rows.size())) return;
     const auto& row = rows[osk_row_];
     if (osk_col_ < 0 || osk_col_ >= static_cast<int>(row.size())) return;
     const std::string& k = row[osk_col_];
-    if      (k == "SPACE")  { if (osk_text_.size() < 40) osk_text_ += ' '; }
+    if      (k == "SPACE")  osk_insert(' ');
     else if (k == "DEL")    osk_backspace();
     else if (k == "SAVE")   osk_commit();
     else if (k == "CANCEL") osk_cancel();
-    else if (k.size() == 1) { if (osk_text_.size() < 40) osk_text_ += k[0]; }
+    else if (k == "?123" || k == "ABC") {
+        osk_page_ ^= 1;
+        const auto& np = osk_rows(osk_page_);
+        osk_row_ = std::clamp(osk_row_, 0, static_cast<int>(np.size()) - 1);
+        osk_col_ = std::clamp(osk_col_, 0,
+                              static_cast<int>(np[osk_row_].size()) - 1);
+    }
+    else if (k.size() == 1) osk_insert(k[0]);
 }
 
 void MenuSystem::osk_backspace() {
     if (!osk_active_) return;
-    if (!osk_text_.empty()) osk_text_.pop_back();
-    else                    osk_cancel();   // backspace on empty = cancel out
+    if (osk_text_.empty()) { osk_cancel(); return; }   // backspace on empty = cancel out
+    osk_caret_ = std::clamp(osk_caret_, 0, static_cast<int>(osk_text_.size()));
+    if (osk_caret_ > 0) {
+        osk_text_.erase(static_cast<size_t>(osk_caret_) - 1, 1);
+        --osk_caret_;
+    }
 }
 
 void MenuSystem::osk_commit() {
@@ -399,6 +437,45 @@ void MenuSystem::open_face_editor(std::string title,
 void MenuSystem::close_face_editor() {
     face_editor_.back();
     if (overlay_ == &face_editor_) overlay_ = nullptr;
+}
+
+// ── Expression editor ─────────────────────────────────────────────────────────
+
+void MenuSystem::open_expression_editor(
+        std::string title,
+        menu::ExpressionEditor::Mode mode,
+        face::CustomExpression initial,
+        std::vector<std::pair<std::string, std::string>> base_faces,
+        std::vector<std::pair<std::string, std::string>> materials,
+        std::vector<std::pair<std::string, nlohmann::json>> effects,
+        menu::ExpressionEditor::CommitFn on_commit,
+        menu::ExpressionEditor::CancelFn on_cancel,
+        menu::ExpressionEditor::PreviewFn on_preview) {
+    // Mutually-exclusive overlays — bring others down first.
+    if (osk_active_)              close_keyboard();
+    if (file_picker_.is_open())   file_picker_.cancel();
+    if (color_picker_.is_open())  color_picker_.close();
+    if (face_editor_.is_open())   face_editor_.back();
+    expression_editor_.set_detent_callback(
+        [this](int n){ emit_detents_override(n); });
+    expression_editor_.open(std::move(title), mode, std::move(initial),
+                            std::move(base_faces), std::move(materials),
+                            std::move(effects),
+                            std::move(on_commit), std::move(on_cancel),
+                            std::move(on_preview),
+        [this](std::string t, std::string initial_text,
+               std::function<void(const std::string&)> on_commit_kb){
+            open_keyboard(std::move(t), std::move(initial_text),
+                          std::move(on_commit_kb));
+        });
+    overlay_ = &expression_editor_;
+}
+
+void MenuSystem::close_expression_editor() {
+    // back() disarms first if a row is armed; a second call cancels out.
+    for (int i = 0; i < 2 && expression_editor_.is_open(); ++i)
+        expression_editor_.back();
+    if (overlay_ == &expression_editor_) overlay_ = nullptr;
 }
 
 void MenuSystem::emit_detents() {
@@ -1541,19 +1618,42 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
     std::string title = osk_title_.empty() ? std::string("ENTER NAME") : to_upper(osk_title_);
     dl->AddText(font, fs * 1.4f, { x0, pmin.y + 14.f }, IM_COL32(255, 255, 255, 255), title.c_str());
 
-    // Text field.
+    // Remaining-characters counter, right-aligned above the field. Dim
+    // normally; warn in red when the budget is nearly spent.
     const float fy = pmin.y + 14.f + fs * 1.4f + 12.f;
+    {
+        const size_t remaining = osk_max_len_ - std::min(osk_text_.size(), osk_max_len_);
+        char cnt[32];
+        std::snprintf(cnt, sizeof cnt, "%zu/%zu", osk_text_.size(), osk_max_len_);
+        ImVec2 csz = font->CalcTextSizeA(fs * 0.9f, FLT_MAX, 0.f, cnt);
+        dl->AddText(font, fs * 0.9f, { x1 - csz.x, fy - fs * 0.9f - 4.f },
+                    remaining <= 5 ? IM_COL32(255, 90, 90, 230)
+                                   : menu_with_alpha(accent_color_, 150), cnt);
+    }
+
+    // Text field. Border brightens when the field itself is focused (row -1),
+    // where Left/Right move the caret instead of the key selection.
+    const bool field_focus = (osk_row_ == -1);
     const float fh = fs * 1.5f + 12.f;
     dl->AddRectFilled({ x0, fy }, { x1, fy + fh }, IM_COL32(0, 0, 0, 160), 3.f);
-    dl->AddRect({ x0, fy }, { x1, fy + fh }, menu_with_alpha(accent_color_, 200), 3.f, 0, 1.5f);
-    std::string shown = osk_text_;
-    // blinking caret
-    if (static_cast<int>(ImGui::GetTime() * 2.0) & 1) shown += "_";
+    dl->AddRect({ x0, fy }, { x1, fy + fh },
+                menu_with_alpha(accent_color_, field_focus ? 255 : 200), 3.f, 0,
+                field_focus ? 2.5f : 1.5f);
     dl->AddText(font, fs * 1.2f, { x0 + 10.f, fy + (fh - fs * 1.2f) * 0.5f },
-                IM_COL32(255, 255, 255, 240), shown.c_str());
+                IM_COL32(255, 255, 255, 240), osk_text_.c_str());
+    // Blinking caret bar at the in-string insertion point.
+    if (static_cast<int>(ImGui::GetTime() * 2.0) & 1) {
+        const int caret = std::clamp(osk_caret_, 0, static_cast<int>(osk_text_.size()));
+        const std::string before = osk_text_.substr(0, static_cast<size_t>(caret));
+        const float cx = x0 + 10.f +
+            font->CalcTextSizeA(fs * 1.2f, FLT_MAX, 0.f, before.c_str()).x;
+        const float cy0 = fy + (fh - fs * 1.2f) * 0.5f;
+        dl->AddRectFilled({ cx, cy0 }, { cx + 2.f, cy0 + fs * 1.2f },
+                          IM_COL32(255, 255, 255, 235));
+    }
 
     // Key grid.
-    const auto& rows = osk_rows();
+    const auto& rows = osk_rows(osk_page_);
     const float grid_top = fy + fh + 22.f;
     const float grid_bot = pmax.y - 40.f;
     const int   nrows    = static_cast<int>(rows.size());
@@ -1595,8 +1695,10 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
                 ImVec2 kmin{ kx, ky }, kmax{ kx + kw, ky + key_h };
                 bool is_save   = (row[c] == "SAVE");
                 bool is_cancel = (row[c] == "CANCEL");
+                bool is_page   = (row[c] == "?123" || row[c] == "ABC");
                 ImU32 base = is_save   ? IM_COL32(40, 110, 60, 150)
                            : is_cancel ? IM_COL32(120, 50, 50, 150)
+                           : is_page   ? menu_with_alpha(accent_color_, 90)
                            :             menu_with_alpha(accent_color_, 40);
                 dl->AddRectFilled(kmin, kmax, sel ? IM_COL32(255, 255, 255, 235) : base, 3.f);
                 if (sel) dl->AddRect(kmin, kmax, menu_with_alpha(accent_color_, 230), 3.f, 0, 1.5f);
@@ -1612,7 +1714,8 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
 
     // Hint bar.
     dl->AddText(font, fs * 0.9f, { x0, pmax.y - 26.f }, menu_with_alpha(accent_color_, 185),
-                "ARROWS/STICK MOVE   \xC2\xB7   A/ENTER KEY   \xC2\xB7   B/BKSP DELETE   \xC2\xB7   TYPE ON KEYBOARD");
+                "ARROWS/STICK MOVE   \xC2\xB7   UP TO FIELD: LEFT/RIGHT MOVE CURSOR   \xC2\xB7   "
+                "A/ENTER KEY   \xC2\xB7   B/BKSP DELETE");
 }
 
 // ── draw_radial (quick menu around the minimap) ─────────────────────────────────

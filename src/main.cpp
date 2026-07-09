@@ -55,6 +55,7 @@
 #include "sensor/bme280.h"
 #include "sensor/temp_sensors.h"
 #include "face/reaction_engine.h"
+#include "face/expression_director.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
 #include "sys/fan_controller.h"
@@ -1762,13 +1763,16 @@ int main(int argc, char* argv[]) {
     // ── Accessory LEDs (cheekhubs + fins on WS2812 daisy-chain) ──────────────
     // Single chain driven through Pi 5 SPI MOSI (GPIO 10). Zone slicing is
     // declarative — config picks {start, count} per zone (LeftCheekhub,
-    // RightCheekhub, LeftFin, RightFin); patterns are per-zone (Off / Solid /
-    // Breathe in v1, audio + event hooks later).
+    // RightCheekhub, LeftFin, RightFin, Blush); patterns are per-zone (Off /
+    // Solid / Breathe / Level / Chase / Sparkle), plus per-zone brightness
+    // and a follow-face color sync. Legacy 4-zone configs load unchanged —
+    // blush just defaults to count 0 (dark).
     accessory::AccessoryLeds::Config led_cfg;
     led_cfg.zones[0].name = "left_cheekhub";
     led_cfg.zones[1].name = "right_cheekhub";
     led_cfg.zones[2].name = "left_fin";
     led_cfg.zones[3].name = "right_fin";
+    led_cfg.zones[4].name = "blush";
     if (cfg.contains("accessory_leds")) {
         auto& jl = cfg["accessory_leds"];
         led_cfg.enabled            = jval(jl, "enabled",           false);
@@ -1796,9 +1800,17 @@ int main(int argc, char* argv[]) {
                 const std::string pat = jz.value("pattern", std::string("solid"));
                 if      (pat == "off")     led_cfg.zones[i].pattern = accessory::Pattern::Off;
                 else if (pat == "breathe") led_cfg.zones[i].pattern = accessory::Pattern::Breathe;
+                else if (pat == "level")   led_cfg.zones[i].pattern = accessory::Pattern::Level;
+                else if (pat == "chase")   led_cfg.zones[i].pattern = accessory::Pattern::Chase;
+                else if (pat == "sparkle") led_cfg.zones[i].pattern = accessory::Pattern::Sparkle;
                 else                       led_cfg.zones[i].pattern = accessory::Pattern::Solid;
                 led_cfg.zones[i].breathe_hz =
                     jval(jz, "breathe_hz", led_cfg.zones[i].breathe_hz);
+                led_cfg.zones[i].zone_brightness = static_cast<uint8_t>(std::clamp(
+                    jval(jz, "zone_brightness",
+                         static_cast<int>(led_cfg.zones[i].zone_brightness)), 0, 255));
+                led_cfg.zones[i].follow_face =
+                    jval(jz, "follow_face", led_cfg.zones[i].follow_face);
             }
         }
         // Strip length = highest (start + count) across configured zones; lets
@@ -2013,6 +2025,11 @@ int main(int argc, char* argv[]) {
     // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
     // region_desync, expr_flicker) is an independent variable.
     face::GlitchConfig pf_glitch;
+    // Per-expression style overrides (material/effect/glitch per expression),
+    // persisted under protoface.expression_styles. Pushed into the native
+    // controller at start; the controller is the live source of truth after
+    // that (menu edits go straight to it), so saves read back from it.
+    std::map<std::string, face::ExpressionStyle> pf_expr_styles;
     // Scrolling-text banner across the face panels (marquee) — forwarded to
     // the native controller live and persisted to cfg["protoface"]
     // ["scroll_text"]. See face/scroll_text.h.
@@ -2110,6 +2127,18 @@ int main(int argc, char* argv[]) {
         }
         if (jpf.contains("glitch") && jpf["glitch"].is_object())
             pf_glitch = face::GlitchConfig::from_json(jpf["glitch"]);
+        if (jpf.contains("expression_styles") && jpf["expression_styles"].is_object())
+            for (auto it = jpf["expression_styles"].begin();
+                 it != jpf["expression_styles"].end(); ++it)
+                pf_expr_styles[it.key()] = face::ExpressionStyle::from_json(it.value());
+        if (jpf.contains("custom_expressions") && jpf["custom_expressions"].is_array()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (const auto& jc : jpf["custom_expressions"]) {
+                state.custom_expressions.push_back(face::CustomExpression::from_json(jc));
+                if ((int)state.custom_expressions.size() >= face::kMaxCustomExpressions)
+                    break;
+            }
+        }
         if (jpf.contains("scroll_text") && jpf["scroll_text"].is_object())
             pf_scroll = face::ScrollTextConfig::from_json(jpf["scroll_text"]);
         if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
@@ -2849,6 +2878,40 @@ int main(int argc, char* argv[]) {
         return "";
     };
 
+    // ── Custom-expression director ────────────────────────────────────────────
+    // Watches boop/gesture/motion/light triggers for user-created expressions
+    // and shows base face + style override while one is active (see
+    // face/expression_director.h). Thread-safe internally; trigger sources
+    // pass a snapshot of the list so state.mtx never nests inside it.
+    face::ExpressionDirector expr_director;
+    {
+        // First run (or short list): seed the starter empty slots so the
+        // menu always shows something to fill in.
+        std::lock_guard<std::mutex> lk(state.mtx);
+        while ((int)state.custom_expressions.size() < face::kInitialCustomSlots)
+            state.custom_expressions.emplace_back();
+    }
+    {
+        face::ExpressionDirector::Actions da;
+        da.set_face     = [&face_proxy](const std::string& e){ face_proxy.set_face_by_name(e); };
+        da.current_face = [&face_proxy]{ return face_proxy.current_expression(); };
+        da.set_style_override   = [&face_proxy](const face::ExpressionStyle& st){
+            face_proxy.set_style_override(st);
+        };
+        da.clear_style_override = [&face_proxy]{ face_proxy.clear_style_override(); };
+        da.notify = [&state](const std::string& t, const std::string& b){
+            Notification n; n.type = NotifType::App;
+            n.title = t; n.body = b; n.auto_dismiss_s = 3.f;
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.notifs.push(std::move(n));
+        };
+        expr_director.set_actions(std::move(da));
+    }
+    auto customs_snapshot = [&state]{
+        std::lock_guard<std::mutex> lk(state.mtx);
+        return state.custom_expressions;
+    };
+
     // Per-zone rapid-boop tracking for the animated-eyes easter egg. Touched
     // only from the sensor poll thread, so no extra locking is needed here.
     auto eye_now = []{
@@ -2872,20 +2935,26 @@ int main(int argc, char* argv[]) {
             break;
         case sensor::BoopSensor::Zone::LeftCheek:
             accessory_leds.trigger_flash(LZ::LeftCheekhub,  0.35);
+            accessory_leds.trigger_flash(LZ::Blush,         0.45);
             break;
         case sensor::BoopSensor::Zone::RightCheek:
             accessory_leds.trigger_flash(LZ::RightCheekhub, 0.35);
+            accessory_leds.trigger_flash(LZ::Blush,         0.45);
             break;
         case sensor::BoopSensor::Zone::BothCheeks:
             accessory_leds.trigger_flash(LZ::LeftCheekhub,  0.45);
             accessory_leds.trigger_flash(LZ::RightCheekhub, 0.45);
             accessory_leds.trigger_flash(LZ::LeftFin,       0.45);
             accessory_leds.trigger_flash(LZ::RightFin,      0.45);
+            accessory_leds.trigger_flash(LZ::Blush,         0.6);
             break;
         }
     };
 
-    auto fire_boop = [&face_proxy, &state, boop_face_stem,
+    // Boop precedence: rapid-boop animated-eyes easter egg → custom
+    // expression bound to the zone → default boop reaction.
+    auto fire_boop = [&face_proxy, &state, &expr_director, customs_snapshot,
+                      boop_face_stem,
                       eye_now, flash_zone, eye_last, eye_run, eye_mtx]
                      (sensor::BoopSensor::Zone z) {
         const auto zi = static_cast<size_t>(z);
@@ -2927,6 +2996,14 @@ int main(int argc, char* argv[]) {
         } else {
             std::lock_guard<std::mutex> lk(*eye_mtx);
             (*eye_run)[zi] = 0;
+        }
+        // A custom expression bound to this zone claims the boop: it shows
+        // its own face + style (with its own hold), so the default reaction
+        // is suppressed. LED feedback still fires.
+        if (expr_director.on_boop(static_cast<int>(z), customs_snapshot())) {
+            face_proxy.trigger_boop_ripple(static_cast<int>(z));
+            flash_zone(z);
+            return;
         }
         // Prefer the dedicated boop_<zone> face when present on disk.
         // face_image_exists() is the canonical "is this PNG in the active
@@ -2982,7 +3059,11 @@ int main(int argc, char* argv[]) {
         double last_squint_t = -1.0e9;
     };
     auto light_edge = std::make_shared<LightEdgeState>();
-    light_sensor.set_lux_callback([light_edge, &state, &face_proxy](float lux) {
+    light_sensor.set_lux_callback([light_edge, &state, &face_proxy,
+                                   &expr_director, customs_snapshot](float lux) {
+        // Custom-expression light triggers see every sample (their own
+        // hysteresis lives in the director), independent of the squint gate.
+        expr_director.on_lux(lux, customs_snapshot());
         const double now = std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         // Snapshot the config so a mid-callback menu edit can't tear strings.
@@ -3321,6 +3402,9 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.notifs.push(std::move(n));
         };
+        ra.motion_event = [&expr_director, customs_snapshot](const char* ev){
+            expr_director.on_motion(ev, customs_snapshot());
+        };
         reactions.set_actions(std::move(ra));
     }
 
@@ -3428,6 +3512,8 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        for (const auto& [expr, st] : pf_expr_styles)
+            native_ctrl->set_expression_style(expr, st);
         native_ctrl->set_scroll_text(pf_scroll);
         native_ctrl->set_active_layout_name(pf_hub75_active);
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
@@ -3706,6 +3792,8 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        for (const auto& [expr, st] : pf_expr_styles)
+            native_ctrl->set_expression_style(expr, st);
         native_ctrl->set_scroll_text(pf_scroll);
         native_ctrl->set_active_layout_name(pf_hub75_active);
 
@@ -4189,6 +4277,9 @@ int main(int argc, char* argv[]) {
 
     MenuBuildContext menu_ctx;
     menu_ctx.teensy  = &face_proxy;
+    menu_ctx.expr_director = &expr_director;
+    menu_ctx.show_prototracer = cfg.contains("protoface") &&
+        cfg["protoface"].value("show_prototracer", false);
     // Live rendered face canvas (face + material + effects) for the Effects
     // context-panel preview. Reads the current native_ctrl each call so it keeps
     // working across backend swaps; empty on the Teensy/daemon backends.
@@ -4983,8 +5074,13 @@ int main(int argc, char* argv[]) {
                     ja.value(keys[i], std::string("none")));
     }
     sensor::Apds9960 apds(apds_cfg);
-    apds.set_gesture_callback([&gpio_dispatch, &apds_fn](sensor::Apds9960::Gesture g){
-        gpio_dispatch(apds_fn[static_cast<int>(g)]);
+    apds.set_gesture_callback([&gpio_dispatch, &apds_fn,
+                               &expr_director, customs_snapshot](sensor::Apds9960::Gesture g){
+        static const char* kGestureNames[] = { "up", "down", "left", "right" };
+        const int gi = static_cast<int>(g);
+        if (gi >= 0 && gi < 4)
+            expr_director.on_gesture(kGestureNames[gi], customs_snapshot());
+        gpio_dispatch(apds_fn[gi]);
     });
     apds.set_proximity_callback([&gpio_dispatch, &apds_fn](bool near){
         if (near) gpio_dispatch(apds_fn[4]);          // fire on approach only
@@ -5505,14 +5601,18 @@ int main(int argc, char* argv[]) {
             auto& jl = cfg["accessory_leds"];
             jl["global_brightness"] = static_cast<int>(accessory_leds.global_brightness());
             auto& jzones = jl["zones"];
-            if (!jzones.is_array() || jzones.size() < accessory::ZoneCount)
-                jzones = json::array({json{}, json{}, json{}, json{}});
-            static const char* pat_name[] = { "off", "solid", "breathe", "level" };
+            if (!jzones.is_array()) jzones = json::array();
+            while (jzones.size() < accessory::ZoneCount) jzones.push_back(json{});
+            // Index order MUST match the Pattern enum.
+            static const char* pat_name[] = { "off", "solid", "breathe", "level",
+                                              "chase", "sparkle" };
             for (int i = 0; i < accessory::ZoneCount; ++i) {
                 auto zc = accessory_leds.zone(static_cast<accessory::Zone>(i));
-                jzones[i]["pattern"]    = pat_name[static_cast<int>(zc.pattern)];
-                jzones[i]["color"]      = json::array({ zc.r, zc.g, zc.b });
-                jzones[i]["breathe_hz"] = zc.breathe_hz;
+                jzones[i]["pattern"]         = pat_name[static_cast<int>(zc.pattern)];
+                jzones[i]["color"]           = json::array({ zc.r, zc.g, zc.b });
+                jzones[i]["breathe_hz"]      = zc.breathe_hz;
+                jzones[i]["zone_brightness"] = static_cast<int>(zc.zone_brightness);
+                jzones[i]["follow_face"]     = zc.follow_face;
             }
         }
 
@@ -5612,6 +5712,19 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
         cfg["protoface"]["animation"]["preview_duration_s"] = pf_preview_duration_s;
         cfg["protoface"]["glitch"] = pf_glitch.to_json();
+        {
+            if (native_ctrl) pf_expr_styles = native_ctrl->all_expression_styles();
+            nlohmann::json js = nlohmann::json::object();
+            for (const auto& [expr, st] : pf_expr_styles)
+                if (st.any()) js[expr] = st.to_json();
+            cfg["protoface"]["expression_styles"] = std::move(js);
+        }
+        {
+            nlohmann::json jc = nlohmann::json::array();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (const auto& cx : state.custom_expressions) jc.push_back(cx.to_json());
+            cfg["protoface"]["custom_expressions"] = std::move(jc);
+        }
         cfg["protoface"]["scroll_text"] = pf_scroll.to_json();
         {
             auto& jg = cfg["protoface"]["gradient"];
@@ -6217,6 +6330,42 @@ int main(int argc, char* argv[]) {
             // is about the wearer, not the effect settings.
             reactions.feed_motion(m_gyro_mag, std::fabs(m_accel - 1.0));
             reactions.tick(dt);
+            expr_director.tick(dt);
+
+            // Follow-face feed for accessory LED zones: mean color of the lit
+            // face pixels, sampled a few times a second — cheap, and works
+            // for any material (gradients, GIFs, glitch) since it reads the
+            // composited canvas.
+            {
+                static double follow_face_cooldown = 0.0;
+                follow_face_cooldown -= dt;
+                if (follow_face_cooldown <= 0.0 && accessory_leds.is_running() &&
+                    native_ctrl) {
+                    bool any_follow = false;
+                    for (int zi = 0; zi < accessory::ZoneCount; ++zi)
+                        if (accessory_leds.zone(static_cast<accessory::Zone>(zi)).follow_face) {
+                            any_follow = true;
+                            break;
+                        }
+                    if (any_follow) {
+                        cv::Mat frame;
+                        if (native_ctrl->latest_frame(frame) && !frame.empty()) {
+                            const cv::Scalar sum = cv::sum(frame);
+                            // Mean over LIT pixels: normalize by a luma-based
+                            // count so dark backgrounds don't wash the color out.
+                            cv::Mat gray;
+                            cv::cvtColor(frame, gray, cv::COLOR_RGB2GRAY);
+                            const int lit = cv::countNonZero(gray > 24);
+                            if (lit > 0)
+                                accessory_leds.set_face_color(
+                                    static_cast<uint8_t>(std::min(255.0, sum[0] / lit)),
+                                    static_cast<uint8_t>(std::min(255.0, sum[1] / lit)),
+                                    static_cast<uint8_t>(std::min(255.0, sum[2] / lit)));
+                        }
+                    }
+                    follow_face_cooldown = 0.2;   // ~5 Hz
+                }
+            }
 
             // ── Motion-range calibration wizard ─────────────────────────
             // Press-driven: each Select on the menu row captures the current

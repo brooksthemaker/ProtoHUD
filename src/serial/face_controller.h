@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
+
+#include "../face/expression_style.h"
 
 /**
  * Abstract interface for face display backends.
@@ -136,6 +139,23 @@ public:
     // No-op on non-native backends.
     virtual void        set_active_layout_name(const std::string& /*name*/) {}
     virtual std::string face_image_layout(const std::string& /*expression*/) const { return {}; }
+
+    // Per-expression styles (native Protoface only): every expression may
+    // carry its own material / particle effect / glitch that overrides the
+    // default look while it is active. The override slot is stronger still —
+    // custom-expression activation and the style editor's live preview use
+    // it. No-ops / empty on non-native backends.
+    virtual void set_expression_style(const std::string& /*expr*/,
+                                      const face::ExpressionStyle& /*s*/) {}
+    virtual face::ExpressionStyle expression_style(const std::string& /*expr*/) const {
+        return {};
+    }
+    virtual void clear_expression_style(const std::string& /*expr*/) {}
+    virtual std::map<std::string, face::ExpressionStyle> all_expression_styles() const {
+        return {};
+    }
+    virtual void set_style_override(const face::ExpressionStyle& /*s*/) {}
+    virtual void clear_style_override() {}
 };
 
 /**
@@ -206,6 +226,22 @@ public:
     std::string face_image_layout(const std::string& e) const override {
         return (*active_)->face_image_layout(e);
     }
+    void set_expression_style(const std::string& e, const face::ExpressionStyle& s) override {
+        (*active_)->set_expression_style(e, s);
+    }
+    face::ExpressionStyle expression_style(const std::string& e) const override {
+        return (*active_)->expression_style(e);
+    }
+    void clear_expression_style(const std::string& e) override {
+        (*active_)->clear_expression_style(e);
+    }
+    std::map<std::string, face::ExpressionStyle> all_expression_styles() const override {
+        return (*active_)->all_expression_styles();
+    }
+    void set_style_override(const face::ExpressionStyle& s) override {
+        (*active_)->set_style_override(s);
+    }
+    void clear_style_override() override { (*active_)->clear_style_override(); }
 
     IFaceController* backend() const { return *active_; }
 

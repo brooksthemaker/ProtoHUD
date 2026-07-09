@@ -64,6 +64,16 @@ void ReactionEngine::tick(double dt) {
     // value handles the wake spike so a sharp nudge snaps the face awake.
     energy_ += (instant_ - energy_) * std::min(1.0, dt / 2.0);
 
+    // Edge-detected motion spike for the custom-expression director — fires
+    // once per shake regardless of the sleepy state machine, re-arming after
+    // the motion settles below half the spike threshold.
+    if (instant_ > cfg_.wake_dps) {
+        if (spike_armed_ && act_.motion_event) act_.motion_event("shake");
+        spike_armed_ = false;
+    } else if (instant_ < cfg_.wake_dps * 0.5) {
+        spike_armed_ = true;
+    }
+
     if (!cfg_.enabled || !cfg_.sleepy_enabled) return;
 
     if (instant_ > cfg_.wake_dps) {
@@ -89,6 +99,7 @@ void ReactionEngine::tick(double dt) {
 
 void ReactionEngine::enter_drowsy() {
     activity_ = Activity::Drowsy;
+    if (act_.motion_event) act_.motion_event("still");
     if (act_.current_expression) prev_expression_ = act_.current_expression();
     // Heavy lids: long, slow blinks.
     if (act_.set_blink) act_.set_blink(1.5, 3.0, 0.45);

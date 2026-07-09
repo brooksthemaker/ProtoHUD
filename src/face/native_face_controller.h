@@ -21,6 +21,7 @@
 #include <opencv2/core.hpp>
 
 #include "../serial/face_controller.h"
+#include "expression_style.h"
 #include "eye_anim.h"
 #include "face_config.h"
 #include "glitch.h"         // GlitchEffect + GlitchConfig
@@ -105,6 +106,21 @@ public:
     // base effect for neutral/unmapped expressions and when disabled.
     void        set_expression_effects(bool enabled);
 
+    // Per-expression styles: any expression (built-in or custom) may carry its
+    // own material / particle effect / glitch, overriding the default look
+    // while it is active and restoring it on switch-away. Unset fields
+    // inherit. set_expression_style re-applies immediately when `expr` is the
+    // current expression. The override slot (set_style_override) is stronger
+    // still — it wins over the current expression's own style until cleared;
+    // custom-expression activation and the editor's live preview use it.
+    void            set_expression_style(const std::string& expr,
+                                         const ExpressionStyle& s) override;
+    ExpressionStyle expression_style(const std::string& expr) const override;
+    void            clear_expression_style(const std::string& expr) override;
+    std::map<std::string, ExpressionStyle> all_expression_styles() const override;
+    void            set_style_override(const ExpressionStyle& s) override;
+    void            clear_style_override() override;
+
     // Motion-reactive particles: when on, directional effects (rain/snow/
     // embers/steam/…) default to real-gravity coupling — they lean with head
     // roll and sweep on quick turns. Forwarded to every panel's ParticleSystem.
@@ -141,6 +157,11 @@ public:
     // empty string for untagged / legacy folders.
     void        set_active_layout_name(const std::string& name) override;
     std::string face_image_layout(const std::string& expression) const override;
+
+    // Material spec string for a Material Color preset index (0-33; pride
+    // flags return their smooth vertical variant). Used by the menu to build
+    // the expression editor's material vocabulary.
+    static std::string preset_material_spec(int idx) { return preset_material(idx); }
 
     // Copy the latest rendered RGB canvas (CV_8UC3) for the preview. Returns
     // false until the first frame exists. Safe to call from the main/GL thread.
@@ -198,6 +219,10 @@ private:
         std::unique_ptr<ParticleSystem> particles; // null for mirror panels
         std::unique_ptr<GifPlayer>     gif;        // null for mirror panels
         double gif_release_timer = 0.0;            // s left before auto-revert (0 = off)
+        // Per-expression style material — rendered INSTEAD of `material` while
+        // set. The persisted base (`material`/`material_spec`) stays intact, so
+        // switching to an unstyled expression restores it with no bookkeeping.
+        std::shared_ptr<BaseMaterial>  style_material;
         std::string    material_spec;              // current material spec (for persistence)
         nlohmann::json particles_spec = "none";    // current particle config (for persistence)
         bool is_mirror = false;
@@ -207,9 +232,12 @@ private:
 
     void build_panels();
     void render_thread();
-    // Apply the mood preset mapped to `expr` (or restore each panel's base
-    // particles_spec when neutral/unmapped). Caller holds state_mtx_.
-    void apply_expression_effect_locked(const std::string& expr);
+    // Resolve and apply the full look for `expr`: default look → the
+    // expression's own style → the override slot. Covers material (per-panel
+    // style_material), particle effect (transient set_effect), and glitch
+    // (glitch_active_). The legacy expr_effect_map_ mood coupling remains the
+    // effect fallback when the resolved style has none. Caller holds state_mtx_.
+    void apply_expression_style_locked(const std::string& expr);
     // The spec the panels return to when no mood override is active: the
     // weather override while one is set, else the panel's own base effect.
     // Caller holds state_mtx_.
@@ -274,9 +302,19 @@ private:
     double             eye_anim_t_     = 0.0;   // elapsed seconds (animation phase)
 
     // Glitch post-effect. glitch_ (sim state) is touched only by the render
-    // thread; glitch_cfg_ is written by set_glitch() under state_mtx_.
+    // thread; glitch_cfg_ (the default look's config) is written by
+    // set_glitch() under state_mtx_. glitch_active_ is the RESOLVED config —
+    // the active expression style's glitch when it has one, else glitch_cfg_ —
+    // recomputed by apply_expression_style_locked and read by the render loop.
     GlitchEffect       glitch_;
     GlitchConfig       glitch_cfg_;
+    GlitchConfig       glitch_active_;
+
+    // Per-expression styles + the stronger override slot (custom expressions,
+    // editor live preview). Live under state_mtx_.
+    std::map<std::string, ExpressionStyle> expr_styles_;
+    ExpressionStyle    style_override_;
+    bool               override_active_ = false;
 
     // Scrolling-text banner. Thread-safe internally (own mutex): tick/render
     // run on the render thread, set_scroll_text() from menu/config threads.

@@ -10,6 +10,7 @@
 #include <ctime>
 #include <imgui.h>
 #include "capture.h"
+#include "face/custom_expression.h"
 
 // ── Post-processing config ────────────────────────────────────────────────────
 // Modified from menu (any thread); read by the render thread via snap.
@@ -969,6 +970,10 @@ struct AppState {
     // cheek touches into a single BothCheeks event. Mirror of the sensor's
     // cfg field; the menu writes both this and the sensor's live value.
     float                boop_coalesce_window_s = 0.10f;
+    // User-created custom expressions (see face/custom_expression.h). Seeded
+    // with kInitialCustomSlots empty slots when the config key is absent;
+    // "Add Another..." appends up to kMaxCustomExpressions. Guarded by mtx.
+    std::vector<face::CustomExpression> custom_expressions;
     LightSquintConfig    light_squint;
     VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;
