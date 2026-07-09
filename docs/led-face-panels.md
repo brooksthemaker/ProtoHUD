@@ -42,6 +42,35 @@ Panels are face-shaped, not grids. Each chain takes:
 - or `cols`/`rows`/`pitch`/`canvas_x`/`canvas_y`/`serpentine` — generated
   rectangular grid for prototypes.
 
+### Generating the map from a pick-and-place CSV
+
+`scripts/pnp_to_ledmap.py` builds the `map_file` straight from the board's
+pick-and-place (centroid) export — KiCad, Altium, and JLC/EasyEDA formats all
+work. Chain order comes from the LED designator numbers (LED1 = first on the
+data line), so number designators along the actual wiring in the schematic
+and the map is correct by construction.
+
+```sh
+# Panel A: 2 canvas px per LED pitch, preview SVG to verify orientation
+scripts/pnp_to_ledmap.py PickPlace_Top.csv -o config/panels/face_l.json \
+    --pitch-px 2 --preview face_l.svg
+
+# Panel B: same board assembled on the bottom layer = the mirrored twin.
+# Mirroring is auto-detected from the Layer column; place it on the right
+# half of the canvas with --origin.
+scripts/pnp_to_ledmap.py PickPlace_Bottom.csv -o config/panels/face_r.json \
+    --pitch-px 2 --origin 80 0 --preview face_r.svg
+```
+
+Scaling: `--pitch-px N` (N px per auto-detected LED pitch — the usual
+choice), `--px-per-mm F`, or `--fit W H`. Orientation: PnP Y-up is flipped
+to canvas Y-down by default (`--no-flip-y` to skip), `--mirror-x`/`--mirror-y`
+force mirroring. **Always check the `--preview` SVG**: dots walk blue→red in
+chain order with IN/OUT marked, so a wrong flip or mirror is obvious at a
+glance. The tool warns about designator gaps, duplicates, and LEDs that
+collide on the same pixel (raise the scale for distinct samples), and prints
+the canvas extent to size `protoface.canvas_w/h` against.
+
 Bump `protoface.canvas_w/h` if you want more sampling resolution — the face
 art scales automatically.
 
