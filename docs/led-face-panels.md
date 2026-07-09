@@ -65,7 +65,8 @@ scripts/pnp_to_ledmap.py PickPlace_Bottom.csv -o config/panels/face_r.json \
 Scaling: `--pitch-px N` (N px per auto-detected LED pitch — the usual
 choice), `--px-per-mm F`, or `--fit W H`. Orientation: PnP Y-up is flipped
 to canvas Y-down by default (`--no-flip-y` to skip), `--mirror-x`/`--mirror-y`
-force mirroring. **Always check the `--preview` SVG**: dots walk blue→red in
+force mirroring. If the designators were numbered against the wiring (data
+enters at the HIGHEST number and exits at LED1), add `--reverse`. **Always check the `--preview` SVG**: dots walk blue→red in
 chain order with IN/OUT marked, so a wrong flip or mirror is obvious at a
 glance. The tool warns about designator gaps, duplicates, and LEDs that
 collide on the same pixel (raise the scale for distinct samples), and prints

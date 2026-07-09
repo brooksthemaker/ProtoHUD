@@ -193,6 +193,9 @@ def main():
                     "(default: output filename stem)")
     ap.add_argument("--led-regex", default=r"LED(\d+)",
                     help="designator pattern; group 1 = chain index (default LED(\\d+))")
+    ap.add_argument("--reverse", action="store_true",
+                    help="designators are numbered AGAINST the wiring: data "
+                         "enters at the highest number and exits at LED1")
     scale = ap.add_mutually_exclusive_group()
     scale.add_argument("--px-per-mm", type=float, help="explicit scale")
     scale.add_argument("--pitch-px", type=float,
@@ -217,6 +220,8 @@ def main():
     leds, layers = load_leds(args.csv, args.led_regex)
     if not leds:
         sys.exit(f"error: no designators matching {args.led_regex!r} in {args.csv}")
+    if args.reverse:
+        leds.reverse()
     pts = [(x, y) for _, x, y in leds]
     pitch = detect_pitch(pts)
 
@@ -269,6 +274,7 @@ def main():
         "px_per_mm": round(ppm, 6),
         "bounds_mm": [round(span_x, 3), round(span_y, 3)],
         "mirrored_x": mirror_x,
+        "reversed": args.reverse,
         "canvas_extent": [w, h],
         "leds": mapped,
     }
