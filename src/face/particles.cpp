@@ -1938,22 +1938,24 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        // Glyph size / stroke are configurable; defaults are a touch bigger,
-        // thicker and brighter than the original hairline Z's.
-        const int base_s = std::max(1, jint(cfg_, "size", 2));       // half-size px (was 1)
-        const int thick  = std::max(1, jint(cfg_, "thickness", 2));  // stroke px  (was 1)
+        // Glyph size / stroke are configurable. Bigger box (so a 2 px Z still
+        // reads), 2 px sharp strokes, full-bright. Sharp (LINE_8, no AA) keeps
+        // the blocky pixel-font look — anti-aliasing blurred the small glyph
+        // into a blob.
+        const int base_s = std::max(2, jint(cfg_, "size", 3));       // half-size px
+        const int thick  = std::max(1, jint(cfg_, "thickness", 2));  // stroke px
         for (auto& p : particles_) {
             // Fade in quickly, out slowly; grow one size step mid-flight.
             const double env = std::clamp(std::min((1.0 - p.life) * 5.0,
                                                    p.life * 2.5), 0.0, 1.0);
-            const int a = (int)std::lround(env * 255.0);             // full-bright (was 230)
+            const int a = (int)std::lround(env * 255.0);             // full-bright
             if (a <= 0) continue;
             const int s = base_s + (p.life < 0.55 ? 1 : 0);         // grow one step as it rises
             const int x = (int)p.x, y = (int)p.y, w = 2 * s;
             const cv::Scalar col(p.r, p.g, p.b, a);
-            cv::line(c, {x, y},         {x + w, y},         col, thick, cv::LINE_AA);  // top bar
-            cv::line(c, {x + w, y},     {x, y + w},         col, thick, cv::LINE_AA);  // diagonal
-            cv::line(c, {x, y + w},     {x + w, y + w},     col, thick, cv::LINE_AA);  // bottom bar
+            cv::line(c, {x, y},         {x + w, y},         col, thick);  // top bar
+            cv::line(c, {x + w, y},     {x, y + w},         col, thick);  // diagonal
+            cv::line(c, {x, y + w},     {x + w, y + w},     col, thick);  // bottom bar
         }
         return c;
     }
