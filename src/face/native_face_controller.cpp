@@ -289,11 +289,13 @@ void NativeFaceController::render_thread() {
                 mi.pitch_deg   = motion_pitch_.load(std::memory_order_relaxed);
                 mi.roll_deg    = motion_roll_.load(std::memory_order_relaxed);
                 mi.accel_g     = motion_accel_.load(std::memory_order_relaxed);
+                const double humid = env_humidity_.load(std::memory_order_relaxed);
                 for (auto& pn : panels_) {
                     if (pn.state) pn.state->set_audio(vol, mouth);
                     if (pn.particles) {
                         pn.particles->set_audio(vol);
                         pn.particles->set_motion(mi);
+                        pn.particles->set_humidity(humid);
                     }
                 }
 
@@ -1397,6 +1399,12 @@ void NativeFaceController::set_motion(double heading_deg, double yaw_rate,
     motion_pitch_.store(pitch_deg, std::memory_order_relaxed);
     motion_roll_.store(roll_deg, std::memory_order_relaxed);
     motion_accel_.store(accel_g, std::memory_order_relaxed);
+}
+
+void NativeFaceController::set_env_humidity(double humidity01) {
+    // Slow sensor value (BME280 poll ~1 Hz); same lock-free handoff so the
+    // render thread reads it at the top of every tick and feeds the panels.
+    env_humidity_.store(humidity01, std::memory_order_relaxed);
 }
 
 void NativeFaceController::set_mouth_shape(const std::string& shape) {

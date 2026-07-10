@@ -185,6 +185,9 @@ public:
     // Effects read it through count()/direction_unit() when the cfg opts in.
     void set_motion(const MotionInput& m) { motion_ = m; }
     void set_audio(double level) { audio_ = level; }
+    // Relative humidity 0..1 (or <0 = no reading), pushed each frame. The water
+    // effect reads it when the layer opts in with "level_from":"humidity".
+    void set_humidity(double humidity01) { humidity_ = humidity01; }
     // Global default for direction coupling (see direction_unit): layers with
     // no explicit "direction_from" behave as "gravity" while this is on.
     void set_motion_reactive(bool on) { motion_reactive_ = on; }
@@ -291,6 +294,7 @@ protected:
     std::vector<Particle> particles_;
     MotionInput motion_{};
     double audio_ = 0.0;
+    double humidity_ = -1.0;          // rel humidity 0..1; <0 = no sensor reading
     bool motion_reactive_ = false;
     bool shape_rect_ = false;         // "shape" resolved once per cfg change
     cv::Mat scratch_;                 // blank() backing buffer, reused each frame
@@ -1791,12 +1795,26 @@ private:
     // Effective fill fraction — base level shifted by smoothed pitch (look
     // down → liquid rises) when pitch_fill is set.
     double level_eff() const {
-        return std::clamp(jnum(cfg_, "level", 0.40)
+        return std::clamp(base_level()
                           // Default ON (0.3): in a 3-D container, pitching
                           // forward brings the liquid toward you — reads as
                           // the level rising. pitch_fill: 0 restores flat.
                           + jnum(cfg_, "pitch_fill", 0.3) * (pitch_smooth_ / 45.0),
                           0.0, 1.0);
+    }
+    // Base (untilted) fill fraction. Normally the static "level", but with
+    // "level_from":"humidity" the tank fills with the room's relative humidity:
+    // the reading (0..1) is mapped onto [level_min, level_max] so a dry room
+    // isn't bone-empty nor a muggy one overflowing. Falls back to "level" when
+    // no sensor reading has arrived yet.
+    double base_level() const {
+        if (cfg_.value("level_from", std::string("none")) == "humidity" &&
+            humidity_ >= 0.0) {
+            const double lo = std::clamp(jnum(cfg_, "level_min", 0.10), 0.0, 1.0);
+            const double hi = std::clamp(jnum(cfg_, "level_max", 0.90), 0.0, 1.0);
+            return lo + (hi - lo) * std::clamp(humidity_, 0.0, 1.0);
+        }
+        return jnum(cfg_, "level", 0.40);
     }
     // Local surface row at local column lx, computed in canvas space (so the
     // tank is continuous across panels) then shifted into this panel's frame.
@@ -2501,6 +2519,7 @@ struct ParticleLayer {
     double  face_glow() const { return effect ? effect->face_glow() : 0.0; }
     void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
     void set_audio(double level)          { if (effect) effect->set_audio(level); }
+    void set_humidity(double h)           { if (effect) effect->set_humidity(h); }
     void set_motion_reactive(bool on)     { if (effect) effect->set_motion_reactive(on); }
     void set_canvas_geometry(int cw, int ch, int ox, int oy) {
         if (effect) effect->set_canvas_geometry(cw, ch, ox, oy);
@@ -2521,6 +2540,7 @@ struct ParticleSystem::Impl {
     std::vector<ParticleLayer> layers;
     MotionInput motion{};   // latest IMU state, re-applied to rebuilt layers
     double audio = 0.0;     // latest mic level, re-applied to rebuilt layers
+    double humidity = -1.0; // latest rel humidity 0..1 (<0 = none), re-applied
     int cw, ch, ox = 0, oy = 0;   // canvas geometry, re-applied to rebuilt layers
     bool motion_reactive = false; // global gravity default, re-applied on rebuilds
 
@@ -2545,6 +2565,7 @@ struct ParticleSystem::Impl {
             layers.emplace_back(lc, w, h);
             layers.back().set_motion(motion);
             layers.back().set_audio(audio);
+            layers.back().set_humidity(humidity);
             layers.back().set_motion_reactive(motion_reactive);
             layers.back().set_canvas_geometry(cw, ch, ox, oy);
         }
@@ -2599,6 +2620,11 @@ void ParticleSystem::set_motion(const MotionInput& m) {
 void ParticleSystem::set_audio(double level) {
     impl_->audio = level;
     for (auto& l : impl_->layers) l.set_audio(level);
+}
+
+void ParticleSystem::set_humidity(double humidity01) {
+    impl_->humidity = humidity01;
+    for (auto& l : impl_->layers) l.set_humidity(humidity01);
 }
 
 void ParticleSystem::set_motion_reactive(bool on) {

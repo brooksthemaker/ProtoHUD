@@ -51,6 +51,7 @@ public:
     void set_effect(const nlohmann::json& cfg);   // replace all layers at runtime
     void set_motion(const MotionInput& m);        // latest IMU state for reactive layers
     void set_audio(double level);                 // mic level [0,1] for audio-reactive layers
+    void set_humidity(double humidity01);         // rel humidity [0,1] for the water fill level (<0 = no reading)
     // Global motion coupling: when on, directional layers that don't set their
     // own "direction_from" default to the real-gravity mode — precipitation
     // leans with head roll and sweeps on quick turns. Toggled from the menu.

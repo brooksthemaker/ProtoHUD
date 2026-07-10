@@ -5178,12 +5178,19 @@ int main(int argc, char* argv[]) {
         bme_cfg.poll_s   = jval(jb, "poll_s",   bme_cfg.poll_s);
     }
     sensor::Bme280 bme280(bme_cfg);
-    bme280.set_callback([&state](const sensor::Bme280::Reading& r){
-        std::lock_guard<std::mutex> lk(state.mtx);
-        state.env.ok           = true;
-        state.env.temp_c       = r.temp_c;
-        state.env.humidity_pct = r.humidity_pct;
-        state.env.pressure_hpa = r.pressure_hpa;
+    bme280.set_callback([&state, &face_proxy](const sensor::Bme280::Reading& r){
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.env.ok           = true;
+            state.env.temp_c       = r.temp_c;
+            state.env.humidity_pct = r.humidity_pct;
+            state.env.pressure_hpa = r.pressure_hpa;
+        }
+        // Feed relative humidity (0..1) to the face so a water effect with
+        // "level_from":"humidity" fills to match the room. Lock-free atomic
+        // store; no-op unless the native Protoface controller is active.
+        face_proxy.set_env_humidity(
+            std::clamp(r.humidity_pct / 100.0f, 0.0f, 1.0f));
     });
     if (bme_cfg.enabled && !bme280.start())
         std::cerr << "[main] BME280 environment sensor unavailable\n";

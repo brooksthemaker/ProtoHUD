@@ -120,6 +120,11 @@ public:
                                    double /*pitch_deg*/, double /*roll_deg*/,
                                    double /*accel_g*/) {}
 
+    // Latest relative humidity (0..1) from the BME280, so a water effect can
+    // tie its fill level to how humid it is. -1 = no reading (sensor absent).
+    // Native Protoface forwards to each panel's ParticleSystem; no-op elsewhere.
+    virtual void        set_env_humidity(double /*humidity01*/) {}
+
     // Pick which viseme overlay (mouth_open / mouth_small / mouth_smile /
     // mouth_round) the FaceLoader blends at the mouth region. Driven by the
     // voice analyzer's spectral-centroid-to-viseme classifier when visemes
@@ -221,6 +226,7 @@ public:
     void set_motion(double hd, double yr, double pi, double ro, double ac) override {
         (*active_)->set_motion(hd, yr, pi, ro, ac);
     }
+    void set_env_humidity(double h) override { (*active_)->set_env_humidity(h); }
     void set_mouth_shape(const std::string& s) override { (*active_)->set_mouth_shape(s); }
     bool has_led_face_editor() const override { return (*active_)->has_led_face_editor(); }
     void set_active_layout_name(const std::string& n) override {

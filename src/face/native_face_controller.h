@@ -101,6 +101,7 @@ public:
     void        set_audio_drive(double volume, double mouth_open) override;
     void        set_motion(double heading_deg, double yaw_rate, double pitch_deg,
                            double roll_deg, double accel_g) override;
+    void        set_env_humidity(double humidity01) override;
     void        set_mouth_shape(const std::string& shape) override;
 
     // Expression-coupled effects: when enabled, the active particle effect is
@@ -366,6 +367,7 @@ private:
     std::atomic<double> motion_pitch_{0.0};
     std::atomic<double> motion_roll_{0.0};
     std::atomic<double> motion_accel_{1.0};   // ≈1 g at rest (MotionInput default)
+    std::atomic<double> env_humidity_{-1.0};  // rel humidity 0..1; <0 = no reading
 
     // Name of the currently-active HUB75 layout (or "" when unset). Used to
     // stamp face folders on import_face_image and surfaced via

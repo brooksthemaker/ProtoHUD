@@ -128,6 +128,12 @@ struct LayerCfg {
     float direction_deg = -1.f;
     // Liquid fill fraction for the "water" effect (0..1). Ignored by others.
     float level = 0.4f;
+    // Tie the water fill level to the BME280 humidity sensor: relative humidity
+    // (0..100%) maps onto [level_min, level_max] instead of the fixed level, so
+    // the tank fills as the room gets muggier. Water only.
+    bool  level_from_humidity = false;
+    float level_min = 0.10f;   // fill at 0% RH (bone-dry room)
+    float level_max = 0.90f;   // fill at 100% RH (saturated)
     // Liquid opacity for "water" (0 = fully transparent, 1 = solid). The face
     // and background read through the liquid as this drops.
     float alpha = 0.85f;
@@ -1649,6 +1655,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 layer["wave_gain"]  = L.wave_gain;
                 layer["pitch_fill"] = L.pitch_fill;
                 layer["face_glow"]  = L.face_glow;
+                if (L.level_from_humidity) {
+                    layer["level_from"] = "humidity";
+                    layer["level_min"]  = L.level_min;
+                    layer["level_max"]  = L.level_max;
+                }
                 if (L.bubbles > 0) {
                     layer["bubbles"]     = L.bubbles;
                     layer["bubble_mode"] = L.bubble_mode;
@@ -1689,6 +1700,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.direction_from = jl.value("direction_from", std::string("none"));
             L.intensity_from = jl.value("intensity_from", std::string("none"));
             L.level = jl.value("level", 0.4f);
+            L.level_from_humidity =
+                jl.value("level_from", std::string("none")) == "humidity";
+            L.level_min = jl.value("level_min", 0.10f);
+            L.level_max = jl.value("level_max", 0.90f);
             L.alpha = jl.value("alpha", 0.85f);
             L.viscosity = jl.value("viscosity", 0.15f);
             L.wave_gain = jl.value("wave_gain", 1.0f);
@@ -1820,12 +1835,50 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 return dir;
             })(),
             // Fill Level — only meaningful for the "water" liquid effect.
+            // Hidden when the level is driven by the humidity sensor (the
+            // Dry/Full range below takes over).
             ([&]{
                 MenuItem lvl = slider("Fill Level", 0.f, 100.f, 5.f, "%",
                     [L]{ return L->level * 100.f; },
                     [L](float v){ L->level = v / 100.f; });
-                lvl.visible_fn = [L]{ return L->effect == "water"; };
+                lvl.visible_fn = [L]{
+                    return L->effect == "water" && !L->level_from_humidity;
+                };
                 return lvl;
+            })(),
+            // Fill from Humidity — water only: tie the fill level to the
+            // BME280 humidity sensor instead of the fixed Fill Level.
+            ([&]{
+                MenuItem h = with_desc(toggle("Fill from Humidity",
+                    [L]{ return L->level_from_humidity; },
+                    [L](bool v){ L->level_from_humidity = v; }),
+                    "Tie the liquid level to the room's relative humidity "
+                    "(BME280). Dry room = Dry Level, muggy = Full Level. "
+                    "Needs the environment sensor enabled.");
+                h.visible_fn = [L]{ return L->effect == "water"; };
+                return h;
+            })(),
+            // Dry / Full Level — the humidity mapping range, shown only when
+            // Fill from Humidity is on.
+            ([&]{
+                MenuItem lo = with_desc(slider("Dry Level", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->level_min * 100.f; },
+                    [L](float v){ L->level_min = v / 100.f; }),
+                    "Fill fraction at 0% humidity (a bone-dry room).");
+                lo.visible_fn = [L]{
+                    return L->effect == "water" && L->level_from_humidity;
+                };
+                return lo;
+            })(),
+            ([&]{
+                MenuItem hi = with_desc(slider("Full Level", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->level_max * 100.f; },
+                    [L](float v){ L->level_max = v / 100.f; }),
+                    "Fill fraction at 100% humidity (fully saturated air).");
+                hi.visible_fn = [L]{
+                    return L->effect == "water" && L->level_from_humidity;
+                };
+                return hi;
             })(),
             // Opacity — water only: how solid the liquid reads. Lower = more
             // transparent, the face and background show through more.
