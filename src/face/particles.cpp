@@ -779,9 +779,13 @@ public:
         // Fixed-step growth with a FIXED-SEED rng: every panel instance of
         // the same canvas computes an identical field, so the sheet stays
         // continuous across panel seams.
+        // "speed" (default 1.0) is the user-facing knob: >1 forms/creeps
+        // faster, <1 slower. It scales the growth rate and the drifting
+        // snowflakes together so the whole effect speeds up coherently.
+        const double speed  = std::clamp(jnum(cfg_, "speed", 1.0), 0.1, 4.0);
         const double form_s = std::max(0.1, jnum(cfg_, "form_s", 5.0));
         const float  rate   = static_cast<float>(
-            kStep * (5.0 / form_s) * std::max(0.05, intensity_));
+            kStep * (5.0 / form_s) * speed * std::max(0.05, intensity_));
         acc_ += dt;
         int guard = 0;
         while (acc_ >= kStep && guard++ < 8) { acc_ -= kStep; step_field(rate); }
@@ -809,8 +813,8 @@ public:
             const double drift = jnum(cfg_, "flake_drift", 6.0);
             for (auto& fp : flakes_) {
                 fp.extra += dt;                             // rotation phase
-                fp.y += fp.vy * dt;                         // slow fall
-                fp.x += std::sin(fp.extra * 0.9 + fp.vx) * drift * dt;
+                fp.y += fp.vy * dt * speed;                 // slow fall (scaled)
+                fp.x += std::sin(fp.extra * 0.9 + fp.vx) * drift * dt * speed;
                 fp.life -= dt / fp.max_life;
             }
             flakes_.erase(std::remove_if(flakes_.begin(), flakes_.end(),
@@ -1024,13 +1028,17 @@ public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
         heartbeat_ = cfg_.value("heartbeat", false);
-        hb_t_ += dt;
+        // "speed" (default 1.0) is the user-facing knob: >1 the shimmer rises
+        // and wavers faster and the heartbeat quickens, <1 slower. Life still
+        // ticks in real time so the streak lengths stay natural.
+        const double speed = std::clamp(jnum(cfg_, "speed", 1.0), 0.1, 4.0);
+        hb_t_ += dt * speed;
         const double wander = jnum(cfg_, "wander", 8.0);
         double dx, dy; direction_unit(dx, dy, 270.0);   // rises by default
         for (auto& p : particles_) {
-            p.extra += dt;
-            p.x += (p.vy * dx + std::sin(p.extra * 3.1 + p.vx) * wander) * dt;
-            p.y += p.vy * dy * dt;
+            p.extra += dt * speed;
+            p.x += (p.vy * dx + std::sin(p.extra * 3.1 + p.vx) * wander) * dt * speed;
+            p.y += p.vy * dy * dt * speed;
             p.life -= dt / p.max_life;
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),

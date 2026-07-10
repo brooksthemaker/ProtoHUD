@@ -451,6 +451,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     double* pf_temp_hot_p     = ctx.pf_temp_hot_p;
     bool*   pf_frost_fractal_p  = ctx.pf_frost_fractal_p;
     bool*   pf_heat_heartbeat_p = ctx.pf_heat_heartbeat_p;
+    double* pf_frost_speed_p    = ctx.pf_frost_speed_p;
+    double* pf_heat_speed_p     = ctx.pf_heat_speed_p;
     int*    pf_temp_force_p     = ctx.pf_temp_force_p;
     std::function<void()> pf_ambient_resync = ctx.pf_ambient_resync;
     std::shared_ptr<std::function<void()>> pf_live_tick = ctx.pf_live_tick;
@@ -2365,42 +2367,32 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "the HUD's weather monitor; your chosen effect returns when it "
             "clears up. Expression moods still play on top."));
     if (pf_temp_effects_p && pf_ambient_resync) {
-        pf_effects.push_back(with_desc(toggle("Temp Effects",
+        // Temp Effects live under their own leaf, with a Frost subset and a
+        // Heat subset each holding its threshold, look toggle, speed and test.
+        std::vector<MenuItem> te;
+        te.push_back(with_desc(toggle("Enabled",
             [pf_temp_effects_p]{ return *pf_temp_effects_p; },
             [pf_temp_effects_p, pf_ambient_resync, cfg_root](bool v){
                 *pf_temp_effects_p = v; pf_ambient_resync();
                 if (cfg_root) (*cfg_root)["protoface"]["temp_effects"] = v;
             }),
-            "Ambient frost crystals when it's freezing outside and rising "
-            "heat shimmer when it's scorching, from the live temperature. "
-            "Weather Sync's precipitation takes priority when both are on; "
-            "the thresholds below are Â°""C."));
-        if (pf_temp_cold_p) {
-            MenuItem m = with_desc(slider("Cold Below", -20.f, 15.f, 1.f,
-                "Â°""C",
+            "Ambient frost when it's freezing outside and rising heat shimmer "
+            "when it's scorching, from the live temperature. Weather Sync's "
+            "precipitation takes priority when both are on."));
+
+        // ── Frost subset ────────────────────────────────────────────────────
+        std::vector<MenuItem> frost;
+        if (pf_temp_cold_p)
+            frost.push_back(with_desc(slider("Frost Below", -20.f, 15.f, 1.f,
+                "\xc2\xb0""C",
                 [pf_temp_cold_p]{ return static_cast<float>(*pf_temp_cold_p); },
                 [pf_temp_cold_p, pf_ambient_resync, cfg_root](float v){
                     *pf_temp_cold_p = v; pf_ambient_resync();
                     if (cfg_root) (*cfg_root)["protoface"]["temp_cold_c"] = v;
                 }),
-                "Frost appears at or below this outdoor temperature.");
-            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
-            pf_effects.push_back(std::move(m));
-        }
-        if (pf_temp_hot_p) {
-            MenuItem m = with_desc(slider("Hot Above", 25.f, 50.f, 1.f,
-                "Â°""C",
-                [pf_temp_hot_p]{ return static_cast<float>(*pf_temp_hot_p); },
-                [pf_temp_hot_p, pf_ambient_resync, cfg_root](float v){
-                    *pf_temp_hot_p = v; pf_ambient_resync();
-                    if (cfg_root) (*cfg_root)["protoface"]["temp_hot_c"] = v;
-                }),
-                "Heat shimmer appears at or above this outdoor temperature.");
-            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
-            pf_effects.push_back(std::move(m));
-        }
-        if (pf_frost_fractal_p) {
-            MenuItem m = with_desc(toggle("Fractal Frost",
+                "Frost appears at or below this outdoor temperature."));
+        if (pf_frost_fractal_p)
+            frost.push_back(with_desc(toggle("Fractal Frost",
                 [pf_frost_fractal_p]{ return *pf_frost_fractal_p; },
                 [pf_frost_fractal_p, pf_ambient_resync, cfg_root](bool v){
                     *pf_frost_fractal_p = v; pf_ambient_resync();
@@ -2408,12 +2400,39 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 }),
                 "Frost edges grow in branching, fractal fern patterns and "
                 "large snowflakes drift in as it forms. Off = the smooth "
-                "creeping sheet.");
-            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
-            pf_effects.push_back(std::move(m));
-        }
-        if (pf_heat_heartbeat_p) {
-            MenuItem m = with_desc(toggle("Heatwave Heartbeat",
+                "creeping sheet."));
+        if (pf_frost_speed_p)
+            frost.push_back(with_desc(slider("Frost Speed", 0.25f, 3.f, 0.25f, "x",
+                [pf_frost_speed_p]{ return static_cast<float>(*pf_frost_speed_p); },
+                [pf_frost_speed_p, pf_ambient_resync, cfg_root](float v){
+                    *pf_frost_speed_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["frost_speed"] = v;
+                }),
+                "How fast the frost creeps in and the snowflakes drift. 1x is "
+                "the default pace; higher forms quicker."));
+        if (pf_temp_force_p)
+            frost.push_back(with_desc(toggle("Test Frost",
+                [p = pf_temp_force_p]{ return *p == 1; },
+                [p = pf_temp_force_p, pf_ambient_resync](bool v){
+                    *p = v ? 1 : 0; pf_ambient_resync(); }),
+                "Force the frost on now, ignoring the temperature, to preview "
+                "it (uses the settings above). Not saved."));
+        te.push_back(with_desc(submenu("Frost", std::move(frost)),
+            "The freezing look: creeping ice, fractal ferns, snowflakes."));
+
+        // ── Heat subset ─────────────────────────────────────────────────────
+        std::vector<MenuItem> heat;
+        if (pf_temp_hot_p)
+            heat.push_back(with_desc(slider("Heat Above", 25.f, 50.f, 1.f,
+                "\xc2\xb0""C",
+                [pf_temp_hot_p]{ return static_cast<float>(*pf_temp_hot_p); },
+                [pf_temp_hot_p, pf_ambient_resync, cfg_root](float v){
+                    *pf_temp_hot_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["temp_hot_c"] = v;
+                }),
+                "Heat shimmer appears at or above this outdoor temperature."));
+        if (pf_heat_heartbeat_p)
+            heat.push_back(with_desc(toggle("Heatwave Heartbeat",
                 [pf_heat_heartbeat_p]{ return *pf_heat_heartbeat_p; },
                 [pf_heat_heartbeat_p, pf_ambient_resync, cfg_root](bool v){
                     *pf_heat_heartbeat_p = v; pf_ambient_resync();
@@ -2421,32 +2440,29 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 }),
                 "Adds a slow orange glow pulsing along the same edges as the "
                 "frost, throbbing like a lub-dub heartbeat. Off = shimmer "
-                "only.");
-            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
-            pf_effects.push_back(std::move(m));
-        }
-        // Preview: force frost / heatwave on regardless of the live temperature
-        // so you can eyeball the look (and the Fractal / Heartbeat sub-toggles)
-        // on the bench. Mutually exclusive; not saved — clears on restart.
-        if (pf_temp_force_p) {
-            MenuItem tf = with_desc(toggle("Test Frost",
-                [p = pf_temp_force_p]{ return *p == 1; },
-                [p = pf_temp_force_p, pf_ambient_resync](bool v){
-                    *p = v ? 1 : 0; pf_ambient_resync(); }),
-                "Force the frost effect on now, ignoring the temperature, to "
-                "preview it (uses the Fractal Frost setting). Not saved.");
-            tf.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
-            pf_effects.push_back(std::move(tf));
-
-            MenuItem th = with_desc(toggle("Test Heatwave",
+                "only."));
+        if (pf_heat_speed_p)
+            heat.push_back(with_desc(slider("Heat Speed", 0.25f, 3.f, 0.25f, "x",
+                [pf_heat_speed_p]{ return static_cast<float>(*pf_heat_speed_p); },
+                [pf_heat_speed_p, pf_ambient_resync, cfg_root](float v){
+                    *pf_heat_speed_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["heatwave_speed"] = v;
+                }),
+                "How fast the shimmer rises and the heartbeat throbs. 1x is "
+                "the default pace; higher runs hotter and quicker."));
+        if (pf_temp_force_p)
+            heat.push_back(with_desc(toggle("Test Heatwave",
                 [p = pf_temp_force_p]{ return *p == 2; },
                 [p = pf_temp_force_p, pf_ambient_resync](bool v){
                     *p = v ? 2 : 0; pf_ambient_resync(); }),
-                "Force the heatwave shimmer on now, ignoring the temperature, "
-                "to preview it (uses the Heatwave Heartbeat setting). Not saved.");
-            th.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
-            pf_effects.push_back(std::move(th));
-        }
+                "Force the heatwave on now, ignoring the temperature, to "
+                "preview it (uses the settings above). Not saved."));
+        te.push_back(with_desc(submenu("Heat", std::move(heat)),
+            "The scorching look: rising heat shimmer + optional heartbeat."));
+
+        pf_effects.push_back(with_desc(submenu("Temp Effects", std::move(te)),
+            "Frost when it's freezing and heat shimmer when it's scorching, "
+            "driven by the live outdoor temperature."));
     }
     {
         // Legacy Teensy/ProtoTracer single-effect ids (only meaningful on the

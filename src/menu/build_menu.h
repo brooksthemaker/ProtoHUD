@@ -427,6 +427,8 @@ struct MenuBuildContext {
     double* pf_temp_hot_p     = nullptr;
     bool*   pf_frost_fractal_p  = nullptr;   // frost fractal ferns + big snowflakes
     bool*   pf_heat_heartbeat_p = nullptr;   // heatwave orange heartbeat rim pulse
+    double* pf_frost_speed_p    = nullptr;   // frost formation/creep speed multiplier
+    double* pf_heat_speed_p     = nullptr;   // heatwave shimmer + heartbeat speed multiplier
     // Transient preview override (not persisted): 0 = off (follow temperature),
     // 1 = force frost, 2 = force heatwave. Lets the wearer eyeball the temp
     // effects on the bench without waiting for the threshold to be crossed.

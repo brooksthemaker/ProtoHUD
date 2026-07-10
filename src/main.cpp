@@ -2018,6 +2018,8 @@ int main(int argc, char* argv[]) {
     double pf_temp_hot_c       = 45.0;   // heatwave at/above this (deg C)
     bool   pf_frost_fractal    = true;   // frost grows in fractal ferns + big snowflakes
     bool   pf_heat_heartbeat   = true;   // heatwave adds an orange heartbeat rim pulse
+    double pf_frost_speed      = 1.0;    // frost formation/creep speed multiplier
+    double pf_heat_speed       = 1.0;    // heatwave shimmer + heartbeat speed multiplier
     int    pf_temp_force       = 0;      // preview override: 0 off, 1 frost, 2 heatwave (not saved)
     bool   weather_fx_resync   = true;
     // MAX7219 panel layout editor state (Face Display > MAX7219 Layout). Loaded
@@ -2071,6 +2073,8 @@ int main(int argc, char* argv[]) {
         pf_temp_hot_c          = jval(jpf, "temp_hot_c",        pf_temp_hot_c);
         pf_frost_fractal       = jval(jpf, "frost_fractal",     pf_frost_fractal);
         pf_heat_heartbeat      = jval(jpf, "heatwave_heartbeat", pf_heat_heartbeat);
+        pf_frost_speed         = jval(jpf, "frost_speed",       pf_frost_speed);
+        pf_heat_speed          = jval(jpf, "heatwave_speed",    pf_heat_speed);
         state.face.pride_angle = jval(jpf, "pride_angle", 90);
         if (jpf.contains("layout") && jpf["layout"].is_object()) {
             auto& jl = jpf["layout"];
@@ -4571,6 +4575,8 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_temp_hot_p     = &pf_temp_hot_c;
     menu_ctx.pf_frost_fractal_p  = &pf_frost_fractal;
     menu_ctx.pf_heat_heartbeat_p = &pf_heat_heartbeat;
+    menu_ctx.pf_frost_speed_p    = &pf_frost_speed;
+    menu_ctx.pf_heat_speed_p     = &pf_heat_speed;
     menu_ctx.pf_temp_force_p     = &pf_temp_force;
     menu_ctx.pf_ambient_resync = [&]{ weather_fx_resync = true; };
     menu_ctx.pf_live_tick = pf_live_tick;
@@ -5758,6 +5764,8 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["temp_hot_c"]          = pf_temp_hot_c;
         cfg["protoface"]["frost_fractal"]       = pf_frost_fractal;
         cfg["protoface"]["heatwave_heartbeat"]  = pf_heat_heartbeat;
+        cfg["protoface"]["frost_speed"]         = pf_frost_speed;
+        cfg["protoface"]["heatwave_speed"]      = pf_heat_speed;
         cfg["protoface"]["pride_angle"]         = state.face.pride_angle;
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
@@ -6252,10 +6260,12 @@ int main(int argc, char* argv[]) {
             // it shows even with no sensor/weather. Wins over everything else.
             if (pf_temp_force == 1)
                 spec = {{"effect", "frost"}, {"count", 44},
-                        {"fractal", pf_frost_fractal}, {"blend", "add"}};
+                        {"fractal", pf_frost_fractal}, {"speed", pf_frost_speed},
+                        {"blend", "add"}};
             else if (pf_temp_force == 2)
                 spec = {{"effect", "heatwave"}, {"count", 18},
-                        {"heartbeat", pf_heat_heartbeat}, {"blend", "add"}};
+                        {"heartbeat", pf_heat_heartbeat}, {"speed", pf_heat_speed},
+                        {"blend", "add"}};
             else if (pf_weather_effects || pf_temp_effects) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 if (state.weather.ok) {
@@ -6270,10 +6280,12 @@ int main(int argc, char* argv[]) {
                             t = (t - 32.0) * 5.0 / 9.0;
                         if (t <= pf_temp_cold_c)
                             spec = {{"effect", "frost"}, {"count", 44},
-                                    {"fractal", pf_frost_fractal}, {"blend", "add"}};
+                                    {"fractal", pf_frost_fractal},
+                                    {"speed", pf_frost_speed}, {"blend", "add"}};
                         else if (t >= pf_temp_hot_c)
                             spec = {{"effect", "heatwave"}, {"count", 18},
-                                    {"heartbeat", pf_heat_heartbeat}, {"blend", "add"}};
+                                    {"heartbeat", pf_heat_heartbeat},
+                                    {"speed", pf_heat_speed}, {"blend", "add"}};
                     }
                 }
             }
