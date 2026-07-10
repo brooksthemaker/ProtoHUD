@@ -2930,8 +2930,8 @@ int main(int argc, char* argv[]) {
         face::ReactionRules::Actions ra2;
         ra2.set_face     = [&face_proxy](const std::string& e){ face_proxy.set_face_by_name(e); };
         ra2.current_face = [&face_proxy]{ return face_proxy.current_expression(); };
-        ra2.play_gif     = [&face_proxy](int slot){
-            face_proxy.play_gif(static_cast<uint8_t>(std::max(0, slot)));
+        ra2.play_gif     = [&face_proxy](const std::string& file){
+            face_proxy.play_gif_file(file);
         };
         ra2.notify = [&state](const std::string& t, const std::string& b){
             Notification n; n.type = NotifType::App;

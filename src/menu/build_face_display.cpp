@@ -3805,6 +3805,92 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 auto save2 = [RR, cfgr]{
                     if (cfgr) (*cfgr)["protoface"]["reaction_rules"] = RR->to_json();
                 };
+                // GIF outcome picker: lists every file in gifs_dir by name and
+                // previews the highlighted one in the context panel. The
+                // outcome stores the filename (play_gif_file plays it directly),
+                // so it survives slot rebinds and folder changes.
+                using RGet = std::function<face::ReactionRule()>;
+                using RMod = std::function<void(std::function<void(face::ReactionRule&)>)>;
+                auto make_gif_picker = [gifs_dir](RGet rget, RMod rmod) -> MenuItem {
+                    struct GP {
+                        face::GifPlayer player{256, 128};
+                        std::string loaded, want_path, want_label;
+                        GLuint tex = 0;
+                    };
+                    auto gp = std::make_shared<GP>();
+                    MenuContextPanelDraw draw =
+                        [gp](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                            GP& g = *gp;
+                            const bool have = !g.want_path.empty();
+                            if (have && g.want_path != g.loaded) {
+                                g.player.load(g.want_path, true);
+                                g.loaded = g.want_path;
+                            } else if (!have && !g.loaded.empty()) {
+                                g.player.stop(); g.loaded.clear();
+                            }
+                            g.player.update(ImGui::GetIO().DeltaTime);
+                            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
+                            const float ph = pw * 0.5f;
+                            const float px = o.x + (sz.x - pw) * 0.5f;
+                            const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
+                            dl->AddRectFilled({px, py}, {px + pw, py + ph},
+                                              IM_COL32(10, 16, 22, 190));
+                            cv::Mat fr = g.player.get_frame();
+                            if (!fr.empty() && fr.isContinuous()) {
+                                if (g.tex == 0) {
+                                    glGenTextures(1, &g.tex);
+                                    glBindTexture(GL_TEXTURE_2D, g.tex);
+                                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                                }
+                                glBindTexture(GL_TEXTURE_2D, g.tex);
+                                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fr.cols, fr.rows, 0,
+                                             GL_RGBA, GL_UNSIGNED_BYTE, fr.data);
+                                glBindTexture(GL_TEXTURE_2D, 0);
+                                dl->AddImage(reinterpret_cast<ImTextureID>(
+                                                 static_cast<uintptr_t>(g.tex)),
+                                             {px, py}, {px + pw, py + ph});
+                            } else {
+                                const char* msg = have ? "Decode failed" : "(pick a GIF)";
+                                const ImVec2 ts = ImGui::CalcTextSize(msg);
+                                dl->AddText({px + pw * 0.5f - ts.x * 0.5f,
+                                             py + ph * 0.5f - ts.y * 0.5f},
+                                            IM_COL32(180, 190, 200, 200), msg);
+                            }
+                            const std::string nm = have ? g.want_label : std::string("(none)");
+                            const ImVec2 ns = ImGui::CalcTextSize(nm.c_str());
+                            dl->AddText({o.x + sz.x * 0.5f - ns.x * 0.5f, o.y + sz.y - ns.y},
+                                        IM_COL32(220, 230, 235, 230), nm.c_str());
+                        };
+                    std::vector<MenuItem> files;
+                    for (const auto& path : face::GifPlayer::scan_folder(gifs_dir)) {
+                        const std::string base = std::filesystem::path(path).filename().string();
+                        const std::string stem = std::filesystem::path(path).stem().string();
+                        MenuItem it = leaf_sel(stem,
+                            [rmod, base]{ rmod([&base](face::ReactionRule& r){
+                                r.outcome.gif_file = base; }); },
+                            [rget, base]{ return rget().outcome.gif_file == base; });
+                        it.on_highlight = [gp, path, stem]{
+                            gp->want_path = path; gp->want_label = stem;
+                        };
+                        files.push_back(std::move(it));
+                    }
+                    if (files.empty())
+                        files.push_back(with_desc(leaf("(no GIFs in folder)", []{}),
+                            "Add .gif files to the gifs folder (import under "
+                            "Gifs and Text > GIFs), then reopen this menu."));
+                    MenuItem m = submenu("GIF", std::move(files));
+                    m.label_fn = [rget]() -> std::string {
+                        const std::string f = rget().outcome.gif_file;
+                        return f.empty() ? "GIF: (none)"
+                            : "GIF: " + std::filesystem::path(f).stem().string();
+                    };
+                    m.context_panel_title = "GIF Preview";
+                    m.context_panel_draw  = draw;
+                    return m;
+                };
                 for (const auto& m : face::ReactionRules::metas()) {
                     const std::string id = m.id;
                     auto rget = [RR, id]{ return RR->rule(id); };
@@ -3850,15 +3936,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         expr_it.visible_fn = [rget]{ return rget().outcome.kind ==
                             face::ReactionOutcome::Kind::Expression; };
                         oi.push_back(std::move(expr_it));
-                        MenuItem gif_it = slider("GIF Slot", 1.f, 8.f, 1.f, "",
-                            [rget]{ return static_cast<float>(rget().outcome.gif_slot + 1); },
-                            [rmod](float v){ rmod([v](face::ReactionRule& r){
-                                r.outcome.gif_slot = static_cast<int>(v) - 1; }); });
+                        MenuItem gif_it = make_gif_picker(rget, rmod);
                         gif_it.visible_fn = [rget]{ return rget().outcome.kind ==
                             face::ReactionOutcome::Kind::Gif; };
-                        oi.push_back(with_desc(std::move(gif_it),
-                            "Which GIF slot to play (1-8). Bind slots under "
-                            "Gifs and Text > GIFs."));
+                        oi.push_back(std::move(gif_it));
                         re.push_back(with_desc(submenu("Triggers", std::move(oi)),
                             "What this reaction shows: an expression or a GIF."));
                     }

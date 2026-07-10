@@ -626,15 +626,9 @@ void NativeFaceController::set_face(uint8_t face_id) {
 }
 
 void NativeFaceController::play_gif(uint8_t gif_id) {
-    // Resolve the path and per-panel player sizes under the lock, but decode
-    // OUTSIDE it: a full GIF decode takes tens of ms and the render thread
-    // holds state_mtx_ for every tick, so decoding under the lock froze both
-    // the face and the calling thread.
     std::string path;
-    std::vector<std::pair<int, int>> sizes;   // (w,h) per panel; (0,0) = no player
     {
         std::lock_guard<std::mutex> lk(state_mtx_);
-
         // Prefer the slot manifest binding; fall back to the sorted scan when the
         // slot is unbound or its bound file has been removed from gifs_dir.
         if (gif_id < gif_slots_.size() && !gif_slots_[gif_id].empty()) {
@@ -646,7 +640,29 @@ void NativeFaceController::play_gif(uint8_t gif_id) {
             if (gif_id >= gif_files_.size()) return;
             path = gif_files_[gif_id];
         }
+    }
+    start_gif(path);
+}
 
+void NativeFaceController::play_gif_file(const std::string& filename) {
+    if (filename.empty()) return;
+    // A named file straight out of gifs_dir — bypasses the 8-slot manifest, so
+    // reactions can point at any GIF in the folder. gifs_dir is fixed after
+    // construction, so no lock is needed to read it.
+    const std::string path = cfg_.gifs_dir + "/" + filename;
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return;
+    start_gif(path);
+}
+
+void NativeFaceController::start_gif(const std::string& path) {
+    // Resolve per-panel player sizes under the lock, but decode OUTSIDE it: a
+    // full GIF decode takes tens of ms and the render thread holds state_mtx_
+    // for every tick, so decoding under the lock froze both the face and the
+    // calling thread.
+    std::vector<std::pair<int, int>> sizes;   // (w,h) per panel; (0,0) = no player
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
         sizes.reserve(panels_.size());
         for (const auto& pn : panels_)
             sizes.emplace_back(pn.gif ? pn.gif->width()  : 0,

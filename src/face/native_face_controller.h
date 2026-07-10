@@ -61,6 +61,9 @@ public:
     nlohmann::json get_effect_json() const;
     void set_face(uint8_t face_id) override;
     void play_gif(uint8_t gif_id) override;
+    // Play a specific GIF by filename straight from gifs_dir (bypasses the
+    // 8-slot manifest), so reactions can point at any file in the folder.
+    void play_gif_file(const std::string& filename) override;
     void set_brightness(uint8_t value) override;
     void set_palette(uint8_t palette_id) override;
     void set_menu_item(uint8_t menu_index, uint8_t value) override;
@@ -234,6 +237,7 @@ private:
     };
 
     void build_panels();
+    void start_gif(const std::string& path);   // decode + swap players
     void render_thread();
     // Resolve and apply the full look for `expr`: default look → the
     // expression's own style → the override slot. Covers material (per-panel

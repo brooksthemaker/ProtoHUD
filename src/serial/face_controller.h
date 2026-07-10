@@ -27,6 +27,8 @@ public:
     // Select a face/expression by 0-based index in the backend's face set.
     virtual void set_face(uint8_t face_id) = 0;
     virtual void play_gif(uint8_t gif_id) = 0;
+    // Play a specific GIF by filename (native Protoface only); no-op elsewhere.
+    virtual void play_gif_file(const std::string& /*filename*/) {}
     virtual void set_brightness(uint8_t value) = 0;
     virtual void set_palette(uint8_t palette_id) = 0;
     virtual void set_menu_item(uint8_t menu_index, uint8_t value) = 0;
@@ -179,6 +181,7 @@ public:
     }
     void set_face(uint8_t face_id)             override { (*active_)->set_face(face_id); }
     void play_gif(uint8_t gif_id)              override { (*active_)->play_gif(gif_id); }
+    void play_gif_file(const std::string& f)   override { (*active_)->play_gif_file(f); }
     void set_brightness(uint8_t value)         override { (*active_)->set_brightness(value); }
     void set_palette(uint8_t palette_id)       override { (*active_)->set_palette(palette_id); }
     void set_menu_item(uint8_t idx, uint8_t v) override { (*active_)->set_menu_item(idx, v); }

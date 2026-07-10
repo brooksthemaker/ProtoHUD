@@ -35,7 +35,7 @@ struct ReactionOutcome {
     enum class Kind : uint8_t { Expression = 0, Gif = 1 };
     Kind        kind = Kind::Expression;
     std::string expression = "surprised";   // Kind::Expression
-    int         gif_slot   = 0;              // Kind::Gif (0-based slot)
+    std::string gif_file;                    // Kind::Gif — a filename in gifs_dir
 
     nlohmann::json to_json() const;
     static ReactionOutcome from_json(const nlohmann::json& j);
@@ -63,7 +63,7 @@ public:
     struct Actions {
         std::function<void(const std::string&)> set_face;      // persistent switch
         std::function<std::string()>            current_face;
-        std::function<void(int)>                play_gif;      // 0-based slot
+        std::function<void(const std::string&)> play_gif;      // by filename
         std::function<void(const std::string&, const std::string&)> notify;
     };
 

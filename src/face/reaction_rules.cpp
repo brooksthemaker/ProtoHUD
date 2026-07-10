@@ -10,7 +10,7 @@ namespace face {
 nlohmann::json ReactionOutcome::to_json() const {
     nlohmann::json j;
     j["kind"] = (kind == Kind::Gif) ? "gif" : "expression";
-    if (kind == Kind::Gif) j["gif_slot"] = gif_slot;
+    if (kind == Kind::Gif) j["gif_file"] = gif_file;
     else                   j["expression"] = expression;
     return j;
 }
@@ -19,7 +19,7 @@ ReactionOutcome ReactionOutcome::from_json(const nlohmann::json& j) {
     if (!j.is_object()) return o;
     if (j.value("kind", "expression") == "gif") {
         o.kind = Kind::Gif;
-        o.gif_slot = j.value("gif_slot", 0);
+        o.gif_file = j.value("gif_file", "");
     } else {
         o.kind = Kind::Expression;
         o.expression = j.value("expression", o.expression);
@@ -113,7 +113,8 @@ void ReactionRules::fire_locked(const std::string& id, const ReactionRule& r) {
     if (r.outcome.kind == ReactionOutcome::Kind::Gif) {
         // GIFs take over the face and auto-revert on their own timer — no
         // hold bookkeeping here.
-        if (act_.play_gif) act_.play_gif(r.outcome.gif_slot);
+        if (act_.play_gif && !r.outcome.gif_file.empty())
+            act_.play_gif(r.outcome.gif_file);
         if (act_.notify) act_.notify("Reaction", id);
         return;
     }
