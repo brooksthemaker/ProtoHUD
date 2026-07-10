@@ -973,6 +973,14 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         toggle("Compass Tape",
             [&state]{ return state.compass_tape; },
             [&state](bool v){ state.compass_tape = v; }),
+        with_desc(slider("Response", 0.0f, 1.0f, 0.05f, "",
+            [&state]{ return state.compass_smooth; },
+            [&state](float v){ state.compass_smooth = v; }),
+            "Heading smoothing vs responsiveness. 0 = raw (most real-time, "
+            "tracks the IMU frame-for-frame); higher calms residual jitter "
+            "when you hold still. Speed-adaptive either way - a real turn "
+            "always tracks near-raw. The BNO086's fusion is clean, so low "
+            "values stay steady."),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },

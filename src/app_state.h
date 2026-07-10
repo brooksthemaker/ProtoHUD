@@ -804,6 +804,11 @@ struct AppState {
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
     bool  compass_tape       = true;   // the top-of-screen compass tape
+    // Heading smoothing: 0 = raw (most real-time), 1 = calm/heavy. Same
+    // speed-adaptive filter as the attitude indicator — low cutoff when
+    // still, opening near-raw during a turn. The BNO086's on-chip fusion is
+    // clean, so a low value tracks in real time without jitter.
+    float compass_smooth     = 0.25f;
 
     // Fighter-style attitude indicator overlay (HUD > Attitude Indicator).
     // Reads the calibrated head-tracking pose (imu_pose), so the PIT/YAW/ROL
@@ -817,8 +822,10 @@ struct AppState {
         bool  per_eye = true;    // one instrument per SBS eye half (3D glasses);
                                  // off = a single instrument centered on the window
         float text_scale = 1.0f; // readout / label font multiplier
-        float smooth  = 0.5f;    // 0 = raw sensor, 1 = heavy speed-adaptive
-                                 // smoothing (One-Euro-style; jumps snap through)
+        float smooth  = 0.3f;    // 0 = raw sensor, 1 = heavy speed-adaptive
+                                 // smoothing (One-Euro-style; jumps snap through).
+                                 // Low by default for a real-time feel on the
+                                 // clean BNO086 fusion.
     };
     AttitudeIndicatorCfg attitude;
     // Pose shown by the attitude indicator: resolved each frame from the

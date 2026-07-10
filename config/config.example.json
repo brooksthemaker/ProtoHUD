@@ -168,6 +168,8 @@
     "compass_bg": true,
     "compass_bg_opacity": 0.75,
     "compass_bg_side_fade_px": 80,
+    "compass_smooth": 0.25,
+    "_compass_smooth_note": "Compass heading smoothing (HUD > Compass > Response). 0 = raw / most real-time (tracks the IMU frame-for-frame), 1 = calm. Speed-adaptive One-Euro filter: low cutoff when still, opens near-raw during a turn. The BNO086's on-chip fusion is clean, so low values stay steady.",
     "panel_width_px": 320,
     "lora_message_history": 50,
     "show_secondary_cams": true,

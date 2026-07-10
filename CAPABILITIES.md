@@ -118,11 +118,13 @@ Live 128×64 HUB75 panel canvas from Protoface shared memory, displayed as a flo
 - Height (px)
 - Bottom margin (px)
 - LoRa node bearing markers (colored per-node)
-- **Response** — the heading is smoothed with a speed-adaptive (One-Euro-style)
-  filter: calm when your head is still (jitter rejection), opening near-raw
-  during a turn so the needle tracks instead of gliding behind. Tare / source
-  switches snap through. The attitude indicator shares the same filter (its
-  **Smoothing** slider sets how calm it is at rest, 0 = raw).
+- **Response** (slider, 0–1) — heading smoothing vs. responsiveness. **0 = raw**
+  (most real-time, tracks the IMU frame-for-frame); higher calms residual
+  jitter at rest. Speed-adaptive (One-Euro-style) either way: low cutoff when
+  still, opening near-raw during a turn so the needle tracks instead of gliding
+  behind. Tare / source switches snap through. The attitude indicator has the
+  same filter via its **Smoothing** slider (also 0 = raw). Both default low for
+  a real-time feel on the BNO086's clean fusion.
 
 ### HUD Styling
 - **Text Scale**: 0.7×–2.0×, step 0.1

@@ -2328,6 +2328,7 @@ int main(int argc, char* argv[]) {
     state.max_messages        = jval(jhud, "lora_message_history", 50);
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
+    state.compass_smooth      = std::clamp(jhud.value("compass_smooth", 0.25f), 0.f, 1.f);
     state.legacy_hud          = jhud.value("legacy_hud", true);
     if (jhud.contains("attitude_indicator") && jhud["attitude_indicator"].is_object()) {
         // .value() throws on a key present with the wrong type (e.g. a quoted
@@ -5560,6 +5561,7 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
+        cfg["hud"]["compass_smooth"]      = state.compass_smooth;
         cfg["hud"]["legacy_hud"]          = state.legacy_hud;
         // A hand-edited config could hold attitude_indicator as a non-object;
         // operator[] on it would then throw out of the save path. Reset first.
@@ -6363,10 +6365,12 @@ int main(int argc, char* argv[]) {
                 static AngleSmooth s_att_r, s_att_p, s_att_y;
                 const float sm = std::clamp(state.attitude.smooth, 0.f, 1.f);
                 if (sm > 0.001f) {
-                    // slider 0→~raw (8 Hz); 1→0.6 Hz floor (calm when still).
-                    // The floor only rules at rest — the speed term above
-                    // opens the cutoff as soon as the head actually moves.
-                    const double fc_min = 0.6 + (1.0 - sm) * 7.4;
+                    // slider 0→raw (bypassed below); →0 approaches ~14 Hz
+                    // (near-raw), 1→1.0 Hz floor (calm when still). The floor
+                    // only rules at rest — the speed term above opens the
+                    // cutoff as soon as the head actually moves, so even a
+                    // smooth setting tracks a real turn in near-real time.
+                    const double fc_min = 1.0 + (1.0 - sm) * 13.0;
                     ap.roll  = s_att_r.step(ap.roll,  dt, fc_min, true);
                     ap.pitch = s_att_p.step(ap.pitch, dt, fc_min, false);
                     ap.yaw   = s_att_y.step(ap.yaw,   dt, fc_min, true);
@@ -7357,7 +7361,12 @@ int main(int argc, char* argv[]) {
                 return v;
             };
             const double diff = circ(raw - s_smooth);
-            if (!s_init || dt > 1.f || std::fabs(diff) > 90.0) {
+            // Response control (HUD > Compass > Response): 0 = raw (most
+            // real-time), 1 = calm. Maps to the calm-cutoff floor; the speed
+            // term opens it near-raw during a turn regardless.
+            const float  csm = std::clamp(state.compass_smooth, 0.f, 1.f);
+            if (csm <= 0.001f || !s_init || dt > 1.f || std::fabs(diff) > 90.0) {
+                // Raw / re-init / big jump (tare, source switch): snap through.
                 s_smooth = raw;
                 s_rate   = 0.0;
                 s_init   = true;
@@ -7365,7 +7374,8 @@ int main(int argc, char* argv[]) {
                 const double dts = std::clamp(static_cast<double>(dt), 1e-3, 0.1);
                 s_rate += (1.0 - std::exp(-2.0 * M_PI * 2.5 * dts)) *
                           (diff / dts - s_rate);
-                const double fc = 0.8 + 0.35 * std::fabs(s_rate);   // Hz
+                const double fc_min = 1.0 + (1.0 - csm) * 13.0;   // 1.0 (calm) .. 14 Hz
+                const double fc = fc_min + 0.35 * std::fabs(s_rate);
                 s_smooth += (1.0 - std::exp(-2.0 * M_PI * fc * dts)) * diff;
                 while (s_smooth < 0.0)    s_smooth += 360.0;
                 while (s_smooth >= 360.0) s_smooth -= 360.0;
