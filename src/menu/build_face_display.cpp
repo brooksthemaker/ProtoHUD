@@ -2218,14 +2218,20 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     }
     *premade_combo = std::string(kPremadeEffects[0].name) + "\n" + kPremadeEffects[0].combo;  // seed panel
     MenuItem premade_item = submenu("Premade Effects", std::move(premade_items));
-    premade_item.context_panel_title = "Recipe";
+    premade_item.context_panel_title = "Effect Preview";
+    // Same live face-render window as Single / Custom on top, with the
+    // highlighted preset's recipe underneath. Select applies the preset, so
+    // the window shows it live (with Live Preview on).
     premade_item.context_panel_draw =
-        [premade_combo](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-            (void)sz;
+        [premade_combo, draw_effect_preview](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            // Top ~58%: the live face render (shared with Single / Custom).
+            const float top_h = sz.y * 0.58f;
+            draw_effect_preview(dl, o, ImVec2(sz.x, top_h));
+            // Bottom: the highlighted preset's recipe.
             ImFont* font = ImGui::GetFont();
             const float fs = ImGui::GetFontSize();
             const std::string& s = *premade_combo;
-            float y = o.y + 6.f;
+            float y = o.y + top_h + 6.f;
             size_t start = 0;
             while (start <= s.size()) {
                 const size_t nl = s.find('\n', start);
@@ -2239,8 +2245,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             }
         };
     premade_item = with_desc(std::move(premade_item),
-        "Curated multi-layer presets. The side panel shows what each is made of. "
-        "Select applies; Ctrl+Select saves a copy to Custom.");
+        "Curated multi-layer presets. The side panel previews the face and "
+        "shows the recipe. Select applies; Ctrl+Select saves a copy to Custom.");
 
     // 3) CUSTOM is the layered builder (pf_layered_item, renamed above).
     // 4) RANDOM — generate a fresh mix; optionally save it to Custom.
