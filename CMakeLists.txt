@@ -407,6 +407,7 @@ add_library(protoface_native STATIC EXCLUDE_FROM_ALL
     src/face/expression_style.cpp
     src/face/scroll_text.cpp
     src/face/reaction_engine.cpp
+    src/face/reaction_rules.cpp
     src/face/expression_director.cpp
     src/face/gif_player.cpp
     src/face/eye_animations.cpp

@@ -1179,7 +1179,16 @@ void NativeFaceController::apply_expression_style_locked(const std::string& expr
     for (auto& pn : panels_) {
         if (!pn.particles) continue;
         if (!st->effect_spec.is_null()) {
-            pn.particles->set_effect(st->effect_spec);
+            const bool is_none = st->effect_spec.is_string() &&
+                                 st->effect_spec.get<std::string>() == "none";
+            if (st->effect_overlay && !is_none) {
+                // Layer the expression's effect ON TOP of the base/ambient
+                // effect instead of replacing it.
+                pn.particles->set_effect(
+                    merge_effect_specs(base_particles_locked(pn), st->effect_spec));
+            } else {
+                pn.particles->set_effect(st->effect_spec);
+            }
         } else if (mapped) {
             nlohmann::json spec; spec["preset"] = it->second;
             pn.particles->set_effect(spec);

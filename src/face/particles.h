@@ -33,6 +33,14 @@ struct ParticleFrame {
     double  face_glow = 0.0;
 };
 
+// Combine two particle specs into one layered spec — `base`'s layers first,
+// then `over`'s on top. Either arg may be any form set_effect understands
+// (string, {"preset":..}, {"effect":..}, {"layers":[..]}); presets are
+// resolved. Used by the per-expression "overlay" effect mode. Returns "none"
+// when both resolve to nothing.
+nlohmann::json merge_effect_specs(const nlohmann::json& base,
+                                  const nlohmann::json& over);
+
 class ParticleSystem {
 public:
     // cfg accepts any form _resolve_cfg understands: a string effect name,

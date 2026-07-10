@@ -21,6 +21,10 @@ struct ExpressionStyle {
     nlohmann::json effect_spec;              // null = inherit; else a particle
                                              // spec ({"preset":..}, {"layers":[..]}
                                              // or "none")
+    bool           effect_overlay = false;   // true = layer effect_spec ON TOP of
+                                             // the base/ambient effect instead of
+                                             // replacing it (ignored when
+                                             // effect_spec is null or "none")
     bool           has_glitch = false;       // false = inherit default glitch
     GlitchConfig   glitch;                   // used when has_glitch
 

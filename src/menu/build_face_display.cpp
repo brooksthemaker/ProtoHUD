@@ -83,6 +83,7 @@
 #include "face/expression_director.h"
 #include "face/native_face_controller.h"
 #include "face/reaction_engine.h"
+#include "face/reaction_rules.h"
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
@@ -864,10 +865,25 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "Your saved layered presets (Default Style > Effects > "
                 "Custom > Save). Saved after boot? Reopen the menu to list "
                 "new ones."));
+        // Replace vs overlay: does this expression's effect stand alone or
+        // layer on top of the default/ambient effect? Only meaningful once an
+        // effect is chosen (not inherit / none).
+        items.push_back(with_desc(submenu("Effect Mode", {
+                leaf_sel("Replace",
+                    [get, set]{ auto st = get(); st.effect_overlay = false; set(st); },
+                    [get]{ return !get().effect_overlay; }),
+                leaf_sel("Overlay",
+                    [get, set]{ auto st = get(); st.effect_overlay = true; set(st); },
+                    [get]{ return get().effect_overlay; }),
+            }),
+            "Replace: this effect is the only one shown. Overlay: it layers on "
+            "top of the Default Style / ambient effect. (Applies once an "
+            "Effect other than Default/None is picked.)"));
         return with_desc(submenu("Effect", std::move(items)),
             "This expression's own particle effect — single primitive, "
             "premade combo, or one of your saved custom presets. Default "
-            "(inherit) follows the Default Style / ambient weather.");
+            "(inherit) follows the Default Style / ambient weather; Effect "
+            "Mode chooses replace vs overlay.");
     };
 
     auto make_glitch_item = [](StyleGet get, StyleSet set) -> MenuItem {
@@ -3711,69 +3727,161 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "tinted, above every layer). Config: cfg[\"protoface\"]"
                 "[\"scroll_text\"].");
         })(),
-        // Environment / movement reactions (sleepy, wake, ...). The engine
-        // lives in main; this page edits its config and fires test runs.
+        // Reactions: the sleep state machine (ReactionEngine) as "Falling
+        // Asleep", plus the named environmental reactions (ReactionRules).
         ([&]() -> MenuItem {
-            face::ReactionEngine* R = ctx.reactions;
+            face::ReactionEngine* R  = ctx.reactions;
+            face::ReactionRules*  RR = ctx.reaction_rules;
             if (!R) { MenuItem e; e.visible_fn = []{ return false; }; return e; }
             nlohmann::json* cfgr = cfg_root;
             auto save = [R, cfgr]{
                 if (cfgr) (*cfgr)["reactions"] = R->config().to_json();
             };
             std::vector<MenuItem> ri;
-            {
-                MenuItem st = leaf("Status", []{});
-                st.label_fn = [R]{
-                    char b[64];
-                    snprintf(b, sizeof b, "State: %s  (energy %.0f)",
-                             R->activity_name(), R->energy_dps());
-                    return std::string(b);
-                };
-                ri.push_back(with_desc(std::move(st),
-                    "Live activity state from the IMU: awake / drowsy / "
-                    "asleep, with the smoothed motion energy the timers "
-                    "watch (deg/s-equivalent)."));
-            }
+
             ri.push_back(with_desc(toggle("Reactions",
                 [R]{ return R->config().enabled; },
                 [R, save](bool v){ auto c = R->config(); c.enabled = v;
                                    R->set_config(c); save(); }),
                 "Master enable for environment/movement reactions."));
-            ri.push_back(with_desc(toggle("Sleepy / Wake",
-                [R]{ return R->config().sleepy_enabled; },
-                [R, save](bool v){ auto c = R->config(); c.sleepy_enabled = v;
-                                   R->set_config(c); save(); }),
-                "Hold still and the face gets heavy-lidded (slow blinks + "
-                "the 'sleepy' face if the folder has one), then falls asleep "
-                "- eyes closed ('asleep' face) with floating Z's. Any sharp "
-                "head motion snaps it awake with a surprised flash and "
-                "restores everything."));
-            ri.push_back(with_desc(slider("Drowsy After", 30.f, 600.f, 15.f, "s",
-                [R]{ return static_cast<float>(R->config().drowsy_after_s); },
-                [R, save](float v){ auto c = R->config(); c.drowsy_after_s = v;
-                                    R->set_config(c); save(); }),
-                "Seconds of stillness before the heavy-lidded stage."));
-            ri.push_back(with_desc(slider("Sleep After", 60.f, 1800.f, 30.f, "s",
-                [R]{ return static_cast<float>(R->config().sleep_after_s); },
-                [R, save](float v){ auto c = R->config(); c.sleep_after_s = v;
-                                    R->set_config(c); save(); }),
-                "Seconds of stillness before falling asleep (measured from "
-                "the start of stillness, not from drowsy)."));
-            ri.push_back(with_desc(slider("Wake Threshold", 15.f, 120.f, 5.f, "\xc2\xb0/s",
-                [R]{ return static_cast<float>(R->config().wake_dps); },
-                [R, save](float v){ auto c = R->config(); c.wake_dps = v;
-                                    R->set_config(c); save(); }),
-                "How sharp a head motion wakes the face. Lower = lighter "
-                "sleeper."));
-            ri.push_back(with_desc(leaf("Test: Fall Asleep", [R]{ R->force_sleepy(); }),
-                "Preview the sleep look right now (runs drowsy then asleep). "
-                "Move your head - or use Test: Wake - to end it."));
-            ri.push_back(leaf("Test: Wake", [R]{ R->force_wake(); }));
+
+            // ── Falling Asleep (the stillness state machine) ─────────────────
+            {
+                std::vector<MenuItem> fa;
+                {
+                    MenuItem st = leaf("Status", []{});
+                    st.label_fn = [R]{
+                        char b[64];
+                        snprintf(b, sizeof b, "State: %s  (energy %.0f)",
+                                 R->activity_name(), R->energy_dps());
+                        return std::string(b);
+                    };
+                    fa.push_back(with_desc(std::move(st),
+                        "Live activity: awake / drowsy / asleep, with the "
+                        "smoothed motion energy the timers watch."));
+                }
+                fa.push_back(with_desc(toggle("Enabled",
+                    [R]{ return R->config().sleepy_enabled; },
+                    [R, save](bool v){ auto c = R->config(); c.sleepy_enabled = v;
+                                       R->set_config(c); save(); }),
+                    "Hold still and the face gets heavy-lidded (slow blinks), "
+                    "then falls asleep with closed eyes + floating Z's. Sharp "
+                    "head motion snaps it awake."));
+                fa.push_back(with_desc(slider("Sensitivity", 0.f, 1.f, 0.05f, "",
+                    [R]{ return static_cast<float>(R->config().sensitivity); },
+                    [R, save](float v){ auto c = R->config(); c.sensitivity = v;
+                                        R->set_config(c); save(); }),
+                    "How readily it nods off: 0.5 uses the times below as-is, "
+                    "higher falls asleep sooner, lower stays awake longer."));
+                fa.push_back(with_desc(slider("Drowsy After", 30.f, 600.f, 15.f, "s",
+                    [R]{ return static_cast<float>(R->config().drowsy_after_s); },
+                    [R, save](float v){ auto c = R->config(); c.drowsy_after_s = v;
+                                        R->set_config(c); save(); }),
+                    "Baseline stillness before the heavy-lidded stage "
+                    "(scaled by Sensitivity)."));
+                fa.push_back(with_desc(slider("Sleep After", 60.f, 1800.f, 30.f, "s",
+                    [R]{ return static_cast<float>(R->config().sleep_after_s); },
+                    [R, save](float v){ auto c = R->config(); c.sleep_after_s = v;
+                                        R->set_config(c); save(); }),
+                    "Baseline stillness before falling asleep (scaled by "
+                    "Sensitivity; measured from the start of stillness)."));
+                fa.push_back(with_desc(slider("Wake Threshold", 15.f, 120.f, 5.f, "\xc2\xb0/s",
+                    [R]{ return static_cast<float>(R->config().wake_dps); },
+                    [R, save](float v){ auto c = R->config(); c.wake_dps = v;
+                                        R->set_config(c); save(); }),
+                    "How sharp a head motion wakes the face. Lower = lighter "
+                    "sleeper."));
+                fa.push_back(with_desc(leaf("Test: Fall Asleep", [R]{ R->force_sleepy(); }),
+                    "Preview the sleep look now (drowsy then asleep). Move "
+                    "your head or use Test: Wake to end it."));
+                fa.push_back(leaf("Test: Wake", [R]{ R->force_wake(); }));
+                ri.push_back(with_desc(submenu("Falling Asleep", std::move(fa)),
+                    "Stillness makes the face drowsy then asleep; sharp motion "
+                    "wakes it."));
+            }
+
+            // ── Named environmental reactions ────────────────────────────────
+            if (RR) {
+                auto save2 = [RR, cfgr]{
+                    if (cfgr) (*cfgr)["protoface"]["reaction_rules"] = RR->to_json();
+                };
+                for (const auto& m : face::ReactionRules::metas()) {
+                    const std::string id = m.id;
+                    auto rget = [RR, id]{ return RR->rule(id); };
+                    auto rmod = [RR, id, save2](std::function<void(face::ReactionRule&)> fn){
+                        auto r = RR->rule(id); fn(r); RR->set_rule(id, r); save2();
+                    };
+                    std::vector<MenuItem> re;
+                    re.push_back(with_desc(toggle("Enabled",
+                        [rget]{ return rget().enabled; },
+                        [rmod](bool v){ rmod([v](face::ReactionRule& r){ r.enabled = v; }); }),
+                        m.desc));
+                    re.push_back(leaf("Test", [RR, id]{ RR->test(id); }));
+                    re.push_back(with_desc(slider("Threshold", m.thr_min, m.thr_max,
+                        m.thr_step, m.thr_unit,
+                        [rget]{ return rget().threshold; },
+                        [rmod](float v){ rmod([v](face::ReactionRule& r){ r.threshold = v; }); }),
+                        "Where the reaction trips (see the reaction's "
+                        "description)."));
+                    // Outcome: expression or GIF, and which.
+                    {
+                        std::vector<MenuItem> oi;
+                        oi.push_back(submenu("Type", {
+                            leaf_sel("Expression",
+                                [rmod]{ rmod([](face::ReactionRule& r){
+                                    r.outcome.kind = face::ReactionOutcome::Kind::Expression; }); },
+                                [rget]{ return rget().outcome.kind ==
+                                    face::ReactionOutcome::Kind::Expression; }),
+                            leaf_sel("GIF",
+                                [rmod]{ rmod([](face::ReactionRule& r){
+                                    r.outcome.kind = face::ReactionOutcome::Kind::Gif; }); },
+                                [rget]{ return rget().outcome.kind ==
+                                    face::ReactionOutcome::Kind::Gif; }),
+                        }));
+                        std::vector<MenuItem> ei;
+                        for (int fi = 0; fi < kFaceSlotCount; ++fi) {
+                            const std::string stem = kFaceSlots[fi].expression;
+                            ei.push_back(leaf_sel(kFaceSlots[fi].label,
+                                [rmod, stem]{ rmod([&stem](face::ReactionRule& r){
+                                    r.outcome.expression = stem; }); },
+                                [rget, stem]{ return rget().outcome.expression == stem; }));
+                        }
+                        MenuItem expr_it = submenu("Expression", std::move(ei));
+                        expr_it.visible_fn = [rget]{ return rget().outcome.kind ==
+                            face::ReactionOutcome::Kind::Expression; };
+                        oi.push_back(std::move(expr_it));
+                        MenuItem gif_it = slider("GIF Slot", 1.f, 8.f, 1.f, "",
+                            [rget]{ return static_cast<float>(rget().outcome.gif_slot + 1); },
+                            [rmod](float v){ rmod([v](face::ReactionRule& r){
+                                r.outcome.gif_slot = static_cast<int>(v) - 1; }); });
+                        gif_it.visible_fn = [rget]{ return rget().outcome.kind ==
+                            face::ReactionOutcome::Kind::Gif; };
+                        oi.push_back(with_desc(std::move(gif_it),
+                            "Which GIF slot to play (1-8). Bind slots under "
+                            "Gifs and Text > GIFs."));
+                        re.push_back(with_desc(submenu("Triggers", std::move(oi)),
+                            "What this reaction shows: an expression or a GIF."));
+                    }
+                    re.push_back(with_desc(slider("Hold Time", 0.f, 10.f, 0.5f, " s",
+                        [rget]{ return static_cast<float>(rget().hold_s); },
+                        [rmod](float v){ rmod([v](face::ReactionRule& r){ r.hold_s = v; }); }),
+                        "How long an expression outcome shows before restoring "
+                        "the previous face (0 = latch). GIFs use their own "
+                        "auto-revert."));
+                    MenuItem rm = submenu(m.label, std::move(re));
+                    rm.label_fn = [rget, lbl = std::string(m.label)]() -> std::string {
+                        return rget().enabled ? (lbl + "  (on)") : lbl;
+                    };
+                    ri.push_back(with_desc(std::move(rm), m.desc));
+                }
+            }
+
             return with_desc(submenu("Reactions", std::move(ri)),
-                "The face reacts to the real world: stillness makes it "
-                "drowsy then asleep (floating Z's), sharp motion wakes it. "
-                "The dark-to-bright squint lives under its light-sensor "
-                "config; more reactions land here as they're added.");
+                "The face reacts to the real world: Falling Asleep on "
+                "stillness, plus named reactions (move into bright/dark, "
+                "dizzy, low battery, loud noise, upside-down) that each show "
+                "an expression or GIF. The dark-to-bright squint also has its "
+                "own light-sensor config.");
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),

@@ -49,6 +49,10 @@ public:
         bool   sleepy_enabled = true;
         double drowsy_after_s = 120.0;  // stillness before heavy lids
         double sleep_after_s  = 300.0;  // stillness before eyes close + Z's
+        // Convenience macro (0..1, 0.5 = neutral) scaling the two timers: a
+        // higher value nods off sooner, lower keeps it awake longer. Applied
+        // on top of the raw seconds above so the sliders still fine-tune.
+        double sensitivity    = 0.5;
         double calm_dps       = 6.0;    // below this smoothed energy = "still"
         double wake_dps       = 45.0;   // instant energy spike that wakes
         double wake_flash_s   = 1.5;    // surprised flash on wake

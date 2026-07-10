@@ -50,7 +50,7 @@ namespace accessory    { class AccessoryLeds; }
 namespace sys          { class FanController; }
 namespace input        { struct GpioPinCfg; struct CoprocConfig; }
 namespace integrations { class KdeConnectBridge; }
-namespace face         { struct GlitchConfig; struct ScrollTextConfig; class ReactionEngine; }
+namespace face         { struct GlitchConfig; struct ScrollTextConfig; class ReactionEngine; class ReactionRules; }
 
 // HUB75 panel layout state. Lives here (not main.cpp) because both the menu
 // (HUB75 Layout editor) and main's renderer-rebuild path use it.
@@ -510,6 +510,7 @@ struct MenuBuildContext {
     // Reaction engine (environment/movement reactions; main owns it). The
     // menu edits its Config via set_config and calls the force_* test hooks.
     face::ReactionEngine* reactions = nullptr;
+    face::ReactionRules*  reaction_rules = nullptr;
 
     // ── Build-phase shared fragments ──────────────────────────────────────────
     // NOT caller-supplied: set by build_menu() before the tab builders run

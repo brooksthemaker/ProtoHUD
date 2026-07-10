@@ -12,6 +12,7 @@ nlohmann::json ReactionEngine::Config::to_json() const {
             {"enabled",        sleepy_enabled},
             {"drowsy_after_s", drowsy_after_s},
             {"sleep_after_s",  sleep_after_s},
+            {"sensitivity",    sensitivity},
             {"calm_dps",       calm_dps},
             {"wake_dps",       wake_dps},
             {"wake_flash_s",   wake_flash_s},
@@ -27,6 +28,7 @@ ReactionEngine::Config ReactionEngine::Config::from_json(const nlohmann::json& j
         c.sleepy_enabled = s.value("enabled",        c.sleepy_enabled);
         c.drowsy_after_s = s.value("drowsy_after_s", c.drowsy_after_s);
         c.sleep_after_s  = s.value("sleep_after_s",  c.sleep_after_s);
+        c.sensitivity    = s.value("sensitivity",    c.sensitivity);
         c.calm_dps       = s.value("calm_dps",       c.calm_dps);
         c.wake_dps       = s.value("wake_dps",       c.wake_dps);
         c.wake_flash_s   = s.value("wake_flash_s",   c.wake_flash_s);
@@ -84,12 +86,18 @@ void ReactionEngine::tick(double dt) {
 
     still_s_ = (energy_ < cfg_.calm_dps) ? still_s_ + dt : 0.0;
 
+    // Sensitivity (0..1, 0.5 neutral) scales the timers: 1.0 nods off at ~½
+    // the configured seconds, 0.0 at ~1.5×.
+    const double sscale = 1.5 - std::clamp(cfg_.sensitivity, 0.0, 1.0);
+    const double drowsy_at = cfg_.drowsy_after_s * sscale;
+    const double sleep_at  = cfg_.sleep_after_s  * sscale;
+
     switch (activity_) {
     case Activity::Awake:
-        if (still_s_ >= cfg_.drowsy_after_s) enter_drowsy();
+        if (still_s_ >= drowsy_at) enter_drowsy();
         break;
     case Activity::Drowsy:
-        if (still_s_ >= cfg_.sleep_after_s) enter_asleep();
+        if (still_s_ >= sleep_at) enter_asleep();
         else if (still_s_ <= 0.0) wake(false);   // gentle motion: no flash
         break;
     case Activity::Asleep:

@@ -56,6 +56,7 @@
 #include "sensor/temp_sensors.h"
 #include "face/reaction_engine.h"
 #include "face/expression_director.h"
+#include "face/reaction_rules.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
 #include "sys/fan_controller.h"
@@ -2919,6 +2920,33 @@ int main(int argc, char* argv[]) {
         };
         expr_director.set_actions(std::move(da));
     }
+    // ── Reactions list (named environmental reactions) ────────────────────────
+    // Move into bright/dark, dizzy, low battery, loud noise, upside-down: each
+    // a trigger + outcome (expression or GIF). See face/reaction_rules.h. Owns
+    // its own rules (persisted as protoface.reaction_rules); the menu edits
+    // them and it fires outcomes on the render thread.
+    face::ReactionRules reaction_rules;
+    {
+        face::ReactionRules::Actions ra2;
+        ra2.set_face     = [&face_proxy](const std::string& e){ face_proxy.set_face_by_name(e); };
+        ra2.current_face = [&face_proxy]{ return face_proxy.current_expression(); };
+        ra2.play_gif     = [&face_proxy](int slot){
+            face_proxy.play_gif(static_cast<uint8_t>(std::max(0, slot)));
+        };
+        ra2.notify = [&state](const std::string& t, const std::string& b){
+            Notification n; n.type = NotifType::App;
+            n.title = t; n.body = b; n.auto_dismiss_s = 3.f;
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.notifs.push(std::move(n));
+        };
+        reaction_rules.set_actions(std::move(ra2));
+        if (cfg.contains("protoface") && cfg["protoface"].is_object() &&
+            cfg["protoface"].contains("reaction_rules"))
+            reaction_rules.load_json(cfg["protoface"]["reaction_rules"]);
+    }
+    // Latest mic level (0..1) for the Loud Noise reaction — written by the
+    // audio callback thread.
+    auto last_mic = std::make_shared<std::atomic<float>>(0.f);
     // Latest ambient lux for the director's light events/conditions
     // (written by the light-sensor callback thread; -1 = no reading yet).
     auto last_lux = std::make_shared<std::atomic<float>>(-1.f);
@@ -4045,10 +4073,11 @@ int main(int argc, char* argv[]) {
     // are disabled we don't push at all and the FaceLoader's "mouth_open"
     // default stays selected.
     audio.set_face_drive_callback(
-        [&face_proxy, &accessory_leds, voice = audio.voice()](double vol, double mouth) {
+        [&face_proxy, &accessory_leds, last_mic, voice = audio.voice()](double vol, double mouth) {
             // Accessory LEDs use the analyzer's broadband volume for any zone
             // running Pattern::Level — even if mouth-open is disabled.
             accessory_leds.set_audio_volume(static_cast<float>(vol));
+            last_mic->store(static_cast<float>(vol));
             if (voice && voice->visemes_enabled())
                 face_proxy.set_mouth_shape(voice->mouth_shape());
             face_proxy.set_audio_drive(vol, mouth);
@@ -4617,6 +4646,7 @@ int main(int argc, char* argv[]) {
     };
     menu_ctx.pf_glitch_p = &pf_glitch;
     menu_ctx.reactions = &reactions;
+    menu_ctx.reaction_rules = &reaction_rules;
     menu_ctx.pf_scroll_p = &pf_scroll;
 
     MenuSystem menu(build_menu(menu_ctx));
@@ -5779,6 +5809,7 @@ int main(int argc, char* argv[]) {
                 if (ts.any()) jt[key] = ts.to_json();
             cfg["protoface"]["custom_expressions"]  = std::move(jc);
             cfg["protoface"]["expression_triggers"] = std::move(jt);
+            cfg["protoface"]["reaction_rules"]      = reaction_rules.to_json();
         }
         cfg["protoface"]["scroll_text"] = pf_scroll.to_json();
         {
@@ -6403,6 +6434,19 @@ int main(int argc, char* argv[]) {
                 state.attitude_pose.roll, last_lux->load(),
                 reactions.energy_dps() > reactions.config().calm_dps * 2.0);
             expr_director.tick(dt, rules_snapshot());
+
+            // Named environmental reactions (Reactions list).
+            {
+                face::ReactionRules::Signals rs;
+                rs.lux         = last_lux->load();
+                rs.spin_dps    = static_cast<float>(std::fabs(m_yaw));
+                rs.roll_deg    = state.attitude_pose.roll;
+                rs.mic         = last_mic->load();
+                { std::lock_guard<std::mutex> lk(state.mtx);
+                  rs.battery_pct = state.health.wireless_battery_pct; }
+                reaction_rules.set_signals(rs);
+                reaction_rules.tick(dt);
+            }
 
             // Follow-face feed for accessory LED zones: mean color of the lit
             // face pixels, sampled a few times a second — cheap, and works

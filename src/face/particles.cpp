@@ -2571,6 +2571,17 @@ ParticleSystem::ParticleSystem(int width, int height, const json& cfg)
 }
 ParticleSystem::~ParticleSystem() = default;
 
+json merge_effect_specs(const json& base, const json& over) {
+    json bl = resolve_cfg(base), ol = resolve_cfg(over);
+    json out; out["layers"] = json::array();
+    if (bl.contains("layers"))
+        for (auto& l : bl["layers"]) out["layers"].push_back(l);
+    if (ol.contains("layers"))
+        for (auto& l : ol["layers"]) out["layers"].push_back(l);
+    if (out["layers"].empty()) return json("none");
+    return out;
+}
+
 void ParticleSystem::set_effect(const json& cfg) {
     if (!impl_->try_update(cfg)) impl_->build(cfg);   // in-place when structure matches
 }
