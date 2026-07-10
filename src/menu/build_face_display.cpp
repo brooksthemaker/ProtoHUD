@@ -442,6 +442,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     bool*   pf_temp_effects_p = ctx.pf_temp_effects_p;
     double* pf_temp_cold_p    = ctx.pf_temp_cold_p;
     double* pf_temp_hot_p     = ctx.pf_temp_hot_p;
+    bool*   pf_frost_fractal_p  = ctx.pf_frost_fractal_p;
+    bool*   pf_heat_heartbeat_p = ctx.pf_heat_heartbeat_p;
     std::function<void()> pf_ambient_resync = ctx.pf_ambient_resync;
     std::shared_ptr<std::function<void()>> pf_live_tick = ctx.pf_live_tick;
     nlohmann::json* cfg_root = ctx.cfg_root;
@@ -2324,6 +2326,32 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     if (cfg_root) (*cfg_root)["protoface"]["temp_hot_c"] = v;
                 }),
                 "Heat shimmer appears at or above this outdoor temperature.");
+            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
+            pf_effects.push_back(std::move(m));
+        }
+        if (pf_frost_fractal_p) {
+            MenuItem m = with_desc(toggle("Fractal Frost",
+                [pf_frost_fractal_p]{ return *pf_frost_fractal_p; },
+                [pf_frost_fractal_p, pf_ambient_resync, cfg_root](bool v){
+                    *pf_frost_fractal_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["frost_fractal"] = v;
+                }),
+                "Frost edges grow in branching, fractal fern patterns and "
+                "large snowflakes drift in as it forms. Off = the smooth "
+                "creeping sheet.");
+            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
+            pf_effects.push_back(std::move(m));
+        }
+        if (pf_heat_heartbeat_p) {
+            MenuItem m = with_desc(toggle("Heatwave Heartbeat",
+                [pf_heat_heartbeat_p]{ return *pf_heat_heartbeat_p; },
+                [pf_heat_heartbeat_p, pf_ambient_resync, cfg_root](bool v){
+                    *pf_heat_heartbeat_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["heatwave_heartbeat"] = v;
+                }),
+                "Adds a slow orange glow pulsing along the same edges as the "
+                "frost, throbbing like a lub-dub heartbeat. Off = shimmer "
+                "only.");
             m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
             pf_effects.push_back(std::move(m));
         }

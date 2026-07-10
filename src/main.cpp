@@ -2015,6 +2015,8 @@ int main(int argc, char* argv[]) {
     bool   pf_temp_effects     = false;
     double pf_temp_cold_c      = 5.0;    // frost at/below this (deg C)
     double pf_temp_hot_c       = 45.0;   // heatwave at/above this (deg C)
+    bool   pf_frost_fractal    = true;   // frost grows in fractal ferns + big snowflakes
+    bool   pf_heat_heartbeat   = true;   // heatwave adds an orange heartbeat rim pulse
     bool   weather_fx_resync   = true;
     // MAX7219 panel layout editor state (Face Display > MAX7219 Layout). Loaded
     // from cfg["protoface"]["max7219"] below; pf_max7219_apply serialises it back
@@ -2065,6 +2067,8 @@ int main(int argc, char* argv[]) {
         pf_temp_effects        = jval(jpf, "temp_effects",      pf_temp_effects);
         pf_temp_cold_c         = jval(jpf, "temp_cold_c",       pf_temp_cold_c);
         pf_temp_hot_c          = jval(jpf, "temp_hot_c",        pf_temp_hot_c);
+        pf_frost_fractal       = jval(jpf, "frost_fractal",     pf_frost_fractal);
+        pf_heat_heartbeat      = jval(jpf, "heatwave_heartbeat", pf_heat_heartbeat);
         state.face.pride_angle = jval(jpf, "pride_angle", 90);
         if (jpf.contains("layout") && jpf["layout"].is_object()) {
             auto& jl = jpf["layout"];
@@ -4535,6 +4539,8 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_temp_effects_p = &pf_temp_effects;
     menu_ctx.pf_temp_cold_p    = &pf_temp_cold_c;
     menu_ctx.pf_temp_hot_p     = &pf_temp_hot_c;
+    menu_ctx.pf_frost_fractal_p  = &pf_frost_fractal;
+    menu_ctx.pf_heat_heartbeat_p = &pf_heat_heartbeat;
     menu_ctx.pf_ambient_resync = [&]{ weather_fx_resync = true; };
     menu_ctx.pf_live_tick = pf_live_tick;
     menu_ctx.cfg_root = &cfg;
@@ -5711,6 +5717,8 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["temp_effects"]        = pf_temp_effects;
         cfg["protoface"]["temp_cold_c"]         = pf_temp_cold_c;
         cfg["protoface"]["temp_hot_c"]          = pf_temp_hot_c;
+        cfg["protoface"]["frost_fractal"]       = pf_frost_fractal;
+        cfg["protoface"]["heatwave_heartbeat"]  = pf_heat_heartbeat;
         cfg["protoface"]["pride_angle"]         = state.face.pride_angle;
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
@@ -6211,8 +6219,12 @@ int main(int argc, char* argv[]) {
                         double t = state.weather.temp;
                         if (!state.weather_cfg.metric)
                             t = (t - 32.0) * 5.0 / 9.0;
-                        if      (t <= pf_temp_cold_c) spec = {{"preset", "frost"}};
-                        else if (t >= pf_temp_hot_c)  spec = {{"preset", "heatwave"}};
+                        if (t <= pf_temp_cold_c)
+                            spec = {{"effect", "frost"}, {"count", 44},
+                                    {"fractal", pf_frost_fractal}, {"blend", "add"}};
+                        else if (t >= pf_temp_hot_c)
+                            spec = {{"effect", "heatwave"}, {"count", 18},
+                                    {"heartbeat", pf_heat_heartbeat}, {"blend", "add"}};
                     }
                 }
             }

@@ -425,6 +425,8 @@ struct MenuBuildContext {
     bool*   pf_temp_effects_p = nullptr;
     double* pf_temp_cold_p    = nullptr;
     double* pf_temp_hot_p     = nullptr;
+    bool*   pf_frost_fractal_p  = nullptr;   // frost fractal ferns + big snowflakes
+    bool*   pf_heat_heartbeat_p = nullptr;   // heatwave orange heartbeat rim pulse
     std::function<void()> pf_ambient_resync;
     // Live-preview tick: main calls this each frame; when Live Preview is on
     // it re-applies the builder spec on change. Installed inside build_menu.

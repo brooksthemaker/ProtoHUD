@@ -135,6 +135,34 @@ inline void draw_rect(cv::Mat& c, double x, double y, int r, int g, int b,
     }
 }
 
+// A six-armed snowflake: three spokes through the centre plus short side
+// branches, at radius R and rotation `rot`. Sharp (per-pixel) so it keeps the
+// blocky pixel look. `a` is 0..1 coverage.
+inline void draw_snowflake(cv::Mat& c, double cx, double cy, double R,
+                           double rot, int r, int g, int b, double a) {
+    const int col_a = (int)std::clamp(a * 255.0, 0.0, 255.0);
+    if (col_a <= 0) return;
+    draw_pixel(c, (int)std::lround(cx), (int)std::lround(cy), r, g, b, col_a);
+    for (int arm = 0; arm < 6; ++arm) {
+        const double ang = rot + arm * (kTau / 6.0);
+        const double ux = std::cos(ang), uy = std::sin(ang);
+        for (double d = 1.0; d <= R; d += 1.0) {
+            const double px = cx + ux * d, py = cy + uy * d;
+            const double fade = a * (1.0 - 0.4 * (d / std::max(1.0, R)));
+            draw_pixel(c, (int)std::lround(px), (int)std::lround(py),
+                       r, g, b, (int)std::clamp(fade * 255.0, 0.0, 255.0));
+            // Little branch pips two-thirds out, giving the dendritic look.
+            if (d >= R * 0.6 && d <= R * 0.7) {
+                const double bx = -uy, by = ux;   // perpendicular
+                for (int s = -1; s <= 1; s += 2)
+                    draw_pixel(c, (int)std::lround(px + bx * s),
+                               (int)std::lround(py + by * s), r, g, b,
+                               (int)std::clamp(fade * 0.8 * 255.0, 0.0, 255.0));
+            }
+        }
+    }
+}
+
 // ── Base effect ──────────────────────────────────────────────────────────────
 
 class BaseEffect {
@@ -741,6 +769,7 @@ public:
     using BaseEffect::BaseEffect;
 
     void update(double dt) override {
+        fractal_ = cfg_.value("fractal", false);
         ensure_field();
         age_ += dt;
         // Fixed-step growth with a FIXED-SEED rng: every panel instance of
@@ -768,6 +797,40 @@ public:
             p.r = 255; p.g = 255; p.b = 255; p.size = 1;
             p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
+        }
+
+        // Fractal mode: large snowflakes drift down and settle, appearing
+        // gradually as the sheet develops. Panel-local + cosmetic.
+        if (fractal_) {
+            const double drift = jnum(cfg_, "flake_drift", 6.0);
+            for (auto& fp : flakes_) {
+                fp.extra += dt;                             // rotation phase
+                fp.y += fp.vy * dt;                         // slow fall
+                fp.x += std::sin(fp.extra * 0.9 + fp.vx) * drift * dt;
+                fp.life -= dt / fp.max_life;
+            }
+            flakes_.erase(std::remove_if(flakes_.begin(), flakes_.end(),
+                [&](const Particle& p){ return p.life <= 0 || p.y > h_ + p.size + 2; }),
+                flakes_.end());
+            const int want_f = count(5);                    // a handful at a time
+            flake_acc_ += dt;
+            const double spawn_every = std::max(0.3, jnum(cfg_, "flake_every", 0.9));
+            while ((int)flakes_.size() < want_f && flake_acc_ >= spawn_every) {
+                flake_acc_ -= spawn_every;
+                Particle fp;
+                fp.x = frand(rng_, 0, w_ - 1);
+                fp.y = frand(rng_, -4.0, h_ * 0.35);        // enter from the top
+                fp.vx = frand(rng_, 0, kTau);               // sway phase
+                fp.vy = pick_speed(cfg_, 5.0, 11.0, rng_);  // fall speed
+                fp.size = irand(rng_, 3, 5);                // LARGE flakes
+                fp.max_life = frand(rng_, 2.5, 4.5);
+                fp.life = 1.0;
+                fp.r = 235; fp.g = 245; fp.b = 255;
+                fp.extra = frand(rng_, 0, kTau);
+                flakes_.push_back(fp);
+            }
+        } else if (!flakes_.empty()) {
+            flakes_.clear();
         }
     }
 
@@ -819,6 +882,14 @@ public:
             draw_particle(c, p, env * (0.4 + 0.6 * (0.5 + 0.5 * std::sin(p.extra * 9.0)))
                               * opacity);
         }
+        // Large snowflakes (fractal mode): fade in, hold, fade out.
+        for (auto& fp : flakes_) {
+            const double env = std::clamp(std::min((1.0 - fp.life) * 4.0,
+                                                   fp.life * 3.0), 0.0, 1.0);
+            draw_snowflake(c, fp.x, fp.y, fp.size, fp.extra * 0.5,
+                           (int)fp.r, (int)fp.g, (int)fp.b,
+                           env * std::min(1.0, opacity + 0.35));
+        }
         return c;
     }
 
@@ -839,12 +910,14 @@ private:
     // (Re)build the field + reach mask when geometry or shaping cfg changes.
     void ensure_field() {
         const bool   top   = cfg_.value("include_top", false);
+        // Fractal fingers reach deeper in than the smooth front.
         const double reach = std::clamp(
-            jnum(cfg_, "reach", jnum(cfg_, "depth_frac", 0.32)), 0.05, 0.9);
+            jnum(cfg_, "reach", jnum(cfg_, "depth_frac", 0.32)) *
+            (fractal_ ? 1.4 : 1.0), 0.05, 0.95);
         if ((int)field_.size() == cw_ * ch_ && top == mask_top_ &&
-            std::fabs(reach - mask_reach_) < 1e-6)
+            std::fabs(reach - mask_reach_) < 1e-6 && fractal_ == mask_fractal_)
             return;
-        mask_top_ = top; mask_reach_ = reach;
+        mask_top_ = top; mask_reach_ = reach; mask_fractal_ = fractal_;
         const int W = cw_, H = ch_;
         field_.assign((size_t)W * H, 0.f);
         mask_.assign((size_t)W * H, 0.f);
@@ -873,8 +946,13 @@ private:
                 mask_[(size_t)y * W + x] = std::pow(m, 0.7f);
                 // Static per-cell heterogeneity: fast lanes become the
                 // fingers that race ahead of the front, slow cells the gaps.
+                // Fractal mode sharpens this hard (g^4, near-zero floor) so a
+                // few lanes race far ahead and branch — dendritic ferns —
+                // while the gaps between them stay clear.
                 const float g = hash01(x * 3 + 1, y * 5 + 2);
-                grain_[(size_t)y * W + x] = 0.15f + 0.85f * g * g;
+                grain_[(size_t)y * W + x] = fractal_
+                    ? 0.03f + 0.97f * g * g * g * g
+                    : 0.15f + 0.85f * g * g;
             }
         }
     }
@@ -908,18 +986,26 @@ private:
                         if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
                         sup = std::max(sup, field_[(size_t)ny * W + nx]);
                     }
-                if (sup <= 0.05f) continue;
+                // Fractal mode lets thinner fingers thread inward (lower
+                // supply threshold) and race with more variance.
+                if (sup <= (mask_fractal_ ? 0.02f : 0.05f)) continue;
+                const double vlo = mask_fractal_ ? 0.4 : 0.6;
+                const double vhi = mask_fractal_ ? 1.7 : 1.4;
                 f = std::min(m, f + rate * m * sup * grain_[i] *
-                                     (float)frand(det_rng_, 0.6, 1.4));
+                                     (float)frand(det_rng_, vlo, vhi));
             }
         }
     }
 
     double age_ = 0.0, acc_ = 0.0;
     uint32_t step_n_ = 0;
-    bool   mask_top_   = false;
-    double mask_reach_ = -1.0;
+    bool   mask_top_     = false;
+    bool   fractal_      = false;   // dendritic growth + large snowflakes
+    bool   mask_fractal_ = false;   // fractal value the field was built for
+    double mask_reach_   = -1.0;
     std::vector<float> field_, mask_, grain_;   // canvas-space growth state
+    std::vector<Particle> flakes_;              // large drifting snowflakes
+    double flake_acc_ = 0.0;                     // snowflake spawn timer
     std::mt19937 det_rng_{0x1CEF7057u};         // shared fixed seed (see update)
 };
 
@@ -933,6 +1019,8 @@ class HeatwaveEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
+        heartbeat_ = cfg_.value("heartbeat", false);
+        hb_t_ += dt;
         const double wander = jnum(cfg_, "wander", 8.0);
         double dx, dy; direction_unit(dx, dy, 270.0);   // rises by default
         for (auto& p : particles_) {
@@ -961,6 +1049,21 @@ public:
             particles_.push_back(p);
         }
     }
+
+    // A heartbeat envelope over one beat period: a strong "lub" then a softer
+    // "dub" a moment later, then rest — 0..1. bpm sets the (slow) pace.
+    double heartbeat_env() const {
+        const double bpm    = std::max(20.0, jnum(cfg_, "bpm", 50.0));
+        const double period = 60.0 / bpm;
+        const double ph     = std::fmod(hb_t_, period) / period;   // 0..1
+        auto thump = [](double x, double c, double w) {
+            const double d = (x - c) / w;
+            return std::exp(-d * d);
+        };
+        const double e = thump(ph, 0.00, 0.045) + 0.6 * thump(ph, 0.18, 0.05);
+        return std::clamp(e, 0.0, 1.0);
+    }
+
     cv::Mat render() override {
         cv::Mat c = blank();
         double dx, dy; direction_unit(dx, dy, 270.0);
@@ -973,8 +1076,43 @@ public:
                            (int)p.r, (int)p.g, (int)p.b, (int)(a * 255));
             }
         }
+
+        // Heartbeat: an orange glow pulsing along the SAME panel edges the
+        // frost creeps in from (canvas-edge band, corners deeper), throbbing
+        // lub-dub. Additive over the shimmer.
+        if (heartbeat_) {
+            const double env = heartbeat_env();
+            if (env > 0.01) {
+                const bool   top  = cfg_.value("include_top", false);
+                const double reach = std::clamp(
+                    jnum(cfg_, "reach", jnum(cfg_, "depth_frac", 0.32)), 0.05, 0.9);
+                const double reach_px = reach * std::min(cw_, ch_);
+                Color glow = has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                              : Color{255, 90, 20};
+                const double amp = std::clamp(jnum(cfg_, "pulse_alpha", 0.55), 0.0, 1.0)
+                                   * std::max(0.05, intensity_);
+                for (int ly = 0; ly < h_; ++ly) {
+                    for (int lx = 0; lx < w_; ++lx) {
+                        const int gx = lx + ox_, gy = ly + oy_;
+                        const double de = std::min({ (double)gx, (double)(cw_ - 1 - gx),
+                                                     (double)(ch_ - 1 - gy),
+                                                     top ? (double)gy : 1e9 });
+                        double band = 1.0 - de / std::max(1.0, reach_px);
+                        if (band <= 0.02) continue;
+                        band = band * band;             // concentrate at the rim
+                        const double a = amp * band * env;
+                        draw_pixel(c, lx, ly, glow.r, glow.g, glow.b,
+                                   (int)std::clamp(a * 255.0, 0.0, 255.0));
+                    }
+                }
+            }
+        }
         return c;
     }
+
+private:
+    bool   heartbeat_ = false;
+    double hb_t_ = 0.0;
 };
 
 // ── Fireflies ────────────────────────────────────────────────────────────────
@@ -2227,8 +2365,8 @@ const std::map<std::string, json>& presets() {
           "waveform": {"effect":"waveform","blend":"add"},
           "matrix": {"effect":"matrix","blend":"add"},
           "circuit": {"effect":"circuit","count":5,"blend":"add"},
-          "frost": {"effect":"frost","count":44,"blend":"add"},
-          "heatwave": {"effect":"heatwave","count":18,"blend":"add"},
+          "frost": {"effect":"frost","count":44,"fractal":true,"blend":"add"},
+          "heatwave": {"effect":"heatwave","count":18,"heartbeat":true,"blend":"add"},
           "snooze": {"effect":"snooze","count":3,"blend":"add"},
           "petals": {"effect":"snow","count":14,"colors":[[255,150,180],[255,190,210],[240,120,160]],"speed_min":3.0,"speed_max":6.0,"drift_x":2.5,"blend":"add"},
           "dizzy": {"layers":[
