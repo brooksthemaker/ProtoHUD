@@ -3767,32 +3767,37 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     "Hold still and the face gets heavy-lidded (slow blinks), "
                     "then falls asleep with closed eyes + floating Z's. Sharp "
                     "head motion snaps it awake."));
-                fa.push_back(with_desc(slider("Sensitivity", 0.f, 1.f, 0.05f, "",
-                    [R]{ return static_cast<float>(R->config().sensitivity); },
-                    [R, save](float v){ auto c = R->config(); c.sensitivity = v;
+                fa.push_back(with_desc(slider("Motion Deadzone", 1.f, 40.f, 1.f, "\xc2\xb0/s",
+                    [R]{ return static_cast<float>(R->config().calm_dps); },
+                    [R, save](float v){ auto c = R->config(); c.calm_dps = v;
                                         R->set_config(c); save(); }),
-                    "How readily it nods off: 0.5 uses the times below as-is, "
-                    "higher falls asleep sooner, lower stays awake longer."));
+                    "How much head motion to ignore. While the IMU stays below "
+                    "this, the face counts as still and the timers below run; "
+                    "any faster movement resets them. Higher = tolerates more "
+                    "fidget before nodding off."));
                 fa.push_back(with_desc(slider("Drowsy After", 30.f, 600.f, 15.f, "s",
                     [R]{ return static_cast<float>(R->config().drowsy_after_s); },
                     [R, save](float v){ auto c = R->config(); c.drowsy_after_s = v;
                                         R->set_config(c); save(); }),
-                    "Baseline stillness before the heavy-lidded stage "
-                    "(scaled by Sensitivity)."));
+                    "Seconds of stillness (motion below the deadzone) before "
+                    "the heavy-lidded drowsy stage."));
                 fa.push_back(with_desc(slider("Sleep After", 60.f, 1800.f, 30.f, "s",
                     [R]{ return static_cast<float>(R->config().sleep_after_s); },
                     [R, save](float v){ auto c = R->config(); c.sleep_after_s = v;
                                         R->set_config(c); save(); }),
-                    "Baseline stillness before falling asleep (scaled by "
-                    "Sensitivity; measured from the start of stillness)."));
+                    "Seconds of stillness before falling asleep (measured from "
+                    "the start of stillness)."));
                 fa.push_back(with_desc(slider("Wake Threshold", 15.f, 120.f, 5.f, "\xc2\xb0/s",
                     [R]{ return static_cast<float>(R->config().wake_dps); },
                     [R, save](float v){ auto c = R->config(); c.wake_dps = v;
                                         R->set_config(c); save(); }),
                     "How sharp a head motion wakes the face. Lower = lighter "
                     "sleeper."));
-                fa.push_back(with_desc(leaf("Test: Fall Asleep", [R]{ R->force_sleepy(); }),
-                    "Preview the sleep look now (drowsy then asleep). Move "
+                fa.push_back(with_desc(leaf("Test: Drowsy", [R]{ R->force_drowsy(); }),
+                    "Jump straight to the drowsy look (sleepy face + slow "
+                    "blinks, eyes open) so you can see that stage on its own."));
+                fa.push_back(with_desc(leaf("Test: Asleep", [R]{ R->force_asleep(); }),
+                    "Jump to the asleep look (eyes closed + floating Z's). Move "
                     "your head or use Test: Wake to end it."));
                 fa.push_back(leaf("Test: Wake", [R]{ R->force_wake(); }));
                 ri.push_back(with_desc(submenu("Falling Asleep", std::move(fa)),

@@ -12,7 +12,6 @@ nlohmann::json ReactionEngine::Config::to_json() const {
             {"enabled",        sleepy_enabled},
             {"drowsy_after_s", drowsy_after_s},
             {"sleep_after_s",  sleep_after_s},
-            {"sensitivity",    sensitivity},
             {"calm_dps",       calm_dps},
             {"wake_dps",       wake_dps},
             {"wake_flash_s",   wake_flash_s},
@@ -28,7 +27,6 @@ ReactionEngine::Config ReactionEngine::Config::from_json(const nlohmann::json& j
         c.sleepy_enabled = s.value("enabled",        c.sleepy_enabled);
         c.drowsy_after_s = s.value("drowsy_after_s", c.drowsy_after_s);
         c.sleep_after_s  = s.value("sleep_after_s",  c.sleep_after_s);
-        c.sensitivity    = s.value("sensitivity",    c.sensitivity);
         c.calm_dps       = s.value("calm_dps",       c.calm_dps);
         c.wake_dps       = s.value("wake_dps",       c.wake_dps);
         c.wake_flash_s   = s.value("wake_flash_s",   c.wake_flash_s);
@@ -84,20 +82,16 @@ void ReactionEngine::tick(double dt) {
         return;
     }
 
+    // Motion below the deadzone (calm_dps) counts as "still" and accumulates
+    // the drowsy/sleep timers; any faster movement resets it.
     still_s_ = (energy_ < cfg_.calm_dps) ? still_s_ + dt : 0.0;
-
-    // Sensitivity (0..1, 0.5 neutral) scales the timers: 1.0 nods off at ~½
-    // the configured seconds, 0.0 at ~1.5×.
-    const double sscale = 1.5 - std::clamp(cfg_.sensitivity, 0.0, 1.0);
-    const double drowsy_at = cfg_.drowsy_after_s * sscale;
-    const double sleep_at  = cfg_.sleep_after_s  * sscale;
 
     switch (activity_) {
     case Activity::Awake:
-        if (still_s_ >= drowsy_at) enter_drowsy();
+        if (still_s_ >= cfg_.drowsy_after_s) enter_drowsy();
         break;
     case Activity::Drowsy:
-        if (still_s_ >= sleep_at) enter_asleep();
+        if (still_s_ >= cfg_.sleep_after_s) enter_asleep();
         else if (still_s_ <= 0.0) wake(false);   // gentle motion: no flash
         break;
     case Activity::Asleep:
@@ -160,9 +154,16 @@ void ReactionEngine::set_base_ambient(const nlohmann::json& spec) {
     if (!override_active_ && act_.set_ambient) act_.set_ambient(spec);
 }
 
-void ReactionEngine::force_sleepy() {
-    if (activity_ == Activity::Awake) enter_drowsy();
-    if (activity_ == Activity::Drowsy) enter_asleep();
+void ReactionEngine::force_drowsy() {
+    // Clean-reset from a deeper state so the drowsy look (sleepy face + slow
+    // blinks, eyes open) shows on its own, distinct from asleep.
+    if (activity_ != Activity::Awake) wake(false);
+    enter_drowsy();
+}
+
+void ReactionEngine::force_asleep() {
+    if (activity_ == Activity::Awake) enter_drowsy();   // capture prev face first
+    if (activity_ != Activity::Asleep) enter_asleep();
 }
 
 void ReactionEngine::force_wake() {

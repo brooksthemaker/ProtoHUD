@@ -49,11 +49,11 @@ public:
         bool   sleepy_enabled = true;
         double drowsy_after_s = 120.0;  // stillness before heavy lids
         double sleep_after_s  = 300.0;  // stillness before eyes close + Z's
-        // Convenience macro (0..1, 0.5 = neutral) scaling the two timers: a
-        // higher value nods off sooner, lower keeps it awake longer. Applied
-        // on top of the raw seconds above so the sliders still fine-tune.
-        double sensitivity    = 0.5;
-        double calm_dps       = 6.0;    // below this smoothed energy = "still"
+        // Motion deadzone (deg/s-equivalent): head motion below this is
+        // treated as "still", so the drowsy/sleep timers accumulate. Higher =
+        // ignores more IMU wobble (nods off even with some fidget); lower =
+        // must be genuinely still. This is the knob the user tunes.
+        double calm_dps       = 6.0;
         double wake_dps       = 45.0;   // instant energy spike that wakes
         double wake_flash_s   = 1.5;    // surprised flash on wake
 
@@ -82,8 +82,10 @@ public:
     Activity    activity() const { return activity_; }
     const char* activity_name() const;
     double      energy_dps() const { return energy_; }
-    void        force_sleepy();   // jump straight to Asleep (test)
-    void        force_wake();     // as if a motion spike arrived (test)
+    // Test hooks — step through the stages so each is visible in preview.
+    void        force_drowsy();   // → Drowsy (sleepy face + slow blinks)
+    void        force_asleep();   // → Asleep (eyes closed + Z's)
+    void        force_wake();     // as if a motion spike arrived
 
 private:
     bool spike_armed_ = true;   // motion-spike edge detector (see tick)
