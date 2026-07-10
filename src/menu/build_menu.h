@@ -427,6 +427,10 @@ struct MenuBuildContext {
     double* pf_temp_hot_p     = nullptr;
     bool*   pf_frost_fractal_p  = nullptr;   // frost fractal ferns + big snowflakes
     bool*   pf_heat_heartbeat_p = nullptr;   // heatwave orange heartbeat rim pulse
+    // Transient preview override (not persisted): 0 = off (follow temperature),
+    // 1 = force frost, 2 = force heatwave. Lets the wearer eyeball the temp
+    // effects on the bench without waiting for the threshold to be crossed.
+    int*    pf_temp_force_p     = nullptr;
     std::function<void()> pf_ambient_resync;
     // Live-preview tick: main calls this each frame; when Live Preview is on
     // it re-applies the builder spec on change. Installed inside build_menu.

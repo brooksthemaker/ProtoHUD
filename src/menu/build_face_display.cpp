@@ -451,6 +451,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     double* pf_temp_hot_p     = ctx.pf_temp_hot_p;
     bool*   pf_frost_fractal_p  = ctx.pf_frost_fractal_p;
     bool*   pf_heat_heartbeat_p = ctx.pf_heat_heartbeat_p;
+    int*    pf_temp_force_p     = ctx.pf_temp_force_p;
     std::function<void()> pf_ambient_resync = ctx.pf_ambient_resync;
     std::shared_ptr<std::function<void()>> pf_live_tick = ctx.pf_live_tick;
     nlohmann::json* cfg_root = ctx.cfg_root;
@@ -2423,6 +2424,28 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "only.");
             m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
             pf_effects.push_back(std::move(m));
+        }
+        // Preview: force frost / heatwave on regardless of the live temperature
+        // so you can eyeball the look (and the Fractal / Heartbeat sub-toggles)
+        // on the bench. Mutually exclusive; not saved — clears on restart.
+        if (pf_temp_force_p) {
+            MenuItem tf = with_desc(toggle("Test Frost",
+                [p = pf_temp_force_p]{ return *p == 1; },
+                [p = pf_temp_force_p, pf_ambient_resync](bool v){
+                    *p = v ? 1 : 0; pf_ambient_resync(); }),
+                "Force the frost effect on now, ignoring the temperature, to "
+                "preview it (uses the Fractal Frost setting). Not saved.");
+            tf.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
+            pf_effects.push_back(std::move(tf));
+
+            MenuItem th = with_desc(toggle("Test Heatwave",
+                [p = pf_temp_force_p]{ return *p == 2; },
+                [p = pf_temp_force_p, pf_ambient_resync](bool v){
+                    *p = v ? 2 : 0; pf_ambient_resync(); }),
+                "Force the heatwave shimmer on now, ignoring the temperature, "
+                "to preview it (uses the Heatwave Heartbeat setting). Not saved.");
+            th.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
+            pf_effects.push_back(std::move(th));
         }
     }
     {

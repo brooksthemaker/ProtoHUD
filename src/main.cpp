@@ -2018,6 +2018,7 @@ int main(int argc, char* argv[]) {
     double pf_temp_hot_c       = 45.0;   // heatwave at/above this (deg C)
     bool   pf_frost_fractal    = true;   // frost grows in fractal ferns + big snowflakes
     bool   pf_heat_heartbeat   = true;   // heatwave adds an orange heartbeat rim pulse
+    int    pf_temp_force       = 0;      // preview override: 0 off, 1 frost, 2 heatwave (not saved)
     bool   weather_fx_resync   = true;
     // MAX7219 panel layout editor state (Face Display > MAX7219 Layout). Loaded
     // from cfg["protoface"]["max7219"] below; pf_max7219_apply serialises it back
@@ -4570,6 +4571,7 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_temp_hot_p     = &pf_temp_hot_c;
     menu_ctx.pf_frost_fractal_p  = &pf_frost_fractal;
     menu_ctx.pf_heat_heartbeat_p = &pf_heat_heartbeat;
+    menu_ctx.pf_temp_force_p     = &pf_temp_force;
     menu_ctx.pf_ambient_resync = [&]{ weather_fx_resync = true; };
     menu_ctx.pf_live_tick = pf_live_tick;
     menu_ctx.cfg_root = &cfg;
@@ -6245,7 +6247,16 @@ int main(int argc, char* argv[]) {
             weather_fx_last   = std::chrono::steady_clock::now();
             weather_fx_resync = false;
             nlohmann::json spec;
-            if (pf_weather_effects || pf_temp_effects) {
+            // Preview override (Face Display > Effects > Test Frost/Heatwave):
+            // force the temp effect on regardless of the live temperature, so
+            // it shows even with no sensor/weather. Wins over everything else.
+            if (pf_temp_force == 1)
+                spec = {{"effect", "frost"}, {"count", 44},
+                        {"fractal", pf_frost_fractal}, {"blend", "add"}};
+            else if (pf_temp_force == 2)
+                spec = {{"effect", "heatwave"}, {"count", 18},
+                        {"heartbeat", pf_heat_heartbeat}, {"blend", "add"}};
+            else if (pf_weather_effects || pf_temp_effects) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 if (state.weather.ok) {
                     if (pf_weather_effects)
