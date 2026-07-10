@@ -18,14 +18,29 @@
 
 namespace face {
 
+// How the banner moves.
+enum class ScrollMode : uint8_t {
+    Left   = 0,   // scroll right→left (classic marquee)
+    Right  = 1,   // scroll left→right
+    Static = 2,   // centred, no motion (a fixed label)
+    Bounce = 3,   // ping-pong between the edges
+};
+// Vertical placement of the band.
+enum class TextVPos : uint8_t { Center = 0, Top = 1, Bottom = 2 };
+
 struct ScrollTextConfig {
     bool        enabled    = false;
     std::string text;                  // glyphs the 5×7 font lacks render blank
-    double      speed_px_s = 24.0;     // leftward scroll speed, canvas px/s
+    double      speed_px_s = 24.0;     // scroll speed, canvas px/s
     int         scale      = 2;        // integer font upscale (2 → 10×14 glyphs)
-    int         y          = -1;       // top row of the band; -1 = vertical centre
+    int         y          = -1;       // legacy top row; superseded by vpos
     uint8_t     r = 255, g = 255, b = 255;
     bool        loop       = true;     // false = one pass, then auto-disables
+    ScrollMode  mode       = ScrollMode::Left;
+    TextVPos    vpos       = TextVPos::Center;
+    bool        bold       = false;    // dilate glyphs one px for a heavier stroke
+    bool        bg         = false;    // dark band behind the text for contrast
+    uint8_t     bg_alpha   = 150;      // band opacity when bg is on
 
     nlohmann::json to_json() const;
     static ScrollTextConfig from_json(const nlohmann::json& j);

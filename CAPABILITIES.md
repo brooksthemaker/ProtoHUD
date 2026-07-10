@@ -379,6 +379,16 @@ Available as the **Default Style** material and, per expression, as an override
 ### GIF Playback
 8 GIF slots (labels configurable via `serial.teensy.gif_names[]` in config)
 
+### Scrolling Text Banner
+`Gifs and Text > Scrolling Text` — a 5×7-font banner across the whole face
+canvas (above every layer). Options: text (on-screen keyboard), **Speed**,
+**Size** (1–4× integer upscale), **Color** (six presets + a full RGB **Custom**
+picker), **Motion** (Scroll Left / Scroll Right / Static / Bounce),
+**Position** (Center / Top / Bottom), **Bold** (heavier strokes),
+**Background** (a dimmed band behind the text with adjustable **BG Dim** for
+legibility over busy faces), and **Loop** (wrap forever vs one pass then
+auto-off). Stored in `protoface.scroll_text`.
+
 ### Face Size & Position (per-face placement transform)
 Face Options → **Size & Position** scales/shifts the active face so art drawn
 for one panel size fits another, applied live:

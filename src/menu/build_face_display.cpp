@@ -3613,13 +3613,71 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         [S, c, pf_anim_push]{ S->r = c.r; S->g = c.g; S->b = c.b;
                                               if (pf_anim_push) pf_anim_push(); },
                         [S, c]{ return S->r == c.r && S->g == c.g && S->b == c.b; }));
-                si.push_back(submenu("Color", std::move(ci)));
+                ci.push_back(color_picker("Custom...",
+                    [S, pf_anim_push](uint8_t r, uint8_t g, uint8_t b){
+                        S->r = r; S->g = g; S->b = b;
+                        if (pf_anim_push) pf_anim_push();
+                    },
+                    [S]() -> std::tuple<uint8_t,uint8_t,uint8_t>{
+                        return { S->r, S->g, S->b };
+                    }));
+                si.push_back(with_desc(submenu("Color", std::move(ci)),
+                    "Six presets or a full RGB picker (Custom...)."));
             }
+            {
+                struct M { const char* n; face::ScrollMode m; const char* d; };
+                static const M kModes[] = {
+                    {"Scroll Left",  face::ScrollMode::Left,   "Classic marquee, right to left."},
+                    {"Scroll Right", face::ScrollMode::Right,  "Marquee left to right."},
+                    {"Static",       face::ScrollMode::Static, "Centred, no motion - a fixed label."},
+                    {"Bounce",       face::ScrollMode::Bounce, "Ping-pong between the edges."},
+                };
+                std::vector<MenuItem> mi;
+                for (const auto& m : kModes)
+                    mi.push_back(with_desc(leaf_sel(m.n,
+                        [S, m, pf_anim_push]{ S->mode = m.m; if (pf_anim_push) pf_anim_push(); },
+                        [S, m]{ return S->mode == m.m; }), m.d));
+                si.push_back(with_desc(submenu("Motion", std::move(mi)),
+                    "How the banner moves. Static and Bounce ignore Loop; "
+                    "Speed drives scroll and bounce."));
+            }
+            {
+                struct P { const char* n; face::TextVPos v; };
+                static const P kPos[] = {
+                    {"Center", face::TextVPos::Center},
+                    {"Top",    face::TextVPos::Top},
+                    {"Bottom", face::TextVPos::Bottom},
+                };
+                std::vector<MenuItem> pi;
+                for (const auto& p : kPos)
+                    pi.push_back(leaf_sel(p.n,
+                        [S, p, pf_anim_push]{ S->vpos = p.v; if (pf_anim_push) pf_anim_push(); },
+                        [S, p]{ return S->vpos == p.v; }));
+                si.push_back(with_desc(submenu("Position", std::move(pi)),
+                    "Vertical placement of the banner on the face."));
+            }
+            si.push_back(with_desc(toggle("Bold",
+                [S]{ return S->bold; },
+                [S, pf_anim_push](bool v){ S->bold = v; if (pf_anim_push) pf_anim_push(); }),
+                "Thicken the glyph strokes a step for heavier, more legible "
+                "text (uses more panel real estate)."));
+            si.push_back(with_desc(toggle("Background",
+                [S]{ return S->bg; },
+                [S, pf_anim_push](bool v){ S->bg = v; if (pf_anim_push) pf_anim_push(); }),
+                "Dim the face behind the text band so the message stays "
+                "readable over busy expressions/effects."));
+            si.push_back(with_desc(slider("BG Dim", 0.f, 255.f, 15.f, "",
+                [S]{ return static_cast<float>(S->bg_alpha); },
+                [S, pf_anim_push](float v){ S->bg_alpha = static_cast<uint8_t>(v);
+                                            if (pf_anim_push) pf_anim_push(); }),
+                "How strongly the Background darkens the band (0 = none, "
+                "255 = solid black)."));
             si.push_back(with_desc(toggle("Loop",
                 [S]{ return S->loop; },
                 [S, pf_anim_push](bool v){ S->loop = v; if (pf_anim_push) pf_anim_push(); }),
                 "On: the message wraps around forever. Off: one pass across "
-                "the panels, then the banner switches itself off."));
+                "the panels, then the banner switches itself off. (Scroll "
+                "modes only.)"));
             return with_desc(submenu("Scrolling Text", std::move(si)),
                 "Scroll a text banner across the face panels (5x7 pixel font, "
                 "tinted, above every layer). Config: cfg[\"protoface\"]"
