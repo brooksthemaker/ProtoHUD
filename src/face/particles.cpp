@@ -2076,12 +2076,12 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        // Glyph size / stroke are configurable. Bigger box (so a 2 px Z still
-        // reads), 2 px sharp strokes, full-bright. Sharp (LINE_8, no AA) keeps
-        // the blocky pixel-font look — anti-aliasing blurred the small glyph
-        // into a blob.
+        // Glyph size / stroke are configurable. Bigger box + thin 1 px sharp
+        // strokes (LINE_8, no AA), full-bright: the larger box gives the Z
+        // open counter-spaces so the thin strokes read clearly, without the
+        // chunky blob a thick stroke made on a small glyph.
         const int base_s = std::max(2, jint(cfg_, "size", 3));       // half-size px
-        const int thick  = std::max(1, jint(cfg_, "thickness", 2));  // stroke px
+        const int thick  = std::max(1, jint(cfg_, "thickness", 1));  // stroke px
         for (auto& p : particles_) {
             // Fade in quickly, out slowly; grow one size step mid-flight.
             const double env = std::clamp(std::min((1.0 - p.life) * 5.0,
