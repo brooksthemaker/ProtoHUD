@@ -6115,14 +6115,33 @@ int main(int argc, char* argv[]) {
 
     // Snapshot current settings into `cfg` and write them to `path`. Always writes
     // (callers gate config.json on cfg_parse_failed themselves). Returns success.
-    auto save_config_to = [&](const std::string& path) -> bool {
+    // Atomic config write: tmp + fsync + rename, so a power cut mid-write can
+    // never leave a truncated/corrupt config.json (the old direct fopen(path)
+    // could). Shared by the exit save, profile save and the settings autosave.
+    auto write_cfg_file = [](const std::string& path, const std::string& s) -> bool {
+        const std::string tmp = path + ".tmp";
+        FILE* f = fopen(tmp.c_str(), "w");
+        if (!f) { std::cerr << "[cfg] cannot write to " << path << "\n"; return false; }
+        fwrite(s.c_str(), 1, s.size(), f);
+        fflush(f);
+        fsync(fileno(f));   // durable before the rename makes it visible
+        fclose(f);
+        std::error_code ec;
+        std::filesystem::rename(tmp, path, ec);   // atomic replace
+        if (ec) {
+            std::cerr << "[cfg] rename to " << path << " failed: " << ec.message() << "\n";
+            return false;
+        }
+        return true;
+    };
+    // Last JSON text written to cfg_path — the autosave's change detector.
+    auto cfg_last_saved = std::make_shared<std::string>();
+    auto save_config_to = [&, write_cfg_file, cfg_last_saved](const std::string& path) -> bool {
         try {
             mutate_cfg();
-            FILE* f = fopen(path.c_str(), "w");
-            if (!f) { std::cerr << "[cfg] cannot write to " << path << "\n"; return false; }
             std::string s = cfg.dump(2);
-            fwrite(s.c_str(), 1, s.size(), f);
-            fclose(f);
+            if (!write_cfg_file(path, s)) return false;
+            if (path == cfg_path) *cfg_last_saved = std::move(s);
             std::cout << "[cfg] saved to " << path << "\n";
             return true;
         } catch (const std::exception& e) {
@@ -6295,6 +6314,33 @@ int main(int argc, char* argv[]) {
                 reactions.set_base_ambient(spec);
             }
         }
+
+        // ── Settings autosave ────────────────────────────────────────────────
+        // Persist runtime settings shortly after they change so a hard power-off
+        // (no clean shutdown) doesn't lose them — falling-asleep tuning, effect
+        // speeds, reaction rules, everything mutate_cfg captures. Snapshot +
+        // compare every 10 s; the disk is only touched when something actually
+        // changed (mutate_cfg is settings-only, so idle = zero writes). The
+        // clean-exit save still runs as before. Honors the no-clobber guard.
+        {
+            static auto cfg_autosave_last = std::chrono::steady_clock::now();
+            if (!cfg_parse_failed &&
+                std::chrono::steady_clock::now() - cfg_autosave_last >=
+                    std::chrono::seconds(10)) {
+                cfg_autosave_last = std::chrono::steady_clock::now();
+                try {
+                    mutate_cfg();
+                    std::string s = cfg.dump(2);
+                    if (s != *cfg_last_saved && write_cfg_file(cfg_path, s)) {
+                        *cfg_last_saved = std::move(s);
+                        std::cout << "[cfg] autosaved settings\n";
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[cfg] autosave failed: " << e.what() << "\n";
+                }
+            }
+        }
+
         if (state.win_resize_dirty.exchange(false)) {
             const int rw = state.win_resize_w.load(), rh = state.win_resize_h.load();
             if (rw > 0 && rh > 0 && xr.glfw_window())
