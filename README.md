@@ -226,6 +226,10 @@ The serial symlinks are created by the udev rules in `scripts/install.sh`.
 
 Connected to the CM5 via a single USB-C cable (DisplayPort Alt Mode + USB data for the VITURE SDK).
 
+Driving the glasses through an HDMI→USB-C(DP) converter instead, or SBS/3D not
+engaging? See **[docs/viture-beast-sbs.md](docs/viture-beast-sbs.md)** for the
+EDID / 3840-wide bring-up steps and diagnostics.
+
 ---
 
 ### RP2350 Helmet Audio Processor
