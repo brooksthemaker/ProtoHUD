@@ -79,7 +79,9 @@ The level-shift buffer (U11) is listed once under **RP2354B level shifting**
 
 | # | Part | Example P/N | Qty | Req | Notes |
 |---|------|-------------|-----|-----|-------|
-| 28 | USB 2.0 hub controller | USB2514B / USB2517 | 1 | N1 | Consolidate USB peripherals |
+| 28 | USB 2.0 hub controller | USB2514B / USB2517 | 1 | N1 | Consolidate USB peripherals · full parts list in [`USB-PCIE-EXPANSION.md`](USB-PCIE-EXPANSION.md) |
+| 28b | USB 3.1 Gen 1 4-port hub | USB5744 (alt TUSB8041A) | 1 | N11 | On a CM5 USB 3 port · see [`USB-PCIE-EXPANSION.md`](USB-PCIE-EXPANSION.md) |
+| 28c | PCIe Gen 2 packet switch | PI7C9X2G404 (alt ASM1184e) | 1 | N12 | Fans out the CM5's Gen2 x1 to NVMe + spares · see [`USB-PCIE-EXPANSION.md`](USB-PCIE-EXPANSION.md) |
 | 29 | Current-sense monitors | INA219 / INA260 | 1–4 | N2 | Per-rail telemetry to HUD |
 | 30 | e-Fuse | TPS259x | 1–4 | N3 | Latch-off short protection |
 | 31 | RTC coin-cell holder + cell | CR1220 + holder | 1 | N4 | CM5 onboard RTC backup |
