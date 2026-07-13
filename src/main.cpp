@@ -1562,6 +1562,18 @@ int main(int argc, char* argv[]) {
 
     CamConfig owl_left, owl_right;
 
+    // Saved per-eye focus profile (mode + lens position, written by
+    // mutate_cfg). Restored at boot so a hard power reset comes back with the
+    // last-known focus instead of re-running the AF hunt.
+    auto parse_focus = [](const nlohmann::json& jc, CameraFocusState& f) {
+        if (!jc.contains("focus") || !jc["focus"].is_object()) return;
+        const auto& jf = jc["focus"];
+        const std::string m = jf.value("mode", "auto");
+        f.mode = m == "manual" ? CameraFocusState::Mode::MANUAL
+               : m == "slave"  ? CameraFocusState::Mode::SLAVE
+                               : CameraFocusState::Mode::AUTO;
+        f.focus_position = std::clamp(jf.value("position", 500), 0, 1000);
+    };
     if (jcam.contains("owlsight_left")) {
         auto& jl              = jcam["owlsight_left"];
         owl_left.libcamera_id = jl.value("libcamera_id", 0);
@@ -1571,6 +1583,7 @@ int main(int argc, char* argv[]) {
         owl_left.fps          = jl.value("fps",      60);
         owl_left.rotation_deg = jl.value("rotation_deg", 0);
         parse_cam_controls(jl, state.camera_controls_left);
+        parse_focus(jl, state.focus_left);
     }
     if (jcam.contains("owlsight_right")) {
         auto& jr               = jcam["owlsight_right"];
@@ -1581,6 +1594,7 @@ int main(int argc, char* argv[]) {
         owl_right.fps          = jr.value("fps",      60);
         owl_right.rotation_deg = jr.value("rotation_deg", 0);
         parse_cam_controls(jr, state.camera_controls_right);
+        parse_focus(jr, state.focus_right);
     }
     // Back-compat: older builds persisted a single top-level "resolution" block
     // that forced BOTH eyes to one value. Newer builds save per-eye under
@@ -6017,6 +6031,26 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["owlsight_left"]["rotation_deg"]  = cameras.owl_left_rotation();
         cfg["cameras"]["owlsight_right"]["rotation_deg"] = cameras.owl_right_rotation();
 
+        // Persist the per-eye focus profile. Position is sampled from the live
+        // lens (where AF/slave actually parked it), quantized to steps of 10 so
+        // AF jitter never counts as "settings changed" for the autosave. On a
+        // hard power-off the next boot restores this profile directly instead
+        // of re-running the boot AF hunt (see the boot-focus block).
+        {
+            auto save_focus = [&](const char* key, DmaCamera* c,
+                                  const CameraFocusState& f) {
+                auto& jf = cfg["cameras"][key]["focus"];
+                jf["mode"] = f.mode == CameraFocusState::Mode::AUTO   ? "auto"
+                           : f.mode == CameraFocusState::Mode::MANUAL ? "manual"
+                                                                      : "slave";
+                int pos = f.focus_position;
+                if (c) pos = c->get_focus_position();
+                jf["position"] = std::clamp((pos + 5) / 10 * 10, 0, 1000);
+            };
+            save_focus("owlsight_left",  cameras.owl_left(),  state.focus_left);
+            save_focus("owlsight_right", cameras.owl_right(), state.focus_right);
+        }
+
         // Per-eye AF/AE/WB/ISP/HDR controls. Refresh state from the live cameras
         // (no-op if a camera is absent — the loaded values are kept), then write
         // them under each camera's "controls" block.
@@ -6221,17 +6255,38 @@ int main(int argc, char* argv[]) {
         return true;
     };
 
-    // Kick off a one-shot autofocus on the OWLsight (CSI) cameras at boot; once it
-    // locks (or times out) both settle into SLAVE focus (handled in the loop).
+    // Boot focus: if the config carries a saved focus profile (SLAVE/MANUAL —
+    // written by the settings autosave), restore it directly so the helmet
+    // comes back from a hard power reset with the last-known focus, no AF
+    // hunt. Otherwise (first boot, or the profile was AUTO) kick off the
+    // one-shot boot autofocus; once it locks (or times out) both eyes settle
+    // into SLAVE focus (handled in the loop).
     bool   boot_af_pending = false;
     double boot_af_t0      = 0.0;
     if (cameras.owl_left() || cameras.owl_right()) {
-        if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
-        if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
-        state.focus_left.mode  = CameraFocusState::Mode::AUTO;
-        state.focus_right.mode = CameraFocusState::Mode::AUTO;
-        boot_af_pending = true;
-        boot_af_t0      = glfwGetTime();
+        auto has_profile = [](const CameraFocusState& f) {
+            return f.mode != CameraFocusState::Mode::AUTO;
+        };
+        if (has_profile(state.focus_left) && has_profile(state.focus_right)) {
+            auto restore = [](DmaCamera* c, const CameraFocusState& f) {
+                if (!c) return;
+                c->stop_autofocus();
+                c->set_focus_position(f.focus_position);
+            };
+            restore(cameras.owl_left(),  state.focus_left);
+            restore(cameras.owl_right(), state.focus_right);
+            std::cout << "[cam] restored saved focus profile (L "
+                      << state.focus_left.focus_position << " / R "
+                      << state.focus_right.focus_position
+                      << ") — skipping boot autofocus\n";
+        } else {
+            if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+            if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+            state.focus_left.mode  = CameraFocusState::Mode::AUTO;
+            state.focus_right.mode = CameraFocusState::Mode::AUTO;
+            boot_af_pending = true;
+            boot_af_t0      = glfwGetTime();
+        }
     }
 
     double prev_time = glfwGetTime();
@@ -7299,8 +7354,19 @@ int main(int argc, char* argv[]) {
             const bool l_done = !cameras.owl_left()  || cameras.owl_left()->is_af_locked();
             const bool r_done = !cameras.owl_right() || cameras.owl_right()->is_af_locked();
             if ((l_done && r_done) || (glfwGetTime() - boot_af_t0) > 5.0) {
-                if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
-                if (cameras.owl_right()) cameras.owl_right()->stop_autofocus();
+                // Record where AF parked each lens so the reinit reapply and
+                // the saved focus profile hold the real position, not the
+                // default.
+                if (cameras.owl_left()) {
+                    cameras.owl_left()->stop_autofocus();
+                    state.focus_left.focus_position =
+                        cameras.owl_left()->get_focus_position();
+                }
+                if (cameras.owl_right()) {
+                    cameras.owl_right()->stop_autofocus();
+                    state.focus_right.focus_position =
+                        cameras.owl_right()->get_focus_position();
+                }
                 state.focus_left.mode  = CameraFocusState::Mode::SLAVE;
                 state.focus_right.mode = CameraFocusState::Mode::SLAVE;
                 boot_af_pending = false;

@@ -83,6 +83,45 @@ CM5 PCIe Gen2 x1 ─────► PI7C9X2G404 ──► NVMe (M.2) · 2 spare 
   (Gen 2 x1); everything behind the 3.1 hub shares 5 Gbps. Fine for NVMe
   recording + a TPU; don't expect four full-rate NVMe drives.
 
+## melonHD option — USB-C DP Alt Mode instead of HDMI0
+
+The [melonHD](https://github.com/mackieks/melonHD) (mackieks) is a 17×13 mm
+castellated module — Lontium **LT6711A**, HDMI 2.0 in → USB-C **DP 1.2 Alt
+Mode** out, VBUS-powered with pin-strappable PDO (5 V/3 A … 15 V/3 A) and an
+HPD status pin. Routing CM5 HDMI0 → melonHD → one USB-C to the VITURE Beast
+replaces the external converter chain with a single cable.
+
+**EDID:** the module does **not** expose HDMI DDC and presents a fixed EDID
+from custom firmware ("compatibility with … sources which rely on EDID is not
+guaranteed"). Same problem as any converter — and the same fix:
+`drm.edid_firmware` on the CM5 (see [`../../docs/viture-beast-sbs.md`](../../docs/viture-beast-sbs.md)).
+Residual risk: the LT6711A firmware must accept a forced non-CEA 3840-wide
+timing. It's spec'd to 2160p (≥297 MHz pixel clocks) and DP 1.2 bandwidth fits
+3840×1200@60 (~7.1 Gbps), so plausible — **test one module before committing
+copper**.
+
+**USB data bypass (keeps the VITURE SDK / IMU):** DP Alt Mode only occupies the
+SS pairs — the USB-C receptacle's **D+/D− pins stay free** and the receptacle
+is on our carrier, so the CM5 routes straight past the module:
+
+```
+CM5 HDMI0 ──────────► melonHD ──► SSTX/SSRX (DP video) ─┐
+                         │      ─► CC1/CC2 (PD / alt-mode) ├─► USB-C receptacle ──► Beast
+                         └──────► VBUS source (5 V/3 A)    │
+CM5 USB 2.0 D+/D− ─────────────────────────────────────────┘  (A6/A7 + B6/B7)
+```
+
+- Tie A6↔B6 and A7↔B7 **at the receptacle** (cable-flip), then one 90 Ω pair
+  back to the CM5. USBLC6-2 ESD on the pair.
+- **Do not connect the CM5 port's VBUS** — the module sources VBUS to the
+  glasses; the CM5 contributes data only (hosts don't need their VBUS loaded).
+- Roles align: the module's PD contract makes this end the DFP/source, exactly
+  where a device expects the USB host.
+- If the module's castellations already pass D± (check its reference carrier
+  KiCAD), use that path instead — same result.
+- Strap 5 V/3 A PDO; budget ~8–15 W on `+5V` for module + Beast (POWER.md).
+  HPD → GPIO for connect telemetry. Keep HDMI1 on J10 as debug fallback.
+
 ## Layout notes (the part that actually makes it work)
 
 - USB HS pairs 90 Ω diff; USB SS and PCIe pairs 85–90 Ω diff per datasheet;
