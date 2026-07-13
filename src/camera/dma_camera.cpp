@@ -9,6 +9,7 @@
 #include <EGL/eglext.h>
 
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <cstring>
 #include <sys/mman.h>
@@ -24,6 +25,83 @@
 #define DRM_FORMAT_YUYV   0x56595559u  // packed 4:2:2: Y0 Cb Y1 Cr interleaved
 
 using namespace libcamera;
+
+// ── Manufacturer mode tables ──────────────────────────────────────────────────
+// Datasheet/driver sensor modes per sensor, keyed by the sensor's kernel name.
+// Geometry is authoritative; fps is a nominal figure (0 = platform-dependent)
+// — the startup probe measures the real max on this Pi/link-frequency and
+// overrides. Matched against the libcamera camera id first, then against
+// dtoverlay= lines scanned from /boot/firmware/config.txt.
+namespace {
+struct SpecMode { int w, h, fps; };
+struct SensorSpec { const char* key; std::vector<SpecMode> modes; };
+const std::vector<SensorSpec>& sensor_specs() {
+    static const std::vector<SensorSpec> specs = {
+        // Arducam OwlSight 64MP (kernel driver mode list; fps varies Pi4/Pi5)
+        {"ov64a40", {{1920,1080,0},{2312,1736,0},{3840,2160,0},
+                     {4624,3472,0},{8000,6000,0},{9248,6944,0}}},
+        // Pi Camera Module 3
+        {"imx708",  {{1536,864,120},{2304,1296,56},{4608,2592,14}}},
+        // Pi HQ camera
+        {"imx477",  {{1332,990,120},{2028,1080,50},{2028,1520,40},{4056,3040,10}}},
+        // Pi Camera Module 2
+        {"imx219",  {{640,480,103},{1640,1232,41},{1920,1080,47},{3280,2464,21}}},
+        // Global-shutter camera
+        {"imx296",  {{1456,1088,60}}},
+        // OV9281 global-shutter (fps depends on vendor board/link)
+        {"ov9281",  {{640,400,0},{1280,720,0},{1280,800,0}}},
+    };
+    return specs;
+}
+
+// dtoverlay= values from the boot config, lowered, read once. Lets us name the
+// sensor even when the libcamera id string doesn't carry it.
+const std::vector<std::string>& boot_config_overlays() {
+    static const std::vector<std::string> overlays = []{
+        std::vector<std::string> out;
+        for (const char* path : {"/boot/firmware/config.txt", "/boot/config.txt"}) {
+            std::ifstream f(path);
+            if (!f) continue;
+            std::string line;
+            while (std::getline(f, line)) {
+                const size_t hash = line.find('#');
+                if (hash != std::string::npos) line = line.substr(0, hash);
+                const size_t eq = line.find("dtoverlay=");
+                if (eq == std::string::npos) continue;
+                std::string v = line.substr(eq + 10);
+                if (const size_t comma = v.find(','); comma != std::string::npos)
+                    v = v.substr(0, comma);
+                while (!v.empty() && (v.back() == ' ' || v.back() == '\r' || v.back() == '\t'))
+                    v.pop_back();
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                if (!v.empty()) out.push_back(std::move(v));
+            }
+            break;   // first config file that exists wins
+        }
+        return out;
+    }();
+    return overlays;
+}
+
+// Identify this camera's sensor: substring-match the spec keys against the
+// libcamera id (".../ov64a40@36"), falling back to the config.txt overlays.
+const SensorSpec* match_sensor_spec(const std::string& cam_id, std::string* how) {
+    std::string id = cam_id;
+    std::transform(id.begin(), id.end(), id.begin(), ::tolower);
+    for (const auto& s : sensor_specs())
+        if (id.find(s.key) != std::string::npos) {
+            if (how) *how = "libcamera id";
+            return &s;
+        }
+    for (const auto& ov : boot_config_overlays())
+        for (const auto& s : sensor_specs())
+            if (ov.find(s.key) != std::string::npos) {
+                if (how) *how = "config.txt dtoverlay";
+                return &s;
+            }
+    return nullptr;
+}
+}  // namespace
 
 // ── Construction / destruction ────────────────────────────────────────────────
 
@@ -195,7 +273,7 @@ bool DmaCamera::configure_camera() {
         if (!discrete.empty()) {
             for (const auto& s : discrete)
                 modes_.push_back({ static_cast<int>(s.width),
-                                   static_cast<int>(s.height), 0 });
+                                   static_cast<int>(s.height), 0, kModeSensor });
         } else {
             // The Raspberry Pi ISP pipeline reports a CONTINUOUS size range, not
             // a discrete list, so sizes() is empty. Offer the standard
@@ -217,18 +295,62 @@ bool DmaCamera::configure_camera() {
                     && (w - minw) % hs == 0 && (h - minh) % vs == 0;
             };
             for (const auto& c : kCand)
-                if (fits(c[0], c[1])) modes_.push_back({ c[0], c[1], 0 });
-            if (maxw > 0 && maxh > 0) modes_.push_back({ maxw, maxh, 0 }); // native
+                if (fits(c[0], c[1])) modes_.push_back({ c[0], c[1], 0, kModeScaled });
+            if (maxw > 0 && maxh > 0)
+                modes_.push_back({ maxw, maxh, 0, kModeScaled });   // native
         }
+
+        // The RAW stream role reports the kernel driver's DISCRETE sensor mode
+        // list (what `rpicam-hello --list-cameras` prints) even when the
+        // processed stream only gives a continuous range — these are the
+        // camera's real modes, so matching the output size to one gets its
+        // full binning/fps behaviour.
+        try {
+            auto rc = camera_->generateConfiguration({ StreamRole::Raw });
+            if (rc && !rc->empty()) {
+                const auto& rf = rc->at(0).formats();
+                for (const auto& rpf : rf.pixelformats())
+                    for (const auto& s : rf.sizes(rpf))
+                        modes_.push_back({ static_cast<int>(s.width),
+                                           static_cast<int>(s.height),
+                                           0, kModeSensor });
+            }
+        } catch (...) {}
+
+        // Manufacturer mode table, matched via the libcamera id or a
+        // dtoverlay= scan of /boot/firmware/config.txt. Geometry from the
+        // datasheet; nominal fps only where it isn't platform-dependent (the
+        // probe below measures the real figure on this Pi).
+        {
+            std::string how;
+            if (const auto* spec = match_sensor_spec(camera_->id(), &how)) {
+                for (const auto& m : spec->modes)
+                    modes_.push_back({ m.w, m.h, m.fps, kModeSpec });
+                std::cout << "[dma] camera " << cfg_.libcamera_id << " sensor '"
+                          << spec->key << "' (" << how << "): "
+                          << spec->modes.size() << " datasheet modes merged\n";
+            }
+        }
+
         std::sort(modes_.begin(), modes_.end(),
                   [](const Mode& a, const Mode& b){
-                      return static_cast<long>(a.width) * a.height
-                           > static_cast<long>(b.width) * b.height;
+                      const long aa = static_cast<long>(a.width) * a.height;
+                      const long bb = static_cast<long>(b.width) * b.height;
+                      return aa != bb ? aa > bb : a.width > b.width;
                   });
-        modes_.erase(std::unique(modes_.begin(), modes_.end(),
-                     [](const Mode& a, const Mode& b){
-                         return a.width == b.width && a.height == b.height;
-                     }), modes_.end());
+        // Dedup by size, merging source flags (a size can be reported by the
+        // sensor AND listed in the datasheet) and keeping the best fps guess.
+        std::vector<Mode> merged;
+        for (const auto& m : modes_) {
+            if (!merged.empty() && merged.back().width == m.width &&
+                merged.back().height == m.height) {
+                merged.back().src     |= m.src;
+                merged.back().max_fps  = std::max(merged.back().max_fps, m.max_fps);
+            } else {
+                merged.push_back(m);
+            }
+        }
+        modes_ = std::move(merged);
     } catch (...) {}
 
     // ── Probe each mode's max fps ─────────────────────────────────────────────
@@ -240,8 +362,10 @@ bool DmaCamera::configure_camera() {
     // Bounded so a sensor with a long discrete-mode list doesn't stall startup.
     if (!modes_.empty()) {
         const PixelFormat pf = cam_cfg_->at(0).pixelFormat;
+        std::vector<bool> cfg_failed(modes_.size(), false);
         int probed = 0;
-        for (auto& m : modes_) {
+        for (size_t i = 0; i < modes_.size(); ++i) {
+            auto& m = modes_[i];
             if (probed >= 40) break;
             ++probed;
             try {
@@ -251,16 +375,37 @@ bool DmaCamera::configure_camera() {
                 psc.pixelFormat = pf;
                 psc.size = { static_cast<unsigned>(m.width),
                              static_cast<unsigned>(m.height) };
-                if (pc->validate() == CameraConfiguration::Invalid) continue;
-                if (camera_->configure(pc.get()) != 0) continue;
+                if (pc->validate() == CameraConfiguration::Invalid ||
+                    camera_->configure(pc.get()) != 0) {
+                    cfg_failed[i] = true;
+                    continue;
+                }
                 const auto& cim = camera_->controls();
                 if (cim.count(&controls::FrameDurationLimits)) {
                     int64_t min_dur =
                         cim.at(&controls::FrameDurationLimits).min().get<int64_t>();
+                    // Keep the datasheet nominal when the probe can't measure.
                     if (min_dur > 0)
                         m.max_fps = static_cast<int>((1000000LL + min_dur / 2) / min_dur);
                 }
-            } catch (...) {}
+            } catch (...) { cfg_failed[i] = true; }
+        }
+        // Drop datasheet-only modes this pipeline refused to configure —
+        // offering them would give the user a dead menu entry. Sizes also
+        // reported by the sensor/range enumeration stay (probe hiccups are
+        // possible; libcamera clamps on selection).
+        {
+            size_t k = 0;
+            std::vector<Mode> kept;
+            kept.reserve(modes_.size());
+            for (size_t i = 0; i < modes_.size(); ++i) {
+                const bool spec_only = modes_[i].src == kModeSpec;
+                if (!(spec_only && cfg_failed[i])) kept.push_back(modes_[i]);
+                else ++k;
+            }
+            if (k) std::cout << "[dma] camera " << cfg_.libcamera_id << ": dropped "
+                             << k << " datasheet mode(s) the pipeline rejected\n";
+            modes_ = std::move(kept);
         }
         // Restore the configuration we actually want to run.
         camera_->configure(cam_cfg_.get());
