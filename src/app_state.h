@@ -851,6 +851,14 @@ struct AppState {
         float width_deg  = 30.f;    // angular width of the window (persisted)
         bool  focus_keys = false;   // route the keyboard into the terminal
         float fov_deg    = 43.f;    // per-eye horizontal FOV (persisted)
+        // Smooth follow (persisted): instead of staying world-locked, the pin
+        // anchor glides after the head pose, so the window lazily follows
+        // your gaze. Within follow_dead degrees of center it holds still
+        // (stable reading); beyond that, the excess is eased away at
+        // follow_speed per second (higher = snappier catch-up).
+        bool  follow       = false;
+        float follow_speed = 2.0f;  // 1/s easing rate on the out-of-deadzone delta
+        float follow_dead  = 5.0f;  // deg the window may rest off-center
     };
     FloatWin float_win;
 

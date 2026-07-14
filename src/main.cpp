@@ -2379,6 +2379,9 @@ int main(int argc, char* argv[]) {
         const auto& jfw = jhud["float_window"];
         state.float_win.content   = std::clamp(jfw.value("content", 0), 0, 1);
         state.float_win.width_deg = std::clamp(jfw.value("width_deg", 30.0f), 10.f, 60.f);
+        state.float_win.follow       = jfw.value("follow", false);
+        state.float_win.follow_speed = std::clamp(jfw.value("follow_speed", 2.0f), 0.25f, 8.f);
+        state.float_win.follow_dead  = std::clamp(jfw.value("follow_dead", 5.0f), 0.f, 30.f);
     }
     // Timewarp pose prediction horizon (ms). Covers pose age + render +
     // scan-out; 0 disables extrapolation.
@@ -5642,6 +5645,9 @@ int main(int argc, char* argv[]) {
         cfg["display"]["fov_deg"]                      = state.float_win.fov_deg;
         cfg["hud"]["float_window"]["content"]          = state.float_win.content;
         cfg["hud"]["float_window"]["width_deg"]        = state.float_win.width_deg;
+        cfg["hud"]["float_window"]["follow"]           = state.float_win.follow;
+        cfg["hud"]["float_window"]["follow_speed"]     = state.float_win.follow_speed;
+        cfg["hud"]["float_window"]["follow_dead"]      = state.float_win.follow_dead;
         cfg["landing"]["skip"]            = state.skip_landing;
         cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
         cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
@@ -7436,6 +7442,29 @@ int main(int argc, char* argv[]) {
             snap.compass_tape       = state.compass_tape;
             snap.attitude           = state.attitude;
             snap.attitude_pose      = state.attitude_pose;
+            // Floating-window smooth follow: ease the pin anchor toward the
+            // current head pose so the window glides after your gaze instead
+            // of staying world-locked. Inside the deadzone it holds perfectly
+            // still (stable reading); only the delta beyond it is chased, so
+            // the window comes to rest follow_dead degrees off-center.
+            if (state.float_win.enabled && state.float_win.pinned &&
+                state.float_win.follow && dt > 0.f) {
+                auto circ = [](float d){
+                    while (d >  180.f) d -= 360.f;
+                    while (d < -180.f) d += 360.f;
+                    return d;
+                };
+                auto& fwin = state.float_win;
+                const float rate = std::min(1.f, fwin.follow_speed * dt);
+                const float dz   = std::clamp(fwin.follow_dead, 0.f, 30.f);
+                const float dyaw = circ(state.attitude_pose.yaw - fwin.yaw);
+                if (std::fabs(dyaw) > dz)
+                    fwin.yaw = circ(fwin.yaw +
+                                    (dyaw - std::copysign(dz, dyaw)) * rate);
+                const float dpit = state.attitude_pose.pitch - fwin.pitch;
+                if (std::fabs(dpit) > dz)
+                    fwin.pitch += (dpit - std::copysign(dz, dpit)) * rate;
+            }
             snap.float_win          = state.float_win;
             snap.legacy_hud         = state.legacy_hud;
             snap.imu_pose           = state.imu_pose;

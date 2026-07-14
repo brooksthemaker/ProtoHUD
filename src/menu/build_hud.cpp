@@ -1750,6 +1750,32 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [&state]{ return state.float_win.width_deg; },
             [&state](float v){ state.float_win.width_deg = v; }),
             "Angular width of the window in degrees of your view."),
+        with_desc(toggle("Smooth Follow",
+            [&state]{ return state.float_win.follow; },
+            [&state](bool v){ state.float_win.follow = v; }),
+            "Instead of staying locked in place, the window glides after "
+            "your gaze — it holds still for small head movements (see "
+            "Follow Deadzone) and smoothly catches up when you turn away. "
+            "Off = classic world-pinned."),
+        [&state]() -> MenuItem {
+            MenuItem m = with_desc(slider("Follow Speed", 0.25f, 6.f, 0.25f, "x",
+                [&state]{ return state.float_win.follow_speed; },
+                [&state](float v){ state.float_win.follow_speed = v; }),
+                "How quickly the window catches up once it's outside the "
+                "deadzone. Higher = snappier; lower = a lazy drift.");
+            m.visible_fn = [&state]{ return state.float_win.follow; };
+            return m;
+        }(),
+        [&state]() -> MenuItem {
+            MenuItem m = with_desc(slider("Follow Deadzone", 0.f, 20.f, 1.f, "\xc2\xb0",
+                [&state]{ return state.float_win.follow_dead; },
+                [&state](float v){ state.float_win.follow_dead = v; }),
+                "How far off-center the window may sit before it starts "
+                "following. Bigger = more stable for reading; 0 = always "
+                "drifts back to center.");
+            m.visible_fn = [&state]{ return state.float_win.follow; };
+            return m;
+        }(),
         [&state, menu_sys_pp]() -> MenuItem {
             MenuItem m = with_desc(toggle("Keyboard Focus",
                 [&state]{ return state.float_win.focus_keys; },
