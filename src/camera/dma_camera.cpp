@@ -40,12 +40,29 @@ const std::vector<SensorSpec>& sensor_specs() {
         // Arducam OwlSight 64MP (kernel driver mode list; fps varies Pi4/Pi5)
         {"ov64a40", {{1920,1080,0},{2312,1736,0},{3840,2160,0},
                      {4624,3472,0},{8000,6000,0},{9248,6944,0}}},
+        // Arducam 64MP Hawkeye (overlay arducam-64mp / id arducam_64mp —
+        // matcher normalizes '-' to '_')
+        {"arducam_64mp", {{1280,720,120},{1920,1080,60},{2312,1736,30},
+                          {3840,2160,20},{4624,3472,10},{9152,6944,2}}},
+        // Arducam 16MP autofocus
+        {"imx519",  {{1280,720,120},{1920,1080,60},{2328,1748,30},
+                     {3840,2160,18},{4656,3496,9}}},
         // Pi Camera Module 3
         {"imx708",  {{1536,864,120},{2304,1296,56},{4608,2592,14}}},
         // Pi HQ camera
         {"imx477",  {{1332,990,120},{2028,1080,50},{2028,1520,40},{4056,3040,10}}},
+        // IMX378 (imx477 family — same mode geometry; fps platform-dependent)
+        {"imx378",  {{1332,990,0},{2028,1080,0},{2028,1520,0},{4056,3040,0}}},
         // Pi Camera Module 2
         {"imx219",  {{640,480,103},{1640,1232,41},{1920,1080,47},{3280,2464,21}}},
+        // Pi Camera Module 1 / clones
+        {"ov5647",  {{640,480,59},{1296,972,43},{1920,1080,31},{2592,1944,16}}},
+        // Arducam 16MP IMX298 (native full-res; driver mode list not public)
+        {"imx298",  {{4640,3488,0}}},
+        // Arducam 8.3MP IMX415 STARVIS (driver mode 3864x2192@30 on 4 lanes)
+        {"imx415",  {{3864,2192,30}}},
+        // Arducam 5MP IMX335 STARVIS
+        {"imx335",  {{2592,1944,0}}},
         // Global-shutter camera
         {"imx296",  {{1456,1088,60}}},
         // OV9281 global-shutter (fps depends on vendor board/link)
@@ -85,20 +102,28 @@ const std::vector<std::string>& boot_config_overlays() {
 
 // Identify this camera's sensor: substring-match the spec keys against the
 // libcamera id (".../ov64a40@36"), falling back to the config.txt overlays.
+// '-' normalizes to '_' so overlay spellings (arducam-64mp) match driver ids
+// (arducam_64mp).
 const SensorSpec* match_sensor_spec(const std::string& cam_id, std::string* how) {
-    std::string id = cam_id;
-    std::transform(id.begin(), id.end(), id.begin(), ::tolower);
+    auto norm = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        std::replace(s.begin(), s.end(), '-', '_');
+        return s;
+    };
+    const std::string id = norm(cam_id);
     for (const auto& s : sensor_specs())
         if (id.find(s.key) != std::string::npos) {
             if (how) *how = "libcamera id";
             return &s;
         }
-    for (const auto& ov : boot_config_overlays())
+    for (const auto& ov : boot_config_overlays()) {
+        const std::string o = norm(ov);
         for (const auto& s : sensor_specs())
-            if (ov.find(s.key) != std::string::npos) {
+            if (o.find(s.key) != std::string::npos) {
                 if (how) *how = "config.txt dtoverlay";
                 return &s;
             }
+    }
     return nullptr;
 }
 }  // namespace
