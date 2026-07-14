@@ -180,6 +180,12 @@ public:
     // "Refraction" hint: how strongly the backdrop face should glow back through
     // this layer (water overrides). 0 = opaque overlay like every other effect.
     virtual double face_glow() const { return 0.0; }
+    // Face-tint request (frost overrides): a panel-local CV_8UC1 mask filled
+    // during render(), or nullptr when the effect doesn't tint. r/g/b is the
+    // tint colour. The mask shares a scratch buffer consumed the same tick.
+    virtual const cv::Mat* face_tint(uint8_t&, uint8_t&, uint8_t&) const {
+        return nullptr;
+    }
 
     // Latest IMU / audio state, pushed each frame by the owning ParticleSystem.
     // Effects read it through count()/direction_unit() when the cfg opts in.
@@ -863,12 +869,31 @@ public:
         }
         if (grad.empty())
             grad = { {255, 255, 255}, {200, 230, 255}, {120, 180, 255} };
+        // Face tint: the face material "freezes" toward the frost's rim colour
+        // in a gradient that follows the density field — strongest where the
+        // sheet is solid, fading to nothing at the growth front. Default ON
+        // for fractal frost; "face_tint" (0..1) in the layer cfg overrides.
+        const double tint_k = std::clamp(
+            jnum(cfg_, "face_tint", fractal_ ? 0.7 : 0.0), 0.0, 1.0);
+        tint_active_ = tint_k > 0.0;
+        if (tint_active_) {
+            if (tint_mask_.rows != h_ || tint_mask_.cols != w_ ||
+                tint_mask_.type() != CV_8UC1)
+                tint_mask_.create(h_, w_, CV_8UC1);
+            tint_mask_.setTo(0);
+            tint_col_ = grad.back();   // dense rim colour = the frost blue
+        }
         const double tsh = age_ * 1.4;
         for (int ly = 0; ly < h_; ++ly) {
+            uchar* tm = tint_active_ ? tint_mask_.ptr<uchar>(ly) : nullptr;
             for (int lx = 0; lx < w_; ++lx) {
                 const int gx = lx + ox_, gy = ly + oy_;
                 const float f = cell(gx, gy);
                 if (f < 0.04f) continue;
+                // pow<1 pushes the tint deeper into the thin leading edge, so
+                // the blue reads as a gradient spreading ahead of solid ice.
+                if (tm) tm[lx] = (uchar)std::lround(
+                    255.0 * tint_k * std::pow((double)f, 0.6));
                 const float h1 = hash01(gx, gy);
                 const Color col = sample_grad(grad, f);
                 // Per-cell grain brightness keeps crystal texture in the sheet
@@ -899,6 +924,14 @@ public:
                            env * std::min(1.0, opacity + 0.35));
         }
         return c;
+    }
+
+    const cv::Mat* face_tint(uint8_t& r, uint8_t& g, uint8_t& b) const override {
+        if (!tint_active_ || tint_mask_.empty()) return nullptr;
+        r = (uint8_t)tint_col_.r;
+        g = (uint8_t)tint_col_.g;
+        b = (uint8_t)tint_col_.b;
+        return &tint_mask_;
     }
 
 private:
@@ -1015,6 +1048,9 @@ private:
     std::vector<Particle> flakes_;              // large drifting snowflakes
     double flake_acc_ = 0.0;                     // snowflake spawn timer
     std::mt19937 det_rng_{0x1CEF7057u};         // shared fixed seed (see update)
+    cv::Mat tint_mask_;                          // face-tint mask (see render)
+    bool    tint_active_ = false;
+    Color   tint_col_{120, 180, 255};
 };
 
 // ── Heatwave ─────────────────────────────────────────────────────────────────
@@ -2525,6 +2561,9 @@ struct ParticleLayer {
     void update(double dt) { if (effect) effect->update(dt); }
     cv::Mat render()       { return effect ? effect->render() : cv::Mat(); }
     double  face_glow() const { return effect ? effect->face_glow() : 0.0; }
+    const cv::Mat* face_tint(uint8_t& r, uint8_t& g, uint8_t& b) const {
+        return effect ? effect->face_tint(r, g, b) : nullptr;
+    }
     void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
     void set_audio(double level)          { if (effect) effect->set_audio(level); }
     void set_humidity(double h)           { if (effect) effect->set_humidity(h); }
@@ -2675,6 +2714,15 @@ ParticleFrame ParticleSystem::render() {
         has = true;
         if (layer.blend != Blend::Add) all_add = false;
         result.face_glow = std::max(result.face_glow, layer.face_glow());
+        // Face-tint request (frost): first tinting layer wins — the mask is a
+        // scratch header consumed this tick, same contract as rgba.
+        if (result.face_tint.empty()) {
+            uint8_t tr, tg, tb;
+            if (const cv::Mat* tm = layer.face_tint(tr, tg, tb)) {
+                result.face_tint = *tm;
+                result.tint_r = tr; result.tint_g = tg; result.tint_b = tb;
+            }
+        }
 
         if (layer.blend == Blend::Add) {
             // Vectorized accumulate: uchar layer → float, summed in one pass.

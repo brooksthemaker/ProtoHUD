@@ -59,6 +59,34 @@ nlohmann::json effect_cfg_for_id(int id) {
     }
 }
 
+// Freeze-over tint (frost): recolour the face layer toward the tint colour
+// where the mask is set, preserving each pixel's luminance so the art stays
+// readable — the material reads as "turned frost blue" in the mask's
+// gradient, not painted over. Runs on the face layer BEFORE the particle
+// layer composites, so the crystals sit on top of the frozen face.
+static void apply_face_tint(cv::Mat& face_rgba, const cv::Mat& mask,
+                            uint8_t tr, uint8_t tg, uint8_t tb) {
+    if (face_rgba.empty() || mask.empty() ||
+        face_rgba.size() != mask.size() || face_rgba.type() != CV_8UC4 ||
+        mask.type() != CV_8UC1)
+        return;
+    for (int y = 0; y < face_rgba.rows; ++y) {
+        cv::Vec4b*   p = face_rgba.ptr<cv::Vec4b>(y);
+        const uchar* m = mask.ptr<uchar>(y);
+        for (int x = 0; x < face_rgba.cols; ++x) {
+            if (!m[x] || !p[x][3]) continue;
+            const float k    = m[x] / 255.f;
+            const float luma = (0.299f * p[x][0] + 0.587f * p[x][1] +
+                                0.114f * p[x][2]) / 255.f;
+            // Slight lift so dim art still reads icy rather than black.
+            const float lift = std::min(1.f, luma * 1.1f + 0.06f);
+            p[x][0] = (uchar)std::lround(p[x][0] * (1.f - k) + tr * lift * k);
+            p[x][1] = (uchar)std::lround(p[x][1] * (1.f - k) + tg * lift * k);
+            p[x][2] = (uchar)std::lround(p[x][2] * (1.f - k) + tb * lift * k);
+        }
+    }
+}
+
 // Bloom the submerged face back over a composited frame: the face glows in
 // its OWN colours (the material colour), and a blurred halo bleeds that light
 // into the liquid around it, gently tinted by the liquid so it reads as light
@@ -486,6 +514,13 @@ void NativeFaceController::render_thread() {
                 ParticleFrame pf;
                 if (pn.particles && gframe.empty() && !eye_active) {
                     pf = pn.particles->render();
+                    // Freeze-over: frost recolours the face toward its rim
+                    // blue in the field's gradient before the crystal layer
+                    // composites on top (in-place on face_layer, which
+                    // layers[0] shares).
+                    if (pf.has && !pf.face_tint.empty())
+                        apply_face_tint(face_layer, pf.face_tint,
+                                        pf.tint_r, pf.tint_g, pf.tint_b);
                     if (pf.has) layers.push_back(Layer{pf.rgba, pf.blend});
                 }
 

@@ -31,6 +31,13 @@ struct ParticleFrame {
     // Max "refraction" hint across layers (water): how strongly the backdrop
     // face should glow back through the layer. 0 for ordinary effects.
     double  face_glow = 0.0;
+    // Face-tint request (frost): a per-pixel mask (CV_8UC1, panel-local, empty
+    // = none) plus the tint colour. The renderer recolours the face layer
+    // toward the tint where the mask is set, BEFORE the particle layer
+    // composites on top — so the face material "freezes over" in a gradient
+    // that follows the frost's spread.
+    cv::Mat face_tint;
+    uint8_t tint_r = 0, tint_g = 0, tint_b = 0;
 };
 
 // Combine two particle specs into one layered spec — `base`'s layers first,
