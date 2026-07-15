@@ -55,6 +55,8 @@
 #include "sensor/bme280.h"
 #include "sensor/temp_sensors.h"
 #include "face/reaction_engine.h"
+#include "face/expression_director.h"
+#include "face/reaction_rules.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
 #include "sys/fan_controller.h"
@@ -1560,6 +1562,18 @@ int main(int argc, char* argv[]) {
 
     CamConfig owl_left, owl_right;
 
+    // Saved per-eye focus profile (mode + lens position, written by
+    // mutate_cfg). Restored at boot so a hard power reset comes back with the
+    // last-known focus instead of re-running the AF hunt.
+    auto parse_focus = [](const nlohmann::json& jc, CameraFocusState& f) {
+        if (!jc.contains("focus") || !jc["focus"].is_object()) return;
+        const auto& jf = jc["focus"];
+        const std::string m = jf.value("mode", "auto");
+        f.mode = m == "manual" ? CameraFocusState::Mode::MANUAL
+               : m == "slave"  ? CameraFocusState::Mode::SLAVE
+                               : CameraFocusState::Mode::AUTO;
+        f.focus_position = std::clamp(jf.value("position", 500), 0, 1000);
+    };
     if (jcam.contains("owlsight_left")) {
         auto& jl              = jcam["owlsight_left"];
         owl_left.libcamera_id = jl.value("libcamera_id", 0);
@@ -1569,6 +1583,7 @@ int main(int argc, char* argv[]) {
         owl_left.fps          = jl.value("fps",      60);
         owl_left.rotation_deg = jl.value("rotation_deg", 0);
         parse_cam_controls(jl, state.camera_controls_left);
+        parse_focus(jl, state.focus_left);
     }
     if (jcam.contains("owlsight_right")) {
         auto& jr               = jcam["owlsight_right"];
@@ -1579,6 +1594,7 @@ int main(int argc, char* argv[]) {
         owl_right.fps          = jr.value("fps",      60);
         owl_right.rotation_deg = jr.value("rotation_deg", 0);
         parse_cam_controls(jr, state.camera_controls_right);
+        parse_focus(jr, state.focus_right);
     }
     // Back-compat: older builds persisted a single top-level "resolution" block
     // that forced BOTH eyes to one value. Newer builds save per-eye under
@@ -1762,13 +1778,16 @@ int main(int argc, char* argv[]) {
     // ── Accessory LEDs (cheekhubs + fins on WS2812 daisy-chain) ──────────────
     // Single chain driven through Pi 5 SPI MOSI (GPIO 10). Zone slicing is
     // declarative — config picks {start, count} per zone (LeftCheekhub,
-    // RightCheekhub, LeftFin, RightFin); patterns are per-zone (Off / Solid /
-    // Breathe in v1, audio + event hooks later).
+    // RightCheekhub, LeftFin, RightFin, Blush); patterns are per-zone (Off /
+    // Solid / Breathe / Level / Chase / Sparkle), plus per-zone brightness
+    // and a follow-face color sync. Legacy 4-zone configs load unchanged —
+    // blush just defaults to count 0 (dark).
     accessory::AccessoryLeds::Config led_cfg;
     led_cfg.zones[0].name = "left_cheekhub";
     led_cfg.zones[1].name = "right_cheekhub";
     led_cfg.zones[2].name = "left_fin";
     led_cfg.zones[3].name = "right_fin";
+    led_cfg.zones[4].name = "blush";
     if (cfg.contains("accessory_leds")) {
         auto& jl = cfg["accessory_leds"];
         led_cfg.enabled            = jval(jl, "enabled",           false);
@@ -1796,9 +1815,17 @@ int main(int argc, char* argv[]) {
                 const std::string pat = jz.value("pattern", std::string("solid"));
                 if      (pat == "off")     led_cfg.zones[i].pattern = accessory::Pattern::Off;
                 else if (pat == "breathe") led_cfg.zones[i].pattern = accessory::Pattern::Breathe;
+                else if (pat == "level")   led_cfg.zones[i].pattern = accessory::Pattern::Level;
+                else if (pat == "chase")   led_cfg.zones[i].pattern = accessory::Pattern::Chase;
+                else if (pat == "sparkle") led_cfg.zones[i].pattern = accessory::Pattern::Sparkle;
                 else                       led_cfg.zones[i].pattern = accessory::Pattern::Solid;
                 led_cfg.zones[i].breathe_hz =
                     jval(jz, "breathe_hz", led_cfg.zones[i].breathe_hz);
+                led_cfg.zones[i].zone_brightness = static_cast<uint8_t>(std::clamp(
+                    jval(jz, "zone_brightness",
+                         static_cast<int>(led_cfg.zones[i].zone_brightness)), 0, 255));
+                led_cfg.zones[i].follow_face =
+                    jval(jz, "follow_face", led_cfg.zones[i].follow_face);
             }
         }
         // Strip length = highest (start + count) across configured zones; lets
@@ -2003,6 +2030,11 @@ int main(int argc, char* argv[]) {
     bool   pf_temp_effects     = false;
     double pf_temp_cold_c      = 5.0;    // frost at/below this (deg C)
     double pf_temp_hot_c       = 45.0;   // heatwave at/above this (deg C)
+    bool   pf_frost_fractal    = true;   // frost grows in fractal ferns + big snowflakes
+    bool   pf_heat_heartbeat   = true;   // heatwave adds an orange heartbeat rim pulse
+    double pf_frost_speed      = 1.0;    // frost formation/creep speed multiplier
+    double pf_heat_speed       = 1.0;    // heatwave shimmer + heartbeat speed multiplier
+    int    pf_temp_force       = 0;      // preview override: 0 off, 1 frost, 2 heatwave (not saved)
     bool   weather_fx_resync   = true;
     // MAX7219 panel layout editor state (Face Display > MAX7219 Layout). Loaded
     // from cfg["protoface"]["max7219"] below; pf_max7219_apply serialises it back
@@ -2013,6 +2045,11 @@ int main(int argc, char* argv[]) {
     // every option (chromatic, tearing, blocks, bitcrush, dropout, datamosh,
     // region_desync, expr_flicker) is an independent variable.
     face::GlitchConfig pf_glitch;
+    // Per-expression style overrides (material/effect/glitch per expression),
+    // persisted under protoface.expression_styles. Pushed into the native
+    // controller at start; the controller is the live source of truth after
+    // that (menu edits go straight to it), so saves read back from it.
+    std::map<std::string, face::ExpressionStyle> pf_expr_styles;
     // Scrolling-text banner across the face panels (marquee) — forwarded to
     // the native controller live and persisted to cfg["protoface"]
     // ["scroll_text"]. See face/scroll_text.h.
@@ -2048,6 +2085,10 @@ int main(int argc, char* argv[]) {
         pf_temp_effects        = jval(jpf, "temp_effects",      pf_temp_effects);
         pf_temp_cold_c         = jval(jpf, "temp_cold_c",       pf_temp_cold_c);
         pf_temp_hot_c          = jval(jpf, "temp_hot_c",        pf_temp_hot_c);
+        pf_frost_fractal       = jval(jpf, "frost_fractal",     pf_frost_fractal);
+        pf_heat_heartbeat      = jval(jpf, "heatwave_heartbeat", pf_heat_heartbeat);
+        pf_frost_speed         = jval(jpf, "frost_speed",       pf_frost_speed);
+        pf_heat_speed          = jval(jpf, "heatwave_speed",    pf_heat_speed);
         state.face.pride_angle = jval(jpf, "pride_angle", 90);
         if (jpf.contains("layout") && jpf["layout"].is_object()) {
             auto& jl = jpf["layout"];
@@ -2110,6 +2151,25 @@ int main(int argc, char* argv[]) {
         }
         if (jpf.contains("glitch") && jpf["glitch"].is_object())
             pf_glitch = face::GlitchConfig::from_json(jpf["glitch"]);
+        if (jpf.contains("expression_styles") && jpf["expression_styles"].is_object())
+            for (auto it = jpf["expression_styles"].begin();
+                 it != jpf["expression_styles"].end(); ++it)
+                pf_expr_styles[it.key()] = face::ExpressionStyle::from_json(it.value());
+        if (jpf.contains("custom_expressions") && jpf["custom_expressions"].is_array()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (const auto& jc : jpf["custom_expressions"]) {
+                state.custom_expressions.push_back(face::CustomExpression::from_json(jc));
+                if ((int)state.custom_expressions.size() >= face::kMaxCustomExpressions)
+                    break;
+            }
+        }
+        if (jpf.contains("expression_triggers") && jpf["expression_triggers"].is_object()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (auto it = jpf["expression_triggers"].begin();
+                 it != jpf["expression_triggers"].end(); ++it)
+                state.expression_triggers[it.key()] =
+                    face::TriggerSet::from_json(it.value());
+        }
         if (jpf.contains("scroll_text") && jpf["scroll_text"].is_object())
             pf_scroll = face::ScrollTextConfig::from_json(jpf["scroll_text"]);
         if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
@@ -2292,6 +2352,7 @@ int main(int argc, char* argv[]) {
     state.max_messages        = jval(jhud, "lora_message_history", 50);
     state.compass_bg_enabled  = jhud.value("compass_bg", true);
     state.compass_tape        = jhud.value("compass_tape", true);
+    state.compass_smooth      = std::clamp(jhud.value("compass_smooth", 0.25f), 0.f, 1.f);
     state.legacy_hud          = jhud.value("legacy_hud", true);
     if (jhud.contains("attitude_indicator") && jhud["attitude_indicator"].is_object()) {
         // .value() throws on a key present with the wrong type (e.g. a quoted
@@ -2318,6 +2379,9 @@ int main(int argc, char* argv[]) {
         const auto& jfw = jhud["float_window"];
         state.float_win.content   = std::clamp(jfw.value("content", 0), 0, 1);
         state.float_win.width_deg = std::clamp(jfw.value("width_deg", 30.0f), 10.f, 60.f);
+        state.float_win.follow       = jfw.value("follow", false);
+        state.float_win.follow_speed = std::clamp(jfw.value("follow_speed", 2.0f), 0.25f, 8.f);
+        state.float_win.follow_dead  = std::clamp(jfw.value("follow_dead", 5.0f), 0.f, 30.f);
     }
     // Timewarp pose prediction horizon (ms). Covers pose age + render +
     // scan-out; 0 disables extrapolation.
@@ -2849,6 +2913,93 @@ int main(int argc, char* argv[]) {
         return "";
     };
 
+    // ── Custom-expression director ────────────────────────────────────────────
+    // Watches boop/gesture/motion/light triggers for user-created expressions
+    // and shows base face + style override while one is active (see
+    // face/expression_director.h). Thread-safe internally; trigger sources
+    // pass a snapshot of the list so state.mtx never nests inside it.
+    face::ExpressionDirector expr_director;
+    {
+        // First run (or short list): seed the starter empty slots so the
+        // menu always shows something to fill in.
+        std::lock_guard<std::mutex> lk(state.mtx);
+        while ((int)state.custom_expressions.size() < face::kInitialCustomSlots)
+            state.custom_expressions.emplace_back();
+    }
+    {
+        face::ExpressionDirector::Actions da;
+        da.set_face     = [&face_proxy](const std::string& e){ face_proxy.set_face_by_name(e); };
+        da.current_face = [&face_proxy]{ return face_proxy.current_expression(); };
+        da.set_style_override   = [&face_proxy](const face::ExpressionStyle& st){
+            face_proxy.set_style_override(st);
+        };
+        da.clear_style_override = [&face_proxy]{ face_proxy.clear_style_override(); };
+        da.notify = [&state](const std::string& t, const std::string& b){
+            Notification n; n.type = NotifType::App;
+            n.title = t; n.body = b; n.auto_dismiss_s = 3.f;
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.notifs.push(std::move(n));
+        };
+        expr_director.set_actions(std::move(da));
+    }
+    // ── Reactions list (named environmental reactions) ────────────────────────
+    // Move into bright/dark, dizzy, low battery, loud noise, upside-down: each
+    // a trigger + outcome (expression or GIF). See face/reaction_rules.h. Owns
+    // its own rules (persisted as protoface.reaction_rules); the menu edits
+    // them and it fires outcomes on the render thread.
+    face::ReactionRules reaction_rules;
+    {
+        face::ReactionRules::Actions ra2;
+        ra2.set_face     = [&face_proxy](const std::string& e){ face_proxy.set_face_by_name(e); };
+        ra2.current_face = [&face_proxy]{ return face_proxy.current_expression(); };
+        ra2.play_gif     = [&face_proxy](const std::string& file){
+            face_proxy.play_gif_file(file);
+        };
+        ra2.notify = [&state](const std::string& t, const std::string& b){
+            Notification n; n.type = NotifType::App;
+            n.title = t; n.body = b; n.auto_dismiss_s = 3.f;
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.notifs.push(std::move(n));
+        };
+        reaction_rules.set_actions(std::move(ra2));
+        if (cfg.contains("protoface") && cfg["protoface"].is_object() &&
+            cfg["protoface"].contains("reaction_rules"))
+            reaction_rules.load_json(cfg["protoface"]["reaction_rules"]);
+    }
+    // Latest mic level (0..1) for the Loud Noise reaction — written by the
+    // audio callback thread.
+    auto last_mic = std::make_shared<std::atomic<float>>(0.f);
+    // Latest ambient lux for the director's light events/conditions
+    // (written by the light-sensor callback thread; -1 = no reading yet).
+    auto last_lux = std::make_shared<std::atomic<float>>(-1.f);
+    // Rules snapshot for the director: every expression key with recipes,
+    // resolved to what activation shows (custom slots carry name/base/style;
+    // built-ins activate their own stem and style via the resolver).
+    auto rules_snapshot = [&state]{
+        std::vector<face::ExpressionDirector::Rule> rules;
+        std::lock_guard<std::mutex> lk(state.mtx);
+        for (const auto& [key, ts] : state.expression_triggers) {
+            if (!ts.any()) continue;
+            face::ExpressionDirector::Rule r;
+            r.key = key; r.hold_s = ts.hold_s; r.recipes = ts.recipes;
+            if (key.rfind("custom_", 0) == 0) {
+                const int idx = std::atoi(key.c_str() + 7);
+                if (idx < 0 || idx >= (int)state.custom_expressions.size()) continue;
+                const auto& cx = state.custom_expressions[idx];
+                if (!cx.used) continue;
+                r.name = cx.name;
+                r.base_expression = cx.base_expression;
+                r.has_style = true;
+                r.style = cx.style;
+            } else {
+                r.name = key;
+                r.base_expression = key;
+            }
+            rules.push_back(std::move(r));
+        }
+        return rules;
+    };
+
     // Per-zone rapid-boop tracking for the animated-eyes easter egg. Touched
     // only from the sensor poll thread, so no extra locking is needed here.
     auto eye_now = []{
@@ -2872,20 +3023,27 @@ int main(int argc, char* argv[]) {
             break;
         case sensor::BoopSensor::Zone::LeftCheek:
             accessory_leds.trigger_flash(LZ::LeftCheekhub,  0.35);
+            accessory_leds.trigger_flash(LZ::Blush,         0.45);
             break;
         case sensor::BoopSensor::Zone::RightCheek:
             accessory_leds.trigger_flash(LZ::RightCheekhub, 0.35);
+            accessory_leds.trigger_flash(LZ::Blush,         0.45);
             break;
         case sensor::BoopSensor::Zone::BothCheeks:
             accessory_leds.trigger_flash(LZ::LeftCheekhub,  0.45);
             accessory_leds.trigger_flash(LZ::RightCheekhub, 0.45);
             accessory_leds.trigger_flash(LZ::LeftFin,       0.45);
             accessory_leds.trigger_flash(LZ::RightFin,      0.45);
+            accessory_leds.trigger_flash(LZ::Blush,         0.6);
             break;
         }
     };
 
-    auto fire_boop = [&face_proxy, &state, boop_face_stem,
+    // Boop precedence: rapid-boop animated-eyes easter egg → a FIRING
+    // trigger recipe (counting boops still get the default reaction as
+    // feedback) → default boop reaction.
+    auto fire_boop = [&face_proxy, &state, &expr_director, rules_snapshot,
+                      boop_face_stem,
                       eye_now, flash_zone, eye_last, eye_run, eye_mtx]
                      (sensor::BoopSensor::Zone z) {
         const auto zi = static_cast<size_t>(z);
@@ -2927,6 +3085,15 @@ int main(int argc, char* argv[]) {
         } else {
             std::lock_guard<std::mutex> lk(*eye_mtx);
             (*eye_run)[zi] = 0;
+        }
+        // A recipe firing on this boop claims it: the director shows its
+        // expression (with its own hold), so the default reaction is
+        // suppressed. Intermediate counting boops fall through — the normal
+        // reaction is the per-boop feedback on the way to e.g. "×5 → angry".
+        if (expr_director.on_boop(static_cast<int>(z), rules_snapshot())) {
+            face_proxy.trigger_boop_ripple(static_cast<int>(z));
+            flash_zone(z);
+            return;
         }
         // Prefer the dedicated boop_<zone> face when present on disk.
         // face_image_exists() is the canonical "is this PNG in the active
@@ -2982,7 +3149,11 @@ int main(int argc, char* argv[]) {
         double last_squint_t = -1.0e9;
     };
     auto light_edge = std::make_shared<LightEdgeState>();
-    light_sensor.set_lux_callback([light_edge, &state, &face_proxy](float lux) {
+    light_sensor.set_lux_callback([light_edge, &state, &face_proxy,
+                                   last_lux](float lux) {
+        // Publish for the director's light events/conditions (it edge-detects
+        // in its tick), independent of the squint gate below.
+        last_lux->store(lux);
         const double now = std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         // Snapshot the config so a mid-callback menu edit can't tear strings.
@@ -3312,6 +3483,9 @@ int main(int argc, char* argv[]) {
                 native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max,
                                               pf_blink_duration);
         };
+        ra.set_eyes_closed = [&native_ctrl](bool closed){
+            if (native_ctrl) native_ctrl->set_eyes_closed(closed);
+        };
         ra.set_ambient = [&native_ctrl](const nlohmann::json& spec){
             if (native_ctrl) native_ctrl->set_ambient_effect(spec);
         };
@@ -3320,6 +3494,12 @@ int main(int argc, char* argv[]) {
             n.title = t; n.body = b; n.auto_dismiss_s = 5.f;
             std::lock_guard<std::mutex> lk(state.mtx);
             state.notifs.push(std::move(n));
+        };
+        ra.motion_event = [&expr_director, rules_snapshot](const char* ev){
+            // Shake is a recipe event; stillness is a WHILE-condition (fed
+            // via set_conditions), so only the spike routes through here.
+            if (std::string_view(ev) == "shake")
+                expr_director.on_shake(rules_snapshot());
         };
         reactions.set_actions(std::move(ra));
     }
@@ -3428,6 +3608,8 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        for (const auto& [expr, st] : pf_expr_styles)
+            native_ctrl->set_expression_style(expr, st);
         native_ctrl->set_scroll_text(pf_scroll);
         native_ctrl->set_active_layout_name(pf_hub75_active);
         protoface_ctrl.start();   // shm reader only — feeds the in-HUD preview
@@ -3706,6 +3888,8 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
         native_ctrl->set_expression_fade(pf_expr_fade);
         native_ctrl->set_glitch(pf_glitch);
+        for (const auto& [expr, st] : pf_expr_styles)
+            native_ctrl->set_expression_style(expr, st);
         native_ctrl->set_scroll_text(pf_scroll);
         native_ctrl->set_active_layout_name(pf_hub75_active);
 
@@ -3911,10 +4095,11 @@ int main(int argc, char* argv[]) {
     // are disabled we don't push at all and the FaceLoader's "mouth_open"
     // default stays selected.
     audio.set_face_drive_callback(
-        [&face_proxy, &accessory_leds, voice = audio.voice()](double vol, double mouth) {
+        [&face_proxy, &accessory_leds, last_mic, voice = audio.voice()](double vol, double mouth) {
             // Accessory LEDs use the analyzer's broadband volume for any zone
             // running Pattern::Level — even if mouth-open is disabled.
             accessory_leds.set_audio_volume(static_cast<float>(vol));
+            last_mic->store(static_cast<float>(vol));
             if (voice && voice->visemes_enabled())
                 face_proxy.set_mouth_shape(voice->mouth_shape());
             face_proxy.set_audio_drive(vol, mouth);
@@ -4189,6 +4374,9 @@ int main(int argc, char* argv[]) {
 
     MenuBuildContext menu_ctx;
     menu_ctx.teensy  = &face_proxy;
+    menu_ctx.expr_director = &expr_director;
+    menu_ctx.show_prototracer = cfg.contains("protoface") &&
+        cfg["protoface"].value("show_prototracer", false);
     // Live rendered face canvas (face + material + effects) for the Effects
     // context-panel preview. Reads the current native_ctrl each call so it keeps
     // working across backend swaps; empty on the Teensy/daemon backends.
@@ -4402,6 +4590,11 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_temp_effects_p = &pf_temp_effects;
     menu_ctx.pf_temp_cold_p    = &pf_temp_cold_c;
     menu_ctx.pf_temp_hot_p     = &pf_temp_hot_c;
+    menu_ctx.pf_frost_fractal_p  = &pf_frost_fractal;
+    menu_ctx.pf_heat_heartbeat_p = &pf_heat_heartbeat;
+    menu_ctx.pf_frost_speed_p    = &pf_frost_speed;
+    menu_ctx.pf_heat_speed_p     = &pf_heat_speed;
+    menu_ctx.pf_temp_force_p     = &pf_temp_force;
     menu_ctx.pf_ambient_resync = [&]{ weather_fx_resync = true; };
     menu_ctx.pf_live_tick = pf_live_tick;
     menu_ctx.cfg_root = &cfg;
@@ -4478,6 +4671,7 @@ int main(int argc, char* argv[]) {
     };
     menu_ctx.pf_glitch_p = &pf_glitch;
     menu_ctx.reactions = &reactions;
+    menu_ctx.reaction_rules = &reaction_rules;
     menu_ctx.pf_scroll_p = &pf_scroll;
 
     MenuSystem menu(build_menu(menu_ctx));
@@ -4983,8 +5177,13 @@ int main(int argc, char* argv[]) {
                     ja.value(keys[i], std::string("none")));
     }
     sensor::Apds9960 apds(apds_cfg);
-    apds.set_gesture_callback([&gpio_dispatch, &apds_fn](sensor::Apds9960::Gesture g){
-        gpio_dispatch(apds_fn[static_cast<int>(g)]);
+    apds.set_gesture_callback([&gpio_dispatch, &apds_fn,
+                               &expr_director, rules_snapshot](sensor::Apds9960::Gesture g){
+        static const char* kGestureNames[] = { "up", "down", "left", "right" };
+        const int gi = static_cast<int>(g);
+        if (gi >= 0 && gi < 4)
+            expr_director.on_gesture(kGestureNames[gi], rules_snapshot());
+        gpio_dispatch(apds_fn[gi]);
     });
     apds.set_proximity_callback([&gpio_dispatch, &apds_fn](bool near){
         if (near) gpio_dispatch(apds_fn[4]);          // fire on approach only
@@ -5004,12 +5203,19 @@ int main(int argc, char* argv[]) {
         bme_cfg.poll_s   = jval(jb, "poll_s",   bme_cfg.poll_s);
     }
     sensor::Bme280 bme280(bme_cfg);
-    bme280.set_callback([&state](const sensor::Bme280::Reading& r){
-        std::lock_guard<std::mutex> lk(state.mtx);
-        state.env.ok           = true;
-        state.env.temp_c       = r.temp_c;
-        state.env.humidity_pct = r.humidity_pct;
-        state.env.pressure_hpa = r.pressure_hpa;
+    bme280.set_callback([&state, &face_proxy](const sensor::Bme280::Reading& r){
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.env.ok           = true;
+            state.env.temp_c       = r.temp_c;
+            state.env.humidity_pct = r.humidity_pct;
+            state.env.pressure_hpa = r.pressure_hpa;
+        }
+        // Feed relative humidity (0..1) to the face so a water effect with
+        // "level_from":"humidity" fills to match the room. Lock-free atomic
+        // store; no-op unless the native Protoface controller is active.
+        face_proxy.set_env_humidity(
+            std::clamp(r.humidity_pct / 100.0f, 0.0f, 1.0f));
     });
     if (bme_cfg.enabled && !bme280.start())
         std::cerr << "[main] BME280 environment sensor unavailable\n";
@@ -5423,6 +5629,7 @@ int main(int argc, char* argv[]) {
         cfg["hud"]["glow_intensity"]      = hud.config().glow_intensity;
         cfg["hud"]["compass_bg"]          = state.compass_bg_enabled;
         cfg["hud"]["compass_tape"]        = state.compass_tape;
+        cfg["hud"]["compass_smooth"]      = state.compass_smooth;
         cfg["hud"]["legacy_hud"]          = state.legacy_hud;
         // A hand-edited config could hold attitude_indicator as a non-object;
         // operator[] on it would then throw out of the save path. Reset first.
@@ -5438,6 +5645,9 @@ int main(int argc, char* argv[]) {
         cfg["display"]["fov_deg"]                      = state.float_win.fov_deg;
         cfg["hud"]["float_window"]["content"]          = state.float_win.content;
         cfg["hud"]["float_window"]["width_deg"]        = state.float_win.width_deg;
+        cfg["hud"]["float_window"]["follow"]           = state.float_win.follow;
+        cfg["hud"]["float_window"]["follow_speed"]     = state.float_win.follow_speed;
+        cfg["hud"]["float_window"]["follow_dead"]      = state.float_win.follow_dead;
         cfg["landing"]["skip"]            = state.skip_landing;
         cfg["hud"]["expanded_show_debug"] = state.expanded_show_debug;
         cfg["hud"]["expanded_hide_info"]  = state.expanded_hide_info;
@@ -5505,14 +5715,18 @@ int main(int argc, char* argv[]) {
             auto& jl = cfg["accessory_leds"];
             jl["global_brightness"] = static_cast<int>(accessory_leds.global_brightness());
             auto& jzones = jl["zones"];
-            if (!jzones.is_array() || jzones.size() < accessory::ZoneCount)
-                jzones = json::array({json{}, json{}, json{}, json{}});
-            static const char* pat_name[] = { "off", "solid", "breathe", "level" };
+            if (!jzones.is_array()) jzones = json::array();
+            while (jzones.size() < accessory::ZoneCount) jzones.push_back(json{});
+            // Index order MUST match the Pattern enum.
+            static const char* pat_name[] = { "off", "solid", "breathe", "level",
+                                              "chase", "sparkle" };
             for (int i = 0; i < accessory::ZoneCount; ++i) {
                 auto zc = accessory_leds.zone(static_cast<accessory::Zone>(i));
-                jzones[i]["pattern"]    = pat_name[static_cast<int>(zc.pattern)];
-                jzones[i]["color"]      = json::array({ zc.r, zc.g, zc.b });
-                jzones[i]["breathe_hz"] = zc.breathe_hz;
+                jzones[i]["pattern"]         = pat_name[static_cast<int>(zc.pattern)];
+                jzones[i]["color"]           = json::array({ zc.r, zc.g, zc.b });
+                jzones[i]["breathe_hz"]      = zc.breathe_hz;
+                jzones[i]["zone_brightness"] = static_cast<int>(zc.zone_brightness);
+                jzones[i]["follow_face"]     = zc.follow_face;
             }
         }
 
@@ -5568,6 +5782,10 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["temp_effects"]        = pf_temp_effects;
         cfg["protoface"]["temp_cold_c"]         = pf_temp_cold_c;
         cfg["protoface"]["temp_hot_c"]          = pf_temp_hot_c;
+        cfg["protoface"]["frost_fractal"]       = pf_frost_fractal;
+        cfg["protoface"]["heatwave_heartbeat"]  = pf_heat_heartbeat;
+        cfg["protoface"]["frost_speed"]         = pf_frost_speed;
+        cfg["protoface"]["heatwave_speed"]      = pf_heat_speed;
         cfg["protoface"]["pride_angle"]         = state.face.pride_angle;
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
@@ -5612,6 +5830,24 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["animation"]["expression_fade"] = pf_expr_fade;
         cfg["protoface"]["animation"]["preview_duration_s"] = pf_preview_duration_s;
         cfg["protoface"]["glitch"] = pf_glitch.to_json();
+        {
+            if (native_ctrl) pf_expr_styles = native_ctrl->all_expression_styles();
+            nlohmann::json js = nlohmann::json::object();
+            for (const auto& [expr, st] : pf_expr_styles)
+                if (st.any()) js[expr] = st.to_json();
+            cfg["protoface"]["expression_styles"] = std::move(js);
+        }
+        {
+            nlohmann::json jc = nlohmann::json::array();
+            nlohmann::json jt = nlohmann::json::object();
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (const auto& cx : state.custom_expressions) jc.push_back(cx.to_json());
+            for (const auto& [key, ts] : state.expression_triggers)
+                if (ts.any()) jt[key] = ts.to_json();
+            cfg["protoface"]["custom_expressions"]  = std::move(jc);
+            cfg["protoface"]["expression_triggers"] = std::move(jt);
+            cfg["protoface"]["reaction_rules"]      = reaction_rules.to_json();
+        }
         cfg["protoface"]["scroll_text"] = pf_scroll.to_json();
         {
             auto& jg = cfg["protoface"]["gradient"];
@@ -5801,6 +6037,26 @@ int main(int argc, char* argv[]) {
         cfg["cameras"]["owlsight_left"]["rotation_deg"]  = cameras.owl_left_rotation();
         cfg["cameras"]["owlsight_right"]["rotation_deg"] = cameras.owl_right_rotation();
 
+        // Persist the per-eye focus profile. Position is sampled from the live
+        // lens (where AF/slave actually parked it), quantized to steps of 10 so
+        // AF jitter never counts as "settings changed" for the autosave. On a
+        // hard power-off the next boot restores this profile directly instead
+        // of re-running the boot AF hunt (see the boot-focus block).
+        {
+            auto save_focus = [&](const char* key, DmaCamera* c,
+                                  const CameraFocusState& f) {
+                auto& jf = cfg["cameras"][key]["focus"];
+                jf["mode"] = f.mode == CameraFocusState::Mode::AUTO   ? "auto"
+                           : f.mode == CameraFocusState::Mode::MANUAL ? "manual"
+                                                                      : "slave";
+                int pos = f.focus_position;
+                if (c) pos = c->get_focus_position();
+                jf["position"] = std::clamp((pos + 5) / 10 * 10, 0, 1000);
+            };
+            save_focus("owlsight_left",  cameras.owl_left(),  state.focus_left);
+            save_focus("owlsight_right", cameras.owl_right(), state.focus_right);
+        }
+
         // Per-eye AF/AE/WB/ISP/HDR controls. Refresh state from the live cameras
         // (no-op if a camera is absent — the loaded values are kept), then write
         // them under each camera's "controls" block.
@@ -5899,14 +6155,33 @@ int main(int argc, char* argv[]) {
 
     // Snapshot current settings into `cfg` and write them to `path`. Always writes
     // (callers gate config.json on cfg_parse_failed themselves). Returns success.
-    auto save_config_to = [&](const std::string& path) -> bool {
+    // Atomic config write: tmp + fsync + rename, so a power cut mid-write can
+    // never leave a truncated/corrupt config.json (the old direct fopen(path)
+    // could). Shared by the exit save, profile save and the settings autosave.
+    auto write_cfg_file = [](const std::string& path, const std::string& s) -> bool {
+        const std::string tmp = path + ".tmp";
+        FILE* f = fopen(tmp.c_str(), "w");
+        if (!f) { std::cerr << "[cfg] cannot write to " << path << "\n"; return false; }
+        fwrite(s.c_str(), 1, s.size(), f);
+        fflush(f);
+        fsync(fileno(f));   // durable before the rename makes it visible
+        fclose(f);
+        std::error_code ec;
+        std::filesystem::rename(tmp, path, ec);   // atomic replace
+        if (ec) {
+            std::cerr << "[cfg] rename to " << path << " failed: " << ec.message() << "\n";
+            return false;
+        }
+        return true;
+    };
+    // Last JSON text written to cfg_path — the autosave's change detector.
+    auto cfg_last_saved = std::make_shared<std::string>();
+    auto save_config_to = [&, write_cfg_file, cfg_last_saved](const std::string& path) -> bool {
         try {
             mutate_cfg();
-            FILE* f = fopen(path.c_str(), "w");
-            if (!f) { std::cerr << "[cfg] cannot write to " << path << "\n"; return false; }
             std::string s = cfg.dump(2);
-            fwrite(s.c_str(), 1, s.size(), f);
-            fclose(f);
+            if (!write_cfg_file(path, s)) return false;
+            if (path == cfg_path) *cfg_last_saved = std::move(s);
             std::cout << "[cfg] saved to " << path << "\n";
             return true;
         } catch (const std::exception& e) {
@@ -5986,17 +6261,38 @@ int main(int argc, char* argv[]) {
         return true;
     };
 
-    // Kick off a one-shot autofocus on the OWLsight (CSI) cameras at boot; once it
-    // locks (or times out) both settle into SLAVE focus (handled in the loop).
+    // Boot focus: if the config carries a saved focus profile (SLAVE/MANUAL —
+    // written by the settings autosave), restore it directly so the helmet
+    // comes back from a hard power reset with the last-known focus, no AF
+    // hunt. Otherwise (first boot, or the profile was AUTO) kick off the
+    // one-shot boot autofocus; once it locks (or times out) both eyes settle
+    // into SLAVE focus (handled in the loop).
     bool   boot_af_pending = false;
     double boot_af_t0      = 0.0;
     if (cameras.owl_left() || cameras.owl_right()) {
-        if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
-        if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
-        state.focus_left.mode  = CameraFocusState::Mode::AUTO;
-        state.focus_right.mode = CameraFocusState::Mode::AUTO;
-        boot_af_pending = true;
-        boot_af_t0      = glfwGetTime();
+        auto has_profile = [](const CameraFocusState& f) {
+            return f.mode != CameraFocusState::Mode::AUTO;
+        };
+        if (has_profile(state.focus_left) && has_profile(state.focus_right)) {
+            auto restore = [](DmaCamera* c, const CameraFocusState& f) {
+                if (!c) return;
+                c->stop_autofocus();
+                c->set_focus_position(f.focus_position);
+            };
+            restore(cameras.owl_left(),  state.focus_left);
+            restore(cameras.owl_right(), state.focus_right);
+            std::cout << "[cam] restored saved focus profile (L "
+                      << state.focus_left.focus_position << " / R "
+                      << state.focus_right.focus_position
+                      << ") — skipping boot autofocus\n";
+        } else {
+            if (cameras.owl_left())  cameras.owl_left()->start_autofocus();
+            if (cameras.owl_right()) cameras.owl_right()->start_autofocus();
+            state.focus_left.mode  = CameraFocusState::Mode::AUTO;
+            state.focus_right.mode = CameraFocusState::Mode::AUTO;
+            boot_af_pending = true;
+            boot_af_t0      = glfwGetTime();
+        }
     }
 
     double prev_time = glfwGetTime();
@@ -6039,7 +6335,18 @@ int main(int argc, char* argv[]) {
             weather_fx_last   = std::chrono::steady_clock::now();
             weather_fx_resync = false;
             nlohmann::json spec;
-            if (pf_weather_effects || pf_temp_effects) {
+            // Preview override (Face Display > Effects > Test Frost/Heatwave):
+            // force the temp effect on regardless of the live temperature, so
+            // it shows even with no sensor/weather. Wins over everything else.
+            if (pf_temp_force == 1)
+                spec = {{"effect", "frost"}, {"count", 44},
+                        {"fractal", pf_frost_fractal}, {"speed", pf_frost_speed},
+                        {"blend", "add"}};
+            else if (pf_temp_force == 2)
+                spec = {{"effect", "heatwave"}, {"count", 18},
+                        {"heartbeat", pf_heat_heartbeat}, {"speed", pf_heat_speed},
+                        {"blend", "add"}};
+            else if (pf_weather_effects || pf_temp_effects) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 if (state.weather.ok) {
                     if (pf_weather_effects)
@@ -6051,8 +6358,14 @@ int main(int argc, char* argv[]) {
                         double t = state.weather.temp;
                         if (!state.weather_cfg.metric)
                             t = (t - 32.0) * 5.0 / 9.0;
-                        if      (t <= pf_temp_cold_c) spec = {{"preset", "frost"}};
-                        else if (t >= pf_temp_hot_c)  spec = {{"preset", "heatwave"}};
+                        if (t <= pf_temp_cold_c)
+                            spec = {{"effect", "frost"}, {"count", 44},
+                                    {"fractal", pf_frost_fractal},
+                                    {"speed", pf_frost_speed}, {"blend", "add"}};
+                        else if (t >= pf_temp_hot_c)
+                            spec = {{"effect", "heatwave"}, {"count", 18},
+                                    {"heartbeat", pf_heat_heartbeat},
+                                    {"speed", pf_heat_speed}, {"blend", "add"}};
                     }
                 }
             }
@@ -6062,6 +6375,33 @@ int main(int argc, char* argv[]) {
                 reactions.set_base_ambient(spec);
             }
         }
+
+        // ── Settings autosave ────────────────────────────────────────────────
+        // Persist runtime settings shortly after they change so a hard power-off
+        // (no clean shutdown) doesn't lose them — falling-asleep tuning, effect
+        // speeds, reaction rules, everything mutate_cfg captures. Snapshot +
+        // compare every 10 s; the disk is only touched when something actually
+        // changed (mutate_cfg is settings-only, so idle = zero writes). The
+        // clean-exit save still runs as before. Honors the no-clobber guard.
+        {
+            static auto cfg_autosave_last = std::chrono::steady_clock::now();
+            if (!cfg_parse_failed &&
+                std::chrono::steady_clock::now() - cfg_autosave_last >=
+                    std::chrono::seconds(10)) {
+                cfg_autosave_last = std::chrono::steady_clock::now();
+                try {
+                    mutate_cfg();
+                    std::string s = cfg.dump(2);
+                    if (s != *cfg_last_saved && write_cfg_file(cfg_path, s)) {
+                        *cfg_last_saved = std::move(s);
+                        std::cout << "[cfg] autosaved settings\n";
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[cfg] autosave failed: " << e.what() << "\n";
+                }
+            }
+        }
+
         if (state.win_resize_dirty.exchange(false)) {
             const int rw = state.win_resize_w.load(), rh = state.win_resize_h.load();
             if (rw > 0 && rh > 0 && xr.glfw_window())
@@ -6191,9 +6531,12 @@ int main(int argc, char* argv[]) {
                             return static_cast<float>(y);
                         }
                         const double dts = std::clamp(dt_s, 1e-3, 0.1);
-                        dy += (1.0 - std::exp(-2.0 * M_PI * 1.0 * dts)) *
+                        // Derivative tracked at 2.5 Hz (was 1.0) so the filter
+                        // notices motion sooner, and a stronger speed term so
+                        // it opens wider once it does.
+                        dy += (1.0 - std::exp(-2.0 * M_PI * 2.5 * dts)) *
                               (diff / dts - dy);
-                        const double fc = fc_min + 0.15 * std::fabs(dy);
+                        const double fc = fc_min + 0.35 * std::fabs(dy);
                         y += (1.0 - std::exp(-2.0 * M_PI * fc * dts)) * diff;
                         if (wrap) y = circ(y);
                         return static_cast<float>(y);
@@ -6202,8 +6545,12 @@ int main(int argc, char* argv[]) {
                 static AngleSmooth s_att_r, s_att_p, s_att_y;
                 const float sm = std::clamp(state.attitude.smooth, 0.f, 1.f);
                 if (sm > 0.001f) {
-                    // slider 0→raw; 1→0.3 Hz floor (very calm when still)
-                    const double fc_min = 0.3 + (1.0 - sm) * 4.7;
+                    // slider 0→raw (bypassed below); →0 approaches ~14 Hz
+                    // (near-raw), 1→1.0 Hz floor (calm when still). The floor
+                    // only rules at rest — the speed term above opens the
+                    // cutoff as soon as the head actually moves, so even a
+                    // smooth setting tracks a real turn in near-real time.
+                    const double fc_min = 1.0 + (1.0 - sm) * 13.0;
                     ap.roll  = s_att_r.step(ap.roll,  dt, fc_min, true);
                     ap.pitch = s_att_p.step(ap.pitch, dt, fc_min, false);
                     ap.yaw   = s_att_y.step(ap.yaw,   dt, fc_min, true);
@@ -6217,6 +6564,61 @@ int main(int argc, char* argv[]) {
             // is about the wearer, not the effect settings.
             reactions.feed_motion(m_gyro_mag, std::fabs(m_accel - 1.0));
             reactions.tick(dt);
+            // Recipe WHILE-conditions: head roll from the attitude pose,
+            // latest ambient lux, and "moving" = smoothed motion energy above
+            // twice the reactions calm threshold.
+            expr_director.set_conditions(
+                state.attitude_pose.roll, last_lux->load(),
+                reactions.energy_dps() > reactions.config().calm_dps * 2.0);
+            expr_director.tick(dt, rules_snapshot());
+
+            // Named environmental reactions (Reactions list).
+            {
+                face::ReactionRules::Signals rs;
+                rs.lux         = last_lux->load();
+                rs.spin_dps    = static_cast<float>(std::fabs(m_yaw));
+                rs.roll_deg    = state.attitude_pose.roll;
+                rs.mic         = last_mic->load();
+                { std::lock_guard<std::mutex> lk(state.mtx);
+                  rs.battery_pct = state.health.wireless_battery_pct; }
+                reaction_rules.set_signals(rs);
+                reaction_rules.tick(dt);
+            }
+
+            // Follow-face feed for accessory LED zones: mean color of the lit
+            // face pixels, sampled a few times a second — cheap, and works
+            // for any material (gradients, GIFs, glitch) since it reads the
+            // composited canvas.
+            {
+                static double follow_face_cooldown = 0.0;
+                follow_face_cooldown -= dt;
+                if (follow_face_cooldown <= 0.0 && accessory_leds.is_running() &&
+                    native_ctrl) {
+                    bool any_follow = false;
+                    for (int zi = 0; zi < accessory::ZoneCount; ++zi)
+                        if (accessory_leds.zone(static_cast<accessory::Zone>(zi)).follow_face) {
+                            any_follow = true;
+                            break;
+                        }
+                    if (any_follow) {
+                        cv::Mat frame;
+                        if (native_ctrl->latest_frame(frame) && !frame.empty()) {
+                            const cv::Scalar sum = cv::sum(frame);
+                            // Mean over LIT pixels: normalize by a luma-based
+                            // count so dark backgrounds don't wash the color out.
+                            cv::Mat gray;
+                            cv::cvtColor(frame, gray, cv::COLOR_RGB2GRAY);
+                            const int lit = cv::countNonZero(gray > 24);
+                            if (lit > 0)
+                                accessory_leds.set_face_color(
+                                    static_cast<uint8_t>(std::min(255.0, sum[0] / lit)),
+                                    static_cast<uint8_t>(std::min(255.0, sum[1] / lit)),
+                                    static_cast<uint8_t>(std::min(255.0, sum[2] / lit)));
+                        }
+                    }
+                    follow_face_cooldown = 0.2;   // ~5 Hz
+                }
+            }
 
             // ── Motion-range calibration wizard ─────────────────────────
             // Press-driven: each Select on the menu row captures the current
@@ -6744,8 +7146,13 @@ int main(int argc, char* argv[]) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.float_win.focus_keys = false;
             }
+            // Never capture the keyboard while the deep menu (or its OSK)
+            // is up — the fullscreen menu would sit on top eating every
+            // keystroke into the pty with no keyboard way out. Focus
+            // resumes automatically when the menu closes.
             g_term_focus.store(want_term && terminal.running() &&
-                               snap.float_win.focus_keys);
+                               snap.float_win.focus_keys &&
+                               !menu.is_deep_open());
         }
 
         // PiP toggle state (pip_left_active / pip_right_active) is now flipped
@@ -6953,8 +7360,19 @@ int main(int argc, char* argv[]) {
             const bool l_done = !cameras.owl_left()  || cameras.owl_left()->is_af_locked();
             const bool r_done = !cameras.owl_right() || cameras.owl_right()->is_af_locked();
             if ((l_done && r_done) || (glfwGetTime() - boot_af_t0) > 5.0) {
-                if (cameras.owl_left())  cameras.owl_left()->stop_autofocus();
-                if (cameras.owl_right()) cameras.owl_right()->stop_autofocus();
+                // Record where AF parked each lens so the reinit reapply and
+                // the saved focus profile hold the real position, not the
+                // default.
+                if (cameras.owl_left()) {
+                    cameras.owl_left()->stop_autofocus();
+                    state.focus_left.focus_position =
+                        cameras.owl_left()->get_focus_position();
+                }
+                if (cameras.owl_right()) {
+                    cameras.owl_right()->stop_autofocus();
+                    state.focus_right.focus_position =
+                        cameras.owl_right()->get_focus_position();
+                }
                 state.focus_left.mode  = CameraFocusState::Mode::SLAVE;
                 state.focus_right.mode = CameraFocusState::Mode::SLAVE;
                 boot_af_pending = false;
@@ -7024,6 +7442,29 @@ int main(int argc, char* argv[]) {
             snap.compass_tape       = state.compass_tape;
             snap.attitude           = state.attitude;
             snap.attitude_pose      = state.attitude_pose;
+            // Floating-window smooth follow: ease the pin anchor toward the
+            // current head pose so the window glides after your gaze instead
+            // of staying world-locked. Inside the deadzone it holds perfectly
+            // still (stable reading); only the delta beyond it is chased, so
+            // the window comes to rest follow_dead degrees off-center.
+            if (state.float_win.enabled && state.float_win.pinned &&
+                state.float_win.follow && dt > 0.f) {
+                auto circ = [](float d){
+                    while (d >  180.f) d -= 360.f;
+                    while (d < -180.f) d += 360.f;
+                    return d;
+                };
+                auto& fwin = state.float_win;
+                const float rate = std::min(1.f, fwin.follow_speed * dt);
+                const float dz   = std::clamp(fwin.follow_dead, 0.f, 30.f);
+                const float dyaw = circ(state.attitude_pose.yaw - fwin.yaw);
+                if (std::fabs(dyaw) > dz)
+                    fwin.yaw = circ(fwin.yaw +
+                                    (dyaw - std::copysign(dz, dyaw)) * rate);
+                const float dpit = state.attitude_pose.pitch - fwin.pitch;
+                if (std::fabs(dpit) > dz)
+                    fwin.pitch += (dpit - std::copysign(dz, dpit)) * rate;
+            }
             snap.float_win          = state.float_win;
             snap.legacy_hud         = state.legacy_hud;
             snap.imu_pose           = state.imu_pose;
@@ -7124,29 +7565,49 @@ int main(int argc, char* argv[]) {
         }
 
         // Smooth compass heading on the render thread so the rate is constant
-        // and independent of IMU callback frequency.  Circular lerp (sin/cos)
-        // handles the 0/360 wrap.  tau=0.35 s → ~350 ms time constant.
+        // and independent of IMU callback frequency. Speed-adaptive (One-Euro
+        // style, same idea as the attitude indicator): a calm ~0.8 Hz cutoff
+        // eats mag jitter when still, and the cutoff opens with turn rate so
+        // fast heading changes track near-raw instead of gliding behind
+        // (the old fixed tau=0.35 s lagged the needle ~a second per turn).
+        // Wrap-aware; jumps >90° (tare / source switch) snap through.
         {
-            static float    s_smooth  = -1.f;
+            static bool     s_init    = false;
+            static double   s_smooth  = 0.0;
+            static double   s_rate    = 0.0;      // smoothed turn rate, deg/s
             static uint64_t s_last_us = 0;
             auto now_us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count());
             float dt = s_last_us ? (now_us - s_last_us) * 1e-6f : 0.f;
             s_last_us = now_us;
-            float raw = snap.compass_heading;
-            if (s_smooth < 0.f || dt > 1.f) {
+            const double raw = snap.compass_heading;
+            auto circ = [](double v) {
+                while (v > 180.0)  v -= 360.0;
+                while (v < -180.0) v += 360.0;
+                return v;
+            };
+            const double diff = circ(raw - s_smooth);
+            // Response control (HUD > Compass > Response): 0 = raw (most
+            // real-time), 1 = calm. Maps to the calm-cutoff floor; the speed
+            // term opens it near-raw during a turn regardless.
+            const float  csm = std::clamp(state.compass_smooth, 0.f, 1.f);
+            if (csm <= 0.001f || !s_init || dt > 1.f || std::fabs(diff) > 90.0) {
+                // Raw / re-init / big jump (tare, source switch): snap through.
                 s_smooth = raw;
+                s_rate   = 0.0;
+                s_init   = true;
             } else {
-                constexpr float kTau = 0.35f;
-                float alpha = 1.f - std::exp(-dt / kTau);
-                constexpr float kD2R = 3.14159265f / 180.f;
-                float fs = std::sin(s_smooth * kD2R) + alpha * (std::sin(raw * kD2R) - std::sin(s_smooth * kD2R));
-                float fc = std::cos(s_smooth * kD2R) + alpha * (std::cos(raw * kD2R) - std::cos(s_smooth * kD2R));
-                s_smooth = std::atan2(fs, fc) / kD2R;
-                if (s_smooth < 0.f) s_smooth += 360.f;
+                const double dts = std::clamp(static_cast<double>(dt), 1e-3, 0.1);
+                s_rate += (1.0 - std::exp(-2.0 * M_PI * 2.5 * dts)) *
+                          (diff / dts - s_rate);
+                const double fc_min = 1.0 + (1.0 - csm) * 13.0;   // 1.0 (calm) .. 14 Hz
+                const double fc = fc_min + 0.35 * std::fabs(s_rate);
+                s_smooth += (1.0 - std::exp(-2.0 * M_PI * fc * dts)) * diff;
+                while (s_smooth < 0.0)    s_smooth += 360.0;
+                while (s_smooth >= 360.0) s_smooth -= 360.0;
             }
-            snap.compass_heading = s_smooth;
+            snap.compass_heading = static_cast<float>(s_smooth);
         }
 
         // GPIO monitor: poll sysfs ~1 Hz (every ~60 frames at 60 FPS).

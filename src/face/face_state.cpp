@@ -95,6 +95,13 @@ void FaceState::update(double dt) {
 }
 
 void FaceState::update_blink(double dt) {
+    // Asleep — hold the eyes fully shut (overrides everything, incl. a
+    // disabled blink). The closed look is the blink frame at full weight.
+    if (eyes_closed_) {
+        blink_phase_  = BlinkPhase::Closed;
+        blink_weight_ = 1.0;
+        return;
+    }
     // Disabled — hold the eyes open and freeze the countdown so re-enabling
     // resumes from a known state rather than triggering an immediate blink.
     if (!blink_enabled_) {

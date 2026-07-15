@@ -31,10 +31,15 @@ struct ReactionActions {
     // Blink cadence override + restore-to-user-config (drowsy = heavy lids).
     std::function<void(double min_s, double max_s, double duration_s)> set_blink;
     std::function<void()>                   restore_blink;
+    // Hold the eyes fully shut (asleep) / release them on wake. Optional.
+    std::function<void(bool)>               set_eyes_closed;
     // Final ambient sink (native_ctrl->set_ambient_effect).
     std::function<void(const nlohmann::json&)> set_ambient;
     // HUD toast.
     std::function<void(const std::string&, const std::string&)> notify;
+    // Motion-event hook for the custom-expression director: "shake" on a
+    // wake spike, "still" on entering drowsy. Optional.
+    std::function<void(const char*)> motion_event;
 };
 
 class ReactionEngine {
@@ -44,7 +49,11 @@ public:
         bool   sleepy_enabled = true;
         double drowsy_after_s = 120.0;  // stillness before heavy lids
         double sleep_after_s  = 300.0;  // stillness before eyes close + Z's
-        double calm_dps       = 6.0;    // below this smoothed energy = "still"
+        // Motion deadzone (deg/s-equivalent): head motion below this is
+        // treated as "still", so the drowsy/sleep timers accumulate. Higher =
+        // ignores more IMU wobble (nods off even with some fidget); lower =
+        // must be genuinely still. This is the knob the user tunes.
+        double calm_dps       = 6.0;
         double wake_dps       = 45.0;   // instant energy spike that wakes
         double wake_flash_s   = 1.5;    // surprised flash on wake
 
@@ -73,10 +82,13 @@ public:
     Activity    activity() const { return activity_; }
     const char* activity_name() const;
     double      energy_dps() const { return energy_; }
-    void        force_sleepy();   // jump straight to Asleep (test)
-    void        force_wake();     // as if a motion spike arrived (test)
+    // Test hooks — step through the stages so each is visible in preview.
+    void        force_drowsy();   // → Drowsy (sleepy face + slow blinks)
+    void        force_asleep();   // → Asleep (eyes closed + Z's)
+    void        force_wake();     // as if a motion spike arrived
 
 private:
+    bool spike_armed_ = true;   // motion-spike edge detector (see tick)
     void enter_drowsy();
     void enter_asleep();
     void wake(bool flash);

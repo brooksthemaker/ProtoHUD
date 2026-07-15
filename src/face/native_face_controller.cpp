@@ -59,6 +59,34 @@ nlohmann::json effect_cfg_for_id(int id) {
     }
 }
 
+// Freeze-over tint (frost): recolour the face layer toward the tint colour
+// where the mask is set, preserving each pixel's luminance so the art stays
+// readable — the material reads as "turned frost blue" in the mask's
+// gradient, not painted over. Runs on the face layer BEFORE the particle
+// layer composites, so the crystals sit on top of the frozen face.
+static void apply_face_tint(cv::Mat& face_rgba, const cv::Mat& mask,
+                            uint8_t tr, uint8_t tg, uint8_t tb) {
+    if (face_rgba.empty() || mask.empty() ||
+        face_rgba.size() != mask.size() || face_rgba.type() != CV_8UC4 ||
+        mask.type() != CV_8UC1)
+        return;
+    for (int y = 0; y < face_rgba.rows; ++y) {
+        cv::Vec4b*   p = face_rgba.ptr<cv::Vec4b>(y);
+        const uchar* m = mask.ptr<uchar>(y);
+        for (int x = 0; x < face_rgba.cols; ++x) {
+            if (!m[x] || !p[x][3]) continue;
+            const float k    = m[x] / 255.f;
+            const float luma = (0.299f * p[x][0] + 0.587f * p[x][1] +
+                                0.114f * p[x][2]) / 255.f;
+            // Slight lift so dim art still reads icy rather than black.
+            const float lift = std::min(1.f, luma * 1.1f + 0.06f);
+            p[x][0] = (uchar)std::lround(p[x][0] * (1.f - k) + tr * lift * k);
+            p[x][1] = (uchar)std::lround(p[x][1] * (1.f - k) + tg * lift * k);
+            p[x][2] = (uchar)std::lround(p[x][2] * (1.f - k) + tb * lift * k);
+        }
+    }
+}
+
 // Bloom the submerged face back over a composited frame: the face glows in
 // its OWN colours (the material colour), and a blurred halo bleeds that light
 // into the liquid around it, gently tinted by the liquid so it reads as light
@@ -289,11 +317,13 @@ void NativeFaceController::render_thread() {
                 mi.pitch_deg   = motion_pitch_.load(std::memory_order_relaxed);
                 mi.roll_deg    = motion_roll_.load(std::memory_order_relaxed);
                 mi.accel_g     = motion_accel_.load(std::memory_order_relaxed);
+                const double humid = env_humidity_.load(std::memory_order_relaxed);
                 for (auto& pn : panels_) {
                     if (pn.state) pn.state->set_audio(vol, mouth);
                     if (pn.particles) {
                         pn.particles->set_audio(vol);
                         pn.particles->set_motion(mi);
+                        pn.particles->set_humidity(humid);
                     }
                 }
 
@@ -349,7 +379,7 @@ void NativeFaceController::render_thread() {
 
             // Advance the glitch burst envelope once per frame so every panel
             // (and both eyes) corrupts identically this tick.
-            glitch_.tick(dt, glitch_cfg_);
+            glitch_.tick(dt, glitch_active_);
             scroll_text_.tick(dt);
 
             // Expire any transient face overlays whose deadline has passed —
@@ -378,7 +408,7 @@ void NativeFaceController::render_thread() {
             // rendered face for a different expression's raw image — same pick
             // for every panel so both eyes flash the same wrong expression.
             auto glitch_flicker = [&](FaceLoader* loader, FaceState* st, cv::Mat& face) {
-                if (!glitch_cfg_.enabled || !glitch_.flicker_expr() || !loader || !st) return;
+                if (!glitch_active_.enabled || !glitch_.flicker_expr() || !loader || !st) return;
                 const auto& names = loader->expression_names();
                 if (names.size() < 2) return;
                 int idx = std::min<int>(static_cast<int>(names.size()) - 1,
@@ -397,6 +427,7 @@ void NativeFaceController::render_thread() {
 
                 pn.state->update(dt);
                 pn.material->update(dt);
+                if (pn.style_material) pn.style_material->update(dt);
                 if (pn.particles) pn.particles->update(dt);
                 if (pn.gif) pn.gif->update(dt);
 
@@ -451,7 +482,8 @@ void NativeFaceController::render_thread() {
                     face_layer = pn.loader->get_frame(*pn.state);
                     glitch_flicker(pn.loader.get(), pn.state.get(), face_layer);
                 } else {
-                    cv::Mat mat = pn.material->get_frame();
+                    cv::Mat mat = (pn.style_material ? pn.style_material
+                                                     : pn.material)->get_frame();
                     cv::Mat face_rgba = pn.loader->get_frame(*pn.state);
                     glitch_flicker(pn.loader.get(), pn.state.get(), face_rgba);
                     face_layer = apply_material(face_rgba, mat);
@@ -482,6 +514,13 @@ void NativeFaceController::render_thread() {
                 ParticleFrame pf;
                 if (pn.particles && gframe.empty() && !eye_active) {
                     pf = pn.particles->render();
+                    // Freeze-over: frost recolours the face toward its rim
+                    // blue in the field's gradient before the crystal layer
+                    // composites on top (in-place on face_layer, which
+                    // layers[0] shares).
+                    if (pf.has && !pf.face_tint.empty())
+                        apply_face_tint(face_layer, pf.face_tint,
+                                        pf.tint_r, pf.tint_g, pf.tint_b);
                     if (pf.has) layers.push_back(Layer{pf.rgba, pf.blend});
                 }
 
@@ -542,7 +581,7 @@ void NativeFaceController::render_thread() {
 
             // Glitch post-effect: corrupt the fully-composited face canvas in a
             // single pass so it reads as one signal glitch across the whole face.
-            if (glitch_cfg_.enabled) glitch_.apply(canvas, glitch_cfg_);
+            if (glitch_active_.enabled) glitch_.apply(canvas, glitch_active_);
 
             // Scrolling-text banner: above everything (including glitch) so it
             // stays legible; spans the whole canvas, mirrored halves included.
@@ -624,15 +663,9 @@ void NativeFaceController::set_face(uint8_t face_id) {
 }
 
 void NativeFaceController::play_gif(uint8_t gif_id) {
-    // Resolve the path and per-panel player sizes under the lock, but decode
-    // OUTSIDE it: a full GIF decode takes tens of ms and the render thread
-    // holds state_mtx_ for every tick, so decoding under the lock froze both
-    // the face and the calling thread.
     std::string path;
-    std::vector<std::pair<int, int>> sizes;   // (w,h) per panel; (0,0) = no player
     {
         std::lock_guard<std::mutex> lk(state_mtx_);
-
         // Prefer the slot manifest binding; fall back to the sorted scan when the
         // slot is unbound or its bound file has been removed from gifs_dir.
         if (gif_id < gif_slots_.size() && !gif_slots_[gif_id].empty()) {
@@ -644,7 +677,29 @@ void NativeFaceController::play_gif(uint8_t gif_id) {
             if (gif_id >= gif_files_.size()) return;
             path = gif_files_[gif_id];
         }
+    }
+    start_gif(path);
+}
 
+void NativeFaceController::play_gif_file(const std::string& filename) {
+    if (filename.empty()) return;
+    // A named file straight out of gifs_dir — bypasses the 8-slot manifest, so
+    // reactions can point at any GIF in the folder. gifs_dir is fixed after
+    // construction, so no lock is needed to read it.
+    const std::string path = cfg_.gifs_dir + "/" + filename;
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return;
+    start_gif(path);
+}
+
+void NativeFaceController::start_gif(const std::string& path) {
+    // Resolve per-panel player sizes under the lock, but decode OUTSIDE it: a
+    // full GIF decode takes tens of ms and the render thread holds state_mtx_
+    // for every tick, so decoding under the lock froze both the face and the
+    // calling thread.
+    std::vector<std::pair<int, int>> sizes;   // (w,h) per panel; (0,0) = no player
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
         sizes.reserve(panels_.size());
         for (const auto& pn : panels_)
             sizes.emplace_back(pn.gif ? pn.gif->width()  : 0,
@@ -1090,7 +1145,7 @@ void NativeFaceController::set_face_by_name(const std::string& expression) {
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_expression(expression);
     current_expression_ = expression;
-    apply_expression_effect_locked(expression);
+    apply_expression_style_locked(expression);
     const std::string snap = serialize_state_locked();
     lk.unlock();
     write_state_file(snap);
@@ -1122,7 +1177,7 @@ void NativeFaceController::cycle_expression(int dir) {
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_expression(name);
     current_expression_ = name;
-    apply_expression_effect_locked(name);
+    apply_expression_style_locked(name);
     const std::string snap = serialize_state_locked();
     lk.unlock();
     write_state_file(snap);
@@ -1131,13 +1186,9 @@ void NativeFaceController::cycle_expression(int dir) {
 void NativeFaceController::set_expression_effects(bool enabled) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     expr_effects_ = enabled;
-    if (enabled) {
-        apply_expression_effect_locked(current_expression_);
-    } else {
-        // Restore each panel's base effect (weather override or user-chosen).
-        for (auto& pn : panels_)
-            if (pn.particles) pn.particles->set_effect(base_particles_locked(pn));
-    }
+    // Re-resolve either way: the resolver honours per-expression styles first,
+    // the mood map only when enabled, and the base effect otherwise.
+    apply_expression_style_locked(current_expression_);
 }
 
 const nlohmann::json& NativeFaceController::base_particles_locked(const Panel& pn) const {
@@ -1147,19 +1198,99 @@ const nlohmann::json& NativeFaceController::base_particles_locked(const Panel& p
     return ambient_spec_.is_null() ? pn.particles_spec : ambient_spec_;
 }
 
-void NativeFaceController::apply_expression_effect_locked(const std::string& expr) {
-    if (!expr_effects_) return;
-    auto it = expr_effect_map_.find(expr);
-    const bool mapped = (it != expr_effect_map_.end() && !it->second.empty());
+void NativeFaceController::apply_expression_style_locked(const std::string& expr) {
+    // Resolve the style for this expression: the override slot (custom
+    // expressions / editor live preview) wins over the expression's own style.
+    static const ExpressionStyle kEmpty;
+    const ExpressionStyle* st = &kEmpty;
+    if (override_active_) {
+        st = &style_override_;
+    } else {
+        auto sit = expr_styles_.find(expr);
+        if (sit != expr_styles_.end()) st = &sit->second;
+    }
+
+    // Material: a styled material renders INSTEAD of the persisted base; an
+    // unstyled expression drops back to the base with no bookkeeping.
     for (auto& pn : panels_) {
-        if (!pn.particles) continue;
-        if (mapped) {
-            nlohmann::json spec; spec["preset"] = it->second;
-            pn.particles->set_effect(spec);     // transient — leaves particles_spec (base) intact
+        if (pn.is_mirror) continue;
+        if (!st->material_spec.empty()) {
+            pn.style_material = load_material(st->material_spec, pn.cfg.w, pn.cfg.h,
+                                              pn.cfg.material.scroll_x,
+                                              pn.cfg.material.scroll_y,
+                                              cfg_.materials_dir);
         } else {
-            pn.particles->set_effect(base_particles_locked(pn));   // neutral/unmapped → base
+            pn.style_material.reset();
         }
     }
+
+    // Effect: styled spec (transient — particles_spec stays the base), else
+    // the legacy mood-preset coupling, else the base (weather/user) effect.
+    auto it = expr_effect_map_.find(expr);
+    const bool mapped = expr_effects_ &&
+                        it != expr_effect_map_.end() && !it->second.empty();
+    for (auto& pn : panels_) {
+        if (!pn.particles) continue;
+        if (!st->effect_spec.is_null()) {
+            const bool is_none = st->effect_spec.is_string() &&
+                                 st->effect_spec.get<std::string>() == "none";
+            if (st->effect_overlay && !is_none) {
+                // Layer the expression's effect ON TOP of the base/ambient
+                // effect instead of replacing it.
+                pn.particles->set_effect(
+                    merge_effect_specs(base_particles_locked(pn), st->effect_spec));
+            } else {
+                pn.particles->set_effect(st->effect_spec);
+            }
+        } else if (mapped) {
+            nlohmann::json spec; spec["preset"] = it->second;
+            pn.particles->set_effect(spec);
+        } else {
+            pn.particles->set_effect(base_particles_locked(pn));
+        }
+    }
+
+    // Glitch: the render loop reads the resolved config.
+    glitch_active_ = st->has_glitch ? st->glitch : glitch_cfg_;
+}
+
+void NativeFaceController::set_expression_style(const std::string& expr,
+                                                const ExpressionStyle& s) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    if (s.any()) expr_styles_[expr] = s;
+    else         expr_styles_.erase(expr);
+    if (expr == current_expression_) apply_expression_style_locked(expr);
+}
+
+ExpressionStyle NativeFaceController::expression_style(const std::string& expr) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    auto it = expr_styles_.find(expr);
+    return it != expr_styles_.end() ? it->second : ExpressionStyle{};
+}
+
+void NativeFaceController::clear_expression_style(const std::string& expr) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    expr_styles_.erase(expr);
+    if (expr == current_expression_) apply_expression_style_locked(expr);
+}
+
+std::map<std::string, ExpressionStyle> NativeFaceController::all_expression_styles() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    return expr_styles_;
+}
+
+void NativeFaceController::set_style_override(const ExpressionStyle& s) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    style_override_ = s;
+    override_active_ = true;
+    apply_expression_style_locked(current_expression_);
+}
+
+void NativeFaceController::clear_style_override() {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    override_active_ = false;
+    style_override_ = ExpressionStyle{};
+    apply_expression_style_locked(current_expression_);
 }
 
 void NativeFaceController::set_motion_particles(bool on) {
@@ -1183,12 +1314,7 @@ void NativeFaceController::set_ambient_effect(const nlohmann::json& spec) {
                         ? nlohmann::json() : spec;
     // Re-resolve what the panels should show now: a mapped expression mood
     // stays on top; otherwise the new base (weather or user effect) applies.
-    if (expr_effects_) {
-        apply_expression_effect_locked(current_expression_);
-    } else {
-        for (auto& pn : panels_)
-            if (pn.particles) pn.particles->set_effect(base_particles_locked(pn));
-    }
+    apply_expression_style_locked(current_expression_);
 }
 
 void NativeFaceController::trigger_boop_ripple(int zone) {
@@ -1242,6 +1368,12 @@ void NativeFaceController::set_blink_enabled(bool enabled) {
         if (pn.state) pn.state->set_blink_enabled(enabled);
 }
 
+void NativeFaceController::set_eyes_closed(bool closed) {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_eyes_closed(closed);
+}
+
 void NativeFaceController::set_blink_timing(double min_s, double max_s, double duration_s) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
@@ -1280,6 +1412,8 @@ void NativeFaceController::set_wiggle(const WiggleCfg& w) {
 void NativeFaceController::set_glitch(const GlitchConfig& cfg) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     glitch_cfg_ = cfg;
+    // Re-resolve: the active expression's style may shadow the default.
+    apply_expression_style_locked(current_expression_);
 }
 
 void NativeFaceController::set_audio_drive(double volume, double mouth_open) {
@@ -1300,6 +1434,12 @@ void NativeFaceController::set_motion(double heading_deg, double yaw_rate,
     motion_pitch_.store(pitch_deg, std::memory_order_relaxed);
     motion_roll_.store(roll_deg, std::memory_order_relaxed);
     motion_accel_.store(accel_g, std::memory_order_relaxed);
+}
+
+void NativeFaceController::set_env_humidity(double humidity01) {
+    // Slow sensor value (BME280 poll ~1 Hz); same lock-free handoff so the
+    // render thread reads it at the top of every tick and feeds the panels.
+    env_humidity_.store(humidity01, std::memory_order_relaxed);
 }
 
 void NativeFaceController::set_mouth_shape(const std::string& shape) {

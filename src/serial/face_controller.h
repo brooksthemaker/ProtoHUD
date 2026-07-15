@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
+
+#include "../face/expression_style.h"
 
 /**
  * Abstract interface for face display backends.
@@ -24,6 +27,8 @@ public:
     // Select a face/expression by 0-based index in the backend's face set.
     virtual void set_face(uint8_t face_id) = 0;
     virtual void play_gif(uint8_t gif_id) = 0;
+    // Play a specific GIF by filename (native Protoface only); no-op elsewhere.
+    virtual void play_gif_file(const std::string& /*filename*/) {}
     virtual void set_brightness(uint8_t value) = 0;
     virtual void set_palette(uint8_t palette_id) = 0;
     virtual void set_menu_item(uint8_t menu_index, uint8_t value) = 0;
@@ -115,6 +120,11 @@ public:
                                    double /*pitch_deg*/, double /*roll_deg*/,
                                    double /*accel_g*/) {}
 
+    // Latest relative humidity (0..1) from the BME280, so a water effect can
+    // tie its fill level to how humid it is. -1 = no reading (sensor absent).
+    // Native Protoface forwards to each panel's ParticleSystem; no-op elsewhere.
+    virtual void        set_env_humidity(double /*humidity01*/) {}
+
     // Pick which viseme overlay (mouth_open / mouth_small / mouth_smile /
     // mouth_round) the FaceLoader blends at the mouth region. Driven by the
     // voice analyzer's spectral-centroid-to-viseme classifier when visemes
@@ -136,6 +146,23 @@ public:
     // No-op on non-native backends.
     virtual void        set_active_layout_name(const std::string& /*name*/) {}
     virtual std::string face_image_layout(const std::string& /*expression*/) const { return {}; }
+
+    // Per-expression styles (native Protoface only): every expression may
+    // carry its own material / particle effect / glitch that overrides the
+    // default look while it is active. The override slot is stronger still —
+    // custom-expression activation and the style editor's live preview use
+    // it. No-ops / empty on non-native backends.
+    virtual void set_expression_style(const std::string& /*expr*/,
+                                      const face::ExpressionStyle& /*s*/) {}
+    virtual face::ExpressionStyle expression_style(const std::string& /*expr*/) const {
+        return {};
+    }
+    virtual void clear_expression_style(const std::string& /*expr*/) {}
+    virtual std::map<std::string, face::ExpressionStyle> all_expression_styles() const {
+        return {};
+    }
+    virtual void set_style_override(const face::ExpressionStyle& /*s*/) {}
+    virtual void clear_style_override() {}
 };
 
 /**
@@ -159,6 +186,7 @@ public:
     }
     void set_face(uint8_t face_id)             override { (*active_)->set_face(face_id); }
     void play_gif(uint8_t gif_id)              override { (*active_)->play_gif(gif_id); }
+    void play_gif_file(const std::string& f)   override { (*active_)->play_gif_file(f); }
     void set_brightness(uint8_t value)         override { (*active_)->set_brightness(value); }
     void set_palette(uint8_t palette_id)       override { (*active_)->set_palette(palette_id); }
     void set_menu_item(uint8_t idx, uint8_t v) override { (*active_)->set_menu_item(idx, v); }
@@ -198,6 +226,7 @@ public:
     void set_motion(double hd, double yr, double pi, double ro, double ac) override {
         (*active_)->set_motion(hd, yr, pi, ro, ac);
     }
+    void set_env_humidity(double h) override { (*active_)->set_env_humidity(h); }
     void set_mouth_shape(const std::string& s) override { (*active_)->set_mouth_shape(s); }
     bool has_led_face_editor() const override { return (*active_)->has_led_face_editor(); }
     void set_active_layout_name(const std::string& n) override {
@@ -206,6 +235,22 @@ public:
     std::string face_image_layout(const std::string& e) const override {
         return (*active_)->face_image_layout(e);
     }
+    void set_expression_style(const std::string& e, const face::ExpressionStyle& s) override {
+        (*active_)->set_expression_style(e, s);
+    }
+    face::ExpressionStyle expression_style(const std::string& e) const override {
+        return (*active_)->expression_style(e);
+    }
+    void clear_expression_style(const std::string& e) override {
+        (*active_)->clear_expression_style(e);
+    }
+    std::map<std::string, face::ExpressionStyle> all_expression_styles() const override {
+        return (*active_)->all_expression_styles();
+    }
+    void set_style_override(const face::ExpressionStyle& s) override {
+        (*active_)->set_style_override(s);
+    }
+    void clear_style_override() override { (*active_)->clear_style_override(); }
 
     IFaceController* backend() const { return *active_; }
 

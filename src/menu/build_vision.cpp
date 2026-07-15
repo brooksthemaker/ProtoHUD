@@ -446,7 +446,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         };
         res_status.action = []{};   // informational row
 
-        auto res_rows = make_dynamic_rows(16,
+        auto res_rows = make_dynamic_rows(24,
             [cam_ptr]{ auto* c = cam_ptr();
                        return c ? static_cast<int>(c->supported_modes().size()) : 0; },
             [cam_ptr, apply_res, &res_st, &state](int i) {
@@ -457,14 +457,30 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                     auto* c = cam_ptr(); if (!c) return std::string();
                     const auto& ms = c->supported_modes();
                     if (i >= static_cast<int>(ms.size())) return std::string();
-                    char b[48];
+                    // Mark where each mode came from: the sensor's own mode
+                    // list, the manufacturer table (spec), or an ISP-scaled
+                    // size. See DmaCamera::kMode*.
+                    const uint8_t src  = ms[i].src;
+                    const bool    sens = src & DmaCamera::kModeSensor;
+                    const bool    spec = src & DmaCamera::kModeSpec;
+                    const char*   tag  = sens && spec ? "sensor+spec"
+                                       : sens         ? "sensor"
+                                       : spec         ? "spec"
+                                                      : "scaled";
+                    char b[72];
                     if (ms[i].max_fps > 0)
-                        snprintf(b, sizeof(b), "%d x %d  @ %d fps",
-                                 ms[i].width, ms[i].height, ms[i].max_fps);
+                        snprintf(b, sizeof(b), "%d x %d  @ %d fps  \xc2\xb7 %s",
+                                 ms[i].width, ms[i].height, ms[i].max_fps, tag);
                     else
-                        snprintf(b, sizeof(b), "%d x %d", ms[i].width, ms[i].height);
+                        snprintf(b, sizeof(b), "%d x %d  \xc2\xb7 %s",
+                                 ms[i].width, ms[i].height, tag);
                     return std::string(b);
                 };
+                m.description =
+                    "sensor = mode the camera reported at startup \xc2\xb7 "
+                    "spec = manufacturer mode table (matched via config.txt / "
+                    "camera id) \xc2\xb7 scaled = ISP-resized option. fps is "
+                    "probed on this Pi where possible.";
                 m.get_state = [cam_ptr, i]{
                     auto* c = cam_ptr(); if (!c) return false;
                     const auto& ms = c->supported_modes();

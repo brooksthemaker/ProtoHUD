@@ -72,6 +72,20 @@ void AccessoryLeds::set_zone_breathe_hz(Zone z, float hz) {
     cfg_.zones[zi].breathe_hz = hz;
 }
 
+void AccessoryLeds::set_zone_brightness(Zone z, uint8_t b) {
+    const auto zi = static_cast<int>(z);
+    if (zi < 0 || zi >= ZoneCount) return;
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
+    cfg_.zones[zi].zone_brightness = b;
+}
+
+void AccessoryLeds::set_zone_follow_face(Zone z, bool on) {
+    const auto zi = static_cast<int>(z);
+    if (zi < 0 || zi >= ZoneCount) return;
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
+    cfg_.zones[zi].follow_face = on;
+}
+
 void AccessoryLeds::set_global_brightness(uint8_t b) {
     {
         std::lock_guard<std::mutex> lk(cfg_mtx_);
@@ -115,6 +129,7 @@ void AccessoryLeds::render_loop() {
 
         // Snapshot once per frame — avoids re-reading the atomic mid-zone.
         const float vol = std::clamp(audio_volume_.load(), 0.0f, 1.0f);
+        const uint32_t fc = face_color_.load();
         const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
             clock::now().time_since_epoch()).count();
 
@@ -125,12 +140,21 @@ void AccessoryLeds::render_loop() {
             const auto& z = zones[zi];
             if (z.count <= 0) continue;
 
-            // Base envelope: 0..1, multiplies the zone's stored color.
+            // Zone color: the stored color, or the live face mean when the
+            // zone follows the face.
+            const uint8_t zr = z.follow_face ? uint8_t((fc >> 16) & 0xFF) : z.r;
+            const uint8_t zg = z.follow_face ? uint8_t((fc >>  8) & 0xFF) : z.g;
+            const uint8_t zb = z.follow_face ? uint8_t( fc        & 0xFF) : z.b;
+
+            // Base envelope: 0..1, multiplies the zone's color. Chase and
+            // Sparkle compute per-pixel below; env carries the zone scale.
             double env = 0.0;
             switch (z.pattern) {
             case Pattern::Off:
                 break;
             case Pattern::Solid:
+            case Pattern::Chase:
+            case Pattern::Sparkle:
                 env = 1.0;
                 break;
             case Pattern::Breathe: {
@@ -154,12 +178,43 @@ void AccessoryLeds::render_loop() {
                 if (flash > 1.0) flash = 1.0;
             }
 
+            env *= z.zone_brightness / 255.0;
             const double inv = 1.0 - flash;
-            const uint8_t r = static_cast<uint8_t>(z.r * env * inv + 255.0 * flash);
-            const uint8_t g = static_cast<uint8_t>(z.g * env * inv + 255.0 * flash);
-            const uint8_t b = static_cast<uint8_t>(z.b * env * inv + 255.0 * flash);
-            for (int i = 0; i < z.count; ++i)
+
+            for (int i = 0; i < z.count; ++i) {
+                double px = 1.0;   // per-pixel factor on top of env
+                switch (z.pattern) {
+                case Pattern::Chase: {
+                    // One bright dot + fading tail walking the zone at
+                    // breathe_hz cycles per second.
+                    const double head = std::fmod(z.breathe_hz * t, 1.0) * z.count;
+                    double d = head - i;
+                    if (d < 0) d += z.count;          // tail trails the head
+                    const double tail = std::max(3.0, z.count * 0.5);
+                    px = std::max(0.0, 1.0 - d / tail);
+                    px *= px;                          // steeper falloff
+                    break;
+                }
+                case Pattern::Sparkle: {
+                    // Deterministic per-pixel twinkle: each pixel gets its own
+                    // phase/rate from a hash so the pattern needs no state.
+                    const uint32_t h = (uint32_t(z.start + i) * 2654435761u) ^ 0x9E3779B9u;
+                    const double rate  = 0.5 + (h & 0xFF) / 96.0;          // 0.5..3.2 Hz
+                    const double phase = ((h >> 8) & 0xFFFF) / 65536.0;
+                    const double v = 0.5 * (1.0 - std::cos(
+                        2.0 * 3.14159265358979323846 * (rate * t + phase)));
+                    px = v * v * v;                    // mostly-dark twinkle
+                    break;
+                }
+                default:
+                    break;
+                }
+                const double e = env * px;
+                const uint8_t r = static_cast<uint8_t>(zr * e * inv + 255.0 * flash);
+                const uint8_t g = static_cast<uint8_t>(zg * e * inv + 255.0 * flash);
+                const uint8_t b = static_cast<uint8_t>(zb * e * inv + 255.0 * flash);
                 strip_.set_pixel(z.start + i, r, g, b);
+            }
         }
 
         strip_.show();

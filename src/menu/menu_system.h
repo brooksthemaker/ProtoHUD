@@ -274,18 +274,21 @@ public:
     // routing methods below (route to these from your input handlers when
     // is_keyboard_open() is true, so the knob/gamepad/keyboard all work).
     using KeyboardCommit = std::function<void(const std::string&)>;
-    void open_keyboard(std::string title, std::string initial, KeyboardCommit on_commit);
+    void open_keyboard(std::string title, std::string initial, KeyboardCommit on_commit,
+                       size_t max_len = 40);
     void close_keyboard();
     bool is_keyboard_open() const { return osk_active_; }
     const std::string& keyboard_text() const { return osk_text_; }
 
-    void osk_move(int dx, int dy);   // 2D grid move (gamepad d-pad / arrows)
+    void osk_move(int dx, int dy);   // 2D grid move (gamepad d-pad / arrows);
+                                     // Up past the top row focuses the text field,
+                                     // where Left/Right move the text caret
     void osk_step(int d);            // linear walk across the grid (knob rotate)
     void osk_activate();             // press the focused key
-    void osk_backspace();            // delete last char (or cancel if empty)
+    void osk_backspace();            // delete before the caret (or cancel if empty)
     void osk_commit();               // confirm + fire callback
     void osk_cancel();               // discard + close
-    void osk_input_char(unsigned int c);  // append a physically-typed character
+    void osk_input_char(unsigned int c);  // insert a physically-typed character
 
     // ── File picker ─────────────────────────────────────────────────────────────
     // Full-screen overlay for browsing the filesystem (media import). Drawn in
@@ -321,6 +324,7 @@ public:
                           double preview_duration_s = 10.0);
     void close_face_editor();
     bool is_face_editor_open() const { return face_editor_.is_open(); }
+
     menu::FaceEditor& face_editor() { return face_editor_; }
 
     // ── Color picker ────────────────────────────────────────────────────────────
@@ -399,11 +403,15 @@ private:
 
     // ── on-screen keyboard state ────────────────────────────────────────────────
     void draw_keyboard(ImDrawList* dl, ImFont* font, float fs, float W, float H);
+    void osk_insert(char c);         // insert at caret, respecting osk_max_len_
     bool           osk_active_ = false;
     std::string    osk_title_;
     std::string    osk_text_;
-    int            osk_row_ = 0;
+    int            osk_row_ = 0;     // -1 = text field focused (caret editing)
     int            osk_col_ = 0;
+    int            osk_caret_ = 0;   // insertion index into osk_text_
+    int            osk_page_ = 0;    // 0 = letters, 1 = symbols
+    size_t         osk_max_len_ = 40;
     KeyboardCommit osk_commit_;
 
     // File picker overlay (media import) — same input-routing pattern as OSK.
@@ -414,6 +422,7 @@ private:
 
     // Unified color picker overlay — opened by any COLOR_PICKER item.
     menu::ColorPicker color_picker_;
+
 
     // Active full-screen overlay (one of the members above), or nullptr.
     // navigate/select/back/draw_fullscreen dispatch through this instead of

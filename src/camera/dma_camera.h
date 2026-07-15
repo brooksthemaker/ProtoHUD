@@ -61,14 +61,23 @@ public:
         int         rotation_deg = 0;
     };
 
-    // A capture mode the sensor actually supports, as reported by libcamera.
-    // max_fps is 0 when unknown — the simple path leaves it 0 and lets libcamera
-    // clamp the requested rate; a future "probe each mode's FrameDurationLimits"
-    // pass can fill it in without changing this struct or supported_modes().
+    // A capture mode, tagged with where we learned about it (flags OR together
+    // when sources agree on a size):
+    //   kModeScaled — ISP-resizable size synthesized from the continuous range
+    //   kModeSensor — discrete size the camera reported at startup (RAW stream
+    //                 role = the kernel driver's real sensor mode list)
+    //   kModeSpec   — manufacturer mode table, matched via the sensor name
+    //                 (libcamera id / config.txt dtoverlay scan)
+    // max_fps is 0 when unknown; the startup probe fills it from
+    // FrameDurationLimits on the actual platform (spec nominals are fallback).
+    static constexpr uint8_t kModeScaled = 1;
+    static constexpr uint8_t kModeSensor = 2;
+    static constexpr uint8_t kModeSpec   = 4;
     struct Mode {
-        int width   = 0;
-        int height  = 0;
-        int max_fps = 0;   // 0 = unknown (not yet probed)
+        int     width   = 0;
+        int     height  = 0;
+        int     max_fps = 0;   // 0 = unknown (not yet probed)
+        uint8_t src     = 0;   // kMode* flags
     };
 
     DmaCamera();

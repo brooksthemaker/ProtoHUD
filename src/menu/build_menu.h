@@ -28,6 +28,7 @@
 // Forward declarations — the context only holds pointers to these.
 namespace cv { class Mat; }
 class IFaceController;
+namespace face { class ExpressionDirector; }
 class XRDisplay;
 class CameraManager;
 class LoRaRadio;
@@ -49,7 +50,7 @@ namespace accessory    { class AccessoryLeds; }
 namespace sys          { class FanController; }
 namespace input        { struct GpioPinCfg; struct CoprocConfig; }
 namespace integrations { class KdeConnectBridge; }
-namespace face         { struct GlitchConfig; struct ScrollTextConfig; class ReactionEngine; }
+namespace face         { struct GlitchConfig; struct ScrollTextConfig; class ReactionEngine; class ReactionRules; }
 
 // HUB75 panel layout state. Lives here (not main.cpp) because both the menu
 // (HUB75 Layout editor) and main's renderer-rebuild path use it.
@@ -245,6 +246,11 @@ inline std::vector<Entry> list(const std::string& expr_png) {
 // need them. Defaults mirror the old parameter defaults.
 struct MenuBuildContext {
     IFaceController* teensy  = nullptr;
+    // Custom-expression runtime (activation/hold/restore) — face/expression_director.h.
+    face::ExpressionDirector* expr_director = nullptr;
+    // Show the legacy ProtoTracer/Teensy source picker + submenu (hidden by
+    // default since the Face Display redesign; protoface.show_prototracer).
+    bool show_prototracer = false;
     XRDisplay*       xr      = nullptr;
     CameraManager*   cameras = nullptr;
     LoRaRadio*       lora    = nullptr;
@@ -419,6 +425,14 @@ struct MenuBuildContext {
     bool*   pf_temp_effects_p = nullptr;
     double* pf_temp_cold_p    = nullptr;
     double* pf_temp_hot_p     = nullptr;
+    bool*   pf_frost_fractal_p  = nullptr;   // frost fractal ferns + big snowflakes
+    bool*   pf_heat_heartbeat_p = nullptr;   // heatwave orange heartbeat rim pulse
+    double* pf_frost_speed_p    = nullptr;   // frost formation/creep speed multiplier
+    double* pf_heat_speed_p     = nullptr;   // heatwave shimmer + heartbeat speed multiplier
+    // Transient preview override (not persisted): 0 = off (follow temperature),
+    // 1 = force frost, 2 = force heatwave. Lets the wearer eyeball the temp
+    // effects on the bench without waiting for the threshold to be crossed.
+    int*    pf_temp_force_p     = nullptr;
     std::function<void()> pf_ambient_resync;
     // Live-preview tick: main calls this each frame; when Live Preview is on
     // it re-applies the builder spec on change. Installed inside build_menu.
@@ -502,6 +516,7 @@ struct MenuBuildContext {
     // Reaction engine (environment/movement reactions; main owns it). The
     // menu edits its Config via set_config and calls the force_* test hooks.
     face::ReactionEngine* reactions = nullptr;
+    face::ReactionRules*  reaction_rules = nullptr;
 
     // ── Build-phase shared fragments ──────────────────────────────────────────
     // NOT caller-supplied: set by build_menu() before the tab builders run

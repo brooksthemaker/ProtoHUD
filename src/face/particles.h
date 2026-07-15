@@ -31,7 +31,22 @@ struct ParticleFrame {
     // Max "refraction" hint across layers (water): how strongly the backdrop
     // face should glow back through the layer. 0 for ordinary effects.
     double  face_glow = 0.0;
+    // Face-tint request (frost): a per-pixel mask (CV_8UC1, panel-local, empty
+    // = none) plus the tint colour. The renderer recolours the face layer
+    // toward the tint where the mask is set, BEFORE the particle layer
+    // composites on top — so the face material "freezes over" in a gradient
+    // that follows the frost's spread.
+    cv::Mat face_tint;
+    uint8_t tint_r = 0, tint_g = 0, tint_b = 0;
 };
+
+// Combine two particle specs into one layered spec — `base`'s layers first,
+// then `over`'s on top. Either arg may be any form set_effect understands
+// (string, {"preset":..}, {"effect":..}, {"layers":[..]}); presets are
+// resolved. Used by the per-expression "overlay" effect mode. Returns "none"
+// when both resolve to nothing.
+nlohmann::json merge_effect_specs(const nlohmann::json& base,
+                                  const nlohmann::json& over);
 
 class ParticleSystem {
 public:
@@ -43,6 +58,7 @@ public:
     void set_effect(const nlohmann::json& cfg);   // replace all layers at runtime
     void set_motion(const MotionInput& m);        // latest IMU state for reactive layers
     void set_audio(double level);                 // mic level [0,1] for audio-reactive layers
+    void set_humidity(double humidity01);         // rel humidity [0,1] for the water fill level (<0 = no reading)
     // Global motion coupling: when on, directional layers that don't set their
     // own "direction_from" default to the real-gravity mode — precipitation
     // leans with head roll and sweeps on quick turns. Toggled from the menu.

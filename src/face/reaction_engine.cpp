@@ -64,6 +64,16 @@ void ReactionEngine::tick(double dt) {
     // value handles the wake spike so a sharp nudge snaps the face awake.
     energy_ += (instant_ - energy_) * std::min(1.0, dt / 2.0);
 
+    // Edge-detected motion spike for the custom-expression director — fires
+    // once per shake regardless of the sleepy state machine, re-arming after
+    // the motion settles below half the spike threshold.
+    if (instant_ > cfg_.wake_dps) {
+        if (spike_armed_ && act_.motion_event) act_.motion_event("shake");
+        spike_armed_ = false;
+    } else if (instant_ < cfg_.wake_dps * 0.5) {
+        spike_armed_ = true;
+    }
+
     if (!cfg_.enabled || !cfg_.sleepy_enabled) return;
 
     if (instant_ > cfg_.wake_dps) {
@@ -72,6 +82,8 @@ void ReactionEngine::tick(double dt) {
         return;
     }
 
+    // Motion below the deadzone (calm_dps) counts as "still" and accumulates
+    // the drowsy/sleep timers; any faster movement resets it.
     still_s_ = (energy_ < cfg_.calm_dps) ? still_s_ + dt : 0.0;
 
     switch (activity_) {
@@ -89,9 +101,12 @@ void ReactionEngine::tick(double dt) {
 
 void ReactionEngine::enter_drowsy() {
     activity_ = Activity::Drowsy;
+    if (act_.motion_event) act_.motion_event("still");
     if (act_.current_expression) prev_expression_ = act_.current_expression();
-    // Heavy lids: long, slow blinks.
-    if (act_.set_blink) act_.set_blink(1.5, 3.0, 0.45);
+    // Heavy lids: a few languid slow blinks — a long lid-close (~0.9 s) every
+    // 2–4 s, so it reads as "getting sleepy" rather than a normal blink.
+    if (act_.set_eyes_closed) act_.set_eyes_closed(false);   // in case we bounced back from asleep
+    if (act_.set_blink) act_.set_blink(2.0, 4.0, 0.9);
     if (act_.face_exists && act_.set_expression &&
         act_.face_exists("sleepy"))
         act_.set_expression("sleepy");
@@ -99,11 +114,14 @@ void ReactionEngine::enter_drowsy() {
 
 void ReactionEngine::enter_asleep() {
     activity_ = Activity::Asleep;
-    // Eyes closed: prefer a dedicated asleep face, fall back to sleepy.
+    // Eyes closed: prefer a dedicated asleep face, fall back to sleepy, and
+    // hold the eyes fully shut via the blink so they're closed even if the
+    // sleepy/asleep art doesn't already draw closed eyes.
     if (act_.face_exists && act_.set_expression) {
         if      (act_.face_exists("asleep")) act_.set_expression("asleep");
         else if (act_.face_exists("sleepy")) act_.set_expression("sleepy");
     }
+    if (act_.set_eyes_closed) act_.set_eyes_closed(true);
     // Floating Z's over whatever the face shows, via the override slot.
     override_active_ = true;
     if (act_.set_ambient)
@@ -117,6 +135,7 @@ void ReactionEngine::wake(bool flash) {
     const bool was_asleep = (activity_ == Activity::Asleep);
     activity_ = Activity::Awake;
     still_s_  = 0.0;
+    if (act_.set_eyes_closed) act_.set_eyes_closed(false);   // open the eyes back up
     if (act_.restore_blink) act_.restore_blink();
     if (override_active_) {
         override_active_ = false;
@@ -135,9 +154,16 @@ void ReactionEngine::set_base_ambient(const nlohmann::json& spec) {
     if (!override_active_ && act_.set_ambient) act_.set_ambient(spec);
 }
 
-void ReactionEngine::force_sleepy() {
-    if (activity_ == Activity::Awake) enter_drowsy();
-    if (activity_ == Activity::Drowsy) enter_asleep();
+void ReactionEngine::force_drowsy() {
+    // Clean-reset from a deeper state so the drowsy look (sleepy face + slow
+    // blinks, eyes open) shows on its own, distinct from asleep.
+    if (activity_ != Activity::Awake) wake(false);
+    enter_drowsy();
+}
+
+void ReactionEngine::force_asleep() {
+    if (activity_ == Activity::Awake) enter_drowsy();   // capture prev face first
+    if (activity_ != Activity::Asleep) enter_asleep();
 }
 
 void ReactionEngine::force_wake() {

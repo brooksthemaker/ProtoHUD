@@ -973,6 +973,14 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         toggle("Compass Tape",
             [&state]{ return state.compass_tape; },
             [&state](bool v){ state.compass_tape = v; }),
+        with_desc(slider("Response", 0.0f, 1.0f, 0.05f, "",
+            [&state]{ return state.compass_smooth; },
+            [&state](float v){ state.compass_smooth = v; }),
+            "Heading smoothing vs responsiveness. 0 = raw (most real-time, "
+            "tracks the IMU frame-for-frame); higher calms residual jitter "
+            "when you hold still. Speed-adaptive either way - a real turn "
+            "always tracks near-raw. The BNO086's fusion is clean, so low "
+            "values stay steady."),
         submenu("Onboard Compass",     std::move(onboard_compass_menu)),
         slider("Tick Length", 8.f, 48.f, 2.f, "",
             [hud_cfg]{ return static_cast<float>(hud_cfg->compass_tick_length); },
@@ -1742,13 +1750,48 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             [&state]{ return state.float_win.width_deg; },
             [&state](float v){ state.float_win.width_deg = v; }),
             "Angular width of the window in degrees of your view."),
+        with_desc(toggle("Smooth Follow",
+            [&state]{ return state.float_win.follow; },
+            [&state](bool v){ state.float_win.follow = v; }),
+            "Instead of staying locked in place, the window glides after "
+            "your gaze — it holds still for small head movements (see "
+            "Follow Deadzone) and smoothly catches up when you turn away. "
+            "Off = classic world-pinned."),
         [&state]() -> MenuItem {
+            MenuItem m = with_desc(slider("Follow Speed", 0.25f, 6.f, 0.25f, "x",
+                [&state]{ return state.float_win.follow_speed; },
+                [&state](float v){ state.float_win.follow_speed = v; }),
+                "How quickly the window catches up once it's outside the "
+                "deadzone. Higher = snappier; lower = a lazy drift.");
+            m.visible_fn = [&state]{ return state.float_win.follow; };
+            return m;
+        }(),
+        [&state]() -> MenuItem {
+            MenuItem m = with_desc(slider("Follow Deadzone", 0.f, 20.f, 1.f, "\xc2\xb0",
+                [&state]{ return state.float_win.follow_dead; },
+                [&state](float v){ state.float_win.follow_dead = v; }),
+                "How far off-center the window may sit before it starts "
+                "following. Bigger = more stable for reading; 0 = always "
+                "drifts back to center.");
+            m.visible_fn = [&state]{ return state.float_win.follow; };
+            return m;
+        }(),
+        [&state, menu_sys_pp]() -> MenuItem {
             MenuItem m = with_desc(toggle("Keyboard Focus",
                 [&state]{ return state.float_win.focus_keys; },
-                [&state](bool v){ state.float_win.focus_keys = v; }),
-                "Route the paired keyboard into the terminal. While on, HUD "
-                "hotkeys are suppressed — press F10 (or toggle this off with "
-                "the knob) to take the keyboard back.");
+                [&state, menu_sys_pp](bool v){
+                    state.float_win.focus_keys = v;
+                    // Land in the terminal, not a menu that now ignores the
+                    // keyboard: capture only starts once the deep menu is
+                    // closed (it also auto-suspends while any menu is open),
+                    // so close it on the way in.
+                    if (v && menu_sys_pp && *menu_sys_pp)
+                        (*menu_sys_pp)->close_deep();
+                }),
+                "Route the paired keyboard into the terminal (closes this "
+                "menu). While on, HUD hotkeys are suppressed — press F10 to "
+                "take the keyboard back, or reopen the menu with the knob "
+                "(capture pauses while a menu is open).");
             m.visible_fn = [&state]{
                 return state.float_win.enabled && state.float_win.content == 0;
             };

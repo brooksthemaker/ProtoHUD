@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <deque>
+#include <map>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -10,6 +11,7 @@
 #include <ctime>
 #include <imgui.h>
 #include "capture.h"
+#include "face/custom_expression.h"
 
 // ── Post-processing config ────────────────────────────────────────────────────
 // Modified from menu (any thread); read by the render thread via snap.
@@ -802,6 +804,11 @@ struct AppState {
     float compass_heading    = 0.0f;
     bool  compass_bg_enabled = true;
     bool  compass_tape       = true;   // the top-of-screen compass tape
+    // Heading smoothing: 0 = raw (most real-time), 1 = calm/heavy. Same
+    // speed-adaptive filter as the attitude indicator — low cutoff when
+    // still, opening near-raw during a turn. The BNO086's on-chip fusion is
+    // clean, so a low value tracks in real time without jitter.
+    float compass_smooth     = 0.25f;
 
     // Fighter-style attitude indicator overlay (HUD > Attitude Indicator).
     // Reads the calibrated head-tracking pose (imu_pose), so the PIT/YAW/ROL
@@ -815,8 +822,10 @@ struct AppState {
         bool  per_eye = true;    // one instrument per SBS eye half (3D glasses);
                                  // off = a single instrument centered on the window
         float text_scale = 1.0f; // readout / label font multiplier
-        float smooth  = 0.5f;    // 0 = raw sensor, 1 = heavy speed-adaptive
-                                 // smoothing (One-Euro-style; jumps snap through)
+        float smooth  = 0.3f;    // 0 = raw sensor, 1 = heavy speed-adaptive
+                                 // smoothing (One-Euro-style; jumps snap through).
+                                 // Low by default for a real-time feel on the
+                                 // clean BNO086 fusion.
     };
     AttitudeIndicatorCfg attitude;
     // Pose shown by the attitude indicator: resolved each frame from the
@@ -842,6 +851,14 @@ struct AppState {
         float width_deg  = 30.f;    // angular width of the window (persisted)
         bool  focus_keys = false;   // route the keyboard into the terminal
         float fov_deg    = 43.f;    // per-eye horizontal FOV (persisted)
+        // Smooth follow (persisted): instead of staying world-locked, the pin
+        // anchor glides after the head pose, so the window lazily follows
+        // your gaze. Within follow_dead degrees of center it holds still
+        // (stable reading); beyond that, the excess is eased away at
+        // follow_speed per second (higher = snappier catch-up).
+        bool  follow       = false;
+        float follow_speed = 2.0f;  // 1/s easing rate on the out-of-deadzone delta
+        float follow_dead  = 5.0f;  // deg the window may rest off-center
     };
     FloatWin float_win;
 
@@ -969,6 +986,15 @@ struct AppState {
     // cheek touches into a single BothCheeks event. Mirror of the sensor's
     // cfg field; the menu writes both this and the sensor's live value.
     float                boop_coalesce_window_s = 0.10f;
+    // User-created custom expressions (see face/custom_expression.h). Seeded
+    // with kInitialCustomSlots empty slots when the config key is absent;
+    // "Add Expression..." appends up to kMaxCustomExpressions. Guarded by mtx.
+    std::vector<face::CustomExpression> custom_expressions;
+    // Trigger recipes per expression, keyed by built-in stem ("happy") or
+    // custom slot key ("custom_3") — uniform for every expression. Evaluated
+    // by ExpressionDirector; persisted as protoface.expression_triggers.
+    // Guarded by mtx.
+    std::map<std::string, face::TriggerSet> expression_triggers;
     LightSquintConfig    light_squint;
     VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;

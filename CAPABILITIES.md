@@ -118,6 +118,13 @@ Live 128×64 HUB75 panel canvas from Protoface shared memory, displayed as a flo
 - Height (px)
 - Bottom margin (px)
 - LoRa node bearing markers (colored per-node)
+- **Response** (slider, 0–1) — heading smoothing vs. responsiveness. **0 = raw**
+  (most real-time, tracks the IMU frame-for-frame); higher calms residual
+  jitter at rest. Speed-adaptive (One-Euro-style) either way: low cutoff when
+  still, opening near-raw during a turn so the needle tracks instead of gliding
+  behind. Tare / source switches snap through. The attitude indicator has the
+  same filter via its **Smoothing** slider (also 0 = raw). Both default low for
+  a real-time feel on the BNO086's clean fusion.
 
 ### HUD Styling
 - **Text Scale**: 0.7×–2.0×, step 0.1
@@ -268,7 +275,50 @@ ESP32-S3 haptic detent rotary encoder over UART.
 
 ## 9. Face / LED Panels
 
-Two interchangeable backends — Teensy (ProtoTracer) and Protoface Python daemon. Runtime-selectable.
+The **Face Display** menu is organised into four groups — **Base Settings**
+(backend selection, Panel Preview, Brightness, Save/Release Face Config),
+**Faces and Expressions**, **Accessory LEDs**, and **Gifs and Text**. The
+native in-process renderer drives four backends (`hub75` default, `max7219`,
+`rgb_matrix`, `led_panels`); the legacy ProtoTracer/Teensy source picker is
+hidden unless `protoface.show_prototracer` is set. See
+[`docs/face-expressions.md`](docs/face-expressions.md) for the full
+Expressions/triggers guide and [`docs/led-face-panels.md`](docs/led-face-panels.md)
+for the custom APA102 panel backend.
+
+### Expressions list (built-in + custom, one list)
+`Faces and Expressions > Expressions` holds every expression — the built-in
+slots (Neutral, Happy, Angry, Sad, Surprised, Squint, Sleepy, Asleep, Blink)
+and up to 24 **custom** slots (5 seeded, **Add Expression…** for more). A
+custom expression borrows a built-in's PNG for its art and adds its own name,
+style, and triggers. Everything is edited **in place** (no pop-up editor) so
+the Face Preview panel stays visible while styling.
+
+### Per-expression styling
+Every expression — built-in or custom — can carry its own **Material**,
+**Effect**, and **Glitch**, each overriding the inherited **Default Style**
+(`Faces and Expressions > Default Style`, the former top-level Material Color /
+Effects / Glitch menus) only while that expression is showing.
+- **Material** — Default (inherit) / solid+gradient presets / Pride/ / Custom
+  Color (RGB picker).
+- **Effect** — Default (inherit) / None / Single Effects / Premade Effects /
+  Custom Effects (your saved layered presets).
+- **Glitch** — Default (inherit) / Off / presets.
+- Stored as `protoface.expression_styles` (built-ins) and inside
+  `protoface.custom_expressions` (customs), saved via Save Face Config.
+
+### Trigger recipes (per expression)
+Each expression's **Triggers** menu holds a hold-time plus up to three
+**recipes** — *event × count within a window, WHILE conditions hold*:
+- **Events**: boop zones (snout / left / right / both), APDS-9960 swipes
+  (up/down/left/right), head shake, gets-bright / gets-dark (light edges,
+  hysteresis-gated).
+- **Conditions** (`While:`): head tilt left/right past an angle (attitude
+  roll), light above/below a lux threshold, moving/still (reactions energy).
+- e.g. **nose boop ×5 → angry**, **left cheek while tilted left → curious**.
+- The most specific matching recipe wins (count, then condition count);
+  counting boops still play the default reaction, only the firing boop is
+  claimed. Hold time per expression (0 = latch). Stored as
+  `protoface.expression_triggers`, keyed by stem or `custom_<slot>`.
 
 ### Effects (10 face animations)
 Idle, Blink, Angry, Happy, Sad, Shocked, Rainbow, Pulse, Wave, Custom
@@ -319,11 +369,27 @@ mercury`.
   **Random** (Surprise-Me generator with Save-to-Custom).
   Presets persist under `cfg["protoface"]["custom_effects"]`.
 
-### Material Colors (12)
-Default, Yellow, Orange, White, Green, Purple, Red, Blue, Rainbow, Flow Noise, H Rainbow, Black
+### Material Colors
+Solids (Teal, Yellow, Orange, White, Green, Purple, Red, Blue, Black), pattern
+gradients (Rainbow, Cool, Warm) and built-in gradient presets (Sunset, Ocean,
+Forest, Fire, Aurora, Lava, Galaxy, Pastel, Candy, Toxic), a **Pride/** flag
+submenu (rainbow, progress, trans, … — sharp bands or smooth, rotatable), a
+multi-stop **Custom Gradient** editor, and a full RGB **Custom Color** picker.
+Available as the **Default Style** material and, per expression, as an override
+(§ Per-expression styling above).
 
 ### GIF Playback
 8 GIF slots (labels configurable via `serial.teensy.gif_names[]` in config)
+
+### Scrolling Text Banner
+`Gifs and Text > Scrolling Text` — a 5×7-font banner across the whole face
+canvas (above every layer). Options: text (on-screen keyboard), **Speed**,
+**Size** (1–4× integer upscale), **Color** (six presets + a full RGB **Custom**
+picker), **Motion** (Scroll Left / Scroll Right / Static / Bounce),
+**Position** (Center / Top / Bottom), **Bold** (heavier strokes),
+**Background** (a dimmed band behind the text with adjustable **BG Dim** for
+legibility over busy faces), and **Loop** (wrap forever vs one pass then
+auto-off). Stored in `protoface.scroll_text`.
 
 ### Face Size & Position (per-face placement transform)
 Face Options → **Size & Position** scales/shifts the active face so art drawn
@@ -380,6 +446,21 @@ Cooling Fans** — global Enabled, then per-zone Mode (**Manual** fixed speed /
 `hardware/carrier-board/PINMAP.md`). Distinct from the Teensy face-fan control
 above.
 
+### Accessory LEDs (cheek hubs / fins / blush)
+`Face Display > Accessory LEDs` — a WS2812/SK6812 chain on the Pi SPI MOSI,
+composited as logical **zones**: **Cheek Hub L/R**, **Cheek Fin L/R**, and
+**Blush**. Global **Brightness** plus, per zone:
+- **Pattern** — Off / Solid / Breathe / Level (mic-reactive) / **Chase**
+  (walking dot + tail) / **Sparkle** (per-pixel twinkle).
+- **Color** (RGB picker) or **Follow Face** — the zone tracks the mean lit
+  colour of the composited face canvas (~5 Hz; works for any material,
+  gradient, or GIF).
+- **Zone Brightness** (on top of the global) and **Breathe Rate**.
+- **Test Flash**.
+Cheek boops flash the matching cheek zone and the blush zone. Config lives in
+`config["accessory_leds"]["zones"]` (a legacy 4-zone config loads unchanged,
+with blush dark).
+
 ---
 
 ## 10. XR Display Controls
@@ -427,6 +508,23 @@ All thresholds configurable via config.json (`af_trigger_time_ms`, `pip_trigger_
 
 ### SmartKnob
 Rotate to navigate menus and toasts; detent count matches current menu level.
+
+### On-Screen Keyboard
+Text entry (profile names, expression names, SMS, scroll-text, …) is driven by
+the knob, arrows, gamepad, or a USB keyboard:
+- **Symbols page** — a `?123` / `ABC` key flips the grid between letters and
+  symbols; a USB keyboard can type any printable character.
+- **Text cursor** — **Up** from the top key row focuses the text field, where
+  **Left/Right** move a real insertion caret; characters insert/delete at the
+  caret. The knob keeps walking the keys.
+- **Character counter** — a `used/max` readout that turns red near the limit.
+
+### Floating Terminal (keyboard focus)
+`HUD > Floating Window > Content: Terminal` renders a real Pi shell pinned in
+space. Enabling **Keyboard Focus** routes the paired keyboard into the pty and
+**closes the deep menu** so you land in the terminal; capture is suspended
+whenever the menu is open (reopen it with the knob to get the keyboard back),
+and **F10** always releases focus.
 
 ---
 

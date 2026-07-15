@@ -80,8 +80,10 @@
 #include "face/face_image.h"
 #include "face/eye_animations.h"
 #include "face/gif_player.h"
+#include "face/expression_director.h"
 #include "face/native_face_controller.h"
 #include "face/reaction_engine.h"
+#include "face/reaction_rules.h"
 #include "face/panel_output.h"
 #include "face/shm_pusher_output.h"
 #include "face/max7219_panel_output.h"
@@ -126,6 +128,12 @@ struct LayerCfg {
     float direction_deg = -1.f;
     // Liquid fill fraction for the "water" effect (0..1). Ignored by others.
     float level = 0.4f;
+    // Tie the water fill level to the BME280 humidity sensor: relative humidity
+    // (0..100%) maps onto [level_min, level_max] instead of the fixed level, so
+    // the tank fills as the room gets muggier. Water only.
+    bool  level_from_humidity = false;
+    float level_min = 0.10f;   // fill at 0% RH (bone-dry room)
+    float level_max = 0.90f;   // fill at 100% RH (saturated)
     // Liquid opacity for "water" (0 = fully transparent, 1 = solid). The face
     // and background read through the liquid as this drops.
     float alpha = 0.85f;
@@ -209,6 +217,68 @@ constexpr BoopFaceSlot kBoopFaceSlots[] = {
     {"boop_both",  "Both Cheeks"},
 };
 constexpr int kBoopFaceSlotCount = sizeof(kBoopFaceSlots) / sizeof(kBoopFaceSlots[0]);
+
+// ── Style vocabularies ────────────────────────────────────────────────────────
+// Shared by the Default Style menus and every expression's own Material /
+// Effect pickers (each expression can override the default look).
+struct PFMat { const char* label; uint8_t idx; };
+constexpr PFMat kMaterialPresets[] = {
+    // Solids
+    { "Teal",    0 }, { "Yellow", 1 }, { "Orange", 2 }, { "White", 3 },
+    { "Green",   4 }, { "Purple", 5 }, { "Red",    6 }, { "Blue",  7 },
+    { "Black",  11 },
+    // Multi-colour patterns / gradients (8-10 are PNG patterns; 12+ are
+    // built-in GradientMaterial presets — see preset_material()).
+    { "Rainbow", 8 }, { "Cool",    9 }, { "Warm",  10 },
+    { "Sunset", 12 }, { "Ocean",  13 }, { "Forest",14 }, { "Fire",  15 },
+    { "Aurora", 16 }, { "Lava",   17 }, { "Galaxy",18 }, { "Pastel",19 },
+    { "Candy",  20 }, { "Toxic",  21 },
+};
+struct PFFlag { const char* label; uint8_t idx; };
+constexpr PFFlag kPridePresets[] = {
+    { "Rainbow",     22 }, { "Progress",    23 }, { "Trans",       24 },
+    { "Bisexual",    25 }, { "Pansexual",   26 }, { "Lesbian",     27 },
+    { "Nonbinary",   28 }, { "Asexual",     29 }, { "Genderfluid", 30 },
+    { "Genderqueer", 31 }, { "Aromantic",   32 }, { "Intersex",    33 },
+};
+// Curated particle combos; the names line up with particles.cpp presets.
+struct PremadeEffect { const char* name; const char* combo; };
+constexpr PremadeEffect kPremadeEffects[] = {
+    {"gentle_snow","snow — light drift"}, {"heavy_snow","snow — dense"},
+    {"campfire","embers"}, {"galaxy","sparkle — multicolour"},
+    {"party","confetti"}, {"radar","expanding rings"},
+    {"fire","embers + embers + sparkle"}, {"aurora","fireflies + sparkle"},
+    {"blizzard","driven snow x2"}, {"sonar","rings + fireflies"},
+    {"celebration","confetti + sparkle"}, {"plasma","blue embers x2 + ring"},
+    {"thunderstorm","rain + branched lightning"}, {"arc","crackling electric arcs"},
+    {"meteor_shower","meteors + sparkle"},
+    {"fireworks","fireworks bursts"}, {"bubbles","rising bubbles"},
+    {"vortex","comet vortex (cool) + sparkle"},
+    {"vortex_ember","comet vortex (fire palette)"},
+    {"vortex_toxic","comet vortex (toxic green)"},
+    {"vortex_rose","comet vortex (pink/violet)"},
+    {"vortex_rainbow","comet vortex (rainbow)"},
+    {"nebula","clouds x2 + sparkle"},
+    {"starfield","parallax stars from centre"},
+    {"warp","hyperspace streaks"},
+    {"constellation","still twinkling sky"},
+    {"shooting_stars","meteors from centre"},
+    {"night_sky","twinkle + shooting stars"},
+    {"water","liquid — cyan, bubbles"}, {"lava","liquid — lava, thick"},
+    {"toxic","liquid — green, bubbles"}, {"ocean","liquid — teal"},
+    {"plasma_fluid","liquid — magenta"}, {"mercury","liquid — silver, thick"},
+};
+// Effects users can pick per layer. "none" is the sentinel for "disable
+// this slot." The strings line up with the names ParticleSystem's factory
+// recognises (see particles.cpp::make_effect).
+const char* const kLayerEffects[] = {
+    "none", "sparkle", "embers", "rain", "snow",
+    "confetti", "rings", "fireflies", "clouds",
+    "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
+    "starfield", "warp", "constellation", "shootingstars",
+    "steam", "waveform", "matrix", "circuit", "frost", "heatwave",
+    "snooze",
+};
 } // namespace
 
 // Open the face image picker for a given expression. On commit copies the
@@ -379,6 +449,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     bool*   pf_temp_effects_p = ctx.pf_temp_effects_p;
     double* pf_temp_cold_p    = ctx.pf_temp_cold_p;
     double* pf_temp_hot_p     = ctx.pf_temp_hot_p;
+    bool*   pf_frost_fractal_p  = ctx.pf_frost_fractal_p;
+    bool*   pf_heat_heartbeat_p = ctx.pf_heat_heartbeat_p;
+    double* pf_frost_speed_p    = ctx.pf_frost_speed_p;
+    double* pf_heat_speed_p     = ctx.pf_heat_speed_p;
+    int*    pf_temp_force_p     = ctx.pf_temp_force_p;
     std::function<void()> pf_ambient_resync = ctx.pf_ambient_resync;
     std::shared_ptr<std::function<void()>> pf_live_tick = ctx.pf_live_tick;
     nlohmann::json* cfg_root = ctx.cfg_root;
@@ -690,6 +765,345 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     for (int j = 0; j < kBoopFaceSlotCount; ++j)
         boop_peers.emplace_back(kBoopFaceSlots[j].file_stem, kBoopFaceSlots[j].label);
 
+    // ── Per-expression style + trigger submenus (menu-native) ────────────────
+    // Every expression — built-in slot or custom — gets Material / Effect /
+    // Glitch / Triggers submenus inside its own row, edited in place like any
+    // other menu level (no popup editor), so the face preview context panel
+    // stays visible while styling. get/set close over the right storage:
+    // built-ins go through the controller (persisted per stem), customs
+    // through state.custom_expressions[idx].style.
+    using StyleGet = std::function<face::ExpressionStyle()>;
+    using StyleSet = std::function<void(const face::ExpressionStyle&)>;
+
+    auto make_material_item = [](StyleGet get, StyleSet set) -> MenuItem {
+        auto set_spec = [get, set](std::string spec) {
+            face::ExpressionStyle st = get();
+            st.material_spec = std::move(spec);
+            set(st);
+        };
+        std::vector<MenuItem> items;
+        items.push_back(leaf_sel("Default (inherit)",
+            [set_spec]{ set_spec(""); },
+            [get]{ return get().material_spec.empty(); }));
+        for (const auto& m : kMaterialPresets) {
+            const std::string spec =
+                face::NativeFaceController::preset_material_spec(m.idx);
+            items.push_back(leaf_sel(m.label,
+                [set_spec, spec]{ set_spec(spec); },
+                [get, spec]{ return get().material_spec == spec; }));
+        }
+        std::vector<MenuItem> pride;
+        for (const auto& f : kPridePresets) {
+            const std::string spec =
+                face::NativeFaceController::preset_material_spec(f.idx);
+            pride.push_back(leaf_sel(f.label,
+                [set_spec, spec]{ set_spec(spec); },
+                [get, spec]{ return get().material_spec == spec; }));
+        }
+        items.push_back(submenu("Pride", std::move(pride)));
+        items.push_back(color_picker("Custom Color",
+            [set_spec](uint8_t r, uint8_t g, uint8_t b) {
+                char spec[32];
+                std::snprintf(spec, sizeof spec, "solid:%u,%u,%u", r, g, b);
+                set_spec(spec);
+            },
+            [get]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
+                int r = 0, g = 220, b = 180;
+                std::sscanf(get().material_spec.c_str(), "solid:%d,%d,%d",
+                            &r, &g, &b);
+                return { (uint8_t)r, (uint8_t)g, (uint8_t)b };
+            }));
+        return with_desc(submenu("Material", std::move(items)),
+            "This expression's own material color. Default (inherit) uses "
+            "the Default Style; anything else overrides while this "
+            "expression is showing.");
+    };
+
+    auto make_effect_item = [cfg_root](StyleGet get, StyleSet set) -> MenuItem {
+        auto set_spec = [get, set](nlohmann::json spec) {
+            face::ExpressionStyle st = get();
+            st.effect_spec = std::move(spec);
+            set(st);
+        };
+        auto sel_is = [get](const nlohmann::json& spec) {
+            return get().effect_spec == spec;
+        };
+        std::vector<MenuItem> items;
+        items.push_back(leaf_sel("Default (inherit)",
+            [set_spec]{ set_spec(nlohmann::json()); },
+            [get]{ return get().effect_spec.is_null(); }));
+        items.push_back(leaf_sel("None",
+            [set_spec]{ set_spec(nlohmann::json("none")); },
+            [sel_is]{ return sel_is(nlohmann::json("none")); }));
+        std::vector<MenuItem> singles;
+        for (const char* nm : kLayerEffects) {
+            if (std::string_view(nm) == "none") continue;
+            nlohmann::json spec;
+            spec["layers"] = nlohmann::json::array({ { { "effect", nm } } });
+            singles.push_back(leaf_sel(nm,
+                [set_spec, spec]{ set_spec(spec); },
+                [sel_is, spec]{ return sel_is(spec); }));
+        }
+        items.push_back(submenu("Single Effects", std::move(singles)));
+        std::vector<MenuItem> premade;
+        for (const auto& pm : kPremadeEffects) {
+            nlohmann::json spec; spec["preset"] = pm.name;
+            MenuItem it = leaf_sel(pm.name,
+                [set_spec, spec]{ set_spec(spec); },
+                [sel_is, spec]{ return sel_is(spec); });
+            it.description = pm.combo;
+            premade.push_back(std::move(it));
+        }
+        items.push_back(submenu("Premade Effects", std::move(premade)));
+        // User-saved layered presets (Effects > Custom > Save) — read from
+        // the config at build time, same as the Load list.
+        std::vector<MenuItem> customs;
+        if (cfg_root && cfg_root->contains("protoface") &&
+            (*cfg_root)["protoface"].contains("custom_effects") &&
+            (*cfg_root)["protoface"]["custom_effects"].is_object()) {
+            for (auto it = (*cfg_root)["protoface"]["custom_effects"].begin();
+                 it != (*cfg_root)["protoface"]["custom_effects"].end(); ++it) {
+                nlohmann::json spec = it.value();
+                customs.push_back(leaf_sel(it.key(),
+                    [set_spec, spec]{ set_spec(spec); },
+                    [sel_is, spec]{ return sel_is(spec); }));
+            }
+        }
+        if (!customs.empty())
+            items.push_back(with_desc(submenu("Custom Effects", std::move(customs)),
+                "Your saved layered presets (Default Style > Effects > "
+                "Custom > Save). Saved after boot? Reopen the menu to list "
+                "new ones."));
+        // Replace vs overlay: does this expression's effect stand alone or
+        // layer on top of the default/ambient effect? Only meaningful once an
+        // effect is chosen (not inherit / none).
+        items.push_back(with_desc(submenu("Effect Mode", {
+                leaf_sel("Replace",
+                    [get, set]{ auto st = get(); st.effect_overlay = false; set(st); },
+                    [get]{ return !get().effect_overlay; }),
+                leaf_sel("Overlay",
+                    [get, set]{ auto st = get(); st.effect_overlay = true; set(st); },
+                    [get]{ return get().effect_overlay; }),
+            }),
+            "Replace: this effect is the only one shown. Overlay: it layers on "
+            "top of the Default Style / ambient effect. (Applies once an "
+            "Effect other than Default/None is picked.)"));
+        return with_desc(submenu("Effect", std::move(items)),
+            "This expression's own particle effect — single primitive, "
+            "premade combo, or one of your saved custom presets. Default "
+            "(inherit) follows the Default Style / ambient weather; Effect "
+            "Mode chooses replace vs overlay.");
+    };
+
+    auto make_glitch_item = [](StyleGet get, StyleSet set) -> MenuItem {
+        std::vector<MenuItem> items;
+        items.push_back(leaf_sel("Default (inherit)",
+            [get, set]{
+                face::ExpressionStyle st = get();
+                st.has_glitch = false;
+                st.glitch = face::GlitchConfig{};
+                set(st);
+            },
+            [get]{ return !get().has_glitch; }));
+        items.push_back(leaf_sel("Off",
+            [get, set]{
+                face::ExpressionStyle st = get();
+                st.has_glitch = true;
+                st.glitch = face::GlitchConfig{};
+                st.glitch.enabled = false;
+                set(st);
+            },
+            [get]{
+                const auto st = get();
+                return st.has_glitch && !st.glitch.enabled;
+            }));
+        for (const auto& [name, preset] : face::GlitchConfig::presets()) {
+            items.push_back(leaf_sel(name,
+                [get, set, preset]{
+                    face::ExpressionStyle st = get();
+                    st.has_glitch = true;
+                    st.glitch = preset;
+                    set(st);
+                },
+                [get, preset]{
+                    const auto st = get();
+                    return st.has_glitch && st.glitch.enabled &&
+                           st.glitch.to_json() == preset.to_json();
+                }));
+        }
+        return with_desc(submenu("Glitch", std::move(items)),
+            "This expression's own glitch. Default (inherit) follows the "
+            "Default Style glitch; Off forces it clean even when the "
+            "default glitches.");
+    };
+
+    // Trigger recipes: "event × count within a window, while conditions
+    // hold". Uniform for every expression, keyed by stem or custom_<slot>.
+    auto trig_mod = [&state](const std::string& key,
+                             const std::function<void(face::TriggerSet&)>& fn) {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        auto& ts = state.expression_triggers[key];
+        if ((int)ts.recipes.size() < face::kRecipeSlots)
+            ts.recipes.resize(face::kRecipeSlots);
+        fn(ts);
+    };
+    auto trig_get = [&state](const std::string& key) {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        auto& ts = state.expression_triggers[key];
+        if ((int)ts.recipes.size() < face::kRecipeSlots)
+            ts.recipes.resize(face::kRecipeSlots);
+        return ts;
+    };
+
+    auto make_triggers_item = [trig_get, trig_mod](std::string key) -> MenuItem {
+        using TR = face::TriggerRecipe;
+        std::vector<MenuItem> rows;
+        rows.push_back(with_desc(slider("Hold Time", 0.f, 10.f, 0.5f, " s",
+            [trig_get, key]{ return (float)trig_get(key).hold_s; },
+            [trig_mod, key](float v){
+                trig_mod(key, [v](face::TriggerSet& ts){ ts.hold_s = v; });
+            }),
+            "How long a triggered activation shows before restoring the "
+            "previous face. 0 = stay until another expression is picked."));
+
+        for (int j = 0; j < face::kRecipeSlots; ++j) {
+            auto rget = [trig_get, key, j]{ return trig_get(key).recipes[j]; };
+            auto rmod = [trig_mod, key, j](std::function<void(TR&)> fn) {
+                trig_mod(key, [j, fn](face::TriggerSet& ts){ fn(ts.recipes[j]); });
+            };
+
+            struct EvOpt { const char* label; TR::Event ev; int zone; const char* gest; };
+            static const EvOpt kEvents[] = {
+                { "Off",          TR::Event::None,        0, "" },
+                { "Boop: Snout",  TR::Event::Boop,        0, "" },
+                { "Boop: Left Cheek",  TR::Event::Boop,   1, "" },
+                { "Boop: Right Cheek", TR::Event::Boop,   2, "" },
+                { "Boop: Both Cheeks", TR::Event::Boop,   3, "" },
+                { "Swipe Up",     TR::Event::Gesture,     0, "up" },
+                { "Swipe Down",   TR::Event::Gesture,     0, "down" },
+                { "Swipe Left",   TR::Event::Gesture,     0, "left" },
+                { "Swipe Right",  TR::Event::Gesture,     0, "right" },
+                { "Head Shake",   TR::Event::Shake,       0, "" },
+                { "Gets Bright",  TR::Event::LightBright, 0, "" },
+                { "Gets Dark",    TR::Event::LightDark,   0, "" },
+            };
+            std::vector<MenuItem> ev_items;
+            for (const auto& o : kEvents) {
+                ev_items.push_back(leaf_sel(o.label,
+                    [rmod, o]{
+                        rmod([o](TR& r){
+                            r.event = o.ev; r.boop_zone = o.zone;
+                            r.gesture = o.gest;
+                        });
+                    },
+                    [rget, o]{
+                        const TR r = rget();
+                        if (r.event != o.ev) return false;
+                        if (r.event == TR::Event::Boop)
+                            return r.boop_zone == o.zone;
+                        if (r.event == TR::Event::Gesture)
+                            return r.gesture == o.gest;
+                        return true;
+                    }));
+            }
+
+            auto tri_sel = [rget, rmod](const char* label, auto member, auto value) {
+                return leaf_sel(label,
+                    [rmod, member, value]{ rmod([member, value](TR& r){ r.*member = value; }); },
+                    [rget, member, value]{ return rget().*member == value; });
+            };
+
+            std::vector<MenuItem> recipe_items = {
+                with_desc(submenu("Event", std::move(ev_items)),
+                    "What counts. Boops, APDS swipe gestures, a head-motion "
+                    "spike, or the ambient light crossing the threshold."),
+                with_desc(slider("Count", 1.f, 10.f, 1.f, "x",
+                    [rget]{ return (float)rget().count; },
+                    [rmod](float v){ rmod([v](TR& r){ r.count = (int)v; }); }),
+                    "Fire after this many events inside the window — e.g. "
+                    "nose boop x5."),
+                with_desc(slider("Window", 0.5f, 10.f, 0.5f, " s",
+                    [rget]{ return rget().window_s; },
+                    [rmod](float v){ rmod([v](TR& r){ r.window_s = v; }); }),
+                    "Rolling time window the count must land inside."),
+                with_desc(submenu("While: Head Tilt", {
+                        tri_sel("Any",   &TR::tilt, TR::Tilt::Any),
+                        tri_sel("Tilted Left",  &TR::tilt, TR::Tilt::Left),
+                        tri_sel("Tilted Right", &TR::tilt, TR::Tilt::Right),
+                    }),
+                    "Condition: head roll must be past Tilt Angle when the "
+                    "final event lands — e.g. left cheek + tilted left = "
+                    "curious."),
+                slider("Tilt Angle", 5.f, 45.f, 5.f, "\xc2\xb0",
+                    [rget]{ return rget().tilt_deg; },
+                    [rmod](float v){ rmod([v](TR& r){ r.tilt_deg = v; }); }),
+                with_desc(submenu("While: Light", {
+                        tri_sel("Any",    &TR::light, TR::Light::Any),
+                        tri_sel("Bright", &TR::light, TR::Light::Bright),
+                        tri_sel("Dark",   &TR::light, TR::Light::Dark),
+                    }),
+                    "Condition: ambient light above/below the threshold."),
+                slider("Light Threshold", 0.f, 2000.f, 50.f, " lux",
+                    [rget]{ return rget().light_lux; },
+                    [rmod](float v){ rmod([v](TR& r){ r.light_lux = v; }); }),
+                with_desc(submenu("While: Motion", {
+                        tri_sel("Any",    &TR::motion, TR::Motion::Any),
+                        tri_sel("Moving", &TR::motion, TR::Motion::Moving),
+                        tri_sel("Still",  &TR::motion, TR::Motion::Still),
+                    }),
+                    "Condition: wearer moving (walking, head active) or "
+                    "holding still."),
+                leaf("Clear Recipe", [rmod]{ rmod([](TR& r){ r = TR{}; }); }),
+            };
+            MenuItem recipe = submenu("Trigger " + std::to_string(j + 1),
+                                      std::move(recipe_items));
+            recipe.label_fn = [rget, j]() -> std::string {
+                const TR r = rget();
+                std::string base = "Trigger " + std::to_string(j + 1) + ": ";
+                if (!r.armed()) return base + "Off";
+                std::string ev;
+                switch (r.event) {
+                    case TR::Event::Boop: {
+                        static const char* z[] = { "Boop Snout", "Boop Left",
+                                                   "Boop Right", "Boop Both" };
+                        ev = z[std::clamp(r.boop_zone, 0, 3)];
+                        break;
+                    }
+                    case TR::Event::Gesture:     ev = "Swipe " + r.gesture; break;
+                    case TR::Event::Shake:       ev = "Head Shake"; break;
+                    case TR::Event::LightBright: ev = "Gets Bright"; break;
+                    case TR::Event::LightDark:   ev = "Gets Dark"; break;
+                    default:                     ev = "Off"; break;
+                }
+                if (r.count > 1) ev += " x" + std::to_string(r.count);
+                if (r.tilt != TR::Tilt::Any)
+                    ev += (r.tilt == TR::Tilt::Left) ? " +tiltL" : " +tiltR";
+                if (r.light != TR::Light::Any)
+                    ev += (r.light == TR::Light::Bright) ? " +bright" : " +dark";
+                if (r.motion != TR::Motion::Any)
+                    ev += (r.motion == TR::Motion::Moving) ? " +moving" : " +still";
+                return base + ev;
+            };
+            rows.push_back(std::move(recipe));
+        }
+        return with_desc(submenu("Triggers", std::move(rows)),
+            "Recipes that activate this expression: an event repeated COUNT "
+            "times inside the window, while the conditions hold — e.g. "
+            "nose boop x5 = angry, or left cheek while tilted left = "
+            "curious. The most specific matching recipe wins.");
+    };
+
+    auto make_style_trigger_children =
+        [make_material_item, make_effect_item, make_glitch_item,
+         make_triggers_item](const std::string& key, StyleGet get, StyleSet set) {
+        std::vector<MenuItem> out;
+        out.push_back(make_material_item(get, set));
+        out.push_back(make_effect_item(get, set));
+        out.push_back(make_glitch_item(get, set));
+        out.push_back(make_triggers_item(key));
+        return out;
+    };
+
     auto face_slot_row = [&, face_preview, edit_face, make_versions_submenu](int slot_idx) -> MenuItem {
         const std::string expr  = kFaceSlots[slot_idx].expression;
         const std::string label = kFaceSlots[slot_idx].label;
@@ -716,6 +1130,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         versions.description = "Saved versions of this face (named + auto-backups) "
                                "with thumbnails — Make Current to restore one.";
         d.versions = std::move(versions);
+        d.extra_children = make_style_trigger_children(expr,
+            [teensy, expr]{ return teensy->expression_style(expr); },
+            [teensy, expr](const face::ExpressionStyle& st){
+                teensy->set_expression_style(expr, st);
+            });
 
         d.copy_from = make_copy_from_submenu(teensy, expr, face_peers,
             "Copy another face's PNG into this slot as a "
@@ -726,6 +1145,144 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     std::vector<MenuItem> face_files_menu;
     for (int i = 0; i < kFaceSlotCount; ++i)
         face_files_menu.push_back(face_slot_row(i));
+
+    // ── Custom expression slots, in the same list as the built-ins ──────────
+    // Pre-allocated placeholder rows over state.custom_expressions (the tree
+    // must not grow while open — see item_factories.h); everything is edited
+    // in place through normal menu levels, so the face preview panel stays
+    // visible while styling.
+    face::ExpressionDirector* expr_director = ctx.expr_director;
+    auto custom_used = [&state](int i) {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        return i < (int)state.custom_expressions.size() &&
+               state.custom_expressions[i].used;
+    };
+    auto custom_key = [](int i) { return "custom_" + std::to_string(i); };
+    auto make_custom_rule = [&state, trig_get, custom_key](int i) {
+        face::ExpressionDirector::Rule r;
+        r.key = custom_key(i);
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i >= (int)state.custom_expressions.size()) return r;
+            const auto& cx = state.custom_expressions[i];
+            r.name = cx.name;
+            r.base_expression = cx.base_expression;
+            r.has_style = true;
+            r.style = cx.style;
+        }
+        r.hold_s = trig_get(r.key).hold_s;
+        return r;
+    };
+    auto custom_slot_row = [&, expr_director, custom_used, custom_key,
+                            make_custom_rule](int i) -> MenuItem {
+        MenuItem row;
+        row.type  = MenuItemType::SUBMENU;
+        row.label = "Custom " + std::to_string(i + 1);
+        row.label_fn = [&state, i]() -> std::string {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i < (int)state.custom_expressions.size() &&
+                state.custom_expressions[i].used &&
+                !state.custom_expressions[i].name.empty())
+                return state.custom_expressions[i].name + " (custom)";
+            return "Empty Slot " + std::to_string(i + 1);
+        };
+        row.description = "A user-created expression: base face art + its own "
+                          "material / effect / glitch + trigger recipes.";
+
+        auto cx_get = [&state, i]() -> face::CustomExpression {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i < (int)state.custom_expressions.size())
+                return state.custom_expressions[i];
+            return {};
+        };
+        auto cx_mod = [&state, i](std::function<void(face::CustomExpression&)> fn) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i >= (int)state.custom_expressions.size()) return;
+            fn(state.custom_expressions[i]);
+            state.custom_expressions[i].used = true;
+        };
+
+        // Activate / Deactivate through the director (hold + restore).
+        MenuItem act = leaf("Activate", [expr_director, make_custom_rule, i]{
+            if (expr_director) expr_director->activate(make_custom_rule(i));
+        });
+        act.visible_fn = [custom_used, i]{ return custom_used(i); };
+        row.children.push_back(std::move(act));
+        MenuItem deact = leaf("Deactivate",
+            [expr_director]{ if (expr_director) expr_director->deactivate(); });
+        deact.visible_fn = [expr_director, custom_key, i]{
+            return expr_director && expr_director->active() &&
+                   expr_director->active_key() == custom_key(i);
+        };
+        row.children.push_back(std::move(deact));
+
+        // Name via the on-screen keyboard.
+        MenuItem name_it = leaf("Name...", [menu_sys_pp, cx_get, cx_mod]{
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+            (*menu_sys_pp)->open_keyboard("Expression Name", cx_get().name,
+                [cx_mod](const std::string& s){
+                    cx_mod([&s](face::CustomExpression& cx){ cx.name = s; });
+                }, 24);
+        });
+        name_it.label_fn = [cx_get]() -> std::string {
+            const auto cx = cx_get();
+            return cx.name.empty() ? "Name..." : ("Name: " + cx.name);
+        };
+        row.children.push_back(std::move(name_it));
+
+        // Base face: which PNG slot supplies the art.
+        std::vector<MenuItem> base_items;
+        for (int bi = 0; bi < kFaceSlotCount; ++bi) {
+            const std::string stem  = kFaceSlots[bi].expression;
+            const std::string label = kFaceSlots[bi].label;
+            base_items.push_back(leaf_sel(label,
+                [cx_mod, stem]{
+                    cx_mod([&stem](face::CustomExpression& cx){
+                        cx.base_expression = stem;
+                    });
+                },
+                [cx_get, stem]{ return cx_get().base_expression == stem; }));
+        }
+        row.children.push_back(with_desc(submenu("Base Face", std::move(base_items)),
+            "Which expression slot's PNG this custom expression shows — its "
+            "style below is what makes it different."));
+
+        // Material / Effect / Glitch / Triggers — same submenus as built-ins,
+        // writing into the slot's own style.
+        for (auto& it : make_style_trigger_children(custom_key(i),
+                 [cx_get]{ return cx_get().style; },
+                 [cx_mod](const face::ExpressionStyle& st){
+                     cx_mod([&st](face::CustomExpression& cx){ cx.style = st; });
+                 }))
+            row.children.push_back(std::move(it));
+
+        MenuItem clr = leaf("Clear Slot", [&state, i]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if (i < (int)state.custom_expressions.size())
+                state.custom_expressions[i] = face::CustomExpression{};
+            state.expression_triggers.erase("custom_" + std::to_string(i));
+        });
+        clr.visible_fn = [custom_used, i]{ return custom_used(i); };
+        row.children.push_back(std::move(clr));
+        return row;
+    };
+    {
+        auto custom_rows = make_dynamic_rows(
+            face::kMaxCustomExpressions,
+            [&state]{
+                std::lock_guard<std::mutex> lk(state.mtx);
+                return (int)state.custom_expressions.size();
+            },
+            custom_slot_row);
+        for (auto& r : custom_rows) face_files_menu.push_back(std::move(r));
+        face_files_menu.push_back(with_desc(leaf("Add Expression...", [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            if ((int)state.custom_expressions.size() < face::kMaxCustomExpressions)
+                state.custom_expressions.emplace_back();
+        }),
+            "Add another custom-expression slot (up to 24). Open the new "
+            "slot to name it and pick its base face, style, and triggers."));
+    }
 
     // ── Mouth Shapes (viseme overlays) ───────────────────────────────────────
     // Same import/preview pipeline as the expression slots, minus Play (these
@@ -1101,6 +1658,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 layer["wave_gain"]  = L.wave_gain;
                 layer["pitch_fill"] = L.pitch_fill;
                 layer["face_glow"]  = L.face_glow;
+                if (L.level_from_humidity) {
+                    layer["level_from"] = "humidity";
+                    layer["level_min"]  = L.level_min;
+                    layer["level_max"]  = L.level_max;
+                }
                 if (L.bubbles > 0) {
                     layer["bubbles"]     = L.bubbles;
                     layer["bubble_mode"] = L.bubble_mode;
@@ -1141,6 +1703,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.direction_from = jl.value("direction_from", std::string("none"));
             L.intensity_from = jl.value("intensity_from", std::string("none"));
             L.level = jl.value("level", 0.4f);
+            L.level_from_humidity =
+                jl.value("level_from", std::string("none")) == "humidity";
+            L.level_min = jl.value("level_min", 0.10f);
+            L.level_max = jl.value("level_max", 0.90f);
             L.alpha = jl.value("alpha", 0.85f);
             L.viscosity = jl.value("viscosity", 0.15f);
             L.wave_gain = jl.value("wave_gain", 1.0f);
@@ -1197,20 +1763,6 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         };
     }
 
-    // Effects users can pick per layer. "none" is the sentinel for "disable
-    // this slot." The strings line up with the names ParticleSystem's factory
-    // recognises (see particles.cpp::make_effect).
-    static const char* const kLayerEffects[] = {
-        "none", "sparkle", "embers", "rain", "snow",
-        "confetti", "rings", "fireflies", "clouds",
-        "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
-        "starfield", "warp", "constellation", "shootingstars",
-        // The "alive"-pack primitives shipped in the renderer + presets but
-        // never landed in this list, so Single Effects / the layer editor
-        // couldn't reach them.
-        "steam", "waveform", "matrix", "circuit", "frost", "heatwave",
-        "snooze",
-    };
     static const char* const kBlendModes[] = {
         "add", "normal", "multiply", "screen",
     };
@@ -1286,12 +1838,50 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 return dir;
             })(),
             // Fill Level — only meaningful for the "water" liquid effect.
+            // Hidden when the level is driven by the humidity sensor (the
+            // Dry/Full range below takes over).
             ([&]{
                 MenuItem lvl = slider("Fill Level", 0.f, 100.f, 5.f, "%",
                     [L]{ return L->level * 100.f; },
                     [L](float v){ L->level = v / 100.f; });
-                lvl.visible_fn = [L]{ return L->effect == "water"; };
+                lvl.visible_fn = [L]{
+                    return L->effect == "water" && !L->level_from_humidity;
+                };
                 return lvl;
+            })(),
+            // Fill from Humidity — water only: tie the fill level to the
+            // BME280 humidity sensor instead of the fixed Fill Level.
+            ([&]{
+                MenuItem h = with_desc(toggle("Fill from Humidity",
+                    [L]{ return L->level_from_humidity; },
+                    [L](bool v){ L->level_from_humidity = v; }),
+                    "Tie the liquid level to the room's relative humidity "
+                    "(BME280). Dry room = Dry Level, muggy = Full Level. "
+                    "Needs the environment sensor enabled.");
+                h.visible_fn = [L]{ return L->effect == "water"; };
+                return h;
+            })(),
+            // Dry / Full Level — the humidity mapping range, shown only when
+            // Fill from Humidity is on.
+            ([&]{
+                MenuItem lo = with_desc(slider("Dry Level", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->level_min * 100.f; },
+                    [L](float v){ L->level_min = v / 100.f; }),
+                    "Fill fraction at 0% humidity (a bone-dry room).");
+                lo.visible_fn = [L]{
+                    return L->effect == "water" && L->level_from_humidity;
+                };
+                return lo;
+            })(),
+            ([&]{
+                MenuItem hi = with_desc(slider("Full Level", 0.f, 100.f, 5.f, "%",
+                    [L]{ return L->level_max * 100.f; },
+                    [L](float v){ L->level_max = v / 100.f; }),
+                    "Fill fraction at 100% humidity (fully saturated air).");
+                hi.visible_fn = [L]{
+                    return L->effect == "water" && L->level_from_humidity;
+                };
+                return hi;
             })(),
             // Opacity — water only: how solid the liquid reads. Lower = more
             // transparent, the face and background show through more.
@@ -1609,35 +2199,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         "(colour, density, speed, and effect-specific options).");
 
     // 2) PREMADE EFFECTS — curated combos; the side panel shows the recipe.
-    struct Premade { const char* name; const char* combo; };
-    static const Premade kPremades[] = {
-        {"gentle_snow","snow — light drift"}, {"heavy_snow","snow — dense"},
-        {"campfire","embers"}, {"galaxy","sparkle — multicolour"},
-        {"party","confetti"}, {"radar","expanding rings"},
-        {"fire","embers + embers + sparkle"}, {"aurora","fireflies + sparkle"},
-        {"blizzard","driven snow x2"}, {"sonar","rings + fireflies"},
-        {"celebration","confetti + sparkle"}, {"plasma","blue embers x2 + ring"},
-        {"thunderstorm","rain + branched lightning"}, {"arc","crackling electric arcs"},
-        {"meteor_shower","meteors + sparkle"},
-        {"fireworks","fireworks bursts"}, {"bubbles","rising bubbles"},
-        {"vortex","comet vortex (cool) + sparkle"},
-        {"vortex_ember","comet vortex (fire palette)"},
-        {"vortex_toxic","comet vortex (toxic green)"},
-        {"vortex_rose","comet vortex (pink/violet)"},
-        {"vortex_rainbow","comet vortex (rainbow)"},
-        {"nebula","clouds x2 + sparkle"},
-        {"starfield","parallax stars from centre"},
-        {"warp","hyperspace streaks"},
-        {"constellation","still twinkling sky"},
-        {"shooting_stars","meteors from centre"},
-        {"night_sky","twinkle + shooting stars"},
-        {"water","liquid — cyan, bubbles"}, {"lava","liquid — lava, thick"},
-        {"toxic","liquid — green, bubbles"}, {"ocean","liquid — teal"},
-        {"plasma_fluid","liquid — magenta"}, {"mercury","liquid — silver, thick"},
-    };
     auto premade_combo = std::make_shared<std::string>();
     std::vector<MenuItem> premade_items;
-    for (const auto& pm : kPremades) {
+    for (const auto& pm : kPremadeEffects) {
         const std::string name = pm.name, combo = pm.combo;
         MenuItem it = leaf(name, [name, pf_set_effect_json]{
             nlohmann::json spec; spec["preset"] = name;
@@ -1652,16 +2216,22 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         };
         premade_items.push_back(std::move(it));
     }
-    *premade_combo = std::string(kPremades[0].name) + "\n" + kPremades[0].combo;  // seed panel
+    *premade_combo = std::string(kPremadeEffects[0].name) + "\n" + kPremadeEffects[0].combo;  // seed panel
     MenuItem premade_item = submenu("Premade Effects", std::move(premade_items));
-    premade_item.context_panel_title = "Recipe";
+    premade_item.context_panel_title = "Effect Preview";
+    // Same live face-render window as Single / Custom on top, with the
+    // highlighted preset's recipe underneath. Select applies the preset, so
+    // the window shows it live (with Live Preview on).
     premade_item.context_panel_draw =
-        [premade_combo](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
-            (void)sz;
+        [premade_combo, draw_effect_preview](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            // Top ~58%: the live face render (shared with Single / Custom).
+            const float top_h = sz.y * 0.58f;
+            draw_effect_preview(dl, o, ImVec2(sz.x, top_h));
+            // Bottom: the highlighted preset's recipe.
             ImFont* font = ImGui::GetFont();
             const float fs = ImGui::GetFontSize();
             const std::string& s = *premade_combo;
-            float y = o.y + 6.f;
+            float y = o.y + top_h + 6.f;
             size_t start = 0;
             while (start <= s.size()) {
                 const size_t nl = s.find('\n', start);
@@ -1675,8 +2245,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             }
         };
     premade_item = with_desc(std::move(premade_item),
-        "Curated multi-layer presets. The side panel shows what each is made of. "
-        "Select applies; Ctrl+Select saves a copy to Custom.");
+        "Curated multi-layer presets. The side panel previews the face and "
+        "shows the recipe. Select applies; Ctrl+Select saves a copy to Custom.");
 
     // 3) CUSTOM is the layered builder (pf_layered_item, renamed above).
     // 4) RANDOM — generate a fresh mix; optionally save it to Custom.
@@ -1803,40 +2373,102 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "the HUD's weather monitor; your chosen effect returns when it "
             "clears up. Expression moods still play on top."));
     if (pf_temp_effects_p && pf_ambient_resync) {
-        pf_effects.push_back(with_desc(toggle("Temp Effects",
+        // Temp Effects live under their own leaf, with a Frost subset and a
+        // Heat subset each holding its threshold, look toggle, speed and test.
+        std::vector<MenuItem> te;
+        te.push_back(with_desc(toggle("Enabled",
             [pf_temp_effects_p]{ return *pf_temp_effects_p; },
             [pf_temp_effects_p, pf_ambient_resync, cfg_root](bool v){
                 *pf_temp_effects_p = v; pf_ambient_resync();
                 if (cfg_root) (*cfg_root)["protoface"]["temp_effects"] = v;
             }),
-            "Ambient frost crystals when it's freezing outside and rising "
-            "heat shimmer when it's scorching, from the live temperature. "
-            "Weather Sync's precipitation takes priority when both are on; "
-            "the thresholds below are Â°""C."));
-        if (pf_temp_cold_p) {
-            MenuItem m = with_desc(slider("Cold Below", -20.f, 15.f, 1.f,
-                "Â°""C",
+            "Ambient frost when it's freezing outside and rising heat shimmer "
+            "when it's scorching, from the live temperature. Weather Sync's "
+            "precipitation takes priority when both are on."));
+
+        // ── Frost subset ────────────────────────────────────────────────────
+        std::vector<MenuItem> frost;
+        if (pf_temp_cold_p)
+            frost.push_back(with_desc(slider("Frost Below", -20.f, 15.f, 1.f,
+                "\xc2\xb0""C",
                 [pf_temp_cold_p]{ return static_cast<float>(*pf_temp_cold_p); },
                 [pf_temp_cold_p, pf_ambient_resync, cfg_root](float v){
                     *pf_temp_cold_p = v; pf_ambient_resync();
                     if (cfg_root) (*cfg_root)["protoface"]["temp_cold_c"] = v;
                 }),
-                "Frost appears at or below this outdoor temperature.");
-            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
-            pf_effects.push_back(std::move(m));
-        }
-        if (pf_temp_hot_p) {
-            MenuItem m = with_desc(slider("Hot Above", 25.f, 50.f, 1.f,
-                "Â°""C",
+                "Frost appears at or below this outdoor temperature."));
+        if (pf_frost_fractal_p)
+            frost.push_back(with_desc(toggle("Fractal Frost",
+                [pf_frost_fractal_p]{ return *pf_frost_fractal_p; },
+                [pf_frost_fractal_p, pf_ambient_resync, cfg_root](bool v){
+                    *pf_frost_fractal_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["frost_fractal"] = v;
+                }),
+                "Frost edges grow in branching, fractal fern patterns and "
+                "large snowflakes drift in as it forms. Off = the smooth "
+                "creeping sheet."));
+        if (pf_frost_speed_p)
+            frost.push_back(with_desc(slider("Frost Speed", 0.25f, 3.f, 0.25f, "x",
+                [pf_frost_speed_p]{ return static_cast<float>(*pf_frost_speed_p); },
+                [pf_frost_speed_p, pf_ambient_resync, cfg_root](float v){
+                    *pf_frost_speed_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["frost_speed"] = v;
+                }),
+                "How fast the frost creeps in and the snowflakes drift. 1x is "
+                "the default pace; higher forms quicker."));
+        if (pf_temp_force_p)
+            frost.push_back(with_desc(toggle("Test Frost",
+                [p = pf_temp_force_p]{ return *p == 1; },
+                [p = pf_temp_force_p, pf_ambient_resync](bool v){
+                    *p = v ? 1 : 0; pf_ambient_resync(); }),
+                "Force the frost on now, ignoring the temperature, to preview "
+                "it (uses the settings above). Not saved."));
+        te.push_back(with_desc(submenu("Frost", std::move(frost)),
+            "The freezing look: creeping ice, fractal ferns, snowflakes."));
+
+        // ── Heat subset ─────────────────────────────────────────────────────
+        std::vector<MenuItem> heat;
+        if (pf_temp_hot_p)
+            heat.push_back(with_desc(slider("Heat Above", 25.f, 50.f, 1.f,
+                "\xc2\xb0""C",
                 [pf_temp_hot_p]{ return static_cast<float>(*pf_temp_hot_p); },
                 [pf_temp_hot_p, pf_ambient_resync, cfg_root](float v){
                     *pf_temp_hot_p = v; pf_ambient_resync();
                     if (cfg_root) (*cfg_root)["protoface"]["temp_hot_c"] = v;
                 }),
-                "Heat shimmer appears at or above this outdoor temperature.");
-            m.visible_fn = [pf_temp_effects_p]{ return *pf_temp_effects_p; };
-            pf_effects.push_back(std::move(m));
-        }
+                "Heat shimmer appears at or above this outdoor temperature."));
+        if (pf_heat_heartbeat_p)
+            heat.push_back(with_desc(toggle("Heatwave Heartbeat",
+                [pf_heat_heartbeat_p]{ return *pf_heat_heartbeat_p; },
+                [pf_heat_heartbeat_p, pf_ambient_resync, cfg_root](bool v){
+                    *pf_heat_heartbeat_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["heatwave_heartbeat"] = v;
+                }),
+                "Adds a slow orange glow pulsing along the same edges as the "
+                "frost, throbbing like a lub-dub heartbeat. Off = shimmer "
+                "only."));
+        if (pf_heat_speed_p)
+            heat.push_back(with_desc(slider("Heat Speed", 0.25f, 3.f, 0.25f, "x",
+                [pf_heat_speed_p]{ return static_cast<float>(*pf_heat_speed_p); },
+                [pf_heat_speed_p, pf_ambient_resync, cfg_root](float v){
+                    *pf_heat_speed_p = v; pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"]["heatwave_speed"] = v;
+                }),
+                "How fast the shimmer rises and the heartbeat throbs. 1x is "
+                "the default pace; higher runs hotter and quicker."));
+        if (pf_temp_force_p)
+            heat.push_back(with_desc(toggle("Test Heatwave",
+                [p = pf_temp_force_p]{ return *p == 2; },
+                [p = pf_temp_force_p, pf_ambient_resync](bool v){
+                    *p = v ? 2 : 0; pf_ambient_resync(); }),
+                "Force the heatwave on now, ignoring the temperature, to "
+                "preview it (uses the settings above). Not saved."));
+        te.push_back(with_desc(submenu("Heat", std::move(heat)),
+            "The scorching look: rising heat shimmer + optional heartbeat."));
+
+        pf_effects.push_back(with_desc(submenu("Temp Effects", std::move(te)),
+            "Frost when it's freezing and heat shimmer when it's scorching, "
+            "driven by the live outdoor temperature."));
     }
     {
         // Legacy Teensy/ProtoTracer single-effect ids (only meaningful on the
@@ -1887,20 +2519,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         pf_palette.push_back(std::move(t));
     }
     {
-        struct PFMat { const char* label; uint8_t idx; };
-        const PFMat pf_mats[] = {
-            // Solids
-            { "Teal",    0 }, { "Yellow", 1 }, { "Orange", 2 }, { "White", 3 },
-            { "Green",   4 }, { "Purple", 5 }, { "Red",    6 }, { "Blue",  7 },
-            { "Black",  11 },
-            // Multi-colour patterns / gradients (8-10 are PNG patterns; 12+ are
-            // built-in GradientMaterial presets — see preset_material()).
-            { "Rainbow", 8 }, { "Cool",    9 }, { "Warm",  10 },
-            { "Sunset", 12 }, { "Ocean",  13 }, { "Forest",14 }, { "Fire",  15 },
-            { "Aurora", 16 }, { "Lava",   17 }, { "Galaxy",18 }, { "Pastel",19 },
-            { "Candy",  20 }, { "Toxic",  21 },
-        };
-        for (const auto& m : pf_mats)
+        for (const auto& m : kMaterialPresets) {
             pf_palette.push_back(leaf_sel(m.label,
                 [teensy, idx = m.idx, &state]{
                     teensy->set_menu_item(8, idx);
@@ -1908,18 +2527,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     state.face.material_color = idx;
                 },
                 [&state, idx = m.idx]{ return state.face.material_color == idx; }));
+        }
 
         // ── Pride flags ──────────────────────────────────────────────────────
         // Vertical smooth gradients matching each flag's colours (presets 22-33;
         // see NativeFaceController::preset_material). Grouped in a submenu so the
         // top-level Material Color list stays compact.
-        struct PFFlag { const char* label; uint8_t idx; };
-        const PFFlag pf_pride[] = {
-            { "Rainbow",     22 }, { "Progress",    23 }, { "Trans",       24 },
-            { "Bisexual",    25 }, { "Pansexual",   26 }, { "Lesbian",     27 },
-            { "Nonbinary",   28 }, { "Asexual",     29 }, { "Genderfluid", 30 },
-            { "Genderqueer", 31 }, { "Aromantic",   32 }, { "Intersex",    33 },
-        };
         std::vector<MenuItem> pride_items;
         // Hard-edged distinct stripes vs a smooth blend, for every flag below.
         pride_items.push_back(with_desc(
@@ -1955,7 +2568,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 }),
             "Rotate the flag stripes. 90\xc2\xb0 is the usual vertical stripes; "
             "0\xc2\xb0 lays them left\xe2\x86\x92right, other values give diagonals."));
-        for (const auto& f : pf_pride)
+        for (const auto& f : kPridePresets) {
             pride_items.push_back(leaf_sel(f.label,
                 [teensy, idx = f.idx, &state]{
                     teensy->set_menu_item(8, idx);
@@ -1963,6 +2576,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     state.face.material_color = idx;
                 },
                 [&state, idx = f.idx]{ return state.face.material_color == idx; }));
+        }
         pf_palette.push_back(with_desc(submenu("Pride", std::move(pride_items)),
             "Colour gradients matching pride flags (vertical stripes, top \xe2\x86\x92 "
             "bottom). Applies like any other material; persists with your setup."));
@@ -2903,16 +3517,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         // live here under Protoface rather than the generic Files menu —
         // they're meaningful per-backend, and the editor only makes sense
         // when the active backend supports it (MAX7219 / RGB matrix).
-        with_desc(with_panel(submenu("Face Options", std::move(face_files_menu)),
+        with_desc(with_panel(submenu("Expressions", std::move(face_files_menu)),
                              "Face Preview", draw_face_preview),
-                  "Per-expression face PNGs, mouth/boop slots, the in-HUD "
-                  "pixel editor, and the chain layout pickers that shape "
-                  "its bounding boxes. Edit... opens whenever the active "
-                  "backend (Hardware > Backend) has an editor capability "
-                  "— today: MAX7219 and RGB matrix; HUB75 stays "
-                  "import-only. Files are stored in "
-                  "faces/<active>[_<backend>]/ so each panel technology "
-                  "keeps its own art."),
+                  "Every expression in one list — built-in slots and custom "
+                  "ones. Each has its art (Play/Edit/Import/Versions), its "
+                  "own Material / Effect / Glitch overriding the Default "
+                  "Style, and Trigger recipes (boop x5, cheek + head tilt, "
+                  "...). Custom slots borrow a base face's art and add "
+                  "their own name and style. Mouth/boop overlay slots and "
+                  "the layout pickers live here too."),
         // Face Animations — blink timing + expression fade. Mutates the live
         // FaceState on every panel via the pf_anim_push callback wired by
         // main; persists to cfg["protoface"]["animation"].
@@ -3142,81 +3755,317 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         [S, c, pf_anim_push]{ S->r = c.r; S->g = c.g; S->b = c.b;
                                               if (pf_anim_push) pf_anim_push(); },
                         [S, c]{ return S->r == c.r && S->g == c.g && S->b == c.b; }));
-                si.push_back(submenu("Color", std::move(ci)));
+                ci.push_back(color_picker("Custom...",
+                    [S, pf_anim_push](uint8_t r, uint8_t g, uint8_t b){
+                        S->r = r; S->g = g; S->b = b;
+                        if (pf_anim_push) pf_anim_push();
+                    },
+                    [S]() -> std::tuple<uint8_t,uint8_t,uint8_t>{
+                        return { S->r, S->g, S->b };
+                    }));
+                si.push_back(with_desc(submenu("Color", std::move(ci)),
+                    "Six presets or a full RGB picker (Custom...)."));
             }
+            {
+                struct M { const char* n; face::ScrollMode m; const char* d; };
+                static const M kModes[] = {
+                    {"Scroll Left",  face::ScrollMode::Left,   "Classic marquee, right to left."},
+                    {"Scroll Right", face::ScrollMode::Right,  "Marquee left to right."},
+                    {"Static",       face::ScrollMode::Static, "Centred, no motion - a fixed label."},
+                    {"Bounce",       face::ScrollMode::Bounce, "Ping-pong between the edges."},
+                };
+                std::vector<MenuItem> mi;
+                for (const auto& m : kModes)
+                    mi.push_back(with_desc(leaf_sel(m.n,
+                        [S, m, pf_anim_push]{ S->mode = m.m; if (pf_anim_push) pf_anim_push(); },
+                        [S, m]{ return S->mode == m.m; }), m.d));
+                si.push_back(with_desc(submenu("Motion", std::move(mi)),
+                    "How the banner moves. Static and Bounce ignore Loop; "
+                    "Speed drives scroll and bounce."));
+            }
+            {
+                struct P { const char* n; face::TextVPos v; };
+                static const P kPos[] = {
+                    {"Center", face::TextVPos::Center},
+                    {"Top",    face::TextVPos::Top},
+                    {"Bottom", face::TextVPos::Bottom},
+                };
+                std::vector<MenuItem> pi;
+                for (const auto& p : kPos)
+                    pi.push_back(leaf_sel(p.n,
+                        [S, p, pf_anim_push]{ S->vpos = p.v; if (pf_anim_push) pf_anim_push(); },
+                        [S, p]{ return S->vpos == p.v; }));
+                si.push_back(with_desc(submenu("Position", std::move(pi)),
+                    "Vertical placement of the banner on the face."));
+            }
+            si.push_back(with_desc(toggle("Bold",
+                [S]{ return S->bold; },
+                [S, pf_anim_push](bool v){ S->bold = v; if (pf_anim_push) pf_anim_push(); }),
+                "Thicken the glyph strokes a step for heavier, more legible "
+                "text (uses more panel real estate)."));
+            si.push_back(with_desc(toggle("Background",
+                [S]{ return S->bg; },
+                [S, pf_anim_push](bool v){ S->bg = v; if (pf_anim_push) pf_anim_push(); }),
+                "Dim the face behind the text band so the message stays "
+                "readable over busy expressions/effects."));
+            si.push_back(with_desc(slider("BG Dim", 0.f, 255.f, 15.f, "",
+                [S]{ return static_cast<float>(S->bg_alpha); },
+                [S, pf_anim_push](float v){ S->bg_alpha = static_cast<uint8_t>(v);
+                                            if (pf_anim_push) pf_anim_push(); }),
+                "How strongly the Background darkens the band (0 = none, "
+                "255 = solid black)."));
             si.push_back(with_desc(toggle("Loop",
                 [S]{ return S->loop; },
                 [S, pf_anim_push](bool v){ S->loop = v; if (pf_anim_push) pf_anim_push(); }),
                 "On: the message wraps around forever. Off: one pass across "
-                "the panels, then the banner switches itself off."));
+                "the panels, then the banner switches itself off. (Scroll "
+                "modes only.)"));
             return with_desc(submenu("Scrolling Text", std::move(si)),
                 "Scroll a text banner across the face panels (5x7 pixel font, "
                 "tinted, above every layer). Config: cfg[\"protoface\"]"
                 "[\"scroll_text\"].");
         })(),
-        // Environment / movement reactions (sleepy, wake, ...). The engine
-        // lives in main; this page edits its config and fires test runs.
+        // Reactions: the sleep state machine (ReactionEngine) as "Falling
+        // Asleep", plus the named environmental reactions (ReactionRules).
         ([&]() -> MenuItem {
-            face::ReactionEngine* R = ctx.reactions;
+            face::ReactionEngine* R  = ctx.reactions;
+            face::ReactionRules*  RR = ctx.reaction_rules;
             if (!R) { MenuItem e; e.visible_fn = []{ return false; }; return e; }
             nlohmann::json* cfgr = cfg_root;
             auto save = [R, cfgr]{
                 if (cfgr) (*cfgr)["reactions"] = R->config().to_json();
             };
             std::vector<MenuItem> ri;
-            {
-                MenuItem st = leaf("Status", []{});
-                st.label_fn = [R]{
-                    char b[64];
-                    snprintf(b, sizeof b, "State: %s  (energy %.0f)",
-                             R->activity_name(), R->energy_dps());
-                    return std::string(b);
-                };
-                ri.push_back(with_desc(std::move(st),
-                    "Live activity state from the IMU: awake / drowsy / "
-                    "asleep, with the smoothed motion energy the timers "
-                    "watch (deg/s-equivalent)."));
-            }
+
             ri.push_back(with_desc(toggle("Reactions",
                 [R]{ return R->config().enabled; },
                 [R, save](bool v){ auto c = R->config(); c.enabled = v;
                                    R->set_config(c); save(); }),
                 "Master enable for environment/movement reactions."));
-            ri.push_back(with_desc(toggle("Sleepy / Wake",
-                [R]{ return R->config().sleepy_enabled; },
-                [R, save](bool v){ auto c = R->config(); c.sleepy_enabled = v;
-                                   R->set_config(c); save(); }),
-                "Hold still and the face gets heavy-lidded (slow blinks + "
-                "the 'sleepy' face if the folder has one), then falls asleep "
-                "- eyes closed ('asleep' face) with floating Z's. Any sharp "
-                "head motion snaps it awake with a surprised flash and "
-                "restores everything."));
-            ri.push_back(with_desc(slider("Drowsy After", 30.f, 600.f, 15.f, "s",
-                [R]{ return static_cast<float>(R->config().drowsy_after_s); },
-                [R, save](float v){ auto c = R->config(); c.drowsy_after_s = v;
-                                    R->set_config(c); save(); }),
-                "Seconds of stillness before the heavy-lidded stage."));
-            ri.push_back(with_desc(slider("Sleep After", 60.f, 1800.f, 30.f, "s",
-                [R]{ return static_cast<float>(R->config().sleep_after_s); },
-                [R, save](float v){ auto c = R->config(); c.sleep_after_s = v;
-                                    R->set_config(c); save(); }),
-                "Seconds of stillness before falling asleep (measured from "
-                "the start of stillness, not from drowsy)."));
-            ri.push_back(with_desc(slider("Wake Threshold", 15.f, 120.f, 5.f, "\xc2\xb0/s",
-                [R]{ return static_cast<float>(R->config().wake_dps); },
-                [R, save](float v){ auto c = R->config(); c.wake_dps = v;
-                                    R->set_config(c); save(); }),
-                "How sharp a head motion wakes the face. Lower = lighter "
-                "sleeper."));
-            ri.push_back(with_desc(leaf("Test: Fall Asleep", [R]{ R->force_sleepy(); }),
-                "Preview the sleep look right now (runs drowsy then asleep). "
-                "Move your head - or use Test: Wake - to end it."));
-            ri.push_back(leaf("Test: Wake", [R]{ R->force_wake(); }));
+
+            // ── Falling Asleep (the stillness state machine) ─────────────────
+            {
+                std::vector<MenuItem> fa;
+                {
+                    MenuItem st = leaf("Status", []{});
+                    st.label_fn = [R]{
+                        char b[64];
+                        snprintf(b, sizeof b, "State: %s  (energy %.0f)",
+                                 R->activity_name(), R->energy_dps());
+                        return std::string(b);
+                    };
+                    fa.push_back(with_desc(std::move(st),
+                        "Live activity: awake / drowsy / asleep, with the "
+                        "smoothed motion energy the timers watch."));
+                }
+                fa.push_back(with_desc(toggle("Enabled",
+                    [R]{ return R->config().sleepy_enabled; },
+                    [R, save](bool v){ auto c = R->config(); c.sleepy_enabled = v;
+                                       R->set_config(c); save(); }),
+                    "Hold still and the face gets heavy-lidded (slow blinks), "
+                    "then falls asleep with closed eyes + floating Z's. Sharp "
+                    "head motion snaps it awake."));
+                fa.push_back(with_desc(slider("Motion Deadzone", 1.f, 40.f, 1.f, "\xc2\xb0/s",
+                    [R]{ return static_cast<float>(R->config().calm_dps); },
+                    [R, save](float v){ auto c = R->config(); c.calm_dps = v;
+                                        R->set_config(c); save(); }),
+                    "How much head motion to ignore. While the IMU stays below "
+                    "this, the face counts as still and the timers below run; "
+                    "any faster movement resets them. Higher = tolerates more "
+                    "fidget before nodding off."));
+                fa.push_back(with_desc(slider("Drowsy After", 30.f, 600.f, 15.f, "s",
+                    [R]{ return static_cast<float>(R->config().drowsy_after_s); },
+                    [R, save](float v){ auto c = R->config(); c.drowsy_after_s = v;
+                                        R->set_config(c); save(); }),
+                    "Seconds of stillness (motion below the deadzone) before "
+                    "the heavy-lidded drowsy stage."));
+                fa.push_back(with_desc(slider("Sleep After", 60.f, 1800.f, 30.f, "s",
+                    [R]{ return static_cast<float>(R->config().sleep_after_s); },
+                    [R, save](float v){ auto c = R->config(); c.sleep_after_s = v;
+                                        R->set_config(c); save(); }),
+                    "Seconds of stillness before falling asleep (measured from "
+                    "the start of stillness)."));
+                fa.push_back(with_desc(slider("Wake Threshold", 15.f, 120.f, 5.f, "\xc2\xb0/s",
+                    [R]{ return static_cast<float>(R->config().wake_dps); },
+                    [R, save](float v){ auto c = R->config(); c.wake_dps = v;
+                                        R->set_config(c); save(); }),
+                    "How sharp a head motion wakes the face. Lower = lighter "
+                    "sleeper."));
+                fa.push_back(with_desc(leaf("Test: Drowsy", [R]{ R->force_drowsy(); }),
+                    "Jump straight to the drowsy look (sleepy face + slow "
+                    "blinks, eyes open) so you can see that stage on its own."));
+                fa.push_back(with_desc(leaf("Test: Asleep", [R]{ R->force_asleep(); }),
+                    "Jump to the asleep look (eyes closed + floating Z's). Move "
+                    "your head or use Test: Wake to end it."));
+                fa.push_back(leaf("Test: Wake", [R]{ R->force_wake(); }));
+                ri.push_back(with_desc(submenu("Falling Asleep", std::move(fa)),
+                    "Stillness makes the face drowsy then asleep; sharp motion "
+                    "wakes it."));
+            }
+
+            // ── Named environmental reactions ────────────────────────────────
+            if (RR) {
+                auto save2 = [RR, cfgr]{
+                    if (cfgr) (*cfgr)["protoface"]["reaction_rules"] = RR->to_json();
+                };
+                // GIF outcome picker: lists every file in gifs_dir by name and
+                // previews the highlighted one in the context panel. The
+                // outcome stores the filename (play_gif_file plays it directly),
+                // so it survives slot rebinds and folder changes.
+                using RGet = std::function<face::ReactionRule()>;
+                using RMod = std::function<void(std::function<void(face::ReactionRule&)>)>;
+                auto make_gif_picker = [gifs_dir](RGet rget, RMod rmod) -> MenuItem {
+                    struct GP {
+                        face::GifPlayer player{256, 128};
+                        std::string loaded, want_path, want_label;
+                        GLuint tex = 0;
+                    };
+                    auto gp = std::make_shared<GP>();
+                    MenuContextPanelDraw draw =
+                        [gp](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                            GP& g = *gp;
+                            const bool have = !g.want_path.empty();
+                            if (have && g.want_path != g.loaded) {
+                                g.player.load(g.want_path, true);
+                                g.loaded = g.want_path;
+                            } else if (!have && !g.loaded.empty()) {
+                                g.player.stop(); g.loaded.clear();
+                            }
+                            g.player.update(ImGui::GetIO().DeltaTime);
+                            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
+                            const float ph = pw * 0.5f;
+                            const float px = o.x + (sz.x - pw) * 0.5f;
+                            const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
+                            dl->AddRectFilled({px, py}, {px + pw, py + ph},
+                                              IM_COL32(10, 16, 22, 190));
+                            cv::Mat fr = g.player.get_frame();
+                            if (!fr.empty() && fr.isContinuous()) {
+                                if (g.tex == 0) {
+                                    glGenTextures(1, &g.tex);
+                                    glBindTexture(GL_TEXTURE_2D, g.tex);
+                                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                                }
+                                glBindTexture(GL_TEXTURE_2D, g.tex);
+                                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fr.cols, fr.rows, 0,
+                                             GL_RGBA, GL_UNSIGNED_BYTE, fr.data);
+                                glBindTexture(GL_TEXTURE_2D, 0);
+                                dl->AddImage(reinterpret_cast<ImTextureID>(
+                                                 static_cast<uintptr_t>(g.tex)),
+                                             {px, py}, {px + pw, py + ph});
+                            } else {
+                                const char* msg = have ? "Decode failed" : "(pick a GIF)";
+                                const ImVec2 ts = ImGui::CalcTextSize(msg);
+                                dl->AddText({px + pw * 0.5f - ts.x * 0.5f,
+                                             py + ph * 0.5f - ts.y * 0.5f},
+                                            IM_COL32(180, 190, 200, 200), msg);
+                            }
+                            const std::string nm = have ? g.want_label : std::string("(none)");
+                            const ImVec2 ns = ImGui::CalcTextSize(nm.c_str());
+                            dl->AddText({o.x + sz.x * 0.5f - ns.x * 0.5f, o.y + sz.y - ns.y},
+                                        IM_COL32(220, 230, 235, 230), nm.c_str());
+                        };
+                    std::vector<MenuItem> files;
+                    for (const auto& path : face::GifPlayer::scan_folder(gifs_dir)) {
+                        const std::string base = std::filesystem::path(path).filename().string();
+                        const std::string stem = std::filesystem::path(path).stem().string();
+                        MenuItem it = leaf_sel(stem,
+                            [rmod, base]{ rmod([&base](face::ReactionRule& r){
+                                r.outcome.gif_file = base; }); },
+                            [rget, base]{ return rget().outcome.gif_file == base; });
+                        it.on_highlight = [gp, path, stem]{
+                            gp->want_path = path; gp->want_label = stem;
+                        };
+                        files.push_back(std::move(it));
+                    }
+                    if (files.empty())
+                        files.push_back(with_desc(leaf("(no GIFs in folder)", []{}),
+                            "Add .gif files to the gifs folder (import under "
+                            "Gifs and Text > GIFs), then reopen this menu."));
+                    MenuItem m = submenu("GIF", std::move(files));
+                    m.label_fn = [rget]() -> std::string {
+                        const std::string f = rget().outcome.gif_file;
+                        return f.empty() ? "GIF: (none)"
+                            : "GIF: " + std::filesystem::path(f).stem().string();
+                    };
+                    m.context_panel_title = "GIF Preview";
+                    m.context_panel_draw  = draw;
+                    return m;
+                };
+                for (const auto& m : face::ReactionRules::metas()) {
+                    const std::string id = m.id;
+                    auto rget = [RR, id]{ return RR->rule(id); };
+                    auto rmod = [RR, id, save2](std::function<void(face::ReactionRule&)> fn){
+                        auto r = RR->rule(id); fn(r); RR->set_rule(id, r); save2();
+                    };
+                    std::vector<MenuItem> re;
+                    re.push_back(with_desc(toggle("Enabled",
+                        [rget]{ return rget().enabled; },
+                        [rmod](bool v){ rmod([v](face::ReactionRule& r){ r.enabled = v; }); }),
+                        m.desc));
+                    re.push_back(leaf("Test", [RR, id]{ RR->test(id); }));
+                    re.push_back(with_desc(slider("Threshold", m.thr_min, m.thr_max,
+                        m.thr_step, m.thr_unit,
+                        [rget]{ return rget().threshold; },
+                        [rmod](float v){ rmod([v](face::ReactionRule& r){ r.threshold = v; }); }),
+                        "Where the reaction trips (see the reaction's "
+                        "description)."));
+                    // Outcome: expression or GIF, and which.
+                    {
+                        std::vector<MenuItem> oi;
+                        oi.push_back(submenu("Type", {
+                            leaf_sel("Expression",
+                                [rmod]{ rmod([](face::ReactionRule& r){
+                                    r.outcome.kind = face::ReactionOutcome::Kind::Expression; }); },
+                                [rget]{ return rget().outcome.kind ==
+                                    face::ReactionOutcome::Kind::Expression; }),
+                            leaf_sel("GIF",
+                                [rmod]{ rmod([](face::ReactionRule& r){
+                                    r.outcome.kind = face::ReactionOutcome::Kind::Gif; }); },
+                                [rget]{ return rget().outcome.kind ==
+                                    face::ReactionOutcome::Kind::Gif; }),
+                        }));
+                        std::vector<MenuItem> ei;
+                        for (int fi = 0; fi < kFaceSlotCount; ++fi) {
+                            const std::string stem = kFaceSlots[fi].expression;
+                            ei.push_back(leaf_sel(kFaceSlots[fi].label,
+                                [rmod, stem]{ rmod([&stem](face::ReactionRule& r){
+                                    r.outcome.expression = stem; }); },
+                                [rget, stem]{ return rget().outcome.expression == stem; }));
+                        }
+                        MenuItem expr_it = submenu("Expression", std::move(ei));
+                        expr_it.visible_fn = [rget]{ return rget().outcome.kind ==
+                            face::ReactionOutcome::Kind::Expression; };
+                        oi.push_back(std::move(expr_it));
+                        MenuItem gif_it = make_gif_picker(rget, rmod);
+                        gif_it.visible_fn = [rget]{ return rget().outcome.kind ==
+                            face::ReactionOutcome::Kind::Gif; };
+                        oi.push_back(std::move(gif_it));
+                        re.push_back(with_desc(submenu("Triggers", std::move(oi)),
+                            "What this reaction shows: an expression or a GIF."));
+                    }
+                    re.push_back(with_desc(slider("Hold Time", 0.f, 10.f, 0.5f, " s",
+                        [rget]{ return static_cast<float>(rget().hold_s); },
+                        [rmod](float v){ rmod([v](face::ReactionRule& r){ r.hold_s = v; }); }),
+                        "How long an expression outcome shows before restoring "
+                        "the previous face (0 = latch). GIFs use their own "
+                        "auto-revert."));
+                    MenuItem rm = submenu(m.label, std::move(re));
+                    rm.label_fn = [rget, lbl = std::string(m.label)]() -> std::string {
+                        return rget().enabled ? (lbl + "  (on)") : lbl;
+                    };
+                    ri.push_back(with_desc(std::move(rm), m.desc));
+                }
+            }
+
             return with_desc(submenu("Reactions", std::move(ri)),
-                "The face reacts to the real world: stillness makes it "
-                "drowsy then asleep (floating Z's), sharp motion wakes it. "
-                "The dark-to-bright squint lives under its light-sensor "
-                "config; more reactions land here as they're added.");
+                "The face reacts to the real world: Falling Asleep on "
+                "stillness, plus named reactions (move into bright/dark, "
+                "dizzy, low battery, loud noise, upside-down) that each show "
+                "an expression or GIF. The dark-to-bright squint also has its "
+                "own light-sensor config.");
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),
@@ -3254,21 +4103,78 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         protoface_inner_menu.push_back(submenu("Panel Preview",
                                                std::move(pf_preview_menu)));
 
-    // ── Face Display root: Source picker (radios) + per-backend submenus ─────
-    // Protoface first (the primary renderer), then the source radios and the
-    // ProtoTracer submenu.
-    std::vector<MenuItem> face_display_menu;
-    if (!protoface_inner_menu.empty())
-        face_display_menu.push_back(submenu("Protoface", std::move(protoface_inner_menu)));
-    if (active_face_pp && teensy_option && fp_option) {
-        face_display_menu.push_back(leaf_sel("Source: Teensy (ProtoTracer)",
+    // ── Regroup: split the flat Protoface list into the four top-level
+    // groups. take() moves items out by label; anything unclaimed falls
+    // through to Base Settings so future additions never vanish.
+    auto take = [](std::vector<MenuItem>& v, const char* label)
+            -> std::optional<MenuItem> {
+        for (auto it = v.begin(); it != v.end(); ++it)
+            if (it->label == label) {
+                MenuItem m = std::move(*it);
+                v.erase(it);
+                return m;
+            }
+        return std::nullopt;
+    };
+    auto take_into = [&take](std::vector<MenuItem>& dst,
+                             std::vector<MenuItem>& src, const char* label) {
+        if (auto m = take(src, label)) dst.push_back(std::move(*m));
+    };
+
+    std::vector<MenuItem> base_items, faces_items, media_items;
+
+    take_into(base_items, protoface_inner_menu, "Start Protoface");
+    take_into(base_items, protoface_inner_menu, "Restart Protoface");
+    take_into(base_items, protoface_inner_menu, "Hardware");
+    take_into(base_items, protoface_inner_menu, "Panel Preview");
+    take_into(base_items, protoface_inner_menu, "Brightness");
+    take_into(base_items, protoface_inner_menu, "Save Face Config");
+    take_into(base_items, protoface_inner_menu, "Release Control");
+
+    // Default Style — the old top-level Material Color / Effects / Glitch,
+    // reframed: it's what every expression inherits unless its own
+    // Material/Effect/Glitch (Expressions > <slot>) overrides it.
+    std::vector<MenuItem> default_style_items;
+    take_into(default_style_items, protoface_inner_menu, "Material Color");
+    take_into(default_style_items, protoface_inner_menu, "Effects");
+    take_into(default_style_items, protoface_inner_menu, "Glitch");
+    // Live face preview beside Default Style: the composited canvas (face +
+    // material + effect + glitch) so material/glitch changes show while you
+    // pick, the same panel the Effects builder already uses. Attached to each
+    // child too so the preview stays up when you descend into Material/Glitch.
+    for (auto& it : default_style_items) {
+        it.context_panel_title = "Face Preview";
+        it.context_panel_draw  = draw_effect_preview;
+    }
+
+    take_into(faces_items, protoface_inner_menu, "Expressions");
+    faces_items.push_back(with_desc(with_panel(
+        submenu("Default Style", std::move(default_style_items)),
+        "Face Preview", draw_effect_preview),
+        "The look every expression inherits — material color, particle "
+        "effects, glitch — unless the expression's own Style overrides it."));
+    take_into(faces_items, protoface_inner_menu, "Animations");
+    take_into(faces_items, protoface_inner_menu, "Reactions");
+
+    take_into(media_items, protoface_inner_menu, "GIFs");
+    take_into(media_items, protoface_inner_menu, "Scrolling Text");
+
+    // Anything still in the old flat list falls through to Base Settings.
+    for (auto& m : protoface_inner_menu) base_items.push_back(std::move(m));
+    protoface_inner_menu.clear();
+
+    // ProtoTracer/Teensy source path: hidden since the redesign. The wiring
+    // stays intact — protoface.show_prototracer=true brings the source
+    // radios and the ProtoTracer submenu back (under Base Settings).
+    if (ctx.show_prototracer && active_face_pp && teensy_option && fp_option) {
+        base_items.push_back(leaf_sel("Source: Teensy (ProtoTracer)",
             [active_face_pp, teensy_option]{ *active_face_pp = teensy_option; },
             [active_face_pp, teensy_option]{ return *active_face_pp == teensy_option; }));
-        face_display_menu.push_back(leaf_sel("Source: Protoface",
+        base_items.push_back(leaf_sel("Source: Protoface",
             [active_face_pp, fp_option]{ *active_face_pp = fp_option; },
             [active_face_pp, fp_option]{ return *active_face_pp == fp_option; }));
+        base_items.push_back(submenu("ProtoTracer", std::move(prototracer_inner_menu)));
     }
-    face_display_menu.push_back(submenu("ProtoTracer", std::move(prototracer_inner_menu)));
 
     // ── Boop sensor (Protoface-side reactive behaviour) ──────────────────────
     // One submenu per zone, each with Enabled / Expression / Hold Duration /
@@ -3471,7 +4377,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Cheeks event fires instead. Set to 0 to disable coalescing "
             "(single-side events fire immediately)."),
     };
-    face_display_menu.push_back(
+    faces_items.push_back(
         with_desc(submenu("Boop", std::move(boop_menu)),
                   "Per-zone capacitive-touch reactions. Drives "
                   "Protoface's trigger_boop() — fires the chosen expression "
@@ -3525,7 +4431,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 state.light_squint.cooldown_s = v;
             }),
     };
-    face_display_menu.push_back(
+    faces_items.push_back(
         with_desc(submenu("Light Sensor", std::move(light_menu)),
                   "Triggers a face reaction when the wearer steps from a dim "
                   "area into a bright one. Reads a BH1750 over I²C "
@@ -3640,7 +4546,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             voice_apply_visemes();
         }),
         "Centroid below this is the small-open shape; above, EE (smile)."));
-    face_display_menu.push_back(
+    faces_items.push_back(
         with_desc(submenu("Voice", std::move(voice_menu)),
                   "Mic-driven mouth_open. FFT-based: speech-band RMS feeds an "
                   "envelope follower whose output drives face::set_audio() each "
@@ -3660,6 +4566,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             { "Solid",   accessory::Pattern::Solid   },
             { "Breathe", accessory::Pattern::Breathe },
             { "Level",   accessory::Pattern::Level   },
+            { "Chase",   accessory::Pattern::Chase   },
+            { "Sparkle", accessory::Pattern::Sparkle },
         };
         std::vector<MenuItem> pat_items;
         for (const auto& o : opts) {
@@ -3685,11 +4593,28 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     auto zc = leds->zone(z);
                     return {zc.r, zc.g, zc.b};
                 }),
+            with_desc(slider("Zone Brightness", 0.f, 255.f, 5.f, "",
+                [leds, z]{
+                    return leds ? static_cast<float>(leds->zone(z).zone_brightness)
+                                : 255.f;
+                },
+                [leds, z](float v){
+                    if (leds) leds->set_zone_brightness(z, static_cast<uint8_t>(v));
+                }),
+                "Per-zone brightness, on top of the chain-wide Brightness — "
+                "e.g. keep a subtle blush while the fins run bright."),
+            with_desc(toggle("Follow Face",
+                [leds, z]{ return leds && leds->zone(z).follow_face; },
+                [leds, z](bool v){ if (leds) leds->set_zone_follow_face(z, v); }),
+                "Sync this zone's color to the face: the zone tracks the "
+                "mean color of the lit face pixels (material, gradients, "
+                "GIFs — whatever is rendering), updating a few times a "
+                "second. The zone's own Color is ignored while on."),
             with_desc(slider("Breathe Rate", 0.05f, 5.f, 0.05f, " Hz",
                 [leds, z]{ return leds ? leds->zone(z).breathe_hz : 0.5f; },
                 [leds, z](float v){ if (leds) leds->set_zone_breathe_hz(z, v); }),
-                "How fast the Breathe pattern oscillates. Only meaningful "
-                "when Pattern is Breathe."),
+                "How fast the Breathe pattern oscillates (and the Chase dot "
+                "walks its loop). Meaningful for Breathe and Chase."),
             leaf("Test Flash", [leds, z]{ if (leds) leds->trigger_flash(z, 0.35); }),
         };
         return submenu(std::move(label), std::move(items));
@@ -3702,16 +4627,33 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Master brightness applied to the whole accessory chain at SPI "
             "encode time. WS2812s draw a lot of current at full white — "
             "keep this low (~64) unless you have power injection."),
-        led_zone_menu(accessory::Zone::LeftCheekhub,  "Left Cheekhub"),
-        led_zone_menu(accessory::Zone::RightCheekhub, "Right Cheekhub"),
-        led_zone_menu(accessory::Zone::LeftFin,       "Left Fin"),
-        led_zone_menu(accessory::Zone::RightFin,      "Right Fin"),
+        led_zone_menu(accessory::Zone::LeftCheekhub,  "Cheek Hub Left"),
+        led_zone_menu(accessory::Zone::RightCheekhub, "Cheek Hub Right"),
+        led_zone_menu(accessory::Zone::LeftFin,       "Cheek Fin Left"),
+        led_zone_menu(accessory::Zone::RightFin,      "Cheek Fin Right"),
+        led_zone_menu(accessory::Zone::Blush,         "Blush"),
     };
-    face_display_menu.push_back(
-        with_desc(submenu("LEDs", std::move(led_menu)),
-                  "Accessory WS2812 strip (cheekhubs + fins). Driven via "
-                  "SPI MOSI; boops flash the matching zone, mic volume "
-                  "drives Level zones."));
+
+    // ── Face Display root: the four groups ───────────────────────────────────
+    std::vector<MenuItem> face_display_menu;
+    face_display_menu.push_back(with_desc(
+        submenu("Base Settings", std::move(base_items)),
+        "Hardware selection (face backend), panel preview, brightness, and "
+        "saving the face config."));
+    face_display_menu.push_back(with_desc(
+        submenu("Faces and Expressions", std::move(faces_items)),
+        "Everything about what the face shows: expression art, custom "
+        "expressions, the default style it all inherits, animations, and "
+        "the triggers that switch expressions (boops, reactions, voice, "
+        "light)."));
+    face_display_menu.push_back(with_desc(
+        submenu("Accessory LEDs", std::move(led_menu)),
+        "Accessory LED zones — cheek hubs, cheek fins, blush. Per zone: "
+        "pattern, color or follow-face sync, and brightness; boops flash "
+        "the matching zone."));
+    face_display_menu.push_back(with_desc(
+        submenu("Gifs and Text", std::move(media_items)),
+        "GIF playback slots and the scrolling text banner."));
 
     return face_display_menu;
 }

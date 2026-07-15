@@ -135,6 +135,34 @@ inline void draw_rect(cv::Mat& c, double x, double y, int r, int g, int b,
     }
 }
 
+// A six-armed snowflake: three spokes through the centre plus short side
+// branches, at radius R and rotation `rot`. Sharp (per-pixel) so it keeps the
+// blocky pixel look. `a` is 0..1 coverage.
+inline void draw_snowflake(cv::Mat& c, double cx, double cy, double R,
+                           double rot, int r, int g, int b, double a) {
+    const int col_a = (int)std::clamp(a * 255.0, 0.0, 255.0);
+    if (col_a <= 0) return;
+    draw_pixel(c, (int)std::lround(cx), (int)std::lround(cy), r, g, b, col_a);
+    for (int arm = 0; arm < 6; ++arm) {
+        const double ang = rot + arm * (kTau / 6.0);
+        const double ux = std::cos(ang), uy = std::sin(ang);
+        for (double d = 1.0; d <= R; d += 1.0) {
+            const double px = cx + ux * d, py = cy + uy * d;
+            const double fade = a * (1.0 - 0.4 * (d / std::max(1.0, R)));
+            draw_pixel(c, (int)std::lround(px), (int)std::lround(py),
+                       r, g, b, (int)std::clamp(fade * 255.0, 0.0, 255.0));
+            // Little branch pips two-thirds out, giving the dendritic look.
+            if (d >= R * 0.6 && d <= R * 0.7) {
+                const double bx = -uy, by = ux;   // perpendicular
+                for (int s = -1; s <= 1; s += 2)
+                    draw_pixel(c, (int)std::lround(px + bx * s),
+                               (int)std::lround(py + by * s), r, g, b,
+                               (int)std::clamp(fade * 0.8 * 255.0, 0.0, 255.0));
+            }
+        }
+    }
+}
+
 // ── Base effect ──────────────────────────────────────────────────────────────
 
 class BaseEffect {
@@ -152,11 +180,20 @@ public:
     // "Refraction" hint: how strongly the backdrop face should glow back through
     // this layer (water overrides). 0 = opaque overlay like every other effect.
     virtual double face_glow() const { return 0.0; }
+    // Face-tint request (frost overrides): a panel-local CV_8UC1 mask filled
+    // during render(), or nullptr when the effect doesn't tint. r/g/b is the
+    // tint colour. The mask shares a scratch buffer consumed the same tick.
+    virtual const cv::Mat* face_tint(uint8_t&, uint8_t&, uint8_t&) const {
+        return nullptr;
+    }
 
     // Latest IMU / audio state, pushed each frame by the owning ParticleSystem.
     // Effects read it through count()/direction_unit() when the cfg opts in.
     void set_motion(const MotionInput& m) { motion_ = m; }
     void set_audio(double level) { audio_ = level; }
+    // Relative humidity 0..1 (or <0 = no reading), pushed each frame. The water
+    // effect reads it when the layer opts in with "level_from":"humidity".
+    void set_humidity(double humidity01) { humidity_ = humidity01; }
     // Global default for direction coupling (see direction_unit): layers with
     // no explicit "direction_from" behave as "gravity" while this is on.
     void set_motion_reactive(bool on) { motion_reactive_ = on; }
@@ -263,6 +300,7 @@ protected:
     std::vector<Particle> particles_;
     MotionInput motion_{};
     double audio_ = 0.0;
+    double humidity_ = -1.0;          // rel humidity 0..1; <0 = no sensor reading
     bool motion_reactive_ = false;
     bool shape_rect_ = false;         // "shape" resolved once per cfg change
     cv::Mat scratch_;                 // blank() backing buffer, reused each frame
@@ -741,14 +779,19 @@ public:
     using BaseEffect::BaseEffect;
 
     void update(double dt) override {
+        fractal_ = cfg_.value("fractal", false);
         ensure_field();
         age_ += dt;
         // Fixed-step growth with a FIXED-SEED rng: every panel instance of
         // the same canvas computes an identical field, so the sheet stays
         // continuous across panel seams.
+        // "speed" (default 1.0) is the user-facing knob: >1 forms/creeps
+        // faster, <1 slower. It scales the growth rate and the drifting
+        // snowflakes together so the whole effect speeds up coherently.
+        const double speed  = std::clamp(jnum(cfg_, "speed", 1.0), 0.1, 4.0);
         const double form_s = std::max(0.1, jnum(cfg_, "form_s", 5.0));
         const float  rate   = static_cast<float>(
-            kStep * (5.0 / form_s) * std::max(0.05, intensity_));
+            kStep * (5.0 / form_s) * speed * std::max(0.05, intensity_));
         acc_ += dt;
         int guard = 0;
         while (acc_ >= kStep && guard++ < 8) { acc_ -= kStep; step_field(rate); }
@@ -768,6 +811,40 @@ public:
             p.r = 255; p.g = 255; p.b = 255; p.size = 1;
             p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
+        }
+
+        // Fractal mode: large snowflakes drift down and settle, appearing
+        // gradually as the sheet develops. Panel-local + cosmetic.
+        if (fractal_) {
+            const double drift = jnum(cfg_, "flake_drift", 6.0);
+            for (auto& fp : flakes_) {
+                fp.extra += dt;                             // rotation phase
+                fp.y += fp.vy * dt * speed;                 // slow fall (scaled)
+                fp.x += std::sin(fp.extra * 0.9 + fp.vx) * drift * dt * speed;
+                fp.life -= dt / fp.max_life;
+            }
+            flakes_.erase(std::remove_if(flakes_.begin(), flakes_.end(),
+                [&](const Particle& p){ return p.life <= 0 || p.y > h_ + p.size + 2; }),
+                flakes_.end());
+            const int want_f = count(5);                    // a handful at a time
+            flake_acc_ += dt;
+            const double spawn_every = std::max(0.3, jnum(cfg_, "flake_every", 0.9));
+            while ((int)flakes_.size() < want_f && flake_acc_ >= spawn_every) {
+                flake_acc_ -= spawn_every;
+                Particle fp;
+                fp.x = frand(rng_, 0, w_ - 1);
+                fp.y = frand(rng_, -4.0, h_ * 0.35);        // enter from the top
+                fp.vx = frand(rng_, 0, kTau);               // sway phase
+                fp.vy = pick_speed(cfg_, 5.0, 11.0, rng_);  // fall speed
+                fp.size = irand(rng_, 3, 5);                // LARGE flakes
+                fp.max_life = frand(rng_, 2.5, 4.5);
+                fp.life = 1.0;
+                fp.r = 235; fp.g = 245; fp.b = 255;
+                fp.extra = frand(rng_, 0, kTau);
+                flakes_.push_back(fp);
+            }
+        } else if (!flakes_.empty()) {
+            flakes_.clear();
         }
     }
 
@@ -792,12 +869,31 @@ public:
         }
         if (grad.empty())
             grad = { {255, 255, 255}, {200, 230, 255}, {120, 180, 255} };
+        // Face tint: the face material "freezes" toward the frost's rim colour
+        // in a gradient that follows the density field — strongest where the
+        // sheet is solid, fading to nothing at the growth front. Default ON
+        // for fractal frost; "face_tint" (0..1) in the layer cfg overrides.
+        const double tint_k = std::clamp(
+            jnum(cfg_, "face_tint", fractal_ ? 0.7 : 0.0), 0.0, 1.0);
+        tint_active_ = tint_k > 0.0;
+        if (tint_active_) {
+            if (tint_mask_.rows != h_ || tint_mask_.cols != w_ ||
+                tint_mask_.type() != CV_8UC1)
+                tint_mask_.create(h_, w_, CV_8UC1);
+            tint_mask_.setTo(0);
+            tint_col_ = grad.back();   // dense rim colour = the frost blue
+        }
         const double tsh = age_ * 1.4;
         for (int ly = 0; ly < h_; ++ly) {
+            uchar* tm = tint_active_ ? tint_mask_.ptr<uchar>(ly) : nullptr;
             for (int lx = 0; lx < w_; ++lx) {
                 const int gx = lx + ox_, gy = ly + oy_;
                 const float f = cell(gx, gy);
                 if (f < 0.04f) continue;
+                // pow<1 pushes the tint deeper into the thin leading edge, so
+                // the blue reads as a gradient spreading ahead of solid ice.
+                if (tm) tm[lx] = (uchar)std::lround(
+                    255.0 * tint_k * std::pow((double)f, 0.6));
                 const float h1 = hash01(gx, gy);
                 const Color col = sample_grad(grad, f);
                 // Per-cell grain brightness keeps crystal texture in the sheet
@@ -819,7 +915,23 @@ public:
             draw_particle(c, p, env * (0.4 + 0.6 * (0.5 + 0.5 * std::sin(p.extra * 9.0)))
                               * opacity);
         }
+        // Large snowflakes (fractal mode): fade in, hold, fade out.
+        for (auto& fp : flakes_) {
+            const double env = std::clamp(std::min((1.0 - fp.life) * 4.0,
+                                                   fp.life * 3.0), 0.0, 1.0);
+            draw_snowflake(c, fp.x, fp.y, fp.size, fp.extra * 0.5,
+                           (int)fp.r, (int)fp.g, (int)fp.b,
+                           env * std::min(1.0, opacity + 0.35));
+        }
         return c;
+    }
+
+    const cv::Mat* face_tint(uint8_t& r, uint8_t& g, uint8_t& b) const override {
+        if (!tint_active_ || tint_mask_.empty()) return nullptr;
+        r = (uint8_t)tint_col_.r;
+        g = (uint8_t)tint_col_.g;
+        b = (uint8_t)tint_col_.b;
+        return &tint_mask_;
     }
 
 private:
@@ -839,12 +951,14 @@ private:
     // (Re)build the field + reach mask when geometry or shaping cfg changes.
     void ensure_field() {
         const bool   top   = cfg_.value("include_top", false);
+        // Fractal fingers reach deeper in than the smooth front.
         const double reach = std::clamp(
-            jnum(cfg_, "reach", jnum(cfg_, "depth_frac", 0.32)), 0.05, 0.9);
+            jnum(cfg_, "reach", jnum(cfg_, "depth_frac", 0.32)) *
+            (fractal_ ? 1.4 : 1.0), 0.05, 0.95);
         if ((int)field_.size() == cw_ * ch_ && top == mask_top_ &&
-            std::fabs(reach - mask_reach_) < 1e-6)
+            std::fabs(reach - mask_reach_) < 1e-6 && fractal_ == mask_fractal_)
             return;
-        mask_top_ = top; mask_reach_ = reach;
+        mask_top_ = top; mask_reach_ = reach; mask_fractal_ = fractal_;
         const int W = cw_, H = ch_;
         field_.assign((size_t)W * H, 0.f);
         mask_.assign((size_t)W * H, 0.f);
@@ -873,8 +987,13 @@ private:
                 mask_[(size_t)y * W + x] = std::pow(m, 0.7f);
                 // Static per-cell heterogeneity: fast lanes become the
                 // fingers that race ahead of the front, slow cells the gaps.
+                // Fractal mode sharpens this hard (g^4, near-zero floor) so a
+                // few lanes race far ahead and branch — dendritic ferns —
+                // while the gaps between them stay clear.
                 const float g = hash01(x * 3 + 1, y * 5 + 2);
-                grain_[(size_t)y * W + x] = 0.15f + 0.85f * g * g;
+                grain_[(size_t)y * W + x] = fractal_
+                    ? 0.03f + 0.97f * g * g * g * g
+                    : 0.15f + 0.85f * g * g;
             }
         }
     }
@@ -908,19 +1027,30 @@ private:
                         if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
                         sup = std::max(sup, field_[(size_t)ny * W + nx]);
                     }
-                if (sup <= 0.05f) continue;
+                // Fractal mode lets thinner fingers thread inward (lower
+                // supply threshold) and race with more variance.
+                if (sup <= (mask_fractal_ ? 0.02f : 0.05f)) continue;
+                const double vlo = mask_fractal_ ? 0.4 : 0.6;
+                const double vhi = mask_fractal_ ? 1.7 : 1.4;
                 f = std::min(m, f + rate * m * sup * grain_[i] *
-                                     (float)frand(det_rng_, 0.6, 1.4));
+                                     (float)frand(det_rng_, vlo, vhi));
             }
         }
     }
 
     double age_ = 0.0, acc_ = 0.0;
     uint32_t step_n_ = 0;
-    bool   mask_top_   = false;
-    double mask_reach_ = -1.0;
+    bool   mask_top_     = false;
+    bool   fractal_      = false;   // dendritic growth + large snowflakes
+    bool   mask_fractal_ = false;   // fractal value the field was built for
+    double mask_reach_   = -1.0;
     std::vector<float> field_, mask_, grain_;   // canvas-space growth state
+    std::vector<Particle> flakes_;              // large drifting snowflakes
+    double flake_acc_ = 0.0;                     // snowflake spawn timer
     std::mt19937 det_rng_{0x1CEF7057u};         // shared fixed seed (see update)
+    cv::Mat tint_mask_;                          // face-tint mask (see render)
+    bool    tint_active_ = false;
+    Color   tint_col_{120, 180, 255};
 };
 
 // ── Heatwave ─────────────────────────────────────────────────────────────────
@@ -933,12 +1063,18 @@ class HeatwaveEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
+        heartbeat_ = cfg_.value("heartbeat", false);
+        // "speed" (default 1.0) is the user-facing knob: >1 the shimmer rises
+        // and wavers faster and the heartbeat quickens, <1 slower. Life still
+        // ticks in real time so the streak lengths stay natural.
+        const double speed = std::clamp(jnum(cfg_, "speed", 1.0), 0.1, 4.0);
+        hb_t_ += dt * speed;
         const double wander = jnum(cfg_, "wander", 8.0);
         double dx, dy; direction_unit(dx, dy, 270.0);   // rises by default
         for (auto& p : particles_) {
-            p.extra += dt;
-            p.x += (p.vy * dx + std::sin(p.extra * 3.1 + p.vx) * wander) * dt;
-            p.y += p.vy * dy * dt;
+            p.extra += dt * speed;
+            p.x += (p.vy * dx + std::sin(p.extra * 3.1 + p.vx) * wander) * dt * speed;
+            p.y += p.vy * dy * dt * speed;
             p.life -= dt / p.max_life;
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
@@ -961,6 +1097,21 @@ public:
             particles_.push_back(p);
         }
     }
+
+    // A heartbeat envelope over one beat period: a strong "lub" then a softer
+    // "dub" a moment later, then rest — 0..1. bpm sets the (slow) pace.
+    double heartbeat_env() const {
+        const double bpm    = std::max(20.0, jnum(cfg_, "bpm", 50.0));
+        const double period = 60.0 / bpm;
+        const double ph     = std::fmod(hb_t_, period) / period;   // 0..1
+        auto thump = [](double x, double c, double w) {
+            const double d = (x - c) / w;
+            return std::exp(-d * d);
+        };
+        const double e = thump(ph, 0.00, 0.045) + 0.6 * thump(ph, 0.18, 0.05);
+        return std::clamp(e, 0.0, 1.0);
+    }
+
     cv::Mat render() override {
         cv::Mat c = blank();
         double dx, dy; direction_unit(dx, dy, 270.0);
@@ -973,8 +1124,43 @@ public:
                            (int)p.r, (int)p.g, (int)p.b, (int)(a * 255));
             }
         }
+
+        // Heartbeat: an orange glow pulsing along the SAME panel edges the
+        // frost creeps in from (canvas-edge band, corners deeper), throbbing
+        // lub-dub. Additive over the shimmer.
+        if (heartbeat_) {
+            const double env = heartbeat_env();
+            if (env > 0.01) {
+                const bool   top  = cfg_.value("include_top", false);
+                const double reach = std::clamp(
+                    jnum(cfg_, "reach", jnum(cfg_, "depth_frac", 0.32)), 0.05, 0.9);
+                const double reach_px = reach * std::min(cw_, ch_);
+                Color glow = has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                              : Color{255, 90, 20};
+                const double amp = std::clamp(jnum(cfg_, "pulse_alpha", 0.55), 0.0, 1.0)
+                                   * std::max(0.05, intensity_);
+                for (int ly = 0; ly < h_; ++ly) {
+                    for (int lx = 0; lx < w_; ++lx) {
+                        const int gx = lx + ox_, gy = ly + oy_;
+                        const double de = std::min({ (double)gx, (double)(cw_ - 1 - gx),
+                                                     (double)(ch_ - 1 - gy),
+                                                     top ? (double)gy : 1e9 });
+                        double band = 1.0 - de / std::max(1.0, reach_px);
+                        if (band <= 0.02) continue;
+                        band = band * band;             // concentrate at the rim
+                        const double a = amp * band * env;
+                        draw_pixel(c, lx, ly, glow.r, glow.g, glow.b,
+                                   (int)std::clamp(a * 255.0, 0.0, 255.0));
+                    }
+                }
+            }
+        }
         return c;
     }
+
+private:
+    bool   heartbeat_ = false;
+    double hb_t_ = 0.0;
 };
 
 // ── Fireflies ────────────────────────────────────────────────────────────────
@@ -1653,12 +1839,26 @@ private:
     // Effective fill fraction — base level shifted by smoothed pitch (look
     // down → liquid rises) when pitch_fill is set.
     double level_eff() const {
-        return std::clamp(jnum(cfg_, "level", 0.40)
+        return std::clamp(base_level()
                           // Default ON (0.3): in a 3-D container, pitching
                           // forward brings the liquid toward you — reads as
                           // the level rising. pitch_fill: 0 restores flat.
                           + jnum(cfg_, "pitch_fill", 0.3) * (pitch_smooth_ / 45.0),
                           0.0, 1.0);
+    }
+    // Base (untilted) fill fraction. Normally the static "level", but with
+    // "level_from":"humidity" the tank fills with the room's relative humidity:
+    // the reading (0..1) is mapped onto [level_min, level_max] so a dry room
+    // isn't bone-empty nor a muggy one overflowing. Falls back to "level" when
+    // no sensor reading has arrived yet.
+    double base_level() const {
+        if (cfg_.value("level_from", std::string("none")) == "humidity" &&
+            humidity_ >= 0.0) {
+            const double lo = std::clamp(jnum(cfg_, "level_min", 0.10), 0.0, 1.0);
+            const double hi = std::clamp(jnum(cfg_, "level_max", 0.90), 0.0, 1.0);
+            return lo + (hi - lo) * std::clamp(humidity_, 0.0, 1.0);
+        }
+        return jnum(cfg_, "level", 0.40);
     }
     // Local surface row at local column lx, computed in canvas space (so the
     // tank is continuous across panels) then shifted into this panel's frame.
@@ -1938,18 +2138,24 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
+        // Glyph size / stroke are configurable. Bigger box + thin 1 px sharp
+        // strokes (LINE_8, no AA), full-bright: the larger box gives the Z
+        // open counter-spaces so the thin strokes read clearly, without the
+        // chunky blob a thick stroke made on a small glyph.
+        const int base_s = std::max(2, jint(cfg_, "size", 3));       // half-size px
+        const int thick  = std::max(1, jint(cfg_, "thickness", 1));  // stroke px
         for (auto& p : particles_) {
             // Fade in quickly, out slowly; grow one size step mid-flight.
             const double env = std::clamp(std::min((1.0 - p.life) * 5.0,
                                                    p.life * 2.5), 0.0, 1.0);
-            const int a = (int)std::lround(env * 230.0);
+            const int a = (int)std::lround(env * 255.0);             // full-bright
             if (a <= 0) continue;
-            const int s = 1 + (p.life < 0.55 ? 1 : 0);          // 1 -> 2 as it rises
+            const int s = base_s + (p.life < 0.55 ? 1 : 0);         // grow one step as it rises
             const int x = (int)p.x, y = (int)p.y, w = 2 * s;
             const cv::Scalar col(p.r, p.g, p.b, a);
-            cv::line(c, {x, y},         {x + w, y},         col, 1);   // top bar
-            cv::line(c, {x + w, y},     {x, y + w},         col, 1);   // diagonal
-            cv::line(c, {x, y + w},     {x + w, y + w},     col, 1);   // bottom bar
+            cv::line(c, {x, y},         {x + w, y},         col, thick);  // top bar
+            cv::line(c, {x + w, y},     {x, y + w},         col, thick);  // diagonal
+            cv::line(c, {x, y + w},     {x + w, y + w},     col, thick);  // bottom bar
         }
         return c;
     }
@@ -2221,8 +2427,8 @@ const std::map<std::string, json>& presets() {
           "waveform": {"effect":"waveform","blend":"add"},
           "matrix": {"effect":"matrix","blend":"add"},
           "circuit": {"effect":"circuit","count":5,"blend":"add"},
-          "frost": {"effect":"frost","count":44,"blend":"add"},
-          "heatwave": {"effect":"heatwave","count":18,"blend":"add"},
+          "frost": {"effect":"frost","count":44,"fractal":true,"blend":"add"},
+          "heatwave": {"effect":"heatwave","count":18,"heartbeat":true,"blend":"add"},
           "snooze": {"effect":"snooze","count":3,"blend":"add"},
           "petals": {"effect":"snow","count":14,"colors":[[255,150,180],[255,190,210],[240,120,160]],"speed_min":3.0,"speed_max":6.0,"drift_x":2.5,"blend":"add"},
           "dizzy": {"layers":[
@@ -2355,8 +2561,12 @@ struct ParticleLayer {
     void update(double dt) { if (effect) effect->update(dt); }
     cv::Mat render()       { return effect ? effect->render() : cv::Mat(); }
     double  face_glow() const { return effect ? effect->face_glow() : 0.0; }
+    const cv::Mat* face_tint(uint8_t& r, uint8_t& g, uint8_t& b) const {
+        return effect ? effect->face_tint(r, g, b) : nullptr;
+    }
     void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
     void set_audio(double level)          { if (effect) effect->set_audio(level); }
+    void set_humidity(double h)           { if (effect) effect->set_humidity(h); }
     void set_motion_reactive(bool on)     { if (effect) effect->set_motion_reactive(on); }
     void set_canvas_geometry(int cw, int ch, int ox, int oy) {
         if (effect) effect->set_canvas_geometry(cw, ch, ox, oy);
@@ -2377,6 +2587,7 @@ struct ParticleSystem::Impl {
     std::vector<ParticleLayer> layers;
     MotionInput motion{};   // latest IMU state, re-applied to rebuilt layers
     double audio = 0.0;     // latest mic level, re-applied to rebuilt layers
+    double humidity = -1.0; // latest rel humidity 0..1 (<0 = none), re-applied
     int cw, ch, ox = 0, oy = 0;   // canvas geometry, re-applied to rebuilt layers
     bool motion_reactive = false; // global gravity default, re-applied on rebuilds
 
@@ -2401,6 +2612,7 @@ struct ParticleSystem::Impl {
             layers.emplace_back(lc, w, h);
             layers.back().set_motion(motion);
             layers.back().set_audio(audio);
+            layers.back().set_humidity(humidity);
             layers.back().set_motion_reactive(motion_reactive);
             layers.back().set_canvas_geometry(cw, ch, ox, oy);
         }
@@ -2427,6 +2639,17 @@ ParticleSystem::ParticleSystem(int width, int height, const json& cfg)
 }
 ParticleSystem::~ParticleSystem() = default;
 
+json merge_effect_specs(const json& base, const json& over) {
+    json bl = resolve_cfg(base), ol = resolve_cfg(over);
+    json out; out["layers"] = json::array();
+    if (bl.contains("layers"))
+        for (auto& l : bl["layers"]) out["layers"].push_back(l);
+    if (ol.contains("layers"))
+        for (auto& l : ol["layers"]) out["layers"].push_back(l);
+    if (out["layers"].empty()) return json("none");
+    return out;
+}
+
 void ParticleSystem::set_effect(const json& cfg) {
     if (!impl_->try_update(cfg)) impl_->build(cfg);   // in-place when structure matches
 }
@@ -2444,6 +2667,11 @@ void ParticleSystem::set_motion(const MotionInput& m) {
 void ParticleSystem::set_audio(double level) {
     impl_->audio = level;
     for (auto& l : impl_->layers) l.set_audio(level);
+}
+
+void ParticleSystem::set_humidity(double humidity01) {
+    impl_->humidity = humidity01;
+    for (auto& l : impl_->layers) l.set_humidity(humidity01);
 }
 
 void ParticleSystem::set_motion_reactive(bool on) {
@@ -2486,6 +2714,15 @@ ParticleFrame ParticleSystem::render() {
         has = true;
         if (layer.blend != Blend::Add) all_add = false;
         result.face_glow = std::max(result.face_glow, layer.face_glow());
+        // Face-tint request (frost): first tinting layer wins — the mask is a
+        // scratch header consumed this tick, same contract as rgba.
+        if (result.face_tint.empty()) {
+            uint8_t tr, tg, tb;
+            if (const cv::Mat* tm = layer.face_tint(tr, tg, tb)) {
+                result.face_tint = *tm;
+                result.tint_r = tr; result.tint_g = tg; result.tint_b = tb;
+            }
+        }
 
         if (layer.blend == Blend::Add) {
             // Vectorized accumulate: uchar layer → float, summed in one pass.

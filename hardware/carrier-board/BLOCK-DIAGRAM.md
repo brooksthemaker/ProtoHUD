@@ -9,6 +9,9 @@ own (see [`README.md`](README.md) and [`RP2354-IO.md`](RP2354-IO.md)).
 Because HUB75 (CM5) and MAX7219 (RP2354B) are now on different brains, they can
 run **simultaneously** — see [`MULTI-BACKEND.md`](MULTI-BACKEND.md).
 
+High-speed I/O (USB 3.1 hub, USB 2.0 hub, PCIe switch) parts and layout notes
+live in [`USB-PCIE-EXPANSION.md`](USB-PCIE-EXPANSION.md).
+
 ```mermaid
 flowchart TB
     J1["J1 · 5 V INPUT<br/>fuse · reverse-polarity FET · TVS"]:::pwr
@@ -69,21 +72,36 @@ flowchart TB
     USEL -. "A: hub→CM5" .-> HUBIC
     USEL -. "B: standalone" .-> UPROG["J12 · USB-C program port"]:::usb
 
-    %% ---- CM5 cameras / display / USB stack ----
+    %% ---- CM5 cameras / display / USB / PCIe ----
     CM5 -- "2× CSI (MIPI)" --> CSI["J7/J8 · 2× cameras (22-pin FFC)"]:::dir
     CM5 -- "2× HDMI" --> HDMI["J10 · HDMI out / VITURE"]:::load
 
-    subgraph USB["USB stack (onboard hub)"]
+    subgraph USB["USB stack (two onboard hubs — see USB-PCIE-EXPANSION.md)"]
         direction TB
-        HUBIC["J9 · USB 2.0 hub"]:::usb
+        HUB3["U20 · USB 3.1 Gen 1 hub ×4<br/>USB5744 → J11 ports"]:::usb
+        HUBIC["J9 · USB 2.0 hub ×4<br/>USB2514B"]:::usb
         RP2350["RP2350 helmet audio<br/>(UAC2: 6-mic beamform/NR/DOA)"]:::usb
         KNOB["Smart knob"]:::usb
         LORA["LoRa RAK4631"]:::usb
-        VIT["VITURE glasses"]:::usb
         UCAM["USB cameras"]:::usb
-        HUBIC --> RP2350 & KNOB & LORA & VIT & UCAM
+        SS["spare 5 Gbps ports"]:::usb
+        HUB3 --> UCAM & SS
+        HUBIC --> RP2350 & KNOB & LORA
     end
+    CM5 == "USB 3.0 #1 (5 Gbps)" ==> HUB3
+    VIT["J14 · VITURE glasses USB data<br/>(1.5 A VBUS switch)"]:::usb
+    CM5 == "USB 3.0 #2" ==> VIT
 
+    subgraph PCIE["PCIe — one Gen 2 x1 lane, shared ~500 MB/s"]
+        direction TB
+        PSW["U21 · PCIe Gen 2 packet switch<br/>PI7C9X2G404 · 1 up + 3 down"]:::pcie
+        NVME["J13 · M.2 Key-M · NVMe<br/>(recording / gallery)"]:::load
+        PSP["2× spare x1<br/>(Coral TPU / 2.5GbE / …)"]:::load
+        PSW --> NVME & PSP
+    end
+    CM5 == "PCIe Gen2 x1 · refclk · PERST#" ==> PSW
+
+    classDef pcie  fill:#d2f2ec,stroke:#1d8a74,color:#000,font-weight:bold;
     classDef pwr   fill:#fde2c4,stroke:#c9772a,color:#000;
     classDef cm5   fill:#cfe3ff,stroke:#2a5bc9,color:#000,font-weight:bold;
     classDef rp    fill:#cfeaff,stroke:#1f8fc9,color:#000,font-weight:bold;
@@ -105,7 +123,8 @@ flowchart TB
 | 🟨 Yellow | USB selector (hub ⇄ standalone program port) |
 | ⬜ Grey | 5 V-logic load (panels, LEDs, HDMI) |
 | 🟩 Green | 3.3 V-native peripheral — direct connect, no shifter |
-| 🟪 Purple | USB peripheral (behind the hub) |
+| 🟪 Purple | USB hub / peripheral |
+| 🟦 Teal (bold) | PCIe switch — fans out the CM5's single Gen 2 x1 lane |
 
 ## Connector schedule
 
@@ -118,9 +137,12 @@ flowchart TB
 | J5 | I²C0 sensors | RP2354B | SDA, SCL, 3.3 V, GND, INT | 3.3 V |
 | J6 | buttons / boop | RP2354B | GPIO×n, 3.3 V, GND | 3.3 V |
 | J7/J8 | CSI cameras | CM5 | 22-pin 0.5 mm FFC | MIPI |
-| J9 | USB hub uplink | CM5 | USB 2.0 → RP2354B / RP2350 audio / knob / LoRa / VITURE / cams | USB |
+| J9 | USB 2.0 hub (USB2514B) | CM5 | USB 2.0 host → RP2354B CDC / RP2350 audio / knob / LoRa | USB 2.0 |
 | J10 | HDMI | CM5 | 2× HDMI out | — |
+| J11 | USB 3.1 hub ports ×4 (USB5744) | CM5 | USB 3.0 #1 → USB cams + spare 5 Gbps ports | USB 3 (5 Gbps) |
 | J12 | USB-C program port | RP2354B | standalone flash (via SW1) | USB |
+| J13 | M.2 Key-M (NVMe) | CM5 | PCIe Gen2 x1 via PI7C9X2G404 switch (+2 spare x1) | PCIe |
+| J14 | VITURE USB data | CM5 | USB 3.0 #2, 1.5 A VBUS switch | USB |
 | J20–J27 | servo headers ×8 | RP2354B | SIG, +V_SERVO, GND | 5–6 V pwr / 3.3 V sig |
 | SW1 | USB selector | RP2354B | routes RP2354B USB → hub **or** J12 | — |
 
