@@ -1233,7 +1233,13 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         std::string name = std::filesystem::path(path).stem().string();
         map_select_items.push_back(
             leaf_sel(name,
-                [&state, path]{ std::lock_guard<std::mutex> lk(state.mtx); state.map_overlay.map_path = path; },
+                [&state, path]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.map_overlay.map_path = path;
+                    // Each map carries its own north set point — load it (or
+                    // clear calibration if this map hasn't been set yet).
+                    apply_map_north(state.map_overlay);
+                },
                 [&state, path]{ return state.map_overlay.map_path == path; }));
     }
     if (map_select_items.empty())
@@ -1346,11 +1352,18 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         toggle("Rotate with Heading",
             [&state]{ return state.map_overlay.rotate_with_heading; },
             [&state](bool v){ state.map_overlay.rotate_with_heading = v; }),
-        leaf("Set My Direction", [&state]{
+        with_desc(leaf("Set Map North", [&state]{
             std::lock_guard<std::mutex> lk(state.mtx);
-            state.map_overlay.map_north_deg = state.compass_heading;
-            state.map_overlay.calibrated    = true;
+            auto& mo = state.map_overlay;
+            mo.map_north_deg = state.compass_heading;
+            mo.calibrated    = true;
+            // Remember it per map, so switching maps (and restarting) brings
+            // each one back with its own north.
+            mo.map_norths[map_north_key(mo)] = mo.map_north_deg;
         }),
+            "Face the direction that is UP on this map, then select: the map "
+            "rotates with the compass from that reference. Saved per map — "
+            "every map keeps its own north set point."),
         // close_menu = nullptr: unlike the quick wheel's Expand Map, the deep
         // menu stays open behind the expanded view.
         menu_shared::expand_map_leaf(state_ptr, "Expand Map (Pan/Zoom)", nullptr),
