@@ -277,6 +277,13 @@ private:
     std::atomic<int>   pending_awb_enable_ { -1 };       // AwbEnable: 1=on 0=off -1=no-op
     std::atomic<float> pending_rg_gain_    { -1.0f };    // ColourGains R, -1 = no-op
     std::atomic<float> pending_bg_gain_    { -1.0f };    // ColourGains B, -1 = no-op
+    // Active manual shutter (0 = auto). Tracked so the per-request frame-rate
+    // pin can widen its max bound for a deliberate long exposure instead of
+    // clamping it (see apply_pending_controls).
+    std::atomic<int>   manual_shutter_us_  { 0 };
+    // One-shot achieved-frame-rate check after start (capture thread only).
+    int  frames_seen_ = 0;
+    bool rate_warned_ = false;
 
     // Extended controls (AF tuning / AE tuning / WB mode / ISP image / HDR).
     // pending_* sentinels: ints -1 = no-op; floats -1.0f (or -9999.0f where the

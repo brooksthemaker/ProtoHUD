@@ -870,11 +870,14 @@ public:
         if (grad.empty())
             grad = { {255, 255, 255}, {200, 230, 255}, {120, 180, 255} };
         // Face tint: the face material "freezes" toward the frost's rim colour
-        // in a gradient that follows the density field — strongest where the
-        // sheet is solid, fading to nothing at the growth front. Default ON
-        // for fractal frost; "face_tint" (0..1) in the layer cfg overrides.
+        // in a gradient that LEADS the crystal front. The ramp saturates fast
+        // (f*2) and the mask is then blurred, spreading the blue several px
+        // INSIDE the visible crystal edge — without this the strong tint sat
+        // only where the add-blended crystals already wash the face out, so
+        // it was invisible in practice. Default ON for fractal frost;
+        // "face_tint" (0..1) in the layer cfg overrides.
         const double tint_k = std::clamp(
-            jnum(cfg_, "face_tint", fractal_ ? 0.7 : 0.0), 0.0, 1.0);
+            jnum(cfg_, "face_tint", fractal_ ? 0.8 : 0.0), 0.0, 1.0);
         tint_active_ = tint_k > 0.0;
         if (tint_active_) {
             if (tint_mask_.rows != h_ || tint_mask_.cols != w_ ||
@@ -890,10 +893,8 @@ public:
                 const int gx = lx + ox_, gy = ly + oy_;
                 const float f = cell(gx, gy);
                 if (f < 0.04f) continue;
-                // pow<1 pushes the tint deeper into the thin leading edge, so
-                // the blue reads as a gradient spreading ahead of solid ice.
                 if (tm) tm[lx] = (uchar)std::lround(
-                    255.0 * tint_k * std::pow((double)f, 0.6));
+                    255.0 * tint_k * std::min(1.0, (double)f * 2.0));
                 const float h1 = hash01(gx, gy);
                 const Color col = sample_grad(grad, f);
                 // Per-cell grain brightness keeps crystal texture in the sheet
@@ -907,6 +908,16 @@ public:
                 const double a = opacity * std::pow((double)f, 0.9) * shimmer;
                 draw_pixel(c, lx, ly, r, g, b, (int)std::lround(a * 255.0));
             }
+        }
+        // Spread the tint past the crystal front: blur a copy inward and take
+        // the per-pixel MAX with the raw mask — the raw term keeps the rim at
+        // full strength while the blurred term pushes the blue several pixels
+        // deeper into the face than the ice itself, so the freeze-over reads
+        // AHEAD of the crystals instead of hidden underneath them.
+        if (tint_active_) {
+            const int ks = std::max(5, (std::min(w_, h_) / 3) | 1);
+            cv::GaussianBlur(tint_mask_, tint_blur_, cv::Size(ks, ks), ks * 0.5);
+            cv::max(tint_mask_, tint_blur_, tint_mask_);
         }
         // Glints on top: brief white twinkles on the solid sheet.
         for (auto& p : particles_) {
@@ -1048,7 +1059,7 @@ private:
     std::vector<Particle> flakes_;              // large drifting snowflakes
     double flake_acc_ = 0.0;                     // snowflake spawn timer
     std::mt19937 det_rng_{0x1CEF7057u};         // shared fixed seed (see update)
-    cv::Mat tint_mask_;                          // face-tint mask (see render)
+    cv::Mat tint_mask_, tint_blur_;              // face-tint mask + blur scratch
     bool    tint_active_ = false;
     Color   tint_col_{120, 180, 255};
 };
