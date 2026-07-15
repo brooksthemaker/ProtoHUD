@@ -59,7 +59,21 @@ public:
         // clamped to the nearest multiple at set time. Mounting protogen
         // CSI cameras sideways on the helmet is the main use case.
         int         rotation_deg = 0;
+        // Sensor model for the manufacturer mode table: "auto" (default)
+        // identifies the sensor from the libcamera id / config.txt dtoverlay;
+        // any key from sensor_catalog() forces that model's datasheet modes
+        // into the resolution list instead.
+        std::string sensor_model = "auto";
     };
+
+    // Sensor catalog entry for the menu's model picker (key = the value
+    // Config::sensor_model takes, vendor groups the picker's submenus).
+    struct SensorInfo {
+        const char* key;
+        const char* vendor;   // "Raspberry Pi" | "Arducam"
+        const char* label;
+    };
+    static const std::vector<SensorInfo>& sensor_catalog();
 
     // A capture mode, tagged with where we learned about it (flags OR together
     // when sources agree on a size):
@@ -161,6 +175,7 @@ public:
     int   height()          const { return cfg_.height; }
     int   fps()             const { return cfg_.fps; }
     const std::string& model_name() const { return cfg_.model_name; }
+    const std::string& sensor_model() const { return cfg_.sensor_model; }
     const std::string& camera_id()  const { return cfg_.camera_id; }
 
     // Save the current full-resolution frame to `path` as a JPEG, by mapping the

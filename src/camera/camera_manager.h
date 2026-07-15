@@ -26,6 +26,10 @@ struct CamConfig {
     // other values are snapped at set time). Seed value at startup; runtime
     // changes go through CameraManager::set_owl_*_rotation.
     int         rotation_deg = 0;
+    // Manufacturer mode-table selection: "auto" (identify from driver /
+    // config.txt) or a DmaCamera::sensor_catalog() key to force that model's
+    // datasheet modes into the resolution list.
+    std::string sensor_model = "auto";
 };
 
 struct UsbCamConfig {
@@ -102,6 +106,11 @@ public:
     bool set_resolution(int width, int height, int fps);          // both eyes
     bool set_owl_left_resolution(int width, int height, int fps);
     bool set_owl_right_resolution(int width, int height, int fps);
+    // Force (or restore "auto" for) the manufacturer mode-table model for one
+    // eye; rebuilds the cameras so the resolution list re-merges.
+    bool set_owl_sensor_model(bool left, const std::string& model);
+    const std::string& owl_left_sensor_model()  const { return owl_left_cfg_.sensor_model; }
+    const std::string& owl_right_sensor_model() const { return owl_right_cfg_.sensor_model; }
 
     int current_width()  const { return owl_left_  ? owl_left_->width()  :
                                         owl_right_ ? owl_right_->width()  : 0; }

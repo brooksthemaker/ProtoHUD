@@ -1582,6 +1582,7 @@ int main(int argc, char* argv[]) {
         owl_left.height       = jl.value("height",  800);
         owl_left.fps          = jl.value("fps",      60);
         owl_left.rotation_deg = jl.value("rotation_deg", 0);
+        owl_left.sensor_model = jl.value("sensor_model", std::string("auto"));
         parse_cam_controls(jl, state.camera_controls_left);
         parse_focus(jl, state.focus_left);
     }
@@ -1593,6 +1594,7 @@ int main(int argc, char* argv[]) {
         owl_right.height       = jr.value("height",  800);
         owl_right.fps          = jr.value("fps",      60);
         owl_right.rotation_deg = jr.value("rotation_deg", 0);
+        owl_right.sensor_model = jr.value("sensor_model", std::string("auto"));
         parse_cam_controls(jr, state.camera_controls_right);
         parse_focus(jr, state.focus_right);
     }
@@ -6050,6 +6052,8 @@ int main(int argc, char* argv[]) {
         // block where the user already finds the rest of the per-eye config).
         cfg["cameras"]["owlsight_left"]["rotation_deg"]  = cameras.owl_left_rotation();
         cfg["cameras"]["owlsight_right"]["rotation_deg"] = cameras.owl_right_rotation();
+        cfg["cameras"]["owlsight_left"]["sensor_model"]  = cameras.owl_left_sensor_model();
+        cfg["cameras"]["owlsight_right"]["sensor_model"] = cameras.owl_right_sensor_model();
 
         // Persist the per-eye focus profile. Position is sampled from the live
         // lens (where AF/slave actually parked it), quantized to steps of 10 so

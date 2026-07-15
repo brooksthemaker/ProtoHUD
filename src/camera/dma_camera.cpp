@@ -34,39 +34,57 @@ using namespace libcamera;
 // dtoverlay= lines scanned from /boot/firmware/config.txt.
 namespace {
 struct SpecMode { int w, h, fps; };
-struct SensorSpec { const char* key; std::vector<SpecMode> modes; };
+struct SensorSpec {
+    const char* key;
+    const char* vendor;   // menu grouping: "Raspberry Pi" | "Arducam"
+    const char* label;    // menu display name
+    std::vector<SpecMode> modes;
+};
 const std::vector<SensorSpec>& sensor_specs() {
     static const std::vector<SensorSpec> specs = {
         // Arducam OwlSight 64MP (kernel driver mode list; fps varies Pi4/Pi5)
-        {"ov64a40", {{1920,1080,0},{2312,1736,0},{3840,2160,0},
+        {"ov64a40", "Arducam", "OwlSight 64MP (OV64A40)",
+                    {{1920,1080,0},{2312,1736,0},{3840,2160,0},
                      {4624,3472,0},{8000,6000,0},{9248,6944,0}}},
         // Arducam 64MP Hawkeye (overlay arducam-64mp / id arducam_64mp —
         // matcher normalizes '-' to '_')
-        {"arducam_64mp", {{1280,720,120},{1920,1080,60},{2312,1736,30},
-                          {3840,2160,20},{4624,3472,10},{9152,6944,2}}},
+        {"arducam_64mp", "Arducam", "Hawkeye 64MP",
+                    {{1280,720,120},{1920,1080,60},{2312,1736,30},
+                     {3840,2160,20},{4624,3472,10},{9152,6944,2}}},
         // Arducam 16MP autofocus
-        {"imx519",  {{1280,720,120},{1920,1080,60},{2328,1748,30},
+        {"imx519",  "Arducam", "16MP AF (IMX519)",
+                    {{1280,720,120},{1920,1080,60},{2328,1748,30},
                      {3840,2160,18},{4656,3496,9}}},
         // Pi Camera Module 3
-        {"imx708",  {{1536,864,120},{2304,1296,56},{4608,2592,14}}},
+        {"imx708",  "Raspberry Pi", "Camera Module 3 (IMX708)",
+                    {{1536,864,120},{2304,1296,56},{4608,2592,14}}},
         // Pi HQ camera
-        {"imx477",  {{1332,990,120},{2028,1080,50},{2028,1520,40},{4056,3040,10}}},
+        {"imx477",  "Raspberry Pi", "HQ Camera (IMX477)",
+                    {{1332,990,120},{2028,1080,50},{2028,1520,40},{4056,3040,10}}},
         // IMX378 (imx477 family — same mode geometry; fps platform-dependent)
-        {"imx378",  {{1332,990,0},{2028,1080,0},{2028,1520,0},{4056,3040,0}}},
+        {"imx378",  "Arducam", "12MP (IMX378)",
+                    {{1332,990,0},{2028,1080,0},{2028,1520,0},{4056,3040,0}}},
         // Pi Camera Module 2
-        {"imx219",  {{640,480,103},{1640,1232,41},{1920,1080,47},{3280,2464,21}}},
+        {"imx219",  "Raspberry Pi", "Camera Module 2 (IMX219)",
+                    {{640,480,103},{1640,1232,41},{1920,1080,47},{3280,2464,21}}},
         // Pi Camera Module 1 / clones
-        {"ov5647",  {{640,480,59},{1296,972,43},{1920,1080,31},{2592,1944,16}}},
+        {"ov5647",  "Raspberry Pi", "Camera Module 1 (OV5647)",
+                    {{640,480,59},{1296,972,43},{1920,1080,31},{2592,1944,16}}},
         // Arducam 16MP IMX298 (native full-res; driver mode list not public)
-        {"imx298",  {{4640,3488,0}}},
+        {"imx298",  "Arducam", "16MP (IMX298)",
+                    {{4640,3488,0}}},
         // Arducam 8.3MP IMX415 STARVIS (driver mode 3864x2192@30 on 4 lanes)
-        {"imx415",  {{3864,2192,30}}},
+        {"imx415",  "Arducam", "8.3MP STARVIS (IMX415)",
+                    {{3864,2192,30}}},
         // Arducam 5MP IMX335 STARVIS
-        {"imx335",  {{2592,1944,0}}},
+        {"imx335",  "Arducam", "5MP STARVIS (IMX335)",
+                    {{2592,1944,0}}},
         // Global-shutter camera
-        {"imx296",  {{1456,1088,60}}},
+        {"imx296",  "Raspberry Pi", "Global Shutter (IMX296)",
+                    {{1456,1088,60}}},
         // OV9281 global-shutter (fps depends on vendor board/link)
-        {"ov9281",  {{640,400,0},{1280,720,0},{1280,800,0}}},
+        {"ov9281",  "Arducam", "Global Shutter (OV9281)",
+                    {{640,400,0},{1280,720,0},{1280,800,0}}},
     };
     return specs;
 }
@@ -127,6 +145,16 @@ const SensorSpec* match_sensor_spec(const std::string& cam_id, std::string* how)
     return nullptr;
 }
 }  // namespace
+
+const std::vector<DmaCamera::SensorInfo>& DmaCamera::sensor_catalog() {
+    static const std::vector<SensorInfo> catalog = []{
+        std::vector<SensorInfo> out;
+        for (const auto& s : sensor_specs())
+            out.push_back({ s.key, s.vendor, s.label });
+        return out;
+    }();
+    return catalog;
+}
 
 // ── Construction / destruction ────────────────────────────────────────────────
 
@@ -342,13 +370,26 @@ bool DmaCamera::configure_camera() {
             }
         } catch (...) {}
 
-        // Manufacturer mode table, matched via the libcamera id or a
-        // dtoverlay= scan of /boot/firmware/config.txt. Geometry from the
-        // datasheet; nominal fps only where it isn't platform-dependent (the
-        // probe below measures the real figure on this Pi).
+        // Manufacturer mode table. A manual sensor_model selection (menu:
+        // Resolution > Sensor Model) takes priority; otherwise the sensor is
+        // identified from the libcamera id or a dtoverlay= scan of
+        // /boot/firmware/config.txt. Geometry from the datasheet; nominal fps
+        // only where it isn't platform-dependent (the probe below measures
+        // the real figure on this Pi).
         {
             std::string how;
-            if (const auto* spec = match_sensor_spec(camera_->id(), &how)) {
+            const SensorSpec* spec = nullptr;
+            if (!cfg_.sensor_model.empty() && cfg_.sensor_model != "auto") {
+                for (const auto& s : sensor_specs())
+                    if (cfg_.sensor_model == s.key) { spec = &s; break; }
+                how = "manual selection";
+                if (!spec)
+                    std::cerr << "[dma] camera " << cfg_.libcamera_id
+                              << ": unknown sensor_model '" << cfg_.sensor_model
+                              << "' — falling back to auto-detect\n";
+            }
+            if (!spec) spec = match_sensor_spec(camera_->id(), &how);
+            if (spec) {
                 for (const auto& m : spec->modes)
                     modes_.push_back({ m.w, m.h, m.fps, kModeSpec });
                 std::cout << "[dma] camera " << cfg_.libcamera_id << " sensor '"
