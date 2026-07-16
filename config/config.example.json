@@ -587,6 +587,7 @@
   },
   "map": {
     "_note2": "The minimap module is always on (forced by hud_dock); 'enabled' is kept for compatibility.",
+    "_follow_expanded_note": "follow_expanded (default true): the area you zoom/pan to in the expanded map view stays shown in the minimap after closing it (reopening the expanded view resets the framing). The centre crosshair hides while the framing is panned off the wearer's position. Toggle: HUD > Map Options > Minimap Follows Expanded View.",
     "_north_note": "north_by_map (written automatically) maps each map file's basename to its north set point: face the direction that is UP on the map, then Menu > HUD > Minimap > Set Map North (or Shift+M). With rotate_with_heading on, the map turns with the IMU compass (heading-up, matching the compass ring); a map WITHOUT a set point assumes the image is north-up (0 deg), so rotation works out of the box for ordinary maps. Every map keeps its own set point, applied when you select or cycle to it.",
     "enabled":             true,
     "map_path":            "",

@@ -400,6 +400,12 @@ struct MapOverlayConfig {
     float       view_zoom           = 1.0f;   // expanded-view zoom (independent of minimap)
     float       view_pan_x          = 0.f;    // expanded-view pan, image-space fraction
     float       view_pan_y          = 0.f;
+    // Minimap mirrors the expanded view's framing (persisted): the area you
+    // zoom/pan to in the large map stays shown in the minimap after closing
+    // it (reopening the expanded view resets the framing, and the minimap
+    // with it). The centre crosshair hides while the framing is panned off
+    // the wearer's position.
+    bool        follow_expanded     = true;
 };
 
 // Key for the per-map north table: the map file's basename (stable if the

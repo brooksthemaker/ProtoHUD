@@ -534,8 +534,20 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         // refines the reference per map.
         if (cfg.rotate_with_heading)
             nvgRotate(vg, (cfg.map_north_deg - s.compass_heading) * (float)M_PI / 180.f);
-        const float z   = std::max(cfg.zoom, 1.0f);
-        NVGpaint img = nvgImagePattern(vg, -hw * z, -hh * z, hw * 2.f * z, hh * 2.f * z,
+        // Follow the expanded view's framing: the region zoomed/panned to in
+        // the large map is what the minimap shows (same pattern construction
+        // as draw_map_expanded, so the composition matches 1:1). The framing
+        // persists after the expanded view closes; reopening it resets to
+        // the full view (and the minimap with it).
+        const bool follow = cfg.follow_expanded &&
+                            (cfg.view_zoom > 1.001f ||
+                             cfg.view_pan_x != 0.f || cfg.view_pan_y != 0.f);
+        const float z    = std::max(cfg.zoom, 1.0f) *
+                           (follow ? std::max(cfg.view_zoom, 1.0f) : 1.f);
+        const float panx = follow ? cfg.view_pan_x * hw * 2.f : 0.f;
+        const float pany = follow ? cfg.view_pan_y * hh * 2.f : 0.f;
+        NVGpaint img = nvgImagePattern(vg, -hw * z - panx, -hh * z - pany,
+                                       hw * 2.f * z, hh * 2.f * z,
                                        0.f, map_img_, cfg.opacity);
         nvgFillPaint(vg, img);   // paint xform composes with the rotated frame
         nvgFill(vg);             // fills the pre-recorded, screen-aligned window
@@ -553,13 +565,19 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     nvgStrokeWidth(vg, 1.8f);
     nvgStroke(vg);
 
-    // Red crosshair at centre = wearer's position on the map.
-    nvgBeginPath(vg);
-    nvgMoveTo(vg, -9.f, 0.f); nvgLineTo(vg, 9.f, 0.f);
-    nvgMoveTo(vg, 0.f, -9.f); nvgLineTo(vg, 0.f, 9.f);
-    nvgStrokeColor(vg, nvgRGBA(255, 70, 70, 220));
-    nvgStrokeWidth(vg, 1.5f);
-    nvgStroke(vg);
+    // Red crosshair at centre = wearer's position on the map — hidden while
+    // the followed expanded framing is panned away from centre (the middle of
+    // the window no longer corresponds to the wearer).
+    const bool panned_off = cfg.follow_expanded &&
+                            (cfg.view_pan_x != 0.f || cfg.view_pan_y != 0.f);
+    if (!panned_off) {
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, -9.f, 0.f); nvgLineTo(vg, 9.f, 0.f);
+        nvgMoveTo(vg, 0.f, -9.f); nvgLineTo(vg, 0.f, 9.f);
+        nvgStrokeColor(vg, nvgRGBA(255, 70, 70, 220));
+        nvgStrokeWidth(vg, 1.5f);
+        nvgStroke(vg);
+    }
 
     nvgRestore(vg);
 

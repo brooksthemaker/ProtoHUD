@@ -2527,6 +2527,7 @@ int main(int argc, char* argv[]) {
         mo.portrait_right_half = jm.value("portrait_right_half", mo.portrait_right_half);
         mo.portrait_scale      = jm.value("portrait_scale",      mo.portrait_scale);
         mo.zoom                = jm.value("zoom",                mo.zoom);
+        mo.follow_expanded     = jm.value("follow_expanded",     mo.follow_expanded);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
         // Per-map north set points (basename -> compass heading at set time),
         // then load the active calibration for the selected map so it comes
@@ -6005,6 +6006,7 @@ int main(int argc, char* argv[]) {
                 cfg["map"]["north_by_map"] = std::move(jn);
             }
             cfg["map"]["zoom"]                = mo.zoom;
+            cfg["map"]["follow_expanded"]     = mo.follow_expanded;
         }
 
         {

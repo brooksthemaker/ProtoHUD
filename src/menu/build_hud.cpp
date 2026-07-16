@@ -1382,6 +1382,13 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         // close_menu = nullptr: unlike the quick wheel's Expand Map, the deep
         // menu stays open behind the expanded view.
         menu_shared::expand_map_leaf(state_ptr, "Expand Map (Pan/Zoom)", nullptr),
+        with_desc(toggle("Minimap Follows Expanded View",
+            [&state]{ return state.map_overlay.follow_expanded; },
+            [&state](bool v){ state.map_overlay.follow_expanded = v; }),
+            "The area you zoom/pan to in the expanded map stays shown in the "
+            "minimap after closing it. Reopen the expanded view to reset to "
+            "the full map. The centre crosshair hides while the view is "
+            "panned off your position."),
         with_desc(toggle("Expanded: Debug Window",
             [&state]{ return state.expanded_show_debug; },
             [&state](bool v){ state.expanded_show_debug = v; }),
