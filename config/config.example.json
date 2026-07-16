@@ -579,7 +579,7 @@
     "fourcc": "mp4v",
     "camera": "left"
   },
-  "_resolution_note": "Capture resolution is per-camera — set cameras.owlsight_left/right width/height/fps independently (Menu > Cameras > Left/Right Camera > Resolution). The mode list merges three sources, each tagged in the menu: 'sensor' = the kernel driver's real mode list (RAW stream, what rpicam-hello --list-cameras prints), 'spec' = a built-in manufacturer table matched via the libcamera id or a dtoverlay= scan of /boot/firmware/config.txt (ov64a40 OwlSight / arducam-64mp Hawkeye / imx519 / imx708 / imx477 / imx378 / imx219 / ov5647 / imx298 / imx415 / imx335 / imx296 / ov9281), 'scaled' = ISP-resized standard sizes. fps is probed per mode on this Pi at startup; datasheet modes the pipeline rejects are dropped. fps is a best-effort target; libcamera clamps to the sensor's achievable rate at the chosen size. A legacy top-level 'resolution' block that forced both eyes equal is still honoured on load for old configs but is retired on the next save.",
+  "_resolution_note": "Capture resolution is per-camera — set cameras.owlsight_left/right width/height/fps independently (Menu > Cameras > Left/Right Camera > Resolution). The mode list merges three sources, each tagged in the menu: 'sensor' = the kernel driver's real mode list (RAW stream, what rpicam-hello --list-cameras prints), 'spec' = a built-in manufacturer table matched via the libcamera id or a dtoverlay= scan of /boot/firmware/config.txt (ov64a40 OwlSight / arducam-64mp Hawkeye / imx519 / imx708 / imx477 / imx378 / imx219 / ov5647 / imx298 / imx415 / imx335 / imx296 / ov9281 - or forced per eye with cameras.owlsight_left/right.sensor_model, set from Resolution > Sensor Model with Raspberry Pi and Arducam vendor submenus; 'auto' = detect), 'scaled' = ISP-resized standard sizes. fps is probed per mode on this Pi at startup; datasheet modes the pipeline rejects are dropped. fps is a best-effort target; libcamera clamps to the sensor's achievable rate at the chosen size. A legacy top-level 'resolution' block that forced both eyes equal is still honoured on load for old configs but is retired on the next save.",
   "qr": {
     "_note": "Persisted QR scan state. scan_main=OWLsight cameras, scan_usb=USB cameras.",
     "scan_main": false,
@@ -587,6 +587,8 @@
   },
   "map": {
     "_note2": "The minimap module is always on (forced by hud_dock); 'enabled' is kept for compatibility.",
+    "_follow_expanded_note": "follow_expanded (default true): the area you zoom/pan to in the expanded map view stays shown in the minimap after closing it (reopening the expanded view resets the framing). The centre crosshair hides while the framing is panned off the wearer's position. Toggle: HUD > Map Options > Minimap Follows Expanded View.",
+    "_north_note": "north_by_map (written automatically) maps each map file's basename to its north set point: face the direction that is UP on the map, then Menu > HUD > Minimap > Set Map North (or Shift+M). With rotate_with_heading on, the map turns with the IMU compass (heading-up, matching the compass ring); a map WITHOUT a set point assumes the image is north-up (0 deg), so rotation works out of the box for ordinary maps. Every map keeps its own set point, applied when you select or cycle to it.",
     "enabled":             true,
     "map_path":            "",
     "opacity":             0.80,

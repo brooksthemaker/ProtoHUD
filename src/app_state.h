@@ -366,9 +366,14 @@ struct MapOverlayConfig {
     float       opacity             = 0.80f;
     float       pan_x               = 0.f;    // pixel offset from anchor
     float       pan_y               = 0.f;
-    float       map_north_deg       = 0.f;    // compass_heading saved at calibration
+    float       map_north_deg       = 0.f;    // ACTIVE north set point (see map_norths)
     bool        calibrated          = false;
     bool        rotate_with_heading = true;
+    // Per-map north set points, keyed by the map file's basename, so every
+    // map remembers its own calibration (persisted as map.north_by_map).
+    // apply_map_north() below loads the active pair whenever the selected
+    // map changes; Set Map North writes both the active pair and this table.
+    std::map<std::string, float> map_norths;
     float       image_rotate_deg    = 0.f;    // manual image rotation offset (degrees)
     bool        circle_window       = true;   // round minimap by default
     float       zoom                = 1.0f;   // >1 = zoom into map content (shows less of the image)
@@ -395,7 +400,37 @@ struct MapOverlayConfig {
     float       view_zoom           = 1.0f;   // expanded-view zoom (independent of minimap)
     float       view_pan_x          = 0.f;    // expanded-view pan, image-space fraction
     float       view_pan_y          = 0.f;
+    // Minimap mirrors the expanded view's framing (persisted): the area you
+    // zoom/pan to in the large map stays shown in the minimap after closing
+    // it (reopening the expanded view resets the framing, and the minimap
+    // with it). The centre crosshair hides while the framing is panned off
+    // the wearer's position.
+    bool        follow_expanded     = true;
 };
+
+// Key for the per-map north table: the map file's basename (stable if the
+// maps folder moves; unique within it).
+inline std::string map_north_key(const MapOverlayConfig& mo) {
+    const size_t slash = mo.map_path.find_last_of('/');
+    return slash == std::string::npos ? mo.map_path : mo.map_path.substr(slash + 1);
+}
+
+// Load the ACTIVE north calibration for the currently selected map from the
+// per-map table. Call after map_path changes (select / cycle / config load):
+// a map with a saved set point comes up calibrated and rotating with the
+// compass; one without shows unrotated until its north is set.
+inline void apply_map_north(MapOverlayConfig& mo) {
+    const auto it = mo.map_norths.find(map_north_key(mo));
+    if (it != mo.map_norths.end()) {
+        mo.map_north_deg = it->second;
+        mo.calibrated    = true;
+    } else {
+        // No set point: default to north-up (0°) so Rotate with Heading works
+        // out of the box for north-up map images; Set Map North refines it.
+        mo.map_north_deg = 0.f;
+        mo.calibrated    = false;
+    }
+}
 
 // ── Info panel (cycling side widgets) ───────────────────────────────────────────
 // A configurable HUD region — typically mirroring the minimap on the opposite

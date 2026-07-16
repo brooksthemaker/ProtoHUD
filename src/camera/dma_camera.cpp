@@ -34,39 +34,57 @@ using namespace libcamera;
 // dtoverlay= lines scanned from /boot/firmware/config.txt.
 namespace {
 struct SpecMode { int w, h, fps; };
-struct SensorSpec { const char* key; std::vector<SpecMode> modes; };
+struct SensorSpec {
+    const char* key;
+    const char* vendor;   // menu grouping: "Raspberry Pi" | "Arducam"
+    const char* label;    // menu display name
+    std::vector<SpecMode> modes;
+};
 const std::vector<SensorSpec>& sensor_specs() {
     static const std::vector<SensorSpec> specs = {
         // Arducam OwlSight 64MP (kernel driver mode list; fps varies Pi4/Pi5)
-        {"ov64a40", {{1920,1080,0},{2312,1736,0},{3840,2160,0},
+        {"ov64a40", "Arducam", "OwlSight 64MP (OV64A40)",
+                    {{1920,1080,0},{2312,1736,0},{3840,2160,0},
                      {4624,3472,0},{8000,6000,0},{9248,6944,0}}},
         // Arducam 64MP Hawkeye (overlay arducam-64mp / id arducam_64mp —
         // matcher normalizes '-' to '_')
-        {"arducam_64mp", {{1280,720,120},{1920,1080,60},{2312,1736,30},
-                          {3840,2160,20},{4624,3472,10},{9152,6944,2}}},
+        {"arducam_64mp", "Arducam", "Hawkeye 64MP",
+                    {{1280,720,120},{1920,1080,60},{2312,1736,30},
+                     {3840,2160,20},{4624,3472,10},{9152,6944,2}}},
         // Arducam 16MP autofocus
-        {"imx519",  {{1280,720,120},{1920,1080,60},{2328,1748,30},
+        {"imx519",  "Arducam", "16MP AF (IMX519)",
+                    {{1280,720,120},{1920,1080,60},{2328,1748,30},
                      {3840,2160,18},{4656,3496,9}}},
         // Pi Camera Module 3
-        {"imx708",  {{1536,864,120},{2304,1296,56},{4608,2592,14}}},
+        {"imx708",  "Raspberry Pi", "Camera Module 3 (IMX708)",
+                    {{1536,864,120},{2304,1296,56},{4608,2592,14}}},
         // Pi HQ camera
-        {"imx477",  {{1332,990,120},{2028,1080,50},{2028,1520,40},{4056,3040,10}}},
+        {"imx477",  "Raspberry Pi", "HQ Camera (IMX477)",
+                    {{1332,990,120},{2028,1080,50},{2028,1520,40},{4056,3040,10}}},
         // IMX378 (imx477 family — same mode geometry; fps platform-dependent)
-        {"imx378",  {{1332,990,0},{2028,1080,0},{2028,1520,0},{4056,3040,0}}},
+        {"imx378",  "Arducam", "12MP (IMX378)",
+                    {{1332,990,0},{2028,1080,0},{2028,1520,0},{4056,3040,0}}},
         // Pi Camera Module 2
-        {"imx219",  {{640,480,103},{1640,1232,41},{1920,1080,47},{3280,2464,21}}},
+        {"imx219",  "Raspberry Pi", "Camera Module 2 (IMX219)",
+                    {{640,480,103},{1640,1232,41},{1920,1080,47},{3280,2464,21}}},
         // Pi Camera Module 1 / clones
-        {"ov5647",  {{640,480,59},{1296,972,43},{1920,1080,31},{2592,1944,16}}},
+        {"ov5647",  "Raspberry Pi", "Camera Module 1 (OV5647)",
+                    {{640,480,59},{1296,972,43},{1920,1080,31},{2592,1944,16}}},
         // Arducam 16MP IMX298 (native full-res; driver mode list not public)
-        {"imx298",  {{4640,3488,0}}},
+        {"imx298",  "Arducam", "16MP (IMX298)",
+                    {{4640,3488,0}}},
         // Arducam 8.3MP IMX415 STARVIS (driver mode 3864x2192@30 on 4 lanes)
-        {"imx415",  {{3864,2192,30}}},
+        {"imx415",  "Arducam", "8.3MP STARVIS (IMX415)",
+                    {{3864,2192,30}}},
         // Arducam 5MP IMX335 STARVIS
-        {"imx335",  {{2592,1944,0}}},
+        {"imx335",  "Arducam", "5MP STARVIS (IMX335)",
+                    {{2592,1944,0}}},
         // Global-shutter camera
-        {"imx296",  {{1456,1088,60}}},
+        {"imx296",  "Raspberry Pi", "Global Shutter (IMX296)",
+                    {{1456,1088,60}}},
         // OV9281 global-shutter (fps depends on vendor board/link)
-        {"ov9281",  {{640,400,0},{1280,720,0},{1280,800,0}}},
+        {"ov9281",  "Arducam", "Global Shutter (OV9281)",
+                    {{640,400,0},{1280,720,0},{1280,800,0}}},
     };
     return specs;
 }
@@ -127,6 +145,16 @@ const SensorSpec* match_sensor_spec(const std::string& cam_id, std::string* how)
     return nullptr;
 }
 }  // namespace
+
+const std::vector<DmaCamera::SensorInfo>& DmaCamera::sensor_catalog() {
+    static const std::vector<SensorInfo> catalog = []{
+        std::vector<SensorInfo> out;
+        for (const auto& s : sensor_specs())
+            out.push_back({ s.key, s.vendor, s.label });
+        return out;
+    }();
+    return catalog;
+}
 
 // ── Construction / destruction ────────────────────────────────────────────────
 
@@ -342,13 +370,26 @@ bool DmaCamera::configure_camera() {
             }
         } catch (...) {}
 
-        // Manufacturer mode table, matched via the libcamera id or a
-        // dtoverlay= scan of /boot/firmware/config.txt. Geometry from the
-        // datasheet; nominal fps only where it isn't platform-dependent (the
-        // probe below measures the real figure on this Pi).
+        // Manufacturer mode table. A manual sensor_model selection (menu:
+        // Resolution > Sensor Model) takes priority; otherwise the sensor is
+        // identified from the libcamera id or a dtoverlay= scan of
+        // /boot/firmware/config.txt. Geometry from the datasheet; nominal fps
+        // only where it isn't platform-dependent (the probe below measures
+        // the real figure on this Pi).
         {
             std::string how;
-            if (const auto* spec = match_sensor_spec(camera_->id(), &how)) {
+            const SensorSpec* spec = nullptr;
+            if (!cfg_.sensor_model.empty() && cfg_.sensor_model != "auto") {
+                for (const auto& s : sensor_specs())
+                    if (cfg_.sensor_model == s.key) { spec = &s; break; }
+                how = "manual selection";
+                if (!spec)
+                    std::cerr << "[dma] camera " << cfg_.libcamera_id
+                              << ": unknown sensor_model '" << cfg_.sensor_model
+                              << "' — falling back to auto-detect\n";
+            }
+            if (!spec) spec = match_sensor_spec(camera_->id(), &how);
+            if (spec) {
                 for (const auto& m : spec->modes)
                     modes_.push_back({ m.w, m.h, m.fps, kModeSpec });
                 std::cout << "[dma] camera " << cfg_.libcamera_id << " sensor '"
@@ -603,16 +644,22 @@ void DmaCamera::start_capture() {
 
     if (camera_->start(&startCtrls)) {
         // Older libcamera build may not accept a ControlList on start(); retry bare.
+        std::cerr << "[dma] camera " << cfg_.libcamera_id
+                  << ": start() rejected the control list — retrying bare "
+                     "(frame rate enforced per-request instead)\n";
         if (camera_->start()) {
             std::cerr << "[dma] camera_->start() failed\n";
             return;
         }
     }
 
-    // Queue all slots for initial capture
+    // Queue all slots for initial capture — with the per-request controls
+    // (frame-rate pin) already attached, so the very first frames run at the
+    // requested rate even when the start() ControlList was rejected.
     std::lock_guard<std::mutex> lk(handoff_mtx_);
     for (int i = 0; i < NUM_SLOTS; i++) {
         slots_[i].state = SlotState::CAPTURING;
+        apply_pending_controls(slots_[i].request->controls());
         camera_->queueRequest(slots_[i].request);
     }
 }
@@ -647,6 +694,22 @@ void DmaCamera::on_request_complete(Request* req) {
         // Real per-frame duration (µs) → drives measured_fps() in the menu.
         last_frame_dur_us_.store(meta.get(controls::FrameDuration).value_or(0));
     } catch (...) {}
+
+    // One-shot sanity check ~2 s in: is the sensor actually running at the
+    // requested rate? A big gap points at AE stretching exposure (pin not in
+    // effect), a manual long shutter, or an Arducam link-frequency limit —
+    // this makes "picked 70 fps, getting 35" visible in the log.
+    if (!rate_warned_ && ++frames_seen_ >= 120) {
+        rate_warned_ = true;
+        const int64_t fd_target = 1000000LL / std::max(1, cfg_.fps);
+        const int64_t fd_meas   = last_frame_dur_us_.load();
+        if (fd_meas > fd_target * 12 / 10)
+            std::cerr << "[dma] camera " << cfg_.libcamera_id
+                      << ": sensor delivers " << (1000000.0 / fd_meas)
+                      << " fps vs requested " << cfg_.fps
+                      << " — check AE/manual shutter, or the sensor's CSI "
+                         "link-frequency (dtoverlay param) for high-fps modes\n";
+    }
 
     auto it = req_to_slot_.find(req);
     if (it == req_to_slot_.end()) return;
@@ -920,22 +983,45 @@ bool DmaCamera::reconfigure(int width, int height, int fps) {
 //     in last_af_state_ / last_lens_pos_ atomics.
 
 void DmaCamera::apply_pending_controls(ControlList& ctrls) {
+    // Pin the frame rate on EVERY request, not only in the start() ControlList:
+    // if the IPA rejects that list, start() is retried bare and the fps pin
+    // silently vanishes — auto-exposure then stretches the frame duration in
+    // dim light and the sensor runs at a fraction of the mode's rated rate
+    // (e.g. 35 fps on a 70 fps mode). Per-request controls are the canonical
+    // path and survive that. A deliberate manual shutter longer than one
+    // frame widens the max bound so long exposures still work.
+    try {
+        if (camera_->controls().count(&controls::FrameDurationLimits)) {
+            const int64_t fd = 1000000LL / std::max(1, cfg_.fps);
+            int64_t fd_max = fd;
+            const int sh_now = manual_shutter_us_.load(std::memory_order_relaxed);
+            if (sh_now > 0 && (int64_t)sh_now + 200 > fd)
+                fd_max = (int64_t)sh_now + 200;
+            ctrls.set(controls::FrameDurationLimits,
+                      Span<const int64_t, 2>({ fd, fd_max }));
+        }
+    } catch (...) {}
+
     int af = pending_af_mode_.exchange(-1);
     if (af >= 0)
         ctrls.set(controls::AfMode, af);
 
     // AeEnable must be applied before ExposureTime so manual shutter takes effect.
     int ae = pending_ae_enable_.exchange(-1);
-    if (ae >= 0)
+    if (ae >= 0) {
         ctrls.set(controls::AeEnable, ae == 1);
+        if (ae == 1) manual_shutter_us_.store(0, std::memory_order_relaxed);
+    }
 
     float ev = pending_ev_.exchange(-9999.0f);
     if (ev > -9998.0f)
         ctrls.set(controls::ExposureValue, ev);
 
     int sh = pending_shutter_us_.exchange(-1);
-    if (sh > 0)
+    if (sh > 0) {
         ctrls.set(controls::ExposureTime, sh);
+        manual_shutter_us_.store(sh, std::memory_order_relaxed);
+    }
 
     float lp = pending_lens_pos_.exchange(-1.0f);
     if (lp >= 0.0f)

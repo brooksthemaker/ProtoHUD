@@ -1233,7 +1233,13 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         std::string name = std::filesystem::path(path).stem().string();
         map_select_items.push_back(
             leaf_sel(name,
-                [&state, path]{ std::lock_guard<std::mutex> lk(state.mtx); state.map_overlay.map_path = path; },
+                [&state, path]{
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.map_overlay.map_path = path;
+                    // Each map carries its own north set point — load it (or
+                    // clear calibration if this map hasn't been set yet).
+                    apply_map_north(state.map_overlay);
+                },
                 [&state, path]{ return state.map_overlay.map_path == path; }));
     }
     if (map_select_items.empty())
@@ -1343,17 +1349,46 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
         slider("Transparency", 0.f, 1.f, 0.05f, "",
             [&state]{ return state.map_overlay.opacity; },
             [&state](float v){ state.map_overlay.opacity = v; }),
-        toggle("Rotate with Heading",
+        with_desc(toggle("Rotate with Heading",
             [&state]{ return state.map_overlay.rotate_with_heading; },
             [&state](bool v){ state.map_overlay.rotate_with_heading = v; }),
-        leaf("Set My Direction", [&state]{
-            std::lock_guard<std::mutex> lk(state.mtx);
-            state.map_overlay.map_north_deg = state.compass_heading;
-            state.map_overlay.calibrated    = true;
-        }),
+            "Heading-up map: the image turns with the compass (like the ring "
+            "around the minimap). Works immediately for a north-up map; if "
+            "this map's up isn't north, use Set Map North below."),
+        [&state]() -> MenuItem {
+            MenuItem m = leaf("Set Map North", [&state]{
+                std::lock_guard<std::mutex> lk(state.mtx);
+                auto& mo = state.map_overlay;
+                mo.map_north_deg = state.compass_heading;
+                mo.calibrated    = true;
+                // Remember it per map, so switching maps (and restarting)
+                // brings each one back with its own north.
+                mo.map_norths[map_north_key(mo)] = mo.map_north_deg;
+            });
+            m.label_fn = [&state]() -> std::string {
+                const auto& mo = state.map_overlay;
+                if (!mo.calibrated) return "Set Map North  (unset: north-up)";
+                char b[48];
+                snprintf(b, sizeof(b), "Set Map North  (set: %.0f\xc2\xb0)",
+                         mo.map_north_deg);
+                return std::string(b);
+            };
+            return with_desc(std::move(m),
+                "Face the direction that is UP on this map, then select: the "
+                "map rotates with the compass from that reference. Saved per "
+                "map — every map keeps its own north set point. Unset maps "
+                "assume the image is north-up.");
+        }(),
         // close_menu = nullptr: unlike the quick wheel's Expand Map, the deep
         // menu stays open behind the expanded view.
         menu_shared::expand_map_leaf(state_ptr, "Expand Map (Pan/Zoom)", nullptr),
+        with_desc(toggle("Minimap Follows Expanded View",
+            [&state]{ return state.map_overlay.follow_expanded; },
+            [&state](bool v){ state.map_overlay.follow_expanded = v; }),
+            "The area you zoom/pan to in the expanded map stays shown in the "
+            "minimap after closing it. Reopen the expanded view to reset to "
+            "the full map. The centre crosshair hides while the view is "
+            "panned off your position."),
         with_desc(toggle("Expanded: Debug Window",
             [&state]{ return state.expanded_show_debug; },
             [&state](bool v){ state.expanded_show_debug = v; }),

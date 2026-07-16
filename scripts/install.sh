@@ -571,6 +571,32 @@ EOF
     ok "DBus session override written: ${OVERRIDE_FILE} (uid=${REAL_UID})"
 fi
 
+# ── Systemd drop-in: runtime dir for the command FIFO (KDE Connect run-commands)
+# /run/protohud (inputs.command_fifo → /run/protohud/cmd) lives on root-owned
+# tmpfs; the service runs as ${REAL_USER} and can't mkdir there, so CmdFifo init
+# fails with "mkfifo ... No such file or directory". RuntimeDirectory= makes
+# systemd create it (owned by User=) on every start, recreated each boot. A
+# drop-in so it also reaches installs whose base unit already exists.
+section_inline "Systemd runtime dir override (command FIFO)"
+
+RUNTIME_OVERRIDE_FILE="${OVERRIDE_DIR}/20-runtime-dir.conf"
+
+if [[ -f "${RUNTIME_OVERRIDE_FILE}" ]] && grep -q "RuntimeDirectory" "${RUNTIME_OVERRIDE_FILE}"; then
+    ok "Runtime dir override already present: ${RUNTIME_OVERRIDE_FILE}"
+else
+    sudo mkdir -p "${OVERRIDE_DIR}"
+    sudo tee "${RUNTIME_OVERRIDE_FILE}" >/dev/null << 'EOF'
+[Service]
+# Create /run/protohud (owned by User=) on every start so the command FIFO
+# (inputs.command_fifo → /run/protohud/cmd) can be created. /run is root-owned
+# tmpfs; without this CmdFifo init fails with "mkfifo ... No such file or directory".
+RuntimeDirectory=protohud
+RuntimeDirectoryMode=0755
+EOF
+    sudo systemctl daemon-reload
+    ok "Runtime dir override written: ${RUNTIME_OVERRIDE_FILE}"
+fi
+
 # Lingering keeps the user bus alive without a graphical login so KDE Connect
 # can be reached on the helmet even with no screen attached.
 if command -v loginctl &>/dev/null; then

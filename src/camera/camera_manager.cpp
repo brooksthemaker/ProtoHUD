@@ -238,7 +238,7 @@ void CameraManager::init_owls() {
     } else {
         DmaCamera::Config lc { owl_left_cfg_.libcamera_id, owl_left_cfg_.model_name, left_id,
                                owl_left_cfg_.width, owl_left_cfg_.height, owl_left_cfg_.fps,
-                               owl_left_cfg_.rotation_deg };
+                               owl_left_cfg_.rotation_deg, owl_left_cfg_.sensor_model };
         owl_left_ = std::make_unique<DmaCamera>();
         if (!owl_left_->init(lcam_mgr_.get(), lc, nv12_vs, nv12_fs)) {
             std::cerr << "[cam] OWLsight left init failed\n";
@@ -253,7 +253,7 @@ void CameraManager::init_owls() {
     } else {
         DmaCamera::Config rc { owl_right_cfg_.libcamera_id, owl_right_cfg_.model_name, right_id,
                                owl_right_cfg_.width, owl_right_cfg_.height, owl_right_cfg_.fps,
-                               owl_right_cfg_.rotation_deg };
+                               owl_right_cfg_.rotation_deg, owl_right_cfg_.sensor_model };
         owl_right_ = std::make_unique<DmaCamera>();
         if (!owl_right_->init(lcam_mgr_.get(), rc, nv12_vs, nv12_fs)) {
             std::cerr << "[cam] OWLsight right init failed\n";
@@ -416,6 +416,16 @@ bool CameraManager::set_owl_left_resolution(int width, int height, int fps) {
     // CameraManager, which is the only thing that clears it. The OTHER eye keeps
     // its own config (owl_*_cfg_), so resolutions stay independent — both just
     // blip while re-initialising.
+    return reinit_owls();
+}
+
+bool CameraManager::set_owl_sensor_model(bool left, const std::string& model) {
+    (left ? owl_left_cfg_ : owl_right_cfg_).sensor_model = model;
+    std::cout << "[cam] " << (left ? "left" : "right")
+              << " sensor model -> " << model << " (re-init)\n";
+    // Full reset for the same libpisp reason as set_owl_left_resolution: the
+    // mode list is enumerated during configure, so a rebuild re-merges the
+    // manufacturer table for the newly selected model.
     return reinit_owls();
 }
 

@@ -513,19 +513,45 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     };
 
     if (has_img) {
-        // Build the image paint inside the rotated frame so it captures rotation.
+        // Record the window path FIRST (screen-aligned — path commands are
+        // transformed as they're appended), then rotate the CURRENT transform
+        // and set the fill paint inside that rotated frame. nvgImagePattern
+        // ignores the context transform entirely (NVG_NOTUSED(ctx)) and
+        // nvgFillPaint composes the paint with the state transform at
+        // FillPaint time — the old code rotated around the pattern *creation*
+        // and restored before FillPaint, so map rotation (heading AND the
+        // manual Rotate Map angle) never had any effect.
+        path_window();
         nvgSave(vg);
         if (cfg.image_rotate_deg != 0.f)
             nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
-        if (cfg.rotate_with_heading && cfg.calibrated)
-            nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
-        const float z   = std::max(cfg.zoom, 1.0f);
-        NVGpaint img = nvgImagePattern(vg, -hw * z, -hh * z, hw * 2.f * z, hh * 2.f * z,
+        // Heading-up rotation, matching the compass ring's convention: the
+        // bearing that is UP on the image (map_north_deg; 0 = a north-up map)
+        // is drawn toward that bearing on the ring. NanoVG rotation is
+        // clockwise-positive (y-down), so turn right → map turns left, like
+        // the bezel. No `calibrated` gate: an unset map defaults to north-up
+        // (map_north_deg 0) so the toggle works immediately; Set Map North
+        // refines the reference per map.
+        if (cfg.rotate_with_heading)
+            nvgRotate(vg, (cfg.map_north_deg - s.compass_heading) * (float)M_PI / 180.f);
+        // Follow the expanded view's framing: the region zoomed/panned to in
+        // the large map is what the minimap shows (same pattern construction
+        // as draw_map_expanded, so the composition matches 1:1). The framing
+        // persists after the expanded view closes; reopening it resets to
+        // the full view (and the minimap with it).
+        const bool follow = cfg.follow_expanded &&
+                            (cfg.view_zoom > 1.001f ||
+                             cfg.view_pan_x != 0.f || cfg.view_pan_y != 0.f);
+        const float z    = std::max(cfg.zoom, 1.0f) *
+                           (follow ? std::max(cfg.view_zoom, 1.0f) : 1.f);
+        const float panx = follow ? cfg.view_pan_x * hw * 2.f : 0.f;
+        const float pany = follow ? cfg.view_pan_y * hh * 2.f : 0.f;
+        NVGpaint img = nvgImagePattern(vg, -hw * z - panx, -hh * z - pany,
+                                       hw * 2.f * z, hh * 2.f * z,
                                        0.f, map_img_, cfg.opacity);
-        nvgRestore(vg);  // back to screen-aligned at (cx, cy)
-        path_window();
-        nvgFillPaint(vg, img);
-        nvgFill(vg);
+        nvgFillPaint(vg, img);   // paint xform composes with the rotated frame
+        nvgFill(vg);             // fills the pre-recorded, screen-aligned window
+        nvgRestore(vg);
     } else {
         // No image configured — still draw a dark "always-on" base disc.
         path_window();
@@ -539,13 +565,19 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     nvgStrokeWidth(vg, 1.8f);
     nvgStroke(vg);
 
-    // Red crosshair at centre = wearer's position on the map.
-    nvgBeginPath(vg);
-    nvgMoveTo(vg, -9.f, 0.f); nvgLineTo(vg, 9.f, 0.f);
-    nvgMoveTo(vg, 0.f, -9.f); nvgLineTo(vg, 0.f, 9.f);
-    nvgStrokeColor(vg, nvgRGBA(255, 70, 70, 220));
-    nvgStrokeWidth(vg, 1.5f);
-    nvgStroke(vg);
+    // Red crosshair at centre = wearer's position on the map — hidden while
+    // the followed expanded framing is panned away from centre (the middle of
+    // the window no longer corresponds to the wearer).
+    const bool panned_off = cfg.follow_expanded &&
+                            (cfg.view_pan_x != 0.f || cfg.view_pan_y != 0.f);
+    if (!panned_off) {
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, -9.f, 0.f); nvgLineTo(vg, 9.f, 0.f);
+        nvgMoveTo(vg, 0.f, -9.f); nvgLineTo(vg, 0.f, 9.f);
+        nvgStrokeColor(vg, nvgRGBA(255, 70, 70, 220));
+        nvgStrokeWidth(vg, 1.5f);
+        nvgStroke(vg);
+    }
 
     nvgRestore(vg);
 
@@ -1808,17 +1840,22 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
         const float z = std::max(cfg.zoom, 1.0f) * std::max(cfg.view_zoom, 1.0f);
         const float panx = cfg.view_pan_x * half * 2.f;
         const float pany = cfg.view_pan_y * half * 2.f;
+        // Path first (screen-aligned), then rotate the CURRENT transform for
+        // the fill paint — see draw_map_overlay for why the old rotate-around-
+        // pattern-creation was a no-op (nvgImagePattern ignores the context
+        // transform; nvgFillPaint composes at FillPaint time).
+        path_win();
         nvgSave(vg);
         if (cfg.image_rotate_deg != 0.f)
             nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
-        if (cfg.rotate_with_heading && cfg.calibrated)
-            nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
+        // Same heading-up rotation as the minimap (see draw_map_overlay).
+        if (cfg.rotate_with_heading)
+            nvgRotate(vg, (cfg.map_north_deg - s.compass_heading) * (float)M_PI / 180.f);
         NVGpaint img = nvgImagePattern(vg, -half * z - panx, -half * z - pany,
                                        half * 2.f * z, half * 2.f * z, 0.f, map_img_, 1.0f);
-        nvgRestore(vg);
-        path_win();
         nvgFillPaint(vg, img);
         nvgFill(vg);
+        nvgRestore(vg);
     } else {
         path_win();
         nvgFillColor(vg, nvgRGBA(10, 16, 22, 220));

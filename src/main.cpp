@@ -1582,6 +1582,7 @@ int main(int argc, char* argv[]) {
         owl_left.height       = jl.value("height",  800);
         owl_left.fps          = jl.value("fps",      60);
         owl_left.rotation_deg = jl.value("rotation_deg", 0);
+        owl_left.sensor_model = jl.value("sensor_model", std::string("auto"));
         parse_cam_controls(jl, state.camera_controls_left);
         parse_focus(jl, state.focus_left);
     }
@@ -1593,6 +1594,7 @@ int main(int argc, char* argv[]) {
         owl_right.height       = jr.value("height",  800);
         owl_right.fps          = jr.value("fps",      60);
         owl_right.rotation_deg = jr.value("rotation_deg", 0);
+        owl_right.sensor_model = jr.value("sensor_model", std::string("auto"));
         parse_cam_controls(jr, state.camera_controls_right);
         parse_focus(jr, state.focus_right);
     }
@@ -2525,7 +2527,17 @@ int main(int argc, char* argv[]) {
         mo.portrait_right_half = jm.value("portrait_right_half", mo.portrait_right_half);
         mo.portrait_scale      = jm.value("portrait_scale",      mo.portrait_scale);
         mo.zoom                = jm.value("zoom",                mo.zoom);
+        mo.follow_expanded     = jm.value("follow_expanded",     mo.follow_expanded);
         { auto v = jm.value("map_path", std::string{}); if (!v.empty()) mo.map_path = v; }
+        // Per-map north set points (basename -> compass heading at set time),
+        // then load the active calibration for the selected map so it comes
+        // up rotating with the compass right away.
+        if (jm.contains("north_by_map") && jm["north_by_map"].is_object())
+            for (auto it = jm["north_by_map"].begin();
+                 it != jm["north_by_map"].end(); ++it)
+                if (it.value().is_number())
+                    mo.map_norths[it.key()] = it.value().get<float>();
+        apply_map_north(mo);
     }
 
     // Cycling info panel (opposite the minimap).
@@ -5988,7 +6000,13 @@ int main(int argc, char* argv[]) {
             cfg["map"]["portrait"]            = mo.portrait;
             cfg["map"]["portrait_right_half"] = mo.portrait_right_half;
             cfg["map"]["portrait_scale"]      = mo.portrait_scale;
+            {
+                nlohmann::json jn = nlohmann::json::object();
+                for (const auto& [key, deg] : mo.map_norths) jn[key] = deg;
+                cfg["map"]["north_by_map"] = std::move(jn);
+            }
             cfg["map"]["zoom"]                = mo.zoom;
+            cfg["map"]["follow_expanded"]     = mo.follow_expanded;
         }
 
         {
@@ -6036,6 +6054,8 @@ int main(int argc, char* argv[]) {
         // block where the user already finds the rest of the per-eye config).
         cfg["cameras"]["owlsight_left"]["rotation_deg"]  = cameras.owl_left_rotation();
         cfg["cameras"]["owlsight_right"]["rotation_deg"] = cameras.owl_right_rotation();
+        cfg["cameras"]["owlsight_left"]["sensor_model"]  = cameras.owl_left_sensor_model();
+        cfg["cameras"]["owlsight_right"]["sensor_model"] = cameras.owl_right_sensor_model();
 
         // Persist the per-eye focus profile. Position is sampled from the live
         // lens (where AF/slave actually parked it), quantized to steps of 10 so
@@ -6899,6 +6919,7 @@ int main(int argc, char* argv[]) {
                         state.map_overlay.map_path = maps.front();
                     else
                         state.map_overlay.map_path = *std::next(it);
+                    apply_map_north(state.map_overlay);   // per-map north set point
                 }
                 m_long_fired = true;
             }
@@ -7051,11 +7072,14 @@ int main(int argc, char* argv[]) {
         // Y — toggle vsync (diagnostic: tells a display-refresh cap apart from
         // real render cost; watch the [perf] fps line jump when off).
         if (key_pressed(ImGuiKey_Y)) xr.set_vsync(!xr.vsync());
-        // Shift+M — calibrate north (Set My Direction); edge-only
+        // Shift+M — calibrate north (Set Map North); edge-only. Saved per
+        // map, so each map keeps its own set point.
         if (ImGui::GetIO().KeyShift && key_pressed(ImGuiKey_M)) {
             std::lock_guard<std::mutex> lk(state.mtx);
-            state.map_overlay.map_north_deg = state.compass_heading;
-            state.map_overlay.calibrated    = true;
+            auto& mo = state.map_overlay;
+            mo.map_north_deg = state.compass_heading;
+            mo.calibrated    = true;
+            mo.map_norths[map_north_key(mo)] = mo.map_north_deg;
         }
         // Space — dismiss focused toast or close menu (back)
         if (key_pressed(ImGuiKey_Space)) {

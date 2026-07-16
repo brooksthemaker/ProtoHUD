@@ -85,22 +85,50 @@ def to_json_map(cmds):
     return {("{%s}" % _cmd_uuid(n)): {"name": n, "command": c} for n, c in cmds}
 
 
+# Modern KDE Connect (>= ~20.x, incl. 25.04) stores `commands=` as a KConfig
+# entry holding a QByteArray, serialised as  "@ByteArray(<json>)"  — wrapped in
+# double quotes with '\' and '"' backslash-escaped. Older builds stored the bare
+# compact JSON. Decode/encode handle both; we write back the form the file
+# already used (defaulting to @ByteArray, which is what current KDE Connect
+# reads and would rewrite anyway).
+def _decode_commands(raw: str):
+    """Parse a `commands=` value (bare JSON or KConfig @ByteArray) -> (dict, used_bytearray)."""
+    val = raw.strip()
+    used_ba = False
+    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+        val = val[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    m = re.fullmatch(r"@ByteArray\((.*)\)", val, re.DOTALL)
+    if m:
+        val, used_ba = m.group(1), True
+    try:
+        parsed = json.loads(val)
+    except Exception:
+        parsed = {}
+    return (parsed if isinstance(parsed, dict) else {}), used_ba
+
+
+def _encode_commands(cmd_map: dict, use_bytearray: bool) -> str:
+    """Serialise cmd_map back to a `commands=` value in the requested format."""
+    blob = json.dumps(cmd_map, separators=(",", ":"))
+    if not use_bytearray:
+        return blob
+    inner = "@ByteArray(" + blob + ")"
+    return '"' + inner.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
 def merge_into_config(path: pathlib.Path, new_map: dict) -> bool:
     """Merge new_map (by command name) into the device's runcommand config."""
     text = path.read_text() if path.exists() else "[General]\n"
     existing = {}
+    used_ba = True  # default to modern KDE Connect's format for a fresh config
     m = re.search(r"^commands=(.*)$", text, re.MULTILINE)
     if m:
-        try:
-            existing = json.loads(m.group(1).strip())
-        except Exception:
-            existing = {}
+        existing, used_ba = _decode_commands(m.group(1))
     have = {v.get("name") for v in existing.values() if isinstance(v, dict)}
     for k, v in new_map.items():
         if v["name"] not in have:
             existing[k] = v
-    blob = json.dumps(existing, separators=(",", ":"))
-    line = f"commands={blob}"
+    line = "commands=" + _encode_commands(existing, used_ba)
     if m:
         text = re.sub(r"^commands=.*$", lambda _: line, text, count=1, flags=re.MULTILINE)
     else:

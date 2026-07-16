@@ -331,6 +331,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         bool&                                  awb_flag,
         CameraResolutionState&                 res_st,
         std::function<bool(int,int,int)>       apply_res,  // re-init at new w/h/fps
+        std::function<bool(const std::string&)> set_model, // force sensor model (re-init)
         EyeSource*                             eye_src,    // this eye's background source
         ZoomCropState*                         zoom_st,    // this eye's digital zoom
         int                                    eye_num)    // 1 = left, 2 = right
@@ -510,8 +511,49 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 return m;
             });
 
+        // Sensor Model picker — Auto-detect, or force a specific model so the
+        // resolution list carries that manufacturer's mode table (vendor
+        // submenus: Raspberry Pi / Arducam). Forcing rebuilds the camera.
+        MenuItem model_sub;
+        {
+            auto cur_model = [cam_ptr]() -> std::string {
+                auto* c = cam_ptr();
+                return c ? c->sensor_model() : std::string("auto");
+            };
+            std::vector<MenuItem> rp_items, ard_items;
+            for (const auto& si : DmaCamera::sensor_catalog()) {
+                const std::string key = si.key;
+                MenuItem it = leaf_sel(si.label,
+                    [set_model, key]{ if (set_model) set_model(key); },
+                    [cur_model, key]{ return cur_model() == key; });
+                (std::string(si.vendor) == "Raspberry Pi" ? rp_items : ard_items)
+                    .push_back(std::move(it));
+            }
+            std::vector<MenuItem> model_items;
+            model_items.push_back(with_desc(leaf_sel("Auto-detect",
+                [set_model]{ if (set_model) set_model("auto"); },
+                [cur_model]{ return cur_model() == "auto"; }),
+                "Identify the sensor from the camera driver / config.txt "
+                "dtoverlay (the startup log shows what was matched)."));
+            model_items.push_back(submenu("Raspberry Pi", std::move(rp_items)));
+            model_items.push_back(submenu("Arducam",      std::move(ard_items)));
+            model_sub = with_desc(submenu("Sensor Model", std::move(model_items)),
+                "Which manufacturer mode table fills the resolution list. "
+                "Auto-detect matches the driver; force a model if the "
+                "detected list is missing modes the datasheet promises. "
+                "Changing it re-initialises the camera.");
+            model_sub.label_fn = [cur_model]() -> std::string {
+                const std::string m = cur_model();
+                if (m == "auto" || m.empty()) return "Sensor Model: Auto";
+                for (const auto& si : DmaCamera::sensor_catalog())
+                    if (m == si.key) return std::string("Sensor Model: ") + si.label;
+                return "Sensor Model: " + m;
+            };
+        }
+
         std::vector<MenuItem> resm;
         resm.push_back(std::move(res_status));
+        resm.push_back(std::move(model_sub));
         for (auto& r : res_rows) resm.push_back(std::move(r));
 
         // ── Exposure (AE tuning + manual gain) ────────────────────────────────
@@ -642,6 +684,8 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         state.camera_resolution,
         [cameras](int w, int h, int fps){
             return cameras ? cameras->set_owl_left_resolution(w, h, fps) : false; },
+        [cameras](const std::string& m){
+            return cameras ? cameras->set_owl_sensor_model(true, m) : false; },
         left_eye_src,  &state.zoom_left,  /*eye_num=*/1);
     auto right_cam_menu = make_cam_menu(
         [cameras]{ return cameras ? cameras->owl_right() : nullptr; },
@@ -649,6 +693,8 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
         state.camera_resolution_right,
         [cameras](int w, int h, int fps){
             return cameras ? cameras->set_owl_right_resolution(w, h, fps) : false; },
+        [cameras](const std::string& m){
+            return cameras ? cameras->set_owl_sensor_model(false, m) : false; },
         right_eye_src, &state.zoom_right, /*eye_num=*/2);
 
     // ── Digital zoom presets (both eyes together) ─────────────────────────────

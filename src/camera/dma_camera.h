@@ -59,7 +59,21 @@ public:
         // clamped to the nearest multiple at set time. Mounting protogen
         // CSI cameras sideways on the helmet is the main use case.
         int         rotation_deg = 0;
+        // Sensor model for the manufacturer mode table: "auto" (default)
+        // identifies the sensor from the libcamera id / config.txt dtoverlay;
+        // any key from sensor_catalog() forces that model's datasheet modes
+        // into the resolution list instead.
+        std::string sensor_model = "auto";
     };
+
+    // Sensor catalog entry for the menu's model picker (key = the value
+    // Config::sensor_model takes, vendor groups the picker's submenus).
+    struct SensorInfo {
+        const char* key;
+        const char* vendor;   // "Raspberry Pi" | "Arducam"
+        const char* label;
+    };
+    static const std::vector<SensorInfo>& sensor_catalog();
 
     // A capture mode, tagged with where we learned about it (flags OR together
     // when sources agree on a size):
@@ -161,6 +175,7 @@ public:
     int   height()          const { return cfg_.height; }
     int   fps()             const { return cfg_.fps; }
     const std::string& model_name() const { return cfg_.model_name; }
+    const std::string& sensor_model() const { return cfg_.sensor_model; }
     const std::string& camera_id()  const { return cfg_.camera_id; }
 
     // Save the current full-resolution frame to `path` as a JPEG, by mapping the
@@ -277,6 +292,13 @@ private:
     std::atomic<int>   pending_awb_enable_ { -1 };       // AwbEnable: 1=on 0=off -1=no-op
     std::atomic<float> pending_rg_gain_    { -1.0f };    // ColourGains R, -1 = no-op
     std::atomic<float> pending_bg_gain_    { -1.0f };    // ColourGains B, -1 = no-op
+    // Active manual shutter (0 = auto). Tracked so the per-request frame-rate
+    // pin can widen its max bound for a deliberate long exposure instead of
+    // clamping it (see apply_pending_controls).
+    std::atomic<int>   manual_shutter_us_  { 0 };
+    // One-shot achieved-frame-rate check after start (capture thread only).
+    int  frames_seen_ = 0;
+    bool rate_warned_ = false;
 
     // Extended controls (AF tuning / AE tuning / WB mode / ISP image / HDR).
     // pending_* sentinels: ints -1 = no-op; floats -1.0f (or -9999.0f where the
