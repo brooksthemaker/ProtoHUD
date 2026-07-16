@@ -10,10 +10,11 @@
 // Compiled only when -DVOICE_CHANGER is set (see platformio.ini). Without it
 // this file is empty and the plain button coprocessor needs no audio libraries.
 //
-// The DSP (pitch/robot/crush/echo) is verified numerically. The HARDWARE GLUE
-// that this file can't self-verify is (1) the TLV320 register init via the
-// Adafruit library and (2) the exact earlephilhower I2S/ADC call names — both
-// are isolated below and flagged. Bring up with VFX_PASS first.
+// The DSP (pitch/robot/crush/echo) is verified numerically, and the file now
+// compiles against the pinned library and core, which settles the TLV320 and
+// earlephilhower I2S/ADC call names. What no build can settle is whether
+// dac_begin() actually produces sound: its divider chain is solved against the
+// datasheet bounds but has not been run on the board. Bring up with VFX_PASS.
 
 #ifdef VOICE_CHANGER
 
@@ -116,10 +117,22 @@ float fx_echo(float x) {
 }
 
 // ── TLV320DAC3100 register init ───────────────────────────────────────────────
-// !! HARDWARE GLUE — verify against your installed Adafruit_TLV320DAC3100
-// version's example sketch (examples/…): method names on this codec library
-// have shifted between releases. Everything else in this file is independent of
-// these calls. Goal: I2S slave, 16-bit, PLL clocked from BCLK, DAC → speaker.
+// Written against the "Adafruit TLV320 I2S" library, mirroring the order of its
+// examples/basicI2Sconfig sketch. Goal: I2S slave, 16-bit, PLL clocked from the
+// incoming BCLK (no MCLK wire), DAC → mixer → class-D speaker.
+//
+// The divider chain below is solved for kSampleRate and nothing else — redo all
+// of it together if you change the rate, because the datasheet bounds (enforced
+// by the library's validatePLLConfig) are tight at 16 kHz:
+//   BCLK    = 16 bit x 2 ch x 16 kHz              = 512 kHz  (RP2350 is master)
+//   PLL_CLK = BCLK x R x J / P = 512k x 4 x 48 / 1 = 98.304 MHz  (must be
+//                                                    80..110 MHz)
+//   Fs      = PLL_CLK / (NDAC x MDAC x DOSR) = 98.304M / (6 x 8 x 128) = 16 kHz
+// PLL_CLKIN/P must be >= 512 kHz, which pins P at 1 for this BCLK.
+//
+// Don't "simplify" this to configurePLL(): it solves J = ratio x P x R, the
+// inverse of the datasheet's J = ratio x P / R that the rest of the library
+// (and this chain) follows, so it finds no solution here and returns false.
 bool dac_begin() {
     if (kDacResetPin >= 0) {
         pinMode(kDacResetPin, OUTPUT);
@@ -131,18 +144,36 @@ bool dac_begin() {
     Wire.begin();
     if (!g_dac.begin(kDacI2cAddr, &Wire)) return false;
 
-    // Clocking: derive the codec's internal clocks from the incoming BCLK via
-    // its PLL (no MCLK wire needed). Then route the DAC to the class-D speaker.
-    // Align the following with your library version's example if it won't build:
-    g_dac.setCodecInterface(TLV320_FORMAT_I2S, TLV320_DATA_LEN_16);
-    g_dac.setPLL(true, TLV320_PLL_CLKIN_BCLK);   // PLL source = BCLK
-    g_dac.configurePLL(kSampleRate);             // set for our sample rate
-    g_dac.powerDAC(true);
-    g_dac.setDACDataPath(true, true);            // L+R DAC on
-    g_dac.configureSpeaker(true);                // enable Class-D speaker amp
-    g_dac.setSpeakerVolume(0);                   // 0 dB; raise/lower to taste
-    g_dac.setDACVolume(0.0f);                    // 0 dB
-    g_dac.muteDAC(false);
+    // Interface. bclk_out/wclk_out stay at their false defaults: the codec is
+    // the I2S slave, the RP2350 drives BCLK and WS.
+    if (!g_dac.setCodecInterface(TLV320DAC3100_FORMAT_I2S,
+                                 TLV320DAC3100_DATA_LEN_16)) return false;
+
+    // Clocks: codec runs off the PLL, PLL runs off BCLK.
+    if (!g_dac.setCodecClockInput(TLV320DAC3100_CODEC_CLKIN_PLL) ||
+        !g_dac.setPLLClockInput(TLV320DAC3100_PLL_CLKIN_BCLK)) return false;
+    if (!g_dac.setPLLValues(1, 4, 48, 0)) return false;   // P, R, J, D (see above)
+    if (!g_dac.setNDAC(true, 6) ||
+        !g_dac.setMDAC(true, 8) ||
+        !g_dac.setDOSR(128)) return false;
+    if (!g_dac.powerPLL(true)) return false;
+
+    // DAC → output mixer → class-D speaker.
+    if (!g_dac.setDACDataPath(true, true,                 // L+R DAC on
+                              TLV320_DAC_PATH_NORMAL,
+                              TLV320_DAC_PATH_NORMAL,
+                              TLV320_VOLUME_STEP_1SAMPLE)) return false;
+    if (!g_dac.configureAnalogInputs(TLV320_DAC_ROUTE_MIXER,
+                                     TLV320_DAC_ROUTE_MIXER,
+                                     false, false, false,  // no AIN routing
+                                     false)) return false; // no HPL→HPR
+    if (!g_dac.setDACVolumeControl(false, false,          // unmute L+R
+                                   TLV320_VOL_INDEPENDENT) ||
+        !g_dac.setChannelVolume(false, 0.0f) ||           // 0 dB
+        !g_dac.setChannelVolume(true,  0.0f)) return false;
+    if (!g_dac.enableSpeaker(true) ||
+        !g_dac.configureSPK_PGA(TLV320_SPK_GAIN_6DB, true) ||
+        !g_dac.setSPKVolume(true, 0)) return false;       // 0 dB; raise to taste
     return true;
 }
 
