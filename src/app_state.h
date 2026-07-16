@@ -419,6 +419,9 @@ inline void apply_map_north(MapOverlayConfig& mo) {
         mo.map_north_deg = it->second;
         mo.calibrated    = true;
     } else {
+        // No set point: default to north-up (0°) so Rotate with Heading works
+        // out of the box for north-up map images; Set Map North refines it.
+        mo.map_north_deg = 0.f;
         mo.calibrated    = false;
     }
 }

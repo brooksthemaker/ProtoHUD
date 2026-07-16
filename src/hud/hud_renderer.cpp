@@ -517,8 +517,15 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         nvgSave(vg);
         if (cfg.image_rotate_deg != 0.f)
             nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
-        if (cfg.rotate_with_heading && cfg.calibrated)
-            nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
+        // Heading-up rotation, matching the compass ring's convention: the
+        // bearing that is UP on the image (map_north_deg; 0 = a north-up map)
+        // is drawn toward that bearing on the ring. NanoVG rotation is
+        // clockwise-positive (y-down), so turn right → map turns left, like
+        // the bezel. No `calibrated` gate: an unset map defaults to north-up
+        // (map_north_deg 0) so the toggle works immediately; Set Map North
+        // refines the reference per map.
+        if (cfg.rotate_with_heading)
+            nvgRotate(vg, (cfg.map_north_deg - s.compass_heading) * (float)M_PI / 180.f);
         const float z   = std::max(cfg.zoom, 1.0f);
         NVGpaint img = nvgImagePattern(vg, -hw * z, -hh * z, hw * 2.f * z, hh * 2.f * z,
                                        0.f, map_img_, cfg.opacity);
@@ -1811,8 +1818,9 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
         nvgSave(vg);
         if (cfg.image_rotate_deg != 0.f)
             nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
-        if (cfg.rotate_with_heading && cfg.calibrated)
-            nvgRotate(vg, (s.compass_heading - cfg.map_north_deg) * (float)M_PI / 180.f);
+        // Same heading-up rotation as the minimap (see draw_map_overlay).
+        if (cfg.rotate_with_heading)
+            nvgRotate(vg, (cfg.map_north_deg - s.compass_heading) * (float)M_PI / 180.f);
         NVGpaint img = nvgImagePattern(vg, -half * z - panx, -half * z - pany,
                                        half * 2.f * z, half * 2.f * z, 0.f, map_img_, 1.0f);
         nvgRestore(vg);
