@@ -1787,17 +1787,19 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             "Angular width of the window in degrees of your view."),
         with_desc(toggle("Smooth Follow",
             [&state]{ return state.float_win.follow; },
-            [&state](bool v){ state.float_win.follow = v; }),
-            "Instead of staying locked in place, the window glides after "
-            "your gaze — it holds still for small head movements (see "
-            "Follow Deadzone) and smoothly catches up when you turn away. "
+            [&state](bool v){ state.float_win.follow = v;
+                              state.float_win.follow_gliding = false;
+                              state.float_win.follow_over_s  = 0.f; }),
+            "Lazy follow: the window stays locked in place until you look "
+            "past the Follow Deadzone and hold there a moment — then it "
+            "glides smoothly to re-center on your gaze and locks again. "
             "Off = classic world-pinned."),
         [&state]() -> MenuItem {
             MenuItem m = with_desc(slider("Follow Speed", 0.25f, 6.f, 0.25f, "x",
                 [&state]{ return state.float_win.follow_speed; },
                 [&state](float v){ state.float_win.follow_speed = v; }),
-                "How quickly the window catches up once it's outside the "
-                "deadzone. Higher = snappier; lower = a lazy drift.");
+                "How quick the re-centering glide is. Higher = snappier; "
+                "lower = a slow, calm drift.");
             m.visible_fn = [&state]{ return state.float_win.follow; };
             return m;
         }(),
@@ -1805,9 +1807,9 @@ std::vector<MenuItem> build_hud_menu(MenuBuildContext& ctx)
             MenuItem m = with_desc(slider("Follow Deadzone", 0.f, 20.f, 1.f, "\xc2\xb0",
                 [&state]{ return state.float_win.follow_dead; },
                 [&state](float v){ state.float_win.follow_dead = v; }),
-                "How far off-center the window may sit before it starts "
-                "following. Bigger = more stable for reading; 0 = always "
-                "drifts back to center.");
+                "How far past center you must look (and briefly hold) before "
+                "the window glides over. Bigger = it stays put longer; the "
+                "glide always finishes re-centered.");
             m.visible_fn = [&state]{ return state.float_win.follow; };
             return m;
         }(),

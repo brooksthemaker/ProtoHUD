@@ -7466,11 +7466,14 @@ int main(int argc, char* argv[]) {
             snap.compass_tape       = state.compass_tape;
             snap.attitude           = state.attitude;
             snap.attitude_pose      = state.attitude_pose;
-            // Floating-window smooth follow: ease the pin anchor toward the
-            // current head pose so the window glides after your gaze instead
-            // of staying world-locked. Inside the deadzone it holds perfectly
-            // still (stable reading); only the delta beyond it is chased, so
-            // the window comes to rest follow_dead degrees off-center.
+            // Floating-window smooth follow — lazy-follow state machine.
+            // IDLE: the anchor doesn't move at all, so the window is rock
+            // solid regardless of head jitter. When the head moves past the
+            // deadzone and STAYS there for a short dwell (a quick glance
+            // doesn't count), one smooth GLIDE eases the window to re-center
+            // on the gaze, then it locks again. Hysteresis (glide starts at
+            // the deadzone, ends near centred) removes the boundary chatter
+            // that made the always-chasing v1 jerk.
             if (state.float_win.enabled && state.float_win.pinned &&
                 state.float_win.follow && dt > 0.f) {
                 auto circ = [](float d){
@@ -7479,15 +7482,27 @@ int main(int argc, char* argv[]) {
                     return d;
                 };
                 auto& fwin = state.float_win;
-                const float rate = std::min(1.f, fwin.follow_speed * dt);
-                const float dz   = std::clamp(fwin.follow_dead, 0.f, 30.f);
                 const float dyaw = circ(state.attitude_pose.yaw - fwin.yaw);
-                if (std::fabs(dyaw) > dz)
-                    fwin.yaw = circ(fwin.yaw +
-                                    (dyaw - std::copysign(dz, dyaw)) * rate);
                 const float dpit = state.attitude_pose.pitch - fwin.pitch;
-                if (std::fabs(dpit) > dz)
-                    fwin.pitch += (dpit - std::copysign(dz, dpit)) * rate;
+                const float off  = std::max(std::fabs(dyaw), std::fabs(dpit));
+                const float dz   = std::clamp(fwin.follow_dead, 0.f, 30.f);
+                constexpr float kDwellS  = 0.35f;  // sustained past deadzone → glide
+                constexpr float kDoneDeg = 0.8f;   // re-centred → lock again
+                if (!fwin.follow_gliding) {
+                    fwin.follow_over_s = (off > dz) ? fwin.follow_over_s + dt : 0.f;
+                    if (fwin.follow_over_s >= kDwellS) {
+                        fwin.follow_gliding = true;
+                        fwin.follow_over_s  = 0.f;
+                    }
+                } else {
+                    // Exponential ease toward the LIVE pose — fast start,
+                    // slowing as it arrives, converging on where you're
+                    // looking now.
+                    const float k = 1.f - std::exp(-fwin.follow_speed * dt);
+                    fwin.yaw    = circ(fwin.yaw + dyaw * k);
+                    fwin.pitch += dpit * k;
+                    if (off < kDoneDeg) fwin.follow_gliding = false;
+                }
             }
             snap.float_win          = state.float_win;
             snap.legacy_hud         = state.legacy_hud;
