@@ -142,7 +142,7 @@ else
 fi
 if [[ -d "${OVERRIDE_DIR}" ]]; then
     run sudo rm -rf "${OVERRIDE_DIR}"; REMOVED_UNIT=1
-    ok "Removed ${OVERRIDE_DIR} (DBus session drop-in)"
+    ok "Removed ${OVERRIDE_DIR} (DBus session + runtime-dir drop-ins)"
 fi
 [[ "${REMOVED_UNIT}" == "1" ]] && run sudo systemctl daemon-reload && ok "systemd reloaded"
 
