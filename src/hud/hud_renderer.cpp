@@ -513,7 +513,15 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
     };
 
     if (has_img) {
-        // Build the image paint inside the rotated frame so it captures rotation.
+        // Record the window path FIRST (screen-aligned — path commands are
+        // transformed as they're appended), then rotate the CURRENT transform
+        // and set the fill paint inside that rotated frame. nvgImagePattern
+        // ignores the context transform entirely (NVG_NOTUSED(ctx)) and
+        // nvgFillPaint composes the paint with the state transform at
+        // FillPaint time — the old code rotated around the pattern *creation*
+        // and restored before FillPaint, so map rotation (heading AND the
+        // manual Rotate Map angle) never had any effect.
+        path_window();
         nvgSave(vg);
         if (cfg.image_rotate_deg != 0.f)
             nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
@@ -529,10 +537,9 @@ void HudRenderer::draw_map_overlay(NVGcontext* vg, const AppState& s, float fw, 
         const float z   = std::max(cfg.zoom, 1.0f);
         NVGpaint img = nvgImagePattern(vg, -hw * z, -hh * z, hw * 2.f * z, hh * 2.f * z,
                                        0.f, map_img_, cfg.opacity);
-        nvgRestore(vg);  // back to screen-aligned at (cx, cy)
-        path_window();
-        nvgFillPaint(vg, img);
-        nvgFill(vg);
+        nvgFillPaint(vg, img);   // paint xform composes with the rotated frame
+        nvgFill(vg);             // fills the pre-recorded, screen-aligned window
+        nvgRestore(vg);
     } else {
         // No image configured — still draw a dark "always-on" base disc.
         path_window();
@@ -1815,6 +1822,11 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
         const float z = std::max(cfg.zoom, 1.0f) * std::max(cfg.view_zoom, 1.0f);
         const float panx = cfg.view_pan_x * half * 2.f;
         const float pany = cfg.view_pan_y * half * 2.f;
+        // Path first (screen-aligned), then rotate the CURRENT transform for
+        // the fill paint — see draw_map_overlay for why the old rotate-around-
+        // pattern-creation was a no-op (nvgImagePattern ignores the context
+        // transform; nvgFillPaint composes at FillPaint time).
+        path_win();
         nvgSave(vg);
         if (cfg.image_rotate_deg != 0.f)
             nvgRotate(vg, cfg.image_rotate_deg * (float)M_PI / 180.f);
@@ -1823,10 +1835,9 @@ void HudRenderer::draw_map_expanded(NVGcontext* vg, const AppState& s, float fw,
             nvgRotate(vg, (cfg.map_north_deg - s.compass_heading) * (float)M_PI / 180.f);
         NVGpaint img = nvgImagePattern(vg, -half * z - panx, -half * z - pany,
                                        half * 2.f * z, half * 2.f * z, 0.f, map_img_, 1.0f);
-        nvgRestore(vg);
-        path_win();
         nvgFillPaint(vg, img);
         nvgFill(vg);
+        nvgRestore(vg);
     } else {
         path_win();
         nvgFillColor(vg, nvgRGBA(10, 16, 22, 220));
