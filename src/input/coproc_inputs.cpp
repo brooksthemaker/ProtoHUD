@@ -93,7 +93,8 @@ void CoprocInputs::reader_loop() {
             }
             buf.clear();
             last_rx = clock::now();
-            pins_pushed_ = false;   // re-push the pin map on the fresh connection
+            pins_pushed_   = false;   // re-push the pin map on the fresh connection
+            pins_repushed_ = false;   // and re-arm the post-push mismatch retry
         }
 
         pollfd pfd{fd_, POLLIN, 0};
@@ -166,7 +167,29 @@ void CoprocInputs::on_line(const std::string& line) {
         std::cout << "[coproc] " << line << "\n";
         // Push the configured pin map once per connection. The firmware re-HELLOs
         // after applying it; pins_pushed_ stops that from looping.
-        if (!pins_pushed_ && !cfg_.pins.empty()) push_pin_config();
+        if (!pins_pushed_ && !cfg_.pins.empty()) {
+            push_pin_config();
+            return;
+        }
+        // Post-push HELLO: its n= is the button count the firmware ACTUALLY
+        // holds. If it differs from what we pushed, the push got mangled in
+        // transit (seen once on a first-boot connect — another port client can
+        // interleave) and the firmware is running a doubled/stale map: re-push
+        // once rather than run misnumbered buttons all session.
+        if (pins_pushed_ && !pins_repushed_ && pushed_count_ > 0) {
+            const size_t npos = line.rfind("n=");
+            int fw_n = -1;
+            if (npos != std::string::npos) {
+                try { fw_n = std::stoi(line.substr(npos + 2)); } catch (...) {}
+            }
+            if (fw_n >= 0 && fw_n != pushed_count_) {
+                std::cerr << "[coproc] firmware holds " << fw_n
+                          << " buttons after a push of " << pushed_count_
+                          << " — re-pushing the pin map\n";
+                pins_repushed_ = true;
+                push_pin_config();
+            }
+        }
         return;
     }
     if (cmd == "PING") {
@@ -213,6 +236,33 @@ void CoprocInputs::on_line(const std::string& line) {
         adc_mv_[ch] = static_cast<int>(mv);
         return;
     }
+    if (cmd == "PIN") {   // "PIN <gp> <val> <roles>" — one line of a PINS dump
+        const std::string gp_s   = next_tok(line, pos);
+        const std::string val_s  = next_tok(line, pos);
+        const std::string role_s = next_tok(line, pos);
+        if (gp_s.empty() || val_s.empty() || role_s.empty()) return;
+        int gp = -1;
+        try { gp = std::stoi(gp_s); } catch (...) { return; }
+        if (gp < 0 || gp > 47 || val_s.size() > 8 || role_s.size() > 48) return;
+        connected_.store(true);
+        std::lock_guard<std::mutex> lk(pins_mtx_);
+        pinstat_accum_[gp] = PinStat{ role_s, val_s };
+        return;
+    }
+    if (cmd == "PINS") {  // "PINS <ngpio> n=<k>" opens a dump, "PINS END" closes it
+        connected_.store(true);
+        const std::string arg = next_tok(line, pos);
+        std::lock_guard<std::mutex> lk(pins_mtx_);
+        if (arg == "END") {
+            if (!pinstat_accum_.empty()) {
+                pinstat_.swap(pinstat_accum_);
+                pinstat_at_    = std::chrono::steady_clock::now();
+                pinstat_valid_ = true;
+            }
+        }
+        pinstat_accum_.clear();
+        return;
+    }
     if (cmd == "TEMP") {  // "TEMP <rom16hex> <milli°C>" — one DS18B20 reading
         const std::string id_s = next_tok(line, pos);
         const std::string m_s  = next_tok(line, pos);
@@ -229,11 +279,13 @@ void CoprocInputs::on_line(const std::string& line) {
 
 void CoprocInputs::push_pin_config() {
     if (fd_ < 0) return;
+    int nbtn = 0;
     std::string msg = "PINCFG CLR\n";
     for (const CoprocPin& p : cfg_.pins) {
         if (p.gp < 0) continue;
         msg += "PINCFG BTN " + std::to_string(p.gp) + " " + p.pull + " " +
                (p.active_low ? "1" : "0") + "\n";
+        ++nbtn;
     }
     // LED lines reference the button id (index), so emit them after all BTNs.
     for (size_t i = 0; i < cfg_.pins.size(); ++i)
@@ -241,9 +293,13 @@ void CoprocInputs::push_pin_config() {
             msg += "PINCFG LED " + std::to_string(i) + " " +
                    std::to_string(cfg_.pins[i].led_gp) + "\n";
     msg += "PINCFG APPLY\n";
-    (void)::write(fd_, msg.data(), msg.size());
-    pins_pushed_ = true;
-    std::cout << "[coproc] pushed pin map (" << cfg_.pins.size() << " buttons)\n";
+    const ssize_t wr = ::write(fd_, msg.data(), msg.size());
+    if (wr != static_cast<ssize_t>(msg.size()))
+        std::cerr << "[coproc] pin map push short write (" << wr << "/"
+                  << msg.size() << ") — the post-push HELLO check will retry\n";
+    pins_pushed_  = true;
+    pushed_count_ = nbtn;
+    std::cout << "[coproc] pushed pin map (" << nbtn << " buttons)\n";
 }
 
 void CoprocInputs::request_i2c_scan(int sda, int scl) {
@@ -355,6 +411,24 @@ std::string CoprocInputs::adc_result() const {
                                : std::to_string(adc_mv_[ch]) + "mV";
     }
     return out;
+}
+
+void CoprocInputs::request_pins() {
+    if (fd_ < 0) return;
+    const char* cmd = "PINS\n";
+    (void)::write(fd_, cmd, 5);
+}
+
+std::map<int, CoprocInputs::PinStat> CoprocInputs::pins_snapshot() const {
+    std::lock_guard<std::mutex> lk(pins_mtx_);
+    return pinstat_;
+}
+
+int CoprocInputs::pins_age_ms() const {
+    std::lock_guard<std::mutex> lk(pins_mtx_);
+    if (!pinstat_valid_) return -1;
+    return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - pinstat_at_).count());
 }
 
 void CoprocInputs::handle_button(int id, bool is_long) {

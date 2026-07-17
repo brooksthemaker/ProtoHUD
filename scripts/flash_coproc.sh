@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # ── flash_coproc.sh ──────────────────────────────────────────────────────────
-# Flash the ProtoHUD button/voice coprocessor (RP2350 / Raspberry Pi Pico 2)
-# from the CM5 over USB — no BOOTSEL button press. It resets the running firmware
-# into the UF2 bootloader (the Arduino "1200-baud touch"), then writes the image
-# with picotool and reboots into it.
+# Flash the ProtoHUD button/voice coprocessor (RP2350) from the CM5 over USB —
+# no BOOTSEL button press. It resets the running firmware into the UF2 bootloader
+# (the Arduino "1200-baud touch"), then writes the image with picotool and
+# reboots into it.
+#
+# The touch needs firmware already running to reset. A blank board (or one held
+# in BOOTSEL) has no serial port to touch, so flash those directly instead:
+#   picotool load -x firmware/button_coproc/pico/.pio/build/coproc_voice/firmware.uf2
 #
 # Usage:
 #   scripts/flash_coproc.sh path/to/firmware.uf2      # flash a prebuilt image
 #   scripts/flash_coproc.sh --build                   # build the env below, then flash
-#   scripts/flash_coproc.sh --env rpipico2w fw.uf2    # plain (non-voice) build
+#   scripts/flash_coproc.sh --env coproc fw.uf2       # plain (non-voice) build
 #   scripts/flash_coproc.sh --device /dev/serial/by-id/...-if00 fw.uf2
 #
 # Requires: picotool  (sudo apt install picotool). Building also needs PlatformIO.
@@ -19,9 +23,14 @@
 # want a clean, uncontended log.
 set -euo pipefail
 
-DEVICE="/dev/serial/by-id/usb-ProtoHUD_Buttons-if00"
+# The firmware's USB identity, as udev names it: usb-<mfr>_<product>_<serial>.
+# Resolved by glob because the board serial differs per unit; --device overrides
+# (needed for a board still running stock-named firmware, e.g. first flash).
+DEVICE="$(ls /dev/serial/by-id/usb-ProtoHUD_Buttons*-if00 2>/dev/null | head -1 ||
+          true)"
+DEVICE="${DEVICE:-/dev/serial/by-id/usb-ProtoHUD_Buttons-if00}"
 FW_DIR="$(cd "$(dirname "$0")/.." && pwd)/firmware/button_coproc/pico"
-ENV="rpipico2w_voice"
+ENV="coproc_voice"
 uf2=""
 do_build=0
 
@@ -89,8 +98,14 @@ echo "[flash] picotool load -x"
 picotool load -x "$uf2"
 
 # 4) Wait for the app's serial port to come back, then show its HELLO (fw=…).
-echo -n "[wait] for $DEVICE to re-appear"
-for _ in $(seq 1 30); do [ -e "$DEVICE" ] && break; echo -n "."; sleep 0.5; done
+# Re-glob rather than reusing $DEVICE: flashing firmware with different USB
+# strings (or a first flash from a stock-named board) changes the by-id path.
+echo -n "[wait] for the ProtoHUD Buttons port to re-appear"
+for _ in $(seq 1 30); do
+  NEW_DEV="$(ls /dev/serial/by-id/usb-ProtoHUD_Buttons*-if00 2>/dev/null | head -1 || true)"
+  [ -n "$NEW_DEV" ] && { DEVICE="$NEW_DEV"; break; }
+  echo -n "."; sleep 0.5
+done
 echo
 echo "[done] flashed. HELLO from the new firmware:"
 timeout 3 head -n 1 "$DEVICE" 2>/dev/null || echo "  (no line yet — reconnect to confirm the fw= version)"

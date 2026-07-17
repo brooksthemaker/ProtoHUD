@@ -11,7 +11,7 @@
 
 // Firmware version, reported in the HELLO line so the Pi (and the flash script)
 // can confirm an update actually took. Bump it whenever you change the firmware.
-static constexpr const char* kFwVersion = "1.3.0";
+static constexpr const char* kFwVersion = "1.4.0";
 
 // Switches wired between the listed GP pin and GND. We use INPUT_PULLUP, so a
 // pressed switch reads LOW (active-low). Add/remove entries freely — kLedPins
@@ -44,8 +44,19 @@ static_assert(sizeof(kButtonPins) == sizeof(kLedPins),
 // used, no extra libraries needed).
 static constexpr bool     kVoiceEnabled = false;   // flip to true once wired
 
-// Analog mic input: MAX9814 OUT → an ADC-capable pin (GP26/27/28 = ADC0/1/2).
-static constexpr uint8_t  kMicAdcPin    = 26;      // ADC0
+// Analog mic input: MAX9814 OUT → an ADC-capable pin.
+//
+// WHICH PIN depends on the chip, and the two are not interchangeable: the ADC
+// block moves between RP2350 packages. On RP2350A (QFN60, Pico 2 / Pico 2 W)
+// it is GP26-28; on RP2350B (QFN80, Pimoroni Pico Plus 2 / Pico LiPo 2 XL W)
+// it is GP40-47, and GP26-28 are plain digital pins there. Wiring the mic to
+// GP26 on an RP2350B fails silently — analogRead() just never sees it — so
+// this follows the chip rather than making you remember.
+#if NUM_BANK0_GPIOS >= 48
+static constexpr uint8_t  kMicAdcPin    = 40;      // ADC0 on RP2350B
+#else
+static constexpr uint8_t  kMicAdcPin    = 26;      // ADC0 on RP2350A
+#endif
 
 // I2S out to the TLV320DAC3100. BCLK and LRCLK/WS must be CONSECUTIVE GPIOs
 // (WS = BCLK+1 automatically); DIN is independent. Keep these clear of the
@@ -133,10 +144,32 @@ static constexpr int8_t   kLedZoneClkPin  = 28;    // APA102 clock (WS2812: unus
 static constexpr uint16_t kLedZoneCount   = 16;    // strip/panel pixel count
 static constexpr uint16_t kLedZoneMax     = 300;   // hard cap (frame buffer size)
 
-// ADC TEST inputs (planned: flex sensors / pots / battery sense). GP26-28 =
-// ADC0-2; read on demand with "ADCREAD" -> "ADC <ch> <raw> <mv>" x3.
-// GP26 doubles as the voice mic input - with voice enabled ch0 reads the mic.
-static constexpr uint8_t kAdcPins[3]      = { 26, 27, 28 };
+// ADC TEST inputs (planned: flex sensors / pots / battery sense). Read on demand
+// with "ADCREAD" -> "ADC <ch> <raw> <mv>" x3. ch0 doubles as the voice mic input
+// (kMicAdcPin) - with voice enabled ch0 reads the mic.
+//
+// ADC0-2, following the chip's ADC block like kMicAdcPin above. On RP2350B this
+// deliberately stops at GP42: GP43 is VBAT sense on the Pico LiPo 2 XL W.
+#if NUM_BANK0_GPIOS >= 48
+static constexpr uint8_t kAdcPins[3]      = { 40, 41, 42 };   // RP2350B
+#else
+static constexpr uint8_t kAdcPins[3]      = { 26, 27, 28 };   // RP2350A
+#endif
+
+// Hand-editing the pins above onto a non-ADC GP is the one mistake this file
+// can't survive: analogRead() returns garbage rather than failing, so the mic
+// goes quiet and the DSP happily processes silence. Fail the build instead.
+#if NUM_BANK0_GPIOS >= 48
+static_assert(kMicAdcPin >= 40 && kMicAdcPin <= 47,
+              "RP2350B: the mic must be on GP40-47 (GP26-28 are not ADC here)");
+static_assert(kAdcPins[0] >= 40 && kAdcPins[1] >= 40 && kAdcPins[2] >= 40,
+              "RP2350B: kAdcPins must all be GP40-47");
+#else
+static_assert(kMicAdcPin >= 26 && kMicAdcPin <= 28,
+              "RP2350A: the mic must be on GP26-28");
+static_assert(kAdcPins[0] >= 26 && kAdcPins[1] >= 26 && kAdcPins[2] >= 26,
+              "RP2350A: kAdcPins must all be GP26-28");
+#endif
 
 // Optional LOCAL control so the changer works standalone (no Pi): a button id
 // (index into kButtonPins) that toggles voice on a SHORT press / cycles the

@@ -492,6 +492,14 @@ struct MenuBuildContext {
     std::function<void(int)>                coproc_led_bright; // 0-255
     std::function<void()>                   coproc_adc_read;
     std::function<std::string()>            coproc_adc_result;
+    // Live per-pin readout for the Pins visualizer: poll asks the firmware for
+    // a fresh PINS dump (call at a few Hz while the panel is visible); get
+    // returns the last complete dump as gp → (firmware role, live value —
+    // "0"/"1" or "812mv"), empty before the first; age is its ms since
+    // arrival, -1 = never (link down / old firmware).
+    std::function<void()> coproc_pins_poll;
+    std::function<std::map<int, std::pair<std::string, std::string>>()> coproc_pins_get;
+    std::function<int()>  coproc_pins_age;
     // Live coprocessor config (pins + button maps) for the Pins visualizer/editor.
     // Edited in place, then persisted to cfg["inputs"]["coprocessor"] and re-pushed
     // via coproc_reload.

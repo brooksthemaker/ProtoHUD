@@ -4681,6 +4681,19 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_adc_result = [&]() -> std::string {
         return coproc_inputs ? coproc_inputs->adc_result() : std::string("n/a");
     };
+    // Live pin readout for the Pins visualizer (firmware "PINS" dumps).
+    menu_ctx.coproc_pins_poll = [&]{ if (coproc_inputs) coproc_inputs->request_pins(); };
+    menu_ctx.coproc_pins_get =
+        [&]() -> std::map<int, std::pair<std::string, std::string>> {
+        std::map<int, std::pair<std::string, std::string>> out;
+        if (coproc_inputs)
+            for (const auto& [gp, st] : coproc_inputs->pins_snapshot())
+                out[gp] = { st.role, st.val };
+        return out;
+    };
+    menu_ctx.coproc_pins_age = [&]() -> int {
+        return coproc_inputs ? coproc_inputs->pins_age_ms() : -1;
+    };
     menu_ctx.pf_glitch_p = &pf_glitch;
     menu_ctx.reactions = &reactions;
     menu_ctx.reaction_rules = &reaction_rules;

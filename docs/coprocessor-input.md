@@ -75,6 +75,9 @@ PING                              # heartbeat, ~1 Hz
 I2C <hex> <hex> …                 # I2CSCAN reply: addresses that ACKed (or "none")
 BOOP <electrode> <1|0>            # boop-pad touch edge (peripheral hub)
 TEMP <rom16hex> <milli°C>         # one DS18B20 reading per probe per cycle
+PINS <ngpio> n=<buttons>          # PINS reply header, then one line per GP:
+PIN <gp> <val> <roles>            #   live level (ADC pins "<mv>mv") + role(s),
+PINS END                          #   e.g. "PIN 16 0 touch3+i2s_bclk"; END closes
 ```
 
 **Pi → Coprocessor** (optional, v1 can ignore)
@@ -96,7 +99,19 @@ LEDB <0-255>                      # LED zone brightness (APA102: also its 5-bit 
 LEDF <start> <hexRRGGBB...>       # write per-pixel frame data from index start (chunkable)
 LEDSHOW                           # latch the assembled LEDF frame to the LEDs
 ADCREAD                           # one-shot ADC report; replies "ADC <ch> <raw> <mv>" x3
+PINS                              # live per-pin readout; replies the PINS dump above
 ```
+
+**Live pin readout:** `PINS` reports every GP the package exposes — its
+configured role(s) as the firmware sees them (`btn0`, `led3`, `touch3+i2s_bclk`,
+`adc0+mic`, `free`, …) and its live input level, with ADC-role pins reported in
+millivolts. The dump only ever reads: pin configs are untouched, and unassigned
+pins get their input buffer enabled just for the read. The HUD polls it a few
+times a second while **GPIO → RP2350 GPIO Expander → Pins** is open, so the pin
+diagram there shows live levels (pressed buttons and touched pads highlight).
+After a `PINCFG` push the HUD also compares the re-HELLO's `n=` against what it
+sent and re-pushes once on a mismatch, so a mangled push can't leave a doubled
+button map running all session.
 
 ### Peripheral hub (`-DPERIPHERAL_HUB`) — boop, temps, fans
 

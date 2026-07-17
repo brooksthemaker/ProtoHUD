@@ -30,6 +30,9 @@ RULE=/etc/udev/rules.d/99-picotool.rules
 sudo tee "$RULE" >/dev/null <<'EOF'
 # Raspberry Pi RP2040/RP2350 (app + BOOTSEL) — no sudo needed for picotool.
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+# Keep ModemManager off RP2 CDC serial ports: its probe of a fresh ACM device
+# can interleave with the HUD's on-connect pin-map push to the coprocessor.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ENV{ID_MM_DEVICE_IGNORE}="1"
 EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger || true
 sudo usermod -aG plugdev,dialout "${SUDO_USER:-$USER}" || true
