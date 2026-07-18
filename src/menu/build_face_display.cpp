@@ -1579,6 +1579,23 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     "copy and a mirrored right copy, like a pair of eyes — "
                     "instead of one instance across the whole panel. Position "
                     "then applies within each half."),
+                with_desc(toggle("Overlay Face",
+                    [eget]{ return eget().overlay; },
+                    [emod](bool v){ emod([v](face::EyeAnimParams& p){
+                        p.overlay = v; }); }),
+                    "Play the animation over the live face instead of taking "
+                    "over the panel. The face keeps rendering — blinks, "
+                    "effects and all — with the animation's lit pixels "
+                    "composited on top."),
+                with_desc(toggle("Blackout Eyes",
+                    [eget]{ return eget().blackout_eyes; },
+                    [emod](bool v){ emod([v](face::EyeAnimParams& p){
+                        p.blackout_eyes = v; }); }),
+                    "With Overlay Face on, black out the face's blink eye "
+                    "regions while the animation plays, so an animation "
+                    "positioned over an eye replaces it instead of glowing "
+                    "through it. Uses the same eye_left / eye_right regions "
+                    "blinks use — faces without them are unaffected."),
                 color_picker("Color",
                     [emod](uint8_t r, uint8_t g, uint8_t b){
                         emod([r, g, b](face::EyeAnimParams& p){

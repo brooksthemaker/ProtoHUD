@@ -246,6 +246,25 @@ void FaceLoader::load() {
     if (cfg.contains("eye_left"))  eye_left_  = parse_region(cfg["eye_left"]);
     if (cfg.contains("eye_right")) eye_right_ = parse_region(cfg["eye_right"]);
     if (cfg.contains("mouth"))     mouth_     = parse_region(cfg["mouth"]);
+
+    // Union stencil of the eye regions for eye_region_mask(). Built once —
+    // regions never change after load.
+    if (eye_left_.set || eye_right_.set) {
+        eye_mask_ = cv::Mat::zeros(h_, w_, CV_8U);
+        auto stamp = [&](const Region& r) {
+            if (!r.set) return;
+            if (!r.mask.empty() && r.mask.size() == eye_mask_.size()) {
+                cv::bitwise_or(eye_mask_, r.mask, eye_mask_);
+                return;
+            }
+            const int x  = std::max(0, r.x), y = std::max(0, r.y);
+            const int x2 = std::min(r.x + r.w, w_), y2 = std::min(r.y + r.h, h_);
+            if (x2 > x && y2 > y)
+                eye_mask_(cv::Rect(x, y, x2 - x, y2 - y)).setTo(255);
+        };
+        stamp(eye_left_);
+        stamp(eye_right_);
+    }
 }
 
 void FaceLoader::blend_region(cv::Mat& frame, const cv::Mat& overlay,

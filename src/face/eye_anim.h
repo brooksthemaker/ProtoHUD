@@ -42,6 +42,14 @@ struct EyeAnimParams {
     // horizontally-mirrored right copy, like a pair of eyes — instead of one
     // instance across the whole panel. cx/cy then position within each half.
     bool    mirror = false;
+    // Composite the animation over the live face (which keeps rendering —
+    // blinks, GIFs, effects and all) instead of taking over the panel.
+    bool    overlay = false;
+    // With overlay: black out the face's blink eye regions (config.json
+    // eye_left / eye_right) while the animation plays, so an eye-positioned
+    // animation replaces the eyes instead of glowing through them. Panels
+    // whose face defines no eye regions are left untouched.
+    bool    blackout_eyes = false;
 };
 
 } // namespace face

@@ -2184,6 +2184,8 @@ int main(int argc, char* argv[]) {
                 ep.cx         = std::clamp(jval(je, "x", ep.cx), 0.0, 1.0);
                 ep.cy         = std::clamp(jval(je, "y", ep.cy), 0.0, 1.0);
                 ep.mirror     = jval(je, "mirror",     ep.mirror);
+                ep.overlay    = jval(je, "overlay",    ep.overlay);
+                ep.blackout_eyes = jval(je, "blackout_eyes", ep.blackout_eyes);
                 if (je.contains("color") && je["color"].is_array() &&
                     je["color"].size() >= 3) {
                     ep.r = static_cast<uint8_t>(std::clamp(je["color"][0].get<int>(), 0, 255));
@@ -5920,6 +5922,8 @@ int main(int argc, char* argv[]) {
                 je["x"]          = ep.cx;
                 je["y"]          = ep.cy;
                 je["mirror"]     = ep.mirror;
+                je["overlay"]    = ep.overlay;
+                je["blackout_eyes"] = ep.blackout_eyes;
                 je["color"]      = nlohmann::json::array({ ep.r, ep.g, ep.b });
                 ja.push_back(std::move(je));
             }

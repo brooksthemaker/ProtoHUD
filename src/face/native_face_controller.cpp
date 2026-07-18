@@ -445,26 +445,34 @@ void NativeFaceController::render_thread() {
                 // disabled (MAX7219 / RGB matrix), we also skip the material
                 // and use the face PNG verbatim — the material's luminance-
                 // modulation washes RGB-matrix art to grey/teal otherwise.
-                cv::Mat face_layer;
-                cv::Mat gframe = (!eye_active && pn.gif) ? pn.gif->get_frame() : cv::Mat();
-                if (eye_active) {
-                    // Procedural eye animation owns the whole panel. Mirror
-                    // mode draws a copy per half — left as rendered, right
-                    // horizontally flipped — so a single wide canvas reads as
-                    // a pair of eyes; cx/cy position within each half.
+                // Overlay mode plays the animation on top of the live face;
+                // otherwise (replace mode) it owns the whole panel.
+                const bool eye_replace = eye_active && !eye_anim_.overlay;
+
+                // Render one animation frame at panel size. Mirror mode draws
+                // a copy per half — left as rendered, right horizontally
+                // flipped — so a single wide canvas reads as a pair of eyes;
+                // cx/cy position within each half.
+                auto render_anim_layer = [&]() -> cv::Mat {
                     if (eye_anim_.mirror && pc.w >= 2) {
                         const int hw = pc.w / 2;
                         cv::Mat half = render_eye_animation(eye_anim_, eye_anim_t_,
                                                             hw, pc.h);
-                        face_layer = cv::Mat::zeros(pc.h, pc.w, CV_8UC4);
-                        half.copyTo(face_layer(cv::Rect(0, 0, hw, pc.h)));
+                        cv::Mat out = cv::Mat::zeros(pc.h, pc.w, CV_8UC4);
+                        half.copyTo(out(cv::Rect(0, 0, hw, pc.h)));
                         cv::Mat flipped;
                         cv::flip(half, flipped, 1);
-                        flipped.copyTo(face_layer(cv::Rect(pc.w - hw, 0, hw, pc.h)));
-                    } else {
-                        face_layer = render_eye_animation(eye_anim_, eye_anim_t_,
-                                                          pc.w, pc.h);
+                        flipped.copyTo(out(cv::Rect(pc.w - hw, 0, hw, pc.h)));
+                        return out;
                     }
+                    return render_eye_animation(eye_anim_, eye_anim_t_,
+                                                pc.w, pc.h);
+                };
+
+                cv::Mat face_layer;
+                cv::Mat gframe = (!eye_replace && pn.gif) ? pn.gif->get_frame() : cv::Mat();
+                if (eye_replace) {
+                    face_layer = render_anim_layer();
                 } else if (!gframe.empty()) {
                     if (!cfg_.output_panels.empty() &&
                         (gframe.cols != pc.w || gframe.rows != pc.h)) {
@@ -504,6 +512,39 @@ void NativeFaceController::render_thread() {
                     face_layer = apply_material(face_rgba, mat);
                 }
 
+                // Overlay mode: composite the animation over the live face,
+                // optionally blacking out the blink eye regions first so an
+                // eye-positioned animation replaces the eyes instead of
+                // glowing through them. Done before the inertia shift and
+                // face mirror so the animation tracks the face art.
+                if (eye_active && !eye_replace && !face_layer.empty()) {
+                    if (eye_anim_.blackout_eyes && pn.loader) {
+                        const cv::Mat& em = pn.loader->eye_region_mask();
+                        if (!em.empty() && em.size() == face_layer.size())
+                            face_layer.setTo(cv::Scalar(0, 0, 0, 255), em);
+                    }
+                    cv::Mat anim = render_anim_layer();
+                    if (anim.size() == face_layer.size()) {
+                        // Luminance-keyed "over": the animation's brightness is
+                        // its coverage, so lit pixels replace the face and its
+                        // black background leaves the face untouched.
+                        for (int yy = 0; yy < face_layer.rows; ++yy) {
+                            cv::Vec4b*       fr = face_layer.ptr<cv::Vec4b>(yy);
+                            const cv::Vec4b* an = anim.ptr<cv::Vec4b>(yy);
+                            for (int xx = 0; xx < face_layer.cols; ++xx) {
+                                const int a = std::max({ an[xx][0], an[xx][1],
+                                                         an[xx][2] });
+                                if (a == 0) continue;
+                                for (int c = 0; c < 3; ++c)
+                                    fr[xx][c] = cv::saturate_cast<uchar>(
+                                        an[xx][c] + fr[xx][c] * (255 - a) / 255);
+                                fr[xx][3] = std::max<uchar>(fr[xx][3],
+                                                            static_cast<uchar>(a));
+                            }
+                        }
+                    }
+                }
+
                 // Face Inertia: slide the whole face layer by the sprung
                 // offset (exposed border fills transparent, so the background
                 // shows through). Applied before the mirror flip so mirrored
@@ -522,12 +563,14 @@ void NativeFaceController::render_thread() {
                     cv::flip(face_layer, face_layer, 1);
 
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
-                // Effects are suppressed while a GIF or eye animation plays —
-                // the clip owns the whole panel — and resume automatically when
-                // it ends and the face animation returns. (The sim keeps running
-                // so the field is already settled when it reappears.)
+                // Effects are suppressed while a GIF or a panel-owning eye
+                // animation plays — the clip owns the whole panel — and resume
+                // automatically when it ends and the face returns. An overlay
+                // animation rides on the live face, so effects keep running
+                // under it. (The sim keeps running while suppressed so the
+                // field is already settled when it reappears.)
                 ParticleFrame pf;
-                if (pn.particles && gframe.empty() && !eye_active) {
+                if (pn.particles && gframe.empty() && !eye_replace) {
                     pf = pn.particles->render();
                     // Freeze-over: frost recolours the face toward its rim
                     // blue in the field's gradient before the crystal layer
