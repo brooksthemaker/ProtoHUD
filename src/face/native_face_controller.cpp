@@ -450,19 +450,20 @@ void NativeFaceController::render_thread() {
                 const bool eye_replace = eye_active && !eye_anim_.overlay;
 
                 // Render one animation frame at panel size. Mirror mode draws
-                // a copy per half — left as rendered, right horizontally
-                // flipped — so a single wide canvas reads as a pair of eyes;
-                // cx/cy position within each half.
+                // a copy per half — right as rendered, left horizontally
+                // flipped — so a single wide canvas reads as a pair of eyes
+                // and directional animations (the EKG sweep) radiate outward
+                // from the centre; cx/cy position within each half.
                 auto render_anim_layer = [&]() -> cv::Mat {
                     if (eye_anim_.mirror && pc.w >= 2) {
                         const int hw = pc.w / 2;
                         cv::Mat half = render_eye_animation(eye_anim_, eye_anim_t_,
                                                             hw, pc.h);
                         cv::Mat out = cv::Mat::zeros(pc.h, pc.w, CV_8UC4);
-                        half.copyTo(out(cv::Rect(0, 0, hw, pc.h)));
+                        half.copyTo(out(cv::Rect(pc.w - hw, 0, hw, pc.h)));
                         cv::Mat flipped;
                         cv::flip(half, flipped, 1);
-                        flipped.copyTo(out(cv::Rect(pc.w - hw, 0, hw, pc.h)));
+                        flipped.copyTo(out(cv::Rect(0, 0, hw, pc.h)));
                         return out;
                     }
                     return render_eye_animation(eye_anim_, eye_anim_t_,
