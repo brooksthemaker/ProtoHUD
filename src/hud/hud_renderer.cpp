@@ -2369,7 +2369,7 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int tex_w, int tex_h,
                                      int screen_w, int screen_h,
                                      float anchor_x, float anchor_y,
                                      float pan_x, float pan_y, float size_frac,
-                                     int view) {
+                                     int view, bool behind_windows) {
     if (tex == 0) return;
     if (tex_w <= 0 || tex_h <= 0) { tex_w = ShmFrameReader::W; tex_h = ShmFrameReader::H; }
 
@@ -2397,19 +2397,31 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int tex_w, int tex_h,
     const float wx = anchor_x * (static_cast<float>(screen_w) - win_w) + pan_x;
     const float wy = anchor_y * (static_cast<float>(screen_h) - win_h) + pan_y;
 
-    ImGui::SetNextWindowPos ({wx, wy}, ImGuiCond_Always);
-    ImGui::SetNextWindowSize({win_w, win_h}, ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.f);
-    ImGui::Begin("##panel_preview", nullptr,
-        ImGuiWindowFlags_NoDecoration          |
-        ImGuiWindowFlags_NoInputs              |
-        ImGuiWindowFlags_NoMove                |
-        ImGuiWindowFlags_NoNav                 |
-        ImGuiWindowFlags_NoBringToFrontOnFocus |
-        ImGuiWindowFlags_NoSavedSettings);
-
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 p  = ImGui::GetWindowPos();
+    // All drawing below is absolute-coordinate; the window exists purely for
+    // z-ordering among the other HUD windows. With behind_windows the deep
+    // menu is up, and its window would otherwise sit UNDER this one (window
+    // z-order sticks to creation order) — the background list draws beneath
+    // every window, so the preview shows in the menu's margins instead of on
+    // top of its content.
+    ImDrawList* dl;
+    ImVec2      p;
+    if (behind_windows) {
+        dl = ImGui::GetBackgroundDrawList();
+        p  = {wx, wy};
+    } else {
+        ImGui::SetNextWindowPos ({wx, wy}, ImGuiCond_Always);
+        ImGui::SetNextWindowSize({win_w, win_h}, ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.f);
+        ImGui::Begin("##panel_preview", nullptr,
+            ImGuiWindowFlags_NoDecoration          |
+            ImGuiWindowFlags_NoInputs              |
+            ImGuiWindowFlags_NoMove                |
+            ImGuiWindowFlags_NoNav                 |
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoSavedSettings);
+        dl = ImGui::GetWindowDrawList();
+        p  = ImGui::GetWindowPos();
+    }
 
     // Dark backing rectangle
     dl->AddRectFilled({p.x, p.y}, {p.x + win_w, p.y + win_h},
@@ -2429,7 +2441,7 @@ void HudRenderer::draw_panel_preview(unsigned int tex, int tex_w, int tex_h,
     // Small "LED" label in the corner
     // (no corner label)
 
-    ImGui::End();
+    if (!behind_windows) ImGui::End();
 }
 
 // ── Protoface portrait beside the minimap ───────────────────────────────────────

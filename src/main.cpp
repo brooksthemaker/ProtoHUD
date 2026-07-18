@@ -8304,10 +8304,14 @@ int main(int argc, char* argv[]) {
             // would all show the same content — force "full" so the user
             // doesn't get a duplicate or half-face.
             const int view = ft.native ? 0 : protoface_preview_view;
+            // With the fullscreen menu up, drop behind its window so the
+            // preview shows in the margins instead of covering the menu.
+            const bool behind = menu.is_deep_open() || menu.is_keyboard_open()
+                             || menu.is_color_picker_open();
             hud.draw_panel_preview(ft.id, ft.w, ft.h, xr.display_width(), xr.display_height(),
                                    protoface_preview_cfg.anchor_x, protoface_preview_cfg.anchor_y,
                                    protoface_preview_cfg.pan_x,    protoface_preview_cfg.pan_y,
-                                   protoface_preview_cfg.size,     view);
+                                   protoface_preview_cfg.size,     view, behind);
         }
 
         // Protoface portrait beside the minimap (closed-menu HUD element).
