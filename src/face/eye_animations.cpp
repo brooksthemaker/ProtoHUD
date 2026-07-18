@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include <opencv2/imgproc.hpp>
+
 namespace face {
 
 namespace {
@@ -35,7 +37,7 @@ inline cv::Vec3b paint(const EyeAnimParams& p, double inten) {
 
 } // namespace
 
-cv::Mat render_eye_animation(const EyeAnimParams& p, double t, int w, int h) {
+static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
     cv::Mat out(std::max(1, h), std::max(1, w), CV_8UC3, cv::Scalar(0, 0, 0));
     const double cx = (w - 1) * 0.5;
     const double cy = (h - 1) * 0.5;
@@ -107,6 +109,15 @@ cv::Mat render_eye_animation(const EyeAnimParams& p, double t, int w, int h) {
         }
     }
     return out;
+}
+
+cv::Mat render_eye_animation(const EyeAnimParams& p, double t, int w, int h) {
+    // The compositor consumes RGBA face layers (composite() splits out the
+    // alpha channel); the animation owns the whole panel, so it converts to
+    // fully opaque RGBA here rather than teaching every draw loop about alpha.
+    cv::Mat rgba;
+    cv::cvtColor(render_rgb(p, t, w, h), rgba, cv::COLOR_RGB2RGBA);
+    return rgba;
 }
 
 const char* eye_anim_name(EyeAnim a) {
