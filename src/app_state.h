@@ -194,6 +194,7 @@ struct EyeTriggerConfig {
     double  size       = 1.0;
     double  duration_s = 2.5;     // how long the animation plays
     uint8_t r = 0, g = 220, b = 180;   // primary colour
+    double  x = 0.5, y = 0.5;     // animation centre, panel-normalised (0..1)
 };
 
 struct BoopZoneConfig {

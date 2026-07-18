@@ -1943,6 +1943,8 @@ int main(int argc, char* argv[]) {
                     et.speed      = jval(je, "speed",      et.speed);
                     et.size       = jval(je, "size",       et.size);
                     et.duration_s = jval(je, "duration_s", et.duration_s);
+                    et.x          = std::clamp(jval(je, "x", et.x), 0.0, 1.0);
+                    et.y          = std::clamp(jval(je, "y", et.y), 0.0, 1.0);
                     if (je.contains("color") && je["color"].is_array() &&
                         je["color"].size() >= 3) {
                         et.r = static_cast<uint8_t>(std::clamp(je["color"][0].get<int>(), 0, 255));
@@ -3142,8 +3144,13 @@ int main(int argc, char* argv[]) {
                 if ((*eye_run)[zi] >= eye.count) { (*eye_run)[zi] = 0; fire = true; }
             }
             if (fire) {
-                face_proxy.play_eye_animation(eye.anim, eye.speed, eye.size,
-                                              eye.r, eye.g, eye.b, eye.duration_s);
+                face::EyeAnimParams ep;
+                ep.type  = static_cast<face::EyeAnim>(eye.anim);
+                ep.speed = eye.speed;  ep.size = eye.size;
+                ep.r = eye.r; ep.g = eye.g; ep.b = eye.b;
+                ep.duration_s = eye.duration_s;
+                ep.cx = eye.x; ep.cy = eye.y;
+                face_proxy.play_eye_animation(ep);
                 flash_zone(z);
                 return;   // eyes play instead of the normal boop reaction
             }
@@ -5787,6 +5794,8 @@ int main(int argc, char* argv[]) {
                 je["speed"]      = et.speed;
                 je["size"]       = et.size;
                 je["duration_s"] = et.duration_s;
+                je["x"]          = et.x;
+                je["y"]          = et.y;
                 je["color"]      = json::array({ et.r, et.g, et.b });
             }
         }

@@ -97,9 +97,7 @@ public:
     void        trigger_boop_ripple(double cx, double cy,   // expanding ring at (cx, cy)
                                     uint8_t r, uint8_t g, uint8_t b,
                                     double speed) override;
-    void        play_eye_animation(int type, double speed, double size,
-                                   uint8_t r, uint8_t g, uint8_t b,
-                                   double duration_s) override;
+    void        play_eye_animation(const EyeAnimParams& p) override;
     void        set_audio_drive(double volume, double mouth_open) override;
     void        set_motion(double heading_deg, double yaw_rate, double pitch_deg,
                            double roll_deg, double accel_g) override;

@@ -4396,6 +4396,20 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         return static_cast<float>(bz.boop_zones[idx].eye_trigger.size); },
                     [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
                         bz.boop_zones[idx].eye_trigger.size = static_cast<double>(v); }),
+                with_desc(slider("Position X", 0.f, 100.f, 1.f, "%",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.x * 100.0); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.x = static_cast<double>(v) / 100.0; }),
+                    "Animation centre across each panel; 50% = centred. "
+                    "Eye-panel rigs shift both eyes together. Glitch always "
+                    "fills the panel."),
+                with_desc(slider("Position Y", 0.f, 100.f, 1.f, "%",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.y * 100.0); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].eye_trigger.y = static_cast<double>(v) / 100.0; }),
+                    "Animation centre down each panel; 50% = centred."),
                 slider("Duration", 1.f, 8.f, 0.5f, " s",
                     [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
                         return static_cast<float>(bz.boop_zones[idx].eye_trigger.duration_s); },
@@ -4416,8 +4430,13 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         EyeTriggerConfig e;
                         { std::lock_guard<std::mutex> lk(bz.mtx);
                           e = bz.boop_zones[idx].eye_trigger; }
-                        teensy->play_eye_animation(e.anim, e.speed, e.size,
-                                                   e.r, e.g, e.b, e.duration_s);
+                        face::EyeAnimParams p;
+                        p.type  = static_cast<face::EyeAnim>(e.anim);
+                        p.speed = e.speed;  p.size = e.size;
+                        p.r = e.r; p.g = e.g; p.b = e.b;
+                        p.duration_s = e.duration_s;
+                        p.cx = e.x; p.cy = e.y;
+                        teensy->play_eye_animation(p);
                     }),
             };
             items.push_back(with_desc(submenu("Animated Eyes", std::move(eye_items)),

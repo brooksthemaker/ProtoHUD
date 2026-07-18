@@ -39,8 +39,8 @@ inline cv::Vec3b paint(const EyeAnimParams& p, double inten) {
 
 static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
     cv::Mat out(std::max(1, h), std::max(1, w), CV_8UC3, cv::Scalar(0, 0, 0));
-    const double cx = (w - 1) * 0.5;
-    const double cy = (h - 1) * 0.5;
+    const double cx = (w - 1) * clamp01(p.cx);
+    const double cy = (h - 1) * clamp01(p.cy);
     const double scale = std::max(1.0, std::min(w, h) * 0.5);  // radius → ~1 at edge
     const double sz = std::max(0.1, p.size);
     const double sp = p.speed;

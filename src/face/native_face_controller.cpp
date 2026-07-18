@@ -1337,17 +1337,17 @@ void NativeFaceController::trigger_boop(const std::string& expression, double du
     // in FaceState::update will bring expression back without our help.
 }
 
-void NativeFaceController::play_eye_animation(int type, double speed, double size,
-                                              uint8_t r, uint8_t g, uint8_t b,
-                                              double duration_s) {
+void NativeFaceController::play_eye_animation(const EyeAnimParams& p) {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    const int n = std::clamp(type, 0, static_cast<int>(EyeAnim::Count) - 1);
-    eye_anim_.type       = static_cast<EyeAnim>(n);
-    eye_anim_.speed      = (speed > 0.0) ? speed : 1.0;
-    eye_anim_.size       = (size  > 0.0) ? size  : 1.0;
-    eye_anim_.r = r; eye_anim_.g = g; eye_anim_.b = b;
-    eye_anim_.duration_s = duration_s;
-    eye_anim_timer_ = (duration_s > 0.0) ? duration_s : 0.0;
+    eye_anim_ = p;
+    const int n = std::clamp(static_cast<int>(p.type), 0,
+                             static_cast<int>(EyeAnim::Count) - 1);
+    eye_anim_.type = static_cast<EyeAnim>(n);
+    if (eye_anim_.speed <= 0.0) eye_anim_.speed = 1.0;
+    if (eye_anim_.size  <= 0.0) eye_anim_.size  = 1.0;
+    eye_anim_.cx = std::clamp(eye_anim_.cx, 0.0, 1.0);
+    eye_anim_.cy = std::clamp(eye_anim_.cy, 0.0, 1.0);
+    eye_anim_timer_ = (p.duration_s > 0.0) ? p.duration_s : 0.0;
     eye_anim_t_     = 0.0;
     // Transient by design — no save_state_locked().
 }

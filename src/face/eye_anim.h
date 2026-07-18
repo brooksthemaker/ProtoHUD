@@ -28,6 +28,10 @@ struct EyeAnimParams {
     double  size       = 1.0;          // feature-scale multiplier
     uint8_t r = 0, g = 220, b = 180;   // primary colour (RGB)
     double  duration_s = 2.5;          // how long it plays before the face returns
+    // Centre of the animation on each panel, panel-normalised (0..1) — each
+    // panel draws its own copy, so eye-panel rigs shift both eyes together.
+    // Glitch fills the whole panel and ignores this.
+    double  cx = 0.5, cy = 0.5;
 };
 
 } // namespace face
