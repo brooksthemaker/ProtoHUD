@@ -183,8 +183,7 @@ struct VoiceMouthConfig {
 // in lockstep with sensor::BoopSensor::Zone (Snout=0, LeftCheek=1, RightCheek=2).
 struct BoopZoneConfig {
     bool        enabled    = true;
-    std::string expression = "surprised";   // canonical face PNG name
-    double      duration_s = 0.8;           // how long the expression holds
+    double      duration_s = 0.8;           // hold for a dedicated-art fire
     uint8_t     threshold  = 12;            // MPR121 touch threshold (lower = more sensitive)
     int         electrode  = -1;            // MPR121 electrode 0..11 driving this zone (-1 = none/derived)
     // Touch-feedback ripple ring: canvas-normalised centre (0..1 across the
@@ -982,28 +981,27 @@ struct AppState {
     // Camera focus, night vision, resolution, and digital zoom
     CameraFocusState     focus_left, focus_right;
     NightVisionState     night_vision;
-    // Boop zones: [0]=Snout, [1]=LeftCheek, [2]=RightCheek. Sane defaults so
-    // a user with the sensor wired sees something sensible before they ever
-    // open the menu.
-    // [0]=Snout, [1]=LeftCheek, [2]=RightCheek, [3]=BothCheeks (derived),
-    // [4]=TopHead, [5]=MouthTop, [6]=MouthBottom — in lockstep with
-    // sensor::BoopSensor::Zone. Threshold on the BothCheeks slot is unused
-    // (it doesn't probe an electrode directly) but kept in the schema for
-    // index parity. The head/mouth zones ship with electrode -1 (inert)
-    // so an unwired MPR121 can't false-trigger them; assign an electrode
-    // in the menu when the pad is wired.
+    // Boop zones, in lockstep with sensor::BoopSensor::Zone: [0]=Snout,
+    // [1]=LeftCheek, [2]=RightCheek, [3]=BothCheeks (derived), [4]=TopHead,
+    // [5]=MouthTop, [6]=MouthBottom. A zone has NO default expression — what
+    // a boop shows is bound in the Expressions menu (a Triggers recipe, or
+    // dedicated boop_<zone> art); unbound zones give ripple + LED feedback
+    // only. Threshold on the BothCheeks slot is unused (it doesn't probe an
+    // electrode directly) but kept in the schema for index parity. The
+    // head/mouth zones ship with electrode -1 (inert) so an unwired MPR121
+    // can't false-trigger them; assign an electrode in the menu when wired.
     // Ripple centres default to where each zone's pad sits on a typical face:
     // snout bottom-centre, cheeks at the outer thirds, head top-centre, the
     // mouth rows between snout and cheek line. All editable per zone in the
     // menu (BothCheeks' own centre is unused — it rings both cheeks).
     BoopZoneConfig       boop_zones[7] = {
-        { true, "surprised", 0.8, 12,  0, 0.50, 0.92 },   // Snout      → electrode 0
-        { true, "happy",     0.6, 12,  1, 0.15, 0.55 },   // LeftCheek  → electrode 1
-        { true, "happy",     0.6, 12,  2, 0.85, 0.55 },   // RightCheek → electrode 2
-        { true, "surprised", 1.0, 12, -1, 0.50, 0.55 },   // BothCheeks → derived (no electrode)
-        { true, "happy",     0.8, 12, -1, 0.50, 0.08 },   // TopHead     → assign when wired
-        { true, "surprised", 0.8, 12, -1, 0.50, 0.72 },   // MouthTop    → assign when wired
-        { true, "surprised", 0.8, 12, -1, 0.50, 0.86 },   // MouthBottom → assign when wired
+        { true, 0.8, 12,  0, 0.50, 0.92 },   // Snout      → electrode 0
+        { true, 0.6, 12,  1, 0.15, 0.55 },   // LeftCheek  → electrode 1
+        { true, 0.6, 12,  2, 0.85, 0.55 },   // RightCheek → electrode 2
+        { true, 1.0, 12, -1, 0.50, 0.55 },   // BothCheeks → derived (no electrode)
+        { true, 0.8, 12, -1, 0.50, 0.08 },   // TopHead     → assign when wired
+        { true, 0.8, 12, -1, 0.50, 0.72 },   // MouthTop    → assign when wired
+        { true, 0.8, 12, -1, 0.50, 0.86 },   // MouthBottom → assign when wired
     };
     // Coalesce window (seconds) for combining near-simultaneous left + right
     // cheek touches into a single BothCheeks event. Mirror of the sensor's

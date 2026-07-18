@@ -32,8 +32,9 @@ struct EyeAnimParams {
     // panel draws its own copy, so eye-panel rigs shift both eyes together.
     // Glitch fills the whole panel and ignores this.
     double  cx = 0.5, cy = 0.5;
-    // Horizontally mirror the animation (a spiral spins the other way). The
-    // configured centre is kept — only the animation itself flips.
+    // Draw the animation once per HALF of the panel — a left copy and a
+    // horizontally-mirrored right copy, like a pair of eyes — instead of one
+    // instance across the whole panel. cx/cy then position within each half.
     bool    mirror = false;
 };
 

@@ -1575,8 +1575,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [eget]{ return eget().mirror; },
                     [emod](bool v){ emod([v](face::EyeAnimParams& p){
                         p.mirror = v; }); }),
-                    "Horizontally mirror the animation — a spiral spins the "
-                    "other way. The position above is kept."),
+                    "Draw the animation on both halves of the panel — a left "
+                    "copy and a mirrored right copy, like a pair of eyes — "
+                    "instead of one instance across the whole panel. Position "
+                    "then applies within each half."),
                 color_picker("Color",
                     [emod](uint8_t r, uint8_t g, uint8_t b){
                         emod([r, g, b](face::EyeAnimParams& p){
@@ -4091,7 +4093,30 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         [rget]{ return rget().enabled; },
                         [rmod](bool v){ rmod([v](face::ReactionRule& r){ r.enabled = v; }); }),
                         m.desc));
-                    re.push_back(leaf("Test", [RR, id]{ RR->test(id); }));
+                    re.push_back(with_desc(leaf("Test",
+                        [RR, id, teensy, &state]{
+                            // A missing outcome PNG silently renders Neutral —
+                            // which looks like "Test did nothing" when the face
+                            // is already neutral. Say so instead.
+                            const auto r = RR->rule(id);
+                            if (r.outcome.kind ==
+                                    face::ReactionOutcome::Kind::Expression &&
+                                !r.outcome.expression.empty() &&
+                                !teensy->face_image_exists(r.outcome.expression)) {
+                                Notification n; n.type = NotifType::App;
+                                n.title = "Reaction test";
+                                n.body  = "No art for \"" + r.outcome.expression +
+                                          "\" in the active face folder — it "
+                                          "shows Neutral. Import the PNG under "
+                                          "Expressions, or pick another face.";
+                                n.auto_dismiss_s = 6.f;
+                                std::lock_guard<std::mutex> lk(state.mtx);
+                                state.notifs.push(std::move(n));
+                            }
+                            RR->test(id);
+                        }),
+                        "Fire this reaction now, exactly as the real trigger "
+                        "would."));
                     re.push_back(with_desc(slider("Threshold", m.thr_min, m.thr_max,
                         m.thr_step, m.thr_unit,
                         [rget]{ return rget().threshold; },
@@ -4116,10 +4141,18 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         std::vector<MenuItem> ei;
                         for (int fi = 0; fi < kFaceSlotCount; ++fi) {
                             const std::string stem = kFaceSlots[fi].expression;
-                            ei.push_back(leaf_sel(kFaceSlots[fi].label,
+                            MenuItem fit = leaf_sel(kFaceSlots[fi].label,
                                 [rmod, stem]{ rmod([&stem](face::ReactionRule& r){
                                     r.outcome.expression = stem; }); },
-                                [rget, stem]{ return rget().outcome.expression == stem; }));
+                                [rget, stem]{ return rget().outcome.expression == stem; });
+                            // Flag faces with no PNG in the active folder —
+                            // they render as Neutral, which reads as a no-op.
+                            fit.label_fn = [teensy, stem,
+                                            label = std::string(kFaceSlots[fi].label)]{
+                                return teensy->face_image_exists(stem)
+                                     ? label : label + "  (no art)";
+                            };
+                            ei.push_back(std::move(fit));
                         }
                         MenuItem expr_it = submenu("Expression", std::move(ei));
                         expr_it.visible_fn = [rget]{ return rget().outcome.kind ==
@@ -4300,9 +4333,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             const char* stem = kBoopFaceSlots[idx].file_stem;
             if (teensy->face_image_exists(stem))
                 return { "dedicated art", stem };
-            std::lock_guard<std::mutex> lk(state.mtx);
-            const std::string fb = state.boop_zones[idx].expression;
-            return { fb + " (default)", fb };
+            return { "none (ripple only)", "" };
         };
 
         std::vector<MenuItem> items = {
@@ -4337,7 +4368,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     "Expressions > Expressions > [face] > Triggers with "
                     "event \"Boop\" on this zone, count 1. No trigger bound "
                     "means the dedicated boop art fires (when its PNG "
-                    "exists), else the built-in default.");
+                    "exists); otherwise the boop is feedback-only — ripple "
+                    "and LED flash, no face change.");
                 m.label_fn = [resolve_reaction]{
                     return "Reaction: " + resolve_reaction().first;
                 };

@@ -115,18 +115,10 @@ cv::Mat render_eye_animation(const EyeAnimParams& p, double t, int w, int h) {
     // The compositor consumes RGBA face layers (composite() splits out the
     // alpha channel); the animation owns the whole panel, so it converts to
     // fully opaque RGBA here rather than teaching every draw loop about alpha.
+    // (p.mirror is handled by the CALLER — it renders one half-width copy via
+    // this function and composites left + mirrored right.)
     cv::Mat rgba;
-    if (p.mirror) {
-        // Mirror the animation but keep the user's position: render at the
-        // mirrored centre, then flip the whole frame — the feature lands back
-        // at the configured spot with its rotation/asymmetry reversed.
-        EyeAnimParams q = p;
-        q.cx = 1.0 - clamp01(p.cx);
-        cv::cvtColor(render_rgb(q, t, w, h), rgba, cv::COLOR_RGB2RGBA);
-        cv::flip(rgba, rgba, 1);
-    } else {
-        cv::cvtColor(render_rgb(p, t, w, h), rgba, cv::COLOR_RGB2RGBA);
-    }
+    cv::cvtColor(render_rgb(p, t, w, h), rgba, cv::COLOR_RGB2RGBA);
     return rgba;
 }
 

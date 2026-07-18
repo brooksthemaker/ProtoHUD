@@ -1910,8 +1910,6 @@ int main(int argc, char* argv[]) {
                 state.boop_zones[i].electrode =
                     jval(jz, "electrode", state.boop_zones[i].electrode);
                 boop_cfg.electrode[i] = static_cast<int8_t>(state.boop_zones[i].electrode);
-                state.boop_zones[i].expression =
-                    jz.value("expression", state.boop_zones[i].expression);
                 state.boop_zones[i].duration_s =
                     jval(jz, "duration_s", state.boop_zones[i].duration_s);
                 state.boop_zones[i].threshold =
@@ -3134,7 +3132,6 @@ int main(int argc, char* argv[]) {
         // Snapshot under the state lock so a menu edit mid-boop can't tear
         // the std::string read.
         bool             enabled;
-        std::string      fallback_expr;
         double           duration_s;
         // Ripple ring(s) for this boop: one at the zone's configured centre —
         // except BothCheeks, which rings both cheeks at their own spots.
@@ -3144,7 +3141,6 @@ int main(int argc, char* argv[]) {
         {
             std::lock_guard<std::mutex> lk(state.mtx);
             enabled       = state.boop_zones[zi].enabled;
-            fallback_expr = state.boop_zones[zi].expression;
             duration_s    = state.boop_zones[zi].duration_s;
             auto grab = [&state](size_t i) {
                 const auto& bz = state.boop_zones[i];
@@ -3177,22 +3173,16 @@ int main(int argc, char* argv[]) {
             flash_zone(z);
             return;
         }
-        // Prefer the dedicated boop_<zone> face when present on disk.
-        // face_image_exists() is the canonical "is this PNG in the active
-        // face folder" check the editor/import path uses too.
-        std::string expression;
+        // No recipe claimed it: show the dedicated boop_<zone> face when its
+        // PNG exists (face_image_exists() is the canonical check the editor/
+        // import path uses too). Zones have no default expression — an
+        // unbound zone is feedback-only: ripple + LED flash, no face change.
         const std::string stem = boop_face_stem(z);
         if (!stem.empty() && face_proxy.face_image_exists(stem))
-            expression = stem;
-        else
-            expression = fallback_expr;
-        if (expression.empty()) return;
-        face_proxy.trigger_boop(expression, duration_s);
+            face_proxy.trigger_boop(stem, duration_s);
         // Touch feedback on the panels: an expanding ring at the booped zone
-        // (native renderer only; other backends no-op).
+        // (native renderer only; other backends no-op), plus the LED flash.
         fire_ripple();
-
-        // Accessory LED flash feedback (same per-zone mapping for both paths).
         flash_zone(z);
     };
     boop_sensor.on_boop(fire_boop);
@@ -5745,8 +5735,10 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(state.mtx);
             for (int i = 0; i < sensor::BoopSensor::ZoneCount; ++i) {
                 jzones[i]["enabled"]    = state.boop_zones[i].enabled;
-                jzones[i]["expression"] = state.boop_zones[i].expression;
                 jzones[i]["duration_s"] = state.boop_zones[i].duration_s;
+                // Zones no longer carry a default expression — reactions bind
+                // via Expression Triggers / dedicated art. Scrub the old key.
+                jzones[i].erase("expression");
                 jzones[i]["threshold"]  = state.boop_zones[i].threshold;
                 jzones[i]["electrode"]  = state.boop_zones[i].electrode;
                 auto& jr = jzones[i]["ripple"];

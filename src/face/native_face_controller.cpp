@@ -448,8 +448,23 @@ void NativeFaceController::render_thread() {
                 cv::Mat face_layer;
                 cv::Mat gframe = (!eye_active && pn.gif) ? pn.gif->get_frame() : cv::Mat();
                 if (eye_active) {
-                    // Procedural eye animation owns the whole panel.
-                    face_layer = render_eye_animation(eye_anim_, eye_anim_t_, pc.w, pc.h);
+                    // Procedural eye animation owns the whole panel. Mirror
+                    // mode draws a copy per half — left as rendered, right
+                    // horizontally flipped — so a single wide canvas reads as
+                    // a pair of eyes; cx/cy position within each half.
+                    if (eye_anim_.mirror && pc.w >= 2) {
+                        const int hw = pc.w / 2;
+                        cv::Mat half = render_eye_animation(eye_anim_, eye_anim_t_,
+                                                            hw, pc.h);
+                        face_layer = cv::Mat::zeros(pc.h, pc.w, CV_8UC4);
+                        half.copyTo(face_layer(cv::Rect(0, 0, hw, pc.h)));
+                        cv::Mat flipped;
+                        cv::flip(half, flipped, 1);
+                        flipped.copyTo(face_layer(cv::Rect(pc.w - hw, 0, hw, pc.h)));
+                    } else {
+                        face_layer = render_eye_animation(eye_anim_, eye_anim_t_,
+                                                          pc.w, pc.h);
+                    }
                 } else if (!gframe.empty()) {
                     if (!cfg_.output_panels.empty() &&
                         (gframe.cols != pc.w || gframe.rows != pc.h)) {
