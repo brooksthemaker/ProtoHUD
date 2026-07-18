@@ -16,7 +16,13 @@ enum class EyeAnim : int {
     Hearts,       // pulsing heart
     Swirl,        // dizzy swirl
     Starburst,    // rotating rays from centre
-    Glitch,       // random colour blocks
+    Glitch,       // random colour blocks (fills the panel)
+    XEyes,        // cartoon K.O. cross
+    Radar,        // rotating sweep with afterglow trail + range rings
+    Fire,         // rising flame flicker (fills the panel)
+    Rain,         // falling streaks (fills the panel)
+    Sparkle,      // twinkling star field (fills the panel)
+    Heartbeat,    // monitor-sweep ECG trace, redrawn left→right each pass
     Count
 };
 
@@ -28,6 +34,22 @@ struct EyeAnimParams {
     double  size       = 1.0;          // feature-scale multiplier
     uint8_t r = 0, g = 220, b = 180;   // primary colour (RGB)
     double  duration_s = 2.5;          // how long it plays before the face returns
+    // Centre of the animation on each panel, panel-normalised (0..1) — each
+    // panel draws its own copy, so eye-panel rigs shift both eyes together.
+    // Glitch fills the whole panel and ignores this.
+    double  cx = 0.5, cy = 0.5;
+    // Draw the animation once per HALF of the panel — a left copy and a
+    // horizontally-mirrored right copy, like a pair of eyes — instead of one
+    // instance across the whole panel. cx/cy then position within each half.
+    bool    mirror = false;
+    // Composite the animation over the live face (which keeps rendering —
+    // blinks, GIFs, effects and all) instead of taking over the panel.
+    bool    overlay = false;
+    // With overlay: black out the face's blink eye regions (config.json
+    // eye_left / eye_right) while the animation plays, so an eye-positioned
+    // animation replaces the eyes instead of glowing through them. Panels
+    // whose face defines no eye regions are left untouched.
+    bool    blackout_eyes = false;
 };
 
 } // namespace face

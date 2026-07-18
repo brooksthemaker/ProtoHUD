@@ -30,14 +30,15 @@ struct TriggerRecipe {
     // The counting event.
     enum class Event : uint8_t {
         None = 0,
-        Boop,           // boop_zone picks snout/left/right/both
+        Boop,           // boop_zone picks snout/cheeks/both/head/mouth
         Gesture,        // gesture picks up/down/left/right (APDS-9960 swipe)
         Shake,          // head-motion spike (ReactionEngine wake_dps)
         LightBright,    // ambient light rising past light_lux
         LightDark,      // ambient light falling past light_lux
     };
     Event       event = Event::None;
-    int         boop_zone = 0;          // 0 snout / 1 left / 2 right / 3 both
+    int         boop_zone = 0;          // sensor::BoopSensor::Zone value: 0 snout / 1 left /
+                                        // 2 right / 3 both / 4 head / 5 mouth top / 6 mouth bottom
     std::string gesture;                // "up" / "down" / "left" / "right"
     int         count    = 1;           // events within window_s to fire
     float       window_s = 3.0f;

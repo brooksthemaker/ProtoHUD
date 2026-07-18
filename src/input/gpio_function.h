@@ -12,6 +12,7 @@ namespace input {
 enum class GpioFunc : int {
     None = 0,
     BoopSnout, BoopLeft, BoopRight, BoopBoth,
+    BoopHead, BoopMouthTop, BoopMouthBottom,
     MenuOpen, MenuSelect, MenuBack,
     SystemRestart, SystemShutdown,
     CamAfLeft, CamAfRight,
@@ -44,6 +45,9 @@ inline const char* gpio_func_name(GpioFunc f) {
     case GpioFunc::BoopLeft:        return "Boop: Left Cheek";
     case GpioFunc::BoopRight:       return "Boop: Right Cheek";
     case GpioFunc::BoopBoth:        return "Boop: Both Cheeks";
+    case GpioFunc::BoopHead:        return "Boop: Top of Head";
+    case GpioFunc::BoopMouthTop:    return "Boop: Mouth Top";
+    case GpioFunc::BoopMouthBottom: return "Boop: Mouth Bottom";
     case GpioFunc::MenuOpen:        return "Menu: Open/Close";
     case GpioFunc::MenuSelect:      return "Menu: Select";
     case GpioFunc::MenuBack:        return "Menu: Back";
@@ -105,6 +109,9 @@ inline const char* gpio_func_id(GpioFunc f) {
     case GpioFunc::BoopLeft:        return "boop_left";
     case GpioFunc::BoopRight:       return "boop_right";
     case GpioFunc::BoopBoth:        return "boop_both";
+    case GpioFunc::BoopHead:        return "boop_head";
+    case GpioFunc::BoopMouthTop:    return "boop_mouth_top";
+    case GpioFunc::BoopMouthBottom: return "boop_mouth_bottom";
     case GpioFunc::MenuOpen:        return "menu_open";
     case GpioFunc::MenuSelect:      return "menu_select";
     case GpioFunc::MenuBack:        return "menu_back";

@@ -13,6 +13,8 @@
 //   Pi → coproc : "PONG"             (ack — ignored)
 //                 "CFG long_ms=<n>"  (push the short/long threshold)
 //                 "LED <id> <0|1>"   (drive a switch backlight, if wired)
+//                 "PINS"             (live per-pin readout — role + level/mV,
+//                                     "PIN <gp> <val> <roles>" per GP, PINS END)
 //
 // The firmware is "dumb about meaning": it reports button id + SHORT/LONG; the
 // Pi decides what each id does (remappable in the HUD config). Bytes from the
@@ -363,6 +365,75 @@ void adc_read() {
     }
 }
 
+// "PINS" — live readout of every GP the package exposes: its configured role(s)
+// and its current level, one "PIN <gp> <val> <roles>" line each, bracketed by
+// "PINS <ngpio> n=<buttons>" and "PINS END". ADC-role pins report millivolts
+// ("812mv"); everything else reports the input level (0/1). The dump only ever
+// READS: digitalRead touches no pin config, and the input buffer of unassigned
+// pins is enabled just for the read (then restored) so a jumper wiggled on a
+// free pin shows up without leaving floating inputs enabled (RP2350-E9).
+void pins_dump() {
+    Serial.print("PINS "); Serial.print((int)NUM_BANK0_GPIOS);
+    Serial.print(" n=");   Serial.println((int)g_npins);
+    analogReadResolution(12);
+    for (int gp = 0; gp < (int)NUM_BANK0_GPIOS; ++gp) {
+        String role;
+        auto add = [&role](const String& r) {
+            if (role.length()) role += '+';
+            role += r;
+        };
+        bool adc_role = false;
+        for (size_t i = 0; i < g_npins; ++i) {
+            if (g_pins[i].gp == gp)
+                add(String("btn") + i + (gp_claimed_by_servo(gp) ? "(servo)" : ""));
+            if (g_pins[i].led >= 0 && g_pins[i].led == gp) add(String("led") + i);
+        }
+        for (int ch = 0; ch < 4; ++ch)
+            if (g_servo_on[ch] && kServoPins[ch] == gp && !gp_claimed_by_servo(gp))
+                add(String("servo") + ch);
+        for (int i = 0; i < 6; ++i)
+            if (kTouchPins[i] == gp) add(String("touch") + i);
+        if (kLedZonePin == gp) add("ledz");
+        if (kLedZoneType == 1 && kLedZoneClkPin == gp) add("ledclk");
+        for (int ch = 0; ch < 3; ++ch)
+            if (kAdcPins[ch] == gp) { add(String("adc") + ch); adc_role = true; }
+#ifdef VOICE_CHANGER
+        if (kMicAdcPin == gp)      { add("mic"); adc_role = true; }
+        if (kI2sBclkPin == gp)       add("i2s_bclk");
+        if (kI2sBclkPin + 1 == gp)   add("i2s_ws");
+        if (kI2sDoutPin == gp)       add("i2s_din");
+        if (kDacSdaPin == gp)        add("dac_sda");
+        if (kDacSclPin == gp)        add("dac_scl");
+        if (kDacResetPin == gp)      add("dac_rst");
+#endif
+#ifdef MAX_BRIDGE
+        if (kMaxSpiSck == gp)        add("max_clk");
+        if (kMaxSpiTx == gp)         add("max_din");
+        for (size_t i = 0; i < kMaxCs; ++i)
+            if (kMaxCsPins[i] == gp) add(String("max_cs") + i);
+#endif
+#ifdef PERIPHERAL_HUB
+        if (kOneWirePin == gp)       add("1wire");
+        for (size_t i = 0; i < sizeof(kFanPins); ++i)
+            if (kFanPins[i] == gp)   add(String("fan") + i);
+#endif
+        const bool free_pin = !role.length();
+        if (free_pin) role = "free";
+
+        Serial.print("PIN "); Serial.print(gp); Serial.print(' ');
+        if (adc_role) {
+            const long mv = (long)analogRead((pin_size_t)gp) * 3300 / 4095;
+            Serial.print(mv); Serial.print("mv");
+        } else {
+            if (free_pin) gpio_set_input_enabled(gp, true);
+            Serial.print(digitalRead((pin_size_t)gp) == HIGH ? 1 : 0);
+            if (free_pin) gpio_set_input_enabled(gp, false);
+        }
+        Serial.print(' '); Serial.println(role);
+    }
+    Serial.println("PINS END");
+}
+
 // Seed the live map from config.h's compiled-in defaults.
 void load_default_pins() {
     g_npins = 0;
@@ -507,6 +578,7 @@ void handle_line(const String& line) {
     if (line.startsWith("LEDF "))   { ledf_line(line);  return; }
     if (line == "LEDSHOW")          { if (g_led_dirty) { led_show(); g_led_dirty = false; } return; }
     if (line == "ADCREAD")          { adc_read();       return; }
+    if (line == "PINS")             { pins_dump();      return; }
 #ifdef PERIPHERAL_HUB
     if (periph_handle_command(line)) return;  // FAN <zone> <duty%>
 #endif

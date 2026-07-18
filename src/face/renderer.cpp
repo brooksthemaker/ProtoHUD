@@ -64,7 +64,7 @@ cv::Mat composite(const cv::Mat& base_rgb, const std::vector<Layer>& layers) {
     base_rgb.convertTo(out, CV_32FC3);
 
     for (const Layer& L : layers) {
-        if (L.rgba.empty()) continue;
+        if (L.rgba.empty() || L.rgba.channels() < 3) continue;
 
         cv::split(L.rgba, ch);
 
@@ -72,7 +72,16 @@ cv::Mat composite(const cv::Mat& base_rgb, const std::vector<Layer>& layers) {
         cv::merge(rgbv, rgb);
         rgb.convertTo(rgbf, CV_32FC3);
 
-        ch[3].convertTo(af, CV_32F, 1.0 / 255.0);          // (h,w) 0..1
+        // A 3-channel layer has no alpha plane — and indexing ch[3] on its
+        // split would read a destroyed vector slot (cv::split shrinks ch),
+        // which reads back as an empty Mat and aborts in cv::merge below.
+        // Treat such layers as fully opaque instead of crashing the HUD.
+        if (L.rgba.channels() >= 4) {
+            ch[3].convertTo(af, CV_32F, 1.0 / 255.0);      // (h,w) 0..1
+        } else {
+            af.create(L.rgba.rows, L.rgba.cols, CV_32F);
+            af.setTo(1.0f);
+        }
         a3v.assign({af, af, af});
         cv::merge(a3v, a3);                                 // (h,w,3)
 

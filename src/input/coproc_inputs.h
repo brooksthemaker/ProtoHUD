@@ -148,6 +148,18 @@ public:
     void request_adc();
     std::string adc_result() const;
 
+    // ── Live pin readout ("PINS" dump) ───────────────────────────────────────
+    // request_pins() asks the firmware for a fresh dump of every GP: its
+    // role(s) as the FIRMWARE sees them ("btn0", "touch3+i2s_bclk", "free"…)
+    // and its live level ("0"/"1", ADC pins "812mv"). pins_snapshot() returns
+    // the last COMPLETE dump keyed by GP (empty until one arrives);
+    // pins_age_ms() its age, -1 before the first. Poll at a few Hz while a
+    // pin visualizer is open — the firmware answers each request once.
+    struct PinStat { std::string role, val; };
+    void request_pins();
+    std::map<int, PinStat> pins_snapshot() const;
+    int pins_age_ms() const;
+
 private:
     void reader_loop();                       // transport read + reconnect loop
     void on_line(const std::string& line);    // parse one framed message → dispatch
@@ -161,10 +173,20 @@ private:
     std::thread                   thread_;
     int                           fd_ = -1;   // serial or i2c fd
     bool                          pins_pushed_ = false;  // once per connection
+    bool                          pins_repushed_ = false;   // mismatch retry, once
+    int                           pushed_count_  = 0;    // BTN lines last pushed
     mutable std::mutex            i2c_mtx_;
     std::string                   i2c_result_ = "not scanned";  // last I2CSCAN reply
     mutable std::mutex            adc_mtx_;
     int                           adc_mv_[3] = { -1, -1, -1 };  // last ADC replies
+
+    // PINS dump state: lines accumulate in pinstat_accum_ until "PINS END"
+    // publishes them to pinstat_ (so readers never see a half dump).
+    mutable std::mutex            pins_mtx_;
+    std::map<int, PinStat>        pinstat_;
+    std::map<int, PinStat>        pinstat_accum_;
+    std::chrono::steady_clock::time_point pinstat_at_{};
+    bool                          pinstat_valid_ = false;
 
     // Peripheral hub state (see set_boop_handler / coproc_temp above).
     std::function<void(int, bool)> boop_fn_;

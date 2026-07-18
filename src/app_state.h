@@ -12,6 +12,7 @@
 #include <imgui.h>
 #include "capture.h"
 #include "face/custom_expression.h"
+#include "face/eye_anim.h"
 
 // ── Post-processing config ────────────────────────────────────────────────────
 // Modified from menu (any thread); read by the render thread via snap.
@@ -180,44 +181,19 @@ struct VoiceMouthConfig {
 // touches (no expression knowledge); main.cpp's on_boop callback reads this
 // to call IFaceController::trigger_boop with the per-zone expression. Indexed
 // in lockstep with sensor::BoopSensor::Zone (Snout=0, LeftCheek=1, RightCheek=2).
-// Rapid-trigger "animated eyes" easter egg for a boop zone: boop the same zone
-// `count` times within `window_s` and a procedural eye animation takes over the
-// panels for `duration_s` (played instead of the normal reaction, then the
-// counter resets). anim is a face::EyeAnim value; the other fields re-skin the
-// built-in animations. Stored as plain types to keep app_state.h dependency-free.
-struct EyeTriggerConfig {
-    bool    enabled    = false;
-    int     count      = 3;       // boops within the window to fire
-    double  window_s   = 4.0;     // consecutive boops must land this close together
-    int     anim       = 0;       // face::EyeAnim value
-    double  speed      = 1.0;
-    double  size       = 1.0;
-    double  duration_s = 2.5;     // how long the animation plays
-    uint8_t r = 0, g = 220, b = 180;   // primary colour
-};
-
 struct BoopZoneConfig {
     bool        enabled    = true;
-    std::string expression = "surprised";   // canonical face PNG name
-    double      duration_s = 0.8;           // how long the expression holds
+    double      duration_s = 0.8;           // hold for a dedicated-art fire
     uint8_t     threshold  = 12;            // MPR121 touch threshold (lower = more sensitive)
     int         electrode  = -1;            // MPR121 electrode 0..11 driving this zone (-1 = none/derived)
-    EyeTriggerConfig eye_trigger;           // optional rapid-boop animated-eyes reaction
-};
-
-// ── Light-sensor squint trigger ──────────────────────────────────────────────
-// Edge-detects the wearer stepping from a dim area into a bright one and
-// fires a transient expression (default "squint") for a few seconds before
-// reverting. The driver lives in sensor::LightSensor; main hosts the edge
-// detector and the menu mutates this struct.
-struct LightSquintConfig {
-    bool        enabled              = false;
-    float       dark_threshold_lux   = 100.f;   // below = "dark"
-    float       bright_threshold_lux = 800.f;   // above = "bright"
-    float       transition_window_s  = 2.0f;    // dark→bright must happen within this many seconds
-    std::string expression           = "squint";
-    double      duration_s           = 1.5;     // hold time before reverting
-    float       cooldown_s           = 3.0f;    // min time between consecutive squints
+    // Touch-feedback ripple ring: canvas-normalised centre (0..1 across the
+    // whole logical face canvas, so multi-panel faces share one ring), colour,
+    // and an expansion-speed multiplier (also scales the fade — a fast ring
+    // lives short). The BothCheeks zone ignores its own entry: it rings both
+    // cheeks at their configured spots.
+    double      ripple_x = 0.50, ripple_y = 0.55;
+    uint8_t     ripple_r = 235, ripple_g = 245, ripple_b = 255;
+    double      ripple_speed = 1.0;
 };
 
 struct NightVisionState {
@@ -1010,17 +986,27 @@ struct AppState {
     // Camera focus, night vision, resolution, and digital zoom
     CameraFocusState     focus_left, focus_right;
     NightVisionState     night_vision;
-    // Boop zones: [0]=Snout, [1]=LeftCheek, [2]=RightCheek. Sane defaults so
-    // a user with the sensor wired sees something sensible before they ever
-    // open the menu.
-    // [0]=Snout, [1]=LeftCheek, [2]=RightCheek, [3]=BothCheeks (derived).
-    // Threshold on the BothCheeks slot is unused (it doesn't probe an
-    // electrode directly) but kept in the schema for index parity.
-    BoopZoneConfig       boop_zones[4] = {
-        { true, "surprised", 0.8, 12,  0 },   // Snout      → electrode 0
-        { true, "happy",     0.6, 12,  1 },   // LeftCheek  → electrode 1
-        { true, "happy",     0.6, 12,  2 },   // RightCheek → electrode 2
-        { true, "surprised", 1.0, 12, -1 },   // BothCheeks → derived (no electrode)
+    // Boop zones, in lockstep with sensor::BoopSensor::Zone: [0]=Snout,
+    // [1]=LeftCheek, [2]=RightCheek, [3]=BothCheeks (derived), [4]=TopHead,
+    // [5]=MouthTop, [6]=MouthBottom. A zone has NO default expression — what
+    // a boop shows is bound in the Expressions menu (a Triggers recipe, or
+    // dedicated boop_<zone> art); unbound zones give ripple + LED feedback
+    // only. Threshold on the BothCheeks slot is unused (it doesn't probe an
+    // electrode directly) but kept in the schema for index parity. The
+    // head/mouth zones ship with electrode -1 (inert) so an unwired MPR121
+    // can't false-trigger them; assign an electrode in the menu when wired.
+    // Ripple centres default to where each zone's pad sits on a typical face:
+    // snout bottom-centre, cheeks at the outer thirds, head top-centre, the
+    // mouth rows between snout and cheek line. All editable per zone in the
+    // menu (BothCheeks' own centre is unused — it rings both cheeks).
+    BoopZoneConfig       boop_zones[7] = {
+        { true, 0.8, 12,  0, 0.50, 0.92 },   // Snout      → electrode 0
+        { true, 0.6, 12,  1, 0.15, 0.55 },   // LeftCheek  → electrode 1
+        { true, 0.6, 12,  2, 0.85, 0.55 },   // RightCheek → electrode 2
+        { true, 1.0, 12, -1, 0.50, 0.55 },   // BothCheeks → derived (no electrode)
+        { true, 0.8, 12, -1, 0.50, 0.08 },   // TopHead     → assign when wired
+        { true, 0.8, 12, -1, 0.50, 0.72 },   // MouthTop    → assign when wired
+        { true, 0.8, 12, -1, 0.50, 0.86 },   // MouthBottom → assign when wired
     };
     // Coalesce window (seconds) for combining near-simultaneous left + right
     // cheek touches into a single BothCheeks event. Mirror of the sensor's
@@ -1035,7 +1021,18 @@ struct AppState {
     // by ExpressionDirector; persisted as protoface.expression_triggers.
     // Guarded by mtx.
     std::map<std::string, face::TriggerSet> expression_triggers;
-    LightSquintConfig    light_squint;
+    // Per-animation params for the procedural Animated Eyes (edited in the
+    // Expressions menu). Slot index == face::EyeAnim value; each slot's
+    // Triggers live in expression_triggers under key "eyeanim_<index>".
+    // Persisted as protoface.eye_animations. Guarded by mtx.
+    face::EyeAnimParams  eye_anims[static_cast<int>(face::EyeAnim::Count)] = {
+        { face::EyeAnim::Spiral },    { face::EyeAnim::Rings },
+        { face::EyeAnim::Hearts },    { face::EyeAnim::Swirl },
+        { face::EyeAnim::Starburst }, { face::EyeAnim::Glitch },
+        { face::EyeAnim::XEyes },     { face::EyeAnim::Radar },
+        { face::EyeAnim::Fire },      { face::EyeAnim::Rain },
+        { face::EyeAnim::Sparkle },   { face::EyeAnim::Heartbeat },
+    };
     VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;        // left / primary eye

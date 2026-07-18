@@ -44,6 +44,12 @@ public:
     // panel and would only cover one eye on the wide canvas.
     void    set_whole_face_blink(bool b) { whole_face_blink_ = b; }
 
+    // Panel-sized CV_8U stencil of the blink eye regions — 255 inside
+    // eye_left / eye_right (polygon masks honoured, legacy rectangles
+    // filled). Empty when the face defines no eye regions. Used by the
+    // Animated Eyes overlay's blackout option.
+    const cv::Mat& eye_region_mask() const { return eye_mask_; }
+
 private:
     // A blink/mouth region. x,y,w,h is always the (panel-local) bounding box
     // used to clip the blend ROI. When `mask` is non-empty it is a panel-sized
@@ -89,6 +95,7 @@ private:
     // mouth_round). All optional — missing entries fall back to mouth_open.
     std::map<std::string, cv::Mat> mouth_shapes_;
     Region   eye_left_, eye_right_, mouth_;
+    cv::Mat  eye_mask_;         // union stencil of the eye regions (may be empty)
 };
 
 } // namespace face

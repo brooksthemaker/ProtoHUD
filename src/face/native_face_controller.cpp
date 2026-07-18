@@ -445,11 +445,34 @@ void NativeFaceController::render_thread() {
                 // disabled (MAX7219 / RGB matrix), we also skip the material
                 // and use the face PNG verbatim — the material's luminance-
                 // modulation washes RGB-matrix art to grey/teal otherwise.
+                // Overlay mode plays the animation on top of the live face;
+                // otherwise (replace mode) it owns the whole panel.
+                const bool eye_replace = eye_active && !eye_anim_.overlay;
+
+                // Render one animation frame at panel size. Mirror mode draws
+                // a copy per half — left as rendered, right horizontally
+                // flipped — so a single wide canvas reads as a pair of eyes;
+                // cx/cy position within each half.
+                auto render_anim_layer = [&]() -> cv::Mat {
+                    if (eye_anim_.mirror && pc.w >= 2) {
+                        const int hw = pc.w / 2;
+                        cv::Mat half = render_eye_animation(eye_anim_, eye_anim_t_,
+                                                            hw, pc.h);
+                        cv::Mat out = cv::Mat::zeros(pc.h, pc.w, CV_8UC4);
+                        half.copyTo(out(cv::Rect(0, 0, hw, pc.h)));
+                        cv::Mat flipped;
+                        cv::flip(half, flipped, 1);
+                        flipped.copyTo(out(cv::Rect(pc.w - hw, 0, hw, pc.h)));
+                        return out;
+                    }
+                    return render_eye_animation(eye_anim_, eye_anim_t_,
+                                                pc.w, pc.h);
+                };
+
                 cv::Mat face_layer;
-                cv::Mat gframe = (!eye_active && pn.gif) ? pn.gif->get_frame() : cv::Mat();
-                if (eye_active) {
-                    // Procedural eye animation owns the whole panel.
-                    face_layer = render_eye_animation(eye_anim_, eye_anim_t_, pc.w, pc.h);
+                cv::Mat gframe = (!eye_replace && pn.gif) ? pn.gif->get_frame() : cv::Mat();
+                if (eye_replace) {
+                    face_layer = render_anim_layer();
                 } else if (!gframe.empty()) {
                     if (!cfg_.output_panels.empty() &&
                         (gframe.cols != pc.w || gframe.rows != pc.h)) {
@@ -489,6 +512,39 @@ void NativeFaceController::render_thread() {
                     face_layer = apply_material(face_rgba, mat);
                 }
 
+                // Overlay mode: composite the animation over the live face,
+                // optionally blacking out the blink eye regions first so an
+                // eye-positioned animation replaces the eyes instead of
+                // glowing through them. Done before the inertia shift and
+                // face mirror so the animation tracks the face art.
+                if (eye_active && !eye_replace && !face_layer.empty()) {
+                    if (eye_anim_.blackout_eyes && pn.loader) {
+                        const cv::Mat& em = pn.loader->eye_region_mask();
+                        if (!em.empty() && em.size() == face_layer.size())
+                            face_layer.setTo(cv::Scalar(0, 0, 0, 255), em);
+                    }
+                    cv::Mat anim = render_anim_layer();
+                    if (anim.size() == face_layer.size()) {
+                        // Luminance-keyed "over": the animation's brightness is
+                        // its coverage, so lit pixels replace the face and its
+                        // black background leaves the face untouched.
+                        for (int yy = 0; yy < face_layer.rows; ++yy) {
+                            cv::Vec4b*       fr = face_layer.ptr<cv::Vec4b>(yy);
+                            const cv::Vec4b* an = anim.ptr<cv::Vec4b>(yy);
+                            for (int xx = 0; xx < face_layer.cols; ++xx) {
+                                const int a = std::max({ an[xx][0], an[xx][1],
+                                                         an[xx][2] });
+                                if (a == 0) continue;
+                                for (int c = 0; c < 3; ++c)
+                                    fr[xx][c] = cv::saturate_cast<uchar>(
+                                        an[xx][c] + fr[xx][c] * (255 - a) / 255);
+                                fr[xx][3] = std::max<uchar>(fr[xx][3],
+                                                            static_cast<uchar>(a));
+                            }
+                        }
+                    }
+                }
+
                 // Face Inertia: slide the whole face layer by the sprung
                 // offset (exposed border fills transparent, so the background
                 // shows through). Applied before the mirror flip so mirrored
@@ -507,12 +563,14 @@ void NativeFaceController::render_thread() {
                     cv::flip(face_layer, face_layer, 1);
 
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
-                // Effects are suppressed while a GIF or eye animation plays —
-                // the clip owns the whole panel — and resume automatically when
-                // it ends and the face animation returns. (The sim keeps running
-                // so the field is already settled when it reappears.)
+                // Effects are suppressed while a GIF or a panel-owning eye
+                // animation plays — the clip owns the whole panel — and resume
+                // automatically when it ends and the face returns. An overlay
+                // animation rides on the live face, so effects keep running
+                // under it. (The sim keeps running while suppressed so the
+                // field is already settled when it reappears.)
                 ParticleFrame pf;
-                if (pn.particles && gframe.empty() && !eye_active) {
+                if (pn.particles && gframe.empty() && !eye_replace) {
                     pf = pn.particles->render();
                     // Freeze-over: frost recolours the face toward its rim
                     // blue in the field's gradient before the crystal layer
@@ -1317,21 +1375,16 @@ void NativeFaceController::set_ambient_effect(const nlohmann::json& spec) {
     apply_expression_style_locked(current_expression_);
 }
 
-void NativeFaceController::trigger_boop_ripple(int zone) {
-    // Zone → canvas-normalised centre: the snout sits at bottom-centre of the
-    // face, cheeks at the outer thirds. Multi-panel faces share one ring via
-    // the canvas-space centre.
-    struct Pt { double x, y; };
-    static constexpr Pt kZone[3] = { {0.50, 0.92},    // snout
-                                     {0.15, 0.55},    // left cheek
-                                     {0.85, 0.55} };  // right cheek
+void NativeFaceController::trigger_boop_ripple(double cx, double cy,
+                                               uint8_t r, uint8_t g, uint8_t b,
+                                               double speed) {
+    // Centre arrives canvas-normalised, so multi-panel faces share one ring.
+    // Zone → position/colour/speed is the caller's job (BoopZoneConfig) —
+    // BothCheeks arrives as two calls, one per cheek.
     std::lock_guard<std::mutex> lk(state_mtx_);
-    auto fire = [&](const Pt& p) {
-        for (auto& pn : panels_)
-            if (!pn.is_mirror && pn.particles) pn.particles->trigger_ripple(p.x, p.y);
-    };
-    if (zone >= 0 && zone <= 2) fire(kZone[zone]);
-    else if (zone == 3) { fire(kZone[1]); fire(kZone[2]); }   // both cheeks
+    for (auto& pn : panels_)
+        if (!pn.is_mirror && pn.particles)
+            pn.particles->trigger_ripple(cx, cy, r, g, b, speed);
 }
 
 void NativeFaceController::trigger_boop(const std::string& expression, double duration_s) {
@@ -1342,17 +1395,17 @@ void NativeFaceController::trigger_boop(const std::string& expression, double du
     // in FaceState::update will bring expression back without our help.
 }
 
-void NativeFaceController::play_eye_animation(int type, double speed, double size,
-                                              uint8_t r, uint8_t g, uint8_t b,
-                                              double duration_s) {
+void NativeFaceController::play_eye_animation(const EyeAnimParams& p) {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    const int n = std::clamp(type, 0, static_cast<int>(EyeAnim::Count) - 1);
-    eye_anim_.type       = static_cast<EyeAnim>(n);
-    eye_anim_.speed      = (speed > 0.0) ? speed : 1.0;
-    eye_anim_.size       = (size  > 0.0) ? size  : 1.0;
-    eye_anim_.r = r; eye_anim_.g = g; eye_anim_.b = b;
-    eye_anim_.duration_s = duration_s;
-    eye_anim_timer_ = (duration_s > 0.0) ? duration_s : 0.0;
+    eye_anim_ = p;
+    const int n = std::clamp(static_cast<int>(p.type), 0,
+                             static_cast<int>(EyeAnim::Count) - 1);
+    eye_anim_.type = static_cast<EyeAnim>(n);
+    if (eye_anim_.speed <= 0.0) eye_anim_.speed = 1.0;
+    if (eye_anim_.size  <= 0.0) eye_anim_.size  = 1.0;
+    eye_anim_.cx = std::clamp(eye_anim_.cx, 0.0, 1.0);
+    eye_anim_.cy = std::clamp(eye_anim_.cy, 0.0, 1.0);
+    eye_anim_timer_ = (p.duration_s > 0.0) ? p.duration_s : 0.0;
     eye_anim_t_     = 0.0;
     // Transient by design — no save_state_locked().
 }

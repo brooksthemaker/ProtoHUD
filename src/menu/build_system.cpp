@@ -30,6 +30,7 @@
 #include <qrcodegen.hpp>
 
 #include "app_state.h"
+#include "sensor/boop_sensor.h"
 #include "android/android_mirror.h"
 #include "camera/camera_manager.h"
 #include "camera/viture_camera.h"
@@ -253,8 +254,9 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
         if (ctx.coproc_adc_read) {
             pt.push_back(with_desc(leaf("Read ADC Now",
                 [rd = ctx.coproc_adc_read]{ if (rd) rd(); }),
-                "One-shot reading of the three test ADC inputs "
-                "(GP26/27/28 = ch0-2, 0-3300 mV)."));
+                "One-shot reading of the three test ADC inputs, 0-3300 mV. "
+                "ch0-2 = GP26-28 on RP2350A boards, GP40-42 on RP2350B "
+                "(the ADC block moves with the package)."));
             MenuItem ar = leaf("ADC", []{});
             ar.label_fn = [get = ctx.coproc_adc_result]{
                 return std::string("ADC: ") + (get ? get() : std::string("n/a"));
@@ -265,9 +267,10 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
         out.push_back(with_desc(submenu("Peripheral Test", std::move(pt)),
             "Exercise the pre-assigned test pins for the planned peripherals: "
             "4 servo channels (GP6-9), a WS2812 LED zone (GP22) and 3 ADC "
-            "inputs (GP26-28). TTP223 touch pads (GP0/1/12/16/17/18) test "
-            "themselves \xe2\x80\x94 touching one fires its boop zone / "
-            "mapped function. See docs/wiring-guide.md."));
+            "inputs (GP26-28 on RP2350A, GP40-42 on RP2350B). TTP223 touch "
+            "pads (GP0/1/12/16/17/18) test themselves \xe2\x80\x94 touching "
+            "one fires its boop zone / mapped function. See "
+            "docs/wiring-guide.md."));
     }
 
     if (!ctx.coproc_cfg_p) return out;    // the Pins editor needs the live config
@@ -491,13 +494,124 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
     // board-reserved brown, power/ground per the shared header palette.
     MenuItem pins_item = submenu("Pins", std::move(pins_menu));
     pins_item.context_panel_title = "Coprocessor Pins";
-    pins_item.context_panel_draw = [role_of, variant](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+    pins_item.context_panel_draw = [role_of, variant, C, st = ctx.state,
+                                    poll = ctx.coproc_pins_poll,
+                                    get  = ctx.coproc_pins_get,
+                                    age  = ctx.coproc_pins_age,
+                                    last_poll = std::make_shared<double>(0.0)](
+                                       ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+        // Live readout: while this panel is on screen, ask the firmware for a
+        // PINS dump a few times a second and overlay each pin's level (or mV)
+        // on the diagram. Drawing is the poll's lifecycle — leave the panel and
+        // the polling stops with it.
+        const double now_s = ImGui::GetTime();
+        if (poll && now_s - *last_poll > 0.35) { *last_poll = now_s; poll(); }
+        const auto live = get ? get()
+            : std::map<int, std::pair<std::string, std::string>>{};
+        const int age_ms = age ? age() : -1;
+
+        // Boop zone electrodes, snapshotted once per frame (not per row) so
+        // the touch-pad labels below can say which zone a pad drives.
+        constexpr int kNZones = sensor::BoopSensor::ZoneCount;
+        static const char* kZoneNames[kNZones] = {
+            "Snout", "Left Cheek", "Right Cheek", "Both Cheeks",
+            "Top of Head", "Mouth Top", "Mouth Bottom" };
+        int zone_electrode[kNZones];
+        for (auto& e : zone_electrode) e = -1;
+        if (st) {
+            std::lock_guard<std::mutex> lk(st->mtx);
+            for (int z = 0; z < kNZones; ++z)
+                zone_electrode[z] = st->boop_zones[z].electrode;
+        }
+        // The firmware reports its TTP223 pads as "touch<pad>" roles; a pad's
+        // index doubles as the electrode number in the boop-zone map, so when
+        // a zone claims it we can label the pin in user language ("Boop Top
+        // of Head") instead of firmware shorthand.
+        auto boop_label = [&zone_electrode](const std::string& fw_role,
+                                            std::string& out) {
+            const size_t tp = fw_role.find("touch");
+            if (tp == std::string::npos ||
+                tp + 5 >= fw_role.size() ||
+                !std::isdigit(static_cast<unsigned char>(fw_role[tp + 5])))
+                return false;
+            const int pad = fw_role[tp + 5] - '0';
+            for (int z = 0; z < kNZones; ++z) {
+                if (z == static_cast<int>(sensor::BoopSensor::Zone::BothCheeks))
+                    continue;
+                if (zone_electrode[z] == pad) {
+                    out = std::string("Boop ") + kZoneNames[z] +
+                          " (touch" + std::to_string(pad) + ")";
+                    return true;
+                }
+            }
+            out = "touch" + std::to_string(pad) + " (no zone)";
+            return true;
+        };
+
+        // A pin is "active" when its live level means something is happening:
+        // a configured button at its pressed level, or a touch pad reading
+        // touched (firmware TTP223 default = active-high).
+        auto live_active = [&live, C](int gp) {
+            const auto it = live.find(gp);
+            if (it == live.end()) return false;
+            const std::string& val = it->second.second;
+            for (const auto& p : C->pins)
+                if (p.gp == gp) return val == (p.active_low ? "0" : "1");
+            if (it->second.first.rfind("touch", 0) == 0) return val == "1";
+            return false;
+        };
+
         const sys::PicoVariant pv = variant();
         ImFont* font = ImGui::GetFont();
         const float fs = ImGui::GetFontSize();
         dl->AddText(font, fs * 1.05f, {o.x, o.y},
                     IM_COL32(230, 235, 240, 255), sys::pico_variant_name(pv));
+        {   // Readout freshness, top-right: green = live, amber = stale,
+            // dim = never seen one (link down or pre-1.4.0 firmware).
+            const char* txt; ImU32 col;
+            if      (age_ms < 0)    { txt = "no readout"; col = IM_COL32(120, 125, 135, 255); }
+            else if (age_ms < 1500) { txt = "\xe2\x97\x8f live";  col = IM_COL32(90, 190, 110, 255); }
+            else                    { txt = "\xe2\x97\x8b stale"; col = IM_COL32(220, 170, 60, 255); }
+            const ImVec2 ts = font->CalcTextSizeA(fs * 0.8f, 1e9f, 0.f, txt);
+            dl->AddText(font, fs * 0.8f, {o.x + sz.x - ts.x - 4.f, o.y}, col, txt);
+        }
         const float top = o.y + fs * 1.7f;
+
+        // One row: role cell + label, with the live overlay — the value text
+        // ("1", "0", "812mv") after the role, the firmware's own role name for
+        // pins the host map can't know (i2s/fan/1wire/…), and a bright border
+        // while the pin is active (button pressed / pad touched).
+        auto draw_pin = [&](int gp, float x, float y, float rh, float tfs,
+                            const char* label, const std::string& host_role,
+                            ImU32 col) {
+            std::string txt = label;
+            std::string role = host_role;
+            const auto it = live.find(gp);
+            if (it != live.end()) {
+                if (role.rfind("free", 0) == 0 && it->second.first != "free")
+                    role = it->second.first;          // firmware knows better
+                // Boop pads get their zone name and a violet tint — these are
+                // the pins a user wires touch pads to, so speak zone language.
+                std::string bl;
+                if (boop_label(it->second.first, bl)) {
+                    role = (host_role.rfind("free", 0) == 0)
+                         ? bl : host_role + " \xc2\xb7 " + bl;
+                    col  = bl.rfind("Boop ", 0) == 0
+                         ? IM_COL32(150, 110, 230, 255)     // zone-mapped pad
+                         : IM_COL32(110, 90, 160, 255);     // pad without a zone
+                }
+                txt += "  " + role + " = " + it->second.second;
+            } else if (!role.empty()) {
+                txt += "  " + role;
+            }
+            dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, col, 2.f);
+            if (live_active(gp))
+                dl->AddRect({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f},
+                            IM_COL32(255, 255, 255, 220), 2.f, 0, 1.5f);
+            dl->AddText(font, tfs, {x + rh + 2.f, y + (rh - tfs) * 0.5f},
+                        IM_COL32(215, 220, 226, 255), txt.c_str());
+        };
+
         if (pv == sys::PicoVariant::Rp2350a) {
             // Physical Pico 2 header: 2 columns × 20 pins (1-20 down the left,
             // 40-21 down the right, matching the board held USB-up).
@@ -505,13 +619,16 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
             const float rh = std::max(9.f, (o.y + sz.y - top - 4.f) / rows);
             const float colw = (sz.x - 8.f) * 0.5f;
             auto cell = [&](const sys::PicoPin& p, float x, float y) {
-                ImU32 col; std::string txt;
-                if (p.gp < 0) { col = sys::pin_kind_color(p.kind); txt = p.label; }
-                else { auto r = role_of(p.gp);
-                       col = r.second; txt = std::string(p.label) + "  " + r.first; }
-                dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, col, 2.f);
-                dl->AddText(font, fs * 0.68f, {x + rh + 2.f, y + (rh - fs * 0.68f) * 0.5f},
-                            IM_COL32(215, 220, 226, 255), txt.c_str());
+                if (p.gp < 0) {
+                    dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f},
+                                      sys::pin_kind_color(p.kind), 2.f);
+                    dl->AddText(font, fs * 0.68f,
+                                {x + rh + 2.f, y + (rh - fs * 0.68f) * 0.5f},
+                                IM_COL32(215, 220, 226, 255), p.label);
+                    return;
+                }
+                auto r = role_of(p.gp);
+                draw_pin(p.gp, x, y, rh, fs * 0.68f, p.label, r.first, r.second);
             };
             for (int r = 0; r < rows; ++r) {
                 cell(sys::kPico2Pins[r],      o.x + 4.f,        top + r * rh);
@@ -529,10 +646,8 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
                 const float x = o.x + 4.f + (gp / per_col) * colw;
                 const float y = top + (gp % per_col) * rh;
                 auto r = role_of(gp);
-                char lbl[64]; std::snprintf(lbl, sizeof lbl, "GP%d %s", gp, r.first.c_str());
-                dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, r.second, 2.f);
-                dl->AddText(font, fs * 0.6f, {x + rh, y + (rh - fs * 0.6f) * 0.5f},
-                            IM_COL32(215, 220, 226, 255), lbl);
+                char lbl[16]; std::snprintf(lbl, sizeof lbl, "GP%d", gp);
+                draw_pin(gp, x, y, rh, fs * 0.6f, lbl, r.first, r.second);
             }
         }
     };

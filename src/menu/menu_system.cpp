@@ -94,9 +94,14 @@ static void draw_glow_text(ImDrawList* dl, ImVec2 pos, const char* text,
 }
 
 static void format_slider_value(char* buf, size_t bufsz,
-                                float val, float min, float max,
-                                const std::string& unit)
+                                float val, const SliderConfig& cfg)
 {
+    if (cfg.format) {
+        std::snprintf(buf, bufsz, "%s", cfg.format(val).c_str());
+        return;
+    }
+    const float min = cfg.min, max = cfg.max;
+    const std::string& unit = cfg.unit;
     if (unit == "%") {
         // "percentage of max" scaling: face brightness 0-255 → 0%-100%
         float pct = (max > min) ? (val - min) / (max - min) * 100.f : 0.f;
@@ -110,7 +115,6 @@ static void format_slider_value(char* buf, size_t bufsz,
     } else {
         std::snprintf(buf, bufsz, "%.0f", val);
     }
-    (void)min;
 }
 
 MenuSystem::MenuSystem(std::vector<MenuItem> root)
@@ -913,8 +917,7 @@ void MenuSystem::draw(int screen_w, int screen_h) {
                 ? std::clamp((val - item.slider.min) / range, 0.f, 1.f) : 0.f;
 
             char val_str[32];
-            format_slider_value(val_str, sizeof(val_str),
-                                val, item.slider.min, item.slider.max, item.slider.unit);
+            format_slider_value(val_str, sizeof(val_str), val, item.slider);
 
             draw_item_text({rmin.x + 4.f, ty}, to_upper(item_label(item)).c_str(), selected);
 
@@ -1378,7 +1381,7 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             case MenuItemType::SLIDER: {
                 char b[32];
                 float v = it.slider.get_value ? it.slider.get_value() : it.slider.min;
-                format_slider_value(b, sizeof(b), v, it.slider.min, it.slider.max, it.slider.unit);
+                format_slider_value(b, sizeof(b), v, it.slider);
                 return b;
             }
             case MenuItemType::FACE_PICKER: {
@@ -1518,7 +1521,7 @@ void MenuSystem::draw_fullscreen(int screen_w, int screen_h) {
             float bw = rx1 - rx0, bh = 12.f;
             dl->AddRectFilled({ rx0, by }, { rx0 + bw, by + bh }, menu_with_alpha(accent_color_, 55), 3.f);
             dl->AddRectFilled({ rx0, by }, { rx0 + bw * fill, by + bh }, menu_with_alpha(accent_color_, 230), 3.f);
-            char vb[32]; format_slider_value(vb, sizeof(vb), edit_float_, sel.slider.min, sel.slider.max, sel.slider.unit);
+            char vb[32]; format_slider_value(vb, sizeof(vb), edit_float_, sel.slider);
             ImVec2 vsz = font->CalcTextSizeA(fs * 1.1f, FLT_MAX, 0.f, vb);
             dl->AddText(font, fs * 1.1f, { rx1 - vsz.x, by - fs * 1.1f - 2.f },
                         IM_COL32(255, 255, 255, 255), vb);
@@ -1839,7 +1842,7 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
             case MenuItemType::SLIDER: {
                 char b[32];
                 float v = it.slider.get_value ? it.slider.get_value() : it.slider.min;
-                format_slider_value(b, sizeof(b), v, it.slider.min, it.slider.max, it.slider.unit);
+                format_slider_value(b, sizeof(b), v, it.slider);
                 return b;
             }
             default: return std::string();
@@ -1949,8 +1952,7 @@ void MenuSystem::draw_radial(float cx, float cy, float inner_r,
                     const float range = it.slider.max - it.slider.min;
                     frac = (range > 0.f)
                         ? std::clamp((edit_float_ - it.slider.min) / range, 0.f, 1.f) : 0.f;
-                    format_slider_value(vbuf, sizeof(vbuf), edit_float_,
-                                        it.slider.min, it.slider.max, it.slider.unit);
+                    format_slider_value(vbuf, sizeof(vbuf), edit_float_, it.slider);
                 } else {
                     const int n = std::max(1, it.face_picker.face_count);
                     frac = (n > 1) ? static_cast<float>((int)edit_float_) / (n - 1) : 0.f;

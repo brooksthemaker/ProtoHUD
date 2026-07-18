@@ -65,9 +65,11 @@ public:
     void set_motion_reactive(bool on);
     // One-shot expanding ring (boop feedback), centred at canvas-normalised
     // coordinates so a multi-panel face stays continuous. Drawn over the
-    // running effect (or on an empty layer when no effect is active).
+    // running effect (or on an empty layer when no effect is active). speed
+    // multiplies both expansion and fade, so a fast ring also lives short.
     void trigger_ripple(double cx_norm, double cy_norm,
-                        uint8_t r = 235, uint8_t g = 245, uint8_t b = 255);
+                        uint8_t r = 235, uint8_t g = 245, uint8_t b = 255,
+                        double speed = 1.0);
     // Where this panel sits in the full logical canvas, so canvas-space effects
     // (e.g. water) render one continuous field across a multi-panel face. Local
     // pixel (lx,ly) maps to canvas (off_x+lx, off_y+ly). Defaults to per-panel.
