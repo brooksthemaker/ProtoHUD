@@ -1536,6 +1536,87 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     // is the same recipe editor every expression has, keyed eyeanim_<i> in
     // expression_triggers — so "Boop: Snout ×3 → Hearts" is just a recipe.
     {
+        // Live animation preview for the context panel. Shows the highlighted
+        // (list level) or edited (editor level) slot's animation, looping,
+        // with its live params — slider edits apply on the next frame. One
+        // shared texture: only one context panel is ever open.
+        struct EyeAnimPreview { GLuint tex = 0; double t = 0.0; int slot = 0; };
+        auto eye_preview = std::make_shared<EyeAnimPreview>();
+        MenuContextPanelDraw draw_eye_anim_preview =
+            [eye_preview, &state](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                EyeAnimPreview& ap = *eye_preview;
+                ap.t += ImGui::GetIO().DeltaTime;
+                const int a = std::clamp(ap.slot, 0, face::eye_anim_count() - 1);
+                face::EyeAnimParams p;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    p = state.eye_anims[a];
+                }
+                p.type = static_cast<face::EyeAnim>(a);
+
+                // 2:1 panel-pair canvas, honouring Mirror like the face
+                // controller: one copy per half, right half flipped.
+                const int W = 128, H = 64;
+                cv::Mat frame;
+                if (p.mirror) {
+                    cv::Mat half = face::render_eye_animation(p, ap.t, W / 2, H);
+                    frame = cv::Mat::zeros(H, W, CV_8UC4);
+                    half.copyTo(frame(cv::Rect(0, 0, W / 2, H)));
+                    cv::Mat flipped;
+                    cv::flip(half, flipped, 1);
+                    flipped.copyTo(frame(cv::Rect(W / 2, 0, W / 2, H)));
+                } else {
+                    frame = face::render_eye_animation(p, ap.t, W, H);
+                }
+
+                const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
+                const float ph = pw * 0.5f;
+                const float px = o.x + (sz.x - pw) * 0.5f;
+                const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
+                dl->AddRectFilled({px, py}, {px + pw, py + ph},
+                                  IM_COL32(10, 16, 22, 190));
+                if (frame.isContinuous()) {
+                    if (ap.tex == 0) {
+                        glGenTextures(1, &ap.tex);
+                        glBindTexture(GL_TEXTURE_2D, ap.tex);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    }
+                    glBindTexture(GL_TEXTURE_2D, ap.tex);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame.cols, frame.rows,
+                                 0, GL_RGBA, GL_UNSIGNED_BYTE, frame.data);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    dl->AddImage(
+                        reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(ap.tex)),
+                        {px, py}, {px + pw, py + ph});
+                }
+                const char* nm = face::eye_anim_name(static_cast<face::EyeAnim>(a));
+                const ImVec2 ns = ImGui::CalcTextSize(nm);
+                dl->AddText({o.x + sz.x * 0.5f - ns.x * 0.5f, o.y + sz.y - ns.y},
+                            IM_COL32(220, 230, 235, 230), nm);
+            };
+
+        // Position slider whose value reads as direction-from-centre
+        // ("12% Left" / "Centred" / "12% Right") instead of a raw percent.
+        // Storage stays 0-100 with 50 = centred.
+        auto dir_slider = [](const char* lbl, const char* neg, const char* pos,
+                             std::function<float()>     get,
+                             std::function<void(float)> set) {
+            MenuItem m = slider(lbl, 0.f, 100.f, 1.f, "%",
+                                std::move(get), std::move(set));
+            m.slider.format = [neg, pos](float v) -> std::string {
+                const int off = static_cast<int>(std::lround(v)) - 50;
+                if (off == 0) return "Centred";
+                char b[24];
+                std::snprintf(b, sizeof(b), "%d%% %s",
+                              std::abs(off), off < 0 ? neg : pos);
+                return b;
+            };
+            return m;
+        };
+
         std::vector<MenuItem> eye_slot_rows;
         for (int a = 0; a < face::eye_anim_count(); ++a) {
             auto eget = [&state, a]() -> face::EyeAnimParams {
@@ -1559,18 +1640,20 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [eget]{ return static_cast<float>(eget().duration_s); },
                     [emod](float v){ emod([v](face::EyeAnimParams& p){
                         p.duration_s = static_cast<double>(v); }); }),
-                with_desc(slider("Position X", 0.f, 100.f, 1.f, "%",
+                with_desc(dir_slider("Position X", "Left", "Right",
                     [eget]{ return static_cast<float>(eget().cx * 100.0); },
                     [emod](float v){ emod([v](face::EyeAnimParams& p){
                         p.cx = static_cast<double>(v) / 100.0; }); }),
-                    "Animation centre across each panel; 50% = centred. "
-                    "Eye-panel rigs shift both eyes together. Glitch, Fire, "
-                    "Rain, and Sparkle always fill the panel."),
-                with_desc(slider("Position Y", 0.f, 100.f, 1.f, "%",
+                    "Animation centre across each panel, as distance left or "
+                    "right of centre. Eye-panel rigs shift both eyes "
+                    "together. Glitch, Fire, Rain, and Sparkle always fill "
+                    "the panel."),
+                with_desc(dir_slider("Position Y", "Up", "Down",
                     [eget]{ return static_cast<float>(eget().cy * 100.0); },
                     [emod](float v){ emod([v](face::EyeAnimParams& p){
                         p.cy = static_cast<double>(v) / 100.0; }); }),
-                    "Animation centre down each panel; 50% = centred."),
+                    "Animation centre down each panel, as distance above or "
+                    "below centre."),
                 with_desc(toggle("Mirror",
                     [eget]{ return eget().mirror; },
                     [emod](bool v){ emod([v](face::EyeAnimParams& p){
@@ -1611,12 +1694,26 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         teensy->play_eye_animation(p);
                     }),
             };
-            eye_slot_rows.push_back(
+            // Editor level: pin the preview to this slot. The list level's
+            // shared panel follows the highlight (on_highlight below), so
+            // by the time this submenu opens the slot already matches — the
+            // pin just makes it robust to entering without a cursor move.
+            MenuItem slot_menu = with_panel(
                 submenu(face::eye_anim_name(static_cast<face::EyeAnim>(a)),
-                        std::move(rows)));
+                        std::move(rows)),
+                "Animation Preview",
+                [eye_preview, draw_eye_anim_preview, a](
+                    ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                    eye_preview->slot = a;
+                    draw_eye_anim_preview(dl, o, sz);
+                });
+            slot_menu.on_highlight = [eye_preview, a]{ eye_preview->slot = a; };
+            eye_slot_rows.push_back(std::move(slot_menu));
         }
         face_files_menu.push_back(
-            with_desc(submenu("Animated Eyes", std::move(eye_slot_rows)),
+            with_desc(with_panel(submenu("Animated Eyes",
+                                         std::move(eye_slot_rows)),
+                                 "Animation Preview", draw_eye_anim_preview),
                       "Procedural eye takeovers as trigger targets. Give an "
                       "animation a Trigger (boop ×N, swipe, shake, light) "
                       "and it plays for its Duration when the recipe fires, "

@@ -36,6 +36,10 @@ struct SliderConfig {
     //   "%"    → scaled %     e.g. "75%"   (value/max * 100, for 0–255 raw)
     //   " EV"  → EV suffix    e.g. "+1.0 EV"
     std::string unit;
+    // Optional custom value renderer — when set, its return value is shown
+    // instead of the unit-based formatting (e.g. "12% Left" / "Centred" for
+    // a direction-from-centre position slider).
+    std::function<std::string(float)> format;
     std::function<float()>     get_value;
     std::function<void(float)> set_value;
 };
