@@ -178,15 +178,18 @@ static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
             }
             case EyeAnim::Heartbeat: {
                 // Scrolling ECG trace on the cy baseline: P wave, QRS spike,
-                // T wave as gaussian bumps along the scroll phase.
+                // T wave as gaussian bumps along the scroll phase. ~2.5
+                // complexes fit across the panel at Size 1.0; Size trades
+                // amplitude against density (smaller = more, smaller beats).
+                const double beats = std::clamp(2.5 / sz, 1.0, 8.0);
                 auto bump = [](double uu, double c, double wd, double amp) {
                     const double d = (uu - c) / wd;
                     return amp * std::exp(-d * d * 4.0);
                 };
                 auto wave = [&](int px) {
-                    const double u = std::fmod(
-                        px / static_cast<double>(std::max(1, w)) -
-                        t * 0.55 * sp + 16.0, 1.0);
+                    const double ph = px * beats / std::max(1, w)
+                                      - t * 0.55 * sp;
+                    const double u  = ph - std::floor(ph);   // wrap-safe ∀ t
                     return bump(u, 0.18, 0.030, 0.18)             // P
                          - bump(u, 0.28, 0.014, 0.16)             // Q
                          + bump(u, 0.31, 0.016, 0.95)             // R
@@ -200,8 +203,11 @@ static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
                 const double ty1 = cy - wave(x + 1) * scale * 0.9 * sz;
                 const double lo  = std::min(ty0, ty1);
                 const double hi  = std::max(ty0, ty1);
+                // Floor the half-thickness at ~a pixel so the trace can't
+                // fall between pixel rows and vanish at small sizes.
+                const double thick = std::max(0.8, scale * 0.06 * sz);
                 const double d   = (y < lo ? lo - y : y > hi ? y - hi : 0.0)
-                                   / (scale * 0.06 * sz);
+                                   / thick;
                 inten = clamp01(1.0 - d);
                 break;
             }

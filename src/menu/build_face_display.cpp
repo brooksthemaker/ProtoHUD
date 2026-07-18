@@ -1632,10 +1632,13 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [eget]{ return static_cast<float>(eget().speed); },
                     [emod](float v){ emod([v](face::EyeAnimParams& p){
                         p.speed = static_cast<double>(v); }); }),
-                slider("Size", 0.4f, 2.5f, 0.1f, "x",
+                with_desc(slider("Size", 0.4f, 2.5f, 0.1f, "x",
                     [eget]{ return static_cast<float>(eget().size); },
                     [emod](float v){ emod([v](face::EyeAnimParams& p){
                         p.size = static_cast<double>(v); }); }),
+                    "Feature scale of the animation. Heartbeat also fits "
+                    "more (smaller) beats across the panel as size shrinks, "
+                    "fewer (bigger) as it grows."),
                 slider("Duration", 1.f, 8.f, 0.5f, " s",
                     [eget]{ return static_cast<float>(eget().duration_s); },
                     [emod](float v){ emod([v](face::EyeAnimParams& p){
