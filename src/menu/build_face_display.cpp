@@ -4195,20 +4195,41 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     auto boop_zone_menu = [&, teensy, boop_sensor_pp](int idx, std::string label) -> MenuItem {
         const auto zone_enum = static_cast<sensor::BoopSensor::Zone>(idx);
 
-        std::vector<MenuItem> expr_items;
-        for (int ei = 0; ei < kFaceSlotCount; ++ei) {
-            const std::string expr     = kFaceSlots[ei].expression;
-            const std::string ex_label = kFaceSlots[ei].label;
-            expr_items.push_back(leaf_sel(ex_label,
-                [&state, idx, expr]{
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    state.boop_zones[idx].expression = expr;
-                },
-                [&state, idx, expr]{
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    return state.boop_zones[idx].expression == expr;
-                }));
-        }
+        // What a single boop on this zone resolves to, mirroring fire_boop's
+        // precedence: a count-1 trigger recipe on any expression → this zone's
+        // dedicated boop art → the built-in default expression. Returns
+        // {display text, expression stem to fire}. The zone's face is BOUND in
+        // Expressions → [face] → Triggers; this menu only shows the result.
+        auto resolve_reaction = [&state, teensy, idx]()
+                -> std::pair<std::string, std::string> {
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                auto claims = [&](const std::string& key) {
+                    const auto it = state.expression_triggers.find(key);
+                    if (it == state.expression_triggers.end()) return false;
+                    for (const auto& r : it->second.recipes)
+                        if (r.event == face::TriggerRecipe::Event::Boop &&
+                            r.boop_zone == idx && r.count <= 1) return true;
+                    return false;
+                };
+                for (int ei = 0; ei < kFaceSlotCount; ++ei)
+                    if (claims(kFaceSlots[ei].expression))
+                        return { std::string(kFaceSlots[ei].label) + " (trigger)",
+                                 kFaceSlots[ei].expression };
+                for (size_t ci = 0; ci < state.custom_expressions.size(); ++ci) {
+                    const auto& ce = state.custom_expressions[ci];
+                    if (ce.used && claims("custom_" + std::to_string(ci)))
+                        return { ce.name + " (trigger)",
+                                 "custom_" + std::to_string(ci) };
+                }
+            }
+            const char* stem = kBoopFaceSlots[idx].file_stem;
+            if (teensy->face_image_exists(stem))
+                return { "dedicated art", stem };
+            std::lock_guard<std::mutex> lk(state.mtx);
+            const std::string fb = state.boop_zones[idx].expression;
+            return { fb + " (default)", fb };
+        };
 
         std::vector<MenuItem> items = {
             toggle("Enabled",
@@ -4224,9 +4245,30 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     if (auto* s = boop_sensor_pp ? *boop_sensor_pp : nullptr)
                         s->set_zone_enabled(zone_enum, v);
                 }),
-            with_desc(submenu("Expression", std::move(expr_items)),
-                      "Which face the boop triggers. Auto-reverts when the "
-                      "hold duration elapses."),
+            // The face itself binds in the Expressions menu (Triggers recipe,
+            // count 1) — this row shows the live resolution and previews it.
+            [&]{
+                MenuItem m = with_desc(leaf("Reaction",
+                    [teensy, &state, idx, resolve_reaction]{
+                        const auto [text, expr] = resolve_reaction();
+                        double dur = 0.8;
+                        {
+                            std::lock_guard<std::mutex> lk(state.mtx);
+                            dur = state.boop_zones[idx].duration_s;
+                        }
+                        if (!expr.empty()) teensy->trigger_boop(expr, dur);
+                    }),
+                    "What one boop on this zone shows right now; select to "
+                    "preview it. To change it, bind a face in Faces and "
+                    "Expressions > Expressions > [face] > Triggers with "
+                    "event \"Boop\" on this zone, count 1. No trigger bound "
+                    "means the dedicated boop art fires (when its PNG "
+                    "exists), else the built-in default.");
+                m.label_fn = [resolve_reaction]{
+                    return "Reaction: " + resolve_reaction().first;
+                };
+                return m;
+            }(),
             slider("Hold Duration", 0.2f, 3.0f, 0.1f, " s",
                 [&state, idx]{
                     std::lock_guard<std::mutex> lk(state.mtx);
@@ -4279,17 +4321,6 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 m.visible_fn = [idx]{ return idx != static_cast<int>(sensor::BoopSensor::Zone::BothCheeks); };
                 return m;
             }(),
-            leaf("Test Boop",
-                [teensy, &state, idx]{
-                    std::string expr;
-                    double dur = 0.0;
-                    {
-                        std::lock_guard<std::mutex> lk(state.mtx);
-                        expr = state.boop_zones[idx].expression;
-                        dur  = state.boop_zones[idx].duration_s;
-                    }
-                    if (!expr.empty()) teensy->trigger_boop(expr, dur);
-                }),
         };
 
         // ── Ripple ring — per-zone touch feedback ────────────────────────────
@@ -4470,10 +4501,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     };
     faces_items.push_back(
         with_desc(submenu("Boop", std::move(boop_menu)),
-                  "Per-zone capacitive-touch reactions. Drives "
-                  "Protoface's trigger_boop() — fires the chosen expression "
-                  "when the snout, a cheek pad, or both cheeks together are "
-                  "touched."));
+                  "Per-zone touch options: sensor wiring, hold time, ripple "
+                  "ring, and the rapid-boop eye animation. WHICH face a boop "
+                  "shows is bound in Expressions > [face] > Triggers (event "
+                  "\"Boop\", count 1); each zone's Reaction row here shows "
+                  "the live result."));
 
     // ── Light Sensor (BH1750) → squint reaction ────────────────────────────
     // Edge-detects dark→bright transitions (helmet stepping into sunlight)
