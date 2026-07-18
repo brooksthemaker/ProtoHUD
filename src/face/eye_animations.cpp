@@ -103,6 +103,108 @@ static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
                         * (0.6 + 0.4 * std::sin(rr * (6.0 / sz) - t * 3.0 * sp));
                 break;
             }
+            case EyeAnim::XEyes: {
+                // Cartoon K.O. cross: two diagonal strokes with soft edges
+                // and a light pulse. 0.7071 = 1/√2 (point-to-line distance).
+                const double pulse = 0.88 + 0.12 * std::sin(t * 5.0 * sp);
+                const double thick = 0.15 * sz * pulse;
+                const double d = std::min(std::fabs(dx - dy),
+                                          std::fabs(dx + dy)) * 0.7071;
+                if (rr < 0.85 * sz)
+                    inten = clamp01(1.0 - d / thick) * (0.75 + 0.25 * pulse);
+                break;
+            }
+            case EyeAnim::Radar: {
+                // Sweep beam with an exponential afterglow trail, over faint
+                // range rings, clipped to the scope radius.
+                constexpr double kTau2 = 6.283185307179586;
+                if (rr < 1.05 * sz) {
+                    const double sweep = std::fmod(t * 2.0 * sp, kTau2);
+                    double da = sweep - a;
+                    da -= kTau2 * std::floor(da / kTau2);       // 0 at the beam
+                    const double trail = std::exp(-da * 2.4);
+                    const double rings = 0.22 * clamp01(
+                        std::sin(rr * (12.0 / sz)) * 6.0 - 5.0); // thin circles
+                    inten = clamp01(trail + rings) * clamp01(1.15 - rr * 0.4);
+                }
+                break;
+            }
+            case EyeAnim::Fire: {
+                // Column flame: per-column flickering height, bright at the
+                // panel base, fading toward the tip. Fills the whole panel
+                // (like Glitch), so the centre setting is ignored.
+                const double yy = (h - 1 - y) / static_cast<double>(std::max(1, h - 1));
+                const double flick = 0.5 + 0.5 * std::sin(
+                    x * 0.35 / sz + t * 9.0 * sp +
+                    2.0 * std::sin(x * 0.13 - t * 5.0 * sp));
+                const double hgt = 0.45 + 0.5 * flick;          // flame height
+                const double v = clamp01((hgt - yy) / hgt);
+                inten = v * v * (0.7 + 0.3 * flick);
+                break;
+            }
+            case EyeAnim::Rain: {
+                // Falling streaks: hash-phased columns, bright head + fading
+                // tail, two interleaved layers for density. Fills the panel.
+                const int cw = std::max(2, static_cast<int>(std::round(2.5 * sz)));
+                const double yy = y / static_cast<double>(std::max(1, h - 1));
+                for (int layer = 0; layer < 2; ++layer) {
+                    const int col = x / cw + layer * 131;
+                    const double ph = hash01(col, layer, 17);
+                    const double fall = std::fmod(
+                        t * (1.2 + ph) * sp * 0.8 + ph * 7.0, 1.4);
+                    const double d = fall - yy;                 // head at 0
+                    if (d >= 0.0 && d < 0.4)
+                        inten = std::max(inten, clamp01(1.0 - d / 0.4) *
+                                                (layer ? 0.6 : 1.0));
+                }
+                break;
+            }
+            case EyeAnim::Sparkle: {
+                // Twinkling star field: sparse hash-picked cells, each with
+                // its own twinkle rate/phase, bright at the cell centre.
+                // Fills the panel.
+                const int cell = std::max(3, static_cast<int>(std::round(5.0 * sz)));
+                const int bx = x / cell, by = y / cell;
+                if (hash01(bx, by, 3) > 0.7) {
+                    const double ph = hash01(bx, by, 5) * 6.283185307179586;
+                    const double tw = std::sin(
+                        t * (2.0 + 3.0 * hash01(bx, by, 9)) * sp + ph);
+                    const double lx = (x % cell - cell * 0.5) / (cell * 0.5);
+                    const double ly = (y % cell - cell * 0.5) / (cell * 0.5);
+                    const double rd = std::sqrt(lx * lx + ly * ly);
+                    inten = clamp01(tw) * clamp01(1.0 - rd * 1.4);
+                }
+                break;
+            }
+            case EyeAnim::Heartbeat: {
+                // Scrolling ECG trace on the cy baseline: P wave, QRS spike,
+                // T wave as gaussian bumps along the scroll phase.
+                auto bump = [](double uu, double c, double wd, double amp) {
+                    const double d = (uu - c) / wd;
+                    return amp * std::exp(-d * d * 4.0);
+                };
+                auto wave = [&](int px) {
+                    const double u = std::fmod(
+                        px / static_cast<double>(std::max(1, w)) -
+                        t * 0.55 * sp + 16.0, 1.0);
+                    return bump(u, 0.18, 0.030, 0.18)             // P
+                         - bump(u, 0.28, 0.014, 0.16)             // Q
+                         + bump(u, 0.31, 0.016, 0.95)             // R
+                         - bump(u, 0.345, 0.016, 0.28)            // S
+                         + bump(u, 0.50, 0.050, 0.22);            // T
+                };
+                // Span this column's and the next column's trace heights so
+                // steep segments (the QRS spike) stay a connected line
+                // instead of aliasing into detached dots.
+                const double ty0 = cy - wave(x)     * scale * 0.9 * sz;
+                const double ty1 = cy - wave(x + 1) * scale * 0.9 * sz;
+                const double lo  = std::min(ty0, ty1);
+                const double hi  = std::max(ty0, ty1);
+                const double d   = (y < lo ? lo - y : y > hi ? y - hi : 0.0)
+                                   / (scale * 0.06 * sz);
+                inten = clamp01(1.0 - d);
+                break;
+            }
             default: break;
             }
             row[x] = paint(p, inten);
@@ -130,6 +232,12 @@ const char* eye_anim_name(EyeAnim a) {
     case EyeAnim::Swirl:     return "Swirl";
     case EyeAnim::Starburst: return "Starburst";
     case EyeAnim::Glitch:    return "Glitch";
+    case EyeAnim::XEyes:     return "X Eyes";
+    case EyeAnim::Radar:     return "Radar";
+    case EyeAnim::Fire:      return "Fire";
+    case EyeAnim::Rain:      return "Rain";
+    case EyeAnim::Sparkle:   return "Sparkle";
+    case EyeAnim::Heartbeat: return "Heartbeat";
     default:                 return "?";
     }
 }

@@ -1564,8 +1564,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [emod](float v){ emod([v](face::EyeAnimParams& p){
                         p.cx = static_cast<double>(v) / 100.0; }); }),
                     "Animation centre across each panel; 50% = centred. "
-                    "Eye-panel rigs shift both eyes together. Glitch always "
-                    "fills the panel."),
+                    "Eye-panel rigs shift both eyes together. Glitch, Fire, "
+                    "Rain, and Sparkle always fill the panel."),
                 with_desc(slider("Position Y", 0.f, 100.f, 1.f, "%",
                     [eget]{ return static_cast<float>(eget().cy * 100.0); },
                     [emod](float v){ emod([v](face::EyeAnimParams& p){

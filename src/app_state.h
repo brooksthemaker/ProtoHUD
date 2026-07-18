@@ -1024,6 +1024,9 @@ struct AppState {
         { face::EyeAnim::Spiral },    { face::EyeAnim::Rings },
         { face::EyeAnim::Hearts },    { face::EyeAnim::Swirl },
         { face::EyeAnim::Starburst }, { face::EyeAnim::Glitch },
+        { face::EyeAnim::XEyes },     { face::EyeAnim::Radar },
+        { face::EyeAnim::Fire },      { face::EyeAnim::Rain },
+        { face::EyeAnim::Sparkle },   { face::EyeAnim::Heartbeat },
     };
     VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;

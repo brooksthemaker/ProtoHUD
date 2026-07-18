@@ -16,7 +16,13 @@ enum class EyeAnim : int {
     Hearts,       // pulsing heart
     Swirl,        // dizzy swirl
     Starburst,    // rotating rays from centre
-    Glitch,       // random colour blocks
+    Glitch,       // random colour blocks (fills the panel)
+    XEyes,        // cartoon K.O. cross
+    Radar,        // rotating sweep with afterglow trail + range rings
+    Fire,         // rising flame flicker (fills the panel)
+    Rain,         // falling streaks (fills the panel)
+    Sparkle,      // twinkling star field (fills the panel)
+    Heartbeat,    // scrolling ECG trace across the baseline
     Count
 };
 
