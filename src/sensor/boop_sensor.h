@@ -24,10 +24,14 @@ public:
         LeftCheek   = 1,
         RightCheek  = 2,
         // Derived (not directly measured): fires when both cheek electrodes
-        // land touch events within the configured coalesce window.
+        // land touch events within the configured coalesce window. Keeps its
+        // historic slot 3 — configs index zones by this number.
         BothCheeks  = 3,
+        TopHead     = 4,
+        MouthTop    = 5,
+        MouthBottom = 6,
     };
-    static constexpr uint8_t ZoneCount = 4;
+    static constexpr uint8_t ZoneCount = 7;
 
     using BoopCallback = std::function<void(Zone)>;
 

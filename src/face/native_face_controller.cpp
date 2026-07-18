@@ -1318,20 +1318,26 @@ void NativeFaceController::set_ambient_effect(const nlohmann::json& spec) {
 }
 
 void NativeFaceController::trigger_boop_ripple(int zone) {
-    // Zone → canvas-normalised centre: the snout sits at bottom-centre of the
-    // face, cheeks at the outer thirds. Multi-panel faces share one ring via
-    // the canvas-space centre.
+    // Zone → canvas-normalised centre (sensor::BoopSensor::Zone order): the
+    // snout at bottom-centre of the face, cheeks at the outer thirds, head at
+    // top-centre, the mouth rows between snout and cheek line. Multi-panel
+    // faces share one ring via the canvas-space centre. Slot 3 (BothCheeks)
+    // is derived — it rings both cheeks — so its own entry is unused.
     struct Pt { double x, y; };
-    static constexpr Pt kZone[3] = { {0.50, 0.92},    // snout
+    static constexpr Pt kZone[7] = { {0.50, 0.92},    // snout
                                      {0.15, 0.55},    // left cheek
-                                     {0.85, 0.55} };  // right cheek
+                                     {0.85, 0.55},    // right cheek
+                                     {0.50, 0.55},    // (both cheeks — unused)
+                                     {0.50, 0.08},    // top of head
+                                     {0.50, 0.72},    // mouth top
+                                     {0.50, 0.86} };  // mouth bottom
     std::lock_guard<std::mutex> lk(state_mtx_);
     auto fire = [&](const Pt& p) {
         for (auto& pn : panels_)
             if (!pn.is_mirror && pn.particles) pn.particles->trigger_ripple(p.x, p.y);
     };
-    if (zone >= 0 && zone <= 2) fire(kZone[zone]);
-    else if (zone == 3) { fire(kZone[1]); fire(kZone[2]); }   // both cheeks
+    if (zone == 3)                    { fire(kZone[1]); fire(kZone[2]); }  // both cheeks
+    else if (zone >= 0 && zone <= 6)  fire(kZone[zone]);
 }
 
 void NativeFaceController::trigger_boop(const std::string& expression, double duration_s) {

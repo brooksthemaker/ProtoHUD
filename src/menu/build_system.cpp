@@ -30,6 +30,7 @@
 #include <qrcodegen.hpp>
 
 #include "app_state.h"
+#include "sensor/boop_sensor.h"
 #include "android/android_mirror.h"
 #include "camera/camera_manager.h"
 #include "camera/viture_camera.h"
@@ -493,7 +494,7 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
     // board-reserved brown, power/ground per the shared header palette.
     MenuItem pins_item = submenu("Pins", std::move(pins_menu));
     pins_item.context_panel_title = "Coprocessor Pins";
-    pins_item.context_panel_draw = [role_of, variant, C,
+    pins_item.context_panel_draw = [role_of, variant, C, st = ctx.state,
                                     poll = ctx.coproc_pins_poll,
                                     get  = ctx.coproc_pins_get,
                                     age  = ctx.coproc_pins_age,
@@ -508,6 +509,44 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
         const auto live = get ? get()
             : std::map<int, std::pair<std::string, std::string>>{};
         const int age_ms = age ? age() : -1;
+
+        // Boop zone electrodes, snapshotted once per frame (not per row) so
+        // the touch-pad labels below can say which zone a pad drives.
+        constexpr int kNZones = sensor::BoopSensor::ZoneCount;
+        static const char* kZoneNames[kNZones] = {
+            "Snout", "Left Cheek", "Right Cheek", "Both Cheeks",
+            "Top of Head", "Mouth Top", "Mouth Bottom" };
+        int zone_electrode[kNZones];
+        for (auto& e : zone_electrode) e = -1;
+        if (st) {
+            std::lock_guard<std::mutex> lk(st->mtx);
+            for (int z = 0; z < kNZones; ++z)
+                zone_electrode[z] = st->boop_zones[z].electrode;
+        }
+        // The firmware reports its TTP223 pads as "touch<pad>" roles; a pad's
+        // index doubles as the electrode number in the boop-zone map, so when
+        // a zone claims it we can label the pin in user language ("Boop Top
+        // of Head") instead of firmware shorthand.
+        auto boop_label = [&zone_electrode](const std::string& fw_role,
+                                            std::string& out) {
+            const size_t tp = fw_role.find("touch");
+            if (tp == std::string::npos ||
+                tp + 5 >= fw_role.size() ||
+                !std::isdigit(static_cast<unsigned char>(fw_role[tp + 5])))
+                return false;
+            const int pad = fw_role[tp + 5] - '0';
+            for (int z = 0; z < kNZones; ++z) {
+                if (z == static_cast<int>(sensor::BoopSensor::Zone::BothCheeks))
+                    continue;
+                if (zone_electrode[z] == pad) {
+                    out = std::string("Boop ") + kZoneNames[z] +
+                          " (touch" + std::to_string(pad) + ")";
+                    return true;
+                }
+            }
+            out = "touch" + std::to_string(pad) + " (no zone)";
+            return true;
+        };
 
         // A pin is "active" when its live level means something is happening:
         // a configured button at its pressed level, or a touch pad reading
@@ -551,6 +590,16 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
             if (it != live.end()) {
                 if (role.rfind("free", 0) == 0 && it->second.first != "free")
                     role = it->second.first;          // firmware knows better
+                // Boop pads get their zone name and a violet tint — these are
+                // the pins a user wires touch pads to, so speak zone language.
+                std::string bl;
+                if (boop_label(it->second.first, bl)) {
+                    role = (host_role.rfind("free", 0) == 0)
+                         ? bl : host_role + " \xc2\xb7 " + bl;
+                    col  = bl.rfind("Boop ", 0) == 0
+                         ? IM_COL32(150, 110, 230, 255)     // zone-mapped pad
+                         : IM_COL32(110, 90, 160, 255);     // pad without a zone
+                }
                 txt += "  " + role + " = " + it->second.second;
             } else if (!role.empty()) {
                 txt += "  " + role;

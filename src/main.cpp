@@ -1897,10 +1897,13 @@ int main(int argc, char* argv[]) {
         boop_cfg.coalesce_window_s = jval(jb, "coalesce_window_s", boop_cfg.coalesce_window_s);
         state.boop_coalesce_window_s = static_cast<float>(boop_cfg.coalesce_window_s);
         if (jb.contains("zones") && jb["zones"].is_array()) {
-            // Up to 4 zones now: [0]=Snout, [1]=LeftCheek, [2]=RightCheek,
-            // [3]=BothCheeks. BothCheeks is derived (no electrode probe),
-            // so its electrode field stays at -1 even if config sets it.
-            for (size_t i = 0; i < jb["zones"].size() && i < 4; ++i) {
+            // Zones in sensor::BoopSensor::Zone order: [0]=Snout, [1]=Left,
+            // [2]=Right, [3]=BothCheeks (derived — no electrode probe, its
+            // electrode stays -1 even if config sets it), [4]=TopHead,
+            // [5]=MouthTop, [6]=MouthBottom. Older configs with fewer
+            // entries leave the tail zones on their compiled-in defaults.
+            for (size_t i = 0;
+                 i < jb["zones"].size() && i < sensor::BoopSensor::ZoneCount; ++i) {
                 const auto& jz = jb["zones"][i];
                 // Electrode mapping is editable in the menu (state.boop_zones)
                 // and mirrored into the sensor config consumed at start().
@@ -2917,10 +2920,13 @@ int main(int argc, char* argv[]) {
     // "surprise" reactions on top of the generic expression cycle.
     auto boop_face_stem = [](sensor::BoopSensor::Zone z) -> const char* {
         switch (z) {
-        case sensor::BoopSensor::Zone::Snout:      return "boop_snout";
-        case sensor::BoopSensor::Zone::LeftCheek:  return "boop_left";
-        case sensor::BoopSensor::Zone::RightCheek: return "boop_right";
-        case sensor::BoopSensor::Zone::BothCheeks: return "boop_both";
+        case sensor::BoopSensor::Zone::Snout:       return "boop_snout";
+        case sensor::BoopSensor::Zone::LeftCheek:   return "boop_left";
+        case sensor::BoopSensor::Zone::RightCheek:  return "boop_right";
+        case sensor::BoopSensor::Zone::BothCheeks:  return "boop_both";
+        case sensor::BoopSensor::Zone::TopHead:     return "boop_head";
+        case sensor::BoopSensor::Zone::MouthTop:    return "boop_mouth_top";
+        case sensor::BoopSensor::Zone::MouthBottom: return "boop_mouth_bottom";
         }
         return "";
     };
@@ -3018,8 +3024,10 @@ int main(int argc, char* argv[]) {
         return std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
-    auto eye_last = std::make_shared<std::array<double, 4>>();   // last boop time / zone
-    auto eye_run  = std::make_shared<std::array<int, 4>>();      // consecutive run / zone
+    auto eye_last = std::make_shared<
+        std::array<double, sensor::BoopSensor::ZoneCount>>();   // last boop time / zone
+    auto eye_run  = std::make_shared<
+        std::array<int, sensor::BoopSensor::ZoneCount>>();      // consecutive run / zone
     // fire_boop is now callable from BOTH the MPR121 poll thread and the GPIO
     // input thread, so the rapid-boop counters need a lock.
     auto eye_mtx  = std::make_shared<std::mutex>();
@@ -3048,6 +3056,14 @@ int main(int argc, char* argv[]) {
             accessory_leds.trigger_flash(LZ::RightFin,      0.45);
             accessory_leds.trigger_flash(LZ::Blush,         0.6);
             break;
+        case sensor::BoopSensor::Zone::TopHead:
+            accessory_leds.trigger_flash(LZ::LeftFin,       0.35);
+            accessory_leds.trigger_flash(LZ::RightFin,      0.35);
+            break;
+        case sensor::BoopSensor::Zone::MouthTop:
+        case sensor::BoopSensor::Zone::MouthBottom:
+            accessory_leds.trigger_flash(LZ::Blush,         0.45);
+            break;
         }
     };
 
@@ -3059,7 +3075,7 @@ int main(int argc, char* argv[]) {
                       eye_now, flash_zone, eye_last, eye_run, eye_mtx]
                      (sensor::BoopSensor::Zone z) {
         const auto zi = static_cast<size_t>(z);
-        if (zi >= 4) return;
+        if (zi >= sensor::BoopSensor::ZoneCount) return;
         // Snapshot under the state lock so a menu edit mid-boop can't tear
         // the std::string read.
         bool             enabled;
@@ -5050,10 +5066,13 @@ int main(int argc, char* argv[]) {
     auto gpio_apply = [&, restart_script](input::GpioFunc f) {
         using F = input::GpioFunc;
         switch (f) {
-        case F::BoopSnout: fire_boop(sensor::BoopSensor::Zone::Snout);      break;
-        case F::BoopLeft:  fire_boop(sensor::BoopSensor::Zone::LeftCheek);  break;
-        case F::BoopRight: fire_boop(sensor::BoopSensor::Zone::RightCheek); break;
-        case F::BoopBoth:  fire_boop(sensor::BoopSensor::Zone::BothCheeks); break;
+        case F::BoopSnout:       fire_boop(sensor::BoopSensor::Zone::Snout);       break;
+        case F::BoopLeft:        fire_boop(sensor::BoopSensor::Zone::LeftCheek);   break;
+        case F::BoopRight:       fire_boop(sensor::BoopSensor::Zone::RightCheek);  break;
+        case F::BoopBoth:        fire_boop(sensor::BoopSensor::Zone::BothCheeks);  break;
+        case F::BoopHead:        fire_boop(sensor::BoopSensor::Zone::TopHead);     break;
+        case F::BoopMouthTop:    fire_boop(sensor::BoopSensor::Zone::MouthTop);    break;
+        case F::BoopMouthBottom: fire_boop(sensor::BoopSensor::Zone::MouthBottom); break;
         case F::MenuOpen:  if (menu.is_open()) menu.close(); else menu.open(); break;
         case F::MenuSelect:
             if      (menu.is_open())          menu.select();
@@ -5268,17 +5287,30 @@ int main(int argc, char* argv[]) {
     // coprocessor reuse the SAME electrode→zone map as a local MPR121, so the
     // pads work identically from either board. Edges arrive on the reader
     // thread; the fire is posted to the input queue like every other source.
-    // (BothCheeks stays derived by the local sensor only — coproc pads fire the
-    // three measured zones.)
+    // (BothCheeks stays derived by the local sensor only — coproc pads fire
+    // the directly-measured zones: snout, cheeks, head, mouth.)
     auto coproc_wire_peripherals = [&]{
         if (!coproc_inputs) return;
         coproc_inputs->set_boop_handler([&](int electrode, bool touched){
             if (!touched) return;
-            for (size_t z = 0; z < 3; ++z)   // Snout / LeftCheek / RightCheek
-                if (boop_cfg.electrode[z] == electrode)
+            // stderr on purpose: stdout is block-buffered under systemd and
+            // lags minutes, which makes touch debugging impossible.
+            bool matched = false;
+            for (size_t z = 0; z < sensor::BoopSensor::ZoneCount; ++z) {
+                if (z == static_cast<size_t>(sensor::BoopSensor::Zone::BothCheeks))
+                    continue;
+                if (boop_cfg.electrode[z] == electrode) {
+                    matched = true;
+                    std::cerr << "[coproc] boop pad " << electrode
+                              << " -> zone " << z << "\n";
                     post_input([&fire_boop, z]{
                         fire_boop(static_cast<sensor::BoopSensor::Zone>(z));
                     });
+                }
+            }
+            if (!matched)
+                std::cerr << "[coproc] boop pad " << electrode
+                          << " -> no zone electrode matches\n";
         });
     };
     coproc_wire_peripherals();
@@ -5692,10 +5724,11 @@ int main(int argc, char* argv[]) {
             auto& jb = cfg["boop"];
             jb["coalesce_window_s"] = state.boop_coalesce_window_s;
             auto& jzones = jb["zones"];
-            if (!jzones.is_array() || jzones.size() < 4)
-                jzones = json::array({ json{}, json{}, json{}, json{} });
+            if (!jzones.is_array()) jzones = json::array();
+            while (jzones.size() < sensor::BoopSensor::ZoneCount)
+                jzones.push_back(json{});   // older configs grow to the new count
             std::lock_guard<std::mutex> lk(state.mtx);
-            for (int i = 0; i < 4; ++i) {
+            for (int i = 0; i < sensor::BoopSensor::ZoneCount; ++i) {
                 jzones[i]["enabled"]    = state.boop_zones[i].enabled;
                 jzones[i]["expression"] = state.boop_zones[i].expression;
                 jzones[i]["duration_s"] = state.boop_zones[i].duration_s;

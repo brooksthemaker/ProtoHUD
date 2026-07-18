@@ -435,6 +435,11 @@ void CoprocInputs::handle_button(int id, bool is_long) {
     const auto& map = is_long ? cfg_.long_map : cfg_.short_map;
     const auto it = map.find(id);
     const GpioFunc f = (it != map.end()) ? it->second : GpioFunc::None;
+    // stderr so it shows immediately under systemd (stdout lags minutes).
+    // Logged even when unmapped — a silent None eats the only evidence that
+    // a physical pin actually moved.
+    std::cerr << "[coproc] BTN " << id << (is_long ? " LONG" : " SHORT")
+              << " -> " << gpio_func_id(f) << "\n";
     if (f != GpioFunc::None && dispatch_) dispatch_(f);
 }
 

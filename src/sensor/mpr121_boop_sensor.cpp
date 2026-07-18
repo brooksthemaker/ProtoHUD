@@ -193,15 +193,15 @@ void Mpr121BoopSensor::poll_loop() {
         // Snapshot live coalesce window + Both enable once per tick.
         double coalesce_s = 0.0;
         bool   both_enabled = false;
-        bool   zone_enabled[3] = {};
-        int8_t zone_electrode[3] = {};
+        bool   zone_enabled[ZoneCount] = {};
+        int8_t zone_electrode[ZoneCount] = {};
         {
             // One snapshot of the per-zone config for this whole tick — the
-            // zone loop below used to re-lock per zone (5 lock cycles/tick).
+            // zone loop below used to re-lock per zone (one lock cycle/tick).
             std::lock_guard<std::mutex> lk(bus_mtx_);
             coalesce_s   = cfg_.coalesce_window_s;
             both_enabled = cfg_.zone_enabled[static_cast<size_t>(Zone::BothCheeks)];
-            for (uint8_t zi = 0; zi < static_cast<uint8_t>(Zone::BothCheeks); ++zi) {
+            for (uint8_t zi = 0; zi < ZoneCount; ++zi) {
                 zone_enabled[zi]   = cfg_.zone_enabled[zi];
                 zone_electrode[zi] = cfg_.electrode[zi];
             }
@@ -218,9 +218,10 @@ void Mpr121BoopSensor::poll_loop() {
             if (on_boop_) on_boop_(z);
         };
 
-        // Walk the directly-measured zones (Snout, LeftCheek, RightCheek).
-        // BothCheeks is derived — it only fires from the coalescer below.
-        for (uint8_t zi = 0; zi < static_cast<uint8_t>(Zone::BothCheeks); ++zi) {
+        // Walk the directly-measured zones (everything except BothCheeks,
+        // which is derived — it only fires from the coalescer below).
+        for (uint8_t zi = 0; zi < ZoneCount; ++zi) {
+            if (zi == static_cast<uint8_t>(Zone::BothCheeks)) continue;
             const bool   enabled   = zone_enabled[zi];
             const int8_t electrode = zone_electrode[zi];
             if (!enabled || electrode < 0 || electrode > 11) {
@@ -234,9 +235,12 @@ void Mpr121BoopSensor::poll_loop() {
 
             if (!rising) continue;
 
-            // Snout is never coalesced. Fire immediately.
-            if (zi == static_cast<uint8_t>(Zone::Snout)) {
-                fire(Zone::Snout);
+            // Only the two cheeks coalesce; every other zone (snout, head,
+            // mouth) fires immediately.
+            const bool is_cheek = zi == static_cast<uint8_t>(Zone::LeftCheek) ||
+                                  zi == static_cast<uint8_t>(Zone::RightCheek);
+            if (!is_cheek) {
+                fire(static_cast<Zone>(zi));
                 continue;
             }
 

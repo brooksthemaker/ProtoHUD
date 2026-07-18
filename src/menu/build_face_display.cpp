@@ -211,10 +211,14 @@ constexpr int kMouthShapeCount = sizeof(kMouthShapes) / sizeof(kMouthShapes[0]);
 // just like any other expression slot.
 struct BoopFaceSlot { const char* file_stem; const char* label; };
 constexpr BoopFaceSlot kBoopFaceSlots[] = {
-    {"boop_snout", "Snout"},
-    {"boop_left",  "Left Cheek"},
-    {"boop_right", "Right Cheek"},
-    {"boop_both",  "Both Cheeks"},
+    // Order matches sensor::BoopSensor::Zone — slot index == zone index.
+    {"boop_snout",        "Snout"},
+    {"boop_left",         "Left Cheek"},
+    {"boop_right",        "Right Cheek"},
+    {"boop_both",         "Both Cheeks"},
+    {"boop_head",         "Top of Head"},
+    {"boop_mouth_top",    "Mouth Top"},
+    {"boop_mouth_bottom", "Mouth Bottom"},
 };
 constexpr int kBoopFaceSlotCount = sizeof(kBoopFaceSlots) / sizeof(kBoopFaceSlots[0]);
 
@@ -976,9 +980,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             static const EvOpt kEvents[] = {
                 { "Off",          TR::Event::None,        0, "" },
                 { "Boop: Snout",  TR::Event::Boop,        0, "" },
-                { "Boop: Left Cheek",  TR::Event::Boop,   1, "" },
-                { "Boop: Right Cheek", TR::Event::Boop,   2, "" },
-                { "Boop: Both Cheeks", TR::Event::Boop,   3, "" },
+                { "Boop: Left Cheek",   TR::Event::Boop,  1, "" },
+                { "Boop: Right Cheek",  TR::Event::Boop,  2, "" },
+                { "Boop: Both Cheeks",  TR::Event::Boop,  3, "" },
+                { "Boop: Top of Head",  TR::Event::Boop,  4, "" },
+                { "Boop: Mouth Top",    TR::Event::Boop,  5, "" },
+                { "Boop: Mouth Bottom", TR::Event::Boop,  6, "" },
                 { "Swipe Up",     TR::Event::Gesture,     0, "up" },
                 { "Swipe Down",   TR::Event::Gesture,     0, "down" },
                 { "Swipe Left",   TR::Event::Gesture,     0, "left" },
@@ -1065,8 +1072,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 switch (r.event) {
                     case TR::Event::Boop: {
                         static const char* z[] = { "Boop Snout", "Boop Left",
-                                                   "Boop Right", "Boop Both" };
-                        ev = z[std::clamp(r.boop_zone, 0, 3)];
+                                                   "Boop Right", "Boop Both",
+                                                   "Boop Head",  "Boop Mouth Top",
+                                                   "Boop Mouth Bottom" };
+                        ev = z[std::clamp(r.boop_zone, 0, 6)];
                         break;
                     }
                     case TR::Event::Gesture:     ev = "Swipe " + r.gesture; break;
@@ -1488,7 +1497,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             double dur = 0.8;
             {
                 std::lock_guard<std::mutex> lk(state.mtx);
-                if (idx >= 0 && idx < 4) dur = state.boop_zones[idx].duration_s;
+                if (idx >= 0 && idx < kBoopFaceSlotCount)
+                    dur = state.boop_zones[idx].duration_s;
             }
             teensy->trigger_boop(expr, dur);
         };
@@ -1517,7 +1527,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                   "Dedicated face per boop zone. When a slot's PNG exists, "
                   "the boop sensor triggers that face instead of the zone's "
                   "fallback expression. Filenames: boop_snout, boop_left, "
-                  "boop_right, boop_both — all in the active face folder."));
+                  "boop_right, boop_both, boop_head, boop_mouth_top, "
+                  "boop_mouth_bottom — all in the active face folder."));
 
     // ── ProtoTracer (Teensy-driven LED matrix) submenu ────────────────────────
     std::vector<MenuItem> prototracer_inner_menu = {
@@ -4261,8 +4272,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         std::lock_guard<std::mutex> lk(state.mtx);
                         state.boop_zones[idx].electrode = static_cast<int>(v);
                     }),
-                    "Which MPR121 capacitive electrode (0-11) drives this zone; "
-                    "-1 disables it. Takes effect on the next launch.");
+                    "Which capacitive electrode drives this zone: an MPR121 "
+                    "electrode (0-11), or a coprocessor TTP223 touch-pad index "
+                    "(0-5) \xe2\x80\x94 both feed the same map. -1 disables it. "
+                    "Takes effect on the next launch.");
                 m.visible_fn = [idx]{ return idx != static_cast<int>(sensor::BoopSensor::Zone::BothCheeks); };
                 return m;
             }(),
@@ -4365,6 +4378,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         boop_zone_menu(1, "Left Cheek"),
         boop_zone_menu(2, "Right Cheek"),
         boop_zone_menu(3, "Both Cheeks"),
+        boop_zone_menu(4, "Top of Head"),
+        boop_zone_menu(5, "Mouth Top"),
+        boop_zone_menu(6, "Mouth Bottom"),
         with_desc(slider("Coalesce Window", 0.f, 0.30f, 0.01f, " s",
             [&state]{ return state.boop_coalesce_window_s; },
             [&state, boop_sensor_pp](float v){

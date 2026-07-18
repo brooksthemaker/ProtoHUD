@@ -31,15 +31,19 @@ public:
         // Which MPR121 electrode (0..11) maps to each zone. -1 disables a
         // zone or marks it as "derived" (BothCheeks is the only derived
         // zone today — its events come from the coalescer, not a direct
-        // electrode read, so its slot here is -1 by default).
-        std::array<int8_t,  ZoneCount> electrode        = { 0,  1,  2, -1 };
+        // electrode read, so its slot here is -1 by default). The newer
+        // zones (TopHead / MouthTop / MouthBottom) ship unassigned: give
+        // each an electrode in the menu once its pad is physically wired,
+        // so unwired chips can't false-trigger them.
+        std::array<int8_t,  ZoneCount> electrode        = { 0,  1,  2, -1, -1, -1, -1 };
         // Touch/release threshold pairs. Touch must be > release for the
         // chip's hysteresis to behave; defaults are MPR121-typical for skin
         // touch through a couple of mm of plastic. The BothCheeks slot's
         // thresholds are unused (it's derived) but kept for index parity.
-        std::array<uint8_t, ZoneCount> touch_threshold   = { 12, 12, 12, 12 };
-        std::array<uint8_t, ZoneCount> release_threshold = {  6,  6,  6,  6 };
-        std::array<bool,    ZoneCount> zone_enabled      = { true, true, true, true };
+        std::array<uint8_t, ZoneCount> touch_threshold   = { 12, 12, 12, 12, 12, 12, 12 };
+        std::array<uint8_t, ZoneCount> release_threshold = {  6,  6,  6,  6,  6,  6,  6 };
+        std::array<bool,    ZoneCount> zone_enabled      = { true, true, true, true,
+                                                             true, true, true };
 
         double poll_hz      = 30.0;   // sensor sampling rate
         double refractory_s = 0.25;   // min seconds between boops on the same zone
@@ -80,7 +84,7 @@ private:
     std::thread       thread_;
 
     // Last per-zone touched state and time-of-last-boop, used to debounce.
-    std::array<bool,                                    ZoneCount> last_touched_ = { false, false, false, false };
+    std::array<bool,                                    ZoneCount> last_touched_ = {};
     std::array<std::chrono::steady_clock::time_point,   ZoneCount> last_boop_t_;
 
     // Coalescer state for the two cheek zones. When one cheek's rising

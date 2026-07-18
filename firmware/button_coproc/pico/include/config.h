@@ -11,7 +11,7 @@
 
 // Firmware version, reported in the HELLO line so the Pi (and the flash script)
 // can confirm an update actually took. Bump it whenever you change the firmware.
-static constexpr const char* kFwVersion = "1.4.0";
+static constexpr const char* kFwVersion = "1.4.2";
 
 // Switches wired between the listed GP pin and GND. We use INPUT_PULLUP, so a
 // pressed switch reads LOW (active-low). Add/remove entries freely — kLedPins
@@ -112,11 +112,19 @@ static constexpr int      kMaxOwDevices  = 8;         // probes on the 1-Wire bu
 // momentary (solder-jumper variants can invert/latch — set the polarity flag
 // to match). Touch edges stream up as "BOOP <idx> <1|0>", so the Pi maps them
 // exactly like MPR121 electrodes: give the boop zones these INDICES (0-5) in
-// the boop config, and/or map extra pads to any GpioFunc via
-// inputs.coprocessor.touch. -1 disables a slot.
-// NOTE: pads 3-5 (GP16/17/18) share the OPTIONAL voice-changer I2S pins —
-// with kVoiceEnabled/VOICE_CHANGER on, wire at most pads 0-2.
-static constexpr int8_t  kTouchPins[6]    = { 0, 1, 12, 16, 17, 18 };
+// the boop config (snout/cheeks = 0-2; top-of-head / mouth-top / mouth-bottom
+// = 3-5), and/or map extra pads to any GpioFunc via inputs.coprocessor.touch.
+// -1 disables a slot.
+// On RP2350B, pads 3-5 live on GP31-33 — free pins the QFN60 package doesn't
+// have — so all six pads coexist with the voice changer. (NOT GP30: that's
+// the BOOT button on the Pimoroni Pico LiPo 2 XL W.) On RP2350A they fall
+// back to GP16/17/18, which share the OPTIONAL voice-changer I2S pins: with
+// kVoiceEnabled/VOICE_CHANGER on there, wire at most pads 0-2.
+#if NUM_BANK0_GPIOS >= 48
+static constexpr int8_t  kTouchPins[6]    = { 0, 1, 12, 31, 32, 33 };   // RP2350B
+#else
+static constexpr int8_t  kTouchPins[6]    = { 0, 1, 12, 16, 17, 18 };   // RP2350A
+#endif
 static constexpr bool    kTouchActiveHigh = true;   // stock TTP223 = high on touch
 static constexpr uint32_t kTouchDebounceMs = 30;
 

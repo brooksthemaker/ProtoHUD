@@ -1008,14 +1008,21 @@ struct AppState {
     // Boop zones: [0]=Snout, [1]=LeftCheek, [2]=RightCheek. Sane defaults so
     // a user with the sensor wired sees something sensible before they ever
     // open the menu.
-    // [0]=Snout, [1]=LeftCheek, [2]=RightCheek, [3]=BothCheeks (derived).
-    // Threshold on the BothCheeks slot is unused (it doesn't probe an
-    // electrode directly) but kept in the schema for index parity.
-    BoopZoneConfig       boop_zones[4] = {
+    // [0]=Snout, [1]=LeftCheek, [2]=RightCheek, [3]=BothCheeks (derived),
+    // [4]=TopHead, [5]=MouthTop, [6]=MouthBottom — in lockstep with
+    // sensor::BoopSensor::Zone. Threshold on the BothCheeks slot is unused
+    // (it doesn't probe an electrode directly) but kept in the schema for
+    // index parity. The head/mouth zones ship with electrode -1 (inert)
+    // so an unwired MPR121 can't false-trigger them; assign an electrode
+    // in the menu when the pad is wired.
+    BoopZoneConfig       boop_zones[7] = {
         { true, "surprised", 0.8, 12,  0 },   // Snout      → electrode 0
         { true, "happy",     0.6, 12,  1 },   // LeftCheek  → electrode 1
         { true, "happy",     0.6, 12,  2 },   // RightCheek → electrode 2
         { true, "surprised", 1.0, 12, -1 },   // BothCheeks → derived (no electrode)
+        { true, "happy",     0.8, 12, -1 },   // TopHead     → assign when wired
+        { true, "surprised", 0.8, 12, -1 },   // MouthTop    → assign when wired
+        { true, "surprised", 0.8, 12, -1 },   // MouthBottom → assign when wired
     };
     // Coalesce window (seconds) for combining near-simultaneous left + right
     // cheek touches into a single BothCheeks event. Mirror of the sensor's
