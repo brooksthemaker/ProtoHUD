@@ -7037,10 +7037,11 @@ int main(int argc, char* argv[]) {
         // Communications, System, ...), pressing the ACTIVE tab's key again
         // closes it (keeps F1's old toggle feel). The key after the last tab
         // jumps to System > Software > Updates - always the last F key.
-        // (F10 is reserved: floating-terminal focus release.)
+        // (F9 is reserved: face panel preview toggle. F10 is reserved:
+        // floating-terminal focus release.)
         {
             const int ntabs = menu.deep_tab_count();
-            const int nkeys = std::min(ntabs + 1, 9);   // F1..F9; F10 reserved
+            const int nkeys = std::min(ntabs + 1, 8);   // F1..F8; F9/F10 reserved
             for (int i = 0; i < nkeys; ++i) {
                 if (!key_pressed(static_cast<ImGuiKey>(ImGuiKey_F1 + i)))
                     continue;
@@ -7058,6 +7059,10 @@ int main(int argc, char* argv[]) {
                 break;
             }
         }
+        // F9 — toggle the face Panel Preview overlay (same flag as Face
+        // Display > Panel Preview > Enabled).
+        if (key_pressed(ImGuiKey_F9))
+            panel_preview_enabled = !panel_preview_enabled;
         // Per-camera autofocus: [ = Left camera, ] = Right camera.
         if (key_pressed(ImGuiKey_LeftBracket)) {
             if (cameras.owl_left()) cameras.owl_left()->start_autofocus();
