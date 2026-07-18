@@ -218,15 +218,17 @@ static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
                 if (!trace(x + 1, ty1, age1)) ty1 = ty0;
                 const double lo = std::min(ty0, ty1);
                 const double hi = std::max(ty0, ty1);
-                // Floor the half-thickness at ~a pixel so the trace can't
-                // fall between pixel rows and vanish at small sizes.
-                const double thick = std::max(0.8, scale * 0.06 * sz);
-                const double d = (y < lo ? lo - y : y > hi ? y - hi : 0.0)
-                                 / thick;
-                // Full-bright (white-hot) pen tip; the trail ages toward
-                // ~55% before the erase gap catches up to it.
-                const double fade = (age0 < 0.02) ? 1.0 : 0.97 - 0.42 * age0;
-                inten = clamp01(1.0 - d) * fade;
+                // Thin bright stroke: full intensity for any pixel within
+                // the core half-width (≥ 0.5 px, so the nearest pixel row
+                // always saturates no matter where the trace sits between
+                // rows), then a fast half-pixel falloff. The trail only
+                // ages to ~70% before the erase gap catches up to it.
+                const double core = std::max(0.5, scale * 0.03 * sz);
+                const double dp = (y < lo ? lo - y : y > hi ? y - hi : 0.0);
+                const double edge =
+                    clamp01(1.0 - std::max(0.0, dp - core) / 0.5);
+                const double fade = (age0 < 0.02) ? 1.0 : 0.99 - 0.31 * age0;
+                inten = edge * fade;
                 break;
             }
             default: break;
