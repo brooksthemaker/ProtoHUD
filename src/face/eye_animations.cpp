@@ -177,38 +177,56 @@ static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
                 break;
             }
             case EyeAnim::Heartbeat: {
-                // Scrolling ECG trace on the cy baseline: P wave, QRS spike,
-                // T wave as gaussian bumps along the scroll phase. ~2.5
-                // complexes fit across the panel at Size 1.0; Size trades
-                // amplitude against density (smaller = more, smaller beats).
+                // Monitor-style ECG: a sweep head redraws the trace left →
+                // right each pass, hospital-EKG style — bright pen tip, an
+                // erase gap just ahead of the head, and the older trace
+                // dimming until the next pass overwrites it. ~2.5 complexes
+                // fit across the panel at Size 1.0; Size trades amplitude
+                // against density (smaller = more, smaller beats).
                 const double beats = std::clamp(2.5 / sz, 1.0, 8.0);
+                const double tau   = t * 0.45 * sp;      // sweeps elapsed
                 auto bump = [](double uu, double c, double wd, double amp) {
                     const double d = (uu - c) / wd;
                     return amp * std::exp(-d * d * 4.0);
                 };
-                auto wave = [&](int px) {
-                    const double ph = px * beats / std::max(1, w)
-                                      - t * 0.55 * sp;
-                    const double u  = ph - std::floor(ph);   // wrap-safe ∀ t
-                    return bump(u, 0.18, 0.030, 0.18)             // P
-                         - bump(u, 0.28, 0.014, 0.16)             // Q
-                         + bump(u, 0.31, 0.016, 0.95)             // R
-                         - bump(u, 0.345, 0.016, 0.28)            // S
-                         + bump(u, 0.50, 0.050, 0.22);            // T
+                // Trace height at a column, sampled at the sweep-time when
+                // the head last drew it (each pass shows the signal's NEXT
+                // stretch, like a real monitor). False when the column
+                // hasn't been drawn yet (first pass) or sits in the erase
+                // gap ahead of the head.
+                auto trace = [&](int px, double& ty, double& age) -> bool {
+                    const double fx   = px / static_cast<double>(std::max(1, w));
+                    const double taux = std::floor(tau - fx) + fx;
+                    if (taux < 0.0) return false;        // not drawn yet
+                    age = tau - taux;                    // sweeps since drawn
+                    if (age > 0.94) return false;        // erase gap
+                    const double ph = beats * taux;
+                    const double u  = ph - std::floor(ph);
+                    const double wv = bump(u, 0.18, 0.030, 0.18)     // P
+                                    - bump(u, 0.28, 0.014, 0.16)     // Q
+                                    + bump(u, 0.31, 0.016, 0.95)     // R
+                                    - bump(u, 0.345, 0.016, 0.28)    // S
+                                    + bump(u, 0.50, 0.050, 0.22);    // T
+                    ty = cy - wv * scale * 0.9 * sz;
+                    return true;
                 };
                 // Span this column's and the next column's trace heights so
                 // steep segments (the QRS spike) stay a connected line
                 // instead of aliasing into detached dots.
-                const double ty0 = cy - wave(x)     * scale * 0.9 * sz;
-                const double ty1 = cy - wave(x + 1) * scale * 0.9 * sz;
-                const double lo  = std::min(ty0, ty1);
-                const double hi  = std::max(ty0, ty1);
+                double ty0 = 0.0, ty1 = 0.0, age0 = 0.0, age1 = 0.0;
+                if (!trace(x, ty0, age0)) break;
+                if (!trace(x + 1, ty1, age1)) ty1 = ty0;
+                const double lo = std::min(ty0, ty1);
+                const double hi = std::max(ty0, ty1);
                 // Floor the half-thickness at ~a pixel so the trace can't
                 // fall between pixel rows and vanish at small sizes.
                 const double thick = std::max(0.8, scale * 0.06 * sz);
-                const double d   = (y < lo ? lo - y : y > hi ? y - hi : 0.0)
-                                   / thick;
-                inten = clamp01(1.0 - d);
+                const double d = (y < lo ? lo - y : y > hi ? y - hi : 0.0)
+                                 / thick;
+                // Full-bright (white-hot) pen tip; the trail ages toward
+                // ~55% before the erase gap catches up to it.
+                const double fade = (age0 < 0.02) ? 1.0 : 0.97 - 0.42 * age0;
+                inten = clamp01(1.0 - d) * fade;
                 break;
             }
             default: break;

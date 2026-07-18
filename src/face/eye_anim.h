@@ -22,7 +22,7 @@ enum class EyeAnim : int {
     Fire,         // rising flame flicker (fills the panel)
     Rain,         // falling streaks (fills the panel)
     Sparkle,      // twinkling star field (fills the panel)
-    Heartbeat,    // scrolling ECG trace across the baseline
+    Heartbeat,    // monitor-sweep ECG trace, redrawn left→right each pass
     Count
 };
 
