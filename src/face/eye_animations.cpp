@@ -183,7 +183,7 @@ static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
                 // dimming until the next pass overwrites it. ~2.5 complexes
                 // fit across the panel at Size 1.0; Size trades amplitude
                 // against density (smaller = more, smaller beats).
-                const double beats = std::clamp(2.5 / sz, 1.0, 8.0);
+                const double beats = std::clamp(4.0 / sz, 1.0, 10.0);
                 const double tau   = t * 0.45 * sp;      // sweeps elapsed
                 auto bump = [](double uu, double c, double wd, double amp) {
                     const double d = (uu - c) / wd;
@@ -218,17 +218,16 @@ static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
                 if (!trace(x + 1, ty1, age1)) ty1 = ty0;
                 const double lo = std::min(ty0, ty1);
                 const double hi = std::max(ty0, ty1);
-                // Thin bright stroke: full intensity for any pixel within
-                // the core half-width (≥ 0.5 px, so the nearest pixel row
-                // always saturates no matter where the trace sits between
-                // rows), then a fast half-pixel falloff. The trail only
+                // Hard single-pixel stroke: snap the trace span to pixel
+                // rows and light exactly those, full intensity — no soft
+                // edges to smear the line across two rows (the default
+                // centre puts the baseline exactly between rows, which a
+                // soft stroke renders 2 px thick forever). The trail only
                 // ages to ~70% before the erase gap catches up to it.
-                const double core = std::max(0.5, scale * 0.03 * sz);
-                const double dp = (y < lo ? lo - y : y > hi ? y - hi : 0.0);
-                const double edge =
-                    clamp01(1.0 - std::max(0.0, dp - core) / 0.5);
-                const double fade = (age0 < 0.02) ? 1.0 : 0.99 - 0.31 * age0;
-                inten = edge * fade;
+                const int lo_r = static_cast<int>(std::lround(lo));
+                const int hi_r = static_cast<int>(std::lround(hi));
+                if (y >= lo_r && y <= hi_r)
+                    inten = (age0 < 0.02) ? 1.0 : 0.99 - 0.31 * age0;
                 break;
             }
             default: break;
