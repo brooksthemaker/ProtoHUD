@@ -41,6 +41,14 @@ bool ExpressionDirector::conditions_hold_locked(const TriggerRecipe& r) const {
 }
 
 void ExpressionDirector::fire_locked(const Rule& rule) {
+    if (rule.is_eye_anim) {
+        // Transient by nature: the animation takes over the panels for its
+        // own duration and reverts by itself, so none of the activation /
+        // restore-face bookkeeping below applies. A retrigger just replays.
+        if (act_.play_eyes) act_.play_eyes(rule.eyes);
+        if (act_.notify && !rule.name.empty()) act_.notify("Expression", rule.name);
+        return;
+    }
     if (rule.base_expression.empty() && rule.name.empty()) return;
     const bool retrigger = active_ && active_key_ == rule.key;
     if (!retrigger) {

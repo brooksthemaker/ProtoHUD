@@ -1932,26 +1932,6 @@ int main(int argc, char* argv[]) {
                         bz.ripple_b = static_cast<uint8_t>(std::clamp(jr["color"][2].get<int>(), 0, 255));
                     }
                 }
-                if (jz.contains("eye_trigger") && jz["eye_trigger"].is_object()) {
-                    const auto& je = jz["eye_trigger"];
-                    auto& et = state.boop_zones[i].eye_trigger;
-                    et.enabled    = jval(je, "enabled",    et.enabled);
-                    et.count      = std::clamp(jval(je, "count", et.count), 2, 10);
-                    et.window_s   = jval(je, "window_s",   et.window_s);
-                    et.anim       = std::clamp(jval(je, "anim", et.anim),
-                                               0, face::eye_anim_count() - 1);
-                    et.speed      = jval(je, "speed",      et.speed);
-                    et.size       = jval(je, "size",       et.size);
-                    et.duration_s = jval(je, "duration_s", et.duration_s);
-                    et.x          = std::clamp(jval(je, "x", et.x), 0.0, 1.0);
-                    et.y          = std::clamp(jval(je, "y", et.y), 0.0, 1.0);
-                    if (je.contains("color") && je["color"].is_array() &&
-                        je["color"].size() >= 3) {
-                        et.r = static_cast<uint8_t>(std::clamp(je["color"][0].get<int>(), 0, 255));
-                        et.g = static_cast<uint8_t>(std::clamp(je["color"][1].get<int>(), 0, 255));
-                        et.b = static_cast<uint8_t>(std::clamp(je["color"][2].get<int>(), 0, 255));
-                    }
-                }
                 boop_cfg.touch_threshold[i] = state.boop_zones[i].threshold;
                 boop_cfg.zone_enabled[i]    = state.boop_zones[i].enabled;
             }
@@ -2190,6 +2170,69 @@ int main(int argc, char* argv[]) {
                  it != jpf["expression_triggers"].end(); ++it)
                 state.expression_triggers[it.key()] =
                     face::TriggerSet::from_json(it.value());
+        }
+        // Animated Eyes slot params (one per face::EyeAnim; the slots'
+        // Triggers ride in expression_triggers under eyeanim_<i>).
+        if (jpf.contains("eye_animations") && jpf["eye_animations"].is_array()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            const auto& ja = jpf["eye_animations"];
+            for (int a = 0; a < face::eye_anim_count() && a < (int)ja.size(); ++a) {
+                if (!ja[a].is_object()) continue;
+                const auto& je = ja[a];
+                auto& ep = state.eye_anims[a];
+                ep.speed      = jval(je, "speed",      ep.speed);
+                ep.size       = jval(je, "size",       ep.size);
+                ep.duration_s = jval(je, "duration_s", ep.duration_s);
+                ep.cx         = std::clamp(jval(je, "x", ep.cx), 0.0, 1.0);
+                ep.cy         = std::clamp(jval(je, "y", ep.cy), 0.0, 1.0);
+                ep.mirror     = jval(je, "mirror",     ep.mirror);
+                if (je.contains("color") && je["color"].is_array() &&
+                    je["color"].size() >= 3) {
+                    ep.r = static_cast<uint8_t>(std::clamp(je["color"][0].get<int>(), 0, 255));
+                    ep.g = static_cast<uint8_t>(std::clamp(je["color"][1].get<int>(), 0, 255));
+                    ep.b = static_cast<uint8_t>(std::clamp(je["color"][2].get<int>(), 0, 255));
+                }
+            }
+        }
+        // One-time migration: the old per-boop-zone rapid-boop "eye_trigger"
+        // configs become Animated Eyes trigger recipes (key eyeanim_<anim>)
+        // plus slot params. Only fills a slot whose trigger set is still
+        // empty — re-running can't clobber user edits — and the save path
+        // erases boop.zones[].eye_trigger, completing the move.
+        if (cfg.contains("boop") && cfg["boop"].contains("zones") &&
+            cfg["boop"]["zones"].is_array()) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            const auto& jzs = cfg["boop"]["zones"];
+            for (size_t i = 0; i < jzs.size() &&
+                               i < sensor::BoopSensor::ZoneCount; ++i) {
+                if (!jzs[i].is_object() || !jzs[i].contains("eye_trigger") ||
+                    !jzs[i]["eye_trigger"].is_object()) continue;
+                const auto& je = jzs[i]["eye_trigger"];
+                if (!jval(je, "enabled", false)) continue;
+                const int a = std::clamp(jval(je, "anim", 0),
+                                         0, face::eye_anim_count() - 1);
+                auto& ts = state.expression_triggers["eyeanim_" + std::to_string(a)];
+                if ((int)ts.recipes.size() < face::kRecipeSlots)
+                    ts.recipes.resize(face::kRecipeSlots);
+                if (ts.any()) continue;   // already authored — leave it alone
+                auto& ep = state.eye_anims[a];
+                ep.speed      = jval(je, "speed",      ep.speed);
+                ep.size       = jval(je, "size",       ep.size);
+                ep.duration_s = jval(je, "duration_s", ep.duration_s);
+                ep.cx         = std::clamp(jval(je, "x", ep.cx), 0.0, 1.0);
+                ep.cy         = std::clamp(jval(je, "y", ep.cy), 0.0, 1.0);
+                if (je.contains("color") && je["color"].is_array() &&
+                    je["color"].size() >= 3) {
+                    ep.r = static_cast<uint8_t>(std::clamp(je["color"][0].get<int>(), 0, 255));
+                    ep.g = static_cast<uint8_t>(std::clamp(je["color"][1].get<int>(), 0, 255));
+                    ep.b = static_cast<uint8_t>(std::clamp(je["color"][2].get<int>(), 0, 255));
+                }
+                auto& r = ts.recipes[0];
+                r.event     = face::TriggerRecipe::Event::Boop;
+                r.boop_zone = static_cast<int>(i);
+                r.count     = std::clamp(jval(je, "count", 3), 1, 10);
+                r.window_s  = static_cast<float>(jval(je, "window_s", 4.0));
+            }
         }
         if (jpf.contains("scroll_text") && jpf["scroll_text"].is_object())
             pf_scroll = face::ScrollTextConfig::from_json(jpf["scroll_text"]);
@@ -2974,6 +3017,9 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.notifs.push(std::move(n));
         };
+        da.play_eyes = [&face_proxy](const face::EyeAnimParams& p){
+            face_proxy.play_eye_animation(p);
+        };
         expr_director.set_actions(std::move(da));
     }
     // ── Reactions list (named environmental reactions) ────────────────────────
@@ -3025,6 +3071,14 @@ int main(int argc, char* argv[]) {
                 r.base_expression = cx.base_expression;
                 r.has_style = true;
                 r.style = cx.style;
+            } else if (key.rfind("eyeanim_", 0) == 0) {
+                const int a = std::atoi(key.c_str() + 8);
+                if (a < 0 || a >= face::eye_anim_count()) continue;
+                r.name = std::string("Eyes: ") +
+                         face::eye_anim_name(static_cast<face::EyeAnim>(a));
+                r.is_eye_anim = true;
+                r.eyes = state.eye_anims[a];
+                r.eyes.type = static_cast<face::EyeAnim>(a);   // slot index is authoritative
             } else {
                 r.name = key;
                 r.base_expression = key;
@@ -3034,22 +3088,8 @@ int main(int argc, char* argv[]) {
         return rules;
     };
 
-    // Per-zone rapid-boop tracking for the animated-eyes easter egg. Touched
-    // only from the sensor poll thread, so no extra locking is needed here.
-    auto eye_now = []{
-        return std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
-    auto eye_last = std::make_shared<
-        std::array<double, sensor::BoopSensor::ZoneCount>>();   // last boop time / zone
-    auto eye_run  = std::make_shared<
-        std::array<int, sensor::BoopSensor::ZoneCount>>();      // consecutive run / zone
-    // fire_boop is now callable from BOTH the MPR121 poll thread and the GPIO
-    // input thread, so the rapid-boop counters need a lock.
-    auto eye_mtx  = std::make_shared<std::mutex>();
-
     // Accessory LED flash feedback per boop zone — shared by the normal boop
-    // reaction and the animated-eyes path.
+    // reaction and the trigger-recipe path.
     auto flash_zone = [&accessory_leds](sensor::BoopSensor::Zone z) {
         using LZ = accessory::Zone;
         switch (z) {
@@ -3083,12 +3123,11 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    // Boop precedence: rapid-boop animated-eyes easter egg → a FIRING
-    // trigger recipe (counting boops still get the default reaction as
-    // feedback) → default boop reaction.
+    // Boop precedence: a FIRING trigger recipe — expression or animated-eyes
+    // rule alike (counting boops still get the default reaction as feedback)
+    // → dedicated boop art → default boop reaction.
     auto fire_boop = [&face_proxy, &state, &expr_director, rules_snapshot,
-                      boop_face_stem,
-                      eye_now, flash_zone, eye_last, eye_run, eye_mtx]
+                      boop_face_stem, flash_zone]
                      (sensor::BoopSensor::Zone z) {
         const auto zi = static_cast<size_t>(z);
         if (zi >= sensor::BoopSensor::ZoneCount) return;
@@ -3097,7 +3136,6 @@ int main(int argc, char* argv[]) {
         bool             enabled;
         std::string      fallback_expr;
         double           duration_s;
-        EyeTriggerConfig eye;
         // Ripple ring(s) for this boop: one at the zone's configured centre —
         // except BothCheeks, which rings both cheeks at their own spots.
         struct RippleParams { double x, y, speed; uint8_t r, g, b; };
@@ -3108,7 +3146,6 @@ int main(int argc, char* argv[]) {
             enabled       = state.boop_zones[zi].enabled;
             fallback_expr = state.boop_zones[zi].expression;
             duration_s    = state.boop_zones[zi].duration_s;
-            eye           = state.boop_zones[zi].eye_trigger;
             auto grab = [&state](size_t i) {
                 const auto& bz = state.boop_zones[i];
                 return RippleParams{ bz.ripple_x, bz.ripple_y, bz.ripple_speed,
@@ -3130,38 +3167,11 @@ int main(int argc, char* argv[]) {
                                                rip[i].speed);
         };
 
-        // Rapid-boop animated-eyes easter egg: count boops on this zone landing
-        // within window_s of each other; on the Nth, play the procedural eye
-        // animation *instead* of the normal reaction and reset the counter.
-        if (eye.enabled && eye.count > 0) {
-            const double now = eye_now();
-            bool fire = false;
-            {
-                std::lock_guard<std::mutex> lk(*eye_mtx);
-                if (now - (*eye_last)[zi] <= eye.window_s) (*eye_run)[zi] += 1;
-                else                                       (*eye_run)[zi]  = 1;
-                (*eye_last)[zi] = now;
-                if ((*eye_run)[zi] >= eye.count) { (*eye_run)[zi] = 0; fire = true; }
-            }
-            if (fire) {
-                face::EyeAnimParams ep;
-                ep.type  = static_cast<face::EyeAnim>(eye.anim);
-                ep.speed = eye.speed;  ep.size = eye.size;
-                ep.r = eye.r; ep.g = eye.g; ep.b = eye.b;
-                ep.duration_s = eye.duration_s;
-                ep.cx = eye.x; ep.cy = eye.y;
-                face_proxy.play_eye_animation(ep);
-                flash_zone(z);
-                return;   // eyes play instead of the normal boop reaction
-            }
-        } else {
-            std::lock_guard<std::mutex> lk(*eye_mtx);
-            (*eye_run)[zi] = 0;
-        }
         // A recipe firing on this boop claims it: the director shows its
-        // expression (with its own hold), so the default reaction is
-        // suppressed. Intermediate counting boops fall through — the normal
-        // reaction is the per-boop feedback on the way to e.g. "×5 → angry".
+        // expression (or plays an eye animation — those are recipes on the
+        // eyeanim_* keys now), so the default reaction is suppressed.
+        // Intermediate counting boops fall through — the normal reaction is
+        // the per-boop feedback on the way to e.g. "×5 → angry".
         if (expr_director.on_boop(static_cast<int>(z), rules_snapshot())) {
             fire_ripple();
             flash_zone(z);
@@ -3193,10 +3203,12 @@ int main(int argc, char* argv[]) {
     if (led_cfg.enabled && !accessory_leds.start())
         std::cerr << "[main] accessory LEDs unavailable — continuing without\n";
 
-    // ── Light sensor (BH1750 ambient lux → squint reaction) ──────────────────
-    // Hardware-level config (bus, address, sensor type) comes from cfg["light_sensor"];
-    // the trigger thresholds + reaction live in state.light_squint so the menu can
-    // mutate them at runtime and mutate_cfg persists them on save.
+    // ── Light sensor (BH1750 ambient lux) ────────────────────────────────────
+    // Hardware config (enable, bus, address, poll rate) comes from
+    // cfg["light_sensor"]. The lux stream feeds the ExpressionDirector
+    // (per-expression "Gets Bright"/"Gets Dark" triggers + While-conditions)
+    // and the ReactionEngine's move-into-bright/dark reactions — the old
+    // standalone squint edge detector is gone; those two cover it.
     sensor::LightSensor::Config light_cfg;
     if (cfg.contains("light_sensor")) {
         auto& jl = cfg["light_sensor"];
@@ -3204,51 +3216,10 @@ int main(int argc, char* argv[]) {
         light_cfg.i2c_bus  = jl.value("i2c_bus",  light_cfg.i2c_bus);
         light_cfg.i2c_addr = jval(jl, "i2c_addr", light_cfg.i2c_addr);
         light_cfg.poll_hz  = jval(jl, "poll_hz",  light_cfg.poll_hz);
-        state.light_squint.enabled              = jval(jl, "enabled",              state.light_squint.enabled);
-        state.light_squint.dark_threshold_lux   = jval(jl, "dark_threshold_lux",   state.light_squint.dark_threshold_lux);
-        state.light_squint.bright_threshold_lux = jval(jl, "bright_threshold_lux", state.light_squint.bright_threshold_lux);
-        state.light_squint.transition_window_s  = jval(jl, "transition_window_s",  state.light_squint.transition_window_s);
-        state.light_squint.expression           = jl.value("expression",            state.light_squint.expression);
-        state.light_squint.duration_s           = jval(jl, "duration_s",           state.light_squint.duration_s);
-        state.light_squint.cooldown_s           = jval(jl, "cooldown_s",           state.light_squint.cooldown_s);
     }
     sensor::LightSensor light_sensor(light_cfg);
-    // Edge detector: remember when we last saw "dark"; if we cross into
-    // "bright" within transition_window_s, fire the squint reaction. Cooldown
-    // gates back-to-back squints (e.g. flickering lights).
-    struct LightEdgeState {
-        double last_dark_t   = -1.0;
-        double last_squint_t = -1.0e9;
-    };
-    auto light_edge = std::make_shared<LightEdgeState>();
-    light_sensor.set_lux_callback([light_edge, &state, &face_proxy,
-                                   last_lux](float lux) {
-        // Publish for the director's light events/conditions (it edge-detects
-        // in its tick), independent of the squint gate below.
+    light_sensor.set_lux_callback([last_lux](float lux) {
         last_lux->store(lux);
-        const double now = std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        // Snapshot the config so a mid-callback menu edit can't tear strings.
-        LightSquintConfig c;
-        {
-            std::lock_guard<std::mutex> lk(state.mtx);
-            c = state.light_squint;
-        }
-        if (!c.enabled) return;
-        if (lux < c.dark_threshold_lux) {
-            light_edge->last_dark_t = now;
-            return;
-        }
-        if (lux <= c.bright_threshold_lux) return;
-        // Bright. Did we come from dark recently?
-        if (light_edge->last_dark_t < 0.0) return;
-        if (now - light_edge->last_dark_t > c.transition_window_s) return;
-        // Cooldown gate.
-        if (now - light_edge->last_squint_t < c.cooldown_s) return;
-        light_edge->last_squint_t = now;
-        light_edge->last_dark_t   = -1.0;   // consume the edge
-        if (!c.expression.empty())
-            face_proxy.trigger_boop(c.expression, c.duration_s);
     });
     if (light_cfg.enabled && !light_sensor.start())
         std::cerr << "[main] light sensor unavailable\n";
@@ -5785,31 +5756,21 @@ int main(int argc, char* argv[]) {
                 jr["color"] = json::array({ state.boop_zones[i].ripple_r,
                                             state.boop_zones[i].ripple_g,
                                             state.boop_zones[i].ripple_b });
-                const auto& et = state.boop_zones[i].eye_trigger;
-                auto& je = jzones[i]["eye_trigger"];
-                je["enabled"]    = et.enabled;
-                je["count"]      = et.count;
-                je["window_s"]   = et.window_s;
-                je["anim"]       = et.anim;
-                je["speed"]      = et.speed;
-                je["size"]       = et.size;
-                je["duration_s"] = et.duration_s;
-                je["x"]          = et.x;
-                je["y"]          = et.y;
-                je["color"]      = json::array({ et.r, et.g, et.b });
+                // Migrated to Animated Eyes trigger recipes (eyeanim_* keys
+                // in expression_triggers) — scrub the pre-migration key.
+                jzones[i].erase("eye_trigger");
             }
         }
 
-        {
-            std::lock_guard<std::mutex> lk(state.mtx);
+        if (cfg.contains("light_sensor")) {
+            // The standalone squint reaction is gone (light responses live in
+            // Automatic Reactions and expression Triggers now) — scrub its
+            // stale keys; the hardware fields (enabled/i2c/poll) stay put.
             auto& jls = cfg["light_sensor"];
-            jls["enabled"]              = state.light_squint.enabled;
-            jls["dark_threshold_lux"]   = state.light_squint.dark_threshold_lux;
-            jls["bright_threshold_lux"] = state.light_squint.bright_threshold_lux;
-            jls["transition_window_s"]  = state.light_squint.transition_window_s;
-            jls["expression"]           = state.light_squint.expression;
-            jls["duration_s"]           = state.light_squint.duration_s;
-            jls["cooldown_s"]           = state.light_squint.cooldown_s;
+            for (const char* k : { "dark_threshold_lux", "bright_threshold_lux",
+                                   "transition_window_s", "expression",
+                                   "duration_s", "cooldown_s" })
+                jls.erase(k);
         }
         cfg["voice_mouth"]["enabled"]             = state.voice_mouth.enabled;
         cfg["voice_mouth"]["sensitivity"]         = state.voice_mouth.sensitivity;
@@ -5958,6 +5919,19 @@ int main(int argc, char* argv[]) {
             cfg["protoface"]["custom_expressions"]  = std::move(jc);
             cfg["protoface"]["expression_triggers"] = std::move(jt);
             cfg["protoface"]["reaction_rules"]      = reaction_rules.to_json();
+            nlohmann::json ja = nlohmann::json::array();
+            for (const auto& ep : state.eye_anims) {
+                nlohmann::json je;
+                je["speed"]      = ep.speed;
+                je["size"]       = ep.size;
+                je["duration_s"] = ep.duration_s;
+                je["x"]          = ep.cx;
+                je["y"]          = ep.cy;
+                je["mirror"]     = ep.mirror;
+                je["color"]      = nlohmann::json::array({ ep.r, ep.g, ep.b });
+                ja.push_back(std::move(je));
+            }
+            cfg["protoface"]["eye_animations"] = std::move(ja);
         }
         cfg["protoface"]["scroll_text"] = pf_scroll.to_json();
         {

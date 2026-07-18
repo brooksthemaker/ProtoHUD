@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "custom_expression.h"
+#include "eye_anim.h"
 
 namespace face {
 
@@ -39,6 +40,9 @@ public:
         std::function<void()>                       clear_style_override;
         // Optional HUD toast (title, body).
         std::function<void(const std::string&, const std::string&)> notify;
+        // Animated-eyes rules fire through here instead of set_face (the
+        // animation is transient and reverts on its own).
+        std::function<void(const EyeAnimParams&)> play_eyes;
     };
 
     // One evaluatable rule: the expression to activate + its recipes.
@@ -49,6 +53,11 @@ public:
         bool            has_style = false;  // custom: apply style via override
         ExpressionStyle style;
         double          hold_s = 3.0;       // 0 = latch
+        // Animated-eyes rule: firing plays `eyes` (via Actions::play_eyes)
+        // instead of switching the face; base_expression stays empty and the
+        // hold/restore bookkeeping is skipped (the animation self-reverts).
+        bool         is_eye_anim = false;
+        EyeAnimParams eyes;
         std::vector<TriggerRecipe> recipes;
     };
 

@@ -12,6 +12,7 @@
 #include <imgui.h>
 #include "capture.h"
 #include "face/custom_expression.h"
+#include "face/eye_anim.h"
 
 // ── Post-processing config ────────────────────────────────────────────────────
 // Modified from menu (any thread); read by the render thread via snap.
@@ -180,23 +181,6 @@ struct VoiceMouthConfig {
 // touches (no expression knowledge); main.cpp's on_boop callback reads this
 // to call IFaceController::trigger_boop with the per-zone expression. Indexed
 // in lockstep with sensor::BoopSensor::Zone (Snout=0, LeftCheek=1, RightCheek=2).
-// Rapid-trigger "animated eyes" easter egg for a boop zone: boop the same zone
-// `count` times within `window_s` and a procedural eye animation takes over the
-// panels for `duration_s` (played instead of the normal reaction, then the
-// counter resets). anim is a face::EyeAnim value; the other fields re-skin the
-// built-in animations. Stored as plain types to keep app_state.h dependency-free.
-struct EyeTriggerConfig {
-    bool    enabled    = false;
-    int     count      = 3;       // boops within the window to fire
-    double  window_s   = 4.0;     // consecutive boops must land this close together
-    int     anim       = 0;       // face::EyeAnim value
-    double  speed      = 1.0;
-    double  size       = 1.0;
-    double  duration_s = 2.5;     // how long the animation plays
-    uint8_t r = 0, g = 220, b = 180;   // primary colour
-    double  x = 0.5, y = 0.5;     // animation centre, panel-normalised (0..1)
-};
-
 struct BoopZoneConfig {
     bool        enabled    = true;
     std::string expression = "surprised";   // canonical face PNG name
@@ -211,22 +195,6 @@ struct BoopZoneConfig {
     double      ripple_x = 0.50, ripple_y = 0.55;
     uint8_t     ripple_r = 235, ripple_g = 245, ripple_b = 255;
     double      ripple_speed = 1.0;
-    EyeTriggerConfig eye_trigger;           // optional rapid-boop animated-eyes reaction
-};
-
-// ── Light-sensor squint trigger ──────────────────────────────────────────────
-// Edge-detects the wearer stepping from a dim area into a bright one and
-// fires a transient expression (default "squint") for a few seconds before
-// reverting. The driver lives in sensor::LightSensor; main hosts the edge
-// detector and the menu mutates this struct.
-struct LightSquintConfig {
-    bool        enabled              = false;
-    float       dark_threshold_lux   = 100.f;   // below = "dark"
-    float       bright_threshold_lux = 800.f;   // above = "bright"
-    float       transition_window_s  = 2.0f;    // dark→bright must happen within this many seconds
-    std::string expression           = "squint";
-    double      duration_s           = 1.5;     // hold time before reverting
-    float       cooldown_s           = 3.0f;    // min time between consecutive squints
 };
 
 struct NightVisionState {
@@ -1050,7 +1018,15 @@ struct AppState {
     // by ExpressionDirector; persisted as protoface.expression_triggers.
     // Guarded by mtx.
     std::map<std::string, face::TriggerSet> expression_triggers;
-    LightSquintConfig    light_squint;
+    // Per-animation params for the procedural Animated Eyes (edited in the
+    // Expressions menu). Slot index == face::EyeAnim value; each slot's
+    // Triggers live in expression_triggers under key "eyeanim_<index>".
+    // Persisted as protoface.eye_animations. Guarded by mtx.
+    face::EyeAnimParams  eye_anims[static_cast<int>(face::EyeAnim::Count)] = {
+        { face::EyeAnim::Spiral },    { face::EyeAnim::Rings },
+        { face::EyeAnim::Hearts },    { face::EyeAnim::Swirl },
+        { face::EyeAnim::Starburst }, { face::EyeAnim::Glitch },
+    };
     VoiceMouthConfig     voice_mouth;
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;        // left / primary eye

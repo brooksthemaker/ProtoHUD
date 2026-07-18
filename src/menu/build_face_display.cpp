@@ -1530,6 +1530,81 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                   "boop_right, boop_both, boop_head, boop_mouth_top, "
                   "boop_mouth_bottom — all in the active face folder."));
 
+    // ── Animated Eyes — procedural reactions as trigger targets ──────────────
+    // One slot per built-in animation. Each is edited here (rate / scale /
+    // colour / centre / mirror / hold) and BOUND here: its Triggers submenu
+    // is the same recipe editor every expression has, keyed eyeanim_<i> in
+    // expression_triggers — so "Boop: Snout ×3 → Hearts" is just a recipe.
+    {
+        std::vector<MenuItem> eye_slot_rows;
+        for (int a = 0; a < face::eye_anim_count(); ++a) {
+            auto eget = [&state, a]() -> face::EyeAnimParams {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                return state.eye_anims[a];
+            };
+            auto emod = [&state, a](std::function<void(face::EyeAnimParams&)> fn) {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                fn(state.eye_anims[a]);
+            };
+            std::vector<MenuItem> rows = {
+                slider("Speed", 0.2f, 4.f, 0.1f, "x",
+                    [eget]{ return static_cast<float>(eget().speed); },
+                    [emod](float v){ emod([v](face::EyeAnimParams& p){
+                        p.speed = static_cast<double>(v); }); }),
+                slider("Size", 0.4f, 2.5f, 0.1f, "x",
+                    [eget]{ return static_cast<float>(eget().size); },
+                    [emod](float v){ emod([v](face::EyeAnimParams& p){
+                        p.size = static_cast<double>(v); }); }),
+                slider("Duration", 1.f, 8.f, 0.5f, " s",
+                    [eget]{ return static_cast<float>(eget().duration_s); },
+                    [emod](float v){ emod([v](face::EyeAnimParams& p){
+                        p.duration_s = static_cast<double>(v); }); }),
+                with_desc(slider("Position X", 0.f, 100.f, 1.f, "%",
+                    [eget]{ return static_cast<float>(eget().cx * 100.0); },
+                    [emod](float v){ emod([v](face::EyeAnimParams& p){
+                        p.cx = static_cast<double>(v) / 100.0; }); }),
+                    "Animation centre across each panel; 50% = centred. "
+                    "Eye-panel rigs shift both eyes together. Glitch always "
+                    "fills the panel."),
+                with_desc(slider("Position Y", 0.f, 100.f, 1.f, "%",
+                    [eget]{ return static_cast<float>(eget().cy * 100.0); },
+                    [emod](float v){ emod([v](face::EyeAnimParams& p){
+                        p.cy = static_cast<double>(v) / 100.0; }); }),
+                    "Animation centre down each panel; 50% = centred."),
+                with_desc(toggle("Mirror",
+                    [eget]{ return eget().mirror; },
+                    [emod](bool v){ emod([v](face::EyeAnimParams& p){
+                        p.mirror = v; }); }),
+                    "Horizontally mirror the animation — a spiral spins the "
+                    "other way. The position above is kept."),
+                color_picker("Color",
+                    [emod](uint8_t r, uint8_t g, uint8_t b){
+                        emod([r, g, b](face::EyeAnimParams& p){
+                            p.r = r; p.g = g; p.b = b; }); },
+                    [eget]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
+                        const auto p = eget();
+                        return { p.r, p.g, p.b }; }),
+                make_triggers_item("eyeanim_" + std::to_string(a)),
+                leaf("Test",
+                    [teensy, eget, a]{
+                        face::EyeAnimParams p = eget();
+                        p.type = static_cast<face::EyeAnim>(a);
+                        teensy->play_eye_animation(p);
+                    }),
+            };
+            eye_slot_rows.push_back(
+                submenu(face::eye_anim_name(static_cast<face::EyeAnim>(a)),
+                        std::move(rows)));
+        }
+        face_files_menu.push_back(
+            with_desc(submenu("Animated Eyes", std::move(eye_slot_rows)),
+                      "Procedural eye takeovers as trigger targets. Give an "
+                      "animation a Trigger (boop ×N, swipe, shake, light) "
+                      "and it plays for its Duration when the recipe fires, "
+                      "then the face returns. The recipe's Hold Time is "
+                      "ignored here — Duration rules."));
+    }
+
     // ── ProtoTracer (Teensy-driven LED matrix) submenu ────────────────────────
     std::vector<MenuItem> prototracer_inner_menu = {
         submenu("Faces",              std::move(effects)),
@@ -4071,12 +4146,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 }
             }
 
-            return with_desc(submenu("Reactions", std::move(ri)),
+            return with_desc(submenu("Automatic Reactions", std::move(ri)),
                 "The face reacts to the real world: Falling Asleep on "
                 "stillness, plus named reactions (move into bright/dark, "
                 "dizzy, low battery, loud noise, upside-down) that each show "
-                "an expression or GIF. The dark-to-bright squint also has its "
-                "own light-sensor config.");
+                "an expression or GIF.");
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),
@@ -4165,7 +4239,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         "The look every expression inherits — material color, particle "
         "effects, glitch — unless the expression's own Style overrides it."));
     take_into(faces_items, protoface_inner_menu, "Animations");
-    take_into(faces_items, protoface_inner_menu, "Reactions");
+    take_into(faces_items, protoface_inner_menu, "Automatic Reactions");
 
     take_into(media_items, protoface_inner_menu, "GIFs");
     take_into(media_items, protoface_inner_menu, "Scrolling Text");
@@ -4379,102 +4453,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             items.push_back(std::move(rm));
         }
 
-        // ── Animated Eyes — rapid-boop easter egg ────────────────────────────
-        // After Trigger Count fast boops on this zone, a procedural eye
-        // animation plays instead of the normal reaction. The built-in
-        // animations are re-skinnable (rate / scale / colour / hold time).
-        {
-            auto& bz = state;   // capture helper alias
-            std::vector<MenuItem> anim_items;
-            for (int a = 0; a < face::eye_anim_count(); ++a)
-                anim_items.push_back(leaf_sel(face::eye_anim_name(static_cast<face::EyeAnim>(a)),
-                    [&bz, idx, a]{
-                        std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.anim = a;
-                    },
-                    [&bz, idx, a]{
-                        std::lock_guard<std::mutex> lk(bz.mtx);
-                        return bz.boop_zones[idx].eye_trigger.anim == a;
-                    }));
-
-            std::vector<MenuItem> eye_items = {
-                toggle("Enabled",
-                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
-                        return bz.boop_zones[idx].eye_trigger.enabled; },
-                    [&bz, idx](bool v){ std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.enabled = v; }),
-                submenu("Animation", std::move(anim_items)),
-                with_desc(slider("Trigger Count", 2.f, 10.f, 1.f, " boops",
-                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
-                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.count); },
-                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.count = static_cast<int>(v); }),
-                    "How many fast boops on this zone trigger the eyes."),
-                with_desc(slider("Window", 1.f, 8.f, 0.5f, " s",
-                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
-                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.window_s); },
-                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.window_s = static_cast<double>(v); }),
-                    "Consecutive boops must land within this window or the "
-                    "counter resets."),
-                slider("Speed", 0.2f, 4.f, 0.1f, "x",
-                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
-                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.speed); },
-                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.speed = static_cast<double>(v); }),
-                slider("Size", 0.4f, 2.5f, 0.1f, "x",
-                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
-                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.size); },
-                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.size = static_cast<double>(v); }),
-                with_desc(slider("Position X", 0.f, 100.f, 1.f, "%",
-                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
-                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.x * 100.0); },
-                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.x = static_cast<double>(v) / 100.0; }),
-                    "Animation centre across each panel; 50% = centred. "
-                    "Eye-panel rigs shift both eyes together. Glitch always "
-                    "fills the panel."),
-                with_desc(slider("Position Y", 0.f, 100.f, 1.f, "%",
-                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
-                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.y * 100.0); },
-                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.y = static_cast<double>(v) / 100.0; }),
-                    "Animation centre down each panel; 50% = centred."),
-                slider("Duration", 1.f, 8.f, 0.5f, " s",
-                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
-                        return static_cast<float>(bz.boop_zones[idx].eye_trigger.duration_s); },
-                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.duration_s = static_cast<double>(v); }),
-                color_picker("Color",
-                    [&bz, idx](uint8_t r, uint8_t g, uint8_t b){
-                        std::lock_guard<std::mutex> lk(bz.mtx);
-                        bz.boop_zones[idx].eye_trigger.r = r;
-                        bz.boop_zones[idx].eye_trigger.g = g;
-                        bz.boop_zones[idx].eye_trigger.b = b; },
-                    [&bz, idx]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
-                        std::lock_guard<std::mutex> lk(bz.mtx);
-                        const auto& e = bz.boop_zones[idx].eye_trigger;
-                        return { e.r, e.g, e.b }; }),
-                leaf("Test Eyes",
-                    [teensy, &bz, idx]{
-                        EyeTriggerConfig e;
-                        { std::lock_guard<std::mutex> lk(bz.mtx);
-                          e = bz.boop_zones[idx].eye_trigger; }
-                        face::EyeAnimParams p;
-                        p.type  = static_cast<face::EyeAnim>(e.anim);
-                        p.speed = e.speed;  p.size = e.size;
-                        p.r = e.r; p.g = e.g; p.b = e.b;
-                        p.duration_s = e.duration_s;
-                        p.cx = e.x; p.cy = e.y;
-                        teensy->play_eye_animation(p);
-                    }),
-            };
-            items.push_back(with_desc(submenu("Animated Eyes", std::move(eye_items)),
-                "Boop this zone Trigger-Count times within Window seconds and a "
-                "procedural eye animation plays instead of the normal reaction. "
-                "Tune the built-in animations with Speed / Size / Color."));
-        }
+        // (The per-zone rapid-boop "Animated Eyes" easter egg moved to the
+        // Expressions menu: each animation is now a slot with its own edit
+        // options and Triggers — e.g. "Boop: Snout" x3 — under Animated Eyes.)
 
         return submenu(std::move(label), std::move(items));
     };
@@ -4500,68 +4481,17 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "(single-side events fire immediately)."),
     };
     faces_items.push_back(
-        with_desc(submenu("Boop", std::move(boop_menu)),
-                  "Per-zone touch options: sensor wiring, hold time, ripple "
-                  "ring, and the rapid-boop eye animation. WHICH face a boop "
-                  "shows is bound in Expressions > [face] > Triggers (event "
-                  "\"Boop\", count 1); each zone's Reaction row here shows "
-                  "the live result."));
+        with_desc(submenu("Boop Settings", std::move(boop_menu)),
+                  "Per-zone touch options: sensor wiring, hold time, and the "
+                  "ripple ring. WHICH face a boop shows is bound in "
+                  "Expressions > [face] > Triggers (event \"Boop\", count 1), "
+                  "and Animated Eyes live there too; each zone's Reaction row "
+                  "here shows the live result."));
 
-    // ── Light Sensor (BH1750) → squint reaction ────────────────────────────
-    // Edge-detects dark→bright transitions (helmet stepping into sunlight)
-    // and fires the configured expression for the chosen duration. The
-    // expression name lines up with a Files > Faces slot so the user can
-    // author it in the editor.
-    std::vector<MenuItem> light_menu = {
-        toggle("Enabled",
-            [&state]{ return state.light_squint.enabled; },
-            [&state](bool v){
-                std::lock_guard<std::mutex> lk(state.mtx);
-                state.light_squint.enabled = v;
-            }),
-        slider("Dark Threshold", 1.f, 1000.f, 5.f, " lx",
-            [&state]{ return state.light_squint.dark_threshold_lux; },
-            [&state](float v){
-                std::lock_guard<std::mutex> lk(state.mtx);
-                state.light_squint.dark_threshold_lux = v;
-                if (state.light_squint.bright_threshold_lux <= v)
-                    state.light_squint.bright_threshold_lux = v + 10.f;
-            }),
-        slider("Bright Threshold", 50.f, 20000.f, 50.f, " lx",
-            [&state]{ return state.light_squint.bright_threshold_lux; },
-            [&state](float v){
-                std::lock_guard<std::mutex> lk(state.mtx);
-                state.light_squint.bright_threshold_lux = v;
-                if (state.light_squint.dark_threshold_lux >= v)
-                    state.light_squint.dark_threshold_lux = std::max(1.f, v - 10.f);
-            }),
-        slider("Transition Window", 0.2f, 10.f, 0.1f, " s",
-            [&state]{ return state.light_squint.transition_window_s; },
-            [&state](float v){
-                std::lock_guard<std::mutex> lk(state.mtx);
-                state.light_squint.transition_window_s = v;
-            }),
-        slider("Hold Duration", 0.2f, 5.f, 0.1f, " s",
-            [&state]{ return static_cast<float>(state.light_squint.duration_s); },
-            [&state](float v){
-                std::lock_guard<std::mutex> lk(state.mtx);
-                state.light_squint.duration_s = v;
-            }),
-        slider("Cooldown", 0.5f, 30.f, 0.5f, " s",
-            [&state]{ return state.light_squint.cooldown_s; },
-            [&state](float v){
-                std::lock_guard<std::mutex> lk(state.mtx);
-                state.light_squint.cooldown_s = v;
-            }),
-    };
-    faces_items.push_back(
-        with_desc(submenu("Light Sensor", std::move(light_menu)),
-                  "Triggers a face reaction when the wearer steps from a dim "
-                  "area into a bright one. Reads a BH1750 over I²C "
-                  "(/dev/i2c-1, addr 0x23). The expression name (default "
-                  "\"squint\") maps to a Files > Faces slot — author the PNG "
-                  "there. Cooldown gates back-to-back triggers under "
-                  "flickering light."));
+    // (The old standalone "Light Sensor" squint section is gone — light
+    // responses live in Automatic Reactions (move into bright/dark) and in
+    // per-expression Triggers ("Gets Bright"/"Gets Dark" events). The BH1750
+    // hardware itself is configured in config.json under light_sensor.)
 
     // ── Voice → mouth_open driver ────────────────────────────────────────────
     // Sliders write through to the live analyzer so the next FFT cycle picks
