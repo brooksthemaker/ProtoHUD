@@ -1918,6 +1918,20 @@ int main(int argc, char* argv[]) {
                     static_cast<uint8_t>(jval(jz, "threshold", static_cast<int>(state.boop_zones[i].threshold)));
                 state.boop_zones[i].enabled =
                     jval(jz, "enabled", state.boop_zones[i].enabled);
+                if (jz.contains("ripple") && jz["ripple"].is_object()) {
+                    const auto& jr = jz["ripple"];
+                    auto& bz = state.boop_zones[i];
+                    bz.ripple_x = std::clamp(jval(jr, "x", bz.ripple_x), 0.0, 1.0);
+                    bz.ripple_y = std::clamp(jval(jr, "y", bz.ripple_y), 0.0, 1.0);
+                    bz.ripple_speed =
+                        std::clamp(jval(jr, "speed", bz.ripple_speed), 0.25, 3.0);
+                    if (jr.contains("color") && jr["color"].is_array() &&
+                        jr["color"].size() >= 3) {
+                        bz.ripple_r = static_cast<uint8_t>(std::clamp(jr["color"][0].get<int>(), 0, 255));
+                        bz.ripple_g = static_cast<uint8_t>(std::clamp(jr["color"][1].get<int>(), 0, 255));
+                        bz.ripple_b = static_cast<uint8_t>(std::clamp(jr["color"][2].get<int>(), 0, 255));
+                    }
+                }
                 if (jz.contains("eye_trigger") && jz["eye_trigger"].is_object()) {
                     const auto& je = jz["eye_trigger"];
                     auto& et = state.boop_zones[i].eye_trigger;
@@ -3082,14 +3096,37 @@ int main(int argc, char* argv[]) {
         std::string      fallback_expr;
         double           duration_s;
         EyeTriggerConfig eye;
+        // Ripple ring(s) for this boop: one at the zone's configured centre —
+        // except BothCheeks, which rings both cheeks at their own spots.
+        struct RippleParams { double x, y, speed; uint8_t r, g, b; };
+        RippleParams rip[2];
+        int          nrip = 1;
         {
             std::lock_guard<std::mutex> lk(state.mtx);
             enabled       = state.boop_zones[zi].enabled;
             fallback_expr = state.boop_zones[zi].expression;
             duration_s    = state.boop_zones[zi].duration_s;
             eye           = state.boop_zones[zi].eye_trigger;
+            auto grab = [&state](size_t i) {
+                const auto& bz = state.boop_zones[i];
+                return RippleParams{ bz.ripple_x, bz.ripple_y, bz.ripple_speed,
+                                     bz.ripple_r, bz.ripple_g, bz.ripple_b };
+            };
+            if (z == sensor::BoopSensor::Zone::BothCheeks) {
+                rip[0] = grab(static_cast<size_t>(sensor::BoopSensor::Zone::LeftCheek));
+                rip[1] = grab(static_cast<size_t>(sensor::BoopSensor::Zone::RightCheek));
+                nrip = 2;
+            } else {
+                rip[0] = grab(zi);
+            }
         }
         if (!enabled) return;
+        auto fire_ripple = [&]{
+            for (int i = 0; i < nrip; ++i)
+                face_proxy.trigger_boop_ripple(rip[i].x, rip[i].y,
+                                               rip[i].r, rip[i].g, rip[i].b,
+                                               rip[i].speed);
+        };
 
         // Rapid-boop animated-eyes easter egg: count boops on this zone landing
         // within window_s of each other; on the Nth, play the procedural eye
@@ -3119,7 +3156,7 @@ int main(int argc, char* argv[]) {
         // suppressed. Intermediate counting boops fall through — the normal
         // reaction is the per-boop feedback on the way to e.g. "×5 → angry".
         if (expr_director.on_boop(static_cast<int>(z), rules_snapshot())) {
-            face_proxy.trigger_boop_ripple(static_cast<int>(z));
+            fire_ripple();
             flash_zone(z);
             return;
         }
@@ -3136,7 +3173,7 @@ int main(int argc, char* argv[]) {
         face_proxy.trigger_boop(expression, duration_s);
         // Touch feedback on the panels: an expanding ring at the booped zone
         // (native renderer only; other backends no-op).
-        face_proxy.trigger_boop_ripple(static_cast<int>(z));
+        fire_ripple();
 
         // Accessory LED flash feedback (same per-zone mapping for both paths).
         flash_zone(z);
@@ -5734,6 +5771,13 @@ int main(int argc, char* argv[]) {
                 jzones[i]["duration_s"] = state.boop_zones[i].duration_s;
                 jzones[i]["threshold"]  = state.boop_zones[i].threshold;
                 jzones[i]["electrode"]  = state.boop_zones[i].electrode;
+                auto& jr = jzones[i]["ripple"];
+                jr["x"]     = state.boop_zones[i].ripple_x;
+                jr["y"]     = state.boop_zones[i].ripple_y;
+                jr["speed"] = state.boop_zones[i].ripple_speed;
+                jr["color"] = json::array({ state.boop_zones[i].ripple_r,
+                                            state.boop_zones[i].ripple_g,
+                                            state.boop_zones[i].ripple_b });
                 const auto& et = state.boop_zones[i].eye_trigger;
                 auto& je = jzones[i]["eye_trigger"];
                 je["enabled"]    = et.enabled;

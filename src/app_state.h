@@ -202,6 +202,14 @@ struct BoopZoneConfig {
     double      duration_s = 0.8;           // how long the expression holds
     uint8_t     threshold  = 12;            // MPR121 touch threshold (lower = more sensitive)
     int         electrode  = -1;            // MPR121 electrode 0..11 driving this zone (-1 = none/derived)
+    // Touch-feedback ripple ring: canvas-normalised centre (0..1 across the
+    // whole logical face canvas, so multi-panel faces share one ring), colour,
+    // and an expansion-speed multiplier (also scales the fade — a fast ring
+    // lives short). The BothCheeks zone ignores its own entry: it rings both
+    // cheeks at their configured spots.
+    double      ripple_x = 0.50, ripple_y = 0.55;
+    uint8_t     ripple_r = 235, ripple_g = 245, ripple_b = 255;
+    double      ripple_speed = 1.0;
     EyeTriggerConfig eye_trigger;           // optional rapid-boop animated-eyes reaction
 };
 
@@ -1015,14 +1023,18 @@ struct AppState {
     // index parity. The head/mouth zones ship with electrode -1 (inert)
     // so an unwired MPR121 can't false-trigger them; assign an electrode
     // in the menu when the pad is wired.
+    // Ripple centres default to where each zone's pad sits on a typical face:
+    // snout bottom-centre, cheeks at the outer thirds, head top-centre, the
+    // mouth rows between snout and cheek line. All editable per zone in the
+    // menu (BothCheeks' own centre is unused — it rings both cheeks).
     BoopZoneConfig       boop_zones[7] = {
-        { true, "surprised", 0.8, 12,  0 },   // Snout      → electrode 0
-        { true, "happy",     0.6, 12,  1 },   // LeftCheek  → electrode 1
-        { true, "happy",     0.6, 12,  2 },   // RightCheek → electrode 2
-        { true, "surprised", 1.0, 12, -1 },   // BothCheeks → derived (no electrode)
-        { true, "happy",     0.8, 12, -1 },   // TopHead     → assign when wired
-        { true, "surprised", 0.8, 12, -1 },   // MouthTop    → assign when wired
-        { true, "surprised", 0.8, 12, -1 },   // MouthBottom → assign when wired
+        { true, "surprised", 0.8, 12,  0, 0.50, 0.92 },   // Snout      → electrode 0
+        { true, "happy",     0.6, 12,  1, 0.15, 0.55 },   // LeftCheek  → electrode 1
+        { true, "happy",     0.6, 12,  2, 0.85, 0.55 },   // RightCheek → electrode 2
+        { true, "surprised", 1.0, 12, -1, 0.50, 0.55 },   // BothCheeks → derived (no electrode)
+        { true, "happy",     0.8, 12, -1, 0.50, 0.08 },   // TopHead     → assign when wired
+        { true, "surprised", 0.8, 12, -1, 0.50, 0.72 },   // MouthTop    → assign when wired
+        { true, "surprised", 0.8, 12, -1, 0.50, 0.86 },   // MouthBottom → assign when wired
     };
     // Coalesce window (seconds) for combining near-simultaneous left + right
     // cheek touches into a single BothCheeks event. Mirror of the sensor's

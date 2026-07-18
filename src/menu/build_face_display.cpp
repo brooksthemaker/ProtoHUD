@@ -4292,6 +4292,62 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 }),
         };
 
+        // ── Ripple ring — per-zone touch feedback ────────────────────────────
+        // Where/how the expanding ring draws when this zone is booped. Hidden
+        // for BothCheeks: that zone rings both cheeks at their own settings.
+        {
+            auto& bz = state;
+            std::vector<MenuItem> rip_items = {
+                with_desc(slider("Position X", 0.f, 100.f, 1.f, "%",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].ripple_x * 100.0); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].ripple_x = static_cast<double>(v) / 100.0; }),
+                    "Ring centre across the face canvas: 0% = left edge, "
+                    "100% = right edge."),
+                with_desc(slider("Position Y", 0.f, 100.f, 1.f, "%",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].ripple_y * 100.0); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].ripple_y = static_cast<double>(v) / 100.0; }),
+                    "Ring centre down the face canvas: 0% = top edge, "
+                    "100% = bottom edge."),
+                with_desc(slider("Speed", 0.25f, 3.f, 0.05f, "x",
+                    [&bz, idx]{ std::lock_guard<std::mutex> lk(bz.mtx);
+                        return static_cast<float>(bz.boop_zones[idx].ripple_speed); },
+                    [&bz, idx](float v){ std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].ripple_speed = static_cast<double>(v); }),
+                    "Expansion speed. Also scales the fade — a fast ring "
+                    "lives short, a slow one lingers."),
+                color_picker("Color",
+                    [&bz, idx](uint8_t r, uint8_t g, uint8_t b){
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        bz.boop_zones[idx].ripple_r = r;
+                        bz.boop_zones[idx].ripple_g = g;
+                        bz.boop_zones[idx].ripple_b = b; },
+                    [&bz, idx]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+                        std::lock_guard<std::mutex> lk(bz.mtx);
+                        const auto& z = bz.boop_zones[idx];
+                        return { z.ripple_r, z.ripple_g, z.ripple_b }; }),
+                leaf("Test Ripple",
+                    [teensy, &bz, idx]{
+                        double x, y, sp; uint8_t r, g, b;
+                        { std::lock_guard<std::mutex> lk(bz.mtx);
+                          const auto& z = bz.boop_zones[idx];
+                          x = z.ripple_x; y = z.ripple_y; sp = z.ripple_speed;
+                          r = z.ripple_r; g = z.ripple_g; b = z.ripple_b; }
+                        teensy->trigger_boop_ripple(x, y, r, g, b, sp);
+                    }),
+            };
+            MenuItem rm = with_desc(submenu("Ripple", std::move(rip_items)),
+                "The expanding ring the panels draw when this zone is booped. "
+                "Position is canvas-normalised, so multi-panel faces share "
+                "one continuous ring.");
+            rm.visible_fn = [idx]{
+                return idx != static_cast<int>(sensor::BoopSensor::Zone::BothCheeks); };
+            items.push_back(std::move(rm));
+        }
+
         // ── Animated Eyes — rapid-boop easter egg ────────────────────────────
         // After Trigger Count fast boops on this zone, a procedural eye
         // animation plays instead of the normal reaction. The built-in

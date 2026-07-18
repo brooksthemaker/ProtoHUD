@@ -91,10 +91,13 @@ public:
     // seconds. Used by the boop sensor module — no-op on non-native backends
     // (the Teensy/daemon-Protoface paths run their own boop logic on-device).
     virtual void        trigger_boop(const std::string& /*expression*/, double /*duration_s*/) {}
-    // Boop touch feedback: an expanding ring on the face panels at the booped
-    // zone (0 snout / 1 left cheek / 2 right cheek / 3 both). Default no-op —
-    // only the native renderer draws it; MCU/daemon backends ignore it.
-    virtual void        trigger_boop_ripple(int /*zone*/) {}
+    // Boop touch feedback: an expanding ring on the face panels, centred at
+    // canvas-normalised (cx, cy) with the zone's configured colour and speed
+    // (see BoopZoneConfig — the caller resolves zone → params). Default
+    // no-op — only the native renderer draws it; MCU/daemon backends ignore it.
+    virtual void        trigger_boop_ripple(double /*cx*/, double /*cy*/,
+                                            uint8_t /*r*/, uint8_t /*g*/, uint8_t /*b*/,
+                                            double /*speed*/) {}
 
     // Play a procedural "animated eye" reaction that takes over the panels for
     // duration_s seconds, then reverts to the face. type is a face::EyeAnim
@@ -217,7 +220,10 @@ public:
     void next_expression() override { (*active_)->next_expression(); }
     void prev_expression() override { (*active_)->prev_expression(); }
     void trigger_boop(const std::string& e, double d) override { (*active_)->trigger_boop(e, d); }
-    void trigger_boop_ripple(int zone) override { (*active_)->trigger_boop_ripple(zone); }
+    void trigger_boop_ripple(double cx, double cy, uint8_t r, uint8_t g, uint8_t b,
+                             double speed) override {
+        (*active_)->trigger_boop_ripple(cx, cy, r, g, b, speed);
+    }
     void play_eye_animation(int type, double speed, double size,
                             uint8_t r, uint8_t g, uint8_t b, double dur) override {
         (*active_)->play_eye_animation(type, speed, size, r, g, b, dur);

@@ -94,7 +94,9 @@ public:
     void        next_expression() override;
     void        prev_expression() override;
     void        trigger_boop(const std::string& expression, double duration_s) override;
-    void        trigger_boop_ripple(int zone) override;   // expanding ring at the zone
+    void        trigger_boop_ripple(double cx, double cy,   // expanding ring at (cx, cy)
+                                    uint8_t r, uint8_t g, uint8_t b,
+                                    double speed) override;
     void        play_eye_animation(int type, double speed, double size,
                                    uint8_t r, uint8_t g, uint8_t b,
                                    double duration_s) override;

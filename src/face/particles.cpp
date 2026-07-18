@@ -2609,6 +2609,7 @@ struct ParticleSystem::Impl {
         double  cxn, cyn;
         double  age = 0.0, max_age = 0.9;
         uint8_t r, g, b;
+        double  speed = 1.0;   // scales age advance: expansion AND fade rate
     };
     std::vector<Ripple> ripples;
 
@@ -2691,15 +2692,17 @@ void ParticleSystem::set_motion_reactive(bool on) {
 }
 
 void ParticleSystem::trigger_ripple(double cx_norm, double cy_norm,
-                                    uint8_t r, uint8_t g, uint8_t b) {
+                                    uint8_t r, uint8_t g, uint8_t b,
+                                    double speed) {
     if (impl_->ripples.size() >= 6)                      // rapid boops: cap, drop oldest
         impl_->ripples.erase(impl_->ripples.begin());
-    impl_->ripples.push_back({cx_norm, cy_norm, 0.0, 0.9, r, g, b});
+    impl_->ripples.push_back({cx_norm, cy_norm, 0.0, 0.9, r, g, b,
+                              speed > 0.0 ? speed : 1.0});
 }
 
 void ParticleSystem::update(double dt) {
     for (auto& l : impl_->layers) l.update(dt);
-    for (auto& rp : impl_->ripples) rp.age += dt;
+    for (auto& rp : impl_->ripples) rp.age += dt * rp.speed;
     impl_->ripples.erase(std::remove_if(impl_->ripples.begin(), impl_->ripples.end(),
         [](const Impl::Ripple& rp){ return rp.age >= rp.max_age; }),
         impl_->ripples.end());
