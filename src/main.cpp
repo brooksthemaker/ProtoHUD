@@ -1754,6 +1754,7 @@ int main(int argc, char* argv[]) {
         bno08x_cfg.rst_line           = jval(jb, "rst_line",           -1);
         bno08x_cfg.report_interval_us = jval(jb, "report_interval_us", 5000);
         bno08x_cfg.aux_interval_us    = jval(jb, "aux_interval_us",    40000);
+        bno08x_cfg.stall_reset_ms     = jval(jb, "stall_reset_ms",     2500);
         bno08x_cfg.auto_calibrate     = jval(jb, "auto_calibrate",     true);
         bno08x_cfg.declination_deg    = jval(jb, "declination_deg",    0.0f);
         bno08x_cfg.heading_offset     = jval(jb, "heading_offset",     0.0f);
@@ -1793,6 +1794,7 @@ int main(int argc, char* argv[]) {
     if (cfg.contains("accessory_leds")) {
         auto& jl = cfg["accessory_leds"];
         led_cfg.enabled            = jval(jl, "enabled",           false);
+        led_cfg.transport          = jl.value("transport",         std::string("spidev"));
         led_cfg.global_brightness  = static_cast<uint8_t>(
             jval(jl, "global_brightness", static_cast<int>(led_cfg.global_brightness)));
         led_cfg.frame_hz           = jval(jl, "frame_hz",          60.0);
@@ -1814,27 +1816,81 @@ int main(int argc, char* argv[]) {
                     led_cfg.zones[i].g = static_cast<uint8_t>(std::clamp(jz["color"][1].get<int>(), 0, 255));
                     led_cfg.zones[i].b = static_cast<uint8_t>(std::clamp(jz["color"][2].get<int>(), 0, 255));
                 }
+                if (jz.contains("color2") && jz["color2"].is_array() && jz["color2"].size() >= 3) {
+                    led_cfg.zones[i].r2 = static_cast<uint8_t>(std::clamp(jz["color2"][0].get<int>(), 0, 255));
+                    led_cfg.zones[i].g2 = static_cast<uint8_t>(std::clamp(jz["color2"][1].get<int>(), 0, 255));
+                    led_cfg.zones[i].b2 = static_cast<uint8_t>(std::clamp(jz["color2"][2].get<int>(), 0, 255));
+                }
+                // Multi-stop custom gradient: array of [r,g,b] stops.
+                if (jz.contains("stops") && jz["stops"].is_array()) {
+                    led_cfg.zones[i].stops.clear();
+                    for (const auto& s : jz["stops"]) {
+                        if (s.is_array() && s.size() >= 3)
+                            led_cfg.zones[i].stops.push_back({
+                                static_cast<uint8_t>(std::clamp(s[0].get<int>(), 0, 255)),
+                                static_cast<uint8_t>(std::clamp(s[1].get<int>(), 0, 255)),
+                                static_cast<uint8_t>(std::clamp(s[2].get<int>(), 0, 255)) });
+                    }
+                }
                 const std::string pat = jz.value("pattern", std::string("solid"));
-                if      (pat == "off")     led_cfg.zones[i].pattern = accessory::Pattern::Off;
-                else if (pat == "breathe") led_cfg.zones[i].pattern = accessory::Pattern::Breathe;
-                else if (pat == "level")   led_cfg.zones[i].pattern = accessory::Pattern::Level;
-                else if (pat == "chase")   led_cfg.zones[i].pattern = accessory::Pattern::Chase;
-                else if (pat == "sparkle") led_cfg.zones[i].pattern = accessory::Pattern::Sparkle;
-                else                       led_cfg.zones[i].pattern = accessory::Pattern::Solid;
+                if      (pat == "off")      led_cfg.zones[i].pattern = accessory::Pattern::Off;
+                else if (pat == "breathe")  led_cfg.zones[i].pattern = accessory::Pattern::Breathe;
+                else if (pat == "level")    led_cfg.zones[i].pattern = accessory::Pattern::Level;
+                else if (pat == "chase")    led_cfg.zones[i].pattern = accessory::Pattern::Chase;
+                else if (pat == "sparkle")  led_cfg.zones[i].pattern = accessory::Pattern::Sparkle;
+                else if (pat == "gradient") led_cfg.zones[i].pattern = accessory::Pattern::Gradient;
+                else if (pat == "wave")     led_cfg.zones[i].pattern = accessory::Pattern::Wave;
+                else                        led_cfg.zones[i].pattern = accessory::Pattern::Solid;
                 led_cfg.zones[i].breathe_hz =
                     jval(jz, "breathe_hz", led_cfg.zones[i].breathe_hz);
+                led_cfg.zones[i].wave_speed =
+                    jval(jz, "wave_speed", led_cfg.zones[i].wave_speed);
+                led_cfg.zones[i].grad_spatial =
+                    jval(jz, "grad_spatial", led_cfg.zones[i].grad_spatial);
+                led_cfg.zones[i].grad_angle =
+                    jval(jz, "grad_angle", led_cfg.zones[i].grad_angle);
                 led_cfg.zones[i].zone_brightness = static_cast<uint8_t>(std::clamp(
                     jval(jz, "zone_brightness",
                          static_cast<int>(led_cfg.zones[i].zone_brightness)), 0, 255));
                 led_cfg.zones[i].follow_face =
                     jval(jz, "follow_face", led_cfg.zones[i].follow_face);
+
+                // Topology: shape + per-ring/line section counts + placement.
+                const std::string shp = jz.value("shape", std::string("single"));
+                if      (shp == "rings") led_cfg.zones[i].shape = accessory::Shape::Rings;
+                else if (shp == "lines") led_cfg.zones[i].shape = accessory::Shape::Lines;
+                else                     led_cfg.zones[i].shape = accessory::Shape::Single;
+                if (jz.contains("sections") && jz["sections"].is_array()) {
+                    led_cfg.zones[i].sections.clear();
+                    for (const auto& s : jz["sections"])
+                        led_cfg.zones[i].sections.push_back(std::clamp(s.get<int>(), 0, 256));
+                }
+                led_cfg.zones[i].pos_x    = jval(jz, "pos_x",    led_cfg.zones[i].pos_x);
+                led_cfg.zones[i].pos_y    = jval(jz, "pos_y",    led_cfg.zones[i].pos_y);
+                led_cfg.zones[i].rotation = jval(jz, "rotation", led_cfg.zones[i].rotation);
+                led_cfg.zones[i].band_spacing = jval(jz, "band_spacing", led_cfg.zones[i].band_spacing);
+                led_cfg.zones[i].scale      = jval(jz, "scale",      led_cfg.zones[i].scale);
+                led_cfg.zones[i].mirror     = jval(jz, "mirror",     led_cfg.zones[i].mirror);
+                led_cfg.zones[i].line_align = jval(jz, "line_align", led_cfg.zones[i].line_align);
+                led_cfg.zones[i].reverse    = jval(jz, "reverse",    led_cfg.zones[i].reverse);
+                led_cfg.zones[i].serpentine = jval(jz, "serpentine", led_cfg.zones[i].serpentine);
+                // Sections drive the count when present, so the chain length and
+                // the effects stay consistent with the topology.
+                if (!led_cfg.zones[i].sections.empty())
+                    led_cfg.zones[i].count = accessory::zone_total(led_cfg.zones[i]);
             }
         }
-        // Strip length = highest (start + count) across configured zones; lets
-        // users add or trim zones without separately bookkeeping a total.
-        int max_end = 0;
-        for (const auto& z : led_cfg.zones) max_end = std::max(max_end, z.start + z.count);
-        led_cfg.strip.count = max_end;
+        // Chain the zones end-to-end in enum order: each zone's start follows the
+        // previous zone's end, and the strip length is the running total. (A zone
+        // may still pin its own `start` via config; auto-chaining only fills the
+        // ones left at the default 0.)
+        int cursor = 0;
+        for (auto& z : led_cfg.zones) {
+            if (z.count <= 0) continue;
+            if (z.start <= 0) z.start = cursor;
+            cursor = std::max(cursor, z.start + z.count);
+        }
+        led_cfg.strip.count = cursor;
     }
     accessory::AccessoryLeds accessory_leds(led_cfg);
 
@@ -3192,7 +3248,9 @@ int main(int argc, char* argv[]) {
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
     boop_sensor_ptr = &boop_sensor;   // expose for the menu's live tuning
 
-    if (led_cfg.enabled && !accessory_leds.start())
+    // SPI-transport accessory LEDs start here; the coproc transport starts
+    // later, once the coprocessor link (and thus the frame sink) exists.
+    if (led_cfg.enabled && led_cfg.transport != "coproc" && !accessory_leds.start())
         std::cerr << "[main] accessory LEDs unavailable — continuing without\n";
 
     // ── Light sensor (BH1750 ambient lux) ────────────────────────────────────
@@ -4470,6 +4528,19 @@ int main(int argc, char* argv[]) {
     menu_ctx.boop_sensor_pp = &boop_sensor_ptr;
     menu_ctx.voice_analyzer = audio.voice();
     menu_ctx.leds = &accessory_leds;
+    menu_ctx.acc_cfg_p = &led_cfg;   // editable layout for the zone editor + visualizer
+    // Apply layout edits live: re-chain the zones (each start follows the prior
+    // zone's end) and rebuild the strip at the new total — no process restart.
+    menu_ctx.acc_apply = [&]{
+        int cursor = 0;
+        for (auto& z : led_cfg.zones) {
+            z.count = accessory::zone_total(z);
+            z.start = cursor;
+            cursor += std::max(0, z.count);
+        }
+        led_cfg.strip.count = cursor;
+        accessory_leds.reconfigure(led_cfg);
+    };
     menu_ctx.fans = &cooling_fans;
     menu_ctx.swap_backend = swap_backend;
     menu_ctx.pf_backend_p = &pf_backend;
@@ -4703,6 +4774,14 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_adc_read = [&]{ if (coproc_inputs) coproc_inputs->request_adc(); };
     menu_ctx.coproc_adc_result = [&]() -> std::string {
         return coproc_inputs ? coproc_inputs->adc_result() : std::string("n/a");
+    };
+    // Audio self-test (coproc_voice firmware): DAC test tone + live mic meter.
+    menu_ctx.coproc_tone = [&](int hz, int ms) {
+        if (coproc_inputs) coproc_inputs->send_tone(hz, ms);
+    };
+    menu_ctx.coproc_mic_level = [&]{ if (coproc_inputs) coproc_inputs->request_mic_level(); };
+    menu_ctx.coproc_mic_result = [&]() -> std::string {
+        return coproc_inputs ? coproc_inputs->mic_level_result() : std::string("n/a");
     };
     // Live pin readout for the Pins visualizer (firmware "PINS" dumps).
     menu_ctx.coproc_pins_poll = [&]{ if (coproc_inputs) coproc_inputs->request_pins(); };
@@ -5290,6 +5369,18 @@ int main(int argc, char* argv[]) {
     // (Declared above the menu wiring so its I2C-scan lambdas can capture it.)
     coproc_inputs = std::make_unique<input::CoprocInputs>(coproc_cfg, gpio_dispatch);
 
+    // Accessory-LED coproc transport: stream composited frames to the
+    // coprocessor's LED zone (kLedZonePin) instead of the Pi SPI strip. The
+    // sink derefs the current coproc_inputs at call time, so it survives a
+    // coprocessor reload. Set the sink before starting the render thread.
+    if (led_cfg.transport == "coproc") {
+        accessory_leds.set_frame_sink([&](const uint8_t* rgb, int n){
+            if (coproc_inputs) coproc_inputs->send_led_frame(rgb, n);
+        });
+        if (led_cfg.enabled && !accessory_leds.start())
+            std::cerr << "[main] accessory LEDs (coproc) failed to start\n";
+    }
+
     // Peripheral-hub wiring (firmware -DPERIPHERAL_HUB): boop pads on the
     // coprocessor reuse the SAME electrode→zone map as a local MPR121, so the
     // pads work identically from either board. Edges arrive on the reader
@@ -5756,6 +5847,68 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Accessory LED zones — persist the full editable layout (topology,
+        // placement, per-zone look) so the zone editor's changes survive a
+        // restart. Written from led_cfg, the menu's live edit target.
+        {
+            auto pat_name = [](accessory::Pattern p) -> const char* {
+                switch (p) {
+                    case accessory::Pattern::Off:      return "off";
+                    case accessory::Pattern::Breathe:  return "breathe";
+                    case accessory::Pattern::Level:    return "level";
+                    case accessory::Pattern::Chase:    return "chase";
+                    case accessory::Pattern::Sparkle:  return "sparkle";
+                    case accessory::Pattern::Gradient: return "gradient";
+                    case accessory::Pattern::Wave:     return "wave";
+                    default:                           return "solid";
+                }
+            };
+            auto shape_name = [](accessory::Shape s) -> const char* {
+                switch (s) {
+                    case accessory::Shape::Rings: return "rings";
+                    case accessory::Shape::Lines: return "lines";
+                    default:                      return "single";
+                }
+            };
+            auto& jl = cfg["accessory_leds"];
+            jl["enabled"]          = led_cfg.enabled;
+            jl["transport"]        = led_cfg.transport;
+            jl["global_brightness"] = led_cfg.global_brightness;
+            json jz = json::array();
+            for (const auto& z : led_cfg.zones) {
+                json j;
+                j["start"]           = z.start;
+                j["count"]           = z.count;
+                j["pattern"]         = pat_name(z.pattern);
+                j["color"]           = json::array({ z.r,  z.g,  z.b  });
+                j["color2"]          = json::array({ z.r2, z.g2, z.b2 });
+                if (!z.stops.empty()) {
+                    json js = json::array();
+                    for (const auto& s : z.stops) js.push_back(json::array({ s[0], s[1], s[2] }));
+                    j["stops"] = std::move(js);
+                }
+                j["breathe_hz"]      = z.breathe_hz;
+                j["wave_speed"]      = z.wave_speed;
+                j["grad_spatial"]    = z.grad_spatial;
+                j["grad_angle"]      = z.grad_angle;
+                j["zone_brightness"] = z.zone_brightness;
+                j["follow_face"]     = z.follow_face;
+                j["shape"]           = shape_name(z.shape);
+                j["sections"]        = z.sections;
+                j["pos_x"]           = z.pos_x;
+                j["pos_y"]           = z.pos_y;
+                j["rotation"]        = z.rotation;
+                j["band_spacing"]    = z.band_spacing;
+                j["scale"]           = z.scale;
+                j["mirror"]          = z.mirror;
+                j["line_align"]      = z.line_align;
+                j["reverse"]         = z.reverse;
+                j["serpentine"]      = z.serpentine;
+                jz.push_back(std::move(j));
+            }
+            jl["zones"] = std::move(jz);
+        }
+
         if (cfg.contains("light_sensor")) {
             // The standalone squint reaction is gone (light responses live in
             // Automatic Reactions and expression Triggers now) — scrub its
@@ -5783,14 +5936,29 @@ int main(int argc, char* argv[]) {
             auto& jzones = jl["zones"];
             if (!jzones.is_array()) jzones = json::array();
             while (jzones.size() < accessory::ZoneCount) jzones.push_back(json{});
-            // Index order MUST match the Pattern enum.
-            static const char* pat_name[] = { "off", "solid", "breathe", "level",
-                                              "chase", "sparkle" };
+            // Full pattern table (enum order) — the old array omitted
+            // gradient/wave and would index out of bounds on those zones.
+            static const char* pat_name8[] = { "off", "solid", "breathe", "level",
+                                               "chase", "sparkle", "gradient", "wave" };
             for (int i = 0; i < accessory::ZoneCount; ++i) {
                 auto zc = accessory_leds.zone(static_cast<accessory::Zone>(i));
-                jzones[i]["pattern"]         = pat_name[static_cast<int>(zc.pattern)];
+                // Live-editable fields the menu changes WITHOUT "Apply Layout"
+                // (structural fields already came from led_cfg above).
+                jzones[i]["pattern"]         = pat_name8[
+                    std::clamp(static_cast<int>(zc.pattern), 0, 7)];
                 jzones[i]["color"]           = json::array({ zc.r, zc.g, zc.b });
+                jzones[i]["color2"]          = json::array({ zc.r2, zc.g2, zc.b2 });
+                if (!zc.stops.empty()) {
+                    json js = json::array();
+                    for (const auto& s : zc.stops) js.push_back(json::array({ s[0], s[1], s[2] }));
+                    jzones[i]["stops"] = std::move(js);
+                } else {
+                    jzones[i].erase("stops");
+                }
                 jzones[i]["breathe_hz"]      = zc.breathe_hz;
+                jzones[i]["wave_speed"]      = zc.wave_speed;
+                jzones[i]["grad_spatial"]    = zc.grad_spatial;
+                jzones[i]["grad_angle"]      = zc.grad_angle;
                 jzones[i]["zone_brightness"] = static_cast<int>(zc.zone_brightness);
                 jzones[i]["follow_face"]     = zc.follow_face;
             }
@@ -6692,17 +6860,119 @@ int main(int argc, char* argv[]) {
                     if (any_follow) {
                         cv::Mat frame;
                         if (native_ctrl->latest_frame(frame) && !frame.empty()) {
-                            const cv::Scalar sum = cv::sum(frame);
-                            // Mean over LIT pixels: normalize by a luma-based
-                            // count so dark backgrounds don't wash the color out.
-                            cv::Mat gray;
-                            cv::cvtColor(frame, gray, cv::COLOR_RGB2GRAY);
-                            const int lit = cv::countNonZero(gray > 24);
-                            if (lit > 0)
-                                accessory_leds.set_face_color(
-                                    static_cast<uint8_t>(std::min(255.0, sum[0] / lit)),
-                                    static_cast<uint8_t>(std::min(255.0, sum[1] / lit)),
-                                    static_cast<uint8_t>(std::min(255.0, sum[2] / lit)));
+                            // Sample only the eye's MATERIAL color — the
+                            // saturated fill, not the white highlights, dark
+                            // outline or unlit background. A flat average over
+                            // everything washed reds toward pink; masking to
+                            // saturated + lit pixels (HSV S/V thresholds) keeps
+                            // the true hue. The canvas is true RGB and the panel
+                            // shows true colors (its color_order compensates the
+                            // panel wiring), so the strips take the raw color —
+                            // no reorder. Whole-face for centre zones (blush);
+                            // each half for the cheek hub/fin following its eye.
+                            auto material_color = [](const cv::Mat& m, uint8_t& r,
+                                                     uint8_t& g, uint8_t& b) {
+                                cv::Mat hsv;
+                                cv::cvtColor(m, hsv, cv::COLOR_RGB2HSV);
+                                cv::Mat ch[3];
+                                cv::split(hsv, ch);
+                                cv::Mat lit  = ch[2] > 40;              // bright enough
+                                cv::Mat mask = lit & (ch[1] > 60);      // ...and saturated
+                                if (cv::countNonZero(mask) < 8) mask = lit;  // pastel/white fill
+                                if (cv::countNonZero(mask) <= 0) { r = g = b = 0; return; }
+                                const cv::Scalar mean = cv::mean(m, mask);
+                                r = static_cast<uint8_t>(std::min(255.0, mean[0]));
+                                g = static_cast<uint8_t>(std::min(255.0, mean[1]));
+                                b = static_cast<uint8_t>(std::min(255.0, mean[2]));
+                            };
+                            // Per-length ramp: the eye's material color sampled
+                            // across its WIDTH into K bins, so a follow zone can
+                            // reproduce the eye's gradient LED-for-LED (scaled to
+                            // the zone's LED count via its length fraction).
+                            // Non-material columns (background) borrow the nearest
+                            // eye color, stretching the gradient over the whole
+                            // width; a fully empty region leaves the ramp empty so
+                            // the zone falls back to the flat color.
+                            constexpr int K = 64;
+                            auto build_ramp = [](const cv::Mat& m, std::vector<uint32_t>& out) {
+                                out.assign(K, 0);
+                                if (m.empty()) return;
+                                cv::Mat hsv;
+                                cv::cvtColor(m, hsv, cv::COLOR_RGB2HSV);
+                                cv::Mat ch[3];
+                                cv::split(hsv, ch);
+                                cv::Mat lit  = ch[2] > 40;
+                                cv::Mat mask = lit & (ch[1] > 60);
+                                if (cv::countNonZero(mask) < 8) mask = lit;
+                                cv::Mat rgbf;
+                                m.convertTo(rgbf, CV_32FC3);
+                                cv::Mat notmask;
+                                cv::bitwise_not(mask, notmask);
+                                rgbf.setTo(cv::Scalar(0, 0, 0), notmask);
+                                cv::Mat colSum, maskf, colCnt;
+                                cv::reduce(rgbf, colSum, 0, cv::REDUCE_SUM, CV_32F);   // 1×W ×3
+                                mask.convertTo(maskf, CV_32F, 1.0 / 255.0);
+                                cv::reduce(maskf, colCnt, 0, cv::REDUCE_SUM, CV_32F);  // 1×W
+                                const int W = m.cols;
+                                std::vector<double> br(K, -1), bg(K, 0), bb(K, 0);
+                                std::vector<int> valid;
+                                for (int k = 0; k < K; ++k) {
+                                    int x0 = static_cast<int>((long long)k * W / K);
+                                    int x1 = static_cast<int>((long long)(k + 1) * W / K);
+                                    if (x1 <= x0) x1 = x0 + 1;
+                                    if (x1 > W) x1 = W;
+                                    double sr = 0, sg = 0, sb = 0, cnt = 0;
+                                    for (int x = x0; x < x1; ++x) {
+                                        const cv::Vec3f& s = colSum.at<cv::Vec3f>(0, x);
+                                        sr += s[0]; sg += s[1]; sb += s[2];
+                                        cnt += colCnt.at<float>(0, x);
+                                    }
+                                    if (cnt >= 1.0) {
+                                        br[k] = sr / cnt; bg[k] = sg / cnt; bb[k] = sb / cnt;
+                                        valid.push_back(k);
+                                    }
+                                }
+                                if (valid.empty()) { out.clear(); return; }  // fall back to flat
+                                for (int k = 0; k < K; ++k) {
+                                    if (br[k] >= 0) continue;
+                                    int best = valid[0], bd = 1 << 30;
+                                    for (int v : valid) { int d = std::abs(v - k); if (d < bd) { bd = d; best = v; } }
+                                    br[k] = br[best]; bg[k] = bg[best]; bb[k] = bb[best];
+                                }
+                                for (int k = 0; k < K; ++k) {
+                                    auto u8 = [](double v) { return static_cast<uint32_t>(std::min(255.0, std::max(0.0, v))); };
+                                    out[k] = (u8(br[k]) << 16) | (u8(bg[k]) << 8) | u8(bb[k]);
+                                }
+                            };
+
+                            const int w = frame.cols, h = frame.rows, half = w / 2;
+                            uint8_t r, g, b;
+                            std::vector<uint32_t> ramp;
+                            material_color(frame, r, g, b);
+                            accessory_leds.set_face_color(r, g, b);
+                            build_ramp(frame, ramp);
+                            accessory_leds.set_face_ramp_whole(ramp.data(), static_cast<int>(ramp.size()));
+                            if (half > 0) {
+                                // Eyes sit at the OUTER edges of the face canvas;
+                                // the nose is dead-centre on the half-seam. Sampling
+                                // the whole inner half dragged the cheek colour toward
+                                // the nose (left LEDs followed the nose, not the eye),
+                                // so sample only the OUTER ~45% of each half — enough
+                                // to catch the eye but clear of the central nose.
+                                // (material_color / build_ramp already HSV-mask out
+                                // the unlit background, so a loose rect is fine.)
+                                const int ew = std::max(1, half * 45 / 100);
+                                const cv::Mat lhalf = frame(cv::Rect(0,      0, ew, h));
+                                const cv::Mat rhalf = frame(cv::Rect(w - ew, 0, ew, h));
+                                material_color(lhalf, r, g, b);
+                                accessory_leds.set_face_color_left(r, g, b);
+                                build_ramp(lhalf, ramp);
+                                accessory_leds.set_face_ramp_left(ramp.data(), static_cast<int>(ramp.size()));
+                                material_color(rhalf, r, g, b);
+                                accessory_leds.set_face_color_right(r, g, b);
+                                build_ramp(rhalf, ramp);
+                                accessory_leds.set_face_ramp_right(ramp.data(), static_cast<int>(ramp.size()));
+                            }
                         }
                     }
                     follow_face_cooldown = 0.2;   // ~5 Hz

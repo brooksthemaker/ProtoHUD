@@ -228,7 +228,25 @@ bool Bno08x::restart() {
     return start();
 }
 
+void Bno08x::reinit() {
+    // Full teardown + bring-up, on the service thread. sh2_close() runs the HAL
+    // close (drops the I2C + GPIO fds); sh2_open() runs hal_open(), which pulses
+    // RST (when wired) and re-does the SHTP handshake; then re-arm the reports.
+    sh2_close();
+    const int rc = sh2_open(&g_hal.hal, async_cb_tramp, this);
+    if (rc != SH2_OK) {
+        fprintf(stderr, "[bno086] re-init sh2_open failed (rc=%d)\n", rc);
+        hal_close();
+        ok_.store(false);
+        return;
+    }
+    sh2_setSensorCallback(sensor_cb_tramp, this);
+    enable_reports();
+    ok_.store(true);
+}
+
 void Bno08x::service_loop() {
+    last_report_us_ = steady_us();           // watchdog reference (catches dead-from-boot)
     while (running_.load()) {
         sh2_service();                       // reads via the HAL, dispatches callbacks
         if (want_reinit_.exchange(false))
@@ -286,6 +304,25 @@ void Bno08x::service_loop() {
                                              : SH2_TARE_Z;
             sh2_setTareNow(axes, SH2_TARE_BASIS_ROTATION_VECTOR);
         }
+        // Stall watchdog: the I2C bus can stay alive while the hub stops
+        // sending reports (the wedged state that previously needed an unplug).
+        // If no report arrives for the configured window, re-initialize —
+        // which pulses RST when it's wired. Back the window off after repeated
+        // failed recoveries so an unrecoverable hub (e.g. RST not wired) doesn't
+        // thrash the log or the bus.
+        if (cfg_.stall_reset_ms > 0) {
+            const uint32_t win = static_cast<uint32_t>(cfg_.stall_reset_ms) * 1000u
+                * (1u + static_cast<uint32_t>(std::min(consecutive_resets_, 8)));
+            const uint32_t quiet = steady_us() - last_report_us_;
+            if (quiet > win) {
+                fprintf(stderr, "[bno086] no reports for %u ms — re-initializing"
+                        " (attempt %d)\n", quiet / 1000, consecutive_resets_ + 1);
+                reinit();
+                ++consecutive_resets_;
+                last_report_us_ = steady_us();   // grace before the next check
+            }
+        }
+
         // Poll at ~2× the orientation report rate (clamped 1-3 ms) — enough
         // headroom for the aux reports on top without burning the ~90% empty
         // SHTP header reads a fixed 1 ms poll cost.
@@ -311,6 +348,10 @@ void Bno08x::on_sensor_event(void* sh2_sensor_event) {
     sh2_SensorValue_t val{};
     if (sh2_decodeSensorEvent(&val, static_cast<sh2_SensorEvent_t*>(sh2_sensor_event)) != SH2_OK)
         return;
+
+    // A report arrived — feed the stall watchdog and clear the backoff.
+    last_report_us_ = steady_us();
+    consecutive_resets_ = 0;
 
     // Aux reports (calibrated accel / gyro / mag) — forward and return.
     if (aux_cb_) {

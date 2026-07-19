@@ -1543,7 +1543,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         struct EyeAnimPreview { GLuint tex = 0; double t = 0.0; int slot = 0; };
         auto eye_preview = std::make_shared<EyeAnimPreview>();
         MenuContextPanelDraw draw_eye_anim_preview =
-            [eye_preview, &state](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            [eye_preview, &state, pf_hub75_p, pf_backend_p](
+                ImDrawList* dl, ImVec2 o, ImVec2 sz) {
                 EyeAnimPreview& ap = *eye_preview;
                 ap.t += ImGui::GetIO().DeltaTime;
                 const int a = std::clamp(ap.slot, 0, face::eye_anim_count() - 1);
@@ -1554,9 +1555,13 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 }
                 p.type = static_cast<face::EyeAnim>(a);
 
-                // 2:1 panel-pair canvas, honouring Mirror like the face
-                // controller: one copy per half, left half flipped.
-                const int W = 128, H = 64;
+                // Render at the real panel-canvas geometry so the preview's
+                // aspect matches the hardware — 128×32 for the default 64×32
+                // pair, 64×32 for a single panel — honouring Mirror like the
+                // face controller: one copy per half, left half flipped.
+                int W = 128, H = 32;
+                if (pf_hub75_p && pf_backend_p && *pf_backend_p == "hub75")
+                    pf_hub75_canvas(*pf_hub75_p, W, H);
                 cv::Mat frame;
                 if (p.mirror) {
                     cv::Mat half = face::render_eye_animation(p, ap.t, W / 2, H);
@@ -1569,8 +1574,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     frame = face::render_eye_animation(p, ap.t, W, H);
                 }
 
-                const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
-                const float ph = pw * 0.5f;
+                const float aspect =
+                    static_cast<float>(W) / static_cast<float>(std::max(H, 1));
+                const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * aspect);
+                const float ph = pw / aspect;
                 const float px = o.x + (sz.x - pw) * 0.5f;
                 const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
                 dl->AddRectFilled({px, py}, {px + pw, py + ph},
@@ -4420,40 +4427,6 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     auto boop_zone_menu = [&, teensy, boop_sensor_pp](int idx, std::string label) -> MenuItem {
         const auto zone_enum = static_cast<sensor::BoopSensor::Zone>(idx);
 
-        // What a single boop on this zone resolves to, mirroring fire_boop's
-        // precedence: a count-1 trigger recipe on any expression → this zone's
-        // dedicated boop art → the built-in default expression. Returns
-        // {display text, expression stem to fire}. The zone's face is BOUND in
-        // Expressions → [face] → Triggers; this menu only shows the result.
-        auto resolve_reaction = [&state, teensy, idx]()
-                -> std::pair<std::string, std::string> {
-            {
-                std::lock_guard<std::mutex> lk(state.mtx);
-                auto claims = [&](const std::string& key) {
-                    const auto it = state.expression_triggers.find(key);
-                    if (it == state.expression_triggers.end()) return false;
-                    for (const auto& r : it->second.recipes)
-                        if (r.event == face::TriggerRecipe::Event::Boop &&
-                            r.boop_zone == idx && r.count <= 1) return true;
-                    return false;
-                };
-                for (int ei = 0; ei < kFaceSlotCount; ++ei)
-                    if (claims(kFaceSlots[ei].expression))
-                        return { std::string(kFaceSlots[ei].label) + " (trigger)",
-                                 kFaceSlots[ei].expression };
-                for (size_t ci = 0; ci < state.custom_expressions.size(); ++ci) {
-                    const auto& ce = state.custom_expressions[ci];
-                    if (ce.used && claims("custom_" + std::to_string(ci)))
-                        return { ce.name + " (trigger)",
-                                 "custom_" + std::to_string(ci) };
-                }
-            }
-            const char* stem = kBoopFaceSlots[idx].file_stem;
-            if (teensy->face_image_exists(stem))
-                return { "dedicated art", stem };
-            return { "none (ripple only)", "" };
-        };
-
         std::vector<MenuItem> items = {
             toggle("Enabled",
                 [&state, idx]{
@@ -4468,31 +4441,6 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     if (auto* s = boop_sensor_pp ? *boop_sensor_pp : nullptr)
                         s->set_zone_enabled(zone_enum, v);
                 }),
-            // The face itself binds in the Expressions menu (Triggers recipe,
-            // count 1) — this row shows the live resolution and previews it.
-            [&]{
-                MenuItem m = with_desc(leaf("Reaction",
-                    [teensy, &state, idx, resolve_reaction]{
-                        const auto [text, expr] = resolve_reaction();
-                        double dur = 0.8;
-                        {
-                            std::lock_guard<std::mutex> lk(state.mtx);
-                            dur = state.boop_zones[idx].duration_s;
-                        }
-                        if (!expr.empty()) teensy->trigger_boop(expr, dur);
-                    }),
-                    "What one boop on this zone shows right now; select to "
-                    "preview it. To change it, bind a face in Faces and "
-                    "Expressions > Expressions > [face] > Triggers with "
-                    "event \"Boop\" on this zone, count 1. No trigger bound "
-                    "means the dedicated boop art fires (when its PNG "
-                    "exists); otherwise the boop is feedback-only — ripple "
-                    "and LED flash, no face change.");
-                m.label_fn = [resolve_reaction]{
-                    return "Reaction: " + resolve_reaction().first;
-                };
-                return m;
-            }(),
             slider("Hold Duration", 0.2f, 3.0f, 0.1f, " s",
                 [&state, idx]{
                     std::lock_guard<std::mutex> lk(state.mtx);
@@ -4761,75 +4709,745 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     // so the next render tick uses the new values. Brightness is global to
     // the whole chain. Pattern picker exposes Off / Solid / Breathe / Level
     // — Flash is reserved for event-driven overlays (boop hooks) only.
-    auto led_zone_menu = [&, leds](accessory::Zone z, std::string label) -> MenuItem {
-        // Pattern picker — radio-style leaf_sel set, one per pattern.
+    accessory::AccessoryLeds::Config* acc = ctx.acc_cfg_p;
+    auto led_zone_menu = [&, leds, acc](accessory::Zone z, std::string label) -> MenuItem {
+        const int zi = static_cast<int>(z);
+        // Recompute the zone's LED total from its sections (call after any
+        // section edit so the chain length + effects stay consistent).
+        auto recount = [acc, zi]{
+            if (acc) acc->zones[zi].count = accessory::zone_total(acc->zones[zi]);
+        };
+
+        // Pattern picker — radio leaves. Setter writes the live object (instant
+        // feedback) AND the editable config (so it persists on save).
         struct PatOpt { const char* label; accessory::Pattern pat; };
         const PatOpt opts[] = {
-            { "Off",     accessory::Pattern::Off     },
-            { "Solid",   accessory::Pattern::Solid   },
-            { "Breathe", accessory::Pattern::Breathe },
-            { "Level",   accessory::Pattern::Level   },
-            { "Chase",   accessory::Pattern::Chase   },
-            { "Sparkle", accessory::Pattern::Sparkle },
+            { "Off",      accessory::Pattern::Off      },
+            { "Solid",    accessory::Pattern::Solid    },
+            { "Breathe",  accessory::Pattern::Breathe  },
+            { "Level",    accessory::Pattern::Level    },
+            { "Chase",    accessory::Pattern::Chase    },
+            { "Sparkle",  accessory::Pattern::Sparkle  },
+            { "Gradient", accessory::Pattern::Gradient },
+            { "Wave",     accessory::Pattern::Wave     },
         };
         std::vector<MenuItem> pat_items;
         for (const auto& o : opts) {
             const accessory::Pattern p = o.pat;
             pat_items.push_back(leaf_sel(o.label,
-                [leds, z, p]{ if (leds) leds->set_zone_pattern(z, p); },
-                [leds, z, p]{
-                    return leds && leds->zone(z).pattern == p;
+                [leds, acc, z, zi, p]{ if (leds) leds->set_zone_pattern(z, p);
+                                       if (acc)  acc->zones[zi].pattern = p; },
+                [leds, acc, z, zi, p]{
+                    return acc ? acc->zones[zi].pattern == p
+                               : (leds && leds->zone(z).pattern == p);
                 }));
         }
 
+        // Shape picker (drives the section geometry + which effects make sense).
+        auto shape_leaf = [acc, zi](const char* lbl, accessory::Shape s) {
+            return leaf_sel(lbl,
+                [acc, zi, s]{ if (acc) acc->zones[zi].shape = s; },
+                [acc, zi, s]{ return acc && acc->zones[zi].shape == s; });
+        };
+
+        // One "Ring/Line N: LEDs" slider per section, up to a fixed max; each is
+        // visible only while the zone has that many sections and isn't Single.
+        constexpr int kMaxSections = 12;
+        std::vector<MenuItem> topo_items;
+        topo_items.push_back(with_desc(submenu("Shape", std::vector<MenuItem>{
+            shape_leaf("Single strip", accessory::Shape::Single),
+            shape_leaf("Rings (hub)",  accessory::Shape::Rings),
+            shape_leaf("Lines (fin)",  accessory::Shape::Lines),
+        }), "Rings = concentric hub; Lines = a stacked fin; Single = one run. "
+            "Rings/Lines let you set a per-section LED count and give effects a "
+            "'down the length' axis."));
+        {
+            MenuItem sc = slider("Sections", 1.f, static_cast<float>(kMaxSections), 1.f, "",
+                [acc, zi]{ return acc ? static_cast<float>(std::max<size_t>(
+                                1, acc->zones[zi].sections.size())) : 1.f; },
+                [acc, zi, recount, kMaxSections](float v){
+                    if (!acc) return;
+                    auto& s = acc->zones[zi].sections;
+                    s.resize(std::clamp(static_cast<int>(v), 1, kMaxSections),
+                             s.empty() ? 8 : s.back());
+                    recount();
+                });
+            sc.label_fn = [acc, zi]{
+                const bool rings = acc && acc->zones[zi].shape == accessory::Shape::Rings;
+                const int n = acc ? static_cast<int>(std::max<size_t>(1, acc->zones[zi].sections.size())) : 1;
+                char b[40]; std::snprintf(b, sizeof b, "%s: %d",
+                    rings ? "Rings" : "Lines", n);
+                return std::string(b);
+            };
+            sc.visible_fn = [acc, zi]{ return acc && acc->zones[zi].shape != accessory::Shape::Single; };
+            topo_items.push_back(with_desc(std::move(sc),
+                "How many rings (hub) or lines (fin) the zone is built from."));
+        }
+        for (int k = 0; k < kMaxSections; ++k) {
+            MenuItem sl = slider("Section LEDs", 1.f, 64.f, 1.f, "",
+                [acc, zi, k]{ return (acc && k < static_cast<int>(acc->zones[zi].sections.size()))
+                                     ? static_cast<float>(acc->zones[zi].sections[k]) : 8.f; },
+                [acc, zi, k, recount](float v){
+                    if (acc && k < static_cast<int>(acc->zones[zi].sections.size())) {
+                        acc->zones[zi].sections[k] = static_cast<int>(v);
+                        recount();
+                    }
+                });
+            sl.label_fn = [acc, zi, k]{
+                const bool rings = acc && acc->zones[zi].shape == accessory::Shape::Rings;
+                const int n = (acc && k < static_cast<int>(acc->zones[zi].sections.size()))
+                            ? acc->zones[zi].sections[k] : 0;
+                char b[40]; std::snprintf(b, sizeof b, "%s %d: %d LEDs",
+                    rings ? "Ring" : "Line", k + 1, n);
+                return std::string(b);
+            };
+            sl.visible_fn = [acc, zi, k]{
+                return acc && acc->zones[zi].shape != accessory::Shape::Single &&
+                       k < static_cast<int>(acc->zones[zi].sections.size());
+            };
+            topo_items.push_back(std::move(sl));
+        }
+        // Placement: X/Y live in the Layout Overview (all zones on one canvas);
+        // rotation stays here since it changes this zone's own shape.
+        topo_items.push_back(with_desc(slider("Rotation", -180.f, 180.f, 5.f, " deg",
+            [acc, zi]{ return acc ? acc->zones[zi].rotation : 0.f; },
+            [acc, zi](float v){ if (acc) acc->zones[zi].rotation = v; }),
+            "Rotate the whole zone — e.g. angle a fin outward."));
+        {
+            MenuItem bsp = slider("Band Spacing", 0.3f, 3.f, 0.1f, "\xc3\x97",
+                [acc, zi]{ return acc ? acc->zones[zi].band_spacing : 1.f; },
+                [acc, zi](float v){ if (acc) acc->zones[zi].band_spacing = v; });
+            bsp.visible_fn = [acc, zi]{
+                return acc && acc->zones[zi].shape != accessory::Shape::Single;
+            };
+            topo_items.push_back(with_desc(std::move(bsp),
+                "Preview only: spread the rings/lines apart or pull them together "
+                "in the wiring picture so it matches your real layout. Doesn't "
+                "change the LEDs."));
+        }
+        topo_items.push_back(with_desc(slider("Scale", 0.2f, 4.f, 0.1f, "\xc3\x97",
+            [acc, zi]{ return acc ? acc->zones[zi].scale : 1.f; },
+            [acc, zi](float v){ if (acc) acc->zones[zi].scale = v; }),
+            "Preview only: size the whole zone up or down so it matches the real "
+            "part's size relative to the others in the Layout Overview. Doesn't "
+            "change the LEDs."));
+        topo_items.push_back(with_desc(toggle("Mirror (flip L\xE2\x86\x94R)",
+            [acc, zi]{ return acc && acc->zones[zi].mirror; },
+            [acc, zi](bool v){ if (acc) acc->zones[zi].mirror = v; }),
+            "Preview only: flip the zone left-to-right so a part mounted as the "
+            "mirror image of its twin (e.g. the opposite-side fin) lines up in "
+            "the Layout Overview. Doesn't change the LEDs."));
+        {
+            MenuItem al = slider("End Align", -1.f, 1.f, 0.05f, "",
+                [acc, zi]{ return acc ? acc->zones[zi].line_align : 0.f; },
+                [acc, zi](float v){ if (acc) acc->zones[zi].line_align = v; });
+            al.slider.format = [](float v) -> std::string {
+                const int pct = static_cast<int>(std::lround(std::fabs(v) * 100.f));
+                if (pct < 3) return std::string("Centred");
+                char b[24]; std::snprintf(b, sizeof b, "%d%% %s", pct, v < 0 ? "Left" : "Right");
+                return std::string(b);
+            };
+            al.visible_fn = [acc, zi]{
+                return acc && acc->zones[zi].shape == accessory::Shape::Lines;
+            };
+            topo_items.push_back(with_desc(std::move(al),
+                "Line up the ends of uneven fin lines on one side instead of "
+                "centring them \xE2\x80\x94 Left aligns their base/left ends, Right "
+                "their tip/right ends. Preview only; doesn't change the LEDs."));
+        }
+        topo_items.push_back(with_desc(toggle("LED 0 at far end",
+            [acc, zi]{ return acc && acc->zones[zi].reverse; },
+            [acc, zi](bool v){ if (acc) acc->zones[zi].reverse = v; }),
+            "Flip which end the data chain enters — moves LED 0 to the tip/outer "
+            "ring instead of the base/inner ring."));
+        topo_items.push_back(with_desc(toggle("Serpentine",
+            [acc, zi]{ return acc && acc->zones[zi].serpentine; },
+            [acc, zi](bool v){ if (acc) acc->zones[zi].serpentine = v; }),
+            "Consecutive rings/lines alternate direction, matching a strip that "
+            "folds back on itself so the return wire stays short."));
+        topo_items.push_back(with_desc(leaf("Apply Layout (live)",
+            [&ctx]{ if (ctx.acc_apply) ctx.acc_apply(); }),
+            "Push section/shape/placement edits across ALL zones to the running "
+            "LEDs right now — re-chains the strip and resizes it without "
+            "restarting protohud. (The preview updates live; this makes the "
+            "actual LEDs match.)"));
+
+        // ── The wiring-guide visualizer (context panel) ──────────────────────
+        // Draws the zone's rings/lines from its live geometry, threads the
+        // DIN→DOUT chain through them, numbers each ring/line, and marks the
+        // data-in / data-out ends. Same idea as the MAX7219 wiring panel.
+        std::string title = label;
+        MenuContextPanelDraw draw_wiring =
+            [acc, zi, title, leds](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+                ImFont* font = ImGui::GetFont();
+                const float fs = ImGui::GetFontSize();
+                dl->AddText(font, fs * 1.05f, {o.x, o.y},
+                            IM_COL32(230, 235, 240, 255),
+                            ("Preview \xE2\x80\x94 " + title).c_str());
+                if (!acc) return;
+                const accessory::ZoneConfig z = acc->zones[zi];
+                const auto pts = accessory::zone_geometry(z);
+                const int nsec = z.shape == accessory::Shape::Single
+                               ? 1 : std::max<int>(1, static_cast<int>(z.sections.size()));
+                static const char* kPat[] = { "Off","Solid","Breathe","Level",
+                                              "Chase","Sparkle","Gradient","Wave" };
+                {
+                    char sub[100];
+                    std::snprintf(sub, sizeof sub, "%d LEDs  \xC2\xB7  %d %s  \xC2\xB7  %s",
+                        static_cast<int>(pts.size()), nsec,
+                        z.shape == accessory::Shape::Rings ? "rings" :
+                        z.shape == accessory::Shape::Lines ? "lines" : "run",
+                        kPat[std::clamp(static_cast<int>(z.pattern), 0, 7)]);
+                    dl->AddText(font, fs * 0.8f, {o.x, o.y + fs * 1.2f},
+                                IM_COL32(150, 160, 172, 255), sub);
+                }
+                // Preview backdrop panel.
+                const float top = o.y + fs * 2.6f;
+                dl->AddRectFilled({o.x + 2, top - 4}, {o.x + sz.x - 6, o.y + sz.y - 6},
+                                  IM_COL32(8, 10, 14, 235), 6.f);
+                if (pts.empty()) {
+                    dl->AddText(font, fs * 0.9f, {o.x + 10, top + 12},
+                        IM_COL32(200, 170, 90, 255), "No LEDs \xE2\x80\x94 set Shape + Sections.");
+                    return;
+                }
+                // Bounding box of the geometry → letterbox into the backdrop.
+                float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+                for (const auto& p : pts) {
+                    minx = std::min(minx, p.x); maxx = std::max(maxx, p.x);
+                    miny = std::min(miny, p.y); maxy = std::max(maxy, p.y);
+                }
+                const float gw = std::max(1.f, maxx - minx), gh = std::max(1.f, maxy - miny);
+                const float aw = std::max(40.f, sz.x - 30.f);
+                const float ah = std::max(40.f, o.y + sz.y - top - 24.f);
+                const float scale = std::min(aw / gw, ah / gh);
+                const float ox = o.x + (sz.x - gw * scale) * 0.5f;
+                const float oy = top + (ah - gh * scale) * 0.5f + 6.f;
+                auto SX = [&](float x){ return ox + (x - minx) * scale; };
+                auto SY = [&](float y){ return oy + (y - miny) * scale; };
+                const float dotr  = std::clamp(scale * 0.30f, 1.8f, 6.f);
+                const float led_r = 2.f * dotr;   // LED dot radius (band stays dotr-based)
+
+                // Live pattern colors (animated): exactly what the LEDs render.
+                // Use the same face-mean color and audio level the render loop is
+                // using so follow-face and Level zones match the hardware.
+                const double t = ImGui::GetTime();
+                const float    pvol = leds ? leds->audio_volume() : 0.6f;
+                const uint32_t pfc  = leds
+                    ? leds->face_color_for(static_cast<accessory::Zone>(zi)) : 0x00DCB4u;
+                // A follow zone previews the eye's live per-LED ramp too.
+                std::vector<uint32_t> prampbuf;
+                const uint32_t* pramp = nullptr;
+                int pramp_n = 0;
+                if (z.follow_face && leds) {
+                    prampbuf = leds->face_ramp_for(static_cast<accessory::Zone>(zi));
+                    pramp = prampbuf.data();
+                    pramp_n = static_cast<int>(prampbuf.size());
+                }
+                std::vector<uint8_t> cols;
+                accessory::zone_base_colors(z, t, pvol, pfc, pramp, pramp_n, cols);
+                // Preview brightness: show the LEDs vivid for legibility rather
+                // than dimmed to the (low) hardware global brightness. A gamma
+                // lift raises even dim pattern/follow colors so they read
+                // clearly while keeping black black and hues intact.
+                for (auto& v : cols)
+                    v = static_cast<uint8_t>(std::lround(
+                        255.0 * std::pow(v / 255.0, 0.45)));
+
+                // Per-section geometry: centroids, ring radii, and each line's
+                // two end LEDs (first + last in wiring order).
+                std::vector<ImVec2> cen(nsec, {0, 0});
+                std::vector<int>    cnt(nsec, 0);
+                std::vector<float>  rad(nsec, 0.f);
+                std::vector<ImVec2> ep0(nsec, {0, 0}), ep1(nsec, {0, 0});
+                std::vector<bool>   haveEp(nsec, false);
+                std::vector<ImVec2> topmost(nsec, {0, 0});
+                std::vector<float>  topkey(nsec, 1e9f);
+                for (const auto& p : pts) {
+                    const int s = std::clamp(p.section, 0, nsec - 1);
+                    const ImVec2 sp{SX(p.x), SY(p.y)};
+                    cen[s].x += sp.x; cen[s].y += sp.y; cnt[s]++;
+                    if (!haveEp[s]) { ep0[s] = sp; haveEp[s] = true; }
+                    ep1[s] = sp;
+                    if (sp.y < topkey[s]) { topkey[s] = sp.y; topmost[s] = sp; }
+                }
+                for (int s = 0; s < nsec; ++s)
+                    if (cnt[s] > 0) { cen[s].x /= cnt[s]; cen[s].y /= cnt[s]; }
+                const bool is_rings = z.shape == accessory::Shape::Rings;
+                if (is_rings)
+                    for (const auto& p : pts) {
+                        const int s = std::clamp(p.section, 0, nsec - 1);
+                        const float dx = SX(p.x) - cen[s].x, dy = SY(p.y) - cen[s].y;
+                        rad[s] += std::sqrt(dx*dx + dy*dy);
+                    }
+                for (int s = 0; s < nsec; ++s) if (cnt[s] > 0) rad[s] /= cnt[s];
+
+                // The LED band: rings render as TWO concentric circles with the
+                // LEDs running between them; lines render as a strip box aligned
+                // to the LED row. The band spans 2x the LED diameter with the
+                // LEDs down its centre. A hub also gets one LED at its centre.
+                const float band = 4.f * dotr;            // half-width = two LED diameters
+                const ImU32 edge = IM_COL32(96, 104, 118, 220);
+                const ImU32 fill = IM_COL32(74, 80, 90, 245);   // grey band substrate
+                if (is_rings) {
+                    for (int s = 0; s < nsec; ++s) {
+                        if (cnt[s] <= 0) continue;
+                        // Grey annulus = a thick stroked circle on the LED radius.
+                        dl->AddCircle(cen[s], rad[s], fill, 96, 2.f * band);
+                        dl->AddCircle(cen[s], std::max(1.f, rad[s] - band), edge, 72, 1.3f);
+                        dl->AddCircle(cen[s], rad[s] + band, edge, 72, 1.3f);
+                    }
+                    ImVec2 hc{0, 0}; int hn = 0;
+                    for (int s = 0; s < nsec; ++s)
+                        if (cnt[s] > 0) { hc.x += cen[s].x; hc.y += cen[s].y; ++hn; }
+                    if (hn > 0) {
+                        hc.x /= hn; hc.y /= hn;
+                        dl->AddCircleFilled(hc, led_r + 2.f, fill);
+                        dl->AddCircleFilled(hc, led_r, IM_COL32(120, 130, 146, 255));
+                        dl->AddCircle(hc, led_r, IM_COL32(255, 255, 255, 235), 16, 1.2f);
+                    }
+                } else if (z.shape == accessory::Shape::Lines) {
+                    const double rr = z.rotation * 3.14159265358979323846 / 180.0;
+                    for (int s = 0; s < nsec; ++s) {
+                        if (cnt[s] <= 0) continue;
+                        float dx = ep1[s].x - ep0[s].x, dy = ep1[s].y - ep0[s].y;
+                        float len = std::sqrt(dx*dx + dy*dy);
+                        if (len < 0.5f) { dx = std::cos(rr); dy = std::sin(rr); len = 1.f; }
+                        dx /= len; dy /= len;
+                        const float cap = led_r;                       // extend past end LEDs
+                        const ImVec2 A{ep0[s].x - dx*cap, ep0[s].y - dy*cap};
+                        const ImVec2 B{ep1[s].x + dx*cap, ep1[s].y + dy*cap};
+                        const ImVec2 pv{-dy*band, dx*band};            // perpendicular half-width
+                        const ImVec2 q0{A.x-pv.x, A.y-pv.y}, q1{B.x-pv.x, B.y-pv.y},
+                                     q2{B.x+pv.x, B.y+pv.y}, q3{A.x+pv.x, A.y+pv.y};
+                        dl->AddQuadFilled(q0, q1, q2, q3, fill);       // grey strip substrate
+                        dl->AddQuad(q0, q1, q2, q3, edge, 1.3f);
+                    }
+                }
+
+                // Daisy wiring (dim, behind the LEDs).
+                for (size_t i = 0; i + 1 < pts.size(); ++i)
+                    dl->AddLine({SX(pts[i].x), SY(pts[i].y)},
+                                {SX(pts[i+1].x), SY(pts[i+1].y)},
+                                IM_COL32(90, 150, 210, 90), 1.2f);
+
+                // Each LED in its live color, with a soft glow and a white
+                // outline; unlit LEDs show a dark body so the ring reads clearly.
+                for (size_t i = 0; i < pts.size(); ++i) {
+                    const ImVec2 sp{SX(pts[i].x), SY(pts[i].y)};
+                    const uint8_t r = cols[3*i], g = cols[3*i+1], b = cols[3*i+2];
+                    const int bri = std::max({r, g, b});
+                    if (bri >= 12) {
+                        // Two-layer glow + full-bright core so lit LEDs pop.
+                        dl->AddCircleFilled(sp, led_r * 2.6f,
+                                            IM_COL32(r, g, b, std::min(150, bri / 2)));
+                        dl->AddCircleFilled(sp, led_r * 1.6f,
+                                            IM_COL32(r, g, b, std::min(115, bri)));
+                        dl->AddCircleFilled(sp, led_r, IM_COL32(r, g, b, 255));
+                    } else {
+                        dl->AddCircleFilled(sp, led_r, IM_COL32(28, 32, 38, 255));
+                    }
+                    dl->AddCircle(sp, led_r, IM_COL32(255, 255, 255, 235), 20, 1.3f);
+                }
+
+                // Number each ring/line (rings share a centre → label at the top).
+                for (int s = 0; s < nsec; ++s) {
+                    if (cnt[s] <= 0) continue;
+                    const ImVec2 c = is_rings ? topmost[s] : cen[s];
+                    char n[8]; std::snprintf(n, sizeof n, "%d", s + 1);
+                    const ImVec2 tsz = font->CalcTextSizeA(fs * 0.8f, 1e9f, 0.f, n);
+                    dl->AddRectFilled({c.x - tsz.x*0.5f - 3, c.y - tsz.y*0.5f - 1},
+                                      {c.x + tsz.x*0.5f + 3, c.y + tsz.y*0.5f + 1},
+                                      IM_COL32(12, 15, 20, 210), 3.f);
+                    dl->AddText(font, fs * 0.8f, {c.x - tsz.x*0.5f, c.y - tsz.y*0.5f},
+                                IM_COL32(225, 230, 236, 235), n);
+                }
+                // DIN (green ring) at LED 0, DOUT (orange ring) at the last LED.
+                dl->AddCircle({SX(pts.front().x), SY(pts.front().y)}, led_r + 2.5f,
+                              IM_COL32(90, 220, 130, 255), 20, 2.f);
+                dl->AddText(font, fs * 0.75f,
+                            {SX(pts.front().x) + led_r + 3, SY(pts.front().y) - fs*1.4f},
+                            IM_COL32(120, 225, 145, 255), "DIN");
+                dl->AddCircle({SX(pts.back().x), SY(pts.back().y)}, led_r + 2.5f,
+                              IM_COL32(255, 150, 110, 255), 20, 2.f);
+                dl->AddText(font, fs * 0.75f,
+                            {SX(pts.back().x) + led_r + 3, SY(pts.back().y) + 4},
+                            IM_COL32(255, 160, 120, 255), "DOUT");
+            };
+
+        // ── Custom multi-stop gradient — one colour per section, blended ─────
+        // down the length. Overrides Color 2 when 2+ stops are set. Only shown
+        // for the Gradient pattern; edits push live via set_zone_stops.
+        constexpr int kMaxStops = 8;
+        std::vector<MenuItem> stop_items;
+        {
+            auto seed_stop = [](const accessory::ZoneConfig& zc, int k, int n)
+                    -> std::array<uint8_t, 3> {
+                const float f = (n <= 1) ? 0.f : static_cast<float>(k) / (n - 1);
+                return { static_cast<uint8_t>(zc.r + (zc.r2 - zc.r) * f),
+                         static_cast<uint8_t>(zc.g + (zc.g2 - zc.g) * f),
+                         static_cast<uint8_t>(zc.b + (zc.b2 - zc.b) * f) };
+            };
+            MenuItem cnt = slider("Stops", 0.f, static_cast<float>(kMaxStops), 1.f, "",
+                [acc, zi]{ return acc ? static_cast<float>(acc->zones[zi].stops.size()) : 0.f; },
+                [acc, zi, leds, z, seed_stop, kMaxStops](float v){
+                    if (!acc) return;
+                    int n = static_cast<int>(v);
+                    if (n == 1) n = 2;                       // 1 stop is meaningless
+                    n = std::clamp(n, 0, kMaxStops);
+                    auto& st = acc->zones[zi].stops;
+                    const int old = static_cast<int>(st.size());
+                    st.resize(n);
+                    for (int k = old; k < n; ++k) st[k] = seed_stop(acc->zones[zi], k, n);
+                    if (leds) leds->set_zone_stops(z, st);
+                });
+            cnt.label_fn = [acc, zi]{
+                const int n = acc ? static_cast<int>(acc->zones[zi].stops.size()) : 0;
+                char b[40];
+                if (n < 2) std::snprintf(b, sizeof b, "Stops: off (2-colour)");
+                else       std::snprintf(b, sizeof b, "Stops: %d", n);
+                return std::string(b);
+            };
+            stop_items.push_back(with_desc(std::move(cnt),
+                "How many colour stops the gradient blends through. Off falls back "
+                "to Color \xE2\x86\x92 Color 2. Set it to your section count so each "
+                "ring/line gets its own colour."));
+            stop_items.push_back(with_desc(leaf("Match to Sections",
+                [acc, zi, leds, z, seed_stop]{
+                    if (!acc) return;
+                    const auto& zc = acc->zones[zi];
+                    int nsec = (zc.shape == accessory::Shape::Single)
+                             ? 2 : std::max<int>(2, static_cast<int>(zc.sections.size()));
+                    nsec = std::min(nsec, 8);
+                    std::vector<std::array<uint8_t, 3>> ns(nsec);
+                    for (int k = 0; k < nsec; ++k)
+                        ns[k] = (k < static_cast<int>(zc.stops.size()))
+                              ? zc.stops[k] : seed_stop(zc, k, nsec);
+                    acc->zones[zi].stops = ns;
+                    if (leds) leds->set_zone_stops(z, ns);
+                }),
+                "Set one stop per ring/line, seeded from the current 2-colour "
+                "gradient — the fastest way to a per-section gradient."));
+            for (int k = 0; k < kMaxStops; ++k) {
+                MenuItem cp = color_picker(std::string("Stop ") + std::to_string(k + 1),
+                    [acc, zi, k, leds, z](uint8_t r, uint8_t g, uint8_t b){
+                        if (acc && k < static_cast<int>(acc->zones[zi].stops.size())) {
+                            acc->zones[zi].stops[k] = { r, g, b };
+                            if (leds) leds->set_zone_stops(z, acc->zones[zi].stops);
+                        }
+                    },
+                    [acc, zi, k]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
+                        if (acc && k < static_cast<int>(acc->zones[zi].stops.size())) {
+                            auto& s = acc->zones[zi].stops[k];
+                            return { s[0], s[1], s[2] };
+                        }
+                        return { 0, 0, 0 };
+                    });
+                cp.visible_fn = [acc, zi, k]{
+                    return acc && k < static_cast<int>(acc->zones[zi].stops.size());
+                };
+                stop_items.push_back(std::move(cp));
+            }
+        }
+        MenuItem grad_menu = with_desc(submenu("Custom Gradient", std::move(stop_items)),
+            "Multi-stop gradient: blend through several colours down the length, "
+            "one stop per section. Overrides Color 2 when 2+ stops are set.");
+        grad_menu.visible_fn = [acc, zi]{
+            return acc && acc->zones[zi].pattern == accessory::Pattern::Gradient;
+        };
+
         std::vector<MenuItem> items = {
             with_desc(submenu("Pattern", std::move(pat_items)),
-                      "What the zone does each tick. Level uses the mic "
-                      "volume; Breathe pulses at its own rate; Solid is a "
-                      "steady colour. Boop events flash on top regardless."),
+                      "What the zone does each tick. Gradient fades Color→Color 2 "
+                      "down the length; Wave sends a bright band along it; Level "
+                      "uses the mic; Breathe pulses. Boops flash on top."),
             color_picker("Color",
-                [leds, z](uint8_t r, uint8_t g, uint8_t b) {
+                [leds, acc, z, zi](uint8_t r, uint8_t g, uint8_t b) {
                     if (leds) leds->set_zone_color(z, r, g, b);
+                    if (acc)  { acc->zones[zi].r = r; acc->zones[zi].g = g; acc->zones[zi].b = b; }
                 },
-                [leds, z]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
-                    if (!leds) return {0, 0, 0};
-                    auto zc = leds->zone(z);
-                    return {zc.r, zc.g, zc.b};
+                [acc, leds, z, zi]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
+                    if (acc)  { auto& c = acc->zones[zi]; return {c.r, c.g, c.b}; }
+                    if (leds) { auto c = leds->zone(z);   return {c.r, c.g, c.b}; }
+                    return {0, 0, 0};
                 }),
+            with_desc(color_picker("Color 2 (gradient)",
+                [leds, acc, z, zi](uint8_t r, uint8_t g, uint8_t b) {
+                    if (leds) leds->set_zone_color2(z, r, g, b);
+                    if (acc)  { acc->zones[zi].r2 = r; acc->zones[zi].g2 = g; acc->zones[zi].b2 = b; }
+                },
+                [acc, z, zi, leds]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
+                    if (acc)  { auto& c = acc->zones[zi]; return {c.r2, c.g2, c.b2}; }
+                    if (leds) { auto c = leds->zone(z);   return {c.r2, c.g2, c.b2}; }
+                    return {0, 0, 0};
+                }),
+                "The far-end color for Gradient (base uses Color, tip uses "
+                "Color 2)."),
+            std::move(grad_menu),
+            with_desc(slider("Wave Speed", -3.f, 3.f, 0.1f, " Hz",
+                [acc, zi]{ return acc ? acc->zones[zi].wave_speed : 0.5f; },
+                [leds, acc, z, zi](float v){
+                    if (leds) leds->set_zone_wave_speed(z, v);
+                    if (acc)  acc->zones[zi].wave_speed = v; }),
+                "How fast Wave travels and Gradient scrolls down the length; 0 = "
+                "a static gradient. Negative reverses direction."),
+            [&]() {
+                MenuItem m = toggle("Gradient Across Shape",
+                    [acc, leds, z, zi]{ return acc ? acc->zones[zi].grad_spatial
+                                                   : (leds && leds->zone(z).grad_spatial); },
+                    [leds, acc, z, zi](bool v){ if (leds) leds->set_zone_grad_spatial(z, v);
+                                                if (acc)  acc->zones[zi].grad_spatial = v; });
+                m.visible_fn = [acc, zi]{
+                    return acc && (acc->zones[zi].pattern == accessory::Pattern::Gradient ||
+                                   acc->zones[zi].pattern == accessory::Pattern::Wave); };
+                return with_desc(std::move(m),
+                    "Sweep the Gradient/Wave across the zone's 2D shape (like light "
+                    "crossing the whole hub or fin) instead of stepping along the "
+                    "wiring order ring-by-ring / line-by-line. Aim it with Gradient "
+                    "Angle below.");
+            }(),
+            [&]() {
+                MenuItem m = slider("Gradient Angle", -180.f, 180.f, 5.f, " deg",
+                    [acc, zi]{ return acc ? acc->zones[zi].grad_angle : 0.f; },
+                    [leds, acc, z, zi](float v){ if (leds) leds->set_zone_grad_angle(z, v);
+                                                 if (acc)  acc->zones[zi].grad_angle = v; });
+                m.visible_fn = [acc, zi]{
+                    return acc && acc->zones[zi].grad_spatial &&
+                           (acc->zones[zi].pattern == accessory::Pattern::Gradient ||
+                            acc->zones[zi].pattern == accessory::Pattern::Wave); };
+                return with_desc(std::move(m),
+                    "Direction the spatial Gradient/Wave sweeps across the shape \xE2\x80\x94 "
+                    "turn it to run the colour horizontally, vertically, or on any "
+                    "diagonal. Rotates independently of the zone's own Rotation.");
+            }(),
+            with_desc(submenu("Shape & Wiring", std::move(topo_items)),
+                      "Define the zone's rings/lines and their LED counts, place "
+                      "and rotate it, and set where LED 0 enters — the wiring "
+                      "panel shows the daisy-chain order. Section/shape changes "
+                      "apply to the LEDs on the next restart."),
             with_desc(slider("Zone Brightness", 0.f, 255.f, 5.f, "",
-                [leds, z]{
-                    return leds ? static_cast<float>(leds->zone(z).zone_brightness)
-                                : 255.f;
+                [acc, leds, z, zi]{
+                    if (acc)  return static_cast<float>(acc->zones[zi].zone_brightness);
+                    return leds ? static_cast<float>(leds->zone(z).zone_brightness) : 255.f;
                 },
-                [leds, z](float v){
+                [leds, acc, z, zi](float v){
                     if (leds) leds->set_zone_brightness(z, static_cast<uint8_t>(v));
+                    if (acc)  acc->zones[zi].zone_brightness = static_cast<uint8_t>(v);
                 }),
-                "Per-zone brightness, on top of the chain-wide Brightness — "
-                "e.g. keep a subtle blush while the fins run bright."),
+                "Per-zone brightness, on top of the chain-wide Brightness."),
             with_desc(toggle("Follow Face",
-                [leds, z]{ return leds && leds->zone(z).follow_face; },
-                [leds, z](bool v){ if (leds) leds->set_zone_follow_face(z, v); }),
-                "Sync this zone's color to the face: the zone tracks the "
-                "mean color of the lit face pixels (material, gradients, "
-                "GIFs — whatever is rendering), updating a few times a "
-                "second. The zone's own Color is ignored while on."),
+                [acc, leds, z, zi]{ return acc ? acc->zones[zi].follow_face
+                                               : (leds && leds->zone(z).follow_face); },
+                [leds, acc, z, zi](bool v){ if (leds) leds->set_zone_follow_face(z, v);
+                                            if (acc)  acc->zones[zi].follow_face = v; }),
+                "Sync this zone's color to the face's mean color, updating a few "
+                "times a second. The zone's own Color is ignored while on."),
             with_desc(slider("Breathe Rate", 0.05f, 5.f, 0.05f, " Hz",
-                [leds, z]{ return leds ? leds->zone(z).breathe_hz : 0.5f; },
-                [leds, z](float v){ if (leds) leds->set_zone_breathe_hz(z, v); }),
-                "How fast the Breathe pattern oscillates (and the Chase dot "
-                "walks its loop). Meaningful for Breathe and Chase."),
+                [acc, leds, z, zi]{ return acc ? acc->zones[zi].breathe_hz
+                                               : (leds ? leds->zone(z).breathe_hz : 0.5f); },
+                [leds, acc, z, zi](float v){ if (leds) leds->set_zone_breathe_hz(z, v);
+                                             if (acc)  acc->zones[zi].breathe_hz = v; }),
+                "How fast Breathe oscillates and the Chase dot walks its loop."),
             leaf("Test Flash", [leds, z]{ if (leds) leds->trigger_flash(z, 0.35); }),
         };
-        return submenu(std::move(label), std::move(items));
+        return with_panel(submenu(std::move(label), std::move(items)),
+                          "Wiring", draw_wiring);
     };
 
+        // ── Layout Overview — all five zones on one shared canvas ────────────
+        // Draws every zone at its Align X/Y position (and rotation) with live
+        // pattern colors, plus faint DIN→DOUT connectors in chain order, so the
+        // whole face can be arranged to match the physical build.
+        auto draw_overview = [acc, leds](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
+            ImFont* font = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            dl->AddText(font, fs * 1.05f, {o.x, o.y}, IM_COL32(230, 235, 240, 255),
+                        "Layout Overview \xE2\x80\x94 all zones");
+            if (!acc) return;
+            static const char* kName[] = { "L Hub", "R Hub", "L Fin", "R Fin", "Blush" };
+            const double t    = ImGui::GetTime();
+            const float  pvol = leds ? leds->audio_volume() : 0.6f;
+
+            // Fixed face reference (layout units) — the visor + eyes + mouth are
+            // always drawn and always folded into the fit, so the picture is a
+            // STABLE map: zones sit at absolute positions relative to the face
+            // instead of auto-centring on each other. As long as zones stay near
+            // the face the scale doesn't jump when you nudge one.
+            // (Option 2 will feed the real eye positions here.)
+            const float FHW = 42.f, FHH = 18.f;   // face half-width / half-height
+            struct ZG { int zi; std::vector<accessory::LedPoint> pts; std::vector<uint8_t> cols; };
+            std::vector<ZG> zg;
+            float minx = -FHW, miny = -FHH, maxx = FHW, maxy = FHH;
+            for (int zi = 0; zi < accessory::ZoneCount; ++zi) {
+                accessory::ZoneConfig z = acc->zones[zi];
+                if (z.count <= 0) continue;
+                auto pts = accessory::zone_geometry(z);
+                if (pts.empty()) continue;
+                const uint32_t pfc = leds
+                    ? leds->face_color_for(static_cast<accessory::Zone>(zi)) : 0x00DCB4u;
+                std::vector<uint32_t> rb; const uint32_t* rp = nullptr; int rn = 0;
+                if (z.follow_face && leds) {
+                    rb = leds->face_ramp_for(static_cast<accessory::Zone>(zi));
+                    rp = rb.data(); rn = static_cast<int>(rb.size());
+                }
+                std::vector<uint8_t> cols;
+                accessory::zone_base_colors(z, t, pvol, pfc, rp, rn, cols);
+                for (auto& v : cols)   // vivid preview (gamma lift, not hw-dimmed)
+                    v = static_cast<uint8_t>(std::lround(255.0 * std::pow(v / 255.0, 0.45)));
+                for (auto& p : pts) {
+                    minx = std::min(minx, p.x); maxx = std::max(maxx, p.x);
+                    miny = std::min(miny, p.y); maxy = std::max(maxy, p.y);
+                }
+                zg.push_back({zi, std::move(pts), std::move(cols)});
+            }
+            const float top = o.y + fs * 1.8f;
+            dl->AddRectFilled({o.x + 2, top - 2}, {o.x + sz.x - 6, o.y + sz.y - 6},
+                              IM_COL32(8, 10, 14, 235), 6.f);
+            const float gw = std::max(1.f, maxx - minx), gh = std::max(1.f, maxy - miny);
+            const float aw = std::max(40.f, sz.x - 24.f);
+            const float ah = std::max(40.f, o.y + sz.y - top - 16.f);
+            const float scale = std::min(aw / gw, ah / gh);
+            const float ox = o.x + (sz.x - gw * scale) * 0.5f;
+            const float oy = top + (ah - gh * scale) * 0.5f + 4.f;
+            auto SX = [&](float x){ return ox + (x - minx) * scale; };
+            auto SY = [&](float y){ return oy + (y - miny) * scale; };
+            const float dotr = std::clamp(scale * 0.28f, 1.6f, 5.f);
+
+            // Face reference schematic (visor + eyes + mouth), drawn UNDER the
+            // zones so cheek hubs/fins/blush can be aligned to the eyes & mouth.
+            {
+                dl->AddRectFilled({SX(-FHW), SY(-FHH)}, {SX(FHW), SY(FHH)},
+                                  IM_COL32(28, 38, 54, 70), 4.f);
+                dl->AddRect({SX(-FHW), SY(-FHH)}, {SX(FHW), SY(FHH)},
+                            IM_COL32(70, 90, 120, 110), 4.f, 0, 1.5f);
+                const ImU32 ecol = IM_COL32(96, 134, 178, 160);
+                const float eyr = FHH * 0.32f * scale;
+                for (float ex : { -FHW * 0.52f, FHW * 0.52f })
+                    dl->AddCircle({SX(ex), SY(-FHH * 0.40f)}, eyr, ecol, 20, 1.6f);
+                dl->AddLine({SX(-FHW * 0.24f), SY(FHH * 0.50f)},
+                            {SX(0.f),          SY(FHH * 0.64f)}, ecol, 1.6f);
+                dl->AddLine({SX(0.f),          SY(FHH * 0.64f)},
+                            {SX(FHW * 0.24f),  SY(FHH * 0.50f)}, ecol, 1.6f);
+            }
+            if (zg.empty()) {
+                dl->AddText(font, fs * 0.9f, {o.x + 10, SY(0.f) - fs * 0.5f},
+                    IM_COL32(200, 170, 90, 255),
+                    "No zones \xE2\x80\x94 give a zone LEDs, then Auto-Arrange.");
+                return;
+            }
+
+            // Daisy-chain connectors, in strip start-index order.
+            std::vector<int> order(zg.size());
+            for (size_t i = 0; i < zg.size(); ++i) order[i] = static_cast<int>(i);
+            std::sort(order.begin(), order.end(), [&](int a, int b){
+                return acc->zones[zg[a].zi].start < acc->zones[zg[b].zi].start; });
+            for (size_t k = 0; k + 1 < order.size(); ++k) {
+                const auto& A = zg[order[k]].pts;
+                const auto& B = zg[order[k + 1]].pts;
+                dl->AddLine({SX(A.back().x), SY(A.back().y)},
+                            {SX(B.front().x), SY(B.front().y)},
+                            IM_COL32(80, 90, 105, 150), 1.5f);
+            }
+            // Zones: live-colored dots + a label above each cluster.
+            for (auto& g : zg) {
+                const auto& pts = g.pts;
+                float cx = 0, zminy = 1e9f;
+                for (size_t i = 0; i < pts.size(); ++i) {
+                    ImVec2 sp{SX(pts[i].x), SY(pts[i].y)};
+                    cx += sp.x; zminy = std::min(zminy, sp.y);
+                    if (3 * i + 2 < g.cols.size()) {
+                        const uint8_t r = g.cols[3*i], gg = g.cols[3*i+1], b = g.cols[3*i+2];
+                        const int bri = std::max({r, gg, b});
+                        if (bri >= 12)
+                            dl->AddCircleFilled(sp, dotr * 2.2f,
+                                                IM_COL32(r, gg, b, std::min(130, bri / 2)));
+                        dl->AddCircleFilled(sp, dotr,
+                            bri >= 12 ? IM_COL32(r, gg, b, 255) : IM_COL32(40, 44, 52, 255));
+                    } else {
+                        dl->AddCircleFilled(sp, dotr, IM_COL32(40, 44, 52, 255));
+                    }
+                    dl->AddCircle(sp, dotr, IM_COL32(255, 255, 255, 55), 12, 1.f);
+                }
+                cx /= std::max<size_t>(1, pts.size());
+                const char* nm = (g.zi >= 0 && g.zi < 5) ? kName[g.zi] : "?";
+                const ImVec2 tsz = ImGui::CalcTextSize(nm);
+                const ImVec2 tp{cx - tsz.x * 0.5f, zminy - fs - 2.f};
+                dl->AddRectFilled({tp.x - 3, tp.y - 1}, {tp.x + tsz.x + 3, tp.y + tsz.y + 1},
+                                  IM_COL32(10, 12, 16, 200), 3.f);
+                dl->AddText(font, fs * 0.8f, tp, IM_COL32(225, 230, 236, 235), nm);
+            }
+            // Global DIN (green) on the chain's very first LED.
+            const auto& F = zg[order.front()].pts;
+            dl->AddCircle({SX(F.front().x), SY(F.front().y)}, dotr + 3.f,
+                          IM_COL32(90, 220, 130, 255), 16, 2.f);
+        };
+
+        std::vector<MenuItem> overview_items;
+        overview_items.push_back(with_desc(leaf("Auto-Arrange (face layout)",
+            [acc]{
+                if (!acc) return;
+                // Rough face arrangement in layout units, keyed to the face
+                // reference (eyes ≈ ±22 x, mouth low-centre) drawn in the
+                // overview: hubs beside the eyes, fins out on the cheeks, blush
+                // low-centre. A starting point — then nudge with the sliders.
+                static const int dx[] = { -30, 30, -42, 42, 0 };
+                static const int dy[] = {  -6, -6,   8,  8, 12 };
+                for (int zi = 0; zi < accessory::ZoneCount; ++zi) {
+                    acc->zones[zi].pos_x = dx[zi];
+                    acc->zones[zi].pos_y = dy[zi];
+                }
+            }),
+            "Spread the five zones into a rough face layout as a starting point, "
+            "positioned around the face reference (eyes + mouth) shown in the "
+            "overview \xE2\x80\x94 then nudge each with the Align sliders below."));
+        {
+            static const char* kName[] = { "L Hub", "R Hub", "L Fin", "R Fin", "Blush" };
+            for (int zi = 0; zi < accessory::ZoneCount; ++zi) {
+                overview_items.push_back(slider(std::string(kName[zi]) + " \xE2\x80\x94 X",
+                    -200.f, 200.f, 1.f, "",
+                    [acc, zi]{ return acc ? static_cast<float>(acc->zones[zi].pos_x) : 0.f; },
+                    [acc, zi](float v){ if (acc) acc->zones[zi].pos_x = static_cast<int>(v); }));
+                overview_items.push_back(slider(std::string(kName[zi]) + " \xE2\x80\x94 Y",
+                    -200.f, 200.f, 1.f, "",
+                    [acc, zi]{ return acc ? static_cast<float>(acc->zones[zi].pos_y) : 0.f; },
+                    [acc, zi](float v){ if (acc) acc->zones[zi].pos_y = static_cast<int>(v); }));
+            }
+        }
+        MenuItem overview = with_desc(
+            with_panel(submenu("Layout Overview", std::move(overview_items)),
+                       "Overview", draw_overview),
+            "Arrange all five zones on one canvas to match your physical build, "
+            "against a fixed face reference (visor + eyes + mouth). Align X/Y "
+            "move each zone; per-zone Scale, Rotation and Mirror (in each zone's "
+            "Shape & Wiring) size and flip it. The preview shows live colors and "
+            "the daisy-chain order (green ring = chain DIN). Placement is cosmetic "
+            "\xE2\x80\x94 it's the layout picture, not the LED output.");
+
     std::vector<MenuItem> led_menu = {
+        with_desc(toggle("Enabled",
+            [leds, acc]{ return acc ? acc->enabled : (leds && leds->is_running()); },
+            [leds, acc](bool v){ if (leds) leds->set_enabled(v);
+                                 if (acc)  acc->enabled = v; }),
+            "Master switch for the accessory LED chain — turns the whole chain "
+            "on or off right away. (Changing Data Transport still needs a "
+            "restart; this doesn't.)"),
+        std::move(overview),
         with_desc(slider("Brightness", 0.f, 255.f, 1.f, "",
             [leds]{ return leds ? static_cast<float>(leds->global_brightness()) : 0.f; },
             [leds](float v){ if (leds) leds->set_global_brightness(static_cast<uint8_t>(v)); }),
-            "Master brightness applied to the whole accessory chain at SPI "
-            "encode time. WS2812s draw a lot of current at full white — "
-            "keep this low (~64) unless you have power injection."),
+            "Master brightness applied to the whole accessory chain. WS2812s "
+            "draw a lot of current at full white — keep this low (~64) unless "
+            "you have power injection."),
+        with_desc(submenu("Data Transport", std::vector<MenuItem>{
+            leaf_sel("Pi GPIO  (SPI MOSI / GPIO10)",
+                [acc]{ if (acc) acc->transport = "spidev"; },
+                [acc]{ return acc && acc->transport != "coproc"; }),
+            leaf_sel("Coprocessor  (RP2350 GP37)",
+                [acc]{ if (acc) acc->transport = "coproc"; },
+                [acc]{ return acc && acc->transport == "coproc"; }),
+        }), "Where the accessory chain's DATA wire lands. Pi GPIO drives it "
+            "from the CM5's SPI MOSI (GPIO10 / pin 19); Coprocessor streams the "
+            "frames to the RP2350 and drives them on its GP37. The Pi computes "
+            "the zones/effects either way. Applies on restart."),
         led_zone_menu(accessory::Zone::LeftCheekhub,  "Cheek Hub Left"),
         led_zone_menu(accessory::Zone::RightCheekhub, "Cheek Hub Right"),
         led_zone_menu(accessory::Zone::LeftFin,       "Cheek Fin Left"),

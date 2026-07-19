@@ -47,6 +47,10 @@ public:
 
     int  count() const { return cfg_.count; }
 
+    // Reallocate the pixel + SPI buffers to a new chain length, keeping the
+    // SPI fd open. Lets the chain be re-sized live without closing the device.
+    void resize(int count);
+
     // Per-pixel logical color (0..255, gamma-uncorrected). Caller indexes
     // into the daisy-chain; no zone awareness here.
     void set_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);

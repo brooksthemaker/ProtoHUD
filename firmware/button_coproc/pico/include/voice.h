@@ -33,6 +33,16 @@ struct VoiceState {
     volatile int   crush_down = 3;       // 1..16 sample-hold (SR reduction)
     volatile int   echo_ms    = 180;     // echo delay
     volatile int   echo_fb    = 45;      // echo feedback %, 0..95
+
+    // ── Hardware self-test (host verbs TONE / MICLVL) ────────────────────────
+    // Speaker test: core0 loads a frequency + a sample countdown; core1 plays a
+    // sine straight to the DAC (mic OUT of the loop) until it runs down. Proves
+    // DAC + I2S + speaker independent of the mic — the one thing dac_begin()
+    // can't self-verify. Mic test: core1 tracks the loudest |sample| since core0
+    // last read it; a live AC-peak meter, unlike the DC bias ADCREAD shows.
+    volatile int   test_tone_hz   = 1000;  // sine frequency while playing
+    volatile long  test_tone_left = 0;     // samples remaining (>0 = playing)
+    volatile float mic_peak       = 0.0f;  // peak |sample| since last MICLVL, 0..1
 };
 extern VoiceState g_voice;
 
