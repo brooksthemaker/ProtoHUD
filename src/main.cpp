@@ -14,6 +14,7 @@
 #include <ctime>
 #include <csignal>
 #include <cstdlib>
+#include <glob.h>
 
 #include <GLFW/glfw3.h>
 #include <GLES2/gl2.h>
@@ -227,6 +228,18 @@ static std::string resolve_serial_port(const std::string& configured,
         return first_available;
     }
     return configured; // give up; caller logs the real open() error
+}
+
+// Resolve a stable /dev/serial/by-id/ path by glob. For boards whose udev name
+// is fixed by their USB strings but carries a per-unit board serial suffix
+// (e.g. usb-ProtoHUD_SmartKnob_<serial>-if00). Empty when nothing matches.
+static std::string resolve_by_id_glob(const char* pattern) {
+    glob_t g{};
+    std::string result;
+    if (glob(pattern, 0, nullptr, &g) == 0 && g.gl_pathc > 0)
+        result = g.gl_pathv[0];
+    globfree(&g);
+    return result;
 }
 
 // ── Config loading ────────────────────────────────────────────────────────────
@@ -3470,13 +3483,26 @@ int main(int argc, char* argv[]) {
 
     // Auto-discover serial ports by USB VID:PID when configured paths are absent.
     // Teensy 4.1: VID=0x16C0, PID=0x0483.  LoRa CH340: VID=0x1A86, PID=0x7523.
-    // SmartKnob: the firmware uses the ESP32-S3 NATIVE USB-CDC port (build flag
-    // ARDUINO_USB_MODE=1), so it enumerates as Espressif VID=0x303A, PID=0x1001
-    // on a /dev/ttyACM node — NOT the CH341 UART bridge (0x1A86) the board also
-    // exposes. If the PID varies by core version, set smartknob.port explicitly
-    // to a /dev/serial/by-id/... path instead.
     teensy_port = resolve_serial_port(teensy_port, 0x16C0, 0x0483);
     lora_port   = resolve_serial_port(lora_port,   0x1A86, 0x7523);
+
+    // SmartKnob — two firmware generations:
+    //  - Pico 2 (RP2350) build: enumerates with USB strings ProtoHUD/SmartKnob,
+    //    giving a stable by-id path. Matched by NAME, not VID — the bare
+    //    Raspberry Pi VID (2e8a) would also hit the button coprocessor.
+    //  - ESP32-S3 build: NATIVE USB-CDC port (build flag ARDUINO_USB_MODE=1),
+    //    Espressif VID=0x303A, PID=0x1001 on a /dev/ttyACM node — NOT the
+    //    CH341 UART bridge (0x1A86) the board also exposes. If the PID varies
+    //    by core version, set smartknob.port to a /dev/serial/by-id/... path.
+    if (access(knob_port.c_str(), F_OK) != 0) {
+        std::string by_id =
+            resolve_by_id_glob("/dev/serial/by-id/usb-ProtoHUD_SmartKnob*-if00");
+        if (!by_id.empty()) {
+            std::cerr << "[serial] " << knob_port << " not found — using "
+                      << by_id << " (SmartKnob by-id match)\n";
+            knob_port = by_id;
+        }
+    }
     knob_port   = resolve_serial_port(knob_port,   0x303A, 0x1001);
 
     TeensyController     teensy  (teensy_port,   baud, state);
