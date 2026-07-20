@@ -38,9 +38,10 @@ struct EyeAnimParams {
     // panel draws its own copy, so eye-panel rigs shift both eyes together.
     // Glitch fills the whole panel and ignores this.
     double  cx = 0.5, cy = 0.5;
-    // Draw the animation once per HALF of the panel — a left copy and a
-    // horizontally-mirrored right copy, like a pair of eyes — instead of one
-    // instance across the whole panel. cx/cy then position within each half.
+    // Draw the animation once per HALF of the panel — a right copy and a
+    // horizontally-mirrored left copy, like a pair of eyes (directional
+    // animations radiate outward from the centre) — instead of one instance
+    // across the whole panel. cx/cy then position within each half.
     bool    mirror = false;
     // Composite the animation over the live face (which keeps rendering —
     // blinks, GIFs, effects and all) instead of taking over the panel.

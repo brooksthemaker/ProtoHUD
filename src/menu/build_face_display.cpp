@@ -1555,16 +1555,16 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 p.type = static_cast<face::EyeAnim>(a);
 
                 // 2:1 panel-pair canvas, honouring Mirror like the face
-                // controller: one copy per half, right half flipped.
+                // controller: one copy per half, left half flipped.
                 const int W = 128, H = 64;
                 cv::Mat frame;
                 if (p.mirror) {
                     cv::Mat half = face::render_eye_animation(p, ap.t, W / 2, H);
                     frame = cv::Mat::zeros(H, W, CV_8UC4);
-                    half.copyTo(frame(cv::Rect(0, 0, W / 2, H)));
+                    half.copyTo(frame(cv::Rect(W / 2, 0, W / 2, H)));
                     cv::Mat flipped;
                     cv::flip(half, flipped, 1);
-                    flipped.copyTo(frame(cv::Rect(W / 2, 0, W / 2, H)));
+                    flipped.copyTo(frame(cv::Rect(0, 0, W / 2, H)));
                 } else {
                     frame = face::render_eye_animation(p, ap.t, W, H);
                 }
@@ -1661,10 +1661,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [eget]{ return eget().mirror; },
                     [emod](bool v){ emod([v](face::EyeAnimParams& p){
                         p.mirror = v; }); }),
-                    "Draw the animation on both halves of the panel — a left "
-                    "copy and a mirrored right copy, like a pair of eyes — "
-                    "instead of one instance across the whole panel. Position "
-                    "then applies within each half."),
+                    "Draw the animation on both halves of the panel — a right "
+                    "copy and a mirrored left copy, like a pair of eyes — "
+                    "instead of one instance across the whole panel. Moving "
+                    "animations (the EKG sweep) radiate outward from the "
+                    "centre. Position then applies within each half."),
                 with_desc(toggle("Overlay Face",
                     [eget]{ return eget().overlay; },
                     [emod](bool v){ emod([v](face::EyeAnimParams& p){
