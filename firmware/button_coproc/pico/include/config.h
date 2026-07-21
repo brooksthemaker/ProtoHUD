@@ -11,7 +11,7 @@
 
 // Firmware version, reported in the HELLO line so the Pi (and the flash script)
 // can confirm an update actually took. Bump it whenever you change the firmware.
-static constexpr const char* kFwVersion = "1.4.2";
+static constexpr const char* kFwVersion = "1.4.8";
 
 // Switches wired between the listed GP pin and GND. We use INPUT_PULLUP, so a
 // pressed switch reads LOW (active-low). Add/remove entries freely — kLedPins
@@ -144,10 +144,10 @@ static constexpr int8_t  kServoPins[4]    = { 6, 7, 8, 9 };
 // Level-shift the data (and clock) line to 5 V for long or strict strips;
 // short runs usually accept 3.3 V. Verbs: LEDZ (solid), LEDP (pattern),
 // LEDB (brightness), LEDF/LEDSHOW (per-pixel frames from the Pi).
-// GP22 doubles as the voice DAC reset; the APA102 clock (GP28) doubles as
-// ADC ch2 — with voice enabled move/skip, with APA102 you lose that ADC ch.
+// Data moved off GP22 (that's the voice DAC reset) to free GP37. The APA102
+// clock (GP28) doubles as ADC ch2 — with APA102 you lose that ADC channel.
 static constexpr uint8_t  kLedZoneType    = 0;     // 0 = WS2812, 1 = APA102
-static constexpr int8_t   kLedZonePin     = 22;    // data
+static constexpr int8_t   kLedZonePin     = 37;    // data (GP37: free on the XL W)
 static constexpr int8_t   kLedZoneClkPin  = 28;    // APA102 clock (WS2812: unused)
 static constexpr uint16_t kLedZoneCount   = 16;    // strip/panel pixel count
 static constexpr uint16_t kLedZoneMax     = 300;   // hard cap (frame buffer size)

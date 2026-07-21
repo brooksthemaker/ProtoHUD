@@ -52,6 +52,9 @@ void ExpressionDirector::fire_locked(const Rule& rule) {
     if (rule.base_expression.empty() && rule.name.empty()) return;
     const bool retrigger = active_ && active_key_ == rule.key;
     if (!retrigger) {
+        // Switching from a different active expression: undo ITS actions first
+        // so LED/servo state doesn't leak from one expression into the next.
+        if (active_) revert_actions_locked();
         // Remember where to return to — but never a face we put up ourselves.
         if (!active_ && act_.current_face) restore_face_ = act_.current_face();
         active_     = true;
@@ -67,9 +70,26 @@ void ExpressionDirector::fire_locked(const Rule& rule) {
             act_.clear_style_override();
         }
         if (act_.notify && !rule.name.empty()) act_.notify("Expression", rule.name);
+        // LED/servo side-effects run alongside the face switch; they revert
+        // together in deactivate_locked when the hold expires.
+        apply_actions_locked(rule.actions);
     }
     latched_   = (rule.hold_s <= 0.0);
     hold_left_ = rule.hold_s;
+}
+
+void ExpressionDirector::apply_actions_locked(const std::vector<ExprAction>& actions) {
+    active_actions_ = actions;
+    if (!act_.apply_action) return;
+    for (const auto& a : active_actions_)
+        if (a.armed()) act_.apply_action(a);
+}
+
+void ExpressionDirector::revert_actions_locked() {
+    if (act_.revert_action)
+        for (const auto& a : active_actions_)
+            if (a.armed()) act_.revert_action(a);
+    active_actions_.clear();
 }
 
 void ExpressionDirector::activate(const Rule& rule) {
@@ -88,6 +108,7 @@ void ExpressionDirector::deactivate_locked() {
     active_key_.clear();
     latched_ = false;
     hold_left_ = 0.0;
+    revert_actions_locked();   // undo LED/servo side-effects the activation applied
     if (act_.clear_style_override) act_.clear_style_override();
     if (!restore_face_.empty() && act_.set_face) act_.set_face(restore_face_);
     restore_face_.clear();

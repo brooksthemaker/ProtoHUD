@@ -23,6 +23,13 @@ LedStrip::LedStrip(Config cfg) : cfg_(std::move(cfg)) {
     spi_buf_.assign(static_cast<size_t>(cfg_.count) * 9 + cfg_.reset_bytes, 0);
 }
 
+void LedStrip::resize(int count) {
+    if (count < 0) count = 0;
+    cfg_.count = count;
+    pixels_.assign(static_cast<size_t>(count) * 3, 0);
+    spi_buf_.assign(static_cast<size_t>(count) * 9 + cfg_.reset_bytes, 0);
+}
+
 LedStrip::~LedStrip() { close(); }
 
 bool LedStrip::open() {

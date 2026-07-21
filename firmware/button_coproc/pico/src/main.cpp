@@ -339,7 +339,10 @@ void ledf_line(const String& line) {
     if (sp < 0) return;
     int idx = line.substring(5, sp).toInt();
     const int hstart = sp + 1;
-    for (int i = hstart; i + 5 < (int)line.length() && idx < (int)g_led_n; i += 6, ++idx) {
+    // Cap on the buffer, not g_led_n: a streamed frame auto-sizes the zone
+    // (grows g_led_n to the highest index written) so the Pi can drive the
+    // whole accessory chain over this link without a separate count command.
+    for (int i = hstart; i + 5 < (int)line.length() && idx < (int)kLedZoneMax; i += 6, ++idx) {
         int v[6];
         bool ok = true;
         for (int k = 0; k < 6; ++k) { v[k] = hexval(line[i + k]); if (v[k] < 0) ok = false; }
@@ -348,6 +351,7 @@ void ledf_line(const String& line) {
             g_led_px[idx][0] = (uint8_t)((v[0] << 4) | v[1]);
             g_led_px[idx][1] = (uint8_t)((v[2] << 4) | v[3]);
             g_led_px[idx][2] = (uint8_t)((v[4] << 4) | v[5]);
+            if (idx + 1 > (int)g_led_n) g_led_n = idx + 1;
         }
     }
     g_led_mode = 5;                     // frame-streamed: stop local patterns

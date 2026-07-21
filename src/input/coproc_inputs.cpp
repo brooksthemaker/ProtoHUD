@@ -236,6 +236,17 @@ void CoprocInputs::on_line(const std::string& line) {
         adc_mv_[ch] = static_cast<int>(mv);
         return;
     }
+    if (cmd == "MIC") {   // "MIC <permille>" — MICLVL reply, peak 0..1000
+        const std::string pm_s = next_tok(line, pos);
+        if (pm_s.empty()) return;
+        int pm = -1;
+        try { pm = std::stoi(pm_s); } catch (...) { return; }
+        if (pm < 0 || pm > 1000) return;
+        connected_.store(true);
+        std::lock_guard<std::mutex> lk(mic_mtx_);
+        mic_pm_ = pm;
+        return;
+    }
     if (cmd == "PIN") {   // "PIN <gp> <val> <roles>" — one line of a PINS dump
         const std::string gp_s   = next_tok(line, pos);
         const std::string val_s  = next_tok(line, pos);
@@ -411,6 +422,32 @@ std::string CoprocInputs::adc_result() const {
                                : std::to_string(adc_mv_[ch]) + "mV";
     }
     return out;
+}
+
+void CoprocInputs::send_tone(int hz, int ms) {
+    if (fd_ < 0) return;
+    hz = hz < 50 ? 50 : (hz > 8000 ? 8000 : hz);
+    ms = ms < 20 ? 20 : (ms > 3000 ? 3000 : ms);
+    const std::string msg = "TONE " + std::to_string(hz) + " " +
+                            std::to_string(ms) + "\n";
+    (void)::write(fd_, msg.data(), msg.size());
+}
+
+void CoprocInputs::request_mic_level() {
+    if (fd_ < 0) return;
+    const char* cmd = "MICLVL\n";
+    (void)::write(fd_, cmd, 7);
+}
+
+std::string CoprocInputs::mic_level_result() const {
+    std::lock_guard<std::mutex> lk(mic_mtx_);
+    if (mic_pm_ < 0) return "no reading";
+    // ASCII bar + percent — the menu font has no block-drawing glyphs (they
+    // render as '?'), so use '#'/'-' inside brackets for a clear meter.
+    const int bars = (mic_pm_ + 50) / 100;   // 0..10
+    std::string s = "[";
+    for (int i = 0; i < 10; ++i) s += (i < bars) ? '#' : '-';
+    return s + "] " + std::to_string(mic_pm_ / 10) + "%";
 }
 
 void CoprocInputs::request_pins() {

@@ -24,6 +24,7 @@
 #include "app_state.h"
 #include "face/shm_pusher_output.h"
 #include "menu/menu_system.h"
+#include "accessory/accessory_leds.h"   // AccessoryLeds::Config (nested type in ctx)
 
 // Forward declarations — the context only holds pointers to these.
 namespace cv { class Mat; }
@@ -46,7 +47,6 @@ struct HudConfig;
 enum class EyeSource;
 namespace sensor       { class BoopSensor; }
 namespace audio        { class VoiceAnalyzer; }
-namespace accessory    { class AccessoryLeds; }
 namespace sys          { class FanController; }
 namespace input        { struct GpioPinCfg; struct CoprocConfig; }
 namespace integrations { class KdeConnectBridge; }
@@ -323,6 +323,13 @@ struct MenuBuildContext {
     // Accessory LED chain (cheekhubs + fins). Menu toggles/sliders push
     // through its zone setters so the next render tick uses them.
     accessory::AccessoryLeds* leds = nullptr;
+    // Editable accessory-LED layout (the Config main built the live `leds` from).
+    // The zone editor mutates this in place; the wiring visualizer reads it;
+    // save persists it. Geometry/section edits apply to the LEDs on next start.
+    accessory::AccessoryLeds::Config* acc_cfg_p = nullptr;
+    // Push the edited layout (LED counts, sections, placement) to the live LEDs
+    // now — re-chains the zones and rebuilds the strip without a process restart.
+    std::function<void()> acc_apply;
     sys::FanController* fans = nullptr;
     // Hot-swap callback for Protoface > Hardware > Backend; main wires it
     // to the tear-down-and-rebuild routine that swaps NativeFaceController
@@ -492,6 +499,11 @@ struct MenuBuildContext {
     std::function<void(int)>                coproc_led_bright; // 0-255
     std::function<void()>                   coproc_adc_read;
     std::function<std::string()>            coproc_adc_result;
+    // Audio self-test (coproc_voice firmware): play a DAC test tone (hz, ms),
+    // and a live mic peak meter (poll a few Hz, read back the rendered bar).
+    std::function<void(int, int)>           coproc_tone;        // hz, ms
+    std::function<void()>                   coproc_mic_level;
+    std::function<std::string()>            coproc_mic_result;
     // Live per-pin readout for the Pins visualizer: poll asks the firmware for
     // a fresh PINS dump (call at a few Hz while the panel is visible); get
     // returns the last complete dump as gp → (firmware role, live value —

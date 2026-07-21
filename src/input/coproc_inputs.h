@@ -148,6 +148,21 @@ public:
     void request_adc();
     std::string adc_result() const;
 
+    // ── Audio self-test (firmware built with -DVOICE_CHANGER) ────────────────
+    // Speaker test: play a sine straight from the TLV320 DAC (mic out of the
+    // loop) for ms milliseconds — a clean beep proves DAC + I2S + speaker.
+    void send_tone(int hz = 1000, int ms = 500);
+    // Mic test: ask for the peak level since the last request; poll a few Hz
+    // for a live AC meter. mic_level_result() renders the last reply as a bar.
+    void request_mic_level();
+    std::string mic_level_result() const;
+    // Last MIC reply as a raw per-mille peak (0..1000), or -1 if none yet.
+    // Numeric form of mic_level_result(), for driving effects (accessory Level).
+    int mic_level_permille() const {
+        std::lock_guard<std::mutex> lk(mic_mtx_);
+        return mic_pm_;
+    }
+
     // ── Live pin readout ("PINS" dump) ───────────────────────────────────────
     // request_pins() asks the firmware for a fresh dump of every GP: its
     // role(s) as the FIRMWARE sees them ("btn0", "touch3+i2s_bclk", "free"…)
@@ -179,6 +194,8 @@ private:
     std::string                   i2c_result_ = "not scanned";  // last I2CSCAN reply
     mutable std::mutex            adc_mtx_;
     int                           adc_mv_[3] = { -1, -1, -1 };  // last ADC replies
+    mutable std::mutex            mic_mtx_;
+    int                           mic_pm_ = -1;   // last MIC reply, 0..1000 per-mille
 
     // PINS dump state: lines accumulate in pinstat_accum_ until "PINS END"
     // publishes them to pinstat_ (so readers never see a half dump).

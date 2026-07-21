@@ -264,6 +264,38 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
             pt.push_back(with_desc(std::move(ar),
                 "Millivolts per channel from the last Read ADC Now."));
         }
+        // Audio bring-up (coproc_voice firmware): a speaker test tone that
+        // bypasses the mic, and a live mic level meter. Together they isolate
+        // which half of the voice chain works.
+        if (ctx.coproc_tone) {
+            pt.push_back(with_desc(leaf("Play Test Tone",
+                [t = ctx.coproc_tone]{ if (t) t(1000, 500); }),
+                "Speaker self-test: a 1 kHz sine straight from the TLV320 DAC "
+                "for half a second, with the mic OUT of the loop. A clean beep "
+                "proves the DAC init, the I2S wiring (GP16/17/18) and the "
+                "speaker are all good; silence points at dac_begin()'s "
+                "PLL/dividers, the I2S pins, or the SPKVDD 5 V rail. Needs the "
+                "coproc_voice firmware."));
+        }
+        if (ctx.coproc_mic_level) {
+            auto last = std::make_shared<double>(0.0);
+            MenuItem mr = leaf("Mic", []{});
+            // Poll MICLVL a few Hz while this row is on screen so it reads as a
+            // live meter — speak or tap the mic and watch it move. Same
+            // draw-drives-the-poll lifecycle as the Pins visualizer.
+            mr.label_fn = [get  = ctx.coproc_mic_result,
+                           poll = ctx.coproc_mic_level, last]{
+                const double now = ImGui::GetTime();
+                if (poll && now - *last > 0.25) { *last = now; poll(); }
+                return std::string("Mic: ") + (get ? get() : std::string("n/a"));
+            };
+            pt.push_back(with_desc(std::move(mr),
+                "Live mic level \xe2\x80\x94 the loudest sound picked up each "
+                "quarter-second, as a 0-100% bar. Unlike Read ADC Now (which "
+                "shows the mic's DC bias), this only moves when the mic hears "
+                "SOUND, so speak or tap it to confirm it works. Needs the "
+                "coproc_voice firmware."));
+        }
         out.push_back(with_desc(submenu("Peripheral Test", std::move(pt)),
             "Exercise the pre-assigned test pins for the planned peripherals: "
             "4 servo channels (GP6-9), a WS2812 LED zone (GP22) and 3 ADC "
@@ -468,11 +500,11 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
         board_pick(sys::PicoVariant::Raw),
     };
     MenuItem board_item = with_desc(submenu("Board", std::move(board_items)),
-        "Which RP2350 board the coprocessor runs on. RP2350 (Pico 2) breaks out "
-        "GP0-22 + GP26-28 (ADC GP26-28); the RP2350B boards expose GP0-47 (ADC "
-        "GP40-47) with their onboard-reserved pins flagged. Raw is a "
-        "board-agnostic GP0-47 view. Takes effect immediately \xe2\x80\x94 the "
-        "Pins picker and diagram follow it.");
+        "Which RP2350 board the coprocessor runs on. RP2350 (Pico 2) and the "
+        "Pico LiPo 2 XL W get their real physical headers (power/ground rails "
+        "marked, wireless + internal pins excluded); Pico Plus 2 gets a logical "
+        "GP0-47 grid. Raw is a board-agnostic GP0-47 view. Takes effect "
+        "immediately \xe2\x80\x94 the Pins picker and diagram follow it.");
     board_item.label_fn = [C]{ return std::string("Board:  ") +
         sys::pico_variant_name(sys::pico_variant_from_id(C->variant)); };
     out.push_back(std::move(board_item));
@@ -580,10 +612,12 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
         // One row: role cell + label, with the live overlay — the value text
         // ("1", "0", "812mv") after the role, the firmware's own role name for
         // pins the host map can't know (i2s/fan/1wire/…), and a bright border
-        // while the pin is active (button pressed / pad touched).
+        // while the pin is active (button pressed / pad touched). adc_twin
+        // surfaces an internally-linked ADC pin's reading on the header pin
+        // the wire actually lands on (XL W: GP26-28 → 1 kΩ → GP40-42).
         auto draw_pin = [&](int gp, float x, float y, float rh, float tfs,
                             const char* label, const std::string& host_role,
-                            ImU32 col) {
+                            ImU32 col, int adc_twin = -1) {
             std::string txt = label;
             std::string role = host_role;
             const auto it = live.find(gp);
@@ -604,6 +638,11 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
             } else if (!role.empty()) {
                 txt += "  " + role;
             }
+            if (adc_twin >= 0) {
+                const auto tw = live.find(adc_twin);
+                if (tw != live.end())
+                    txt += " \xc2\xb7 " + tw->second.first + " = " + tw->second.second;
+            }
             dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f}, col, 2.f);
             if (live_active(gp))
                 dl->AddRect({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f},
@@ -612,28 +651,47 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
                         IM_COL32(215, 220, 226, 255), txt.c_str());
         };
 
-        if (pv == sys::PicoVariant::Rp2350a) {
-            // Physical Pico 2 header: 2 columns × 20 pins (1-20 down the left,
-            // 40-21 down the right, matching the board held USB-up).
-            const int rows = 20;
+        // Physical header renderer: 2 columns × rows pins (1..rows down the
+        // left, npins..rows+1 down the right, matching the board held USB-up).
+        // Power / ground / RUN cells are non-assignable: no live overlay, and
+        // both the chip AND the label take the pin-kind colour (orange 3V3,
+        // red 5V, dim grey GND) so they read as hardware rails, not GPIOs.
+        auto draw_physical = [&](const sys::PicoPin* pins, int npins,
+                                 bool xlw_adc_twins) {
+            const int rows = npins / 2;
             const float rh = std::max(9.f, (o.y + sz.y - top - 4.f) / rows);
+            const float tfs = fs * (rows > 20 ? 0.62f : 0.68f);
             const float colw = (sz.x - 8.f) * 0.5f;
             auto cell = [&](const sys::PicoPin& p, float x, float y) {
                 if (p.gp < 0) {
+                    const ImU32 kc = sys::pin_kind_color(p.kind);
+                    // GND's chip colour is near-black; lift the label to a
+                    // readable grey. Power labels reuse the rail colour.
+                    const ImU32 lc = p.kind == sys::PinKind::Ground
+                                   ? IM_COL32(150, 155, 165, 255) : kc;
                     dl->AddRectFilled({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f},
-                                      sys::pin_kind_color(p.kind), 2.f);
-                    dl->AddText(font, fs * 0.68f,
-                                {x + rh + 2.f, y + (rh - fs * 0.68f) * 0.5f},
-                                IM_COL32(215, 220, 226, 255), p.label);
+                                      kc, 2.f);
+                    dl->AddRect({x, y + 1.f}, {x + rh - 3.f, y + rh - 2.f},
+                                IM_COL32(120, 125, 135, 120), 2.f);
+                    dl->AddText(font, tfs, {x + rh + 2.f, y + (rh - tfs) * 0.5f},
+                                lc, p.label);
                     return;
                 }
                 auto r = role_of(p.gp);
-                draw_pin(p.gp, x, y, rh, fs * 0.68f, p.label, r.first, r.second);
+                const int twin = (xlw_adc_twins && p.gp >= 26 && p.gp <= 28)
+                               ? p.gp + 14 : -1;   // 26/27/28 → A0-A2 = GP40-42
+                draw_pin(p.gp, x, y, rh, tfs, p.label, r.first, r.second, twin);
             };
             for (int r = 0; r < rows; ++r) {
-                cell(sys::kPico2Pins[r],      o.x + 4.f,        top + r * rh);
-                cell(sys::kPico2Pins[39 - r], o.x + 4.f + colw, top + r * rh);
+                cell(pins[r],             o.x + 4.f,        top + r * rh);
+                cell(pins[npins - 1 - r], o.x + 4.f + colw, top + r * rh);
             }
+        };
+
+        if (pv == sys::PicoVariant::Rp2350a) {
+            draw_physical(sys::kPico2Pins.data(), 40, false);
+        } else if (pv == sys::PicoVariant::PicoLipo2XlW) {
+            draw_physical(sys::kPicoLipo2XlWPins.data(), 60, true);
         } else {
             // Logical GP grid (physical layouts differ per RP2350B board and
             // aren't needed for logical pin assignment).
@@ -654,7 +712,9 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
     out.push_back(with_desc(std::move(pins_item),
         "Visualise + edit the coprocessor's pins: each button's GPIO, "
         "function, pull, polarity and optional LED. Free pins green, "
-        "buttons blue, LEDs amber, MAX7219 pink, board-reserved brown. "
+        "buttons blue, LEDs amber, MAX7219 pink, board-reserved brown; "
+        "power/ground rails (red 5V, orange 3V3, dark GND) are hardware "
+        "\xe2\x80\x94 never assignable, never listed in the pin picker. "
         "Firmware-fixed pins aren't auto-detected \xe2\x80\x94 avoid them per "
         "your build: voice I2S GP16-18, I2C GP20/21, DAC reset GP22, mic on "
         "the board's first ADC pin; peripheral hub 1-Wire GP19, fans GP14/15. "

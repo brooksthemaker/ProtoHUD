@@ -43,6 +43,12 @@ public:
         // Animated-eyes rules fire through here instead of set_face (the
         // animation is transient and reverts on its own).
         std::function<void(const EyeAnimParams&)> play_eyes;
+        // Non-face side-effects (LED zone / servo). apply_action runs once per
+        // action when the expression activates; revert_action runs when it
+        // ends. The director just calls these in order — the binding owns the
+        // hardware and the save/restore of whatever state the action touched.
+        std::function<void(const ExprAction&)> apply_action;
+        std::function<void(const ExprAction&)> revert_action;
     };
 
     // One evaluatable rule: the expression to activate + its recipes.
@@ -59,6 +65,10 @@ public:
         bool         is_eye_anim = false;
         EyeAnimParams eyes;
         std::vector<TriggerRecipe> recipes;
+        // Extra side-effects applied on activation, reverted on end (LED zone
+        // color/pattern, servo move). Ignored for is_eye_anim rules — those
+        // have no activate/deactivate lifecycle to hang a revert on.
+        std::vector<ExprAction> actions;
     };
 
     void set_actions(Actions a) { act_ = std::move(a); }
@@ -104,6 +114,10 @@ private:
                            const std::function<bool(const TriggerRecipe&)>& match);
     void fire_locked(const Rule& rule);
     void deactivate_locked();
+    // Apply the just-activated rule's actions (remembering them so they can be
+    // undone); revert the ones currently applied. Both assume the lock is held.
+    void apply_actions_locked(const std::vector<ExprAction>& actions);
+    void revert_actions_locked();
     double now_s() const;
 
     mutable std::mutex mtx_;
@@ -113,6 +127,7 @@ private:
     double      hold_left_ = 0.0;
     bool        latched_ = false;
     std::string restore_face_;
+    std::vector<ExprAction> active_actions_;   // actions the current activation applied
 
     // Condition state (set_conditions).
     float  roll_deg_ = 0.f;

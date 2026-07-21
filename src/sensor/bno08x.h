@@ -37,6 +37,10 @@ public:
         int         rst_line           = -1;           // RST offset (active-low); -1 = no hardware reset
         int         report_interval_us = 5000;         // 5 ms = 200 Hz orientation
         int         aux_interval_us    = 40000;        // 25 Hz calibrated accel/gyro/mag
+        int         stall_reset_ms     = 2500;         // watchdog: re-init the hub if no
+                                                       // report arrives for this long (the
+                                                       // wedged state that needed an unplug);
+                                                       // 0 = disabled. Backs off on repeat.
         bool        auto_calibrate     = true;         // dynamic cal on accel/gyro/mag +
                                                        // periodic DCD save to chip flash
         float       declination_deg    = 0.0f;         // local magnetic declination (+E/-W)
@@ -133,6 +137,12 @@ private:
     bool gpio_open();
     bool int_asserted();     // true = data ready (INT low, or no INT wired)
     void rst_pulse();
+    void reinit();           // watchdog recovery: close + re-open (pulses RST) + re-enable
+
+    // Watchdog state (service thread only): time of the last decoded report and
+    // a count of consecutive re-inits that didn't bring reports back (for backoff).
+    uint32_t           last_report_us_ = 0;
+    int                consecutive_resets_ = 0;
 
     Config             cfg_;
     std::thread        thread_;
