@@ -53,6 +53,15 @@ enum class Pattern : uint8_t {
 // An empty `sections` means a plain linear run of `count` LEDs (shape "single").
 enum class Shape : uint8_t { Single = 0, Rings = 1, Lines = 2 };
 
+// How the Level pattern reacts to the mic volume (0..1).
+enum class LevelStyle : uint8_t {
+    Glow        = 0,   // whole zone brightness = volume (default)
+    Meter       = 1,   // VU bar filling base → tip
+    CenterMeter = 2,   // bar filling outward from the centre
+    Peak        = 3,   // Meter fill + a peak marker that holds then falls
+    Pulse       = 4,   // soft centre-weighted burst that grows with volume
+};
+
 struct ZoneConfig {
     std::string name;
     int         start = 0;                       // first index on the shared chain
@@ -70,6 +79,20 @@ struct ZoneConfig {
     float       grad_angle   = 0.f;             // degrees: direction the spatial sweep travels
     uint8_t     zone_brightness = 255;          // per-zone scale on top of global
     bool        follow_face = false;            // color tracks the face's mean color
+    LevelStyle  level_style = LevelStyle::Glow; // how Pattern::Level reacts to volume
+    float       min_level   = 0.f;              // 0..1 brightness floor: modulating
+                                                // effects idle here instead of going dark
+    // Sound gate: when on, the zone's pattern only plays while the mic level is
+    // above sound_threshold, then fades at sound_decay/sec — so a loud sound
+    // "triggers" any pattern (Wave sweep, Chase, Breathe pulse, Sparkle burst).
+    bool        sound_trigger   = false;
+    float       sound_threshold = 0.3f;         // 0..1 mic level that opens the gate
+    float       sound_decay     = 2.0f;         // gate fall rate (per second) after
+    // Complete-on-trigger: instead of gating whatever the pattern is currently
+    // showing, each trigger RESTARTS the effect and holds it open for one full
+    // pass (Wave sweep / Chase lap / Breathe / Gradient scroll), so a brief
+    // sound still plays a whole sweep. Sustained sound loops passes.
+    bool        sound_complete  = false;
 
     // Topology + placement (drives the editor visualizer + length-aware effects).
     Shape            shape = Shape::Single;
@@ -106,6 +129,26 @@ std::vector<float> zone_spatial_fracs(const ZoneConfig& z, float angle_deg);
 // Recompute count = sum(sections) (or leave count if sections is empty). Call
 // after editing sections so the chain layout stays consistent.
 int zone_total(const ZoneConfig& z);
+
+// Cheek-mirror field copies (right ← left). mirror_zone_layout copies topology,
+// sizing and placement (mirrored: mirror flag flipped, pos_x + rotation +
+// gradient angle negated) and recomputes dst.count; it preserves dst.name and
+// dst.start (the wiring offset). mirror_zone_look copies pattern/colors/effects
+// (gradient angle negated so a directional sweep mirrors too). Used by the
+// "Mirror (Right ← Left)" feature for the cheek hub/fin pairs.
+void mirror_zone_layout(ZoneConfig& dst, const ZoneConfig& src);
+void mirror_zone_look  (ZoneConfig& dst, const ZoneConfig& src);
+// Copy a zone's LOOK (pattern/colours/effects) WITHOUT the mirror flips — used
+// by the link-areas feature so the fin runs the hub's exact effect.
+void copy_zone_look    (ZoneConfig& dst, const ZoneConfig& src);
+// Continuous per-LED fractions for a hub+fin pair (a occupies the first part of
+// 0..1, b the rest), so an effect sweeps across both as one area. The length
+// version chains by LED count; the spatial version projects both onto one axis
+// and normalises across their combined extent.
+void zone_group_len_fracs(const ZoneConfig& a, const ZoneConfig& b,
+                          std::vector<float>& out_a, std::vector<float>& out_b);
+void zone_group_spatial_fracs(const ZoneConfig& a, const ZoneConfig& b, float angle_deg,
+                              std::vector<float>& out_a, std::vector<float>& out_b);
 // Per-pixel base colors for a zone at time t — the pattern envelope × per-pixel
 // factor × color, BEFORE the flash overlay and global brightness. Fills `out`
 // with count*3 RGB in strip-index order. Shared by the render loop and the
@@ -115,10 +158,18 @@ int zone_total(const ZoneConfig& z);
 // null) is a per-length follow LUT: when the zone follows the face, each LED
 // samples it at its length fraction so the strip mirrors the eye's gradient,
 // scaled to the zone's LED count. Pass ramp_n=0 / face_ramp=null for flat.
+// `peak` (0..1, or <0 = use vol) is the held peak-marker position for the Level
+// "Peak" reaction; the render loop feeds a decaying value, the preview passes
+// <0 so the marker just sits at the current level. `sound_gate` (0..1) is the
+// sound-trigger envelope multiplied into the effect's modulation (1 = fully
+// open / pattern plays normally; the preview passes 1).
 void zone_base_colors(const ZoneConfig& z, double t, float vol,
                       uint32_t face_color,
                       const uint32_t* face_ramp, int ramp_n,
-                      std::vector<uint8_t>& out);
+                      std::vector<uint8_t>& out, float peak = -1.f,
+                      float sound_gate = 1.f,
+                      const std::vector<float>* lf_override = nullptr,
+                      const std::vector<float>* pulses = nullptr);
 
 class AccessoryLeds {
 public:
@@ -133,7 +184,29 @@ public:
         std::array<ZoneConfig, ZoneCount> zones{};
         uint8_t                       global_brightness = 64;
         double                        frame_hz          = 60.0;
+        // When set, the four "side" zones (both cheek hubs + both fins) share
+        // one phase origin so their time-based effects (Breathe/Wave/Chase/
+        // Gradient scroll) start together and stay aligned; the origin resets
+        // whenever an effect is (re)applied to a side zone. Blush is excluded.
+        bool                          sync_sides        = false;
+        // Link areas: treat each side's hub+fin as ONE continuous area — the fin
+        // adopts the hub's effect and continues its fraction, so a pattern (run
+        // or sound-triggered) flows from the hub into the fin as one sweep.
+        bool                          link_areas        = false;
+        // Cheek mirror: the right hub/fin track the left's physical layout
+        // (counts/sections/shape/placement) and/or look (pattern/color/effects).
+        // Enforced at the config level (main loop keeps right = mirror(left));
+        // layout reaches the strip on Apply Layout, look pushes live.
+        bool                          mirror_layout     = false;
+        bool                          mirror_look       = false;
     };
+
+    // The zones the sync toggle governs — the symmetric cheek pair. Blush
+    // (whole-face) is deliberately left free-running.
+    static bool is_side_zone(Zone z) {
+        return z == Zone::LeftCheekhub || z == Zone::RightCheekhub ||
+               z == Zone::LeftFin      || z == Zone::RightFin;
+    }
 
     explicit AccessoryLeds(Config cfg);
     ~AccessoryLeds();
@@ -176,7 +249,31 @@ public:
     void set_zone_grad_angle(Zone, float deg);
     void set_zone_brightness(Zone, uint8_t b);
     void set_zone_follow_face(Zone, bool on);
+    void set_zone_level_style(Zone, LevelStyle s);
+    void set_zone_min_level(Zone, float f);
+    void set_zone_sound_trigger(Zone, bool on);
+    void set_zone_sound_threshold(Zone, float t);
+    void set_zone_sound_decay(Zone, float per_sec);
+    void set_zone_sound_complete(Zone, bool on);
+    // Live sound-gate envelope (0..1) the render loop is applying to this zone,
+    // so the editor preview can match the strip instead of always showing the
+    // pattern "playing". Only meaningful when the zone's sound_trigger is on.
+    float zone_sound_gate(Zone z) const {
+        const auto zi = static_cast<int>(z);
+        return (zi >= 0 && zi < ZoneCount) ? sound_env_[zi].load() : 1.f;
+    }
     void set_global_brightness(uint8_t b);
+    // Level "Peak" marker fall rate (fraction/sec), fed from CoprocMicConfig.
+    void set_peak_decay(float per_sec) { peak_decay_.store(per_sec); }
+
+    // Phase-lock the side zones' time-based effects (see Config::sync_sides).
+    // Turning it on (re)syncs immediately; while on, any pattern change to a
+    // side zone re-syncs so the new effect starts aligned across all four.
+    void set_sync_sides(bool on);
+    bool sync_sides() const { return sync_sides_.load(); }
+    // Treat each side's hub+fin as one continuous area (see Config::link_areas).
+    void set_link_areas(bool on);
+    bool link_areas() const { return link_areas_.load(); }
 
     // Latest face mean colors (fed ~5 Hz when any zone follows the face), packed
     // 0xRRGGBB. Left/right = the mean of the left/right half of the face canvas
@@ -249,6 +346,33 @@ private:
     std::mutex        cfg_mtx_;       // guards cfg_.zones + global_brightness
     std::atomic<bool> running_ { false };
     std::thread       thread_;
+
+    // Side-zone effect sync. sync_sides_ mirrors Config::sync_sides for the
+    // render thread; a resync request (toggle on, or a side-zone pattern
+    // change) sets resync_pending_, which the render loop consumes to stamp
+    // group_t0_ = current loop time so side zones drive effects off (t - t0).
+    std::atomic<bool>  sync_sides_    { false };
+    std::atomic<bool>  link_areas_    { false };
+    std::atomic<bool>  resync_pending_{ false };
+    double             group_t0_ = 0.0;   // render-thread only; shared phase origin
+
+    // Level "Peak" reaction: held peak of the (global) mic volume with decay.
+    // Render-thread only, except peak_decay_ which the mic poll sets.
+    std::atomic<float> peak_decay_ { 1.2f };
+    float              peak_hold_  = 0.f;
+    double             prev_t_     = 0.0;
+    // Per-zone sound-gate envelope (0..1). Written by the render thread; read
+    // lock-free by the editor preview (zone_sound_gate), hence atomic.
+    std::array<std::atomic<float>, ZoneCount> sound_env_ {};
+    // Complete-on-trigger state (render-thread only): whether the mic was above
+    // threshold last frame (rising-edge detect), the effect's restarted phase
+    // origin, and the time the current pass finishes.
+    bool   sound_prev_above_ [ZoneCount] = {};
+    double zone_phase0_      [ZoneCount] = {};
+    double sound_hold_until_ [ZoneCount] = {};
+    // Complete-on-trigger PULSES: each entry is a live sweep's head position
+    // (0..1), advanced each frame; a new trigger appends one so sweeps overlap.
+    std::vector<float> pulses_[ZoneCount];
 
     std::atomic<float> audio_volume_ { 0.0f };
     std::atomic<uint32_t> face_color_       { 0x00DCB4 };   // whole-face follow feed

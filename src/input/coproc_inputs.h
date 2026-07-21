@@ -156,6 +156,12 @@ public:
     // for a live AC meter. mic_level_result() renders the last reply as a bar.
     void request_mic_level();
     std::string mic_level_result() const;
+    // Last MIC reply as a raw per-mille peak (0..1000), or -1 if none yet.
+    // Numeric form of mic_level_result(), for driving effects (accessory Level).
+    int mic_level_permille() const {
+        std::lock_guard<std::mutex> lk(mic_mtx_);
+        return mic_pm_;
+    }
 
     // ── Live pin readout ("PINS" dump) ───────────────────────────────────────
     // request_pins() asks the firmware for a fresh dump of every GP: its

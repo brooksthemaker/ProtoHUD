@@ -177,6 +177,24 @@ struct VoiceMouthConfig {
     float  viseme_small_max_hz = 2000.f;
 };
 
+// Shaping for the coprocessor's TLV320 mic peak (MICLVL, 0..1 after /1000)
+// before it drives the accessory Level pattern and the mouth openness. The raw
+// peak is usually small, so this makes it usable: subtract a noise floor, apply
+// gain, clamp, then a response curve (gamma < 1 lifts quiet sounds, > 1
+// compresses loud ones). Tunable live from the menu.
+struct CoprocMicConfig {
+    float gain  = 6.0f;     // multiply the gated 0..1 peak
+    float gamma = 0.7f;     // response curve exponent (<1 = more sensitive)
+    float gate  = 0.02f;    // noise floor subtracted before gain (0..1)
+    // Envelope follower on the shaped level (smooths the 30 Hz peaks into a
+    // usable reaction). Fast attack / slow release reads like a real meter.
+    float attack_ms  = 20.f;   // rise time when the level goes up
+    float release_ms = 200.f;  // fall time when the level goes down
+    // Level "Peak" reaction: how fast the held peak marker falls (fraction of
+    // full scale per second).
+    float peak_decay = 1.2f;
+};
+
 // One boop-sensor zone's user-visible behaviour. The sensor reports zone
 // touches (no expression knowledge); main.cpp's on_boop callback reads this
 // to call IFaceController::trigger_boop with the per-zone expression. Indexed
@@ -1034,6 +1052,7 @@ struct AppState {
         { face::EyeAnim::Sparkle },   { face::EyeAnim::Heartbeat },
     };
     VoiceMouthConfig     voice_mouth;
+    CoprocMicConfig      coproc_mic;
     ClockConfig          clock_cfg;
     CameraResolutionState camera_resolution;        // left / primary eye
     CameraResolutionState camera_resolution_right;   // right eye (set independently)

@@ -298,6 +298,13 @@ void NativeFaceController::render_thread() {
         cv::Mat canvas(cfg_.canvas_h, cfg_.canvas_w, CV_8UC3,
                        cv::Scalar(cfg_.background[0], cfg_.background[1],
                                   cfg_.background[2]));
+        // Parallel face-only canvas (material/art over black, NO particle/effect
+        // overlays) for the accessory follow-face sampler — built only while
+        // some zone follows the face. See set_sample_face_layer / latest_face_.
+        const bool want_face = sample_face_layer_.load();
+        cv::Mat face_canvas;
+        if (want_face)
+            face_canvas = cv::Mat::zeros(cfg_.canvas_h, cfg_.canvas_w, CV_8UC3);
         {
             std::lock_guard<std::mutex> lk(state_mtx_);
 
@@ -563,6 +570,19 @@ void NativeFaceController::render_thread() {
                 if (pn.face_mirror && !face_layer.empty())
                     cv::flip(face_layer, face_layer, 1);
 
+                // Snapshot the face/material for this panel BEFORE any particle
+                // layer, frost tint or glow — composited over black so only the
+                // lit material carries color. The same mirror/flip transforms as
+                // the main canvas are applied below so the halves line up.
+                if (want_face && !face_layer.empty()) {
+                    cv::Mat fbg = solid_layer(0, 0, 0, pc.w, pc.h);
+                    cv::Mat fonly = composite(fbg,
+                        std::vector<Layer>{ Layer{face_layer, Blend::Normal} });
+                    cv::Rect froi(pc.x, pc.y, pc.w, pc.h);
+                    if ((froi & cv::Rect(0, 0, face_canvas.cols, face_canvas.rows)) == froi)
+                        fonly.copyTo(face_canvas(froi));
+                }
+
                 std::vector<Layer> layers{ Layer{face_layer, Blend::Normal} };
                 // Effects are suppressed while a GIF or a panel-owning eye
                 // animation plays — the clip owns the whole panel — and resume
@@ -595,51 +615,53 @@ void NativeFaceController::render_thread() {
                     frame.copyTo(canvas(roi));
             }
 
-            // Mirror panels copy a horizontally-flipped source region.
-            for (auto& pn : panels_) {
-                if (!pn.is_mirror || pn.src_index < 0) continue;
-                const PanelCfg& src = panels_[pn.src_index].cfg;
-                const PanelCfg& dst = pn.cfg;
-                cv::Rect sroi(src.x, src.y, src.w, src.h);
-                cv::Rect droi(dst.x, dst.y, dst.w, dst.h);
-                cv::Rect bounds(0, 0, canvas.cols, canvas.rows);
-                if ((sroi & bounds) != sroi || (droi & bounds) != droi) continue;
-                if (sroi.size() != droi.size()) continue;
-                cv::Mat flipped;
-                cv::flip(canvas(sroi), flipped, 1);
-                flipped.copyTo(canvas(droi));
-            }
-
-            // Per-panel orientation flips (HUB75 layout's Flip X / Flip Y).
-            // Applied last so it covers both self-rendered and mirror panels.
-            // flip code: 1 = horizontal (left-right), 0 = vertical (top-bottom),
-            // -1 = both (180°). Done in place on the panel's canvas region.
-            for (auto& pn : panels_) {
-                const PanelCfg& pc = pn.cfg;
-                if (!pc.flip_x && !pc.flip_y) continue;
-                cv::Rect roi(pc.x, pc.y, pc.w, pc.h);
-                if ((roi & cv::Rect(0, 0, canvas.cols, canvas.rows)) != roi) continue;
-                const int code = (pc.flip_x && pc.flip_y) ? -1 : (pc.flip_x ? 1 : 0);
-                cv::Mat region = canvas(roi), flipped;
-                cv::flip(region, flipped, code);
-                flipped.copyTo(region);
-            }
-
-            // Multi-panel face rendered as one logical canvas: flip each physical
-            // panel's slice in place so per-panel mounting flips apply to the
-            // whole composited image (face + material + effects + blink alike).
-            for (const auto& op : cfg_.output_panels) {
-                if (!op.flip_x && !op.flip_y) continue;
-                cv::Rect roi(op.x, op.y, op.w, op.h);
-                if ((roi & cv::Rect(0, 0, canvas.cols, canvas.rows)) != roi) continue;
-                const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
-                cv::Mat region = canvas(roi), flipped;
-                cv::flip(region, flipped, code);
-                flipped.copyTo(region);
-            }
+            // Panel-geometry transforms (mirror-panel copies + mounting flips).
+            // Applied identically to the main canvas and the face-only canvas so
+            // the halves the follow sampler reads line up with what's displayed.
+            auto apply_panel_transforms = [&](cv::Mat& C) {
+                // Mirror panels copy a horizontally-flipped source region.
+                for (auto& pn : panels_) {
+                    if (!pn.is_mirror || pn.src_index < 0) continue;
+                    const PanelCfg& src = panels_[pn.src_index].cfg;
+                    const PanelCfg& dst = pn.cfg;
+                    cv::Rect sroi(src.x, src.y, src.w, src.h);
+                    cv::Rect droi(dst.x, dst.y, dst.w, dst.h);
+                    cv::Rect bounds(0, 0, C.cols, C.rows);
+                    if ((sroi & bounds) != sroi || (droi & bounds) != droi) continue;
+                    if (sroi.size() != droi.size()) continue;
+                    cv::Mat flipped;
+                    cv::flip(C(sroi), flipped, 1);
+                    flipped.copyTo(C(droi));
+                }
+                // Per-panel orientation flips (HUB75 layout's Flip X / Flip Y).
+                // flip code: 1 = horizontal, 0 = vertical, -1 = both (180°).
+                for (auto& pn : panels_) {
+                    const PanelCfg& pc = pn.cfg;
+                    if (!pc.flip_x && !pc.flip_y) continue;
+                    cv::Rect roi(pc.x, pc.y, pc.w, pc.h);
+                    if ((roi & cv::Rect(0, 0, C.cols, C.rows)) != roi) continue;
+                    const int code = (pc.flip_x && pc.flip_y) ? -1 : (pc.flip_x ? 1 : 0);
+                    cv::Mat region = C(roi), flipped;
+                    cv::flip(region, flipped, code);
+                    flipped.copyTo(region);
+                }
+                // Multi-panel logical canvas: flip each physical panel's slice.
+                for (const auto& op : cfg_.output_panels) {
+                    if (!op.flip_x && !op.flip_y) continue;
+                    cv::Rect roi(op.x, op.y, op.w, op.h);
+                    if ((roi & cv::Rect(0, 0, C.cols, C.rows)) != roi) continue;
+                    const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
+                    cv::Mat region = C(roi), flipped;
+                    cv::flip(region, flipped, code);
+                    flipped.copyTo(region);
+                }
+            };
+            apply_panel_transforms(canvas);
+            if (want_face) apply_panel_transforms(face_canvas);
 
             // Glitch post-effect: corrupt the fully-composited face canvas in a
             // single pass so it reads as one signal glitch across the whole face.
+            // (Not applied to face_canvas — the sampler wants the clean material.)
             if (glitch_active_.enabled) glitch_.apply(canvas, glitch_active_);
 
             // Scrolling-text banner: above everything (including glitch) so it
@@ -650,6 +672,8 @@ void NativeFaceController::render_thread() {
         {
             std::lock_guard<std::mutex> lk(frame_mtx_);
             canvas.copyTo(latest_);
+            if (want_face) face_canvas.copyTo(latest_face_);
+            else           latest_face_.release();   // no stale frame while off
             have_frame_ = true;
         }
         if (output_) output_->show(canvas);
@@ -665,6 +689,13 @@ bool NativeFaceController::latest_frame(cv::Mat& out) const {
     std::lock_guard<std::mutex> lk(frame_mtx_);
     if (!have_frame_) return false;
     latest_.copyTo(out);
+    return true;
+}
+
+bool NativeFaceController::latest_face_frame(cv::Mat& out) const {
+    std::lock_guard<std::mutex> lk(frame_mtx_);
+    if (!have_frame_ || latest_face_.empty()) return false;
+    latest_face_.copyTo(out);
     return true;
 }
 

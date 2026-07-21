@@ -171,6 +171,16 @@ public:
     // false until the first frame exists. Safe to call from the main/GL thread.
     bool latest_frame(cv::Mat& out) const;
 
+    // Copy the latest FACE-ONLY canvas: the material/art composited over black
+    // WITHOUT the particle/effect overlay, frost tint, glitch or scroll text —
+    // so a color sampler (accessory follow-face) reads the true eye material
+    // and isn't hijacked by bright effects (embers, lightning). Only produced
+    // while set_sample_face_layer(true) is active; returns false otherwise.
+    bool latest_face_frame(cv::Mat& out) const;
+    // Enable building the face-only canvas each frame (small extra cost). The
+    // follow-face feed turns this on only while some zone follows the face.
+    void set_sample_face_layer(bool on) { sample_face_layer_.store(on); }
+
     int canvas_width()  const { return cfg_.canvas_w; }
     int canvas_height() const { return cfg_.canvas_h; }
 
@@ -288,9 +298,11 @@ private:
     mutable std::map<std::string, FaceProbe> probe_cache_;
 
     mutable std::mutex state_mtx_;   // panels_ mutation + render reads
-    mutable std::mutex frame_mtx_;   // latest_
+    mutable std::mutex frame_mtx_;   // latest_ + latest_face_
     cv::Mat            latest_;
+    cv::Mat            latest_face_;   // face/material only, no effect overlays
     bool               have_frame_ = false;
+    std::atomic<bool>  sample_face_layer_ { false };  // build latest_face_ this frame
     // Transient face overlays — one record per panel a push_transient_face
     // call has touched. tick_render_locked() restores them as their deadlines
     // pass. stop() restores any still-active records before tearing down.

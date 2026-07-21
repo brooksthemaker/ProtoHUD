@@ -1549,6 +1549,16 @@ int main(int argc, char* argv[]) {
         state.voice_mouth.viseme_open_max_hz  = jval(jv, "viseme_open_max_hz",  state.voice_mouth.viseme_open_max_hz);
         state.voice_mouth.viseme_small_max_hz = jval(jv, "viseme_small_max_hz", state.voice_mouth.viseme_small_max_hz);
     }
+    // Coproc TLV320 mic shaping (drives accessory Level + mouth openness).
+    if (cfg.contains("coproc_mic")) {
+        auto& jcm = cfg["coproc_mic"];
+        state.coproc_mic.gain       = jval(jcm, "gain",       state.coproc_mic.gain);
+        state.coproc_mic.gamma      = jval(jcm, "gamma",      state.coproc_mic.gamma);
+        state.coproc_mic.gate       = jval(jcm, "gate",       state.coproc_mic.gate);
+        state.coproc_mic.attack_ms  = jval(jcm, "attack_ms",  state.coproc_mic.attack_ms);
+        state.coproc_mic.release_ms = jval(jcm, "release_ms", state.coproc_mic.release_ms);
+        state.coproc_mic.peak_decay = jval(jcm, "peak_decay", state.coproc_mic.peak_decay);
+    }
 
     XRConfig xr_cfg;
     xr_cfg.product_id       = jval(jvtr,  "product_id",       0);
@@ -1798,6 +1808,10 @@ int main(int argc, char* argv[]) {
         led_cfg.global_brightness  = static_cast<uint8_t>(
             jval(jl, "global_brightness", static_cast<int>(led_cfg.global_brightness)));
         led_cfg.frame_hz           = jval(jl, "frame_hz",          60.0);
+        led_cfg.sync_sides         = jl.value("sync_sides",        false);
+        led_cfg.link_areas         = jl.value("link_areas",        false);
+        led_cfg.mirror_layout      = jl.value("mirror_layout",     false);
+        led_cfg.mirror_look        = jl.value("mirror_look",       false);
         led_cfg.strip.spi_device   = jl.value("spi_device",        std::string("/dev/spidev0.0"));
         led_cfg.strip.speed_hz     = jval(jl, "speed_hz",          2'400'000);
         if (auto co = jl.value("color_order", std::string("GRB")); co == "RGB")
@@ -1854,6 +1868,24 @@ int main(int argc, char* argv[]) {
                          static_cast<int>(led_cfg.zones[i].zone_brightness)), 0, 255));
                 led_cfg.zones[i].follow_face =
                     jval(jz, "follow_face", led_cfg.zones[i].follow_face);
+                {
+                    const std::string ls = jz.value("level_style", std::string("glow"));
+                    if      (ls == "meter")        led_cfg.zones[i].level_style = accessory::LevelStyle::Meter;
+                    else if (ls == "center_meter") led_cfg.zones[i].level_style = accessory::LevelStyle::CenterMeter;
+                    else if (ls == "peak")         led_cfg.zones[i].level_style = accessory::LevelStyle::Peak;
+                    else if (ls == "pulse")        led_cfg.zones[i].level_style = accessory::LevelStyle::Pulse;
+                    else                           led_cfg.zones[i].level_style = accessory::LevelStyle::Glow;
+                }
+                led_cfg.zones[i].min_level = std::clamp(
+                    jval(jz, "min_level", led_cfg.zones[i].min_level), 0.f, 1.f);
+                led_cfg.zones[i].sound_trigger =
+                    jval(jz, "sound_trigger", led_cfg.zones[i].sound_trigger);
+                led_cfg.zones[i].sound_threshold = std::clamp(
+                    jval(jz, "sound_threshold", led_cfg.zones[i].sound_threshold), 0.f, 1.f);
+                led_cfg.zones[i].sound_decay =
+                    jval(jz, "sound_decay", led_cfg.zones[i].sound_decay);
+                led_cfg.zones[i].sound_complete =
+                    jval(jz, "sound_complete", led_cfg.zones[i].sound_complete);
 
                 // Topology: shape + per-ring/line section counts + placement.
                 const std::string shp = jz.value("shape", std::string("single"));
@@ -1879,6 +1911,15 @@ int main(int argc, char* argv[]) {
                 if (!led_cfg.zones[i].sections.empty())
                     led_cfg.zones[i].count = accessory::zone_total(led_cfg.zones[i]);
             }
+        }
+        // Cheek layout mirror: fold the left hub/fin's topology onto the right
+        // BEFORE chaining so the initial strip length + starts are correct.
+        if (led_cfg.mirror_layout) {
+            using LZ = accessory::Zone;
+            accessory::mirror_zone_layout(led_cfg.zones[static_cast<int>(LZ::RightCheekhub)],
+                                          led_cfg.zones[static_cast<int>(LZ::LeftCheekhub)]);
+            accessory::mirror_zone_layout(led_cfg.zones[static_cast<int>(LZ::RightFin)],
+                                          led_cfg.zones[static_cast<int>(LZ::LeftFin)]);
         }
         // Chain the zones end-to-end in enum order: each zone's start follows the
         // previous zone's end, and the strip length is the running total. (A zone
@@ -3059,6 +3100,10 @@ int main(int argc, char* argv[]) {
         while ((int)state.custom_expressions.size() < face::kInitialCustomSlots)
             state.custom_expressions.emplace_back();
     }
+    // Servo output for expression actions. The coprocessor link (coproc_inputs)
+    // is created much later, so the director's action closures reach it through
+    // this indirection, which is filled in once the link exists.
+    auto expr_servo_out = std::make_shared<std::function<void(int, int)>>();
     {
         face::ExpressionDirector::Actions da;
         da.set_face     = [&face_proxy](const std::string& e){ face_proxy.set_face_by_name(e); };
@@ -3075,6 +3120,53 @@ int main(int argc, char* argv[]) {
         };
         da.play_eyes = [&face_proxy](const face::EyeAnimParams& p){
             face_proxy.play_eye_animation(p);
+        };
+        // LED/servo side-effects. On apply we snapshot the target LED zone so
+        // revert can restore exactly what was there before; servos have no
+        // read-back, so they just return to the action's rest angle (or detach).
+        // apply/revert run under the director's lock, one action at a time, so
+        // the shared snapshot store needs no extra guarding.
+        auto led_saved       = std::make_shared<std::array<accessory::ZoneConfig, accessory::ZoneCount>>();
+        auto led_saved_valid = std::make_shared<std::array<bool, accessory::ZoneCount>>();
+        led_saved_valid->fill(false);
+        da.apply_action = [&accessory_leds, expr_servo_out, led_saved, led_saved_valid]
+                          (const face::ExprAction& a) {
+            using K = face::ExprAction::Kind;
+            if (a.kind == K::Led) {
+                const int zi = a.led_zone;
+                if (zi < 0 || zi >= accessory::ZoneCount) return;
+                const auto z = static_cast<accessory::Zone>(zi);
+                (*led_saved)[zi]       = accessory_leds.zone(z);   // for revert
+                (*led_saved_valid)[zi] = true;
+                if (a.led_pattern >= 0)
+                    accessory_leds.set_zone_pattern(
+                        z, static_cast<accessory::Pattern>(a.led_pattern));
+                if (a.led_set_color)
+                    accessory_leds.set_zone_color(z, a.r, a.g, a.b);
+                if (a.led_brightness >= 0)
+                    accessory_leds.set_zone_brightness(
+                        z, static_cast<uint8_t>(std::clamp(a.led_brightness, 0, 255)));
+            } else if (a.kind == K::Servo) {
+                if (*expr_servo_out) (*expr_servo_out)(a.servo_ch, a.servo_deg);
+            }
+        };
+        da.revert_action = [&accessory_leds, expr_servo_out, led_saved, led_saved_valid]
+                           (const face::ExprAction& a) {
+            using K = face::ExprAction::Kind;
+            if (a.kind == K::Led) {
+                const int zi = a.led_zone;
+                if (zi < 0 || zi >= accessory::ZoneCount) return;
+                if (!(*led_saved_valid)[zi]) return;
+                const auto z = static_cast<accessory::Zone>(zi);
+                const auto& s = (*led_saved)[zi];
+                accessory_leds.set_zone_pattern(z, s.pattern);
+                accessory_leds.set_zone_color(z, s.r, s.g, s.b);
+                accessory_leds.set_zone_brightness(z, s.zone_brightness);
+                (*led_saved_valid)[zi] = false;
+            } else if (a.kind == K::Servo) {
+                // Return to rest, or detach when rest < 0 (send_servo takes -1).
+                if (*expr_servo_out) (*expr_servo_out)(a.servo_ch, a.servo_rest);
+            }
         };
         expr_director.set_actions(std::move(da));
     }
@@ -3118,6 +3210,7 @@ int main(int argc, char* argv[]) {
             if (!ts.any()) continue;
             face::ExpressionDirector::Rule r;
             r.key = key; r.hold_s = ts.hold_s; r.recipes = ts.recipes;
+            r.actions = ts.actions;
             if (key.rfind("custom_", 0) == 0) {
                 const int idx = std::atoi(key.c_str() + 7);
                 if (idx < 0 || idx >= (int)state.custom_expressions.size()) continue;
@@ -4188,10 +4281,10 @@ int main(int argc, char* argv[]) {
     // are disabled we don't push at all and the FaceLoader's "mouth_open"
     // default stays selected.
     audio.set_face_drive_callback(
-        [&face_proxy, &accessory_leds, last_mic, voice = audio.voice()](double vol, double mouth) {
-            // Accessory LEDs use the analyzer's broadband volume for any zone
-            // running Pattern::Level — even if mouth-open is disabled.
-            accessory_leds.set_audio_volume(static_cast<float>(vol));
+        [&face_proxy, last_mic, voice = audio.voice()](double vol, double mouth) {
+            // NOTE: the accessory-LED Level pattern is driven from the COPROC
+            // mic (polled in the render loop below), not this Pi-ALSA analyzer,
+            // so set_audio_volume is intentionally NOT called here.
             last_mic->store(static_cast<float>(vol));
             if (voice && voice->visemes_enabled())
                 face_proxy.set_mouth_shape(voice->mouth_shape());
@@ -4762,6 +4855,9 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_servo = [&](int ch, int deg) {
         if (coproc_inputs) coproc_inputs->send_servo(ch, deg);
     };
+    // Now that the coproc link exists, let expression-trigger servo actions
+    // reach it (the director's action closures captured this sink earlier).
+    *expr_servo_out = menu_ctx.coproc_servo;
     menu_ctx.coproc_led_zone = [&](int r, int g, int b, int n) {
         if (coproc_inputs) coproc_inputs->send_led_zone(r, g, b, n);
     };
@@ -5870,10 +5966,23 @@ int main(int argc, char* argv[]) {
                     default:                      return "single";
                 }
             };
+            auto level_style_name = [](accessory::LevelStyle s) -> const char* {
+                switch (s) {
+                    case accessory::LevelStyle::Meter:       return "meter";
+                    case accessory::LevelStyle::CenterMeter: return "center_meter";
+                    case accessory::LevelStyle::Peak:        return "peak";
+                    case accessory::LevelStyle::Pulse:       return "pulse";
+                    default:                                 return "glow";
+                }
+            };
             auto& jl = cfg["accessory_leds"];
             jl["enabled"]          = led_cfg.enabled;
             jl["transport"]        = led_cfg.transport;
             jl["global_brightness"] = led_cfg.global_brightness;
+            jl["sync_sides"]       = led_cfg.sync_sides;
+            jl["link_areas"]       = led_cfg.link_areas;
+            jl["mirror_layout"]    = led_cfg.mirror_layout;
+            jl["mirror_look"]      = led_cfg.mirror_look;
             json jz = json::array();
             for (const auto& z : led_cfg.zones) {
                 json j;
@@ -5893,6 +6002,12 @@ int main(int argc, char* argv[]) {
                 j["grad_angle"]      = z.grad_angle;
                 j["zone_brightness"] = z.zone_brightness;
                 j["follow_face"]     = z.follow_face;
+                j["level_style"]     = level_style_name(z.level_style);
+                j["min_level"]       = z.min_level;
+                j["sound_trigger"]   = z.sound_trigger;
+                j["sound_threshold"] = z.sound_threshold;
+                j["sound_decay"]     = z.sound_decay;
+                j["sound_complete"]  = z.sound_complete;
                 j["shape"]           = shape_name(z.shape);
                 j["sections"]        = z.sections;
                 j["pos_x"]           = z.pos_x;
@@ -5926,6 +6041,12 @@ int main(int argc, char* argv[]) {
         cfg["voice_mouth"]["release_ms"]          = state.voice_mouth.release_ms;
         cfg["voice_mouth"]["band_lo_hz"]          = state.voice_mouth.band_lo_hz;
         cfg["voice_mouth"]["band_hi_hz"]          = state.voice_mouth.band_hi_hz;
+        cfg["coproc_mic"]["gain"]                 = state.coproc_mic.gain;
+        cfg["coproc_mic"]["gamma"]                = state.coproc_mic.gamma;
+        cfg["coproc_mic"]["gate"]                 = state.coproc_mic.gate;
+        cfg["coproc_mic"]["attack_ms"]            = state.coproc_mic.attack_ms;
+        cfg["coproc_mic"]["release_ms"]           = state.coproc_mic.release_ms;
+        cfg["coproc_mic"]["peak_decay"]           = state.coproc_mic.peak_decay;
         // Accessory LEDs — pull from the manager's live snapshot so anything
         // the menu changed persists across launches. Hardware-level fields
         // (spi_device / speed_hz / color_order / zone start+count) stay
@@ -5940,6 +6061,8 @@ int main(int argc, char* argv[]) {
             // gradient/wave and would index out of bounds on those zones.
             static const char* pat_name8[] = { "off", "solid", "breathe", "level",
                                                "chase", "sparkle", "gradient", "wave" };
+            static const char* lvl_name5[] = { "glow", "meter", "center_meter",
+                                               "peak", "pulse" };
             for (int i = 0; i < accessory::ZoneCount; ++i) {
                 auto zc = accessory_leds.zone(static_cast<accessory::Zone>(i));
                 // Live-editable fields the menu changes WITHOUT "Apply Layout"
@@ -5961,6 +6084,13 @@ int main(int argc, char* argv[]) {
                 jzones[i]["grad_angle"]      = zc.grad_angle;
                 jzones[i]["zone_brightness"] = static_cast<int>(zc.zone_brightness);
                 jzones[i]["follow_face"]     = zc.follow_face;
+                jzones[i]["level_style"]     = lvl_name5[
+                    std::clamp(static_cast<int>(zc.level_style), 0, 4)];
+                jzones[i]["min_level"]       = zc.min_level;
+                jzones[i]["sound_trigger"]   = zc.sound_trigger;
+                jzones[i]["sound_threshold"] = zc.sound_threshold;
+                jzones[i]["sound_decay"]     = zc.sound_decay;
+                jzones[i]["sound_complete"]  = zc.sound_complete;
             }
         }
 
@@ -6829,6 +6959,39 @@ int main(int argc, char* argv[]) {
                 reactions.energy_dps() > reactions.config().calm_dps * 2.0);
             expr_director.tick(dt, rules_snapshot());
 
+            // Cheek mirror: keep the right hub/fin tracking the left's layout
+            // and/or look. Runs at the config level (led_cfg) so the editor
+            // preview + save reflect it; look is also pushed to the live strip
+            // (layout reaches the strip on Apply Layout, which re-chains).
+            if (led_cfg.mirror_layout || led_cfg.mirror_look) {
+                const auto mirror_pair = [&](accessory::Zone L, accessory::Zone R) {
+                    auto& l = led_cfg.zones[static_cast<int>(L)];
+                    auto& r = led_cfg.zones[static_cast<int>(R)];
+                    if (led_cfg.mirror_layout) accessory::mirror_zone_layout(r, l);
+                    if (led_cfg.mirror_look) {
+                        accessory::mirror_zone_look(r, l);
+                        accessory_leds.set_zone_pattern (R, r.pattern);
+                        accessory_leds.set_zone_color   (R, r.r,  r.g,  r.b);
+                        accessory_leds.set_zone_color2  (R, r.r2, r.g2, r.b2);
+                        accessory_leds.set_zone_stops   (R, r.stops);
+                        accessory_leds.set_zone_breathe_hz(R, r.breathe_hz);
+                        accessory_leds.set_zone_wave_speed(R, r.wave_speed);
+                        accessory_leds.set_zone_grad_spatial(R, r.grad_spatial);
+                        accessory_leds.set_zone_grad_angle(R, r.grad_angle);
+                        accessory_leds.set_zone_brightness(R, r.zone_brightness);
+                        accessory_leds.set_zone_follow_face(R, r.follow_face);
+                        accessory_leds.set_zone_level_style(R, r.level_style);
+                        accessory_leds.set_zone_min_level(R, r.min_level);
+                        accessory_leds.set_zone_sound_trigger(R, r.sound_trigger);
+                        accessory_leds.set_zone_sound_threshold(R, r.sound_threshold);
+                        accessory_leds.set_zone_sound_decay(R, r.sound_decay);
+                        accessory_leds.set_zone_sound_complete(R, r.sound_complete);
+                    }
+                };
+                mirror_pair(accessory::Zone::LeftCheekhub, accessory::Zone::RightCheekhub);
+                mirror_pair(accessory::Zone::LeftFin,      accessory::Zone::RightFin);
+            }
+
             // Named environmental reactions (Reactions list).
             {
                 face::ReactionRules::Signals rs;
@@ -6857,9 +7020,16 @@ int main(int argc, char* argv[]) {
                             any_follow = true;
                             break;
                         }
+                    // Ask the face controller to build the face-only canvas
+                    // while following, so the sample is the eye's material and
+                    // not the particle/effect overlay (embers, lightning, etc.).
+                    native_ctrl->set_sample_face_layer(any_follow);
                     if (any_follow) {
                         cv::Mat frame;
-                        if (native_ctrl->latest_frame(frame) && !frame.empty()) {
+                        // Sample the FACE-ONLY canvas (no effect overlays); it
+                        // isn't ready for the first cycle after enabling, so we
+                        // simply skip until the render thread produces one.
+                        if (native_ctrl->latest_face_frame(frame) && !frame.empty()) {
                             // Sample only the eye's MATERIAL color — the
                             // saturated fill, not the white highlights, dark
                             // outline or unlit background. A flat average over
@@ -6976,6 +7146,70 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     follow_face_cooldown = 0.2;   // ~5 Hz
+                }
+            }
+
+            // Coprocessor mic → accessory Level + mouth openness. Poll the
+            // coproc's peak mic level (TLV320, MICLVL on the coproc_voice
+            // firmware), shape it (gate → gain → clamp → gamma; see
+            // CoprocMicConfig), and feed it to any zone running Pattern::Level
+            // and, when the mouth is enabled, to the face's audio drive. Read
+            // the last reply, then request the next — the reply is async, so
+            // this stays a frame behind (fine for a volume envelope).
+            // NOTE: this drives mouth OPENNESS only; viseme SHAPES need spectral
+            // analysis the coproc's single peak level can't provide.
+            {
+                static double mic_poll_cd = 0.0;
+                static double mic_since    = 0.0;   // real elapsed between polls
+                static float  mic_env      = 0.0f;  // attack/release-smoothed level
+                mic_poll_cd -= dt;
+                mic_since   += dt;
+                if (mic_poll_cd <= 0.0 && coproc_inputs) {
+                    // Any zone that needs the mic: a Level pattern OR a
+                    // sound-triggered zone (any pattern) — both read the
+                    // accessory audio volume.
+                    bool any_level = false, any_sound = false;
+                    if (accessory_leds.is_running())
+                        for (int zi = 0; zi < accessory::ZoneCount; ++zi) {
+                            const auto zc = accessory_leds.zone(static_cast<accessory::Zone>(zi));
+                            if (zc.pattern == accessory::Pattern::Level) any_level = true;
+                            if (zc.sound_trigger)                        any_sound = true;
+                        }
+                    const bool any_audio = any_level || any_sound;
+                    CoprocMicConfig mc;
+                    bool mouth_on;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        mc = state.coproc_mic;
+                        mouth_on = state.voice_mouth.enabled;
+                    }
+                    accessory_leds.set_peak_decay(mc.peak_decay);
+                    if (any_audio || mouth_on) {
+                        const int pm = coproc_inputs->mic_level_permille();  // -1 = none yet
+                        if (pm >= 0) {
+                            // Shape: gate → gain → clamp → gamma.
+                            float v = pm / 1000.0f;
+                            v = std::max(0.0f, v - mc.gate);
+                            if (mc.gate < 0.999f) v /= (1.0f - mc.gate);
+                            v = std::clamp(v * mc.gain, 0.0f, 1.0f);
+                            if (mc.gamma > 0.f && mc.gamma != 1.0f)
+                                v = std::pow(v, mc.gamma);
+                            // Envelope follower: fast attack / slow release so the
+                            // reaction rises quickly and falls smoothly.
+                            const float tau_ms = (v > mic_env) ? mc.attack_ms : mc.release_ms;
+                            const float tau    = std::max(0.001f, tau_ms * 0.001f);
+                            const float alpha  = 1.0f - std::exp(-static_cast<float>(mic_since) / tau);
+                            mic_env += (v - mic_env) * alpha;
+                            if (any_audio) accessory_leds.set_audio_volume(mic_env);
+                            if (mouth_on) {
+                                face_proxy.set_audio_drive(mic_env, mic_env);
+                                last_mic->store(mic_env);
+                            }
+                        }
+                        coproc_inputs->request_mic_level();                  // ask for the next
+                    }
+                    mic_since   = 0.0;
+                    mic_poll_cd = 0.033;   // ~30 Hz
                 }
             }
 

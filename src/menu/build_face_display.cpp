@@ -949,6 +949,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         auto& ts = state.expression_triggers[key];
         if ((int)ts.recipes.size() < face::kRecipeSlots)
             ts.recipes.resize(face::kRecipeSlots);
+        if ((int)ts.actions.size() < face::kActionSlots)
+            ts.actions.resize(face::kActionSlots);
         fn(ts);
     };
     auto trig_get = [&state](const std::string& key) {
@@ -956,6 +958,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         auto& ts = state.expression_triggers[key];
         if ((int)ts.recipes.size() < face::kRecipeSlots)
             ts.recipes.resize(face::kRecipeSlots);
+        if ((int)ts.actions.size() < face::kActionSlots)
+            ts.actions.resize(face::kActionSlots);
         return ts;
     };
 
@@ -1102,14 +1106,178 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "curious. The most specific matching recipe wins.");
     };
 
+    // Non-face actions an expression fires on activation (LED zone / servo),
+    // reverted when it ends. Same shape as make_triggers_item; attached to the
+    // same expressions (built-in + custom) via make_style_trigger_children so
+    // eye-anim slots — which have no activate/revert lifecycle — don't get it.
+    // `leds` (live) drives the Test preview; `servo_fn` is a copy of the
+    // coproc servo sender (menu is built after it's wired, so the copy is set).
+    auto make_actions_item = [trig_get, trig_mod, leds,
+                              servo_fn = ctx.coproc_servo](std::string key) -> MenuItem {
+        using EA = face::ExprAction;
+        static const char* kZoneNames[accessory::ZoneCount] = {
+            "Cheek Hub Left", "Cheek Hub Right", "Cheek Fin Left",
+            "Cheek Fin Right", "Blush" };
+        struct PatOpt { const char* label; accessory::Pattern p; };
+        static const PatOpt kPats[] = {
+            { "Off", accessory::Pattern::Off },       { "Solid", accessory::Pattern::Solid },
+            { "Breathe", accessory::Pattern::Breathe }, { "Level", accessory::Pattern::Level },
+            { "Chase", accessory::Pattern::Chase },   { "Sparkle", accessory::Pattern::Sparkle },
+            { "Gradient", accessory::Pattern::Gradient }, { "Wave", accessory::Pattern::Wave } };
+
+        std::vector<MenuItem> rows;
+        for (int j = 0; j < face::kActionSlots; ++j) {
+            auto aget = [trig_get, key, j]{ return trig_get(key).actions[j]; };
+            auto amod = [trig_mod, key, j](std::function<void(EA&)> fn) {
+                trig_mod(key, [j, fn](face::TriggerSet& ts){ fn(ts.actions[j]); });
+            };
+
+            std::vector<MenuItem> kind_items = {
+                leaf_sel("Off",
+                    [amod]{ amod([](EA& a){ a.kind = EA::Kind::None; }); },
+                    [aget]{ return aget().kind == EA::Kind::None; }),
+                leaf_sel("LED Zone",
+                    [amod]{ amod([](EA& a){ a.kind = EA::Kind::Led; }); },
+                    [aget]{ return aget().kind == EA::Kind::Led; }),
+                leaf_sel("Servo",
+                    [amod]{ amod([](EA& a){ a.kind = EA::Kind::Servo; }); },
+                    [aget]{ return aget().kind == EA::Kind::Servo; }),
+            };
+
+            // — LED fields (visible when kind == Led) —
+            std::vector<MenuItem> zone_items;
+            for (int zz = 0; zz < accessory::ZoneCount; ++zz)
+                zone_items.push_back(leaf_sel(kZoneNames[zz],
+                    [amod, zz]{ amod([zz](EA& a){ a.led_zone = zz; }); },
+                    [aget, zz]{ return aget().led_zone == zz; }));
+            MenuItem zone_pick = submenu("LED: Zone", std::move(zone_items));
+            zone_pick.visible_fn = [aget]{ return aget().kind == EA::Kind::Led; };
+
+            std::vector<MenuItem> pat_items;
+            pat_items.push_back(leaf_sel("Leave unchanged",
+                [amod]{ amod([](EA& a){ a.led_pattern = -1; }); },
+                [aget]{ return aget().led_pattern < 0; }));
+            for (const auto& po : kPats)
+                pat_items.push_back(leaf_sel(po.label,
+                    [amod, po]{ amod([po](EA& a){ a.led_pattern = static_cast<int>(po.p); }); },
+                    [aget, po]{ return aget().led_pattern == static_cast<int>(po.p); }));
+            MenuItem pat_pick = submenu("LED: Pattern", std::move(pat_items));
+            pat_pick.visible_fn = [aget]{ return aget().kind == EA::Kind::Led; };
+
+            MenuItem setcol = toggle("LED: Set Color",
+                [aget]{ return aget().led_set_color; },
+                [amod](bool v){ amod([v](EA& a){ a.led_set_color = v; }); });
+            setcol.visible_fn = [aget]{ return aget().kind == EA::Kind::Led; };
+
+            MenuItem col = color_picker("LED: Color",
+                [amod](uint8_t r, uint8_t g, uint8_t b){
+                    amod([r, g, b](EA& a){ a.r = r; a.g = g; a.b = b; }); },
+                [aget]() -> std::tuple<uint8_t, uint8_t, uint8_t>{
+                    const auto a = aget(); return { a.r, a.g, a.b }; });
+            col.visible_fn = [aget]{ const auto a = aget();
+                return a.kind == EA::Kind::Led && a.led_set_color; };
+
+            MenuItem bright = slider("LED: Brightness", -1.f, 255.f, 1.f, "",
+                [aget]{ return static_cast<float>(aget().led_brightness); },
+                [amod](float v){ amod([v](EA& a){ a.led_brightness = static_cast<int>(v); }); });
+            bright.visible_fn = [aget]{ return aget().kind == EA::Kind::Led; };
+
+            // — Servo fields (visible when kind == Servo) —
+            std::vector<MenuItem> ch_items;
+            for (int c = 0; c < 4; ++c)
+                ch_items.push_back(leaf_sel("Channel " + std::to_string(c),
+                    [amod, c]{ amod([c](EA& a){ a.servo_ch = c; }); },
+                    [aget, c]{ return aget().servo_ch == c; }));
+            MenuItem ch_pick = submenu("Servo: Channel", std::move(ch_items));
+            ch_pick.visible_fn = [aget]{ return aget().kind == EA::Kind::Servo; };
+
+            MenuItem deg = slider("Servo: Angle", 0.f, 180.f, 1.f, "\xc2\xb0",
+                [aget]{ return static_cast<float>(aget().servo_deg); },
+                [amod](float v){ amod([v](EA& a){ a.servo_deg = static_cast<int>(v); }); });
+            deg.visible_fn = [aget]{ return aget().kind == EA::Kind::Servo; };
+
+            MenuItem rest = slider("Servo: Rest Angle", -1.f, 180.f, 1.f, "\xc2\xb0",
+                [aget]{ return static_cast<float>(aget().servo_rest); },
+                [amod](float v){ amod([v](EA& a){ a.servo_rest = static_cast<int>(v); }); });
+            rest.visible_fn = [aget]{ return aget().kind == EA::Kind::Servo; };
+
+            // Test: apply this action live once so you can eyeball it. No
+            // auto-revert here — real firings revert with the expression.
+            MenuItem test = leaf("Test (apply now)", [aget, leds, servo_fn]{
+                const auto a = aget();
+                if (a.kind == EA::Kind::Led && leds) {
+                    const int zi = a.led_zone;
+                    if (zi < 0 || zi >= accessory::ZoneCount) return;
+                    const auto z = static_cast<accessory::Zone>(zi);
+                    if (a.led_pattern >= 0)
+                        leds->set_zone_pattern(z, static_cast<accessory::Pattern>(a.led_pattern));
+                    if (a.led_set_color) leds->set_zone_color(z, a.r, a.g, a.b);
+                    if (a.led_brightness >= 0)
+                        leds->set_zone_brightness(
+                            z, static_cast<uint8_t>(std::clamp(a.led_brightness, 0, 255)));
+                } else if (a.kind == EA::Kind::Servo && servo_fn) {
+                    servo_fn(a.servo_ch, a.servo_deg);
+                }
+            });
+            test.visible_fn = [aget]{ return aget().kind != EA::Kind::None; };
+
+            std::vector<MenuItem> slot_items;
+            slot_items.push_back(with_desc(submenu("Kind", std::move(kind_items)),
+                "What this action does when the expression activates: drive an "
+                "accessory-LED zone, or move a coprocessor servo (raw channel "
+                "0-3, same as Peripheral Test). Off = unused."));
+            slot_items.push_back(std::move(zone_pick));
+            slot_items.push_back(std::move(pat_pick));
+            slot_items.push_back(std::move(setcol));
+            slot_items.push_back(std::move(col));
+            slot_items.push_back(with_desc(std::move(bright),
+                "Per-zone brightness while active (0-255). -1 = leave the "
+                "zone's own brightness."));
+            slot_items.push_back(std::move(ch_pick));
+            slot_items.push_back(std::move(deg));
+            slot_items.push_back(with_desc(std::move(rest),
+                "Angle the servo returns to when the expression ends. "
+                "-1 = detach (let it go limp)."));
+            slot_items.push_back(std::move(test));
+            slot_items.push_back(leaf("Clear Action",
+                [amod]{ amod([](EA& a){ a = EA{}; }); }));
+
+            MenuItem slot = submenu("Action " + std::to_string(j + 1),
+                                    std::move(slot_items));
+            slot.label_fn = [aget, j]() -> std::string {
+                const auto a = aget();
+                std::string base = "Action " + std::to_string(j + 1) + ": ";
+                if (a.kind == EA::Kind::Led) {
+                    const std::string zn =
+                        (a.led_zone >= 0 && a.led_zone < accessory::ZoneCount)
+                        ? kZoneNames[a.led_zone] : "?";
+                    std::string pn = "keep";
+                    for (const auto& po : kPats)
+                        if (static_cast<int>(po.p) == a.led_pattern) pn = po.label;
+                    return base + "LED " + zn + " " + pn;
+                }
+                if (a.kind == EA::Kind::Servo)
+                    return base + "Servo " + std::to_string(a.servo_ch) + " -> " +
+                           std::to_string(a.servo_deg) + "\xc2\xb0";
+                return base + "Off";
+            };
+            rows.push_back(std::move(slot));
+        }
+        return with_desc(submenu("Actions", std::move(rows)),
+            "Extra things this expression does when it activates — light up a "
+            "cheek zone or move a servo — undone when it ends (mirroring the "
+            "face restore). Fires on ANY of this expression's triggers.");
+    };
+
     auto make_style_trigger_children =
         [make_material_item, make_effect_item, make_glitch_item,
-         make_triggers_item](const std::string& key, StyleGet get, StyleSet set) {
+         make_triggers_item, make_actions_item](const std::string& key, StyleGet get, StyleSet set) {
         std::vector<MenuItem> out;
         out.push_back(make_material_item(get, set));
         out.push_back(make_effect_item(get, set));
         out.push_back(make_glitch_item(get, set));
         out.push_back(make_triggers_item(key));
+        out.push_back(make_actions_item(key));
         return out;
     };
 
@@ -1179,7 +1347,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             r.has_style = true;
             r.style = cx.style;
         }
-        r.hold_s = trig_get(r.key).hold_s;
+        const auto ts = trig_get(r.key);
+        r.hold_s  = ts.hold_s;
+        r.actions = ts.actions;   // manual Activate fires (and later reverts) actions too
         return r;
     };
     auto custom_slot_row = [&, expr_director, custom_used, custom_key,
@@ -4943,8 +5113,13 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     pramp = prampbuf.data();
                     pramp_n = static_cast<int>(prampbuf.size());
                 }
+                // Match the live sound gate so a sound-triggered zone previews
+                // as gated (steady at its floor when quiet) like the strip.
+                float psgate = 1.f;
+                if (z.sound_trigger && leds)
+                    psgate = leds->zone_sound_gate(static_cast<accessory::Zone>(zi));
                 std::vector<uint8_t> cols;
-                accessory::zone_base_colors(z, t, pvol, pfc, pramp, pramp_n, cols);
+                accessory::zone_base_colors(z, t, pvol, pfc, pramp, pramp_n, cols, -1.f, psgate);
                 // Preview brightness: show the LEDs vivid for legibility rather
                 // than dimmed to the (low) hardware global brightness. A gamma
                 // lift raises even dim pattern/follow colors so they read
@@ -5150,9 +5325,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         }
         MenuItem grad_menu = with_desc(submenu("Custom Gradient", std::move(stop_items)),
             "Multi-stop gradient: blend through several colours down the length, "
-            "one stop per section. Overrides Color 2 when 2+ stops are set.");
+            "one stop per section. With 2+ stops it overrides Color 2 for "
+            "Gradient, and colours Wave / Level / Chase too — their effect just "
+            "modulates the gradient's brightness.");
+        // Available for every pattern whose per-LED colour can follow a gradient.
         grad_menu.visible_fn = [acc, zi]{
-            return acc && acc->zones[zi].pattern == accessory::Pattern::Gradient;
+            if (!acc) return false;
+            const auto p = acc->zones[zi].pattern;
+            return p == accessory::Pattern::Gradient || p == accessory::Pattern::Wave ||
+                   p == accessory::Pattern::Level    || p == accessory::Pattern::Chase;
         };
 
         std::vector<MenuItem> items = {
@@ -5183,6 +5364,32 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "The far-end color for Gradient (base uses Color, tip uses "
                 "Color 2)."),
             std::move(grad_menu),
+            [&]() -> MenuItem {
+                struct LSOpt { const char* label; accessory::LevelStyle s; };
+                static const LSOpt kLS[] = {
+                    { "Glow (whole zone)",      accessory::LevelStyle::Glow },
+                    { "Meter (base to tip)",    accessory::LevelStyle::Meter },
+                    { "Center Meter",           accessory::LevelStyle::CenterMeter },
+                    { "Peak (falling marker)",  accessory::LevelStyle::Peak },
+                    { "Pulse (center burst)",   accessory::LevelStyle::Pulse },
+                };
+                std::vector<MenuItem> ls_items;
+                for (const auto& o : kLS)
+                    ls_items.push_back(leaf_sel(o.label,
+                        [leds, acc, z, zi, o]{ if (leds) leds->set_zone_level_style(z, o.s);
+                                               if (acc)  acc->zones[zi].level_style = o.s; },
+                        [acc, leds, z, zi, o]{ return acc ? acc->zones[zi].level_style == o.s
+                                                          : (leds && leds->zone(z).level_style == o.s); }));
+                MenuItem m = with_desc(submenu("Level Style", std::move(ls_items)),
+                    "How the Level pattern reacts to the mic: Glow (whole-zone "
+                    "brightness), Meter (VU bar base->tip), Center Meter (from the "
+                    "middle), Peak (bar + a falling peak marker), or Pulse (soft "
+                    "centre burst). Smoothing/peak-fall live under Coproc Mic; a "
+                    "Custom Gradient colours the bar.");
+                m.visible_fn = [acc, zi]{
+                    return acc && acc->zones[zi].pattern == accessory::Pattern::Level; };
+                return m;
+            }(),
             with_desc(slider("Wave Speed", -3.f, 3.f, 0.1f, " Hz",
                 [acc, zi]{ return acc ? acc->zones[zi].wave_speed : 0.5f; },
                 [leds, acc, z, zi](float v){
@@ -5197,13 +5404,18 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [leds, acc, z, zi](bool v){ if (leds) leds->set_zone_grad_spatial(z, v);
                                                 if (acc)  acc->zones[zi].grad_spatial = v; });
                 m.visible_fn = [acc, zi]{
-                    return acc && (acc->zones[zi].pattern == accessory::Pattern::Gradient ||
-                                   acc->zones[zi].pattern == accessory::Pattern::Wave); };
+                    if (!acc) return false;
+                    const auto& zc = acc->zones[zi];
+                    const auto p = zc.pattern;
+                    return zc.follow_face ||
+                           p == accessory::Pattern::Gradient || p == accessory::Pattern::Wave ||
+                           p == accessory::Pattern::Level    || p == accessory::Pattern::Chase; };
                 return with_desc(std::move(m),
-                    "Sweep the Gradient/Wave across the zone's 2D shape (like light "
+                    "Sweep the gradient across the zone's 2D shape (like light "
                     "crossing the whole hub or fin) instead of stepping along the "
-                    "wiring order ring-by-ring / line-by-line. Aim it with Gradient "
-                    "Angle below.");
+                    "wiring order ring-by-ring / line-by-line. Applies to Gradient/"
+                    "Wave, to Level/Chase with a Custom Gradient, and to a "
+                    "Follow-Face zone's eye gradient. Aim it with Gradient Angle.");
             }(),
             [&]() {
                 MenuItem m = slider("Gradient Angle", -180.f, 180.f, 5.f, " deg",
@@ -5211,9 +5423,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     [leds, acc, z, zi](float v){ if (leds) leds->set_zone_grad_angle(z, v);
                                                  if (acc)  acc->zones[zi].grad_angle = v; });
                 m.visible_fn = [acc, zi]{
-                    return acc && acc->zones[zi].grad_spatial &&
-                           (acc->zones[zi].pattern == accessory::Pattern::Gradient ||
-                            acc->zones[zi].pattern == accessory::Pattern::Wave); };
+                    if (!acc || !acc->zones[zi].grad_spatial) return false;
+                    const auto& zc = acc->zones[zi];
+                    const auto p = zc.pattern;
+                    return zc.follow_face ||
+                           p == accessory::Pattern::Gradient || p == accessory::Pattern::Wave ||
+                           p == accessory::Pattern::Level    || p == accessory::Pattern::Chase; };
                 return with_desc(std::move(m),
                     "Direction the spatial Gradient/Wave sweeps across the shape \xE2\x80\x94 "
                     "turn it to run the colour horizontally, vertically, or on any "
@@ -5234,6 +5449,64 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     if (acc)  acc->zones[zi].zone_brightness = static_cast<uint8_t>(v);
                 }),
                 "Per-zone brightness, on top of the chain-wide Brightness."),
+            with_desc(slider("Minimum Brightness", 0.f, 100.f, 1.f, "%",
+                [acc, leds, z, zi]{
+                    const float f = acc ? acc->zones[zi].min_level
+                                        : (leds ? leds->zone(z).min_level : 0.f);
+                    return f * 100.f;
+                },
+                [leds, acc, z, zi](float v){
+                    const float f = std::clamp(v / 100.f, 0.f, 1.f);
+                    if (leds) leds->set_zone_min_level(z, f);
+                    if (acc)  acc->zones[zi].min_level = f;
+                }),
+                "Floor for modulating effects: the LEDs never drop below this "
+                "brightness, so Level / Breathe / Wave / Chase idle at a dim glow "
+                "and get brighter with the effect instead of going fully off. "
+                "0% = classic (can go dark)."),
+            with_desc(submenu("Sound Trigger", std::vector<MenuItem>{
+                with_desc(toggle("React to Sound",
+                    [acc, leds, z, zi]{ return acc ? acc->zones[zi].sound_trigger
+                                                    : (leds && leds->zone(z).sound_trigger); },
+                    [leds, acc, z, zi](bool v){ if (leds) leds->set_zone_sound_trigger(z, v);
+                                                if (acc)  acc->zones[zi].sound_trigger = v; }),
+                    "Gate this zone's pattern on the coproc mic: it only plays "
+                    "while the sound is above the threshold, then fades. A loud "
+                    "sound triggers the effect (Wave sweep, Chase, Breathe pulse, "
+                    "Sparkle burst) — works with any pattern, not just Level."),
+                with_desc(slider("Threshold", 0.f, 100.f, 1.f, "%",
+                    [acc, leds, z, zi]{
+                        const float t = acc ? acc->zones[zi].sound_threshold
+                                            : (leds ? leds->zone(z).sound_threshold : 0.3f);
+                        return t * 100.f; },
+                    [leds, acc, z, zi](float v){
+                        const float t = std::clamp(v / 100.f, 0.f, 1.f);
+                        if (leds) leds->set_zone_sound_threshold(z, t);
+                        if (acc)  acc->zones[zi].sound_threshold = t; }),
+                    "How loud the sound must be to open the gate (share of the "
+                    "shaped mic level). Uses the same Coproc Mic gain/curve, so "
+                    "tune that first."),
+                with_desc(slider("Fade", 0.2f, 10.f, 0.1f, "/s",
+                    [acc, leds, z, zi]{ return acc ? acc->zones[zi].sound_decay
+                                                   : (leds ? leds->zone(z).sound_decay : 2.f); },
+                    [leds, acc, z, zi](float v){ if (leds) leds->set_zone_sound_decay(z, v);
+                                                 if (acc)  acc->zones[zi].sound_decay = v; }),
+                    "How fast the pattern fades out after the sound drops below "
+                    "the threshold. Low = lingers, high = snaps off."),
+                with_desc(toggle("Complete on Trigger",
+                    [acc, leds, z, zi]{ return acc ? acc->zones[zi].sound_complete
+                                                    : (leds && leds->zone(z).sound_complete); },
+                    [leds, acc, z, zi](bool v){ if (leds) leds->set_zone_sound_complete(z, v);
+                                                if (acc)  acc->zones[zi].sound_complete = v; }),
+                    "Each trigger EMITS a travelling sweep across the zone (or "
+                    "linked area) that completes on its own and OVERLAPS the ones "
+                    "already in flight — a new sound fires another sweep without "
+                    "disturbing the previous, like ripples. Colour = the zone's "
+                    "color/gradient; direction + speed = Wave Speed. Off = gate "
+                    "the free-running pattern instead."),
+            }), "Make a loud sound above a threshold trigger this zone's pattern "
+                "(then fade). Pairs well with Minimum Brightness for an idle glow "
+                "that flares on sound."),
             with_desc(toggle("Follow Face",
                 [acc, leds, z, zi]{ return acc ? acc->zones[zi].follow_face
                                                : (leds && leds->zone(z).follow_face); },
@@ -5289,8 +5562,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     rb = leds->face_ramp_for(static_cast<accessory::Zone>(zi));
                     rp = rb.data(); rn = static_cast<int>(rb.size());
                 }
+                float sg = 1.f;
+                if (z.sound_trigger && leds)
+                    sg = leds->zone_sound_gate(static_cast<accessory::Zone>(zi));
                 std::vector<uint8_t> cols;
-                accessory::zone_base_colors(z, t, pvol, pfc, rp, rn, cols);
+                accessory::zone_base_colors(z, t, pvol, pfc, rp, rn, cols, -1.f, sg);
                 for (auto& v : cols)   // vivid preview (gamma lift, not hw-dimmed)
                     v = static_cast<uint8_t>(std::lround(255.0 * std::pow(v / 255.0, 0.45)));
                 for (auto& p : pts) {
@@ -5437,6 +5713,148 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "Master brightness applied to the whole accessory chain. WS2812s "
             "draw a lot of current at full white — keep this low (~64) unless "
             "you have power injection."),
+        with_desc(toggle("Sync Effect Start (hubs+fins)",
+            [leds, acc]{ return acc ? acc->sync_sides : (leds && leds->sync_sides()); },
+            [leds, acc](bool v){ if (leds) leds->set_sync_sides(v);
+                                 if (acc)  acc->sync_sides = v; }),
+            "Phase-lock the four side zones (both cheek hubs + both fins) so "
+            "their moving effects (Breathe / Wave / Chase / Gradient scroll) "
+            "start together and stay aligned. Re-syncs whenever an effect is "
+            "(re)applied to a side zone — including by an expression action. "
+            "Blush is left free-running."),
+        with_desc(toggle("Link Cheek Areas (hub+fin)",
+            [leds, acc]{ return acc ? acc->link_areas : (leds && leds->link_areas()); },
+            [leds, acc](bool v){ if (leds) leds->set_link_areas(v);
+                                 if (acc)  acc->link_areas = v; }),
+            "Treat each side's cheek hub + fin as ONE continuous area: the fin "
+            "runs the hub's exact effect and its fraction continues from the "
+            "hub, so a pattern (running or sound-triggered) sweeps from the hub "
+            "into the fin as a single area. Works along the length, or across "
+            "the 2D shape when Gradient Across Shape is on. The fin's own "
+            "pattern/colors are ignored while this is on."),
+        [&]() -> MenuItem {
+            using LZ = accessory::Zone;
+            auto acc_apply = ctx.acc_apply;
+            // One-shot layout copy (left → right) + re-chain the strip now.
+            auto copy_layout = [acc, acc_apply]{
+                if (!acc) return;
+                accessory::mirror_zone_layout(acc->zones[static_cast<int>(LZ::RightCheekhub)],
+                                              acc->zones[static_cast<int>(LZ::LeftCheekhub)]);
+                accessory::mirror_zone_layout(acc->zones[static_cast<int>(LZ::RightFin)],
+                                              acc->zones[static_cast<int>(LZ::LeftFin)]);
+                if (acc_apply) acc_apply();
+            };
+            // One-shot look copy (left → right), pushed to the live strip.
+            auto copy_look_one = [acc, leds](LZ Lz, LZ Rz){
+                if (!acc) return;
+                auto& r = acc->zones[static_cast<int>(Rz)];
+                accessory::mirror_zone_look(r, acc->zones[static_cast<int>(Lz)]);
+                if (leds) {
+                    leds->set_zone_pattern(Rz, r.pattern);
+                    leds->set_zone_color(Rz, r.r, r.g, r.b);
+                    leds->set_zone_color2(Rz, r.r2, r.g2, r.b2);
+                    leds->set_zone_stops(Rz, r.stops);
+                    leds->set_zone_breathe_hz(Rz, r.breathe_hz);
+                    leds->set_zone_wave_speed(Rz, r.wave_speed);
+                    leds->set_zone_grad_spatial(Rz, r.grad_spatial);
+                    leds->set_zone_grad_angle(Rz, r.grad_angle);
+                    leds->set_zone_brightness(Rz, r.zone_brightness);
+                    leds->set_zone_follow_face(Rz, r.follow_face);
+                    leds->set_zone_level_style(Rz, r.level_style);
+                    leds->set_zone_min_level(Rz, r.min_level);
+                    leds->set_zone_sound_trigger(Rz, r.sound_trigger);
+                    leds->set_zone_sound_threshold(Rz, r.sound_threshold);
+                    leds->set_zone_sound_decay(Rz, r.sound_decay);
+                    leds->set_zone_sound_complete(Rz, r.sound_complete);
+                }
+            };
+            auto copy_look = [copy_look_one]{
+                copy_look_one(LZ::LeftCheekhub, LZ::RightCheekhub);
+                copy_look_one(LZ::LeftFin,      LZ::RightFin);
+            };
+            std::vector<MenuItem> m = {
+                with_desc(toggle("Mirror Layout (live)",
+                    [acc]{ return acc && acc->mirror_layout; },
+                    [acc, copy_layout](bool v){
+                        if (acc) acc->mirror_layout = v;
+                        if (v) copy_layout();   // apply now; main loop keeps it synced
+                    }),
+                    "Right cheek hub + fin continuously copy the LEFT side's LED "
+                    "counts, sections, shape and placement (mirrored). Edit the "
+                    "left zone, then Apply Layout in its Shape & Wiring to push "
+                    "count changes to the strip. While on, the right zones are "
+                    "driven from the left — editing them directly won't stick."),
+                with_desc(toggle("Mirror Look (live)",
+                    [acc]{ return acc && acc->mirror_look; },
+                    [acc, copy_look](bool v){
+                        if (acc) acc->mirror_look = v;
+                        if (v) copy_look();
+                    }),
+                    "Right cheek hub + fin continuously copy the LEFT side's "
+                    "pattern, colors and effects (gradient direction mirrored). "
+                    "Applies live. Follow-face still tracks each side's own eye."),
+                with_desc(leaf("Copy Layout Now (L->R)", copy_layout),
+                    "One-shot: copy the left layout onto the right and re-chain "
+                    "the strip now. Both sides stay independently editable "
+                    "afterward (unlike the live toggle)."),
+                with_desc(leaf("Copy Look Now (L->R)", copy_look),
+                    "One-shot: copy the left pattern/colors/effects onto the "
+                    "right now. Both sides stay independently editable after."),
+            };
+            return with_desc(submenu("Mirror (Right <- Left)", std::move(m)),
+                "Make the right cheek hub + fin match the left. Two live "
+                "toggles (physical layout / look) plus one-shot copy buttons. "
+                "Different from a zone's cosmetic Mirror flag, which only flips "
+                "its own preview.");
+        }(),
+        with_desc(submenu("Coproc Mic (Level + Mouth)", std::vector<MenuItem>{
+            with_desc(slider("Gain", 0.5f, 20.f, 0.5f, "x",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                          return state.coproc_mic.gain; },
+                [&state](float v){ std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.coproc_mic.gain = v; }),
+                "Multiplies the coproc mic's raw peak. The peak is small, so "
+                "raise this until the Level pattern and mouth react at a normal "
+                "speaking volume (start ~6x)."),
+            with_desc(slider("Response", 0.3f, 2.5f, 0.1f, "",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                          return state.coproc_mic.gamma; },
+                [&state](float v){ std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.coproc_mic.gamma = v; }),
+                "Response curve. Below 1 lifts quiet sounds (more sensitive); "
+                "above 1 compresses loud ones. 1 = linear."),
+            with_desc(slider("Noise Gate", 0.f, 0.5f, 0.01f, "",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                          return state.coproc_mic.gate; },
+                [&state](float v){ std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.coproc_mic.gate = v; }),
+                "Peaks below this fraction of full scale count as silence — "
+                "trims background hiss so Level/mouth sit still when quiet."),
+            with_desc(slider("Attack", 1.f, 200.f, 1.f, " ms",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                          return state.coproc_mic.attack_ms; },
+                [&state](float v){ std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.coproc_mic.attack_ms = v; }),
+                "How fast the reaction rises when sound starts. Short = snappy, "
+                "long = it eases in."),
+            with_desc(slider("Release", 20.f, 1000.f, 10.f, " ms",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                          return state.coproc_mic.release_ms; },
+                [&state](float v){ std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.coproc_mic.release_ms = v; }),
+                "How slowly the reaction falls when sound stops. Longer = "
+                "smoother, less flicker."),
+            with_desc(slider("Peak Fall", 0.2f, 5.f, 0.1f, "/s",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                          return state.coproc_mic.peak_decay; },
+                [&state](float v){ std::lock_guard<std::mutex> lk(state.mtx);
+                                   state.coproc_mic.peak_decay = v; }),
+                "For the Level 'Peak' reaction: how fast the held peak marker "
+                "falls (fraction of the strip per second)."),
+        }), "Shape the coprocessor TLV320 mic that drives the Level pattern and "
+            "the mouth's openness. The raw peak is small, so Gain is usually "
+            "needed to make Level visible. (Mouth openness only — viseme shapes "
+            "need spectral analysis the coproc peak can't provide.)"),
         with_desc(submenu("Data Transport", std::vector<MenuItem>{
             leaf_sel("Pi GPIO  (SPI MOSI / GPIO10)",
                 [acc]{ if (acc) acc->transport = "spidev"; },
