@@ -150,6 +150,48 @@ uint32_t g_led_last   = 0;                    // last pattern tick
 float    g_led_phase  = 0.f;
 bool     g_led_dirty  = false;                // LEDF wrote pixels; LEDSHOW latches
 
+// ── Per-zone autonomous animation (coproc_local transport) ───────────────────
+// The Pi sends high-level per-zone descriptors (LZONE/LZP/LZG/LZF/LVOL) and this
+// MCU runs the animation off its own clock, mirroring the host renderer's math:
+// Solid/Breathe/Chase/Sparkle/Gradient/Wave/Level, linked hub+fin areas, the
+// sound-trigger gate + complete-on-trigger pulses, and the flash overlay. Live
+// mic volume arrives ~30 Hz as LVOL; only follow-face colour is still deferred.
+// Coexists with the legacy whole-chain path (LEDZ/LEDP + LEDF streaming): the
+// first LZ* command flips g_zone_active on and the compositor takes over; a
+// legacy LEDZ/LEDP/LEDF flips it back off.
+constexpr int kLedZones     = 5;               // mirrors accessory::ZoneCount
+constexpr int kLedMaxPulses = 16;              // live complete-on-trigger sweeps per zone
+struct LedZoneState {
+    uint16_t start = 0, count = 0;             // slice on the shared chain
+    uint8_t  pattern = 0;                      // mirrors accessory::Pattern (0..7)
+    uint8_t  r = 0, g = 0, b = 0;              // primary colour
+    uint8_t  r2 = 0, g2 = 0, b2 = 0;           // gradient endpoint
+    int32_t  breathe_mhz = 500;                // Breathe/Chase rate, milli-Hz
+    int32_t  wave_mhz    = 500;                // Gradient scroll / Wave travel, milli-Hz (signed)
+    uint8_t  zbright   = 255;                   // per-zone brightness
+    uint8_t  min_level = 0;                     // idle floor 0..255
+    uint8_t  linked = 0;                        // hub+fin passthrough (no wrap) for Chase/Wave/Gradient
+    uint8_t  level_style = 0;                   // Level reaction 0..4 (glow/meter/center/peak/pulse)
+    uint8_t  sound_trigger = 0;                 // gate the pattern on the mic
+    uint8_t  sound_complete = 0;                // each trigger emits a full travelling pulse
+    uint8_t  sound_thresh = 77;                 // mic gate open level, 0..255
+    int32_t  sound_decay_mhz = 2000;            // gate fall rate, milli per second
+    uint32_t flash_start = 0, flash_end = 0;    // white flash overlay window (millis)
+    // runtime (compositor-owned)
+    float    sound_env = 0.f;                   // gate envelope 0..1
+    uint8_t  prev_above = 0;                    // rising-edge detect
+    uint8_t  npulses = 0;                       // live pulses
+    float    pulses[kLedMaxPulses] = {};        // pulse head positions 0..1
+};
+LedZoneState g_lz[kLedZones];
+uint8_t  g_lz_frac[kLedZoneMax] = {};          // per-pixel length fraction 0..255 (Level/Gradient/Wave/linked)
+bool     g_zone_active = false;                // compositor owns the strip
+bool     g_zone_sync   = false;                // side zones (0..3) share a phase origin
+uint32_t g_zone_t0     = 0;                    // shared phase origin (millis)
+uint32_t g_zone_tick   = 0;                    // compositor throttle / last-tick millis
+float    g_zone_vol    = 0.f;                  // live mic volume 0..1 (LVOL)
+float    g_zone_peak   = 0.f;                  // held mic peak 0..1 (LVOL), for Level "Peak"
+
 void led_show() {
     if (kLedZonePin < 0) return;
     if (kLedZoneType == 0) {
@@ -201,6 +243,7 @@ void led_fill(uint8_t r, uint8_t g, uint8_t b) {
 // Local pattern animation (~30 fps), driven from loop(). Runs standalone —
 // the Pi only sends mode changes.
 void led_service(uint32_t now) {
+    if (g_zone_active) return;                 // per-zone engine owns the strip
     if (kLedZonePin < 0 || g_led_mode < 2) return;
     if (now - g_led_last < 33) return;
     g_led_last = now;
@@ -241,6 +284,277 @@ void led_service(uint32_t now) {
                  (uint16_t)g_led_b * k / 255);
     }
     led_show();
+}
+
+// Composite every live zone into g_led_px and latch, once per tick (~60 fps).
+// Called from loop(); a no-op until the first LZ* command arrives.
+void led_zone_render(uint32_t now) {
+    if (!g_zone_active || kLedZonePin < 0) return;
+    if (now - g_zone_tick < 16) return;                 // ~60 fps
+    float dt = (g_zone_tick == 0) ? 0.016f : (now - g_zone_tick) / 1000.f;
+    if (dt > 0.1f) dt = 0.1f;                            // clamp after a stall
+    g_zone_tick = now;
+
+    const float vol  = g_zone_vol;
+    const float peak = g_zone_peak;
+
+    for (uint16_t i = 0; i < g_led_n; ++i) { g_led_px[i][0] = g_led_px[i][1] = g_led_px[i][2] = 0; }
+
+    for (int zi = 0; zi < kLedZones; ++zi) {
+        LedZoneState& z = g_lz[zi];
+        if (z.count == 0) continue;
+        // Side zones (0..3) optionally share a phase origin so their time-based
+        // effects start aligned; Blush (zi 4) is always free-running.
+        const uint32_t base = (g_zone_sync && zi < 4) ? g_zone_t0 : 0u;
+        const float t          = (now - base) / 1000.f;
+        const float breathe_hz = z.breathe_mhz / 1000.f;
+        const float wave_hz    = z.wave_mhz    / 1000.f;
+        const float zbf        = z.zbright  / 255.f;
+        const float floor_lvl  = z.min_level / 255.f;
+
+        // Sound trigger: gate the pattern on the mic, or (complete mode) emit a
+        // travelling pulse on each rising edge that finishes its own sweep.
+        float sgate = 1.f;
+        bool  use_pulses = false;
+        if (z.sound_trigger) {
+            const float thr   = z.sound_thresh / 255.f;
+            const bool  above = (vol >= thr);
+            const bool  rising = above && !z.prev_above;
+            if (z.sound_complete) {
+                float sp = wave_hz; if (fabsf(sp) < 0.05f) sp = 1.f;
+                const float step = sp * dt;
+                uint8_t w = 0;                            // advance + prune live pulses
+                for (uint8_t k = 0; k < z.npulses; ++k) {
+                    const float ph = z.pulses[k] + step;
+                    if (ph <= 1.2f && ph >= -0.2f) z.pulses[w++] = ph;
+                }
+                z.npulses = w;
+                if (rising && z.npulses < kLedMaxPulses) z.pulses[z.npulses++] = (sp >= 0.f ? 0.f : 1.f);
+                use_pulses = true;
+            } else {
+                if (above) z.sound_env = 1.f;
+                else       z.sound_env = fmaxf(0.f, z.sound_env - (z.sound_decay_mhz / 1000.f) * dt);
+                sgate = z.sound_env;
+                z.npulses = 0;
+            }
+            z.prev_above = above ? 1 : 0;
+        } else {
+            z.sound_env = 0.f; z.prev_above = 0; z.npulses = 0;
+        }
+
+        if (z.pattern != 0) {                           // 0 = Off → slice stays dark
+            float env = 1.f;
+            if (z.pattern == 2)                          // Breathe
+                env = 0.5f * (1.f - cosf(2.f * (float)PI * breathe_hz * t));
+            const float edge = 1.f / fmaxf(1.f, (float)z.count);   // ~1-LED soft edge (Level)
+            for (uint16_t i = 0; i < z.count; ++i) {
+                const uint16_t o = z.start + i;
+                const float lf = g_lz_frac[o] / 255.f;
+                float px = 1.f;
+                float cr = z.r, cg = z.g, cb = z.b;
+
+                // Complete-on-trigger: overlapping pulses REPLACE the base
+                // envelope; brightness is the strongest travelling band.
+                if (use_pulses) {
+                    if (z.pattern == 6) {                // gradient colours the band
+                        cr = z.r + (z.r2 - z.r) * lf;
+                        cg = z.g + (z.g2 - z.g) * lf;
+                        cb = z.b + (z.b2 - z.b) * lf;
+                    }
+                    float best = 0.f;
+                    for (uint8_t k = 0; k < z.npulses; ++k) {
+                        const float d = fabsf(lf - z.pulses[k]);
+                        const float bb = fmaxf(0.f, 1.f - d / 0.18f);
+                        best = fmaxf(best, bb * bb);
+                    }
+                    const float e = (floor_lvl + (1.f - floor_lvl) * best) * zbf;
+                    g_led_px[o][0] = (uint8_t)(cr * e);
+                    g_led_px[o][1] = (uint8_t)(cg * e);
+                    g_led_px[o][2] = (uint8_t)(cb * e);
+                    continue;
+                }
+
+                switch (z.pattern) {
+                case 4: {                                // Chase: dot + fading tail
+                    if (z.linked) {                      // walks the pair's fraction 0→1
+                        float head = fmodf(breathe_hz * t, 1.f); if (head < 0) head += 1.f;
+                        float d = head - lf; if (d < 0) d += 1.f;
+                        px = fmaxf(0.f, 1.f - d / 0.35f); px *= px;
+                    } else {
+                        float head = fmodf(breathe_hz * t, 1.f); if (head < 0) head += 1.f;
+                        head *= z.count;
+                        float d = head - i; if (d < 0) d += z.count;
+                        const float tail = fmaxf(3.f, z.count * 0.5f);
+                        px = fmaxf(0.f, 1.f - d / tail); px *= px;
+                    }
+                    break;
+                }
+                case 5: {                                // Sparkle: per-pixel twinkle
+                    const uint32_t h = ((uint32_t)o * 2654435761u) ^ 0x9E3779B9u;
+                    const float rate  = 0.5f + (h & 0xFF) / 96.f;
+                    const float phase = ((h >> 8) & 0xFFFF) / 65536.f;
+                    const float v = 0.5f * (1.f - cosf(2.f * (float)PI * (rate * t + phase)));
+                    px = v * v * v; break;
+                }
+                case 6: {                                // Gradient: colour→colour2, scroll
+                    float m = lf;
+                    if (wave_hz != 0.f) {
+                        float f = lf + wave_hz * t; f -= floorf(f);
+                        m = z.linked ? f : (1.f - fabsf(2.f * f - 1.f));   // passthrough vs ping-pong
+                    }
+                    cr = z.r + (z.r2 - z.r) * m;
+                    cg = z.g + (z.g2 - z.g) * m;
+                    cb = z.b + (z.b2 - z.b) * m;
+                    break;
+                }
+                case 7: {                                // Wave: bright band travels the length
+                    float head = fmodf(wave_hz * t, 1.f); if (head < 0) head += 1.f;
+                    float d = fabsf(lf - head);
+                    if (!z.linked) d = fminf(d, 1.f - d);   // standalone wraps; linked passes through
+                    px = fmaxf(0.f, 1.f - d / 0.18f); px *= px; break;
+                }
+                case 3: {                                // Level: mic-reactive (LVOL feed)
+                    const float L = vol;
+                    switch (z.level_style) {
+                    case 1: px = fminf(fmaxf((L - lf) / edge + 0.5f, 0.f), 1.f); break;                 // Meter
+                    case 2: { const float d = fabsf(lf - 0.5f) * 2.f;
+                              px = fminf(fmaxf((L - d) / edge + 0.5f, 0.f), 1.f); break; }              // CenterMeter
+                    case 3: { const float fill = fminf(fmaxf((L - lf) / edge + 0.5f, 0.f), 1.f);
+                              const float mk = (fabsf(lf - peak) <= 1.5f * edge) ? 1.f : 0.f;
+                              px = fmaxf(fill * 0.65f, mk); break; }                                    // Peak
+                    case 4: { const float d = fabsf(lf - 0.5f) * 2.f;
+                              px = fminf(fmaxf(L * 1.5f - d * (1.f - L), 0.f), 1.f); break; }           // Pulse
+                    default: px = L; break;                                                            // Glow
+                    }
+                    break;
+                }
+                default: break;                          // Solid: px = 1
+                }
+                const float m = env * px * sgate;
+                const float e = (floor_lvl + (1.f - floor_lvl) * m) * zbf;
+                g_led_px[o][0] = (uint8_t)(cr * e);
+                g_led_px[o][1] = (uint8_t)(cg * e);
+                g_led_px[o][2] = (uint8_t)(cb * e);
+            }
+        }
+
+        // White flash overlay — survives whatever base pattern is on, fades out.
+        if (z.flash_end > now && z.flash_end > z.flash_start) {
+            float fl = (float)(z.flash_end - now) / (float)(z.flash_end - z.flash_start);
+            if (fl > 1.f) fl = 1.f;
+            const float inv = 1.f - fl;
+            for (uint16_t i = 0; i < z.count; ++i) {
+                const uint16_t o = z.start + i;
+                for (int c = 0; c < 3; ++c)
+                    g_led_px[o][c] = (uint8_t)(g_led_px[o][c] * inv + 255.f * fl);
+            }
+        }
+    }
+    led_show();
+}
+
+// Parse a 6-char "RRGGBB" hex colour. Leaves the outputs untouched on bad input.
+bool parse_hex_rgb(const String& s, uint8_t& r, uint8_t& g, uint8_t& b) {
+    if (s.length() < 6) return false;
+    int v[6];
+    for (int k = 0; k < 6; ++k) { v[k] = hexval(s[k]); if (v[k] < 0) return false; }
+    r = (uint8_t)((v[0] << 4) | v[1]);
+    g = (uint8_t)((v[2] << 4) | v[3]);
+    b = (uint8_t)((v[4] << 4) | v[5]);
+    return true;
+}
+
+// "LZONE <zi> <start> <count>" — place/resize zone zi on the shared chain
+// (count 0 disables it). Grows g_led_n so led_show() covers the whole chain.
+void lzone_line(const String& line) {
+    if (kLedZonePin < 0) return;
+    String t[4];
+    if (split_ws(line, t, 4) < 4) return;
+    const int zi = t[1].toInt();
+    if (zi < 0 || zi >= kLedZones) return;
+    g_lz[zi].start = (uint16_t)constrain(t[2].toInt(), 0, (int)kLedZoneMax - 1);
+    g_lz[zi].count = (uint16_t)constrain(t[3].toInt(), 0, (int)kLedZoneMax);
+    const int end = g_lz[zi].start + g_lz[zi].count;
+    if (end > (int)g_led_n) g_led_n = (uint16_t)constrain(end, 1, (int)kLedZoneMax);
+    g_zone_active = true;
+}
+
+// "LZP <zi> <pattern> <RRGGBB> <RRGGBB2> <breathe_mHz> <wave_mHz> <zbright>
+//      <minlevel> [flags] [level_style] [sound_thresh] [sound_decay_mHz]"
+// — the zone's look. This is the "change pattern / colours" command. The tail is
+// optional (older senders stop at minlevel). flags: bit0 linked, bit1
+// sound_trigger, bit2 sound_complete.
+void lzp_line(const String& line) {
+    if (kLedZonePin < 0) return;
+    String t[13];
+    const int nt = split_ws(line, t, 13);
+    if (nt < 9) return;
+    const int zi = t[1].toInt();
+    if (zi < 0 || zi >= kLedZones) return;
+    LedZoneState& z = g_lz[zi];
+    z.pattern = (uint8_t)constrain(t[2].toInt(), 0, 7);
+    parse_hex_rgb(t[3], z.r,  z.g,  z.b);
+    parse_hex_rgb(t[4], z.r2, z.g2, z.b2);
+    z.breathe_mhz = t[5].toInt();
+    z.wave_mhz    = t[6].toInt();
+    z.zbright     = (uint8_t)constrain(t[7].toInt(), 0, 255);
+    z.min_level   = (uint8_t)constrain(t[8].toInt(), 0, 255);
+    const uint8_t flags = (nt >= 10) ? (uint8_t)t[9].toInt() : 0;
+    z.linked          = (flags & 0x01) ? 1 : 0;
+    z.sound_trigger   = (flags & 0x02) ? 1 : 0;
+    z.sound_complete  = (flags & 0x04) ? 1 : 0;
+    z.level_style     = (nt >= 11) ? (uint8_t)constrain(t[10].toInt(), 0, 4) : 0;
+    z.sound_thresh    = (nt >= 12) ? (uint8_t)constrain(t[11].toInt(), 0, 255) : 77;
+    z.sound_decay_mhz = (nt >= 13) ? t[12].toInt() : 2000;
+    if (g_zone_sync && zi < 4) g_zone_t0 = millis();     // realign side zones on change
+    g_zone_active = true;
+}
+
+// "LVOL <vol0-255> [peak0-255]" — live mic level for Level + the sound gate.
+void lvol_line(const String& line) {
+    String t[3];
+    const int nt = split_ws(line, t, 3);
+    if (nt < 2) return;
+    g_zone_vol  = constrain(t[1].toInt(), 0, 255) / 255.f;
+    g_zone_peak = (nt >= 3) ? constrain(t[2].toInt(), 0, 255) / 255.f : g_zone_vol;
+    g_zone_active = true;
+}
+
+// "LZG <start> <hexfrac...>" — per-LED length fraction (00..FF) from absolute
+// index `start`, chunkable. Only Gradient/Wave zones need it.
+void lzg_line(const String& line) {
+    int sp = line.indexOf(' ', 4);
+    if (sp < 0) return;
+    int idx = line.substring(4, sp).toInt();
+    const int hstart = sp + 1;
+    for (int i = hstart; i + 1 < (int)line.length() && idx < (int)kLedZoneMax; i += 2, ++idx) {
+        const int hi = hexval(line[i]), lo = hexval(line[i + 1]);
+        if (hi < 0 || lo < 0) break;
+        if (idx >= 0) g_lz_frac[idx] = (uint8_t)((hi << 4) | lo);
+    }
+    g_zone_active = true;
+}
+
+// "LZF <zi> <ms>" — fire a white flash overlay on zone zi.
+void lzf_line(const String& line) {
+    String t[3];
+    if (split_ws(line, t, 3) < 3) return;
+    const int zi = t[1].toInt();
+    if (zi < 0 || zi >= kLedZones) return;
+    const uint32_t ms = (uint32_t)constrain(t[2].toInt(), 1, 10000);
+    g_lz[zi].flash_start = millis();
+    g_lz[zi].flash_end   = g_lz[zi].flash_start + ms;
+    g_zone_active = true;
+}
+
+// "LZSYNC <0|1>" — share one phase origin across the four side zones so their
+// time-based effects start aligned.
+void lzsync_line(const String& line) {
+    String t[2];
+    if (split_ws(line, t, 2) < 2) return;
+    g_zone_sync = (t[1].toInt() != 0);
+    if (g_zone_sync) g_zone_t0 = millis();
+    g_zone_active = true;
 }
 
 void touch_setup() {
@@ -299,6 +613,7 @@ void ledz_line(const String& line) {
     const uint8_t g = constrain(t[2].toInt(), 0, 255);
     const uint8_t b = constrain(t[3].toInt(), 0, 255);
     if (nt >= 5) g_led_n = constrain(t[4].toInt(), 1, (int)kLedZoneMax);
+    g_zone_active = false;                       // legacy whole-chain path reclaims the strip
     g_led_mode = (r || g || b) ? 1 : 0;
     led_fill(r, g, b);
     led_show();
@@ -311,6 +626,7 @@ void ledp_line(const String& line) {
     String t[7];
     const int nt = split_ws(line, t, 7);
     if (nt < 2) return;
+    g_zone_active = false;                       // legacy whole-chain path reclaims the strip
     g_led_mode = constrain(t[1].toInt(), 0, 4);
     if (nt >= 5) {
         g_led_r = constrain(t[2].toInt(), 0, 255);
@@ -354,6 +670,7 @@ void ledf_line(const String& line) {
             if (idx + 1 > (int)g_led_n) g_led_n = idx + 1;
         }
     }
+    g_zone_active = false;              // legacy frame-streaming path reclaims the strip
     g_led_mode = 5;                     // frame-streamed: stop local patterns
     g_led_dirty = true;
 }
@@ -581,6 +898,12 @@ void handle_line(const String& line) {
     if (line.startsWith("LEDB "))   { ledb_line(line);  return; }
     if (line.startsWith("LEDF "))   { ledf_line(line);  return; }
     if (line == "LEDSHOW")          { if (g_led_dirty) { led_show(); g_led_dirty = false; } return; }
+    if (line.startsWith("LZONE "))  { lzone_line(line);  return; }   // coproc_local: per-zone descriptors
+    if (line.startsWith("LZP "))    { lzp_line(line);    return; }
+    if (line.startsWith("LZG "))    { lzg_line(line);    return; }
+    if (line.startsWith("LZF "))    { lzf_line(line);    return; }
+    if (line.startsWith("LZSYNC ")) { lzsync_line(line); return; }
+    if (line.startsWith("LVOL "))   { lvol_line(line);   return; }
     if (line == "ADCREAD")          { adc_read();       return; }
     if (line == "PINS")             { pins_dump();      return; }
 #ifdef PERIPHERAL_HUB
@@ -686,7 +1009,8 @@ void loop() {
     }
 
     drain_input();
-    led_service(now);                           // local LED patterns (~30 fps)
+    led_service(now);                           // legacy whole-chain patterns (~30 fps)
+    led_zone_render(now);                        // coproc_local per-zone compositor (~60 fps)
 #ifdef PERIPHERAL_HUB
     periph_service();                           // boop poll · one temp step · fans
 #endif

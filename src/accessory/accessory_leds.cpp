@@ -467,7 +467,8 @@ void copy_zone_look(ZoneConfig& d, const ZoneConfig& s) {
 AccessoryLeds::AccessoryLeds(Config cfg)
     : cfg_(std::move(cfg)),
       strip_(std::make_unique<LedStrip>(cfg_.strip)),
-      coproc_(cfg_.transport == "coproc")
+      coproc_(cfg_.transport == "coproc"),
+      coproc_local_(cfg_.transport == "coproc_local")
 {
     strip_->set_global_brightness(cfg_.global_brightness);
     frame_.assign(static_cast<size_t>(std::max(0, strip_->count())) * 3, 0);
@@ -498,9 +499,9 @@ void AccessoryLeds::reconfigure(const Config& cfg) {
 bool AccessoryLeds::start() {
     if (!cfg_.enabled) return false;
     if (running_.load()) return true;
-    // Coproc transport owns no Pi SPI device — the frames go out over the
-    // coprocessor link (frame_sink_). Only the SPI path needs an open strip.
-    if (!coproc_ && !strip_->open()) {
+    // Coproc transports own no Pi SPI device — data goes out over the
+    // coprocessor link (frame_sink_ / cmd_sink_). Only the SPI path needs a strip.
+    if (!coproc_ && !coproc_local_ && !strip_->open()) {
         std::fprintf(stderr, "[led] accessory LEDs unavailable — SPI open failed\n");
         return false;
     }
@@ -519,7 +520,12 @@ void AccessoryLeds::stop() {
     stop_thread();
     if (!was_running) return;
     // Blank on shutdown so leftover pixels don't linger, and release the device.
-    if (coproc_) {
+    if (coproc_local_) {
+        // Turn every zone off on the coprocessor (it keeps animating otherwise).
+        if (cmd_sink_)
+            for (int zi = 0; zi < ZoneCount; ++zi)
+                cmd_sink_("LZP " + std::to_string(zi) + " 0 000000 000000 0 0 0 0");
+    } else if (coproc_) {
         if (frame_sink_ && strip_->count() > 0) {
             std::vector<uint8_t> black(static_cast<size_t>(strip_->count()) * 3, 0);
             frame_sink_(black.data(), strip_->count());
@@ -743,6 +749,7 @@ uint8_t AccessoryLeds::global_brightness() const {
 }
 
 void AccessoryLeds::render_loop() {
+    if (coproc_local_) { command_loop(); return; }   // Pico animates; we just send descriptors
     using clock = std::chrono::steady_clock;
     const double period_s = 1.0 / std::max(1.0, cfg_.frame_hz);
     const auto period = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -805,10 +812,9 @@ void AccessoryLeds::render_loop() {
                 ZoneConfig& F = zones[pr[1]];
                 if (H.count <= 0 || F.count <= 0) continue;
                 copy_zone_look(F, H);           // fin runs the hub's exact effect
-                if (H.grad_spatial)
-                    zone_group_spatial_fracs(H, F, H.grad_angle, lf_over[pr[0]], lf_over[pr[1]]);
-                else
-                    zone_group_len_fracs(H, F, lf_over[pr[0]], lf_over[pr[1]]);
+                // Flow ALONG the appendage (hub → fin tip) so each cheek radiates
+                // out to its own tip, not a spatial-angle sweep across the face.
+                zone_group_len_fracs(H, F, lf_over[pr[0]], lf_over[pr[1]]);
             }
         }
 
@@ -924,6 +930,204 @@ void AccessoryLeds::render_loop() {
             for (int i = 0; i < n; ++i)
                 strip_->set_pixel(i, frame_[i*3], frame_[i*3+1], frame_[i*3+2]);
             strip_->show();
+        }
+        std::this_thread::sleep_until(next_t);
+    }
+}
+
+// coproc_local transport: the coprocessor animates the zones itself, so this
+// thread stops compositing pixels and instead becomes a CONTROLLER — it keeps a
+// shadow of the descriptor the coprocessor currently holds for each zone and
+// emits a command only when something changes, so the USB link goes near-silent
+// when nothing is moving. Autonomous patterns (Off/Solid/Breathe/Chase/Sparkle/
+// Gradient/Wave) + flash run entirely on the MCU. Level + follow-face send their
+// stored colour and render static there until their live feeds land (phase 2).
+void AccessoryLeds::command_loop() {
+    using clock = std::chrono::steady_clock;
+    // Descriptors change rarely; 30 Hz makes menu edits feel instant while the
+    // link stays quiet. Nothing is sent unless a value actually changed.
+    const auto period = std::chrono::microseconds(1'000'000 / 30);
+
+    const double dt = 1.0 / 30.0;         // fixed tick, for the held-peak decay
+
+    struct ZoneShadow {
+        bool    valid = false;
+        int     start = -1, count = -1, pattern = -1, min_level = -1;
+        int     flags = -1, level_style = -1, sound_thresh = -1;
+        uint8_t r = 0, g = 0, b = 0, r2 = 0, g2 = 0, b2 = 0, zbright = 0;
+        long    breathe_mhz = INT32_MIN, wave_mhz = INT32_MIN, sound_decay_mhz = INT32_MIN;
+        std::vector<uint8_t> fracs;
+    };
+    std::array<ZoneShadow, ZoneCount> shadow;
+    int shadow_gbright = -1, shadow_sync = -1, shadow_vol = -1, shadow_peak = -1;
+    std::array<int64_t, ZoneCount> shadow_flash_end;
+    shadow_flash_end.fill(0);
+    float peak_hold = 0.f;                 // held mic peak for the Level "Peak" marker
+    bool force = true;                    // first pass pushes the full state
+
+    auto emit = [&](const std::string& s) { if (cmd_sink_) cmd_sink_(s); };
+    auto hex2 = [](uint8_t v, char* out) {
+        static const char* H = "0123456789ABCDEF";
+        out[0] = H[v >> 4]; out[1] = H[v & 0xF];
+    };
+
+    while (running_.load()) {
+        const auto next_t = clock::now() + period;
+
+        std::array<ZoneConfig, ZoneCount> zones;
+        uint8_t gbright;
+        bool    sync_sides;
+        {
+            std::lock_guard<std::mutex> lk(cfg_mtx_);
+            zones      = cfg_.zones;
+            gbright    = cfg_.global_brightness;
+            sync_sides = cfg_.sync_sides;
+        }
+        const bool link_areas = link_areas_.load();
+
+        // Link areas: the fin adopts its hub's look, and the pair shares one
+        // continuous fraction axis (lf_over) so a swept effect passes hub→fin as
+        // one area. Mirrors the render loop; the `linked` flag tells the MCU to
+        // use passthrough (no-wrap) math for Chase/Wave/Gradient.
+        std::array<std::vector<float>, ZoneCount> lf_over;
+        std::array<bool, ZoneCount> linked{};
+        if (link_areas) {
+            const int pairs[2][2] = {
+                { (int)Zone::LeftCheekhub,  (int)Zone::LeftFin  },
+                { (int)Zone::RightCheekhub, (int)Zone::RightFin } };
+            for (const auto& pr : pairs) {
+                ZoneConfig& H = zones[pr[0]];
+                ZoneConfig& F = zones[pr[1]];
+                if (H.count <= 0 || F.count <= 0) continue;
+                copy_zone_look(F, H);                     // fin runs the hub's exact effect
+                // Linked areas flow ALONG the appendage (hub → fin tip) so each
+                // cheek radiates out to its own tip, rather than a spatial-angle
+                // projection that sweeps diagonally across the whole face.
+                zone_group_len_fracs(H, F, lf_over[pr[0]], lf_over[pr[1]]);
+                linked[pr[0]] = linked[pr[1]] = true;
+            }
+        }
+
+        if (cmd_sink_) {
+            // Live mic feed: Level + the sound gate need ~30 Hz volume. Track the
+            // held peak (Level "Peak" marker) exactly like the renderer, and send
+            // only while an audio zone is live and the value is actually moving.
+            bool any_audio = false;
+            for (const auto& z : zones)
+                if (z.pattern == Pattern::Level || z.sound_trigger) { any_audio = true; break; }
+            const float vol_now = std::clamp(audio_volume_.load(), 0.f, 1.f);
+            peak_hold = std::max(peak_hold - peak_decay_.load() * (float)dt, vol_now);
+            if (any_audio) {
+                const int v = (int)std::lround(vol_now * 255.f);
+                const int p = (int)std::lround(std::clamp(peak_hold, 0.f, 1.f) * 255.f);
+                if (force || v != shadow_vol || p != shadow_peak) {
+                    emit("LVOL " + std::to_string(v) + " " + std::to_string(p));
+                    shadow_vol = v; shadow_peak = p;
+                }
+            }
+
+            if (force || (int)gbright != shadow_gbright) {
+                shadow_gbright = gbright;
+                emit("LEDB " + std::to_string((int)gbright));
+            }
+            if (force || (int)sync_sides != shadow_sync) {
+                shadow_sync = sync_sides;
+                emit(std::string("LZSYNC ") + (sync_sides ? "1" : "0"));
+            }
+            for (int zi = 0; zi < ZoneCount; ++zi) {
+                const ZoneConfig& z = zones[zi];
+                ZoneShadow& sh = shadow[zi];
+
+                // Geometry: where the zone sits on the shared chain.
+                if (force || sh.start != z.start || sh.count != z.count) {
+                    emit("LZONE " + std::to_string(zi) + " " +
+                         std::to_string(z.start) + " " + std::to_string(z.count));
+                    sh.start = z.start; sh.count = z.count;
+                }
+
+                // Length fractions — Level/Gradient/Wave read them per-pixel, and
+                // any linked zone needs its combined hub+fin axis. Ship the
+                // resolved table so the MCU needs no geometry math.
+                const bool self_fracs =
+                    (z.pattern == Pattern::Level || z.pattern == Pattern::Gradient ||
+                     z.pattern == Pattern::Wave);
+                if ((linked[zi] || self_fracs) && z.count > 0) {
+                    std::vector<float> lf;
+                    if (linked[zi] && !lf_over[zi].empty()) lf = lf_over[zi];
+                    else lf = z.grad_spatial ? zone_spatial_fracs(z, z.grad_angle)
+                                             : zone_len_fracs(z);
+                    std::vector<uint8_t> fr(static_cast<size_t>(z.count), 0);
+                    for (int i = 0; i < z.count; ++i) {
+                        const float f = (i < (int)lf.size()) ? lf[i] : 0.f;
+                        const int v = (int)std::lround(std::clamp(f, 0.f, 1.f) * 255.f);
+                        fr[i] = static_cast<uint8_t>(std::clamp(v, 0, 255));
+                    }
+                    if (force || fr != sh.fracs) {
+                        // Chunk under the firmware's 600-char rx buffer.
+                        for (int off = 0; off < (int)fr.size(); off += 200) {
+                            const int n = std::min(200, (int)fr.size() - off);
+                            std::string msg = "LZG " + std::to_string(z.start + off) + " ";
+                            msg.reserve(msg.size() + static_cast<size_t>(n) * 2 + 1);
+                            char hb[2];
+                            for (int i = 0; i < n; ++i) {
+                                hex2(fr[off + i], hb);
+                                msg.push_back(hb[0]); msg.push_back(hb[1]);
+                            }
+                            emit(msg);
+                        }
+                        sh.fracs = std::move(fr);
+                    }
+                } else if (!sh.fracs.empty()) {
+                    sh.fracs.clear();
+                }
+
+                // Look: pattern, colours, rates, brightness, floor, link + audio.
+                const long breathe_mhz = std::lround(z.breathe_hz * 1000.0);
+                const long wave_mhz    = std::lround(z.wave_speed * 1000.0);
+                const int  min_level   = std::clamp((int)std::lround(z.min_level * 255.f), 0, 255);
+                const int  flags = (linked[zi]        ? 0x01 : 0) |
+                                   (z.sound_trigger   ? 0x02 : 0) |
+                                   (z.sound_complete  ? 0x04 : 0);
+                const int  level_style     = static_cast<int>(z.level_style);
+                const int  sound_thresh    = std::clamp((int)std::lround(z.sound_threshold * 255.f), 0, 255);
+                const long sound_decay_mhz = std::lround(z.sound_decay * 1000.0);
+                if (force || !sh.valid ||
+                    sh.pattern != (int)z.pattern ||
+                    sh.r  != z.r  || sh.g  != z.g  || sh.b  != z.b ||
+                    sh.r2 != z.r2 || sh.g2 != z.g2 || sh.b2 != z.b2 ||
+                    sh.breathe_mhz != breathe_mhz || sh.wave_mhz != wave_mhz ||
+                    sh.zbright != z.zone_brightness || sh.min_level != min_level ||
+                    sh.flags != flags || sh.level_style != level_style ||
+                    sh.sound_thresh != sound_thresh || sh.sound_decay_mhz != sound_decay_mhz) {
+                    char col[7], col2[7]; col[6] = col2[6] = '\0';
+                    hex2(z.r,  col  + 0); hex2(z.g,  col  + 2); hex2(z.b,  col  + 4);
+                    hex2(z.r2, col2 + 0); hex2(z.g2, col2 + 2); hex2(z.b2, col2 + 4);
+                    emit("LZP " + std::to_string(zi) + " " + std::to_string((int)z.pattern) +
+                         " " + col + " " + col2 + " " +
+                         std::to_string(breathe_mhz) + " " + std::to_string(wave_mhz) + " " +
+                         std::to_string((int)z.zone_brightness) + " " + std::to_string(min_level) +
+                         " " + std::to_string(flags) + " " + std::to_string(level_style) +
+                         " " + std::to_string(sound_thresh) + " " + std::to_string(sound_decay_mhz));
+                    sh.pattern = (int)z.pattern;
+                    sh.r = z.r;  sh.g = z.g;  sh.b = z.b;
+                    sh.r2 = z.r2; sh.g2 = z.g2; sh.b2 = z.b2;
+                    sh.breathe_mhz = breathe_mhz; sh.wave_mhz = wave_mhz;
+                    sh.zbright = z.zone_brightness; sh.min_level = min_level;
+                    sh.flags = flags; sh.level_style = level_style;
+                    sh.sound_thresh = sound_thresh; sh.sound_decay_mhz = sound_decay_mhz;
+                }
+                sh.valid = true;
+
+                // Flash events: fire LZF once per new flash the sensor thread set.
+                const int64_t fe = flash_end_us_[zi].load();
+                const int64_t fs = flash_start_us_[zi].load();
+                if (fe > shadow_flash_end[zi] && fe > fs) {
+                    const int ms = (int)std::clamp<int64_t>((fe - fs) / 1000, 1, 10000);
+                    emit("LZF " + std::to_string(zi) + " " + std::to_string(ms));
+                    shadow_flash_end[zi] = fe;
+                }
+            }
+            force = false;
         }
         std::this_thread::sleep_until(next_t);
     }

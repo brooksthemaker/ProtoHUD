@@ -143,6 +143,10 @@ public:
     // Per-pixel frame for custom panels: rgb = 3 bytes/pixel, chunked into
     // "LEDF <start> <hex>" lines + "LEDSHOW". Future accessory-content hook.
     void send_led_frame(const uint8_t* rgb, int count);
+    // Accessory-LED "coproc_local" transport: one already-formatted zone command
+    // line (LZONE/LZP/LZG/LZF/LZSYNC) written verbatim + newline. The MCU then
+    // animates the zones itself. AccessoryLeds' command sink is wired here.
+    void send_led_command(const std::string& line);
     // One-shot ADC report: request, then poll adc_result() for
     // "ch0 <mV>mV  ch1 <mV>mV  ch2 <mV>mV".
     void request_adc();
@@ -180,6 +184,11 @@ private:
     void on_line(const std::string& line);    // parse one framed message → dispatch
     void handle_button(int id, bool is_long); // map id→GpioFunc, call dispatch_
     void push_pin_config();                   // send PINCFG map to the firmware
+    // Serialize every write() to fd_. Multiple threads send on this one link
+    // (accessory LED zone/LVOL from the render thread, MIC/servo/fan from the
+    // main loop, PONG from the reader), and a serial fd gives no atomicity —
+    // without this lock concurrent lines interleave and the firmware drops them.
+    void write_locked(const void* data, size_t n);
 
     CoprocConfig                  cfg_;
     std::function<void(GpioFunc)> dispatch_;
@@ -187,6 +196,7 @@ private:
     std::atomic<bool>             connected_{false};
     std::thread                   thread_;
     int                           fd_ = -1;   // serial or i2c fd
+    std::mutex                    write_mtx_; // serializes all write()s to fd_
     bool                          pins_pushed_ = false;  // once per connection
     bool                          pins_repushed_ = false;   // mismatch retry, once
     int                           pushed_count_  = 0;    // BTN lines last pushed

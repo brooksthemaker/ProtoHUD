@@ -3341,9 +3341,11 @@ int main(int argc, char* argv[]) {
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
     boop_sensor_ptr = &boop_sensor;   // expose for the menu's live tuning
 
-    // SPI-transport accessory LEDs start here; the coproc transport starts
-    // later, once the coprocessor link (and thus the frame sink) exists.
-    if (led_cfg.enabled && led_cfg.transport != "coproc" && !accessory_leds.start())
+    // SPI-transport accessory LEDs start here; the coproc transports ("coproc"
+    // frame-stream and "coproc_local" per-zone commands) start later, once the
+    // coprocessor link (and thus the frame/command sink) exists.
+    if (led_cfg.enabled && led_cfg.transport != "coproc" &&
+        led_cfg.transport != "coproc_local" && !accessory_leds.start())
         std::cerr << "[main] accessory LEDs unavailable — continuing without\n";
 
     // ── Light sensor (BH1750 ambient lux) ────────────────────────────────────
@@ -5475,6 +5477,15 @@ int main(int argc, char* argv[]) {
         });
         if (led_cfg.enabled && !accessory_leds.start())
             std::cerr << "[main] accessory LEDs (coproc) failed to start\n";
+    } else if (led_cfg.transport == "coproc_local") {
+        // Autonomous mode: the CM5 sends per-zone descriptor commands and the
+        // RP2350 animates the zones itself. The sink derefs the current
+        // coproc_inputs at call time, so it survives a coprocessor reload.
+        accessory_leds.set_cmd_sink([&](const std::string& line){
+            if (coproc_inputs) coproc_inputs->send_led_command(line);
+        });
+        if (led_cfg.enabled && !accessory_leds.start())
+            std::cerr << "[main] accessory LEDs (coproc_local) failed to start\n";
     }
 
     // Peripheral-hub wiring (firmware -DPERIPHERAL_HUB): boop pads on the

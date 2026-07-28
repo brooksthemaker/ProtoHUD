@@ -235,7 +235,16 @@ public:
     void set_frame_sink(std::function<void(const uint8_t* rgb, int count)> fn) {
         frame_sink_ = std::move(fn);
     }
+    // Coproc "local" transport (transport == "coproc_local"): instead of
+    // compositing pixels, the render thread diffs each zone against a shadow and
+    // emits per-zone descriptor commands (LZONE/LZG/LZP/LZF/LZSYNC/LEDB) to this
+    // sink whenever something changes, so the coprocessor animates the zones on
+    // its own clock. Wired to CoprocInputs::send_led_command. Set before start().
+    void set_cmd_sink(std::function<void(const std::string&)> fn) {
+        cmd_sink_ = std::move(fn);
+    }
     bool uses_coproc() const { return coproc_; }
+    bool uses_coproc_local() const { return coproc_local_; }
     int  total_count() const { return strip_ ? strip_->count() : 0; }
 
     // Per-zone tunables — picked up by the next render tick (≈ next 16 ms).
@@ -335,13 +344,16 @@ public:
 
 private:
     void render_loop();
+    void command_loop();  // coproc_local: diff zones + emit descriptor commands
     void stop_thread();   // stop + join the render thread WITHOUT closing the strip
 
     Config            cfg_;
     std::unique_ptr<LedStrip> strip_;     // rebuilt on reconfigure()
     bool              coproc_ = false;    // cfg_.transport == "coproc"
+    bool              coproc_local_ = false;  // cfg_.transport == "coproc_local"
     std::vector<uint8_t> frame_;          // composited RGB, 3 bytes/pixel
     std::function<void(const uint8_t*, int)> frame_sink_;   // coproc frame push
+    std::function<void(const std::string&)>  cmd_sink_;     // coproc_local command push
     double            last_send_ = 0.0;   // coproc send throttle (loop seconds)
     std::mutex        cfg_mtx_;       // guards cfg_.zones + global_brightness
     std::atomic<bool> running_ { false };

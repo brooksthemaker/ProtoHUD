@@ -5858,14 +5858,21 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         with_desc(submenu("Data Transport", std::vector<MenuItem>{
             leaf_sel("Pi GPIO  (SPI MOSI / GPIO10)",
                 [acc]{ if (acc) acc->transport = "spidev"; },
-                [acc]{ return acc && acc->transport != "coproc"; }),
-            leaf_sel("Coprocessor  (RP2350 GP37)",
+                [acc]{ return acc && acc->transport != "coproc" &&
+                                     acc->transport != "coproc_local"; }),
+            leaf_sel("Coprocessor — stream frames  (RP2350 GP37)",
                 [acc]{ if (acc) acc->transport = "coproc"; },
                 [acc]{ return acc && acc->transport == "coproc"; }),
-        }), "Where the accessory chain's DATA wire lands. Pi GPIO drives it "
-            "from the CM5's SPI MOSI (GPIO10 / pin 19); Coprocessor streams the "
-            "frames to the RP2350 and drives them on its GP37. The Pi computes "
-            "the zones/effects either way. Applies on restart."),
+            leaf_sel("Coprocessor — autonomous  (Pico animates)",
+                [acc]{ if (acc) acc->transport = "coproc_local"; },
+                [acc]{ return acc && acc->transport == "coproc_local"; }),
+        }), "Where the accessory chain's DATA wire lands, and who animates it. "
+            "Pi GPIO drives it from the CM5's SPI MOSI (GPIO10 / pin 19). "
+            "Coprocessor — stream frames: the Pi computes every pixel and streams "
+            "frames to the RP2350 (GP37). Coprocessor — autonomous: the Pi sends "
+            "high-level per-zone pattern/colour commands and the RP2350 runs the "
+            "animation itself (audio-reactive + follow-face render static for now). "
+            "Applies on restart."),
         led_zone_menu(accessory::Zone::LeftCheekhub,  "Cheek Hub Left"),
         led_zone_menu(accessory::Zone::RightCheekhub, "Cheek Hub Right"),
         led_zone_menu(accessory::Zone::LeftFin,       "Cheek Fin Left"),
