@@ -424,6 +424,14 @@
     "i2c_addr": 118,
     "poll_s": 5.0
   },
+  "light_sensor": {
+    "_about": "Ambient light sensor on I2C. The lux stream drives the face/emotion light responses: per-expression 'Gets Bright'/'Gets Dark' triggers and light While-conditions (Face Display > Expressions > Triggers), plus the move_bright/move_dark Automatic Reactions. type 'bh1750' (ROHM BH1750, addr 0x23 = 35, or 0x5C = 92 with ADDR high) or 'opt3001' (TI OPT3001, auto-ranging 0.01-83k lux with a photopic filter; ADDR pin picks the address: GND=0x44=68, VDD=0x45=69, SDA=0x46=70, SCL=0x47=71). Omit i2c_addr to use the selected chip's default.",
+    "enabled": false,
+    "type": "opt3001",
+    "i2c_bus": "/dev/i2c-1",
+    "i2c_addr": 68,
+    "poll_hz": 8.0
+  },
   "temperature": {
     "_about": "Temperature probes, read into the HUD/menu (System > Temperature) ~1 Hz and available to warn on. v1 reads DS18B20 1-Wire sensors: wire the data line to a spare GPIO (e.g. BCM 25, clear of the HUB75 bonnet) with a 4.7k pull-up to 3.3V, add `dtoverlay=w1-gpio,gpiopin=25` to /boot/firmware/config.txt, then find each probe id with `ls /sys/bus/w1/devices/` (they look like 28-XXXXXXXXXXXX). Many probes share the one data pin. id:\"\" uses the first probe found. type 'ds18b20' reads the CM5's 1-Wire bus; type 'coproc' reads a probe wired to the RP2350 coprocessor instead (peripheral-hub firmware; id = the 16-hex ROM from its TEMP reports). max31865/PT100 and i2c chips can be added later. A probe also drives the fan curve — point fans.temp_path at its /sys/bus/w1/devices/<id>/temperature file (or use fans.temp_probe for a coproc probe).",
     "enabled": false,

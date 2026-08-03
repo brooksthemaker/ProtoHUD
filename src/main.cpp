@@ -3346,8 +3346,8 @@ int main(int argc, char* argv[]) {
     if (led_cfg.enabled && led_cfg.transport != "coproc" && !accessory_leds.start())
         std::cerr << "[main] accessory LEDs unavailable — continuing without\n";
 
-    // ── Light sensor (BH1750 ambient lux) ────────────────────────────────────
-    // Hardware config (enable, bus, address, poll rate) comes from
+    // ── Light sensor (BH1750 / OPT3001 ambient lux) ──────────────────────────
+    // Hardware config (enable, chip type, bus, address, poll rate) comes from
     // cfg["light_sensor"]. The lux stream feeds the ExpressionDirector
     // (per-expression "Gets Bright"/"Gets Dark" triggers + While-conditions)
     // and the ReactionEngine's move-into-bright/dark reactions — the old
@@ -3356,8 +3356,13 @@ int main(int argc, char* argv[]) {
     if (cfg.contains("light_sensor")) {
         auto& jl = cfg["light_sensor"];
         light_cfg.enabled  = jval(jl, "enabled",  light_cfg.enabled);
+        light_cfg.type     = sensor::LightSensor::type_from_string(
+                                 jl.value("type", std::string("bh1750")));
         light_cfg.i2c_bus  = jl.value("i2c_bus",  light_cfg.i2c_bus);
-        light_cfg.i2c_addr = jval(jl, "i2c_addr", light_cfg.i2c_addr);
+        // Address default follows the chip (BH1750 0x23, OPT3001 0x44); an
+        // explicit i2c_addr still wins for ADDR-strapped parts.
+        light_cfg.i2c_addr = jval(jl, "i2c_addr",
+                                  sensor::LightSensor::default_addr(light_cfg.type));
         light_cfg.poll_hz  = jval(jl, "poll_hz",  light_cfg.poll_hz);
     }
     sensor::LightSensor light_sensor(light_cfg);
