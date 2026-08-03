@@ -1140,7 +1140,14 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         add_i2c("bno055",       "BNO055 IMU");
         add_i2c("mpu9250",      "MPU9250 IMU");
         add_i2c("boop",         "MPR121 boop");
-        add_i2c("light_sensor", "BH1750 light");
+        // Light-sensor label follows the configured chip (bh1750 / opt3001).
+        const auto light_type = sensor::LightSensor::type_from_string(
+            cfg.contains("light_sensor") && cfg["light_sensor"].is_object()
+                ? cfg["light_sensor"].value("type", std::string("bh1750"))
+                : std::string("bh1750"));
+        const std::string light_label =
+            std::string(sensor::LightSensor::chip_name(light_type)) + " light";
+        add_i2c("light_sensor", light_label.c_str());
 
         // SPI chains — every chain on /dev/spidev0.x claims SPI0 pins,
         // /dev/spidev1.x claims SPI1 pins. Record per-bus speed for the
@@ -1237,7 +1244,15 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         add_if("bno055",       0x28, "BNO055 IMU");
         add_if("mpu9250",      0x68, "MPU9250 IMU");
         add_if("boop",         0x5A, "MPR121 boop");
-        add_if("light_sensor", 0x23, "BH1750 light");
+        // Light-sensor default address + label follow the configured chip.
+        const auto light_type = sensor::LightSensor::type_from_string(
+            cfg.contains("light_sensor") && cfg["light_sensor"].is_object()
+                ? cfg["light_sensor"].value("type", std::string("bh1750"))
+                : std::string("bh1750"));
+        const std::string light_label =
+            std::string(sensor::LightSensor::chip_name(light_type)) + " light";
+        add_if("light_sensor", sensor::LightSensor::default_addr(light_type),
+               light_label.c_str());
         return out;
     };
 
