@@ -147,7 +147,16 @@ static constexpr int8_t  kServoPins[4]    = { 6, 7, 8, 9 };
 // Data moved off GP22 (that's the voice DAC reset) to free GP37. The APA102
 // clock (GP28) doubles as ADC ch2 — with APA102 you lose that ADC channel.
 static constexpr uint8_t  kLedZoneType    = 0;     // 0 = WS2812, 1 = APA102
+// The data pin follows the chip, like kTouchPins/kAdcPins above: GP37 only
+// exists on the RP2350B (QFN80) package. On RP2350A (standard Pico 2 / 2 W)
+// fall back to GP22 — it is only the voice DAC's reset line, so it is free
+// whenever the voice changer is off; with VOICE_CHANGER enabled on RP2350A,
+// move it or set -1 to disable the zone.
+#if NUM_BANK0_GPIOS >= 48
 static constexpr int8_t   kLedZonePin     = 37;    // data (GP37: free on the XL W)
+#else
+static constexpr int8_t   kLedZonePin     = 22;    // data (RP2350A: shares GP22 with the DAC reset)
+#endif
 static constexpr int8_t   kLedZoneClkPin  = 28;    // APA102 clock (WS2812: unused)
 static constexpr uint16_t kLedZoneCount   = 16;    // strip/panel pixel count
 static constexpr uint16_t kLedZoneMax     = 300;   // hard cap (frame buffer size)
