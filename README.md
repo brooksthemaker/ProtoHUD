@@ -114,7 +114,7 @@ Optional async timewarp warps each eye FBO using the latest IMU pose before comp
 
 | Component | Details |
 |-----------|---------|
-| SmartKnob | ESP32-S3 haptic rotary control |
+| SmartKnob | Haptic rotary control — Pico 2 (RP2350); ESP32-S3 firmware also supported |
 | GPIO buttons | 3 hardware buttons (see [GPIO Button Wiring](#gpio-button-wiring)) |
 | Wireless controller | ESP32-C3 over USB-serial → ESP-NOW in-paw remote (optional) |
 | Gamepad | Any SDL2-compatible USB / Bluetooth gamepad (optional) |
@@ -169,7 +169,7 @@ This section lists every physical connection for each controller in the system a
                      │         Raspberry Pi CM5                │
                      │                                         │
   OWLsight Left ─────┤ CSI0             USB-A ├──────────────────── Teensy 4.1
-  OWLsight Right ────┤ CSI1             USB-A ├──────────────────── SmartKnob (ESP32-S3)
+  OWLsight Right ────┤ CSI1             USB-A ├──────────────────── SmartKnob (Pico 2)
                      │                  USB-A ├──────────────────── RAK4631 LoRa radio
   GPIO 17, 27, 22 ───┤ GPIO             USB-A ├──────────────────── RP2350 Helmet Audio
   MPU-9250 (GY-9250)─┤ I2C-1 (GPIO2/3) USB-C ├──────────────────── VITURE Beast XR glasses
@@ -209,7 +209,7 @@ The GY-9250 breakout board includes onboard 4.7 kΩ pull-up resistors on SDA and
 | Port symlink      | Device       | Controller                      | Protocol |
 |-------------------|--------------|---------------------------------|----------|
 | `/dev/teensy`     | /dev/ttyACM0 | Teensy 4.1 (face LEDs)          | CDC serial 115200 |
-| `/dev/smartknob`  | /dev/ttyACM1 | SmartKnob (ESP32-S3)            | CDC serial 115200 |
+| `/dev/smartknob`  | /dev/ttyACM1 | SmartKnob (Pico 2 / ESP32-S3)   | CDC serial 115200 |
 | `/dev/lora`       | /dev/ttyACM2 | RAK4631 LoRa radio              | CDC serial 115200 |
 | `hw:CARD=HelmetAudio6Mic,DEV=0` | USB Audio | RP2350 Helmet Audio | UAC2 stereo 48 kHz |
 
@@ -267,14 +267,16 @@ The Teensy runs the [ProtoTracer](https://github.com/coelacanthus/ProtoTracer) f
 
 ---
 
-### SmartKnob — ESP32-S3
+### SmartKnob — Pico 2 (RP2350)
 
-The SmartKnob provides haptic detent navigation. It communicates with the CM5 over a framed binary UART protocol at 115200 baud.
+The SmartKnob provides haptic detent navigation. It communicates with the CM5 over a framed binary UART protocol at 115200 baud. The firmware ([Smart-Knob-Redux](https://github.com/brooksthemaker/Smart-Knob-Redux)) targets a Raspberry Pi Pico 2 (RP2350); the original ESP32-S3 build remains available as the `esp32s3` env.
 
-**CM5 → SmartKnob:** USB-A (CM5) to USB-C (SmartKnob)  
-**Serial port on CM5:** `/dev/smartknob` → `/dev/ttyACM1`
+**CM5 → SmartKnob:** USB-A (CM5) to micro-USB (Pico 2)  
+**Serial port on CM5:** `/dev/smartknob` → `/dev/ttyACM1` (stable path: `/dev/serial/by-id/usb-ProtoHUD_SmartKnob_*-if00`)
 
 The SmartKnob has no additional external wiring to the CM5 beyond the USB cable. All data exchange (position events, haptic commands, sleep control) flows over the USB serial link. See [SmartKnob Menu Navigation](#smartknob-menu-navigation) for the full protocol table.
+
+Like the button coprocessor, the Pico 2 knob can be reflashed from the CM5 without touching BOOTSEL — `scripts/flash_knob.sh --build` in the Smart-Knob-Redux repo uses the same 1200-baud-touch + picotool flow as `scripts/flash_coproc.sh`, and the udev rule from `scripts/install_coproc_tools.sh` (VID 2e8a) already covers it.
 
 ---
 
@@ -317,11 +319,12 @@ The optional GPS module connects to the RAK4631 via WisBlock Slot A UART (`Seria
 
 ---
 
-#### SmartKnob / ESP32-S3
+#### SmartKnob / Pico 2
 
 | Alternative | Pros | Cons |
 |-------------|------|------|
-| **SmartKnob (ESP32-S3)** *(default)* | Open hardware, haptic detents feel premium, USB-C | Requires motor + driver PCB; must source or build the custom PCB |
+| **SmartKnob (Pico 2 / RP2350)** *(default)* | Open hardware, haptic detents feel premium, no-BOOTSEL reflash from the CM5 like the coprocessor | Requires motor + driver PCB; must source or build the custom PCB |
+| **SmartKnob (ESP32-S3)** | Original hardware, same firmware repo (`esp32s3` env) | Requires motor + driver PCB; flashes over esptool instead of picotool |
 | **ESP32-S3 (bare, rotary encoder)** | Drop-in firmware replacement (same UART protocol) | No haptic feedback |
 | **GPIO rotary encoder (direct to CM5)** | Zero additional hardware | No haptic feedback; uses GPIO pins |
 
@@ -979,7 +982,7 @@ Size is a fraction of the current eye height (1080 px at default resolution):
 
 ## SmartKnob Menu Navigation
 
-The SmartKnob (ESP32-S3) provides haptic-feedback detent navigation over UART.
+The SmartKnob (Pico 2 / RP2350) provides haptic-feedback detent navigation over UART.
 
 ### Menu Structure
 

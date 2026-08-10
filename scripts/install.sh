@@ -302,6 +302,12 @@ SUBSYSTEM=="sound", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b350", \
 SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="0483", \
     SYMLINK+="teensy", MODE="0660", GROUP="dialout"
 
+# SmartKnob — Pico 2 (RP2350) firmware. Matched on the USB product string,
+# NOT the bare Raspberry Pi VID 0x2e8a — that would also catch the button
+# coprocessor and anything else RP2-based on the hub.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{product}=="SmartKnob", \
+    SYMLINK+="smartknob", MODE="0660", GROUP="dialout"
+
 # SmartKnob — ESP32-S3 native USB (Espressif VID 0x303a)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", \
     SYMLINK+="smartknob", MODE="0660", GROUP="dialout"
