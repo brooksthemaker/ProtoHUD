@@ -28,6 +28,34 @@ int zone_total(const ZoneConfig& z) {
     return s;
 }
 
+std::array<int, ZoneCount> normalize_wire_order(const std::array<int, ZoneCount>& in) {
+    std::array<int, ZoneCount> out{};
+    bool used[ZoneCount] = {};
+    int  n = 0;
+    for (int v : in)
+        if (v >= 0 && v < ZoneCount && !used[v]) { used[v] = true; out[n++] = v; }
+    // Anything missing (duplicate or out-of-range entries above) joins the tail
+    // in enum order, so every zone is always on the chain exactly once.
+    for (int z = 0; z < ZoneCount && n < ZoneCount; ++z)
+        if (!used[z]) out[n++] = z;
+    return out;
+}
+
+int chain_zones(std::array<ZoneConfig, ZoneCount>& zones,
+                const std::array<int, ZoneCount>& order) {
+    const auto ord = normalize_wire_order(order);
+    int cursor = 0;
+    for (int oi = 0; oi < ZoneCount; ++oi) {
+        ZoneConfig& z = zones[ord[oi]];
+        z.count = zone_total(z);
+        // An empty zone takes no chain space but must still hold a sane start,
+        // so giving it LEDs later doesn't inherit a stale offset.
+        z.start = cursor;
+        cursor += std::max(0, z.count);
+    }
+    return cursor;
+}
+
 std::vector<float> zone_len_fracs(const ZoneConfig& z) {
     const auto secs = resolve_sections(z);
     const int nsec = static_cast<int>(secs.size());
@@ -206,14 +234,71 @@ inline double effect_period(const ZoneConfig& z) {
 }
 }  // namespace
 
+// How much of the overlay shows at axis fraction f, 0..1. Each shape is written
+// so amount == 0 yields EXACTLY zero coverage everywhere — otherwise a feathered
+// edge would leave a smear of colour sitting on the zone at rest.
+double overlay_cover(const ZoneOverlay& ov, double f) {
+    const double soft = std::clamp(static_cast<double>(ov.softness), 0.02, 1.0);
+    const double a    = std::clamp(static_cast<double>(ov.amount), 0.0, 1.0);
+    if (a <= 0.0) return 0.0;
+    switch (ov.shape) {
+    case OverlayShape::Rise: {
+        // Fills from the axis start up to `amount`, feathered leading edge. The
+        // (1+soft) overshoot lets amount==1 cover the far end completely.
+        return std::clamp((a * (1.0 + soft) - f) / soft, 0.0, 1.0);
+    }
+    case OverlayShape::Sweep: {
+        // A band travelling at `phase`; `amount` fades the whole band in and out
+        // so a sweep can still rise and retract like the others.
+        const double d = std::fabs(f - static_cast<double>(ov.phase));
+        return std::max(0.0, 1.0 - d / std::max(0.02, soft)) * a;
+    }
+    case OverlayShape::Bloom: {
+        // Grows outward from the middle of the axis; `amount` is the radius.
+        const double d = std::fabs(f - 0.5) * 2.0;
+        return std::clamp((a * (1.0 + soft) - d) / soft, 0.0, 1.0);
+    }
+    }
+    return 0.0;
+}
+
+// Composite the overlay over whatever the pattern already wrote. One pass at the
+// end rather than inside the per-LED loop, so it covers the normal path AND the
+// sound-pulse branch (which `continue`s past the usual write) with one piece of
+// code that can't drift between them.
+void blend_overlay(const ZoneConfig& z, const ZoneOverlay& ov,
+                   std::vector<uint8_t>& out, int n) {
+    if (!ov.active || ov.amount <= 0.f || n <= 0) return;
+    const double op = std::clamp(static_cast<double>(ov.opacity), 0.0, 1.0);
+    if (op <= 0.0) return;
+    // The overlay gets its OWN axis, so a blush can rise vertically while the
+    // zone's gradient runs along the appendage.
+    const std::vector<float> of = zone_spatial_fracs(z, ov.angle);
+    for (int i = 0; i < n && i * 3 + 2 < static_cast<int>(out.size()); ++i) {
+        const double f = (i < static_cast<int>(of.size())) ? of[i] : 0.0;
+        const double c = overlay_cover(ov, f) * op;
+        if (c <= 0.0) continue;
+        out[3*i+0] = static_cast<uint8_t>(out[3*i+0] * (1.0 - c) + ov.r * c);
+        out[3*i+1] = static_cast<uint8_t>(out[3*i+1] * (1.0 - c) + ov.g * c);
+        out[3*i+2] = static_cast<uint8_t>(out[3*i+2] * (1.0 - c) + ov.b * c);
+    }
+}
+
 void zone_base_colors(const ZoneConfig& z, double t, float vol, uint32_t fc,
                       const uint32_t* face_ramp, int ramp_n,
                       std::vector<uint8_t>& out, float peak, float sound_gate,
                       const std::vector<float>* lf_override,
-                      const std::vector<float>* pulses) {
+                      const std::vector<float>* pulses,
+                      const ZoneOverlay* ov) {
     const int n = std::max(0, z.count);
     out.assign(static_cast<size_t>(n) * 3, 0);
-    if (n <= 0 || z.pattern == Pattern::Off) return;
+    if (n <= 0) return;
+    // An Off zone stays black, but an overlay still shows on it — a blush on a
+    // dark cheek is a perfectly reasonable thing to ask for.
+    if (z.pattern == Pattern::Off) {
+        if (ov) blend_overlay(z, *ov, out, n);
+        return;
+    }
 
     const uint8_t zr = z.follow_face ? uint8_t((fc >> 16) & 0xFF) : z.r;
     const uint8_t zg = z.follow_face ? uint8_t((fc >>  8) & 0xFF) : z.g;
@@ -221,15 +306,16 @@ void zone_base_colors(const ZoneConfig& z, double t, float vol, uint32_t fc,
 
     // A follow zone with a fed ramp colors each LED from the eye's gradient.
     const bool use_ramp   = z.follow_face && face_ramp && ramp_n > 0;
-    // A custom multi-stop gradient (≥2 stops) colors each LED along the length.
-    // For Gradient it overrides the 2-color Color→Color2 ramp; it also tints
-    // Wave / Level / Chase — there the effect's envelope just modulates the
-    // brightness of the gradient-coloured base. (Follow-face ramp wins over it.)
+    // The multi-stop gradient is the ONLY gradient source — the legacy
+    // Color→Color 2 pair is gone — and it now colours EVERY pattern, not just
+    // Gradient/Wave/Level/Chase: the stops give each LED its BASE colour along
+    // the length and the pattern's envelope simply modulates that colour's
+    // brightness. Gradient additionally SCROLLS the stops (hence its own case
+    // below). A follow-face ramp still wins over stops, and a zone with fewer
+    // than 2 stops is a flat Color exactly as before.
     const bool has_stops  = z.stops.size() >= 2 && !use_ramp;
     const bool multi_stop = (z.pattern == Pattern::Gradient) && has_stops;
-    const bool grad_color = has_stops &&
-        (z.pattern == Pattern::Wave || z.pattern == Pattern::Level ||
-         z.pattern == Pattern::Chase);
+    const bool grad_color = has_stops && z.pattern != Pattern::Gradient;
 
     double env = 0.0;
     switch (z.pattern) {
@@ -288,22 +374,24 @@ void zone_base_colors(const ZoneConfig& z, double t, float vol, uint32_t fc,
         // then the pattern below only modulates brightness (px). The custom
         // gradient does the same for Wave/Level/Chase (Gradient colours itself
         // in its own case below, with optional scroll).
-        if (use_ramp) sample_lut(face_ramp, ramp_n, lf_i, cr, cg, cb);
-        else if (grad_color) sample_stops(z.stops, lf_i, cr, cg, cb);
+        // Palette drift scrolls WHICH colour each LED takes, independently of the
+        // pattern's envelope — so Breathe/Solid/Sparkle can show flowing colours
+        // instead of a frozen ramp. Minus, matching the Gradient pattern and the
+        // Wave/Chase/pulse convention: a positive value travels toward the tip.
+        double pal_f = lf_i;
+        if (z.palette_drift != 0.0f) {
+            pal_f = lf_i - static_cast<double>(z.palette_drift) * t;
+            pal_f -= std::floor(pal_f);
+        }
+        if (use_ramp) sample_lut(face_ramp, ramp_n, pal_f, cr, cg, cb);
+        else if (grad_color) sample_stops(z.stops, pal_f, cr, cg, cb);
 
         // Overlapping sound pulses (complete-on-trigger): brightness is the
         // strongest travelling band over all live pulses; colour is the zone's
         // (ramp/stops already applied, a plain Gradient sampled here). Each
         // pulse sweeps independently so a new trigger doesn't disturb the rest.
         if (pulses) {
-            if (!use_ramp && !grad_color && z.pattern == Pattern::Gradient) {
-                if (multi_stop) sample_stops(z.stops, lf_i, cr, cg, cb);
-                else {
-                    cr = static_cast<double>(zr) + (static_cast<double>(z.r2) - zr) * lf_i;
-                    cg = static_cast<double>(zg) + (static_cast<double>(z.g2) - zg) * lf_i;
-                    cb = static_cast<double>(zb) + (static_cast<double>(z.b2) - zb) * lf_i;
-                }
-            }
+            if (!use_ramp && multi_stop) sample_stops(z.stops, lf_i, cr, cg, cb);
             double best = 0.0;
             for (float ph : *pulses) {
                 const double d = std::fabs(lf_i - static_cast<double>(ph));
@@ -352,19 +440,20 @@ void zone_base_colors(const ZoneConfig& z, double t, float vol, uint32_t fc,
             if (use_ramp) break;              // ramp already set the color
             double m = lf_i;
             if (z.wave_speed != 0.0f) {
-                double f = lf_i + z.wave_speed * t;
+                // MINUS, so a positive Wave Speed carries the gradient the SAME
+                // WAY the Wave band, the Chase dot and the sound pulses travel
+                // (toward the tip). With `+` a colour feature sat at
+                // lf = const - speed*t and drifted the opposite way to every
+                // other pattern off the same slider — a gradient and a wave on
+                // neighbouring zones visibly disagreed. Gradient was the outlier.
+                double f = lf_i - z.wave_speed * t;
                 f -= std::floor(f);
                 // Linked: scroll the gradient straight through the pair
                 // (sawtooth); standalone: ping-pong so it doesn't hard-jump.
                 m = linked ? f : (1.0 - std::fabs(2.0 * f - 1.0));
             }
-            if (multi_stop) {
-                sample_stops(z.stops, m, cr, cg, cb);
-            } else {
-                cr = static_cast<double>(zr) + (static_cast<double>(z.r2) - zr) * m;
-                cg = static_cast<double>(zg) + (static_cast<double>(z.g2) - zg) * m;
-                cb = static_cast<double>(zb) + (static_cast<double>(z.b2) - zb) * m;
-            }
+            // <2 stops = a flat Color (the old Color→Color 2 ramp is gone).
+            if (multi_stop) sample_stops(z.stops, m, cr, cg, cb);
             break;
         }
         case Pattern::Wave: {
@@ -422,6 +511,7 @@ void zone_base_colors(const ZoneConfig& z, double t, float vol, uint32_t fc,
         out[3*i+1] = static_cast<uint8_t>(cg * e);
         out[3*i+2] = static_cast<uint8_t>(cb * e);
     }
+    if (ov) blend_overlay(z, *ov, out, n);
 }
 
 void mirror_zone_layout(ZoneConfig& d, const ZoneConfig& s) {
@@ -657,6 +747,34 @@ void AccessoryLeds::set_zone_grad_angle(Zone z, float deg) {
     cfg_.zones[zi].grad_angle = deg;
 }
 
+void AccessoryLeds::set_zone_palette_drift(Zone z, float cps) {
+    const auto zi = static_cast<int>(z);
+    if (zi < 0 || zi >= ZoneCount) return;
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
+    cfg_.zones[zi].palette_drift = cps;
+}
+
+void AccessoryLeds::set_zone_overlay(Zone z, const ZoneOverlay& ov) {
+    const auto zi = static_cast<int>(z);
+    if (zi < 0 || zi >= ZoneCount) return;
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
+    overlay_[zi] = ov;
+}
+
+void AccessoryLeds::clear_zone_overlay(Zone z) {
+    const auto zi = static_cast<int>(z);
+    if (zi < 0 || zi >= ZoneCount) return;
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
+    overlay_[zi] = ZoneOverlay{};
+}
+
+ZoneOverlay AccessoryLeds::zone_overlay(Zone z) const {
+    const auto zi = static_cast<int>(z);
+    if (zi < 0 || zi >= ZoneCount) return ZoneOverlay{};
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
+    return overlay_[zi];
+}
+
 void AccessoryLeds::set_zone_breathe_hz(Zone z, float hz) {
     const auto zi = static_cast<int>(z);
     if (zi < 0 || zi >= ZoneCount) return;
@@ -812,9 +930,18 @@ void AccessoryLeds::render_loop() {
                 ZoneConfig& F = zones[pr[1]];
                 if (H.count <= 0 || F.count <= 0) continue;
                 copy_zone_look(F, H);           // fin runs the hub's exact effect
-                // Flow ALONG the appendage (hub → fin tip) so each cheek radiates
-                // out to its own tip, not a spatial-angle sweep across the face.
-                zone_group_len_fracs(H, F, lf_over[pr[0]], lf_over[pr[1]]);
+                // Which axis a LINKED pair flows along is the hub's "Gradient Across
+                // Shape" toggle. OFF: along the appendage (hub -> fin tip), so each
+                // cheek radiates out to its own tip. ON: both zones projected onto
+                // the hub's Gradient Angle, so the sweep crosses the combined 2D
+                // shape instead of stepping ring-by-ring. (The toggle was being
+                // ignored entirely while linked, which pinned every linked pair to
+                // the ring-by-ring axis.)
+                if (H.grad_spatial)
+                    zone_group_spatial_fracs(H, F, H.grad_angle,
+                                             lf_over[pr[0]], lf_over[pr[1]]);
+                else
+                    zone_group_len_fracs(H, F, lf_over[pr[0]], lf_over[pr[1]]);
             }
         }
 
@@ -892,10 +1019,14 @@ void AccessoryLeds::render_loop() {
             const double zt = (sync_sides && is_side_zone(static_cast<Zone>(zi)))
                                 ? (t - group_t0_) : t;
 
+            // Overlay is read under the same lock that guards the zone config it
+            // composites over, so a frame can't catch it half-updated.
+            ZoneOverlay ov_now;
+            { std::lock_guard<std::mutex> lk(cfg_mtx_); ov_now = overlay_[zi]; }
             zone_base_colors(z, zt, vol, face_color_for(static_cast<Zone>(zi)),
                              ramp, ramp_n, zbuf, peak_hold_, sgate,
                              lf_over[zi].empty() ? nullptr : &lf_over[zi],
-                             pulse_ptr);
+                             pulse_ptr, &ov_now);
             double flash = 0.0;
             const int64_t fs = flash_start_us_[zi].load();
             const int64_t fe = flash_end_us_  [zi].load();
@@ -956,7 +1087,17 @@ void AccessoryLeds::command_loop() {
         int     flags = -1, level_style = -1, sound_thresh = -1;
         uint8_t r = 0, g = 0, b = 0, r2 = 0, g2 = 0, b2 = 0, zbright = 0;
         long    breathe_mhz = INT32_MIN, wave_mhz = INT32_MIN, sound_decay_mhz = INT32_MIN;
+        long    pal_drift_mhz = INT32_MIN;
         std::vector<uint8_t> fracs;
+        std::vector<std::array<uint8_t, 3>> stops;   // last multi-stop gradient sent (LZS)
+        // Overlay: params (LZOV) + axis table (LZOG) diff like everything else,
+        // but amount/phase (LZOA) are ANIMATED, so they stream every pass while
+        // the overlay is live — same shape as the LVOL mic feed.
+        int     ov_on = -1, ov_shape = -1, ov_opacity = -1, ov_soft = -1;
+        uint8_t ov_r = 0, ov_g = 0, ov_b = 0;
+        int     ov_amount = -1, ov_phase = -1;
+        float   ov_angle = 1e9f;
+        std::vector<uint8_t> ov_fracs;
     };
     std::array<ZoneShadow, ZoneCount> shadow;
     int shadow_gbright = -1, shadow_sync = -1, shadow_vol = -1, shadow_peak = -1;
@@ -970,9 +1111,17 @@ void AccessoryLeds::command_loop() {
         static const char* H = "0123456789ABCDEF";
         out[0] = H[v >> 4]; out[1] = H[v & 0xF];
     };
-
     while (running_.load()) {
         const auto next_t = clock::now() + period;
+
+        // The coprocessor came up (or came BACK up — a reconnect, a reflash, a
+        // power cycle). It boots with no zone state, so re-push everything.
+        if (resync_cmds_.exchange(false)) force = true;
+
+        // No sink wired yet: skip rather than spend the forced full push on a
+        // pass whose emits go nowhere — that would mark the shadow valid and
+        // leave the zones dark until something happened to change.
+        if (!cmd_sink_) { std::this_thread::sleep_until(next_t); continue; }
 
         std::array<ZoneConfig, ZoneCount> zones;
         uint8_t gbright;
@@ -1000,10 +1149,18 @@ void AccessoryLeds::command_loop() {
                 ZoneConfig& F = zones[pr[1]];
                 if (H.count <= 0 || F.count <= 0) continue;
                 copy_zone_look(F, H);                     // fin runs the hub's exact effect
-                // Linked areas flow ALONG the appendage (hub → fin tip) so each
-                // cheek radiates out to its own tip, rather than a spatial-angle
-                // projection that sweeps diagonally across the whole face.
-                zone_group_len_fracs(H, F, lf_over[pr[0]], lf_over[pr[1]]);
+                // Which axis a LINKED pair flows along is the hub's "Gradient Across
+                // Shape" toggle. OFF: along the appendage (hub -> fin tip), so each
+                // cheek radiates out to its own tip. ON: both zones projected onto
+                // the hub's Gradient Angle, so the sweep crosses the combined 2D
+                // shape instead of stepping ring-by-ring. (The toggle was being
+                // ignored entirely while linked, which pinned every linked pair to
+                // the ring-by-ring axis.)
+                if (H.grad_spatial)
+                    zone_group_spatial_fracs(H, F, H.grad_angle,
+                                             lf_over[pr[0]], lf_over[pr[1]]);
+                else
+                    zone_group_len_fracs(H, F, lf_over[pr[0]], lf_over[pr[1]]);
                 linked[pr[0]] = linked[pr[1]] = true;
             }
         }
@@ -1091,6 +1248,7 @@ void AccessoryLeds::command_loop() {
                 const int  level_style     = static_cast<int>(z.level_style);
                 const int  sound_thresh    = std::clamp((int)std::lround(z.sound_threshold * 255.f), 0, 255);
                 const long sound_decay_mhz = std::lround(z.sound_decay * 1000.0);
+                const long pal_drift_mhz   = std::lround(z.palette_drift * 1000.0);
                 if (force || !sh.valid ||
                     sh.pattern != (int)z.pattern ||
                     sh.r  != z.r  || sh.g  != z.g  || sh.b  != z.b ||
@@ -1098,7 +1256,8 @@ void AccessoryLeds::command_loop() {
                     sh.breathe_mhz != breathe_mhz || sh.wave_mhz != wave_mhz ||
                     sh.zbright != z.zone_brightness || sh.min_level != min_level ||
                     sh.flags != flags || sh.level_style != level_style ||
-                    sh.sound_thresh != sound_thresh || sh.sound_decay_mhz != sound_decay_mhz) {
+                    sh.sound_thresh != sound_thresh || sh.sound_decay_mhz != sound_decay_mhz ||
+                    sh.pal_drift_mhz != pal_drift_mhz) {
                     char col[7], col2[7]; col[6] = col2[6] = '\0';
                     hex2(z.r,  col  + 0); hex2(z.g,  col  + 2); hex2(z.b,  col  + 4);
                     hex2(z.r2, col2 + 0); hex2(z.g2, col2 + 2); hex2(z.b2, col2 + 4);
@@ -1107,7 +1266,8 @@ void AccessoryLeds::command_loop() {
                          std::to_string(breathe_mhz) + " " + std::to_string(wave_mhz) + " " +
                          std::to_string((int)z.zone_brightness) + " " + std::to_string(min_level) +
                          " " + std::to_string(flags) + " " + std::to_string(level_style) +
-                         " " + std::to_string(sound_thresh) + " " + std::to_string(sound_decay_mhz));
+                         " " + std::to_string(sound_thresh) + " " + std::to_string(sound_decay_mhz) +
+                         " " + std::to_string(pal_drift_mhz));
                     sh.pattern = (int)z.pattern;
                     sh.r = z.r;  sh.g = z.g;  sh.b = z.b;
                     sh.r2 = z.r2; sh.g2 = z.g2; sh.b2 = z.b2;
@@ -1115,6 +1275,90 @@ void AccessoryLeds::command_loop() {
                     sh.zbright = z.zone_brightness; sh.min_level = min_level;
                     sh.flags = flags; sh.level_style = level_style;
                     sh.sound_thresh = sound_thresh; sh.sound_decay_mhz = sound_decay_mhz;
+                    sh.pal_drift_mhz = pal_drift_mhz;
+                }
+                // ── Overlay layer ────────────────────────────────────────────
+                // Params + the axis table diff like everything else; the animated
+                // amount/phase pair streams while it's live (the host owns the
+                // rise/hold/retract timing — see led_overlay.h).
+                {
+                    ZoneOverlay ov;
+                    { std::lock_guard<std::mutex> lk(cfg_mtx_); ov = overlay_[zi]; }
+                    const int on   = ov.active ? 1 : 0;
+                    const int opa  = std::clamp((int)std::lround(ov.opacity  * 255.f), 0, 255);
+                    const int soft = std::clamp((int)std::lround(ov.softness * 255.f), 1, 255);
+                    const int shp  = static_cast<int>(ov.shape);
+                    if (force || sh.ov_on != on || sh.ov_shape != shp ||
+                        sh.ov_opacity != opa || sh.ov_soft != soft ||
+                        sh.ov_r != ov.r || sh.ov_g != ov.g || sh.ov_b != ov.b) {
+                        char oc[7]; oc[6] = '\0';
+                        hex2(ov.r, oc + 0); hex2(ov.g, oc + 2); hex2(ov.b, oc + 4);
+                        emit("LZOV " + std::to_string(zi) + " " + std::to_string(on) +
+                             " " + oc + " " + std::to_string(shp) + " " +
+                             std::to_string(opa) + " " + std::to_string(soft));
+                        sh.ov_on = on; sh.ov_shape = shp;
+                        sh.ov_opacity = opa; sh.ov_soft = soft;
+                        sh.ov_r = ov.r; sh.ov_g = ov.g; sh.ov_b = ov.b;
+                    }
+                    if (on) {
+                        // Axis table: the overlay has its OWN angle, so it can't
+                        // share the pattern's frac table. Only recomputed when the
+                        // angle (or the zone's geometry) actually changes.
+                        if (force || sh.ov_angle != ov.angle || sh.ov_fracs.empty()) {
+                            const auto ff = zone_spatial_fracs(z, ov.angle);
+                            std::vector<uint8_t> fr(ff.size());
+                            for (size_t k = 0; k < ff.size(); ++k)
+                                fr[k] = (uint8_t)std::clamp(
+                                    (int)std::lround(ff[k] * 255.f), 0, 255);
+                            if (fr != sh.ov_fracs) {
+                                for (size_t off = 0; off < fr.size(); off += 64) {
+                                    const size_t nn = std::min<size_t>(64, fr.size() - off);
+                                    std::string msg = "LZOG " +
+                                        std::to_string(z.start + (int)off) + " ";
+                                    char hb[2];
+                                    for (size_t k = 0; k < nn; ++k) {
+                                        hex2(fr[off + k], hb);
+                                        msg.push_back(hb[0]); msg.push_back(hb[1]);
+                                    }
+                                    emit(msg);
+                                }
+                                sh.ov_fracs = std::move(fr);
+                            }
+                            sh.ov_angle = ov.angle;
+                        }
+                        const int amt = std::clamp((int)std::lround(ov.amount * 255.f), 0, 255);
+                        const int pha = std::clamp((int)std::lround(ov.phase  * 255.f), 0, 255);
+                        if (amt != sh.ov_amount || pha != sh.ov_phase) {
+                            emit("LZOA " + std::to_string(zi) + " " +
+                                 std::to_string(amt) + " " + std::to_string(pha));
+                            sh.ov_amount = amt; sh.ov_phase = pha;
+                        }
+                    } else if (!sh.ov_fracs.empty()) {
+                        sh.ov_fracs.clear();
+                        sh.ov_angle = 1e9f;
+                        sh.ov_amount = sh.ov_phase = -1;
+                    }
+                }
+
+                // Multi-stop gradient — now the ONLY gradient source, so it has to
+                // reach the Pico. Capped at the firmware's kLedMaxStops (8); a
+                // longer list is resampled evenly so it still spans base->tip.
+                if (force || !sh.valid || sh.stops != z.stops) {
+                    constexpr int kMaxStops = 8;
+                    const int have = static_cast<int>(z.stops.size());
+                    const int n    = std::min(have, kMaxStops);
+                    std::string ls = "LZS " + std::to_string(zi) + " " + std::to_string(n);
+                    for (int k = 0; k < n; ++k) {
+                        const int src = (have <= kMaxStops || n <= 1)
+                            ? k
+                            : static_cast<int>(std::lround(double(k) * (have - 1) / (n - 1)));
+                        const auto& c = z.stops[std::clamp(src, 0, have - 1)];
+                        char hx[7]; hx[6] = '\0';
+                        hex2(c[0], hx + 0); hex2(c[1], hx + 2); hex2(c[2], hx + 4);
+                        ls += " "; ls += hx;
+                    }
+                    emit(ls);
+                    sh.stops = z.stops;
                 }
                 sh.valid = true;
 

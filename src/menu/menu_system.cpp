@@ -39,25 +39,85 @@ static const std::string& item_label(const MenuItem& it) {
     return it.label;
 }
 
-// On-screen keyboard layout (variable-width rows). Special keys live on the last
-// row. Shared by the input (move/activate) and draw paths so they stay in sync.
-// Page 0 = letters, page 1 = symbols; the ?123/ABC key flips between them.
-static const std::vector<std::vector<std::string>>& osk_rows(int page) {
-    static const std::vector<std::vector<std::string>> letters = {
-        {"1","2","3","4","5","6","7","8","9","0",","},
-        {"Q","W","E","R","T","Y","U","I","O","P"},
-        {"A","S","D","F","G","H","J","K","L"},
-        {"Z","X","C","V","B","N","M"},
-        {"?123","SPACE","DEL","SAVE","CANCEL"},
+// On-screen keyboard layout. Special keys live on the last row. Shared by the
+// input (move/activate) and draw paths so they stay in sync.
+//
+// One row of the on-screen keyboard. `split` is where the symbol block starts,
+// so the renderer can draw letters and symbols as two aligned blocks with a gap
+// between them; `split == keys.size()` means the row has no symbol block (the
+// action row at the bottom spans the full width instead).
+//
+// Navigation stays flat over `keys` — walking right off the last letter lands on
+// the first symbol, which is what you want from a d-pad or a knob.
+struct OskRow {
+    std::vector<std::string> keys;
+    size_t                   split;
+};
+
+// Key grid. `shift` swaps letter case (and is what the SHIFT key toggles);
+// `multiline` adds the newline key, which only makes sense for a field that
+// accepts one. Symbols sit permanently on the right rather than behind a page
+// toggle, so every character is reachable without changing modes.
+//
+// The variants are built once each and cached, so the renderer and the
+// navigation code can hold a reference without copying per frame.
+static const std::vector<OskRow>& osk_rows(bool shift, bool multiline) {
+    auto build = [](bool upper, bool nl) {
+        // Left block: letters and digits. Right block: all 32 ASCII punctuation
+        // marks, a uniform 8 x 4 so every symbol row lands on the same columns.
+        // '.' and ',' appear here as well as on the letter rows, the way a real
+        // keyboard carries them in both places — and filling the row is what
+        // keeps the block from rendering wider than the ones above it.
+        std::vector<std::vector<std::string>> left = {
+            {"1","2","3","4","5","6","7","8","9","0"},
+            {"Q","W","E","R","T","Y","U","I","O","P"},
+            {"A","S","D","F","G","H","J","K","L"},
+            {"SHIFT","Z","X","C","V","B","N","M",".",","},
+        };
+        const std::vector<std::vector<std::string>> right = {
+            {"!","@","#","$","%","^","&","*"},
+            {"(",")","-","_","+","=","/","\\"},
+            {"|","~","`","[","]","{","}","<"},
+            {">",";",":","'","\"","?",".",","},
+        };
+        if (!upper)
+            for (auto& row : left)
+                for (auto& k : row)
+                    if (k.size() == 1 && k[0] >= 'A' && k[0] <= 'Z')
+                        k[0] = static_cast<char>(k[0] - 'A' + 'a');
+        std::vector<OskRow> rows;
+        for (size_t r = 0; r < left.size(); ++r) {
+            OskRow row;
+            row.keys  = left[r];
+            row.split = row.keys.size();
+            row.keys.insert(row.keys.end(), right[r].begin(), right[r].end());
+            rows.push_back(std::move(row));
+        }
+        std::vector<std::string> last = {"SPACE"};
+        if (nl) last.push_back("NEWLINE");
+        last.insert(last.end(), {"DEL","SAVE","CANCEL"});
+        OskRow action;
+        action.split = last.size();     // no symbol block; spans the full width
+        action.keys  = std::move(last);
+        rows.push_back(std::move(action));
+        return rows;
     };
-    static const std::vector<std::vector<std::string>> symbols = {
-        {"!","@","#","$","%","^","&","*","(",")"},
-        {"-","_","+","=","/","\\","|","~","`"},
-        {"[","]","{","}","<",">",";",":"},
-        {"'","\"",".",",","?"},
-        {"ABC","SPACE","DEL","SAVE","CANCEL"},
-    };
-    return page == 1 ? symbols : letters;
+    static const std::vector<OskRow> upper_1  = build(true,  false);
+    static const std::vector<OskRow> upper_ml = build(true,  true);
+    static const std::vector<OskRow> lower_1  = build(false, false);
+    static const std::vector<OskRow> lower_ml = build(false, true);
+    if (shift) return multiline ? lower_ml : lower_1;
+    return multiline ? upper_ml : upper_1;
+}
+
+// Widest left/right block across the letter rows, so every row can be laid out
+// on the same two-block geometry and the columns line up vertically.
+static void osk_block_cols(const std::vector<OskRow>& rows, int& left, int& right) {
+    left = right = 0;
+    for (size_t r = 0; r + 1 < rows.size(); ++r) {
+        left  = std::max(left,  static_cast<int>(rows[r].split));
+        right = std::max(right, static_cast<int>(rows[r].keys.size() - rows[r].split));
+    }
 }
 
 // Derive alpha-variant of an ImU32 (format ABGR, alpha in high byte).
@@ -266,17 +326,41 @@ void MenuSystem::prev_tab() {
 // ── On-screen keyboard ──────────────────────────────────────────────────────────
 
 void MenuSystem::open_keyboard(std::string title, std::string initial,
-                               KeyboardCommit on_commit, size_t max_len) {
-    osk_title_   = std::move(title);
-    osk_text_    = std::move(initial);
-    osk_commit_  = std::move(on_commit);
-    osk_max_len_ = std::max<size_t>(1, max_len);
+                               KeyboardCommit on_commit, size_t max_len,
+                               bool multiline, size_t max_lines) {
+    osk_title_     = std::move(title);
+    osk_text_      = std::move(initial);
+    osk_commit_    = std::move(on_commit);
+    osk_max_len_   = std::max<size_t>(1, max_len);
+    osk_multiline_ = multiline;
+    osk_max_lines_ = multiline ? max_lines : 0;   // meaningless on one line
     if (osk_text_.size() > osk_max_len_) osk_text_.resize(osk_max_len_);
+    // Trim an over-long initial value down to the cap rather than opening in a
+    // state the editor won't let you return to — text set before the cap
+    // existed, or assembled elsewhere, would otherwise be uneditable.
+    if (osk_max_lines_ > 0) {
+        size_t seen = 1, i = 0;
+        for (; i < osk_text_.size(); ++i) {
+            if (!osk_is_break(osk_text_[i])) continue;
+            if (++seen > osk_max_lines_) break;
+        }
+        if (i < osk_text_.size()) osk_text_.resize(i);
+    }
     osk_caret_  = static_cast<int>(osk_text_.size());
     osk_row_    = 0;
     osk_col_    = 0;
-    osk_page_   = 0;
+    osk_shift_  = false;
     osk_active_ = true;
+}
+
+size_t MenuSystem::osk_line_count() const {
+    size_t n = 1;
+    for (char c : osk_text_) if (osk_is_break(c)) ++n;
+    return n;
+}
+
+bool MenuSystem::osk_lines_full() const {
+    return osk_max_lines_ > 0 && osk_line_count() >= osk_max_lines_;
 }
 
 void MenuSystem::close_keyboard() {
@@ -287,45 +371,83 @@ void MenuSystem::close_keyboard() {
 
 void MenuSystem::osk_insert(char c) {
     if (osk_text_.size() >= osk_max_len_) return;
+    // A '|' typed from the grid makes a line just as much as the NEWLINE key
+    // does, so it has to answer to the same cap.
+    if (osk_is_break(c) && osk_lines_full()) return;
     osk_caret_ = std::clamp(osk_caret_, 0, static_cast<int>(osk_text_.size()));
     osk_text_.insert(static_cast<size_t>(osk_caret_), 1, c);
     ++osk_caret_;
 }
 
+void MenuSystem::osk_newline() {
+    if (!osk_active_ || !osk_multiline_) return;
+    if (osk_lines_full()) return;
+    osk_insert('\n');
+}
+
 void MenuSystem::osk_move(int dx, int dy) {
     if (!osk_active_) return;
-    const auto& rows = osk_rows(osk_page_);
+    const auto& rows = osk_rows(osk_shift_, osk_multiline_);
     int nrows = static_cast<int>(rows.size());
     if (nrows == 0) return;
     // Row -1 = the text field: Left/Right move the caret, Down returns to keys.
     if (osk_row_ == -1) {
         if (dx) osk_caret_ = std::clamp(osk_caret_ + dx, 0,
                                         static_cast<int>(osk_text_.size()));
-        if (dy > 0) osk_row_ = 0;
+        if (dy) {
+            // In a multi-line field Up/Down walk between lines first, keeping
+            // the column where possible; only the last line drops back to the
+            // key grid, so the caret can reach every row.
+            const int caret = std::clamp(osk_caret_, 0,
+                                         static_cast<int>(osk_text_.size()));
+            const size_t ls = osk_text_.rfind('\n', caret > 0 ? caret - 1 : 0);
+            const int line_start = (ls == std::string::npos ||
+                                    (caret == 0)) ? 0 : static_cast<int>(ls) + 1;
+            const int col = caret - line_start;
+            if (osk_multiline_ && dy < 0 && line_start > 0) {
+                const size_t ps = osk_text_.rfind('\n', static_cast<size_t>(line_start) - 2);
+                const int prev_start = (ps == std::string::npos) ? 0
+                                                                 : static_cast<int>(ps) + 1;
+                const int prev_len = line_start - 1 - prev_start;
+                osk_caret_ = prev_start + std::min(col, prev_len);
+                return;
+            }
+            const size_t ne = osk_text_.find('\n', static_cast<size_t>(caret));
+            if (osk_multiline_ && dy > 0 && ne != std::string::npos) {
+                const int next_start = static_cast<int>(ne) + 1;
+                const size_t nn = osk_text_.find('\n', static_cast<size_t>(next_start));
+                const int next_len = (nn == std::string::npos)
+                                   ? static_cast<int>(osk_text_.size()) - next_start
+                                   : static_cast<int>(nn) - next_start;
+                osk_caret_ = next_start + std::min(col, next_len);
+                return;
+            }
+            if (dy > 0) osk_row_ = 0;   // past the last line → back to the keys
+        }
         return;
     }
     if (osk_row_ == 0 && dy < 0) { osk_row_ = -1; return; }   // Up into the field
     osk_row_ = std::clamp(osk_row_ + dy, 0, nrows - 1);
-    int ncols = static_cast<int>(rows[osk_row_].size());
+    int ncols = static_cast<int>(rows[osk_row_].keys.size());
     osk_col_ = std::clamp(osk_col_ + dx, 0, std::max(0, ncols - 1));
 }
 
 void MenuSystem::osk_step(int d) {
     if (!osk_active_) return;
-    const auto& rows = osk_rows(osk_page_);
+    const auto& rows = osk_rows(osk_shift_, osk_multiline_);
     // Knob walks keys only — pull field focus back onto the grid first.
     if (osk_row_ < 0) { osk_row_ = 0; osk_col_ = 0; return; }
     // Flatten current (row,col) to a linear index, step with wrap, unflatten.
     int flat = 0, total = 0;
     for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
-        if (r < osk_row_) flat += static_cast<int>(rows[r].size());
-        total += static_cast<int>(rows[r].size());
+        if (r < osk_row_) flat += static_cast<int>(rows[r].keys.size());
+        total += static_cast<int>(rows[r].keys.size());
     }
-    flat += std::min(osk_col_, static_cast<int>(rows[osk_row_].size()) - 1);
+    flat += std::min(osk_col_, static_cast<int>(rows[osk_row_].keys.size()) - 1);
     if (total == 0) return;
     flat = ((flat + d) % total + total) % total;
     for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
-        int sz = static_cast<int>(rows[r].size());
+        int sz = static_cast<int>(rows[r].keys.size());
         if (flat < sz) { osk_row_ = r; osk_col_ = flat; return; }
         flat -= sz;
     }
@@ -339,22 +461,17 @@ void MenuSystem::osk_input_char(unsigned int c) {
 void MenuSystem::osk_activate() {
     if (!osk_active_) return;
     if (osk_row_ == -1) return;              // field focus: nothing to press
-    const auto& rows = osk_rows(osk_page_);
+    const auto& rows = osk_rows(osk_shift_, osk_multiline_);
     if (osk_row_ < 0 || osk_row_ >= static_cast<int>(rows.size())) return;
-    const auto& row = rows[osk_row_];
+    const auto& row = rows[osk_row_].keys;
     if (osk_col_ < 0 || osk_col_ >= static_cast<int>(row.size())) return;
     const std::string& k = row[osk_col_];
-    if      (k == "SPACE")  osk_insert(' ');
-    else if (k == "DEL")    osk_backspace();
-    else if (k == "SAVE")   osk_commit();
-    else if (k == "CANCEL") osk_cancel();
-    else if (k == "?123" || k == "ABC") {
-        osk_page_ ^= 1;
-        const auto& np = osk_rows(osk_page_);
-        osk_row_ = std::clamp(osk_row_, 0, static_cast<int>(np.size()) - 1);
-        osk_col_ = std::clamp(osk_col_, 0,
-                              static_cast<int>(np[osk_row_].size()) - 1);
-    }
+    if      (k == "SPACE")   osk_insert(' ');
+    else if (k == "DEL")     osk_backspace();
+    else if (k == "SAVE")    osk_commit();
+    else if (k == "CANCEL")  osk_cancel();
+    else if (k == "NEWLINE") osk_newline();
+    else if (k == "SHIFT")   osk_shift_ = !osk_shift_;   // grid relabels in place
     else if (k.size() == 1) osk_insert(k[0]);
 }
 
@@ -370,10 +487,13 @@ void MenuSystem::osk_backspace() {
 
 void MenuSystem::osk_commit() {
     if (!osk_active_) return;
-    // trim surrounding whitespace
+    // Trim surrounding whitespace. Newlines count as whitespace here so a
+    // stray trailing break doesn't commit an empty last line, but interior
+    // ones are left exactly as typed.
+    const char* ws = " \t\n";
     std::string t = osk_text_;
-    size_t b = t.find_first_not_of(' ');
-    size_t e = t.find_last_not_of(' ');
+    size_t b = t.find_first_not_of(ws);
+    size_t e = t.find_last_not_of(ws);
     std::string name = (b == std::string::npos) ? std::string() : t.substr(b, e - b + 1);
     KeyboardCommit cb = osk_commit_;   // copy before close clears it
     close_keyboard();
@@ -1565,9 +1685,12 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
     // Dim everything behind.
     dl->AddRectFilled({0.f, 0.f}, {W, H}, IM_COL32(4, 8, 12, 205));
 
-    // Centered panel.
-    const float pw = std::min(W * 0.86f, 760.f * ui_scale_);
-    const float ph = std::min(H * 0.80f, 460.f * ui_scale_);
+    // Centered panel. The symbol block lives permanently to the right of the
+    // letters, so the grid is ~18 columns wide and needs the extra width; a
+    // capped multi-line field also reserves its full row budget below.
+    const float pw = std::min(W * 0.95f, 1180.f * ui_scale_);
+    const float ph = std::min(H * 0.88f, osk_multiline_ ? 560.f * ui_scale_
+                                                        : 460.f * ui_scale_);
     const ImVec2 pmin{ (W - pw) * 0.5f, (H - ph) * 0.5f };
     const ImVec2 pmax{ pmin.x + pw,     pmin.y + ph };
     dl->AddRectFilled(pmin, pmax, IM_COL32(8, 12, 16, 235));
@@ -1593,64 +1716,159 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
         dl->AddText(font, fs * 0.9f, { x1 - csz.x, fy - fs * 0.9f - 4.f },
                     remaining <= 5 ? IM_COL32(255, 90, 90, 230)
                                    : menu_with_alpha(accent_color_, 150), cnt);
+        // Line budget beside it, so the cap is visible before you hit it
+        // rather than the NEWLINE key just going quiet.
+        if (osk_max_lines_ > 0) {
+            char lc[32];
+            std::snprintf(lc, sizeof lc, "%zu/%zu LINES",
+                          osk_line_count(), osk_max_lines_);
+            ImVec2 lsz = font->CalcTextSizeA(fs * 0.9f, FLT_MAX, 0.f, lc);
+            dl->AddText(font, fs * 0.9f,
+                        { x1 - csz.x - 14.f - lsz.x, fy - fs * 0.9f - 4.f },
+                        osk_lines_full() ? IM_COL32(255, 90, 90, 230)
+                                         : menu_with_alpha(accent_color_, 150), lc);
+        }
     }
 
     // Text field. Border brightens when the field itself is focused (row -1),
     // where Left/Right move the caret instead of the key selection.
     const bool field_focus = (osk_row_ == -1);
-    const float fh = fs * 1.5f + 12.f;
+    // Split on newlines so a multi-line field renders as the block it is —
+    // what you see here is what the banner will stack. Always at least one
+    // line, so an empty field still draws its box at full height.
+    std::vector<std::string> flines;
+    {
+        size_t start = 0;
+        while (true) {
+            const size_t nl = osk_text_.find('\n', start);
+            flines.push_back(osk_text_.substr(start, nl == std::string::npos
+                                                     ? std::string::npos
+                                                     : nl - start));
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+    }
+    const float line_h = fs * 1.2f + 3.f;
+    // Reserve the whole budget when there is one, so the field is the same
+    // height throughout and you can see how many rows are still going spare.
+    const size_t shown_lines = std::max(flines.size(),
+                                        static_cast<size_t>(osk_max_lines_));
+    const float fh = std::max(fs * 1.5f + 12.f,
+                              shown_lines * line_h + 12.f);
     dl->AddRectFilled({ x0, fy }, { x1, fy + fh }, IM_COL32(0, 0, 0, 160), 3.f);
     dl->AddRect({ x0, fy }, { x1, fy + fh },
                 menu_with_alpha(accent_color_, field_focus ? 255 : 200), 3.f, 0,
                 field_focus ? 2.5f : 1.5f);
-    dl->AddText(font, fs * 1.2f, { x0 + 10.f, fy + (fh - fs * 1.2f) * 0.5f },
-                IM_COL32(255, 255, 255, 240), osk_text_.c_str());
-    // Blinking caret bar at the in-string insertion point.
+    const float text_top = (shown_lines > 1)
+                         ? fy + 6.f
+                         : fy + (fh - fs * 1.2f) * 0.5f;
+    // Faint rule under each unused row, so the spare capacity reads as space
+    // you may fill rather than as dead padding.
+    for (size_t i = flines.size(); i < shown_lines; ++i) {
+        const float ry = text_top + i * line_h + fs * 1.2f - 1.f;
+        dl->AddLine({ x0 + 10.f, ry }, { x1 - 10.f, ry },
+                    menu_with_alpha(accent_color_, 45), 1.f);
+    }
+    for (size_t i = 0; i < flines.size(); ++i)
+        dl->AddText(font, fs * 1.2f, { x0 + 10.f, text_top + i * line_h },
+                    IM_COL32(255, 255, 255, 240), flines[i].c_str());
+    // Blinking caret bar at the in-string insertion point, on its own line.
     if (static_cast<int>(ImGui::GetTime() * 2.0) & 1) {
         const int caret = std::clamp(osk_caret_, 0, static_cast<int>(osk_text_.size()));
         const std::string before = osk_text_.substr(0, static_cast<size_t>(caret));
+        const size_t line_idx = static_cast<size_t>(
+            std::count(before.begin(), before.end(), '\n'));
+        const size_t bol = before.rfind('\n');
+        const std::string seg = (bol == std::string::npos)
+                              ? before : before.substr(bol + 1);
         const float cx = x0 + 10.f +
-            font->CalcTextSizeA(fs * 1.2f, FLT_MAX, 0.f, before.c_str()).x;
-        const float cy0 = fy + (fh - fs * 1.2f) * 0.5f;
+            font->CalcTextSizeA(fs * 1.2f, FLT_MAX, 0.f, seg.c_str()).x;
+        const float cy0 = text_top + line_idx * line_h;
         dl->AddRectFilled({ cx, cy0 }, { cx + 2.f, cy0 + fs * 1.2f },
                           IM_COL32(255, 255, 255, 235));
     }
 
     // Key grid.
-    const auto& rows = osk_rows(osk_page_);
+    const auto& rows = osk_rows(osk_shift_, osk_multiline_);
     const float grid_top = fy + fh + 22.f;
     const float grid_bot = pmax.y - 40.f;
     const int   nrows    = static_cast<int>(rows.size());
     const float key_h    = (grid_bot - grid_top) / static_cast<float>(nrows) - 8.f;
-    const float gap      = 8.f;
+    const float gap      = 6.f;
+    const float blk_gap  = 26.f;   // channel between the letter and symbol blocks
+
+    // Two-block geometry, computed once from the widest row of each block so
+    // every row lands on the same columns. Both blocks get the same key width,
+    // which is what makes the gap read as a deliberate divider rather than as
+    // one block having been squeezed.
+    int max_left = 0, max_right = 0;
+    osk_block_cols(rows, max_left, max_right);
+    const float unit = (x1 - x0 - blk_gap - gap * (max_left - 1)
+                        - gap * (max_right - 1))
+                     / static_cast<float>(max_left + max_right);
+    const float left_w  = unit * max_left  + gap * (max_left  - 1);
+    const float right_w = unit * max_right + gap * (max_right - 1);
+    const float right_x = x1 - right_w;
+
+    // Break keys go inert at the line cap, and are drawn dimmed so the reason
+    // a press does nothing is visible on the key itself.
+    const bool breaks_locked = osk_lines_full();
 
     for (int r = 0; r < nrows; ++r) {
-        const auto& row = rows[r];
-        int ncols = static_cast<int>(row.size());
-        float ky  = grid_top + r * (key_h + 8.f);
-        // Letter/number rows are evenly divided across the full width; the last
-        // (special-key) row sizes each key by weight.
-        bool special = (r == nrows - 1);
+        const auto& row   = rows[r].keys;
+        const int   ncols = static_cast<int>(row.size());
+        const int   split = static_cast<int>(rows[r].split);
+        const float ky    = grid_top + r * (key_h + 8.f);
+        // The action row spans the full width by weight; letter/symbol rows are
+        // divided within their own block.
+        const bool special = (r == nrows - 1);
         if (!special) {
-            float kw = (x1 - x0 - gap * (ncols - 1)) / static_cast<float>(ncols);
+            const int nl_keys = split;
+            const int nr_keys = ncols - split;
+            // Every key is one `unit` wide and a short row is CENTRED in its
+            // block rather than stretched to fill it. Stretching would make the
+            // 9-key home row's keys visibly fatter than the 10-key rows above;
+            // centring instead indents it, the way a real keyboard does.
+            const float l_span = unit * nl_keys + gap * (nl_keys - 1);
+            const float r_span = unit * nr_keys + gap * (nr_keys - 1);
+            const float l_x0   = x0      + (left_w  - l_span) * 0.5f;
+            const float r_x0   = right_x + (right_w - r_span) * 0.5f;
             for (int c = 0; c < ncols; ++c) {
-                float kx = x0 + c * (kw + gap);
-                bool sel = (r == osk_row_ && c == osk_col_);
+                const bool  in_right = (c >= split);
+                const float kw = unit;
+                const float kx = in_right ? r_x0 + (c - split) * (kw + gap)
+                                          : l_x0 + c * (kw + gap);
+                const bool sel = (r == osk_row_ && c == osk_col_);
                 ImVec2 kmin{ kx, ky }, kmax{ kx + kw, ky + key_h };
+                // SHIFT is a latch, so it stays lit while it's engaged —
+                // otherwise the only clue is the letters themselves.
+                const bool shift_key = (row[c] == "SHIFT");
+                const bool dead      = breaks_locked && row[c].size() == 1 &&
+                                       osk_is_break(row[c][0]);
+                const ImU32 base = (shift_key && osk_shift_)
+                                 ? menu_with_alpha(accent_color_, 130)
+                                 : dead ? menu_with_alpha(accent_color_, 15)
+                                 : in_right ? menu_with_alpha(accent_color_, 62)
+                                            : menu_with_alpha(accent_color_, 40);
                 dl->AddRectFilled(kmin, kmax,
-                    sel ? IM_COL32(255, 255, 255, 235) : menu_with_alpha(accent_color_, 40), 3.f);
+                    sel ? IM_COL32(255, 255, 255, 235) : base, 3.f);
                 if (sel) dl->AddRect(kmin, kmax, menu_with_alpha(accent_color_, 230), 3.f, 0, 1.5f);
-                ImVec2 tsz = font->CalcTextSizeA(fs * 1.1f, FLT_MAX, 0.f, row[c].c_str());
+                // Abbreviate SHIFT to the arrow — the full word doesn't fit a
+                // key sized for one character.
+                const char* klabel = shift_key ? "\xe2\x87\xa7" : row[c].c_str();
+                ImVec2 tsz = font->CalcTextSizeA(fs * 1.1f, FLT_MAX, 0.f, klabel);
                 dl->AddText(font, fs * 1.1f,
                             { kx + (kw - tsz.x) * 0.5f, ky + (key_h - fs * 1.1f) * 0.5f },
-                            sel ? IM_COL32(10, 12, 14, 255) : IM_COL32(230, 235, 240, 220),
-                            row[c].c_str());
+                            sel  ? IM_COL32(10, 12, 14, 255)
+                            : dead ? IM_COL32(230, 235, 240, 70)
+                                   : IM_COL32(230, 235, 240, 220),
+                            klabel);
             }
         } else {
             // proportional widths for SPACE/DEL/SAVE/CANCEL
             float total_w = x1 - x0 - gap * (ncols - 1);
-            float weights[8] = { 1,1,1,1,1,1,1,1 };
-            for (int c = 0; c < ncols; ++c) if (row[c] == "SPACE") weights[c] = 2.2f;
+            float weights[10] = { 1,1,1,1,1,1,1,1,1,1 };
+            for (int c = 0; c < ncols; ++c) if (row[c] == "SPACE") weights[c] = 3.4f;
             float wsum = 0.f; for (int c = 0; c < ncols; ++c) wsum += weights[c];
             float kx = x0;
             for (int c = 0; c < ncols; ++c) {
@@ -1659,18 +1877,24 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
                 ImVec2 kmin{ kx, ky }, kmax{ kx + kw, ky + key_h };
                 bool is_save   = (row[c] == "SAVE");
                 bool is_cancel = (row[c] == "CANCEL");
-                bool is_page   = (row[c] == "?123" || row[c] == "ABC");
-                ImU32 base = is_save   ? IM_COL32(40, 110, 60, 150)
+                bool is_nl     = (row[c] == "NEWLINE");
+                bool dead      = is_nl && breaks_locked;
+                ImU32 base = dead      ? menu_with_alpha(accent_color_, 15)
+                           : is_save   ? IM_COL32(40, 110, 60, 150)
                            : is_cancel ? IM_COL32(120, 50, 50, 150)
-                           : is_page   ? menu_with_alpha(accent_color_, 90)
+                           : is_nl     ? menu_with_alpha(accent_color_, 90)
                            :             menu_with_alpha(accent_color_, 40);
                 dl->AddRectFilled(kmin, kmax, sel ? IM_COL32(255, 255, 255, 235) : base, 3.f);
                 if (sel) dl->AddRect(kmin, kmax, menu_with_alpha(accent_color_, 230), 3.f, 0, 1.5f);
-                ImVec2 tsz = font->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0.f, row[c].c_str());
+                // NEWLINE reads better as the return arrow than as the word.
+                const char* klabel = is_nl ? "\xe2\x86\xb5" : row[c].c_str();
+                ImVec2 tsz = font->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0.f, klabel);
                 dl->AddText(font, fs * 1.0f,
                             { kx + (kw - tsz.x) * 0.5f, ky + (key_h - fs) * 0.5f },
-                            sel ? IM_COL32(10, 12, 14, 255) : IM_COL32(230, 235, 240, 220),
-                            row[c].c_str());
+                            sel  ? IM_COL32(10, 12, 14, 255)
+                            : dead ? IM_COL32(230, 235, 240, 70)
+                                   : IM_COL32(230, 235, 240, 220),
+                            klabel);
                 kx += kw + gap;
             }
         }
@@ -1678,8 +1902,12 @@ void MenuSystem::draw_keyboard(ImDrawList* dl, ImFont* font, float fs,
 
     // Hint bar.
     dl->AddText(font, fs * 0.9f, { x0, pmax.y - 26.f }, menu_with_alpha(accent_color_, 185),
-                "ARROWS/STICK MOVE   \xC2\xB7   UP TO FIELD: LEFT/RIGHT MOVE CURSOR   \xC2\xB7   "
-                "A/ENTER KEY   \xC2\xB7   B/BKSP DELETE");
+                osk_multiline_
+                  ? "ARROWS/STICK MOVE   \xC2\xB7   UP TO FIELD: ARROWS MOVE CURSOR   \xC2\xB7   "
+                    "ENTER SAVE   \xC2\xB7   SHIFT+ENTER NEW LINE   \xC2\xB7   "
+                    "BKSP DELETE   \xC2\xB7   SHIFT+BKSP CANCEL"
+                  : "ARROWS/STICK MOVE   \xC2\xB7   UP TO FIELD: LEFT/RIGHT MOVE CURSOR   \xC2\xB7   "
+                    "ENTER SAVE   \xC2\xB7   BKSP DELETE   \xC2\xB7   SHIFT+BKSP CANCEL");
 }
 
 // ── draw_radial (quick menu around the minimap) ─────────────────────────────────

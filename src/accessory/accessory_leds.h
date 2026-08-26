@@ -62,6 +62,29 @@ enum class LevelStyle : uint8_t {
     Pulse       = 4,   // soft centre-weighted burst that grows with volume
 };
 
+// ── Overlay layer ────────────────────────────────────────────────────────────
+// A second colour layer composited OVER whatever a zone is already showing,
+// covering part of it while the rest shows through underneath — a blush rising
+// up the cheeks, a flush sweeping across. It never replaces the zone's look, so
+// the base pattern keeps running beneath it and reappears as coverage falls.
+enum class OverlayShape : uint8_t {
+    Rise  = 0,   // coverage fills from one edge along the axis (a level rising)
+    Sweep = 1,   // a soft band travels across, base showing before and behind
+    Bloom = 2,   // a soft patch grows outward from the middle of the axis
+};
+
+struct ZoneOverlay {
+    bool         active   = false;
+    uint8_t      r = 255, g = 105, b = 180;   // blush pink
+    OverlayShape shape    = OverlayShape::Rise;
+    float        opacity  = 0.85f;   // 0..1 blend strength where fully covered
+    float        angle    = 90.f;    // axis across the zone's 2D shape, degrees
+    float        softness = 0.18f;   // 0..1 edge feather (also the Sweep's width)
+    // Animated by OverlayDirector on the host; shipped to the coprocessor.
+    float        amount   = 0.f;     // 0..1 how far the effect has progressed
+    float        phase    = 0.f;     // 0..1 travelling position (Sweep/Bloom)
+};
+
 struct ZoneConfig {
     std::string name;
     int         start = 0;                       // first index on the shared chain
@@ -75,6 +98,15 @@ struct ZoneConfig {
     std::vector<std::array<uint8_t, 3>> stops;
     float       breathe_hz = 0.5f;              // half-cycle / chase-cycle per second
     float       wave_speed = 0.5f;              // Gradient scroll / Wave travel, cycles/s
+    // Palette drift: scroll the custom-gradient COLOURS along the zone
+    // independently of the pattern, in cycles/s. This is what lets a Breathe or
+    // Solid zone show flowing Lava/Aurora colours — those patterns sample the
+    // palette at a fixed position, so without it the colours sit still while the
+    // brightness pulses. Deliberately separate from Wave Speed, which also times
+    // the Wave band, the Chase dot and the sound pulses; coupling them would mean
+    // you couldn't have slow-drifting colour under a fast wave. 0 = static.
+    // The Gradient PATTERN ignores this — Wave Speed is already its scroll.
+    float       palette_drift = 0.f;
     bool        grad_spatial = false;           // Gradient/Wave sweep across the 2D shape (vs along the wire/length)
     float       grad_angle   = 0.f;             // degrees: direction the spatial sweep travels
     uint8_t     zone_brightness = 255;          // per-zone scale on top of global
@@ -130,6 +162,19 @@ std::vector<float> zone_spatial_fracs(const ZoneConfig& z, float angle_deg);
 // after editing sections so the chain layout stays consistent.
 int zone_total(const ZoneConfig& z);
 
+// Force a wiring order to be a valid permutation of 0..ZoneCount-1: entries out
+// of range or repeated are dropped, and whatever is missing is appended in enum
+// order. A malformed order (hand-edited config, a shorter array from an older
+// build) must never silently drop a zone off the chain.
+std::array<int, ZoneCount> normalize_wire_order(const std::array<int, ZoneCount>& in);
+
+// Chain the zones end-to-end in WIRING order and return the total strip length.
+// Each zone's start follows the previous one's end, so `start` always reflects
+// how the run is physically soldered. The single place this is computed —
+// startup and the live "Apply Layout" both call it, so they cannot drift.
+int chain_zones(std::array<ZoneConfig, ZoneCount>& zones,
+                const std::array<int, ZoneCount>& order);
+
 // Cheek-mirror field copies (right ← left). mirror_zone_layout copies topology,
 // sizing and placement (mirrored: mirror flag flipped, pos_x + rotation +
 // gradient angle negated) and recomputes dst.count; it preserves dst.name and
@@ -169,7 +214,12 @@ void zone_base_colors(const ZoneConfig& z, double t, float vol,
                       std::vector<uint8_t>& out, float peak = -1.f,
                       float sound_gate = 1.f,
                       const std::vector<float>* lf_override = nullptr,
-                      const std::vector<float>* pulses = nullptr);
+                      const std::vector<float>* pulses = nullptr,
+                      const ZoneOverlay* overlay = nullptr);
+
+// Overlay coverage at axis fraction f (0..1). Exposed so the menu preview and
+// the tests can reason about the same curve the renderer uses.
+double overlay_cover(const ZoneOverlay& ov, double f);
 
 class AccessoryLeds {
 public:
@@ -182,6 +232,13 @@ public:
         std::string                   transport = "spidev";
         LedStrip::Config              strip;
         std::array<ZoneConfig, ZoneCount> zones{};
+        // Physical WIRING ORDER of the areas along the chain (DIN→DOUT), as zone
+        // indices: wire_order[0] is whichever area the data line reaches first.
+        // The strip is one continuous run, so this is a property of how the build
+        // was soldered, not of the enum — and it decides each zone's `start`, so
+        // getting it wrong lights the right pattern on the wrong area. Defaults
+        // to enum order (hub L, hub R, fin L, fin R, blush).
+        std::array<int, ZoneCount>    wire_order { 0, 1, 2, 3, 4 };
         uint8_t                       global_brightness = 64;
         double                        frame_hz          = 60.0;
         // When set, the four "side" zones (both cheek hubs + both fins) share
@@ -240,6 +297,13 @@ public:
     // emits per-zone descriptor commands (LZONE/LZG/LZP/LZF/LZSYNC/LEDB) to this
     // sink whenever something changes, so the coprocessor animates the zones on
     // its own clock. Wired to CoprocInputs::send_led_command. Set before start().
+    // Force the next command_loop pass to re-push EVERY zone descriptor even
+    // though nothing changed locally. Call this when the coprocessor link comes
+    // up: the Pico boots with no zone state, and the diff-and-emit controller
+    // would otherwise stay silent forever because its shadow still says the
+    // state was already sent. Safe from any thread.
+    void request_cmd_resync() { resync_cmds_.store(true); }
+
     void set_cmd_sink(std::function<void(const std::string&)> fn) {
         cmd_sink_ = std::move(fn);
     }
@@ -256,6 +320,13 @@ public:
     void set_zone_wave_speed(Zone, float hz);
     void set_zone_grad_spatial(Zone, bool on);
     void set_zone_grad_angle(Zone, float deg);
+    void set_zone_palette_drift(Zone, float cycles_per_s);
+    // Overlay layer (see ZoneOverlay). Live-only: deliberately NOT part of the
+    // saved zone config, because an overlay is a transient expression effect, not
+    // a setting — a crash mid-blush must not persist a half-covered zone.
+    void        set_zone_overlay(Zone, const ZoneOverlay&);
+    void        clear_zone_overlay(Zone);
+    ZoneOverlay zone_overlay(Zone) const;
     void set_zone_brightness(Zone, uint8_t b);
     void set_zone_follow_face(Zone, bool on);
     void set_zone_level_style(Zone, LevelStyle s);
@@ -354,8 +425,10 @@ private:
     std::vector<uint8_t> frame_;          // composited RGB, 3 bytes/pixel
     std::function<void(const uint8_t*, int)> frame_sink_;   // coproc frame push
     std::function<void(const std::string&)>  cmd_sink_;     // coproc_local command push
+    std::atomic<bool>                        resync_cmds_{false};  // re-push all zones next pass
     double            last_send_ = 0.0;   // coproc send throttle (loop seconds)
-    std::mutex        cfg_mtx_;       // guards cfg_.zones + global_brightness
+    // mutable so const readers (zone_overlay) can lock it too.
+    mutable std::mutex cfg_mtx_;      // guards cfg_.zones + global_brightness
     std::atomic<bool> running_ { false };
     std::thread       thread_;
 
@@ -385,6 +458,9 @@ private:
     // Complete-on-trigger PULSES: each entry is a live sweep's head position
     // (0..1), advanced each frame; a new trigger appends one so sweeps overlap.
     std::vector<float> pulses_[ZoneCount];
+    // Live overlay per zone, guarded by cfg_mtx_ like the zone config it composites
+    // over. Not persisted — see set_zone_overlay.
+    ZoneOverlay        overlay_[ZoneCount];
 
     std::atomic<float> audio_volume_ { 0.0f };
     std::atomic<uint32_t> face_color_       { 0x00DCB4 };   // whole-face follow feed

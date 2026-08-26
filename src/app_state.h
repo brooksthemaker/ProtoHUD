@@ -13,6 +13,7 @@
 #include "capture.h"
 #include "face/custom_expression.h"
 #include "face/eye_anim.h"
+#include "face/scroll_text.h"
 
 // ── Post-processing config ────────────────────────────────────────────────────
 // Modified from menu (any thread); read by the render thread via snap.
@@ -80,6 +81,10 @@ struct FaceState {
     bool     face_colors  = false;  // true = draw the face's own RGB art; false = material override
     bool     pride_sharp  = true;   // pride flags: hard-edged distinct bands vs smooth blend
     int      pride_angle  = 90;     // pride flag stripe rotation, degrees (90 = vertical stripes)
+    // Built-in gradient materials (Sunset/Fire/Lava/…): live direction + scroll.
+    // 0/0 is the shipped look (horizontal, mirrored, static).
+    int      mat_angle    = 0;      // gradient direction, degrees
+    int      mat_speed    = 0;      // gradient scroll, px/s (negative reverses)
 };
 
 struct LoRaNode {
@@ -1039,6 +1044,13 @@ struct AppState {
     // by ExpressionDirector; persisted as protoface.expression_triggers.
     // Guarded by mtx.
     std::map<std::string, face::TriggerSet> expression_triggers;
+    // Event-driven text slots. Each carries its own message AND its own full
+    // set of banner properties; its Triggers live in expression_triggers under
+    // key "textev_<index>", so faces, eye-anims, diagnostics and event text all
+    // share one recipe editor and one persistence path.
+    // Persisted as protoface.text_events. Guarded by mtx.
+    std::vector<face::TextEvent> text_events{
+        static_cast<size_t>(face::kTextEventSlots)};
     // Per-animation params for the procedural Animated Eyes (edited in the
     // Expressions menu). Slot index == face::EyeAnim value; each slot's
     // Triggers live in expression_triggers under key "eyeanim_<index>".
@@ -1050,6 +1062,17 @@ struct AppState {
         { face::EyeAnim::XEyes },     { face::EyeAnim::Radar },
         { face::EyeAnim::Fire },      { face::EyeAnim::Rain },
         { face::EyeAnim::Sparkle },   { face::EyeAnim::Heartbeat },
+        // Crying is the one animation designed AROUND the face art — it anchors to
+        // the eye regions' lid line — so unlike the others it ships pre-tuned to
+        // its intended look: pale blue tears, a longer hold, and overlay +
+        // blackout on so it reads as closed crying eyes over the live face.
+        // (type, speed, size, r, g, b, duration_s, cx, cy, mirror, overlay,
+        //  blackout_eyes)
+        { face::EyeAnim::Crying, 1.0, 1.0, 150, 210, 255, 5.0, 0.5, 0.5,
+          false, true, true },
+        // Waterfall is the same idea turned up — pre-tuned the same way.
+        { face::EyeAnim::Waterfall, 1.0, 1.0, 150, 210, 255, 5.0, 0.5, 0.5,
+          false, true, true },
     };
     VoiceMouthConfig     voice_mouth;
     CoprocMicConfig      coproc_mic;

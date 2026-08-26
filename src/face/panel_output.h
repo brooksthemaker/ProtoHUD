@@ -7,6 +7,7 @@
 //   • PiomatterOutput  — (future) drives the panels directly via a vendored
 //                        Piomatter C++ core, no Python.
 
+#include <array>
 #include <opencv2/core.hpp>
 #include <string>
 #include <vector>
@@ -42,6 +43,33 @@ public:
     // inside its grid. Default returns empty; override in any backend
     // that wants editor labels.
     virtual std::vector<NamedRegion> covered_named_regions() const { return {}; }
+
+    // Mirror the whole physical output — for a panel set mounted rotated or
+    // mirrored as a unit. Done here rather than on the canvas so it maps whole
+    // panels onto each other (the way a 180° mount does) and so the in-HUD
+    // preview, which reads the canvas, stays the right way up. Backends that
+    // can't express it ignore it.
+    virtual void set_output_flip(bool /*flip_x*/, bool /*flip_y*/) {}
+
+    // Per-panel mounting rotation in degrees, angles[i] for panel i. Live so
+    // the setup slider can be turned against the panels; the canvas box that
+    // feeds the tilted sample only grows on a layout rebuild, so a large angle
+    // may read black at the corners until the layout is re-applied. Backends
+    // without a panel inventory ignore it.
+    virtual void set_panel_angles(const std::vector<double>& /*angles*/) {}
+
+    // Mounting flips, applied to the physical output rather than to the canvas.
+    // flips[i] = {flip_x, flip_y} for panel i; halves[j] = the same for half j
+    // (0 = top, 1 = bottom) flipped as one strip. These belong here, not in the
+    // renderer: the canvas is helmet space, and a rotated panel samples past its
+    // own rect, so a flip applied to a canvas region would leak into whatever
+    // neighbour a tilted edge reaches into.
+    virtual void set_panel_flips(const std::vector<std::array<bool, 2>>& /*flips*/) {}
+    virtual void set_half_flips (const std::vector<std::array<bool, 2>>& /*halves*/) {}
+
+    // Sample rotated panels with nearest-neighbour rather than bilinear —
+    // exact pixels (crisp text) at the cost of stair-stepped diagonals.
+    virtual void set_sharp_rotation(bool /*on*/) {}
 
     // True if this backend has a sensible pixel grid the editor can target.
     // Decouples editor availability from whether the user has configured

@@ -107,6 +107,12 @@ public:
     void shutdown();
     bool connected() const { return connected_.load(); }   // surfaced to HUD status
 
+    // Fired on every HELLO — i.e. whenever the coprocessor link comes up, which
+    // includes a reconnect, a reflash and a power cycle. Subsystems that push
+    // state INTO the firmware (rather than streaming it every frame) use this to
+    // re-send it, since the Pico boots blank. Runs on the reader thread.
+    void set_on_link_up(std::function<void()> fn) { on_link_up_ = std::move(fn); }
+
     // I²C bus test: ask the coprocessor to probe its I²C lines (default GP20/21,
     // or the given SDA/SCL) and report which addresses ACK. The reply is captured
     // asynchronously; poll i2c_scan_result() for the last result ("scanning…",
@@ -132,6 +138,11 @@ public:
     // ── Peripheral TEST verbs (pre-assigned pins; see firmware config.h) ─────
     // Servo test channel: 0-180 degrees, or -1 = off/detach ("SERVO ch off").
     void send_servo(int ch, int deg);
+    // Smooth move: target + slew speed (deg/s); the firmware eases toward it.
+    // deg < 0 detaches, matching send_servo. speed 0 = snap.
+    void send_servo_move(int ch, int deg, int speed);
+    // Pulse-width window (us) that 0..180 deg maps onto — sets the servo's travel.
+    void send_servo_calibration(int ch, int min_us, int max_us);
     // Addressable LED zone (WS2812 or APA102, firmware config.h picks):
     // solid fill ("LEDZ r g b [count]"); 0/0/0 = off.
     void send_led_zone(int r, int g, int b, int count = -1);
@@ -194,6 +205,7 @@ private:
     std::function<void(GpioFunc)> dispatch_;
     std::atomic<bool>             running_{false};
     std::atomic<bool>             connected_{false};
+    std::function<void()>         on_link_up_;      // fired on each HELLO
     std::thread                   thread_;
     int                           fd_ = -1;   // serial or i2c fd
     std::mutex                    write_mtx_; // serializes all write()s to fd_

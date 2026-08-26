@@ -27,6 +27,7 @@
 #include "glitch.h"         // GlitchEffect + GlitchConfig
 #include "panel_output.h"   // PanelOutput + NamedRegion
 #include "scroll_text.h"    // ScrollText + ScrollTextConfig
+#include "test_pattern.h"   // TestPatternRenderer + TestPattern
 
 namespace face {
 
@@ -98,6 +99,12 @@ public:
                                     uint8_t r, uint8_t g, uint8_t b,
                                     double speed) override;
     void        play_eye_animation(const EyeAnimParams& p) override;
+
+    // Head roll in degrees from the IMU (0 = upright). Only the gravity-aware eye
+    // animations (Crying, Waterfall) use it — their tears fall along real gravity,
+    // so a leaning head makes them run downhill. Safe to call every frame; cheap
+    // enough that it's fine to feed unconditionally.
+    void        set_head_roll(float deg) { head_roll_deg_.store(deg); }
     void        set_audio_drive(double volume, double mouth_open) override;
     void        set_motion(double heading_deg, double yaw_rate, double pitch_deg,
                            double roll_deg, double accel_g) override;
@@ -198,6 +205,25 @@ public:
     // = {flip_x, flip_y} for panel i; extra/missing entries are ignored. Read by
     // the render thread on the next frame.
     void set_panel_flips(const std::vector<std::array<bool, 2>>& flips);
+    // Live per-half strip flips (HUB75 layout Top Half / Bottom Half). halves[i]
+    // = {flip_x, flip_y} for half i (0 = top, 1 = bottom). The strip rects come
+    // from the layout at build time, so only the flags move here — extra or
+    // missing entries are ignored, same as set_panel_flips.
+    void set_half_flips(const std::vector<std::array<bool, 2>>& halves);
+    // Live per-panel mounting rotation in degrees (HUB75 layout Rotation), so
+    // the slider can be turned against the panels. Forwarded to the output,
+    // which resamples each panel's slice along the tilted rect.
+    void set_panel_angles(const std::vector<double>& angles);
+    // Nearest-neighbour sampling for rotated panels — crisp text, stepped
+    // diagonals. Forwarded to the output, which owns the resample.
+    void set_sharp_rotation(bool on) {
+        if (output_) output_->set_sharp_rotation(on);
+    }
+    // Live whole-canvas mirror for the OUTPUT only (HUB75 layout Flip Whole
+    // Canvas H / V) — applied after the per-panel flips, so a panel set mounted
+    // rotated or mirrored as a unit reads correctly without re-nudging every
+    // panel. The preview keeps the unflipped canvas.
+    void set_canvas_flip(bool flip_x, bool flip_y);
     // Apply an arbitrary material spec (e.g. "gradient:h:s:20:00DCB4-0064FF")
     // to every self-rendered panel and persist it. Used by the Material Color
     // gradient editor for live preview.
@@ -217,6 +243,21 @@ public:
     // panels and stays legible.
     void set_scroll_text(const ScrollTextConfig& cfg) { scroll_text_.set_config(cfg); }
     ScrollTextConfig scroll_text() const              { return scroll_text_.config(); }
+    // Live values for the banner's {token} placeholders. Pushed from the app
+    // loop (see main.cpp) so resolving them never crosses into AppState's lock
+    // from the render thread. Cheap when nothing changed.
+    void set_scroll_tokens(std::map<std::string, std::string> values) {
+        scroll_text_.set_tokens(std::move(values));
+    }
+
+    // Panel setup / diagnostic overlays (see test_pattern.h). Replaces the face
+    // on the canvas, then goes through the mounting flips, the gather into the
+    // chain framebuffer and the whole-output mirror exactly as the face does —
+    // so what lands on the panels is the real mapping, not a second guess at it.
+    // Deliberately not persisted: it's a bench tool, and booting the helmet into
+    // a test pattern would be worse than losing the setting.
+    void set_test_pattern(TestPattern p) { test_pattern_.set_pattern(p); }
+    TestPattern test_pattern() const     { return test_pattern_.pattern(); }
 
     // Push a "transient" image for the named expression onto every panel
     // for duration_s seconds. The current image is stashed and restored
@@ -320,6 +361,11 @@ private:
     EyeAnimParams      eye_anim_;
     double             eye_anim_timer_ = 0.0;   // seconds remaining
     double             eye_anim_t_     = 0.0;   // elapsed seconds (animation phase)
+    // Head roll in degrees, fed from the IMU (see set_head_roll). The Crying and
+    // Waterfall animations fall along real gravity, so tears run downhill when the
+    // head leans. Atomic: written from the main loop, read by the render thread
+    // without taking state_mtx_ (a stale frame is harmless here).
+    std::atomic<float> head_roll_deg_{0.f};
 
     // Glitch post-effect. glitch_ (sim state) is touched only by the render
     // thread; glitch_cfg_ (the default look's config) is written by
@@ -340,6 +386,10 @@ private:
     // run on the render thread, set_scroll_text() from menu/config threads.
     ScrollText         scroll_text_;
 
+    // Panel setup / diagnostic overlays. Atomic pattern selector internally, so
+    // the menu can switch patterns while the render thread ticks it.
+    TestPatternRenderer test_pattern_;
+
     // Expression → mood-preset coupling (off by default). expr_effects_ gates
     // it; current_expression_ tracks the latest set face so toggling re-applies
     // correctly. Lives under state_mtx_.
@@ -350,6 +400,10 @@ private:
     std::thread        thread_;
     std::atomic<bool>  running_{false};
     std::atomic<bool>  face_colors_{false};   // draw art's own RGB vs material override
+    // Whole-canvas output mirror (see set_canvas_flip). Atomic so the menu can
+    // flip it between frames without taking state_mtx_.
+    std::atomic<bool>  canvas_flip_x_{false};
+    std::atomic<bool>  canvas_flip_y_{false};
     std::atomic<bool>  pride_sharp_{true};    // pride flags: hard bands vs smooth blend
     std::atomic<bool>  motion_particles_{true};  // gravity/slosh coupling for effects
     std::atomic<bool>   face_inertia_{true};          // whole-face motion slide
@@ -366,6 +420,13 @@ private:
     bool   inertia_prev_valid_ = false;
     nlohmann::json     ambient_spec_;         // ambient override (guarded by state_mtx_)
     std::atomic<int>   pride_angle_{90};      // pride flag stripe rotation, degrees
+    // Live direction + scroll for the BUILT-IN gradient materials (Sunset, Ocean,
+    // Fire, Lava, …). They ship as "gradient:hm:s:0:…" — horizontal, mirrored,
+    // static — and these two override the direction and speed fields so the same
+    // preset can be aimed and made to flow without a new preset per variation.
+    // 0 / 0 reproduces the shipped look exactly (a0m is identical to hm).
+    std::atomic<int>   mat_angle_{0};         // gradient direction, degrees
+    std::atomic<int>   mat_speed_{0};         // gradient scroll, px/s (sign = direction)
 
     // Per-frame drive inputs written by other threads (audio thread, IMU
     // pump) at high rate. Atomics instead of state_mtx_: the render thread

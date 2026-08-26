@@ -165,6 +165,10 @@ void CoprocInputs::on_line(const std::string& line) {
     if (cmd == "HELLO") {
         connected_.store(true);
         std::cout << "[coproc] " << line << "\n";
+        // Tell anyone holding pushed-once state that the firmware just came up
+        // with none of it. Fired on EVERY HELLO (including the re-HELLO after a
+        // pin-map push) — re-pushing is idempotent and cheap, missing one is not.
+        if (on_link_up_) on_link_up_();
         // Push the configured pin map once per connection. The firmware re-HELLOs
         // after applying it; pins_pushed_ stops that from looping.
         if (!pins_pushed_ && !cfg_.pins.empty()) {
@@ -356,10 +360,30 @@ void CoprocInputs::send_fan_duty(int zone, int duty_pct) {
 }
 
 void CoprocInputs::send_servo(int ch, int deg) {
-    if (fd_ < 0 || ch < 0 || ch > 3) return;
+    if (fd_ < 0 || ch < 0 || ch > 15) return;
     const std::string msg = "SERVO " + std::to_string(ch) + " " +
         (deg < 0 ? std::string("off")
                  : std::to_string(deg > 180 ? 180 : deg)) + "\n";
+    write_locked(msg.data(), msg.size());
+}
+
+void CoprocInputs::send_servo_move(int ch, int deg, int speed) {
+    // SERVOM: the firmware eases toward the target at `speed` deg/s in its own
+    // ~66 Hz service loop, so one line per move keeps ear motion smooth even when
+    // the CM5 is busy — no angle streaming. speed 0 = snap (same as SERVO).
+    if (fd_ < 0 || ch < 0 || ch > 15) return;
+    if (deg < 0) { send_servo(ch, -1); return; }        // detach
+    const std::string msg = "SERVOM " + std::to_string(ch) + " " +
+                            std::to_string(deg > 180 ? 180 : deg) + " " +
+                            std::to_string(speed < 0 ? 0 : speed) + "\n";
+    write_locked(msg.data(), msg.size());
+}
+
+void CoprocInputs::send_servo_calibration(int ch, int min_us, int max_us) {
+    if (fd_ < 0 || ch < 0 || ch > 15) return;
+    const std::string msg = "SERVOCAL " + std::to_string(ch) + " " +
+                            std::to_string(min_us) + " " +
+                            std::to_string(max_us) + "\n";
     write_locked(msg.data(), msg.size());
 }
 

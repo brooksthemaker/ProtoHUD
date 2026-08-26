@@ -23,6 +23,12 @@ enum class EyeAnim : int {
     Rain,         // falling streaks (fills the panel)
     Sparkle,      // twinkling star field (fills the panel)
     Heartbeat,    // monitor-sweep ECG trace, redrawn left→right each pass
+    Crying,       // tears welling on the eye's lid line and falling away
+    Waterfall,    // a continuous sheet of tears pouring from the lid line
+    // APPEND ONLY, always immediately before Count. These indices are persisted
+    // POSITIONALLY (config protoface.eye_animations[i]) and keyed by index in the
+    // trigger map (expression_triggers["eyeanim_<i>"]), so inserting a value
+    // anywhere else silently rebinds every existing user's params and triggers.
     Count
 };
 

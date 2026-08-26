@@ -264,6 +264,49 @@ void FaceLoader::load() {
         };
         stamp(eye_left_);
         stamp(eye_right_);
+
+        // Per-column lower edge of that stencil — the closed-lid line the Crying
+        // and Waterfall animations hang their tears off. Scanning top→bottom and
+        // letting the last hit win yields the LOWEST lit row per column with no
+        // branching.
+        if (!eye_mask_.empty()) {
+            eye_lid_.width  = w_;
+            eye_lid_.height = h_;
+            eye_lid_.bottom.assign(static_cast<size_t>(w_), -1);
+            for (int y = 0; y < h_; ++y) {
+                const uint8_t* row = eye_mask_.ptr<uint8_t>(y);
+                for (int x = 0; x < w_; ++x)
+                    if (row[x]) eye_lid_.bottom[static_cast<size_t>(x)] =
+                                    static_cast<int16_t>(y);
+            }
+
+            // Refine it against the BLINK ART, which is the real closed eyelid.
+            // The eye polygon is a coarse box the artist traced around the whole
+            // eye, so its lower edge sits well below the drawn lid (on faces/main
+            // it's row 12-14 while the drawn blink line is row 3-5). blink.png's
+            // lit pixels inside the region ARE that line, so their per-column
+            // lower edge gives tears a source that hugs what's actually drawn —
+            // no second polygon for the artist to trace. Columns where the blink
+            // art is empty keep the polygon edge computed above.
+            if (!blink_.empty() && blink_.size() == eye_mask_.size() &&
+                blink_.type() == CV_8UC4) {
+                std::vector<int16_t> art_lid(static_cast<size_t>(w_), -1);
+                for (int y = 0; y < h_; ++y) {
+                    const uint8_t* mrow = eye_mask_.ptr<uint8_t>(y);
+                    const cv::Vec4b* brow = blink_.ptr<cv::Vec4b>(y);
+                    for (int x = 0; x < w_; ++x) {
+                        if (!mrow[x] || brow[x][3] == 0) continue;
+                        const int lum = std::max({ brow[x][0], brow[x][1], brow[x][2] });
+                        if (lum <= 30) continue;      // ignore near-black art
+                        art_lid[static_cast<size_t>(x)] = static_cast<int16_t>(y);
+                    }
+                }
+                for (int x = 0; x < w_; ++x)
+                    if (art_lid[static_cast<size_t>(x)] >= 0)
+                        eye_lid_.bottom[static_cast<size_t>(x)] =
+                            art_lid[static_cast<size_t>(x)];
+            }
+        }
     }
 }
 

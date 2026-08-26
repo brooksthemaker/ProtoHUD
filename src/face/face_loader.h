@@ -10,6 +10,8 @@
 #include <vector>
 #include <opencv2/core.hpp>
 
+#include "face/eye_lid.h"
+
 namespace face {
 
 class FaceState;   // fwd
@@ -49,6 +51,13 @@ public:
     // filled). Empty when the face defines no eye regions. Used by the
     // Animated Eyes overlay's blackout option.
     const cv::Mat& eye_region_mask() const { return eye_mask_; }
+
+    // Per-column LOWER edge of those same eye regions — the closed-lid line.
+    // Derived from eye_mask_ at load (regions never change afterwards, and every
+    // face reload builds a fresh FaceLoader, so this needs no invalidation).
+    // Empty when the face defines no eye regions. Used by the Crying animation
+    // so its tears fall from the eye the artist actually drew.
+    const EyeLidLine& eye_lid_line() const { return eye_lid_; }
 
 private:
     // A blink/mouth region. x,y,w,h is always the (panel-local) bounding box
@@ -96,6 +105,7 @@ private:
     std::map<std::string, cv::Mat> mouth_shapes_;
     Region   eye_left_, eye_right_, mouth_;
     cv::Mat  eye_mask_;         // union stencil of the eye regions (may be empty)
+    EyeLidLine eye_lid_;        // per-column lower edge of eye_mask_ (may be empty)
 };
 
 } // namespace face

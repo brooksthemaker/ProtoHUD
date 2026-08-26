@@ -55,16 +55,36 @@ void ExpressionDirector::fire_locked(const Rule& rule) {
         // Switching from a different active expression: undo ITS actions first
         // so LED/servo state doesn't leak from one expression into the next.
         if (active_) revert_actions_locked();
+        if (active_diag_ && act_.show_diag) { act_.show_diag(false); active_diag_ = false; }
+        if (active_text_slot_ >= 0 && act_.show_text_event) {
+            act_.show_text_event(active_text_slot_, false);
+            active_text_slot_ = -1;
+        }
         // Remember where to return to — but never a face we put up ourselves.
-        if (!active_ && act_.current_face) restore_face_ = act_.current_face();
+        // A diagnostics rule doesn't touch the face, so there's nothing to
+        // return to and nothing to stash.
+        const bool banner_rule = rule.is_diag || rule.is_text_event;
+        if (!active_ && act_.current_face && !banner_rule)
+            restore_face_ = act_.current_face();
         active_     = true;
         active_key_ = rule.key;
-        if (act_.set_face && !rule.base_expression.empty())
+        if (rule.is_diag) {
+            if (act_.show_diag) { act_.show_diag(true); active_diag_ = true; }
+        } else if (rule.is_text_event) {
+            if (act_.show_text_event && rule.text_slot >= 0) {
+                act_.show_text_event(rule.text_slot, true);
+                active_text_slot_ = rule.text_slot;
+            }
+        } else if (act_.set_face && !rule.base_expression.empty()) {
             act_.set_face(rule.base_expression);
+        }
         // Custom expressions carry their style in the override slot (applied
         // AFTER set_face — the face switch re-runs the style resolver).
-        // Built-ins get their style from the resolver itself.
-        if (rule.has_style) {
+        // Built-ins get their style from the resolver itself. A diagnostics
+        // rule leaves the face and its style entirely alone.
+        if (banner_rule) {
+            // nothing to style — neither banner kind touches the face
+        } else if (rule.has_style) {
             if (act_.set_style_override) act_.set_style_override(rule.style);
         } else if (act_.clear_style_override) {
             act_.clear_style_override();
@@ -109,6 +129,23 @@ void ExpressionDirector::deactivate_locked() {
     latched_ = false;
     hold_left_ = 0.0;
     revert_actions_locked();   // undo LED/servo side-effects the activation applied
+    if (active_diag_) {
+        // Lower the readout and stop there — a diagnostics activation never
+        // touched the face or its style, so clearing either would stomp on
+        // whatever the wearer had up.
+        if (act_.show_diag) act_.show_diag(false);
+        active_diag_ = false;
+        restore_face_.clear();
+        return;
+    }
+    if (active_text_slot_ >= 0) {
+        // Same reasoning as the readout: put the previous banner back and
+        // leave the face exactly as the wearer had it.
+        if (act_.show_text_event) act_.show_text_event(active_text_slot_, false);
+        active_text_slot_ = -1;
+        restore_face_.clear();
+        return;
+    }
     if (act_.clear_style_override) act_.clear_style_override();
     if (!restore_face_.empty() && act_.set_face) act_.set_face(restore_face_);
     restore_face_.clear();
@@ -171,6 +208,14 @@ void ExpressionDirector::on_shake(const std::vector<Rule>& rules) {
     std::lock_guard<std::mutex> lk(mtx_);
     feed_event_locked(rules, [](const TriggerRecipe& r) {
         return r.event == TriggerRecipe::Event::Shake;
+    });
+}
+
+void ExpressionDirector::on_system(TriggerRecipe::Event ev,
+                                   const std::vector<Rule>& rules) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    feed_event_locked(rules, [ev](const TriggerRecipe& r) {
+        return r.event == ev;
     });
 }
 

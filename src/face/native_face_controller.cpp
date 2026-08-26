@@ -152,6 +152,11 @@ void apply_face_glow(cv::Mat& rgb, const cv::Mat& face_rgba,
 NativeFaceController::NativeFaceController(RenderConfig cfg,
                                           std::unique_ptr<PanelOutput> output)
     : cfg_(std::move(cfg)), output_(std::move(output)) {
+    // Seed the live output mirror from the config so a backend rebuild doesn't
+    // drop the user's mounting orientation back to unflipped.
+    canvas_flip_x_.store(cfg_.canvas_flip_x);
+    canvas_flip_y_.store(cfg_.canvas_flip_y);
+    if (output_) output_->set_output_flip(cfg_.canvas_flip_x, cfg_.canvas_flip_y);
     // Default expression → mood-preset coupling (used when set_expression_effects
     // is enabled). Keys match the face expression stems; values are presets in
     // particles.cpp. An empty value (or missing key) means "show the base effect".
@@ -461,11 +466,21 @@ void NativeFaceController::render_thread() {
                 // flipped — so a single wide canvas reads as a pair of eyes
                 // and directional animations (the EKG sweep) radiate outward
                 // from the centre; cx/cy position within each half.
+                // The face's closed-lid line (Crying hangs its tears off it).
+                // Null for a face with no eye regions — the renderer then falls
+                // back to a synthetic flat lid at Position Y.
+                const EyeLidLine* eye_lid =
+                    pn.loader ? &pn.loader->eye_lid_line() : nullptr;
+                const float groll = head_roll_deg_.load();
                 auto render_anim_layer = [&]() -> cv::Mat {
                     if (eye_anim_.mirror && pc.w >= 2) {
                         const int hw = pc.w / 2;
+                        // The half render covers panel columns [pc.w-hw, pc.w) —
+                        // pass that as lid_x0 so a lid-anchored animation lines up
+                        // with the RIGHT eye, which is then flipped onto the left.
                         cv::Mat half = render_eye_animation(eye_anim_, eye_anim_t_,
-                                                            hw, pc.h);
+                                                            hw, pc.h,
+                                                            eye_lid, pc.w - hw, groll);
                         cv::Mat out = cv::Mat::zeros(pc.h, pc.w, CV_8UC4);
                         half.copyTo(out(cv::Rect(pc.w - hw, 0, hw, pc.h)));
                         cv::Mat flipped;
@@ -474,7 +489,7 @@ void NativeFaceController::render_thread() {
                         return out;
                     }
                     return render_eye_animation(eye_anim_, eye_anim_t_,
-                                                pc.w, pc.h);
+                                                pc.w, pc.h, eye_lid, 0, groll);
                 };
 
                 cv::Mat face_layer;
@@ -491,13 +506,13 @@ void NativeFaceController::render_thread() {
                             cv::Mat g = gframe;
                             if (gframe.cols != op.w || gframe.rows != op.h)
                                 cv::resize(gframe, g, cv::Size(op.w, op.h), 0, 0, cv::INTER_NEAREST);
-                            // Pre-flip so the per-panel output flip cancels out:
-                            // GIFs (which may contain text) read forwards on every
-                            // panel regardless of its mounting flip.
-                            if (op.flip_x || op.flip_y) {
-                                const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
-                                cv::Mat tmp; cv::flip(g, tmp, code); g = tmp;
-                            }
+                            // No pre-flip here. This used to cancel the panel's
+                            // mounting flip so GIF text "read forwards", but the
+                            // cancellation ran the wrong way: on a panel hung
+                            // upside down the face gets flipped to come out
+                            // right, and undoing that for the GIF is exactly
+                            // what made it play upside down while everything
+                            // else looked correct.
                             const cv::Rect dst(op.x - pc.x, op.y - pc.y, op.w, op.h);
                             const cv::Rect inter = dst & cv::Rect(0, 0, pc.w, pc.h);
                             if (inter.width > 0 && inter.height > 0)
@@ -615,11 +630,11 @@ void NativeFaceController::render_thread() {
                     frame.copyTo(canvas(roi));
             }
 
-            // Panel-geometry transforms (mirror-panel copies + mounting flips).
-            // Applied identically to the main canvas and the face-only canvas so
-            // the halves the follow sampler reads line up with what's displayed.
-            auto apply_panel_transforms = [&](cv::Mat& C) {
-                // Mirror panels copy a horizontally-flipped source region.
+            // Mirror-panel copies: a CONTENT transform (the right eye is a
+            // flipped copy of the left), so it runs before the overlay layers —
+            // a glitch or a scroll banner should read continuously across the
+            // finished face rather than being duplicated per half.
+            auto apply_mirror_copies = [&](cv::Mat& C) {
                 for (auto& pn : panels_) {
                     if (!pn.is_mirror || pn.src_index < 0) continue;
                     const PanelCfg& src = panels_[pn.src_index].cfg;
@@ -633,8 +648,21 @@ void NativeFaceController::render_thread() {
                     cv::flip(C(sroi), flipped, 1);
                     flipped.copyTo(C(droi));
                 }
-                // Per-panel orientation flips (HUB75 layout's Flip X / Flip Y).
-                // flip code: 1 = horizontal, 0 = vertical, -1 = both (180°).
+            };
+            // Legacy PanelCfg flips (config-driven "panels" array, e.g. a
+            // face_left / face_right pair). These panels ARE the canvas layout,
+            // so flipping their region in place is well defined.
+            //
+            // The HUB75 layout's per-panel / per-half / whole-set flips are NOT
+            // done here — they live in the PanelOutput, applied to each panel's
+            // sampled tile and to the assembled framebuffer. They have to: the
+            // canvas is helmet space, and a rotated panel samples PAST its own
+            // rect to keep the face flowing over a seam. Rearranging canvas
+            // regions under it meant a tilted edge picked up whatever a flip had
+            // just moved in next door — which is how panel 1 ended up showing a
+            // slice of panel 4 (the bottom-half flip had swapped 3 and 4 into
+            // each other's place directly below it).
+            auto apply_mounting_flips = [&](cv::Mat& C) {
                 for (auto& pn : panels_) {
                     const PanelCfg& pc = pn.cfg;
                     if (!pc.flip_x && !pc.flip_y) continue;
@@ -645,19 +673,9 @@ void NativeFaceController::render_thread() {
                     cv::flip(region, flipped, code);
                     flipped.copyTo(region);
                 }
-                // Multi-panel logical canvas: flip each physical panel's slice.
-                for (const auto& op : cfg_.output_panels) {
-                    if (!op.flip_x && !op.flip_y) continue;
-                    cv::Rect roi(op.x, op.y, op.w, op.h);
-                    if ((roi & cv::Rect(0, 0, C.cols, C.rows)) != roi) continue;
-                    const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
-                    cv::Mat region = C(roi), flipped;
-                    cv::flip(region, flipped, code);
-                    flipped.copyTo(region);
-                }
             };
-            apply_panel_transforms(canvas);
-            if (want_face) apply_panel_transforms(face_canvas);
+            apply_mirror_copies(canvas);
+            if (want_face) apply_mirror_copies(face_canvas);
 
             // Glitch post-effect: corrupt the fully-composited face canvas in a
             // single pass so it reads as one signal glitch across the whole face.
@@ -667,6 +685,20 @@ void NativeFaceController::render_thread() {
             // Scrolling-text banner: above everything (including glitch) so it
             // stays legible; spans the whole canvas, mirrored halves included.
             scroll_text_.render(canvas);
+
+            // Panel setup patterns replace the face but still run through the
+            // mounting flips below (and the gather / output mirror downstream) —
+            // the whole point is to exercise the same path the face takes.
+            if (test_pattern_.active()) {
+                test_pattern_.tick(dt);
+                test_pattern_.render(canvas, cfg_.output_panels);
+            }
+
+            // Mounting flips last — see apply_mounting_flips. The face-only
+            // canvas gets them too so the halves the accessory follow sampler
+            // reads still line up with what's displayed.
+            apply_mounting_flips(canvas);
+            if (want_face) apply_mounting_flips(face_canvas);
         }
 
         {
@@ -822,22 +854,59 @@ void NativeFaceController::set_brightness(uint8_t value) {
     write_state_file(snap);
 }
 
+// Rewrite a "gradient:<dir>:<mode>:<speed>:<stops>" spec's direction and/or
+// scroll speed, leaving every other field alone. Non-gradient specs (solids, the
+// PNG pattern presets) pass through untouched.
+//
+// ⚠️ The trailing "m" on the direction MIRRORS the ramp about the face's centre
+// line, and every built-in gradient relies on it so the two sides of the face
+// reflect each other. Replacing "hm" with a bare "a45" would silently break that
+// symmetry, so the mirror flag is carried across.
+static std::string regrad_spec(const std::string& spec,
+                               const int* angle, const int* speed) {
+    if (spec.rfind("gradient:", 0) != 0) return spec;
+    const size_t p0 = 9;                                  // after "gradient:"
+    const size_t c1 = spec.find(':', p0);
+    if (c1 == std::string::npos) return spec;
+    const size_t c2 = spec.find(':', c1 + 1);
+    if (c2 == std::string::npos) return spec;
+    const size_t c3 = spec.find(':', c2 + 1);
+    if (c3 == std::string::npos) return spec;             // no stop list = leave it
+
+    std::string dir  = spec.substr(p0, c1 - p0);
+    std::string mode = spec.substr(c1 + 1, c2 - c1 - 1);
+    std::string spd  = spec.substr(c2 + 1, c3 - c2 - 1);
+    const std::string stops = spec.substr(c3 + 1);
+
+    if (angle) {
+        const bool mirror = !dir.empty() && (dir.back() == 'm' || dir.back() == 'M');
+        const int  a      = ((*angle % 360) + 360) % 360;
+        dir = "a" + std::to_string(a) + (mirror ? "m" : "");
+    }
+    if (speed) spd = std::to_string(*speed);
+    return "gradient:" + dir + ":" + mode + ":" + spd + ":" + stops;
+}
+
 std::string NativeFaceController::material_for_index(int idx) const {
     std::string spec = preset_material(idx);
     if (idx >= 22 && idx <= 33) {
         // Pride flags (22-33) are stored as smooth vertical gradients
         // ("gradient:v:s:0:…"). Apply the live rotation and sharp-bands
         // preferences before handing the spec to the renderer.
-        static const std::string kPrefix = "gradient:v:";
-        if (spec.rfind(kPrefix, 0) == 0) {
-            const int ang = ((pride_angle_.load() % 360) + 360) % 360;
-            spec = "gradient:a" + std::to_string(ang) + ":" + spec.substr(kPrefix.size());
-        }
+        const int ang = ((pride_angle_.load() % 360) + 360) % 360;
+        spec = regrad_spec(spec, &ang, nullptr);
         if (pride_sharp_.load()) {
             const auto p = spec.find(":s:");   // swap smooth → banded for distinct stripes
             if (p != std::string::npos) spec.replace(p, 3, ":b:");
         }
+    } else {
+        // Built-in gradients (12-21): live direction from the menu.
+        const int ang = mat_angle_.load();
+        spec = regrad_spec(spec, &ang, nullptr);
     }
+    // Scroll applies to every gradient material, flags included.
+    const int spd = mat_speed_.load();
+    spec = regrad_spec(spec, nullptr, &spd);
     return spec;
 }
 
@@ -860,6 +929,16 @@ void NativeFaceController::set_menu_item(uint8_t menu_index, uint8_t value) {
     }
     if (menu_index == 11) {        // 11 = pride stripe rotation, in 15° units (native only)
         pride_angle_.store((static_cast<int>(value) * 15) % 360);
+        return;                    // menu re-applies the current preset via item 8
+    }
+    if (menu_index == 12) {        // 12 = gradient material direction, 15° units
+        mat_angle_.store((static_cast<int>(value) * 15) % 360);
+        return;                    // menu re-applies the current preset via item 8
+    }
+    if (menu_index == 13) {        // 13 = gradient material scroll, px/s
+        // Byte transport, but the speed is SIGNED (negative reverses the flow),
+        // so it rides across offset by 100: 0..200 maps to -100..+100 px/s.
+        mat_speed_.store(static_cast<int>(value) - 100);
         return;                    // menu re-applies the current preset via item 8
     }
     if (menu_index != 8) return;   // 8 = material colour preset (matches Protoface)
@@ -1472,20 +1551,45 @@ void NativeFaceController::set_expression_fade(double seconds) {
 }
 
 void NativeFaceController::set_panel_flips(const std::vector<std::array<bool, 2>>& flips) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
     if (!cfg_.output_panels.empty()) {
-        // Multi-panel face rendered as one canvas: flips live on the physical
-        // output slices, applied at the end of the render loop.
-        for (size_t i = 0; i < cfg_.output_panels.size() && i < flips.size(); ++i) {
-            cfg_.output_panels[i].flip_x = flips[i][0];
-            cfg_.output_panels[i].flip_y = flips[i][1];
+        // Multi-panel face rendered as one canvas: the flip is a property of
+        // the physical output, so it goes to the PanelOutput and is applied to
+        // each panel's sampled tile — never to a canvas region, which a
+        // neighbouring rotated panel may be reading across.
+        {
+            std::lock_guard<std::mutex> lk(state_mtx_);
+            for (size_t i = 0; i < cfg_.output_panels.size() && i < flips.size(); ++i) {
+                cfg_.output_panels[i].flip_x = flips[i][0];
+                cfg_.output_panels[i].flip_y = flips[i][1];
+            }
         }
+        if (output_) output_->set_panel_flips(flips);
         return;
     }
+    std::lock_guard<std::mutex> lk(state_mtx_);
     for (size_t i = 0; i < panels_.size() && i < flips.size(); ++i) {
         panels_[i].cfg.flip_x = flips[i][0];
         panels_[i].cfg.flip_y = flips[i][1];
     }
+}
+
+void NativeFaceController::set_half_flips(
+        const std::vector<std::array<bool, 2>>& halves) {
+    if (output_) output_->set_half_flips(halves);
+}
+
+void NativeFaceController::set_panel_angles(const std::vector<double>& angles) {
+    if (output_) output_->set_panel_angles(angles);
+}
+
+void NativeFaceController::set_canvas_flip(bool flip_x, bool flip_y) {
+    canvas_flip_x_.store(flip_x);
+    canvas_flip_y_.store(flip_y);
+    // The mirror belongs to the physical output, not the canvas: it has to act
+    // on the assembled framebuffer so it swaps whole panels (what a 180° mount
+    // does) rather than sliding the face across a canvas whose panel rects no
+    // longer line up. Keeping the preview on the unflipped canvas is the point.
+    if (output_) output_->set_output_flip(flip_x, flip_y);
 }
 
 void NativeFaceController::set_wiggle(const WiggleCfg& w) {
