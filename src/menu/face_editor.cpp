@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -72,12 +73,13 @@ void FaceEditor::open(std::string title,
 
     // Default palette fallback for color mode.
     palette_.clear();
-    if (mode_ == Mode::Color) {
-        if (palette.empty())
-            for (uint32_t c : kDefaultPalette) palette_.push_back(c);
-        else
-            palette_ = std::move(palette);
-    }
+    // A supplied palette is kept whatever the mode: opening a mono face and
+    // pressing C must bring the user's custom swatches back, not silently
+    // reset them to the defaults.
+    if (!palette.empty())
+        palette_ = std::move(palette);
+    else if (mode_ == Mode::Color)
+        for (uint32_t c : kDefaultPalette) palette_.push_back(c);
     palette_idx_ = 0;
 
     // Compute bbox = union of covered regions, clamped to the canvas. If
@@ -169,8 +171,7 @@ void FaceEditor::paint_pixel(int x, int y) {
     if (mode_ == Mode::Mono) {
         dst = cv::Vec4b(255, 255, 255, 255);
     } else {
-        const uint32_t hex = palette_.empty() ? 0xffffff
-                              : palette_[palette_idx_ % palette_.size()];
+        const uint32_t hex = current_color();
         const uint8_t r = (hex >> 16) & 0xFF;
         const uint8_t g = (hex >>  8) & 0xFF;
         const uint8_t b =  hex        & 0xFF;
@@ -198,8 +199,7 @@ void FaceEditor::flood_fill(int sx, int sy) {
     } else if (mode_ == Mode::Mono) {
         target = cv::Vec4b(255, 255, 255, 255);
     } else {
-        const uint32_t hex = palette_.empty() ? 0xffffff
-                              : palette_[palette_idx_ % palette_.size()];
+        const uint32_t hex = current_color();
         target = cv::Vec4b(static_cast<uint8_t>((hex >> 16) & 0xFF),
                            static_cast<uint8_t>((hex >>  8) & 0xFF),
                            static_cast<uint8_t>( hex        & 0xFF), 255);
@@ -253,32 +253,47 @@ void FaceEditor::draw_rect_filled(int x0, int y0, int x1, int y1) {
 }
 
 void FaceEditor::eyedrop_at(int x, int y) {
-    if (mode_ != Mode::Color || palette_.empty()) return;
     if (!inside_covered(x, y)) return;
+    if (canvas_.empty()) return;
     const cv::Vec4b pix = canvas_.at<cv::Vec4b>(y, x);
     if (pix[3] == 0) return;   // transparent — nothing to pick
-    // Choose the palette entry closest to the sampled pixel (sum of squared
-    // channel differences). Keeps the picker self-contained — no "custom
-    // colour" slot needed yet.
-    int best = 0;
-    int best_d = std::numeric_limits<int>::max();
-    for (size_t i = 0; i < palette_.size(); ++i) {
-        const int pr = (palette_[i] >> 16) & 0xFF;
-        const int pg = (palette_[i] >>  8) & 0xFF;
-        const int pb =  palette_[i]        & 0xFF;
-        const int dr = pr - pix[0];
-        const int dg = pg - pix[1];
-        const int db = pb - pix[2];
-        const int d  = dr * dr + dg * dg + db * db;
-        if (d < best_d) { best_d = d; best = static_cast<int>(i); }
-    }
-    palette_idx_ = best;
+    // Take the EXACT colour. This used to snap to the nearest palette entry
+    // because there was nowhere to put an off-palette colour; Recent is that
+    // place, so sampling now reproduces what was actually on the canvas
+    // instead of the closest thing the palette happened to hold.
+    const uint32_t rgb = (static_cast<uint32_t>(pix[0]) << 16) |
+                         (static_cast<uint32_t>(pix[1]) <<  8) |
+                          static_cast<uint32_t>(pix[2]);
+    if (mode_ != Mode::Color) toggle_color_mode();   // a picked colour needs colour mode
+    push_recent(rgb);
+    recent_idx_ = 0;            // paint with what was just sampled
 }
 
 void FaceEditor::apply_at_cursor() {
     if (tool_ == Tool::Eyedrop) {
         // Sampling doesn't mutate the canvas — no undo push, no mirror.
         eyedrop_at(cursor_x_, cursor_y_);
+        return;
+    }
+
+    // Region Select: outline a region the same way Eye Region does, then lift
+    // it into a floating selection. With one already floating, primary drops it.
+    if (tool_ == Tool::Select) {
+        if (sel_active_) { select_commit(); return; }
+        const bool can_close =
+            sel_pts_.size() >= 3 &&
+            cursor_x_ == sel_pts_.front().x && cursor_y_ == sel_pts_.front().y;
+        if (!can_close) {
+            if (sel_pts_.empty() ||
+                sel_pts_.back().x != cursor_x_ || sel_pts_.back().y != cursor_y_)
+                sel_pts_.emplace_back(cursor_x_, cursor_y_);
+            return;
+        }
+        // The lift CUTS the pixels out, so it has to be undoable as one step.
+        push_undo();
+        EyePoly poly = sel_pts_;
+        sel_pts_.clear();
+        select_lift(poly);
         return;
     }
 
@@ -367,6 +382,9 @@ void FaceEditor::apply_at_cursor() {
 
 void FaceEditor::cursor_step(int dx, int dy) {
     if (!open_) return;
+    // While a selection floats, the arrows move IT rather than the cursor —
+    // that is the whole point of having lifted it.
+    if (sel_active_) { select_nudge(dx, dy); return; }
     cursor_x_ = std::clamp(cursor_x_ + dx, bbox_.x, bbox_.x + bbox_.width  - 1);
     cursor_y_ = std::clamp(cursor_y_ + dy, bbox_.y, bbox_.y + bbox_.height - 1);
 }
@@ -375,19 +393,25 @@ void FaceEditor::primary()   { if (open_) apply_at_cursor(); }
 
 void FaceEditor::secondary() {
     if (!open_) return;
+    // Drop a floating selection before leaving the tool, or it would be lost
+    // with its pixels already cut out of the canvas.
+    if (sel_active_) select_commit();
     // Cycle Pencil → Eraser → Bucket → Eyedrop → Line → Rect → Pencil…
     tool_ = static_cast<Tool>((static_cast<int>(tool_) + 1) % kToolCount);
     anchor_set_ = false;
     eye_pts_.clear();
+    sel_pts_.clear();
 }
 
 void FaceEditor::tertiary()  { if (open_) mirror_ = !mirror_; }
 
 void FaceEditor::set_tool(Tool t) {
     if (!open_) return;
+    if (sel_active_) select_commit();   // see secondary()
     tool_ = t;
     anchor_set_ = false;
     eye_pts_.clear();
+    sel_pts_.clear();
 }
 
 void FaceEditor::set_brush_size(int radius) {
@@ -399,6 +423,10 @@ void FaceEditor::set_brush_size(int radius) {
 
 void FaceEditor::back() {
     if (!open_) return;
+    // A floating selection goes back where it came from — one press undoes the
+    // move, it does not close the editor.
+    if (sel_active_) { select_cancel(); return; }
+    if (!sel_pts_.empty()) { sel_pts_.clear(); return; }
     // A pending line/rect anchor consumes one back press without closing
     // the editor — same UX as cancelling a shape in Aseprite / Krita.
     if (anchor_set_) {
@@ -426,8 +454,243 @@ void FaceEditor::save() {
     if (cb) cb(out, path, eyes);
 }
 
+int FaceEditor::orphan_pixels() const {
+    if (canvas_.empty()) return 0;
+    int n = 0;
+    for (int y = 0; y < canvas_.rows; ++y)
+        for (int x = 0; x < canvas_.cols; ++x)
+            if (canvas_.at<cv::Vec4b>(y, x)[3] > 8 && !inside_covered(x, y)) ++n;
+    return n;
+}
+
+// ── Region select ───────────────────────────────────────────────────────────
+
+void FaceEditor::select_lift(const EyePoly& poly) {
+    if (poly.size() < 3 || canvas_.empty()) return;
+    cv::Rect bb = cv::boundingRect(poly) & cv::Rect(0, 0, canvas_.cols, canvas_.rows);
+    if (bb.width <= 0 || bb.height <= 0) return;
+
+    // Mask the polygon so a non-rectangular selection lifts only what is
+    // actually inside it, not its bounding box.
+    cv::Mat mask(bb.size(), CV_8U, cv::Scalar(0));
+    std::vector<cv::Point> local;
+    local.reserve(poly.size());
+    for (const auto& p : poly) local.emplace_back(p.x - bb.x, p.y - bb.y);
+    cv::fillPoly(mask, std::vector<std::vector<cv::Point>>{local}, cv::Scalar(255));
+
+    sel_src_ = cv::Mat::zeros(bb.size(), CV_8UC4);
+    for (int y = 0; y < bb.height; ++y)
+        for (int x = 0; x < bb.width; ++x) {
+            if (!mask.at<uchar>(y, x)) continue;
+            const int cx = bb.x + x, cy = bb.y + y;
+            if (!inside_covered(cx, cy)) continue;   // never lift unreachable art
+            sel_src_.at<cv::Vec4b>(y, x) = canvas_.at<cv::Vec4b>(cy, cx);
+            canvas_.at<cv::Vec4b>(cy, cx) = cv::Vec4b(0, 0, 0, 0);   // cut
+        }
+    sel_origin_ = { bb.x, bb.y };
+    sel_offset_ = { 0, 0 };
+    sel_angle_  = 0.0;
+    sel_flip_   = false;
+    sel_active_ = true;
+}
+
+cv::Mat FaceEditor::selection_render(cv::Point& origin) const {
+    if (!sel_active_ || sel_src_.empty()) { origin = {0, 0}; return cv::Mat(); }
+    // Flip first, then rotate — mirroring the source and spinning the result is
+    // what "mirror it, then angle it" means; the other order rotates into the
+    // mirror and reads backwards.
+    cv::Mat src = sel_src_;
+    if (sel_flip_) cv::flip(sel_src_, src, 1);
+    if (std::abs(sel_angle_) < 1e-6) {
+        origin = sel_origin_ + sel_offset_;
+        return src;
+    }
+    // Rotate about the patch centre, growing the output to hold the corners so
+    // nothing is clipped as it turns.
+    const cv::Point2f c(src.cols * 0.5f, src.rows * 0.5f);
+    cv::Mat M = cv::getRotationMatrix2D(c, sel_angle_, 1.0);
+    const cv::Rect2f box = cv::RotatedRect(c, src.size(),
+                                           static_cast<float>(sel_angle_))
+                               .boundingRect2f();
+    M.at<double>(0, 2) += box.width  * 0.5 - c.x;
+    M.at<double>(1, 2) += box.height * 0.5 - c.y;
+    cv::Mat out;
+    // NEAREST, not linear: this is pixel art on an LED panel, and interpolating
+    // would blur every edge and fringe the alpha into a halo.
+    cv::warpAffine(src, out, M,
+                   cv::Size(static_cast<int>(std::ceil(box.width)),
+                            static_cast<int>(std::ceil(box.height))),
+                   cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+    origin = sel_origin_ + sel_offset_
+           - cv::Point(static_cast<int>((out.cols - src.cols) / 2),
+                       static_cast<int>((out.rows - src.rows) / 2));
+    return out;
+}
+
+void FaceEditor::select_nudge(int dx, int dy) {
+    if (!open_ || !sel_active_) return;
+    sel_offset_.x += dx;
+    sel_offset_.y += dy;
+}
+
+void FaceEditor::select_rotate(double deg) {
+    if (!open_ || !sel_active_) return;
+    sel_angle_ += deg;
+    if (sel_angle_ >= 360.0) sel_angle_ -= 360.0;
+    if (sel_angle_ <    0.0) sel_angle_ += 360.0;
+}
+
+void FaceEditor::select_flip() {
+    if (!open_ || !sel_active_) return;
+    sel_flip_ = !sel_flip_;
+}
+
+// The axis the mirror brush and the Eye Region tool use. Shared so a region
+// sent across, and a copy stamped across, land in exactly the same place.
+int FaceEditor::mirror_axis() const {
+    return (mirror_axis_x_ >= 0) ? (2 * mirror_axis_x_ - 1)
+                                 : (2 * bbox_.x + bbox_.width - 1);
+}
+
+void FaceEditor::select_mirror_copy() {
+    if (!open_ || !sel_active_ || canvas_.empty()) return;
+    cv::Point org;
+    const cv::Mat patch = selection_render(org);
+    if (patch.empty()) return;
+    cv::Mat flipped;
+    cv::flip(patch, flipped, 1);
+    const int tx = mirror_axis() - (org.x + patch.cols - 1);
+    // Writes straight to the canvas and leaves the float alone — that IS the
+    // difference from mirror-across: you keep what you have and gain the pair.
+    push_undo();
+    for (int y = 0; y < flipped.rows; ++y)
+        for (int x = 0; x < flipped.cols; ++x) {
+            const cv::Vec4b& sp = flipped.at<cv::Vec4b>(y, x);
+            if (sp[3] == 0) continue;
+            const int cx = tx + x, cy = org.y + y;
+            if (cx < 0 || cy < 0 || cx >= canvas_.cols || cy >= canvas_.rows) continue;
+            if (!inside_covered(cx, cy)) continue;    // same rule as painting
+            canvas_.at<cv::Vec4b>(cy, cx) = sp;
+        }
+}
+
+void FaceEditor::select_mirror_across() {
+    if (!open_ || !sel_active_) return;
+    const int axis = mirror_axis();
+    cv::Point org;
+    const cv::Mat patch = selection_render(org);
+    if (patch.empty()) return;
+    sel_flip_ = !sel_flip_;                       // it has to face the other way
+    const int target_x = axis - (org.x + patch.cols - 1);
+    sel_offset_.x += target_x - org.x;
+}
+
+void FaceEditor::select_commit() {
+    if (!open_ || !sel_active_) return;
+    cv::Point org;
+    const cv::Mat patch = selection_render(org);
+    sel_active_ = false;
+    if (patch.empty()) { sel_src_.release(); return; }
+    push_undo();
+    for (int y = 0; y < patch.rows; ++y)
+        for (int x = 0; x < patch.cols; ++x) {
+            const cv::Vec4b& sp = patch.at<cv::Vec4b>(y, x);
+            if (sp[3] == 0) continue;                    // transparent: leave be
+            const int cx = org.x + x, cy = org.y + y;
+            if (cx < 0 || cy < 0 || cx >= canvas_.cols || cy >= canvas_.rows) continue;
+            if (!inside_covered(cx, cy)) continue;       // same rule as painting
+            canvas_.at<cv::Vec4b>(cy, cx) = sp;
+        }
+    sel_src_.release();
+    sel_pts_.clear();
+}
+
+void FaceEditor::select_cancel() {
+    if (!open_ || !sel_active_) return;
+    // Put it back exactly where it came from, unrotated — a cancelled move must
+    // not cost the user the pixels the lift cut out.
+    const cv::Point org = sel_origin_;
+    for (int y = 0; y < sel_src_.rows; ++y)
+        for (int x = 0; x < sel_src_.cols; ++x) {
+            const cv::Vec4b& sp = sel_src_.at<cv::Vec4b>(y, x);
+            if (sp[3] == 0) continue;
+            const int cx = org.x + x, cy = org.y + y;
+            if (cx < 0 || cy < 0 || cx >= canvas_.cols || cy >= canvas_.rows) continue;
+            canvas_.at<cv::Vec4b>(cy, cx) = sp;
+        }
+    sel_active_ = false;
+    sel_src_.release();
+    sel_pts_.clear();
+}
+
+void FaceEditor::clear_outside_zones() {
+    if (!open_ || canvas_.empty()) return;
+    if (orphan_pixels() <= 0) return;      // nothing to do — no noisy undo entry
+    push_undo();
+    for (int y = 0; y < canvas_.rows; ++y)
+        for (int x = 0; x < canvas_.cols; ++x)
+            if (!inside_covered(x, y))
+                canvas_.at<cv::Vec4b>(y, x) = cv::Vec4b(0, 0, 0, 0);
+}
+
+void FaceEditor::toggle_color_mode() {
+    if (!open_) return;
+    mode_ = (mode_ == Mode::Color) ? Mode::Mono : Mode::Color;
+    // The palette is only filled by open() when the editor STARTS in colour,
+    // so a mono session that switches over has none yet. Fill it on the way in
+    // rather than at open, so a mono edit never carries a palette it can't use.
+    if (mode_ == Mode::Color && palette_.empty()) {
+        for (uint32_t c : kDefaultPalette) palette_.push_back(c);
+        palette_idx_ = 0;
+    }
+    // Existing pixels are deliberately left alone. Switching mode changes what
+    // the NEXT stroke lays down; it is not a convert-the-artwork operation, and
+    // silently flattening someone's colours to white would be unrecoverable
+    // past the undo ring.
+}
+
+uint32_t FaceEditor::current_color() const {
+    if (recent_idx_ >= 0 && recent_idx_ < static_cast<int>(recent_.size()))
+        return recent_[recent_idx_];
+    if (palette_.empty()) return 0xffffff;
+    return palette_[palette_idx_ % palette_.size()];
+}
+
+void FaceEditor::set_palette_color(uint8_t r, uint8_t g, uint8_t b) {
+    if (!open_) return;
+    // Entering colour mode is implied: picking a colour while in mono would
+    // otherwise change a swatch that nothing paints with.
+    if (mode_ != Mode::Color) toggle_color_mode();
+    if (palette_.empty()) return;
+    recent_idx_ = -1;   // the picker edits a PALETTE swatch
+    palette_[palette_idx_ % palette_.size()] =
+        (static_cast<uint32_t>(r) << 16) |
+        (static_cast<uint32_t>(g) <<  8) |
+         static_cast<uint32_t>(b);
+    push_recent(palette_[palette_idx_ % palette_.size()]);
+    if (palette_hook_) palette_hook_(palette_);
+}
+
+void FaceEditor::request_color_pick() {
+    if (!open_) return;
+    // Make sure there IS a swatch to edit before handing off — in mono the
+    // palette is empty, so seed it the same way the mode toggle does.
+    if (mode_ != Mode::Color) toggle_color_mode();
+    if (pick_color_) pick_color_();
+}
+
+void FaceEditor::push_recent(uint32_t rgb) {
+    rgb &= 0xFFFFFFu;
+    // Move-to-front: re-using a colour should promote it, not add a duplicate.
+    for (size_t i = 0; i < recent_.size(); ++i)
+        if (recent_[i] == rgb) { recent_.erase(recent_.begin() + i); break; }
+    recent_.insert(recent_.begin(), rgb);
+    if (recent_.size() > kRecentMax) recent_.resize(kRecentMax);
+}
+
 void FaceEditor::cycle_palette(int dir) {
     if (!open_ || mode_ != Mode::Color || palette_.empty()) return;
+    recent_idx_ = -1;   // back to the fixed palette
     const int n = static_cast<int>(palette_.size());
     palette_idx_ = ((palette_idx_ + dir) % n + n) % n;
 }
@@ -506,6 +769,13 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     // so we poll them directly here.
     if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  cursor_step(-1, 0);
     if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) cursor_step(+1, 0);
+    // ⚠ Up/Down have to be handled HERE, next to Left/Right. main.cpp only
+    // routes them via menu.navigate(), and that whole block sits behind
+    // `!is_face_editor_open()` — so on a keyboard the editor never saw them and
+    // the cursor could only move horizontally. (The gamepad worked, because its
+    // on_nav_up/down have no editor guard.)
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    cursor_step(0, -1);
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  cursor_step(0, +1);
     if (ImGui::IsKeyPressed(ImGuiKey_Space))      primary();
     if (ImGui::IsKeyPressed(ImGuiKey_X))          secondary();
     if (ImGui::IsKeyPressed(ImGuiKey_Y) ||
@@ -514,6 +784,14 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     if (ImGui::IsKeyPressed(ImGuiKey_V))          preview();
     if (ImGui::IsKeyPressed(ImGuiKey_T))          toggle_live();
     if (ImGui::IsKeyPressed(ImGuiKey_G))          toggle_wiring();
+    if (ImGui::IsKeyPressed(ImGuiKey_C))          toggle_color_mode();
+    if (ImGui::IsKeyPressed(ImGuiKey_K))          request_color_pick();
+    if (ImGui::IsKeyPressed(ImGuiKey_O))          clear_outside_zones();
+    if (ImGui::IsKeyPressed(ImGuiKey_Comma))     select_rotate(-5.0);
+    if (ImGui::IsKeyPressed(ImGuiKey_Period))    select_rotate(+5.0);
+    if (ImGui::IsKeyPressed(ImGuiKey_F))         select_flip();
+    if (ImGui::IsKeyPressed(ImGuiKey_H))         select_mirror_across();
+    if (ImGui::IsKeyPressed(ImGuiKey_D))         select_mirror_copy();
     if (ImGui::IsKeyPressed(ImGuiKey_S))          save();
     // Direct tool selection. Number keys 1-6 map to the six tools in
     // declaration order (Pencil/Eraser/Bucket/Eyedrop/Line/Rect); the
@@ -527,12 +805,14 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     if (ImGui::IsKeyPressed(ImGuiKey_5))          set_tool(Tool::Line);
     if (ImGui::IsKeyPressed(ImGuiKey_6))          set_tool(Tool::Rect);
     if (ImGui::IsKeyPressed(ImGuiKey_7))          set_tool(Tool::EyeBox);
+    if (ImGui::IsKeyPressed(ImGuiKey_8))          set_tool(Tool::Select);
     if (ImGui::IsKeyPressed(ImGuiKey_P))          set_tool(Tool::Pencil);
     if (ImGui::IsKeyPressed(ImGuiKey_E))          set_tool(Tool::Eraser);
     if (ImGui::IsKeyPressed(ImGuiKey_B))          set_tool(Tool::Bucket);
     if (ImGui::IsKeyPressed(ImGuiKey_I))          set_tool(Tool::Eyedrop);
     if (ImGui::IsKeyPressed(ImGuiKey_L))          set_tool(Tool::Line);
     if (ImGui::IsKeyPressed(ImGuiKey_R))          set_tool(Tool::Rect);
+    if (ImGui::IsKeyPressed(ImGuiKey_A))          set_tool(Tool::Select);
     // Brush size — Minus shrinks, Equals/Plus grows. Clamped 0..2 by
     // the setter itself, so we just pass current ± 1.
     if (ImGui::IsKeyPressed(ImGuiKey_Minus) ||
@@ -543,6 +823,13 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         set_brush_size(brush_size_ + 1);
     if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))  cycle_palette(-1);
     if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) cycle_palette(+1);
+    if (!recent_.empty()) {
+        const int n = static_cast<int>(recent_.size());
+        if (ImGui::IsKeyPressed(ImGuiKey_Semicolon))
+            recent_idx_ = (recent_idx_ <= 0) ? n - 1 : recent_idx_ - 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_Apostrophe))
+            recent_idx_ = (recent_idx_ + 1) % n;
+    }
     // Press EDGE fires primary() exactly once; holding the button paints a
     // drag stroke (freehand brushes only). Using IsMouseDown for the
     // primary action re-fired it every frame, which corrupted the two-step
@@ -576,7 +863,7 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     cy += fs * 1.6f + 6.f;
 
     // Subtitle: dims + cursor + tool + brush + mirror + mode.
-    char sub[192];
+    char sub[288];   // room for the stranded-pixel note appended below
     const char* tool_str = "Pencil";
     switch (tool_) {
     case Tool::Pencil:  tool_str = "Pencil";  break;
@@ -587,6 +874,9 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     case Tool::Rect:    tool_str = anchor_set_ ? "Rect (anchor set)"   : "Rect";    break;
     case Tool::EyeBox:  tool_str = eye_pts_.empty() ? "Eye Region"
                                                     : "Eye Region (drawing)"; break;
+    case Tool::Select:  tool_str = sel_active_ ? "Select (moving)"
+                                : sel_pts_.empty() ? "Select"
+                                                   : "Select (outlining)"; break;
     }
     const int brush_side = 1 + brush_size_ * 2;
     std::snprintf(sub, sizeof(sub),
@@ -597,6 +887,17 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         mirror_ ? "  Mirror" : "",
         mode_ == Mode::Color ? "  Color" : "  Mono",
         live_mode_ ? "  Live" : "");
+    // Stranded art is otherwise invisible from in here: it sits outside every
+    // zone, so it can't be selected, painted or erased, and the only clue is
+    // that it still shows up on the panels. Say so, and say how to remove it.
+    if (const int orph = orphan_pixels(); orph > 0) {
+        char ow[96];
+        std::snprintf(ow, sizeof ow,
+                      "  %d px outside the zones (unreachable - press O to clear)",
+                      orph);
+        const size_t len = std::strlen(sub);
+        std::snprintf(sub + len, sizeof(sub) - len, "%s", ow);
+    }
     dl->AddText(font, fs * 0.9f, {cx0, cy}, IM_COL32(170, 180, 190, 230), sub);
     cy += fs * 0.9f + 10.f;
     dl->AddLine({cx0, cy}, {cx1, cy}, IM_COL32(255, 255, 255, 60), 1.f);
@@ -606,13 +907,35 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
     // readability. Two columns: general controls on the left, the six
     // numbered tools on the right. Height tracks the taller column.
     const float footer_line_h = fs * 0.95f + 2.f;
-    const int   left_lines    = (mode_ == Mode::Color) ? 10 : 9;
-    const int   right_lines   = 7;   // 1..7 tool bindings
-    const int   footer_lines  = std::max(left_lines, right_lines);
+    const int   mid_lines     = 11;   // the middle column, fixed
+    // 8 tools, plus the contextual region-select block when that tool is up.
+    const int   tool_lines    = (tool_ == Tool::Select)
+                              ? (sel_active_ ? 17 : 12) : 8;
+    // Colour column: its hint lines, then the swatch grid underneath. The
+    // swatches used to be a full-width strip ABOVE the footer; folding them
+    // into this column gives that whole band back to the drawing grid.
+    const float col_w_pre  = (cx1 - cx0) / 3.f;
+    const int   pal_cols   = 8;
+    const int   pal_rows   = (mode_ == Mode::Color && !palette_.empty())
+                           ? static_cast<int>((palette_.size() + pal_cols - 1) / pal_cols)
+                           : 0;
+    const float pal_gap    = 4.f;
+    const float pal_sz     = pal_rows
+                           ? std::min(18.f,
+                                      (col_w_pre - 12.f - (pal_cols - 1) * pal_gap)
+                                          / static_cast<float>(pal_cols))
+                           : 0.f;
+    const int   rec_rows    = (mode_ == Mode::Color && !recent_.empty()) ? 1 : 0;
+    const float pal_block_h = (pal_rows || rec_rows)
+                            ? ((pal_rows + rec_rows) * (pal_sz + pal_gap)
+                               + (rec_rows ? 16.f : 0.f) + 8.f)
+                            : 0.f;
+    const int   colour_hint_lines = (mode_ == Mode::Color) ? 5 : 2;
+    const int   colour_lines = colour_hint_lines +
+                               static_cast<int>(std::ceil(pal_block_h / footer_line_h));
+    const int   footer_lines  = std::max({mid_lines, tool_lines, colour_lines});
     const float footer_h      = footer_line_h * footer_lines + 12.f;
-    // Palette strip (color mode) above the footer.
-    const float palette_h = (mode_ == Mode::Color) ? (fs * 1.4f + 14.f) : 0.f;
-    const float grid_bot  = pmax.y - footer_h - palette_h - 8.f;
+    const float grid_bot      = pmax.y - footer_h - 8.f;
 
     // Fit the bbox into the remaining rect at integer cell size.
     if (bbox_.width > 0 && bbox_.height > 0) {
@@ -682,6 +1005,52 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
                 const float ry = grid_origin_y_ + py * cell_size_;
                 dl->AddRectFilled({rx, ry},
                                   {rx + cell_size_, ry + cell_size_}, col);
+            }
+        }
+
+        // Floating selection. Its pixels were CUT from the canvas by the lift,
+        // so unless they are drawn here the region simply disappears while you
+        // are moving it. Rendered through selection_render(), the same call
+        // commit uses, so the preview cannot disagree with the result.
+        if (sel_active_) {
+            cv::Point sorg;
+            const cv::Mat patch = selection_render(sorg);
+            for (int y = 0; y < patch.rows; ++y)
+                for (int x = 0; x < patch.cols; ++x) {
+                    const cv::Vec4b& sp = patch.at<cv::Vec4b>(y, x);
+                    if (sp[3] == 0) continue;
+                    const int cx = sorg.x + x, cy = sorg.y + y;
+                    const int px = cx - bbox_.x, py = cy - bbox_.y;
+                    if (px < 0 || py < 0 || px >= bbox_.width || py >= bbox_.height)
+                        continue;
+                    const float rx = grid_origin_x_ + px * cell_size_;
+                    const float ry = grid_origin_y_ + py * cell_size_;
+                    // Dim anything that has drifted outside the editable zones
+                    // — it will NOT be written on commit, and finding that out
+                    // afterwards would be a nasty surprise.
+                    const bool ok = inside_covered(cx, cy);
+                    dl->AddRectFilled({rx, ry}, {rx + cell_size_, ry + cell_size_},
+                        IM_COL32(sp[0], sp[1], sp[2], ok ? sp[3] : sp[3] / 3));
+                }
+            // Marching-ant-ish outline of the selection's current bounds.
+            const float sx0 = grid_origin_x_ + (sorg.x - bbox_.x) * cell_size_;
+            const float sy0 = grid_origin_y_ + (sorg.y - bbox_.y) * cell_size_;
+            dl->AddRect({sx0, sy0},
+                        {sx0 + patch.cols * cell_size_, sy0 + patch.rows * cell_size_},
+                        IM_COL32(255, 230, 90, 220), 0.f, 0, 1.5f);
+        }
+        // Outline being drawn for a not-yet-lifted selection.
+        if (!sel_pts_.empty()) {
+            for (size_t i = 0; i < sel_pts_.size(); ++i) {
+                const float ax = grid_origin_x_ + (sel_pts_[i].x - bbox_.x + 0.5f) * cell_size_;
+                const float ay = grid_origin_y_ + (sel_pts_[i].y - bbox_.y + 0.5f) * cell_size_;
+                if (i + 1 < sel_pts_.size()) {
+                    const float bx = grid_origin_x_ + (sel_pts_[i+1].x - bbox_.x + 0.5f) * cell_size_;
+                    const float by = grid_origin_y_ + (sel_pts_[i+1].y - bbox_.y + 0.5f) * cell_size_;
+                    dl->AddLine({ax, ay}, {bx, by}, IM_COL32(255, 230, 90, 200), 1.5f);
+                }
+                dl->AddCircleFilled({ax, ay}, std::max(2.f, cell_size_ * 0.22f),
+                                    IM_COL32(255, 230, 90, 230));
             }
         }
 
@@ -927,41 +1296,31 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         }
     }
 
-    // Palette strip (color mode).
-    if (mode_ == Mode::Color && !palette_.empty()) {
-        const float py = pmax.y - footer_h - palette_h + 8.f;
-        const float sz = palette_h - 14.f;
-        const float spacing = 6.f;
-        float px = cx0;
-        for (size_t i = 0; i < palette_.size(); ++i) {
-            const ImU32 col = imu32_from_hex(palette_[i]);
-            dl->AddRectFilled({px, py}, {px + sz, py + sz}, col, 3.f);
-            if (static_cast<int>(i) == palette_idx_)
-                dl->AddRect({px - 2.f, py - 2.f},
-                            {px + sz + 2.f, py + sz + 2.f},
-                            accent, 3.f, 0, 2.f);
-            px += sz + spacing;
-            if (px + sz > cx1) break;
-        }
-    }
-
     // Footer hints — two columns, one key↔action per line for easy
     // scanning. Left column lists general controls; right column lists
     // the six numbered tool bindings (each spelled out). Matches what
     // menu_system.cpp polls when the editor is the active overlay.
-    const char* left[] = {
+    // Middle column: general editing. Colour lives in its own column on the
+    // right, tools in their own on the left — so each column answers one
+    // question instead of the reader scanning a single long list.
+    const char* mid[] = {
         "Select       paint",
+        "ARROWS       move cursor",
         "X            cycle tool",
         "-/+          brush size",
-        "Y / M        mirror",
-        "[ / ]        palette colour",   // skipped in mono mode
+        "Y / M        mirror brush",
+        "O            clear outside zones",
         "Z            undo",
         "V            preview to panels",
         "T            show live (effects)",
         "S            save",
         "Back         cancel",
     };
-    const char* right[] = {
+    // Right column: the numbered tools, plus the region-select commands appended
+    // underneath while that tool is selected. Contextual rather than permanent —
+    // six extra lines shown all the time would push the footer up and squeeze
+    // the drawing grid for the sake of hints most sessions never need.
+    std::vector<const char*> tools = {
         "1            Pencil",
         "2            Eraser",
         "3            Bucket",
@@ -969,23 +1328,95 @@ void FaceEditor::draw(ImDrawList* dl, ImFont* font, float fs,
         "5            Line",
         "6            Rect",
         "7            Eye Region",
+        "8 / A        Select Region",
     };
+    if (tool_ == Tool::Select) {
+        tools.push_back("");
+        tools.push_back(sel_active_ ? "-- region lifted --"
+                                    : "-- outline a region --");
+        if (sel_active_) {
+            tools.push_back("ARROWS       move it");
+            tools.push_back(", / .        rotate 5\xc2\xb0");
+            tools.push_back("F            flip it");
+            tools.push_back("H            mirror to other side");
+            tools.push_back("D            mirror COPY across");
+            tools.push_back("SPACE        drop it");
+            tools.push_back("BACK         put it back");
+        } else {
+            tools.push_back("SPACE        drop a corner");
+            tools.push_back("             (close on the 1st)");
+        }
+    }
+    // Right column: everything colour. The mode toggle heads it so the way OUT
+    // of mono is visible from mono, where the palette rows are hidden.
+    std::vector<const char*> colour = {
+        "C            colour / mono",
+    };
+    if (mode_ == Mode::Color) {
+        colour.push_back("K            edit swatch colour");
+        colour.push_back("[ / ]        palette colour");
+        colour.push_back("4 / I        eyedrop (exact)");
+        colour.push_back("; / \x27        recent colour");
+    } else {
+        colour.push_back("             (mono: painting white)");
+    }
+
     const ImU32 hint_col = IM_COL32(170, 185, 200, 220);
     const float text_size = footer_line_h - 2.f;
-    const float left_x  = cx0;
-    const float right_x = cx0 + (cx1 - cx0) * 0.55f;
+    const float col_w   = (cx1 - cx0) / 3.f;
+    const float left_x  = cx0;                  // tools
+    const float mid_x   = cx0 + col_w;          // general editing
+    const float right_x = cx0 + col_w * 2.f;    // colour
     const float ftop    = pmax.y - footer_h + 6.f;
     float ly = ftop;
-    for (size_t i = 0; i < sizeof(left) / sizeof(left[0]); ++i) {
-        // Hide the palette-cycle line in mono mode (no palette to cycle).
-        if (mode_ != Mode::Color && left[i][0] == '[') continue;
-        dl->AddText(font, text_size, {left_x, ly}, hint_col, left[i]);
+    for (const char* t : tools) {
+        dl->AddText(font, text_size, {left_x, ly}, hint_col, t);
         ly += footer_line_h;
     }
     ly = ftop;
-    for (size_t i = 0; i < sizeof(right) / sizeof(right[0]); ++i) {
-        dl->AddText(font, text_size, {right_x, ly}, hint_col, right[i]);
+    for (size_t i = 0; i < sizeof(mid) / sizeof(mid[0]); ++i) {
+        dl->AddText(font, text_size, {mid_x, ly}, hint_col, mid[i]);
         ly += footer_line_h;
+    }
+    ly = ftop;
+    for (const char* c : colour) {
+        dl->AddText(font, text_size, {right_x, ly}, hint_col, c);
+        ly += footer_line_h;
+    }
+    // Swatch grid, directly under this column's hints so colour is one place.
+    if (pal_rows > 0) {
+        ly += 4.f;
+        for (size_t i = 0; i < palette_.size(); ++i) {
+            const int r = static_cast<int>(i) / pal_cols;
+            const int c = static_cast<int>(i) % pal_cols;
+            const float sx = right_x + c * (pal_sz + pal_gap);
+            const float sy = ly      + r * (pal_sz + pal_gap);
+            dl->AddRectFilled({sx, sy}, {sx + pal_sz, sy + pal_sz},
+                              imu32_from_hex(palette_[i]), 2.f);
+            if (static_cast<int>(i) == palette_idx_ && recent_idx_ < 0)
+                dl->AddRect({sx - 2.f, sy - 2.f},
+                            {sx + pal_sz + 2.f, sy + pal_sz + 2.f},
+                            accent, 2.f, 0, 2.f);
+        }
+        ly += pal_rows * (pal_sz + pal_gap);
+        // Recent colours: a single MRU row under the fixed palette. Anything
+        // sampled with the eyedropper or mixed in the picker lands here, so an
+        // off-palette colour stays reachable without burning a palette slot.
+        if (!recent_.empty()) {
+            ly += 4.f;
+            dl->AddText(font, text_size * 0.92f, {right_x, ly},
+                        IM_COL32(150, 165, 180, 200), "recent");
+            ly += text_size * 0.92f + 3.f;
+            for (size_t i = 0; i < recent_.size(); ++i) {
+                const float sx = right_x + i * (pal_sz + pal_gap);
+                dl->AddRectFilled({sx, ly}, {sx + pal_sz, ly + pal_sz},
+                                  imu32_from_hex(recent_[i]), 2.f);
+                if (static_cast<int>(i) == recent_idx_)
+                    dl->AddRect({sx - 2.f, ly - 2.f},
+                                {sx + pal_sz + 2.f, ly + pal_sz + 2.f},
+                                accent, 2.f, 0, 2.f);
+            }
+        }
     }
 }
 

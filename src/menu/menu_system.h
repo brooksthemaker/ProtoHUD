@@ -336,7 +336,17 @@ public:
                           menu::FaceEditor::LiveFrameFn live_frame = {},
                           double preview_duration_s = 10.0);
     void close_face_editor();
-    bool is_face_editor_open() const { return face_editor_.is_open(); }
+    // ⚠ "Does the editor OWN INPUT right now" — not "does it have a canvas".
+    // Callers use this to decide whether to route keys/d-pad to the editor, so
+    // it must go false while another overlay (the colour picker, raised by 'K')
+    // sits on top. The editor stays genuinely open underneath — its canvas and
+    // undo ring have to survive, since FaceEditor::close() frees both — and
+    // comes back when the overlay above it closes. Use editor_has_canvas() for
+    // the other question.
+    bool is_face_editor_open() const {
+        return face_editor_.is_open() && overlay_ == &face_editor_;
+    }
+    bool editor_has_canvas() const { return face_editor_.is_open(); }
 
     menu::FaceEditor& face_editor() { return face_editor_; }
 
@@ -450,6 +460,23 @@ private:
     // navigate/select/back/draw_fullscreen dispatch through this instead of
     // per-class if-chains; the OSK is still checked first, before the overlay.
     menu::IOverlay* overlay_ = nullptr;
+    // Overlay to fall back to when the active one closes, instead of dropping
+    // to the menu. Set when one overlay is opened ON TOP of another — the face
+    // editor raising the colour picker to edit a swatch. It matters because
+    // FaceEditor::close() frees the canvas and the undo ring, so the editor
+    // must stay OPEN (just not the input target) while the picker is up.
+    menu::IOverlay* overlay_return_ = nullptr;
+    // Called wherever an overlay may have closed itself; restores the one
+    // underneath if there is one.
+    void overlay_closed() {
+        overlay_ = (overlay_return_ && overlay_return_->is_open())
+                 ? overlay_return_ : nullptr;
+        overlay_return_ = nullptr;
+        emit_detents();
+    }
+    // Raise the unified colour picker over the face editor, bound to the
+    // currently selected palette swatch.
+    void open_editor_color_picker();
 
     std::vector<MenuItem>  root_items_;
     std::vector<MenuItem>  quick_items_;   // curated corner "quick menu" tree

@@ -31,8 +31,9 @@ namespace menu {
 class FaceEditor : public IOverlay {
 public:
     enum class Mode : uint8_t { Mono, Color };
-    enum class Tool : uint8_t { Pencil, Eraser, Bucket, Eyedrop, Line, Rect, EyeBox };
-    static constexpr int kToolCount = 7;
+    enum class Tool : uint8_t { Pencil, Eraser, Bucket, Eyedrop, Line, Rect, EyeBox,
+                               Select };
+    static constexpr int kToolCount = 8;
 
     // eye_regions are canvas-space closed polygons (one per eye) defining where
     // a blink replaces the open eye with the blink art — authored point-by-point
@@ -93,6 +94,60 @@ public:
     Tool tool()         const { return tool_; }
     // Eye polygons authored this session (canvas px). Persisted by the caller on save.
     const std::vector<EyePoly>& eye_polys() const { return eye_polys_; }
+    // Switch between painting white (Mono) and painting the selected palette
+    // colour (Color), mid-edit. The mode used to be fixed by whoever opened the
+    // editor, which meant a mono face couldn't be recoloured without backing
+    // out and changing a render setting first.
+    void toggle_color_mode();
+    bool color_mode() const { return mode_ == Mode::Color; }
+
+    // ── Custom swatch colours ───────────────────────────────────────────────
+    // The editor doesn't own a colour UI; it asks the host to raise the shared
+    // picker (MenuSystem::open_editor_color_picker) and takes the result back
+    // through set_palette_color. Keeps one colour editor in the build rather
+    // than a second one that would drift from it.
+    void set_pick_color_hook(std::function<void()> fn) { pick_color_ = std::move(fn); }
+    void request_color_pick();                  // 'K' — edit the current swatch
+    // Wipe everything OUTSIDE the editable zones. Zones come from the eye /
+    // nose / mouth layout, so turning a feature off (nose picker -> "none")
+    // removes its zone and STRANDS whatever was drawn there: paint_pixel gates
+    // on inside_covered(), so the eraser silently no-ops over it and the art
+    // can never be removed from inside the editor. This is the way out.
+    void clear_outside_zones();
+
+    // ── Region select (Tool::Select) ────────────────────────────────────────
+    // Outline a region the same way the Eye Region tool does — vertex by
+    // vertex, closing on the first point — then LIFT those pixels into a
+    // floating selection that can be nudged and rotated before being dropped
+    // back down. Primary commits, Back cancels and puts it back untouched.
+    bool selection_active() const { return sel_active_; }
+    void select_nudge(int dx, int dy);
+    void select_rotate(double deg);
+    void select_flip();            // mirror the floating region left-right
+    void select_mirror_across();   // flip it AND send it to the other side of
+                                   // the face's mirror axis
+    void select_mirror_copy();     // STAMP a mirrored copy on the other side and
+                                   // keep the floating region where it is
+    void select_commit();
+    void select_cancel();
+    // How many opaque pixels are currently stranded outside the zones. Shown
+    // in the status bar so stranded art is visible rather than a mystery.
+    int  orphan_pixels() const;
+    uint32_t current_color() const;             // selected swatch, 0xRRGGBB
+    void set_palette_color(uint8_t r, uint8_t g, uint8_t b);   // live from the picker
+    const std::vector<uint32_t>& palette() const { return palette_; }
+    // Recently used colours, most-recent first. Fed by the eyedropper and by
+    // the colour picker, so a mixed or sampled colour stays reachable without
+    // spending one of the fixed palette slots on it.
+    const std::vector<uint32_t>& recent() const { return recent_; }
+    void push_recent(uint32_t rgb);
+    // Fired whenever a swatch changes. A palette is a TOOL setting, not
+    // artwork, so it is persisted the moment it is edited — independent of
+    // whether the drawing is saved or cancelled. (It also has to be: save()
+    // calls close(), which clears palette_, before the commit callback runs.)
+    void set_palette_hook(std::function<void(const std::vector<uint32_t>&)> fn) {
+        palette_hook_ = std::move(fn);
+    }
     void set_brush_size(int radius);     // 0 = 1px, 1 = 3x3, 2 = 5x5
     int  brush_size()   const { return brush_size_; }
     void undo();
@@ -184,6 +239,29 @@ private:
     // Palette + selection (color mode).
     std::vector<uint32_t>  palette_;
     int                    palette_idx_ = 0;
+    std::vector<uint32_t>  recent_;          // MRU, capped at kRecentMax
+    static constexpr size_t kRecentMax = 8;
+    // -1 = a palette swatch is selected; >= 0 = a recent one is.
+    int                    recent_idx_ = -1;
+    std::function<void()>  pick_color_;   // host raises the shared picker
+    std::function<void(const std::vector<uint32_t>&)> palette_hook_;
+
+    // Floating selection. sel_src_ holds the pixels EXACTLY as lifted and is
+    // never re-sampled — every move/rotate re-renders from it, so spinning a
+    // selection round and back leaves it pixel-identical instead of smearing a
+    // little more on each step.
+    bool      sel_active_ = false;
+    cv::Mat   sel_src_;                 // RGBA patch, original orientation
+    cv::Point sel_origin_{0, 0};        // where sel_src_ was lifted from
+    cv::Point sel_offset_{0, 0};        // accumulated nudge
+    double    sel_angle_  = 0.0;        // accumulated rotation, degrees
+    bool      sel_flip_   = false;      // horizontal mirror, applied first
+    EyePoly   sel_pts_;                 // outline being drawn (pre-lift)
+    int  mirror_axis() const;      // shared by mirror-across and mirror-copy
+    void select_lift(const EyePoly& poly);
+    // Current appearance + where it lands. Shared by draw() and commit so what
+    // you see is exactly what gets written.
+    cv::Mat   selection_render(cv::Point& origin) const;
 
     // Undo ring (cv::Mat::clone snapshots; cap at 16).
     std::vector<cv::Mat>   undo_stack_;

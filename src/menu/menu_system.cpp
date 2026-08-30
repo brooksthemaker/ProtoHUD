@@ -555,7 +555,34 @@ void MenuSystem::open_face_editor(std::string title,
                       std::move(on_commit), std::move(on_cancel),
                       std::move(on_preview), std::move(live_frame),
                       preview_duration_s);
+    // 'K' in the editor raises the shared colour picker for the live swatch.
+    face_editor_.set_pick_color_hook([this]{ open_editor_color_picker(); });
     overlay_ = &face_editor_;
+    overlay_return_ = nullptr;
+}
+
+void MenuSystem::open_editor_color_picker() {
+    if (!face_editor_.is_open()) return;
+    const uint32_t hex = face_editor_.current_color();
+    // ⚠ The editor is left OPEN — only the input target moves. Closing it would
+    // free the canvas and the undo ring (see FaceEditor::close), so the artwork
+    // would be gone by the time the picker returned.
+    color_picker_.set_detent_callback([this](int n){ emit_detents_override(n); });
+    color_picker_.open("Swatch Colour",
+        static_cast<uint8_t>((hex >> 16) & 0xFF),
+        static_cast<uint8_t>((hex >>  8) & 0xFF),
+        static_cast<uint8_t>( hex        & 0xFF),
+        // Live: every adjustment writes straight into the swatch, so strokes
+        // painted while the picker is up already use the new colour.
+        [this](uint8_t r, uint8_t g, uint8_t b){
+            face_editor_.set_palette_color(r, g, b);
+        },
+        [this](std::string t, std::string initial,
+               std::function<void(const std::string&)> on_commit){
+            open_keyboard(std::move(t), std::move(initial), std::move(on_commit));
+        });
+    overlay_return_ = &face_editor_;   // restored when the picker closes
+    overlay_        = &color_picker_;
 }
 
 void MenuSystem::close_face_editor() {
@@ -625,10 +652,8 @@ void MenuSystem::select() {
     if (osk_active_) { osk_activate(); return; }
     if (overlay_ && overlay_->is_open()) {
         overlay_->activate();
-        if (!overlay_->is_open()) {       // commit may close it
-            overlay_ = nullptr;
-            emit_detents();               // restore the level's knob detents
-        }
+        if (!overlay_->is_open())         // commit may close it
+            overlay_closed();             // back to the editor beneath, or the menu
         return;
     }
     if (!open_ || stack_.empty()) return;
@@ -749,10 +774,8 @@ void MenuSystem::back() {
     if (osk_active_) { osk_backspace(); return; }
     if (overlay_ && overlay_->is_open()) {
         overlay_->back();
-        if (!overlay_->is_open()) {       // back may close it
-            overlay_ = nullptr;
-            emit_detents();               // restore the level's knob detents
-        }
+        if (!overlay_->is_open())         // back may close it
+            overlay_closed();             // back to the editor beneath, or the menu
         return;
     }
     if (!stack_.empty() && cursor_ < stack_.back().size()) {
