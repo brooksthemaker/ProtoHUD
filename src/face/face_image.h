@@ -17,6 +17,8 @@ namespace face {
 
 // Load a PNG as an (h, w) RGBA cv::Mat (CV_8UC4), NEAREST-resized to panel size.
 // Returns an empty Mat if the file can't be read.
+// w or h <= 0 keeps the image's own size on that axis — use it when the caller
+// wants the ART'S aspect rather than a fixed thumbnail shape.
 inline cv::Mat load_png_rgba(const std::string& path, int w, int h) {
     cv::Mat raw = cv::imread(path, cv::IMREAD_UNCHANGED);
     if (raw.empty()) return cv::Mat();
@@ -25,8 +27,12 @@ inline cv::Mat load_png_rgba(const std::string& path, int w, int h) {
     else if (raw.channels() == 3) cv::cvtColor(raw, rgba, cv::COLOR_BGR2RGBA);
     else if (raw.channels() == 1) cv::cvtColor(raw, rgba, cv::COLOR_GRAY2RGBA);
     else                          return cv::Mat();
+    if (w <= 0 && h <= 0) return rgba;          // native size, native aspect
     cv::Mat out;
-    cv::resize(rgba, out, cv::Size(w, h), 0, 0, cv::INTER_NEAREST);
+    // One axis given: scale the other to preserve aspect rather than squashing.
+    const int tw = (w > 0) ? w : std::max(1, rgba.cols * h / std::max(1, rgba.rows));
+    const int th = (h > 0) ? h : std::max(1, rgba.rows * w / std::max(1, rgba.cols));
+    cv::resize(rgba, out, cv::Size(tw, th), 0, 0, cv::INTER_NEAREST);
     return out;
 }
 
