@@ -1,9 +1,13 @@
 #include "native_face_controller.h"
 
+#include "blink_anim_cfg.h"
+#include "json_atomic.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -201,6 +205,10 @@ void NativeFaceController::build_panels() {
         pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
         pn.state = std::make_unique<FaceState>(
             fc->face, pn.loader->expression_names());
+        // A face folder that carries its own wiggle overrides the panel default,
+        // so switching face sets switches the idle motion with them.
+        if (pn.loader->has_wiggle())
+            pn.state->set_wiggle(pn.loader->wiggle_cfg());
         pn.material = load_material(fc->material.active, pc.w, pc.h,
                                     fc->material.scroll_x, fc->material.scroll_y,
                                     cfg_.materials_dir);
@@ -330,12 +338,26 @@ void NativeFaceController::render_thread() {
                 mi.roll_deg    = motion_roll_.load(std::memory_order_relaxed);
                 mi.accel_g     = motion_accel_.load(std::memory_order_relaxed);
                 const double humid = env_humidity_.load(std::memory_order_relaxed);
+                const double lux   = env_lux_.load(std::memory_order_relaxed);
+                const double tempc = env_temp_c_.load(std::memory_order_relaxed);
+                // Fraction of the day elapsed, computed once per frame rather
+                // than per layer — localtime() is not cheap and every layer
+                // would otherwise ask for the same answer.
+                double day_frac = 0.5;
+                {
+                    const std::time_t now = std::time(nullptr);
+                    std::tm tmv{};
+                    if (localtime_r(&now, &tmv))
+                        day_frac = (tmv.tm_hour * 3600 + tmv.tm_min * 60 + tmv.tm_sec)
+                                 / 86400.0;
+                }
                 for (auto& pn : panels_) {
                     if (pn.state) pn.state->set_audio(vol, mouth);
                     if (pn.particles) {
                         pn.particles->set_audio(vol);
                         pn.particles->set_motion(mi);
                         pn.particles->set_humidity(humid);
+                        pn.particles->set_ambient(lux, tempc, day_frac);
                     }
                 }
 
@@ -686,6 +708,40 @@ void NativeFaceController::render_thread() {
             // stays legible; spans the whole canvas, mirrored halves included.
             scroll_text_.render(canvas);
 
+            // Outer-rim fade: soften where the panel set physically ends, so
+            // content dissolves instead of being chopped mid-image. Applied to
+            // the union of the panel rects, not to each panel — see
+            // face/edge_fade.h for why that distinction matters on a build
+            // whose panels touch.
+            //
+            // ⚠ Runs AFTER the banner, deliberately. It was placed before it at
+            // first, to keep a diagnostics readout legible edge to edge — but on
+            // a rig where the banner is the main thing lit, that made the fade
+            // look like it did nothing at all: the one layer still hard-cutting
+            // at the panel edge was the one being skipped. Everything the wearer
+            // sees now fades together.
+            //
+            // Test patterns still don't, because they render after this point —
+            // softening an alignment pattern would defeat what it exists to show.
+            //
+            // The face-layer dither runs immediately after, for the same reason
+            // and in the same window: it reduces the finished picture to the
+            // panel's real depth, and an alignment pattern is flat colour that
+            // gains nothing from it.
+            {
+                const int fw = edge_fade_px_.load();
+                if (fw > 0) {
+                    std::vector<cv::Rect> prects;
+                    prects.reserve(cfg_.output_panels.size());
+                    for (const auto& op : cfg_.output_panels)
+                        prects.emplace_back(op.x, op.y, op.w, op.h);
+                    edge_fade_.apply(canvas, prects, fw,
+                                     edge_fade_dither_.load());
+                }
+                FaceDither::apply(canvas, face_dither_planes_.load());
+            }
+
+
             // Panel setup patterns replace the face but still run through the
             // mounting flips below (and the gather / output mirror downstream) —
             // the whole point is to exercise the same path the face takes.
@@ -721,6 +777,28 @@ bool NativeFaceController::latest_frame(cv::Mat& out) const {
     std::lock_guard<std::mutex> lk(frame_mtx_);
     if (!have_frame_) return false;
     latest_.copyTo(out);
+    return true;
+}
+
+bool NativeFaceController::latest_physical(cv::Mat& out) const {
+    {
+        std::lock_guard<std::mutex> lk(frame_mtx_);
+        if (!have_frame_) return false;
+        latest_.copyTo(out);
+    }
+    if (cfg_.output_panels.empty() || out.empty()) return true;  // canvas IS it
+    // Black out everything no panel covers, so the preview shows only pixels
+    // that can actually light: the gap between panels stays dark instead of
+    // showing face the wearer will never see.
+    cv::Mat lit(out.size(), CV_8U, cv::Scalar(0));
+    const cv::Rect bounds(0, 0, out.cols, out.rows);
+    for (const auto& op : cfg_.output_panels) {
+        const cv::Rect r = cv::Rect(op.x, op.y, op.w, op.h) & bounds;
+        if (r.width > 0 && r.height > 0) lit(r).setTo(255);
+    }
+    cv::Mat dark;
+    cv::bitwise_not(lit, dark);
+    out.setTo(cv::Scalar(0, 0, 0), dark);
     return true;
 }
 
@@ -1532,6 +1610,16 @@ void NativeFaceController::set_blink_enabled(bool enabled) {
         if (pn.state) pn.state->set_blink_enabled(enabled);
 }
 
+void NativeFaceController::trigger_blink() {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    // ⚠ Every panel is triggered under ONE lock hold. Each panel owns its own
+    // FaceState with its own countdown, so triggering them in separate calls
+    // would let the blinks land a frame or two apart — on a multi-panel face
+    // that is two eyes blinking out of step.
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->trigger_blink();
+}
+
 void NativeFaceController::set_eyes_closed(bool closed) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
@@ -1598,6 +1686,169 @@ void NativeFaceController::set_wiggle(const WiggleCfg& w) {
         if (pn.state) pn.state->set_wiggle(w);
 }
 
+bool NativeFaceController::get_face_wiggle(WiggleCfg& out) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_)
+        if (pn.state) { out = pn.state->wiggle(); return true; }
+    return false;
+}
+
+void NativeFaceController::set_face_wiggle(const WiggleCfg& w) {
+    std::string folder;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        for (auto& pn : panels_) {
+            if (pn.state) pn.state->set_wiggle(w);
+            if (folder.empty() && pn.loader) folder = pn.loader->folder();
+        }
+    }
+    if (folder.empty()) return;
+    // Persist into the face folder's own config.json — the same file the eye
+    // regions live in — so the setting travels with the face, not the rig.
+    // Read-modify-write so nothing else in there is lost.
+    namespace fs = std::filesystem;
+    const fs::path cfg_path = fs::path(folder) / "config.json";
+    nlohmann::json cfg = nlohmann::json::object();
+    if (fs::exists(cfg_path)) {
+        std::ifstream in(cfg_path);
+        try { in >> cfg; } catch (...) { cfg = nlohmann::json::object(); }
+        if (!cfg.is_object()) cfg = nlohmann::json::object();
+    }
+    cfg["wiggle"] = { {"speed", w.speed},
+                      {"amplitude_x", w.amplitude_x},
+                      {"amplitude_y", w.amplitude_y} };
+    // Atomic like the blink writers: this file also holds the eye polygons, so
+    // a torn write would cost the wearer their blink regions.
+    write_json_atomic(cfg_path, cfg);
+}
+
+bool NativeFaceController::get_blink_anim(bool& enabled, int& frames) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_)
+        if (pn.loader) {
+            enabled = pn.loader->blink_anim_enabled();
+            frames  = pn.loader->blink_anim_frames();
+            return true;
+        }
+    return false;
+}
+
+int NativeFaceController::blink_frames_loaded() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_)
+        if (pn.loader) return pn.loader->blink_frame_count();
+    return 0;
+}
+
+void NativeFaceController::set_blink_anim(bool enabled, int frames) {
+    std::string folder;
+    bool whole = false;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        for (const auto& pn : panels_)
+            if (pn.loader) { folder = pn.loader->folder();
+                             whole  = pn.loader->blink_anim_whole(); break; }
+    }
+    if (folder.empty()) return;
+    // Same read-modify-write as set_face_wiggle — the setting belongs to the
+    // face, not the rig, so it rides in the face folder's own config.json.
+    namespace fs = std::filesystem;
+    const fs::path cfg_path = fs::path(folder) / "config.json";
+    nlohmann::json cfg = nlohmann::json::object();
+    if (fs::exists(cfg_path)) {
+        std::ifstream in(cfg_path);
+        try { in >> cfg; } catch (...) { cfg = nlohmann::json::object(); }
+        if (!cfg.is_object()) cfg = nlohmann::json::object();
+    }
+    // ⚠ READ-MODIFY-WRITE, via the shared writer. This used to assign a fresh
+    // object to cfg["blink_anim"], which silently destroyed the "expressions"
+    // map — so adjusting the face-wide toggle or frame count wiped every
+    // per-expression override the wearer had set, with no error and no clue.
+    blink_cfg_set_face(cfg, enabled, frames, whole);
+    // ⚠ The frames are held by the LOADERS, so the toggle only takes effect
+    // once they re-read the folder. Reloading here (rather than leaving it to
+    // the caller) is what makes the menu row feel live — but the write MUST be
+    // complete on disk first, which is what write_json_atomic guarantees.
+    if (write_json_atomic(cfg_path, cfg)) reload_active_face();
+}
+
+std::string NativeFaceController::blink_frame_path(int frame_1based) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_) {
+        if (pn.is_mirror || !pn.loader) continue;
+        return cfg_.faces_dir + "/" + pn.cfg.face.active + "/blink/" +
+               std::to_string(frame_1based) + ".png";
+    }
+    return {};
+}
+
+bool NativeFaceController::get_expr_blink(const std::string& expr,
+                                          ExprBlink& out) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_) {
+        if (!pn.loader) continue;
+        out.mode   = pn.loader->blink_mode_for(expr);
+        out.frames = pn.loader->blink_frames_cfg_for(expr);
+        out.whole  = pn.loader->blink_whole_for(expr);
+        out.loaded = pn.loader->blink_frame_count_for(expr);
+        return true;
+    }
+    return false;
+}
+
+void NativeFaceController::set_expr_blink(const std::string& expr,
+                                          const ExprBlink& in) {
+    std::string folder;
+    bool face_on = false;
+    int  face_frames = 0;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        for (const auto& pn : panels_)
+            if (pn.loader) {
+                folder      = pn.loader->folder();
+                face_on     = pn.loader->blink_anim_enabled();
+                face_frames = pn.loader->blink_anim_frames();
+                break;
+            }
+    }
+    if (folder.empty()) return;
+    namespace fs = std::filesystem;
+    const fs::path cfg_path = fs::path(folder) / "config.json";
+    nlohmann::json cfg = nlohmann::json::object();
+    if (fs::exists(cfg_path)) {
+        std::ifstream in_f(cfg_path);
+        try { in_f >> cfg; } catch (...) { cfg = nlohmann::json::object(); }
+        if (!cfg.is_object()) cfg = nlohmann::json::object();
+    }
+    // ⚠ An EMPTY expression name addresses the FACE-WIDE settings. "" is never
+    // a real expression, so the menu's face-wide Cover row reuses this one
+    // setter instead of growing a parallel path that could drift from it.
+    if (expr.empty())
+        blink_cfg_set_face(cfg, face_on, face_frames, in.whole);
+    else
+        blink_cfg_set_expr(cfg, expr, static_cast<int>(in.mode), in.frames, in.whole);
+    // Atomic, and reload only once the new file is actually on disk — the
+    // loaders re-read it, so a half-written file would parse to nothing.
+    if (write_json_atomic(cfg_path, cfg)) reload_active_face();
+}
+
+std::string NativeFaceController::expr_blink_frame_path(const std::string& expr,
+                                                        int frame_1based) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_) {
+        if (pn.is_mirror || !pn.loader) continue;
+        return cfg_.faces_dir + "/" + pn.cfg.face.active + "/blink/" + expr + "/" +
+               std::to_string(frame_1based) + ".png";
+    }
+    return {};
+}
+
+void NativeFaceController::set_sharp_motion(bool on) {
+    std::lock_guard<std::mutex> lk(state_mtx_);   // same guard as set_wiggle
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_sharp_motion(on);
+}
+
 void NativeFaceController::set_glitch(const GlitchConfig& cfg) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     glitch_cfg_ = cfg;
@@ -1629,6 +1880,14 @@ void NativeFaceController::set_env_humidity(double humidity01) {
     // Slow sensor value (BME280 poll ~1 Hz); same lock-free handoff so the
     // render thread reads it at the top of every tick and feeds the panels.
     env_humidity_.store(humidity01, std::memory_order_relaxed);
+}
+
+void NativeFaceController::set_env_light(double lux) {
+    env_lux_.store(lux, std::memory_order_relaxed);
+}
+
+void NativeFaceController::set_env_temp(double temp_c) {
+    env_temp_c_.store(temp_c, std::memory_order_relaxed);
 }
 
 void NativeFaceController::set_mouth_shape(const std::string& shape) {

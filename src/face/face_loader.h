@@ -11,10 +11,16 @@
 #include <opencv2/core.hpp>
 
 #include "face/eye_lid.h"
+#include "face/face_config.h"   // WiggleCfg
 
 namespace face {
 
 class FaceState;   // fwd
+
+// Upper bound on animated-blink frames. Kept small on purpose: the whole blink
+// is ~0.15 s, so past a handful of frames each one is on screen for a single
+// panel refresh and the extra art buys nothing visible.
+inline constexpr int kBlinkAnimMaxFrames = 8;
 
 class FaceLoader {
 public:
@@ -45,6 +51,52 @@ public:
     // canvas, where any eye regions in config.json were authored for a single
     // panel and would only cover one eye on the wide canvas.
     void    set_whole_face_blink(bool b) { whole_face_blink_ = b; }
+    // Per-face wiggle, from this face folder's own config.json. Absent means
+    // the face has no opinion and the panel default stands.
+    bool    has_wiggle() const { return has_wiggle_; }
+    const WiggleCfg& wiggle_cfg() const { return wiggle_; }
+    const std::string& folder() const { return folder_; }
+
+    // ── Animated blink ──────────────────────────────────────────────────────
+    // Frames live in a `blink/` SUBFOLDER of the face folder (1.png, 2.png, …),
+    // and that placement is load-bearing: the expression scan below walks the
+    // face folder with a non-recursive directory_iterator and turns every PNG
+    // stem into an expression, excluding only the exact names "blink" and
+    // "mouth_open". Frames named blink_1.png alongside the others would each
+    // become a bogus expression; inside a subfolder the scan simply cannot see
+    // them, so there is no exclusion rule to keep in sync.
+    // Config lives in the face folder's config.json as
+    //   "blink_anim": { "enabled": true, "frames": 4 }
+    bool blink_anim_enabled() const { return blink_anim_on_; }
+    bool blink_anim_whole()   const { return blink_anim_whole_; }
+    int  blink_anim_frames()  const { return blink_anim_frames_; }
+    // How many frames actually LOADED. Can be under blink_anim_frames() when
+    // art is missing; 0 means fall back to the single blink.png.
+    int  blink_frame_count() const { return static_cast<int>(blink_frames_.size()); }
+
+    // Per-EXPRESSION sequences, in `blink/<expression>/` (1.png, 2.png, …), so
+    // a happy blink and an angry blink can differ. Config:
+    //   "blink_anim": { …, "expressions": { "happy": {"enabled":true,
+    //                                                 "frames":3} } }
+    // An expression absent from that map inherits the face-wide sequence; one
+    // present with enabled=false does not animate at all.
+    enum class BlinkMode : uint8_t { Inherit, Own, None };
+    BlinkMode blink_mode_for(const std::string& expr) const;
+    int       blink_frames_cfg_for(const std::string& expr) const;
+    int       blink_frame_count_for(const std::string& expr) const;
+    bool      blink_whole_for(const std::string& expr) const;
+
+    // How a sequence lands on the panel.
+    //   false (default) — masked to the face's eye_left/eye_right polygons,
+    //                     exactly like the single-image blink.
+    //   true  ("whole") — the frame REPLACES the whole composited face for
+    //                     that tick, because the art is a complete face.
+    // ⚠ Whole is what makes differing eye layouts work. The eye polygons are a
+    // property of the FACE FOLDER, so an expression with a different number of
+    // eyes (or extra features that close with them) has eyes sitting outside
+    // those polygons — a region blink would clip them and leave them staring.
+    // Drawing that expression's blink frames as complete faces sidesteps the
+    // whole question.
 
     // Panel-sized CV_8U stencil of the blink eye regions — 255 inside
     // eye_left / eye_right (polygon masks honoured, legacy rectangles
@@ -79,6 +131,13 @@ private:
                       const Region& region, double t) const;
 
     std::string folder_;
+    // Sharp-motion smoothing. get_frame() takes a CONST FaceState, so this
+    // per-panel state lives on the loader. sm_f* is the low-passed target
+    // position; sm_i* is the whole-pixel position actually being drawn.
+    double      sm_fx_ = 0.0, sm_fy_ = 0.0;
+    int         sm_ix_ = 0,   sm_iy_ = 0;
+    bool        has_wiggle_ = false;
+    WiggleCfg   wiggle_;
     int w_, h_;
     int src_w_ = 0, src_h_ = 0, src_x_ = 0, src_y_ = 0;   // canvas this panel slices
     bool whole_face_blink_ = false;
@@ -100,6 +159,23 @@ private:
     std::map<std::string, cv::Mat> expressions_;   // name → RGBA (h,w)
     std::vector<std::string>       expr_order_;     // stable insertion order
     cv::Mat  blink_;            // may be empty
+    // Animated-blink frames, index 0 = barely closed … back = fully shut.
+    // Empty (or the feature off) falls back to the single blink_ crossfade.
+    std::vector<cv::Mat> blink_frames_;
+    bool     blink_anim_on_     = false;
+    int      blink_anim_frames_ = 0;
+    bool     blink_anim_whole_  = false;   // face-wide Cover mode
+    struct BlinkExpr {
+        bool                 enabled = true;   // false = this expression never animates
+        bool                 whole   = false;  // Cover: whole face vs eye regions
+        int                  frames  = 0;      // configured count
+        std::vector<cv::Mat> art;              // loaded frames (may be short/empty)
+    };
+    std::map<std::string, BlinkExpr> blink_expr_;
+    // Which sequence a given expression blinks with, and how it lands.
+    // seq == nullptr means fall back to the single-image crossfade.
+    struct BlinkPick { const std::vector<cv::Mat>* seq = nullptr; bool whole = false; };
+    BlinkPick blink_pick_for(const std::string& expr) const;
     // Viseme overlays keyed by stem (mouth_open / mouth_small / mouth_smile /
     // mouth_round). All optional — missing entries fall back to mouth_open.
     std::map<std::string, cv::Mat> mouth_shapes_;

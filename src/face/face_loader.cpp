@@ -90,6 +90,50 @@ cv::Mat FaceLoader::load_img(const std::string& path) const {
     return out;
 }
 
+// Resolution order, and the reason for each step:
+//   feature off            -> nothing animates, full stop.
+//   expression says "off"  -> that expression uses the plain crossfade even
+//                             though the face animates. This is deliberate: a
+//                             face whose "asleep" art is already closed eyes
+//                             has nothing to animate.
+//   expression has its own -> use it.
+//   expression is enabled
+//     but has no art yet   -> fall through to the face-wide sequence, so a
+//                             half-set-up expression still blinks properly
+//                             instead of going flat.
+//   not mentioned at all   -> inherit the face-wide sequence.
+FaceLoader::BlinkPick FaceLoader::blink_pick_for(const std::string& expr) const {
+    if (!blink_anim_on_) return {};
+    auto it = blink_expr_.find(expr);
+    if (it != blink_expr_.end()) {
+        if (!it->second.enabled) return {};
+        if (it->second.art.size() >= 2) return { &it->second.art, it->second.whole };
+    }
+    if (blink_frames_.size() >= 2) return { &blink_frames_, blink_anim_whole_ };
+    return {};
+}
+
+FaceLoader::BlinkMode FaceLoader::blink_mode_for(const std::string& expr) const {
+    auto it = blink_expr_.find(expr);
+    if (it == blink_expr_.end()) return BlinkMode::Inherit;
+    return it->second.enabled ? BlinkMode::Own : BlinkMode::None;
+}
+
+int FaceLoader::blink_frames_cfg_for(const std::string& expr) const {
+    auto it = blink_expr_.find(expr);
+    return (it == blink_expr_.end()) ? blink_anim_frames_ : it->second.frames;
+}
+
+int FaceLoader::blink_frame_count_for(const std::string& expr) const {
+    auto it = blink_expr_.find(expr);
+    return (it == blink_expr_.end()) ? 0 : static_cast<int>(it->second.art.size());
+}
+
+bool FaceLoader::blink_whole_for(const std::string& expr) const {
+    auto it = blink_expr_.find(expr);
+    return (it == blink_expr_.end()) ? blink_anim_whole_ : it->second.whole;
+}
+
 void FaceLoader::load() {
     json cfg = json::object();
     fs::path cfg_path = fs::path(folder_) / "config.json";
@@ -101,6 +145,17 @@ void FaceLoader::load() {
     // Placement transform (optional) — read BEFORE images load so load_img can
     // apply it. Only "active" when at least one of fit/scale/offset is present,
     // so legacy faces render exactly as before.
+    // Per-face wiggle. Lives with the face rather than the panel so a set can
+    // carry its own idle motion — a twitchy face and a still one can coexist
+    // without editing the panel config between them.
+    has_wiggle_ = false;
+    if (cfg.contains("wiggle") && cfg["wiggle"].is_object()) {
+        const auto& jw = cfg["wiggle"];
+        if (jw.contains("speed"))       wiggle_.speed       = jw["speed"].get<double>();
+        if (jw.contains("amplitude_x")) wiggle_.amplitude_x = jw["amplitude_x"].get<double>();
+        if (jw.contains("amplitude_y")) wiggle_.amplitude_y = jw["amplitude_y"].get<double>();
+        has_wiggle_ = true;
+    }
     if (cfg.contains("fit") && cfg["fit"].is_string())
         fit_mode_ = cfg["fit"].get<std::string>();
     if (cfg.contains("scale") && cfg["scale"].is_number())
@@ -147,6 +202,67 @@ void FaceLoader::load() {
     // Blink image.
     std::string blink_file = cfg.value("blink", std::string("blink.png"));
     blink_ = load_img((fs::path(folder_) / blink_file).string());
+
+    // Animated blink: frames from the `blink/` subfolder (see face_loader.h for
+    // why they live there and not beside the expressions).
+    blink_frames_.clear();
+    blink_anim_on_     = false;
+    blink_anim_frames_ = 0;
+    if (cfg.contains("blink_anim") && cfg["blink_anim"].is_object()) {
+        const auto& ja = cfg["blink_anim"];
+        blink_anim_on_     = ja.value("enabled", false);
+        blink_anim_frames_ = std::clamp(ja.value("frames", 0), 0, kBlinkAnimMaxFrames);
+        blink_anim_whole_  = ja.value("whole", false);
+    }
+    // Load 1.png…count.png out of `dir`. ⚠ STOPS at the first gap rather than
+    // skipping it: the frame index is derived from the blink weight, so a hole
+    // would make the lid jump straight past the missing position. A
+    // short-but-complete sequence reads far better than a stuttering one.
+    // Fewer than 2 frames is not an animation — it is the single-image
+    // crossfade with extra steps — so it is handed back to that path.
+    auto load_blink_seq = [this](const fs::path& dir, int count) {
+        std::vector<cv::Mat> out;
+        for (int i = 1; i <= count; ++i) {
+            cv::Mat f = load_img((dir / (std::to_string(i) + ".png")).string());
+            if (f.empty()) break;
+            out.push_back(std::move(f));
+        }
+        if (out.size() < 2) out.clear();
+        return out;
+    };
+
+    blink_expr_.clear();
+    if (blink_anim_on_ && blink_anim_frames_ > 0)
+        blink_frames_ = load_blink_seq(fs::path(folder_) / "blink",
+                                       blink_anim_frames_);
+    // Per-expression sequences, from `blink/<expression>/`. Only expressions
+    // named in the config are considered — every other one inherits the
+    // face-wide sequence, so a face with no per-expression settings costs
+    // nothing at load time.
+    // ⚠ PARSED EVEN WHEN THE FACE-WIDE TOGGLE IS OFF. The master toggle gates
+    // PLAYBACK (blink_pick_for returns nothing), not what the config says. When
+    // parsing was gated on it too, the menu could not read back a per-expression
+    // setting it had just written — every row snapped straight back to "Use
+    // Face Default" and the options looked unselectable.
+    if (cfg.contains("blink_anim") &&
+        cfg["blink_anim"].is_object() &&
+        cfg["blink_anim"].contains("expressions") &&
+        cfg["blink_anim"]["expressions"].is_object()) {
+        for (auto& [name, je] : cfg["blink_anim"]["expressions"].items()) {
+            if (!je.is_object()) continue;
+            BlinkExpr be;
+            be.enabled = je.value("enabled", true);
+            be.whole   = je.value("whole", blink_anim_whole_);
+            be.frames  = std::clamp(je.value("frames", blink_anim_frames_),
+                                    0, kBlinkAnimMaxFrames);
+            std::string key = name;
+            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            if (be.enabled && be.frames > 0)
+                be.art = load_blink_seq(fs::path(folder_) / "blink" / key,
+                                        be.frames);
+            blink_expr_.emplace(std::move(key), std::move(be));
+        }
+    }
 
     // Viseme overlays — all four are optional. A missing mouth_open simply
     // disables audio-driven mouth blending; missing visemes fall back to
@@ -353,15 +469,57 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
 
     // 2. Blink.
     double bw = std::clamp(state.blink_weight(), 0.0, 1.0);
-    if (bw > 0.0 && !blink_.empty()) {
-        if (eye_left_.set || eye_right_.set) {
+    // Animated blink: pick the frame from the blink weight itself.
+    //
+    // blink_weight() already sweeps 0 -> 1 -> 0 across a whole blink, so a
+    // straight index off it plays the lid DOWN and back UP with no second
+    // clock, no phase of its own to drift, and no reading of BlinkPhase. It
+    // also inherits the rest of the machine for free: Blink Duration still sets
+    // the pace, and set_eyes_closed() (the asleep reaction) pins the weight at
+    // 1.0, which pins the index at the last frame — the fully-shut one, which
+    // is exactly the art that should hold while asleep.
+    //
+    // ⚠ The chosen frame REPLACES the eye at full strength (weight forced to
+    // 1.0) instead of cross-fading. A crossfade is what the single-image path
+    // already does, and blending frame N over the open eye is precisely what
+    // makes a sequence read as a dissolve rather than as animation. The cost is
+    // that frame 1 appears the instant the blink starts, so it wants to be
+    // drawn as a barely-closed lid — an artwork rule, not a code one.
+    const BlinkPick pick = blink_pick_for(state.expression());
+    const cv::Mat* blink_img = &blink_;
+    bool whole_replace = false;
+    if (pick.seq && !pick.seq->empty()) {
+        const int n = static_cast<int>(pick.seq->size());
+        // ⚠ floor(w * n), NOT round(w * (n-1)). Rounding onto n-1 steps gives
+        // the FIRST and LAST frames only half the weight band of the middle
+        // ones, and at 60 fps a 0.075 s close is sampled about five times — so
+        // the very first tick already lands at w≈0.22, past frame 1's narrow
+        // band, and frame 1 never appears on the way down at all. (It shows up
+        // on the way back open, which makes the blink visibly lopsided.)
+        // Flooring onto n equal slices gives every frame the same share.
+        const int idx = std::clamp(static_cast<int>(bw * n), 0, n - 1);
+        blink_img = &(*pick.seq)[idx];
+        whole_replace = pick.whole;
+        bw = 1.0;
+    }
+    const cv::Mat& bimg = *blink_img;
+    if (bw > 0.0 && !bimg.empty()) {
+        if (whole_replace && bimg.size() == frame.size()) {
+            // Cover = whole face: the frame IS the face for this tick, so it
+            // replaces rather than composites. This is the path for an
+            // expression whose eyes don't sit inside the face folder's shared
+            // eye polygons — a different number of them, or extra features
+            // that shut along with them — where masking to those polygons
+            // would clip the art and leave the odd ones out staring.
+            frame = bimg.clone();
+        } else if (eye_left_.set || eye_right_.set) {
             // Region blink: cross-fade ONLY the eye box(es) from the open
             // expression to the blink art, so the open eye is replaced (it
             // closes) while the mouth/nose outside the boxes are untouched.
             // Used in both single- and multi-panel mode whenever eye regions
             // are defined — the boxes are mapped to this panel's slice above.
-            if (eye_left_.set)  blend_region(frame, blink_, eye_left_,  bw);
-            if (eye_right_.set) blend_region(frame, blink_, eye_right_, bw);
+            if (eye_left_.set)  blend_region(frame, bimg, eye_left_,  bw);
+            if (eye_right_.set) blend_region(frame, bimg, eye_right_, bw);
         } else {
             // No eye regions defined → fall back to a whole-face alpha
             // composite of the blink canvas over the face using the blink
@@ -370,10 +528,10 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
             // blink art (the blink only adds pixels, never removes the open
             // eye), so define eye regions in the editor for a proper blink.
             // Both images are RGBA at this loader's panel size.
-            if (blink_.size() == frame.size() && blink_.type() == CV_8UC4) {
+            if (bimg.size() == frame.size() && bimg.type() == CV_8UC4) {
                 for (int y = 0; y < frame.rows; ++y) {
                     cv::Vec4b*       fr = frame.ptr<cv::Vec4b>(y);
-                    const cv::Vec4b* bl = blink_.ptr<cv::Vec4b>(y);
+                    const cv::Vec4b* bl = bimg.ptr<cv::Vec4b>(y);
                     for (int x = 0; x < frame.cols; ++x) {
                         double a = (bl[x][3] / 255.0) * bw;   // overlay coverage
                         if (a <= 0.0) continue;
@@ -384,7 +542,7 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
                     }
                 }
             } else {
-                cv::addWeighted(frame, 1.0 - bw, blink_, bw, 0.0, frame);  // size mismatch fallback
+                cv::addWeighted(frame, 1.0 - bw, bimg, bw, 0.0, frame);  // size mismatch fallback
             }
         }
     }
@@ -406,11 +564,49 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
     double dy = wc.amplitude_y * std::sin(2.0 * M_PI * wc.speed * tsec * 1.3);
     double shift_x = dx + state.gyro_dx();
     double shift_y = dy + state.gyro_dy();
+    // Sharp Motion: round to whole pixels and sample nearest, so a moving face
+    // stays pixel-exact. Sub-pixel + INTER_LINEAR blends each pixel with its
+    // neighbours for the whole duration of the movement; at a half-pixel offset
+    // that is a 50/50 smear of the entire face. On a 64x32 panel the smoothness
+    // it buys is invisible while the blur it costs is not.
+    const bool sharp = state.sharp_motion();
+    if (sharp) {
+        // Whole-pixel motion that still reads as smooth. Plain std::round has
+        // two problems: a value hovering near .5 flips back and forth every
+        // frame (1px jitter), and gyro noise makes the steps land unevenly, so
+        // the face lurches rather than drifts.
+        //
+        // 1. LOW-PASS the target. Takes the jitter out of the gyro feed and
+        //    turns a noisy signal into a deliberate one. ~3-frame time
+        //    constant at 60fps — short enough not to feel laggy.
+        constexpr double kSmooth = 0.35;
+        sm_fx_ += (shift_x - sm_fx_) * kSmooth;
+        sm_fy_ += (shift_y - sm_fy_) * kSmooth;
+        // 2. HYSTERESIS on the step. Commit to a new pixel only once the
+        //    target is clearly past it, not at the .5 boundary — so a value
+        //    sitting on the edge stays put instead of oscillating. Stepping in
+        //    a loop keeps up with fast motion rather than lagging one pixel
+        //    per frame behind it.
+        constexpr double kStep = 0.62;
+        while (sm_fx_ - sm_ix_ >  kStep) ++sm_ix_;
+        while (sm_fx_ - sm_ix_ < -kStep) --sm_ix_;
+        while (sm_fy_ - sm_iy_ >  kStep) ++sm_iy_;
+        while (sm_fy_ - sm_iy_ < -kStep) --sm_iy_;
+        shift_x = sm_ix_;
+        shift_y = sm_iy_;
+    } else {
+        // Keep the smoother tracking the live value so toggling Sharp Motion
+        // on doesn't start from a stale position and snap.
+        sm_fx_ = shift_x; sm_fy_ = shift_y;
+        sm_ix_ = static_cast<int>(std::lround(shift_x));
+        sm_iy_ = static_cast<int>(std::lround(shift_y));
+    }
     if (std::abs(shift_x) > 0.01 || std::abs(shift_y) > 0.01) {
         cv::Mat M = (cv::Mat_<double>(2, 3) << 1, 0, shift_x, 0, 1, shift_y);
         cv::Mat shifted;
         cv::warpAffine(frame, shifted, M, frame.size(),
-                       cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+                       sharp ? cv::INTER_NEAREST : cv::INTER_LINEAR,
+                       cv::BORDER_REPLICATE);
         frame = shifted;
     }
 

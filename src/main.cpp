@@ -2426,6 +2426,8 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.notifs.push(std::move(n));
     };
+    // Snap the wiggle/inertia shift to whole pixels (no motion blur).
+    bool   pf_sharp_motion     = false;
     bool   pf_face_inertia     = true;
     double pf_face_inertia_strength = 1.0;   // 1.0 = slide up to ~10% of a panel
     bool   pf_weather_effects  = false;
@@ -2436,7 +2438,14 @@ int main(int argc, char* argv[]) {
     bool   pf_heat_heartbeat   = true;   // heatwave adds an orange heartbeat rim pulse
     double pf_frost_speed      = 1.0;    // frost formation/creep speed multiplier
     double pf_heat_speed       = 1.0;    // heatwave shimmer + heartbeat speed multiplier
-    int    pf_temp_force       = 0;      // preview override: 0 off, 1 frost, 2 heatwave (not saved)
+    // Per-band custom effect: the name of a saved layered preset under
+    // cfg["protoface"]["custom_effects"], or "" for the band's built-in look.
+    // Mild is the band BETWEEN the two thresholds, which has always shown
+    // nothing — "" keeps it that way.
+    std::string pf_temp_cold_fx;         // "" = built-in frost
+    std::string pf_temp_hot_fx;          // "" = built-in heatwave
+    std::string pf_temp_mild_fx;         // "" = nothing
+    int    pf_temp_force       = 0;      // preview override: 0 off, 1 cold, 2 hot, 3 mild (not saved)
     bool   weather_fx_resync   = true;
     // MAX7219 panel layout editor state (Face Display > MAX7219 Layout). Loaded
     // from cfg["protoface"]["max7219"] below; pf_max7219_apply serialises it back
@@ -2455,6 +2464,9 @@ int main(int argc, char* argv[]) {
     // Scrolling-text banner across the face panels (marquee) — forwarded to
     // the native controller live and persisted to cfg["protoface"]
     // ["scroll_text"]. See face/scroll_text.h.
+    // Face-painter swatches (0xRRGGBB). Persisted so a colour mixed in the
+    // editor is still there next session; empty = use the editor's defaults.
+    std::vector<uint32_t> pf_face_palette;
     face::ScrollTextConfig pf_scroll;
     // ⚠ An Event Text slot (or a menu Preview) REPLACES pf_scroll while it is
     // up, so pf_scroll is not the wearer's banner at that moment. This holds
@@ -2491,6 +2503,7 @@ int main(int argc, char* argv[]) {
             pf_range_pitch = jval(jpf["motion_range"], "pitch_deg", 0.0);
             pf_range_yaw   = jval(jpf["motion_range"], "yaw_deg",   0.0);
         }
+        pf_sharp_motion        = jval(jpf, "sharp_motion",     pf_sharp_motion);
         pf_face_inertia        = jval(jpf, "face_inertia",     pf_face_inertia);
         pf_face_inertia_strength =
             jval(jpf, "face_inertia_strength", pf_face_inertia_strength);
@@ -2502,6 +2515,9 @@ int main(int argc, char* argv[]) {
         pf_heat_heartbeat      = jval(jpf, "heatwave_heartbeat", pf_heat_heartbeat);
         pf_frost_speed         = jval(jpf, "frost_speed",       pf_frost_speed);
         pf_heat_speed          = jval(jpf, "heatwave_speed",    pf_heat_speed);
+        pf_temp_cold_fx        = jpf.value("temp_cold_effect",  pf_temp_cold_fx);
+        pf_temp_hot_fx         = jpf.value("temp_hot_effect",   pf_temp_hot_fx);
+        pf_temp_mild_fx        = jpf.value("temp_mild_effect",  pf_temp_mild_fx);
         state.face.pride_angle = jval(jpf, "pride_angle", 90);
         state.face.mat_angle   = jval(jpf, "mat_angle", 0);
         state.face.mat_speed   = jval(jpf, "mat_speed", 0);
@@ -2523,6 +2539,9 @@ int main(int argc, char* argv[]) {
             L.camera_temporal_planes = jval(jh, "camera_temporal_planes", L.camera_temporal_planes);
             L.serpentine  = jval(jh, "serpentine",  L.serpentine);
             L.sharp_rotation = jval(jh, "sharp_rotation", L.sharp_rotation);
+            L.edge_fade        = jval(jh, "edge_fade",        L.edge_fade);
+            L.edge_fade_dither = jval(jh, "edge_fade_dither", L.edge_fade_dither);
+            L.face_dither      = jval(jh, "face_dither",      L.face_dither);
             L.flip_canvas_x = jval(jh, "flip_canvas_x", L.flip_canvas_x);
             L.flip_canvas_y = jval(jh, "flip_canvas_y", L.flip_canvas_y);
             if (jh.contains("flip_half_x") && jh["flip_half_x"].is_array())
@@ -2683,6 +2702,12 @@ int main(int argc, char* argv[]) {
         }
         if (jpf.contains("scroll_text") && jpf["scroll_text"].is_object())
             pf_scroll = face::ScrollTextConfig::from_json(jpf["scroll_text"]);
+        if (jpf.contains("face_palette") && jpf["face_palette"].is_array()) {
+            pf_face_palette.clear();
+            for (const auto& c : jpf["face_palette"])
+                if (c.is_number_unsigned())
+                    pf_face_palette.push_back(c.get<uint32_t>() & 0xFFFFFFu);
+        }
         if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
             auto& jg = jpf["gradient"];
             pf_gradient.count     = std::clamp(jval(jg, "count", pf_gradient.count), 2, 6);
@@ -3859,8 +3884,10 @@ int main(int argc, char* argv[]) {
         light_cfg.poll_hz  = jval(jl, "poll_hz",  light_cfg.poll_hz);
     }
     sensor::LightSensor light_sensor(light_cfg);
-    light_sensor.set_lux_callback([last_lux](float lux) {
+    light_sensor.set_lux_callback([last_lux, &face_proxy](float lux) {
         last_lux->store(lux);
+        // Feed the face too, for layers on "intensity_from": light / dark.
+        face_proxy.set_env_light(lux);
     });
     if (light_cfg.enabled && !light_sensor.start())
         std::cerr << "[main] light sensor unavailable\n";
@@ -4287,6 +4314,7 @@ int main(int argc, char* argv[]) {
         native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->set_motion_particles(pf_motion_particles);
+        native_ctrl->set_sharp_motion(pf_sharp_motion);
         native_ctrl->set_face_inertia(pf_face_inertia);
         native_ctrl->set_face_inertia_strength(pf_face_inertia_strength);
         native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
@@ -4580,9 +4608,20 @@ int main(int argc, char* argv[]) {
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, std::move(new_output));
         active_face = native_ctrl.get();
+        // A rebuild makes a NEW controller and output, so live-only state has
+        // to be re-pushed or it reverts to defaults. The flips and angles ride
+        // in through pf_build_panel_output; these have no build path.
+        native_ctrl->set_sharp_rotation(pf_hub75.sharp_rotation);
+        native_ctrl->set_edge_fade(pf_hub75.edge_fade, pf_hub75.edge_fade_dither);
+        // Panel depth is only known in camera mode; outside it piomatter uses
+        // its own defaults, so there is no honest number to dither to.
+        native_ctrl->set_face_dither(
+            pf_hub75.face_dither,
+            pf_hub75.camera_mode ? pf_hub75.camera_planes : 0);
         native_ctrl->set_face_colors(state.face.face_colors);
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->set_motion_particles(pf_motion_particles);
+        native_ctrl->set_sharp_motion(pf_sharp_motion);
         native_ctrl->set_face_inertia(pf_face_inertia);
         native_ctrl->set_face_inertia_strength(pf_face_inertia_strength);
         native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
@@ -4676,13 +4715,31 @@ int main(int argc, char* argv[]) {
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
 
+        // ⚠ An expression name containing '/' addresses art in a SUBFOLDER of
+        // the face folder — today that means the animated-blink frames
+        // ("blink/1" -> <face>/blink/1.png). Their parent directory is
+        // therefore NOT the face folder, and everything that reads or writes
+        // the face's config.json has to climb out first. Left unhandled, a
+        // frame edit would look for the eye regions in the wrong place and then
+        // write a stray config.json beside the frames.
+        // ⚠ Climb ONE LEVEL PER SLASH, not a fixed one. The face-wide blink
+        // frames are "blink/<n>" (one level down) but a per-expression
+        // sequence is "blink/<expression>/<n>" (two), and a hardcoded single
+        // parent_path() would land on <face>/blink and quietly read the
+        // config.json that isn't there.
+        const size_t sub_depth =
+            static_cast<size_t>(std::count(expression.begin(), expression.end(), '/'));
+        const bool is_sub_art = sub_depth > 0;
+        fs::path face_dir = fs::path(abs_path).parent_path();
+        for (size_t i = 0; i < sub_depth; ++i) face_dir = face_dir.parent_path();
+
         // Preload any blink eye polygons from the face folder's config.json
         // (canvas coords) so the editor shows them and round-trips them on save.
         // Accepts the new {"points":[[x,y],...]} polygon form and the legacy
         // {x,y,w,h} rectangle (promoted to a 4-corner polygon for editing).
         std::vector<menu::FaceEditor::EyePoly> eye_polys;
         {
-            const fs::path cfgp = fs::path(abs_path).parent_path() / "config.json";
+            const fs::path cfgp = face_dir / "config.json";
             std::ifstream ef(cfgp);
             if (ef) {
                 try {
@@ -4723,9 +4780,10 @@ int main(int argc, char* argv[]) {
         menu_ptr->open_face_editor(
             title, abs_path, cw, ch, std::move(covered), std::move(labels),
             zones.mirror_x,
-            mode, {} /* default palette */,
+            mode, pf_face_palette,   // empty -> editor defaults
             std::move(eye_polys),
-            /* on_commit */ [&face_proxy, &native_ctrl, expression]
+            /* on_commit */ [&face_proxy, &native_ctrl, expression,
+                             face_dir, is_sub_art]
                 (const cv::Mat& rgba_canvas, const std::string& target_path,
                  const std::vector<menu::FaceEditor::EyePoly>& eye_polys) {
                 // Convert RGBA back to BGRA for cv::imwrite (PNG storage
@@ -4749,9 +4807,14 @@ int main(int argc, char* argv[]) {
                 // each polygon to a mask so a region blink only closes the eye(s)
                 // inside the shape. Always rewrite both keys so clearing an eye
                 // (drawing fewer shapes) removes the stale one.
-                {
-                    const std::filesystem::path cfgp =
-                        std::filesystem::path(target_path).parent_path() / "config.json";
+                // ⚠ SKIPPED ENTIRELY FOR SUB-FOLDER ART (blink frames). The eye
+                // polygons are canvas-space and shared by every frame, so if
+                // each frame wrote them back, whichever frame was saved last
+                // would silently become the authority — and a frame opened
+                // before the regions existed would erase them. Frames consume
+                // the polygons read-only; only the real slots author them.
+                if (!is_sub_art) {
+                    const std::filesystem::path cfgp = face_dir / "config.json";
                     json ej = json::object();
                     { std::ifstream ef(cfgp);
                       if (ef) { try { ef >> ej; } catch (...) { ej = json::object(); } }
@@ -4776,22 +4839,46 @@ int main(int argc, char* argv[]) {
                 // falls back to neutral gracefully when the name isn't an
                 // expression in the loader's set (mouth-shape PNGs).
                 if (native_ctrl) native_ctrl->reload_active_face();
-                face_proxy.set_face_by_name(expression);
+                // ⚠ A blink frame is NOT an expression: set_face_by_name would
+                // fall back to neutral and yank the wearer's face off whatever
+                // it was showing on every single frame save. Fire a blink
+                // instead — that IS this art on screen, which is the whole
+                // point of showing something after a save.
+                if (is_sub_art) {
+                    if (native_ctrl) native_ctrl->trigger_blink();
+                } else {
+                    face_proxy.set_face_by_name(expression);
+                }
             },
             /* on_cancel */ {},
-            /* on_preview */ [&native_ctrl, expression, &face_proxy]
+            /* on_preview */ [&native_ctrl, expression, is_sub_art, &face_proxy]
                 (const cv::Mat& rgba_canvas, double duration_s) {
                 if (!native_ctrl) return;
-                // Pop the expression so the user is looking at it, then push
-                // the in-progress canvas as a transient. The renderer thread
-                // will composite material + effects on top.
-                face_proxy.set_face_by_name(expression);
-                native_ctrl->push_transient_face(expression, rgba_canvas, duration_s);
+                // ⚠ A blink frame has no expression to pop to. Pushing the
+                // transient under "blink/1" would register it against a name
+                // the loader has never heard of and V would silently do
+                // nothing — the worst outcome for a preview key. Push it over
+                // whatever expression is CURRENTLY on the face instead: the
+                // art lands on the panels for the duration and is restored
+                // afterwards, exactly as it is for a real slot.
+                const std::string target =
+                    is_sub_art ? face_proxy.current_expression() : expression;
+                if (target.empty()) return;
+                if (!is_sub_art) face_proxy.set_face_by_name(target);
+                native_ctrl->push_transient_face(target, rgba_canvas, duration_s);
             },
             /* live_frame */ [&native_ctrl](cv::Mat& out) -> bool {
                 return native_ctrl && native_ctrl->latest_frame(out);
             },
             /* preview_duration_s */ pf_preview_duration_s);
+        // Swatch edits ('K' -> the shared colour picker) write straight back
+        // here, so a mixed colour survives the editor closing — and survives a
+        // cancelled drawing, since the palette is a tool setting rather than
+        // part of the artwork.
+        menu_ptr->face_editor().set_palette_hook(
+            [&pf_face_palette](const std::vector<uint32_t>& p){
+                pf_face_palette = p;
+            });
         // MAX7219 wiring guide: when the face is shown on MAX panels (as the
         // main backend, or a coproc "section"), hand the editor the chain's
         // module order so it overlays the DIN→DOUT wiring on the grid.
@@ -5091,7 +5178,10 @@ int main(int argc, char* argv[]) {
     // context-panel preview. Reads the current native_ctrl each call so it keeps
     // working across backend swaps; empty on the Teensy/daemon backends.
     menu_ctx.live_face_frame = [&native_ctrl](cv::Mat& out) -> bool {
-        return native_ctrl && native_ctrl->latest_frame(out);
+        // The PHYSICAL view (canvas masked to the real panels), not the raw
+        // canvas — a context preview showing face in the gap between panels is
+        // showing something the wearer can never see.
+        return native_ctrl && native_ctrl->latest_physical(out);
     };
     menu_ctx.xr      = &xr;
     menu_ctx.cameras = &cameras;
@@ -5189,7 +5279,22 @@ int main(int argc, char* argv[]) {
                 pf_hub75, i, pf_hub75_panel_half(pf_hub75, i)));
         native_ctrl->set_panel_angles(angles);
         native_ctrl->set_sharp_rotation(pf_hub75.sharp_rotation);
+        native_ctrl->set_edge_fade(pf_hub75.edge_fade, pf_hub75.edge_fade_dither);
+        // Panel depth is only known in camera mode; outside it piomatter uses
+        // its own defaults, so there is no honest number to dither to.
+        native_ctrl->set_face_dither(
+            pf_hub75.face_dither,
+            pf_hub75.camera_mode ? pf_hub75.camera_planes : 0);
     };
+    // ⚠ PUSH IT ONCE AT STARTUP. Everything above is live controller/output
+    // state with no build-time path of its own, and this lambda used to be
+    // called ONLY from the menu — so a saved value took effect when you set it
+    // and then silently reverted on the next restart. `sharp_rotation` was the
+    // visible casualty: it defaults to false in ShmPusherOutput, so a build
+    // configured for nearest-neighbour sampling came back up bilinear every
+    // boot. Safe to call here — it pushes state and nothing else: no rebuild,
+    // no driver relaunch.
+    if (native_ctrl) menu_ctx.pf_layout_changed();
     // HUB75 geometry edits (panel count / arrangement / size / nudge / chain
     // order). These resize the renderer canvas AND the piomatter framebuffer,
     // so pushing state into the live controller isn't enough — the whole panel
@@ -5322,6 +5427,50 @@ int main(int argc, char* argv[]) {
         pf_motion_particles = v;
         if (native_ctrl) native_ctrl->set_motion_particles(v);
     };
+    menu_ctx.pf_get_wiggle = [&](double& sp, double& ax, double& ay) -> bool {
+        if (!native_ctrl) return false;
+        face::WiggleCfg w;
+        if (!native_ctrl->get_face_wiggle(w)) return false;
+        sp = w.speed; ax = w.amplitude_x; ay = w.amplitude_y;
+        return true;
+    };
+    menu_ctx.pf_set_wiggle = [&](double sp, double ax, double ay){
+        if (!native_ctrl) return;
+        face::WiggleCfg w; w.speed = sp; w.amplitude_x = ax; w.amplitude_y = ay;
+        native_ctrl->set_face_wiggle(w);
+    };
+    menu_ctx.pf_get_blink_anim = [&](bool& en, int& frames) -> bool {
+        return native_ctrl && native_ctrl->get_blink_anim(en, frames);
+    };
+    menu_ctx.pf_set_blink_anim = [&](bool en, int frames){
+        if (native_ctrl) native_ctrl->set_blink_anim(en, frames);
+    };
+    menu_ctx.pf_blink_frames_loaded = [&]() -> int {
+        return native_ctrl ? native_ctrl->blink_frames_loaded() : 0;
+    };
+    menu_ctx.pf_trigger_blink = [&]{ if (native_ctrl) native_ctrl->trigger_blink(); };
+    menu_ctx.pf_get_expr_blink = [&](const std::string& expr, int& mode, int& frames,
+                                     bool& whole, int& loaded) -> bool {
+        if (!native_ctrl) return false;
+        face::NativeFaceController::ExprBlink eb;
+        if (!native_ctrl->get_expr_blink(expr, eb)) return false;
+        mode   = static_cast<int>(eb.mode);
+        frames = eb.frames; whole = eb.whole; loaded = eb.loaded;
+        return true;
+    };
+    menu_ctx.pf_set_expr_blink = [&](const std::string& expr, int mode, int frames,
+                                     bool whole){
+        if (!native_ctrl) return;
+        face::NativeFaceController::ExprBlink eb;
+        eb.mode   = static_cast<face::FaceLoader::BlinkMode>(mode);
+        eb.frames = frames;
+        eb.whole  = whole;
+        native_ctrl->set_expr_blink(expr, eb);
+    };
+    menu_ctx.pf_sharp_motion_p = &pf_sharp_motion;
+    menu_ctx.pf_set_sharp_motion = [&](bool v){
+        if (native_ctrl) native_ctrl->set_sharp_motion(v);
+    };
     menu_ctx.pf_face_inertia_p = &pf_face_inertia;
     menu_ctx.pf_set_face_inertia = [&](bool v){
         pf_face_inertia = v;
@@ -5342,6 +5491,9 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_temp_hot_p     = &pf_temp_hot_c;
     menu_ctx.pf_frost_fractal_p  = &pf_frost_fractal;
     menu_ctx.pf_heat_heartbeat_p = &pf_heat_heartbeat;
+    menu_ctx.pf_temp_cold_fx_p   = &pf_temp_cold_fx;
+    menu_ctx.pf_temp_hot_fx_p    = &pf_temp_hot_fx;
+    menu_ctx.pf_temp_mild_fx_p   = &pf_temp_mild_fx;
     menu_ctx.pf_frost_speed_p    = &pf_frost_speed;
     menu_ctx.pf_heat_speed_p     = &pf_heat_speed;
     menu_ctx.pf_temp_force_p     = &pf_temp_force;
@@ -6028,6 +6180,9 @@ int main(int argc, char* argv[]) {
         // store; no-op unless the native Protoface controller is active.
         face_proxy.set_env_humidity(
             std::clamp(r.humidity_pct / 100.0f, 0.0f, 1.0f));
+        // Ambient temperature for effect layers on "intensity_from":
+        // warm / cold. Same reading the env panel shows.
+        face_proxy.set_env_temp(r.temp_c);
     });
     if (bme_cfg.enabled && !bme280.start())
         std::cerr << "[main] BME280 environment sensor unavailable\n";
@@ -6242,14 +6397,14 @@ int main(int argc, char* argv[]) {
     // editor is open the shoulder buttons cycle the palette (via the menu_system
     // handler) so we must not also tab through the menu underneath.
     gamepad.on_pip_left ([&menu, &kb_pip_left, &landing, &bg_lib, &state, &map_zoom] {
-        if (menu.is_face_editor_open())  return;
+        if (menu.editor_has_canvas())  return;
         if      (state.map_overlay.expanded) map_zoom(-0.4f);
         else if (landing.active)        bg_lib.prev();
         else if (menu.is_deep_open())   menu.prev_tab();
         else                            kb_pip_left  = !kb_pip_left;
     });
     gamepad.on_pip_right([&menu, &kb_pip_right, &landing, &bg_lib, &state, &map_zoom]{
-        if (menu.is_face_editor_open())  return;
+        if (menu.editor_has_canvas())  return;
         if      (state.map_overlay.expanded) map_zoom(+0.4f);
         else if (landing.active)        bg_lib.next();
         else if (menu.is_deep_open())   menu.next_tab();
@@ -6791,6 +6946,7 @@ int main(int argc, char* argv[]) {
         cfg["reactions"] = reactions.config().to_json();
         cfg["protoface"]["motion_range"]["pitch_deg"] = pf_range_pitch;
         cfg["protoface"]["motion_range"]["yaw_deg"]   = pf_range_yaw;
+        cfg["protoface"]["sharp_motion"]        = pf_sharp_motion;
         cfg["protoface"]["face_inertia"]        = pf_face_inertia;
         cfg["protoface"]["face_inertia_strength"] = pf_face_inertia_strength;
         cfg["protoface"]["weather_effects"]     = pf_weather_effects;
@@ -6801,6 +6957,9 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["heatwave_heartbeat"]  = pf_heat_heartbeat;
         cfg["protoface"]["frost_speed"]         = pf_frost_speed;
         cfg["protoface"]["heatwave_speed"]      = pf_heat_speed;
+        cfg["protoface"]["temp_cold_effect"]    = pf_temp_cold_fx;
+        cfg["protoface"]["temp_hot_effect"]     = pf_temp_hot_fx;
+        cfg["protoface"]["temp_mild_effect"]    = pf_temp_mild_fx;
         cfg["protoface"]["pride_angle"]         = state.face.pride_angle;
         cfg["protoface"]["mat_angle"]           = state.face.mat_angle;
         cfg["protoface"]["mat_speed"]           = state.face.mat_speed;
@@ -6823,6 +6982,9 @@ int main(int argc, char* argv[]) {
             jh["camera_temporal_planes"] = L.camera_temporal_planes;
             jh["serpentine"]       = L.serpentine;
             jh["sharp_rotation"]   = L.sharp_rotation;
+            jh["edge_fade"]        = L.edge_fade;
+            jh["edge_fade_dither"] = L.edge_fade_dither;
+            jh["face_dither"]      = L.face_dither;
             jh["flip_canvas_x"]    = L.flip_canvas_x;
             jh["flip_canvas_y"]    = L.flip_canvas_y;
             jh["flip_half_x"]      = json::array({L.flip_half_x[0], L.flip_half_x[1]});
@@ -6891,6 +7053,7 @@ int main(int argc, char* argv[]) {
             }
             cfg["protoface"]["eye_animations"] = std::move(ja);
         }
+        cfg["protoface"]["face_palette"] = pf_face_palette;
         // Never persist a live event/preview banner as the wearer's message.
         cfg["protoface"]["scroll_text"] =
             (pf_scroll_displaced ? pf_scroll_saved : pf_scroll).to_json();
@@ -7366,6 +7529,39 @@ int main(int argc, char* argv[]) {
     auto        weather_fx_last = std::chrono::steady_clock::now() - std::chrono::minutes(2);
     std::string weather_fx_sent = "null";
 
+    // Temp Effects band -> spec. A band plays its named custom effect (one of
+    // the user's saved layered presets) when one is picked, and its built-in
+    // look otherwise.
+    // ⚠ A name that has since been DELETED falls back to the built-in rather
+    // than going silent: a band that quietly does nothing reads as a bug, and
+    // the stale name stays visible in the menu so it can be fixed.
+    // ⚠ Read with find(), never operator[]: `cfg` is non-const here, so
+    // operator[] would CREATE "protoface" / "custom_effects" as a side effect
+    // and the settings autosave would write those empty objects back out.
+    auto temp_band_spec = [&cfg](const std::string& custom,
+                                 nlohmann::json builtin) -> nlohmann::json {
+        if (custom.empty()) return builtin;
+        auto jpf = cfg.find("protoface");
+        if (jpf != cfg.end() && jpf->is_object()) {
+            auto ce = jpf->find("custom_effects");
+            if (ce != jpf->end() && ce->is_object()) {
+                auto hit = ce->find(custom);
+                if (hit != ce->end()) return *hit;
+            }
+        }
+        return builtin;
+    };
+    auto frost_builtin = [&]{
+        return nlohmann::json{{"effect", "frost"}, {"count", 44},
+                              {"fractal", pf_frost_fractal},
+                              {"speed", pf_frost_speed}, {"blend", "add"}};
+    };
+    auto heat_builtin = [&]{
+        return nlohmann::json{{"effect", "heatwave"}, {"count", 18},
+                              {"heartbeat", pf_heat_heartbeat},
+                              {"speed", pf_heat_speed}, {"blend", "add"}};
+    };
+
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         {
             static bool s_first_frame = true;
@@ -7388,17 +7584,19 @@ int main(int argc, char* argv[]) {
             weather_fx_last   = std::chrono::steady_clock::now();
             weather_fx_resync = false;
             nlohmann::json spec;
-            // Preview override (Face Display > Effects > Test Frost/Heatwave):
-            // force the temp effect on regardless of the live temperature, so
-            // it shows even with no sensor/weather. Wins over everything else.
+            // Preview override (Face Display > Effects > Temp Effects > Test):
+            // force a band on regardless of the live temperature, so it shows
+            // even with no sensor/weather. Wins over everything else.
+            // ⚠ Each forces the BAND, not the built-in look — so a Test row
+            // previews whatever that band actually resolves to, custom effect
+            // included. Previewing the stock frost while the cold band is set
+            // to a custom effect would be a preview of the wrong thing.
             if (pf_temp_force == 1)
-                spec = {{"effect", "frost"}, {"count", 44},
-                        {"fractal", pf_frost_fractal}, {"speed", pf_frost_speed},
-                        {"blend", "add"}};
+                spec = temp_band_spec(pf_temp_cold_fx, frost_builtin());
             else if (pf_temp_force == 2)
-                spec = {{"effect", "heatwave"}, {"count", 18},
-                        {"heartbeat", pf_heat_heartbeat}, {"speed", pf_heat_speed},
-                        {"blend", "add"}};
+                spec = temp_band_spec(pf_temp_hot_fx, heat_builtin());
+            else if (pf_temp_force == 3)
+                spec = temp_band_spec(pf_temp_mild_fx, nlohmann::json());
             else if (pf_weather_effects || pf_temp_effects) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 if (state.weather.ok) {
@@ -7412,13 +7610,15 @@ int main(int argc, char* argv[]) {
                         if (!state.weather_cfg.metric)
                             t = (t - 32.0) * 5.0 / 9.0;
                         if (t <= pf_temp_cold_c)
-                            spec = {{"effect", "frost"}, {"count", 44},
-                                    {"fractal", pf_frost_fractal},
-                                    {"speed", pf_frost_speed}, {"blend", "add"}};
+                            spec = temp_band_spec(pf_temp_cold_fx, frost_builtin());
                         else if (t >= pf_temp_hot_c)
-                            spec = {{"effect", "heatwave"}, {"count", 18},
-                                    {"heartbeat", pf_heat_heartbeat},
-                                    {"speed", pf_heat_speed}, {"blend", "add"}};
+                            spec = temp_band_spec(pf_temp_hot_fx, heat_builtin());
+                        else
+                            // The MILD band — everything between the two
+                            // thresholds. Its built-in is null (nothing), which
+                            // is exactly what this gap has always shown, so
+                            // leaving Custom Effect unset changes nothing.
+                            spec = temp_band_spec(pf_temp_mild_fx, nlohmann::json());
                     }
                 }
             }
@@ -8218,7 +8418,7 @@ int main(int argc, char* argv[]) {
         // Skipped while typing on the on-screen keyboard. Shift+M (recenter) is
         // handled in the normal-hotkeys branch below. Also skip when the
         // face editor is on top — it owns the keyboard while open.
-        if (!menu.is_keyboard_open() && !menu.is_face_editor_open()) {
+        if (!menu.is_keyboard_open() && !menu.editor_has_canvas()) {
             const bool m_held = ImGui::IsKeyDown(ImGuiKey_M) && !ImGui::GetIO().KeyShift;
             if (m_held && m_press_t < 0.0) {
                 m_press_t    = glfwGetTime();
@@ -8489,7 +8689,11 @@ int main(int argc, char* argv[]) {
         // open/close edge logic on want1/2/3 picks the streams back up when
         // the user closes the editor. CSI eye cameras keep running so the
         // renderer still has eye textures behind the editor overlay.
-        const bool editor_open = menu.is_face_editor_open();
+        // Cameras/PiPs stay suppressed for as long as the editor holds the
+        // screen — including while the colour picker sits on top of it.
+        // Using the input-ownership predicate here would thrash the camera
+        // streams open and shut every time that picker appeared.
+        const bool editor_open = menu.editor_has_canvas();
         bool p1 = (pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left)
                   && !editor_open;
         bool p2 = (pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right)
@@ -9710,8 +9914,47 @@ int main(int argc, char* argv[]) {
         // face portrait beside the minimap so both surfaces stay in sync.
         struct FaceTex { GLuint id = 0; int w = 0; int h = 0; bool native = false; };
         auto pick_face_tex = [&]() -> FaceTex {
+            // ⚠ HUB75 must NOT use the shm path. That shm carries the
+            // FRAMEBUFFER — panels packed in chain order with every mounting
+            // flip and rotation pre-applied — which is deliberately distorted
+            // so it comes out right on physically flipped panels, and reads as
+            // a scrambled mess on a flat preview. (ShmFrameReader also has the
+            // frame size hardcoded to 128x32, so a 4-panel 128x64 build was
+            // being shown as its top half.) Preview the helmet-space canvas
+            // masked to the real panels instead.
+            const bool hub75_native = (pf_backend == "hub75") && native_ctrl;
             const bool native = (pf_backend == "max7219" || pf_backend == "rgb_matrix")
                                  && native_ctrl;
+            if (hub75_native) {
+                static GLuint hub_tex = 0;
+                static int    hub_w = 0, hub_h = 0;
+                cv::Mat rgb;
+                if (native_ctrl->latest_physical(rgb) && !rgb.empty()) {
+                    cv::Mat rgba;
+                    cv::cvtColor(rgb, rgba, cv::COLOR_RGB2RGBA);
+                    if (hub_tex == 0) {
+                        glGenTextures(1, &hub_tex);
+                        glBindTexture(GL_TEXTURE_2D, hub_tex);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    }
+                    glBindTexture(GL_TEXTURE_2D, hub_tex);
+                    if (rgba.cols != hub_w || rgba.rows != hub_h) {
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba.cols, rgba.rows, 0,
+                                     GL_RGBA, GL_UNSIGNED_BYTE, rgba.data);
+                        hub_w = rgba.cols; hub_h = rgba.rows;
+                    } else {
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, rgba.cols, rgba.rows,
+                                        GL_RGBA, GL_UNSIGNED_BYTE, rgba.data);
+                    }
+                }
+                FaceTex out;
+                out.id = hub_tex; out.w = hub_w; out.h = hub_h;
+                out.native = true;   // already the centred face; no L/R split
+                return out;
+            }
             if (!native) {
                 FaceTex out;
                 protoface_ctrl.get_frame_texture(out.id);

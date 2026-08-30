@@ -27,6 +27,9 @@
 #include "glitch.h"         // GlitchEffect + GlitchConfig
 #include "panel_output.h"   // PanelOutput + NamedRegion
 #include "scroll_text.h"    // ScrollText + ScrollTextConfig
+#include "face_loader.h"    // FaceLoader::BlinkMode (used by ExprBlink below)
+#include "edge_fade.h"      // EdgeFade (outer-rim softening)
+#include "face_dither.h"    // FaceDither (panel-depth dithering)
 #include "test_pattern.h"   // TestPatternRenderer + TestPattern
 
 namespace face {
@@ -109,6 +112,10 @@ public:
     void        set_motion(double heading_deg, double yaw_rate, double pitch_deg,
                            double roll_deg, double accel_g) override;
     void        set_env_humidity(double humidity01) override;
+    // Ambient light (lux, <0 = no sensor) and temperature (°C) for effect
+    // layers using "intensity_from": light/dark/warm/cold.
+    void        set_env_light(double lux) override;
+    void        set_env_temp(double temp_c) override;
     void        set_mouth_shape(const std::string& shape) override;
 
     // Expression-coupled effects: when enabled, the active particle effect is
@@ -195,12 +202,57 @@ public:
     // changes take effect on the next update tick. The menu pushes these
     // when the user adjusts the corresponding slider/toggle.
     void set_blink_enabled(bool enabled);
+    // Fire one blink now, on every panel together. Used by the menu's Preview
+    // Blink row and after a frame edit, since a blink is over in ~0.15 s and
+    // waiting for the random countdown makes the art impossible to check.
+    void trigger_blink();
     // Hold the eyes shut (asleep) / release them. Uses the blink art at full
     // weight, so it works without a dedicated closed-eye expression.
     void set_eyes_closed(bool closed);
     void set_blink_timing(double min_s, double max_s, double duration_s);
     void set_expression_fade(double seconds);
     void set_wiggle(const WiggleCfg& w);
+    void set_sharp_motion(bool on);
+    // Per-face wiggle, stored in the active face folder's config.json.
+    // get returns false when no panel has a face loaded yet.
+    // The canvas masked to the panels that actually exist — i.e. what the build
+    // physically LOOKS like, gaps included. The raw framebuffer is packed in
+    // chain order with every mounting flip pre-applied, so it is deliberately
+    // distorted and makes a poor preview; the canvas is helmet space and does
+    // not have that problem.
+    bool latest_physical(cv::Mat& out) const;
+    bool get_face_wiggle(WiggleCfg& out) const;
+    void set_face_wiggle(const WiggleCfg& w);   // live + persisted to the folder
+    // Animated blink, per face folder. get returns false when no face is
+    // loaded yet; set persists to the folder's config.json AND reloads, since
+    // the frames themselves live in the loaders.
+    bool get_blink_anim(bool& enabled, int& frames) const;
+    void set_blink_anim(bool enabled, int frames);
+    // How many frames actually loaded (art present), vs the configured count.
+    // Under the configured number means art is missing — surfaced in the menu
+    // so a half-drawn sequence is visible rather than mysterious.
+    int  blink_frames_loaded() const;
+    // Absolute path of one blink frame's PNG (1-based), in the active face
+    // folder's `blink/` subfolder. Empty when no face is loaded.
+    std::string blink_frame_path(int frame_1based) const;
+
+    // ── Per-expression blink ────────────────────────────────────────────────
+    // Each expression can carry its own sequence in `blink/<expression>/`,
+    // because expressions are not required to share an eye layout — a face may
+    // have two eyes neutral and four when surprised, or extra features that
+    // shut along with them. `whole` is what makes that work: it replaces the
+    // whole face for the tick instead of masking to the face-wide eye polygons,
+    // which an odd eye would fall outside of.
+    struct ExprBlink {
+        FaceLoader::BlinkMode mode = FaceLoader::BlinkMode::Inherit;
+        int  frames = 0;      // configured
+        bool whole  = false;  // Cover: whole face vs eye regions
+        int  loaded = 0;      // frames whose art actually exists (read-only)
+    };
+    bool get_expr_blink(const std::string& expr, ExprBlink& out) const;
+    void set_expr_blink(const std::string& expr, const ExprBlink& in);
+    std::string expr_blink_frame_path(const std::string& expr,
+                                      int frame_1based) const;
     // Live per-panel orientation flips (HUB75 layout Flip X / Flip Y). flips[i]
     // = {flip_x, flip_y} for panel i; extra/missing entries are ignored. Read by
     // the render thread on the next frame.
@@ -216,6 +268,16 @@ public:
     void set_panel_angles(const std::vector<double>& angles);
     // Nearest-neighbour sampling for rotated panels — crisp text, stepped
     // diagonals. Forwarded to the output, which owns the resample.
+    // Outer-rim fade. width_px <= 0 is a true no-op; see face/edge_fade.h for
+    // why the mask follows the union of the panel rects rather than each panel.
+    // Face-layer dithering. `planes` is the panel's PWM bit depth; 0 disables.
+    void set_face_dither(bool on, int planes) {
+        face_dither_planes_.store(on ? planes : 0);
+    }
+    void set_edge_fade(int width_px, bool dither) {
+        edge_fade_px_.store(width_px);
+        edge_fade_dither_.store(dither);
+    }
     void set_sharp_rotation(bool on) {
         if (output_) output_->set_sharp_rotation(on);
     }
@@ -385,6 +447,10 @@ private:
     // Scrolling-text banner. Thread-safe internally (own mutex): tick/render
     // run on the render thread, set_scroll_text() from menu/config threads.
     ScrollText         scroll_text_;
+    EdgeFade           edge_fade_;
+    std::atomic<int>   edge_fade_px_{0};      // 0 = off
+    std::atomic<bool>  edge_fade_dither_{true};
+    std::atomic<int>   face_dither_planes_{0};   // 0 = off
 
     // Panel setup / diagnostic overlays. Atomic pattern selector internally, so
     // the menu can switch patterns while the render thread ticks it.
@@ -441,6 +507,8 @@ private:
     std::atomic<double> motion_roll_{0.0};
     std::atomic<double> motion_accel_{1.0};   // ≈1 g at rest (MotionInput default)
     std::atomic<double> env_humidity_{-1.0};  // rel humidity 0..1; <0 = no reading
+    std::atomic<double> env_lux_{-1.0};       // ambient lux; <0 = no sensor
+    std::atomic<double> env_temp_c_{-1000.0}; // ambient °C; <= -1000 = no sensor
 
     // Name of the currently-active HUB75 layout (or "" when unset). Used to
     // stamp face folders on import_face_image and surfaced via

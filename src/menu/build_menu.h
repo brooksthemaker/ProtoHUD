@@ -58,6 +58,15 @@ namespace face         { struct GlitchConfig; struct ScrollTextConfig; class Rea
 // HUB75 panel layout state. Lives here (not main.cpp) because both the menu
 // (HUB75 Layout editor) and main's renderer-rebuild path use it.
 struct PfHub75Layout {
+    // Outer-rim fade width in canvas pixels (0 = off), and whether to dither
+    // the ramp. A property of the physical build, so it rides the layout
+    // alongside the nudges and rotations rather than being a global.
+    int  edge_fade        = 0;
+    bool edge_fade_dither = true;
+    // Dither the finished face down to the panel's real PWM depth
+    // (camera_planes) so gradients stipple instead of banding. Only meaningful
+    // when that depth is below 8 bits, i.e. in camera mode.
+    bool face_dither      = false;
     // Default size applied to every panel slot. Per-slot overrides in
     // panel_size_per (empty string = "use default") let a build mix
     // sizes — e.g. two 64x32 eye panels plus a 64x64 mouth.
@@ -459,6 +468,28 @@ struct MenuBuildContext {
     // Face Inertia - the whole face slides opposite quick head motion and
     // springs back like it has mass. Strength scales the maximum slide
     // (1.0 = up to ~10% of the panel).
+    // Per-face wiggle: get returns false when no face is loaded yet; set applies
+    // live AND writes it into the active face folder's config.json.
+    std::function<bool(double&, double&, double&)> pf_get_wiggle;
+    std::function<void(double, double, double)>    pf_set_wiggle;
+    // Animated blink, per face folder (Files > Faces > Blink). get returns
+    // false when no face is loaded yet; set persists to the folder's
+    // config.json and reloads. frames_loaded is how many frame PNGs actually
+    // exist, which can trail the configured count while art is being drawn.
+    std::function<bool(bool&, int&)> pf_get_blink_anim;
+    std::function<void(bool, int)>   pf_set_blink_anim;
+    std::function<int()>             pf_blink_frames_loaded;
+    std::function<void()>            pf_trigger_blink;
+    // Per-expression blink. mode: 0 = inherit the face-wide sequence,
+    // 1 = this expression has its own, 2 = this expression doesn't animate.
+    // frames/whole/loaded as in NativeFaceController::ExprBlink — `whole`
+    // replaces the entire face for the tick instead of masking to the shared
+    // eye polygons, which is what lets an expression carry a different number
+    // of eyes. get returns false when no face is loaded yet.
+    std::function<bool(const std::string&, int&, int&, bool&, int&)> pf_get_expr_blink;
+    std::function<void(const std::string&, int, int, bool)>          pf_set_expr_blink;
+    std::function<void(bool)>   pf_set_sharp_motion;
+    bool*                       pf_sharp_motion_p = nullptr;
     std::function<void(bool)>   pf_set_face_inertia;
     bool*                       pf_face_inertia_p = nullptr;
     std::function<void(double)> pf_set_face_inertia_strength;
@@ -489,9 +520,20 @@ struct MenuBuildContext {
     bool*   pf_heat_heartbeat_p = nullptr;   // heatwave orange heartbeat rim pulse
     double* pf_frost_speed_p    = nullptr;   // frost formation/creep speed multiplier
     double* pf_heat_speed_p     = nullptr;   // heatwave shimmer + heartbeat speed multiplier
+    // Per-band custom effect: the NAME of one of the user's saved layered
+    // presets (cfg["protoface"]["custom_effects"]), or "" for the band's
+    // built-in behaviour. Cold/hot default to "" = the stock frost / heatwave
+    // looks; mild defaults to "" = nothing at all, which is what the two
+    // thresholds have always left in the middle. A name that no longer exists
+    // falls back to the built-in rather than going silent.
+    std::string* pf_temp_cold_fx_p = nullptr;
+    std::string* pf_temp_hot_fx_p  = nullptr;
+    std::string* pf_temp_mild_fx_p = nullptr;
     // Transient preview override (not persisted): 0 = off (follow temperature),
-    // 1 = force frost, 2 = force heatwave. Lets the wearer eyeball the temp
-    // effects on the bench without waiting for the threshold to be crossed.
+    // 1 = force cold band, 2 = force hot band, 3 = force mild band. Lets the
+    // wearer eyeball the temp effects on the bench without waiting for the
+    // threshold to be crossed. Each forces the BAND, so it previews whatever
+    // that band resolves to — custom effect included.
     int*    pf_temp_force_p     = nullptr;
     std::function<void()> pf_ambient_resync;
     // Live-preview tick: main calls this each frame; when Live Preview is on
