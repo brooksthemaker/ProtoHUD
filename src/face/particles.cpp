@@ -194,6 +194,12 @@ public:
     // Relative humidity 0..1 (or <0 = no reading), pushed each frame. The water
     // effect reads it when the layer opts in with "level_from":"humidity".
     void set_humidity(double humidity01) { humidity_ = humidity01; }
+    // Ambient signals for density reactivity. lux < 0 and temp <= kNoTemp mean
+    // "no sensor" and contribute nothing rather than reading as zero/cold.
+    void set_ambient(double lux, double temp_c, double day_frac) {
+        lux_ = lux; temp_c_ = temp_c; day_frac_ = day_frac;
+    }
+    static constexpr double kNoTemp = -1000.0;
     // Global default for direction coupling (see direction_unit): layers with
     // no explicit "direction_from" behave as "gravity" while this is on.
     void set_motion_reactive(bool on) { motion_reactive_ = on; }
@@ -220,6 +226,31 @@ protected:
                 scale *= 1.0 + std::min(std::fabs(motion_.accel_g - 1.0) * 4.0, 3.0) * gain;
             else if (from == "audio")
                 scale *= 1.0 + std::min(audio_, 1.0) * 3.0 * gain;
+            // Ambient sources. Each is normalised to 0..1 where 1 = densest,
+            // and offered in BOTH directions so a layer can thicken in the
+            // dark or in the light without needing a separate invert control.
+            else if (from == "light" || from == "dark") {
+                if (lux_ >= 0.0) {
+                    // 800 lx ~ bright indoors; the same reference the trigger
+                    // recipes use for their light conditions.
+                    const double lit = std::clamp(lux_ / 800.0, 0.0, 1.0);
+                    const double v = (from == "light") ? lit : (1.0 - lit);
+                    scale *= 1.0 + v * 3.0 * gain;
+                }
+            } else if (from == "warm" || from == "cold") {
+                if (temp_c_ > kNoTemp) {
+                    // 18 °C is the neutral point; ±15 °C reaches full effect.
+                    const double warm = std::clamp((temp_c_ - 18.0) / 15.0, 0.0, 1.0);
+                    const double cold = std::clamp((18.0 - temp_c_) / 15.0, 0.0, 1.0);
+                    scale *= 1.0 + ((from == "warm") ? warm : cold) * 3.0 * gain;
+                }
+            } else if (from == "night" || from == "day") {
+                // Smooth cosine over the day rather than a hard switch, so an
+                // effect thickens toward its hour instead of popping at one.
+                const double night = 0.5 * (1.0 + std::cos(2.0 * M_PI * day_frac_));
+                const double v = (from == "night") ? night : (1.0 - night);
+                scale *= 1.0 + v * 3.0 * gain;
+            }
         }
         return std::max(1, static_cast<int>(jnum(cfg_, "count", def) * scale));
     }
@@ -300,6 +331,9 @@ protected:
     std::vector<Particle> particles_;
     MotionInput motion_{};
     double audio_ = 0.0;
+    double lux_      = -1.0;        // <0 = no light sensor
+    double temp_c_   = kNoTemp;     // ambient °C
+    double day_frac_ = 0.5;         // 0 = midnight, 0.5 = noon
     double humidity_ = -1.0;          // rel humidity 0..1; <0 = no sensor reading
     bool motion_reactive_ = false;
     bool shape_rect_ = false;         // "shape" resolved once per cfg change
@@ -1205,6 +1239,140 @@ public:
     }
 };
 
+// ── Breath (expanding puff) ──────────────────────────────────────────────────
+// A soft, semi-transparent cloud that grows from a point and fades as it goes —
+// a visible exhale. Unlike the ambient effects this one is EVENT-shaped: it can
+// free-run at a rate, or fire on a threshold crossing (speaking, a jolt) so a
+// puff coincides with the thing that caused it.
+//
+// Config: origin_x/origin_y (0..1 of the panel), colors, alpha_max (peak
+// opacity), size_min/size_max (start/end radius in px), speed_min/speed_max
+// (px/s of expansion — this sets how long a puff lives), rate (puffs/s when
+// free-running), trigger ("none"|"audio"|"motion"), threshold, count (puffs per
+// firing), spread_frac (jitter around the origin as a fraction of the panel).
+class BreathEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+
+    void update(double dt) override {
+        const std::string trig = cfg_.value("trigger", std::string("none"));
+        const double thr = jnum(cfg_, "threshold", 0.25);
+        bool fire = false;
+        if (trig == "audio" || trig == "motion") {
+            const double lvl = (trig == "audio")
+                             ? audio_
+                             : std::fabs(motion_.accel_g - 1.0);
+            // Rising-edge with hysteresis: one puff per crossing, not one per
+            // frame for as long as the signal stays loud.
+            if (lvl >= thr && armed_) { fire = true; armed_ = false; }
+            if (lvl < thr * 0.6)      armed_ = true;
+        } else {
+            emit_cd_ -= dt;
+            if (emit_cd_ <= 0.0) {
+                fire = true;
+                emit_cd_ = 1.0 / std::max(0.05, jnum(cfg_, "rate", 0.6));
+            }
+        }
+        if (fire) spawn();
+
+        for (auto& p : puffs_) p.age += dt;
+        puffs_.erase(std::remove_if(puffs_.begin(), puffs_.end(),
+                                    [](const Puff& p){ return p.age >= p.life; }),
+                     puffs_.end());
+    }
+
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        const double amax = std::clamp(jnum(cfg_, "alpha_max", 0.55), 0.0, 1.0);
+        for (const auto& p : puffs_) {
+            const double t = std::clamp(p.age / std::max(1e-3, p.life), 0.0, 1.0);
+            const double r = p.r0 + (p.r1 - p.r0) * t;
+            // Fade in briefly then out, so a puff appears rather than pops.
+            const double env = (t < 0.15) ? (t / 0.15) : (1.0 - (t - 0.15) / 0.85);
+            const double a = amax * std::clamp(env, 0.0, 1.0);
+            if (a <= 0.004 || r <= 0.5) continue;
+            draw_soft_disc(c, p.x, p.y, r, p.r, p.g, p.b, a);
+        }
+        return c;
+    }
+
+private:
+    struct Puff {
+        double x = 0, y = 0, age = 0, life = 1, r0 = 1, r1 = 8;
+        int r = 255, g = 255, b = 255;
+    };
+
+    void spawn() {
+        const int n = count(1);
+        const double ox = jnum(cfg_, "origin_x", 0.5) * w_;
+        const double oy = jnum(cfg_, "origin_y", 0.5) * h_;
+        // Origin can be a LINE rather than a point, so the puff can leave a
+        // long muzzle along its whole width instead of pinching out of one
+        // spot. origin_len is a fraction of panel width (0 = point) and
+        // origin_angle tilts the line (0 = horizontal, +ve = clockwise).
+        const double llen = std::max(0.0, jnum(cfg_, "origin_len", 0.0)) * w_;
+        const double lrad = jnum(cfg_, "origin_angle", 0.0) * M_PI / 180.0;
+        const double lux = std::cos(lrad), luy = std::sin(lrad);
+        const double jitter = jnum(cfg_, "spread_frac", 0.06) *
+                              std::min(w_, h_);
+        const double r0lo = jnum(cfg_, "size_min", 1.5);
+        const double r1hi = jnum(cfg_, "size_max", 14.0);
+        const double slo  = jnum(cfg_, "speed_min", 6.0);
+        const double shi  = jnum(cfg_, "speed_max", 12.0);
+        for (int i = 0; i < n; ++i) {
+            Puff p;
+            // Even spread along the line, then jitter — a row of puffs that
+            // reads as one exhale rather than n separate ones.
+            const double t = (llen > 0.0) ? frand(rng_, -0.5, 0.5) * llen : 0.0;
+            p.x = ox + lux * t + frand(rng_, -jitter, jitter);
+            p.y = oy + luy * t + frand(rng_, -jitter, jitter);
+            p.r0 = r0lo;
+            p.r1 = std::max(r0lo + 1.0, r1hi * frand(rng_, 0.75, 1.0));
+            const double spd = std::max(0.5, frand(rng_, slo, shi));
+            p.life = (p.r1 - p.r0) / spd;      // speed sets how long it lives
+            const Color col = pick_color(cfg_, rng_);
+            p.r = col.r; p.g = col.g; p.b = col.b;
+            puffs_.push_back(p);
+        }
+    }
+
+    // Radial falloff so the puff reads as vapour, not a hard circle.
+    void draw_soft_disc(cv::Mat& c, double cx, double cy, double rad,
+                        int cr, int cg, int cb, double a) {
+        const int x0 = std::max(0, static_cast<int>(cx - rad) - 1);
+        const int x1 = std::min(c.cols - 1, static_cast<int>(cx + rad) + 1);
+        const int y0 = std::max(0, static_cast<int>(cy - rad) - 1);
+        const int y1 = std::min(c.rows - 1, static_cast<int>(cy + rad) + 1);
+        const double inv = 1.0 / std::max(1e-3, rad);
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x) {
+                const double dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+                const double d = std::sqrt(dx * dx + dy * dy) * inv;
+                if (d >= 1.0) continue;
+                // smoothstep edge — soft rim, denser core
+                const double f = (1.0 - d) * (1.0 - d);
+                // Accumulate by MAX rather than overwrite: overlapping puffs
+                // should read as one denser cloud, and draw_pixel replaces the
+                // pixel outright (alpha included), which would let a young puff
+                // punch a hole through an older one it crosses.
+                const int na = static_cast<int>(
+                    std::clamp(a * f * 255.0, 0.0, 255.0));
+                if (x >= 0 && x < c.cols && y >= 0 && y < c.rows) {
+                    cv::Vec4b& px = c.at<cv::Vec4b>(y, x);
+                    if (na > px[3])
+                        px = cv::Vec4b(cv::saturate_cast<uchar>(cr),
+                                       cv::saturate_cast<uchar>(cg),
+                                       cv::saturate_cast<uchar>(cb),
+                                       static_cast<uchar>(na));
+                }
+            }
+    }
+
+    std::vector<Puff> puffs_;
+    double emit_cd_ = 0.0;
+    bool   armed_   = true;
+};
+
 // ── Clouds (nebula) ──────────────────────────────────────────────────────────
 
 class CloudsEffect : public BaseEffect {
@@ -1234,14 +1402,36 @@ public:
             const bool off_y = c.y - margin > h_ || c.y + margin < 0;
             if (off_x || off_y) {
                 if (has_dir) {
-                    // Respawn opposite the direction of travel so the clump
-                    // re-enters the canvas. For axis-aligned cases this
-                    // mimics the old left/right wrap; for diagonals it picks
-                    // a corner along the trailing edges.
-                    c.x = (dx > 0) ? -margin : (dx < 0 ? w_ + margin
-                                               : frand(rng_, 0, w_ - 1));
-                    c.y = (dy > 0) ? -margin : (dy < 0 ? h_ + margin
-                                               : frand(rng_, 0, h_ - 1));
+                    // Re-enter from a TRAILING EDGE, spread along it.
+                    //
+                    // ⚠ NEVER test an axis for zero here. direction_unit()
+                    // goes through cos/sin, so only 0° gives a true 0 — 90°,
+                    // 180°, 270° and 360° come back with a ~1e-16 residue on
+                    // the other axis. The old code tested `dx > 0` / `dx < 0`
+                    // and treated that residue as real travel, so it pinned
+                    // the clump to an edge it had no velocity to leave: at
+                    // 180° every clump respawned at y = -margin and drifted
+                    // left forever, off-screen. Every direction the 10° slider
+                    // can reach except exactly 0° was affected.
+                    //
+                    // An axis below kAxisEps is therefore treated as no motion
+                    // at all, and the clump is spread randomly along it.
+                    constexpr double kAxisEps = 1e-3;
+                    const double ax = std::fabs(dx), ay = std::fabs(dy);
+                    const bool can_x = ax > kAxisEps, can_y = ay > kAxisEps;
+                    // With both axes live, pick the entry edge in proportion to
+                    // the travel on each. A 45° drift then feeds the left AND
+                    // top edges instead of funnelling every clump through one
+                    // corner and down a single diagonal.
+                    const bool use_x_edge =
+                        can_x && (!can_y || frand(rng_, 0.0, ax + ay) < ax);
+                    if (use_x_edge) {
+                        c.x = (dx >= 0) ? -margin : w_ + margin;
+                        c.y = frand(rng_, 0, h_ - 1);
+                    } else {
+                        c.y = (dy >= 0) ? -margin : h_ + margin;
+                        c.x = frand(rng_, 0, w_ - 1);
+                    }
                 } else {
                     c.x = (c.vx >= 0) ? -margin : w_ + margin;
                     c.y = frand(rng_, 0, h_ - 1);
@@ -2416,6 +2606,7 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "snooze")    return std::make_unique<SnoozeEffect>(w, h, cfg);
     if (name == "fireflies") return std::make_unique<FirefliesEffect>(w, h, cfg);
     if (name == "clouds")    return std::make_unique<CloudsEffect>(w, h, cfg);
+    if (name == "breath")    return std::make_unique<BreathEffect>(w, h, cfg);
     if (name == "lightning") return std::make_unique<LightningEffect>(w, h, cfg);
     if (name == "meteor")    return std::make_unique<MeteorEffect>(w, h, cfg);
     if (name == "bubbles")   return std::make_unique<BubblesEffect>(w, h, cfg);
@@ -2445,7 +2636,7 @@ const std::map<std::string, json>& presets() {
           "dizzy": {"layers":[
             {"effect":"vortex","count":24,"swirl":3.2,"infall":4,"colors":[[255,230,120],[255,255,255],[255,200,80]],"blend":"add"},
             {"effect":"sparkle","count":5,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.3,"blend":"add"}]},
-          "cold_breath": {"effect":"steam","count":10,"colors":[[215,230,245],[235,245,255]],"speed_min":5.0,"speed_max":9.0,"spread_frac":0.12,"blend":"add"},
+          "cold_breath": {"effect":"breath","count":2,"colors":[[215,230,245],[235,245,255]],"origin_x":0.5,"origin_y":0.62,"size_min":1.5,"size_max":16.0,"speed_min":6.0,"speed_max":11.0,"alpha_max":0.5,"rate":0.5,"spread_frac":0.05,"trigger":"none","threshold":0.25,"blend":"add"},
           "gentle_snow": {"effect":"snow","count":15,"colors":[[200,215,255],[220,235,255]],"speed_min":4.0,"speed_max":7.0,"drift_x":0.8,"blend":"add"},
           "heavy_snow": {"effect":"snow","count":60,"colors":[[240,245,255],[255,255,255]],"speed_min":10.0,"speed_max":18.0,"drift_x":3.0,"blend":"add"},
           "campfire": {"effect":"embers","count":40,"colors":[[255,80,10],[255,100,20]],"speed_min":14.0,"speed_max":22.0,"spread":0.6,"blend":"add"},
@@ -2578,6 +2769,9 @@ struct ParticleLayer {
     void set_motion(const MotionInput& m) { if (effect) effect->set_motion(m); }
     void set_audio(double level)          { if (effect) effect->set_audio(level); }
     void set_humidity(double h)           { if (effect) effect->set_humidity(h); }
+    void set_ambient(double lux, double t, double d) {
+        if (effect) effect->set_ambient(lux, t, d);
+    }
     void set_motion_reactive(bool on)     { if (effect) effect->set_motion_reactive(on); }
     void set_canvas_geometry(int cw, int ch, int ox, int oy) {
         if (effect) effect->set_canvas_geometry(cw, ch, ox, oy);
@@ -2684,6 +2878,10 @@ void ParticleSystem::set_audio(double level) {
 void ParticleSystem::set_humidity(double humidity01) {
     impl_->humidity = humidity01;
     for (auto& l : impl_->layers) l.set_humidity(humidity01);
+}
+
+void ParticleSystem::set_ambient(double lux, double temp_c, double day_frac) {
+    for (auto& l : impl_->layers) l.set_ambient(lux, temp_c, day_frac);
 }
 
 void ParticleSystem::set_motion_reactive(bool on) {
