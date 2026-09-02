@@ -116,6 +116,26 @@ public:
     // layers using "intensity_from": light/dark/warm/cold.
     void        set_env_light(double lux) override;
     void        set_env_temp(double temp_c) override;
+
+    // Auto-dim: scale the user's Brightness by ambient lux at render time.
+    // The stored Brightness setting is never touched — the factor is applied
+    // on top, so turning auto-dim off restores the user's value exactly.
+    // Curve: t = log-lux position between dark_lux and bright_lux (clamped
+    // 0..1), bent by curve as t^curve, mapped onto [min_pct% .. 100%].
+    struct AutoDimCfg {
+        bool  enabled    = false;
+        float dark_lux   = 5.f;    // at/below → the min_pct floor
+        float bright_lux = 400.f;  // at/above → full user brightness
+        float min_pct    = 10.f;   // floor, % of the Brightness setting
+        float curve      = 1.f;    // >1 stays dim longer, <1 brightens sooner
+    };
+    void   set_auto_dim(const AutoDimCfg& c);
+    // Current factor 0..1 (1.0 when disabled or no lux sample yet) — for the
+    // menu's live readout.
+    double auto_dim_factor() const;
+    // The live Brightness value (0-255) — restored from protoface_state.json
+    // at construction, so main can sync the menu slider's shared state to it.
+    uint8_t brightness() const;
     void        set_mouth_shape(const std::string& shape) override;
 
     // Expression-coupled effects: when enabled, the active particle effect is
@@ -509,6 +529,13 @@ private:
     std::atomic<double> env_humidity_{-1.0};  // rel humidity 0..1; <0 = no reading
     std::atomic<double> env_lux_{-1.0};       // ambient lux; <0 = no sensor
     std::atomic<double> env_temp_c_{-1000.0}; // ambient °C; <= -1000 = no sensor
+    // Auto-dim params (see AutoDimCfg). Individual atomics — read every render
+    // tick, written from the menu thread.
+    std::atomic<bool>  ad_enabled_{false};
+    std::atomic<float> ad_dark_{5.f};
+    std::atomic<float> ad_bright_{400.f};
+    std::atomic<float> ad_min_pct_{10.f};
+    std::atomic<float> ad_curve_{1.f};
 
     // Name of the currently-active HUB75 layout (or "" when unset). Used to
     // stamp face folders on import_face_image and surfaced via

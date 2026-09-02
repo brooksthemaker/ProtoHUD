@@ -91,12 +91,10 @@ public:
     //                     exactly like the single-image blink.
     //   true  ("whole") — the frame REPLACES the whole composited face for
     //                     that tick, because the art is a complete face.
-    // ⚠ Whole is what makes differing eye layouts work. The eye polygons are a
-    // property of the FACE FOLDER, so an expression with a different number of
-    // eyes (or extra features that close with them) has eyes sitting outside
-    // those polygons — a region blink would clip them and leave them staring.
-    // Drawing that expression's blink frames as complete faces sidesteps the
-    // whole question.
+    // ⚠ Two ways to handle differing eye layouts: Whole replaces the entire
+    // face so the polygons never matter, OR the expression authors its own
+    // polygons (see eye_regions below) and keeps the region blink. The shared
+    // pair alone would clip eyes that sit outside it and leave them staring.
 
     // Panel-sized CV_8U stencil of the blink eye regions — 255 inside
     // eye_left / eye_right (polygon masks honoured, legacy rectangles
@@ -111,6 +109,16 @@ public:
     // so its tears fall from the eye the artist actually drew.
     const EyeLidLine& eye_lid_line() const { return eye_lid_; }
 
+    // Per-EXPRESSION eye regions. An expression can carry its own polygons in
+    // the face folder's config.json —
+    //   "eye_regions": { "<expr>": { "eye_left": {…}, "eye_right": {…} } }
+    // (same region format and canvas/draw_size mapping as the face-wide pair)
+    // — so a face whose eyes sit elsewhere can still region-blink instead of
+    // needing Cover: Whole Face. These accessors return that expression's
+    // mask / lid line when authored, falling back to the face-wide pair.
+    const cv::Mat&    eye_region_mask(const std::string& expr) const;
+    const EyeLidLine& eye_lid_line(const std::string& expr) const;
+
 private:
     // A blink/mouth region. x,y,w,h is always the (panel-local) bounding box
     // used to clip the blend ROI. When `mask` is non-empty it is a panel-sized
@@ -122,6 +130,16 @@ private:
         bool set = false;
         cv::Mat mask;   // empty = rectangular; else panel-sized polygon stencil
     };
+
+    // One expression's own eye regions plus the derived mask/lid (mirroring
+    // the face-wide eye_left_/eye_right_/eye_mask_/eye_lid_ quartet).
+    struct EyeSet {
+        Region     left, right;
+        cv::Mat    mask;
+        EyeLidLine lid;
+    };
+    // nullptr when the expression has no override (use the face-wide pair).
+    const EyeSet* eye_set_for(const std::string& expr) const;
 
     void load();
     // Load a face PNG sized to this panel: crops our slice when the PNG is
@@ -182,6 +200,7 @@ private:
     Region   eye_left_, eye_right_, mouth_;
     cv::Mat  eye_mask_;         // union stencil of the eye regions (may be empty)
     EyeLidLine eye_lid_;        // per-column lower edge of eye_mask_ (may be empty)
+    std::map<std::string, EyeSet> eye_sets_;   // per-expression overrides
 };
 
 } // namespace face

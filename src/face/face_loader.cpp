@@ -363,67 +363,101 @@ void FaceLoader::load() {
     if (cfg.contains("eye_right")) eye_right_ = parse_region(cfg["eye_right"]);
     if (cfg.contains("mouth"))     mouth_     = parse_region(cfg["mouth"]);
 
-    // Union stencil of the eye regions for eye_region_mask(). Built once —
+    // Union stencil + closed-lid line for one left/right pair. Shared by the
+    // face-wide pair and the per-expression overrides below. Built once —
     // regions never change after load.
-    if (eye_left_.set || eye_right_.set) {
-        eye_mask_ = cv::Mat::zeros(h_, w_, CV_8U);
+    auto build_mask_lid = [&](const Region& left, const Region& right,
+                              cv::Mat& mask, EyeLidLine& lid) {
+        if (!left.set && !right.set) return;
+        mask = cv::Mat::zeros(h_, w_, CV_8U);
         auto stamp = [&](const Region& r) {
             if (!r.set) return;
-            if (!r.mask.empty() && r.mask.size() == eye_mask_.size()) {
-                cv::bitwise_or(eye_mask_, r.mask, eye_mask_);
+            if (!r.mask.empty() && r.mask.size() == mask.size()) {
+                cv::bitwise_or(mask, r.mask, mask);
                 return;
             }
             const int x  = std::max(0, r.x), y = std::max(0, r.y);
             const int x2 = std::min(r.x + r.w, w_), y2 = std::min(r.y + r.h, h_);
             if (x2 > x && y2 > y)
-                eye_mask_(cv::Rect(x, y, x2 - x, y2 - y)).setTo(255);
+                mask(cv::Rect(x, y, x2 - x, y2 - y)).setTo(255);
         };
-        stamp(eye_left_);
-        stamp(eye_right_);
+        stamp(left);
+        stamp(right);
 
         // Per-column lower edge of that stencil — the closed-lid line the Crying
         // and Waterfall animations hang their tears off. Scanning top→bottom and
         // letting the last hit win yields the LOWEST lit row per column with no
         // branching.
-        if (!eye_mask_.empty()) {
-            eye_lid_.width  = w_;
-            eye_lid_.height = h_;
-            eye_lid_.bottom.assign(static_cast<size_t>(w_), -1);
-            for (int y = 0; y < h_; ++y) {
-                const uint8_t* row = eye_mask_.ptr<uint8_t>(y);
-                for (int x = 0; x < w_; ++x)
-                    if (row[x]) eye_lid_.bottom[static_cast<size_t>(x)] =
-                                    static_cast<int16_t>(y);
-            }
+        lid.width  = w_;
+        lid.height = h_;
+        lid.bottom.assign(static_cast<size_t>(w_), -1);
+        for (int y = 0; y < h_; ++y) {
+            const uint8_t* row = mask.ptr<uint8_t>(y);
+            for (int x = 0; x < w_; ++x)
+                if (row[x]) lid.bottom[static_cast<size_t>(x)] =
+                                static_cast<int16_t>(y);
+        }
 
-            // Refine it against the BLINK ART, which is the real closed eyelid.
-            // The eye polygon is a coarse box the artist traced around the whole
-            // eye, so its lower edge sits well below the drawn lid (on faces/main
-            // it's row 12-14 while the drawn blink line is row 3-5). blink.png's
-            // lit pixels inside the region ARE that line, so their per-column
-            // lower edge gives tears a source that hugs what's actually drawn —
-            // no second polygon for the artist to trace. Columns where the blink
-            // art is empty keep the polygon edge computed above.
-            if (!blink_.empty() && blink_.size() == eye_mask_.size() &&
-                blink_.type() == CV_8UC4) {
-                std::vector<int16_t> art_lid(static_cast<size_t>(w_), -1);
-                for (int y = 0; y < h_; ++y) {
-                    const uint8_t* mrow = eye_mask_.ptr<uint8_t>(y);
-                    const cv::Vec4b* brow = blink_.ptr<cv::Vec4b>(y);
-                    for (int x = 0; x < w_; ++x) {
-                        if (!mrow[x] || brow[x][3] == 0) continue;
-                        const int lum = std::max({ brow[x][0], brow[x][1], brow[x][2] });
-                        if (lum <= 30) continue;      // ignore near-black art
-                        art_lid[static_cast<size_t>(x)] = static_cast<int16_t>(y);
-                    }
+        // Refine it against the BLINK ART, which is the real closed eyelid.
+        // The eye polygon is a coarse box the artist traced around the whole
+        // eye, so its lower edge sits well below the drawn lid (on faces/main
+        // it's row 12-14 while the drawn blink line is row 3-5). blink.png's
+        // lit pixels inside the region ARE that line, so their per-column
+        // lower edge gives tears a source that hugs what's actually drawn —
+        // no second polygon for the artist to trace. Columns where the blink
+        // art is empty keep the polygon edge computed above.
+        if (!blink_.empty() && blink_.size() == mask.size() &&
+            blink_.type() == CV_8UC4) {
+            std::vector<int16_t> art_lid(static_cast<size_t>(w_), -1);
+            for (int y = 0; y < h_; ++y) {
+                const uint8_t* mrow = mask.ptr<uint8_t>(y);
+                const cv::Vec4b* brow = blink_.ptr<cv::Vec4b>(y);
+                for (int x = 0; x < w_; ++x) {
+                    if (!mrow[x] || brow[x][3] == 0) continue;
+                    const int lum = std::max({ brow[x][0], brow[x][1], brow[x][2] });
+                    if (lum <= 30) continue;      // ignore near-black art
+                    art_lid[static_cast<size_t>(x)] = static_cast<int16_t>(y);
                 }
-                for (int x = 0; x < w_; ++x)
-                    if (art_lid[static_cast<size_t>(x)] >= 0)
-                        eye_lid_.bottom[static_cast<size_t>(x)] =
-                            art_lid[static_cast<size_t>(x)];
             }
+            for (int x = 0; x < w_; ++x)
+                if (art_lid[static_cast<size_t>(x)] >= 0)
+                    lid.bottom[static_cast<size_t>(x)] =
+                        art_lid[static_cast<size_t>(x)];
+        }
+    };
+    build_mask_lid(eye_left_, eye_right_, eye_mask_, eye_lid_);
+
+    // Per-expression eye regions — "eye_regions": { "<expr>": { "eye_left":
+    // {…}, "eye_right": {…} } }. Same region format and the same
+    // canvas/draw_size mapping as the face-wide pair; an expression present
+    // here blinks/masks with its OWN polygons, absent falls back to the
+    // face-wide pair. Authored per-slot in the face editor.
+    if (cfg.contains("eye_regions") && cfg["eye_regions"].is_object()) {
+        for (const auto& [ename, jr] : cfg["eye_regions"].items()) {
+            if (!jr.is_object()) continue;
+            EyeSet es;
+            if (jr.contains("eye_left"))  es.left  = parse_region(jr["eye_left"]);
+            if (jr.contains("eye_right")) es.right = parse_region(jr["eye_right"]);
+            if (!es.left.set && !es.right.set) continue;
+            build_mask_lid(es.left, es.right, es.mask, es.lid);
+            eye_sets_[ename] = std::move(es);
         }
     }
+}
+
+const FaceLoader::EyeSet* FaceLoader::eye_set_for(const std::string& expr) const {
+    auto it = eye_sets_.find(expr);
+    return it == eye_sets_.end() ? nullptr : &it->second;
+}
+
+const cv::Mat& FaceLoader::eye_region_mask(const std::string& expr) const {
+    const EyeSet* es = eye_set_for(expr);
+    return es ? es->mask : eye_mask_;
+}
+
+const EyeLidLine& FaceLoader::eye_lid_line(const std::string& expr) const {
+    const EyeSet* es = eye_set_for(expr);
+    return es ? es->lid : eye_lid_;
 }
 
 void FaceLoader::blend_region(cv::Mat& frame, const cv::Mat& overlay,
@@ -504,6 +538,11 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
     }
     const cv::Mat& bimg = *blink_img;
     if (bw > 0.0 && !bimg.empty()) {
+        // The expression's own eye regions win when authored (eye_regions in
+        // config.json); otherwise the face-wide pair applies.
+        const EyeSet* eset  = eye_set_for(state.expression());
+        const Region& eye_l = eset ? eset->left  : eye_left_;
+        const Region& eye_r = eset ? eset->right : eye_right_;
         if (whole_replace && bimg.size() == frame.size()) {
             // Cover = whole face: the frame IS the face for this tick, so it
             // replaces rather than composites. This is the path for an
@@ -512,14 +551,14 @@ cv::Mat FaceLoader::get_frame(const FaceState& state) {
             // that shut along with them — where masking to those polygons
             // would clip the art and leave the odd ones out staring.
             frame = bimg.clone();
-        } else if (eye_left_.set || eye_right_.set) {
+        } else if (eye_l.set || eye_r.set) {
             // Region blink: cross-fade ONLY the eye box(es) from the open
             // expression to the blink art, so the open eye is replaced (it
             // closes) while the mouth/nose outside the boxes are untouched.
             // Used in both single- and multi-panel mode whenever eye regions
             // are defined — the boxes are mapped to this panel's slice above.
-            if (eye_left_.set)  blend_region(frame, bimg, eye_left_,  bw);
-            if (eye_right_.set) blend_region(frame, bimg, eye_right_, bw);
+            if (eye_l.set) blend_region(frame, bimg, eye_l, bw);
+            if (eye_r.set) blend_region(frame, bimg, eye_r, bw);
         } else {
             // No eye regions defined → fall back to a whole-face alpha
             // composite of the blink canvas over the face using the blink

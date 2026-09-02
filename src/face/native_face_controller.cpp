@@ -488,11 +488,13 @@ void NativeFaceController::render_thread() {
                 // flipped — so a single wide canvas reads as a pair of eyes
                 // and directional animations (the EKG sweep) radiate outward
                 // from the centre; cx/cy position within each half.
-                // The face's closed-lid line (Crying hangs its tears off it).
-                // Null for a face with no eye regions — the renderer then falls
-                // back to a synthetic flat lid at Position Y.
-                const EyeLidLine* eye_lid =
-                    pn.loader ? &pn.loader->eye_lid_line() : nullptr;
+                // The face's closed-lid line (Crying hangs its tears off it) —
+                // the current expression's own regions when authored, else the
+                // face-wide pair. Null for a face with no eye regions — the
+                // renderer then falls back to a synthetic flat lid at Position Y.
+                const EyeLidLine* eye_lid = (pn.loader && pn.state)
+                    ? &pn.loader->eye_lid_line(pn.state->expression())
+                    : (pn.loader ? &pn.loader->eye_lid_line() : nullptr);
                 const float groll = head_roll_deg_.load();
                 auto render_anim_layer = [&]() -> cv::Mat {
                     if (eye_anim_.mirror && pc.w >= 2) {
@@ -564,7 +566,9 @@ void NativeFaceController::render_thread() {
                 // face mirror so the animation tracks the face art.
                 if (eye_active && !eye_replace && !face_layer.empty()) {
                     if (eye_anim_.blackout_eyes && pn.loader) {
-                        const cv::Mat& em = pn.loader->eye_region_mask();
+                        const cv::Mat& em = pn.state
+                            ? pn.loader->eye_region_mask(pn.state->expression())
+                            : pn.loader->eye_region_mask();
                         if (!em.empty() && em.size() == face_layer.size())
                             face_layer.setTo(cv::Scalar(0, 0, 0, 255), em);
                     }
@@ -645,7 +649,17 @@ void NativeFaceController::render_thread() {
                 // layer, tinted by the liquid, so eyes read through the water.
                 if (pf.has && pf.face_glow > 0.0 && !face_layer.empty())
                     apply_face_glow(frame, face_layer, pf.rgba, pf.face_glow);
-                frame = scale_brightness(frame, pn.state->brightness());
+                // Auto-dim rides ON TOP of the user's Brightness — the stored
+                // setting is untouched, so disabling auto-dim restores it.
+                // The user's 0-255 Brightness is PERCEPTUAL: LEDs are linear
+                // in light while the eye follows a power law, so a linear
+                // slider spends its whole top half doing nothing visible —
+                // gamma 2.2 makes mid-slider actually read as half as bright.
+                // The auto-dim factor stays linear-light (its floor/curve
+                // already shape the response in the lux domain).
+                const double b01 = pn.state->brightness() / 255.0;
+                frame = scale_brightness(frame, static_cast<uint8_t>(std::lround(
+                    255.0 * std::pow(b01, 2.2) * auto_dim_factor())));
 
                 cv::Rect roi(pc.x, pc.y, pc.w, pc.h);
                 if ((roi & cv::Rect(0, 0, canvas.cols, canvas.rows)) == roi)
@@ -930,6 +944,15 @@ void NativeFaceController::set_brightness(uint8_t value) {
     const std::string snap = serialize_state_locked();
     lk.unlock();
     write_state_file(snap);
+}
+
+uint8_t NativeFaceController::brightness() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_)
+        if (pn.state)
+            return static_cast<uint8_t>(
+                std::clamp(pn.state->brightness(), 0, 255));
+    return 255;
 }
 
 // Rewrite a "gradient:<dir>:<mode>:<speed>:<stops>" spec's direction and/or
@@ -1309,7 +1332,10 @@ bool NativeFaceController::import_face_image(const std::string& expression,
     const std::string dst    = folder + "/" + canonical_face_filename(expression);
 
     std::error_code ec;
-    std::filesystem::create_directories(folder, ec);
+    // The dst's own parent, not `folder`: a blink-frame expression
+    // ("blink/1", "blink/happy/1") lands in a subfolder that may not exist yet.
+    std::filesystem::create_directories(
+        std::filesystem::path(dst).parent_path(), ec);
     std::filesystem::copy_file(
         src_path, dst,
         std::filesystem::copy_options::overwrite_existing, ec);
@@ -1884,6 +1910,35 @@ void NativeFaceController::set_env_humidity(double humidity01) {
 
 void NativeFaceController::set_env_light(double lux) {
     env_lux_.store(lux, std::memory_order_relaxed);
+}
+
+void NativeFaceController::set_auto_dim(const AutoDimCfg& c) {
+    ad_enabled_.store(c.enabled,    std::memory_order_relaxed);
+    ad_dark_.store(c.dark_lux,      std::memory_order_relaxed);
+    ad_bright_.store(c.bright_lux,  std::memory_order_relaxed);
+    ad_min_pct_.store(c.min_pct,    std::memory_order_relaxed);
+    ad_curve_.store(c.curve,        std::memory_order_relaxed);
+}
+
+double NativeFaceController::auto_dim_factor() const {
+    if (!ad_enabled_.load(std::memory_order_relaxed)) return 1.0;
+    const double lux = env_lux_.load(std::memory_order_relaxed);
+    if (lux < 0.0) return 1.0;                  // no sample yet → don't dim
+    // Interpolate in LOG lux — perception of light level is roughly
+    // logarithmic, so equal slider spans read as equal brightness steps.
+    const double dk = std::max(0.01, static_cast<double>(
+                          ad_dark_.load(std::memory_order_relaxed)));
+    const double br = std::max(dk * 1.05, static_cast<double>(
+                          ad_bright_.load(std::memory_order_relaxed)));
+    double t = (std::log(std::max(lux, 0.001)) - std::log(dk)) /
+               (std::log(br) - std::log(dk));
+    t = std::clamp(t, 0.0, 1.0);
+    const double g = std::clamp(static_cast<double>(
+                         ad_curve_.load(std::memory_order_relaxed)), 0.05, 8.0);
+    t = std::pow(t, g);
+    const double floor01 = std::clamp(static_cast<double>(
+        ad_min_pct_.load(std::memory_order_relaxed)) / 100.0, 0.0, 1.0);
+    return floor01 + (1.0 - floor01) * t;
 }
 
 void NativeFaceController::set_env_temp(double temp_c) {
