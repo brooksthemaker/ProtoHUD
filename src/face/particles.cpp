@@ -135,6 +135,30 @@ inline void draw_rect(cv::Mat& c, double x, double y, int r, int g, int b,
     }
 }
 
+// Tapered anti-aliased streak: from the head at (x,y) back along -(ux,uy) for
+// len px, fading to nothing at the tail. Used by shooting stars (and any
+// future streaking effect) so tails match the vortex's streamline look.
+inline void draw_streak(cv::Mat& c, double x, double y, double ux, double uy,
+                        double len, double r, double g, double b,
+                        double a_head) {
+    const int N = std::max(3, (int)std::lround(len / 2.0));
+    double px = x, py = y;
+    for (int k = 1; k <= N; ++k) {
+        // Midpoint taper: alpha for the segment's middle, not its far end —
+        // an end-based taper zeroed the last segment and left short tails
+        // nearly invisible.
+        const double t  = (static_cast<double>(k) - 0.5) / N;
+        const double qx = x - ux * len * t, qy = y - uy * len * t;
+        const int A = (int)std::clamp(a_head * std::pow(1.0 - t, 1.3) * 255.0,
+                                      0.0, 255.0);
+        if (A > 2)
+            cv::line(c, {(int)std::lround(px), (int)std::lround(py)},
+                        {(int)std::lround(qx), (int)std::lround(qy)},
+                     cv::Scalar(r, g, b, A), 1, cv::LINE_AA);
+        px = qx; py = qy;
+    }
+}
+
 // A six-armed snowflake: three spokes through the centre plus short side
 // branches, at radius R and rotation `rot`. Sharp (per-pixel) so it keeps the
 // blocky pixel look. `a` is 0..1 coverage.
@@ -360,7 +384,23 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        for (auto& p : particles_) draw_particle(c, p, std::sin(p.life * kPi));
+        for (auto& p : particles_) {
+            const double env = std::sin(p.life * kPi);
+            draw_particle(c, p, env);
+            // 4-point glint: short cross arms flash for the brightest couple
+            // of frames of each blink — the classic sparkle read.
+            if (env > 0.90) {
+                const double gl  = (env - 0.90) / 0.10;
+                const int    arm = (p.size > 1) ? 2 : 1;
+                for (int i = 1; i <= arm; ++i) {
+                    const int A = (int)(gl * 220.0) / i;
+                    draw_pixel(c, (int)p.x + i, (int)p.y, (int)p.r, (int)p.g, (int)p.b, A);
+                    draw_pixel(c, (int)p.x - i, (int)p.y, (int)p.r, (int)p.g, (int)p.b, A);
+                    draw_pixel(c, (int)p.x, (int)p.y + i, (int)p.r, (int)p.g, (int)p.b, A);
+                    draw_pixel(c, (int)p.x, (int)p.y - i, (int)p.r, (int)p.g, (int)p.b, A);
+                }
+            }
+        }
         return c;
     }
 };
@@ -370,27 +410,56 @@ public:
 class SnowEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
+    // Depth 0 (far) … 1 (near), inferred from where the flake's speed sits in
+    // the configured range — no extra storage, and speed/brightness/wobble
+    // stay coupled the way real parallax couples them.
+    double depth_of(double spd) const {
+        const double lo = jnum(cfg_, "speed_min", 6.0);
+        const double hi = jnum(cfg_, "speed_max", 12.0);
+        return (hi > lo) ? std::clamp((spd - lo) / (hi - lo), 0.0, 1.0) : 1.0;
+    }
     void update(double dt) override {
         double drift_x = jnum(cfg_, "drift_x", 1.5);
         double dx, dy; direction_unit(dx, dy, 90.0);   // default down
+        // Flakes landing on the bottom edge sit there this long (±40%) before
+        // melting away. 0 turns settling off. Downward snow only.
+        const double settle_s = jnum(cfg_, "settle_s", 2.0);
+        const bool   downish  = dy > 0.5;
         for (auto& p : particles_) {
-            double spd = (p.extra == 0) ? pick_speed(cfg_, 6, 12, rng_) : p.extra;
+            if (p.extra < 0) { p.life -= dt / p.max_life; continue; }   // melting
+            const double spd = (p.extra == 0) ? pick_speed(cfg_, 6, 12, rng_) : p.extra;
             p.extra = spd;
-            p.vx = drift_x * std::sin(p.vx + p.y * 0.3);
+            const double d = depth_of(spd);
+            // Near flakes wobble wider than far ones — same parallax coupling.
+            p.vx = drift_x * (0.55 + 0.9 * d) * std::sin(p.vx + p.y * 0.3);
             p.x += (spd * dx + p.vx) * dt;
+            const double py0 = p.y;
             p.y += spd * dy * dt;
             p.life -= dt / p.max_life;
+            if (settle_s > 0 && downish && py0 < h_ - 1 && p.y >= h_ - 1) {
+                p.extra = -1.0; p.y = h_ - 1;          // settle, then melt
+                p.life = 1.0;
+                p.max_life = frand(rng_, settle_s * 0.6, settle_s * 1.4);
+            }
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [&](const Particle& p){
                 return !(p.x > -4 && p.x < w_ + 4 && p.y > -4 && p.y < h_ + 4 && p.life > 0);
             }), particles_.end());
+        // Cold start (effect just switched on): scatter the first fill across
+        // the whole panel so it's already snowing, instead of one cohort
+        // marching down from the top edge in a band.
+        const bool cold = particles_.empty();
         while ((int)particles_.size() < count(30)) {
             double spd = pick_speed(cfg_, 6, 12, rng_);
-            double ml  = pick_life(cfg_, 1.5, 4.0, rng_);
+            // Life defaults to the crossing time (the old fixed 1.5-4 s killed
+            // most flakes mid-air); explicit cfg life_min/max still override.
+            const double cross = (h_ + 8.0) / std::max(1.0, spd);
+            double ml  = pick_life(cfg_, cross * 1.1, cross * 1.5, rng_);
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{200, 220, 255};
             Particle p;
             direction_spawn_point(2.0, 90.0, p.x, p.y);   // 90° = historical down
+            if (cold) { p.x = frand(rng_, 0, w_ - 1.0); p.y = frand(rng_, 0, h_ - 2.0); }
             p.vx = frand(rng_, 0, kTau); p.max_life = ml; p.life = 1;
             p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 1, rng_); p.extra = spd;
             particles_.push_back(p);
@@ -398,7 +467,15 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        for (auto& p : particles_) draw_particle(c, p, 0.9);
+        for (auto& p : particles_) {
+            if (p.extra < 0) {                          // settled: melt in place
+                draw_particle(c, p, std::clamp(p.life, 0.0, 1.0) * 0.85);
+                continue;
+            }
+            // Depth-graded brightness — far flakes dim, near flakes bright —
+            // instead of the old flat 0.9 across the board.
+            draw_particle(c, p, 0.40 + 0.55 * depth_of(p.extra));
+        }
         return c;
     }
 };
@@ -459,20 +536,192 @@ public:
     }
 };
 
+// ── Flames ───────────────────────────────────────────────────────────────────
+// A real flame body, not particles: the classic heat-field fire. Two fuel rows
+// below the panel burn with a smoothed per-column flicker; each 30 Hz substep
+// every cell pulls heat from the row beneath (with random sideways jitter, so
+// tongues lick and split) minus a random cooling term sized so flames die out
+// at ~"height" of the panel. Heat maps through a black → deep red → orange →
+// yellow → white palette; cfg "colors" replaces the mid-stops for green/blue
+// fire. Transparent above the flame body, so the face shows through.
+//   height (0..1, default 0.5) · turbulence (jitter chance, default 0.55)
+//   · colors (optional palette override, cool → hot)
+class FlamesEffect : public BaseEffect {
+public:
+    using BaseEffect::BaseEffect;
+    void update(double dt) override {
+        acc_ += std::min(dt, 0.1);
+        age_ += dt;
+        // Burn-in: ignition runs at full 30 Hz while the flames first climb
+        // (one row per substep -> h_/30 s per full rise), then the burn eases
+        // down to "settle_hz" over a second - a fire that flares up and
+        // settles into a calm steady flicker.
+        const double ignite_s = (h_ / 30.0) * 1.2;
+        const double settle   = std::clamp(jnum(cfg_, "settle_hz", 16.0), 4.0, 30.0);
+        const double k        = std::clamp((age_ - ignite_s) / 1.0, 0.0, 1.0);
+        const double step     = 1.0 / (30.0 + (settle - 30.0) * k);
+        for (int n = 0; acc_ >= step && n < 3; ++n) { acc_ -= step; tick(); }
+    }
+    cv::Mat render() override {
+        cv::Mat c = blank();
+        if (heat_.empty()) return c;
+        ensure_palette();
+        for (int y = 0; y < h_; ++y) {
+            const float* hr = heat_.ptr<float>(y);
+            cv::Vec4b*   px = c.ptr<cv::Vec4b>(y);
+            for (int x = 0; x < w_; ++x) {
+                const float v = std::clamp(hr[x], 0.f, 1.f);
+                if (v <= 0.06f) continue;
+                // Exposure shaping: LEDs clip the hot end hard, so bias the
+                // body into the red/orange range — white stays a thin core.
+                // The 0.18 floor keeps detached TIP points in the vivid-red
+                // band so they read as distinct glowing licks, not the ramp's
+                // dimmest shades.
+                const float t = 0.18f +
+                    0.82f * std::pow((v - 0.06f) / 0.94f, 1.25f);
+                const int   i = std::min(int(t * (kPalN - 1)), kPalN - 2);
+                const float f = t * (kPalN - 1) - i;
+                px[x][0] = (uchar)(pal_[i][0] + (pal_[i + 1][0] - pal_[i][0]) * f);
+                px[x][1] = (uchar)(pal_[i][1] + (pal_[i + 1][1] - pal_[i][1]) * f);
+                px[x][2] = (uchar)(pal_[i][2] + (pal_[i + 1][2] - pal_[i][2]) * f);
+                px[x][3] = (uchar)(std::clamp(v * 3.f, 0.f, 1.f) * 255.f);
+            }
+        }
+        return c;
+    }
+
+private:
+    void tick() {
+        if (heat_.empty()) {
+            heat_ = cv::Mat::zeros(h_ + 2, w_, CV_32F);   // +2 fuel rows below
+            fuel_.assign(static_cast<size_t>(w_), 1.f);
+        }
+        const double height = std::clamp(jnum(cfg_, "height", 0.5), 0.1, 1.0);
+        const double turb   = std::clamp(jnum(cfg_, "turbulence", 0.55), 0.0, 1.0);
+        // Average cooling per row such that full heat (1.0) burns down to the
+        // visibility floor across height*h_ rows of rise.
+        const float cool = static_cast<float>(0.80 / (height * h_));
+        // Fuel flicker: smoothed random per column, with occasional dips so
+        // the base isn't a solid bar and tongues form above the hot spots.
+        for (int x = 0; x < w_; ++x) {
+            float target = frand(rng_, 0.35f, 1.25f);
+            if (frand(rng_, 0.f, 1.f) < 0.05) target = 0.05f;   // brief gap
+            fuel_[x] += (target - fuel_[x]) * 0.25f;
+        }
+        // Spatial smoothing: hotspots span several columns, so the base burns
+        // as distinct tongues instead of per-pixel noise.
+        for (int x = 1; x < w_ - 1; ++x)
+            fuel_[x] = (fuel_[x - 1] + 2.f * fuel_[x] + fuel_[x + 1]) * 0.25f;
+        for (int y = h_; y < h_ + 2; ++y) {
+            float* row = heat_.ptr<float>(y);
+            for (int x = 0; x < w_; ++x)
+                row[x] = fuel_[x] * static_cast<float>(intensity_);
+        }
+        // Rise: each cell pulls from the row beneath with sideways jitter and
+        // random cooling — the jitter is what makes tongues lick and split.
+        for (int y = 0; y < h_; ++y) {
+            float*       dst = heat_.ptr<float>(y);
+            const float* src = heat_.ptr<float>(y + 1);
+            for (int x = 0; x < w_; ++x) {
+                int sx = x;
+                if (frand(rng_, 0.f, 1.f) < turb)
+                    sx = std::clamp(x + irand(rng_, -1, 1), 0, w_ - 1);
+                // Body: 3-tap pull from below keeps the hot core coherent.
+                // Tips (cool cells): single-source pull with a WIDER waver, so
+                // detached points stay crisp and flicker sideways instead of
+                // melting into mist.
+                const int   l = std::max(0, sx - 1), r = std::min(w_ - 1, sx + 1);
+                float pulled = src[sx];
+                if (pulled > 0.45f)
+                    pulled = (src[l] + 6.f * src[sx] + src[r]) * 0.125f;
+                else if (frand(rng_, 0.f, 1.f) < turb)
+                    pulled = src[std::clamp(x + irand(rng_, -2, 2), 0, w_ - 1)];
+                // Cooling: a smooth burn plus occasional LARGE bites — the
+                // bites carve notches that pinch tongues off into free-rising
+                // points, which is what makes tips break like real flames.
+                float cbite = static_cast<float>(frand(rng_, 0.0, 2.0 * cool));
+                if (frand(rng_, 0.f, 1.f) < 0.10f)
+                    cbite += static_cast<float>(frand(rng_, 3.0, 9.0)) * cool;
+                dst[x] = std::max(0.f, pulled - cbite);
+            }
+        }
+    }
+    void ensure_palette() {
+        // Rebuild whenever the layer's colours change — set_cfg swaps params
+        // in live (keeping the running sim), so a build-once palette made the
+        // builder's colour edits do nothing.
+        const json cur = cfg_.contains("colors") ? cfg_["colors"] : json();
+        if (pal_built_ && cur == pal_src_) return;
+        pal_built_ = true;
+        pal_src_   = cur;
+        // Default: classic blackbody ramp. cfg colors (cool → hot) replace the
+        // mid-stops; the ends stay near-black / near-white so it still reads
+        // as burning rather than a flat tint.
+        // LED palette: saturated hues at high brightness — the hue ramp
+        // (red → orange → yellow) carries the heat read. Dark "realistic"
+        // shades quantise to nothing on dimmed 6-bit panels (they showed as
+        // white-only wisps under Auto Dim).
+        std::vector<std::array<int, 3>> stops = {
+            {150, 0, 0},   {220, 20, 0},   {255, 60, 0},
+            {255, 120, 0}, {255, 180, 20}, {255, 235, 120} };
+        if (has_colors(cfg_) && cfg_["colors"].is_array()) {
+            std::vector<std::array<int, 3>> mid;
+            for (const auto& jc : cfg_["colors"])
+                if (jc.is_array() && jc.size() == 3)
+                    mid.push_back({ jc[0].get<int>(), jc[1].get<int>(),
+                                    jc[2].get<int>() });
+            if (!mid.empty()) {
+                stops.clear();
+                // Bottom stop = a dimmed cut of the coolest colour, not
+                // near-black — dark shades vanish on dimmed panels.
+                stops.push_back({ mid[0][0] * 11 / 20, mid[0][1] * 11 / 20,
+                                  mid[0][2] * 11 / 20 });
+                for (auto& m : mid) stops.push_back(m);
+                const auto& lastc = mid.back();
+                stops.push_back({ std::min(255, lastc[0] / 2 + 150),
+                                  std::min(255, lastc[1] / 2 + 150),
+                                  std::min(255, lastc[2] / 2 + 150) });
+            }
+        }
+        for (int i = 0; i < kPalN; ++i) {
+            const double t = static_cast<double>(i) / (kPalN - 1) *
+                             (static_cast<double>(stops.size()) - 1.0);
+            const int    s = std::min(static_cast<int>(t),
+                                      static_cast<int>(stops.size()) - 2);
+            const double f = t - s;
+            for (int k = 0; k < 3; ++k)
+                pal_[i][k] = static_cast<int>(std::lround(
+                    stops[s][k] + (stops[s + 1][k] - stops[s][k]) * f));
+        }
+    }
+
+    static constexpr int kPalN = 48;
+    cv::Mat            heat_;
+    std::vector<float> fuel_;
+    double             acc_ = 0.0;
+    double             age_ = 0.0;
+    int                pal_[kPalN][3] = {};
+    bool               pal_built_ = false;
+    json               pal_src_;
+};
+
 // ── Confetti ─────────────────────────────────────────────────────────────────
 
 class ConfettiEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
-        double spd     = pick_speed(cfg_, 4, 10, rng_);
         double drift_x = jnum(cfg_, "drift_x", 0.0);
         double dx, dy; direction_unit(dx, dy, 90.0);  // default down
+        const double tumble = jnum(cfg_, "tumble", 4.0);
         for (auto& p : particles_) {
+            // Per-piece fall speed lives in vy — the old code rolled ONE random
+            // speed per frame and applied it to every piece, so the whole
+            // flock jittered in lockstep.
             p.vx = std::sin(p.extra) * 2.0 + drift_x;
-            p.extra += dt * 4.0;
-            p.x += (spd * dx + p.vx) * dt;
-            p.y += spd * dy * dt;
+            p.extra += dt * tumble;
+            p.x += (p.vy * dx + p.vx) * dt;
+            p.y += p.vy * dy * dt;
             p.life -= dt / p.max_life;
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
@@ -481,13 +730,21 @@ public:
             }), particles_.end());
         static const int kDef[][3] = {
             {255,50,50},{255,180,30},{50,220,50},{50,150,255},{220,50,220},{255,255,50}};
+        const bool cold = particles_.empty();   // scatter the first fill (see snow)
         while ((int)particles_.size() < count(20)) {
-            double ml = pick_life(cfg_, 2.0, 5.0, rng_);
+            const double spd = pick_speed(cfg_, 4, 10, rng_);
+            // Life defaults to the actual crossing time (the old fixed 2-5 s
+            // killed most pieces mid-air on a 64 px panel); explicit cfg
+            // life_min/max still override via pick_life.
+            const double cross = (h_ + 8.0) / std::max(1.0, spd);
+            double ml = pick_life(cfg_, cross * 1.1, cross * 1.5, rng_);
             Color col;
             if (has_colors(cfg_)) col = pick_color(cfg_, rng_);
             else { const int* d = kDef[irand(rng_, 0, 5)]; col = {d[0], d[1], d[2]}; }
             Particle p;
             direction_spawn_point(4.0, 90.0, p.x, p.y);   // 90° = historical down
+            if (cold) { p.x = frand(rng_, 0, w_ - 1.0); p.y = frand(rng_, 0, h_ - 2.0); }
+            p.vy = spd;
             p.max_life = ml; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b;
             p.size = pick_size(cfg_, 1, 1, rng_); p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
@@ -495,7 +752,27 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        for (auto& p : particles_) draw_particle(c, p, 1.0);
+        // Tumble flutter: each piece flips between face-on (a wide bright
+        // pair) and edge-on (a thin dim sliver) as its phase turns — the flip
+        // and the brightness dip together are what read as fluttering paper.
+        for (auto& p : particles_) {
+            const double life = std::clamp(p.life, 0.0, 1.0);
+            const double edge = std::cos(p.extra);            // ±1 face-on … 0 edge-on
+            const double a = std::min(1.0, life * 4.0) *
+                             std::min(1.0, (1.0 - life) * 8.0 + 0.2) *
+                             (0.30 + 0.70 * std::fabs(edge));
+            const int A  = (int)std::clamp(a * 255.0, 0.0, 255.0);
+            if (A <= 2) continue;
+            const int ix = (int)p.x, iy = (int)p.y;
+            draw_pixel(c, ix, iy, (int)p.r, (int)p.g, (int)p.b, A);
+            if (std::fabs(edge) > 0.45) {                      // face-on: wide
+                draw_pixel(c, ix + 1, iy, (int)p.r, (int)p.g, (int)p.b, A * 4 / 5);
+                if (p.size > 1)
+                    draw_pixel(c, ix - 1, iy, (int)p.r, (int)p.g, (int)p.b, A * 4 / 5);
+            } else {                                           // edge-on: sliver
+                draw_pixel(c, ix, iy + 1, (int)p.r, (int)p.g, (int)p.b, A * 3 / 5);
+            }
+        }
         return c;
     }
 };
@@ -506,15 +783,18 @@ class RingsEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
-        double max_r  = jnum(cfg_, "max_radius", 20);
-        double expand = pick_speed(cfg_, 15, 25, rng_);
-        for (auto& p : particles_) { p.extra += expand * dt; p.life = std::max(0.0, 1.0 - p.extra / max_r); }
+        double max_r = jnum(cfg_, "max_radius", 20);
+        // Per-ring expansion speed (in vx) — one speed used to be rolled per
+        // FRAME and applied to every ring, so they all jittered in lockstep
+        // and each ring's fade drifted out of step with its radius.
+        for (auto& p : particles_) { p.extra += p.vx * dt; p.life = std::max(0.0, 1.0 - p.extra / max_r); }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [&](const Particle& p){ return !(p.life > 0); }), particles_.end());
         while ((int)particles_.size() < count(3)) {
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{0, 200, 255};
             Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = frand(rng_, 0, h_ - 1);
-            p.max_life = max_r / expand; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b; p.extra = 0;
+            p.vx = pick_speed(cfg_, 15, 25, rng_);
+            p.max_life = max_r / p.vx; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b; p.extra = 0;
             particles_.push_back(p);
         }
     }
@@ -541,7 +821,10 @@ private:
 };
 
 // ── Rain ─────────────────────────────────────────────────────────────────────
-
+// Velocity-aligned streaks with depth parallax: near drops are faster, longer
+// and brighter than far ones. A drop reaching the bottom edge while the rain
+// falls mostly downward flashes a one-tick splash where it lands.
+// Particle.extra: depth 0 (far) … 1 (near); negative = a live splash.
 class RainEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
@@ -549,37 +832,71 @@ public:
         int    length  = jint(cfg_, "length", 4);
         double drift_x = jnum(cfg_, "drift_x", 0.0);
         double dx, dy; direction_unit(dx, dy, 90.0);  // default down
+        const bool downish = dy > 0.5;
         for (auto& p : particles_) {
+            if (p.extra < 0) { p.life -= dt / p.max_life; continue; }   // splash
             p.x += (p.vy * dx + drift_x) * dt;
+            const double py0 = p.y;
             p.y += p.vy * dy * dt;
             p.life -= dt / p.max_life;
+            if (downish && py0 < h_ - 1 && p.y >= h_ - 1) {
+                p.extra = -1.0; p.y = h_ - 1; p.vy = 0;
+                p.life = 1.0; p.max_life = 0.14;
+            }
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [&](const Particle& p){
-                return !(p.x > -length - 2 && p.x < w_ + length + 2 &&
-                         p.y > -length - 2 && p.y < h_ + length + 2 && p.life > 0);
+                return p.life <= 0 ||
+                       !(p.x > -length - 2 && p.x < w_ + length + 2 &&
+                         p.y > -length - 2 && p.y < h_ + length + 2);
             }), particles_.end());
+        const double lo = jnum(cfg_, "speed_min", 70.0);
+        const double hi = jnum(cfg_, "speed_max", 120.0);
+        const bool cold = particles_.empty();   // scatter the first fill (see snow)
         while ((int)particles_.size() < count(15)) {
-            double spd = pick_speed(cfg_, 30, 50, rng_);
-            double ml  = (h_ + length) / spd;
+            const double d   = frand(rng_, 0.0, 1.0);       // depth: 0 far … 1 near
+            const double spd = lo + (hi - lo) * (0.25 + 0.75 * d);
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{100, 150, 255};
             Particle p;
             direction_spawn_point(static_cast<double>(length + 2), 90.0,
                                   p.x, p.y);              // 90° = historical down
-            p.vy = spd; p.max_life = ml; p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b;
-            p.size = pick_size(cfg_, 1, 1, rng_); p.extra = length;
+            if (cold) { p.x = frand(rng_, 0, w_ - 1.0); p.y = frand(rng_, 0, h_ - 2.0); }
+            p.vy = spd; p.max_life = (h_ + length) / spd * 2.0;
+            p.life = 1; p.r = col.r; p.g = col.g; p.b = col.b;
+            p.size = pick_size(cfg_, 1, 1, rng_); p.extra = d;
             particles_.push_back(p);
         }
     }
     cv::Mat render() override {
         cv::Mat c = blank();
+        const int    length  = jint(cfg_, "length", 4);
+        const double drift_x = jnum(cfg_, "drift_x", 0.0);
+        double dx, dy; direction_unit(dx, dy, 90.0);
         for (auto& p : particles_) {
-            int length = (int)p.extra, ix = (int)p.x;
-            for (int i = 0; i < length; ++i) {
-                int iy = (int)p.y - i;
-                double alpha = (1.0 - (double)i / length) * 0.9;
-                draw_dot(c, ix, iy, (int)p.r, (int)p.g, (int)p.b, alpha, p.size);
+            if (p.extra < 0) {                            // splash: crown tick
+                const int a = (int)std::clamp(p.life * 255.0, 0.0, 255.0);
+                draw_pixel(c, (int)p.x - 1, (int)p.y,     (int)p.r, (int)p.g, (int)p.b, a * 3 / 5);
+                draw_pixel(c, (int)p.x + 1, (int)p.y,     (int)p.r, (int)p.g, (int)p.b, a * 3 / 5);
+                draw_pixel(c, (int)p.x,     (int)p.y - 1, 255, 255, 255, a * 3 / 4);
+                continue;
             }
+            // Streak along the drop's ACTUAL velocity (dir · speed + drift) so
+            // angled rain slants with its motion — the old tail was hard-coded
+            // straight down and ignored the direction slider entirely.
+            const double vx = p.vy * dx + drift_x, vy = p.vy * dy;
+            const double sp = std::hypot(vx, vy);
+            if (sp < 1e-3) continue;
+            const double d   = std::clamp(p.extra, 0.0, 1.0);
+            const double len = length * (0.5 + 0.9 * d);
+            const double a   = 0.35 + 0.6 * d;
+            const double ux = vx / sp, uy = vy / sp;
+            cv::line(c,
+                     {(int)std::lround(p.x - ux * len), (int)std::lround(p.y - uy * len)},
+                     {(int)std::lround(p.x), (int)std::lround(p.y)},
+                     cv::Scalar(p.r, p.g, p.b, (int)(a * 235.0)),
+                     std::max(1, p.size), cv::LINE_AA);
+            draw_dot(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b,
+                     std::min(1.0, a + 0.25), p.size);
         }
         return c;
     }
@@ -618,7 +935,7 @@ public:
             p.y = frand(rng_, h_ - 2.0, h_ + 2.0);        // the snout line
             p.vx = frand(rng_, 0, kTau);                  // waver phase
             p.vy = pick_speed(cfg_, 7.0, 13.0, rng_);
-            p.max_life = frand(rng_, 0.9, 1.8);
+            p.max_life = frand(rng_, 1.6, 3.0);   // rise ~1/3-2/3 panel before thinning out
             p.life = 1.0;
             p.r = col.r; p.g = col.g; p.b = col.b;
             p.size = pick_size(cfg_, 1, 2, rng_);
@@ -629,10 +946,22 @@ public:
     cv::Mat render() override {
         cv::Mat c = blank();
         for (auto& p : particles_) {
-            // Grow as it rises, fade as it cools.
-            const int size = p.size + ((1.0 - p.life) > 0.5 ? 1 : 0);
-            draw_dot(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b,
-                     std::clamp(p.life, 0.0, 1.0) * 0.55, size);
+            const double life = std::clamp(p.life, 0.0, 1.0);
+            const double age  = 1.0 - life;                   // 0 fresh → 1 spent
+            // Ease in so wisps condense out of nothing at the snout instead of
+            // popping in, then thin out as they cool.
+            const double a = std::min(1.0, age * 6.0 + 0.1) * life * 0.55;
+            const int size = p.size + (age > 0.5 ? 1 : 0);
+            // A small puff cluster that shears apart as it rises: centre dot
+            // plus two satellites drifting outward with age (diffusion), on a
+            // per-puff axis so no two wisps tear the same way.
+            const double spread = 0.6 + age * 2.4;
+            const double ca = std::cos(p.vx), sa = std::sin(p.vx);
+            draw_dot(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, a, size);
+            draw_dot(c, p.x + ca * spread, p.y - spread * 0.8,
+                     (int)p.r, (int)p.g, (int)p.b, a * 0.70, std::max(1, size - 1));
+            draw_dot(c, p.x - sa * spread, p.y + spread * 0.4,
+                     (int)p.r, (int)p.g, (int)p.b, a * 0.55, 1);
         }
         return c;
     }
@@ -745,17 +1074,20 @@ public:
     void update(double dt) override {
         rebuild_in_ -= dt;
         if (paths_.empty() || rebuild_in_ <= 0.0) build_paths();
-        const double spd = pick_speed(cfg_, 14.0, 22.0, rng_);
         for (size_t i = 0; i < pulse_.size(); ++i) {
-            pulse_[i] += spd * dt;
+            // Per-path speed — one speed per FRAME made every pulse jitter
+            // in lockstep.
+            pulse_[i] += path_spd_[i] * dt;
             if (pulse_[i] >= (double)paths_[i].size())
                 pulse_[i] = 0.0;                       // wrap to the trace start
         }
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{0, 210, 190};
         for (size_t i = 0; i < paths_.size(); ++i) {
+            // Per-path colour, picked at build — re-rolling ONE colour every
+            // rendered frame made a multi-colour board strobe at 60 Hz.
+            const Color& col = path_col_[i];
             const auto& path = paths_[i];
             for (const auto& pt : path)                // dim etched trace
                 draw_pixel(c, pt.first, pt.second, (int)col.r, (int)col.g, (int)col.b, 34);
@@ -774,6 +1106,8 @@ private:
     void build_paths() {
         paths_.clear();
         pulse_.clear();
+        path_col_.clear();
+        path_spd_.clear();
         const int n = count(5);
         for (int i = 0; i < n; ++i) {
             std::vector<std::pair<int,int>> path;
@@ -793,12 +1127,17 @@ private:
             if (path.size() >= 8) {
                 paths_.push_back(std::move(path));
                 pulse_.push_back(frand(rng_, 0, 8));
+                path_col_.push_back(has_colors(cfg_) ? pick_color(cfg_, rng_)
+                                                     : Color{0, 210, 190});
+                path_spd_.push_back(pick_speed(cfg_, 14.0, 22.0, rng_));
             }
         }
         rebuild_in_ = 20.0;
     }
     std::vector<std::vector<std::pair<int,int>>> paths_;
     std::vector<double> pulse_;
+    std::vector<Color>  path_col_;   // per path, refreshed each rebuild (~20 s)
+    std::vector<double> path_spd_;
     double rebuild_in_ = 0.0;
 };
 
@@ -1214,20 +1553,32 @@ class FirefliesEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
-        double spd = pick_speed(cfg_, 3, 6, rng_);
+        const double lo = jnum(cfg_, "speed_min", 3.0);
+        const double hi = jnum(cfg_, "speed_max", 6.0);
         for (auto& p : particles_) {
             p.extra += dt;
+            // Per-fly speed, derived from its own wander phase — one speed
+            // used to be rolled per FRAME for the whole flock (lockstep
+            // jitter). Deriving keeps live speed-slider edits applying.
+            const double spd = lo + (hi - lo) * (0.5 + 0.5 * std::sin(p.vx * 3.7));
             p.x += std::cos(p.extra * 1.3 + p.vx) * spd * dt;
             p.y += std::sin(p.extra       + p.vy) * spd * dt;
             p.x = std::fmod(std::fmod(p.x, w_) + w_, w_);
             p.y = std::fmod(std::fmod(p.y, h_) + h_, h_);
             p.life = 0.5 + 0.5 * std::sin(p.extra * 2.5);
         }
+        // Retire a fly only WHILE DARK once its lifespan is up, then respawn
+        // fresh — flies were immortal, so builder colour edits never applied
+        // to them; now edits fade in blink by blink with no visible pop.
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [](const Particle& p){ return p.extra > p.max_life && p.life < 0.05; }),
+            particles_.end());
         while ((int)particles_.size() < count(8)) {
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{180, 255, 100};
             Particle p; p.x = frand(rng_, 0, w_ - 1); p.y = frand(rng_, 0, h_ - 1);
             p.vx = frand(rng_, 0, kTau); p.vy = frand(rng_, 0, kTau);
-            p.life = 1; p.max_life = 9999; p.r = col.r; p.g = col.g; p.b = col.b;
+            p.life = 1; p.max_life = frand(rng_, 6.0, 12.0);
+            p.r = col.r; p.g = col.g; p.b = col.b;
             p.size = pick_size(cfg_, 1, 1, rng_); p.extra = frand(rng_, 0, kTau);
             particles_.push_back(p);
         }
@@ -1716,68 +2067,32 @@ private:
     }
 };
 
-// ── Meteor / shooting stars ─────────────────────────────────────────────────────
-// Fast streaks with a fading tail along their velocity. Directional (default
-// down-right); "tail" sets streak length.
-class MeteorEffect : public BaseEffect {
-public:
-    using BaseEffect::BaseEffect;
-    void update(double dt) override {
-        for (auto& p : particles_) {
-            p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt / p.max_life;
-        }
-        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [&](const Particle& p){
-                return !(p.x > -8 && p.x < w_ + 8 && p.y > -8 && p.y < h_ + 8 && p.life > 0);
-            }), particles_.end());
-        while ((int)particles_.size() < count(8)) {
-            double dx, dy; direction_unit(dx, dy, 30.0);     // default down-right
-            const double spd = pick_speed(cfg_, 40, 80, rng_);
-            Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{200, 220, 255};
-            Particle p;
-            direction_spawn_point(8.0, 30.0, p.x, p.y);
-            p.vx = spd * dx; p.vy = spd * dy;
-            p.max_life = pick_life(cfg_, 0.6, 1.4, rng_); p.life = 1;
-            p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 2, rng_);
-            particles_.push_back(p);
-        }
-    }
-    cv::Mat render() override {
-        cv::Mat c = blank();
-        const double tail = jnum(cfg_, "tail", 6.0);
-        for (const auto& p : particles_) {
-            const double a = std::clamp(p.life, 0.0, 1.0);
-            const double sp = std::hypot(p.vx, p.vy);
-            if (sp < 1e-3) continue;
-            const cv::Point head((int)p.x, (int)p.y);
-            const cv::Point back((int)(p.x - p.vx / sp * tail),
-                                 (int)(p.y - p.vy / sp * tail));
-            cv::line(c, back, head, cv::Scalar(p.r * 0.4, p.g * 0.4, p.b * 0.4, (int)(a*160)),
-                     1, cv::LINE_8);
-            draw_dot(c, p.x, p.y, p.r, p.g, p.b, a, p.size + 1);
-        }
-        return c;
-    }
-};
-
 // ── Bubbles ─────────────────────────────────────────────────────────────────────
-// Rising wobbling rings that grow and pop near the top. Directional (default up).
+// Rising wobbling rings that grow and actually POP — a one-tick expanding ring
+// with flung droplets — at the top edge or at end of life, instead of the old
+// slow fade-out. Directional (default up). Particle.extra: wobble phase;
+// negative = popping.
 class BubblesEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
         double dx, dy; direction_unit(dx, dy, 270.0);        // default up
         for (auto& p : particles_) {
+            if (p.extra < 0) { p.life -= dt / p.max_life; continue; }   // popping
             p.extra += dt * 3.0;
             const double wob = std::sin(p.extra) * jnum(cfg_, "wobble", 6.0);
             p.x += (p.vy * dx) * dt + wob * dt;
             p.y += (p.vy * dy) * dt;
             p.size = (int)std::min(6.0, p.size + dt * 1.5);   // grow as they rise
             p.life -= dt / p.max_life;
+            if (p.life <= 0.08 || p.y <= p.size + 2.0) {      // surface → pop
+                p.extra = -1.0; p.life = 1.0; p.max_life = 0.13;
+            }
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [&](const Particle& p){
-                return !(p.x > -8 && p.x < w_ + 8 && p.y > -8 && p.y < h_ + 8 && p.life > 0);
+                return p.life <= 0 ||
+                       !(p.x > -8 && p.x < w_ + 8 && p.y > -8 && p.y < h_ + 8);
             }), particles_.end());
         while ((int)particles_.size() < count(14)) {
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{160, 220, 255};
@@ -1793,28 +2108,56 @@ public:
     cv::Mat render() override {
         cv::Mat c = blank();
         for (const auto& p : particles_) {
-            const int A = (int)std::clamp(p.life * 200.0, 0.0, 255.0);
+            if (p.extra < 0) {                               // pop: burst + droplets
+                const double t = 1.0 - std::clamp(p.life, 0.0, 1.0);   // 0 → 1
+                const int rad  = p.size + (int)std::lround(t * 3.0);
+                const int A    = (int)std::clamp((1.0 - t) * 230.0, 0.0, 255.0);
+                cv::circle(c, {(int)p.x, (int)p.y}, std::max(1, rad),
+                           cv::Scalar(p.r, p.g, p.b, A), 1, cv::LINE_AA);
+                for (int i = 0; i < 3; ++i) {                // flung droplets
+                    const double ang = -kPi * 0.5 + (i - 1) * 0.9;
+                    const double dr  = rad + 1.0 + t * 2.5;
+                    draw_pixel(c, (int)std::lround(p.x + std::cos(ang) * dr),
+                                  (int)std::lround(p.y + std::sin(ang) * dr),
+                               255, 255, 255, A * 2 / 3);
+                }
+                continue;
+            }
+            // Alive bubbles hold steady brightness — real bubbles don't fade,
+            // they pop (that's what the state above is for).
             cv::circle(c, {(int)p.x, (int)p.y}, std::max(1, p.size),
-                       cv::Scalar(p.r, p.g, p.b, A), 1, cv::LINE_8);
-            draw_pixel(c, (int)p.x - 1, (int)p.y - 1, 255, 255, 255, (int)(A * 0.7));  // glint
+                       cv::Scalar(p.r, p.g, p.b, 195), 1, cv::LINE_8);
+            const int off = std::max(1, p.size / 2);         // glint tracks size
+            draw_pixel(c, (int)p.x - off, (int)p.y - off, 255, 255, 255, 150);
         }
         return c;
     }
 };
 
 // ── Fireworks ───────────────────────────────────────────────────────────────────
-// Rockets launch from the bottom and burst into a radial spark shower with
-// gravity. "count" ≈ concurrent rockets; "burst" = sparks per explosion.
+// Rockets climb from the bottom on a sputtering exhaust, stall at the apex and
+// burst into a spark shower. Sparks bloom fast then float (air drag), fall in
+// gravity arcs with velocity-aligned streaks, cool white → shell colour →
+// ember red, and twinkle out near burnout. "count" ≈ concurrent rockets;
+// "burst" = sparks per explosion; "drag" shapes the bloom.
+// Particle.extra: >0.5 = rocket; negative = a spark's twinkle phase.
 class FireworksEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
     void update(double dt) override {
         const double grav = jnum(cfg_, "gravity", 26.0);
+        const double drag = jnum(cfg_, "drag", 2.2);
         for (auto& p : particles_) {
-            p.vy += grav * dt;
+            if (p.extra > 0.5) {                       // rocket: ballistic climb
+                p.vy += grav * dt;
+                if (p.vy >= 0) { explode(p); p.life = 0; continue; }  // apex
+            } else {                                   // spark: drag + gravity
+                const double k = std::exp(-drag * dt); // bloom fast, then float
+                p.vx *= k;
+                p.vy  = p.vy * k + grav * dt;
+            }
             p.x += p.vx * dt; p.y += p.vy * dt;
             p.life -= dt / p.max_life;
-            if (p.extra > 0.5 && p.vy >= 0) { p.extra = -1.0; explode(p); }  // apex → burst
         }
         particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
             [&](const Particle& p){ return p.life <= 0 || p.y > h_ + 6; }), particles_.end());
@@ -1837,8 +2180,56 @@ public:
     cv::Mat render() override {
         cv::Mat c = blank();
         for (const auto& p : particles_) {
-            const double a = (p.extra > 0.5) ? 1.0 : std::clamp(p.life, 0.0, 1.0);
-            draw_dot(c, p.x, p.y, p.r, p.g, p.b, a, p.size);
+            if (p.extra > 0.5) {
+                // Rocket: near-white head over a flickering exhaust sputter.
+                draw_dot(c, p.x, p.y, 255, 242, 214, 1.0, p.size);
+                const double sp = std::hypot(p.vx, p.vy);
+                if (sp > 1e-3) {
+                    const double ux = p.vx / sp, uy = p.vy / sp;
+                    for (int i = 1; i <= 3; ++i)
+                        draw_dot(c, p.x - ux * i, p.y - uy * i,
+                                 (int)p.r, (int)(p.g * 0.75), (int)(p.b * 0.45),
+                                 frand(rng_, 0.2, 1.0) * (1.0 - i * 0.27), 1);
+                }
+                continue;
+            }
+            const double life = std::clamp(p.life, 0.0, 1.0);
+            // Colour cooling: overexposed white right after the burst, back to
+            // the shell colour, then dimming toward ember red at burnout.
+            double r, g, b;
+            if (life > 0.72) {
+                const double t = (life - 0.72) / 0.28;
+                r = p.r + (255 - p.r) * t;
+                g = p.g + (255 - p.g) * t;
+                b = p.b + (255 - p.b) * t;
+            } else {
+                const double t = 1.0 - life / 0.72;    // 0 shell → 1 ember
+                r = p.r + (200.0 - p.r) * t * 0.6;
+                g = p.g * (1.0 - 0.80 * t);
+                b = p.b * (1.0 - 0.95 * t);
+            }
+            // Twinkle: strobe once the spark burns low.
+            double a = life;
+            if (life < 0.38) {
+                const double tw = 0.5 + 0.5 * std::sin((1.0 - life) * 55.0
+                                                       - p.extra * 7.0);
+                a *= 0.35 + 0.65 * tw;
+            }
+            // Streak along the velocity — long right after the burst,
+            // shrinking to a floating dot as drag bleeds the speed off.
+            const double sp = std::hypot(p.vx, p.vy);
+            const double len = std::min(6.0, sp * 0.09);
+            if (len >= 0.8) {
+                const double ux = p.vx / sp, uy = p.vy / sp;
+                cv::line(c,
+                         {(int)std::lround(p.x - ux * len),
+                          (int)std::lround(p.y - uy * len)},
+                         {(int)std::lround(p.x), (int)std::lround(p.y)},
+                         cv::Scalar(r, g, b,
+                                    (int)std::clamp(a * 190.0, 0.0, 255.0)),
+                         1, cv::LINE_AA);
+            }
+            draw_dot(c, p.x, p.y, (int)r, (int)g, (int)b, a, p.size);
         }
         return c;
     }
@@ -1849,81 +2240,119 @@ private:
         const double vmax = jnum(cfg_, "burst_speed", std::min(w_, h_) * 0.45);
         for (int i = 0; i < n; ++i) {
             const double ang = kTau * i / n + frand(rng_, -0.1, 0.1);
-            const double spd = frand(rng_, vmax * 0.4, vmax);
+            const double spd = frand(rng_, vmax * 0.25, vmax);
             Particle s;
             s.x = rocket.x; s.y = rocket.y;
             s.vx = std::cos(ang) * spd; s.vy = std::sin(ang) * spd;
             s.r = rocket.r; s.g = rocket.g; s.b = rocket.b; s.size = 1;
-            s.max_life = frand(rng_, 0.5, 1.1); s.life = 1; s.extra = 0.0;  // spark
+            s.max_life = frand(rng_, 0.5, 1.1); s.life = 1;
+            s.extra = -frand(rng_, 0.5, 7.0);          // negative = twinkle phase
             particles_.push_back(s);
         }
     }
 };
 
 // ── Vortex ──────────────────────────────────────────────────────────────────────
-// Particles orbit the centre while spiralling inward, like a swirling drain.
-// "swirl" sets angular speed; negative "infall" spirals outward instead.
+// A whirlpool: thin streamline streaks spiralling into a central drain.
+// Differential rotation (inner turns faster, ~1/r^0.8) and infall that
+// accelerates toward the centre are what make it read as swirling fluid
+// rather than a rigid ring of comets; each streak is the particle's own
+// recent path traced backwards through the same flow field, so inner streaks
+// wind tight and long while outer ones stay short and lazy.
+// "swirl" sets nominal angular speed; negative "infall" spirals outward.
 class VortexEffect : public BaseEffect {
 public:
     using BaseEffect::BaseEffect;
+
+    // Flow field, shared by the integrator and the streak tracer. rref is the
+    // radius where the angular speed equals the configured "swirl".
+    static double ang_speed(double swirl, double rref, double r) {
+        const double w = swirl * std::pow(rref / std::max(3.0, r), 0.8);
+        return std::clamp(w, -std::abs(swirl) * 6.0, std::abs(swirl) * 6.0);
+    }
+    static double infall_speed(double infall, double rref, double r) {
+        // ×3 on the configured rate plus a strong 1/r pull: with the presets'
+        // infall=7 a streak crosses the whole disc in ~4 s and takes its final
+        // plunge fast — the old constant 7 px/s never got a particle to the
+        // drain inside its lifetime, which is why nothing ever spiralled in.
+        return infall * 3.0 * (0.4 + 0.6 * (rref / std::max(3.0, r)));
+    }
+
     void update(double dt) override {
         const double swirl  = jnum(cfg_, "swirl", 2.2);
         const double infall = jnum(cfg_, "infall", 6.0);
-        for (auto& p : particles_) {
-            p.extra += swirl * dt;          // angle
-            p.vy    -= infall * dt;         // radius
-            p.life  -= dt / p.max_life;
-        }
-        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
-            [](const Particle& p){ return p.life <= 0 || p.vy <= 1.0; }), particles_.end());
         // Span the whole canvas (reaches the corners) so it's not a small blob
         // stuck in the middle. cw_/ch_ default to this panel when no canvas set.
         const double maxr = jnum(cfg_, "max_radius", std::hypot(cw_, ch_) * 0.55);
+        const double rref = maxr * 0.45;
+        for (auto& p : particles_) {
+            p.extra += ang_speed(swirl, rref, p.vy) * dt;      // angle
+            p.vy    -= infall_speed(infall, rref, p.vy) * dt;  // radius (reuse vy)
+            p.life  -= dt / p.max_life;
+        }
+        // Die at a small finite radius — the drain's "eye" swallows streaks
+        // instead of letting them pile up as dots at the exact centre.
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+            [](const Particle& p){ return p.life <= 0 || p.vy <= 2.5; }), particles_.end());
         while ((int)particles_.size() < count(60)) {
             Color col = has_colors(cfg_) ? pick_color(cfg_, rng_) : Color{120, 180, 255};
             Particle p;
-            p.extra = frand(rng_, 0, kTau);                 // angle
-            p.vy    = frand(rng_, maxr * 0.30, maxr);       // radius (reuse vy)
-            p.max_life = pick_life(cfg_, 1.5, 3.5, rng_); p.life = 1;
+            p.extra = frand(rng_, 0, kTau);                    // angle
+            // Uniform in radius (not area) — infall dwells longest at the rim,
+            // so seeding evenly keeps the middle of the funnel populated.
+            p.vy    = maxr * (0.15 + 0.85 * frand(rng_, 0, 1));
+            // Long default life: a streak should DIE AT THE DRAIN (r <= 2.5
+            // above), not fade mid-journey — the completed spiral is the
+            // whole whirlpool read. Presets can still set "life".
+            p.max_life = pick_life(cfg_, 5.0, 9.0, rng_); p.life = 1;
             p.r = col.r; p.g = col.g; p.b = col.b; p.size = pick_size(cfg_, 1, 2, rng_);
             particles_.push_back(p);
         }
     }
+
     cv::Mat render() override {
         cv::Mat c = blank();
         // Centre on the whole canvas; render this panel's slice (continuous
-        // across a multi-panel face). Each particle is a comet: a rounded, bright
-        // head that tapers along its trailing arc into a thin fading tail. Drawn
-        // as a chain of anti-aliased circles (head → tail), each smaller/dimmer.
+        // across a multi-panel face). Each streak is drawn by re-integrating
+        // the particle's path BACKWARDS through the flow for a fixed time
+        // window — thin anti-aliased line segments that taper and fade, no
+        // bright comet head. Fast inner particles cover more arc in the same
+        // window, which is exactly the tight winding a whirlpool shows.
         const double cx = cw_ * 0.5, cy = ch_ * 0.5;
-        const double swirl   = jnum(cfg_, "swirl", 2.2);
-        const double tailLen = std::clamp(0.30 + swirl * 0.08, 0.15, 1.1);  // tail arc span
-        const int    N       = 8;
+        const double swirl  = jnum(cfg_, "swirl", 2.2);
+        const double infall = jnum(cfg_, "infall", 6.0);
+        const double maxr   = jnum(cfg_, "max_radius", std::hypot(cw_, ch_) * 0.55);
+        const double rref   = maxr * 0.45;
+        const double tail_s = jnum(cfg_, "tail_s", 0.30);   // streak time window
+        const int    K      = 12;                           // segments per streak
+        const double dt2    = tail_s / K;
         for (const auto& p : particles_) {
-            const double a = p.extra, r = p.vy;
             const double life = std::clamp(p.life, 0.0, 1.0);
-            const double headRad = std::max(1.0, static_cast<double>(p.size) + 1.0);
-            for (int k = N - 1; k >= 0; --k) {          // tail first → head drawn on top
-                const double t   = static_cast<double>(k) / (N - 1);   // 0 head … 1 tail
-                const double aa  = a - tailLen * t;
-                const double rr  = r * (1.0 + 0.12 * t);               // tail trails outward
-                const double x   = cx + std::cos(aa) * rr - ox_;
-                const double y   = cy + std::sin(aa) * rr - oy_;
-                const int    rad = (int)std::lround(headRad * (1.0 - 0.80 * t));  // taper
-                const int    A   = (int)std::clamp(life * std::pow(1.0 - t, 1.6) * 255.0,
-                                                   0.0, 255.0);
-                if (A <= 2) continue;
-                cv::circle(c, {(int)std::lround(x), (int)std::lround(y)}, std::max(0, rad),
-                           cv::Scalar(p.r, p.g, p.b, A), -1, cv::LINE_AA);
+            // Ease in after spawn and out before death so streaks surface and
+            // sink inside the flow rather than popping.
+            const double fade = std::min(1.0, life * 3.0) *
+                                std::min(1.0, (1.0 - life) * 6.0 + 0.15);
+            if (fade <= 0.02) continue;
+            double a = p.extra, r = std::max(2.0, p.vy);
+            double px = cx + std::cos(a) * r - ox_;
+            double py = cy + std::sin(a) * r - oy_;
+            for (int k = 1; k <= K; ++k) {
+                a -= ang_speed(swirl, rref, r) * dt2;          // backwards in time
+                r += infall_speed(infall, rref, r) * dt2;      //   = back outward
+                const double qx = cx + std::cos(a) * r - ox_;
+                const double qy = cy + std::sin(a) * r - oy_;
+                const double t  = static_cast<double>(k) / K;  // 0 head … 1 tail
+                const int A = (int)std::clamp(
+                    fade * std::pow(1.0 - t, 1.35) * 235.0, 0.0, 255.0);
+                if (A > 2) {
+                    const int th = std::max(
+                        1, (int)std::lround(p.size * (1.0 - 0.6 * t)));
+                    cv::line(c, {(int)std::lround(px), (int)std::lround(py)},
+                                {(int)std::lround(qx), (int)std::lround(qy)},
+                             cv::Scalar(p.r, p.g, p.b, A), th, cv::LINE_AA);
+                }
+                px = qx; py = qy;
             }
-            // Bright leading core for a little glow at the head.
-            const double hx = cx + std::cos(a) * r - ox_;
-            const double hy = cy + std::sin(a) * r - oy_;
-            cv::circle(c, {(int)std::lround(hx), (int)std::lround(hy)},
-                       std::max(0, (int)std::lround(headRad * 0.5)),
-                       cv::Scalar(std::min(255.0, p.r + 90.0), std::min(255.0, p.g + 90.0),
-                                  std::min(255.0, p.b + 90.0), life * 255.0),
-                       -1, cv::LINE_AA);
         }
         return c;
     }
@@ -2525,8 +2954,7 @@ private:
 
 // ── Shooting stars (meteors from centre) ─────────────────────────────────────
 // Sparse meteors that launch from the full-canvas centre (the origin) out to a
-// panel edge with a fading tail. Distinct from MeteorEffect, which streaks all
-// meteors in one shared direction; here each flies radially from the centre.
+// panel edge with a fading tail, each flying radially from the centre.
 
 class ShootingStarsEffect : public BaseEffect {
 public:
@@ -2553,17 +2981,16 @@ public:
     }
     cv::Mat render() override {
         cv::Mat c = blank();
-        const int tail = (int)jnum(cfg_, "tail", 8.0);
+        const double tail = jnum(cfg_, "tail", 8.0);
         for (const auto& p : particles_) {
             const double sp = std::hypot(p.vx, p.vy);
             if (sp < 1e-3) continue;
             const double ux = p.vx / sp, uy = p.vy / sp;
             const double head = std::clamp(p.life * 1.5, 0.0, 1.0);
-            for (int i = 0; i < tail; ++i) {
-                const double a = (1.0 - (double)i / tail) * head;
-                if (a <= 0) break;
-                draw_dot(c, p.x - ux * i, p.y - uy * i, (int)p.r, (int)p.g, (int)p.b, a, 1);
-            }
+            // Tapered AA streak instead of the old chain of dots, with a
+            // brighter head pixel.
+            draw_streak(c, p.x, p.y, ux, uy, tail, p.r, p.g, p.b, head * 0.85);
+            draw_dot(c, p.x, p.y, (int)p.r, (int)p.g, (int)p.b, head, p.size);
         }
         return c;
     }
@@ -2595,6 +3022,7 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "snow")      return std::make_unique<SnowEffect>(w, h, cfg);
     if (name == "embers")    return std::make_unique<EmbersEffect>(w, h, cfg);
     if (name == "confetti")  return std::make_unique<ConfettiEffect>(w, h, cfg);
+    if (name == "flames")    return std::make_unique<FlamesEffect>(w, h, cfg);
     if (name == "rings")     return std::make_unique<RingsEffect>(w, h, cfg);
     if (name == "rain")      return std::make_unique<RainEffect>(w, h, cfg);
     if (name == "steam")     return std::make_unique<SteamEffect>(w, h, cfg);
@@ -2608,7 +3036,6 @@ std::unique_ptr<BaseEffect> make_effect(const std::string& name, int w, int h, c
     if (name == "clouds")    return std::make_unique<CloudsEffect>(w, h, cfg);
     if (name == "breath")    return std::make_unique<BreathEffect>(w, h, cfg);
     if (name == "lightning") return std::make_unique<LightningEffect>(w, h, cfg);
-    if (name == "meteor")    return std::make_unique<MeteorEffect>(w, h, cfg);
     if (name == "bubbles")   return std::make_unique<BubblesEffect>(w, h, cfg);
     if (name == "fireworks") return std::make_unique<FireworksEffect>(w, h, cfg);
     if (name == "vortex")    return std::make_unique<VortexEffect>(w, h, cfg);
@@ -2632,21 +3059,23 @@ const std::map<std::string, json>& presets() {
           "frost": {"effect":"frost","count":44,"fractal":true,"blend":"add"},
           "heatwave": {"effect":"heatwave","count":18,"heartbeat":true,"blend":"add"},
           "snooze": {"effect":"snooze","count":3,"blend":"add"},
-          "petals": {"effect":"snow","count":14,"colors":[[255,150,180],[255,190,210],[240,120,160]],"speed_min":3.0,"speed_max":6.0,"drift_x":2.5,"blend":"add"},
+          "petals": {"effect":"confetti","count":14,"colors":[[255,150,180],[255,190,210],[240,120,160]],"speed_min":3.0,"speed_max":6.5,"drift_x":2.5,"tumble":2.5,"blend":"add"},
           "dizzy": {"layers":[
             {"effect":"vortex","count":24,"swirl":3.2,"infall":4,"colors":[[255,230,120],[255,255,255],[255,200,80]],"blend":"add"},
             {"effect":"sparkle","count":5,"colors":[[255,255,255]],"life_min":0.1,"life_max":0.3,"blend":"add"}]},
           "cold_breath": {"effect":"breath","count":2,"colors":[[215,230,245],[235,245,255]],"origin_x":0.5,"origin_y":0.62,"size_min":1.5,"size_max":16.0,"speed_min":6.0,"speed_max":11.0,"alpha_max":0.5,"rate":0.5,"spread_frac":0.05,"trigger":"none","threshold":0.25,"blend":"add"},
           "gentle_snow": {"effect":"snow","count":15,"colors":[[200,215,255],[220,235,255]],"speed_min":4.0,"speed_max":7.0,"drift_x":0.8,"blend":"add"},
           "heavy_snow": {"effect":"snow","count":60,"colors":[[240,245,255],[255,255,255]],"speed_min":10.0,"speed_max":18.0,"drift_x":3.0,"blend":"add"},
-          "campfire": {"effect":"embers","count":40,"colors":[[255,80,10],[255,100,20]],"speed_min":14.0,"speed_max":22.0,"spread":0.6,"blend":"add"},
+          "campfire": {"layers":[
+            {"effect":"flames","height":0.32,"turbulence":0.7,"blend":"normal"},
+            {"effect":"embers","count":18,"colors":[[255,80,10],[255,140,20]],"speed_min":14.0,"speed_max":26.0,"spread":0.6,"size_min":1,"size_max":1,"blend":"add"}]},
           "galaxy": {"effect":"sparkle","count":60,"colors":[[255,80,80],[80,180,255],[255,220,80],[180,80,255],[80,255,160]],"life_min":0.05,"life_max":0.5,"blend":"add"},
           "party": {"effect":"confetti","count":35,"colors":[[255,50,50],[255,180,30],[50,220,50],[50,150,255],[220,50,220],[255,255,50]],"speed_min":6,"speed_max":10,"blend":"normal"},
           "radar": {"effect":"rings","count":2,"colors":[[0,255,80]],"speed_min":12,"speed_max":18,"max_radius":25,"blend":"add"},
           "fire": {"layers":[
-            {"effect":"embers","count":35,"colors":[[255,50,0],[220,60,0],[200,40,0]],"speed_min":8,"speed_max":20,"size_min":2,"size_max":3,"blend":"add"},
-            {"effect":"embers","count":15,"colors":[[255,160,0],[255,200,20],[255,180,10]],"speed_min":18,"speed_max":40,"size_min":1,"size_max":2,"blend":"add"},
-            {"effect":"sparkle","count":5,"colors":[[255,255,200],[255,240,180]],"life_min":0.05,"life_max":0.12,"blend":"add"}]},
+            {"effect":"flames","height":0.55,"blend":"normal"},
+            {"effect":"embers","count":12,"colors":[[255,160,0],[255,200,20],[255,120,0]],"speed_min":18,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
+            {"effect":"sparkle","count":4,"colors":[[255,255,200],[255,240,180]],"life_min":0.05,"life_max":0.12,"blend":"add"}]},
           "aurora": {"layers":[
             {"effect":"fireflies","count":20,"colors":[[0,200,180],[0,160,255],[0,220,200]],"speed_min":3,"speed_max":6,"blend":"add"},
             {"effect":"sparkle","count":10,"colors":[[100,255,220],[80,220,255]],"life_min":0.1,"life_max":0.4,"blend":"add"}]},
@@ -2663,7 +3092,7 @@ const std::map<std::string, json>& presets() {
             {"effect":"embers","count":30,"colors":[[0,180,255],[0,140,220],[20,160,255]],"speed_min":8,"speed_max":20,"blend":"add"},
             {"effect":"embers","count":12,"colors":[[180,220,255],[200,240,255]],"speed_min":20,"speed_max":40,"size_min":1,"size_max":1,"blend":"add"},
             {"effect":"rings","count":1,"colors":[[0,200,255]],"speed_min":10,"speed_max":15,"max_radius":15,"blend":"add"}]},
-          "rain": {"effect":"rain","count":35,"colors":[[120,150,220],[150,180,255]],"speed_min":45,"speed_max":70,"drift_x":1.5,"blend":"add"},
+          "rain": {"effect":"rain","count":35,"colors":[[120,150,220],[150,180,255]],"speed_min":70,"speed_max":120,"drift_x":1.5,"blend":"add"},
           "water": {"effect":"water","level":0.42,"alpha":0.85,"slosh":6,"wave_count":2,"wave_speed":2.0,"pitch_fill":0.30,"sheen":0.55,"face_glow":0.55,"bubbles":8,"bubble_mode":"rise","colors":[[120,220,255],[0,110,210],[0,40,120]],"blend":"normal"},
           "lava": {"effect":"water","level":0.36,"alpha":0.95,"slosh":4,"wave_count":2,"wave_speed":1.3,"viscosity":0.6,"pitch_fill":0.20,"sheen":0.20,"face_glow":0.30,"meniscus":1.0,"colors":[[255,230,120],[255,90,0],[150,20,0]],"blend":"normal"},
           "toxic": {"effect":"water","level":0.40,"alpha":0.9,"slosh":7,"wave_count":3,"wave_speed":2.4,"pitch_fill":0.30,"sheen":0.5,"face_glow":0.6,"bubbles":12,"bubble_mode":"rise","colors":[[210,255,120],[60,200,0],[15,110,0]],"blend":"normal"},
@@ -2671,12 +3100,9 @@ const std::map<std::string, json>& presets() {
           "plasma_fluid": {"effect":"water","level":0.40,"alpha":0.9,"slosh":6,"wave_count":2,"pitch_fill":0.30,"sheen":0.6,"face_glow":0.7,"colors":[[255,130,255],[150,0,200],[40,0,80]],"blend":"normal"},
           "mercury": {"effect":"water","level":0.36,"alpha":0.96,"slosh":3,"wave_count":2,"viscosity":0.7,"pitch_fill":0.15,"sheen":0.9,"face_glow":0.12,"colors":[[235,240,250],[120,130,150],[55,60,75]],"blend":"normal"},
           "thunderstorm": {"layers":[
-            {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":55,"speed_max":80,"drift_x":3.0,"blend":"add"},
+            {"effect":"rain","count":40,"colors":[[120,150,220],[150,180,255]],"speed_min":85,"speed_max":135,"drift_x":3.0,"blend":"add"},
             {"effect":"lightning","rate":0.7,"branches":0.45,"colors":[[200,220,255],[180,200,255]],"blend":"add"}]},
           "arc": {"effect":"lightning","arc":true,"count":2,"branches":0.35,"jitter":5,"colors":[[160,200,255],[210,225,255],[120,170,255]],"blend":"add"},
-          "meteor_shower": {"layers":[
-            {"effect":"meteor","count":7,"colors":[[200,220,255],[255,240,200],[180,220,255]],"speed_min":45,"speed_max":85,"tail":7,"direction_deg":25,"blend":"add"},
-            {"effect":"sparkle","count":18,"colors":[[255,255,255],[200,220,255]],"life_min":0.3,"life_max":1.0,"blend":"add"}]},
           "fireworks": {"effect":"fireworks","count":3,"burst":24,"colors":[[255,80,80],[80,180,255],[255,220,80],[180,80,255],[80,255,160]],"blend":"add"},
           "bubbles": {"effect":"bubbles","count":16,"colors":[[160,220,255],[120,200,255],[200,240,255]],"speed_min":8,"speed_max":18,"wobble":7,"blend":"add"},
           "vortex": {"layers":[
@@ -2755,8 +3181,19 @@ struct ParticleLayer {
     Blend blend = Blend::Add;
     std::string name = "none";
 
+    // Per-effect blend default: flames is an opaque BODY — additive over lit
+    // face art saturates straight to white (how "flames" looked in Single
+    // Effects, which sends no blend key). Everything else keeps "add".
+    static Blend default_blend(const json& layer_cfg) {
+        const std::string def =
+            layer_cfg.value("effect", std::string()) == "flames" ? "normal"
+                                                                 : "add";
+        return layer_cfg.value("blend", def) == "add" ? Blend::Add
+                                                      : Blend::Normal;
+    }
+
     ParticleLayer(const json& layer_cfg, int w, int h) {
-        blend = (layer_cfg.value("blend", std::string("add")) == "add") ? Blend::Add : Blend::Normal;
+        blend = default_blend(layer_cfg);
         name = layer_cfg.value("effect", std::string("none"));
         if (name != "none") effect = make_effect(name, w, h, layer_cfg);
     }
@@ -2778,7 +3215,7 @@ struct ParticleLayer {
     }
     // In-place param update (same effect) — keeps the running sim.
     void update_cfg(const json& layer_cfg) {
-        blend = (layer_cfg.value("blend", std::string("add")) == "add") ? Blend::Add : Blend::Normal;
+        blend = default_blend(layer_cfg);
         if (effect) effect->set_cfg(layer_cfg);
     }
 };
