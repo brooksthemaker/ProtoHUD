@@ -61,6 +61,7 @@
 #include "accessory/accessory_leds.h"
 #include "accessory/accessory_profiles.h"
 #include "accessory/led_overlay.h"
+#include "servo/pca9685_bus.h"
 #include "servo/servo_controller.h"
 #include "sys/fan_controller.h"
 #include "sys/system_monitor.h"
@@ -1643,6 +1644,68 @@ int main(int argc, char* argv[]) {
     bool cfg_parse_failed = false;
     json cfg = load_config(cfg_load, &cfg_parse_failed);
 
+    // ── Single-instance guard ─────────────────────────────────────────────────
+    // Two ProtoHUDs fight over the panels, the serial ports and the I²C bus —
+    // a bench instance started while the service is up (or vice versa) wedges
+    // both. An exclusive flock on a pid-stamped lock file makes the NEWEST
+    // start win. cfg["single_instance"]:
+    //   "takeover" (default) — ask the holder to exit (SIGTERM) and wait for
+    //                          the lock; it shuts down cleanly and releases
+    //                          the hardware before we touch it.
+    //   "exit"               — the new instance bows out instead. Exit code 0
+    //                          on purpose: supervisors (systemd Restart=
+    //                          on-failure, scripts/watchdog.sh) treat non-zero
+    //                          as a crash and would restart-loop forever.
+    //   "off"                — no guard.
+    // ⚠ NO SIGKILL escalation, deliberately. A holder that ignores SIGTERM is
+    // wedged, and its own 8 s render-stall watchdog already force-exits it;
+    // SIGKILLing a supervised instance from here would just start a war over
+    // the lock with whatever relaunches it. The kernel drops the flock on any
+    // exit — even SIGKILL — so a crashed holder never strands the lock.
+    {
+        std::string si_mode = "takeover";
+        if (cfg.contains("single_instance") && cfg["single_instance"].is_string())
+            si_mode = cfg["single_instance"].get<std::string>();
+        if (si_mode != "off") {
+            const char* lock_path = "/tmp/protohud.instance.lock";
+            const int lfd = ::open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+            if (lfd >= 0 && ::flock(lfd, LOCK_EX | LOCK_NB) != 0) {
+                char pidbuf[32] = {0};
+                const ssize_t n = ::pread(lfd, pidbuf, sizeof(pidbuf) - 1, 0);
+                const long other = (n > 0) ? std::strtol(pidbuf, nullptr, 10) : 0;
+                if (si_mode == "exit") {
+                    std::cerr << "[main] another ProtoHUD (pid " << other
+                              << ") holds " << lock_path
+                              << " — single_instance=exit, quitting\n";
+                    return 0;
+                }
+                std::cerr << "[main] another ProtoHUD (pid " << other
+                          << ") is running — taking over (SIGTERM, waiting up "
+                             "to 15 s for it to shut down)\n";
+                if (other > 1) ::kill(static_cast<pid_t>(other), SIGTERM);
+                bool got = false;
+                for (int i = 0; i < 150; ++i) {          // 15 s in 100 ms steps
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (::flock(lfd, LOCK_EX | LOCK_NB) == 0) { got = true; break; }
+                }
+                if (!got) {
+                    std::cerr << "[main] pid " << other
+                              << " did not release the lock — refusing to start "
+                                 "a second instance\n";
+                    return 0;
+                }
+                std::cerr << "[main] takeover complete — previous instance exited\n";
+            }
+            if (lfd >= 0) {
+                // Stamp our pid so the NEXT contender's log names us. The fd
+                // stays open for the process lifetime — the flock IS the guard.
+                const std::string pid = std::to_string(::getpid());
+                if (::ftruncate(lfd, 0) == 0)
+                    (void)::pwrite(lfd, pid.c_str(), pid.size(), 0);
+            }
+        }
+    }
+
     // ── Profiles ──────────────────────────────────────────────────────────────
     // A profile is a full config snapshot under <config>/profiles/<name>.json.
     // Applying one = relaunch ProtoHUD with that file as its config (see the
@@ -2209,12 +2272,26 @@ int main(int argc, char* argv[]) {
     if (cfg.contains("accessory_leds") && cfg["accessory_leds"].contains("profiles"))
         led_profiles.from_json(cfg["accessory_leds"]["profiles"]);
 
-    // ── Servos (coprocessor channels; mainly the ears) ────────────────────────
+    // ── Servos (PCA9685 channels; mainly the ears) ────────────────────────────
     // Named + calibrated so an expression action can only ever command an angle
-    // inside the servo's safe travel. Motion happens on the RP2350 (one SERVOM
-    // target per move), so ear moves stay smooth regardless of CM5 load.
+    // inside the servo's safe travel. Two transports (cfg["servo_bus"]):
+    //   "coproc" — SERVOM over the RP2350's serial link; the firmware's
+    //              servo_service() eases and drives the PCA9685 on ITS bus.
+    //   "i2c"    — the PCA9685 wired to the CM5's own bus; Pca9685Bus runs the
+    //              same ~66 Hz easing loop here. No coprocessor in the path.
     // Defaults to two paired ears on channels 0/1 when the config says nothing,
     // which is the common build and gives the menu something to show.
+    std::string servo_transport = "coproc";
+    servo::Pca9685Bus::Config servo_i2c_cfg;
+    if (cfg.contains("servo_bus") && cfg["servo_bus"].is_object()) {
+        const auto& jb = cfg["servo_bus"];
+        servo_transport       = jb.value("transport", servo_transport);
+        servo_i2c_cfg.i2c_bus = jb.value("i2c_bus",  servo_i2c_cfg.i2c_bus);
+        servo_i2c_cfg.i2c_addr = jval(jb, "i2c_addr", servo_i2c_cfg.i2c_addr);
+    }
+    servo::Pca9685Bus servo_i2c(servo_i2c_cfg);
+    if (servo_transport == "i2c") servo_i2c.start();
+
     servo::ServoController::Config servo_cfg;
     if (cfg.contains("servos") && cfg["servos"].is_array()) {
         for (const auto& js : cfg["servos"]) {
@@ -3869,7 +3946,7 @@ int main(int argc, char* argv[]) {
         led_cfg.transport != "coproc_local" && !accessory_leds.start())
         std::cerr << "[main] accessory LEDs unavailable — continuing without\n";
 
-    // ── Light sensor (BH1750 ambient lux) ────────────────────────────────────
+    // ── Light sensor (ambient lux — BH1750 or OPT3001) ───────────────────────
     // Hardware config (enable, bus, address, poll rate) comes from
     // cfg["light_sensor"]. The lux stream feeds the ExpressionDirector
     // (per-expression "Gets Bright"/"Gets Dark" triggers + While-conditions)
@@ -3879,10 +3956,35 @@ int main(int argc, char* argv[]) {
     if (cfg.contains("light_sensor")) {
         auto& jl = cfg["light_sensor"];
         light_cfg.enabled  = jval(jl, "enabled",  light_cfg.enabled);
+        if (jl.value("type", std::string("bh1750")) == "opt3001") {
+            light_cfg.type     = sensor::LightSensor::Type::Opt3001;
+            light_cfg.i2c_addr = 0x44;   // OPT3001 default; i2c_addr below overrides
+        }
         light_cfg.i2c_bus  = jl.value("i2c_bus",  light_cfg.i2c_bus);
         light_cfg.i2c_addr = jval(jl, "i2c_addr", light_cfg.i2c_addr);
         light_cfg.poll_hz  = jval(jl, "poll_hz",  light_cfg.poll_hz);
+        // Auto-dim (Face Display > Brightness > Auto Dim): scale the face's
+        // Brightness by ambient lux. Saved back by the config writer below.
+        if (jl.contains("auto_dim") && jl["auto_dim"].is_object()) {
+            const auto& ja = jl["auto_dim"];
+            state.face.auto_dim         = jval(ja, "enabled",   state.face.auto_dim);
+            state.face.auto_dim_dark    = jval(ja, "dark_lux",  state.face.auto_dim_dark);
+            state.face.auto_dim_bright  = jval(ja, "bright_lux",state.face.auto_dim_bright);
+            state.face.auto_dim_min_pct = jval(ja, "min_pct",   state.face.auto_dim_min_pct);
+            state.face.auto_dim_curve   = jval(ja, "curve",     state.face.auto_dim_curve);
+        }
     }
+    // Snapshot state.face's auto-dim fields as the controller's cfg struct —
+    // used at controller construction and by the menu's apply hook.
+    auto pf_auto_dim_cfg = [&state]{
+        face::NativeFaceController::AutoDimCfg ad;
+        ad.enabled    = state.face.auto_dim;
+        ad.dark_lux   = state.face.auto_dim_dark;
+        ad.bright_lux = state.face.auto_dim_bright;
+        ad.min_pct    = state.face.auto_dim_min_pct;
+        ad.curve      = state.face.auto_dim_curve;
+        return ad;
+    };
     sensor::LightSensor light_sensor(light_cfg);
     light_sensor.set_lux_callback([last_lux, &face_proxy](float lux) {
         last_lux->store(lux);
@@ -4312,6 +4414,11 @@ int main(int argc, char* argv[]) {
                                       pf_eye_layout, pf_mouth_layout, pf_nose_layout,
                                       &pf_hub75));
         native_ctrl->set_face_colors(state.face.face_colors);
+        native_ctrl->set_auto_dim(pf_auto_dim_cfg());
+        // The controller restored its saved Brightness (protoface_state.json)
+        // in its constructor — sync the menu slider's shared state to it, or
+        // the slider displays the AppState default until first touched.
+        state.face.brightness = native_ctrl->brightness();
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->set_motion_particles(pf_motion_particles);
         native_ctrl->set_sharp_motion(pf_sharp_motion);
@@ -4619,6 +4726,11 @@ int main(int argc, char* argv[]) {
             pf_hub75.face_dither,
             pf_hub75.camera_mode ? pf_hub75.camera_planes : 0);
         native_ctrl->set_face_colors(state.face.face_colors);
+        native_ctrl->set_auto_dim(pf_auto_dim_cfg());
+        // The controller restored its saved Brightness (protoface_state.json)
+        // in its constructor — sync the menu slider's shared state to it, or
+        // the slider displays the AppState default until first touched.
+        state.face.brightness = native_ctrl->brightness();
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->set_motion_particles(pf_motion_particles);
         native_ctrl->set_sharp_motion(pf_sharp_motion);
@@ -4733,20 +4845,43 @@ int main(int argc, char* argv[]) {
         fs::path face_dir = fs::path(abs_path).parent_path();
         for (size_t i = 0; i < sub_depth; ++i) face_dir = face_dir.parent_path();
 
+        // Which expression's eye regions this editor session reads and writes.
+        // The "blink" slot and the face-wide frames ("blink/<n>") carry the
+        // face-wide pair; every other slot carries its OWN override (falling
+        // back to the face-wide pair for display when it has none); a
+        // per-expression frame ("blink/<expr>/<n>") shows that expression's.
+        std::string region_expr;                       // empty = face-wide pair
+        if (!is_sub_art) {
+            if (expression != "blink") region_expr = expression;
+        } else if (sub_depth == 2) {
+            const size_t ra = expression.find('/');
+            const size_t rb = expression.rfind('/');
+            if (rb > ra + 1) region_expr = expression.substr(ra + 1, rb - ra - 1);
+        }
+
         // Preload any blink eye polygons from the face folder's config.json
         // (canvas coords) so the editor shows them and round-trips them on save.
         // Accepts the new {"points":[[x,y],...]} polygon form and the legacy
         // {x,y,w,h} rectangle (promoted to a 4-corner polygon for editing).
         std::vector<menu::FaceEditor::EyePoly> eye_polys;
+        bool had_override = false;   // region_expr had its own entry on open
         {
             const fs::path cfgp = face_dir / "config.json";
             std::ifstream ef(cfgp);
             if (ef) {
                 try {
                     json ej; ef >> ej;
+                    const json* rsrc = &ej;
+                    if (!region_expr.empty() && ej.contains("eye_regions") &&
+                        ej["eye_regions"].is_object() &&
+                        ej["eye_regions"].contains(region_expr) &&
+                        ej["eye_regions"][region_expr].is_object()) {
+                        rsrc = &ej["eye_regions"][region_expr];
+                        had_override = true;
+                    }
                     auto rd = [&](const char* k){
-                        if (!ej.contains(k) || !ej[k].is_object()) return;
-                        const auto& d = ej[k];
+                        if (!rsrc->contains(k) || !(*rsrc)[k].is_object()) return;
+                        const auto& d = (*rsrc)[k];
                         menu::FaceEditor::EyePoly poly;
                         if (d.contains("points") && d["points"].is_array()) {
                             for (const auto& pt : d["points"])
@@ -4777,13 +4912,17 @@ int main(int argc, char* argv[]) {
         std::snprintf(title, sizeof(title),
                       "Edit face: %s  (%s)",
                       expression.c_str(), pf_backend.c_str());
+        // Snapshot of the polygons the editor opened with, so the commit can
+        // tell "user drew regions" from "untouched face-wide fallback" below.
+        auto open_polys = eye_polys;
         menu_ptr->open_face_editor(
             title, abs_path, cw, ch, std::move(covered), std::move(labels),
             zones.mirror_x,
             mode, pf_face_palette,   // empty -> editor defaults
             std::move(eye_polys),
             /* on_commit */ [&face_proxy, &native_ctrl, expression,
-                             face_dir, is_sub_art]
+                             face_dir, is_sub_art, region_expr, had_override,
+                             open_polys = std::move(open_polys)]
                 (const cv::Mat& rgba_canvas, const std::string& target_path,
                  const std::vector<menu::FaceEditor::EyePoly>& eye_polys) {
                 // Convert RGBA back to BGRA for cv::imwrite (PNG storage
@@ -4805,8 +4944,11 @@ int main(int argc, char* argv[]) {
                 // folder's config.json, merging so expressions/blink keys are
                 // preserved. Stored as {"points":[[x,y],...]}; the loader fills
                 // each polygon to a mask so a region blink only closes the eye(s)
-                // inside the shape. Always rewrite both keys so clearing an eye
-                // (drawing fewer shapes) removes the stale one.
+                // inside the shape.
+                // The "blink" slot authors the FACE-WIDE pair; every other slot
+                // authors its own entry under "eye_regions" so each face can
+                // blink inside its own polygons (falling back to the face-wide
+                // pair when it never drew any).
                 // ⚠ SKIPPED ENTIRELY FOR SUB-FOLDER ART (blink frames). The eye
                 // polygons are canvas-space and shared by every frame, so if
                 // each frame wrote them back, whichever frame was saved last
@@ -4819,14 +4961,40 @@ int main(int argc, char* argv[]) {
                     { std::ifstream ef(cfgp);
                       if (ef) { try { ef >> ej; } catch (...) { ej = json::object(); } }
                       if (!ej.is_object()) ej = json::object(); }
-                    auto wr = [&](const char* k, const menu::FaceEditor::EyePoly& poly){
+                    auto wr = [](json& dst, const char* k,
+                                 const menu::FaceEditor::EyePoly& poly){
                         json pts = json::array();
                         for (const auto& p : poly) pts.push_back({p.x, p.y});
-                        ej[k] = {{"points", std::move(pts)}};
+                        dst[k] = {{"points", std::move(pts)}};
                     };
-                    ej.erase("eye_left"); ej.erase("eye_right");
-                    if (!eye_polys.empty())          wr("eye_left",  eye_polys[0]);
-                    if (eye_polys.size() > 1)        wr("eye_right", eye_polys[1]);
+                    if (region_expr.empty()) {
+                        // Face-wide pair. Always rewrite both keys so clearing
+                        // an eye (drawing fewer shapes) removes the stale one.
+                        ej.erase("eye_left"); ej.erase("eye_right");
+                        if (!eye_polys.empty())   wr(ej, "eye_left",  eye_polys[0]);
+                        if (eye_polys.size() > 1) wr(ej, "eye_right", eye_polys[1]);
+                    } else if (eye_polys.empty()) {
+                        // No shapes = inherit: drop this expression's override
+                        // so it follows the face-wide pair again.
+                        if (ej.contains("eye_regions") &&
+                            ej["eye_regions"].is_object()) {
+                            ej["eye_regions"].erase(region_expr);
+                            if (ej["eye_regions"].empty()) ej.erase("eye_regions");
+                        }
+                    } else if (had_override || eye_polys != open_polys) {
+                        // Write this expression's own regions — but NOT when the
+                        // editor still shows the untouched face-wide fallback,
+                        // which would silently pin the expression to today's
+                        // shared shapes and stop later face-wide edits reaching
+                        // it.
+                        if (!ej.contains("eye_regions") ||
+                            !ej["eye_regions"].is_object())
+                            ej["eye_regions"] = json::object();
+                        json& jo = ej["eye_regions"][region_expr];
+                        jo = json::object();
+                        wr(jo, "eye_left", eye_polys[0]);
+                        if (eye_polys.size() > 1) wr(jo, "eye_right", eye_polys[1]);
+                    }
                     // draw_size lets single-panel faces scale regions; multi-
                     // panel slices use canvas coords directly (ignored there).
                     ej["draw_size"] = {rgba_canvas.cols, rgba_canvas.rows};
@@ -5449,6 +5617,19 @@ int main(int argc, char* argv[]) {
         return native_ctrl ? native_ctrl->blink_frames_loaded() : 0;
     };
     menu_ctx.pf_trigger_blink = [&]{ if (native_ctrl) native_ctrl->trigger_blink(); };
+    // Light sensor readout + auto-dim plumbing. The lux getters are wired only
+    // when the sensor is enabled so the GPIO readout row hides on rigs
+    // without one.
+    if (light_cfg.enabled) {
+        menu_ctx.light_lux       = [&light_sensor]{ return light_sensor.latest_lux(); };
+        menu_ctx.light_connected = [&light_sensor]{ return light_sensor.connected(); };
+    }
+    menu_ctx.pf_apply_auto_dim = [&]{
+        if (native_ctrl) native_ctrl->set_auto_dim(pf_auto_dim_cfg());
+    };
+    menu_ctx.pf_auto_dim_factor = [&]() -> double {
+        return native_ctrl ? native_ctrl->auto_dim_factor() : 1.0;
+    };
     menu_ctx.pf_get_expr_blink = [&](const std::string& expr, int& mode, int& frames,
                                      bool& whole, int& loaded) -> bool {
         if (!native_ctrl) return false;
@@ -5575,12 +5756,23 @@ int main(int argc, char* argv[]) {
     // travel limits, per-servo slew speed and Copy/Mirror pairing always apply —
     // menu_ctx.coproc_servo above stays the RAW passthrough, used only by the
     // low-level Peripheral Test sliders.
-    servos.set_sink([&](int ch, int deg, int speed) {
-        if (coproc_inputs) coproc_inputs->send_servo_move(ch, deg, speed);
-    });
-    servos.set_cal_sink([&](int ch, int lo, int hi) {
-        if (coproc_inputs) coproc_inputs->send_servo_calibration(ch, lo, hi);
-    });
+    // Transport pick (cfg["servo_bus"].transport, parsed above): the same
+    // ServoController drives either sink, so limits/pairing/menus don't care.
+    if (servo_transport == "i2c") {
+        servos.set_sink([&](int ch, int deg, int speed) {
+            servo_i2c.move(ch, deg, speed);
+        });
+        servos.set_cal_sink([&](int ch, int lo, int hi) {
+            servo_i2c.calibrate(ch, lo, hi);
+        });
+    } else {
+        servos.set_sink([&](int ch, int deg, int speed) {
+            if (coproc_inputs) coproc_inputs->send_servo_move(ch, deg, speed);
+        });
+        servos.set_cal_sink([&](int ch, int lo, int hi) {
+            if (coproc_inputs) coproc_inputs->send_servo_calibration(ch, lo, hi);
+        });
+    }
     // Pulse windows FIRST — they decide how much travel each servo has, and the
     // firmware applies them on attach, so they must land before the first move.
     servos.push_calibration();
@@ -6818,6 +7010,14 @@ int main(int argc, char* argv[]) {
                                    "transition_window_s", "expression",
                                    "duration_s", "cooldown_s" })
                 jls.erase(k);
+            // Auto-dim (Face Display > Brightness > Auto Dim) lives with the
+            // sensor that drives it.
+            auto& jad = jls["auto_dim"];
+            jad["enabled"]    = state.face.auto_dim;
+            jad["dark_lux"]   = state.face.auto_dim_dark;
+            jad["bright_lux"] = state.face.auto_dim_bright;
+            jad["min_pct"]    = state.face.auto_dim_min_pct;
+            jad["curve"]      = state.face.auto_dim_curve;
         }
         cfg["voice_mouth"]["enabled"]             = state.voice_mouth.enabled;
         cfg["voice_mouth"]["sensitivity"]         = state.voice_mouth.sensitivity;
@@ -10103,6 +10303,7 @@ int main(int argc, char* argv[]) {
     step("bno055");          bno055.stop();
     step("boop_sensor");     boop_sensor.stop();
     step("light_sensor");    light_sensor.stop();
+    step("servo_i2c");       servo_i2c.stop();
     step("apds9960");        apds.stop();
     step("bme280");          bme280.stop();
     step("accessory_leds");  accessory_leds.stop();

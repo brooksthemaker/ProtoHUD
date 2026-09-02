@@ -128,9 +128,11 @@ struct LayerCfg {
     int   r2 = 120, g2 = 80,  b2 = 210;
     int   r3 = 70,  g3 = 120, b3 = 220;
     // Particle size bounds, read by pick_size() in 12 of the effects.
-    // Defaults match the cloud spawn (5..16) so nothing shifts on save.
-    int   size_min = 5;
-    int   size_max = 16;
+    // Default 1/1 (user preference: start pixel-fine, grow from there).
+    // Saved layers always carry explicit size keys, so changing the default
+    // never shifts an existing layer — only brand-new ones start at 1.
+    int   size_min = 1;
+    int   size_max = 1;
     float speed_min = 5.f;
     float speed_max = 15.f;
     // Direction of motion, degrees (0 = right, 90 = down, 180 = left,
@@ -350,21 +352,20 @@ inline ZonePalette zone_palette_for(int idx) {
 struct PremadeEffect { const char* name; const char* combo; };
 constexpr PremadeEffect kPremadeEffects[] = {
     {"gentle_snow","snow — light drift"}, {"heavy_snow","snow — dense"},
-    {"petals","snow — pink petals"}, {"cold_breath","breath — expanding puff"},
+    {"petals","fluttering pink petals"}, {"cold_breath","breath — expanding puff"},
     {"dizzy","spinning stars (also the Dizzy reaction)"},
-    {"campfire","embers"}, {"galaxy","sparkle — multicolour"},
+    {"campfire","low flames + drifting sparks"}, {"galaxy","sparkle — multicolour"},
     {"party","confetti"}, {"radar","expanding rings"},
-    {"fire","embers + embers + sparkle"}, {"aurora","fireflies + sparkle"},
+    {"fire","licking flames + rising sparks"}, {"aurora","fireflies + sparkle"},
     {"blizzard","driven snow x2"}, {"sonar","rings + fireflies"},
     {"celebration","confetti + sparkle"}, {"plasma","blue embers x2 + ring"},
     {"thunderstorm","rain + branched lightning"}, {"arc","crackling electric arcs"},
-    {"meteor_shower","meteors + sparkle"},
     {"fireworks","fireworks bursts"}, {"bubbles","rising bubbles"},
-    {"vortex","comet vortex (cool) + sparkle"},
-    {"vortex_ember","comet vortex (fire palette)"},
-    {"vortex_toxic","comet vortex (toxic green)"},
-    {"vortex_rose","comet vortex (pink/violet)"},
-    {"vortex_rainbow","comet vortex (rainbow)"},
+    {"vortex","whirlpool vortex (cool) + sparkle"},
+    {"vortex_ember","whirlpool vortex (fire palette)"},
+    {"vortex_toxic","whirlpool vortex (toxic green)"},
+    {"vortex_rose","whirlpool vortex (pink/violet)"},
+    {"vortex_rainbow","whirlpool vortex (rainbow)"},
     {"nebula","clouds x2 + sparkle"},
     {"starfield","parallax stars from centre"},
     {"warp","hyperspace streaks"},
@@ -380,8 +381,8 @@ constexpr PremadeEffect kPremadeEffects[] = {
 // recognises (see particles.cpp::make_effect).
 const char* const kLayerEffects[] = {
     "none", "sparkle", "embers", "rain", "snow",
-    "confetti", "rings", "fireflies", "clouds",
-    "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
+    "confetti", "rings", "fireflies", "clouds", "flames",
+    "lightning", "bubbles", "fireworks", "vortex", "water",
     "starfield", "warp", "constellation", "shootingstars",
     "steam", "waveform", "matrix", "circuit", "frost", "heatwave",
     "snooze", "breath",
@@ -391,26 +392,46 @@ const char* const kLayerEffects[] = {
 // Open the face image picker for a given expression. On commit copies the
 // chosen PNG into the active face folder (canonical filename, e.g. happy.png),
 // rebuilds the loader so the face reflects the new image, and switches the
-// live expression so the user sees the import immediately.
+// live expression so the user sees the import immediately. on_imported
+// overrides that show step — blink frames pass one, because a frame is not an
+// expression and set_face_by_name would yank the face to neutral (the editor's
+// save path fires a blink for the same reason).
 static void import_face_into_slot(MenuSystem* menu,
                                   IFaceController* teensy,
                                   std::string expression,
-                                  std::string label) {
+                                  std::string label,
+                                  std::function<void()> on_imported = {}) {
     if (!menu || !teensy) return;
     char title[64];
     std::snprintf(title, sizeof(title), "Import %s face PNG", label.c_str());
     std::string start = menu->file_picker_dir();
     menu->open_file_picker(
         title, std::move(start), {".png"},
-        [teensy, expression = std::move(expression)](const std::string& src) {
+        [teensy, expression = std::move(expression),
+         on_imported = std::move(on_imported)](const std::string& src) {
             if (!teensy->import_face_image(expression, src)) {
                 std::fprintf(stderr,
                              "[face] import failed for '%s' from '%s'\n",
                              expression.c_str(), src.c_str());
                 return;
             }
-            teensy->set_face_by_name(expression);
+            if (on_imported) on_imported();
+            else             teensy->set_face_by_name(expression);
         });
+}
+
+// Insert `item` just before the child labelled `before` (append when absent).
+// Used to slot the blink-frame Copy rows between Edit… and Replace… without
+// re-deriving make_asset_slot_row's child order.
+static void insert_child_before(MenuItem& parent, const char* before,
+                                MenuItem item) {
+    for (auto it = parent.children.begin(); it != parent.children.end(); ++it) {
+        if (it->label == before) {
+            parent.children.insert(it, std::move(item));
+            return;
+        }
+    }
+    parent.children.push_back(std::move(item));
 }
 
 // Dynamic label shared by every PNG-backed slot row (face / mouth / boop):
@@ -2214,11 +2235,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                             [get_eb2]{ int m=0,f=0,l=0; bool w=false;
                                 return get_eb2("", m, f, w, l) && w; }),
                     }),
-                    "Eye Regions: frames are masked to the face's eye_left / "
-                    "eye_right polygons — draw just the eyes. Whole Face: each "
-                    "frame REPLACES the whole face for that tick, so draw "
-                    "complete faces. Pick Whole Face when the eyes don't sit "
-                    "inside those polygons. Each expression can override this."));
+                    "Eye Regions: frames are masked to the eye polygons — draw "
+                    "just the eyes. Each face can carry its OWN polygons (draw "
+                    "them in that face's editor; none drawn = this face-wide "
+                    "pair). Whole Face: each frame REPLACES the whole face for "
+                    "that tick, so draw complete faces. Each expression can "
+                    "override this."));
             }
 
             // ⚠ Pre-allocated rows, hidden rather than absent. The menu tree
@@ -2227,23 +2249,76 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             // the ones past the configured count — the same rule the custom
             // expression slots follow.
             for (int f = 1; f <= face::kBlinkAnimMaxFrames; ++f) {
-                const std::string fexpr = "blink/" + std::to_string(f);
-                MenuItem row = leaf("Frame " + std::to_string(f),
-                    [edit_face, fexpr]{ if (edit_face) edit_face(fexpr); });
-                row.label_fn = [teensy, f, fexpr]{
-                    std::string s = "Frame " + std::to_string(f);
-                    if (!teensy->face_image_exists(fexpr)) s += "  (empty)";
-                    return s;
+                const std::string fexpr  = "blink/" + std::to_string(f);
+                const std::string flabel = "Frame " + std::to_string(f);
+                AssetSlotRowDesc fd;
+                fd.label    = flabel;
+                fd.label_fn = png_slot_label_fn(teensy, fexpr, flabel,
+                                                pf_hub75_active_p);
+                fd.exists   = [teensy, fexpr]{
+                    return teensy->face_image_exists(fexpr); };
+                fd.edit     = [edit_face, fexpr]{
+                    if (edit_face) edit_face(fexpr); };
+                fd.edit_visible = have_led_regions;
+                fd.clear    = [teensy, fexpr]{ teensy->clear_face_image(fexpr); };
+                fd.import_action = [teensy, menu_sys_pp, fexpr, flabel,
+                                    blink_now]{
+                    import_face_into_slot(
+                        menu_sys_pp ? *menu_sys_pp : nullptr, teensy, fexpr,
+                        flabel,
+                        blink_now ? blink_now : std::function<void()>([]{}));
                 };
-                row.visible_fn = [get_anim, f, have_led_regions]{
+                MenuItem row = make_asset_slot_row(std::move(fd));
+                // Authoring starters, slotted between Edit… and Replace…: seed
+                // the frame from the face it will blink over, or from the frame
+                // before it — then Edit… and close the eyes a little further.
+                {
+                    MenuItem cb = leaf("Copy Base", [teensy, fexpr, blink_now]{
+                        const std::string base = teensy->current_expression();
+                        if (base.empty() || !teensy->face_image_exists(base))
+                            return;
+                        teensy->import_face_image(
+                            fexpr, teensy->face_image_path(base));
+                        if (blink_now) blink_now();
+                    });
+                    cb.visible_fn = [teensy]{
+                        const std::string base = teensy->current_expression();
+                        return !base.empty() && teensy->face_image_exists(base);
+                    };
+                    cb.description =
+                        "Copy the CURRENT face's art into this frame as a "
+                        "starting point, then Edit… and close the eyes a "
+                        "little further than the frame before.";
+                    insert_child_before(row, "Replace...", std::move(cb));
+                }
+                if (f >= 2) {
+                    const std::string pexpr = "blink/" + std::to_string(f - 1);
+                    MenuItem cp = leaf("Copy Previous Frame",
+                        [teensy, fexpr, pexpr, blink_now]{
+                            if (!teensy->face_image_exists(pexpr)) return;
+                            teensy->import_face_image(
+                                fexpr, teensy->face_image_path(pexpr));
+                            if (blink_now) blink_now();
+                        });
+                    cp.visible_fn = [teensy, pexpr]{
+                        return teensy->face_image_exists(pexpr); };
+                    cp.description =
+                        "Copy Frame " + std::to_string(f - 1) + " into this "
+                        "frame, so each frame in the sequence only needs the "
+                        "eyes nudged a step further shut.";
+                    insert_child_before(row, "Replace...", std::move(cp));
+                }
+                // No editor-capability gate on the row itself — Import works
+                // on any backend; only Edit… is gated (edit_visible above).
+                row.visible_fn = [get_anim, f]{
                     bool en = false; int n = 0;
                     if (!get_anim(en, n)) return false;
-                    return f <= n && have_led_regions();
+                    return f <= n;
                 };
                 row.description =
-                    "Draw this frame in the face editor. Frames are ordinary "
-                    "face art — the same tools, palette and auto-backup — and "
-                    "they load the moment you save.";
+                    "Draw this frame in the face editor, or Import a ready-made "
+                    "PNG — frames are ordinary face art with the same tools, "
+                    "palette and auto-backup, and they load the moment you save.";
                 anim.push_back(std::move(row));
             }
 
@@ -2327,34 +2402,95 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         [put, cur]{ int m,f,l; bool w; cur(m,f,w,l); put(m, f, true); },
                         [cur]{ int m,f,l; bool w; return cur(m,f,w,l) && w; }),
                 }),
-                "Eye Regions: the frames are masked to the face's eye_left / "
-                "eye_right polygons, like the ordinary blink — draw just the "
-                "eyes. Whole Face: each frame REPLACES the whole face for that "
-                "tick, so draw complete faces. ⚠ Whole Face is the one to pick "
-                "when this expression's eyes don't match the rest of the face "
-                "— a different number of them, or extra parts that close too. "
-                "Those sit outside the shared eye polygons, and Eye Regions "
-                "would clip them and leave them staring."));
+                "Eye Regions: the frames are masked to the eye polygons, like "
+                "the ordinary blink — draw just the eyes. This expression can "
+                "have its OWN polygons: draw them in ITS editor (none drawn = "
+                "the face-wide pair). Whole Face: each frame REPLACES the "
+                "whole face for that tick, so draw complete faces — for eyes "
+                "that don't match the rest of the face when you'd rather not "
+                "trace regions for them."));
 
             // Pre-allocated, hidden past the count — the tree must not grow
             // while open (item_factories.h).
             for (int f = 1; f <= face::kBlinkAnimMaxFrames; ++f) {
-                const std::string fexpr = "blink/" + expr + "/" + std::to_string(f);
-                MenuItem row = leaf("Frame " + std::to_string(f),
-                    [edit_face, fexpr]{ if (edit_face) edit_face(fexpr); });
-                row.label_fn = [teensy, f, fexpr]{
-                    std::string s = "Frame " + std::to_string(f);
-                    if (!teensy->face_image_exists(fexpr)) s += "  (empty)";
-                    return s;
+                const std::string fexpr  = "blink/" + expr + "/" + std::to_string(f);
+                const std::string flabel = "Frame " + std::to_string(f);
+                AssetSlotRowDesc fd;
+                fd.label    = flabel;
+                fd.label_fn = png_slot_label_fn(teensy, fexpr, flabel,
+                                                pf_hub75_active_p);
+                fd.exists   = [teensy, fexpr]{
+                    return teensy->face_image_exists(fexpr); };
+                fd.edit     = [edit_face, fexpr]{
+                    if (edit_face) edit_face(fexpr); };
+                fd.edit_visible = have_led_regions;
+                fd.clear    = [teensy, fexpr]{ teensy->clear_face_image(fexpr); };
+                fd.import_action = [teensy, menu_sys_pp, fexpr, flabel, expr,
+                                    blink_now]{
+                    // Show the import the way this expression's Preview Blink
+                    // does: switch to it first, then blink, so the sequence
+                    // that plays is the one the frame just landed in.
+                    import_face_into_slot(
+                        menu_sys_pp ? *menu_sys_pp : nullptr, teensy, fexpr,
+                        flabel,
+                        [teensy, expr, blink_now]{
+                            teensy->set_face_by_name(expr);
+                            if (blink_now) blink_now();
+                        });
                 };
-                row.visible_fn = [cur, f, have_led_regions]{
+                MenuItem row = make_asset_slot_row(std::move(fd));
+                // Authoring starters, slotted between Edit… and Replace…. The
+                // base here is THIS expression — the art this sequence blinks
+                // over — not whatever happens to be showing.
+                auto show_seq = [teensy, expr, blink_now]{
+                    teensy->set_face_by_name(expr);
+                    if (blink_now) blink_now();
+                };
+                {
+                    MenuItem cb = leaf("Copy Base",
+                        [teensy, fexpr, expr, show_seq]{
+                            if (!teensy->face_image_exists(expr)) return;
+                            teensy->import_face_image(
+                                fexpr, teensy->face_image_path(expr));
+                            show_seq();
+                        });
+                    cb.visible_fn = [teensy, expr]{
+                        return teensy->face_image_exists(expr); };
+                    cb.description =
+                        "Copy " + label + "'s own art into this frame as a "
+                        "starting point, then Edit… and close the eyes a "
+                        "little further than the frame before.";
+                    insert_child_before(row, "Replace...", std::move(cb));
+                }
+                if (f >= 2) {
+                    const std::string pexpr =
+                        "blink/" + expr + "/" + std::to_string(f - 1);
+                    MenuItem cp = leaf("Copy Previous Frame",
+                        [teensy, fexpr, pexpr, show_seq]{
+                            if (!teensy->face_image_exists(pexpr)) return;
+                            teensy->import_face_image(
+                                fexpr, teensy->face_image_path(pexpr));
+                            show_seq();
+                        });
+                    cp.visible_fn = [teensy, pexpr]{
+                        return teensy->face_image_exists(pexpr); };
+                    cp.description =
+                        "Copy Frame " + std::to_string(f - 1) + " into this "
+                        "frame, so each frame in the sequence only needs the "
+                        "eyes nudged a step further shut.";
+                    insert_child_before(row, "Replace...", std::move(cp));
+                }
+                // No editor-capability gate on the row itself — Import works
+                // on any backend; only Edit… is gated (edit_visible above).
+                row.visible_fn = [cur, f]{
                     int m, n, l; bool w;
                     if (!cur(m, n, w, l)) return false;
-                    return m == 1 && f <= n && have_led_regions();
+                    return m == 1 && f <= n;
                 };
                 row.description =
-                    "Draw this frame in the face editor. Frames live in "
-                    "blink/" + expr + "/ and load the moment you save.";
+                    "Draw this frame in the face editor, or Import a ready-made "
+                    "PNG. Frames live in blink/" + expr + "/ and load the "
+                    "moment you save.";
                 eb.push_back(std::move(row));
             }
 
@@ -3094,7 +3230,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     auto effect_is_directional = [](const std::string& e) {
         return e == "snow" || e == "rain" || e == "embers"
             || e == "confetti" || e == "clouds"
-            || e == "lightning" || e == "meteor" || e == "bubbles";
+            || e == "lightning" || e == "bubbles";
     };
     static LayeredEffectState pf_layered;
     LayeredEffectState* pflz = &pf_layered;   // static address — safe to capture
@@ -3304,7 +3440,19 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         std::vector<MenuItem> effect_items;
         for (const char* name : kLayerEffects) {
             effect_items.push_back(leaf_sel(name,
-                [L, name]{ L->effect = name; },
+                [L, name]{
+                    L->effect = name;
+                    // Flames is an opaque body: additive over the lit face
+                    // saturates to white, and the layer's default white
+                    // colour makes a white palette — seed fire-friendly
+                    // values (both still editable).
+                    if (std::string_view(name) == "flames") {
+                        L->blend = "normal";
+                        if (L->r == 255 && L->g == 255 && L->b == 255) {
+                            L->r = 255; L->g = 120; L->b = 0;
+                        }
+                    }
+                },
                 [L, name]{ return L->effect == name; }));
         }
 
@@ -3951,12 +4099,22 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         MenuItem it = leaf(name, [pflz, name, build_layered_spec, pf_set_effect_json]{
             for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i) pflz->layers[i] = LayerCfg{};
             pflz->layers[0].effect = name;
+            if (name == "flames") {                    // see the layer picker
+                pflz->layers[0].blend = "normal";
+                pflz->layers[0].r = 255; pflz->layers[0].g = 120;
+                pflz->layers[0].b = 0;
+            }
             if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
         });
         it.description = "Select: apply this effect.  Ctrl+Select: open its settings.";
         // Ctrl+Select: switch layer 0 to this effect, then open the layer editor.
         it.secondary_action = [pflz, name]{
             pflz->layers[0] = LayerCfg{}; pflz->layers[0].effect = name;
+            if (name == "flames") {                    // see the layer picker
+                pflz->layers[0].blend = "normal";
+                pflz->layers[0].r = 255; pflz->layers[0].g = 120;
+                pflz->layers[0].b = 0;
+            }
             for (int i = 1; i < LayeredEffectState::kMaxLayers; ++i) pflz->layers[i] = LayerCfg{};
         };
         it.secondary_children = build_layer_menu(0).children;   // full per-layer settings
@@ -4024,7 +4182,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             static std::mt19937 rng(std::random_device{}());
             static const char* const fx[] = {
                 "sparkle","embers","rain","snow","confetti","rings","fireflies",
-                "clouds","lightning","meteor","bubbles","fireworks","vortex",
+                "clouds","lightning","bubbles","fireworks","vortex",
                 "starfield","constellation"};
             static const int pal[][3] = {
                 {0,220,180},{255,80,80},{80,180,255},{255,200,40},
@@ -6558,7 +6716,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),
-        slider("Brightness", 0.f, 255.f, 5.f, "%",
+        with_desc(slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy, &state](float v){
                 // Write the shared state too — the slider's getter reads it, so
@@ -6568,6 +6726,95 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.face.brightness = static_cast<uint8_t>(v);
             }),
+            "Panel brightness, perceptual: half the slider reads as half as "
+            "bright (gamma-corrected — on raw LEDs a linear slider does "
+            "almost nothing over its whole top half). Auto Dim scales on "
+            "top of this."),
+        // Auto Dim — scale Brightness by ambient lux (light sensor). Values
+        // live in state.face.auto_dim* (persisted with light_sensor.auto_dim);
+        // every change re-pushes to the controller via pf_apply_auto_dim.
+        [&]() -> MenuItem {
+            auto lux    = ctx.light_lux;
+            auto apply  = ctx.pf_apply_auto_dim;
+            auto factor = ctx.pf_auto_dim_factor;
+            std::vector<MenuItem> ad;
+            {   // Live readout: lux in → brightness factor out.
+                MenuItem r = leaf("Now", []{});
+                r.label_fn = [lux, factor]{
+                    const float l = lux ? lux() : -1.f;
+                    if (l < 0.f) return std::string("Now:  no lux sample");
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf),
+                                  "Now:  %.1f lux  \xe2\x86\x92  %d%%", l,
+                                  static_cast<int>(std::lround(
+                                      (factor ? factor() : 1.0) * 100.0)));
+                    return std::string(buf);
+                };
+                r.description =
+                    "Live: the current ambient reading and the brightness the "
+                    "curve maps it to, as a percentage of the Brightness "
+                    "setting. Watch this while tuning the sliders below.";
+                ad.push_back(std::move(r));
+            }
+            ad.push_back(with_desc(toggle("Enabled",
+                [&state]{ return state.face.auto_dim; },
+                [&state, apply](bool v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim = v; }
+                    if (apply) apply();
+                }),
+                "Dim the face with ambient light: dark room = dim face, "
+                "daylight = the full Brightness setting. Rides on top of "
+                "Brightness — turning this off restores it exactly."));
+            ad.push_back(with_desc(slider("Dark Below", 0.f, 100.f, 1.f, " lux",
+                [&state]{ return state.face.auto_dim_dark; },
+                [&state, apply](float v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim_dark = v; }
+                    if (apply) apply();
+                }),
+                "At or below this many lux the face sits at Min Brightness. "
+                "A dim indoor room reads ~5-20 lux."));
+            ad.push_back(with_desc(slider("Full Bright Above", 20.f, 2000.f, 25.f, " lux",
+                [&state]{ return state.face.auto_dim_bright; },
+                [&state, apply](float v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim_bright = v; }
+                    if (apply) apply();
+                }),
+                "At or above this many lux the face runs at the full "
+                "Brightness setting. Indoor lighting reads ~100-500 lux; "
+                "overcast daylight ~1000+."));
+            ad.push_back(with_desc(slider("Min Brightness", 0.f, 100.f, 5.f, "%",
+                [&state]{ return state.face.auto_dim_min_pct; },
+                [&state, apply](float v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim_min_pct = v; }
+                    if (apply) apply();
+                }),
+                "The floor, as a percentage of Brightness — what the face "
+                "dims to in the dark. 0% lets it go fully black."));
+            ad.push_back(with_desc(slider("Curve", 0.25f, 4.f, 0.05f, "",
+                [&state]{ return state.face.auto_dim_curve; },
+                [&state, apply](float v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim_curve = v; }
+                    if (apply) apply();
+                }),
+                "Bends the ramp between the two lux points (which already "
+                "runs in log-lux, matching how eyes judge light). 1 = even. "
+                "Above 1 the face stays dim longer and brightens late; below "
+                "1 it brightens early. Watch the Now row while adjusting."));
+            MenuItem sub = with_desc(submenu("Auto Dim", std::move(ad)),
+                "Dim the face automatically from the ambient light sensor: "
+                "set the lux range, the dimmest the face may go, and the "
+                "curve between them. Needs light_sensor enabled in config.");
+            sub.label_fn = [&state]{
+                return std::string("Auto Dim  [") +
+                       (state.face.auto_dim ? "on" : "off") + "]";
+            };
+            return sub;
+        }(),
         submenu("Hardware",       std::move(pf_hardware_menu)),
         gated(leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
               visible_for_hub75),
@@ -6622,6 +6869,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     if (pf_hub75_p) base_items.push_back(std::move(pf_hub75_layout_item));
     take_into(base_items, protoface_inner_menu, "Panel Preview");
     take_into(base_items, protoface_inner_menu, "Brightness");
+    take_into(base_items, protoface_inner_menu, "Auto Dim");
     take_into(base_items, protoface_inner_menu, "Save Face Config");
     take_into(base_items, protoface_inner_menu, "Release Control");
 
