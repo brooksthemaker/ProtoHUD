@@ -65,6 +65,14 @@ struct FaceState {
     uint8_t  gif_id       = 0;
     uint8_t  r = 0, g = 220, b = 180;
     uint8_t  brightness   = 200;
+    // Auto-dim: scale Brightness by ambient lux (light sensor). Persisted in
+    // cfg["light_sensor"]["auto_dim"]; live values pushed to the native
+    // controller, which applies the factor at render time.
+    bool     auto_dim         = false;
+    float    auto_dim_dark    = 5.f;    // lux at/below → the floor
+    float    auto_dim_bright  = 400.f;  // lux at/above → full Brightness
+    float    auto_dim_min_pct = 10.f;   // floor, % of Brightness
+    float    auto_dim_curve   = 1.f;    // >1 stays dim longer, <1 brightens sooner
     uint8_t  palette_id      = 0;
     uint8_t  face_index      = 0;
     uint8_t  accent_bright   = 5;

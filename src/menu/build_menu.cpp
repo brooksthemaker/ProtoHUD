@@ -539,6 +539,28 @@ std::vector<MenuItem> build_menu(MenuBuildContext& ctx)
     // visualizer and button map.
     for (auto& it : imu_items) gpio_onboard.push_back(std::move(it));
 
+    // Ambient light sensor readout — same live-value style as the IMU rows.
+    // ctx.light_lux is wired only when the sensor is enabled in config, so
+    // rigs without one don't get a dead row.
+    if (ctx.light_lux) {
+        MenuItem row = leaf("Light Sensor", []{});
+        row.label_fn = [lux = ctx.light_lux, conn = ctx.light_connected]{
+            if (conn && !conn()) return std::string("Light Sensor  [offline]");
+            const float l = lux();
+            if (l < 0.f) return std::string("Light Sensor  [no sample]");
+            char buf[48];
+            std::snprintf(buf, sizeof(buf), "Light Sensor  [%.1f lux]", l);
+            return std::string(buf);
+        };
+        row.description =
+            "Live ambient light from the I\xc2\xb2""C sensor on the 40-pin "
+            "header (see light_sensor in config.json). Feeds the Gets "
+            "Bright / Gets Dark expression triggers, the move-into-bright/"
+            "dark reactions, light-driven face layers, and Face Display > "
+            "Brightness > Auto Dim.";
+        gpio_onboard.push_back(std::move(row));
+    }
+
     std::vector<MenuItem> gpio_tab;
     gpio_tab.push_back(with_desc(submenu("On-Board GPIO", std::move(gpio_onboard)),
         "The Pi / CM5 40-pin header: pin visualizer, the on-board GPIO button "

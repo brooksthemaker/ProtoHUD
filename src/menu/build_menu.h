@@ -627,6 +627,16 @@ struct MenuBuildContext {
     // HUD > Compass, so build_menu can place it in the On-Board GPIO section
     // (the IMU chips hang off the 40-pin header's I²C pins).
     std::vector<MenuItem>* imu_out = nullptr;
+    // Ambient light sensor (BH1750/OPT3001 on the 40-pin header's I²C bus).
+    // Wired only when the sensor is enabled in config. light_lux returns the
+    // latest sample (<0 = none yet); light_connected = worker thread running.
+    // Drives the On-Board GPIO live readout and the Auto Dim rows.
+    std::function<float()> light_lux;
+    std::function<bool()>  light_connected;
+    // Auto-dim plumbing: push state.face.auto_dim* into the native controller,
+    // and read back the live 0..1 factor for the readout row.
+    std::function<void()>   pf_apply_auto_dim;
+    std::function<double()> pf_auto_dim_factor;
     // Glitch post-effect config (null on non-native backends). The menu
     // mutates it in place and re-pushes via pf_anim_push().
     face::GlitchConfig* pf_glitch_p = nullptr;
