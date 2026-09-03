@@ -1,9 +1,13 @@
 #include "native_face_controller.h"
 
+#include "blink_anim_cfg.h"
+#include "json_atomic.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -152,6 +156,11 @@ void apply_face_glow(cv::Mat& rgb, const cv::Mat& face_rgba,
 NativeFaceController::NativeFaceController(RenderConfig cfg,
                                           std::unique_ptr<PanelOutput> output)
     : cfg_(std::move(cfg)), output_(std::move(output)) {
+    // Seed the live output mirror from the config so a backend rebuild doesn't
+    // drop the user's mounting orientation back to unflipped.
+    canvas_flip_x_.store(cfg_.canvas_flip_x);
+    canvas_flip_y_.store(cfg_.canvas_flip_y);
+    if (output_) output_->set_output_flip(cfg_.canvas_flip_x, cfg_.canvas_flip_y);
     // Default expression → mood-preset coupling (used when set_expression_effects
     // is enabled). Keys match the face expression stems; values are presets in
     // particles.cpp. An empty value (or missing key) means "show the base effect".
@@ -196,6 +205,10 @@ void NativeFaceController::build_panels() {
         pn.loader->set_whole_face_blink(!cfg_.output_panels.empty());
         pn.state = std::make_unique<FaceState>(
             fc->face, pn.loader->expression_names());
+        // A face folder that carries its own wiggle overrides the panel default,
+        // so switching face sets switches the idle motion with them.
+        if (pn.loader->has_wiggle())
+            pn.state->set_wiggle(pn.loader->wiggle_cfg());
         pn.material = load_material(fc->material.active, pc.w, pc.h,
                                     fc->material.scroll_x, fc->material.scroll_y,
                                     cfg_.materials_dir);
@@ -325,12 +338,26 @@ void NativeFaceController::render_thread() {
                 mi.roll_deg    = motion_roll_.load(std::memory_order_relaxed);
                 mi.accel_g     = motion_accel_.load(std::memory_order_relaxed);
                 const double humid = env_humidity_.load(std::memory_order_relaxed);
+                const double lux   = env_lux_.load(std::memory_order_relaxed);
+                const double tempc = env_temp_c_.load(std::memory_order_relaxed);
+                // Fraction of the day elapsed, computed once per frame rather
+                // than per layer — localtime() is not cheap and every layer
+                // would otherwise ask for the same answer.
+                double day_frac = 0.5;
+                {
+                    const std::time_t now = std::time(nullptr);
+                    std::tm tmv{};
+                    if (localtime_r(&now, &tmv))
+                        day_frac = (tmv.tm_hour * 3600 + tmv.tm_min * 60 + tmv.tm_sec)
+                                 / 86400.0;
+                }
                 for (auto& pn : panels_) {
                     if (pn.state) pn.state->set_audio(vol, mouth);
                     if (pn.particles) {
                         pn.particles->set_audio(vol);
                         pn.particles->set_motion(mi);
                         pn.particles->set_humidity(humid);
+                        pn.particles->set_ambient(lux, tempc, day_frac);
                     }
                 }
 
@@ -461,11 +488,23 @@ void NativeFaceController::render_thread() {
                 // flipped — so a single wide canvas reads as a pair of eyes
                 // and directional animations (the EKG sweep) radiate outward
                 // from the centre; cx/cy position within each half.
+                // The face's closed-lid line (Crying hangs its tears off it) —
+                // the current expression's own regions when authored, else the
+                // face-wide pair. Null for a face with no eye regions — the
+                // renderer then falls back to a synthetic flat lid at Position Y.
+                const EyeLidLine* eye_lid = (pn.loader && pn.state)
+                    ? &pn.loader->eye_lid_line(pn.state->expression())
+                    : (pn.loader ? &pn.loader->eye_lid_line() : nullptr);
+                const float groll = head_roll_deg_.load();
                 auto render_anim_layer = [&]() -> cv::Mat {
                     if (eye_anim_.mirror && pc.w >= 2) {
                         const int hw = pc.w / 2;
+                        // The half render covers panel columns [pc.w-hw, pc.w) —
+                        // pass that as lid_x0 so a lid-anchored animation lines up
+                        // with the RIGHT eye, which is then flipped onto the left.
                         cv::Mat half = render_eye_animation(eye_anim_, eye_anim_t_,
-                                                            hw, pc.h);
+                                                            hw, pc.h,
+                                                            eye_lid, pc.w - hw, groll);
                         cv::Mat out = cv::Mat::zeros(pc.h, pc.w, CV_8UC4);
                         half.copyTo(out(cv::Rect(pc.w - hw, 0, hw, pc.h)));
                         cv::Mat flipped;
@@ -474,7 +513,7 @@ void NativeFaceController::render_thread() {
                         return out;
                     }
                     return render_eye_animation(eye_anim_, eye_anim_t_,
-                                                pc.w, pc.h);
+                                                pc.w, pc.h, eye_lid, 0, groll);
                 };
 
                 cv::Mat face_layer;
@@ -491,13 +530,13 @@ void NativeFaceController::render_thread() {
                             cv::Mat g = gframe;
                             if (gframe.cols != op.w || gframe.rows != op.h)
                                 cv::resize(gframe, g, cv::Size(op.w, op.h), 0, 0, cv::INTER_NEAREST);
-                            // Pre-flip so the per-panel output flip cancels out:
-                            // GIFs (which may contain text) read forwards on every
-                            // panel regardless of its mounting flip.
-                            if (op.flip_x || op.flip_y) {
-                                const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
-                                cv::Mat tmp; cv::flip(g, tmp, code); g = tmp;
-                            }
+                            // No pre-flip here. This used to cancel the panel's
+                            // mounting flip so GIF text "read forwards", but the
+                            // cancellation ran the wrong way: on a panel hung
+                            // upside down the face gets flipped to come out
+                            // right, and undoing that for the GIF is exactly
+                            // what made it play upside down while everything
+                            // else looked correct.
                             const cv::Rect dst(op.x - pc.x, op.y - pc.y, op.w, op.h);
                             const cv::Rect inter = dst & cv::Rect(0, 0, pc.w, pc.h);
                             if (inter.width > 0 && inter.height > 0)
@@ -527,7 +566,9 @@ void NativeFaceController::render_thread() {
                 // face mirror so the animation tracks the face art.
                 if (eye_active && !eye_replace && !face_layer.empty()) {
                     if (eye_anim_.blackout_eyes && pn.loader) {
-                        const cv::Mat& em = pn.loader->eye_region_mask();
+                        const cv::Mat& em = pn.state
+                            ? pn.loader->eye_region_mask(pn.state->expression())
+                            : pn.loader->eye_region_mask();
                         if (!em.empty() && em.size() == face_layer.size())
                             face_layer.setTo(cv::Scalar(0, 0, 0, 255), em);
                     }
@@ -608,18 +649,28 @@ void NativeFaceController::render_thread() {
                 // layer, tinted by the liquid, so eyes read through the water.
                 if (pf.has && pf.face_glow > 0.0 && !face_layer.empty())
                     apply_face_glow(frame, face_layer, pf.rgba, pf.face_glow);
-                frame = scale_brightness(frame, pn.state->brightness());
+                // Auto-dim rides ON TOP of the user's Brightness — the stored
+                // setting is untouched, so disabling auto-dim restores it.
+                // The user's 0-255 Brightness is PERCEPTUAL: LEDs are linear
+                // in light while the eye follows a power law, so a linear
+                // slider spends its whole top half doing nothing visible —
+                // gamma 2.2 makes mid-slider actually read as half as bright.
+                // The auto-dim factor stays linear-light (its floor/curve
+                // already shape the response in the lux domain).
+                const double b01 = pn.state->brightness() / 255.0;
+                frame = scale_brightness(frame, static_cast<uint8_t>(std::lround(
+                    255.0 * std::pow(b01, 2.2) * auto_dim_factor())));
 
                 cv::Rect roi(pc.x, pc.y, pc.w, pc.h);
                 if ((roi & cv::Rect(0, 0, canvas.cols, canvas.rows)) == roi)
                     frame.copyTo(canvas(roi));
             }
 
-            // Panel-geometry transforms (mirror-panel copies + mounting flips).
-            // Applied identically to the main canvas and the face-only canvas so
-            // the halves the follow sampler reads line up with what's displayed.
-            auto apply_panel_transforms = [&](cv::Mat& C) {
-                // Mirror panels copy a horizontally-flipped source region.
+            // Mirror-panel copies: a CONTENT transform (the right eye is a
+            // flipped copy of the left), so it runs before the overlay layers —
+            // a glitch or a scroll banner should read continuously across the
+            // finished face rather than being duplicated per half.
+            auto apply_mirror_copies = [&](cv::Mat& C) {
                 for (auto& pn : panels_) {
                     if (!pn.is_mirror || pn.src_index < 0) continue;
                     const PanelCfg& src = panels_[pn.src_index].cfg;
@@ -633,8 +684,21 @@ void NativeFaceController::render_thread() {
                     cv::flip(C(sroi), flipped, 1);
                     flipped.copyTo(C(droi));
                 }
-                // Per-panel orientation flips (HUB75 layout's Flip X / Flip Y).
-                // flip code: 1 = horizontal, 0 = vertical, -1 = both (180°).
+            };
+            // Legacy PanelCfg flips (config-driven "panels" array, e.g. a
+            // face_left / face_right pair). These panels ARE the canvas layout,
+            // so flipping their region in place is well defined.
+            //
+            // The HUB75 layout's per-panel / per-half / whole-set flips are NOT
+            // done here — they live in the PanelOutput, applied to each panel's
+            // sampled tile and to the assembled framebuffer. They have to: the
+            // canvas is helmet space, and a rotated panel samples PAST its own
+            // rect to keep the face flowing over a seam. Rearranging canvas
+            // regions under it meant a tilted edge picked up whatever a flip had
+            // just moved in next door — which is how panel 1 ended up showing a
+            // slice of panel 4 (the bottom-half flip had swapped 3 and 4 into
+            // each other's place directly below it).
+            auto apply_mounting_flips = [&](cv::Mat& C) {
                 for (auto& pn : panels_) {
                     const PanelCfg& pc = pn.cfg;
                     if (!pc.flip_x && !pc.flip_y) continue;
@@ -645,19 +709,9 @@ void NativeFaceController::render_thread() {
                     cv::flip(region, flipped, code);
                     flipped.copyTo(region);
                 }
-                // Multi-panel logical canvas: flip each physical panel's slice.
-                for (const auto& op : cfg_.output_panels) {
-                    if (!op.flip_x && !op.flip_y) continue;
-                    cv::Rect roi(op.x, op.y, op.w, op.h);
-                    if ((roi & cv::Rect(0, 0, C.cols, C.rows)) != roi) continue;
-                    const int code = (op.flip_x && op.flip_y) ? -1 : (op.flip_x ? 1 : 0);
-                    cv::Mat region = C(roi), flipped;
-                    cv::flip(region, flipped, code);
-                    flipped.copyTo(region);
-                }
             };
-            apply_panel_transforms(canvas);
-            if (want_face) apply_panel_transforms(face_canvas);
+            apply_mirror_copies(canvas);
+            if (want_face) apply_mirror_copies(face_canvas);
 
             // Glitch post-effect: corrupt the fully-composited face canvas in a
             // single pass so it reads as one signal glitch across the whole face.
@@ -667,6 +721,54 @@ void NativeFaceController::render_thread() {
             // Scrolling-text banner: above everything (including glitch) so it
             // stays legible; spans the whole canvas, mirrored halves included.
             scroll_text_.render(canvas);
+
+            // Outer-rim fade: soften where the panel set physically ends, so
+            // content dissolves instead of being chopped mid-image. Applied to
+            // the union of the panel rects, not to each panel — see
+            // face/edge_fade.h for why that distinction matters on a build
+            // whose panels touch.
+            //
+            // ⚠ Runs AFTER the banner, deliberately. It was placed before it at
+            // first, to keep a diagnostics readout legible edge to edge — but on
+            // a rig where the banner is the main thing lit, that made the fade
+            // look like it did nothing at all: the one layer still hard-cutting
+            // at the panel edge was the one being skipped. Everything the wearer
+            // sees now fades together.
+            //
+            // Test patterns still don't, because they render after this point —
+            // softening an alignment pattern would defeat what it exists to show.
+            //
+            // The face-layer dither runs immediately after, for the same reason
+            // and in the same window: it reduces the finished picture to the
+            // panel's real depth, and an alignment pattern is flat colour that
+            // gains nothing from it.
+            {
+                const int fw = edge_fade_px_.load();
+                if (fw > 0) {
+                    std::vector<cv::Rect> prects;
+                    prects.reserve(cfg_.output_panels.size());
+                    for (const auto& op : cfg_.output_panels)
+                        prects.emplace_back(op.x, op.y, op.w, op.h);
+                    edge_fade_.apply(canvas, prects, fw,
+                                     edge_fade_dither_.load());
+                }
+                FaceDither::apply(canvas, face_dither_planes_.load());
+            }
+
+
+            // Panel setup patterns replace the face but still run through the
+            // mounting flips below (and the gather / output mirror downstream) —
+            // the whole point is to exercise the same path the face takes.
+            if (test_pattern_.active()) {
+                test_pattern_.tick(dt);
+                test_pattern_.render(canvas, cfg_.output_panels);
+            }
+
+            // Mounting flips last — see apply_mounting_flips. The face-only
+            // canvas gets them too so the halves the accessory follow sampler
+            // reads still line up with what's displayed.
+            apply_mounting_flips(canvas);
+            if (want_face) apply_mounting_flips(face_canvas);
         }
 
         {
@@ -689,6 +791,28 @@ bool NativeFaceController::latest_frame(cv::Mat& out) const {
     std::lock_guard<std::mutex> lk(frame_mtx_);
     if (!have_frame_) return false;
     latest_.copyTo(out);
+    return true;
+}
+
+bool NativeFaceController::latest_physical(cv::Mat& out) const {
+    {
+        std::lock_guard<std::mutex> lk(frame_mtx_);
+        if (!have_frame_) return false;
+        latest_.copyTo(out);
+    }
+    if (cfg_.output_panels.empty() || out.empty()) return true;  // canvas IS it
+    // Black out everything no panel covers, so the preview shows only pixels
+    // that can actually light: the gap between panels stays dark instead of
+    // showing face the wearer will never see.
+    cv::Mat lit(out.size(), CV_8U, cv::Scalar(0));
+    const cv::Rect bounds(0, 0, out.cols, out.rows);
+    for (const auto& op : cfg_.output_panels) {
+        const cv::Rect r = cv::Rect(op.x, op.y, op.w, op.h) & bounds;
+        if (r.width > 0 && r.height > 0) lit(r).setTo(255);
+    }
+    cv::Mat dark;
+    cv::bitwise_not(lit, dark);
+    out.setTo(cv::Scalar(0, 0, 0), dark);
     return true;
 }
 
@@ -822,22 +946,68 @@ void NativeFaceController::set_brightness(uint8_t value) {
     write_state_file(snap);
 }
 
+uint8_t NativeFaceController::brightness() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_)
+        if (pn.state)
+            return static_cast<uint8_t>(
+                std::clamp(pn.state->brightness(), 0, 255));
+    return 255;
+}
+
+// Rewrite a "gradient:<dir>:<mode>:<speed>:<stops>" spec's direction and/or
+// scroll speed, leaving every other field alone. Non-gradient specs (solids, the
+// PNG pattern presets) pass through untouched.
+//
+// ⚠️ The trailing "m" on the direction MIRRORS the ramp about the face's centre
+// line, and every built-in gradient relies on it so the two sides of the face
+// reflect each other. Replacing "hm" with a bare "a45" would silently break that
+// symmetry, so the mirror flag is carried across.
+static std::string regrad_spec(const std::string& spec,
+                               const int* angle, const int* speed) {
+    if (spec.rfind("gradient:", 0) != 0) return spec;
+    const size_t p0 = 9;                                  // after "gradient:"
+    const size_t c1 = spec.find(':', p0);
+    if (c1 == std::string::npos) return spec;
+    const size_t c2 = spec.find(':', c1 + 1);
+    if (c2 == std::string::npos) return spec;
+    const size_t c3 = spec.find(':', c2 + 1);
+    if (c3 == std::string::npos) return spec;             // no stop list = leave it
+
+    std::string dir  = spec.substr(p0, c1 - p0);
+    std::string mode = spec.substr(c1 + 1, c2 - c1 - 1);
+    std::string spd  = spec.substr(c2 + 1, c3 - c2 - 1);
+    const std::string stops = spec.substr(c3 + 1);
+
+    if (angle) {
+        const bool mirror = !dir.empty() && (dir.back() == 'm' || dir.back() == 'M');
+        const int  a      = ((*angle % 360) + 360) % 360;
+        dir = "a" + std::to_string(a) + (mirror ? "m" : "");
+    }
+    if (speed) spd = std::to_string(*speed);
+    return "gradient:" + dir + ":" + mode + ":" + spd + ":" + stops;
+}
+
 std::string NativeFaceController::material_for_index(int idx) const {
     std::string spec = preset_material(idx);
     if (idx >= 22 && idx <= 33) {
         // Pride flags (22-33) are stored as smooth vertical gradients
         // ("gradient:v:s:0:…"). Apply the live rotation and sharp-bands
         // preferences before handing the spec to the renderer.
-        static const std::string kPrefix = "gradient:v:";
-        if (spec.rfind(kPrefix, 0) == 0) {
-            const int ang = ((pride_angle_.load() % 360) + 360) % 360;
-            spec = "gradient:a" + std::to_string(ang) + ":" + spec.substr(kPrefix.size());
-        }
+        const int ang = ((pride_angle_.load() % 360) + 360) % 360;
+        spec = regrad_spec(spec, &ang, nullptr);
         if (pride_sharp_.load()) {
             const auto p = spec.find(":s:");   // swap smooth → banded for distinct stripes
             if (p != std::string::npos) spec.replace(p, 3, ":b:");
         }
+    } else {
+        // Built-in gradients (12-21): live direction from the menu.
+        const int ang = mat_angle_.load();
+        spec = regrad_spec(spec, &ang, nullptr);
     }
+    // Scroll applies to every gradient material, flags included.
+    const int spd = mat_speed_.load();
+    spec = regrad_spec(spec, nullptr, &spd);
     return spec;
 }
 
@@ -860,6 +1030,16 @@ void NativeFaceController::set_menu_item(uint8_t menu_index, uint8_t value) {
     }
     if (menu_index == 11) {        // 11 = pride stripe rotation, in 15° units (native only)
         pride_angle_.store((static_cast<int>(value) * 15) % 360);
+        return;                    // menu re-applies the current preset via item 8
+    }
+    if (menu_index == 12) {        // 12 = gradient material direction, 15° units
+        mat_angle_.store((static_cast<int>(value) * 15) % 360);
+        return;                    // menu re-applies the current preset via item 8
+    }
+    if (menu_index == 13) {        // 13 = gradient material scroll, px/s
+        // Byte transport, but the speed is SIGNED (negative reverses the flow),
+        // so it rides across offset by 100: 0..200 maps to -100..+100 px/s.
+        mat_speed_.store(static_cast<int>(value) - 100);
         return;                    // menu re-applies the current preset via item 8
     }
     if (menu_index != 8) return;   // 8 = material colour preset (matches Protoface)
@@ -1152,7 +1332,10 @@ bool NativeFaceController::import_face_image(const std::string& expression,
     const std::string dst    = folder + "/" + canonical_face_filename(expression);
 
     std::error_code ec;
-    std::filesystem::create_directories(folder, ec);
+    // The dst's own parent, not `folder`: a blink-frame expression
+    // ("blink/1", "blink/happy/1") lands in a subfolder that may not exist yet.
+    std::filesystem::create_directories(
+        std::filesystem::path(dst).parent_path(), ec);
     std::filesystem::copy_file(
         src_path, dst,
         std::filesystem::copy_options::overwrite_existing, ec);
@@ -1453,6 +1636,16 @@ void NativeFaceController::set_blink_enabled(bool enabled) {
         if (pn.state) pn.state->set_blink_enabled(enabled);
 }
 
+void NativeFaceController::trigger_blink() {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    // ⚠ Every panel is triggered under ONE lock hold. Each panel owns its own
+    // FaceState with its own countdown, so triggering them in separate calls
+    // would let the blinks land a frame or two apart — on a multi-panel face
+    // that is two eyes blinking out of step.
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->trigger_blink();
+}
+
 void NativeFaceController::set_eyes_closed(bool closed) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
@@ -1472,26 +1665,214 @@ void NativeFaceController::set_expression_fade(double seconds) {
 }
 
 void NativeFaceController::set_panel_flips(const std::vector<std::array<bool, 2>>& flips) {
-    std::lock_guard<std::mutex> lk(state_mtx_);
     if (!cfg_.output_panels.empty()) {
-        // Multi-panel face rendered as one canvas: flips live on the physical
-        // output slices, applied at the end of the render loop.
-        for (size_t i = 0; i < cfg_.output_panels.size() && i < flips.size(); ++i) {
-            cfg_.output_panels[i].flip_x = flips[i][0];
-            cfg_.output_panels[i].flip_y = flips[i][1];
+        // Multi-panel face rendered as one canvas: the flip is a property of
+        // the physical output, so it goes to the PanelOutput and is applied to
+        // each panel's sampled tile — never to a canvas region, which a
+        // neighbouring rotated panel may be reading across.
+        {
+            std::lock_guard<std::mutex> lk(state_mtx_);
+            for (size_t i = 0; i < cfg_.output_panels.size() && i < flips.size(); ++i) {
+                cfg_.output_panels[i].flip_x = flips[i][0];
+                cfg_.output_panels[i].flip_y = flips[i][1];
+            }
         }
+        if (output_) output_->set_panel_flips(flips);
         return;
     }
+    std::lock_guard<std::mutex> lk(state_mtx_);
     for (size_t i = 0; i < panels_.size() && i < flips.size(); ++i) {
         panels_[i].cfg.flip_x = flips[i][0];
         panels_[i].cfg.flip_y = flips[i][1];
     }
 }
 
+void NativeFaceController::set_half_flips(
+        const std::vector<std::array<bool, 2>>& halves) {
+    if (output_) output_->set_half_flips(halves);
+}
+
+void NativeFaceController::set_panel_angles(const std::vector<double>& angles) {
+    if (output_) output_->set_panel_angles(angles);
+}
+
+void NativeFaceController::set_canvas_flip(bool flip_x, bool flip_y) {
+    canvas_flip_x_.store(flip_x);
+    canvas_flip_y_.store(flip_y);
+    // The mirror belongs to the physical output, not the canvas: it has to act
+    // on the assembled framebuffer so it swaps whole panels (what a 180° mount
+    // does) rather than sliding the face across a canvas whose panel rects no
+    // longer line up. Keeping the preview on the unflipped canvas is the point.
+    if (output_) output_->set_output_flip(flip_x, flip_y);
+}
+
 void NativeFaceController::set_wiggle(const WiggleCfg& w) {
     std::lock_guard<std::mutex> lk(state_mtx_);
     for (auto& pn : panels_)
         if (pn.state) pn.state->set_wiggle(w);
+}
+
+bool NativeFaceController::get_face_wiggle(WiggleCfg& out) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_)
+        if (pn.state) { out = pn.state->wiggle(); return true; }
+    return false;
+}
+
+void NativeFaceController::set_face_wiggle(const WiggleCfg& w) {
+    std::string folder;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        for (auto& pn : panels_) {
+            if (pn.state) pn.state->set_wiggle(w);
+            if (folder.empty() && pn.loader) folder = pn.loader->folder();
+        }
+    }
+    if (folder.empty()) return;
+    // Persist into the face folder's own config.json — the same file the eye
+    // regions live in — so the setting travels with the face, not the rig.
+    // Read-modify-write so nothing else in there is lost.
+    namespace fs = std::filesystem;
+    const fs::path cfg_path = fs::path(folder) / "config.json";
+    nlohmann::json cfg = nlohmann::json::object();
+    if (fs::exists(cfg_path)) {
+        std::ifstream in(cfg_path);
+        try { in >> cfg; } catch (...) { cfg = nlohmann::json::object(); }
+        if (!cfg.is_object()) cfg = nlohmann::json::object();
+    }
+    cfg["wiggle"] = { {"speed", w.speed},
+                      {"amplitude_x", w.amplitude_x},
+                      {"amplitude_y", w.amplitude_y} };
+    // Atomic like the blink writers: this file also holds the eye polygons, so
+    // a torn write would cost the wearer their blink regions.
+    write_json_atomic(cfg_path, cfg);
+}
+
+bool NativeFaceController::get_blink_anim(bool& enabled, int& frames) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_)
+        if (pn.loader) {
+            enabled = pn.loader->blink_anim_enabled();
+            frames  = pn.loader->blink_anim_frames();
+            return true;
+        }
+    return false;
+}
+
+int NativeFaceController::blink_frames_loaded() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_)
+        if (pn.loader) return pn.loader->blink_frame_count();
+    return 0;
+}
+
+void NativeFaceController::set_blink_anim(bool enabled, int frames) {
+    std::string folder;
+    bool whole = false;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        for (const auto& pn : panels_)
+            if (pn.loader) { folder = pn.loader->folder();
+                             whole  = pn.loader->blink_anim_whole(); break; }
+    }
+    if (folder.empty()) return;
+    // Same read-modify-write as set_face_wiggle — the setting belongs to the
+    // face, not the rig, so it rides in the face folder's own config.json.
+    namespace fs = std::filesystem;
+    const fs::path cfg_path = fs::path(folder) / "config.json";
+    nlohmann::json cfg = nlohmann::json::object();
+    if (fs::exists(cfg_path)) {
+        std::ifstream in(cfg_path);
+        try { in >> cfg; } catch (...) { cfg = nlohmann::json::object(); }
+        if (!cfg.is_object()) cfg = nlohmann::json::object();
+    }
+    // ⚠ READ-MODIFY-WRITE, via the shared writer. This used to assign a fresh
+    // object to cfg["blink_anim"], which silently destroyed the "expressions"
+    // map — so adjusting the face-wide toggle or frame count wiped every
+    // per-expression override the wearer had set, with no error and no clue.
+    blink_cfg_set_face(cfg, enabled, frames, whole);
+    // ⚠ The frames are held by the LOADERS, so the toggle only takes effect
+    // once they re-read the folder. Reloading here (rather than leaving it to
+    // the caller) is what makes the menu row feel live — but the write MUST be
+    // complete on disk first, which is what write_json_atomic guarantees.
+    if (write_json_atomic(cfg_path, cfg)) reload_active_face();
+}
+
+std::string NativeFaceController::blink_frame_path(int frame_1based) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_) {
+        if (pn.is_mirror || !pn.loader) continue;
+        return cfg_.faces_dir + "/" + pn.cfg.face.active + "/blink/" +
+               std::to_string(frame_1based) + ".png";
+    }
+    return {};
+}
+
+bool NativeFaceController::get_expr_blink(const std::string& expr,
+                                          ExprBlink& out) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_) {
+        if (!pn.loader) continue;
+        out.mode   = pn.loader->blink_mode_for(expr);
+        out.frames = pn.loader->blink_frames_cfg_for(expr);
+        out.whole  = pn.loader->blink_whole_for(expr);
+        out.loaded = pn.loader->blink_frame_count_for(expr);
+        return true;
+    }
+    return false;
+}
+
+void NativeFaceController::set_expr_blink(const std::string& expr,
+                                          const ExprBlink& in) {
+    std::string folder;
+    bool face_on = false;
+    int  face_frames = 0;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        for (const auto& pn : panels_)
+            if (pn.loader) {
+                folder      = pn.loader->folder();
+                face_on     = pn.loader->blink_anim_enabled();
+                face_frames = pn.loader->blink_anim_frames();
+                break;
+            }
+    }
+    if (folder.empty()) return;
+    namespace fs = std::filesystem;
+    const fs::path cfg_path = fs::path(folder) / "config.json";
+    nlohmann::json cfg = nlohmann::json::object();
+    if (fs::exists(cfg_path)) {
+        std::ifstream in_f(cfg_path);
+        try { in_f >> cfg; } catch (...) { cfg = nlohmann::json::object(); }
+        if (!cfg.is_object()) cfg = nlohmann::json::object();
+    }
+    // ⚠ An EMPTY expression name addresses the FACE-WIDE settings. "" is never
+    // a real expression, so the menu's face-wide Cover row reuses this one
+    // setter instead of growing a parallel path that could drift from it.
+    if (expr.empty())
+        blink_cfg_set_face(cfg, face_on, face_frames, in.whole);
+    else
+        blink_cfg_set_expr(cfg, expr, static_cast<int>(in.mode), in.frames, in.whole);
+    // Atomic, and reload only once the new file is actually on disk — the
+    // loaders re-read it, so a half-written file would parse to nothing.
+    if (write_json_atomic(cfg_path, cfg)) reload_active_face();
+}
+
+std::string NativeFaceController::expr_blink_frame_path(const std::string& expr,
+                                                        int frame_1based) const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    for (const auto& pn : panels_) {
+        if (pn.is_mirror || !pn.loader) continue;
+        return cfg_.faces_dir + "/" + pn.cfg.face.active + "/blink/" + expr + "/" +
+               std::to_string(frame_1based) + ".png";
+    }
+    return {};
+}
+
+void NativeFaceController::set_sharp_motion(bool on) {
+    std::lock_guard<std::mutex> lk(state_mtx_);   // same guard as set_wiggle
+    for (auto& pn : panels_)
+        if (pn.state) pn.state->set_sharp_motion(on);
 }
 
 void NativeFaceController::set_glitch(const GlitchConfig& cfg) {
@@ -1525,6 +1906,43 @@ void NativeFaceController::set_env_humidity(double humidity01) {
     // Slow sensor value (BME280 poll ~1 Hz); same lock-free handoff so the
     // render thread reads it at the top of every tick and feeds the panels.
     env_humidity_.store(humidity01, std::memory_order_relaxed);
+}
+
+void NativeFaceController::set_env_light(double lux) {
+    env_lux_.store(lux, std::memory_order_relaxed);
+}
+
+void NativeFaceController::set_auto_dim(const AutoDimCfg& c) {
+    ad_enabled_.store(c.enabled,    std::memory_order_relaxed);
+    ad_dark_.store(c.dark_lux,      std::memory_order_relaxed);
+    ad_bright_.store(c.bright_lux,  std::memory_order_relaxed);
+    ad_min_pct_.store(c.min_pct,    std::memory_order_relaxed);
+    ad_curve_.store(c.curve,        std::memory_order_relaxed);
+}
+
+double NativeFaceController::auto_dim_factor() const {
+    if (!ad_enabled_.load(std::memory_order_relaxed)) return 1.0;
+    const double lux = env_lux_.load(std::memory_order_relaxed);
+    if (lux < 0.0) return 1.0;                  // no sample yet → don't dim
+    // Interpolate in LOG lux — perception of light level is roughly
+    // logarithmic, so equal slider spans read as equal brightness steps.
+    const double dk = std::max(0.01, static_cast<double>(
+                          ad_dark_.load(std::memory_order_relaxed)));
+    const double br = std::max(dk * 1.05, static_cast<double>(
+                          ad_bright_.load(std::memory_order_relaxed)));
+    double t = (std::log(std::max(lux, 0.001)) - std::log(dk)) /
+               (std::log(br) - std::log(dk));
+    t = std::clamp(t, 0.0, 1.0);
+    const double g = std::clamp(static_cast<double>(
+                         ad_curve_.load(std::memory_order_relaxed)), 0.05, 8.0);
+    t = std::pow(t, g);
+    const double floor01 = std::clamp(static_cast<double>(
+        ad_min_pct_.load(std::memory_order_relaxed)) / 100.0, 0.0, 1.0);
+    return floor01 + (1.0 - floor01) * t;
+}
+
+void NativeFaceController::set_env_temp(double temp_c) {
+    env_temp_c_.store(temp_c, std::memory_order_relaxed);
 }
 
 void NativeFaceController::set_mouth_shape(const std::string& shape) {

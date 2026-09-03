@@ -11,7 +11,7 @@
 
 // Firmware version, reported in the HELLO line so the Pi (and the flash script)
 // can confirm an update actually took. Bump it whenever you change the firmware.
-static constexpr const char* kFwVersion = "1.4.8";
+static constexpr const char* kFwVersion = "1.8.0";
 
 // Switches wired between the listed GP pin and GND. We use INPUT_PULLUP, so a
 // pressed switch reads LOW (active-low). Add/remove entries freely — kLedPins
@@ -128,12 +128,47 @@ static constexpr int8_t  kTouchPins[6]    = { 0, 1, 12, 16, 17, 18 };   // RP235
 static constexpr bool    kTouchActiveHigh = true;   // stock TTP223 = high on touch
 static constexpr uint32_t kTouchDebounceMs = 30;
 
-// Servo TEST channels (planned RP2354B carrier feature: 8 channels; 4 here).
-// SHARED with buttons 4-7 (GP6-9): a slot converts from button to servo the
-// FIRST time the Pi commands it ("SERVO <ch> <deg>"), and stays a servo until
-// reboot / PINCFG APPLY. Wire signal to GP, servo V+ to an EXTERNAL 5-6 V
-// supply (never the Pico's 3V3), grounds common.
-static constexpr int8_t  kServoPins[4]    = { 6, 7, 8, 9 };
+// Servo channels (planned RP2354B carrier feature: 8 channels; 4 here).
+// DEDICATED pins — these no longer overlap anything. They used to be GP6-9,
+// shared with buttons 4-7, so a slot converted from button to servo the first
+// time the Pi commanded it and stayed a servo until reboot / PINCFG APPLY;
+// moving a servo therefore cost half the buttons. GP34-36/38 are unclaimed on
+// the Pico LiPo 2 XL W (header pins 26/27/29/31), plain digital+PWM with no
+// onboard function and no hidden ties, so all 8 buttons now stay buttons.
+// (Deliberately NOT GP27: it's A1 with a 1k link to GP41, which is in kAdcPins,
+// so driving it would corrupt ADCREAD channel 1. GP23-25/29 and GP40-42 are not
+// options at all — the first four go to the RM2 wireless module and the rest sit
+// behind internal 1k ADC links, so none of them reach a header.)
+// Wire signal to GP, servo V+ to an EXTERNAL 5-6 V supply (never the Pico's
+// 3V3), grounds common.
+// NOTE these four are now the FALLBACK backend only — see the PCA9685 block
+// below, which takes over automatically whenever the board is fitted.
+static constexpr int8_t  kServoPins[4]    = { 34, 35, 36, 38 };
+
+// ── PCA9685 servo driver (16-channel I2C PWM) — the primary backend ──────────
+// Generates all 16 servo channels in hardware and, critically, takes servo power
+// on its OWN V+ terminal, separate from the Pico's logic rail. Driving servos
+// from shared logic power is what made four of them unusable on the direct-GPIO
+// setup; a dedicated rail behind the board's own bulk capacitor is the fix.
+//
+// It sits on the SAME I2C bus already used by the voice DAC (0x18) and the
+// MPR121 boop pads (0x5A). 0x40 is the PCA9685's default and clashes with
+// neither. A0-A5 solder jumpers shift it if a second board is ever added.
+//
+// WIRING: SDA/SCL to the pins below; VCC to 3V3 (logic only, tiny draw); V+ to
+// an EXTERNAL 5-6 V supply sized for every servo STALLING at once (~1 A each for
+// micro servos, so 4-6 A for a full board); GND common to both the Pico and that
+// supply. The V+ terminal and the 3V3 VCC pin are separate for a reason — never
+// bridge them.
+//
+// The firmware probes for the board at boot and on demand. If nothing answers it
+// falls back to the four direct-GPIO channels above, so this build works both
+// before and after the board is fitted, with no reflash needed either way.
+static constexpr uint8_t  kPcaAddr        = 0x40;
+static constexpr uint8_t  kPcaSdaPin      = 20;    // shared I2C0 (with the DAC)
+static constexpr uint8_t  kPcaSclPin      = 21;
+static constexpr uint16_t kPcaFreqHz      = 50;    // standard servo frame (20 ms)
+static constexpr int      kServoChannels  = 16;    // PCA9685 outputs
 
 // Digital addressable LED TEST zone (planned: 4 zones on the carrier) —
 // a strip OR a custom panel (a panel is just a strip in serpentine order;

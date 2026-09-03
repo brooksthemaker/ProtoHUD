@@ -13,6 +13,7 @@
 #include "capture.h"
 #include "face/custom_expression.h"
 #include "face/eye_anim.h"
+#include "face/scroll_text.h"
 
 // ── Post-processing config ────────────────────────────────────────────────────
 // Modified from menu (any thread); read by the render thread via snap.
@@ -64,6 +65,14 @@ struct FaceState {
     uint8_t  gif_id       = 0;
     uint8_t  r = 0, g = 220, b = 180;
     uint8_t  brightness   = 200;
+    // Auto-dim: scale Brightness by ambient lux (light sensor). Persisted in
+    // cfg["light_sensor"]["auto_dim"]; live values pushed to the native
+    // controller, which applies the factor at render time.
+    bool     auto_dim         = false;
+    float    auto_dim_dark    = 5.f;    // lux at/below → the floor
+    float    auto_dim_bright  = 400.f;  // lux at/above → full Brightness
+    float    auto_dim_min_pct = 10.f;   // floor, % of Brightness
+    float    auto_dim_curve   = 1.f;    // >1 stays dim longer, <1 brightens sooner
     uint8_t  palette_id      = 0;
     uint8_t  face_index      = 0;
     uint8_t  accent_bright   = 5;
@@ -80,6 +89,10 @@ struct FaceState {
     bool     face_colors  = false;  // true = draw the face's own RGB art; false = material override
     bool     pride_sharp  = true;   // pride flags: hard-edged distinct bands vs smooth blend
     int      pride_angle  = 90;     // pride flag stripe rotation, degrees (90 = vertical stripes)
+    // Built-in gradient materials (Sunset/Fire/Lava/…): live direction + scroll.
+    // 0/0 is the shipped look (horizontal, mirrored, static).
+    int      mat_angle    = 0;      // gradient direction, degrees
+    int      mat_speed    = 0;      // gradient scroll, px/s (negative reverses)
 };
 
 struct LoRaNode {
@@ -1039,6 +1052,13 @@ struct AppState {
     // by ExpressionDirector; persisted as protoface.expression_triggers.
     // Guarded by mtx.
     std::map<std::string, face::TriggerSet> expression_triggers;
+    // Event-driven text slots. Each carries its own message AND its own full
+    // set of banner properties; its Triggers live in expression_triggers under
+    // key "textev_<index>", so faces, eye-anims, diagnostics and event text all
+    // share one recipe editor and one persistence path.
+    // Persisted as protoface.text_events. Guarded by mtx.
+    std::vector<face::TextEvent> text_events{
+        static_cast<size_t>(face::kTextEventSlots)};
     // Per-animation params for the procedural Animated Eyes (edited in the
     // Expressions menu). Slot index == face::EyeAnim value; each slot's
     // Triggers live in expression_triggers under key "eyeanim_<index>".
@@ -1050,6 +1070,17 @@ struct AppState {
         { face::EyeAnim::XEyes },     { face::EyeAnim::Radar },
         { face::EyeAnim::Fire },      { face::EyeAnim::Rain },
         { face::EyeAnim::Sparkle },   { face::EyeAnim::Heartbeat },
+        // Crying is the one animation designed AROUND the face art — it anchors to
+        // the eye regions' lid line — so unlike the others it ships pre-tuned to
+        // its intended look: pale blue tears, a longer hold, and overlay +
+        // blackout on so it reads as closed crying eyes over the live face.
+        // (type, speed, size, r, g, b, duration_s, cx, cy, mirror, overlay,
+        //  blackout_eyes)
+        { face::EyeAnim::Crying, 1.0, 1.0, 150, 210, 255, 5.0, 0.5, 0.5,
+          false, true, true },
+        // Waterfall is the same idea turned up — pre-tuned the same way.
+        { face::EyeAnim::Waterfall, 1.0, 1.0, 150, 210, 255, 5.0, 0.5, 0.5,
+          false, true, true },
     };
     VoiceMouthConfig     voice_mouth;
     CoprocMicConfig      coproc_mic;

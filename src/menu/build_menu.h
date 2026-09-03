@@ -23,8 +23,11 @@
 
 #include "app_state.h"
 #include "face/shm_pusher_output.h"
+#include "face/test_pattern.h"        // face::TestPattern (ctx callbacks)
 #include "menu/menu_system.h"
-#include "accessory/accessory_leds.h"   // AccessoryLeds::Config (nested type in ctx)
+#include "accessory/accessory_leds.h"
+#include "accessory/accessory_profiles.h"
+#include "servo/servo_controller.h"   // servo::ServoController (ctx pointer)
 
 // Forward declarations — the context only holds pointers to these.
 namespace cv { class Mat; }
@@ -55,6 +58,15 @@ namespace face         { struct GlitchConfig; struct ScrollTextConfig; class Rea
 // HUB75 panel layout state. Lives here (not main.cpp) because both the menu
 // (HUB75 Layout editor) and main's renderer-rebuild path use it.
 struct PfHub75Layout {
+    // Outer-rim fade width in canvas pixels (0 = off), and whether to dither
+    // the ramp. A property of the physical build, so it rides the layout
+    // alongside the nudges and rotations rather than being a global.
+    int  edge_fade        = 0;
+    bool edge_fade_dither = true;
+    // Dither the finished face down to the panel's real PWM depth
+    // (camera_planes) so gradients stipple instead of banding. Only meaningful
+    // when that depth is below 8 bits, i.e. in camera mode.
+    bool face_dither      = false;
     // Default size applied to every panel slot. Per-slot overrides in
     // panel_size_per (empty string = "use default") let a build mix
     // sizes — e.g. two 64x32 eye panels plus a 64x64 mouth.
@@ -89,6 +101,40 @@ struct PfHub75Layout {
     // nudge geometry — applied to each panel's composited region.
     bool        flip_x[4]       = {false, false, false, false};
     bool        flip_y[4]       = {false, false, false, false};
+    // Per-panel mounting rotation in degrees, for a panel that sits a few
+    // degrees off square in its bracket. The panel's slice is sampled from the
+    // canvas along a rotated rect, so a line crossing the seam stays straight
+    // in the real world instead of kinking at the panel edge. The canvas grows
+    // to cover the rotated corners (see pf_hub75_canvas), so the sample always
+    // has face to read rather than pulling in black from past the edge.
+    double      rotation[4]     = {0.0, 0.0, 0.0, 0.0};
+    // Nearest-neighbour instead of bilinear when sampling a rotated panel.
+    // Bilinear is the better default (it smooths the diagonal edges a few
+    // degrees introduces), but it softens every hard pixel edge on that panel —
+    // very visible on scrolling text. Sharp keeps glyphs exact and stair-steps
+    // the face instead.
+    bool        sharp_rotation  = false;
+    // Daisy-chain walk for multi-ROW arrangements (vertical / grid2x2) on a
+    // single-connector bonnet: the panels are one long chain that piomatter
+    // folds into rows. true = serpentine (each row runs opposite the one above,
+    // the usual "ribbon doubles back" wiring); false = progressive (every row
+    // runs left→right, ribbon returns to the left edge). Ignored for a single
+    // row, where there's nothing to fold. Passed to panel_driver.py.
+    bool        serpentine       = true;
+    // Whole-canvas mirror applied to the panel output (not the in-HUD preview),
+    // on top of the per-panel flips above. For a panel set mounted rotated or
+    // mirrored as a unit — a 180° head mount is both at once — this saves
+    // flipping and re-nudging every panel by hand.
+    bool        flip_canvas_x    = false;
+    bool        flip_canvas_y    = false;
+    // Per-half mirrors, index 0 = top half, 1 = bottom half. A "half" is a row
+    // of panels (both rows of a 2x2 grid; the upper/lower halves of a vertical
+    // stack), flipped as ONE strip — which is what a row mounted rotated 180°
+    // as an assembly needs. That's a different operation from flipping the two
+    // panels individually: flipping the strip also swaps which panel shows
+    // which end of it, exactly as rotating the physical assembly does.
+    bool        flip_half_x[2]   = {false, false};
+    bool        flip_half_y[2]   = {false, false};
     // First-run flag — until apply_defaults has run we treat all-zero
     // nudges as "uninitialised" and populate them.
     bool        defaults_applied = false;
@@ -330,6 +376,14 @@ struct MenuBuildContext {
     // Push the edited layout (LED counts, sections, placement) to the live LEDs
     // now — re-chains the zones and rebuilds the strip without a process restart.
     std::function<void()> acc_apply;
+    // Saved accessory-LED LOOKS (Accessory LEDs > Profiles). Recalled by hand
+    // from the menu, or by a face expression's LED Profile action. Layout is
+    // never part of a profile, so recalling one can't re-chain the strip.
+    accessory::LedProfiles* led_profiles = nullptr;
+    // Named, calibrated coprocessor servos (Face Display > Servo Settings). The
+    // editor mutates the live controller in place — limits/centre/rest/speed take
+    // effect on the next move, and Test buttons drive the real servo immediately.
+    servo::ServoController* servos = nullptr;
     sys::FanController* fans = nullptr;
     // Hot-swap callback for Protoface > Hardware > Backend; main wires it
     // to the tear-down-and-rebuild routine that swaps NativeFaceController
@@ -362,6 +416,14 @@ struct MenuBuildContext {
     std::map<std::string, PfHub75Layout>* pf_hub75_layouts_p = nullptr;
     std::string* pf_hub75_active_p = nullptr;
     std::function<void()> pf_layout_changed;
+    // Applies a HUB75 *geometry* edit (panel count / arrangement / panel size /
+    // nudge / chain order). Unlike pf_layout_changed — which pushes cheap
+    // per-panel state into the live controller — geometry changes resize the
+    // renderer canvas and the piomatter framebuffer, so this rebuilds the panel
+    // output and relaunches panel_driver.py with the new dimensions. Without it
+    // the driver keeps pushing the old canvas shape and the panels show a
+    // truncated / duplicated face until ProtoHUD is restarted.
+    std::function<void()> pf_hub75_apply;
     // MAX7219 panel layout editor (Face Display > MAX7219 Layout). pf_max7219_p
     // is the working copy; pf_max7219_apply serialises it into
     // cfg["protoface"]["max7219"] and hot-swaps the panel output so the change
@@ -406,6 +468,28 @@ struct MenuBuildContext {
     // Face Inertia - the whole face slides opposite quick head motion and
     // springs back like it has mass. Strength scales the maximum slide
     // (1.0 = up to ~10% of the panel).
+    // Per-face wiggle: get returns false when no face is loaded yet; set applies
+    // live AND writes it into the active face folder's config.json.
+    std::function<bool(double&, double&, double&)> pf_get_wiggle;
+    std::function<void(double, double, double)>    pf_set_wiggle;
+    // Animated blink, per face folder (Files > Faces > Blink). get returns
+    // false when no face is loaded yet; set persists to the folder's
+    // config.json and reloads. frames_loaded is how many frame PNGs actually
+    // exist, which can trail the configured count while art is being drawn.
+    std::function<bool(bool&, int&)> pf_get_blink_anim;
+    std::function<void(bool, int)>   pf_set_blink_anim;
+    std::function<int()>             pf_blink_frames_loaded;
+    std::function<void()>            pf_trigger_blink;
+    // Per-expression blink. mode: 0 = inherit the face-wide sequence,
+    // 1 = this expression has its own, 2 = this expression doesn't animate.
+    // frames/whole/loaded as in NativeFaceController::ExprBlink — `whole`
+    // replaces the entire face for the tick instead of masking to the shared
+    // eye polygons, which is what lets an expression carry a different number
+    // of eyes. get returns false when no face is loaded yet.
+    std::function<bool(const std::string&, int&, int&, bool&, int&)> pf_get_expr_blink;
+    std::function<void(const std::string&, int, int, bool)>          pf_set_expr_blink;
+    std::function<void(bool)>   pf_set_sharp_motion;
+    bool*                       pf_sharp_motion_p = nullptr;
     std::function<void(bool)>   pf_set_face_inertia;
     bool*                       pf_face_inertia_p = nullptr;
     std::function<void(double)> pf_set_face_inertia_strength;
@@ -436,9 +520,20 @@ struct MenuBuildContext {
     bool*   pf_heat_heartbeat_p = nullptr;   // heatwave orange heartbeat rim pulse
     double* pf_frost_speed_p    = nullptr;   // frost formation/creep speed multiplier
     double* pf_heat_speed_p     = nullptr;   // heatwave shimmer + heartbeat speed multiplier
+    // Per-band custom effect: the NAME of one of the user's saved layered
+    // presets (cfg["protoface"]["custom_effects"]), or "" for the band's
+    // built-in behaviour. Cold/hot default to "" = the stock frost / heatwave
+    // looks; mild defaults to "" = nothing at all, which is what the two
+    // thresholds have always left in the middle. A name that no longer exists
+    // falls back to the built-in rather than going silent.
+    std::string* pf_temp_cold_fx_p = nullptr;
+    std::string* pf_temp_hot_fx_p  = nullptr;
+    std::string* pf_temp_mild_fx_p = nullptr;
     // Transient preview override (not persisted): 0 = off (follow temperature),
-    // 1 = force frost, 2 = force heatwave. Lets the wearer eyeball the temp
-    // effects on the bench without waiting for the threshold to be crossed.
+    // 1 = force cold band, 2 = force hot band, 3 = force mild band. Lets the
+    // wearer eyeball the temp effects on the bench without waiting for the
+    // threshold to be crossed. Each forces the BAND, so it previews whatever
+    // that band resolves to — custom effect included.
     int*    pf_temp_force_p     = nullptr;
     std::function<void()> pf_ambient_resync;
     // Live-preview tick: main calls this each frame; when Live Preview is on
@@ -463,6 +558,11 @@ struct MenuBuildContext {
     // "gradient:…" spec to the live renderer for instant preview.
     PfGradient* pf_gradient_p = nullptr;
     std::function<void(const std::string&)> pf_set_material;
+    // Panel setup / diagnostic overlays (see face/test_pattern.h). Getter +
+    // setter so the picker can show which pattern is live; the value is
+    // render-thread state, not config — it isn't persisted.
+    std::function<void(face::TestPattern)> pf_set_test_pattern;
+    std::function<face::TestPattern()>     pf_test_pattern;
     // Restart the native HUB75 panel pusher (scripts/panel_driver.py) to
     // recover the face feed after a GPIO conflict, without restarting all of
     // ProtoHUD. No-op outside native HUB75 mode.
@@ -527,12 +627,28 @@ struct MenuBuildContext {
     // HUD > Compass, so build_menu can place it in the On-Board GPIO section
     // (the IMU chips hang off the 40-pin header's I²C pins).
     std::vector<MenuItem>* imu_out = nullptr;
+    // Ambient light sensor (BH1750/OPT3001 on the 40-pin header's I²C bus).
+    // Wired only when the sensor is enabled in config. light_lux returns the
+    // latest sample (<0 = none yet); light_connected = worker thread running.
+    // Drives the On-Board GPIO live readout and the Auto Dim rows.
+    std::function<float()> light_lux;
+    std::function<bool()>  light_connected;
+    // Auto-dim plumbing: push state.face.auto_dim* into the native controller,
+    // and read back the live 0..1 factor for the readout row.
+    std::function<void()>   pf_apply_auto_dim;
+    std::function<double()> pf_auto_dim_factor;
     // Glitch post-effect config (null on non-native backends). The menu
     // mutates it in place and re-pushes via pf_anim_push().
     face::GlitchConfig* pf_glitch_p = nullptr;
     // Scrolling-text banner config — same contract as pf_glitch_p (mutate in
     // place, re-push via pf_anim_push()).
     face::ScrollTextConfig* pf_scroll_p = nullptr;
+    // Set while an Event Text slot or a menu Preview has REPLACED the live
+    // banner: *pf_scroll_saved_p is what it displaced. Preview must go through
+    // these rather than stashing its own copy, so only one displacement can be
+    // in flight and the save path always knows the real banner.
+    face::ScrollTextConfig* pf_scroll_saved_p     = nullptr;
+    bool*                   pf_scroll_displaced_p = nullptr;
     // Reaction engine (environment/movement reactions; main owns it). The
     // menu edits its Config via set_config and calls the force_* test hooks.
     face::ReactionEngine* reactions = nullptr;

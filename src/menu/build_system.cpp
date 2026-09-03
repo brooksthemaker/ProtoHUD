@@ -110,6 +110,16 @@ using json = nlohmann::json;
 #include "menu/item_factories.h"
 #include "menu/shared_items.h"
 
+// Which ambient-light chip is configured (cfg["light_sensor"].type) — the
+// pin-claim and tooltip labels/addresses below follow it.
+static bool light_sensor_is_opt3001(const json& cfg) {
+    return cfg.contains("light_sensor") && cfg["light_sensor"].is_object()
+        && cfg["light_sensor"].value("type", std::string("bh1750")) == "opt3001";
+}
+static const char* light_sensor_label(const json& cfg) {
+    return light_sensor_is_opt3001(cfg) ? "OPT3001 light" : "BH1750 light";
+}
+
 // ── I2C bus scanner ───────────────────────────────────────────────────────────
 // Runs in a background thread. Opens the bus, probes addresses 0x08–0x77, stores
 // found addresses in state.i2c_scan_results, then clears i2c_scan_busy.
@@ -1140,7 +1150,7 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         add_i2c("bno055",       "BNO055 IMU");
         add_i2c("mpu9250",      "MPU9250 IMU");
         add_i2c("boop",         "MPR121 boop");
-        add_i2c("light_sensor", "BH1750 light");
+        add_i2c("light_sensor", light_sensor_label(cfg));
 
         // SPI chains — every chain on /dev/spidev0.x claims SPI0 pins,
         // /dev/spidev1.x claims SPI1 pins. Record per-bus speed for the
@@ -1237,7 +1247,8 @@ std::vector<MenuItem> build_system_menu(MenuBuildContext& ctx)
         add_if("bno055",       0x28, "BNO055 IMU");
         add_if("mpu9250",      0x68, "MPU9250 IMU");
         add_if("boop",         0x5A, "MPR121 boop");
-        add_if("light_sensor", 0x23, "BH1750 light");
+        add_if("light_sensor", light_sensor_is_opt3001(cfg) ? 0x44 : 0x23,
+               light_sensor_label(cfg));
         return out;
     };
 

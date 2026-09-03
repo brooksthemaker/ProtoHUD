@@ -74,6 +74,13 @@ def main():
                     help='PWM bit planes used in camera mode')
     ap.add_argument('--camera-temporal-planes', type=int, default=8,
                     help='temporal-dither planes used in camera mode')
+    # Multi-row arrangements (vertical stack / 2x2 grid) on a single-connector
+    # bonnet are one long daisy chain that piomatter folds into rows. serpentine
+    # = the ribbon doubles back, so each row runs opposite the one above it;
+    # progressive = every row runs left→right. Wrong choice → reversed row 2.
+    ap.add_argument('--serpentine', type=int, default=1,
+                    help='1 = rows alternate direction (ribbon doubles back), '
+                         '0 = every row runs left-to-right')
     ap.add_argument('--shm', default='/dev/shm/protoface_frame')
     ap.add_argument('--fps', type=float, default=60.0, help='poll rate cap')
     args = ap.parse_args()
@@ -82,7 +89,8 @@ def main():
     size = 1 + W * H * 3
     print(f"[panel_driver] starting: canvas {W}x{H}, panel {args.panel_w}x{args.panel_h}, "
           f"chain {args.chain}, parallel {args.parallel}, pinout {args.pinout}, "
-          f"order {args.order}, camera_mode {args.camera_mode}, shm {args.shm}", flush=True)
+          f"order {args.order}, camera_mode {args.camera_mode}, "
+          f"serpentine {args.serpentine}, shm {args.shm}", flush=True)
 
     # Piomatter geometry depends on the bonnet. The Active-3 board drives parallel
     # chains that share address lines, so it needs the multilane mapper. The
@@ -99,18 +107,26 @@ def main():
                                       map=pixelmap, n_lanes=n_lanes)
         chan = [1, 2, 0]      # Active-3 panels display R->G->B rotated; resend (G,B,R)
     else:
+        # Single-connector bonnet: every panel hangs off one daisy chain, and
+        # piomatter derives the chain length from width*height. "parallel" here
+        # means rows of panels stacked into the canvas, not independent lanes —
+        # the bonnet has only one. `serpentine` tells piomatter which way each
+        # row runs so a 2x2 grid folds the way the ribbon is actually wired.
         width    = args.panel_w * args.chain
         height   = args.panel_h * args.parallel
+        serp     = bool(args.serpentine)
         if args.camera_mode:
             # More temporal dithering + explicit bit planes smooths the panel on
             # video (piomatter's PIO refresh is already stable; this tunes the
             # brightness/dither tradeoff). Falls back to library defaults when off.
             geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
+                                          serpentine=serp,
                                           n_planes=args.camera_planes,
                                           n_temporal_planes=args.camera_temporal_planes,
                                           rotation=piomatter.Orientation.Normal)
         else:
             geometry = piomatter.Geometry(width=width, height=height, n_addr_lines=n_addr,
+                                          serpentine=serp,
                                           rotation=piomatter.Orientation.Normal)
         chan = [0, 1, 2]      # straight RGB; switch to *_bgr pinout if red/blue swap
     if args.order != 'auto':
@@ -149,6 +165,7 @@ def main():
 
     last_seq = -1
     period = 1.0 / max(1.0, args.fps)
+    buf = frame = None
     try:
         while running['go']:
             seq = mm[0]
@@ -163,6 +180,11 @@ def main():
         fb[:] = 0           # blank on exit
         matrix.show()
         time.sleep(0.1)
+        # Drop the numpy views into the mapping first: they hold exported buffer
+        # pointers, and mmap.close() raises BufferError while any are alive — so
+        # the driver used to die with a traceback (and leak the fd) on every
+        # relaunch instead of shutting down cleanly.
+        buf = frame = None
         mm.close()
         os.close(fd)
         print("panel_driver stopped.")

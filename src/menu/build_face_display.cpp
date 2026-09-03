@@ -78,6 +78,7 @@
 #include "profile_manager.h"
 #include "face/face_config.h"
 #include "face/face_image.h"
+#include "face/face_loader.h"   // kBlinkAnimMaxFrames
 #include "face/eye_animations.h"
 #include "face/gif_player.h"
 #include "face/expression_director.h"
@@ -119,6 +120,19 @@ struct LayerCfg {
     std::string effect = "none";   // "none" disables the slot
     int   count = 20;              // particle count / density
     int   r = 255, g = 255, b = 255;
+    // Extra palette entries. The engine has always read a "colors" ARRAY —
+    // clouds spread it across each clump's lobes, most other effects pick per
+    // particle — but a layer only ever wrote one entry, so every effect was
+    // stuck single-tone. colors_used says how many of the three are live.
+    int   colors_used = 1;                 // 1..3
+    int   r2 = 120, g2 = 80,  b2 = 210;
+    int   r3 = 70,  g3 = 120, b3 = 220;
+    // Particle size bounds, read by pick_size() in 12 of the effects.
+    // Default 1/1 (user preference: start pixel-fine, grow from there).
+    // Saved layers always carry explicit size keys, so changing the default
+    // never shifts an existing layer — only brand-new ones start at 1.
+    int   size_min = 1;
+    int   size_max = 1;
     float speed_min = 5.f;
     float speed_max = 15.f;
     // Direction of motion, degrees (0 = right, 90 = down, 180 = left,
@@ -150,6 +164,30 @@ struct LayerCfg {
     float pitch_fill = 0.3f;
     int   bubbles = 0;
     std::string bubble_mode = "rise";
+    // "breath" extras: where the puff starts (0..1 of the panel), its peak
+    // opacity, how big it grows, and what makes it fire. trigger "none" free-
+    // runs at `rate`; "audio"/"motion" emit one puff per threshold crossing.
+    float breath_x = 0.5f, breath_y = 0.62f;
+    float breath_alpha = 0.5f;
+    float breath_size  = 16.f;
+    float breath_rate  = 0.5f;
+    // Line origin: width as a fraction of the panel (0 = a single point) and
+    // its tilt. Lets the puff leave a long muzzle across its whole width.
+    float breath_len   = 0.f;
+    float breath_angle = 0.f;
+    // "frost" extras. These exist in the engine but were only reachable as a
+    // GLOBAL ambient setting, so a frost LAYER had no options at all.
+    bool  frost_fractal   = true;    // branching ferns + drifting big flakes
+    float frost_form_s    = 5.f;     // seconds to fully form
+    // ⚠ These defaults MIRROR the engine's (particles.cpp FrostEffect). Getting
+    // them wrong would silently restyle every frost layer the moment it was
+    // saved, because the layer writes its value out unconditionally.
+    float frost_opacity   = 0.5f;    // engine default 0.5, NOT solid
+    float frost_face_tint = -1.f;    // <0 = the mode's default (0.8 fractal / 0)
+    float frost_flake_every = 0.9f;  // seconds between big flakes; engine floors at 0.3
+    float frost_flake_drift = 6.f;   // sideways drift in px/s — a RATE, not a multiplier
+    std::string breath_trigger = "none";
+    float breath_threshold = 0.25f;
     // "lightning" extras: arc mode (crackling arcs vs falling bolts), fork
     // density, and random origin (bolts strike from anywhere instead of the
     // directional edge; bolt mode only).
@@ -222,6 +260,12 @@ constexpr BoopFaceSlot kBoopFaceSlots[] = {
 };
 constexpr int kBoopFaceSlotCount = sizeof(kBoopFaceSlots) / sizeof(kBoopFaceSlots[0]);
 
+// Accessory-LED profile rows pre-allocated in the menu (make_dynamic_rows hides
+// the unused ones). The menu tree is built once at startup, so this caps how
+// many saved looks can be listed — the store itself is unbounded, and a config
+// with more than this simply shows the first kLedProfileSlots.
+constexpr int kLedProfileSlots = 12;
+
 // ── Style vocabularies ────────────────────────────────────────────────────────
 // Shared by the Default Style menus and every expression's own Material /
 // Effect pickers (each expression can override the default look).
@@ -245,23 +289,83 @@ constexpr PFFlag kPridePresets[] = {
     { "Nonbinary",   28 }, { "Asexual",     29 }, { "Genderfluid", 30 },
     { "Genderqueer", 31 }, { "Aromantic",   32 }, { "Intersex",    33 },
 };
+// ── Face Material Color presets, resolved for an LED zone ────────────────────
+// The accessory zones offer the SAME colour options as the face. Rather than
+// duplicating the palette, this parses the face's own spec strings
+// (NativeFaceController::preset_material_spec) so both ends stay in sync from
+// one table: "solid:r,g,b" and "teal" become a flat colour, "gradient:...:HEX-
+// HEX-..." becomes the zone's multi-stop list. Presets 8-10 are PNG pattern
+// assets on the face with no RGB list in code, so they get hand-written strip
+// equivalents here.
+struct ZonePalette {
+    std::array<uint8_t, 3>              flat{ 0, 220, 180 };   // used when stops is empty
+    std::vector<std::array<uint8_t, 3>> stops;                 // empty = flat colour
+};
+inline ZonePalette zone_palette_for(int idx) {
+    ZonePalette out;
+    auto hex_stops = [](const std::string& list) {
+        std::vector<std::array<uint8_t, 3>> v;
+        size_t i = 0;
+        while (i < list.size()) {
+            size_t j = list.find('-', i);
+            if (j == std::string::npos) j = list.size();
+            const std::string h = list.substr(i, j - i);
+            if (h.size() == 6) {
+                const unsigned long n = std::stoul(h, nullptr, 16);
+                v.push_back({ static_cast<uint8_t>((n >> 16) & 0xFF),
+                              static_cast<uint8_t>((n >>  8) & 0xFF),
+                              static_cast<uint8_t>( n        & 0xFF) });
+            }
+            i = j + 1;
+        }
+        return v;
+    };
+    // The face renders these three from PNG patterns; approximate them as stops.
+    if (idx == 8)  { out.stops = hex_stops("FF0000-FFED00-00C853-00E5FF-2962FF-AA00FF"); return out; }
+    if (idx == 9)  { out.stops = hex_stops("00E5FF-0077FF-7A1EB4");                      return out; }
+    if (idx == 10) { out.stops = hex_stops("FFE000-FF7A00-E01E1E");                      return out; }
+    // Trans (24), strip-tuned. The official pastels (5BCEFA / F5A9B8 / FFFFFF) are
+    // all high-value and low-saturation: across the face's 2D panel they read as
+    // stripes, but interpolated along a 1D run of LEDs every stop lands near white
+    // and the whole zone blends into one wash. Deepen the blue and the pink (white
+    // stays pure) so each band stays distinguishable. Strip only — the face keeps
+    // the official colours.
+    if (idx == 24) { out.stops = hex_stops("00A3FF-FF4D88-FFFFFF-FF4D88-00A3FF"); return out; }
+
+    const std::string spec = face::NativeFaceController::preset_material_spec(idx);
+    if (spec.rfind("solid:", 0) == 0) {
+        int c[3] = { 0, 0, 0 };
+        std::sscanf(spec.c_str() + 6, "%d,%d,%d", &c[0], &c[1], &c[2]);
+        for (int k = 0; k < 3; ++k)
+            out.flat[k] = static_cast<uint8_t>(std::clamp(c[k], 0, 255));
+        return out;
+    }
+    if (spec.rfind("gradient:", 0) == 0) {
+        const size_t last = spec.rfind(':');
+        if (last != std::string::npos) out.stops = hex_stops(spec.substr(last + 1));
+        return out;
+    }
+    return out;                                  // "teal" (and any fallback)
+}
+
 // Curated particle combos; the names line up with particles.cpp presets.
 struct PremadeEffect { const char* name; const char* combo; };
 constexpr PremadeEffect kPremadeEffects[] = {
     {"gentle_snow","snow — light drift"}, {"heavy_snow","snow — dense"},
-    {"campfire","embers"}, {"galaxy","sparkle — multicolour"},
+    {"petals","fluttering pink petals"}, {"cold_breath","breath — expanding puff"},
+    {"dizzy","spinning stars (also the Dizzy reaction)"},
+    {"campfire","low flames + drifting sparks"}, {"galaxy","sparkle — multicolour"},
     {"party","confetti"}, {"radar","expanding rings"},
-    {"fire","embers + embers + sparkle"}, {"aurora","fireflies + sparkle"},
+    {"fire","licking flames + rising sparks"}, {"aurora","fireflies + sparkle"},
     {"blizzard","driven snow x2"}, {"sonar","rings + fireflies"},
     {"celebration","confetti + sparkle"}, {"plasma","blue embers x2 + ring"},
     {"thunderstorm","rain + branched lightning"}, {"arc","crackling electric arcs"},
-    {"meteor_shower","meteors + sparkle"},
     {"fireworks","fireworks bursts"}, {"bubbles","rising bubbles"},
-    {"vortex","comet vortex (cool) + sparkle"},
-    {"vortex_ember","comet vortex (fire palette)"},
-    {"vortex_toxic","comet vortex (toxic green)"},
-    {"vortex_rose","comet vortex (pink/violet)"},
-    {"vortex_rainbow","comet vortex (rainbow)"},
+    {"vortex","whirlpool vortex (cool) + sparkle"},
+    {"vortex_ember","whirlpool vortex (fire palette)"},
+    {"vortex_toxic","whirlpool vortex (toxic green)"},
+    {"vortex_rose","whirlpool vortex (pink/violet)"},
+    {"vortex_rainbow","whirlpool vortex (rainbow)"},
     {"nebula","clouds x2 + sparkle"},
     {"starfield","parallax stars from centre"},
     {"warp","hyperspace streaks"},
@@ -277,37 +381,57 @@ constexpr PremadeEffect kPremadeEffects[] = {
 // recognises (see particles.cpp::make_effect).
 const char* const kLayerEffects[] = {
     "none", "sparkle", "embers", "rain", "snow",
-    "confetti", "rings", "fireflies", "clouds",
-    "lightning", "meteor", "bubbles", "fireworks", "vortex", "water",
+    "confetti", "rings", "fireflies", "clouds", "flames",
+    "lightning", "bubbles", "fireworks", "vortex", "water",
     "starfield", "warp", "constellation", "shootingstars",
     "steam", "waveform", "matrix", "circuit", "frost", "heatwave",
-    "snooze",
+    "snooze", "breath",
 };
 } // namespace
 
 // Open the face image picker for a given expression. On commit copies the
 // chosen PNG into the active face folder (canonical filename, e.g. happy.png),
 // rebuilds the loader so the face reflects the new image, and switches the
-// live expression so the user sees the import immediately.
+// live expression so the user sees the import immediately. on_imported
+// overrides that show step — blink frames pass one, because a frame is not an
+// expression and set_face_by_name would yank the face to neutral (the editor's
+// save path fires a blink for the same reason).
 static void import_face_into_slot(MenuSystem* menu,
                                   IFaceController* teensy,
                                   std::string expression,
-                                  std::string label) {
+                                  std::string label,
+                                  std::function<void()> on_imported = {}) {
     if (!menu || !teensy) return;
     char title[64];
     std::snprintf(title, sizeof(title), "Import %s face PNG", label.c_str());
     std::string start = menu->file_picker_dir();
     menu->open_file_picker(
         title, std::move(start), {".png"},
-        [teensy, expression = std::move(expression)](const std::string& src) {
+        [teensy, expression = std::move(expression),
+         on_imported = std::move(on_imported)](const std::string& src) {
             if (!teensy->import_face_image(expression, src)) {
                 std::fprintf(stderr,
                              "[face] import failed for '%s' from '%s'\n",
                              expression.c_str(), src.c_str());
                 return;
             }
-            teensy->set_face_by_name(expression);
+            if (on_imported) on_imported();
+            else             teensy->set_face_by_name(expression);
         });
+}
+
+// Insert `item` just before the child labelled `before` (append when absent).
+// Used to slot the blink-frame Copy rows between Edit… and Replace… without
+// re-deriving make_asset_slot_row's child order.
+static void insert_child_before(MenuItem& parent, const char* before,
+                                MenuItem item) {
+    for (auto it = parent.children.begin(); it != parent.children.end(); ++it) {
+        if (it->label == before) {
+            parent.children.insert(it, std::move(item));
+            return;
+        }
+    }
+    parent.children.push_back(std::move(item));
 }
 
 // Dynamic label shared by every PNG-backed slot row (face / mouth / boop):
@@ -360,6 +484,506 @@ static MenuItem make_copy_from_submenu(
         return false;
     };
     return copy_from;
+}
+
+// Which Event Text slot is being previewed on the panels (-1 = none).
+// File-scope because the preview outlives the menu row that started it — you
+// can walk away into another submenu and come back.
+// ⚠ The displaced banner itself is NOT kept here: it lives in main.cpp behind
+// ctx.pf_scroll_saved_p / pf_scroll_displaced_p, shared with the event path, so
+// only one displacement is ever in flight and the config save can tell that the
+// live banner isn't the wearer's.
+static int s_text_preview_slot = -1;
+
+// ── Scrolling-text rows, shared by the live banner and every text event ──────
+// Every row already went through a plain `ScrollTextConfig*`, so the whole set
+// parameterises cleanly: point it at a different config and it edits that one.
+// `push` is whatever should run after a change — pushing the live banner to the
+// renderer for the real one, saving the slot for a text event.
+//
+// Diagnostics rows are deliberately NOT here: the readout is a property of the
+// live banner, not of an arbitrary message.
+static void build_text_groups(face::ScrollTextConfig* S,
+                              std::function<void()> push,
+                              MenuSystem** menu_sys_pp,
+                              PfHub75Layout* pf_hub75_p,
+                              std::vector<MenuItem>& ed,
+                              std::vector<MenuItem>& st,
+                              std::vector<MenuItem>& dp) {
+    {
+        MenuItem t = leaf("Edit Text...", [S, menu_sys_pp, push]{
+            if (!menu_sys_pp || !*menu_sys_pp) return;
+            // 240 chars: long enough for a real message with a few
+            // tokens expanded into it, where the old 40-char default
+            // ran out mid-sentence.
+            (*menu_sys_pp)->open_keyboard("Scroll Text", S->text,
+                [S, push](const std::string& v){
+                    S->text = v;
+                    if (!v.empty()) S->enabled = true;
+                    // Typing a line break is a clear statement of
+                    // intent, so switch stacking on rather than
+                    // silently rendering the breaks as spaces.
+                    if (v.find('\n') != std::string::npos) S->stack = true;
+                    if (push) push();
+                }, 240, /*multiline=*/true,
+                /*max_lines=*/face::kScrollTextMaxLines);
+        });
+        t.label_fn = [S]{
+            if (S->text.empty()) return std::string("Edit Text...");
+            // Long messages would push the rest of the row off screen.
+            std::string s = S->text.size() > 28
+                          ? S->text.substr(0, 27) + "\xe2\x80\xa6"
+                          : S->text;
+            // Show either break form as an arrow. A raw newline would
+            // render as a box glyph in this proportional font, and a
+            // bare | is easy to miss — and the whole point of the row
+            // is seeing where the message splits.
+            std::string out = "Text: ";
+            for (char c : s) {
+                if (c == '\n' || c == '|') out += " \xe2\x86\xb5 ";
+                else                       out += c;
+            }
+            return out;
+        };
+        ed.push_back(with_desc(std::move(t),
+            "The message to scroll (on-screen keyboard, up to 240 "
+            "characters over at most 5 lines). Committing a non-empty "
+            "text switches the banner on; glyphs the 5x7 font lacks "
+            "render blank. {tokens} are substituted live - see Live "
+            "Tokens below. Press \xe2\x86\xb5 (or Shift+Enter) for a new "
+            "line; a | counts as one too. Breaks stack the message when "
+            "Stack Lines is on, and render as a gap when it isn't."));
+    }
+    {
+        // One-tap line break, for when you just want another row and
+        // don't want to open the editor. It switches stacking on at the
+        // same time, since a break with stacking off only renders a gap
+        // and looks like nothing happened.
+        // Same counting rule the keyboard uses, so this row and the
+        // editor agree on when the message is full.
+        auto line_count = [](const std::string& t) {
+            size_t n = 1;
+            for (char c : t) if (c == '\n' || c == '|') ++n;
+            return n;
+        };
+        MenuItem nl = with_desc(
+            leaf("Add Line Break", [S, push, line_count]{
+                if (line_count(S->text) >= face::kScrollTextMaxLines) return;
+                S->text += "|";
+                S->stack   = true;
+                S->enabled = true;
+                if (push) push();
+            }),
+            "Append a line break to the message so the next words sit "
+            "on their own row, and switch Stack Lines on. A message can "
+            "hold up to 5 lines. You can also press the \xe2\x86\xb5 key "
+            "while editing the text, or Shift+Enter on a real keyboard.");
+        // Hidden with no text, and once the message is at the cap —
+        // a row that silently does nothing is worse than no row.
+        nl.visible_fn = [S, line_count]{
+            return !S->text.empty() &&
+                   line_count(S->text) < face::kScrollTextMaxLines;
+        };
+        ed.push_back(std::move(nl));
+
+        MenuItem c = with_desc(
+            leaf("Clear Text", [S, push]{
+                S->text.clear();
+                S->enabled = false;   // nothing to show, so stop drawing
+                if (push) push();
+            }),
+            "Wipe the message and switch the banner off. Everything "
+            "else - colour, motion, placement - keeps its settings for "
+            "the next message.");
+        c.visible_fn = [S]{ return !S->text.empty(); };
+        ed.push_back(std::move(c));
+    }
+    {
+        // Token reference. Each row inserts its token at the end of the
+        // text, so a banner can be assembled without typing braces on
+        // the on-screen keyboard.
+        struct T { const char* tok; const char* desc; };
+        static const T kToks[] = {
+            {"time",    "Clock, 12-hour (09:41 PM)"},
+            {"time24",  "Clock, 24-hour (21:41)"},
+            {"date",    "Month and day (Aug 25)"},
+            {"day",     "Day of the week (Monday)"},
+            {"batt",    "Wireless/headset battery, 0-100"},
+            {"phone",   "Paired phone battery, 0-100"},
+            {"cpu",     "CPU load, 0-100"},
+            {"cputemp", "CPU package temperature (48C)"},
+            {"gpu",     "GPU load, 0-100"},
+            {"gputemp", "GPU temperature (52C)"},
+            {"fps",     "Render frame rate"},
+            {"ram",     "RAM in use, 0-100"},
+            {"ramgb",   "RAM in use, GB"},
+            {"uptime",  "Time since boot (2H14M)"},
+            {"wifi",    "Wi-Fi link: OK or --"},
+            {"diag",    "The whole diagnostics readout in one go"},
+            {"temp",    "Outside temperature (weather)"},
+            {"heading", "Compass heading in degrees"},
+            {"compass", "Compass point (N, NE, E...)"},
+            {"expr",    "Current expression name"},
+            {"name",    "Active HUB75 layout name"},
+        };
+        std::vector<MenuItem> ti;
+        for (const auto& t : kToks) {
+            const std::string tok = std::string("{") + t.tok + "}";
+            ti.push_back(with_desc(
+                leaf(tok, [S, tok, push]{
+                    S->text += tok;
+                    S->enabled = true;
+                    if (push) push();
+                }), t.desc));
+        }
+        ed.push_back(with_desc(submenu("Live Tokens", std::move(ti)),
+            "Placeholders the banner fills in from live data - pick one "
+            "to append it to the message. A value that isn't available "
+            "yet shows as --, and an unrecognised token stays on screen "
+            "as literal text so a typo is obvious. Values refresh twice "
+            "a second; the text is only re-drawn when one actually "
+            "changes, so a clock costs nothing between minutes. "
+            "Percentages come through as bare numbers - the 5x7 font "
+            "has no % glyph (it covers 0-9, A-Z and ! ? . : - + / = < >)."));
+    }
+    dp.push_back(with_desc(slider("Speed", 4.f, 120.f, 4.f, "px/s",
+        [S]{ return static_cast<float>(S->speed_px_s); },
+        [S, push](float v){ S->speed_px_s = v; if (push) push(); }),
+        "Scroll speed in canvas pixels per second (right to left)."));
+    {
+        std::vector<MenuItem> zi;
+        for (int k = 1; k <= 4; ++k)
+            zi.push_back(leaf_sel(std::to_string(k) + "x",
+                [S, k, push]{ S->scale = k; if (push) push(); },
+                [S, k]{ return S->scale == k; }));
+        st.push_back(with_desc(submenu("Size", std::move(zi)),
+            "Integer upscale of the chosen font. At 1x the Standard "
+            "font is 5x7 and Small is 3x5; each step doubles, trebles "
+            "and so on from there."));
+    }
+    {
+        struct F { const char* n; face::TextFont f; const char* d; };
+        static const F kFonts[] = {
+            {"Standard (5x7)", face::TextFont::Standard,
+             "The HUD's usual font - 6px per character, 7 rows tall. "
+             "Most legible; three stacked lines fit a 32px panel."},
+            {"Small (3x5)",    face::TextFont::Small,
+             "A denser 3x5 font - 4px per character, 5 rows tall. "
+             "Roughly a third more characters per line and five "
+             "stacked lines on a 32px panel, which is what gets a "
+             "full diagnostics readout onto one panel. At three "
+             "pixels wide some letters are necessarily close, so it "
+             "suits dense readouts more than a message read at a "
+             "glance."},
+        };
+        std::vector<MenuItem> fi;
+        for (const auto& f : kFonts)
+            fi.push_back(with_desc(leaf_sel(f.n,
+                [S, f, push]{ S->font = f.f;
+                                      if (push) push(); },
+                [S, f]{ return S->font == f.f; }), f.d));
+        MenuItem fm = with_desc(submenu("Font", std::move(fi)),
+            "Which bitmap font the banner uses. Size multiplies "
+            "whichever is picked, so Small at 2x is larger than "
+            "Standard at 1x but a different shape - for the smallest "
+            "possible text, use Small at 1x.");
+        fm.label_fn = [S]{
+            return std::string("Font  (") +
+                   (S->font == face::TextFont::Small ? "3x5" : "5x7") + ")";
+        };
+        st.push_back(std::move(fm));
+    }
+    {
+        struct C { const char* n; uint8_t r, g, b; };
+        static constexpr C kCols[] = {
+            {"White", 255,255,255}, {"Amber", 255,160,32},
+            {"Red",   255, 50, 50}, {"Green",  30,220,60},
+            {"Cyan",    0,180,255}, {"Purple",180, 30,220},
+        };
+        std::vector<MenuItem> ci;
+        for (const auto& c : kCols)
+            ci.push_back(leaf_sel(c.n,
+                [S, c, push]{ S->r = c.r; S->g = c.g; S->b = c.b;
+                                      if (push) push(); },
+                [S, c]{ return !S->rainbow && S->r == c.r &&
+                               S->g == c.g && S->b == c.b; }));
+        ci.push_back(color_picker("Custom...",
+            [S, push](uint8_t r, uint8_t g, uint8_t b){
+                S->r = r; S->g = g; S->b = b;
+                if (push) push();
+            },
+            [S]() -> std::tuple<uint8_t,uint8_t,uint8_t>{
+                return { S->r, S->g, S->b };
+            }));
+        ci.push_back(with_desc(leaf_sel("Rainbow",
+            [S, push]{ S->rainbow = true; if (push) push(); },
+            [S]{ return S->rainbow; }),
+            "Cycle the whole message through the hue wheel instead of "
+            "holding one colour. Overrides the preset/custom colour "
+            "while on; pick any other entry here to turn it off."));
+        // Picking a fixed colour clears Rainbow, so the two can't
+        // disagree about what the banner is doing.
+        for (auto& it : ci)
+            if (it.label != "Rainbow" && it.action) {
+                auto prev = it.action;
+                it.action = [S, prev]{ S->rainbow = false; prev(); };
+            }
+        st.push_back(with_desc(submenu("Color", std::move(ci)),
+            "Six presets, a full RGB picker (Custom...) or Rainbow."));
+    }
+    {
+        MenuItem m = with_desc(slider("Rainbow Speed", 0.05f, 2.f, 0.05f, " Hz",
+            [S]{ return static_cast<float>(S->rainbow_speed); },
+            [S, push](float v){ S->rainbow_speed = v; if (push) push(); }),
+            "Hue revolutions per second. Slow reads as a colour drift; "
+            "fast reads as a strobe.");
+        m.visible_fn = [S]{ return S->rainbow; };
+        st.push_back(std::move(m));
+    }
+    {
+        struct M { const char* n; face::ScrollMode m; const char* d; };
+        static const M kModes[] = {
+            {"Scroll Left",  face::ScrollMode::Left,   "Classic marquee, right to left."},
+            {"Scroll Right", face::ScrollMode::Right,  "Marquee left to right."},
+            {"Static",       face::ScrollMode::Static, "No motion - a fixed label. Use Align to place it."},
+            {"Bounce",       face::ScrollMode::Bounce, "Ping-pong between the edges."},
+            {"Blink",        face::ScrollMode::Blink,  "Fixed label flashing on and off at Blink Rate."},
+            {"Wipe",         face::ScrollMode::Wipe,   "Typewriter: revealed left to right at Speed, held, then repeated."},
+            {"Scroll Up",    face::ScrollMode::Up,     "Rolls upward like credits. Pairs with Stack Lines for a readout that walks past."},
+            {"Scroll Down",  face::ScrollMode::Down,   "Rolls downward."},
+        };
+        std::vector<MenuItem> mi;
+        for (const auto& m : kModes)
+            mi.push_back(with_desc(leaf_sel(m.n,
+                [S, m, push]{ S->mode = m.m; if (push) push(); },
+                [S, m]{ return S->mode == m.m; }), m.d));
+        dp.push_back(with_desc(submenu("Motion", std::move(mi)),
+            "How the banner moves. Static and Bounce ignore Loop; "
+            "Speed drives scroll and bounce."));
+    }
+    {
+        struct P { const char* n; face::TextVPos v; };
+        static const P kPos[] = {
+            {"Center", face::TextVPos::Center},
+            {"Top",    face::TextVPos::Top},
+            {"Bottom", face::TextVPos::Bottom},
+        };
+        std::vector<MenuItem> pi;
+        for (const auto& p : kPos)
+            pi.push_back(leaf_sel(p.n,
+                [S, p, push]{ S->vpos = p.v; if (push) push(); },
+                [S, p]{ return S->vpos == p.v; }));
+        dp.push_back(with_desc(submenu("Position", std::move(pi)),
+            "Vertical placement of the banner on the face."));
+    }
+    {
+        struct A { const char* n; face::TextHAlign a; };
+        static const A kAlign[] = {
+            {"Center", face::TextHAlign::Center},
+            {"Left",   face::TextHAlign::Left},
+            {"Right",  face::TextHAlign::Right},
+        };
+        std::vector<MenuItem> ai;
+        for (const auto& a : kAlign)
+            ai.push_back(leaf_sel(a.n,
+                [S, a, push]{ S->halign = a.a; if (push) push(); },
+                [S, a]{ return S->halign == a.a; }));
+        MenuItem m = with_desc(submenu("Align", std::move(ai)),
+            "Horizontal placement for the modes that don't move "
+            "sideways - Static, Blink, Wipe and the vertical scrolls. "
+            "The horizontal scrolls ignore it, the same way the "
+            "vertical ones ignore Position.");
+        m.visible_fn = [S]{
+            return S->mode == face::ScrollMode::Static ||
+                   S->mode == face::ScrollMode::Blink  ||
+                   S->mode == face::ScrollMode::Wipe   ||
+                   S->mode == face::ScrollMode::Up     ||
+                   S->mode == face::ScrollMode::Down;
+        };
+        dp.push_back(std::move(m));
+    }
+    {
+        MenuItem m = with_desc(slider("Blink Rate", 0.2f, 6.f, 0.2f, " Hz",
+            [S]{ return static_cast<float>(S->blink_hz); },
+            [S, push](float v){ S->blink_hz = v; if (push) push(); }),
+            "Flashes per second in Blink mode. The face underneath stays "
+            "fully visible on the off beat - the text is skipped, not dimmed.");
+        m.visible_fn = [S]{ return S->mode == face::ScrollMode::Blink; };
+        dp.push_back(std::move(m));
+    }
+    {
+        MenuItem m = with_desc(slider("Hold", 0.f, 6.f, 0.5f, " s",
+            [S]{ return static_cast<float>(S->wipe_hold_s); },
+            [S, push](float v){ S->wipe_hold_s = v; if (push) push(); }),
+            "How long Wipe holds the fully-revealed message before "
+            "starting over (or stopping, when Loop is off).");
+        m.visible_fn = [S]{ return S->mode == face::ScrollMode::Wipe; };
+        dp.push_back(std::move(m));
+    }
+    st.push_back(with_desc(toggle("Bold",
+        [S]{ return S->bold; },
+        [S, push](bool v){ S->bold = v; if (push) push(); }),
+        "Thicken the glyph strokes a step for heavier, more legible "
+        "text (uses more panel real estate)."));
+    {
+        dp.push_back(with_desc(toggle("Stack Lines",
+            [S]{ return S->stack; },
+            [S, push](bool v){ S->stack = v;
+                                       if (push) push(); }),
+            "Break the message into stacked lines at each | instead of "
+            "running it out as one row - four short lines fit a 64px "
+            "face at 1x where one long line wastes the height. With "
+            "this off, | renders as a gap, so the same text reads "
+            "correctly either way. Lines are aligned by Align; the "
+            "block as a whole is placed by Position. Pairs naturally "
+            "with Static and System Diagnostics."));
+        MenuItem g = with_desc(slider("Line Gap", 0.f, 8.f, 1.f, " px",
+            [S]{ return static_cast<float>(S->line_gap); },
+            [S, push](float v){ S->line_gap = static_cast<int>(v);
+                                        if (push) push(); }),
+            "Blank rows between stacked lines, in unscaled font pixels "
+            "- so it grows with Size, the same way the glyphs do.");
+        g.visible_fn = [S]{ return S->stack; };
+        dp.push_back(std::move(g));
+    }
+    {
+        // Slider ranges track the real canvas so the numbers mean
+        // something on this build; falls back to a generous fixed
+        // range when there's no HUB75 layout to measure.
+        auto canvas_wh = [pf_hub75_p]() -> std::pair<int,int> {
+            int cw = 0, ch = 0;
+            if (pf_hub75_p) pf_hub75_canvas(*pf_hub75_p, cw, ch);
+            if (cw <= 0 || ch <= 0) { cw = 256; ch = 64; }
+            return {cw, ch};
+        };
+        const auto [cw, ch] = canvas_wh();
+        dp.push_back(with_desc(
+            slider("Offset X", -static_cast<float>(cw), static_cast<float>(cw),
+                   1.f, " px",
+                [S]{ return static_cast<float>(S->off_x); },
+                [S, push](float v){ S->off_x = static_cast<int>(v);
+                                            if (push) push(); }),
+            "Nudge the banner sideways from wherever Align/Motion put "
+            "it. Useful for lining a label up with an eye or the mouth "
+            "rather than the panel edges."));
+        dp.push_back(with_desc(
+            slider("Offset Y", -static_cast<float>(ch), static_cast<float>(ch),
+                   1.f, " px",
+                [S]{ return static_cast<float>(S->off_y); },
+                [S, push](float v){ S->off_y = static_cast<int>(v);
+                                            if (push) push(); }),
+            "Nudge the banner up or down from the Position anchor."));
+
+        // Display window — "how much is shown". Everything the banner
+        // measures against (align, scroll travel, bounce span, the
+        // background band, the final clip) uses this rect, so a
+        // marquee confined to one panel scrolls within that panel.
+        std::vector<MenuItem> wi;
+        wi.push_back(with_desc(toggle("Limit to Window",
+            [S]{ return S->win_enabled; },
+            [S, push](bool v){ S->win_enabled = v;
+                                       if (push) push(); }),
+            "Off: the banner uses the whole face. On: it's confined to "
+            "the rectangle below - text is clipped to it and a marquee "
+            "scrolls within it rather than across the full width."));
+        auto win_slider = [S, push](const char* lbl, int* slot,
+                                            float hi, const char* desc) {
+            MenuItem m = with_desc(
+                slider(lbl, 0.f, hi, 1.f, " px",
+                    [slot]{ return static_cast<float>(*slot); },
+                    [slot, push](float v){ *slot = static_cast<int>(v);
+                                                   if (push) push(); }),
+                desc);
+            m.visible_fn = [S]{ return S->win_enabled; };
+            return m;
+        };
+        wi.push_back(win_slider("Left", &S->win_x, static_cast<float>(cw),
+            "Left edge of the window, in canvas pixels from the left."));
+        wi.push_back(win_slider("Top", &S->win_y, static_cast<float>(ch),
+            "Top edge of the window, in canvas pixels from the top."));
+        wi.push_back(win_slider("Width", &S->win_w, static_cast<float>(cw),
+            "Window width. 0 means run to the right edge."));
+        wi.push_back(win_slider("Height", &S->win_h, static_cast<float>(ch),
+            "Window height. 0 means run to the bottom edge."));
+        if (pf_hub75_p) {
+            // Snap the window to one panel's exact canvas rect. Beyond
+            // the convenience, this is the fix for soft text on a build
+            // with mounting rotation: a rotated panel resamples its
+            // slice bilinearly, so anything overlapping it is
+            // interpolated. Confining the banner to a panel that isn't
+            // rotated keeps every glyph on whole pixels.
+            auto* H = pf_hub75_p;
+            std::vector<MenuItem> pi;
+            for (int i = 0; i < 4; ++i) {
+                char nm[24];
+                std::snprintf(nm, sizeof nm, "Panel %d", i + 1);
+                MenuItem m = leaf(nm, [S, H, i, push]{
+                    const auto ps = pf_hub75_panels(*H);
+                    if (i >= static_cast<int>(ps.size())) return;
+                    const auto& r = ps[i].rect;
+                    S->win_enabled = true;
+                    S->win_x = r.x; S->win_y = r.y;
+                    S->win_w = r.width; S->win_h = r.height;
+                    if (push) push();
+                });
+                m.label_fn = [H, i]{
+                    char b[48];
+                    std::snprintf(b, sizeof b, "Panel %d%s", i + 1,
+                                  H->rotation[i] != 0.0 ? "  (rotated)" : "");
+                    return std::string(b);
+                };
+                m.visible_fn = [H, i]{ return i < H->panel_count; };
+                pi.push_back(std::move(m));
+            }
+            wi.push_back(with_desc(submenu("Snap to Panel", std::move(pi)),
+                "Set the window to one panel's exact rectangle. Panels "
+                "marked (rotated) resample their slice to correct the "
+                "mounting angle, which softens anything drawn on them - "
+                "pick an unrotated panel for the sharpest text."));
+        }
+        wi.push_back(with_desc(leaf("Reset Window", [S, cw, ch, push]{
+                S->win_x = 0; S->win_y = 0;
+                S->win_w = cw; S->win_h = ch;
+                if (push) push();
+            }),
+            "Snap the window back to the whole canvas."));
+        MenuItem wm = with_desc(submenu("Display Window", std::move(wi)),
+            "Confine the banner to part of the face - one panel, a "
+            "strip across the mouth, above the eyes. Both where it "
+            "draws and how far it scrolls follow this rectangle.");
+        wm.label_fn = [S]{
+            if (!S->win_enabled) return std::string("Display Window  (full face)");
+            char b[64];
+            std::snprintf(b, sizeof b, "Display Window  (%d,%d %dx%d)",
+                          S->win_x, S->win_y, S->win_w, S->win_h);
+            return std::string(b);
+        };
+        dp.push_back(std::move(wm));
+    }
+    st.push_back(with_desc(toggle("Outline",
+        [S]{ return S->outline; },
+        [S, push](bool v){ S->outline = v; if (push) push(); }),
+        "Dark halo one pixel around every glyph. Keeps the message "
+        "readable over a busy face while leaving the expression "
+        "visible either side of it - usually a better trade than "
+        "Background, which darkens the whole band."));
+    st.push_back(with_desc(toggle("Background",
+        [S]{ return S->bg; },
+        [S, push](bool v){ S->bg = v; if (push) push(); }),
+        "Dim the face behind the text band so the message stays "
+        "readable over busy expressions/effects."));
+    st.push_back(with_desc(slider("BG Dim", 0.f, 255.f, 15.f, "",
+        [S]{ return static_cast<float>(S->bg_alpha); },
+        [S, push](float v){ S->bg_alpha = static_cast<uint8_t>(v);
+                                    if (push) push(); }),
+        "How strongly the Background darkens the band (0 = none, "
+        "255 = solid black)."));
+    dp.push_back(with_desc(toggle("Loop",
+        [S]{ return S->loop; },
+        [S, push](bool v){ S->loop = v; if (push) push(); }),
+        "On: the message wraps around forever. Off: one pass across "
+        "the panels, then the banner switches itself off. (Scroll "
+        "modes only.)"));
 }
 
 std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
@@ -429,6 +1053,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     std::map<std::string, PfHub75Layout>* pf_hub75_layouts_p = ctx.pf_hub75_layouts_p;
     std::string* pf_hub75_active_p = ctx.pf_hub75_active_p;
     std::function<void()> pf_layout_changed = ctx.pf_layout_changed;
+    std::function<void()> pf_hub75_apply    = ctx.pf_hub75_apply;
     bool*   pf_blink_enabled_p = ctx.pf_blink_enabled_p;
     double* pf_blink_min_p     = ctx.pf_blink_min_p;
     double* pf_blink_max_p     = ctx.pf_blink_max_p;
@@ -457,6 +1082,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     bool*   pf_heat_heartbeat_p = ctx.pf_heat_heartbeat_p;
     double* pf_frost_speed_p    = ctx.pf_frost_speed_p;
     double* pf_heat_speed_p     = ctx.pf_heat_speed_p;
+    std::string* pf_temp_cold_fx_p = ctx.pf_temp_cold_fx_p;
+    std::string* pf_temp_hot_fx_p  = ctx.pf_temp_hot_fx_p;
+    std::string* pf_temp_mild_fx_p = ctx.pf_temp_mild_fx_p;
     int*    pf_temp_force_p     = ctx.pf_temp_force_p;
     std::function<void()> pf_ambient_resync = ctx.pf_ambient_resync;
     std::shared_ptr<std::function<void()>> pf_live_tick = ctx.pf_live_tick;
@@ -495,15 +1123,23 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     MenuContextPanelDraw draw_effect_preview =
         [eff_preview, live_face_frame](ImDrawList* dl, ImVec2 o, ImVec2 sz) {
             EffectPreview& ep = *eff_preview;
-            // 2:1 thumbnail (HUB75 panel-pair aspect), centred.
-            const float pw = std::min(sz.x * 0.9f, sz.y * 2.0f);
-            const float ph = pw * 0.5f;
+            // Aspect comes from the FRAME, not a constant. This used to assume
+            // 2:1 ("HUB75 panel-pair"), which was true of a two-panel build and
+            // is wrong for anything else — a 4-panel canvas is about 2.4:1, so
+            // the preview was squashed vertically and the face read as a mess.
+            cv::Mat rgb;
+            const bool have = live_face_frame && live_face_frame(rgb) &&
+                              !rgb.empty() && rgb.type() == CV_8UC3 &&
+                              rgb.isContinuous();
+            const float ar = have ? (static_cast<float>(rgb.cols) /
+                                     static_cast<float>(rgb.rows))
+                                  : 2.0f;   // fallback only when there's no frame
+            float pw = std::min(sz.x * 0.9f, sz.y * ar);
+            float ph = pw / ar;
             const float px = o.x + (sz.x - pw) * 0.5f;
             const float py = o.y + (sz.y - ph) * 0.5f;
             dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10, 16, 22, 190));
-            cv::Mat rgb;
-            if (live_face_frame && live_face_frame(rgb) && !rgb.empty() &&
-                rgb.type() == CV_8UC3 && rgb.isContinuous()) {
+            if (have) {
                 if (ep.tex == 0) {
                     glGenTextures(1, &ep.tex);
                     glBindTexture(GL_TEXTURE_2D, ep.tex);
@@ -611,7 +1247,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             if (have && (path != fp.loaded_path || mt != fp.loaded_mtime)) {
                 // 256×128 = 2:1 (HUB75 panel-pair aspect), NEAREST resize
                 // preserves the pixel-art look.
-                fp.image        = face::load_png_rgba(path, 256, 128);
+                fp.image        = face::load_png_rgba(path, 256, 0);
                 fp.loaded_path  = path;
                 fp.loaded_mtime = mt;
             } else if (!have && !fp.loaded_path.empty()) {
@@ -620,10 +1256,16 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 fp.loaded_mtime = {};
             }
 
-            // 2:1 thumbnail (matches HUB75 panel-pair canvas), centred, leaving
-            // a line for the expression label beneath.
-            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
-            const float ph = pw * 0.5f;
+            // Thumbnail centred, leaving a line for the expression label beneath.
+            // Aspect from the loaded art, not a fixed 2:1 — face canvases stopped
+            // being panel-pairs when the build went to four panels, and forcing
+            // the old ratio squashed every thumbnail vertically.
+            const float far_ = (fp.image.empty() || fp.image.rows <= 0)
+                             ? 2.0f
+                             : static_cast<float>(fp.image.cols) /
+                               static_cast<float>(fp.image.rows);
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * far_);
+            const float ph = pw / far_;
             const float px = o.x + (sz.x - pw) * 0.5f;
             const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
             dl->AddRectFilled({px, py}, {px + pw, py + ph},
@@ -725,7 +1367,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             std::string path;
             if (*focus >= 0 && *focus < static_cast<int>(entries->size()))
                 path = (*entries)[*focus].path.string();
-            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f), ph = pw * 0.5f;
+            const float tar = (thumb->img.empty() || thumb->img.rows <= 0)
+                            ? 2.0f
+                            : static_cast<float>(thumb->img.cols) /
+                              static_cast<float>(thumb->img.rows);
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * tar),
+                        ph = pw / tar;
             const float px = o.x + (sz.x - pw) * 0.5f, py = o.y + (sz.y - ph) * 0.5f - 6.f;
             dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10, 16, 22, 190));
             if (path.empty()) {
@@ -737,7 +1384,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             }
             std::error_code ec; auto mt = std::filesystem::last_write_time(path, ec);
             if (path != thumb->loaded || mt != thumb->mt) {
-                thumb->img = face::load_png_rgba(path, 256, 128);
+                thumb->img = face::load_png_rgba(path, 256, 0);
                 thumb->loaded = path; thumb->mt = mt;
             }
             if (!thumb->img.empty() && thumb->img.isContinuous()) {
@@ -1110,10 +1757,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     // reverted when it ends. Same shape as make_triggers_item; attached to the
     // same expressions (built-in + custom) via make_style_trigger_children so
     // eye-anim slots — which have no activate/revert lifecycle — don't get it.
-    // `leds` (live) drives the Test preview; `servo_fn` is a copy of the
-    // coproc servo sender (menu is built after it's wired, so the copy is set).
+    // `leds` (live) drives the Test preview; `servo_ctl` is the ServoController, so
+    // a servo action addresses a NAMED servo and inherits its travel limits, slew
+    // speed and Copy/Mirror pairing — not a raw channel.
     auto make_actions_item = [trig_get, trig_mod, leds,
-                              servo_fn = ctx.coproc_servo](std::string key) -> MenuItem {
+                              servo_ctl = ctx.servos,
+                              led_profiles = ctx.led_profiles](std::string key) -> MenuItem {
         using EA = face::ExprAction;
         static const char* kZoneNames[accessory::ZoneCount] = {
             "Cheek Hub Left", "Cheek Hub Right", "Cheek Fin Left",
@@ -1142,7 +1791,163 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 leaf_sel("Servo",
                     [amod]{ amod([](EA& a){ a.kind = EA::Kind::Servo; }); },
                     [aget]{ return aget().kind == EA::Kind::Servo; }),
+                leaf_sel("LED Profile",
+                    [amod]{ amod([](EA& a){ a.kind = EA::Kind::LedProfile; }); },
+                    [aget]{ return aget().kind == EA::Kind::LedProfile; }),
+                leaf_sel("LED Overlay",
+                    [amod]{ amod([](EA& a){ a.kind = EA::Kind::LedOverlay; }); },
+                    [aget]{ return aget().kind == EA::Kind::LedOverlay; }),
             };
+
+            // — LED Overlay fields (visible when kind == LedOverlay) —
+            // A colour layer composited OVER the chosen zones, covering part of
+            // each while the zone's own look shows through underneath.
+            MenuItem ov_pick;
+            {
+                auto ov_vis = [aget]{ return aget().kind == EA::Kind::LedOverlay; };
+                std::vector<MenuItem> ov;
+
+                // Zones — a multi-select, so a blush can be cheeks-only.
+                {
+                    std::vector<MenuItem> zs;
+                    for (int zz = 0; zz < accessory::ZoneCount; ++zz) {
+                        zs.push_back(toggle(kZoneNames[zz],
+                            [aget, zz]{ return (aget().ov_zones >> zz) & 1u; },
+                            [amod, zz](bool v){ amod([zz, v](EA& a){
+                                if (v) a.ov_zones |=  (1u << zz);
+                                else   a.ov_zones &= ~(1u << zz); }); }));
+                    }
+                    ov.push_back(with_desc(submenu("Zones", std::move(zs)),
+                        "Which areas this overlay covers. Everything else is left "
+                        "showing its normal look."));
+                }
+                ov.push_back(with_desc(color_picker("Color",
+                    [amod](uint8_t r, uint8_t g, uint8_t b){
+                        amod([r, g, b](EA& a){ a.ov_r = r; a.ov_g = g; a.ov_b = b; }); },
+                    [aget]() -> std::tuple<uint8_t,uint8_t,uint8_t> {
+                        const auto a = aget(); return { a.ov_r, a.ov_g, a.ov_b }; }),
+                    "The overlay colour laid over the zone. Pink/red for a blush."));
+                {
+                    struct SOpt { const char* label; int v; const char* d; };
+                    static const SOpt kShapes[] = {
+                        { "Rise",  0, "Coverage fills from one edge along the axis, "
+                                      "like a level rising. The classic blush." },
+                        { "Sweep", 1, "A soft band travels across, with the base "
+                                      "colour showing both before and behind it." },
+                        { "Bloom", 2, "A soft patch grows outward from the middle "
+                                      "of the axis." },
+                    };
+                    std::vector<MenuItem> ss;
+                    for (const auto& s : kShapes)
+                        ss.push_back(with_desc(leaf_sel(s.label,
+                            [amod, s]{ amod([s](EA& a){ a.ov_shape = s.v; }); },
+                            [aget, s]{ return aget().ov_shape == s.v; }), s.d));
+                    ov.push_back(with_desc(submenu("Shape", std::move(ss)),
+                        "How the overlay occupies the zone."));
+                }
+                {
+                    struct MOpt { const char* label; int v; const char* d; };
+                    static const MOpt kModes[] = {
+                        { "Rise, Hold, Retract", 0,
+                          "Rise on activation, hold while the expression is held, "
+                          "retract when it ends." },
+                        { "Cycle While Held",    1,
+                          "Rise and fall over and over for as long as the "
+                          "expression is active — a slow throb." },
+                        { "Once",                2,
+                          "One pass: rise to full then retract straight away, even "
+                          "if the expression is still held." },
+                    };
+                    std::vector<MenuItem> ms;
+                    for (const auto& m : kModes)
+                        ms.push_back(with_desc(leaf_sel(m.label,
+                            [amod, m]{ amod([m](EA& a){ a.ov_mode = m.v; }); },
+                            [aget, m]{ return aget().ov_mode == m.v; }), m.d));
+                    ov.push_back(with_desc(submenu("Timing", std::move(ms)),
+                        "What the overlay does while the expression is active."));
+                }
+                ov.push_back(with_desc(slider("Opacity", 0.f, 100.f, 5.f, "%",
+                    [aget]{ return static_cast<float>(aget().ov_opacity); },
+                    [amod](float v){ amod([v](EA& a){ a.ov_opacity = (int)v; }); }),
+                    "How strongly the overlay covers where it sits. 100% hides the "
+                    "base entirely there; lower lets the zone's own colour tint "
+                    "through, which usually reads better for a blush."));
+                ov.push_back(with_desc(slider("Direction", 0.f, 360.f, 15.f, "\xc2\xb0",
+                    [aget]{ return static_cast<float>(aget().ov_angle); },
+                    [amod](float v){ amod([v](EA& a){ a.ov_angle = (int)v; }); }),
+                    "The axis the overlay moves along, across the zone's 2D shape. "
+                    "90\xc2\xb0 rises bottom\xe2\x80\x91to\xe2\x80\x91top. Independent "
+                    "of the zone's own Gradient Angle, so a blush can rise while the "
+                    "gradient runs along the fin."));
+                ov.push_back(with_desc(slider("Edge Softness", 1.f, 100.f, 1.f, "%",
+                    [aget]{ return static_cast<float>(aget().ov_soft); },
+                    [amod](float v){ amod([v](EA& a){ a.ov_soft = (int)v; }); }),
+                    "How feathered the leading edge is — and for Sweep, how wide "
+                    "the band is. Low is a hard line, high is a soft wash."));
+                ov.push_back(with_desc(slider("Rise Time", 0.f, 5.f, 0.1f, " s",
+                    [aget]{ return aget().ov_rise_s; },
+                    [amod](float v){ amod([v](EA& a){ a.ov_rise_s = v; }); }),
+                    "How long it takes to reach full coverage."));
+                ov.push_back(with_desc(slider("Retract Time", 0.f, 5.f, 0.1f, " s",
+                    [aget]{ return aget().ov_fall_s; },
+                    [amod](float v){ amod([v](EA& a){ a.ov_fall_s = v; }); }),
+                    "How long it takes to fade back out when the expression ends."));
+                ov.push_back(with_desc(slider("Travel Rate", 0.f, 3.f, 0.05f, " Hz",
+                    [aget]{ return aget().ov_cycle; },
+                    [amod](float v){ amod([v](EA& a){ a.ov_cycle = v; }); }),
+                    "How fast a Sweep band travels, and how fast Cycle throbs. "
+                    "Ignored by Rise/Bloom on Rise-Hold-Retract."));
+
+                ov_pick = with_desc(submenu("LED Overlay", std::move(ov)),
+                    "A colour laid OVER the chosen zones while this expression is "
+                    "active — covering part of each zone so the rest of its look "
+                    "still shows underneath. Rises when the expression starts and "
+                    "retracts when it ends.");
+                ov_pick.visible_fn = ov_vis;
+            }
+
+            // — LED Profile field (visible when kind == LedProfile) —
+            // Recalls a whole saved look across every zone while the expression
+            // is active, then restores what was there. Picked BY NAME, so
+            // reordering or deleting profiles can't rebind this to another one.
+            MenuItem prof_pick;
+            {
+                std::vector<MenuItem> prof_items;
+                for (int pi = 0; pi < kLedProfileSlots; ++pi) {
+                    MenuItem m = leaf_sel("profile",
+                        [amod, led_profiles, pi]{
+                            const auto* p = led_profiles ? led_profiles->get(pi) : nullptr;
+                            if (!p) return;
+                            const std::string nm = p->name;
+                            amod([nm](EA& a){ a.led_profile = nm; });
+                        },
+                        [aget, led_profiles, pi]{
+                            const auto* p = led_profiles ? led_profiles->get(pi) : nullptr;
+                            return p && aget().led_profile == p->name;
+                        });
+                    m.label_fn = [led_profiles, pi]() -> std::string {
+                        const auto* p = led_profiles ? led_profiles->get(pi) : nullptr;
+                        return p ? p->name : std::string();
+                    };
+                    m.visible_fn = [led_profiles, pi]{
+                        return led_profiles && pi < led_profiles->count(); };
+                    prof_items.push_back(std::move(m));
+                }
+                MenuItem none_row = with_desc(leaf("(no profiles saved)", []{}),
+                    "Save one first under Accessory LEDs > Profiles.");
+                none_row.visible_fn = [led_profiles]{
+                    return !led_profiles || led_profiles->count() == 0; };
+                prof_items.push_back(std::move(none_row));
+
+                prof_pick = with_desc(
+                    submenu("LED Profile", std::move(prof_items)),
+                    "Which saved lighting look to show while this expression is "
+                    "active. Every zone changes together, and the previous look is "
+                    "restored when the expression ends. Manage these under "
+                    "Accessory LEDs > Profiles.");
+                prof_pick.visible_fn = [aget]{
+                    return aget().kind == EA::Kind::LedProfile; };
+            }
 
             // — LED fields (visible when kind == Led) —
             std::vector<MenuItem> zone_items;
@@ -1183,13 +1988,38 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             bright.visible_fn = [aget]{ return aget().kind == EA::Kind::Led; };
 
             // — Servo fields (visible when kind == Servo) —
+            // Pick a configured servo by NAME (servo_ch is an index into Servo
+            // Settings), so the action inherits that servo's calibration.
             std::vector<MenuItem> ch_items;
-            for (int c = 0; c < 4; ++c)
-                ch_items.push_back(leaf_sel("Channel " + std::to_string(c),
+            const int nsv = servo_ctl ? servo_ctl->count() : 0;
+            for (int c = 0; c < nsv; ++c) {
+                const auto* sc = servo_ctl->get(c);
+                ch_items.push_back(leaf_sel(sc ? sc->name
+                                               : ("Servo " + std::to_string(c)),
                     [amod, c]{ amod([c](EA& a){ a.servo_ch = c; }); },
                     [aget, c]{ return aget().servo_ch == c; }));
-            MenuItem ch_pick = submenu("Servo: Channel", std::move(ch_items));
+            }
+            if (nsv == 0)
+                ch_items.push_back(leaf("(none configured)", []{}));
+            MenuItem ch_pick = with_desc(submenu("Servo", std::move(ch_items)),
+                "Which configured servo this action drives. Calibrate them under "
+                "Face Display > Servo Settings.");
             ch_pick.visible_fn = [aget]{ return aget().kind == EA::Kind::Servo; };
+
+            // Pair mode — drive the servo's configured partner too.
+            std::vector<MenuItem> pair_items;
+            {
+                static const char* kPairNames[] = { "None", "Copy", "Mirror" };
+                for (int m = 0; m < 3; ++m)
+                    pair_items.push_back(leaf_sel(kPairNames[m],
+                        [amod, m]{ amod([m](EA& a){ a.servo_pair = m; }); },
+                        [aget, m]{ return aget().servo_pair == m; }));
+            }
+            MenuItem pair_pick = with_desc(submenu("Servo: Pair", std::move(pair_items)),
+                "Also drive this servo's Partner: Copy sends it the same angle, "
+                "Mirror reflects the angle about the partner's Centre. None moves "
+                "only this servo. Needs a Partner set in Servo Settings.");
+            pair_pick.visible_fn = [aget]{ return aget().kind == EA::Kind::Servo; };
 
             MenuItem deg = slider("Servo: Angle", 0.f, 180.f, 1.f, "\xc2\xb0",
                 [aget]{ return static_cast<float>(aget().servo_deg); },
@@ -1203,7 +2033,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
 
             // Test: apply this action live once so you can eyeball it. No
             // auto-revert here — real firings revert with the expression.
-            MenuItem test = leaf("Test (apply now)", [aget, leds, servo_fn]{
+            MenuItem test = leaf("Test (apply now)", [aget, leds, servo_ctl]{
                 const auto a = aget();
                 if (a.kind == EA::Kind::Led && leds) {
                     const int zi = a.led_zone;
@@ -1215,8 +2045,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     if (a.led_brightness >= 0)
                         leds->set_zone_brightness(
                             z, static_cast<uint8_t>(std::clamp(a.led_brightness, 0, 255)));
-                } else if (a.kind == EA::Kind::Servo && servo_fn) {
-                    servo_fn(a.servo_ch, a.servo_deg);
+                } else if (a.kind == EA::Kind::Servo && servo_ctl) {
+                    servo_ctl->apply(a.servo_ch, a.servo_deg,
+                                     static_cast<servo::Pair>(a.servo_pair));
                 }
             });
             test.visible_fn = [aget]{ return aget().kind != EA::Kind::None; };
@@ -1226,6 +2057,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "What this action does when the expression activates: drive an "
                 "accessory-LED zone, or move a coprocessor servo (raw channel "
                 "0-3, same as Peripheral Test). Off = unused."));
+            slot_items.push_back(std::move(prof_pick));
+            slot_items.push_back(std::move(ov_pick));
             slot_items.push_back(std::move(zone_pick));
             slot_items.push_back(std::move(pat_pick));
             slot_items.push_back(std::move(setcol));
@@ -1234,6 +2067,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "Per-zone brightness while active (0-255). -1 = leave the "
                 "zone's own brightness."));
             slot_items.push_back(std::move(ch_pick));
+            slot_items.push_back(std::move(pair_pick));
             slot_items.push_back(std::move(deg));
             slot_items.push_back(with_desc(std::move(rest),
                 "Angle the servo returns to when the expression ends. "
@@ -1244,7 +2078,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
 
             MenuItem slot = submenu("Action " + std::to_string(j + 1),
                                     std::move(slot_items));
-            slot.label_fn = [aget, j]() -> std::string {
+            slot.label_fn = [aget, j, servo_ctl, led_profiles]() -> std::string {
                 const auto a = aget();
                 std::string base = "Action " + std::to_string(j + 1) + ": ";
                 if (a.kind == EA::Kind::Led) {
@@ -1256,17 +2090,37 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         if (static_cast<int>(po.p) == a.led_pattern) pn = po.label;
                     return base + "LED " + zn + " " + pn;
                 }
-                if (a.kind == EA::Kind::Servo)
-                    return base + "Servo " + std::to_string(a.servo_ch) + " -> " +
-                           std::to_string(a.servo_deg) + "\xc2\xb0";
+                if (a.kind == EA::Kind::Servo) {
+                    const auto* sc = servo_ctl ? servo_ctl->get(a.servo_ch) : nullptr;
+                    return base + (sc ? sc->name : ("Servo " + std::to_string(a.servo_ch)))
+                           + " -> " + std::to_string(a.servo_deg) + "\xc2\xb0";
+                }
+                if (a.kind == EA::Kind::LedOverlay) {
+                    int nz = 0;
+                    for (int z = 0; z < accessory::ZoneCount; ++z)
+                        if ((a.ov_zones >> z) & 1u) ++nz;
+                    static const char* kShape[] = { "Rise", "Sweep", "Bloom" };
+                    const char* sh = kShape[std::clamp(a.ov_shape, 0, 2)];
+                    return base + "Overlay " + sh + " x" + std::to_string(nz) +
+                           (nz ? "" : " (no zones)");
+                }
+                if (a.kind == EA::Kind::LedProfile) {
+                    // Flag a name that no longer resolves, rather than looking set.
+                    const bool ok = led_profiles &&
+                                    led_profiles->index_of(a.led_profile) >= 0;
+                    if (a.led_profile.empty()) return base + "LED Profile (none picked)";
+                    return base + "LED Profile: " + a.led_profile +
+                           (ok ? "" : "  (missing)");
+                }
                 return base + "Off";
             };
             rows.push_back(std::move(slot));
         }
         return with_desc(submenu("Actions", std::move(rows)),
             "Extra things this expression does when it activates — light up a "
-            "cheek zone or move a servo — undone when it ends (mirroring the "
-            "face restore). Fires on ANY of this expression's triggers.");
+            "cheek zone, recall a whole saved LED Profile, or move a servo — all "
+            "undone when it ends (mirroring the face restore). Fires on ANY of "
+            "this expression's triggers.");
     };
 
     auto make_style_trigger_children =
@@ -1316,6 +2170,356 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         d.copy_from = make_copy_from_submenu(teensy, expr, face_peers,
             "Copy another face's PNG into this slot as a "
             "starting point. The source slot keeps its art.");
+
+        // ── Animated blink — the Blink slot only ────────────────────────────
+        // Frames are addressed as the pseudo-expression "blink/<n>", which
+        // face_image_path() turns into <face folder>/blink/<n>.png. That one
+        // trick buys the whole editing pipeline — Edit…, the palette, region
+        // select, mirror-copy, auto-backup — with no second editor entry point
+        // to keep in step. main.cpp's edit_face spots the '/' and treats the
+        // art as living in a subfolder.
+        if (expr == "blink" && ctx.pf_get_blink_anim && ctx.pf_set_blink_anim) {
+            auto get_anim  = ctx.pf_get_blink_anim;
+            auto set_anim  = ctx.pf_set_blink_anim;
+            auto n_loaded  = ctx.pf_blink_frames_loaded;
+            auto blink_now = ctx.pf_trigger_blink;
+
+            std::vector<MenuItem> anim;
+            anim.push_back(with_desc(toggle("Animated Blink",
+                [get_anim]{ bool en = false; int n = 0; return get_anim(en, n) && en; },
+                [get_anim, set_anim](bool v){
+                    bool en = false; int n = 0; get_anim(en, n);
+                    // Switching it on with no frame count would load nothing
+                    // and drop straight back to the crossfade, which reads as
+                    // a dead toggle. Seed a usable sequence length instead.
+                    if (v && n < 2) n = 4;
+                    set_anim(v, n);
+                }),
+                "Blink with a hand-drawn frame sequence from this face's "
+                "blink/ folder instead of cross-fading the single blink.png. "
+                "Stored WITH THE FACE, so different face sets can blink "
+                "differently. Off — or with fewer than 2 frames actually "
+                "drawn — falls back to the crossfade, so nothing breaks while "
+                "the sequence is half-finished."));
+
+            anim.push_back(with_desc(slider("Frames", 2.f,
+                static_cast<float>(face::kBlinkAnimMaxFrames), 1.f, "",
+                [get_anim]{ bool en = false; int n = 0; get_anim(en, n);
+                            return static_cast<float>(std::max(2, n)); },
+                [get_anim, set_anim](float v){
+                    bool en = false; int n = 0; get_anim(en, n);
+                    set_anim(en, static_cast<int>(std::lround(v)));
+                }),
+                "How long the sequence is. The blink weight maps straight onto "
+                "the frames, so frame 1 should be barely closed and the last "
+                "fully shut — and the same frames play back UP as the eye "
+                "reopens, so only the closing half needs drawing. A whole "
+                "blink lasts about 0.15 s, so past a handful of frames each "
+                "one is on screen for a single panel refresh."));
+
+            if (ctx.pf_get_expr_blink && ctx.pf_set_expr_blink) {
+                // Face-wide Cover, reached through the same per-expression
+                // plumbing with an empty expression name — "" is never a real
+                // expression, so it reads and writes the face-wide value.
+                auto get_eb2 = ctx.pf_get_expr_blink;
+                auto set_eb2 = ctx.pf_set_expr_blink;
+                anim.push_back(with_desc(submenu("Cover", {
+                        leaf_sel("Eye Regions",
+                            [get_eb2, set_eb2]{ int m=0,f=0,l=0; bool w=false;
+                                get_eb2("", m, f, w, l); set_eb2("", 0, f, false); },
+                            [get_eb2]{ int m=0,f=0,l=0; bool w=false;
+                                return get_eb2("", m, f, w, l) && !w; }),
+                        leaf_sel("Whole Face",
+                            [get_eb2, set_eb2]{ int m=0,f=0,l=0; bool w=false;
+                                get_eb2("", m, f, w, l); set_eb2("", 0, f, true); },
+                            [get_eb2]{ int m=0,f=0,l=0; bool w=false;
+                                return get_eb2("", m, f, w, l) && w; }),
+                    }),
+                    "Eye Regions: frames are masked to the eye polygons — draw "
+                    "just the eyes. Each face can carry its OWN polygons (draw "
+                    "them in that face's editor; none drawn = this face-wide "
+                    "pair). Whole Face: each frame REPLACES the whole face for "
+                    "that tick, so draw complete faces. Each expression can "
+                    "override this."));
+            }
+
+            // ⚠ Pre-allocated rows, hidden rather than absent. The menu tree
+            // must not grow while it is open (see item_factories.h), so every
+            // frame a face could have gets a row up front and visible_fn hides
+            // the ones past the configured count — the same rule the custom
+            // expression slots follow.
+            for (int f = 1; f <= face::kBlinkAnimMaxFrames; ++f) {
+                const std::string fexpr  = "blink/" + std::to_string(f);
+                const std::string flabel = "Frame " + std::to_string(f);
+                AssetSlotRowDesc fd;
+                fd.label    = flabel;
+                fd.label_fn = png_slot_label_fn(teensy, fexpr, flabel,
+                                                pf_hub75_active_p);
+                fd.exists   = [teensy, fexpr]{
+                    return teensy->face_image_exists(fexpr); };
+                fd.edit     = [edit_face, fexpr]{
+                    if (edit_face) edit_face(fexpr); };
+                fd.edit_visible = have_led_regions;
+                fd.clear    = [teensy, fexpr]{ teensy->clear_face_image(fexpr); };
+                fd.import_action = [teensy, menu_sys_pp, fexpr, flabel,
+                                    blink_now]{
+                    import_face_into_slot(
+                        menu_sys_pp ? *menu_sys_pp : nullptr, teensy, fexpr,
+                        flabel,
+                        blink_now ? blink_now : std::function<void()>([]{}));
+                };
+                MenuItem row = make_asset_slot_row(std::move(fd));
+                // Authoring starters, slotted between Edit… and Replace…: seed
+                // the frame from the face it will blink over, or from the frame
+                // before it — then Edit… and close the eyes a little further.
+                {
+                    MenuItem cb = leaf("Copy Base", [teensy, fexpr, blink_now]{
+                        const std::string base = teensy->current_expression();
+                        if (base.empty() || !teensy->face_image_exists(base))
+                            return;
+                        teensy->import_face_image(
+                            fexpr, teensy->face_image_path(base));
+                        if (blink_now) blink_now();
+                    });
+                    cb.visible_fn = [teensy]{
+                        const std::string base = teensy->current_expression();
+                        return !base.empty() && teensy->face_image_exists(base);
+                    };
+                    cb.description =
+                        "Copy the CURRENT face's art into this frame as a "
+                        "starting point, then Edit… and close the eyes a "
+                        "little further than the frame before.";
+                    insert_child_before(row, "Replace...", std::move(cb));
+                }
+                if (f >= 2) {
+                    const std::string pexpr = "blink/" + std::to_string(f - 1);
+                    MenuItem cp = leaf("Copy Previous Frame",
+                        [teensy, fexpr, pexpr, blink_now]{
+                            if (!teensy->face_image_exists(pexpr)) return;
+                            teensy->import_face_image(
+                                fexpr, teensy->face_image_path(pexpr));
+                            if (blink_now) blink_now();
+                        });
+                    cp.visible_fn = [teensy, pexpr]{
+                        return teensy->face_image_exists(pexpr); };
+                    cp.description =
+                        "Copy Frame " + std::to_string(f - 1) + " into this "
+                        "frame, so each frame in the sequence only needs the "
+                        "eyes nudged a step further shut.";
+                    insert_child_before(row, "Replace...", std::move(cp));
+                }
+                // No editor-capability gate on the row itself — Import works
+                // on any backend; only Edit… is gated (edit_visible above).
+                row.visible_fn = [get_anim, f]{
+                    bool en = false; int n = 0;
+                    if (!get_anim(en, n)) return false;
+                    return f <= n;
+                };
+                row.description =
+                    "Draw this frame in the face editor, or Import a ready-made "
+                    "PNG — frames are ordinary face art with the same tools, "
+                    "palette and auto-backup, and they load the moment you save.";
+                anim.push_back(std::move(row));
+            }
+
+            if (blink_now)
+                anim.push_back(with_desc(leaf("Preview Blink",
+                    [blink_now]{ blink_now(); }),
+                    "Blink once, right now, on every panel together. A blink "
+                    "is over in about 0.15 s and otherwise fires on a random "
+                    "3-7 s countdown, so this is the only practical way to "
+                    "check the art."));
+
+            MenuItem sub = with_desc(submenu("Blink Animation", std::move(anim)),
+                "Replace the single-image blink with a drawn frame sequence. "
+                "This is the FACE-WIDE default; each expression can override "
+                "it with its own sequence under that expression's own Blink "
+                "Animation row.");
+            sub.label_fn = [get_anim, n_loaded]{
+                bool en = false; int n = 0;
+                if (!get_anim(en, n) || !en) return std::string("Blink Animation: off");
+                // Show LOADED vs configured — a sequence with art still
+                // missing is silently running short, and that is worth seeing
+                // here rather than wondering why the blink looks abrupt.
+                const int have = n_loaded ? n_loaded() : 0;
+                return "Blink Animation: " + std::to_string(have) + "/" +
+                       std::to_string(n) + " frames";
+            };
+            d.extra_children.push_back(std::move(sub));
+        }
+
+        // ── Per-expression blink sequence — every slot EXCEPT blink itself ──
+        // Expressions are not required to share an eye layout: a face can have
+        // two eyes neutral and four when surprised, or extra features that shut
+        // along with the eyes. A single face-wide sequence cannot serve those,
+        // so each expression can carry its own art in blink/<expression>/.
+        if (expr != "blink" && ctx.pf_get_expr_blink && ctx.pf_set_expr_blink) {
+            auto get_eb    = ctx.pf_get_expr_blink;
+            auto set_eb    = ctx.pf_set_expr_blink;
+            auto blink_now = ctx.pf_trigger_blink;
+
+            // mode: 0 inherit, 1 own, 2 none — matching FaceLoader::BlinkMode.
+            auto cur = [get_eb, expr](int& mode, int& frames, bool& whole, int& loaded){
+                mode = 0; frames = 0; whole = false; loaded = 0;
+                return get_eb(expr, mode, frames, whole, loaded);
+            };
+            auto put = [set_eb, expr, cur](int mode, int frames, bool whole){
+                set_eb(expr, mode, frames, whole);
+            };
+
+            std::vector<MenuItem> eb;
+            eb.push_back(with_desc(submenu("Blink Source", {
+                    leaf_sel("Use Face Default",
+                        [put, cur]{ int m,f,l; bool w; cur(m,f,w,l); put(0, f, w); },
+                        [cur]{ int m,f,l; bool w; return cur(m,f,w,l) && m == 0; }),
+                    leaf_sel("Own Sequence",
+                        [put, cur]{ int m,f,l; bool w; cur(m,f,w,l);
+                                    put(1, std::max(2, f), w); },
+                        [cur]{ int m,f,l; bool w; return cur(m,f,w,l) && m == 1; }),
+                    leaf_sel("No Animation",
+                        [put, cur]{ int m,f,l; bool w; cur(m,f,w,l); put(2, f, w); },
+                        [cur]{ int m,f,l; bool w; return cur(m,f,w,l) && m == 2; }),
+                }),
+                "Use Face Default: blink with the face-wide sequence (Blink > "
+                "Blink Animation). Own Sequence: this expression has its own "
+                "frames in blink/" + expr + "/. No Animation: this expression "
+                "uses the plain cross-fade even though the face animates — "
+                "right for art that already has the eyes shut, like asleep."));
+
+            eb.push_back(with_desc(slider("Frames", 2.f,
+                static_cast<float>(face::kBlinkAnimMaxFrames), 1.f, "",
+                [cur]{ int m,f,l; bool w; cur(m,f,w,l);
+                       return static_cast<float>(std::max(2, f)); },
+                [put, cur](float v){ int m,f,l; bool w; cur(m,f,w,l);
+                                     put(m, static_cast<int>(std::lround(v)), w); }),
+                "How many frames this expression's own sequence has."));
+
+            eb.push_back(with_desc(submenu("Cover", {
+                    leaf_sel("Eye Regions",
+                        [put, cur]{ int m,f,l; bool w; cur(m,f,w,l); put(m, f, false); },
+                        [cur]{ int m,f,l; bool w; return cur(m,f,w,l) && !w; }),
+                    leaf_sel("Whole Face",
+                        [put, cur]{ int m,f,l; bool w; cur(m,f,w,l); put(m, f, true); },
+                        [cur]{ int m,f,l; bool w; return cur(m,f,w,l) && w; }),
+                }),
+                "Eye Regions: the frames are masked to the eye polygons, like "
+                "the ordinary blink — draw just the eyes. This expression can "
+                "have its OWN polygons: draw them in ITS editor (none drawn = "
+                "the face-wide pair). Whole Face: each frame REPLACES the "
+                "whole face for that tick, so draw complete faces — for eyes "
+                "that don't match the rest of the face when you'd rather not "
+                "trace regions for them."));
+
+            // Pre-allocated, hidden past the count — the tree must not grow
+            // while open (item_factories.h).
+            for (int f = 1; f <= face::kBlinkAnimMaxFrames; ++f) {
+                const std::string fexpr  = "blink/" + expr + "/" + std::to_string(f);
+                const std::string flabel = "Frame " + std::to_string(f);
+                AssetSlotRowDesc fd;
+                fd.label    = flabel;
+                fd.label_fn = png_slot_label_fn(teensy, fexpr, flabel,
+                                                pf_hub75_active_p);
+                fd.exists   = [teensy, fexpr]{
+                    return teensy->face_image_exists(fexpr); };
+                fd.edit     = [edit_face, fexpr]{
+                    if (edit_face) edit_face(fexpr); };
+                fd.edit_visible = have_led_regions;
+                fd.clear    = [teensy, fexpr]{ teensy->clear_face_image(fexpr); };
+                fd.import_action = [teensy, menu_sys_pp, fexpr, flabel, expr,
+                                    blink_now]{
+                    // Show the import the way this expression's Preview Blink
+                    // does: switch to it first, then blink, so the sequence
+                    // that plays is the one the frame just landed in.
+                    import_face_into_slot(
+                        menu_sys_pp ? *menu_sys_pp : nullptr, teensy, fexpr,
+                        flabel,
+                        [teensy, expr, blink_now]{
+                            teensy->set_face_by_name(expr);
+                            if (blink_now) blink_now();
+                        });
+                };
+                MenuItem row = make_asset_slot_row(std::move(fd));
+                // Authoring starters, slotted between Edit… and Replace…. The
+                // base here is THIS expression — the art this sequence blinks
+                // over — not whatever happens to be showing.
+                auto show_seq = [teensy, expr, blink_now]{
+                    teensy->set_face_by_name(expr);
+                    if (blink_now) blink_now();
+                };
+                {
+                    MenuItem cb = leaf("Copy Base",
+                        [teensy, fexpr, expr, show_seq]{
+                            if (!teensy->face_image_exists(expr)) return;
+                            teensy->import_face_image(
+                                fexpr, teensy->face_image_path(expr));
+                            show_seq();
+                        });
+                    cb.visible_fn = [teensy, expr]{
+                        return teensy->face_image_exists(expr); };
+                    cb.description =
+                        "Copy " + label + "'s own art into this frame as a "
+                        "starting point, then Edit… and close the eyes a "
+                        "little further than the frame before.";
+                    insert_child_before(row, "Replace...", std::move(cb));
+                }
+                if (f >= 2) {
+                    const std::string pexpr =
+                        "blink/" + expr + "/" + std::to_string(f - 1);
+                    MenuItem cp = leaf("Copy Previous Frame",
+                        [teensy, fexpr, pexpr, show_seq]{
+                            if (!teensy->face_image_exists(pexpr)) return;
+                            teensy->import_face_image(
+                                fexpr, teensy->face_image_path(pexpr));
+                            show_seq();
+                        });
+                    cp.visible_fn = [teensy, pexpr]{
+                        return teensy->face_image_exists(pexpr); };
+                    cp.description =
+                        "Copy Frame " + std::to_string(f - 1) + " into this "
+                        "frame, so each frame in the sequence only needs the "
+                        "eyes nudged a step further shut.";
+                    insert_child_before(row, "Replace...", std::move(cp));
+                }
+                // No editor-capability gate on the row itself — Import works
+                // on any backend; only Edit… is gated (edit_visible above).
+                row.visible_fn = [cur, f]{
+                    int m, n, l; bool w;
+                    if (!cur(m, n, w, l)) return false;
+                    return m == 1 && f <= n;
+                };
+                row.description =
+                    "Draw this frame in the face editor, or Import a ready-made "
+                    "PNG. Frames live in blink/" + expr + "/ and load the "
+                    "moment you save.";
+                eb.push_back(std::move(row));
+            }
+
+            if (blink_now)
+                eb.push_back(with_desc(leaf("Preview Blink",
+                    [blink_now, teensy, expr]{
+                        // Show THIS expression first — a blink is resolved
+                        // against whatever is on the face, so previewing from
+                        // another expression would play the wrong sequence.
+                        teensy->set_face_by_name(expr);
+                        blink_now();
+                    }),
+                    "Switch to this expression and blink once, so the sequence "
+                    "being previewed is actually this one."));
+
+            MenuItem sub = with_desc(submenu("Blink Animation", std::move(eb)),
+                "How this expression blinks: the face-wide sequence, its own, "
+                "or not at all.");
+            sub.label_fn = [cur]{
+                int m, n, l; bool w;
+                if (!cur(m, n, w, l)) return std::string("Blink Animation");
+                if (m == 0) return std::string("Blink Animation: face default");
+                if (m == 2) return std::string("Blink Animation: off");
+                return "Blink Animation: own " + std::to_string(l) + "/" +
+                       std::to_string(n) + (w ? " (whole)" : "");
+            };
+            d.extra_children.push_back(std::move(sub));
+        }
+
         return make_asset_slot_row(std::move(d));
     };
 
@@ -1490,7 +2694,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 mt = std::filesystem::last_write_time(path, ec);
             }
             if (have && (path != fp.loaded_path || mt != fp.loaded_mtime)) {
-                fp.image        = face::load_png_rgba(path, 256, 128);
+                fp.image        = face::load_png_rgba(path, 256, 0);
                 fp.loaded_path  = path;
                 fp.loaded_mtime = mt;
             } else if (!have && !fp.loaded_path.empty()) {
@@ -1499,8 +2703,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 fp.loaded_mtime = {};
             }
 
-            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
-            const float ph = pw * 0.5f;
+            // Aspect from the loaded art, not a fixed 2:1 — face canvases stopped
+            // being panel-pairs when the build went to four panels, and forcing
+            // the old ratio squashed every thumbnail vertically.
+            const float far_ = (fp.image.empty() || fp.image.rows <= 0)
+                             ? 2.0f
+                             : static_cast<float>(fp.image.cols) /
+                               static_cast<float>(fp.image.rows);
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * far_);
+            const float ph = pw / far_;
             const float px = o.x + (sz.x - pw) * 0.5f;
             const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
             dl->AddRectFilled({px, py}, {px + pw, py + ph},
@@ -1603,7 +2814,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 mt = std::filesystem::last_write_time(path, ec);
             }
             if (have && (path != fp.loaded_path || mt != fp.loaded_mtime)) {
-                fp.image        = face::load_png_rgba(path, 256, 128);
+                fp.image        = face::load_png_rgba(path, 256, 0);
                 fp.loaded_path  = path;
                 fp.loaded_mtime = mt;
             } else if (!have && !fp.loaded_path.empty()) {
@@ -1612,8 +2823,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 fp.loaded_mtime = {};
             }
 
-            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * 2.0f);
-            const float ph = pw * 0.5f;
+            // Aspect from the loaded art, not a fixed 2:1 — face canvases stopped
+            // being panel-pairs when the build went to four panels, and forcing
+            // the old ratio squashed every thumbnail vertically.
+            const float far_ = (fp.image.empty() || fp.image.rows <= 0)
+                             ? 2.0f
+                             : static_cast<float>(fp.image.cols) /
+                               static_cast<float>(fp.image.rows);
+            const float pw = std::min(sz.x * 0.9f, (sz.y - 22.f) * far_);
+            const float ph = pw / far_;
             const float px = o.x + (sz.x - pw) * 0.5f;
             const float py = o.y + (sz.y - ph) * 0.5f - 6.f;
             dl->AddRectFilled({px, py}, {px + pw, py + ph}, IM_COL32(10, 16, 22, 190));
@@ -1815,7 +3033,8 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         p.size = static_cast<double>(v); }); }),
                     "Feature scale of the animation. Heartbeat also fits "
                     "more (smaller) beats across the panel as size shrinks, "
-                    "fewer (bigger) as it grows."),
+                    "fewer (bigger) as it grows. Crying trades off the same "
+                    "way: bigger tears, fewer of them at once."),
                 slider("Duration", 1.f, 8.f, 0.5f, " s",
                     [eget]{ return static_cast<float>(eget().duration_s); },
                     [emod](float v){ emod([v](face::EyeAnimParams& p){
@@ -1827,13 +3046,18 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     "Animation centre across each panel, as distance left or "
                     "right of centre. Eye-panel rigs shift both eyes "
                     "together. Glitch, Fire, Rain, and Sparkle always fill "
-                    "the panel."),
+                    "the panel; Crying ignores this and follows the face's own "
+                    "eye line."),
                 with_desc(dir_slider("Position Y", "Up", "Down",
                     [eget]{ return static_cast<float>(eget().cy * 100.0); },
                     [emod](float v){ emod([v](face::EyeAnimParams& p){
                         p.cy = static_cast<double>(v) / 100.0; }); }),
                     "Animation centre down each panel, as distance above or "
-                    "below centre."),
+                    "below centre. For Crying this NUDGES the lid line the tears "
+                    "fall from, up or down from where the face's eye regions put "
+                    "it — handy if the drawn eye sits a pixel or two off the "
+                    "region you traced. (In the preview, which has no face, it "
+                    "sets the lid outright.)"),
                 with_desc(toggle("Mirror",
                     [eget]{ return eget().mirror; },
                     [emod](bool v){ emod([v](face::EyeAnimParams& p){
@@ -2006,7 +3230,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     auto effect_is_directional = [](const std::string& e) {
         return e == "snow" || e == "rain" || e == "embers"
             || e == "confetti" || e == "clouds"
-            || e == "lightning" || e == "meteor" || e == "bubbles";
+            || e == "lightning" || e == "bubbles";
     };
     static LayeredEffectState pf_layered;
     LayeredEffectState* pflz = &pf_layered;   // static address — safe to capture
@@ -2020,8 +3244,17 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             nlohmann::json layer;
             layer["effect"]   = L.effect;
             layer["count"]    = L.count;
-            layer["colors"]   = nlohmann::json::array({
-                nlohmann::json::array({L.r, L.g, L.b})});
+            {
+                auto cols = nlohmann::json::array();
+                cols.push_back(nlohmann::json::array({L.r, L.g, L.b}));
+                if (L.colors_used >= 2)
+                    cols.push_back(nlohmann::json::array({L.r2, L.g2, L.b2}));
+                if (L.colors_used >= 3)
+                    cols.push_back(nlohmann::json::array({L.r3, L.g3, L.b3}));
+                layer["colors"] = std::move(cols);
+            }
+            layer["size_min"] = L.size_min;
+            layer["size_max"] = L.size_max;
             layer["speed_min"]= L.speed_min;
             layer["speed_max"]= L.speed_max;
             layer["blend"]    = L.blend;
@@ -2034,6 +3267,26 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 layer["direction_from"] = L.direction_from;
             if (L.intensity_from != "none")
                 layer["intensity_from"] = L.intensity_from;
+            if (L.effect == "frost") {
+                layer["fractal"]     = L.frost_fractal;
+                layer["form_s"]      = L.frost_form_s;
+                layer["opacity"]     = L.frost_opacity;
+                if (L.frost_face_tint >= 0.f)
+                    layer["face_tint"] = L.frost_face_tint;
+                layer["flake_every"] = L.frost_flake_every;
+                layer["flake_drift"] = L.frost_flake_drift;
+            }
+            if (L.effect == "breath") {
+                layer["origin_x"]     = L.breath_x;
+                layer["origin_y"]     = L.breath_y;
+                layer["alpha_max"]    = L.breath_alpha;
+                layer["size_max"]     = L.breath_size;
+                layer["rate"]         = L.breath_rate;
+                layer["trigger"]      = L.breath_trigger;
+                layer["threshold"]    = L.breath_threshold;
+                layer["origin_len"]   = L.breath_len;
+                layer["origin_angle"] = L.breath_angle;
+            }
             if (L.effect == "water") {
                 layer["level"]      = L.level;
                 layer["alpha"]      = L.alpha;
@@ -2085,6 +3338,37 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             L.direction_deg = jl.value("direction_deg", -1.f);
             L.direction_from = jl.value("direction_from", std::string("none"));
             L.intensity_from = jl.value("intensity_from", std::string("none"));
+            L.size_min = jl.value("size_min", L.size_min);
+            L.size_max = jl.value("size_max", L.size_max);
+            if (jl.contains("colors") && jl["colors"].is_array()) {
+                const auto& cs = jl["colors"];
+                L.colors_used = std::clamp(static_cast<int>(cs.size()), 1, 3);
+                auto rd = [&](size_t i, int& r, int& g, int& b) {
+                    if (i < cs.size() && cs[i].is_array() && cs[i].size() >= 3) {
+                        r = cs[i][0].get<int>();
+                        g = cs[i][1].get<int>();
+                        b = cs[i][2].get<int>();
+                    }
+                };
+                rd(0, L.r,  L.g,  L.b);
+                rd(1, L.r2, L.g2, L.b2);
+                rd(2, L.r3, L.g3, L.b3);
+            }
+            L.breath_x       = jl.value("origin_x",  L.breath_x);
+            L.breath_y       = jl.value("origin_y",  L.breath_y);
+            L.breath_alpha   = jl.value("alpha_max", L.breath_alpha);
+            L.breath_size    = jl.value("size_max",  L.breath_size);
+            L.breath_rate    = jl.value("rate",      L.breath_rate);
+            L.breath_trigger = jl.value("trigger",   L.breath_trigger);
+            L.breath_threshold = jl.value("threshold", L.breath_threshold);
+            L.frost_fractal     = jl.value("fractal",     L.frost_fractal);
+            L.frost_form_s      = jl.value("form_s",      L.frost_form_s);
+            L.frost_opacity     = jl.value("opacity",     L.frost_opacity);
+            L.frost_face_tint   = jl.value("face_tint",   L.frost_face_tint);
+            L.frost_flake_every = jl.value("flake_every", L.frost_flake_every);
+            L.frost_flake_drift = jl.value("flake_drift", L.frost_flake_drift);
+            L.breath_len     = jl.value("origin_len",   L.breath_len);
+            L.breath_angle   = jl.value("origin_angle", L.breath_angle);
             L.level = jl.value("level", 0.4f);
             L.level_from_humidity =
                 jl.value("level_from", std::string("none")) == "humidity";
@@ -2156,7 +3440,19 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         std::vector<MenuItem> effect_items;
         for (const char* name : kLayerEffects) {
             effect_items.push_back(leaf_sel(name,
-                [L, name]{ L->effect = name; },
+                [L, name]{
+                    L->effect = name;
+                    // Flames is an opaque body: additive over the lit face
+                    // saturates to white, and the layer's default white
+                    // colour makes a white palette — seed fire-friendly
+                    // values (both still editable).
+                    if (std::string_view(name) == "flames") {
+                        L->blend = "normal";
+                        if (L->r == 255 && L->g == 255 && L->b == 255) {
+                            L->r = 255; L->g = 120; L->b = 0;
+                        }
+                    }
+                },
                 [L, name]{ return L->effect == name; }));
         }
 
@@ -2199,9 +3495,57 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                              static_cast<uint8_t>(L->g),
                              static_cast<uint8_t>(L->b) };
                 }),
+            // How many palette entries are live. The engine spreads them across
+            // a cloud's lobes and picks per particle elsewhere, so 2-3 gives a
+            // mottled multi-tone look instead of one flat colour.
+            ([&]{
+                MenuItem m = with_desc(slider("Colours", 1.f, 3.f, 1.f, "",
+                    [L]{ return static_cast<float>(L->colors_used); },
+                    [L](float v){ L->colors_used = std::clamp((int)v, 1, 3); }),
+                    "How many colours this layer mixes. 1 is a single tone; "
+                    "2-3 blend across the palette - on clouds each clump's "
+                    "lobes take different entries, so a cloud is mottled "
+                    "rather than flat. Apply Now to push.");
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = color_picker("Colour 2",
+                    [L](uint8_t r, uint8_t g, uint8_t b){
+                        L->r2 = r; L->g2 = g; L->b2 = b;
+                    },
+                    [L]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
+                        return { (uint8_t)L->r2, (uint8_t)L->g2, (uint8_t)L->b2 };
+                    });
+                m.visible_fn = [L]{ return L->colors_used >= 2; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = color_picker("Colour 3",
+                    [L](uint8_t r, uint8_t g, uint8_t b){
+                        L->r3 = r; L->g3 = g; L->b3 = b;
+                    },
+                    [L]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
+                        return { (uint8_t)L->r3, (uint8_t)L->g3, (uint8_t)L->b3 };
+                    });
+                m.visible_fn = [L]{ return L->colors_used >= 3; };
+                return m;
+            })(),
             slider("Density",    1.f, 120.f,  1.f, "",
                 [L]{ return static_cast<float>(L->count); },
                 [L](float v){ L->count = static_cast<int>(v); }),
+            // Size bounds — read by 12 of the effects via pick_size().
+            with_desc(slider("Size Min", 1.f, 40.f, 1.f, "px",
+                [L]{ return static_cast<float>(L->size_min); },
+                [L](float v){ L->size_min = (int)v;
+                              if (L->size_max < L->size_min) L->size_max = L->size_min; }),
+                "Smallest particle this layer spawns. On clouds this is the "
+                "clump radius, so it sets how small the smallest puff can be."),
+            with_desc(slider("Size Max", 1.f, 40.f, 1.f, "px",
+                [L]{ return static_cast<float>(L->size_max); },
+                [L](float v){ L->size_max = (int)v;
+                              if (L->size_min > L->size_max) L->size_min = L->size_max; }),
+                "Largest particle. Spread Min and Max apart for a mix of small "
+                "and big clumps; set them equal for a uniform look."),
             slider("Speed Min",  0.f, 100.f,  1.f, "",
                 [L]{ return L->speed_min; },
                 [L](float v){ L->speed_min = v; if (L->speed_max < v) L->speed_max = v; }),
@@ -2331,6 +3675,164 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             })(),
             // Lightning extras — arc mode, random origin + fork density
             // (lightning only).
+            // ── frost: the fractal options, per layer ──────────────────────
+            ([&]{
+                MenuItem m = with_desc(toggle("Fractal Ferns",
+                    [L]{ return L->frost_fractal; },
+                    [L](bool v){ L->frost_fractal = v; }),
+                    "Frost edges grow in branching fern patterns and large "
+                    "snowflakes drift down and settle, instead of a plain "
+                    "creeping sheet. Also tints the face by default, since a "
+                    "fern sheet over an untinted face reads as a sticker.");
+                m.visible_fn = [L]{ return L->effect == "frost"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Form Time", 0.5f, 30.f, 0.5f, "s",
+                    [L]{ return L->frost_form_s; },
+                    [L](float v){ L->frost_form_s = v; }),
+                    "How long the sheet takes to reach full coverage from "
+                    "bare. Long values read as a slow freeze.");
+                m.visible_fn = [L]{ return L->effect == "frost"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Ice Opacity", 5.f, 100.f, 5.f, "%",
+                    [L]{ return L->frost_opacity * 100.f; },
+                    [L](float v){ L->frost_opacity = v / 100.f; }),
+                    "How solid the ice is over the face.");
+                m.visible_fn = [L]{ return L->effect == "frost"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Face Tint", -1.f, 100.f, 5.f, "%",
+                    [L]{ return L->frost_face_tint < 0.f ? -1.f
+                                                         : L->frost_face_tint * 100.f; },
+                    [L](float v){ L->frost_face_tint = (v < 0.f) ? -1.f : v / 100.f; }),
+                    "How far the face itself is tinted toward the ice colour "
+                    "under the sheet. -1 uses the mode default (80% with "
+                    "Fractal Ferns on, none without).");
+                m.visible_fn = [L]{ return L->effect == "frost"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Flake Interval", 0.3f, 4.f, 0.1f, "s",
+                    [L]{ return L->frost_flake_every; },
+                    [L](float v){ L->frost_flake_every = v; }),
+                    "Seconds between the large drifting snowflakes. Lower is a "
+                    "heavier fall; the engine floors this at 0.3s, which is "
+                    "where the slider starts.");
+                m.visible_fn = [L]{ return L->effect == "frost" && L->frost_fractal; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Flake Drift", 0.f, 20.f, 0.5f, "px/s",
+                    [L]{ return L->frost_flake_drift; },
+                    [L](float v){ L->frost_flake_drift = v; }),
+                    "How far those flakes wander sideways as they fall, in "
+                    "pixels per second. 0 falls straight down; the default is "
+                    "6.");
+                m.visible_fn = [L]{ return L->effect == "frost" && L->frost_fractal; };
+                return m;
+            })(),
+
+            // ── breath: an expanding puff you can place, tint and trigger ──
+            ([&]{
+                MenuItem m = with_desc(slider("Puff X", 0.f, 100.f, 1.f, "%",
+                    [L]{ return L->breath_x * 100.f; },
+                    [L](float v){ L->breath_x = v / 100.f; }),
+                    "Where the puff starts across the face, 0% = far left, "
+                    "100% = far right. Sits at the muzzle on most builds.");
+                m.visible_fn = [L]{ return L->effect == "breath"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Puff Y", 0.f, 100.f, 1.f, "%",
+                    [L]{ return L->breath_y * 100.f; },
+                    [L](float v){ L->breath_y = v / 100.f; }),
+                    "Where it starts vertically, 0% = top, 100% = bottom.");
+                m.visible_fn = [L]{ return L->effect == "breath"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Mouth Width", 0.f, 100.f, 2.f, "%",
+                    [L]{ return L->breath_len * 100.f; },
+                    [L](float v){ L->breath_len = v / 100.f; }),
+                    "Spread the puff along a LINE instead of out of one point, "
+                    "as a percentage of the panel width. 0% is a single spot; "
+                    "raise it to match a long muzzle so the breath leaves the "
+                    "whole mouth at once rather than pinching out of the "
+                    "middle.");
+                m.visible_fn = [L]{ return L->effect == "breath"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Mouth Angle", -90.f, 90.f, 5.f, "\xc2\xb0",
+                    [L]{ return L->breath_angle; },
+                    [L](float v){ L->breath_angle = v; }),
+                    "Tilt of that line. 0 is horizontal; use it to follow a "
+                    "muzzle that sits at an angle.");
+                m.visible_fn = [L]{ return L->effect == "breath" &&
+                                           L->breath_len > 0.001f; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Opacity", 5.f, 100.f, 5.f, "%",
+                    [L]{ return L->breath_alpha * 100.f; },
+                    [L](float v){ L->breath_alpha = v / 100.f; }),
+                    "Peak opacity at the puff's densest moment. It always "
+                    "fades in and back out from there, so this is the ceiling "
+                    "rather than a constant.");
+                m.visible_fn = [L]{ return L->effect == "breath"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Spread", 4.f, 40.f, 1.f, "px",
+                    [L]{ return L->breath_size; },
+                    [L](float v){ L->breath_size = v; }),
+                    "How wide the puff grows before it dies. Together with "
+                    "Speed this sets how long it lasts: the puff lives exactly "
+                    "as long as it takes to expand this far.");
+                m.visible_fn = [L]{ return L->effect == "breath"; };
+                return m;
+            })(),
+            ([&]{
+                static const char* const kBreathTrig[] = {"none", "audio", "motion"};
+                std::vector<MenuItem> bt;
+                for (const char* t : kBreathTrig)
+                    bt.push_back(leaf_sel(t,
+                        [L, t]{ L->breath_trigger = t; },
+                        [L, t]{ return L->breath_trigger == t; }));
+                MenuItem m = with_desc(submenu("Trigger", std::move(bt)),
+                    "What makes it puff. 'none' free-runs at Rate. 'audio' "
+                    "fires one puff each time the mic crosses the threshold - "
+                    "a visible exhale when you speak. 'motion' fires on a jolt. "
+                    "Both edge-trigger with hysteresis, so a sustained sound "
+                    "gives one puff rather than a stream. Apply Now to push.");
+                m.label_fn = [L]{ return std::string("Trigger: ") + L->breath_trigger; };
+                m.visible_fn = [L]{ return L->effect == "breath"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Rate", 0.1f, 3.f, 0.1f, "/s",
+                    [L]{ return L->breath_rate; },
+                    [L](float v){ L->breath_rate = v; }),
+                    "Puffs per second while free-running.");
+                m.visible_fn = [L]{ return L->effect == "breath" &&
+                                           L->breath_trigger == "none"; };
+                return m;
+            })(),
+            ([&]{
+                MenuItem m = with_desc(slider("Threshold", 5.f, 90.f, 5.f, "%",
+                    [L]{ return L->breath_threshold * 100.f; },
+                    [L](float v){ L->breath_threshold = v / 100.f; }),
+                    "How loud (or how hard a jolt) it takes to fire. It re-arms "
+                    "once the signal drops to 60% of this, which stops one long "
+                    "sound from machine-gunning puffs.");
+                m.visible_fn = [L]{ return L->effect == "breath" &&
+                                           L->breath_trigger != "none"; };
+                return m;
+            })(),
             ([&]{
                 MenuItem t = toggle("Arc Mode",
                     [L]{ return L->arc; }, [L](bool v){ L->arc = v; });
@@ -2372,17 +3874,48 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             })(),
             // Density reactivity — scale particle count from audio or motion.
             ([&]{
-                static const char* const kIntSrc[] = {"none", "audio", "yaw_rate", "accel"};
+                // The stored value stays the terse config key; the row shows a
+                // plain-English label. Each ambient pair reads "Increase
+                // when X" because that is literally what picking it does —
+                // the source only ever ADDS density, and the opposite member
+                // of the pair is how you get the other direction. Naming them
+                // "warm" / "cold" left it ambiguous whether cold meant fewer
+                // particles when warm or more when cold.
+                struct IntSrc { const char* value; const char* label; };
+                static const IntSrc kIntSrc[] = {
+                    {"none",     "None"},
+                    {"audio",    "Audio Level"},
+                    {"yaw_rate", "Head Turn Rate"},
+                    {"accel",    "Head Movement"},
+                    {"light",    "Increase when Bright"},
+                    {"dark",     "Increase when Dark"},
+                    {"warm",     "Increase when Warm"},
+                    {"cold",     "Increase when Cold"},
+                    {"night",    "Increase at Night"},
+                    {"day",      "Increase in Daytime"},
+                };
                 std::vector<MenuItem> isrc;
-                for (const char* s : kIntSrc)
-                    isrc.push_back(leaf_sel(s,
-                        [L, s]{ L->intensity_from = s; },
-                        [L, s]{ return L->intensity_from == s; }));
+                for (const auto& s : kIntSrc)
+                    isrc.push_back(leaf_sel(s.label,
+                        [L, s]{ L->intensity_from = s.value; },
+                        [L, s]{ return L->intensity_from == s.value; }));
                 MenuItem m = with_desc(submenu("Density Reactive", std::move(isrc)),
-                    "Scale this layer's particle count from a live signal: audio "
-                    "(mic level — pulses with sound), yaw_rate or accel (head "
-                    "movement). Apply Now to push.");
-                m.label_fn = [L]{ return std::string("Density: ") + L->intensity_from; };
+                    "Scale this layer's particle count from a live signal. "
+                    "Audio Level = mic level; Head Turn Rate / Head Movement = "
+                    "the IMU. Bright / Dark = ambient brightness (needs the "
+                    "light sensor); Warm / Cold = ambient temperature (needs "
+                    "the BME280), neutral at 18 C and full effect by 15 C "
+                    "either side; Night / Daytime = time of day, easing over "
+                    "the hours rather than switching at one. Each pair only "
+                    "ever adds density, so pick the member that names the "
+                    "condition you want thicker. A source with no sensor "
+                    "attached contributes nothing. Apply Now to push.");
+                m.label_fn = [L]{
+                    for (const auto& s : kIntSrc)
+                        if (L->intensity_from == s.value)
+                            return std::string("Density: ") + s.label;
+                    return std::string("Density: ") + L->intensity_from;
+                };
                 return m;
             })(),
             submenu("Blend Mode", std::move(blend_items)),
@@ -2566,12 +4099,22 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         MenuItem it = leaf(name, [pflz, name, build_layered_spec, pf_set_effect_json]{
             for (int i = 0; i < LayeredEffectState::kMaxLayers; ++i) pflz->layers[i] = LayerCfg{};
             pflz->layers[0].effect = name;
+            if (name == "flames") {                    // see the layer picker
+                pflz->layers[0].blend = "normal";
+                pflz->layers[0].r = 255; pflz->layers[0].g = 120;
+                pflz->layers[0].b = 0;
+            }
             if (pf_set_effect_json) pf_set_effect_json(build_layered_spec());
         });
         it.description = "Select: apply this effect.  Ctrl+Select: open its settings.";
         // Ctrl+Select: switch layer 0 to this effect, then open the layer editor.
         it.secondary_action = [pflz, name]{
             pflz->layers[0] = LayerCfg{}; pflz->layers[0].effect = name;
+            if (name == "flames") {                    // see the layer picker
+                pflz->layers[0].blend = "normal";
+                pflz->layers[0].r = 255; pflz->layers[0].g = 120;
+                pflz->layers[0].b = 0;
+            }
             for (int i = 1; i < LayeredEffectState::kMaxLayers; ++i) pflz->layers[i] = LayerCfg{};
         };
         it.secondary_children = build_layer_menu(0).children;   // full per-layer settings
@@ -2639,7 +4182,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             static std::mt19937 rng(std::random_device{}());
             static const char* const fx[] = {
                 "sparkle","embers","rain","snow","confetti","rings","fireflies",
-                "clouds","lightning","meteor","bubbles","fireworks","vortex",
+                "clouds","lightning","bubbles","fireworks","vortex",
                 "starfield","constellation"};
             static const int pal[][3] = {
                 {0,220,180},{255,80,80},{80,180,255},{255,200,40},
@@ -2715,35 +4258,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "turn rate drive Motion Reactive, water tilt/slosh and Face "
             "Inertia. 100% = raw angles; drop it if slight tilts feel "
             "exaggerated on the panels. The HUD compass is never scaled."));
-    if (pf_face_inertia_p && pf_set_face_inertia) {
-        pf_effects.push_back(with_desc(toggle("Face Inertia",
-            [pf_face_inertia_p]{ return *pf_face_inertia_p; },
-            [pf_face_inertia_p, pf_set_face_inertia, cfg_root](bool v){
-                *pf_face_inertia_p = v; pf_set_face_inertia(v);
-                if (cfg_root) (*cfg_root)["protoface"]["face_inertia"] = v;
-            }),
-            "The whole face slides opposite quick head motion and springs "
-            "back with a small overshoot, like it has mass: eyes lag on a "
-            "fast turn and bob on a nod, then settle. Uses the same IMU "
-            "feed as Motion Reactive."));
-        if (pf_face_inertia_strength_p && pf_set_face_inertia_strength) {
-            MenuItem m = with_desc(slider("Shift Amount", 10.f, 200.f, 10.f, "%",
-                [pf_face_inertia_strength_p]{
-                    return static_cast<float>(*pf_face_inertia_strength_p * 100.0);
-                },
-                [pf_face_inertia_strength_p, pf_set_face_inertia_strength,
-                 cfg_root](float v){
-                    *pf_face_inertia_strength_p = v / 100.0;
-                    pf_set_face_inertia_strength(v / 100.0);
-                    if (cfg_root)
-                        (*cfg_root)["protoface"]["face_inertia_strength"] = v / 100.0;
-                }),
-                "How far the face can slide: 100% is about a tenth of the "
-                "panel width.");
-            m.visible_fn = [pf_face_inertia_p]{ return *pf_face_inertia_p; };
-            pf_effects.push_back(std::move(m));
-        }
-    }
+    // Face Inertia and its Shift Amount moved to Base Settings > HUB75 Layout,
+    // next to Sharp Rotation and Sharp Motion — they are all "how sharp is the
+    // image" controls and belong together rather than split across two menus.
     if (pf_weather_effects_p && pf_set_weather_effects)
         pf_effects.push_back(with_desc(toggle("Weather Sync",
             [pf_weather_effects_p]{ return *pf_weather_effects_p; },
@@ -2756,8 +4273,57 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "the HUD's weather monitor; your chosen effect returns when it "
             "clears up. Expression moods still play on top."));
     if (pf_temp_effects_p && pf_ambient_resync) {
-        // Temp Effects live under their own leaf, with a Frost subset and a
-        // Heat subset each holding its threshold, look toggle, speed and test.
+        // Temp Effects live under their own leaf, with a Frost subset, a Heat
+        // subset and a Mild subset — each holding its threshold, look toggle,
+        // speed, custom-effect override and test.
+        //
+        // Picker over the user's saved layered presets, shared by all three
+        // bands. ⚠ It stores the preset's NAME, not a copy of its spec, so
+        // re-saving a preset updates every band using it — and so a band
+        // survives a config round-trip without carrying a stale duplicate of
+        // an effect the user has since edited. main.cpp resolves the name at
+        // ambient-sync time.
+        auto temp_custom_picker = [cfg_root, pf_ambient_resync](
+                std::string* slot, const char* cfg_key,
+                const char* builtin_label, std::string desc) -> MenuItem {
+            std::vector<MenuItem> items;
+            items.push_back(leaf_sel(builtin_label,
+                [slot, pf_ambient_resync, cfg_root, cfg_key]{
+                    slot->clear(); pf_ambient_resync();
+                    if (cfg_root) (*cfg_root)["protoface"][cfg_key] = "";
+                },
+                [slot]{ return slot->empty(); }));
+            const size_t builtin_only = items.size();
+            if (cfg_root && cfg_root->contains("protoface") &&
+                (*cfg_root)["protoface"].contains("custom_effects") &&
+                (*cfg_root)["protoface"]["custom_effects"].is_object()) {
+                for (auto it = (*cfg_root)["protoface"]["custom_effects"].begin();
+                     it != (*cfg_root)["protoface"]["custom_effects"].end(); ++it) {
+                    const std::string name = it.key();
+                    items.push_back(leaf_sel(name,
+                        [slot, name, pf_ambient_resync, cfg_root, cfg_key]{
+                            *slot = name; pf_ambient_resync();
+                            if (cfg_root) (*cfg_root)["protoface"][cfg_key] = name;
+                        },
+                        [slot, name]{ return *slot == name; }));
+                }
+            }
+            // A picker holding nothing but its own default is a dead end, so
+            // say where presets come from instead of leaving it blank.
+            if (items.size() == builtin_only)
+                items.push_back(with_desc(leaf("(none saved yet)", []{}),
+                    "Build one in Default Style > Effects > Custom, then Save "
+                    "it. Saved after this menu opened? Reopen it to list new "
+                    "ones."));
+            MenuItem m = with_desc(submenu("Custom Effect", std::move(items)),
+                                   std::move(desc));
+            m.label_fn = [slot, builtin_label]{
+                return std::string("Custom Effect: ") +
+                       (slot->empty() ? builtin_label : *slot);
+            };
+            return m;
+        };
+
         std::vector<MenuItem> te;
         te.push_back(with_desc(toggle("Enabled",
             [pf_temp_effects_p]{ return *pf_temp_effects_p; },
@@ -2799,15 +4365,24 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 }),
                 "How fast the frost creeps in and the snowflakes drift. 1x is "
                 "the default pace; higher forms quicker."));
+        if (pf_temp_cold_fx_p)
+            frost.push_back(temp_custom_picker(pf_temp_cold_fx_p,
+                "temp_cold_effect", "Built-in Frost",
+                "Play one of your saved custom effects when it's freezing, "
+                "instead of the built-in frost. The Fractal Frost and Frost "
+                "Speed rows above only shape the built-in look, so they stop "
+                "applying once a custom effect is picked."));
         if (pf_temp_force_p)
             frost.push_back(with_desc(toggle("Test Frost",
                 [p = pf_temp_force_p]{ return *p == 1; },
                 [p = pf_temp_force_p, pf_ambient_resync](bool v){
                     *p = v ? 1 : 0; pf_ambient_resync(); }),
-                "Force the frost on now, ignoring the temperature, to preview "
-                "it (uses the settings above). Not saved."));
+                "Force the cold band on now, ignoring the temperature, to "
+                "preview it (uses the settings above, custom effect "
+                "included). Not saved."));
         te.push_back(with_desc(submenu("Frost", std::move(frost)),
-            "The freezing look: creeping ice, fractal ferns, snowflakes."));
+            "The freezing look: creeping ice, fractal ferns, snowflakes — or "
+            "a custom effect of your own."));
 
         // ── Heat subset ─────────────────────────────────────────────────────
         std::vector<MenuItem> heat;
@@ -2839,19 +4414,56 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 }),
                 "How fast the shimmer rises and the heartbeat throbs. 1x is "
                 "the default pace; higher runs hotter and quicker."));
+        if (pf_temp_hot_fx_p)
+            heat.push_back(temp_custom_picker(pf_temp_hot_fx_p,
+                "temp_hot_effect", "Built-in Heatwave",
+                "Play one of your saved custom effects when it's scorching, "
+                "instead of the built-in heatwave. The Heatwave Heartbeat and "
+                "Heat Speed rows above only shape the built-in look, so they "
+                "stop applying once a custom effect is picked."));
         if (pf_temp_force_p)
             heat.push_back(with_desc(toggle("Test Heatwave",
                 [p = pf_temp_force_p]{ return *p == 2; },
                 [p = pf_temp_force_p, pf_ambient_resync](bool v){
                     *p = v ? 2 : 0; pf_ambient_resync(); }),
-                "Force the heatwave on now, ignoring the temperature, to "
-                "preview it (uses the settings above). Not saved."));
+                "Force the hot band on now, ignoring the temperature, to "
+                "preview it (uses the settings above, custom effect "
+                "included). Not saved."));
         te.push_back(with_desc(submenu("Heat", std::move(heat)),
-            "The scorching look: rising heat shimmer + optional heartbeat."));
+            "The scorching look: rising heat shimmer + optional heartbeat — "
+            "or a custom effect of your own."));
+
+        // ── Mild subset ─────────────────────────────────────────────────────
+        // The band BETWEEN the two thresholds. It has always shown nothing,
+        // and it still does until a custom effect is picked here — there is no
+        // built-in "mild" look to fall back to, which is exactly why this band
+        // is only worth having now that a custom one can fill it.
+        std::vector<MenuItem> mild;
+        if (pf_temp_mild_fx_p)
+            mild.push_back(temp_custom_picker(pf_temp_mild_fx_p,
+                "temp_mild_effect", "None",
+                "Play one of your saved custom effects when the temperature "
+                "is between the Frost Below and Heat Above thresholds — the "
+                "gap Temp Effects otherwise leaves empty. None keeps that gap "
+                "empty, which is the original behaviour."));
+        if (pf_temp_force_p)
+            mild.push_back(with_desc(toggle("Test Mild",
+                [p = pf_temp_force_p]{ return *p == 3; },
+                [p = pf_temp_force_p, pf_ambient_resync](bool v){
+                    *p = v ? 3 : 0; pf_ambient_resync(); }),
+                "Force the mild band on now, ignoring the temperature, to "
+                "preview it. Shows nothing unless a custom effect is picked "
+                "above. Not saved."));
+        if (!mild.empty())
+            te.push_back(with_desc(submenu("Mild", std::move(mild)),
+                "Everything between the two thresholds — empty by default, "
+                "fill it with a custom effect."));
 
         pf_effects.push_back(with_desc(submenu("Temp Effects", std::move(te)),
             "Frost when it's freezing and heat shimmer when it's scorching, "
-            "driven by the live outdoor temperature."));
+            "driven by the live outdoor temperature. Each band — cold, hot "
+            "and the mild gap between them — can play one of your saved "
+            "custom effects instead."));
     }
     {
         // Legacy Teensy/ProtoTracer single-effect ids (only meaningful on the
@@ -2902,6 +4514,63 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         pf_palette.push_back(std::move(t));
     }
     {
+        // ── Gradient direction + scroll ──────────────────────────────────────
+        // The multi-colour presets (Sunset, Ocean, Fire, Lava, …) ship as
+        // horizontal, mirrored, STATIC gradients. These two rows override the
+        // direction and scroll-speed fields of the spec, so one preset can be
+        // aimed any way and made to flow. Both re-apply the live material so the
+        // change shows as you scrub. Solids and the PNG patterns ignore them.
+        // Only meaningful for the gradient presets (12+), so gate on that.
+        auto is_grad_preset = [&state]{
+            std::lock_guard<std::mutex> lk(state.mtx);
+            return state.face.material_color >= 12;
+        };
+        MenuItem ang = with_desc(
+            slider("Gradient Direction", 0.f, 360.f, 15.f, "\xc2\xb0",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                          return static_cast<float>(state.face.mat_angle); },
+                [teensy, &state](float v){
+                    const int a = (static_cast<int>(v) % 360 + 360) % 360;
+                    teensy->set_menu_item(12, static_cast<uint8_t>(a / 15));
+                    uint8_t idx;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        state.face.mat_angle = a;
+                        idx = state.face.material_color;
+                    }
+                    if (idx >= 12) teensy->set_menu_item(8, idx);   // re-apply live
+                }),
+            "Which way the gradient runs. 0\xc2\xb0 is left\xe2\x86\x92right (how "
+            "these presets ship), 90\xc2\xb0 runs top\xe2\x86\x92" "bottom, anything "
+            "else is a diagonal. The mirror each preset uses \xe2\x80\x94 so the "
+            "two sides of the face reflect each other \xe2\x80\x94 is kept "
+            "whatever angle you pick.");
+        ang.visible_fn = is_grad_preset;
+        pf_palette.push_back(std::move(ang));
+
+        MenuItem spd = with_desc(
+            slider("Gradient Scroll", -100.f, 100.f, 5.f, " px/s",
+                [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
+                          return static_cast<float>(state.face.mat_speed); },
+                [teensy, &state](float v){
+                    const int s = std::clamp(static_cast<int>(v), -100, 100);
+                    // Byte transport, signed value: rides across offset by 100.
+                    teensy->set_menu_item(13, static_cast<uint8_t>(s + 100));
+                    uint8_t idx;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        state.face.mat_speed = s;
+                        idx = state.face.material_color;
+                    }
+                    if (idx >= 12) teensy->set_menu_item(8, idx);   // re-apply live
+                }),
+            "Make the gradient FLOW along its direction, in pixels per second. "
+            "0 = static, how these presets ship. Negative reverses the flow. "
+            "Try a slow 5-15 for lava creeping or an aurora drifting; high values "
+            "read as a fast cycle.");
+        spd.visible_fn = is_grad_preset;
+        pf_palette.push_back(std::move(spd));
+
         for (const auto& m : kMaterialPresets) {
             pf_palette.push_back(leaf_sel(m.label,
                 [teensy, idx = m.idx, &state]{
@@ -3027,7 +4696,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 [G]{ return static_cast<float>(G->angle); },
                 [G, apply_grad](float v){ G->angle = static_cast<int>(v) % 360; apply_grad(); }),
             "Rotate the gradient direction. 0\xc2\xb0 runs left\xe2\x86\x92right, "
-            "90\xc2\xb0 top\xe2\x86\x92bottom; values in between give diagonals."));
+            "90\xc2\xb0 top\xe2\x86\x92" "bottom; values in between give diagonals."));
 
         grad_items.push_back(slider("Speed", -60.f, 60.f, 1.f, " px/s",
             [G]{ return static_cast<float>(G->speed); },
@@ -3211,18 +4880,36 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     MenuItem pf_camera_mode_item;
     if (pf_hub75_p) {
         auto* H = pf_hub75_p;
+        // Geometry edits change the canvas size and the piomatter framebuffer,
+        // so they need the full rebuild (panel output + panel_driver.py
+        // relaunch), not just a live push. These are discrete taps, not slider
+        // ticks, so applying on selection is cheap enough — and without it the
+        // panels keep showing the previous geometry (e.g. 2 → 4 panels left the
+        // driver on a 2-panel framebuffer, duplicating the top row onto the
+        // bottom) until ProtoHUD was restarted.
+        auto apply_geom = pf_hub75_apply;
         // String picker that also reapplies the auto-placed centre offsets
         // when the global Default Panel Size / Arrangement changes — the
         // canvas resizes around the new geometry, so the existing nudges
         // would point at the wrong canvas centres.
-        auto hub_pick_str = [H](const char* lbl, std::string* slot, const char* v) {
+        auto hub_pick_str = [H, apply_geom](const char* lbl, std::string* slot, const char* v) {
             return leaf_sel(lbl,
-                [slot, v, H]{ if (slot) { *slot = v; pf_hub75_apply_defaults(*H); } },
+                [slot, v, H, apply_geom]{
+                    if (!slot) return;
+                    *slot = v;
+                    pf_hub75_apply_defaults(*H);
+                    if (apply_geom) apply_geom();
+                },
                 [slot, v]{ return slot && *slot == v; });
         };
-        auto hub_pick_int = [H](const char* lbl, int* slot, int v) {
+        auto hub_pick_int = [H, apply_geom](const char* lbl, int* slot, int v) {
             return leaf_sel(lbl,
-                [slot, v, H]{ if (slot) { *slot = v; pf_hub75_apply_defaults(*H); } },
+                [slot, v, H, apply_geom]{
+                    if (!slot) return;
+                    *slot = v;
+                    pf_hub75_apply_defaults(*H);
+                    if (apply_geom) apply_geom();
+                },
                 [slot, v]{ return slot && *slot == v; });
         };
         std::vector<MenuItem> size_items = {
@@ -3252,9 +4939,13 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         // count.
         // Per-slot Size pickers also reapply defaults — sizing a panel up
         // can grow the canvas, which shifts what "centre" means.
-        auto size_pick = [H](const char* lbl, int i, const char* v) {
+        auto size_pick = [H, apply_geom](const char* lbl, int i, const char* v) {
             return leaf_sel(lbl,
-                [H, i, v]{ H->panel_size_per[i] = v; pf_hub75_apply_defaults(*H); },
+                [H, i, v, apply_geom]{
+                    H->panel_size_per[i] = v;
+                    pf_hub75_apply_defaults(*H);
+                    if (apply_geom) apply_geom();
+                },
                 [H, i, v]{ return H->panel_size_per[i] == v; });
         };
         // Slider range: ±canvas/2 so each panel can be moved to either
@@ -3289,6 +4980,26 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 slider("Offset Y (from centre)", -ymax, ymax, 1.f, " px",
                     [H, i]{ return static_cast<float>(H->nudge_dy[i]); },
                     [H, i](float v){ H->nudge_dy[i] = static_cast<int>(v); }),
+                // Mounting rotation for a panel that sits off square in its
+                // bracket. Pushed live (the output resamples the slice along
+                // the tilted rect) so it can be dialled against the panels;
+                // the canvas only grows to cover the tilted corners on Apply
+                // Layout, so a big angle can read black at the corners until
+                // then. Range is deliberately small — this is mounting slop,
+                // not a layout choice.
+                with_desc(
+                    slider("Rotation", -20.f, 20.f, 0.5f, "\xC2\xB0",
+                        [H, i]{ return static_cast<float>(H->rotation[i]); },
+                        [H, i, pf_layout_changed](float v){
+                            H->rotation[i] = v;
+                            if (pf_layout_changed) pf_layout_changed();
+                        }),
+                    "Tilts the slice of the face this panel shows, to cancel a "
+                    "panel mounted a few degrees off square. Turn it until a "
+                    "line crossing the seam stops kinking — the Alignment Grid "
+                    "test pattern is the easiest thing to judge it against. "
+                    "Applies live; run Apply Layout afterwards so the canvas "
+                    "grows to cover the tilted corners."),
                 // Per-panel orientation. Pushed to the live renderer via
                 // pf_layout_changed so the flip is visible on the panels
                 // immediately (geometry edits above still need a restart/
@@ -3306,13 +5017,15 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         if (pf_layout_changed) pf_layout_changed();
                     }),
                 leaf("Reset to Default Position",
-                     [H, i]{
+                     [H, i, apply_geom]{
                          // Reset just this slot by reapplying defaults to a
                          // scratch copy and copying the slot's values back.
                          PfHub75Layout tmp = *H;
                          pf_hub75_apply_defaults(tmp);
                          H->nudge_dx[i] = tmp.nudge_dx[i];
                          H->nudge_dy[i] = tmp.nudge_dy[i];
+                         H->rotation[i] = 0.0;
+                         if (apply_geom) apply_geom();
                      }),
             };
             char nm[32]; std::snprintf(nm, sizeof(nm), "Panel %d", i + 1);
@@ -3359,22 +5072,42 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             const ImU32 pcol = IM_COL32(255, 220, 60, 255);
             const ImU32 ptxt = IM_COL32(20, 24, 28, 255);
             dl->AddRectFilled({ox, oy}, {ox + gw, oy + gh}, bg);
+            const ImU32 topcol = IM_COL32(120, 230, 255, 255);
             for (size_t i = 0; i < panels.size(); ++i) {
                 const auto& r = panels[i].rect;
-                const float x0 = ox + r.x * scale;
-                const float y0 = oy + r.y * scale;
-                const float x1 = x0 + r.width  * scale;
-                const float y1 = y0 + r.height * scale;
-                dl->AddRectFilled({x0, y0}, {x1, y1},
-                                  IM_COL32(255, 220, 60, 60));
-                dl->AddRect({x0, y0}, {x1, y1}, pcol, 2.f, 0, 2.f);
-                char lab[16];
-                std::snprintf(lab, sizeof(lab), "P%zu", i + 1);
+                // Draw each panel as a quad rotated about its centre, so a
+                // panel with a mounting rotation shows up here tilted the same
+                // way it reads on the wall. Screen coords are y-down, so this
+                // is the same matrix the sampler uses to pick the tilted slice
+                // (positive = clockwise on screen).
+                const double ang = (i < 4) ? H->rotation[i] : 0.0;
+                const float  ca  = static_cast<float>(std::cos(ang * M_PI / 180.0));
+                const float  sa  = static_cast<float>(std::sin(ang * M_PI / 180.0));
+                const float  cx  = ox + (r.x + r.width  * 0.5f) * scale;
+                const float  cy  = oy + (r.y + r.height * 0.5f) * scale;
+                const float  hw  = r.width  * 0.5f * scale;
+                const float  hh  = r.height * 0.5f * scale;
+                auto corner = [&](float dx, float dy) {
+                    return ImVec2{cx + dx * ca - dy * sa,
+                                  cy + dx * sa + dy * ca};
+                };
+                const ImVec2 tl = corner(-hw, -hh), tr = corner(hw, -hh);
+                const ImVec2 br = corner( hw,  hh), bl = corner(-hw, hh);
+                dl->AddQuadFilled(tl, tr, br, bl, IM_COL32(255, 220, 60, 60));
+                dl->AddQuad(tl, tr, br, bl, pcol, 2.f);
+                // Brighter top edge: makes the tilt direction unambiguous at a
+                // glance, and reads as a horizon when you're squaring panels up.
+                dl->AddLine(tl, tr, topcol, 2.5f);
+                // Label stays upright — rotated glyphs would be less legible at
+                // preview size than the quad already is at showing the angle.
+                char lab[24];
+                if (ang != 0.0)
+                    std::snprintf(lab, sizeof(lab), "P%zu %+.1f\xc2\xb0", i + 1, ang);
+                else
+                    std::snprintf(lab, sizeof(lab), "P%zu", i + 1);
                 const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, lab);
-                dl->AddText(font, fs,
-                    {x0 + ((x1 - x0) - ts.x) * 0.5f,
-                     y0 + ((y1 - y0) - ts.y) * 0.5f},
-                    ptxt, lab);
+                dl->AddText(font, fs, {cx - ts.x * 0.5f, cy - ts.y * 0.5f},
+                            ptxt, lab);
             }
         };
 
@@ -3531,26 +5264,410 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             // Camera Mode (piomatter): drives the panels with extra temporal
             // dithering / bit planes so the face reads cleanly on video (less
             // banding/flicker). Relaunches the panel driver, same as Color Order.
+            //
+            // Both plane counts are exposed as pickers (not sliders) because
+            // each selection relaunches the driver — a slider would restart it
+            // per encoder tick. They matter most on big panel sets: piomatter's
+            // refresh rate falls as the chain gets longer, so the settings that
+            // looked fine on two panels can flicker visibly on four.
             auto restart = pf_restart_renderer;
+            auto plane_pick = [H, restart](const char* lbl, int v) {
+                return leaf_sel(lbl,
+                    [H, v, restart]{ H->camera_planes = v; if (restart) restart(); },
+                    [H, v]{ return H->camera_planes == v; });
+            };
+            auto temporal_pick = [H, restart](const char* lbl, int v) {
+                return leaf_sel(lbl,
+                    [H, v, restart]{ H->camera_temporal_planes = v; if (restart) restart(); },
+                    [H, v]{ return H->camera_temporal_planes == v; });
+            };
+            std::vector<MenuItem> cam_items = {
+                with_desc(
+                    toggle("Enabled",
+                        [H]{ return H->camera_mode; },
+                        [H, restart](bool v){ H->camera_mode = v; if (restart) restart(); }),
+                    "Drive the panels with the bit-plane / temporal-dither "
+                    "settings below instead of piomatter's defaults."),
+                with_desc(
+                    submenu("Bit Planes", {
+                        plane_pick("6 (fastest refresh)", 6),
+                        plane_pick("7",                   7),
+                        plane_pick("8",                   8),
+                        plane_pick("9",                   9),
+                        plane_pick("10 (best color)",    10),
+                    }),
+                    "PWM colour depth. Fewer planes = higher refresh rate and "
+                    "less flicker, at the cost of colour fidelity. Drop this "
+                    "first if a long chain flickers."),
+                with_desc(
+                    submenu("Temporal Planes", {
+                        temporal_pick("0 (off)", 0),
+                        temporal_pick("2",       2),
+                        temporal_pick("3",       3),
+                        temporal_pick("4",       4),
+                        temporal_pick("6",       6),
+                        temporal_pick("8",       8),
+                    }),
+                    "How many planes are sent only every 1/N frames. Raises FPS "
+                    "but makes brightness vary between frames — above 4 that "
+                    "variation usually reads as flicker, especially on a long "
+                    "chain where the refresh rate is already lower."),
+            };
             pf_camera_mode_item = with_desc(
-                toggle("Camera Mode (flicker-free)",
-                    [H]{ return H->camera_mode; },
-                    [H, restart](bool v){ H->camera_mode = v; if (restart) restart(); }),
-                "Drives the HUB75 panels with extra temporal dithering / bit "
+                submenu("Camera Mode (flicker-free)", std::move(cam_items)),
+                "Drives the HUB75 panels with tuned temporal dithering / bit "
                 "planes so the face doesn't band or flicker when filmed. A "
-                "tune-and-test knob (piomatter's PIO refresh is already stable); "
-                "fine-tune camera_planes / camera_temporal_planes in config if "
-                "needed. Restarts the panel driver so it applies immediately.");
+                "tune-and-test knob (piomatter's PIO refresh is already stable). "
+                "Each change restarts the panel driver so it applies immediately.");
+            pf_camera_mode_item.label_fn = [H]{
+                if (!H->camera_mode) return std::string("Camera Mode  (off)");
+                return "Camera Mode  (" + std::to_string(H->camera_planes) + "p/" +
+                       std::to_string(H->camera_temporal_planes) + "t)";
+            };
             pf_camera_mode_item.visible_fn = [pf_backend_p]{
                 return pf_backend_p && *pf_backend_p == "hub75";
             };
         }
         for (auto& it : nudge_items) hub_items.push_back(std::move(it));
+        {
+            // Per-half strip flips. Sits between the per-panel flips and the
+            // whole-canvas ones: a row of panels mounted rotated 180° as an
+            // assembly needs the strip flipped, which also swaps which panel
+            // shows which end of it — flipping those panels individually
+            // mirrors each in place and leaves them in the wrong order.
+            auto half_toggle = [pf_layout_changed](const char* lbl, bool* slot) {
+                return toggle(lbl,
+                    [slot]{ return *slot; },
+                    [slot, pf_layout_changed](bool v){
+                        *slot = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    });
+            };
+            static const char* kHalfName[2] = {"Top Half", "Bottom Half"};
+            for (int h = 0; h < 2; ++h) {
+                std::vector<MenuItem> hi = {
+                    with_desc(
+                        half_toggle("Flip Horizontal", &H->flip_half_x[h]),
+                        "Mirror this half left-right as one strip. The two "
+                        "panels swap ends as well as mirroring — that's what "
+                        "rotating the row as an assembly does."),
+                    with_desc(
+                        half_toggle("Flip Vertical", &H->flip_half_y[h]),
+                        "Mirror this half top-bottom as one strip. Turn on "
+                        "both for a row mounted upside down (180°)."),
+                };
+                MenuItem m = with_desc(
+                    submenu(kHalfName[h], std::move(hi)),
+                    "Flips this row of panels as a single strip, for a row "
+                    "mounted rotated relative to the other. Applies to the "
+                    "panels immediately; the HUD preview is unaffected.");
+                m.visible_fn = [H]{
+                    // Only meaningful once there's more than one row of panels.
+                    return H->arrangement != "horizontal" && H->panel_count > 2;
+                };
+                hub_items.push_back(std::move(m));
+            }
+        }
+        {
+            // Whole-canvas mirror. The per-panel Flip Horizontal / Vertical
+            // toggles above fix ONE panel that's mounted turned around; these
+            // fix the whole set at once (a 180° head mount reads as both H and
+            // V). Applied to the panel output only — the HUD preview stays the
+            // right way up — and pushed live, no rebuild.
+            hub_items.push_back(with_desc(
+                toggle("Flip Whole Canvas H",
+                    [H]{ return H->flip_canvas_x; },
+                    [H, pf_layout_changed](bool v){
+                        H->flip_canvas_x = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
+                "Mirror the entire face left-right on the panels. Use when the "
+                "whole panel set is mounted mirrored; for a single turned-around "
+                "panel use that panel's own Flip Horizontal. The in-HUD preview "
+                "is unaffected. Applies immediately."));
+            hub_items.push_back(with_desc(
+                toggle("Flip Whole Canvas V",
+                    [H]{ return H->flip_canvas_y; },
+                    [H, pf_layout_changed](bool v){
+                        H->flip_canvas_y = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
+                "Mirror the entire face top-bottom on the panels. Turn on both "
+                "H and V for a panel set mounted upside down (180°). The in-HUD "
+                "preview is unaffected. Applies immediately."));
+        }
+        {
+            // Chain walk for multi-row arrangements. On a single-connector
+            // bonnet all the panels are one daisy chain that piomatter folds
+            // into rows, so it has to be told which way the ribbon runs — get
+            // it wrong and the second row comes out reversed. Only meaningful
+            // once there's more than one row.
+            MenuItem ser = with_desc(
+                toggle("Serpentine Chain",
+                    [H]{ return H->serpentine; },
+                    [H, apply_geom](bool v){
+                        H->serpentine = v;
+                        if (apply_geom) apply_geom();
+                    }),
+                "How the panel rows are daisy-chained. On (serpentine): the "
+                "ribbon doubles back, so each row runs opposite the one above "
+                "it. Off (progressive): every row runs left-to-right and the "
+                "ribbon returns to the left edge. If the bottom row shows up "
+                "reversed, flip this. Only applies to Vertical Stack / 2x2 "
+                "Grid — a single row has nothing to fold.");
+            ser.visible_fn = [H]{
+                return H->arrangement != "horizontal" && H->panel_count > 1;
+            };
+            hub_items.push_back(std::move(ser));
+
+            // Outer-rim fade.
+            hub_items.push_back(with_desc(
+                slider("Edge Fade", 0.f, 24.f, 1.f, "px",
+                    [H]{ return static_cast<float>(H->edge_fade); },
+                    [H, pf_layout_changed](float v){
+                        H->edge_fade = static_cast<int>(v + 0.5f);
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
+                "Soften the outer rim of the panel set over this many pixels, "
+                "so the face, effects AND the scrolling banner dissolve instead "
+                "of being chopped off where the panels physically end. 0 is "
+                "off. Note the banner is usually the brightest thing at a rim, "
+                "so if it sits at the top or bottom edge a wide fade will dim "
+                "it a long way - try a smaller width, or move it inboard with "
+                "Offset Y. Test patterns are never faded. The fade follows the "
+                "OUTER EDGE OF THE WHOLE SET, not each panel - "
+                "panels that touch have no rim between them, so a continuous "
+                "row keeps running without a dark band down the seam. Panels "
+                "with a gap between them are rimmed on the facing sides, since "
+                "those really do cut off. Applies live."));
+
+            MenuItem fdith = with_desc(
+                toggle("Fade Dither",
+                    [H]{ return H->edge_fade_dither; },
+                    [H, pf_layout_changed](bool v){
+                        H->edge_fade_dither = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
+                "Break the fade into a fine stipple instead of smooth steps. "
+                "A ramp across a few pixels of a 32px panel only lands on a "
+                "handful of brightness levels, which reads as visible banding; "
+                "dithering trades those steps for texture. The pattern is "
+                "fixed to the pixel grid so it sits still while the face "
+                "moves. On by default; turn it off to see the raw ramp.");
+            fdith.visible_fn = [H]{ return H->edge_fade > 0; };
+            hub_items.push_back(std::move(fdith));
+
+            // Face-layer depth dithering.
+            MenuItem fdth = with_desc(
+                toggle("Face Dither",
+                    [H]{ return H->face_dither; },
+                    [H, pf_layout_changed](bool v){
+                        H->face_dither = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
+                "Dither the finished face down to the panels' REAL colour "
+                "depth, so gradients break into a fine stipple instead of "
+                "stepping into bands. Worth knowing why it helps: Bit Planes "
+                "sets how many PWM levels a panel can actually show - at 6 "
+                "planes that's 64 per channel, not 256 - and the renderer "
+                "works in 8-bit, so the hardware truncates the difference and "
+                "that truncation IS the banding. This spends the same levels "
+                "but spreads the error across pixels. The pattern is fixed to "
+                "the pixel grid so it sits still while the face moves. Costs "
+                "nothing in brightness, unlike raising Bit Planes. Applies "
+                "live; only shown when the depth is actually below 8 bits.");
+            fdth.visible_fn = [H]{
+                return H->camera_mode && H->camera_planes > 0 &&
+                       H->camera_planes < 8;
+            };
+            hub_items.push_back(std::move(fdth));
+
+            // Motion sampling — the moving-face counterpart to Sharp Rotation.
+            if (ctx.pf_sharp_motion_p && ctx.pf_set_sharp_motion) {
+                bool* smp = ctx.pf_sharp_motion_p;
+                auto  sms = ctx.pf_set_sharp_motion;
+                hub_items.push_back(with_desc(
+                    toggle("Sharp Motion",
+                        [smp]{ return *smp; },
+                        [smp, sms, cfg_root](bool v){
+                            *smp = v; sms(v);
+                            if (cfg_root) (*cfg_root)["protoface"]["sharp_motion"] = v;
+                        }),
+                    "Snap the Face Inertia / wiggle shift to whole pixels. That "
+                    "shift is normally sub-pixel and interpolated, so while the "
+                    "face is moving every pixel is blended with its neighbours "
+                    "- at a half-pixel offset that's a 50/50 smear of the whole "
+                    "face, which is the blur you see during head movement and "
+                    "which clears when it settles. On is pixel-exact while "
+                    "moving, at the cost of stepping a whole pixel at a time "
+                    "instead of gliding. On a 64x32 panel the glide is barely "
+                    "visible and the blur very much is. Applies live."));
+            }
+
+    if (pf_face_inertia_p && pf_set_face_inertia) {
+        hub_items.push_back(with_desc(toggle("Face Inertia",
+            [pf_face_inertia_p]{ return *pf_face_inertia_p; },
+            [pf_face_inertia_p, pf_set_face_inertia, cfg_root](bool v){
+                *pf_face_inertia_p = v; pf_set_face_inertia(v);
+                if (cfg_root) (*cfg_root)["protoface"]["face_inertia"] = v;
+            }),
+            "The whole face slides opposite quick head motion and springs "
+            "back with a small overshoot, like it has mass: eyes lag on a "
+            "fast turn and bob on a nod, then settle. Uses the same IMU "
+            "feed as Motion Reactive."));
+        if (pf_face_inertia_strength_p && pf_set_face_inertia_strength) {
+            MenuItem m = with_desc(slider("Shift Amount", 10.f, 200.f, 10.f, "%",
+                [pf_face_inertia_strength_p]{
+                    return static_cast<float>(*pf_face_inertia_strength_p * 100.0);
+                },
+                [pf_face_inertia_strength_p, pf_set_face_inertia_strength,
+                 cfg_root](float v){
+                    *pf_face_inertia_strength_p = v / 100.0;
+                    pf_set_face_inertia_strength(v / 100.0);
+                    if (cfg_root)
+                        (*cfg_root)["protoface"]["face_inertia_strength"] = v / 100.0;
+                }),
+                "How far the face can slide: 100% is about a tenth of the "
+                "panel width.");
+            m.visible_fn = [pf_face_inertia_p]{ return *pf_face_inertia_p; };
+            hub_items.push_back(std::move(m));
+        }
+    }
+
+            // Per-face idle wiggle. Stored with the FACE (its folder's
+            // config.json), not the rig, so a face set carries its own motion.
+            if (ctx.pf_get_wiggle && ctx.pf_set_wiggle) {
+                auto wget = ctx.pf_get_wiggle;
+                auto wset = ctx.pf_set_wiggle;
+                auto wcur = [wget](int which) -> float {
+                    double sp = 0.3, ax = 2.0, ay = 1.0;
+                    wget(sp, ax, ay);
+                    return static_cast<float>(which == 0 ? ax : which == 1 ? ay : sp);
+                };
+                auto wput = [wget, wset](int which, float v) {
+                    double sp = 0.3, ax = 2.0, ay = 1.0;
+                    wget(sp, ax, ay);          // read-modify-write: keep the others
+                    if      (which == 0) ax = v;
+                    else if (which == 1) ay = v;
+                    else                 sp = v;
+                    wset(sp, ax, ay);
+                };
+                std::vector<MenuItem> wi;
+                wi.push_back(with_desc(slider("Amount X", 0.f, 8.f, 0.5f, "px",
+                    [wcur]{ return wcur(0); }, [wput](float v){ wput(0, v); }),
+                    "How far the face drifts sideways on the idle wiggle. "
+                    "0 stops horizontal motion."));
+                wi.push_back(with_desc(slider("Amount Y", 0.f, 8.f, 0.5f, "px",
+                    [wcur]{ return wcur(1); }, [wput](float v){ wput(1, v); }),
+                    "How far it drifts vertically. The vertical cycle runs 1.3x "
+                    "the horizontal rate, so the two don't stay in step and the "
+                    "drift traces a slow figure rather than a straight line."));
+                wi.push_back(with_desc(slider("Speed", 0.f, 2.f, 0.05f, "Hz",
+                    [wcur]{ return wcur(2); }, [wput](float v){ wput(2, v); }),
+                    "Oscillation rate. 0 freezes the wiggle without changing "
+                    "the amounts."));
+                hub_items.push_back(with_desc(submenu("Face Wiggle", std::move(wi)),
+                    "A slow idle drift so the face isn't perfectly static. "
+                    "SAVED WITH THE FACE, in that face folder's config.json - "
+                    "so each face set can have its own, and it follows the face "
+                    "rather than the rig. Note the drift is what Sharp Motion "
+                    "snaps to whole pixels: with wiggle on and Sharp Motion "
+                    "off, the face is being resampled continuously."));
+            }
+
+            // Sampling quality for rotated panels.
+            MenuItem sharp = with_desc(
+                toggle("Sharp Rotation",
+                    [H]{ return H->sharp_rotation; },
+                    [H, pf_layout_changed](bool v){
+                        H->sharp_rotation = v;
+                        if (pf_layout_changed) pf_layout_changed();
+                    }),
+                "How a rotated panel resamples its slice. Off (default) is "
+                "bilinear, which smooths the diagonal edges the correction "
+                "introduces but softens every hard pixel edge on that panel - "
+                "most obvious on scrolling text. On is nearest-neighbour: "
+                "glyphs stay exact, at the cost of stair-stepping the face. "
+                "Only affects panels with a Rotation set. Applies live.");
+            sharp.visible_fn = [H]{
+                for (int i = 0; i < H->panel_count && i < 4; ++i)
+                    if (H->rotation[i] != 0.0) return true;
+                return false;
+            };
+            hub_items.push_back(std::move(sharp));
+        }
         hub_items.push_back(with_desc(
             leaf("Reset All Positions",
-                 [H]{ pf_hub75_apply_defaults(*H); }),
+                 [H, apply_geom]{
+                     pf_hub75_apply_defaults(*H);
+                     if (apply_geom) apply_geom();
+                 }),
             "Re-seed every panel's Offset X/Y to the auto-placed positions "
             "for the current size + count + arrangement."));
+        if (ctx.pf_set_test_pattern && ctx.pf_test_pattern) {
+            // Setup patterns. They replace the face on the canvas and then take
+            // the same path it does — mounting flips, the gather into chain
+            // order, the whole-output mirror — so what shows up on the panels is
+            // the real mapping. Live: no rebuild, no driver relaunch.
+            auto set_tp = ctx.pf_set_test_pattern;
+            auto get_tp = ctx.pf_test_pattern;
+            auto tp_pick = [set_tp, get_tp](const char* lbl, face::TestPattern p) {
+                return leaf_sel(lbl,
+                    [set_tp, p]{ set_tp(p); },
+                    [get_tp, p]{ return get_tp() == p; });
+            };
+            std::vector<MenuItem> tp_items = {
+                tp_pick("Off",             face::TestPattern::Off),
+                with_desc(tp_pick("Panel IDs", face::TestPattern::PanelIds),
+                    "Numbers each panel 1..N in layout / chain order. The panel "
+                    "showing 1 is Panel 1 in this menu and the first link in the "
+                    "chain. A digit that reads backwards or upside down means "
+                    "that panel's Flip Horizontal / Vertical is wrong; a digit "
+                    "on the wrong physical panel means the chain order or the "
+                    "Serpentine Chain toggle is."),
+                with_desc(tp_pick("Alignment Grid", face::TestPattern::Grid),
+                    "One continuous 8px grid across the whole set (bright line "
+                    "every 32px). Lines that step at a seam mean that panel's "
+                    "Offset X/Y doesn't match where it physically sits."),
+                with_desc(tp_pick("Panel Edges", face::TestPattern::Edges),
+                    "Outline, corner pips and centre cross per panel. A missing "
+                    "edge or a clipped pip means pixels are falling off — "
+                    "usually an off-by-one offset or the wrong panel size."),
+                with_desc(tp_pick("Color Bars", face::TestPattern::ColorBars),
+                    "Red / green / blue / white / grey bars per panel. Bars in "
+                    "the wrong order mean this build needs a different Color "
+                    "Order (Protoface > Hardware)."),
+                with_desc(tp_pick("Sweep", face::TestPattern::Sweep),
+                    "A line sweeping across the set, horizontal then vertical. "
+                    "It should cross the seams without jumping or stalling."),
+                with_desc(tp_pick("Chain Chase", face::TestPattern::Chase),
+                    "Lights one panel at a time in chain order — the clearest "
+                    "read of how the ribbon actually runs."),
+            };
+            MenuItem tp = with_desc(
+                submenu("Test Patterns", std::move(tp_items)),
+                "Setup overlays for aligning the panel set: which panel is "
+                "which in the chain, whether the offsets match the real "
+                "mounting, and whether flips and colour order are right. "
+                "Replaces the face while active. Not saved to config — it "
+                "clears on restart so the helmet never boots into one.");
+            tp.label_fn = [get_tp]{
+                const auto p = get_tp();
+                if (p == face::TestPattern::Off) return std::string("Test Patterns");
+                return std::string("Test Patterns  (") +
+                       face::test_pattern_name(p) + ")";
+            };
+            hub_items.push_back(std::move(tp));
+        }
+        if (apply_geom) {
+            hub_items.push_back(with_desc(
+                leaf("Apply Layout", [apply_geom]{ apply_geom(); }),
+                "Rebuild the renderer and restart the panel driver for the "
+                "current layout. Panel Count / Arrangement / Size apply "
+                "themselves; the Offset X/Y sliders don't (a rebuild per "
+                "slider tick would stutter), so tap this once you're done "
+                "nudging."));
+        }
 
         pf_hub75_layout_item = with_desc(
             with_panel(submenu("HUB75 Layout", std::move(hub_items)),
@@ -3741,7 +5858,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         pf_max7219_layout_item = with_desc(
             with_panel(submenu("MAX7219 Layout", std::move(mx_items)), "Wiring", wiring),
             "Build the MAX7219 panel grid: rows, panels per row, and the daisy-"
-            "chain order. The Wiring panel shows the DIN\xe2\x86\x92DOUT path and "
+            "chain order. The Wiring panel shows the DIN\xe2\x86\x92" "DOUT path and "
             "which coprocessor pins to connect. Runs beside HUB75 (Section) or as "
             "the whole face (Main). Driven over the coprocessor \xe2\x80\x94 no CM5 GPIO.");
     }
@@ -3770,7 +5887,10 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     // face-authoring concern (it shapes the editor's bbox guides), so it now
     // sits inside Face Options alongside the per-expression slots.
     face_files_menu.push_back(std::move(pf_chain_layout_item));
-    if (pf_hub75_p) face_files_menu.push_back(std::move(pf_hub75_layout_item));
+    // HUB75 Layout is the opposite: panel count, arrangement, offsets, flips
+    // and rotation are all about the physical build, not about what the face
+    // shows — so it lives under Base Settings, next to Hardware. Moved into
+    // base_items in the regroup block further down.
 
     // ── Size & Position — per-face placement transform ───────────────────────
     // Writes fit/scale/offset into the active face folder's config.json so a
@@ -4092,121 +6212,235 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "Master enable for the scrolling banner. Off is a true no-op. "
                 "The text, speed and color keep their values while disabled."));
             {
-                MenuItem t = leaf("Edit Text...", [S, menu_sys_pp, pf_anim_push]{
-                    if (!menu_sys_pp || !*menu_sys_pp) return;
-                    (*menu_sys_pp)->open_keyboard("Scroll Text", S->text,
-                        [S, pf_anim_push](const std::string& v){
-                            S->text = v;
-                            if (!v.empty()) S->enabled = true;
-                            if (pf_anim_push) pf_anim_push();
-                        });
-                });
-                t.label_fn = [S]{
-                    return S->text.empty() ? std::string("Edit Text...")
-                                           : "Text: " + S->text;
-                };
-                si.push_back(with_desc(std::move(t),
-                    "The message to scroll (on-screen keyboard). Committing a "
-                    "non-empty text switches the banner on; glyphs the 5x7 "
-                    "font lacks render blank."));
-            }
-            si.push_back(with_desc(slider("Speed", 4.f, 120.f, 4.f, "px/s",
-                [S]{ return static_cast<float>(S->speed_px_s); },
-                [S, pf_anim_push](float v){ S->speed_px_s = v; if (pf_anim_push) pf_anim_push(); }),
-                "Scroll speed in canvas pixels per second (right to left)."));
-            {
-                std::vector<MenuItem> zi;
-                for (int k = 1; k <= 4; ++k)
-                    zi.push_back(leaf_sel(std::to_string(k) + "x",
-                        [S, k, pf_anim_push]{ S->scale = k; if (pf_anim_push) pf_anim_push(); },
-                        [S, k]{ return S->scale == k; }));
-                si.push_back(with_desc(submenu("Size", std::move(zi)),
-                    "Integer upscale of the 5x7 font. 2x (10x14) reads well "
-                    "across a 32px-tall face; 4x fills most of the panel "
-                    "height."));
+                // Editor / Style / Display all come from the one shared builder
+                // (see build_text_groups) so the live banner and the text
+                // events below can never drift apart.
+                std::vector<MenuItem> ed, st, dp;
+                build_text_groups(S, pf_anim_push, menu_sys_pp, pf_hub75_p, ed, st, dp);
+                si.push_back(with_desc(submenu("Text Editor", std::move(ed)),
+                    "Write the message: the on-screen keyboard, one-tap line "
+                    "breaks, clearing it, and the {tokens} that substitute live "
+                    "values into it."));
+                si.push_back(with_desc(submenu("Text Style", std::move(st)),
+                    "How the text LOOKS - font and size, colour and rainbow, "
+                    "bold, outline and the background band."));
+                si.push_back(with_desc(submenu("Text Display Options", std::move(dp)),
+                    "How the text BEHAVES and where it sits - motion and speed, "
+                    "position, alignment, stacking, offsets and the display "
+                    "window."));
             }
             {
-                struct C { const char* n; uint8_t r, g, b; };
-                static constexpr C kCols[] = {
-                    {"White", 255,255,255}, {"Amber", 255,160,32},
-                    {"Red",   255, 50, 50}, {"Green",  30,220,60},
-                    {"Cyan",    0,180,255}, {"Purple",180, 30,220},
-                };
-                std::vector<MenuItem> ci;
-                for (const auto& c : kCols)
-                    ci.push_back(leaf_sel(c.n,
-                        [S, c, pf_anim_push]{ S->r = c.r; S->g = c.g; S->b = c.b;
-                                              if (pf_anim_push) pf_anim_push(); },
-                        [S, c]{ return S->r == c.r && S->g == c.g && S->b == c.b; }));
-                ci.push_back(color_picker("Custom...",
-                    [S, pf_anim_push](uint8_t r, uint8_t g, uint8_t b){
-                        S->r = r; S->g = g; S->b = b;
+                // Diagnostics readout. Swaps the source string for a live
+                // system ticker without touching the user's message, so it can
+                // be flicked on at the bench and off again with nothing lost.
+                std::vector<MenuItem> di;
+                di.push_back(with_desc(toggle("Show Now",
+                    [S]{ return S->diag; },
+                    [S, pf_anim_push](bool v){
+                        S->diag = v;
+                        if (v) S->enabled = true;   // pointless otherwise
                         if (pf_anim_push) pf_anim_push();
-                    },
-                    [S]() -> std::tuple<uint8_t,uint8_t,uint8_t>{
-                        return { S->r, S->g, S->b };
-                    }));
-                si.push_back(with_desc(submenu("Color", std::move(ci)),
-                    "Six presets or a full RGB picker (Custom...)."));
-            }
-            {
-                struct M { const char* n; face::ScrollMode m; const char* d; };
-                static const M kModes[] = {
-                    {"Scroll Left",  face::ScrollMode::Left,   "Classic marquee, right to left."},
-                    {"Scroll Right", face::ScrollMode::Right,  "Marquee left to right."},
-                    {"Static",       face::ScrollMode::Static, "Centred, no motion - a fixed label."},
-                    {"Bounce",       face::ScrollMode::Bounce, "Ping-pong between the edges."},
+                    }),
+                    "Put the readout up right now and leave it up. Your own "
+                    "message is kept and comes straight back when this goes "
+                    "off. For a readout that appears on a boop or a gesture "
+                    "and clears itself, use Triggers instead."));
+
+                std::vector<MenuItem> fi;
+                for (const auto& f : face::diag_fields()) {
+                    const uint32_t bit = f.bit;
+                    fi.push_back(toggle(f.name,
+                        [S, bit]{ return (S->diag_fields & bit) != 0; },
+                        [S, bit, pf_anim_push](bool v){
+                            if (v) S->diag_fields |=  bit;
+                            else   S->diag_fields &= ~bit;
+                            if (pf_anim_push) pf_anim_push();
+                        }));
+                }
+                fi.push_back(with_desc(leaf("All", [S, pf_anim_push]{
+                        S->diag_fields = 0xFFFFFFFFu;
+                        if (pf_anim_push) pf_anim_push();
+                    }), "Switch every field back on."));
+                fi.push_back(with_desc(leaf("None", [S, pf_anim_push]{
+                        S->diag_fields = 0;
+                        if (pf_anim_push) pf_anim_push();
+                    }), "Clear every field - the readout then says NO FIELDS "
+                        "SELECTED rather than going blank."));
+                MenuItem fm = with_desc(submenu("Fields", std::move(fi)),
+                    "Which values the readout includes. Trimming it down is how "
+                    "you fit diagnostics on one panel or a short ticker - each "
+                    "field takes its line break with it, so switching one off "
+                    "never leaves a blank row in the stacked layout.");
+                fm.label_fn = [S]{
+                    int n = 0;
+                    for (const auto& f : face::diag_fields())
+                        if (S->diag_fields & f.bit) ++n;
+                    char b[48];
+                    std::snprintf(b, sizeof b, "Fields  (%d of %d)",
+                                  n, static_cast<int>(face::diag_fields().size()));
+                    return std::string(b);
                 };
-                std::vector<MenuItem> mi;
-                for (const auto& m : kModes)
-                    mi.push_back(with_desc(leaf_sel(m.n,
-                        [S, m, pf_anim_push]{ S->mode = m.m; if (pf_anim_push) pf_anim_push(); },
-                        [S, m]{ return S->mode == m.m; }), m.d));
-                si.push_back(with_desc(submenu("Motion", std::move(mi)),
-                    "How the banner moves. Static and Bounce ignore Loop; "
-                    "Speed drives scroll and bounce."));
-            }
-            {
-                struct P { const char* n; face::TextVPos v; };
-                static const P kPos[] = {
-                    {"Center", face::TextVPos::Center},
-                    {"Top",    face::TextVPos::Top},
-                    {"Bottom", face::TextVPos::Bottom},
+                di.push_back(std::move(fm));
+
+                // Triggers — the same recipe editor the expressions use, keyed
+                // on a reserved entry in expression_triggers. Firing raises the
+                // readout for Hold Time and lowers it again, so a boop or a
+                // gesture can bring up diagnostics without leaving the menu.
+                di.push_back(with_desc(
+                    make_triggers_item(face::kDiagTriggerKey),
+                    "When to raise the readout automatically - boops, gestures, "
+                    "voice, tilt, light, the same events an expression can use. "
+                    "Hold Time is how long it stays up before the face returns "
+                    "to whatever it was showing; 0 latches it until something "
+                    "else takes over."));
+
+                MenuItem dm = with_desc(submenu("Diagnostic Text Options", std::move(di)),
+                    "A live system readout on the panels: CPU and GPU load and "
+                    "temperature, RAM, render FPS, battery, uptime, which IMU is "
+                    "reporting, and Wi-Fi / audio / camera status. It borrows "
+                    "the banner, so every text setting still applies - pair it "
+                    "with Scroll Left for a ticker, or Small font plus Stack "
+                    "Lines and a Display Window to park it on one panel while "
+                    "the face runs normally on the rest.");
+                dm.label_fn = [S]{
+                    return std::string("Diagnostic Text Options  (") +
+                           (S->diag ? "showing" : "off") + ")";
                 };
-                std::vector<MenuItem> pi;
-                for (const auto& p : kPos)
-                    pi.push_back(leaf_sel(p.n,
-                        [S, p, pf_anim_push]{ S->vpos = p.v; if (pf_anim_push) pf_anim_push(); },
-                        [S, p]{ return S->vpos == p.v; }));
-                si.push_back(with_desc(submenu("Position", std::move(pi)),
-                    "Vertical placement of the banner on the face."));
+                si.push_back(std::move(dm));
             }
-            si.push_back(with_desc(toggle("Bold",
-                [S]{ return S->bold; },
-                [S, pf_anim_push](bool v){ S->bold = v; if (pf_anim_push) pf_anim_push(); }),
-                "Thicken the glyph strokes a step for heavier, more legible "
-                "text (uses more panel real estate)."));
-            si.push_back(with_desc(toggle("Background",
-                [S]{ return S->bg; },
-                [S, pf_anim_push](bool v){ S->bg = v; if (pf_anim_push) pf_anim_push(); }),
-                "Dim the face behind the text band so the message stays "
-                "readable over busy expressions/effects."));
-            si.push_back(with_desc(slider("BG Dim", 0.f, 255.f, 15.f, "",
-                [S]{ return static_cast<float>(S->bg_alpha); },
-                [S, pf_anim_push](float v){ S->bg_alpha = static_cast<uint8_t>(v);
-                                            if (pf_anim_push) pf_anim_push(); }),
-                "How strongly the Background darkens the band (0 = none, "
-                "255 = solid black)."));
-            si.push_back(with_desc(toggle("Loop",
-                [S]{ return S->loop; },
-                [S, pf_anim_push](bool v){ S->loop = v; if (pf_anim_push) pf_anim_push(); }),
-                "On: the message wraps around forever. Off: one pass across "
-                "the panels, then the banner switches itself off. (Scroll "
-                "modes only.)"));
             return with_desc(submenu("Scrolling Text", std::move(si)),
                 "Scroll a text banner across the face panels (5x7 pixel font, "
                 "tinted, above every layer). Config: cfg[\"protoface\"]"
                 "[\"scroll_text\"].");
+        })(),
+        // Event Text — messages that put themselves up when something happens.
+        // Each slot owns its message AND its whole look; the trigger rides the
+        // same recipe map as faces, eye animations and the diagnostics readout,
+        // so the editor below is make_triggers_item() unmodified.
+        ([&]() -> MenuItem {
+            if (!state_ptr || !pf_scroll_p) {
+                MenuItem e; e.visible_fn = []{ return false; }; return e;
+            }
+            std::vector<MenuItem> ev;
+            for (int i = 0; i < face::kTextEventSlots; ++i) {
+                AppState* SP = state_ptr;
+                face::ScrollTextConfig* live = pf_scroll_p;
+                face::TextEvent* T = &SP->text_events[i];
+                face::ScrollTextConfig* S = &T->cfg;
+                const std::string key = std::string(face::kTextEventKeyPrefix) +
+                                        std::to_string(i);
+
+                // Re-apply while previewing, so edits are visible on the panels
+                // as you make them. Outside a preview there is nothing live to
+                // push — the slot is saved with the rest of the config.
+                face::ScrollTextConfig* saved = ctx.pf_scroll_saved_p;
+                bool*                   displaced = ctx.pf_scroll_displaced_p;
+                std::function<void()> push =
+                    [i, SP, live, pf_anim_push]{
+                        if (s_text_preview_slot != i) return;
+                        *live = SP->text_events[i].cfg;
+                        live->enabled = true;
+                        live->diag    = false;
+                        if (pf_anim_push) pf_anim_push();
+                    };
+
+                std::vector<MenuItem> si;
+                si.push_back(with_desc(toggle("Enabled",
+                    [T]{ return T->used; },
+                    [T](bool v){
+                        T->used = v;
+                        if (v && T->name.empty()) T->name = "Event Text";
+                    }),
+                    "Arm this slot. Off means its triggers are ignored entirely "
+                    "and the row stays out of the way."));
+
+                {
+                    MenuItem n = leaf("Name...", [T, menu_sys_pp]{
+                        if (!menu_sys_pp || !*menu_sys_pp) return;
+                        (*menu_sys_pp)->open_keyboard("Event Name", T->name,
+                            [T](const std::string& v){ T->name = v; T->used = true; },
+                            40);
+                    });
+                    n.label_fn = [T]{
+                        return std::string("Name: ") +
+                               (T->name.empty() ? "(unnamed)" : T->name);
+                    };
+                    si.push_back(with_desc(std::move(n),
+                        "What to call this event in the menus and in the "
+                        "notification when it fires."));
+                }
+
+                // The whole trigger system, unmodified: boops, gestures, shake,
+                // light, the "N times within a window while conditions hold"
+                // matching — plus the system events (Boot, Shutdown, Battery
+                // Low, Wi-Fi Up/Down, Phone Charging, Overheat).
+                si.push_back(make_triggers_item(key));
+
+                {
+                    std::vector<MenuItem> ed, st, dp;
+                    build_text_groups(S, push, menu_sys_pp, pf_hub75_p, ed, st, dp);
+                    si.push_back(with_desc(submenu("Text Editor", std::move(ed)),
+                        "This event's own message, its line breaks and the "
+                        "{tokens} substituted into it when it fires."));
+                    si.push_back(with_desc(submenu("Text Style", std::move(st)),
+                        "This event's own font, size, colour, outline and "
+                        "background - independent of the main banner."));
+                    si.push_back(with_desc(submenu("Text Display Options", std::move(dp)),
+                        "This event's own motion, position, stacking and "
+                        "display window."));
+                }
+
+                {
+                    MenuItem p = leaf("Preview",
+                        [i, SP, live, saved, displaced, pf_anim_push]{
+                        if (!saved || !displaced) return;
+                        if (s_text_preview_slot == i) {          // stop
+                            if (*displaced) { *live = *saved; *displaced = false; }
+                            s_text_preview_slot = -1;
+                        } else {
+                            // Same stash the event path uses, so previewing on
+                            // top of a live event doesn't lose the real banner.
+                            if (!*displaced) { *saved = *live; *displaced = true; }
+                            *live = SP->text_events[i].cfg;
+                            live->enabled = true;
+                            live->diag    = false;
+                            s_text_preview_slot = i;
+                        }
+                        if (pf_anim_push) pf_anim_push();
+                    });
+                    p.label_fn = [i]{
+                        return std::string(s_text_preview_slot == i ? "Stop Preview"
+                                                                    : "Preview");
+                    };
+                    si.push_back(with_desc(std::move(p),
+                        "Put this event's banner up now so you can see it "
+                        "without waiting for its trigger. Selecting it again "
+                        "puts the previous banner back."));
+                }
+
+                si.push_back(with_desc(leaf("Clear Slot", [T]{
+                        *T = face::TextEvent{};
+                    }),
+                    "Wipe this slot's message and properties and disarm it. "
+                    "Its triggers are left alone - an unused slot never fires, "
+                    "so a recipe you spent time on survives."));
+
+                MenuItem sm = submenu("Event " + std::to_string(i + 1), std::move(si));
+                sm.label_fn = [T, i]{
+                    std::string s = "Event " + std::to_string(i + 1) + ": ";
+                    s += T->name.empty() ? "(empty)" : T->name;
+                    if (T->used && !T->name.empty()) s += "  (armed)";
+                    return s;
+                };
+                ev.push_back(std::move(sm));
+            }
+            return with_desc(submenu("Event Text", std::move(ev)),
+                "Messages that put themselves up when something happens - boot, "
+                "shutdown, low battery, Wi-Fi coming or going, the phone going "
+                "on charge, or overheating, as well as every boop/gesture/tilt "
+                "recipe the expressions use. Each slot has its own text and its "
+                "own look, and restores whatever the banner was showing when it "
+                "ends. Config: cfg[\"protoface\"][\"text_events\"].");
         })(),
         // Reactions: the sleep state machine (ReactionEngine) as "Falling
         // Asleep", plus the named environmental reactions (ReactionRules).
@@ -4482,7 +6716,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         })(),
         gated(with_panel(submenu("GIFs", std::move(pf_gifs)),
                          "GIF Preview", draw_gif_preview), visible_for_hub75),
-        slider("Brightness", 0.f, 255.f, 5.f, "%",
+        with_desc(slider("Brightness", 0.f, 255.f, 5.f, "%",
             [&state]{ return static_cast<float>(state.face.brightness); },
             [teensy, &state](float v){
                 // Write the shared state too — the slider's getter reads it, so
@@ -4492,6 +6726,95 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 std::lock_guard<std::mutex> lk(state.mtx);
                 state.face.brightness = static_cast<uint8_t>(v);
             }),
+            "Panel brightness, perceptual: half the slider reads as half as "
+            "bright (gamma-corrected — on raw LEDs a linear slider does "
+            "almost nothing over its whole top half). Auto Dim scales on "
+            "top of this."),
+        // Auto Dim — scale Brightness by ambient lux (light sensor). Values
+        // live in state.face.auto_dim* (persisted with light_sensor.auto_dim);
+        // every change re-pushes to the controller via pf_apply_auto_dim.
+        [&]() -> MenuItem {
+            auto lux    = ctx.light_lux;
+            auto apply  = ctx.pf_apply_auto_dim;
+            auto factor = ctx.pf_auto_dim_factor;
+            std::vector<MenuItem> ad;
+            {   // Live readout: lux in → brightness factor out.
+                MenuItem r = leaf("Now", []{});
+                r.label_fn = [lux, factor]{
+                    const float l = lux ? lux() : -1.f;
+                    if (l < 0.f) return std::string("Now:  no lux sample");
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf),
+                                  "Now:  %.1f lux  \xe2\x86\x92  %d%%", l,
+                                  static_cast<int>(std::lround(
+                                      (factor ? factor() : 1.0) * 100.0)));
+                    return std::string(buf);
+                };
+                r.description =
+                    "Live: the current ambient reading and the brightness the "
+                    "curve maps it to, as a percentage of the Brightness "
+                    "setting. Watch this while tuning the sliders below.";
+                ad.push_back(std::move(r));
+            }
+            ad.push_back(with_desc(toggle("Enabled",
+                [&state]{ return state.face.auto_dim; },
+                [&state, apply](bool v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim = v; }
+                    if (apply) apply();
+                }),
+                "Dim the face with ambient light: dark room = dim face, "
+                "daylight = the full Brightness setting. Rides on top of "
+                "Brightness — turning this off restores it exactly."));
+            ad.push_back(with_desc(slider("Dark Below", 0.f, 100.f, 1.f, " lux",
+                [&state]{ return state.face.auto_dim_dark; },
+                [&state, apply](float v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim_dark = v; }
+                    if (apply) apply();
+                }),
+                "At or below this many lux the face sits at Min Brightness. "
+                "A dim indoor room reads ~5-20 lux."));
+            ad.push_back(with_desc(slider("Full Bright Above", 20.f, 2000.f, 25.f, " lux",
+                [&state]{ return state.face.auto_dim_bright; },
+                [&state, apply](float v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim_bright = v; }
+                    if (apply) apply();
+                }),
+                "At or above this many lux the face runs at the full "
+                "Brightness setting. Indoor lighting reads ~100-500 lux; "
+                "overcast daylight ~1000+."));
+            ad.push_back(with_desc(slider("Min Brightness", 0.f, 100.f, 5.f, "%",
+                [&state]{ return state.face.auto_dim_min_pct; },
+                [&state, apply](float v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim_min_pct = v; }
+                    if (apply) apply();
+                }),
+                "The floor, as a percentage of Brightness — what the face "
+                "dims to in the dark. 0% lets it go fully black."));
+            ad.push_back(with_desc(slider("Curve", 0.25f, 4.f, 0.05f, "",
+                [&state]{ return state.face.auto_dim_curve; },
+                [&state, apply](float v){
+                    { std::lock_guard<std::mutex> lk(state.mtx);
+                      state.face.auto_dim_curve = v; }
+                    if (apply) apply();
+                }),
+                "Bends the ramp between the two lux points (which already "
+                "runs in log-lux, matching how eyes judge light). 1 = even. "
+                "Above 1 the face stays dim longer and brightens late; below "
+                "1 it brightens early. Watch the Now row while adjusting."));
+            MenuItem sub = with_desc(submenu("Auto Dim", std::move(ad)),
+                "Dim the face automatically from the ambient light sensor: "
+                "set the lux range, the dimmest the face may go, and the "
+                "curve between them. Needs light_sensor enabled in config.");
+            sub.label_fn = [&state]{
+                return std::string("Auto Dim  [") +
+                       (state.face.auto_dim ? "on" : "off") + "]";
+            };
+            return sub;
+        }(),
         submenu("Hardware",       std::move(pf_hardware_menu)),
         gated(leaf("Save Face Config", [teensy]{ teensy->save_config(); }),
               visible_for_hub75),
@@ -4539,8 +6862,14 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
     take_into(base_items, protoface_inner_menu, "Start Protoface");
     take_into(base_items, protoface_inner_menu, "Restart Protoface");
     take_into(base_items, protoface_inner_menu, "Hardware");
+    // Straight after Hardware: both describe the physical build, and the
+    // Color Order / Camera Mode knobs next door are the ones you reach for
+    // while setting panels up. (Its own visible_fn keeps it hidden unless the
+    // HUB75 backend is active.)
+    if (pf_hub75_p) base_items.push_back(std::move(pf_hub75_layout_item));
     take_into(base_items, protoface_inner_menu, "Panel Preview");
     take_into(base_items, protoface_inner_menu, "Brightness");
+    take_into(base_items, protoface_inner_menu, "Auto Dim");
     take_into(base_items, protoface_inner_menu, "Save Face Config");
     take_into(base_items, protoface_inner_menu, "Release Control");
 
@@ -4571,6 +6900,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
 
     take_into(media_items, protoface_inner_menu, "GIFs");
     take_into(media_items, protoface_inner_menu, "Scrolling Text");
+    // Right after the banner it shares its builders with, so the two read as a
+    // pair: one message you put up, and the ones that put themselves up.
+    take_into(media_items, protoface_inner_menu, "Event Text");
 
     // Anything still in the old flat list falls through to Base Settings.
     for (auto& m : protoface_inner_menu) base_items.push_back(std::move(m));
@@ -5250,8 +7582,9 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             };
 
         // ── Custom multi-stop gradient — one colour per section, blended ─────
-        // down the length. Overrides Color 2 when 2+ stops are set. Only shown
-        // for the Gradient pattern; edits push live via set_zone_stops.
+        // down the length. With 2+ stops this is the zone's colour source for
+        // EVERY pattern (the old two-colour Color/Color 2 ramp is long gone), so
+        // there is no visibility gate; edits push live via set_zone_stops.
         constexpr int kMaxStops = 8;
         std::vector<MenuItem> stop_items;
         {
@@ -5284,7 +7617,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             };
             stop_items.push_back(with_desc(std::move(cnt),
                 "How many colour stops the gradient blends through. Off falls back "
-                "to Color \xE2\x86\x92 Color 2. Set it to your section count so each "
+                "to the zone's flat Color. Set it to your section count so each "
                 "ring/line gets its own colour."));
             stop_items.push_back(with_desc(leaf("Match to Sections",
                 [acc, zi, leds, z, seed_stop]{
@@ -5325,22 +7658,62 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         }
         MenuItem grad_menu = with_desc(submenu("Custom Gradient", std::move(stop_items)),
             "Multi-stop gradient: blend through several colours down the length, "
-            "one stop per section. With 2+ stops it overrides Color 2 for "
-            "Gradient, and colours Wave / Level / Chase too — their effect just "
-            "modulates the gradient's brightness.");
-        // Available for every pattern whose per-LED colour can follow a gradient.
-        grad_menu.visible_fn = [acc, zi]{
-            if (!acc) return false;
-            const auto p = acc->zones[zi].pattern;
-            return p == accessory::Pattern::Gradient || p == accessory::Pattern::Wave ||
-                   p == accessory::Pattern::Level    || p == accessory::Pattern::Chase;
-        };
+            "one stop per section. With 2+ stops it replaces the flat Color on "
+            "EVERY pattern — Gradient scrolls through it, and Solid / Breathe / "
+            "Wave / Level / Chase just modulate its brightness.");
+        // No visibility gate any more: the stops colour EVERY pattern (Solid,
+        // Breathe, Sparkle included) — the effect just modulates their brightness
+        // — so the Custom Gradient is offered for all of them.
 
-        std::vector<MenuItem> items = {
-            with_desc(submenu("Pattern", std::move(pat_items)),
-                      "What the zone does each tick. Gradient fades Color→Color 2 "
-                      "down the length; Wave sends a bright band along it; Level "
-                      "uses the mic; Breathe pulses. Boops flash on top."),
+        // ── Palette — the face's own Material Color options, on the strip ────
+        // Same names, same colours as Face > Material Color (resolved through
+        // zone_palette_for, which reads the face's own spec table). A solid
+        // applies as this zone's flat Color and clears the stops; a gradient or
+        // pride flag fills the stops instead. One-shot: tweak freely afterwards.
+        MenuItem palette_menu = [&]{
+            auto apply_pal = [leds, acc, z, zi](int idx){
+                if (!acc) return;
+                const ZonePalette pal = zone_palette_for(idx);
+                auto& zc = acc->zones[zi];
+                if (pal.stops.empty()) {
+                    zc.stops.clear();
+                    zc.r = pal.flat[0]; zc.g = pal.flat[1]; zc.b = pal.flat[2];
+                } else {
+                    zc.stops = pal.stops;
+                    zc.r = pal.stops.front()[0];   // sensible base for the flat patterns
+                    zc.g = pal.stops.front()[1];
+                    zc.b = pal.stops.front()[2];
+                }
+                if (leds) {
+                    leds->set_zone_stops(z, zc.stops);
+                    leds->set_zone_color(z, zc.r, zc.g, zc.b);
+                }
+            };
+            std::vector<MenuItem> solids, grads, pride;
+            for (const auto& m : kMaterialPresets) {
+                const bool is_grad = (m.idx >= 8 && m.idx <= 10) || m.idx >= 12;
+                (is_grad ? grads : solids).push_back(
+                    leaf(m.label, [apply_pal, idx = m.idx]{ apply_pal(idx); }));
+            }
+            for (const auto& f : kPridePresets)
+                pride.push_back(leaf(f.label, [apply_pal, idx = f.idx]{ apply_pal(idx); }));
+            return with_desc(submenu("Palette", std::vector<MenuItem>{
+                with_desc(submenu("Solids", std::move(solids)),
+                    "Flat colours \xE2\x80\x94 applied as this zone's Color, clearing any "
+                    "gradient stops."),
+                with_desc(submenu("Gradients", std::move(grads)),
+                    "Multi-colour presets, applied as this zone's gradient stops."),
+                with_desc(submenu("Pride", std::move(pride)),
+                    "Pride flag colours, applied as this zone's gradient stops."),
+            }), "The same colour options the face offers under Material Color. "
+                "Picking one fills this zone in: a solid sets Color, a gradient or "
+                "flag fills the Custom Gradient stops.");
+        }();
+
+        // ── Colour ───────────────────────────────────────────────────────
+        // Everything that decides what colour an LED is — the flat colours, the
+        // multi-stop gradient, face-following, and how a gradient is aimed.
+        std::vector<MenuItem> color_items = {
             color_picker("Color",
                 [leds, acc, z, zi](uint8_t r, uint8_t g, uint8_t b) {
                     if (leds) leds->set_zone_color(z, r, g, b);
@@ -5351,45 +7724,24 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     if (leds) { auto c = leds->zone(z);   return {c.r, c.g, c.b}; }
                     return {0, 0, 0};
                 }),
-            with_desc(color_picker("Color 2 (gradient)",
-                [leds, acc, z, zi](uint8_t r, uint8_t g, uint8_t b) {
-                    if (leds) leds->set_zone_color2(z, r, g, b);
-                    if (acc)  { acc->zones[zi].r2 = r; acc->zones[zi].g2 = g; acc->zones[zi].b2 = b; }
-                },
-                [acc, z, zi, leds]() -> std::tuple<uint8_t, uint8_t, uint8_t> {
-                    if (acc)  { auto& c = acc->zones[zi]; return {c.r2, c.g2, c.b2}; }
-                    if (leds) { auto c = leds->zone(z);   return {c.r2, c.g2, c.b2}; }
-                    return {0, 0, 0};
-                }),
-                "The far-end color for Gradient (base uses Color, tip uses "
-                "Color 2)."),
+            std::move(palette_menu),
             std::move(grad_menu),
-            [&]() -> MenuItem {
-                struct LSOpt { const char* label; accessory::LevelStyle s; };
-                static const LSOpt kLS[] = {
-                    { "Glow (whole zone)",      accessory::LevelStyle::Glow },
-                    { "Meter (base to tip)",    accessory::LevelStyle::Meter },
-                    { "Center Meter",           accessory::LevelStyle::CenterMeter },
-                    { "Peak (falling marker)",  accessory::LevelStyle::Peak },
-                    { "Pulse (center burst)",   accessory::LevelStyle::Pulse },
-                };
-                std::vector<MenuItem> ls_items;
-                for (const auto& o : kLS)
-                    ls_items.push_back(leaf_sel(o.label,
-                        [leds, acc, z, zi, o]{ if (leds) leds->set_zone_level_style(z, o.s);
-                                               if (acc)  acc->zones[zi].level_style = o.s; },
-                        [acc, leds, z, zi, o]{ return acc ? acc->zones[zi].level_style == o.s
-                                                          : (leds && leds->zone(z).level_style == o.s); }));
-                MenuItem m = with_desc(submenu("Level Style", std::move(ls_items)),
-                    "How the Level pattern reacts to the mic: Glow (whole-zone "
-                    "brightness), Meter (VU bar base->tip), Center Meter (from the "
-                    "middle), Peak (bar + a falling peak marker), or Pulse (soft "
-                    "centre burst). Smoothing/peak-fall live under Coproc Mic; a "
-                    "Custom Gradient colours the bar.");
-                m.visible_fn = [acc, zi]{
-                    return acc && acc->zones[zi].pattern == accessory::Pattern::Level; };
-                return m;
-            }(),
+            with_desc(toggle("Follow Face",
+                [acc, leds, z, zi]{ return acc ? acc->zones[zi].follow_face
+                                               : (leds && leds->zone(z).follow_face); },
+                [leds, acc, z, zi](bool v){ if (leds) leds->set_zone_follow_face(z, v);
+                                            if (acc)  acc->zones[zi].follow_face = v; }),
+                "Sync this zone's color to the face's mean color, updating a few "
+                "times a second. The zone's own Color is ignored while on."),
+        };
+
+        // ── Color Motion ─────────────────────────────────────────────────
+        // How the colour moves: the RATES (Wave Speed also scrolls Gradient,
+        // Breathe Rate also walks the Chase dot), and the AXIS that movement
+        // follows. Gradient Across Shape / Gradient Angle sit here next to Wave
+        // Speed because they decide the direction the thing Wave Speed scrolls
+        // actually travels in; Level Style only applies to Level.
+        std::vector<MenuItem> motion_items = {
             with_desc(slider("Wave Speed", -3.f, 3.f, 0.1f, " Hz",
                 [acc, zi]{ return acc ? acc->zones[zi].wave_speed : 0.5f; },
                 [leds, acc, z, zi](float v){
@@ -5434,11 +7786,57 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     "turn it to run the colour horizontally, vertically, or on any "
                     "diagonal. Rotates independently of the zone's own Rotation.");
             }(),
-            with_desc(submenu("Shape & Wiring", std::move(topo_items)),
-                      "Define the zone's rings/lines and their LED counts, place "
-                      "and rotate it, and set where LED 0 enters — the wiring "
-                      "panel shows the daisy-chain order. Section/shape changes "
-                      "apply to the LEDs on the next restart."),
+            with_desc(slider("Palette Drift", -3.f, 3.f, 0.05f, " Hz",
+                [acc, zi]{ return acc ? acc->zones[zi].palette_drift : 0.f; },
+                [leds, acc, z, zi](float v){
+                    if (leds) leds->set_zone_palette_drift(z, v);
+                    if (acc)  acc->zones[zi].palette_drift = v; }),
+                "Scroll the Custom Gradient's COLOURS along the zone, independently "
+                "of what the pattern is doing. This is what makes a Breathe or "
+                "Solid zone show flowing colours (Lava creeping, an aurora "
+                "drifting) instead of a frozen ramp that only changes brightness. "
+                "0 = static; negative reverses. Separate from Wave Speed on "
+                "purpose, so slow colour can drift under a fast effect. The "
+                "Gradient pattern ignores this \xe2\x80\x94 Wave Speed is already "
+                "its scroll."),
+            with_desc(slider("Breathe Rate", 0.05f, 5.f, 0.05f, " Hz",
+                [acc, leds, z, zi]{ return acc ? acc->zones[zi].breathe_hz
+                                               : (leds ? leds->zone(z).breathe_hz : 0.5f); },
+                [leds, acc, z, zi](float v){ if (leds) leds->set_zone_breathe_hz(z, v);
+                                             if (acc)  acc->zones[zi].breathe_hz = v; }),
+                "How fast Breathe oscillates and the Chase dot walks its loop."),
+            [&]() -> MenuItem {
+                struct LSOpt { const char* label; accessory::LevelStyle s; };
+                static const LSOpt kLS[] = {
+                    { "Glow (whole zone)",      accessory::LevelStyle::Glow },
+                    { "Meter (base to tip)",    accessory::LevelStyle::Meter },
+                    { "Center Meter",           accessory::LevelStyle::CenterMeter },
+                    { "Peak (falling marker)",  accessory::LevelStyle::Peak },
+                    { "Pulse (center burst)",   accessory::LevelStyle::Pulse },
+                };
+                std::vector<MenuItem> ls_items;
+                for (const auto& o : kLS)
+                    ls_items.push_back(leaf_sel(o.label,
+                        [leds, acc, z, zi, o]{ if (leds) leds->set_zone_level_style(z, o.s);
+                                               if (acc)  acc->zones[zi].level_style = o.s; },
+                        [acc, leds, z, zi, o]{ return acc ? acc->zones[zi].level_style == o.s
+                                                          : (leds && leds->zone(z).level_style == o.s); }));
+                MenuItem m = with_desc(submenu("Level Style", std::move(ls_items)),
+                    "How the Level pattern reacts to the mic: Glow (whole-zone "
+                    "brightness), Meter (VU bar base->tip), Center Meter (from the "
+                    "middle), Peak (bar + a falling peak marker), or Pulse (soft "
+                    "centre burst). Smoothing/peak-fall live under Setup > Mic "
+                    "Response; a "
+                    "Custom Gradient colours the bar.");
+                m.visible_fn = [acc, zi]{
+                    return acc && acc->zones[zi].pattern == accessory::Pattern::Level; };
+                return m;
+            }(),
+        };
+
+        // ── Brightness ──────────────────────────────────────────────────
+        // The zone's own scale, and the floor a modulating effect idles at.
+        std::vector<MenuItem> bright_items = {
             with_desc(slider("Zone Brightness", 0.f, 255.f, 5.f, "",
                 [acc, leds, z, zi]{
                     if (acc)  return static_cast<float>(acc->zones[zi].zone_brightness);
@@ -5464,6 +7862,27 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                 "brightness, so Level / Breathe / Wave / Chase idle at a dim glow "
                 "and get brighter with the effect instead of going fully off. "
                 "0% = classic (can go dark)."),
+        };
+
+        std::vector<MenuItem> items = {
+            with_desc(submenu("Pattern", std::move(pat_items)),
+                      "What the zone does each tick. Gradient blends through the "
+                      "Custom Gradient down the length; Wave sends a bright band "
+                      "along it; Level uses the mic; Breathe pulses. Boops flash "
+                      "on top."),
+            with_desc(submenu("Color", std::move(color_items)),
+                      "What colour this zone is: the flat Color, a multi-stop "
+                      "Custom Gradient, and Follow Face to track the eye. How that "
+                      "colour MOVES lives under Color Motion."),
+            with_desc(submenu("Color Motion", std::move(motion_items)),
+                      "How the colour moves: how fast Wave travels and Gradient "
+                      "scrolls, which direction a gradient sweeps across the shape, "
+                      "how fast Breathe pulses and Chase walks, and which reaction "
+                      "the Level pattern uses."),
+            with_desc(submenu("Brightness", std::move(bright_items)),
+                      "This zone's own brightness, on top of the chain-wide "
+                      "Brightness, and the minimum level modulating effects idle "
+                      "at instead of going fully dark."),
             with_desc(submenu("Sound Trigger", std::vector<MenuItem>{
                 with_desc(toggle("React to Sound",
                     [acc, leds, z, zi]{ return acc ? acc->zones[zi].sound_trigger
@@ -5484,7 +7903,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                         if (leds) leds->set_zone_sound_threshold(z, t);
                         if (acc)  acc->zones[zi].sound_threshold = t; }),
                     "How loud the sound must be to open the gate (share of the "
-                    "shaped mic level). Uses the same Coproc Mic gain/curve, so "
+                    "shaped mic level). Uses the same Setup > Mic Response curve, so "
                     "tune that first."),
                 with_desc(slider("Fade", 0.2f, 10.f, 0.1f, "/s",
                     [acc, leds, z, zi]{ return acc ? acc->zones[zi].sound_decay
@@ -5507,19 +7926,11 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             }), "Make a loud sound above a threshold trigger this zone's pattern "
                 "(then fade). Pairs well with Minimum Brightness for an idle glow "
                 "that flares on sound."),
-            with_desc(toggle("Follow Face",
-                [acc, leds, z, zi]{ return acc ? acc->zones[zi].follow_face
-                                               : (leds && leds->zone(z).follow_face); },
-                [leds, acc, z, zi](bool v){ if (leds) leds->set_zone_follow_face(z, v);
-                                            if (acc)  acc->zones[zi].follow_face = v; }),
-                "Sync this zone's color to the face's mean color, updating a few "
-                "times a second. The zone's own Color is ignored while on."),
-            with_desc(slider("Breathe Rate", 0.05f, 5.f, 0.05f, " Hz",
-                [acc, leds, z, zi]{ return acc ? acc->zones[zi].breathe_hz
-                                               : (leds ? leds->zone(z).breathe_hz : 0.5f); },
-                [leds, acc, z, zi](float v){ if (leds) leds->set_zone_breathe_hz(z, v);
-                                             if (acc)  acc->zones[zi].breathe_hz = v; }),
-                "How fast Breathe oscillates and the Chase dot walks its loop."),
+            with_desc(submenu("Shape & Wiring", std::move(topo_items)),
+                      "Define the zone's rings/lines and their LED counts, place "
+                      "and rotate it, and set where LED 0 enters — the wiring "
+                      "panel shows the daisy-chain order. Section/shape changes "
+                      "apply to the LEDs on the next restart."),
             leaf("Test Flash", [leds, z]{ if (leds) leds->trigger_flash(z, 0.35); }),
         };
         return with_panel(submenu(std::move(label), std::move(items)),
@@ -5661,28 +8072,38 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         overview_items.push_back(with_desc(leaf("Auto-Arrange (face layout)",
             [acc]{
                 if (!acc) return;
-                // Rough face arrangement in layout units, keyed to the face
-                // reference (eyes ≈ ±22 x, mouth low-centre) drawn in the
-                // overview: hubs beside the eyes, fins out on the cheeks, blush
-                // low-centre. A starting point — then nudge with the sliders.
-                static const int dx[] = { -30, 30, -42, 42, 0 };
-                static const int dy[] = {  -6, -6,   8,  8, 12 };
+                // The build's assumed physical order, left to right:
+                //   L Fin | L Hub | R Hub | R Fin      (one row, cheek height)
+                //              Blush                   (underneath, low-centre)
+                // Indexed by ZONE INDEX (LHub, RHub, LFin, RFin, Blush), so the
+                // fins take the outer slots and the hubs the inner ones. Keyed to
+                // the face reference drawn in the overview (eyes ≈ ±22 x, mouth
+                // low-centre). A starting point — then nudge with the sliders.
+                static const int dx[] = { -12, 12, -30, 30, 0 };
+                static const int dy[] = {   0,  0,   0,  0, 13 };
                 for (int zi = 0; zi < accessory::ZoneCount; ++zi) {
                     acc->zones[zi].pos_x = dx[zi];
                     acc->zones[zi].pos_y = dy[zi];
                 }
             }),
-            "Spread the five zones into a rough face layout as a starting point, "
-            "positioned around the face reference (eyes + mouth) shown in the "
-            "overview \xE2\x80\x94 then nudge each with the Align sliders below."));
+            "Lay the zones out in the build's assumed order \xE2\x80\x94 L Fin, L Hub, "
+            "R Hub, R Fin in one row across the cheeks, with Blush underneath "
+            "\xE2\x80\x94 positioned around the face reference (eyes + mouth) shown in "
+            "the overview. A starting point; nudge each with the Align sliders "
+            "below."));
         {
-            static const char* kName[] = { "L Hub", "R Hub", "L Fin", "R Fin", "Blush" };
-            for (int zi = 0; zi < accessory::ZoneCount; ++zi) {
-                overview_items.push_back(slider(std::string(kName[zi]) + " \xE2\x80\x94 X",
+            // Listed in the build's physical left-to-right order (fins outermost,
+            // blush underneath) so the sliders read the way the strip looks
+            // rather than the way the Zone enum happens to be numbered.
+            static const int   kOrder[] = { 2, 0, 1, 3, 4 };
+            static const char* kName[]  = { "L Fin", "L Hub", "R Hub", "R Fin", "Blush" };
+            for (int r = 0; r < accessory::ZoneCount; ++r) {
+                const int zi = kOrder[r];
+                overview_items.push_back(slider(std::string(kName[r]) + " \xE2\x80\x94 X",
                     -200.f, 200.f, 1.f, "",
                     [acc, zi]{ return acc ? static_cast<float>(acc->zones[zi].pos_x) : 0.f; },
                     [acc, zi](float v){ if (acc) acc->zones[zi].pos_x = static_cast<int>(v); }));
-                overview_items.push_back(slider(std::string(kName[zi]) + " \xE2\x80\x94 Y",
+                overview_items.push_back(slider(std::string(kName[r]) + " \xE2\x80\x94 Y",
                     -200.f, 200.f, 1.f, "",
                     [acc, zi]{ return acc ? static_cast<float>(acc->zones[zi].pos_y) : 0.f; },
                     [acc, zi](float v){ if (acc) acc->zones[zi].pos_y = static_cast<int>(v); }));
@@ -5698,22 +8119,79 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "the daisy-chain order (green ring = chain DIN). Placement is cosmetic "
             "\xE2\x80\x94 it's the layout picture, not the LED output.");
 
-    std::vector<MenuItem> led_menu = {
-        with_desc(toggle("Enabled",
-            [leds, acc]{ return acc ? acc->enabled : (leds && leds->is_running()); },
-            [leds, acc](bool v){ if (leds) leds->set_enabled(v);
-                                 if (acc)  acc->enabled = v; }),
-            "Master switch for the accessory LED chain — turns the whole chain "
-            "on or off right away. (Changing Data Transport still needs a "
-            "restart; this doesn't.)"),
+    // ── Layout & Sides ──────────────────────────────────────────────────────
+    // Arranging the physical build, and everything describing how the LEFT and
+    // RIGHT sides relate. The overview keeps its live panel, so the Align
+    // sliders inside it still nudge zones against the face reference.
+    std::vector<MenuItem> layout_sides_items = {
         std::move(overview),
-        with_desc(slider("Brightness", 0.f, 255.f, 1.f, "",
-            [leds]{ return leds ? static_cast<float>(leds->global_brightness()) : 0.f; },
-            [leds](float v){ if (leds) leds->set_global_brightness(static_cast<uint8_t>(v)); }),
-            "Master brightness applied to the whole accessory chain. WS2812s "
-            "draw a lot of current at full white — keep this low (~64) unless "
-            "you have power injection."),
-        with_desc(toggle("Sync Effect Start (hubs+fins)",
+        // ── Wiring Order ─────────────────────────────────────────────────────
+        // Which area the data line reaches first, second, and so on. The build is
+        // ONE continuous run, so every zone's start index falls out of how it was
+        // physically soldered — describe the wiring wrong and the right pattern
+        // lands on the wrong area. This is where that order is stated.
+        [&]() -> MenuItem {
+            auto acc_apply = ctx.acc_apply;
+            static const char* kWireNames[accessory::ZoneCount] = {
+                "Cheek Hub Left", "Cheek Hub Right", "Cheek Fin Left",
+                "Cheek Fin Right", "Blush" };
+            static const char* kWirePos[accessory::ZoneCount] = {
+                "1st", "2nd", "3rd", "4th", "5th" };
+            auto zone_at = [acc](int pos) -> int {
+                if (!acc) return pos;
+                return accessory::normalize_wire_order(acc->wire_order)[pos];
+            };
+            // Put `zone` at chain position `pos`, SWAPPING with whatever was
+            // there. Swapping (rather than inserting) keeps the order a complete
+            // permutation, so no area can ever fall off the chain mid-edit.
+            auto set_pos = [acc, acc_apply](int pos, int zone) {
+                if (!acc) return;
+                acc->wire_order = accessory::normalize_wire_order(acc->wire_order);
+                int cur = -1;
+                for (int i = 0; i < accessory::ZoneCount; ++i)
+                    if (acc->wire_order[i] == zone) cur = i;
+                if (cur < 0 || cur == pos) return;
+                std::swap(acc->wire_order[pos], acc->wire_order[cur]);
+                if (acc_apply) acc_apply();   // re-chain + rebuild the strip now
+            };
+            std::vector<MenuItem> rows;
+            for (int pos = 0; pos < accessory::ZoneCount; ++pos) {
+                std::vector<MenuItem> picks;
+                for (int z = 0; z < accessory::ZoneCount; ++z)
+                    picks.push_back(leaf_sel(kWireNames[z],
+                        [set_pos, pos, z]{ set_pos(pos, z); },
+                        [zone_at, pos, z]{ return zone_at(pos) == z; }));
+                MenuItem row = submenu(kWirePos[pos], std::move(picks));
+                // Live label: the area here plus the LED span it ends up owning,
+                // so the numbers can be read straight off against the real build.
+                row.label_fn = [acc, zone_at, pos]() -> std::string {
+                    const int z = zone_at(pos);
+                    std::string s = std::string(kWirePos[pos]) + ": " + kWireNames[z];
+                    if (acc) {
+                        const auto& zc = acc->zones[z];
+                        s += zc.count > 0
+                             ? "  (" + std::to_string(zc.start) + "-" +
+                               std::to_string(zc.start + zc.count - 1) + ")"
+                             : "  (no LEDs)";
+                    }
+                    return s;
+                };
+                rows.push_back(with_desc(std::move(row),
+                    "Which area sits at this point along the chain. Picking one "
+                    "SWAPS it with whatever was here, so the list stays complete. "
+                    "The range in the label is the LED span that area ends up "
+                    "owning — re-chaining happens immediately, no Apply needed."));
+            }
+            return with_desc(submenu("Wiring Order", std::move(rows)),
+                "The order the data line reaches each area, DIN\xe2\x86\x92" "DOUT. "
+                "The whole build is one continuous run, so this is what decides "
+                "each area's LED range: the first area starts at 0, the next "
+                "starts where it ends, and so on. Set it to match how the strip "
+                "is ACTUALLY soldered — if an effect shows up on the wrong part "
+                "of the face, this is usually why. Areas with no LEDs take no "
+                "space. Changing the order re-chains the strip live.");
+        }(),
+        with_desc(toggle("Sync Effect Start",
             [leds, acc]{ return acc ? acc->sync_sides : (leds && leds->sync_sides()); },
             [leds, acc](bool v){ if (leds) leds->set_sync_sides(v);
                                  if (acc)  acc->sync_sides = v; }),
@@ -5722,7 +8200,7 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
             "start together and stay aligned. Re-syncs whenever an effect is "
             "(re)applied to a side zone — including by an expression action. "
             "Blush is left free-running."),
-        with_desc(toggle("Link Cheek Areas (hub+fin)",
+        with_desc(toggle("Link Hub + Fin",
             [leds, acc]{ return acc ? acc->link_areas : (leds && leds->link_areas()); },
             [leds, acc](bool v){ if (leds) leds->set_link_areas(v);
                                  if (acc)  acc->link_areas = v; }),
@@ -5801,13 +8279,19 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
                     "One-shot: copy the left pattern/colors/effects onto the "
                     "right now. Both sides stay independently editable after."),
             };
-            return with_desc(submenu("Mirror (Right <- Left)", std::move(m)),
+            return with_desc(submenu("Mirror Left to Right", std::move(m)),
                 "Make the right cheek hub + fin match the left. Two live "
                 "toggles (physical layout / look) plus one-shot copy buttons. "
                 "Different from a zone's cosmetic Mirror flag, which only flips "
                 "its own preview.");
         }(),
-        with_desc(submenu("Coproc Mic (Level + Mouth)", std::vector<MenuItem>{
+    };
+
+    // ── Setup ───────────────────────────────────────────────────────────────
+    // Set once for a given build, then left alone — kept out of the way of the
+    // per-zone controls you actually reach for.
+    std::vector<MenuItem> setup_items = {
+        with_desc(submenu("Mic Response", std::vector<MenuItem>{
             with_desc(slider("Gain", 0.5f, 20.f, 0.5f, "x",
                 [&state]{ std::lock_guard<std::mutex> lk(state.mtx);
                           return state.coproc_mic.gain; },
@@ -5858,22 +8342,397 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         with_desc(submenu("Data Transport", std::vector<MenuItem>{
             leaf_sel("Pi GPIO  (SPI MOSI / GPIO10)",
                 [acc]{ if (acc) acc->transport = "spidev"; },
-                [acc]{ return acc && acc->transport != "coproc"; }),
-            leaf_sel("Coprocessor  (RP2350 GP37)",
+                [acc]{ return acc && acc->transport != "coproc" &&
+                                     acc->transport != "coproc_local"; }),
+            leaf_sel("Coprocessor — stream frames  (RP2350 GP37)",
                 [acc]{ if (acc) acc->transport = "coproc"; },
                 [acc]{ return acc && acc->transport == "coproc"; }),
-        }), "Where the accessory chain's DATA wire lands. Pi GPIO drives it "
-            "from the CM5's SPI MOSI (GPIO10 / pin 19); Coprocessor streams the "
-            "frames to the RP2350 and drives them on its GP37. The Pi computes "
-            "the zones/effects either way. Applies on restart."),
+            leaf_sel("Coprocessor — autonomous  (Pico animates)",
+                [acc]{ if (acc) acc->transport = "coproc_local"; },
+                [acc]{ return acc && acc->transport == "coproc_local"; }),
+        }), "Where the accessory chain's DATA wire lands, and who animates it. "
+            "Pi GPIO drives it from the CM5's SPI MOSI (GPIO10 / pin 19). "
+            "Coprocessor — stream frames: the Pi computes every pixel and streams "
+            "frames to the RP2350 (GP37). Coprocessor — autonomous: the Pi sends "
+            "high-level per-zone pattern/colour commands and the RP2350 runs the "
+            "animation itself (audio-reactive + follow-face render static for now). "
+            "Applies on restart."),
+    };
+
+    std::vector<MenuItem> led_menu = {
+        with_desc(toggle("Enabled",
+            [leds, acc]{ return acc ? acc->enabled : (leds && leds->is_running()); },
+            [leds, acc](bool v){ if (leds) leds->set_enabled(v);
+                                 if (acc)  acc->enabled = v; }),
+            "Master switch for the accessory LED chain — turns the whole chain "
+            "on or off right away. (Changing Setup > Data Transport still needs a "
+            "restart; this doesn't.)"),
+        // Steps of 5, matching Zone Brightness — 0..255 in 1s took 255 clicks to
+        // cross and the eye can't see a single-unit change anyway.
+        with_desc(slider("Brightness", 0.f, 255.f, 5.f, "",
+            [leds]{ return leds ? static_cast<float>(leds->global_brightness()) : 0.f; },
+            [leds](float v){ if (leds) leds->set_global_brightness(static_cast<uint8_t>(v)); }),
+            "Master brightness applied to the whole accessory chain. WS2812s "
+            "draw a lot of current at full white — keep this low (~64) unless "
+            "you have power injection."),
         led_zone_menu(accessory::Zone::LeftCheekhub,  "Cheek Hub Left"),
         led_zone_menu(accessory::Zone::RightCheekhub, "Cheek Hub Right"),
         led_zone_menu(accessory::Zone::LeftFin,       "Cheek Fin Left"),
         led_zone_menu(accessory::Zone::RightFin,      "Cheek Fin Right"),
         led_zone_menu(accessory::Zone::Blush,         "Blush"),
+        // ── Profiles ─────────────────────────────────────────────────────────
+        // Named whole-strip LOOKS. Save the current colours/patterns/effects once
+        // and recall them by hand, or have a face expression apply one while it's
+        // active (Faces and Expressions > [expression] > Actions > LED Profile).
+        // A profile carries the LOOK of every zone and NEVER the layout, so
+        // recalling one can't re-chain the strip or change LED counts.
+        [&]() -> MenuItem {
+            auto* profs = ctx.led_profiles;
+            auto  acc_p = acc;
+            auto  leds_p = leds;
+            std::vector<MenuItem> pitems;
+
+            // Save Current As... — the on-screen keyboard names it. Saving over an
+            // existing name UPDATES that profile rather than making a duplicate,
+            // so any expression already pointing at the name keeps working.
+            pitems.push_back(with_desc(leaf("Save Current As...",
+                [profs, acc_p, leds_p, menu_sys_pp]{
+                    if (!profs || !acc_p || !menu_sys_pp || !*menu_sys_pp) return;
+                    (*menu_sys_pp)->open_keyboard("Profile Name",
+                        profs->unused_name(),
+                        [profs, acc_p, leds_p](const std::string& name){
+                            if (name.empty()) return;
+                            profs->put(accessory::capture_profile(*acc_p, leds_p, name));
+                        });
+                }),
+                "Save what every zone is showing right now — pattern, colours, "
+                "gradient, motion, brightness and sound settings — as a named "
+                "profile. Layout and wiring are NOT saved, so recalling a profile "
+                "never changes LED counts or re-chains the strip. Reusing a name "
+                "overwrites that profile, and any expression using it follows."));
+
+            auto count_fn = [profs]{ return profs ? profs->count() : 0; };
+            for (auto& row : make_dynamic_rows(kLedProfileSlots, count_fn,
+                                               [&](int i) -> MenuItem {
+                std::vector<MenuItem> sub;
+                sub.push_back(with_desc(leaf("Apply Now",
+                    [profs, acc_p, leds_p, i]{
+                        if (!profs) return;
+                        const auto* p = profs->get(i);
+                        if (!p) return;
+                        if (leds_p) accessory::apply_profile_live(*leds_p, *p);
+                        // Also into the editable config, so the zone editor, the
+                        // preview and the next save all agree with the strip.
+                        if (acc_p) accessory::apply_profile_config(*acc_p, *p);
+                    }),
+                    "Recall this profile onto the strip now, and into the zone "
+                    "editor so the menu matches what you can see."));
+                sub.push_back(with_desc(leaf("Update from Current",
+                    [profs, acc_p, leds_p, i]{
+                        if (!profs || !acc_p) return;
+                        auto* p = profs->mutable_get(i);
+                        if (!p) return;
+                        *p = accessory::capture_profile(*acc_p, leds_p, p->name);
+                    }),
+                    "Overwrite this profile with what the zones are showing now, "
+                    "keeping its name — so expressions using it pick up the new "
+                    "look without being re-pointed."));
+                sub.push_back(with_desc(leaf("Rename...",
+                    [profs, menu_sys_pp, i]{
+                        if (!profs || !menu_sys_pp || !*menu_sys_pp) return;
+                        const auto* p = profs->get(i);
+                        if (!p) return;
+                        (*menu_sys_pp)->open_keyboard("Profile Name", p->name,
+                            [profs, i](const std::string& name){
+                                if (name.empty()) return;
+                                if (auto* q = profs->mutable_get(i)) q->name = name;
+                            });
+                    }),
+                    "Rename this profile. NOTE expressions reference profiles BY "
+                    "NAME, so any expression using the old name stops matching and "
+                    "does nothing until you re-pick the profile in its action."));
+                sub.push_back(with_desc(leaf("Delete",
+                    [profs, i]{ if (profs) profs->remove(i); }),
+                    "Remove this profile. Expressions pointing at it become "
+                    "no-ops rather than breaking; nothing on the strip changes "
+                    "until the next thing applies a look."));
+
+                MenuItem m = submenu("profile", std::move(sub));
+                m.label_fn = [profs, i]() -> std::string {
+                    const auto* p = profs ? profs->get(i) : nullptr;
+                    return p ? p->name : std::string("(empty)");
+                };
+                return m;
+            }))
+                pitems.push_back(std::move(row));
+
+            pitems.push_back(with_desc(leaf("(no profiles saved yet)", []{}),
+                "Set the zones up how you want them, then use Save Current As..."));
+            pitems.back().visible_fn = [count_fn]{ return count_fn() == 0; };
+
+            return with_desc(submenu("Profiles", std::move(pitems)),
+                "Saved lighting looks. Set the zones up how you like, save that as "
+                "a named profile, and recall it any time — or attach it to a face "
+                "expression so the LEDs change with the emotion and change back "
+                "when it ends (Faces and Expressions > [expression] > Actions). "
+                "Profiles store the LOOK of every zone only: layout, LED counts "
+                "and wiring order are never touched.");
+        }(),
+        with_desc(submenu("Layout & Sides", std::move(layout_sides_items)),
+            "Arrange the five zones against a face reference, and set how the "
+            "left and right sides relate — phase-locking their effects, linking "
+            "each side's hub and fin into one area, and mirroring the left onto "
+            "the right."),
+        with_desc(submenu("Setup", std::move(setup_items)),
+            "Set once per build: how the coprocessor mic is shaped (it drives "
+            "the Level pattern, the sound triggers and the mouth), and where the "
+            "chain's data wire lands."),
     };
 
-    // ── Face Display root: the four groups ───────────────────────────────────
+    // ── Servo Settings ───────────────────────────────────────────────────────
+    // Calibration for the coprocessor servos (the ears). This is where the safe
+    // travel window lives, so an expression action can only ever command an angle
+    // the mechanism can actually reach — everything routes through
+    // ServoController, which clamps. Edits apply to the next move; the Test rows
+    // drive the real servo immediately so you can find the stops by feel.
+    // Servos are addressed by CHANNEL, never by pin: the coprocessor drives them
+    // through a PCA9685 board when one is fitted (16 channels, its own servo
+    // power rail) and falls back to four direct GPIO channels when not, with no
+    // change needed here either way.
+    std::vector<MenuItem> servo_items;
+    {
+        servo::ServoController* sv = ctx.servos;
+        // Per-servo scratch angle for the Test slider (the controller doesn't track
+        // a "current" angle — motion lives on the MCU).
+        auto test_deg = std::make_shared<std::vector<int>>(
+            sv ? static_cast<size_t>(sv->count()) : 0u, 90);
+
+        servo_items.push_back(with_desc(leaf("Rest All Now",
+            [sv]{ if (sv) sv->rest_all(); }),
+            "Send every servo to its Rest angle. Also done automatically at "
+            "startup so the ears begin from a known pose."));
+
+        // ── Check All Servos ─────────────────────────────────────────────────
+        // The "is everything wired and calibrated?" page. The sweep is driven by
+        // ServoController::tick from the main loop, so the menu stays live while
+        // it runs and Stop always works. Every row goes through the controller,
+        // so each servo is held inside its OWN travel window — "All to Max" means
+        // each servo's own max, not one shared angle.
+        {
+            std::vector<MenuItem> chk;
+            auto loop_flag = std::make_shared<bool>(false);
+            auto all_deg   = std::make_shared<int>(90);
+
+            // Live status line: which servo is moving where, or the result of the
+            // last run. A label_fn so it updates as the sweep progresses.
+            MenuItem status = leaf("Status", []{});
+            status.label_fn = [sv]() -> std::string {
+                if (!sv) return "Status: no servos";
+                return "Status: " + sv->check_status();
+            };
+            chk.push_back(with_desc(std::move(status),
+                "What the check is doing right now. Each servo is driven "
+                "centre \xe2\x86\x92 min \xe2\x86\x92 max \xe2\x86\x92 centre "
+                "\xe2\x86\x92 rest, holding each step long enough for it to "
+                "actually arrive at its own Speed."));
+
+            chk.push_back(with_desc(leaf("Check One at a Time",
+                [sv, loop_flag]{ if (sv)
+                    sv->start_check(servo::CheckMode::Sequential, *loop_flag); }),
+                "Sweep each servo in turn, on its own. This is the one that tells "
+                "you WHICH servo is on which channel and which side \xe2\x80\x94 "
+                "watch the order and confirm it matches the names."));
+            chk.push_back(with_desc(leaf("Check All Together",
+                [sv, loop_flag]{ if (sv)
+                    sv->start_check(servo::CheckMode::Together, *loop_flag); }),
+                "Sweep every servo at once. The quick pass: anything that stays "
+                "still, lags, or runs backwards stands out immediately."));
+            chk.push_back(with_desc(toggle("Repeat Continuously",
+                [loop_flag]{ return *loop_flag; },
+                [loop_flag](bool v){ *loop_flag = v; }),
+                "Keep the check cycling until you press Stop, instead of one pass. "
+                "Useful for watching for a servo that only misbehaves when warm, or "
+                "for hunting a mechanical rub. Takes effect on the next start."));
+            MenuItem stop = with_desc(leaf("Stop Check",
+                [sv]{ if (sv) sv->stop_check(); }),
+                "Cancel the sweep and park everything at Rest \xe2\x80\x94 a "
+                "stopped check never leaves an ear stranded mid-travel.");
+            stop.visible_fn = [sv]{ return sv && sv->checking(); };
+            chk.push_back(std::move(stop));
+
+            // Static all-servo poses — for checking alignment and symmetry by eye
+            // rather than watching a sweep go past.
+            chk.push_back(with_desc(leaf("All to Min",
+                [sv]{ if (sv) sv->all_to_min(); }),
+                "Send every servo to its own Min Angle at once \xe2\x80\x94 the "
+                "quickest way to see whether the pair sits symmetrically at one "
+                "end of travel."));
+            chk.push_back(with_desc(leaf("All to Centre",
+                [sv]{ if (sv) sv->all_to_center(); }),
+                "Send every servo to its own Centre. If the ears don't look "
+                "level here, it's the per-servo Centre that needs adjusting."));
+            chk.push_back(with_desc(leaf("All to Max",
+                [sv]{ if (sv) sv->all_to_max(); }),
+                "Send every servo to its own Max Angle at once."));
+            chk.push_back(with_desc(slider("All to Angle", 0.f, 180.f, 1.f, "\xc2\xb0",
+                [all_deg]{ return static_cast<float>(*all_deg); },
+                [sv, all_deg](float v){
+                    *all_deg = static_cast<int>(v);
+                    if (sv) sv->move_all(*all_deg);
+                }),
+                "Drive every servo to the same angle live as you scrub, each still "
+                "clamped to its own limits. Good for spotting a servo that binds or "
+                "runs the opposite way to the others."));
+            chk.push_back(with_desc(leaf("Detach All (release)",
+                [sv]{ if (sv) sv->detach_all(); }),
+                "Stop driving every servo so they all go limp, for adjusting the "
+                "mechanism by hand. Any move re-attaches them."));
+
+            servo_items.push_back(with_desc(submenu("Check All Servos", std::move(chk)),
+                "Test every servo in one place: sweep them one at a time or all "
+                "together, or park them all at a shared pose. Start here after "
+                "wiring or re-seating a servo horn."));
+        }
+
+        const int n = sv ? sv->count() : 0;
+        for (int i = 0; i < n; ++i) {
+            std::vector<MenuItem> rows;
+            rows.push_back(with_desc(slider("Channel", 0.f, 15.f, 1.f, "",
+                [sv, i]{ auto* s = sv ? sv->get(i) : nullptr;
+                         return s ? static_cast<float>(s->channel) : 0.f; },
+                [sv, i](float v){ if (auto* s = sv ? sv->mutable_get(i) : nullptr)
+                                      s->channel = static_cast<int>(v); }),
+                "Which coprocessor servo channel drives this servo. With the "
+                "PCA9685 driver board fitted these are its 16 numbered outputs. "
+                "Without one the firmware falls back to four direct RP2350 pins "
+                "(0-3 = GP34 / GP35 / GP36 / GP38) and channels 4-15 do nothing."));
+            rows.push_back(with_desc(slider("Min Angle", 0.f, 180.f, 1.f, "\xc2\xb0",
+                [sv, i]{ auto* s = sv ? sv->get(i) : nullptr;
+                         return s ? static_cast<float>(s->min_deg) : 0.f; },
+                [sv, i](float v){ if (auto* s = sv ? sv->mutable_get(i) : nullptr)
+                                      s->min_deg = static_cast<int>(v); }),
+                "Lower end of the safe travel window. Commands below this are "
+                "clamped, so a trigger can't drive the ear into its stop."));
+            rows.push_back(with_desc(slider("Max Angle", 0.f, 180.f, 1.f, "\xc2\xb0",
+                [sv, i]{ auto* s = sv ? sv->get(i) : nullptr;
+                         return s ? static_cast<float>(s->max_deg) : 180.f; },
+                [sv, i](float v){ if (auto* s = sv ? sv->mutable_get(i) : nullptr)
+                                      s->max_deg = static_cast<int>(v); }),
+                "Upper end of the safe travel window. Same clamp as Min."));
+            rows.push_back(with_desc(slider("Centre", 0.f, 180.f, 1.f, "\xc2\xb0",
+                [sv, i]{ auto* s = sv ? sv->get(i) : nullptr;
+                         return s ? static_cast<float>(s->center_deg) : 90.f; },
+                [sv, i](float v){ if (auto* s = sv ? sv->mutable_get(i) : nullptr)
+                                      s->center_deg = static_cast<int>(v); }),
+                "Neutral angle, and the point a Mirror pairing reflects about — "
+                "set it where the ear looks straight and mirroring stays even."));
+            rows.push_back(with_desc(slider("Rest", 0.f, 180.f, 1.f, "\xc2\xb0",
+                [sv, i]{ auto* s = sv ? sv->get(i) : nullptr;
+                         return s ? static_cast<float>(s->rest_deg) : 90.f; },
+                [sv, i](float v){ if (auto* s = sv ? sv->mutable_get(i) : nullptr)
+                                      s->rest_deg = static_cast<int>(v); }),
+                "Idle pose. Startup parks here, and an expression action returns "
+                "here when it ends unless it sets its own return angle."));
+            rows.push_back(with_desc(slider("Speed", 0.f, 600.f, 10.f, "\xc2\xb0/s",
+                [sv, i]{ auto* s = sv ? sv->get(i) : nullptr;
+                         return s ? s->speed : 120.f; },
+                [sv, i](float v){ if (auto* s = sv ? sv->mutable_get(i) : nullptr)
+                                      s->speed = v; }),
+                "How fast it travels to a new angle. The coprocessor does the "
+                "easing, so this stays smooth even when the Pi is busy. 0 = snap "
+                "instantly."));
+            // Pulse window — the real travel control. Re-pushed on every edit so
+            // the firmware re-attaches and the change is felt immediately.
+            rows.push_back(with_desc(slider("Pulse Min", 200.f, 3000.f, 10.f, "us",
+                [sv, i]{ auto* s = sv ? sv->get(i) : nullptr;
+                         return s ? static_cast<float>(s->min_us) : 500.f; },
+                [sv, i](float v){
+                    if (auto* s = sv ? sv->mutable_get(i) : nullptr) {
+                        s->min_us = static_cast<int>(v);
+                        sv->push_calibration_one(i);
+                    }
+                }),
+                "Pulse width for 0\xc2\xb0. THIS is what sets how far the servo "
+                "actually travels: the MCU maps 0-180\xc2\xb0 linearly onto the "
+                "Pulse Min..Max window. The Servo library's own default is a narrow "
+                "1000-2000us, which gives only about half a sweep and leaves the "
+                "servo clicking against its stop \xe2\x80\x94 500us is the usual "
+                "full-range value. Raise it if the servo buzzes at the low end."));
+            rows.push_back(with_desc(slider("Pulse Max", 250.f, 3000.f, 10.f, "us",
+                [sv, i]{ auto* s = sv ? sv->get(i) : nullptr;
+                         return s ? static_cast<float>(s->max_us) : 2500.f; },
+                [sv, i](float v){
+                    if (auto* s = sv ? sv->mutable_get(i) : nullptr) {
+                        s->max_us = static_cast<int>(v);
+                        sv->push_calibration_one(i);
+                    }
+                }),
+                "Pulse width for 180\xc2\xb0. Pair with Pulse Min to set the travel "
+                "range; 2500us is the usual full-range value. Lower it if the servo "
+                "buzzes or strains at the high end."));
+
+            // Partner picker — None, or any other servo by name.
+            {
+                std::vector<MenuItem> pitems;
+                pitems.push_back(leaf_sel("None",
+                    [sv, i]{ if (auto* s = sv ? sv->mutable_get(i) : nullptr) s->partner = -1; },
+                    [sv, i]{ auto* s = sv ? sv->get(i) : nullptr; return s && s->partner < 0; }));
+                for (int k = 0; k < n; ++k) {
+                    if (k == i) continue;
+                    const auto* ks = sv ? sv->get(k) : nullptr;
+                    pitems.push_back(leaf_sel(ks ? ks->name : std::string("Servo"),
+                        [sv, i, k]{ if (auto* s = sv ? sv->mutable_get(i) : nullptr) s->partner = k; },
+                        [sv, i, k]{ auto* s = sv ? sv->get(i) : nullptr; return s && s->partner == k; }));
+                }
+                rows.push_back(with_desc(submenu("Partner", std::move(pitems)),
+                    "The other ear. An expression action set to Copy or Mirror "
+                    "drives this servo too, so one action moves both — Copy sends "
+                    "the same angle, Mirror reflects it about the partner's Centre."));
+            }
+            // Test rows — drive the real servo now, so the stops can be found by feel.
+            {
+                std::vector<MenuItem> t;
+                t.push_back(with_desc(slider("Test Angle", 0.f, 180.f, 1.f, "\xc2\xb0",
+                    [test_deg, i]{ return static_cast<float>(
+                        i < (int)test_deg->size() ? (*test_deg)[i] : 90); },
+                    [sv, i, test_deg](float v){
+                        const int d = static_cast<int>(v);
+                        if (i < (int)test_deg->size()) (*test_deg)[i] = d;
+                        if (sv) sv->move(i, d);      // clamped to the limits
+                    }),
+                    "Drives the servo live as you scrub, clamped to Min/Max. The "
+                    "quickest way to find the real mechanical stops: widen the "
+                    "limits, scrub until it binds, then bring the limit back in."));
+                t.push_back(leaf("Go to Min",    [sv, i]{
+                    if (auto* s = sv ? sv->get(i) : nullptr) sv->move(i, s->min_deg); }));
+                t.push_back(leaf("Go to Centre", [sv, i]{
+                    if (auto* s = sv ? sv->get(i) : nullptr) sv->move(i, s->center_deg); }));
+                t.push_back(leaf("Go to Max",    [sv, i]{
+                    if (auto* s = sv ? sv->get(i) : nullptr) sv->move(i, s->max_deg); }));
+                t.push_back(leaf("Go to Rest",   [sv, i]{ if (sv) sv->rest_one(i); }));
+                t.push_back(with_desc(leaf("Detach (release)",
+                    [sv, i]{ if (sv) sv->detach(i); }),
+                    "Stop driving the servo so it goes limp — useful while "
+                    "adjusting the mechanism by hand. Any move re-attaches it."));
+                rows.push_back(with_desc(submenu("Test", std::move(t)),
+                    "Move this servo now. Handy for calibration; these bypass "
+                    "nothing — the travel limits still apply."));
+            }
+            const auto* s0 = sv ? sv->get(i) : nullptr;
+            servo_items.push_back(with_desc(
+                submenu(s0 ? s0->name : (std::string("Servo ") + std::to_string(i)),
+                        std::move(rows)),
+                "Calibration for one servo: which channel it's on, the travel it "
+                "is allowed, its neutral/idle poses, how fast it moves, and which "
+                "servo it pairs with."));
+        }
+        if (n == 0)
+            servo_items.push_back(with_desc(leaf("(no servos configured)", []{}),
+                "Add a \"servos\" array to config.json, or restart to pick up the "
+                "two-ear default (channels 0 and 1, paired)."));
+    }
+
+    // ── Face Display root: the groups ────────────────────────────────────────
     std::vector<MenuItem> face_display_menu;
     face_display_menu.push_back(with_desc(
         submenu("Base Settings", std::move(base_items)),
@@ -5890,6 +8749,12 @@ std::vector<MenuItem> build_face_display_menu(MenuBuildContext& ctx)
         "Accessory LED zones — cheek hubs, cheek fins, blush. Per zone: "
         "pattern, color or follow-face sync, and brightness; boops flash "
         "the matching zone."));
+    face_display_menu.push_back(with_desc(
+        submenu("Servo Settings", std::move(servo_items)),
+        "Calibrate the coprocessor servos (the ears): channel, the travel they're "
+        "allowed, neutral/idle poses, speed, and which servo each pairs with. "
+        "Expression actions drive them through these limits, so a trigger can "
+        "never command an angle the mechanism can't reach."));
     face_display_menu.push_back(with_desc(
         submenu("Gifs and Text", std::move(media_items)),
         "GIF playback slots and the scrolling text banner."));

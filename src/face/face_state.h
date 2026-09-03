@@ -56,6 +56,12 @@ public:
     }
     void set_expression_fade(double seconds)         { fade_speed_ = 1.0 / std::max(0.01, seconds); }
     void set_wiggle(const WiggleCfg& w)              { wiggle_ = w; }
+    // Snap the wiggle/inertia shift to whole pixels. The shift is otherwise
+    // sub-pixel and interpolated, which blends every pixel with its neighbours
+    // for as long as the face is moving — the "blurs while it moves, sharp when
+    // it stops" effect. Snapping trades a smooth glide for exact pixels.
+    void set_sharp_motion(bool on)                   { sharp_motion_ = on; }
+    bool sharp_motion() const                        { return sharp_motion_; }
     bool blink_enabled()  const { return blink_enabled_; }
     double blink_min()    const { return blink_min_; }
     double blink_max()    const { return blink_max_; }
@@ -105,6 +111,7 @@ private:
     bool   eyes_closed_    = false;   // asleep: hold the blink fully shut
 
     WiggleCfg wiggle_;
+    bool      sharp_motion_ = false;
 
     // Inputs
     double audio_volume_ = 0.0;

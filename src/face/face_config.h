@@ -87,8 +87,21 @@ struct RenderConfig {
     // whole face once (so blink / material / effects are continuous across the
     // seam) and then flips each physical panel's slice in place at output time —
     // so per-panel mounting flips apply to everything, not just the face PNG.
+    // flip_x / flip_y here are the layout's per-panel mounting flips. They are
+    // recorded for the editor and for whoever builds the PanelOutput, but the
+    // renderer does NOT apply them to the canvas — the output does, to each
+    // panel's sampled tile. Flipping a canvas region would leak into whatever a
+    // neighbouring rotated panel reads across the seam.
     struct OutputPanel { int x = 0, y = 0, w = 64, h = 32; bool flip_x = false, flip_y = false; };
     std::vector<OutputPanel> output_panels;
+
+    // Whole-canvas mirror applied to the OUTPUT only, after the per-panel flips
+    // above — for a panel set that's mounted rotated or mirrored as a unit (a
+    // 180° head mount reads as both). The in-HUD preview keeps the unflipped
+    // canvas, so the HUD shows the face the right way up while the hardware
+    // gets the orientation it's physically wired for.
+    bool canvas_flip_x = false;
+    bool canvas_flip_y = false;
 };
 
 } // namespace face

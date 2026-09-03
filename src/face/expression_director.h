@@ -43,6 +43,14 @@ public:
         // Animated-eyes rules fire through here instead of set_face (the
         // animation is transient and reverts on its own).
         std::function<void(const EyeAnimParams&)> play_eyes;
+        // Diagnostics-banner rules: true on activation, false when the hold
+        // expires. Same activate/hold/revert lifecycle as a face rule, it just
+        // puts a readout on the panels instead of switching the expression.
+        std::function<void(bool)> show_diag;
+        // Event-text rules: (slot, on). Raises that slot's banner — its own
+        // message AND its own properties — over whatever the live banner was,
+        // and puts the live one back when the hold expires.
+        std::function<void(int, bool)> show_text_event;
         // Non-face side-effects (LED zone / servo). apply_action runs once per
         // action when the expression activates; revert_action runs when it
         // ends. The director just calls these in order — the binding owns the
@@ -64,6 +72,16 @@ public:
         // hold/restore bookkeeping is skipped (the animation self-reverts).
         bool         is_eye_anim = false;
         EyeAnimParams eyes;
+        // Diagnostics-banner rule: firing raises the system readout (via
+        // Actions::show_diag) instead of switching the face, and lowers it when
+        // the hold expires. Keeps the normal lifecycle — unlike is_eye_anim,
+        // this one has something to turn back off.
+        bool         is_diag = false;
+        // Event-text rule: firing raises text_slot's banner (via
+        // Actions::show_text_event) and lowers it when the hold expires. Same
+        // lifecycle as is_diag — it has something to turn back off.
+        bool         is_text_event = false;
+        int          text_slot     = -1;
         std::vector<TriggerRecipe> recipes;
         // Extra side-effects applied on activation, reverted on end (LED zone
         // color/pattern, servo move). Ignored for is_eye_anim rules — those
@@ -101,6 +119,10 @@ public:
     bool on_boop(int zone, const std::vector<Rule>& rules);
     void on_gesture(const std::string& gesture, const std::vector<Rule>& rules);
     void on_shake(const std::vector<Rule>& rules);
+    // System lifecycle/state events (boot, shutdown, battery, Wi-Fi, heat).
+    // One entry point for all of them — they carry no parameters, so matching
+    // is just the event id. Fired by the app, not by a sensor callback.
+    void on_system(TriggerRecipe::Event ev, const std::vector<Rule>& rules);
 
 private:
     struct Accum {                      // per (rule, recipe) counting state
@@ -128,6 +150,9 @@ private:
     bool        latched_ = false;
     std::string restore_face_;
     std::vector<ExprAction> active_actions_;   // actions the current activation applied
+    bool        active_diag_ = false;
+    // Which event-text slot is currently raised, or -1. Mirrors active_diag_.
+    int         active_text_slot_ = -1;          // current activation raised the readout
 
     // Condition state (set_conditions).
     float  roll_deg_ = 0.f;

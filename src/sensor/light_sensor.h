@@ -5,9 +5,10 @@
 // sunlight) and fires a boop-style squint expression for a configurable
 // duration before reverting.
 //
-// Initial implementation drives a BH1750 — cheap, common, single-register
-// continuous-conversion I²C device. The Type enum + factory leaves room for
-// TSL2591 / VEML7700 later without changing callers.
+// Drives a BH1750 (cheap, common, single-register continuous-conversion
+// device) or a TI OPT3001 (register-addressed, auto-ranging, 0.01-lux
+// resolution). The Type enum + factory leaves room for TSL2591 / VEML7700
+// later without changing callers.
 
 #include <atomic>
 #include <functional>
@@ -19,13 +20,13 @@ namespace sensor {
 
 class LightSensor {
 public:
-    enum class Type : uint8_t { Bh1750 = 0 };
+    enum class Type : uint8_t { Bh1750 = 0, Opt3001 = 1 };
 
     struct Config {
         bool        enabled    = false;
         Type        type       = Type::Bh1750;
         std::string i2c_bus    = "/dev/i2c-1";   // GPIO 2/3 on CM5 40-pin header
-        int         i2c_addr   = 0x23;            // BH1750 default; 0x5C if ADDR high
+        int         i2c_addr   = 0x23;            // BH1750 0x23 (0x5C ADDR high); OPT3001 0x44
         float       poll_hz    = 8.0f;            // sensor settles in ~120 ms (high-res mode)
     };
 
@@ -49,6 +50,10 @@ private:
     void run();
     bool init_bh1750();
     bool read_bh1750(float& lux);
+    bool init_opt3001();
+    bool read_opt3001(float& lux);
+    bool opt3001_read_reg(uint8_t reg, uint16_t& value);
+    bool opt3001_write_reg(uint8_t reg, uint16_t value);
 
     Config             cfg_;
     int                fd_      = -1;
