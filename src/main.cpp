@@ -59,6 +59,10 @@
 #include "face/reaction_rules.h"
 #include "sensor/mpr121_boop_sensor.h"
 #include "accessory/accessory_leds.h"
+#include "accessory/accessory_profiles.h"
+#include "accessory/led_overlay.h"
+#include "servo/pca9685_bus.h"
+#include "servo/servo_controller.h"
 #include "sys/fan_controller.h"
 #include "sys/system_monitor.h"
 #include "sys/scheduler_monitor.h"
@@ -405,7 +409,8 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                                    const std::string& color_order = "auto",
                                    bool camera_mode = false,
                                    int camera_planes = 10,
-                                   int camera_temporal_planes = 8) {
+                                   int camera_temporal_planes = 8,
+                                   bool serpentine = true) {
     std::string drv = bin_dir + "/../scripts/panel_driver.py";
     // Validate host-side — an unknown value would hit the driver's argparse
     // choices and exit, leaving the panels dark with only a log to explain.
@@ -422,6 +427,7 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
     std::string cm  = camera_mode ? "1" : "0";
     std::string cp  = std::to_string(camera_planes);
     std::string ctp = std::to_string(camera_temporal_planes);
+    std::string ser = serpentine ? "1" : "0";
     // Stop any existing driver and WAIT for it to actually exit before
     // relaunching. piomatter (RP1 PIO + DMA + /dev/mem) can't be initialised
     // by two processes at once, so an immediate relaunch races the dying
@@ -456,6 +462,7 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
                "--camera-mode", cm.c_str(),
                "--camera-planes", cp.c_str(),
                "--camera-temporal-planes", ctp.c_str(),
+               "--serpentine", ser.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }
@@ -464,7 +471,8 @@ static void pf_launch_panel_driver(const std::string& bin_dir,
               << ", canvas " << cw << "x" << chh
               << ", panel " << pw << "x" << ph
               << ", chain " << ch << ", parallel " << par
-              << ", camera_mode " << cm << ")\n";
+              << ", camera_mode " << cm
+              << ", serpentine " << ser << ")\n";
 }
 
 // Build the PanelOutput that NativeFaceController writes into. Reads
@@ -499,6 +507,53 @@ static nlohmann::json weather_effect_spec(int code, bool is_day) {
     return nlohmann::json();                          // partly cloudy etc. → none
 }
 
+// GPU busy time, in nanoseconds, from the v3d DRM client's fdinfo. The Pi has
+// no system-wide GPU utilisation counter — vcgencmd reports clocks and
+// temperature only — but the kernel does track per-client engine time, and
+// ProtoHUD is the dominant GPU client on this box, so its own render-engine
+// time over wall time is a faithful load figure. Returns -1 when the counter
+// isn't there (a kernel without fdinfo engine stats, or a non-v3d GPU).
+//
+// The winning path is cached: /proc/self/fdinfo has a lot of entries and this
+// is sampled twice a second. A counter that goes backwards means the fd was
+// recycled, so the scan is redone.
+static long long pf_gpu_render_ns() {
+    static std::string cached;
+    static long long   last = -1;
+
+    auto read_render_ns = [](const std::string& path) -> long long {
+        std::ifstream f(path);
+        if (!f) return -1;
+        std::string line;
+        bool is_v3d = false;
+        long long ns = -1;
+        while (std::getline(f, line)) {
+            if (line.rfind("drm-driver:", 0) == 0 &&
+                line.find("v3d") != std::string::npos) is_v3d = true;
+            else if (line.rfind("drm-engine-render:", 0) == 0)
+                ns = std::strtoll(line.c_str() + 18, nullptr, 10);
+        }
+        return is_v3d ? ns : -1;
+    };
+
+    if (!cached.empty()) {
+        const long long ns = read_render_ns(cached);
+        if (ns >= 0 && ns >= last) { last = ns; return ns; }
+        cached.clear();            // fd recycled or gone — rescan
+    }
+    // Pick the busiest v3d fd: several may be open, but only the one actually
+    // submitting work carries the accumulated time.
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    long long best = -1;
+    for (const auto& e : fs::directory_iterator("/proc/self/fdinfo", ec)) {
+        const long long ns = read_render_ns(e.path().string());
+        if (ns > best) { best = ns; cached = e.path().string(); }
+    }
+    last = best;
+    return best;
+}
+
 struct PfSideChains {
     std::vector<std::array<int, 2>> left;
     std::vector<std::array<int, 2>> right;
@@ -512,6 +567,57 @@ static PfSideChains pf_auto_side_chains(
 static void pf_hub75_driver_geometry(const PfHub75Layout& L,
                                      int& panel_w, int& panel_h,
                                      int& chain, int& parallel);
+// Physical HUB75 framebuffer (panels butted together in chain order) and, when
+// `slots` is non-null, where each panel's pixels land inside it. Distinct from
+// the renderer canvas, which grows to the nudged bounding box — see the
+// definitions further down.
+static void pf_hub75_framebuffer(const PfHub75Layout& L, int& fw, int& fh,
+                                 cv::Rect* slots);
+// Which half (0 = top, 1 = bottom) panel i sits in, or -1 for a single-row
+// layout. Defined further down alongside the framebuffer helper.
+static int pf_hub75_panel_half(const PfHub75Layout& L, int i);
+
+// Panel i's rotation as the sampler needs it: the user's angle, negated when an
+// odd number of mirrors sits downstream of the sample (per-panel, per-half and
+// whole-set flips all reverse how a tilt reads on the panel). Keeps the slider
+// turning the same direction on screen whatever the flips are set to.
+static double pf_hub75_effective_angle(const PfHub75Layout& L, int i, int half) {
+    if (i < 0 || i >= 4) return 0.0;
+    int mirrors = (L.flip_x[i] ? 1 : 0) + (L.flip_y[i] ? 1 : 0)
+                + (L.flip_canvas_x ? 1 : 0) + (L.flip_canvas_y ? 1 : 0);
+    if (half >= 0 && half < 2)
+        mirrors += (L.flip_half_x[half] ? 1 : 0) + (L.flip_half_y[half] ? 1 : 0);
+    return (mirrors % 2) ? -L.rotation[i] : L.rotation[i];
+}
+
+// The top / bottom half strips in FRAMEBUFFER space: the bounding box of each
+// half's chain slots. Both halves are always listed, flipped or not, so the menu
+// toggles can be pushed live without rebuilding the rects.
+static std::vector<face::ShmPusherOutput::Half>
+pf_hub75_halves(const PfHub75Layout& L) {
+    const int n = std::clamp(L.panel_count, 1, 4);
+    int fw = 0, fh = 0;
+    cv::Rect slots[4];
+    pf_hub75_framebuffer(L, fw, fh, slots);
+    cv::Rect box[2];
+    bool     seen[2] = {false, false};
+    for (int i = 0; i < n; ++i) {
+        const int h = pf_hub75_panel_half(L, i);
+        if (h < 0) continue;
+        box[h]  = seen[h] ? (box[h] | slots[i]) : slots[i];
+        seen[h] = true;
+    }
+    std::vector<face::ShmPusherOutput::Half> out;
+    for (int h = 0; h < 2; ++h) {
+        if (!seen[h]) continue;
+        face::ShmPusherOutput::Half hf;
+        hf.rect   = box[h];
+        hf.flip_x = L.flip_half_x[h];
+        hf.flip_y = L.flip_half_y[h];
+        out.push_back(hf);
+    }
+    return out;
+}
 
 // hot-swap action use the exact same construction logic.
 static std::unique_ptr<face::PanelOutput>
@@ -706,10 +812,22 @@ pf_build_panel_output(const json& cfg, const face::RenderConfig& rc,
     // so the in-HUD face editor knows which regions to outline. When the
     // user hasn't picked a HUB75 layout, panels stays empty and the editor
     // stays hidden (legacy daemon-mode behaviour preserved).
+    // The shm frame carries the PHYSICAL framebuffer (panels butted together in
+    // chain order), which is what panel_driver.py hands piomatter. That's the
+    // canvas size only while nothing is nudged — once panels are spread apart
+    // the canvas is the larger helmet-space box and ShmPusherOutput gathers each
+    // panel's slice out of it. Without a layout (daemon mode) there are no panel
+    // rects to gather, so the canvas is pushed verbatim as before.
     std::vector<face::ShmPusherOutput::Panel> hub75_panels;
-    if (hub75) hub75_panels = pf_hub75_panels(*hub75);
+    std::vector<face::ShmPusherOutput::Half>  hub75_halves;
+    int fb_w = rc.canvas_w, fb_h = rc.canvas_h;
+    if (hub75) {
+        hub75_panels = pf_hub75_panels(*hub75);
+        hub75_halves = pf_hub75_halves(*hub75);
+        pf_hub75_framebuffer(*hub75, fb_w, fb_h, nullptr);
+    }
     auto hub75_out = std::make_unique<face::ShmPusherOutput>(
-        rc.canvas_w, rc.canvas_h, std::move(hub75_panels));
+        fb_w, fb_h, std::move(hub75_panels), std::move(hub75_halves));
 
     // A MAX7219 chain can run as an ADDITIONAL SECTION alongside the HUB75 face
     // ("max7219": { "enabled": true, "mode": "section", ... }). Over the coproc
@@ -755,10 +873,31 @@ static void pf_hub75_panel_dims(const std::string& sz, int& w, int& h) {
 // clips, which is unavoidable on fixed-position hardware anyway.
 static constexpr int kHub75Margin = 0;
 
+// Defined below; declared here so the panel + defaults helpers can use it.
+static void pf_hub75_base_canvas(const PfHub75Layout& L, int& cw, int& ch);
+
+// Axis-aligned footprint of a w×h panel rotated by `deg`. Zero rotation returns
+// w×h unchanged, so an unrotated layout keeps exactly the geometry it had.
+static void pf_hub75_rotated_extent(int w, int h, double deg, int& fw, int& fh) {
+    if (deg == 0.0) { fw = w; fh = h; return; }
+    const double rad = deg * CV_PI / 180.0;
+    const double c = std::abs(std::cos(rad)), s = std::abs(std::sin(rad));
+    fw = static_cast<int>(std::ceil(w * c + h * s));
+    fh = static_cast<int>(std::ceil(w * s + h * c));
+}
+
 // Centre = 0 model. nudge_dx[i] / nudge_dy[i] are stored as the offset of
-// panel i's CENTRE from the canvas centre (px). Default values are the
-// "auto-placed" positions — see pf_hub75_apply_defaults below. To convert
-// stored nudges into a panel rect: rect.x = canvas_w/2 + nudge_dx - pw/2.
+// panel i's CENTRE from the panel SET's centre (px). Default values are the
+// "auto-placed" positions — see pf_hub75_apply_defaults below. The canvas is
+// the bounding box of those nudged rects (pf_hub75_canvas), so converting a
+// stored nudge into a canvas rect is a translate by the box's top-left:
+// rect.x = nudge_dx - pw/2 - box_min_x.
+//
+// Each panel also carries `dst` — where its pixels land in the physical
+// framebuffer (panels butted together in chain order). rect and dst are the
+// same shape and differ only in position once the user nudges panels apart:
+// rect says where the panel sits on the helmet, dst says where it sits on the
+// wire. ShmPusherOutput copies rect → dst per frame.
 std::vector<face::ShmPusherOutput::Panel>
 pf_hub75_panels(const PfHub75Layout& L) {
     const int n = std::clamp(L.panel_count, 1, 4);
@@ -770,16 +909,39 @@ pf_hub75_panels(const PfHub75Layout& L) {
                                ? L.panel_size : L.panel_size_per[i];
         pf_hub75_panel_dims(s, pw[i], ph[i]);
     }
-    int cw = 0, ch = 0;
-    pf_hub75_canvas(L, cw, ch);
-    const int cx = cw / 2;
-    const int cy = ch / 2;
+    // Top-left of the nudged bounding box, in nudge (set-centre = 0) space.
+    // Measured against each panel's rotated footprint, matching the canvas.
+    int min_x = 0, min_y = 0;
+    for (int i = 0; i < n; ++i) {
+        int ew = pw[i], eh = ph[i];
+        pf_hub75_rotated_extent(pw[i], ph[i], L.rotation[i], ew, eh);
+        const int x0 = L.nudge_dx[i] - ew / 2;
+        const int y0 = L.nudge_dy[i] - eh / 2;
+        if (i == 0) { min_x = x0; min_y = y0; }
+        else { min_x = std::min(min_x, x0); min_y = std::min(min_y, y0); }
+    }
+    int fw = 0, fh = 0;
+    cv::Rect slots[4];
+    pf_hub75_framebuffer(L, fw, fh, slots);
     for (int i = 0; i < n; ++i) {
         face::ShmPusherOutput::Panel p;
         p.name = "panel_" + std::to_string(i);
-        p.rect = cv::Rect(cx + L.nudge_dx[i] - pw[i] / 2,
-                          cy + L.nudge_dy[i] - ph[i] / 2,
+        // rect stays the panel's own w×h centred on its nudge — the rotation
+        // lives in `angle` and is applied when the slice is sampled, so the
+        // flips, the editor outline and GIF placement keep working on a plain
+        // rect. Only the canvas box above had to grow for the tilted corners.
+        p.rect = cv::Rect(L.nudge_dx[i] - pw[i] / 2 - min_x + kHub75Margin,
+                          L.nudge_dy[i] - ph[i] / 2 - min_y + kHub75Margin,
                           pw[i], ph[i]);
+        p.dst    = slots[i];
+        p.flip_x = L.flip_x[i];
+        p.flip_y = L.flip_y[i];
+        // Every mirror downstream of the sample reverses which way a rotation
+        // reads on the panel, so an odd number of them flips the angle's sense.
+        // Fold that in here and the slider keeps turning the same direction on
+        // screen no matter which flips are set.
+        const int half = pf_hub75_panel_half(L, i);
+        p.angle = pf_hub75_effective_angle(L, i, half);
         out.push_back(std::move(p));
     }
     return out;
@@ -796,8 +958,9 @@ void pf_hub75_apply_defaults(PfHub75Layout& L) {
                                ? L.panel_size : L.panel_size_per[i];
         pf_hub75_panel_dims(s, pw[i], ph[i]);
     }
-    // First compute centred-set absolute positions (with margin), then
-    // convert to centre-offsets from the canvas centre.
+    // First compute centred-set absolute positions (with margin), then convert
+    // to offsets from the centre of the UN-nudged box — the live canvas is the
+    // nudged bounding box, so measuring against it here would be circular.
     int x[4] = {0,0,0,0}, y[4] = {0,0,0,0};
     if (L.arrangement == "vertical") {
         int yy = kHub75Margin;
@@ -829,7 +992,7 @@ void pf_hub75_apply_defaults(PfHub75Layout& L) {
         }
     }
     int cw = 0, ch = 0;
-    pf_hub75_canvas(L, cw, ch);
+    pf_hub75_base_canvas(L, cw, ch);
     const int cx = cw / 2, cy = ch / 2;
     for (int i = 0; i < n; ++i) {
         L.nudge_dx[i] = (x[i] + pw[i] / 2) - cx;
@@ -842,11 +1005,11 @@ void pf_hub75_apply_defaults(PfHub75Layout& L) {
     L.defaults_applied = true;
 }
 
-// Total canvas size = bounding box of the *un-nudged* panel set (kHub75Margin
-// is 0 — see the note above). Canvas size is therefore stable as the user
-// tweaks nudges (so the renderer canvas doesn't resize every slider step) and
-// equals the physical HUB75 framebuffer the driver pushes into.
-void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch) {
+// Tight bounding box of the panel set laid out at its AUTO positions, ignoring
+// nudges (kHub75Margin is 0 — see the note above). This is the reference frame
+// pf_hub75_apply_defaults converts absolute auto-placements into centre-offsets
+// against; the live canvas below grows out of it as the user nudges.
+static void pf_hub75_base_canvas(const PfHub75Layout& L, int& cw, int& ch) {
     const int n = std::clamp(L.panel_count, 1, 4);
     int pw[4] = {0,0,0,0}, ph[4] = {0,0,0,0};
     for (int i = 0; i < 4; ++i) {
@@ -877,6 +1040,84 @@ void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch) {
     ch = bb_h + 2 * kHub75Margin;
     if (cw <= 0) cw = 64;
     if (ch <= 0) ch = 32;
+}
+
+// Renderer canvas = bounding box of the panel set WITH nudges applied, i.e. the
+// physical space the panels occupy on the helmet rather than the space they'd
+// occupy butted together. Spreading two panels apart therefore widens the
+// canvas and the face is drawn across the gap: each panel keeps showing the
+// slice of the face that lines up with where it actually sits, instead of the
+// set being re-centred and the outer panels clipping off the canvas edge.
+//
+// The canvas no longer matches the physical HUB75 framebuffer once anything is
+// nudged — ShmPusherOutput gathers each panel's slice into the framebuffer the
+// driver expects (see pf_hub75_framebuffer / ShmPusherOutput::Panel::dst).
+//
+// Nudges are offsets from the SET's centre, not from the canvas centre, so this
+// isn't circular: nudges define the box, the box doesn't redefine the nudges.
+void pf_hub75_canvas(const PfHub75Layout& L, int& cw, int& ch) {
+    const int n = std::clamp(L.panel_count, 1, 4);
+    int pw[4] = {0,0,0,0}, ph[4] = {0,0,0,0};
+    for (int i = 0; i < 4; ++i) {
+        const std::string& s = L.panel_size_per[i].empty()
+                               ? L.panel_size : L.panel_size_per[i];
+        pf_hub75_panel_dims(s, pw[i], ph[i]);
+    }
+    int min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+    for (int i = 0; i < n; ++i) {
+        // A rotated panel reads a tilted rect out of the canvas, whose corners
+        // reach past the panel's own footprint — so reserve its rotated
+        // bounding box, otherwise the sample pulls in black from off-canvas.
+        int fw = pw[i], fh = ph[i];
+        pf_hub75_rotated_extent(pw[i], ph[i], L.rotation[i], fw, fh);
+        const int x0 = L.nudge_dx[i] - fw / 2, x1 = x0 + fw;
+        const int y0 = L.nudge_dy[i] - fh / 2, y1 = y0 + fh;
+        if (i == 0) { min_x = x0; max_x = x1; min_y = y0; max_y = y1; }
+        else {
+            min_x = std::min(min_x, x0); max_x = std::max(max_x, x1);
+            min_y = std::min(min_y, y0); max_y = std::max(max_y, y1);
+        }
+    }
+    cw = (max_x - min_x) + 2 * kHub75Margin;
+    ch = (max_y - min_y) + 2 * kHub75Margin;
+    if (cw <= 0) cw = 64;
+    if (ch <= 0) ch = 32;
+}
+
+// Which half — 0 = top, 1 = bottom — panel i belongs to, or -1 when the layout
+// has no halves to speak of (a single row of panels). Rows come from the same
+// split as the chain slots, so a 2x2 grid gives one row per half and a vertical
+// stack splits down the middle; a horizontal chain is one row and opts out.
+static int pf_hub75_panel_half(const PfHub75Layout& L, int i) {
+    const int n = std::clamp(L.panel_count, 1, 4);
+    if (i < 0 || i >= n) return -1;
+    int pw = 64, ph = 32, chain = 1, parallel = 1;
+    pf_hub75_driver_geometry(L, pw, ph, chain, parallel);
+    if (parallel <= 1) return -1;                 // one row: nothing to halve
+    const int rows = (n + chain - 1) / chain;
+    if (rows < 2) return -1;
+    return ((i / chain) < rows / 2) ? 0 : 1;
+}
+
+// Physical HUB75 framebuffer the driver pushes into: the panels butted together
+// in chain order, which is what piomatter clocks out regardless of how far
+// apart they are on the helmet. Slot i is where panel i's pixels land, matching
+// the chain/parallel split pf_hub75_driver_geometry reports. Mixed per-panel
+// sizes can't be expressed as a uniform chain, so slots use panel 0's size (the
+// same fallback the driver geometry makes).
+static void pf_hub75_framebuffer(const PfHub75Layout& L, int& fw, int& fh,
+                                 cv::Rect* slots) {
+    int pw = 64, ph = 32, chain = 1, parallel = 1;
+    pf_hub75_driver_geometry(L, pw, ph, chain, parallel);
+    fw = pw * chain;
+    fh = ph * parallel;
+    if (!slots) return;
+    const int n = std::clamp(L.panel_count, 1, 4);
+    for (int i = 0; i < n; ++i) {
+        const int col = (chain    > 1) ? (i % chain) : 0;
+        const int row = (parallel > 1) ? (i / chain) : 0;
+        slots[i] = cv::Rect(col * pw, row * ph, pw, ph);
+    }
 }
 
 // Translate the panel layout into the piomatter geometry panel_driver.py needs
@@ -1147,6 +1388,8 @@ static face::RenderConfig pf_build_render_config(const json& cfg,
         pf_hub75_canvas(*hub75, cw, ch);
         rc.canvas_w = cw;
         rc.canvas_h = ch;
+        rc.canvas_flip_x = hub75->flip_canvas_x;
+        rc.canvas_flip_y = hub75->flip_canvas_y;
         face::PanelCfg face;
         face.name = "face"; face.x = 0; face.y = 0; face.w = cw; face.h = ch;
         rc.panels.push_back(std::move(face));
@@ -1400,6 +1643,68 @@ int main(int argc, char* argv[]) {
     }
     bool cfg_parse_failed = false;
     json cfg = load_config(cfg_load, &cfg_parse_failed);
+
+    // ── Single-instance guard ─────────────────────────────────────────────────
+    // Two ProtoHUDs fight over the panels, the serial ports and the I²C bus —
+    // a bench instance started while the service is up (or vice versa) wedges
+    // both. An exclusive flock on a pid-stamped lock file makes the NEWEST
+    // start win. cfg["single_instance"]:
+    //   "takeover" (default) — ask the holder to exit (SIGTERM) and wait for
+    //                          the lock; it shuts down cleanly and releases
+    //                          the hardware before we touch it.
+    //   "exit"               — the new instance bows out instead. Exit code 0
+    //                          on purpose: supervisors (systemd Restart=
+    //                          on-failure, scripts/watchdog.sh) treat non-zero
+    //                          as a crash and would restart-loop forever.
+    //   "off"                — no guard.
+    // ⚠ NO SIGKILL escalation, deliberately. A holder that ignores SIGTERM is
+    // wedged, and its own 8 s render-stall watchdog already force-exits it;
+    // SIGKILLing a supervised instance from here would just start a war over
+    // the lock with whatever relaunches it. The kernel drops the flock on any
+    // exit — even SIGKILL — so a crashed holder never strands the lock.
+    {
+        std::string si_mode = "takeover";
+        if (cfg.contains("single_instance") && cfg["single_instance"].is_string())
+            si_mode = cfg["single_instance"].get<std::string>();
+        if (si_mode != "off") {
+            const char* lock_path = "/tmp/protohud.instance.lock";
+            const int lfd = ::open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+            if (lfd >= 0 && ::flock(lfd, LOCK_EX | LOCK_NB) != 0) {
+                char pidbuf[32] = {0};
+                const ssize_t n = ::pread(lfd, pidbuf, sizeof(pidbuf) - 1, 0);
+                const long other = (n > 0) ? std::strtol(pidbuf, nullptr, 10) : 0;
+                if (si_mode == "exit") {
+                    std::cerr << "[main] another ProtoHUD (pid " << other
+                              << ") holds " << lock_path
+                              << " — single_instance=exit, quitting\n";
+                    return 0;
+                }
+                std::cerr << "[main] another ProtoHUD (pid " << other
+                          << ") is running — taking over (SIGTERM, waiting up "
+                             "to 15 s for it to shut down)\n";
+                if (other > 1) ::kill(static_cast<pid_t>(other), SIGTERM);
+                bool got = false;
+                for (int i = 0; i < 150; ++i) {          // 15 s in 100 ms steps
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (::flock(lfd, LOCK_EX | LOCK_NB) == 0) { got = true; break; }
+                }
+                if (!got) {
+                    std::cerr << "[main] pid " << other
+                              << " did not release the lock — refusing to start "
+                                 "a second instance\n";
+                    return 0;
+                }
+                std::cerr << "[main] takeover complete — previous instance exited\n";
+            }
+            if (lfd >= 0) {
+                // Stamp our pid so the NEXT contender's log names us. The fd
+                // stays open for the process lifetime — the flock IS the guard.
+                const std::string pid = std::to_string(::getpid());
+                if (::ftruncate(lfd, 0) == 0)
+                    (void)::pwrite(lfd, pid.c_str(), pid.size(), 0);
+            }
+        }
+    }
 
     // ── Profiles ──────────────────────────────────────────────────────────────
     // A profile is a full config snapshot under <config>/profiles/<name>.json.
@@ -1810,6 +2115,17 @@ int main(int argc, char* argv[]) {
         led_cfg.frame_hz           = jval(jl, "frame_hz",          60.0);
         led_cfg.sync_sides         = jl.value("sync_sides",        false);
         led_cfg.link_areas         = jl.value("link_areas",        false);
+        // Wiring order along the chain, as zone indices. Normalised on use, so a
+        // short/duplicated/hand-edited array can't drop a zone off the strip.
+        if (jl.contains("wire_order") && jl["wire_order"].is_array()) {
+            int n = 0;
+            for (const auto& jv : jl["wire_order"]) {
+                if (n >= accessory::ZoneCount) break;
+                if (jv.is_number_integer()) led_cfg.wire_order[n++] = jv.get<int>();
+            }
+            // Anything the array didn't cover is filled in by the normaliser.
+            for (int i = n; i < accessory::ZoneCount; ++i) led_cfg.wire_order[i] = -1;
+        }
         led_cfg.mirror_layout      = jl.value("mirror_layout",     false);
         led_cfg.mirror_look        = jl.value("mirror_look",       false);
         led_cfg.strip.spi_device   = jl.value("spi_device",        std::string("/dev/spidev0.0"));
@@ -1855,6 +2171,22 @@ int main(int argc, char* argv[]) {
                 else if (pat == "gradient") led_cfg.zones[i].pattern = accessory::Pattern::Gradient;
                 else if (pat == "wave")     led_cfg.zones[i].pattern = accessory::Pattern::Wave;
                 else                        led_cfg.zones[i].pattern = accessory::Pattern::Solid;
+                // MIGRATION: the legacy 2-colour gradient (Color -> Color 2) is
+                // gone — the multi-stop list is the only gradient source now, and
+                // it colours EVERY pattern. Seed the stops from the old pair so a
+                // pre-change zone keeps exactly the look it had, but ONLY for a
+                // Gradient zone: that is the only pattern that ever rendered
+                // color2. On Breathe/Solid/Wave/etc. the saved color2 was
+                // vestigial and never drawn, so seeding it there would turn a flat
+                // zone into a gradient it never had. Must run AFTER the pattern
+                // parse above, which is what tells us which case this is.
+                {
+                    auto& zc = led_cfg.zones[i];
+                    const bool was_gradient = (zc.pattern == accessory::Pattern::Gradient);
+                    const bool pair_differs = (zc.r2 != zc.r || zc.g2 != zc.g || zc.b2 != zc.b);
+                    if (was_gradient && zc.stops.empty() && pair_differs)
+                        zc.stops = { { zc.r, zc.g, zc.b }, { zc.r2, zc.g2, zc.b2 } };
+                }
                 led_cfg.zones[i].breathe_hz =
                     jval(jz, "breathe_hz", led_cfg.zones[i].breathe_hz);
                 led_cfg.zones[i].wave_speed =
@@ -1863,6 +2195,8 @@ int main(int argc, char* argv[]) {
                     jval(jz, "grad_spatial", led_cfg.zones[i].grad_spatial);
                 led_cfg.zones[i].grad_angle =
                     jval(jz, "grad_angle", led_cfg.zones[i].grad_angle);
+                led_cfg.zones[i].palette_drift =
+                    jval(jz, "palette_drift", led_cfg.zones[i].palette_drift);
                 led_cfg.zones[i].zone_brightness = static_cast<uint8_t>(std::clamp(
                     jval(jz, "zone_brightness",
                          static_cast<int>(led_cfg.zones[i].zone_brightness)), 0, 255));
@@ -1921,19 +2255,68 @@ int main(int argc, char* argv[]) {
             accessory::mirror_zone_layout(led_cfg.zones[static_cast<int>(LZ::RightFin)],
                                           led_cfg.zones[static_cast<int>(LZ::LeftFin)]);
         }
-        // Chain the zones end-to-end in enum order: each zone's start follows the
-        // previous zone's end, and the strip length is the running total. (A zone
-        // may still pin its own `start` via config; auto-chaining only fills the
-        // ones left at the default 0.)
-        int cursor = 0;
-        for (auto& z : led_cfg.zones) {
-            if (z.count <= 0) continue;
-            if (z.start <= 0) z.start = cursor;
-            cursor = std::max(cursor, z.start + z.count);
-        }
-        led_cfg.strip.count = cursor;
+        // Chain the zones end-to-end in WIRING order (Accessory LEDs > Layout &
+        // Sides > Wiring Order): each zone's start follows the previous one's
+        // end, and the strip length is the running total.
+        led_cfg.wire_order = accessory::normalize_wire_order(led_cfg.wire_order);
+        led_cfg.strip.count = accessory::chain_zones(led_cfg.zones, led_cfg.wire_order);
     }
     accessory::AccessoryLeds accessory_leds(led_cfg);
+
+    // ── Accessory-LED profiles ────────────────────────────────────────────────
+    // Named whole-strip LOOKS (not layouts) that the menu can recall and a face
+    // expression can apply while it's active. Lives in the HUD config beside the
+    // expressions that reference it by name.
+    accessory::OverlayDirector led_overlays;   // animated expression overlay layer
+    accessory::LedProfiles led_profiles;
+    if (cfg.contains("accessory_leds") && cfg["accessory_leds"].contains("profiles"))
+        led_profiles.from_json(cfg["accessory_leds"]["profiles"]);
+
+    // ── Servos (PCA9685 channels; mainly the ears) ────────────────────────────
+    // Named + calibrated so an expression action can only ever command an angle
+    // inside the servo's safe travel. Two transports (cfg["servo_bus"]):
+    //   "coproc" — SERVOM over the RP2350's serial link; the firmware's
+    //              servo_service() eases and drives the PCA9685 on ITS bus.
+    //   "i2c"    — the PCA9685 wired to the CM5's own bus; Pca9685Bus runs the
+    //              same ~66 Hz easing loop here. No coprocessor in the path.
+    // Defaults to two paired ears on channels 0/1 when the config says nothing,
+    // which is the common build and gives the menu something to show.
+    std::string servo_transport = "coproc";
+    servo::Pca9685Bus::Config servo_i2c_cfg;
+    if (cfg.contains("servo_bus") && cfg["servo_bus"].is_object()) {
+        const auto& jb = cfg["servo_bus"];
+        servo_transport       = jb.value("transport", servo_transport);
+        servo_i2c_cfg.i2c_bus = jb.value("i2c_bus",  servo_i2c_cfg.i2c_bus);
+        servo_i2c_cfg.i2c_addr = jval(jb, "i2c_addr", servo_i2c_cfg.i2c_addr);
+    }
+    servo::Pca9685Bus servo_i2c(servo_i2c_cfg);
+    if (servo_transport == "i2c") servo_i2c.start();
+
+    servo::ServoController::Config servo_cfg;
+    if (cfg.contains("servos") && cfg["servos"].is_array()) {
+        for (const auto& js : cfg["servos"]) {
+            if (!js.is_object()) continue;
+            servo::ServoConfig s;
+            s.name       = js.value("name", std::string("Servo"));
+            s.channel    = jval(js, "channel",    s.channel);
+            s.min_deg    = jval(js, "min_deg",    s.min_deg);
+            s.max_deg    = jval(js, "max_deg",    s.max_deg);
+            s.center_deg = jval(js, "center_deg", s.center_deg);
+            s.rest_deg   = jval(js, "rest_deg",   s.rest_deg);
+            s.speed      = jval(js, "speed",      s.speed);
+            s.partner    = jval(js, "partner",    s.partner);
+            s.min_us     = jval(js, "min_us",     s.min_us);
+            s.max_us     = jval(js, "max_us",     s.max_us);
+            servo_cfg.servos.push_back(std::move(s));
+        }
+    }
+    if (servo_cfg.servos.empty()) {
+        servo::ServoConfig l; l.name = "Ear Left";  l.channel = 0; l.partner = 1;
+        servo::ServoConfig r; r.name = "Ear Right"; r.channel = 1; r.partner = 0;
+        servo_cfg.servos.push_back(std::move(l));
+        servo_cfg.servos.push_back(std::move(r));
+    }
+    servo::ServoController servos(std::move(servo_cfg));
 
     // ── Cooling fans (Pi GPIO PWM, or the coprocessor's fan pins) ─────────────
     sys::FanController::Config fan_cfg;
@@ -2120,6 +2503,8 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.notifs.push(std::move(n));
     };
+    // Snap the wiggle/inertia shift to whole pixels (no motion blur).
+    bool   pf_sharp_motion     = false;
     bool   pf_face_inertia     = true;
     double pf_face_inertia_strength = 1.0;   // 1.0 = slide up to ~10% of a panel
     bool   pf_weather_effects  = false;
@@ -2130,7 +2515,14 @@ int main(int argc, char* argv[]) {
     bool   pf_heat_heartbeat   = true;   // heatwave adds an orange heartbeat rim pulse
     double pf_frost_speed      = 1.0;    // frost formation/creep speed multiplier
     double pf_heat_speed       = 1.0;    // heatwave shimmer + heartbeat speed multiplier
-    int    pf_temp_force       = 0;      // preview override: 0 off, 1 frost, 2 heatwave (not saved)
+    // Per-band custom effect: the name of a saved layered preset under
+    // cfg["protoface"]["custom_effects"], or "" for the band's built-in look.
+    // Mild is the band BETWEEN the two thresholds, which has always shown
+    // nothing — "" keeps it that way.
+    std::string pf_temp_cold_fx;         // "" = built-in frost
+    std::string pf_temp_hot_fx;          // "" = built-in heatwave
+    std::string pf_temp_mild_fx;         // "" = nothing
+    int    pf_temp_force       = 0;      // preview override: 0 off, 1 cold, 2 hot, 3 mild (not saved)
     bool   weather_fx_resync   = true;
     // MAX7219 panel layout editor state (Face Display > MAX7219 Layout). Loaded
     // from cfg["protoface"]["max7219"] below; pf_max7219_apply serialises it back
@@ -2149,7 +2541,21 @@ int main(int argc, char* argv[]) {
     // Scrolling-text banner across the face panels (marquee) — forwarded to
     // the native controller live and persisted to cfg["protoface"]
     // ["scroll_text"]. See face/scroll_text.h.
+    // Face-painter swatches (0xRRGGBB). Persisted so a colour mixed in the
+    // editor is still there next session; empty = use the editor's defaults.
+    std::vector<uint32_t> pf_face_palette;
     face::ScrollTextConfig pf_scroll;
+    // ⚠ An Event Text slot (or a menu Preview) REPLACES pf_scroll while it is
+    // up, so pf_scroll is not the wearer's banner at that moment. This holds
+    // what was displaced, and the save path writes THIS instead — an event
+    // message must never become the saved banner. That matters most for the
+    // Shutdown event, which is by definition live when the config is written.
+    face::ScrollTextConfig pf_scroll_saved;
+    bool                   pf_scroll_displaced = false;
+    // Pushes pf_scroll into the live renderer. Declared here (assigned further
+    // down, once native_ctrl exists) so the expression director's diagnostics
+    // action — bound well before the controller is built — can call it.
+    std::function<void()> pf_scroll_push;
     // Face animation tunables — forwarded to every panel's FaceState live
     // and persisted to cfg["protoface"]["animation"] on save.
     bool   pf_blink_enabled   = true;
@@ -2174,6 +2580,7 @@ int main(int argc, char* argv[]) {
             pf_range_pitch = jval(jpf["motion_range"], "pitch_deg", 0.0);
             pf_range_yaw   = jval(jpf["motion_range"], "yaw_deg",   0.0);
         }
+        pf_sharp_motion        = jval(jpf, "sharp_motion",     pf_sharp_motion);
         pf_face_inertia        = jval(jpf, "face_inertia",     pf_face_inertia);
         pf_face_inertia_strength =
             jval(jpf, "face_inertia_strength", pf_face_inertia_strength);
@@ -2185,7 +2592,12 @@ int main(int argc, char* argv[]) {
         pf_heat_heartbeat      = jval(jpf, "heatwave_heartbeat", pf_heat_heartbeat);
         pf_frost_speed         = jval(jpf, "frost_speed",       pf_frost_speed);
         pf_heat_speed          = jval(jpf, "heatwave_speed",    pf_heat_speed);
+        pf_temp_cold_fx        = jpf.value("temp_cold_effect",  pf_temp_cold_fx);
+        pf_temp_hot_fx         = jpf.value("temp_hot_effect",   pf_temp_hot_fx);
+        pf_temp_mild_fx        = jpf.value("temp_mild_effect",  pf_temp_mild_fx);
         state.face.pride_angle = jval(jpf, "pride_angle", 90);
+        state.face.mat_angle   = jval(jpf, "mat_angle", 0);
+        state.face.mat_speed   = jval(jpf, "mat_speed", 0);
         if (jpf.contains("layout") && jpf["layout"].is_object()) {
             auto& jl = jpf["layout"];
             pf_eye_layout   = jl.value("eye",   pf_eye_layout);
@@ -2202,6 +2614,19 @@ int main(int argc, char* argv[]) {
             L.camera_mode            = jval(jh, "camera_mode",            L.camera_mode);
             L.camera_planes          = jval(jh, "camera_planes",          L.camera_planes);
             L.camera_temporal_planes = jval(jh, "camera_temporal_planes", L.camera_temporal_planes);
+            L.serpentine  = jval(jh, "serpentine",  L.serpentine);
+            L.sharp_rotation = jval(jh, "sharp_rotation", L.sharp_rotation);
+            L.edge_fade        = jval(jh, "edge_fade",        L.edge_fade);
+            L.edge_fade_dither = jval(jh, "edge_fade_dither", L.edge_fade_dither);
+            L.face_dither      = jval(jh, "face_dither",      L.face_dither);
+            L.flip_canvas_x = jval(jh, "flip_canvas_x", L.flip_canvas_x);
+            L.flip_canvas_y = jval(jh, "flip_canvas_y", L.flip_canvas_y);
+            if (jh.contains("flip_half_x") && jh["flip_half_x"].is_array())
+                for (size_t i = 0; i < jh["flip_half_x"].size() && i < 2; ++i)
+                    L.flip_half_x[i] = jh["flip_half_x"][i].get<bool>();
+            if (jh.contains("flip_half_y") && jh["flip_half_y"].is_array())
+                for (size_t i = 0; i < jh["flip_half_y"].size() && i < 2; ++i)
+                    L.flip_half_y[i] = jh["flip_half_y"][i].get<bool>();
             if (jh.contains("panel_size_per") && jh["panel_size_per"].is_array())
                 for (size_t i = 0; i < jh["panel_size_per"].size() && i < 4; ++i)
                     if (jh["panel_size_per"][i].is_string())
@@ -2212,6 +2637,9 @@ int main(int argc, char* argv[]) {
             if (jh.contains("nudge_dy") && jh["nudge_dy"].is_array())
                 for (size_t i = 0; i < jh["nudge_dy"].size() && i < 4; ++i)
                     L.nudge_dy[i] = jh["nudge_dy"][i].get<int>();
+            if (jh.contains("rotation") && jh["rotation"].is_array())
+                for (size_t i = 0; i < jh["rotation"].size() && i < 4; ++i)
+                    L.rotation[i] = jh["rotation"][i].get<double>();
             if (jh.contains("flip_x") && jh["flip_x"].is_array())
                 for (size_t i = 0; i < jh["flip_x"].size() && i < 4; ++i)
                     L.flip_x[i] = jh["flip_x"][i].get<bool>();
@@ -2265,6 +2693,24 @@ int main(int argc, char* argv[]) {
                  it != jpf["expression_triggers"].end(); ++it)
                 state.expression_triggers[it.key()] =
                     face::TriggerSet::from_json(it.value());
+        }
+        // Event-text slots (own message + own banner properties; their
+        // Triggers ride in expression_triggers under textev_<i>). Always
+        // sized to kTextEventSlots so the menu can build a fixed row set.
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            // Overwrite IN PLACE, never reallocate: the menu holds pointers
+            // into these slots for the program's life (same arrangement as
+            // pf_scroll_p), so an assign() here would dangle every row.
+            if ((int)state.text_events.size() != face::kTextEventSlots)
+                state.text_events.resize(face::kTextEventSlots);
+            for (auto& te : state.text_events) te = face::TextEvent{};
+            if (jpf.contains("text_events") && jpf["text_events"].is_array()) {
+                const auto& jte = jpf["text_events"];
+                for (int i = 0; i < face::kTextEventSlots &&
+                                i < static_cast<int>(jte.size()); ++i)
+                    state.text_events[i] = face::TextEvent::from_json(jte[i]);
+            }
         }
         // Animated Eyes slot params (one per face::EyeAnim; the slots'
         // Triggers ride in expression_triggers under eyeanim_<i>).
@@ -2333,6 +2779,12 @@ int main(int argc, char* argv[]) {
         }
         if (jpf.contains("scroll_text") && jpf["scroll_text"].is_object())
             pf_scroll = face::ScrollTextConfig::from_json(jpf["scroll_text"]);
+        if (jpf.contains("face_palette") && jpf["face_palette"].is_array()) {
+            pf_face_palette.clear();
+            for (const auto& c : jpf["face_palette"])
+                if (c.is_number_unsigned())
+                    pf_face_palette.push_back(c.get<uint32_t>() & 0xFFFFFFu);
+        }
         if (jpf.contains("gradient") && jpf["gradient"].is_object()) {
             auto& jg = jpf["gradient"];
             pf_gradient.count     = std::clamp(jval(jg, "count", pf_gradient.count), 2, 6);
@@ -3100,10 +3552,16 @@ int main(int argc, char* argv[]) {
         while ((int)state.custom_expressions.size() < face::kInitialCustomSlots)
             state.custom_expressions.emplace_back();
     }
-    // Servo output for expression actions. The coprocessor link (coproc_inputs)
-    // is created much later, so the director's action closures reach it through
-    // this indirection, which is filled in once the link exists.
-    auto expr_servo_out = std::make_shared<std::function<void(int, int)>>();
+    // Servo output for expression actions. The coprocessor link (coproc_inputs) is
+    // created much later, so the director's action closures reach it through this
+    // indirection, filled in once the link exists. Signature is
+    // (servo index, degrees, pair mode) — it routes through ServoController, so
+    // travel limits, the servo's own slew speed and Copy/Mirror pairing are all
+    // applied here rather than in the action.
+    // Two hooks rather than one with an encoded sentinel: apply moves to an angle,
+    // revert returns to the action's rest (or the servo's own when negative).
+    auto expr_servo_apply  = std::make_shared<std::function<void(int, int, int)>>();
+    auto expr_servo_revert = std::make_shared<std::function<void(int, int, int)>>();
     {
         face::ExpressionDirector::Actions da;
         da.set_face     = [&face_proxy](const std::string& e){ face_proxy.set_face_by_name(e); };
@@ -3121,18 +3579,117 @@ int main(int argc, char* argv[]) {
         da.play_eyes = [&face_proxy](const face::EyeAnimParams& p){
             face_proxy.play_eye_animation(p);
         };
+        // Diagnostics banner. Remembers whether the banner was showing at all
+        // before it fired, so a trigger that raises the readout over a blank
+        // face leaves it blank again afterwards instead of stranding the
+        // wearer's message on the panels.
+        da.show_diag = [&pf_scroll, &pf_scroll_push](bool on){
+            static bool s_was_enabled = false;
+            if (on) {
+                s_was_enabled     = pf_scroll.enabled;
+                pf_scroll.diag    = true;
+                pf_scroll.enabled = true;
+            } else {
+                pf_scroll.diag    = false;
+                pf_scroll.enabled = s_was_enabled;
+            }
+            if (pf_scroll_push) pf_scroll_push();
+        };
+        // Event text. Swaps the WHOLE live banner config for the slot's own —
+        // message and every property — then puts the original back. Same
+        // remember-and-restore shape as show_diag above, but it has a whole
+        // config to stash rather than one flag, because an event owns its
+        // look as well as its words.
+        da.show_text_event = [&state, &pf_scroll, &pf_scroll_saved,
+                              &pf_scroll_displaced, &pf_scroll_push](int slot, bool on){
+            if (on) {
+                face::ScrollTextConfig ev;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    if (slot < 0 || slot >= (int)state.text_events.size()) return;
+                    if (!state.text_events[slot].used) return;
+                    ev = state.text_events[slot].cfg;
+                }
+                if (!pf_scroll_displaced) {
+                    pf_scroll_saved     = pf_scroll;
+                    pf_scroll_displaced = true;
+                }
+                pf_scroll = ev;
+                pf_scroll.enabled = true;
+                // An event message is the wearer's own text, never the readout —
+                // otherwise a slot inherits whatever diag state was live.
+                pf_scroll.diag = false;
+            } else if (pf_scroll_displaced) {
+                pf_scroll           = pf_scroll_saved;
+                pf_scroll_displaced = false;
+            }
+            if (pf_scroll_push) pf_scroll_push();
+        };
         // LED/servo side-effects. On apply we snapshot the target LED zone so
         // revert can restore exactly what was there before; servos have no
         // read-back, so they just return to the action's rest angle (or detach).
         // apply/revert run under the director's lock, one action at a time, so
         // the shared snapshot store needs no extra guarding.
+        // The action callbacks are handed only the action, not the expression that
+        // owns it, so an overlay is keyed by its own CONTENT. Two expressions
+        // configured with an identical overlay therefore share one running
+        // instance — which is what you'd want anyway, since they'd be the same
+        // effect on the same zones. Keeps ExpressionDirector's signature alone.
+        auto overlay_key = [](const face::ExprAction& a) {
+            return "ov:" + std::to_string(a.ov_zones) + ":" +
+                   std::to_string(a.ov_r) + "," + std::to_string(a.ov_g) + "," +
+                   std::to_string(a.ov_b) + ":" + std::to_string(a.ov_shape) + ":" +
+                   std::to_string(a.ov_mode);
+        };
+        auto overlay_spec_of = [](const face::ExprAction& a) {
+            accessory::OverlaySpec s;
+            s.zone_mask = a.ov_zones;
+            s.r = a.ov_r; s.g = a.ov_g; s.b = a.ov_b;
+            s.shape    = static_cast<accessory::OverlayShape>(
+                             std::clamp(a.ov_shape, 0, 2));
+            s.mode     = static_cast<accessory::OverlayMode>(
+                             std::clamp(a.ov_mode, 0, 2));
+            s.opacity  = std::clamp(a.ov_opacity, 0, 100) / 100.f;
+            s.angle    = static_cast<float>(a.ov_angle);
+            s.softness = std::clamp(a.ov_soft, 1, 100) / 100.f;
+            s.rise_s   = std::max(0.f, a.ov_rise_s);
+            s.fall_s   = std::max(0.f, a.ov_fall_s);
+            s.cycle_hz = std::max(0.f, a.ov_cycle);
+            return s;
+        };
         auto led_saved       = std::make_shared<std::array<accessory::ZoneConfig, accessory::ZoneCount>>();
         auto led_saved_valid = std::make_shared<std::array<bool, accessory::ZoneCount>>();
         led_saved_valid->fill(false);
-        da.apply_action = [&accessory_leds, expr_servo_out, led_saved, led_saved_valid]
+        // A profile also carries chain-wide settings, so those need their own
+        // snapshot — restoring zones alone would leave a dimmed/linked chain
+        // stuck that way after the expression ends.
+        auto led_saved_glob   = std::make_shared<accessory::ProfileGlobals>();
+        auto led_saved_glob_ok = std::make_shared<bool>(false);
+        da.apply_action = [&accessory_leds, &led_profiles, &led_overlays, expr_servo_apply,
+                           overlay_key, overlay_spec_of,
+                           led_saved, led_saved_valid, led_saved_glob, led_saved_glob_ok]
                           (const face::ExprAction& a) {
             using K = face::ExprAction::Kind;
-            if (a.kind == K::Led) {
+            if (a.kind == K::LedOverlay) {
+                led_overlays.start(overlay_key(a), overlay_spec_of(a));
+                return;
+            }
+            if (a.kind == K::LedProfile) {
+                const auto* p = led_profiles.find(a.led_profile);
+                if (!p) return;                    // profile deleted → no-op
+                // Snapshot EVERY zone, since a profile touches them all. Same
+                // store as the single-zone action: one action applies at a time
+                // under the director's lock, so the arrays can't interleave.
+                for (int i = 0; i < accessory::ZoneCount; ++i) {
+                    (*led_saved)[i]       = accessory_leds.zone(static_cast<accessory::Zone>(i));
+                    (*led_saved_valid)[i] = true;
+                }
+                led_saved_glob->global_brightness = accessory_leds.global_brightness();
+                led_saved_glob->sync_sides        = accessory_leds.sync_sides();
+                led_saved_glob->link_areas        = accessory_leds.link_areas();
+                *led_saved_glob_ok = true;
+                accessory::apply_profile_live(accessory_leds, *p);
+            } else if (a.kind == K::Led) {
                 const int zi = a.led_zone;
                 if (zi < 0 || zi >= accessory::ZoneCount) return;
                 const auto z = static_cast<accessory::Zone>(zi);
@@ -3147,13 +3704,34 @@ int main(int argc, char* argv[]) {
                     accessory_leds.set_zone_brightness(
                         z, static_cast<uint8_t>(std::clamp(a.led_brightness, 0, 255)));
             } else if (a.kind == K::Servo) {
-                if (*expr_servo_out) (*expr_servo_out)(a.servo_ch, a.servo_deg);
+                if (*expr_servo_apply)
+                    (*expr_servo_apply)(a.servo_ch, a.servo_deg, a.servo_pair);
             }
         };
-        da.revert_action = [&accessory_leds, expr_servo_out, led_saved, led_saved_valid]
+        da.revert_action = [&accessory_leds, &led_overlays, expr_servo_revert, overlay_key,
+                            led_saved, led_saved_valid,
+                            led_saved_glob, led_saved_glob_ok]
                            (const face::ExprAction& a) {
             using K = face::ExprAction::Kind;
-            if (a.kind == K::Led) {
+            if (a.kind == K::LedOverlay) {
+                led_overlays.release(overlay_key(a));   // retracts, then clears
+                return;
+            }
+            if (a.kind == K::LedProfile) {
+                // Restore the full look of every zone captured on apply, zone by
+                // zone so an uncaptured one is left alone rather than defaulted.
+                for (int i = 0; i < accessory::ZoneCount; ++i) {
+                    if (!(*led_saved_valid)[i]) continue;
+                    accessory::apply_zone_look_live(
+                        accessory_leds, static_cast<accessory::Zone>(i),
+                        accessory::look_of((*led_saved)[i]));
+                    (*led_saved_valid)[i] = false;
+                }
+                if (*led_saved_glob_ok) {
+                    accessory::apply_globals_live(accessory_leds, *led_saved_glob);
+                    *led_saved_glob_ok = false;
+                }
+            } else if (a.kind == K::Led) {
                 const int zi = a.led_zone;
                 if (zi < 0 || zi >= accessory::ZoneCount) return;
                 if (!(*led_saved_valid)[zi]) return;
@@ -3165,7 +3743,8 @@ int main(int argc, char* argv[]) {
                 (*led_saved_valid)[zi] = false;
             } else if (a.kind == K::Servo) {
                 // Return to rest, or detach when rest < 0 (send_servo takes -1).
-                if (*expr_servo_out) (*expr_servo_out)(a.servo_ch, a.servo_rest);
+                if (*expr_servo_revert)
+                    (*expr_servo_revert)(a.servo_ch, a.servo_rest, a.servo_pair);
             }
         };
         expr_director.set_actions(std::move(da));
@@ -3220,6 +3799,25 @@ int main(int argc, char* argv[]) {
                 r.base_expression = cx.base_expression;
                 r.has_style = true;
                 r.style = cx.style;
+            } else if (key == face::kDiagTriggerKey) {
+                // Not an expression at all — firing raises the diagnostics
+                // banner for hold_s. Shares the recipe editor and the whole
+                // event/condition pipeline with the face rules.
+                r.name    = "Diagnostics";
+                r.is_diag = true;
+            } else if (key.rfind(face::kTextEventKeyPrefix, 0) == 0) {
+                // Event text: firing raises that slot's banner for hold_s.
+                // Empty slots are skipped so a stale trigger on a cleared slot
+                // can't put a blank banner up.
+                const int idx = std::atoi(key.c_str() +
+                                          std::strlen(face::kTextEventKeyPrefix));
+                if (idx < 0 || idx >= (int)state.text_events.size()) continue;
+                const auto& te = state.text_events[idx];
+                if (!te.used) continue;
+                r.name          = te.name.empty() ? std::string("Event Text")
+                                                  : te.name;
+                r.is_text_event = true;
+                r.text_slot     = idx;
             } else if (key.rfind("eyeanim_", 0) == 0) {
                 const int a = std::atoi(key.c_str() + 8);
                 if (a < 0 || a >= face::eye_anim_count()) continue;
@@ -3341,12 +3939,14 @@ int main(int argc, char* argv[]) {
         std::cerr << "[main] boop sensor (MPR121) unavailable\n";
     boop_sensor_ptr = &boop_sensor;   // expose for the menu's live tuning
 
-    // SPI-transport accessory LEDs start here; the coproc transport starts
-    // later, once the coprocessor link (and thus the frame sink) exists.
-    if (led_cfg.enabled && led_cfg.transport != "coproc" && !accessory_leds.start())
+    // SPI-transport accessory LEDs start here; the coproc transports ("coproc"
+    // frame-stream and "coproc_local" per-zone commands) start later, once the
+    // coprocessor link (and thus the frame/command sink) exists.
+    if (led_cfg.enabled && led_cfg.transport != "coproc" &&
+        led_cfg.transport != "coproc_local" && !accessory_leds.start())
         std::cerr << "[main] accessory LEDs unavailable — continuing without\n";
 
-    // ── Light sensor (BH1750 ambient lux) ────────────────────────────────────
+    // ── Light sensor (ambient lux — BH1750 or OPT3001) ───────────────────────
     // Hardware config (enable, bus, address, poll rate) comes from
     // cfg["light_sensor"]. The lux stream feeds the ExpressionDirector
     // (per-expression "Gets Bright"/"Gets Dark" triggers + While-conditions)
@@ -3356,13 +3956,40 @@ int main(int argc, char* argv[]) {
     if (cfg.contains("light_sensor")) {
         auto& jl = cfg["light_sensor"];
         light_cfg.enabled  = jval(jl, "enabled",  light_cfg.enabled);
+        if (jl.value("type", std::string("bh1750")) == "opt3001") {
+            light_cfg.type     = sensor::LightSensor::Type::Opt3001;
+            light_cfg.i2c_addr = 0x44;   // OPT3001 default; i2c_addr below overrides
+        }
         light_cfg.i2c_bus  = jl.value("i2c_bus",  light_cfg.i2c_bus);
         light_cfg.i2c_addr = jval(jl, "i2c_addr", light_cfg.i2c_addr);
         light_cfg.poll_hz  = jval(jl, "poll_hz",  light_cfg.poll_hz);
+        // Auto-dim (Face Display > Brightness > Auto Dim): scale the face's
+        // Brightness by ambient lux. Saved back by the config writer below.
+        if (jl.contains("auto_dim") && jl["auto_dim"].is_object()) {
+            const auto& ja = jl["auto_dim"];
+            state.face.auto_dim         = jval(ja, "enabled",   state.face.auto_dim);
+            state.face.auto_dim_dark    = jval(ja, "dark_lux",  state.face.auto_dim_dark);
+            state.face.auto_dim_bright  = jval(ja, "bright_lux",state.face.auto_dim_bright);
+            state.face.auto_dim_min_pct = jval(ja, "min_pct",   state.face.auto_dim_min_pct);
+            state.face.auto_dim_curve   = jval(ja, "curve",     state.face.auto_dim_curve);
+        }
     }
+    // Snapshot state.face's auto-dim fields as the controller's cfg struct —
+    // used at controller construction and by the menu's apply hook.
+    auto pf_auto_dim_cfg = [&state]{
+        face::NativeFaceController::AutoDimCfg ad;
+        ad.enabled    = state.face.auto_dim;
+        ad.dark_lux   = state.face.auto_dim_dark;
+        ad.bright_lux = state.face.auto_dim_bright;
+        ad.min_pct    = state.face.auto_dim_min_pct;
+        ad.curve      = state.face.auto_dim_curve;
+        return ad;
+    };
     sensor::LightSensor light_sensor(light_cfg);
-    light_sensor.set_lux_callback([last_lux](float lux) {
+    light_sensor.set_lux_callback([last_lux, &face_proxy](float lux) {
         last_lux->store(lux);
+        // Feed the face too, for layers on "intensity_from": light / dark.
+        face_proxy.set_env_light(lux);
     });
     if (light_cfg.enabled && !light_sensor.start())
         std::cerr << "[main] light sensor unavailable\n";
@@ -3640,6 +4267,11 @@ int main(int argc, char* argv[]) {
     // renders the LED face in C++ and writes the same /dev/shm frame the daemon
     // would, so the existing preview path and panel_driver.py work unchanged.
     std::unique_ptr<face::NativeFaceController> native_ctrl;
+    // Now that native_ctrl exists, close the loop for the forward-declared
+    // pusher above (the director's diagnostics action calls through it).
+    pf_scroll_push = [&native_ctrl, &pf_scroll]{
+        if (native_ctrl) native_ctrl->set_scroll_text(pf_scroll);
+    };
 
     // ── Reaction engine (environment/movement reactions) ─────────────────────
     // v1: sleepy/wake from head stillness + the ambient-override ladder (the
@@ -3782,11 +4414,20 @@ int main(int argc, char* argv[]) {
                                       pf_eye_layout, pf_mouth_layout, pf_nose_layout,
                                       &pf_hub75));
         native_ctrl->set_face_colors(state.face.face_colors);
+        native_ctrl->set_auto_dim(pf_auto_dim_cfg());
+        // The controller restored its saved Brightness (protoface_state.json)
+        // in its constructor — sync the menu slider's shared state to it, or
+        // the slider displays the AppState default until first touched.
+        state.face.brightness = native_ctrl->brightness();
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->set_motion_particles(pf_motion_particles);
+        native_ctrl->set_sharp_motion(pf_sharp_motion);
         native_ctrl->set_face_inertia(pf_face_inertia);
         native_ctrl->set_face_inertia_strength(pf_face_inertia_strength);
         native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
+        native_ctrl->set_menu_item(12, (state.face.mat_angle / 15) & 0xFF);    // gradient direction
+        native_ctrl->set_menu_item(13, static_cast<uint8_t>(
+            std::clamp(state.face.mat_speed, -100, 100) + 100));               // gradient scroll
         native_ctrl->start();
         // Push the user's saved animation tunables into every panel's
         // FaceState. The defaults in FaceState/FaceCfg apply otherwise.
@@ -3812,11 +4453,17 @@ int main(int argc, char* argv[]) {
         if (pf_launch_driver && pf_backend == "hub75") {
             int gpw = 64, gph = 32, gchain = 2, gpar = 1;
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
-            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
+            // The driver's frame is the physical framebuffer, not the (possibly
+            // wider, nudge-driven) renderer canvas — ShmPusherOutput has already
+            // gathered the panels into chain order by the time it's published.
+            int fbw = rc.canvas_w, fbh = rc.canvas_h;
+            pf_hub75_framebuffer(pf_hub75, fbw, fbh, nullptr);
+            pf_launch_panel_driver(bin_dir, fbw, fbh,
                                    gpw, gph, gchain, gpar, pf_hub75.pinout,
                                    pf_hub75.color_order, pf_hub75.camera_mode,
                                    pf_hub75.camera_planes,
-                                   pf_hub75.camera_temporal_planes);
+                                   pf_hub75.camera_temporal_planes,
+                                   pf_hub75.serpentine);
         }
     } else {
         // Auto-start the Protoface daemon on boot (no-op if already running). The
@@ -3985,6 +4632,11 @@ int main(int argc, char* argv[]) {
             return;
         }
 
+        // Carry the setup pattern across the rebuild: Apply Layout is exactly
+        // what you press while aligning panels against one, and having it blink
+        // off every time would make the tool useless for the job it's for.
+        const face::TestPattern keep_pattern = native_ctrl->test_pattern();
+
         // Stop the running controller, then retain it. Setting active_face
         // to the new controller is enough to redirect future calls; any
         // in-flight call on the old pointer keeps working because we don't
@@ -4063,12 +4715,31 @@ int main(int argc, char* argv[]) {
         native_ctrl = std::make_unique<face::NativeFaceController>(
             rc, std::move(new_output));
         active_face = native_ctrl.get();
+        // A rebuild makes a NEW controller and output, so live-only state has
+        // to be re-pushed or it reverts to defaults. The flips and angles ride
+        // in through pf_build_panel_output; these have no build path.
+        native_ctrl->set_sharp_rotation(pf_hub75.sharp_rotation);
+        native_ctrl->set_edge_fade(pf_hub75.edge_fade, pf_hub75.edge_fade_dither);
+        // Panel depth is only known in camera mode; outside it piomatter uses
+        // its own defaults, so there is no honest number to dither to.
+        native_ctrl->set_face_dither(
+            pf_hub75.face_dither,
+            pf_hub75.camera_mode ? pf_hub75.camera_planes : 0);
         native_ctrl->set_face_colors(state.face.face_colors);
+        native_ctrl->set_auto_dim(pf_auto_dim_cfg());
+        // The controller restored its saved Brightness (protoface_state.json)
+        // in its constructor — sync the menu slider's shared state to it, or
+        // the slider displays the AppState default until first touched.
+        state.face.brightness = native_ctrl->brightness();
         native_ctrl->set_menu_item(10, state.face.pride_sharp ? 1 : 0);  // pride sharp-bands
         native_ctrl->set_motion_particles(pf_motion_particles);
+        native_ctrl->set_sharp_motion(pf_sharp_motion);
         native_ctrl->set_face_inertia(pf_face_inertia);
         native_ctrl->set_face_inertia_strength(pf_face_inertia_strength);
         native_ctrl->set_menu_item(11, (state.face.pride_angle / 15) & 0xFF);  // pride rotation
+        native_ctrl->set_menu_item(12, (state.face.mat_angle / 15) & 0xFF);    // gradient direction
+        native_ctrl->set_menu_item(13, static_cast<uint8_t>(
+            std::clamp(state.face.mat_speed, -100, 100) + 100));               // gradient scroll
         native_ctrl->start();
         native_ctrl->set_blink_enabled(pf_blink_enabled);
         native_ctrl->set_blink_timing(pf_blink_min, pf_blink_max, pf_blink_duration);
@@ -4078,6 +4749,7 @@ int main(int argc, char* argv[]) {
             native_ctrl->set_expression_style(expr, st);
         native_ctrl->set_scroll_text(pf_scroll);
         native_ctrl->set_active_layout_name(pf_hub75_active);
+        native_ctrl->set_test_pattern(keep_pattern);
 
         // panel_driver.py choreography. The Python shim is only needed for
         // HUB75 (it reads /dev/shm frames and pushes them via piomatter);
@@ -4088,11 +4760,14 @@ int main(int argc, char* argv[]) {
         } else if (new_backend == "hub75" && pf_launch_driver) {
             int gpw = 64, gph = 32, gchain = 2, gpar = 1;
             pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
-            pf_launch_panel_driver(bin_dir, rc.canvas_w, rc.canvas_h,
+            int fbw = rc.canvas_w, fbh = rc.canvas_h;
+            pf_hub75_framebuffer(pf_hub75, fbw, fbh, nullptr);
+            pf_launch_panel_driver(bin_dir, fbw, fbh,
                                    gpw, gph, gchain, gpar, pf_hub75.pinout,
                                    pf_hub75.color_order, pf_hub75.camera_mode,
                                    pf_hub75.camera_planes,
-                                   pf_hub75.camera_temporal_planes);
+                                   pf_hub75.camera_temporal_planes,
+                                   pf_hub75.serpentine);
         }
     };
 
@@ -4152,20 +4827,61 @@ int main(int argc, char* argv[]) {
         const std::string abs_path = face_proxy.face_image_path(expression);
         if (abs_path.empty()) return;
 
+        // ⚠ An expression name containing '/' addresses art in a SUBFOLDER of
+        // the face folder — today that means the animated-blink frames
+        // ("blink/1" -> <face>/blink/1.png). Their parent directory is
+        // therefore NOT the face folder, and everything that reads or writes
+        // the face's config.json has to climb out first. Left unhandled, a
+        // frame edit would look for the eye regions in the wrong place and then
+        // write a stray config.json beside the frames.
+        // ⚠ Climb ONE LEVEL PER SLASH, not a fixed one. The face-wide blink
+        // frames are "blink/<n>" (one level down) but a per-expression
+        // sequence is "blink/<expression>/<n>" (two), and a hardcoded single
+        // parent_path() would land on <face>/blink and quietly read the
+        // config.json that isn't there.
+        const size_t sub_depth =
+            static_cast<size_t>(std::count(expression.begin(), expression.end(), '/'));
+        const bool is_sub_art = sub_depth > 0;
+        fs::path face_dir = fs::path(abs_path).parent_path();
+        for (size_t i = 0; i < sub_depth; ++i) face_dir = face_dir.parent_path();
+
+        // Which expression's eye regions this editor session reads and writes.
+        // The "blink" slot and the face-wide frames ("blink/<n>") carry the
+        // face-wide pair; every other slot carries its OWN override (falling
+        // back to the face-wide pair for display when it has none); a
+        // per-expression frame ("blink/<expr>/<n>") shows that expression's.
+        std::string region_expr;                       // empty = face-wide pair
+        if (!is_sub_art) {
+            if (expression != "blink") region_expr = expression;
+        } else if (sub_depth == 2) {
+            const size_t ra = expression.find('/');
+            const size_t rb = expression.rfind('/');
+            if (rb > ra + 1) region_expr = expression.substr(ra + 1, rb - ra - 1);
+        }
+
         // Preload any blink eye polygons from the face folder's config.json
         // (canvas coords) so the editor shows them and round-trips them on save.
         // Accepts the new {"points":[[x,y],...]} polygon form and the legacy
         // {x,y,w,h} rectangle (promoted to a 4-corner polygon for editing).
         std::vector<menu::FaceEditor::EyePoly> eye_polys;
+        bool had_override = false;   // region_expr had its own entry on open
         {
-            const fs::path cfgp = fs::path(abs_path).parent_path() / "config.json";
+            const fs::path cfgp = face_dir / "config.json";
             std::ifstream ef(cfgp);
             if (ef) {
                 try {
                     json ej; ef >> ej;
+                    const json* rsrc = &ej;
+                    if (!region_expr.empty() && ej.contains("eye_regions") &&
+                        ej["eye_regions"].is_object() &&
+                        ej["eye_regions"].contains(region_expr) &&
+                        ej["eye_regions"][region_expr].is_object()) {
+                        rsrc = &ej["eye_regions"][region_expr];
+                        had_override = true;
+                    }
                     auto rd = [&](const char* k){
-                        if (!ej.contains(k) || !ej[k].is_object()) return;
-                        const auto& d = ej[k];
+                        if (!rsrc->contains(k) || !(*rsrc)[k].is_object()) return;
+                        const auto& d = (*rsrc)[k];
                         menu::FaceEditor::EyePoly poly;
                         if (d.contains("points") && d["points"].is_array()) {
                             for (const auto& pt : d["points"])
@@ -4196,12 +4912,17 @@ int main(int argc, char* argv[]) {
         std::snprintf(title, sizeof(title),
                       "Edit face: %s  (%s)",
                       expression.c_str(), pf_backend.c_str());
+        // Snapshot of the polygons the editor opened with, so the commit can
+        // tell "user drew regions" from "untouched face-wide fallback" below.
+        auto open_polys = eye_polys;
         menu_ptr->open_face_editor(
             title, abs_path, cw, ch, std::move(covered), std::move(labels),
             zones.mirror_x,
-            mode, {} /* default palette */,
+            mode, pf_face_palette,   // empty -> editor defaults
             std::move(eye_polys),
-            /* on_commit */ [&face_proxy, &native_ctrl, expression]
+            /* on_commit */ [&face_proxy, &native_ctrl, expression,
+                             face_dir, is_sub_art, region_expr, had_override,
+                             open_polys = std::move(open_polys)]
                 (const cv::Mat& rgba_canvas, const std::string& target_path,
                  const std::vector<menu::FaceEditor::EyePoly>& eye_polys) {
                 // Convert RGBA back to BGRA for cv::imwrite (PNG storage
@@ -4223,23 +4944,57 @@ int main(int argc, char* argv[]) {
                 // folder's config.json, merging so expressions/blink keys are
                 // preserved. Stored as {"points":[[x,y],...]}; the loader fills
                 // each polygon to a mask so a region blink only closes the eye(s)
-                // inside the shape. Always rewrite both keys so clearing an eye
-                // (drawing fewer shapes) removes the stale one.
-                {
-                    const std::filesystem::path cfgp =
-                        std::filesystem::path(target_path).parent_path() / "config.json";
+                // inside the shape.
+                // The "blink" slot authors the FACE-WIDE pair; every other slot
+                // authors its own entry under "eye_regions" so each face can
+                // blink inside its own polygons (falling back to the face-wide
+                // pair when it never drew any).
+                // ⚠ SKIPPED ENTIRELY FOR SUB-FOLDER ART (blink frames). The eye
+                // polygons are canvas-space and shared by every frame, so if
+                // each frame wrote them back, whichever frame was saved last
+                // would silently become the authority — and a frame opened
+                // before the regions existed would erase them. Frames consume
+                // the polygons read-only; only the real slots author them.
+                if (!is_sub_art) {
+                    const std::filesystem::path cfgp = face_dir / "config.json";
                     json ej = json::object();
                     { std::ifstream ef(cfgp);
                       if (ef) { try { ef >> ej; } catch (...) { ej = json::object(); } }
                       if (!ej.is_object()) ej = json::object(); }
-                    auto wr = [&](const char* k, const menu::FaceEditor::EyePoly& poly){
+                    auto wr = [](json& dst, const char* k,
+                                 const menu::FaceEditor::EyePoly& poly){
                         json pts = json::array();
                         for (const auto& p : poly) pts.push_back({p.x, p.y});
-                        ej[k] = {{"points", std::move(pts)}};
+                        dst[k] = {{"points", std::move(pts)}};
                     };
-                    ej.erase("eye_left"); ej.erase("eye_right");
-                    if (!eye_polys.empty())          wr("eye_left",  eye_polys[0]);
-                    if (eye_polys.size() > 1)        wr("eye_right", eye_polys[1]);
+                    if (region_expr.empty()) {
+                        // Face-wide pair. Always rewrite both keys so clearing
+                        // an eye (drawing fewer shapes) removes the stale one.
+                        ej.erase("eye_left"); ej.erase("eye_right");
+                        if (!eye_polys.empty())   wr(ej, "eye_left",  eye_polys[0]);
+                        if (eye_polys.size() > 1) wr(ej, "eye_right", eye_polys[1]);
+                    } else if (eye_polys.empty()) {
+                        // No shapes = inherit: drop this expression's override
+                        // so it follows the face-wide pair again.
+                        if (ej.contains("eye_regions") &&
+                            ej["eye_regions"].is_object()) {
+                            ej["eye_regions"].erase(region_expr);
+                            if (ej["eye_regions"].empty()) ej.erase("eye_regions");
+                        }
+                    } else if (had_override || eye_polys != open_polys) {
+                        // Write this expression's own regions — but NOT when the
+                        // editor still shows the untouched face-wide fallback,
+                        // which would silently pin the expression to today's
+                        // shared shapes and stop later face-wide edits reaching
+                        // it.
+                        if (!ej.contains("eye_regions") ||
+                            !ej["eye_regions"].is_object())
+                            ej["eye_regions"] = json::object();
+                        json& jo = ej["eye_regions"][region_expr];
+                        jo = json::object();
+                        wr(jo, "eye_left", eye_polys[0]);
+                        if (eye_polys.size() > 1) wr(jo, "eye_right", eye_polys[1]);
+                    }
                     // draw_size lets single-panel faces scale regions; multi-
                     // panel slices use canvas coords directly (ignored there).
                     ej["draw_size"] = {rgba_canvas.cols, rgba_canvas.rows};
@@ -4252,22 +5007,46 @@ int main(int argc, char* argv[]) {
                 // falls back to neutral gracefully when the name isn't an
                 // expression in the loader's set (mouth-shape PNGs).
                 if (native_ctrl) native_ctrl->reload_active_face();
-                face_proxy.set_face_by_name(expression);
+                // ⚠ A blink frame is NOT an expression: set_face_by_name would
+                // fall back to neutral and yank the wearer's face off whatever
+                // it was showing on every single frame save. Fire a blink
+                // instead — that IS this art on screen, which is the whole
+                // point of showing something after a save.
+                if (is_sub_art) {
+                    if (native_ctrl) native_ctrl->trigger_blink();
+                } else {
+                    face_proxy.set_face_by_name(expression);
+                }
             },
             /* on_cancel */ {},
-            /* on_preview */ [&native_ctrl, expression, &face_proxy]
+            /* on_preview */ [&native_ctrl, expression, is_sub_art, &face_proxy]
                 (const cv::Mat& rgba_canvas, double duration_s) {
                 if (!native_ctrl) return;
-                // Pop the expression so the user is looking at it, then push
-                // the in-progress canvas as a transient. The renderer thread
-                // will composite material + effects on top.
-                face_proxy.set_face_by_name(expression);
-                native_ctrl->push_transient_face(expression, rgba_canvas, duration_s);
+                // ⚠ A blink frame has no expression to pop to. Pushing the
+                // transient under "blink/1" would register it against a name
+                // the loader has never heard of and V would silently do
+                // nothing — the worst outcome for a preview key. Push it over
+                // whatever expression is CURRENTLY on the face instead: the
+                // art lands on the panels for the duration and is restored
+                // afterwards, exactly as it is for a real slot.
+                const std::string target =
+                    is_sub_art ? face_proxy.current_expression() : expression;
+                if (target.empty()) return;
+                if (!is_sub_art) face_proxy.set_face_by_name(target);
+                native_ctrl->push_transient_face(target, rgba_canvas, duration_s);
             },
             /* live_frame */ [&native_ctrl](cv::Mat& out) -> bool {
                 return native_ctrl && native_ctrl->latest_frame(out);
             },
             /* preview_duration_s */ pf_preview_duration_s);
+        // Swatch edits ('K' -> the shared colour picker) write straight back
+        // here, so a mixed colour survives the editor closing — and survives a
+        // cancelled drawing, since the palette is a tool setting rather than
+        // part of the artwork.
+        menu_ptr->face_editor().set_palette_hook(
+            [&pf_face_palette](const std::vector<uint32_t>& p){
+                pf_face_palette = p;
+            });
         // MAX7219 wiring guide: when the face is shown on MAX panels (as the
         // main backend, or a coproc "section"), hand the editor the chain's
         // module order so it overlays the DIN→DOUT wiring on the grid.
@@ -4567,7 +5346,10 @@ int main(int argc, char* argv[]) {
     // context-panel preview. Reads the current native_ctrl each call so it keeps
     // working across backend swaps; empty on the Teensy/daemon backends.
     menu_ctx.live_face_frame = [&native_ctrl](cv::Mat& out) -> bool {
-        return native_ctrl && native_ctrl->latest_frame(out);
+        // The PHYSICAL view (canvas masked to the real panels), not the raw
+        // canvas — a context preview showing face in the gap between panels is
+        // showing something the wearer can never see.
+        return native_ctrl && native_ctrl->latest_physical(out);
     };
     menu_ctx.xr      = &xr;
     menu_ctx.cameras = &cameras;
@@ -4622,16 +5404,11 @@ int main(int argc, char* argv[]) {
     menu_ctx.voice_analyzer = audio.voice();
     menu_ctx.leds = &accessory_leds;
     menu_ctx.acc_cfg_p = &led_cfg;   // editable layout for the zone editor + visualizer
+    menu_ctx.led_profiles = &led_profiles;
     // Apply layout edits live: re-chain the zones (each start follows the prior
     // zone's end) and rebuild the strip at the new total — no process restart.
     menu_ctx.acc_apply = [&]{
-        int cursor = 0;
-        for (auto& z : led_cfg.zones) {
-            z.count = accessory::zone_total(z);
-            z.start = cursor;
-            cursor += std::max(0, z.count);
-        }
-        led_cfg.strip.count = cursor;
+        led_cfg.strip.count = accessory::chain_zones(led_cfg.zones, led_cfg.wire_order);
         accessory_leds.reconfigure(led_cfg);
     };
     menu_ctx.fans = &cooling_fans;
@@ -4653,6 +5430,53 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < pf_hub75.panel_count && i < 4; ++i)
             flips.push_back({pf_hub75.flip_x[i], pf_hub75.flip_y[i]});
         native_ctrl->set_panel_flips(flips);
+        // Per-half strip flips — rects were fixed at build time, only the flags
+        // move, so this is live too.
+        native_ctrl->set_half_flips({
+            {pf_hub75.flip_half_x[0], pf_hub75.flip_half_y[0]},
+            {pf_hub75.flip_half_x[1], pf_hub75.flip_half_y[1]},
+        });
+        // Whole-canvas output mirror — same live path as the per-panel flips
+        // (no rebuild, no driver relaunch: it's a cv::flip on the way out).
+        native_ctrl->set_canvas_flip(pf_hub75.flip_canvas_x, pf_hub75.flip_canvas_y);
+        // Mounting rotation, through the same effective-angle helper the layout
+        // builder uses so the slider's direction doesn't depend on the flips.
+        std::vector<double> angles;
+        for (int i = 0; i < pf_hub75.panel_count && i < 4; ++i)
+            angles.push_back(pf_hub75_effective_angle(
+                pf_hub75, i, pf_hub75_panel_half(pf_hub75, i)));
+        native_ctrl->set_panel_angles(angles);
+        native_ctrl->set_sharp_rotation(pf_hub75.sharp_rotation);
+        native_ctrl->set_edge_fade(pf_hub75.edge_fade, pf_hub75.edge_fade_dither);
+        // Panel depth is only known in camera mode; outside it piomatter uses
+        // its own defaults, so there is no honest number to dither to.
+        native_ctrl->set_face_dither(
+            pf_hub75.face_dither,
+            pf_hub75.camera_mode ? pf_hub75.camera_planes : 0);
+    };
+    // ⚠ PUSH IT ONCE AT STARTUP. Everything above is live controller/output
+    // state with no build-time path of its own, and this lambda used to be
+    // called ONLY from the menu — so a saved value took effect when you set it
+    // and then silently reverted on the next restart. `sharp_rotation` was the
+    // visible casualty: it defaults to false in ShmPusherOutput, so a build
+    // configured for nearest-neighbour sampling came back up bilinear every
+    // boot. Safe to call here — it pushes state and nothing else: no rebuild,
+    // no driver relaunch.
+    if (native_ctrl) menu_ctx.pf_layout_changed();
+    // HUB75 geometry edits (panel count / arrangement / size / nudge / chain
+    // order). These resize the renderer canvas AND the piomatter framebuffer,
+    // so pushing state into the live controller isn't enough — the whole panel
+    // output has to be rebuilt and panel_driver.py relaunched with the new
+    // dimensions. Skipping that leaves the driver pushing the old canvas shape:
+    // going 2 → 4 panels kept a 128x32 framebuffer, so the extra panels on the
+    // chain re-showed the first two instead of the new rows.
+    menu_ctx.pf_hub75_apply = [&]{
+        // Keep the named-layout map in step so a Save/Load round-trip doesn't
+        // resurrect the pre-edit geometry.
+        pf_hub75_layouts[pf_hub75_active] = pf_hub75;
+        if (!native_ctrl || pf_backend != "hub75") return;
+        pf_force_rebuild = true;
+        swap_backend(pf_backend);
     };
     menu_ctx.pf_max7219_p = &pf_max7219;
     menu_ctx.pf_max7219_apply = [&]{
@@ -4771,6 +5595,63 @@ int main(int argc, char* argv[]) {
         pf_motion_particles = v;
         if (native_ctrl) native_ctrl->set_motion_particles(v);
     };
+    menu_ctx.pf_get_wiggle = [&](double& sp, double& ax, double& ay) -> bool {
+        if (!native_ctrl) return false;
+        face::WiggleCfg w;
+        if (!native_ctrl->get_face_wiggle(w)) return false;
+        sp = w.speed; ax = w.amplitude_x; ay = w.amplitude_y;
+        return true;
+    };
+    menu_ctx.pf_set_wiggle = [&](double sp, double ax, double ay){
+        if (!native_ctrl) return;
+        face::WiggleCfg w; w.speed = sp; w.amplitude_x = ax; w.amplitude_y = ay;
+        native_ctrl->set_face_wiggle(w);
+    };
+    menu_ctx.pf_get_blink_anim = [&](bool& en, int& frames) -> bool {
+        return native_ctrl && native_ctrl->get_blink_anim(en, frames);
+    };
+    menu_ctx.pf_set_blink_anim = [&](bool en, int frames){
+        if (native_ctrl) native_ctrl->set_blink_anim(en, frames);
+    };
+    menu_ctx.pf_blink_frames_loaded = [&]() -> int {
+        return native_ctrl ? native_ctrl->blink_frames_loaded() : 0;
+    };
+    menu_ctx.pf_trigger_blink = [&]{ if (native_ctrl) native_ctrl->trigger_blink(); };
+    // Light sensor readout + auto-dim plumbing. The lux getters are wired only
+    // when the sensor is enabled so the GPIO readout row hides on rigs
+    // without one.
+    if (light_cfg.enabled) {
+        menu_ctx.light_lux       = [&light_sensor]{ return light_sensor.latest_lux(); };
+        menu_ctx.light_connected = [&light_sensor]{ return light_sensor.connected(); };
+    }
+    menu_ctx.pf_apply_auto_dim = [&]{
+        if (native_ctrl) native_ctrl->set_auto_dim(pf_auto_dim_cfg());
+    };
+    menu_ctx.pf_auto_dim_factor = [&]() -> double {
+        return native_ctrl ? native_ctrl->auto_dim_factor() : 1.0;
+    };
+    menu_ctx.pf_get_expr_blink = [&](const std::string& expr, int& mode, int& frames,
+                                     bool& whole, int& loaded) -> bool {
+        if (!native_ctrl) return false;
+        face::NativeFaceController::ExprBlink eb;
+        if (!native_ctrl->get_expr_blink(expr, eb)) return false;
+        mode   = static_cast<int>(eb.mode);
+        frames = eb.frames; whole = eb.whole; loaded = eb.loaded;
+        return true;
+    };
+    menu_ctx.pf_set_expr_blink = [&](const std::string& expr, int mode, int frames,
+                                     bool whole){
+        if (!native_ctrl) return;
+        face::NativeFaceController::ExprBlink eb;
+        eb.mode   = static_cast<face::FaceLoader::BlinkMode>(mode);
+        eb.frames = frames;
+        eb.whole  = whole;
+        native_ctrl->set_expr_blink(expr, eb);
+    };
+    menu_ctx.pf_sharp_motion_p = &pf_sharp_motion;
+    menu_ctx.pf_set_sharp_motion = [&](bool v){
+        if (native_ctrl) native_ctrl->set_sharp_motion(v);
+    };
     menu_ctx.pf_face_inertia_p = &pf_face_inertia;
     menu_ctx.pf_set_face_inertia = [&](bool v){
         pf_face_inertia = v;
@@ -4791,6 +5672,9 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_temp_hot_p     = &pf_temp_hot_c;
     menu_ctx.pf_frost_fractal_p  = &pf_frost_fractal;
     menu_ctx.pf_heat_heartbeat_p = &pf_heat_heartbeat;
+    menu_ctx.pf_temp_cold_fx_p   = &pf_temp_cold_fx;
+    menu_ctx.pf_temp_hot_fx_p    = &pf_temp_hot_fx;
+    menu_ctx.pf_temp_mild_fx_p   = &pf_temp_mild_fx;
     menu_ctx.pf_frost_speed_p    = &pf_frost_speed;
     menu_ctx.pf_heat_speed_p     = &pf_heat_speed;
     menu_ctx.pf_temp_force_p     = &pf_temp_force;
@@ -4803,6 +5687,12 @@ int main(int argc, char* argv[]) {
     menu_ctx.tex_usb3 = &tex_usb3;
     menu_ctx.usb_preview_req = &usb_preview_req;
     menu_ctx.pf_gradient_p = &pf_gradient;
+    menu_ctx.pf_set_test_pattern = [&](face::TestPattern p){
+        if (native_ctrl) native_ctrl->set_test_pattern(p);
+    };
+    menu_ctx.pf_test_pattern = [&]() -> face::TestPattern {
+        return native_ctrl ? native_ctrl->test_pattern() : face::TestPattern::Off;
+    };
     menu_ctx.pf_set_material = [&](const std::string& spec){
         if (native_ctrl) native_ctrl->set_material_spec(spec);
     };
@@ -4818,12 +5708,17 @@ int main(int argc, char* argv[]) {
         }
         int gpw = 64, gph = 32, gchain = 2, gpar = 1;
         pf_hub75_driver_geometry(pf_hub75, gpw, gph, gchain, gpar);
+        // Physical framebuffer, not the renderer canvas — see the launch site
+        // in swap_backend. Using the live canvas here would send the driver the
+        // helmet-space box whenever panels are nudged apart.
+        int fbw = native_ctrl->canvas_width(), fbh = native_ctrl->canvas_height();
+        pf_hub75_framebuffer(pf_hub75, fbw, fbh, nullptr);
         // pf_launch_panel_driver now stops the old driver, waits for it
         // to release the PIO/DMA, then relaunches (see its comment).
-        pf_launch_panel_driver(bin_dir, native_ctrl->canvas_width(),
-            native_ctrl->canvas_height(), gpw, gph, gchain, gpar,
+        pf_launch_panel_driver(bin_dir, fbw, fbh, gpw, gph, gchain, gpar,
             pf_hub75.pinout, pf_hub75.color_order, pf_hub75.camera_mode,
-            pf_hub75.camera_planes, pf_hub75.camera_temporal_planes);
+            pf_hub75.camera_planes, pf_hub75.camera_temporal_planes,
+            pf_hub75.serpentine);
         Notification n; n.type = NotifType::App;
         n.title = "Panel driver restarted";
         n.body  = "If panels stay dark, check /tmp/panel_driver.log";
@@ -4855,9 +5750,42 @@ int main(int argc, char* argv[]) {
     menu_ctx.coproc_servo = [&](int ch, int deg) {
         if (coproc_inputs) coproc_inputs->send_servo(ch, deg);
     };
-    // Now that the coproc link exists, let expression-trigger servo actions
-    // reach it (the director's action closures captured this sink earlier).
-    *expr_servo_out = menu_ctx.coproc_servo;
+    // Now that the coproc link exists, give the ServoController its output and let
+    // expression-trigger servo actions reach it (the director's action closures
+    // captured these hooks earlier). Everything goes through the controller so
+    // travel limits, per-servo slew speed and Copy/Mirror pairing always apply —
+    // menu_ctx.coproc_servo above stays the RAW passthrough, used only by the
+    // low-level Peripheral Test sliders.
+    // Transport pick (cfg["servo_bus"].transport, parsed above): the same
+    // ServoController drives either sink, so limits/pairing/menus don't care.
+    if (servo_transport == "i2c") {
+        servos.set_sink([&](int ch, int deg, int speed) {
+            servo_i2c.move(ch, deg, speed);
+        });
+        servos.set_cal_sink([&](int ch, int lo, int hi) {
+            servo_i2c.calibrate(ch, lo, hi);
+        });
+    } else {
+        servos.set_sink([&](int ch, int deg, int speed) {
+            if (coproc_inputs) coproc_inputs->send_servo_move(ch, deg, speed);
+        });
+        servos.set_cal_sink([&](int ch, int lo, int hi) {
+            if (coproc_inputs) coproc_inputs->send_servo_calibration(ch, lo, hi);
+        });
+    }
+    // Pulse windows FIRST — they decide how much travel each servo has, and the
+    // firmware applies them on attach, so they must land before the first move.
+    servos.push_calibration();
+    menu_ctx.servos = &servos;
+    *expr_servo_apply = [&servos](int idx, int deg, int pair) {
+        servos.apply(idx, deg, static_cast<servo::Pair>(pair));
+    };
+    *expr_servo_revert = [&servos](int idx, int rest, int pair) {
+        servos.revert(idx, rest, static_cast<servo::Pair>(pair));
+    };
+    // Park everything at its rest pose so the ears start from a known place
+    // rather than wherever the last session left them.
+    servos.rest_all();
     menu_ctx.coproc_led_zone = [&](int r, int g, int b, int n) {
         if (coproc_inputs) coproc_inputs->send_led_zone(r, g, b, n);
     };
@@ -4895,7 +5823,9 @@ int main(int argc, char* argv[]) {
     menu_ctx.pf_glitch_p = &pf_glitch;
     menu_ctx.reactions = &reactions;
     menu_ctx.reaction_rules = &reaction_rules;
-    menu_ctx.pf_scroll_p = &pf_scroll;
+    menu_ctx.pf_scroll_p           = &pf_scroll;
+    menu_ctx.pf_scroll_saved_p     = &pf_scroll_saved;
+    menu_ctx.pf_scroll_displaced_p = &pf_scroll_displaced;
 
     MenuSystem menu(build_menu(menu_ctx));
     menu_ptr = &menu;
@@ -5442,6 +6372,9 @@ int main(int argc, char* argv[]) {
         // store; no-op unless the native Protoface controller is active.
         face_proxy.set_env_humidity(
             std::clamp(r.humidity_pct / 100.0f, 0.0f, 1.0f));
+        // Ambient temperature for effect layers on "intensity_from":
+        // warm / cold. Same reading the env panel shows.
+        face_proxy.set_env_temp(r.temp_c);
     });
     if (bme_cfg.enabled && !bme280.start())
         std::cerr << "[main] BME280 environment sensor unavailable\n";
@@ -5475,6 +6408,39 @@ int main(int argc, char* argv[]) {
         });
         if (led_cfg.enabled && !accessory_leds.start())
             std::cerr << "[main] accessory LEDs (coproc) failed to start\n";
+    } else if (led_cfg.transport == "coproc_local") {
+        // Autonomous mode: the CM5 sends per-zone descriptor commands and the
+        // RP2350 animates the zones itself. The sink derefs the current
+        // coproc_inputs at call time, so it survives a coprocessor reload.
+        accessory_leds.set_cmd_sink([&](const std::string& line){
+            if (coproc_inputs) coproc_inputs->send_led_command(line);
+        });
+        // The Pico boots with NO zone state, and this transport only sends
+        // deltas — so anything pushed before the link was up (or lost when the
+        // coprocessor reconnected / was reflashed) would never be re-sent, and
+        // the zones sat dark until an unrelated menu edit happened to dirty the
+        // diff. Re-push the full state every time the link comes up.
+        if (led_cfg.enabled && !accessory_leds.start())
+            std::cerr << "[main] accessory LEDs (coproc_local) failed to start\n";
+    }
+
+    // Anything the firmware holds only in RAM has to be re-pushed whenever the
+    // link comes up — a reconnect, a reflash or a coprocessor power cycle all
+    // leave it blank. One hook for both subsystems (set_on_link_up takes a single
+    // callback, so they must share it) and it deliberately sits OUTSIDE the
+    // transport branch above, since servo calibration matters regardless of how
+    // the LEDs are driven.
+    if (coproc_inputs) {
+        const bool acc_needs_resync = (led_cfg.transport == "coproc_local");
+        auto relink = [&, acc_needs_resync]{
+            servos.push_calibration();     // pulse windows = the servos' travel
+            if (acc_needs_resync) accessory_leds.request_cmd_resync();
+        };
+        coproc_inputs->set_on_link_up(relink);
+        // The reader thread starts with CoprocInputs, so a HELLO can land in the
+        // window before the hook is installed and be missed. If the link is
+        // already up by now, do the work directly.
+        if (coproc_inputs->connected()) relink();
     }
 
     // Peripheral-hub wiring (firmware -DPERIPHERAL_HUB): boop pads on the
@@ -5623,14 +6589,14 @@ int main(int argc, char* argv[]) {
     // editor is open the shoulder buttons cycle the palette (via the menu_system
     // handler) so we must not also tab through the menu underneath.
     gamepad.on_pip_left ([&menu, &kb_pip_left, &landing, &bg_lib, &state, &map_zoom] {
-        if (menu.is_face_editor_open())  return;
+        if (menu.editor_has_canvas())  return;
         if      (state.map_overlay.expanded) map_zoom(-0.4f);
         else if (landing.active)        bg_lib.prev();
         else if (menu.is_deep_open())   menu.prev_tab();
         else                            kb_pip_left  = !kb_pip_left;
     });
     gamepad.on_pip_right([&menu, &kb_pip_right, &landing, &bg_lib, &state, &map_zoom]{
-        if (menu.is_face_editor_open())  return;
+        if (menu.editor_has_canvas())  return;
         if      (state.map_overlay.expanded) map_zoom(+0.4f);
         else if (landing.active)        bg_lib.next();
         else if (menu.is_deep_open())   menu.next_tab();
@@ -5720,6 +6686,14 @@ int main(int argc, char* argv[]) {
     // ── Main render loop ──────────────────────────────────────────────────────
 
     KeyRepeat rep_nav_up, rep_nav_down, rep_toast_prev, rep_toast_next;
+    // Shutdown-banner hold: when a Shutdown text event fires we defer the exit
+    // until this deadline so the message is actually rendered. 0 = not holding.
+    double shutdown_hold_until = 0.0;
+    constexpr double kShutdownBannerMaxS = 3.0;
+    // Held arrows in the on-screen keyboard: walk the key grid, or run the text
+    // caret along a line, without tapping once per step. Same helper (and so
+    // the same feel) as menu navigation above.
+    KeyRepeat rep_osk_up, rep_osk_down, rep_osk_left, rep_osk_right;
 
     // M long-press state: short tap = toggle map; hold 1.5 s = cycle next map
     double m_press_t    = -1.0;
@@ -5981,6 +6955,8 @@ int main(int argc, char* argv[]) {
             jl["global_brightness"] = led_cfg.global_brightness;
             jl["sync_sides"]       = led_cfg.sync_sides;
             jl["link_areas"]       = led_cfg.link_areas;
+            jl["wire_order"]       = led_cfg.wire_order;
+            jl["profiles"]         = led_profiles.to_json();
             jl["mirror_layout"]    = led_cfg.mirror_layout;
             jl["mirror_look"]      = led_cfg.mirror_look;
             json jz = json::array();
@@ -6000,6 +6976,7 @@ int main(int argc, char* argv[]) {
                 j["wave_speed"]      = z.wave_speed;
                 j["grad_spatial"]    = z.grad_spatial;
                 j["grad_angle"]      = z.grad_angle;
+                j["palette_drift"]   = z.palette_drift;
                 j["zone_brightness"] = z.zone_brightness;
                 j["follow_face"]     = z.follow_face;
                 j["level_style"]     = level_style_name(z.level_style);
@@ -6033,6 +7010,14 @@ int main(int argc, char* argv[]) {
                                    "transition_window_s", "expression",
                                    "duration_s", "cooldown_s" })
                 jls.erase(k);
+            // Auto-dim (Face Display > Brightness > Auto Dim) lives with the
+            // sensor that drives it.
+            auto& jad = jls["auto_dim"];
+            jad["enabled"]    = state.face.auto_dim;
+            jad["dark_lux"]   = state.face.auto_dim_dark;
+            jad["bright_lux"] = state.face.auto_dim_bright;
+            jad["min_pct"]    = state.face.auto_dim_min_pct;
+            jad["curve"]      = state.face.auto_dim_curve;
         }
         cfg["voice_mouth"]["enabled"]             = state.voice_mouth.enabled;
         cfg["voice_mouth"]["sensitivity"]         = state.voice_mouth.sensitivity;
@@ -6047,6 +7032,26 @@ int main(int argc, char* argv[]) {
         cfg["coproc_mic"]["attack_ms"]            = state.coproc_mic.attack_ms;
         cfg["coproc_mic"]["release_ms"]           = state.coproc_mic.release_ms;
         cfg["coproc_mic"]["peak_decay"]           = state.coproc_mic.peak_decay;
+        // Servos — the calibration IS the value here (limits stop an expression
+        // driving an ear into its stops), so persist the live controller wholesale.
+        {
+            json ja = json::array();
+            for (const auto& sv : servos.servos()) {
+                json js;
+                js["name"]       = sv.name;
+                js["channel"]    = sv.channel;
+                js["min_deg"]    = sv.min_deg;
+                js["max_deg"]    = sv.max_deg;
+                js["center_deg"] = sv.center_deg;
+                js["rest_deg"]   = sv.rest_deg;
+                js["speed"]      = sv.speed;
+                js["partner"]    = sv.partner;
+                js["min_us"]     = sv.min_us;
+                js["max_us"]     = sv.max_us;
+                ja.push_back(std::move(js));
+            }
+            cfg["servos"] = std::move(ja);
+        }
         // Accessory LEDs — pull from the manager's live snapshot so anything
         // the menu changed persists across launches. Hardware-level fields
         // (spi_device / speed_hz / color_order / zone start+count) stay
@@ -6082,6 +7087,7 @@ int main(int argc, char* argv[]) {
                 jzones[i]["wave_speed"]      = zc.wave_speed;
                 jzones[i]["grad_spatial"]    = zc.grad_spatial;
                 jzones[i]["grad_angle"]      = zc.grad_angle;
+                jzones[i]["palette_drift"]   = zc.palette_drift;
                 jzones[i]["zone_brightness"] = static_cast<int>(zc.zone_brightness);
                 jzones[i]["follow_face"]     = zc.follow_face;
                 jzones[i]["level_style"]     = lvl_name5[
@@ -6140,6 +7146,7 @@ int main(int argc, char* argv[]) {
         cfg["reactions"] = reactions.config().to_json();
         cfg["protoface"]["motion_range"]["pitch_deg"] = pf_range_pitch;
         cfg["protoface"]["motion_range"]["yaw_deg"]   = pf_range_yaw;
+        cfg["protoface"]["sharp_motion"]        = pf_sharp_motion;
         cfg["protoface"]["face_inertia"]        = pf_face_inertia;
         cfg["protoface"]["face_inertia_strength"] = pf_face_inertia_strength;
         cfg["protoface"]["weather_effects"]     = pf_weather_effects;
@@ -6150,7 +7157,12 @@ int main(int argc, char* argv[]) {
         cfg["protoface"]["heatwave_heartbeat"]  = pf_heat_heartbeat;
         cfg["protoface"]["frost_speed"]         = pf_frost_speed;
         cfg["protoface"]["heatwave_speed"]      = pf_heat_speed;
+        cfg["protoface"]["temp_cold_effect"]    = pf_temp_cold_fx;
+        cfg["protoface"]["temp_hot_effect"]     = pf_temp_hot_fx;
+        cfg["protoface"]["temp_mild_effect"]    = pf_temp_mild_fx;
         cfg["protoface"]["pride_angle"]         = state.face.pride_angle;
+        cfg["protoface"]["mat_angle"]           = state.face.mat_angle;
+        cfg["protoface"]["mat_speed"]           = state.face.mat_speed;
         cfg["protoface"]["layout"]["eye"]       = pf_eye_layout;
         cfg["protoface"]["layout"]["mouth"]     = pf_mouth_layout;
         cfg["protoface"]["layout"]["nose"]      = pf_nose_layout;
@@ -6168,6 +7180,15 @@ int main(int argc, char* argv[]) {
             jh["camera_mode"]            = L.camera_mode;
             jh["camera_planes"]          = L.camera_planes;
             jh["camera_temporal_planes"] = L.camera_temporal_planes;
+            jh["serpentine"]       = L.serpentine;
+            jh["sharp_rotation"]   = L.sharp_rotation;
+            jh["edge_fade"]        = L.edge_fade;
+            jh["edge_fade_dither"] = L.edge_fade_dither;
+            jh["face_dither"]      = L.face_dither;
+            jh["flip_canvas_x"]    = L.flip_canvas_x;
+            jh["flip_canvas_y"]    = L.flip_canvas_y;
+            jh["flip_half_x"]      = json::array({L.flip_half_x[0], L.flip_half_x[1]});
+            jh["flip_half_y"]      = json::array({L.flip_half_y[0], L.flip_half_y[1]});
             jh["panel_size_per"]   = json::array({L.panel_size_per[0], L.panel_size_per[1],
                                                   L.panel_size_per[2], L.panel_size_per[3]});
             jh["defaults_applied"] = L.defaults_applied;
@@ -6175,6 +7196,8 @@ int main(int argc, char* argv[]) {
                                                   L.nudge_dx[2], L.nudge_dx[3]});
             jh["nudge_dy"]         = json::array({L.nudge_dy[0], L.nudge_dy[1],
                                                   L.nudge_dy[2], L.nudge_dy[3]});
+            jh["rotation"]         = json::array({L.rotation[0], L.rotation[1],
+                                                  L.rotation[2], L.rotation[3]});
             jh["flip_x"]           = json::array({L.flip_x[0], L.flip_x[1],
                                                   L.flip_x[2], L.flip_x[3]});
             jh["flip_y"]           = json::array({L.flip_y[0], L.flip_y[1],
@@ -6211,6 +7234,9 @@ int main(int argc, char* argv[]) {
             cfg["protoface"]["custom_expressions"]  = std::move(jc);
             cfg["protoface"]["expression_triggers"] = std::move(jt);
             cfg["protoface"]["reaction_rules"]      = reaction_rules.to_json();
+            nlohmann::json jte = nlohmann::json::array();
+            for (const auto& te : state.text_events) jte.push_back(te.to_json());
+            cfg["protoface"]["text_events"] = std::move(jte);
             nlohmann::json ja = nlohmann::json::array();
             for (const auto& ep : state.eye_anims) {
                 nlohmann::json je;
@@ -6227,7 +7253,10 @@ int main(int argc, char* argv[]) {
             }
             cfg["protoface"]["eye_animations"] = std::move(ja);
         }
-        cfg["protoface"]["scroll_text"] = pf_scroll.to_json();
+        cfg["protoface"]["face_palette"] = pf_face_palette;
+        // Never persist a live event/preview banner as the wearer's message.
+        cfg["protoface"]["scroll_text"] =
+            (pf_scroll_displaced ? pf_scroll_saved : pf_scroll).to_json();
         {
             auto& jg = cfg["protoface"]["gradient"];
             jg["count"]     = std::clamp(pf_gradient.count, 2, 6);
@@ -6700,6 +7729,39 @@ int main(int argc, char* argv[]) {
     auto        weather_fx_last = std::chrono::steady_clock::now() - std::chrono::minutes(2);
     std::string weather_fx_sent = "null";
 
+    // Temp Effects band -> spec. A band plays its named custom effect (one of
+    // the user's saved layered presets) when one is picked, and its built-in
+    // look otherwise.
+    // ⚠ A name that has since been DELETED falls back to the built-in rather
+    // than going silent: a band that quietly does nothing reads as a bug, and
+    // the stale name stays visible in the menu so it can be fixed.
+    // ⚠ Read with find(), never operator[]: `cfg` is non-const here, so
+    // operator[] would CREATE "protoface" / "custom_effects" as a side effect
+    // and the settings autosave would write those empty objects back out.
+    auto temp_band_spec = [&cfg](const std::string& custom,
+                                 nlohmann::json builtin) -> nlohmann::json {
+        if (custom.empty()) return builtin;
+        auto jpf = cfg.find("protoface");
+        if (jpf != cfg.end() && jpf->is_object()) {
+            auto ce = jpf->find("custom_effects");
+            if (ce != jpf->end() && ce->is_object()) {
+                auto hit = ce->find(custom);
+                if (hit != ce->end()) return *hit;
+            }
+        }
+        return builtin;
+    };
+    auto frost_builtin = [&]{
+        return nlohmann::json{{"effect", "frost"}, {"count", 44},
+                              {"fractal", pf_frost_fractal},
+                              {"speed", pf_frost_speed}, {"blend", "add"}};
+    };
+    auto heat_builtin = [&]{
+        return nlohmann::json{{"effect", "heatwave"}, {"count", 18},
+                              {"heartbeat", pf_heat_heartbeat},
+                              {"speed", pf_heat_speed}, {"blend", "add"}};
+    };
+
     while (!glfwWindowShouldClose(xr.glfw_window()) && !state.quit) {
         {
             static bool s_first_frame = true;
@@ -6722,17 +7784,19 @@ int main(int argc, char* argv[]) {
             weather_fx_last   = std::chrono::steady_clock::now();
             weather_fx_resync = false;
             nlohmann::json spec;
-            // Preview override (Face Display > Effects > Test Frost/Heatwave):
-            // force the temp effect on regardless of the live temperature, so
-            // it shows even with no sensor/weather. Wins over everything else.
+            // Preview override (Face Display > Effects > Temp Effects > Test):
+            // force a band on regardless of the live temperature, so it shows
+            // even with no sensor/weather. Wins over everything else.
+            // ⚠ Each forces the BAND, not the built-in look — so a Test row
+            // previews whatever that band actually resolves to, custom effect
+            // included. Previewing the stock frost while the cold band is set
+            // to a custom effect would be a preview of the wrong thing.
             if (pf_temp_force == 1)
-                spec = {{"effect", "frost"}, {"count", 44},
-                        {"fractal", pf_frost_fractal}, {"speed", pf_frost_speed},
-                        {"blend", "add"}};
+                spec = temp_band_spec(pf_temp_cold_fx, frost_builtin());
             else if (pf_temp_force == 2)
-                spec = {{"effect", "heatwave"}, {"count", 18},
-                        {"heartbeat", pf_heat_heartbeat}, {"speed", pf_heat_speed},
-                        {"blend", "add"}};
+                spec = temp_band_spec(pf_temp_hot_fx, heat_builtin());
+            else if (pf_temp_force == 3)
+                spec = temp_band_spec(pf_temp_mild_fx, nlohmann::json());
             else if (pf_weather_effects || pf_temp_effects) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 if (state.weather.ok) {
@@ -6746,13 +7810,15 @@ int main(int argc, char* argv[]) {
                         if (!state.weather_cfg.metric)
                             t = (t - 32.0) * 5.0 / 9.0;
                         if (t <= pf_temp_cold_c)
-                            spec = {{"effect", "frost"}, {"count", 44},
-                                    {"fractal", pf_frost_fractal},
-                                    {"speed", pf_frost_speed}, {"blend", "add"}};
+                            spec = temp_band_spec(pf_temp_cold_fx, frost_builtin());
                         else if (t >= pf_temp_hot_c)
-                            spec = {{"effect", "heatwave"}, {"count", 18},
-                                    {"heartbeat", pf_heat_heartbeat},
-                                    {"speed", pf_heat_speed}, {"blend", "add"}};
+                            spec = temp_band_spec(pf_temp_hot_fx, heat_builtin());
+                        else
+                            // The MILD band — everything between the two
+                            // thresholds. Its built-in is null (nothing), which
+                            // is exactly what this gap has always shown, so
+                            // leaving Custom Effect unset changes nothing.
+                            spec = temp_band_spec(pf_temp_mild_fx, nlohmann::json());
                     }
                 }
             }
@@ -6958,6 +8024,103 @@ int main(int argc, char* argv[]) {
                 state.attitude_pose.roll, last_lux->load(),
                 reactions.energy_dps() > reactions.config().calm_dps * 2.0);
             expr_director.tick(dt, rules_snapshot());
+
+            // ── System trigger events ────────────────────────────────────────
+            // Boot/Shutdown plus edge-detected state changes, all fed through
+            // the one on_system() entry point so they share the recipe editor,
+            // the count/window matching and the conditions with sensor events.
+            {
+                using SEv = face::TriggerRecipe::Event;
+                static bool   s_boot_fired = false, s_shutdown_fired = false;
+                static double s_poll_cd = 0.0;
+                static int    s_last_batt = -1;
+                static int    s_last_wifi = -1, s_last_charge = -1;
+                static bool   s_hot = false;
+
+                if (!s_boot_fired) {
+                    s_boot_fired = true;
+                    expr_director.on_system(SEv::Boot, rules_snapshot());
+                }
+
+                // Shutdown: fire once when a quit is first requested, then hold
+                // the loop open briefly so the banner is actually seen — the
+                // render loop is what draws it, and after this loop exits
+                // nothing reaches the panels again.
+                if (state.quit && !s_shutdown_fired) {
+                    s_shutdown_fired = true;
+                    expr_director.on_system(SEv::Shutdown, rules_snapshot());
+                    if (expr_director.active()) {
+                        // Something matched — defer the exit. Capped well under
+                        // the 8 s cleanup budget, and a second quit request
+                        // during the hold exits immediately.
+                        shutdown_hold_until = glfwGetTime() + kShutdownBannerMaxS;
+                        state.quit = false;
+                    }
+                }
+                if (shutdown_hold_until > 0.0 &&
+                    glfwGetTime() >= shutdown_hold_until) {
+                    shutdown_hold_until = 0.0;
+                    state.quit = true;
+                }
+
+                // Level/state edges, polled at 1 Hz. Edge-triggered on purpose:
+                // a level event must fire on the CROSSING, not once per frame
+                // for as long as the condition holds.
+                s_poll_cd -= dt;
+                if (s_poll_cd <= 0.0) {
+                    s_poll_cd = 1.0;
+                    int  batt; bool wifi, charging; float temp;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mtx);
+                        batt     = state.health.wireless_battery_pct;
+                        wifi     = state.health.wifi_ok;
+                        charging = state.health.phone_charging;
+                        temp     = state.sys_metrics.cpu_temp_c;
+                    }
+                    const int wifi_i = wifi ? 1 : 0, chg_i = charging ? 1 : 0;
+                    if (batt >= 0) {
+                        const bool low = batt <= face::TriggerRecipe::kBatteryLowPct;
+                        const bool was = (s_last_batt >= 0) &&
+                                         (s_last_batt <= face::TriggerRecipe::kBatteryLowPct);
+                        if (low && !was)
+                            expr_director.on_system(SEv::BatteryLow, rules_snapshot());
+                        s_last_batt = batt;
+                    }
+                    if (s_last_wifi >= 0 && wifi_i != s_last_wifi)
+                        expr_director.on_system(wifi_i ? SEv::WifiUp : SEv::WifiDown,
+                                                rules_snapshot());
+                    s_last_wifi = wifi_i;
+                    if (s_last_charge >= 0 && chg_i && !s_last_charge)
+                        expr_director.on_system(SEv::PhoneCharging, rules_snapshot());
+                    s_last_charge = chg_i;
+                    if (temp > 0.f) {
+                        // 3 degrees of hysteresis, or a reading sitting on the
+                        // threshold re-fires every poll.
+                        if (!s_hot && temp >= face::TriggerRecipe::kOverheatC) {
+                            s_hot = true;
+                            expr_director.on_system(SEv::Overheat, rules_snapshot());
+                        } else if (s_hot && temp < face::TriggerRecipe::kOverheatC - 3.f) {
+                            s_hot = false;
+                        }
+                    }
+                }
+            }
+
+            // Servo self-check sweep (Face Display > Servo Settings > Check All
+            // Servos). Tick-driven rather than a blocking sleep so the menu stays
+            // responsive while it runs — no-op unless a check is active.
+            servos.tick(static_cast<float>(dt));
+
+            // Accessory-LED overlay layer: rise/hold/retract for any expression
+            // overlay currently running. No-op when none are active.
+            led_overlays.tick(static_cast<float>(dt), accessory_leds);
+
+            // Head roll → the gravity-aware eye animations (Crying, Waterfall), so
+            // their tears fall along real gravity and run downhill when the head
+            // leans. attitude_pose is the SELECTED IMU source and is populated
+            // regardless of whether head_tracking owns imu_pose, which makes it the
+            // right feed here. Just an atomic store, so it's fed unconditionally.
+            if (native_ctrl) native_ctrl->set_head_roll(state.attitude_pose.roll);
 
             // Cheek mirror: keep the right hub/fin tracking the left's layout
             // and/or look. Runs at the config level (led_cfg) so the editor
@@ -7455,7 +8618,7 @@ int main(int argc, char* argv[]) {
         // Skipped while typing on the on-screen keyboard. Shift+M (recenter) is
         // handled in the normal-hotkeys branch below. Also skip when the
         // face editor is on top — it owns the keyboard while open.
-        if (!menu.is_keyboard_open() && !menu.is_face_editor_open()) {
+        if (!menu.is_keyboard_open() && !menu.editor_has_canvas()) {
             const bool m_held = ImGui::IsKeyDown(ImGuiKey_M) && !ImGui::GetIO().KeyShift;
             if (m_held && m_press_t < 0.0) {
                 m_press_t    = glfwGetTime();
@@ -7501,6 +8664,14 @@ int main(int argc, char* argv[]) {
         // ── Keyboard input (via ImGui, which owns GLFW callbacks) ─────────────
         // The expanded map and the on-screen keyboard each capture ALL keystrokes
         // while up (so pan/zoom or typing can't trigger app hotkeys).
+        // The OSK repeats only tick inside their own branch, so clear them while
+        // the keyboard is shut. Without this, closing it with an arrow still held
+        // leaves press_t set, and the next press after reopening skips the delay
+        // and repeats immediately.
+        if (!menu.is_keyboard_open()) {
+            rep_osk_up  .tick(false); rep_osk_down .tick(false);
+            rep_osk_left.tick(false); rep_osk_right.tick(false);
+        }
         if (state.map_overlay.expanded) {
             auto& mo = state.map_overlay;
             if (ImGui::IsKeyDown(ImGuiKey_LeftArrow))  map_pan(+0.012f, 0.f);
@@ -7514,12 +8685,28 @@ int main(int argc, char* argv[]) {
             if (key_pressed(ImGuiKey_N) || key_pressed(ImGuiKey_Escape))
                 mo.expanded = false;   // M is handled by the global toggle below
         } else if (menu.is_keyboard_open()) {
-            if (key_pressed(ImGuiKey_UpArrow))    menu.osk_move(0, -1);
-            if (key_pressed(ImGuiKey_DownArrow))  menu.osk_move(0, +1);
-            if (key_pressed(ImGuiKey_LeftArrow))  menu.osk_move(-1, 0);
-            if (key_pressed(ImGuiKey_RightArrow)) menu.osk_move(+1, 0);
-            if (key_pressed(ImGuiKey_Enter))      menu.osk_activate();
-            if (key_pressed(ImGuiKey_Backspace))  menu.osk_backspace();
+            // Held arrows repeat — holding Left/Right runs the caret along a
+            // line rather than stepping it one character per press, which is
+            // what a 240-character message needs.
+            if (rep_osk_up   .tick(ImGui::IsKeyDown(ImGuiKey_UpArrow)))    menu.osk_move(0, -1);
+            if (rep_osk_down .tick(ImGui::IsKeyDown(ImGuiKey_DownArrow)))  menu.osk_move(0, +1);
+            if (rep_osk_left .tick(ImGui::IsKeyDown(ImGuiKey_LeftArrow)))  menu.osk_move(-1, 0);
+            if (rep_osk_right.tick(ImGui::IsKeyDown(ImGuiKey_RightArrow))) menu.osk_move(+1, 0);
+            // Physical keyboard: characters arrive through the input queue, so
+            // Enter doesn't need to press the on-screen grid (that's what the
+            // gamepad's A button is for) and is free to mean "save".
+            //   Enter            → save
+            //   Shift+Enter      → newline (multiline fields)
+            //   Shift+Backspace  → cancel
+            const bool shift = ImGui::GetIO().KeyShift;
+            if (key_pressed(ImGuiKey_Enter) || key_pressed(ImGuiKey_KeypadEnter)) {
+                if (shift) menu.osk_newline();
+                else       menu.osk_commit();
+            }
+            if (key_pressed(ImGuiKey_Backspace)) {
+                if (shift) menu.osk_cancel();
+                else       menu.osk_backspace();
+            }
             if (key_pressed(ImGuiKey_Escape) || key_pressed(ImGuiKey_F1)) menu.osk_cancel();
             for (ImWchar ch : ImGui::GetIO().InputQueueCharacters)
                 menu.osk_input_char(static_cast<unsigned int>(ch));
@@ -7702,7 +8889,11 @@ int main(int argc, char* argv[]) {
         // open/close edge logic on want1/2/3 picks the streams back up when
         // the user closes the editor. CSI eye cameras keep running so the
         // renderer still has eye textures behind the editor overlay.
-        const bool editor_open = menu.is_face_editor_open();
+        // Cameras/PiPs stay suppressed for as long as the editor holds the
+        // screen — including while the colour picker sits on top of it.
+        // Using the input-ownership predicate here would thrash the camera
+        // streams open and shut every time that picker appeared.
+        const bool editor_open = menu.editor_has_canvas();
         bool p1 = (pip_cam1_overlay_active || pip_left_active  || kb_pip_left  || wc_pip_left)
                   && !editor_open;
         bool p2 = (pip_cam2_overlay_active || pip_right_active || kb_pip_right || wc_pip_right)
@@ -8139,6 +9330,171 @@ int main(int argc, char* argv[]) {
                 snap.gpio_states        = state.gpio_states;
                 memcpy(snap.lora_node_colors, state.lora_node_colors,
                        sizeof(state.lora_node_colors));
+            }
+        }
+
+        // ── Scrolling-text live tokens ──────────────────────────────────────
+        // Feed {time}, {batt} … into the face banner. Pushed from here rather
+        // than pulled by ScrollText so the render thread never has to reach
+        // into AppState's lock from inside its own. Twice a second is plenty
+        // for clock/battery-grade values, and ScrollText re-rasterises only
+        // when a substitution actually changes the rendered string.
+        {
+            static double s_tok_last = -1.0;
+            if (native_ctrl && now - s_tok_last >= 0.5 &&
+                pf_scroll.enabled &&
+                (pf_scroll.diag ||
+                 pf_scroll.text.find('{') != std::string::npos)) {
+                s_tok_last = now;
+                std::map<std::string, std::string> tok;
+                auto num = [](const char* fmt, double v) {
+                    char b[32]; std::snprintf(b, sizeof b, fmt, v);
+                    return std::string(b);
+                };
+                // GPU load: engine-busy nanoseconds over wall nanoseconds since
+                // the previous sample. Held across ticks so the figure is a
+                // real average over the interval rather than an instant guess.
+                static long long s_gpu_ns   = -1;
+                static double    s_gpu_when = 0.0;
+                static float     s_gpu_pct  = -1.f;
+                {
+                    const long long ns = pf_gpu_render_ns();
+                    if (ns >= 0 && s_gpu_ns >= 0 && now > s_gpu_when) {
+                        const double busy = static_cast<double>(ns - s_gpu_ns);
+                        const double wall = (now - s_gpu_when) * 1e9;
+                        s_gpu_pct = static_cast<float>(
+                            std::clamp(busy / wall * 100.0, 0.0, 100.0));
+                    }
+                    if (ns >= 0) { s_gpu_ns = ns; s_gpu_when = now; }
+                }
+
+                const std::time_t tt = std::time(nullptr);
+                std::tm lt{};
+                localtime_r(&tt, &lt);
+                char tb[32];
+                std::strftime(tb, sizeof tb, "%I:%M %p", &lt); tok["time"]   = tb;
+                std::strftime(tb, sizeof tb, "%H:%M",    &lt); tok["time24"] = tb;
+                std::strftime(tb, sizeof tb, "%b %d",    &lt); tok["date"]   = tb;
+                std::strftime(tb, sizeof tb, "%A",       &lt); tok["day"]    = tb;
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    // No '%' or degree glyph in the 5x7 font (0-9 A-Z and a
+                    // little punctuation), so percentages are bare numbers —
+                    // they'd render as a blank otherwise.
+                    const int bp = state.health.wireless_battery_pct;
+                    const int pp = state.health.phone_battery_pct;
+                    tok["batt"]    = (bp >= 0) ? num("%.0f", bp) : "--";
+                    tok["phone"]   = (pp >= 0) ? num("%.0f", pp) : "--";
+                    tok["cpu"]     = num("%.0f", state.sys_metrics.cpu_pct);
+                    tok["cputemp"] = state.sys_metrics.cpu_temp_c > 0.f
+                                   ? num("%.0fC", state.sys_metrics.cpu_temp_c) : "--";
+                    tok["temp"]    = state.weather.ok ? num("%.0f", state.weather.temp) : "--";
+                    tok["weather"] = state.weather.ok ? num("%.0f", state.weather.temp) : "--";
+                    const int64_t nus =
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+                    const float hd = pick_imu_heading(state, nus);
+                    tok["heading"] = num("%.0f", hd);
+                    static const char* kPts[] = {"N","NE","E","SE","S","SW","W","NW"};
+                    tok["compass"] = kPts[static_cast<int>(
+                        std::fmod(hd + 22.5f + 360.f, 360.f) / 45.f) & 7];
+                }
+                tok["expr"] = native_ctrl->current_expression();
+                tok["name"] = pf_hub75_active;
+
+                // {diag}: the whole system readout as one ticker string.
+                // Fields are fixed-width so the rasterised strip keeps the same
+                // size as the numbers move — a changing width would make the
+                // marquee shuffle every time the CPU load ticked.
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    const auto& m = state.sys_metrics;
+                    const auto& h = state.health;
+                    // Assemble only the fields the user left switched on. '|'
+                    // marks a line break: the banner splits on it when Stack
+                    // Lines is on and renders it as a gap when it isn't, so one
+                    // string serves the ticker and the stacked readout. The
+                    // break travels with its field, so turning a field off
+                    // never leaves an empty row behind.
+                    const uint64_t up = m.uptime_s;
+                    const uint32_t want = pf_scroll.diag_fields;
+                    std::string dg;
+                    auto add = [&](uint32_t bit, bool brk, const std::string& s) {
+                        if (!(want & bit)) return;
+                        if (!dg.empty()) dg += brk ? "|" : "  ";
+                        dg += s;
+                    };
+                    for (const auto& f : face::diag_fields()) {
+                        switch (f.bit) {
+                        case face::DIAG_CPU:
+                            add(f.bit, f.line_break, "CPU " + num("%3.0f", m.cpu_pct)); break;
+                        case face::DIAG_TEMP:
+                            add(f.bit, f.line_break, num("%3.0f", m.cpu_temp_c) + "C"); break;
+                        case face::DIAG_GPU: {
+                            std::string s = "GPU ";
+                            s += (s_gpu_pct >= 0.f) ? num("%3.0f", s_gpu_pct) : " --";
+                            if (state.gpu.available && state.gpu.temp_c > 0.f)
+                                s += "  " + num("%3.0f", state.gpu.temp_c) + "C";
+                            add(f.bit, f.line_break, s);
+                            break;
+                        }
+                        case face::DIAG_RAM:
+                            // Percent, to line up with CPU and GPU either side
+                            // of it; the absolute figure is still available as
+                            // the {ramgb} token for anyone who wants it.
+                            add(f.bit, f.line_break, "RAM " + num("%3.0f",
+                                m.ram_total_mb > 0.f
+                                    ? m.ram_used_mb / m.ram_total_mb * 100.f
+                                    : 0.f)); break;
+                        case face::DIAG_FPS:
+                            add(f.bit, f.line_break, "FPS " + num("%3.0f", m.fps_avg_smooth)); break;
+                        case face::DIAG_BATT:
+                            add(f.bit, f.line_break, "BATT " + tok["batt"]); break;
+                        case face::DIAG_UPTIME: {
+                            char b[32];
+                            std::snprintf(b, sizeof b, "UP %02lluH%02lluM",
+                                static_cast<unsigned long long>(up / 3600ULL),
+                                static_cast<unsigned long long>((up % 3600ULL) / 60ULL));
+                            add(f.bit, f.line_break, b); break;
+                        }
+                        case face::DIAG_IMU:
+                            add(f.bit, f.line_break, std::string("IMU ") +
+                                ((state.imu_bno08x.last_us > 0) ? "BNO086"
+                                 : (state.imu_bno.last_us > 0)  ? "BNO055"
+                                 : h.mpu9250_ok ? "MPU" : "NONE")); break;
+                        case face::DIAG_WIFI:
+                            add(f.bit, f.line_break,
+                                std::string("WIFI ") + (h.wifi_ok ? "OK" : "--")); break;
+                        case face::DIAG_AUDIO:
+                            add(f.bit, f.line_break,
+                                std::string("AUDIO ") + (h.audio_ok ? "OK" : "--")); break;
+                        case face::DIAG_CAM:
+                            add(f.bit, f.line_break, std::string("CAM ") +
+                                ((h.cam_owl_left || h.cam_owl_right) ? "OK" : "--")); break;
+                        default: break;
+                        }
+                    }
+                    if (dg.empty()) dg = "NO FIELDS SELECTED";
+                    tok["diag"] = std::move(dg);
+                    // Individual pieces too, so a custom message can pull in
+                    // just the one value it cares about.
+                    tok["fps"]    = num("%.0f", m.fps_avg_smooth);
+                    tok["gpu"]    = (s_gpu_pct >= 0.f) ? num("%.0f", s_gpu_pct) : "--";
+                    tok["gputemp"] = (state.gpu.available && state.gpu.temp_c > 0.f)
+                                   ? num("%.0fC", state.gpu.temp_c) : "--";
+                    tok["ram"]    = num("%.0f", m.ram_total_mb > 0.f
+                                        ? m.ram_used_mb / m.ram_total_mb * 100.f : 0.f);
+                    tok["ramgb"]  = num("%.1f", m.ram_used_mb / 1024.f);
+                    tok["uptime"] = [&]{
+                        char b[24];
+                        std::snprintf(b, sizeof b, "%lluH%02lluM",
+                            static_cast<unsigned long long>(up / 3600ULL),
+                            static_cast<unsigned long long>((up % 3600ULL) / 60ULL));
+                        return std::string(b);
+                    }();
+                    tok["wifi"] = h.wifi_ok ? "OK" : "--";
+                }
+                native_ctrl->set_scroll_tokens(std::move(tok));
             }
         }
 
@@ -8758,8 +10114,47 @@ int main(int argc, char* argv[]) {
         // face portrait beside the minimap so both surfaces stay in sync.
         struct FaceTex { GLuint id = 0; int w = 0; int h = 0; bool native = false; };
         auto pick_face_tex = [&]() -> FaceTex {
+            // ⚠ HUB75 must NOT use the shm path. That shm carries the
+            // FRAMEBUFFER — panels packed in chain order with every mounting
+            // flip and rotation pre-applied — which is deliberately distorted
+            // so it comes out right on physically flipped panels, and reads as
+            // a scrambled mess on a flat preview. (ShmFrameReader also has the
+            // frame size hardcoded to 128x32, so a 4-panel 128x64 build was
+            // being shown as its top half.) Preview the helmet-space canvas
+            // masked to the real panels instead.
+            const bool hub75_native = (pf_backend == "hub75") && native_ctrl;
             const bool native = (pf_backend == "max7219" || pf_backend == "rgb_matrix")
                                  && native_ctrl;
+            if (hub75_native) {
+                static GLuint hub_tex = 0;
+                static int    hub_w = 0, hub_h = 0;
+                cv::Mat rgb;
+                if (native_ctrl->latest_physical(rgb) && !rgb.empty()) {
+                    cv::Mat rgba;
+                    cv::cvtColor(rgb, rgba, cv::COLOR_RGB2RGBA);
+                    if (hub_tex == 0) {
+                        glGenTextures(1, &hub_tex);
+                        glBindTexture(GL_TEXTURE_2D, hub_tex);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    }
+                    glBindTexture(GL_TEXTURE_2D, hub_tex);
+                    if (rgba.cols != hub_w || rgba.rows != hub_h) {
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba.cols, rgba.rows, 0,
+                                     GL_RGBA, GL_UNSIGNED_BYTE, rgba.data);
+                        hub_w = rgba.cols; hub_h = rgba.rows;
+                    } else {
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, rgba.cols, rgba.rows,
+                                        GL_RGBA, GL_UNSIGNED_BYTE, rgba.data);
+                    }
+                }
+                FaceTex out;
+                out.id = hub_tex; out.w = hub_w; out.h = hub_h;
+                out.native = true;   // already the centred face; no L/R split
+                return out;
+            }
             if (!native) {
                 FaceTex out;
                 protoface_ctrl.get_frame_texture(out.id);
@@ -8908,6 +10303,7 @@ int main(int argc, char* argv[]) {
     step("bno055");          bno055.stop();
     step("boop_sensor");     boop_sensor.stop();
     step("light_sensor");    light_sensor.stop();
+    step("servo_i2c");       servo_i2c.stop();
     step("apds9960");        apds.stop();
     step("bme280");          bme280.stop();
     step("accessory_leds");  accessory_leds.stop();

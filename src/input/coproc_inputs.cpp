@@ -165,6 +165,10 @@ void CoprocInputs::on_line(const std::string& line) {
     if (cmd == "HELLO") {
         connected_.store(true);
         std::cout << "[coproc] " << line << "\n";
+        // Tell anyone holding pushed-once state that the firmware just came up
+        // with none of it. Fired on EVERY HELLO (including the re-HELLO after a
+        // pin-map push) — re-pushing is idempotent and cheap, missing one is not.
+        if (on_link_up_) on_link_up_();
         // Push the configured pin map once per connection. The firmware re-HELLOs
         // after applying it; pins_pushed_ stops that from looping.
         if (!pins_pushed_ && !cfg_.pins.empty()) {
@@ -194,7 +198,7 @@ void CoprocInputs::on_line(const std::string& line) {
     }
     if (cmd == "PING") {
         connected_.store(true);
-        if (fd_ >= 0) { const char* pong = "PONG\n"; (void)::write(fd_, pong, 5); }
+        write_locked("PONG\n", 5);
         return;
     }
     if (cmd == "I2C") {   // "I2C <hex> <hex> …" or "I2C none" — I2CSCAN reply
@@ -304,13 +308,21 @@ void CoprocInputs::push_pin_config() {
             msg += "PINCFG LED " + std::to_string(i) + " " +
                    std::to_string(cfg_.pins[i].led_gp) + "\n";
     msg += "PINCFG APPLY\n";
-    const ssize_t wr = ::write(fd_, msg.data(), msg.size());
+    ssize_t wr;
+    { std::lock_guard<std::mutex> lk(write_mtx_);
+      wr = (fd_ >= 0) ? ::write(fd_, msg.data(), msg.size()) : -1; }
     if (wr != static_cast<ssize_t>(msg.size()))
         std::cerr << "[coproc] pin map push short write (" << wr << "/"
                   << msg.size() << ") — the post-push HELLO check will retry\n";
     pins_pushed_  = true;
     pushed_count_ = nbtn;
     std::cout << "[coproc] pushed pin map (" << nbtn << " buttons)\n";
+}
+
+// Serialize every write() to the shared serial fd — see the header note.
+void CoprocInputs::write_locked(const void* data, size_t n) {
+    std::lock_guard<std::mutex> lk(write_mtx_);
+    if (fd_ >= 0) (void)::write(fd_, data, n);
 }
 
 void CoprocInputs::request_i2c_scan(int sda, int scl) {
@@ -320,7 +332,7 @@ void CoprocInputs::request_i2c_scan(int sda, int scl) {
         cmd += " " + std::to_string(sda) + " " + std::to_string(scl);
     cmd += "\n";
     { std::lock_guard<std::mutex> lk(i2c_mtx_); i2c_result_ = "scanning…"; }
-    (void)::write(fd_, cmd.data(), cmd.size());
+    write_locked(cmd.data(), cmd.size());
 }
 
 std::string CoprocInputs::i2c_scan_result() const {
@@ -344,15 +356,35 @@ void CoprocInputs::send_fan_duty(int zone, int duty_pct) {
     duty_pct = duty_pct < 0 ? 0 : (duty_pct > 100 ? 100 : duty_pct);
     const std::string msg = "FAN " + std::to_string(zone) + " " +
                             std::to_string(duty_pct) + "\n";
-    (void)::write(fd_, msg.data(), msg.size());
+    write_locked(msg.data(), msg.size());
 }
 
 void CoprocInputs::send_servo(int ch, int deg) {
-    if (fd_ < 0 || ch < 0 || ch > 3) return;
+    if (fd_ < 0 || ch < 0 || ch > 15) return;
     const std::string msg = "SERVO " + std::to_string(ch) + " " +
         (deg < 0 ? std::string("off")
                  : std::to_string(deg > 180 ? 180 : deg)) + "\n";
-    (void)::write(fd_, msg.data(), msg.size());
+    write_locked(msg.data(), msg.size());
+}
+
+void CoprocInputs::send_servo_move(int ch, int deg, int speed) {
+    // SERVOM: the firmware eases toward the target at `speed` deg/s in its own
+    // ~66 Hz service loop, so one line per move keeps ear motion smooth even when
+    // the CM5 is busy — no angle streaming. speed 0 = snap (same as SERVO).
+    if (fd_ < 0 || ch < 0 || ch > 15) return;
+    if (deg < 0) { send_servo(ch, -1); return; }        // detach
+    const std::string msg = "SERVOM " + std::to_string(ch) + " " +
+                            std::to_string(deg > 180 ? 180 : deg) + " " +
+                            std::to_string(speed < 0 ? 0 : speed) + "\n";
+    write_locked(msg.data(), msg.size());
+}
+
+void CoprocInputs::send_servo_calibration(int ch, int min_us, int max_us) {
+    if (fd_ < 0 || ch < 0 || ch > 15) return;
+    const std::string msg = "SERVOCAL " + std::to_string(ch) + " " +
+                            std::to_string(min_us) + " " +
+                            std::to_string(max_us) + "\n";
+    write_locked(msg.data(), msg.size());
 }
 
 void CoprocInputs::send_led_zone(int r, int g, int b, int count) {
@@ -362,7 +394,7 @@ void CoprocInputs::send_led_zone(int r, int g, int b, int count) {
                       std::to_string(c8(g)) + " " + std::to_string(c8(b));
     if (count > 0) msg += " " + std::to_string(count > 300 ? 300 : count);
     msg += "\n";
-    (void)::write(fd_, msg.data(), msg.size());
+    write_locked(msg.data(), msg.size());
 }
 
 void CoprocInputs::send_led_pattern(int mode, int r, int g, int b, int speed) {
@@ -371,20 +403,31 @@ void CoprocInputs::send_led_pattern(int mode, int r, int g, int b, int speed) {
     const std::string msg = "LEDP " + std::to_string(mode < 0 ? 0 : (mode > 4 ? 4 : mode)) +
         " " + std::to_string(c8(r)) + " " + std::to_string(c8(g)) + " " +
         std::to_string(c8(b)) + " " + std::to_string(speed < 1 ? 50 : c8(speed)) + "\n";
-    (void)::write(fd_, msg.data(), msg.size());
+    write_locked(msg.data(), msg.size());
 }
 
 void CoprocInputs::send_led_brightness(int b) {
     if (fd_ < 0) return;
     const std::string msg = "LEDB " +
         std::to_string(b < 0 ? 0 : (b > 255 ? 255 : b)) + "\n";
-    (void)::write(fd_, msg.data(), msg.size());
+    write_locked(msg.data(), msg.size());
+}
+
+void CoprocInputs::send_led_command(const std::string& line) {
+    if (fd_ < 0 || line.empty()) return;
+    // One whole line per write(), serialized against the other senders.
+    const std::string msg = line + "\n";
+    write_locked(msg.data(), msg.size());
 }
 
 void CoprocInputs::send_led_frame(const uint8_t* rgb, int count) {
     if (fd_ < 0 || !rgb || count <= 0) return;
     if (count > 300) count = 300;
     static const char* kHex = "0123456789ABCDEF";
+    // Hold the write lock across the whole frame so its LEDF chunks + LEDSHOW
+    // are not split by another sender's line.
+    std::lock_guard<std::mutex> lk(write_mtx_);
+    if (fd_ < 0) return;
     // ~80 pixels per line keeps each write well under the firmware's 600-char
     // rx buffer; LEDSHOW latches the assembled frame atomically.
     for (int start = 0; start < count; start += 80) {
@@ -407,8 +450,7 @@ void CoprocInputs::send_led_frame(const uint8_t* rgb, int count) {
 void CoprocInputs::request_adc() {
     if (fd_ < 0) return;
     { std::lock_guard<std::mutex> lk(adc_mtx_); adc_mv_[0] = adc_mv_[1] = adc_mv_[2] = -1; }
-    const char* cmd = "ADCREAD\n";
-    (void)::write(fd_, cmd, 8);
+    write_locked("ADCREAD\n", 8);
 }
 
 std::string CoprocInputs::adc_result() const {
@@ -430,13 +472,12 @@ void CoprocInputs::send_tone(int hz, int ms) {
     ms = ms < 20 ? 20 : (ms > 3000 ? 3000 : ms);
     const std::string msg = "TONE " + std::to_string(hz) + " " +
                             std::to_string(ms) + "\n";
-    (void)::write(fd_, msg.data(), msg.size());
+    write_locked(msg.data(), msg.size());
 }
 
 void CoprocInputs::request_mic_level() {
     if (fd_ < 0) return;
-    const char* cmd = "MICLVL\n";
-    (void)::write(fd_, cmd, 7);
+    write_locked("MICLVL\n", 7);
 }
 
 std::string CoprocInputs::mic_level_result() const {
@@ -452,8 +493,7 @@ std::string CoprocInputs::mic_level_result() const {
 
 void CoprocInputs::request_pins() {
     if (fd_ < 0) return;
-    const char* cmd = "PINS\n";
-    (void)::write(fd_, cmd, 5);
+    write_locked("PINS\n", 5);
 }
 
 std::map<int, CoprocInputs::PinStat> CoprocInputs::pins_snapshot() const {

@@ -59,6 +59,10 @@ public:
     void set_motion(const MotionInput& m);        // latest IMU state for reactive layers
     void set_audio(double level);                 // mic level [0,1] for audio-reactive layers
     void set_humidity(double humidity01);         // rel humidity [0,1] for the water fill level (<0 = no reading)
+    // Ambient signals for "intensity_from" density reactivity:
+    // lux (<0 = no sensor), ambient °C (<= -1000 = no sensor), and the fraction
+    // of the day elapsed (0 = midnight, 0.5 = noon).
+    void set_ambient(double lux, double temp_c, double day_frac);
     // Global motion coupling: when on, directional layers that don't set their
     // own "direction_from" default to the real-gravity mode — precipitation
     // leans with head roll and sweeps on quick turns. Toggled from the menu.

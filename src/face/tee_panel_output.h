@@ -30,6 +30,21 @@ public:
     void close() override {
         for (auto& o : outs_) if (o) o->close();
     }
+    void set_output_flip(bool flip_x, bool flip_y) override {
+        for (auto& o : outs_) if (o) o->set_output_flip(flip_x, flip_y);
+    }
+    void set_panel_angles(const std::vector<double>& angles) override {
+        for (auto& o : outs_) if (o) o->set_panel_angles(angles);
+    }
+    void set_panel_flips(const std::vector<std::array<bool, 2>>& flips) override {
+        for (auto& o : outs_) if (o) o->set_panel_flips(flips);
+    }
+    void set_half_flips(const std::vector<std::array<bool, 2>>& halves) override {
+        for (auto& o : outs_) if (o) o->set_half_flips(halves);
+    }
+    void set_sharp_rotation(bool on) override {
+        for (auto& o : outs_) if (o) o->set_sharp_rotation(on);
+    }
 
     std::vector<cv::Rect> covered_regions() const override {
         std::vector<cv::Rect> all;

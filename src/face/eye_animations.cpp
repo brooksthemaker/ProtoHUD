@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 #include <opencv2/imgproc.hpp>
 
@@ -37,7 +39,8 @@ inline cv::Vec3b paint(const EyeAnimParams& p, double inten) {
 
 } // namespace
 
-static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
+static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h,
+                         const EyeLidLine* lid, int lid_x0, float gravity_deg) {
     cv::Mat out(std::max(1, h), std::max(1, w), CV_8UC3, cv::Scalar(0, 0, 0));
     const double cx = (w - 1) * clamp01(p.cx);
     const double cy = (h - 1) * clamp01(p.cy);
@@ -58,6 +61,310 @@ static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
                 if (hash01(bx, by, step * 7 + 3) > 0.93) inten = 1.0;
                 row[x] = paint(p, inten);
             }
+        }
+        return out;
+    }
+
+    // ── Crying ────────────────────────────────────────────────────────────────
+    // Tears welling on the eye's closed-lid line, then falling away. Like Glitch
+    // this gets its own block: it needs w-sized precompute and never uses the
+    // polar dx/dy/rr/a setup below, so it shouldn't pay sqrt+atan2 per pixel.
+    //
+    // Droplets are SPLATTED into a float accumulator over each drop's small bbox
+    // rather than evaluated per-pixel — with ~40 streams a per-pixel test would
+    // cost thousands of sqrt calls a frame, while the splats touch a few thousand
+    // floats total. Still a pure function of (p, t, lid): every bit of randomness
+    // comes from the stateless hash01, so the menu preview and the panel agree.
+    // Waterfall shares all of this — the lid derivation, the spans and the wet
+    // lid stroke are identical; only what happens BELOW the lid differs (discrete
+    // droplets vs a continuous sheet), so they branch at the bottom.
+    if (p.type == EyeAnim::Crying || p.type == EyeAnim::Waterfall) {
+        const double spc = std::max(0.05, sp);
+        cv::Mat1f acc(h, w, 0.f);
+
+        // Gravity direction from head roll. Upright = straight down; clamped to
+        // ±75° so there is always a downward component and a hard tilt can't send
+        // tears running purely sideways. Everything below travels along this ray
+        // rather than blindly down the panel, so tears run downhill when the head
+        // leans — the whole point of feeding the IMU in.
+        constexpr double kDeg2Rad = 0.017453292519943295;
+        const double groll = std::clamp(static_cast<double>(gravity_deg), -75.0, 75.0)
+                             * kDeg2Rad;
+        // NOTE the minus on x. attitude roll is "+ = head tilted RIGHT"
+        // (expression_director.h). At roll +90° the wearer's right is the
+        // OBSERVER's left, so the face image has rotated such that world-down
+        // expressed in image coords is (-1, 0) — tears run toward image -x.
+        // ⚠️ This rig also applies panel mirror/flip transforms downstream, which
+        // can invert x again. If tears run UPHILL on hardware, flip this one sign.
+        const double gxd = -std::sin(groll), gyd = std::cos(groll);
+
+        // The lid line, one row per column. -1 = no eye in that column.
+        const bool have_lid = lid && !lid->empty() && lid->height == h &&
+                              lid_x0 >= 0 && lid_x0 + w <= lid->width;
+        std::vector<float> lidy(static_cast<size_t>(w), -1.f);
+        if (have_lid) {
+            // With a real lid, Position Y NUDGES the authored edge (±17.5% of the
+            // panel) — the polygon can sit a pixel or two off the drawn art.
+            const float nud = static_cast<float>((clamp01(p.cy) - 0.5) * h * 0.35);
+            for (int x = 0; x < w; ++x) {
+                const int b = lid->bottom[static_cast<size_t>(lid_x0 + x)];
+                if (b >= 0)
+                    lidy[x] = std::clamp(static_cast<float>(b) + nud, 0.f,
+                                         static_cast<float>(h - 1));
+            }
+        } else {
+            // No face context (menu preview, or a face with no eye regions):
+            // a flat lid at Position Y so the animation still reads as crying.
+            std::fill(lidy.begin(), lidy.end(), static_cast<float>(cy));
+        }
+
+        // Contiguous runs of eye columns — normally one per eye. Streams are
+        // placed WITHIN a span so tears sit inside the eye instead of landing on
+        // a global lattice that would straddle the bridge of the nose.
+        std::vector<std::pair<int, int>> spans;
+        for (int x = 0; x < w; ++x) {
+            if (lidy[x] < 0.f) continue;
+            if (!spans.empty() && spans.back().second == x - 1) spans.back().second = x;
+            else                                                spans.emplace_back(x, x);
+        }
+
+        // The lid stroke itself, with a travelling highlight so it reads as WET.
+        // Drawn first so brighter droplets win over it.
+        for (int x = 0; x < w; ++x) {
+            if (lidy[x] < 0.f) continue;
+            const double ly    = lidy[x];
+            const double thick = 0.55 + 0.35 * sz;
+            const double glint = 0.70 + 0.30 * std::sin(x * 0.5 + t * 1.8 * spc);
+            const int y_lo = std::max(0, static_cast<int>(std::floor(ly - 3.0)));
+            const int y_hi = std::min(h - 1, static_cast<int>(std::ceil(ly + thick + 1.0)));
+            for (int y = y_lo; y <= y_hi; ++y) {
+                const double d = std::fabs(y - ly);
+                // 0.95 ceiling so the line sits just under paint()'s 0.82 white
+                // threshold at glint's trough and crosses it only at the peak —
+                // a highlight that travels along the lid rather than a
+                // permanently blown-out white bar.
+                double v = clamp01(thick + 0.5 - d) * glint * 0.95;
+                // Faint shading ABOVE the line: with blackout_eyes the eye box is
+                // solid black, and this gives it closed-lid volume instead of
+                // reading as a hole punched in the face.
+                if (y < ly - 0.5)
+                    v = std::max(v, 0.16 * clamp01(1.0 - (ly - y) / 3.0));
+                acc(y, x) = std::max(acc(y, x), static_cast<float>(v));
+            }
+        }
+
+        if (p.type == EyeAnim::Waterfall) {
+            // A continuous SHEET rather than separate drops: every eye column
+            // pours at once, with vertical streaks scrolling down it to read as
+            // flow, a slow undulation along the lid so parts gush and parts
+            // trickle, a bright lip where the water leaves the lid, and
+            // turbulence pooling in the bottom rows.
+            const double flow = 14.0 * spc;                 // streak scroll, rows/sec
+            const double strw = std::max(1.0, 1.6 * sz);    // streak column width
+            const double maxs = std::hypot(static_cast<double>(w),
+                                           static_cast<double>(h)) + 4.0;
+            // Perpendicular to gravity — used for spread, spray and splash-back.
+            const double pxd = -gyd, pyd = gxd;
+            for (int x = 0; x < w; ++x) {
+                if (lidy[x] < 0.f) continue;
+                const double y0   = lidy[x];
+                const double span = std::max(1.0, (h - 1) - y0);
+                const double wob  = 0.55 + 0.45 * std::sin(x * 0.55 + t * 1.1 * spc);
+                const int    col  = static_cast<int>(x / strw);
+                // Flow SURGES: the whole fall swells and eases like a real spout
+                // rather than pouring at one dead-constant rate.
+                const double surge = 0.78 + 0.22 * std::sin(t * 0.9 * spc +
+                                                            hash01(col, 0, 29) * 6.2831853);
+                // Step along the gravity ray at half-pixel intervals (so a leaning
+                // sheet has no gaps) instead of straight down a column.
+                for (double d = 0.0; d < maxs; d += 0.5) {
+                    // The sheet SPREADS as it descends — a fall widens and frays
+                    // instead of staying a clean ribbon. Offset perpendicular to
+                    // gravity, hashed per depth band so the edge looks ragged.
+                    const double sprd = 0.35 * sz * d / std::max(1.0, span);
+                    const double jit  = (hash01(col, static_cast<int>(d * 0.5), 37) - 0.5)
+                                        * sprd * 2.0;
+                    const int px = static_cast<int>(std::lround(x  + gxd * d + pxd * jit));
+                    const int py = static_cast<int>(std::lround(y0 + gyd * d + pyd * jit));
+                    if (py < 0 || py >= h) break;
+                    if (px < 0 || px >= w) continue;
+                    // Quantised scrolling phase, hashed per column so neighbouring
+                    // columns run at their own rate instead of in lockstep.
+                    // MINUS t: a constant-phase feature then satisfies
+                    // d = const + t*flow, i.e. it travels AWAY from the lid. With a
+                    // plus the texture crawled back up the sheet and the whole fall
+                    // read as flowing upward.
+                    const double ph =
+                        (d - t * flow * (0.75 + 0.5 * hash01(col, 0, 83))) / 3.0;
+                    const double st = hash01(col, static_cast<int>(std::floor(ph)), 91);
+                    // Brightest at the lip, easing with depth but never going dry —
+                    // it's a fall, not a drip.
+                    const double depth = 0.55 + 0.45 * clamp01(1.0 - d / span);
+                    double v = depth * (0.45 + 0.55 * st) * wob * surge;
+                    if (d < 1.5) v = std::max(v, 0.85);     // the lip
+                    if (py >= h - 2)                         // splash pooling
+                        v = std::max(v, 0.5 + 0.5 * hash01(
+                                px, static_cast<int>(t * 18.0 * spc), 97));
+                    acc(py, px) = std::max(acc(py, px), static_cast<float>(v));
+                }
+
+                // SPRAY: droplets that break off the sheet and fly their own
+                // little ballistic arc — sideways kick plus gravity — instead of
+                // the sheet being one solid slab. A few per column, each a
+                // stateless function of (column, cycle) like the Crying drops.
+                for (int q = 0; q < 2; ++q) {
+                    const int sd = col * 71 + q * 17;
+                    const double u  = t * (0.9 * spc) + hash01(sd, 0, 43) * 4.0;
+                    const int    k  = static_cast<int>(std::floor(u));
+                    const double f  = u - k;
+                    if (hash01(sd, k, 47) < 0.55) continue;   // most cycles: no spray
+                    // Detach part-way down the fall, then arc away.
+                    const double d0   = span * (0.25 + 0.55 * hash01(sd, k, 51));
+                    const double kick = (hash01(sd, k, 53) - 0.5) * 4.2 * sz;
+                    const double along = d0 + span * 1.4 * f * f;      // gravity
+                    const double across = kick * f;                     // sideways
+                    const int px = static_cast<int>(std::lround(
+                        x + gxd * along + pxd * across));
+                    const int py = static_cast<int>(std::lround(
+                        y0 + gyd * along + pyd * across));
+                    if (px < 0 || px >= w || py < 0 || py >= h) continue;
+                    const double amp = 0.75 * (1.0 - f) * surge;
+                    acc(py, px) = std::max(acc(py, px), static_cast<float>(amp));
+                }
+
+                // SPLASH-BACK: water hitting the bottom throws spray back UP
+                // against gravity, which then falls again. Anchored at the impact
+                // point so it tracks the lean.
+                const double s_floor = ((h - 1.0) - y0) / std::max(0.25, gyd);
+                if (s_floor > 1.0) {
+                    for (int q = 0; q < 3; ++q) {
+                        const int sd = col * 97 + q * 31;
+                        const double u = t * (1.6 * spc) + hash01(sd, 0, 59) * 3.0;
+                        const int    k = static_cast<int>(std::floor(u));
+                        const double f = u - k;
+                        if (hash01(sd, k, 61) < 0.5) continue;
+                        // Up then down: height peaks mid-life (a lobbed arc).
+                        const double up  = (1.6 + 2.4 * sz) * 4.0 * f * (1.0 - f);
+                        const double out = (hash01(sd, k, 67) - 0.5) * 6.0 * sz * f;
+                        const int px = static_cast<int>(std::lround(
+                            x + gxd * s_floor - gxd * up + pxd * out));
+                        const int py = static_cast<int>(std::lround(
+                            y0 + gyd * s_floor - gyd * up + pyd * out));
+                        if (px < 0 || px >= w || py < 0 || py >= h) continue;
+                        acc(py, px) = std::max(acc(py, px),
+                                               static_cast<float>(0.7 * (1.0 - f)));
+                    }
+                }
+            }
+        } else {
+        const double gap = std::max(3.0, 7.0 * sz);   // target stream spacing
+        for (const auto& sn : spans) {
+            const int span_w = sn.second - sn.first + 1;
+            const int n = std::max(1, static_cast<int>(std::lround(span_w / gap)));
+            for (int i = 0; i < n; ++i) {
+                const double base = sn.first + (i + 0.5) * span_w / static_cast<double>(n);
+                // Seeded with the span's start so the two eyes drip INDEPENDENTLY
+                // rather than in lockstep.
+                const int sj = sn.first * 131 + i;
+
+                const double rate = 0.42 * spc * (0.7 + 0.6 * hash01(sj, 0, 23));
+                const double u    = t * rate + hash01(sj, 0, 29) * 5.0;
+                const int    k    = static_cast<int>(std::floor(u));
+                const double f    = u - k;
+                if (hash01(sj, k, 41) < 0.28) continue;   // skip ~28% → irregular
+
+                // Well on the lid, then fall under gravity. This two-phase motion
+                // is what makes it a TEAR rather than rain.
+                const double hold  = 0.28;
+                const double swell = clamp01(f / hold);
+                const double fall  = clamp01((f - hold) / (1.0 - hold));
+                // Accelerate, then ease toward a terminal speed rather than
+                // growing without bound. Normalised so gy still reaches 1 at f=1.
+                const double gy    = (fall * fall / (1.0 + 0.6 * fall)) / 0.625;
+
+                const double ds  = 0.75 + 0.5 * hash01(sj, k, 59);   // per-drop size
+                const double jx  = (hash01(sj, k, 53) - 0.5) * gap * 0.35;
+                const double sx  = base + jx;
+                const int    sxi = std::clamp(static_cast<int>(std::lround(sx)), 0, w - 1);
+                if (lidy[sxi] < 0.f) continue;
+                const double y0 = lidy[sxi];
+                if (h - 1 - y0 < 2.0) continue;      // lid at the panel floor: nowhere to fall
+
+                const double rx  = (0.55 + 0.85 * sz) * ds;
+                const double ry  = (0.85 + 1.15 * sz) * ds;
+                const double srx = rx * (0.5 + 0.5 * swell);
+                const double sry = ry * (0.5 + 0.5 * swell) * (1.0 + 0.5 * gy);
+                // How far the drop travels along the gravity ray before it leaves
+                // the panel, and how far along that ray it is right now.
+                const double reach = (h + ry * 2.0 - y0) / std::max(0.25, gyd);
+                const double trav  = reach * gy;
+                // Lateral wobble PERPENDICULAR to gravity — a running drop shivers
+                // rather than tracking a plumb line. Scaled by how far it has
+                // fallen so it leaves the lid cleanly.
+                const double wob = std::sin(f * 11.0 + hash01(sj, k, 67) * 6.2831853)
+                                   * 0.6 * sz * fall;
+                const double xc = sx + gxd * trav - gyd * wob;
+                const double yc = y0 + ry * 0.6 + gyd * trav + gxd * wob;
+                const double tail = (1.5 + 5.0 * sz) * gy;   // trail grows with speed
+
+                const int bx0 = std::max(0, static_cast<int>(
+                    std::floor(std::min(sx, xc) - srx - tail - 1.0)));
+                const int bx1 = std::min(w - 1, static_cast<int>(
+                    std::ceil(std::max(sx, xc) + srx + tail + 1.0)));
+                const int by0 = std::max(0, static_cast<int>(
+                    std::floor(std::min(y0, yc) - 1.0)));
+                const int by1 = std::min(h - 1, static_cast<int>(
+                    std::ceil(std::max(y0, yc) + sry + 1.0)));
+                for (int y = by0; y <= by1; ++y) {
+                    for (int x = bx0; x <= bx1; ++x) {
+                        const double ex = (x - xc) / std::max(0.35, srx);
+                        const double ey = (y - yc) / std::max(0.35, sry);
+                        double v = clamp01((1.15 - std::sqrt(ex * ex + ey * ey)) * 1.8);
+                        // Tail: behind the head ALONG the gravity ray (projected,
+                        // so it trails correctly at any tilt) rather than straight up.
+                        if (tail > 0.5) {
+                            const double bxr = x - xc, byr = y - yc;
+                            const double along = -(bxr * gxd + byr * gyd);
+                            const double perp  = std::fabs(-bxr * gyd + byr * gxd);
+                            if (along > 0.0 && along < tail)
+                                v = std::max(v, 0.55 * clamp01(1.0 - along / tail) *
+                                    clamp01(1.25 - perp / std::max(0.5, srx * 0.6)));
+                        }
+                        acc(y, x) = std::max(acc(y, x), static_cast<float>(v));
+                    }
+                }
+
+                // Splash: once the ray has carried the drop past the bottom row,
+                // burst outward from the impact point and fade. Stateless — the
+                // "age" is just how far beyond the floor the drop has travelled.
+                const double s_hit = ((h - 1.0) - y0) / std::max(0.25, gyd);
+                if (s_hit > 0.0 && trav > s_hit) {
+                    const double age = clamp01((trav - s_hit) / std::max(1.5, 3.0 * sz));
+                    const double ix  = sx + gxd * s_hit;
+                    const double rad = (0.8 + 3.2 * sz) * age;
+                    const double amp = 0.8 * (1.0 - age);
+                    const int px0 = std::max(0, static_cast<int>(std::floor(ix - rad - 1.0)));
+                    const int px1 = std::min(w - 1, static_cast<int>(std::ceil(ix + rad + 1.0)));
+                    const int py0 = std::max(0, h - 1 - static_cast<int>(
+                        std::ceil(rad * 0.6)) - 1);
+                    for (int y = py0; y < h; ++y)
+                        for (int x = px0; x <= px1; ++x) {
+                            const double dxs = (x - ix) / std::max(0.5, rad);
+                            const double dys = ((h - 1.0) - y) / std::max(0.5, rad * 0.6);
+                            const double rd  = std::sqrt(dxs * dxs + dys * dys);
+                            if (rd > 1.0) continue;
+                            acc(y, x) = std::max(acc(y, x),
+                                                 static_cast<float>(amp * (1.0 - rd)));
+                        }
+                }
+            }
+        }
+        }   // end Crying droplet branch
+
+        for (int y = 0; y < h; ++y) {
+            cv::Vec3b*   row = out.ptr<cv::Vec3b>(y);
+            const float* a   = acc.ptr<float>(y);
+            for (int x = 0; x < w; ++x) row[x] = paint(p, a[x]);
         }
         return out;
     }
@@ -238,14 +545,16 @@ static cv::Mat render_rgb(const EyeAnimParams& p, double t, int w, int h) {
     return out;
 }
 
-cv::Mat render_eye_animation(const EyeAnimParams& p, double t, int w, int h) {
+cv::Mat render_eye_animation(const EyeAnimParams& p, double t, int w, int h,
+                             const EyeLidLine* lid, int lid_x0, float gravity_deg) {
     // The compositor consumes RGBA face layers (composite() splits out the
     // alpha channel); the animation owns the whole panel, so it converts to
     // fully opaque RGBA here rather than teaching every draw loop about alpha.
     // (p.mirror is handled by the CALLER — it renders one half-width copy via
     // this function and composites left + mirrored right.)
     cv::Mat rgba;
-    cv::cvtColor(render_rgb(p, t, w, h), rgba, cv::COLOR_RGB2RGBA);
+    cv::cvtColor(render_rgb(p, t, w, h, lid, lid_x0, gravity_deg), rgba,
+                 cv::COLOR_RGB2RGBA);
     return rgba;
 }
 
@@ -263,6 +572,8 @@ const char* eye_anim_name(EyeAnim a) {
     case EyeAnim::Rain:      return "Rain";
     case EyeAnim::Sparkle:   return "Sparkle";
     case EyeAnim::Heartbeat: return "Heartbeat";
+    case EyeAnim::Crying:    return "Crying";
+    case EyeAnim::Waterfall: return "Waterfall";
     default:                 return "?";
     }
 }

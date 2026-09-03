@@ -278,8 +278,15 @@ public:
     // routing methods below (route to these from your input handlers when
     // is_keyboard_open() is true, so the knob/gamepad/keyboard all work).
     using KeyboardCommit = std::function<void(const std::string&)>;
+    // `multiline` lets the field hold newlines: the grid gains a NEWLINE key,
+    // Shift+Enter inserts one, and the field renders as a block. Off (the
+    // default) keeps single-line behaviour for names and short values.
+    // `max_lines` caps how many lines a multiline field may hold (0 = no cap).
+    // The field then reserves that many rows so the budget is visible, and both
+    // the NEWLINE key and a typed break go inert once it's reached.
     void open_keyboard(std::string title, std::string initial, KeyboardCommit on_commit,
-                       size_t max_len = 40);
+                       size_t max_len = 40, bool multiline = false,
+                       size_t max_lines = 0);
     void close_keyboard();
     bool is_keyboard_open() const { return osk_active_; }
     const std::string& keyboard_text() const { return osk_text_; }
@@ -293,6 +300,8 @@ public:
     void osk_commit();               // confirm + fire callback
     void osk_cancel();               // discard + close
     void osk_input_char(unsigned int c);  // insert a physically-typed character
+    void osk_newline();              // insert a line break (multiline fields only)
+    bool osk_multiline() const { return osk_multiline_; }
 
     // ── File picker ─────────────────────────────────────────────────────────────
     // Full-screen overlay for browsing the filesystem (media import). Drawn in
@@ -327,7 +336,17 @@ public:
                           menu::FaceEditor::LiveFrameFn live_frame = {},
                           double preview_duration_s = 10.0);
     void close_face_editor();
-    bool is_face_editor_open() const { return face_editor_.is_open(); }
+    // ⚠ "Does the editor OWN INPUT right now" — not "does it have a canvas".
+    // Callers use this to decide whether to route keys/d-pad to the editor, so
+    // it must go false while another overlay (the colour picker, raised by 'K')
+    // sits on top. The editor stays genuinely open underneath — its canvas and
+    // undo ring have to survive, since FaceEditor::close() frees both — and
+    // comes back when the overlay above it closes. Use editor_has_canvas() for
+    // the other question.
+    bool is_face_editor_open() const {
+        return face_editor_.is_open() && overlay_ == &face_editor_;
+    }
+    bool editor_has_canvas() const { return face_editor_.is_open(); }
 
     menu::FaceEditor& face_editor() { return face_editor_; }
 
@@ -408,14 +427,23 @@ private:
     // ── on-screen keyboard state ────────────────────────────────────────────────
     void draw_keyboard(ImDrawList* dl, ImFont* font, float fs, float W, float H);
     void osk_insert(char c);         // insert at caret, respecting osk_max_len_
+                                     // and (for break chars) osk_max_lines_
     bool           osk_active_ = false;
     std::string    osk_title_;
     std::string    osk_text_;
     int            osk_row_ = 0;     // -1 = text field focused (caret editing)
     int            osk_col_ = 0;
     int            osk_caret_ = 0;   // insertion index into osk_text_
-    int            osk_page_ = 0;    // 0 = letters, 1 = symbols
+    bool           osk_shift_ = false;      // letters show lowercase
+    bool           osk_multiline_ = false;  // field accepts newlines
     size_t         osk_max_len_ = 40;
+    size_t         osk_max_lines_ = 0;      // 0 = no line limit
+    // A line break is either character: '\n' is what the keyboard enters now,
+    // '|' is the older equivalent that scroll_text still honours. Both have to
+    // count, or typing '|' from the grid would slip past the line cap.
+    static bool osk_is_break(char c) { return c == '\n' || c == '|'; }
+    size_t osk_line_count() const;          // 1 + however many breaks are in it
+    bool   osk_lines_full() const;          // at osk_max_lines_ (false if 0)
     KeyboardCommit osk_commit_;
 
     // File picker overlay (media import) — same input-routing pattern as OSK.
@@ -432,6 +460,23 @@ private:
     // navigate/select/back/draw_fullscreen dispatch through this instead of
     // per-class if-chains; the OSK is still checked first, before the overlay.
     menu::IOverlay* overlay_ = nullptr;
+    // Overlay to fall back to when the active one closes, instead of dropping
+    // to the menu. Set when one overlay is opened ON TOP of another — the face
+    // editor raising the colour picker to edit a swatch. It matters because
+    // FaceEditor::close() frees the canvas and the undo ring, so the editor
+    // must stay OPEN (just not the input target) while the picker is up.
+    menu::IOverlay* overlay_return_ = nullptr;
+    // Called wherever an overlay may have closed itself; restores the one
+    // underneath if there is one.
+    void overlay_closed() {
+        overlay_ = (overlay_return_ && overlay_return_->is_open())
+                 ? overlay_return_ : nullptr;
+        overlay_return_ = nullptr;
+        emit_detents();
+    }
+    // Raise the unified colour picker over the face editor, bound to the
+    // currently selected palette swatch.
+    void open_editor_color_picker();
 
     std::vector<MenuItem>  root_items_;
     std::vector<MenuItem>  quick_items_;   // curated corner "quick menu" tree
