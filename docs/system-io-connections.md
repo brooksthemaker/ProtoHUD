@@ -232,7 +232,7 @@ USB-CDC, newline ASCII protocol (`HELLO/BTN/PING`, `BOOP`, `TEMP`, `FAN`,
 | GP | Function |
 |----|----------|
 | 2–9 | 8 buttons → GND (INPUT_PULLUP, active-low) |
-| 0, 1, 12, 31, 32, 33 | TTP223 touch/boop pads 0–5 (active-high) — RP2350A: 16/17/18 for pads 3–5 |
+| 39, 44, 12, 31, 32, 33 | TTP223 touch/boop pads 0–5 (active-high) — RP2350A: 0/1 for pads 0–1, 16/17/18 for pads 3–5. GP0/GP1 (UART0) stay free on RP2350B |
 | 10 / 11 / 13 | MAX7219 SPI bridge: SPI1 SCK / TX / CS (8 MHz) |
 | 14, 15 | Fan PWM zones (25 kHz) |
 | 19 | DS18B20 1-Wire bus (4.7 kΩ → 3V3), up to 8 probes |

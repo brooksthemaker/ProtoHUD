@@ -145,14 +145,18 @@ Each TTP223 module is a self-contained capacitive touch switch with a plain
 digital output — no shared I2C bus, no electrode tuning, and each pad can sit
 right where it's mounted with only 3 wires. The firmware pre-assigns 6 inputs:
 
-| Pad idx | RP2350 | Notes |
-|--------:|--------|-------|
-| 0 | GP0 | |
-| 1 | GP1 | |
-| 2 | GP12 | |
-| 3 | GP16 | shared with optional voice-changer I2S — voice build: pads 0–2 only |
-| 4 | GP17 | " |
-| 5 | GP18 | " |
+| Pad idx | RP2350B (Pico LiPo 2 XL W, default build) | RP2350A (Pico 2) | Notes |
+|--------:|-------------------------------------------|------------------|-------|
+| 0 | GP39 | GP0 | RP2350B: keeps header pins 1–2 (GP0/GP1, UART0 TX/RX) free |
+| 1 | GP44 | GP1 | " |
+| 2 | GP12 | GP12 | |
+| 3 | GP31 | GP16 | RP2350A: shared with optional voice-changer I2S — voice build: pads 0–2 only |
+| 4 | GP32 | GP17 | " |
+| 5 | GP33 | GP18 | " |
+
+On the RP2350B, GP26–28 were deliberately skipped: the Pico LiPo 2 XL W bridges
+each through 1 kΩ to GP40–42, so driving them corrupts those ADC channels (GP40
+is also the voice-changer mic).
 
 Per module: VCC → 3V3, GND → GND, I/O (OUT) → the listed GP. Stock modules are
 **active-high momentary**; if you solder the A/B jumpers for inverted/latching

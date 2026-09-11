@@ -29,8 +29,8 @@
 ==============================================================================
  GP  ROLE / NET             DIR  BUILD  NOTES
  --  ---------------------  ---  -----  ---------------------------------
-  0  TOUCH0                 in   -      TTP223 pad, active-high
-  1  TOUCH1                 in   -      TTP223 pad, active-high
+  0  free                   -    -      UART0 TX; header pin 1
+  1  free                   -    -      UART0 RX; header pin 2
   2  BTN0                   in   -      switch -> GND, internal pull-up
   3  BTN1                   in   -      switch -> GND, internal pull-up
   4  BTN2                   in   -      switch -> GND, internal pull-up
@@ -55,9 +55,9 @@
  23  -- reserved --         -    -      RM2 wireless module
  24  -- reserved --         -    -      RM2 wireless module
  25  -- reserved --         -    -      RM2 wireless module
- 26  free                   -    -      plain digital on RP2350B
- 27  free, but AVOID        -    -      A1; 1k link to GP41 (ADC1)
- 28  LEDZ CLK (APA102)      out  -      idle: default zone is WS2812
+ 26  AVOID                  -    -      A0; 1k link to GP40 (ADC0/mic)
+ 27  AVOID                  -    -      A1; 1k link to GP41 (ADC1)
+ 28  LEDZ CLK (APA102)      out  -      idle (WS2812); 1k link to GP42
  29  -- reserved --         -    -      RM2 wireless module
  30  -- reserved --         -    -      BOOT button on LiPo 2 XL W
  31  TOUCH3                 in   -      TTP223 pad, active-high
@@ -68,12 +68,12 @@
  36  SERVO2                 out  -      GPIO fallback backend only
  37  LEDZ DATA              out  -      WS2812 (or APA102) zone
  38  SERVO3                 out  -      GPIO fallback backend only
- 39  free                   -    -      spare digital
+ 39  TOUCH0                 in   -      TTP223 pad, active-high
  40  ADC0 / MIC             in   -      mic input in the voice build
  41  ADC1                   in   -      analog in
  42  ADC2                   in   -      analog in
  43  -- reserved --         -    -      VBAT sense on LiPo 2 XL W
- 44  free                   -    -      spare digital
+ 44  TOUCH1                 in   -      TTP223 pad, active-high
  45  free                   -    -      spare digital
  46  free                   -    -      spare digital
  47  -- reserved --         -    -      PSRAM on Plus 2 W / LiPo 2 XL W
@@ -94,13 +94,16 @@
    Protocol : HELLO / "BTN <id> SHORT" / "BTN <id> LONG" / PING (~1 Hz).
 
  CAPACITIVE TOUCH / BOOP PADS (always)
-   GP0 GP1 GP12 GP31 GP32 GP33       -> pad indices 0..5
+   GP39 GP44 GP12 GP31 GP32 GP33     -> pad indices 0..5
    Module   : TTP223 breakout. OUT -> GP, VCC -> 3V3, GND -> GND.
    Polarity : ACTIVE HIGH (stock TTP223 momentary). Debounce 30 ms.
    Events   : "BOOP <idx> <1|0>" - the Pi maps these exactly like MPR121
               electrodes (snout/cheeks 0-2, head/mouth-top/bottom 3-5).
-   Note     : pads 3-5 sit on GP31-33, which only EXIST on the RP2350B.
-              That is what lets all six pads coexist with the voice changer.
+   Note     : pads 0-1 sit on GP39/GP44 and pads 3-5 on GP31-33 - pins that
+              only EXIST on the RP2350B. That is what lets all six pads
+              coexist with the voice changer, and it keeps header pins 1-2
+              (GP0/GP1, UART0 TX/RX) free. GP26-28 were deliberately not
+              used: see CONSTRAINTS.
 
  SERVOS
    PRIMARY  : PCA9685 on I2C0 @ 0x40 - 16 channels, hardware PWM, 50 Hz.
@@ -171,8 +174,9 @@
    a non-ADC pin returns garbage rather than failing. config.h carries
    static_asserts that fail the BUILD instead. Do not hand-edit kMicAdcPin
    or kAdcPins onto a non-ADC GP.
- * GP27 is A1 with a 1k link to GP41 (ADC ch1). Driving GP27 would corrupt
-   ADCREAD channel 1 - that is why no servo was placed there.
+ * GP26 / GP27 / GP28 are A0 / A1 / A2 through 1k links to GP40 / 41 / 42.
+   Driving any of them corrupts that ADC channel (GP40 is also the voice mic),
+   which is why no servo or touch pad was placed there.
  * GP23/24/25/29 go to the RM2 wireless module, GP43 is VBAT sense, GP47 is
    PSRAM, GP30 is the BOOT button. None reach a usable header on the
    Pico LiPo 2 XL W.
@@ -195,6 +199,7 @@
    -----------------  -------------------  --------------------------
    Mic / ADC0         GP40                 GP26
    ADC ch0 / 1 / 2    GP40 / GP41 / GP42   GP26 / GP27 / GP28
+   Touch pads 0/1     GP39 / GP44          GP0 / GP1
    Touch pads 3/4/5   GP31 / GP32 / GP33   GP16 / GP17 / GP18
    LED zone data      GP37                 GP22
 
@@ -205,12 +210,14 @@
      whenever the voice changer is off; with VOICE_CHANGER on, move the
      zone or set kLedZonePin = -1 to disable it.
    * GP26-28 are ADC here, not plain digital as on the RP2350B.
+   * GP0/GP1 are NOT free on the RP2350A - they are still touch pads 0-1,
+     because nothing else on the QFN60 package is spare.
 
 ==============================================================================
  QUICK WIRING CHECKLIST
 ==============================================================================
  [ ] 8x momentary switches, each GP2..GP9 -> GND
- [ ] up to 6x TTP223 pads: OUT -> GP0/1/12/31/32/33, VCC 3V3, GND
+ [ ] up to 6x TTP223 pads: OUT -> GP39/44/12/31/32/33, VCC 3V3, GND
  [ ] PCA9685: SDA GP20, SCL GP21, VCC 3V3, V+ external 5-6 V, GND common
  [ ] WS2812 zone: data GP37, series resistor, bulk cap on the 5 V rail
  [ ] analog sources -> GP40 / GP41 / GP42 (0-3.3 V only)

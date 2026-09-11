@@ -115,13 +115,19 @@ static constexpr int      kMaxOwDevices  = 8;         // probes on the 1-Wire bu
 // the boop config (snout/cheeks = 0-2; top-of-head / mouth-top / mouth-bottom
 // = 3-5), and/or map extra pads to any GpioFunc via inputs.coprocessor.touch.
 // -1 disables a slot.
-// On RP2350B, pads 3-5 live on GP31-33 — free pins the QFN60 package doesn't
-// have — so all six pads coexist with the voice changer. (NOT GP30: that's
-// the BOOT button on the Pimoroni Pico LiPo 2 XL W.) On RP2350A they fall
-// back to GP16/17/18, which share the OPTIONAL voice-changer I2S pins: with
-// kVoiceEnabled/VOICE_CHANGER on there, wire at most pads 0-2.
+// On RP2350B, pads 0-1 live on GP39/GP44 and pads 3-5 on GP31-33 — free pins
+// the QFN60 package doesn't have — so all six pads coexist with the voice
+// changer AND header pins 1-2 (GP0/GP1, UART0 TX/RX) stay free. GP39 is the
+// last plain-digital spare on the Pico LiPo 2 XL W header; GP44 is the first
+// of the A4-A6 spares (GP45/46 stay free for analog). Deliberately NOT
+// GP26-28: on that board each is bridged through 1k to GP40-42, so driving
+// them corrupts the ADC channels / the voice mic. (NOT GP30 either: that's
+// the BOOT button.) On RP2350A pads 0-1 stay on GP0/GP1 — nothing else on
+// the QFN60 is free — and pads 3-5 fall back to GP16/17/18, which share the
+// OPTIONAL voice-changer I2S pins: with kVoiceEnabled/VOICE_CHANGER on
+// there, wire at most pads 0-2.
 #if NUM_BANK0_GPIOS >= 48
-static constexpr int8_t  kTouchPins[6]    = { 0, 1, 12, 31, 32, 33 };   // RP2350B
+static constexpr int8_t  kTouchPins[6]    = { 39, 44, 12, 31, 32, 33 };  // RP2350B
 #else
 static constexpr int8_t  kTouchPins[6]    = { 0, 1, 12, 16, 17, 18 };   // RP2350A
 #endif
