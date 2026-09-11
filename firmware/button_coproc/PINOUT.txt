@@ -1,0 +1,230 @@
+==============================================================================
+ ProtoHUD BUTTON COPROCESSOR - PIN ASSIGNMENTS (as built today)
+==============================================================================
+ Source of truth : firmware/button_coproc/pico/include/config.h
+                   firmware/button_coproc/pico/platformio.ini
+ Firmware version: 1.8.0 (kFwVersion, reported in the HELLO line)
+ Link to the CM5 : USB CDC, 115200 nominal. Enumerates as "ProtoHUD Buttons"
+                   -> /dev/serial/by-id/usb-ProtoHUD_Buttons_<serial>-if00
+
+ TARGET CHIP     : RP2350B (QFN-80, GP0-GP47)
+ DEFAULT BOARD   : pimoroni_pico_plus_2w -- also the closest board definition
+                   for the Pimoroni Pico LiPo 2 XL W actually in use.
+ IMPORTANT       : RP2350A (QFN-60, Pico 2 / 2 W) and RP2350B are NOT
+                   interchangeable. The ADC block moves between packages and
+                   config.h follows the chip via #if NUM_BANK0_GPIOS >= 48.
+                   See "RP2350A DIFFERENCES" at the bottom.
+
+ BUILD ENVS      : coproc       = buttons, touch, servo, LED zone, ADC
+                   coproc_voice = the above plus -DVOICE_CHANGER
+                                                 -DMAX_BRIDGE
+                                                 -DPERIPHERAL_HUB
+
+ The BUILD column says which build claims the pin:
+   -      every build          VOICE  -DVOICE_CHANGER
+   MAX    -DMAX_BRIDGE         HUB    -DPERIPHERAL_HUB
+
+==============================================================================
+ MASTER MAP - GP0 .. GP47
+==============================================================================
+ GP  ROLE / NET             DIR  BUILD  NOTES
+ --  ---------------------  ---  -----  ---------------------------------
+  0  free                   -    -      UART0 TX; header pin 1
+  1  free                   -    -      UART0 RX; header pin 2
+  2  BTN0                   in   -      switch -> GND, internal pull-up
+  3  BTN1                   in   -      switch -> GND, internal pull-up
+  4  BTN2                   in   -      switch -> GND, internal pull-up
+  5  BTN3                   in   -      switch -> GND, internal pull-up
+  6  BTN4                   in   -      switch -> GND, internal pull-up
+  7  BTN5                   in   -      switch -> GND, internal pull-up
+  8  BTN6                   in   -      switch -> GND, internal pull-up
+  9  BTN7                   in   -      switch -> GND, internal pull-up
+ 10  MAX_CLK (SPI1 SCK)     out  MAX    -> MAX7219 CLK, 8 MHz
+ 11  MAX_DIN (SPI1 TX)      out  MAX    -> MAX7219 DIN
+ 12  TOUCH2                 in   -      TTP223 pad, active-high
+ 13  MAX_CS0 (LOAD)         out  MAX    chain 0; idles HIGH
+ 14  FAN0 PWM               out  HUB    25 kHz zone 1
+ 15  FAN1 PWM               out  HUB    25 kHz zone 2
+ 16  I2S BCLK               out  VOICE  -> TLV320DAC3100 BCLK
+ 17  I2S WS / LRCLK         out  VOICE  implicit: always BCLK + 1
+ 18  I2S DATA               out  VOICE  -> TLV320DAC3100 DIN
+ 19  1-WIRE                 bi   HUB    DS18B20 bus, 4.7k -> 3V3
+ 20  I2C0 SDA               bi   -      shared bus, see I2C section
+ 21  I2C0 SCL               out  -      shared bus, see I2C section
+ 22  DAC_RESET              out  VOICE  TLV320 RST (-1 if tied high)
+ 23  -- reserved --         -    -      RM2 wireless module
+ 24  -- reserved --         -    -      RM2 wireless module
+ 25  -- reserved --         -    -      RM2 wireless module
+ 26  AVOID                  -    -      A0; 1k link to GP40 (ADC0/mic)
+ 27  AVOID                  -    -      A1; 1k link to GP41 (ADC1)
+ 28  LEDZ CLK (APA102)      out  -      idle (WS2812); 1k link to GP42
+ 29  -- reserved --         -    -      RM2 wireless module
+ 30  -- reserved --         -    -      BOOT button on LiPo 2 XL W
+ 31  TOUCH3                 in   -      TTP223 pad, active-high
+ 32  TOUCH4                 in   -      TTP223 pad, active-high
+ 33  TOUCH5                 in   -      TTP223 pad, active-high
+ 34  SERVO0                 out  -      GPIO fallback backend only
+ 35  SERVO1                 out  -      GPIO fallback backend only
+ 36  SERVO2                 out  -      GPIO fallback backend only
+ 37  LEDZ DATA              out  -      WS2812 (or APA102) zone
+ 38  SERVO3                 out  -      GPIO fallback backend only
+ 39  TOUCH0                 in   -      TTP223 pad, active-high
+ 40  ADC0 / MIC             in   -      mic input in the voice build
+ 41  ADC1                   in   -      analog in
+ 42  ADC2                   in   -      analog in
+ 43  -- reserved --         -    -      VBAT sense on LiPo 2 XL W
+ 44  TOUCH1                 in   -      TTP223 pad, active-high
+ 45  free                   -    -      spare digital
+ 46  free                   -    -      spare digital
+ 47  -- reserved --         -    -      PSRAM on Plus 2 W / LiPo 2 XL W
+
+==============================================================================
+ GROUPED BY FUNCTION
+==============================================================================
+ BUTTONS (always)
+   GP2 GP3 GP4 GP5 GP6 GP7 GP8 GP9   -> button ids 0..7, in this order
+   Wiring   : switch between GP and GND. Firmware uses INPUT_PULLUP, so a
+              pressed switch reads LOW (active_low = true).
+   Debounce : 15 ms. Long-press threshold 600 ms (tunable at runtime).
+   LEDs     : per-button backlight pins exist in kLedPins but are ALL -1
+              today (none fitted). Array must stay the same length as the
+              button list.
+   Runtime  : the map is re-assignable over USB with PINCFG (any GP 0..47,
+              up to 16 entries). The list above is the compiled-in default.
+   Protocol : HELLO / "BTN <id> SHORT" / "BTN <id> LONG" / PING (~1 Hz).
+
+ CAPACITIVE TOUCH / BOOP PADS (always)
+   GP39 GP44 GP12 GP31 GP32 GP33     -> pad indices 0..5
+   Module   : TTP223 breakout. OUT -> GP, VCC -> 3V3, GND -> GND.
+   Polarity : ACTIVE HIGH (stock TTP223 momentary). Debounce 30 ms.
+   Events   : "BOOP <idx> <1|0>" - the Pi maps these exactly like MPR121
+              electrodes (snout/cheeks 0-2, head/mouth-top/bottom 3-5).
+   Note     : pads 0-1 sit on GP39/GP44 and pads 3-5 on GP31-33 - pins that
+              only EXIST on the RP2350B. That is what lets all six pads
+              coexist with the voice changer, and it keeps header pins 1-2
+              (GP0/GP1, UART0 TX/RX) free. GP26-28 were deliberately not
+              used: see CONSTRAINTS.
+
+ SERVOS
+   PRIMARY  : PCA9685 on I2C0 @ 0x40 - 16 channels, hardware PWM, 50 Hz.
+              It takes servo power on its OWN V+ terminal.
+   FALLBACK : GP34 GP35 GP36 GP38 (4 channels, direct GPIO) - used ONLY if
+              no PCA9685 answers. The firmware probes at boot and on demand
+              and picks, so one build works before and after fitting it.
+   Power    : servo V+ from an EXTERNAL 5-6 V supply sized for every servo
+              stalling at once (~1 A each micro servo, so 4-6 A for a full
+              PCA9685 board). NEVER from the Pico's 3V3. Grounds common.
+              Do not bridge the PCA9685 V+ terminal to its 3V3 VCC pin.
+
+ ADDRESSABLE LED TEST ZONE (always)
+   GP37     : data (WS2812 default, kLedZoneType = 0)
+   GP28     : clock - APA102/DotStar only; idle in the current config
+   Count    : 16 pixels default, 300 hard cap (frame buffer size)
+   Verbs    : LEDZ (solid) LEDP (pattern) LEDB (brightness) LEDF / LEDSHOW
+   Levels   : level-shift data (and clock) to 5 V for long or strict
+              strips; short runs usually accept 3.3 V.
+
+ ANALOG INPUTS (always)
+   GP40 = ch0, GP41 = ch1, GP42 = ch2. 12-bit.
+   Read on demand: "ADCREAD" -> "ADC <ch> <raw> <mv>" x3.
+   In the voice build ch0 IS the microphone input (kMicAdcPin = GP40).
+   Deliberately stops at GP42: GP43 is VBAT sense on the Pico LiPo 2 XL W.
+
+ VOICE CHANGER                                       [env: coproc_voice]
+   Path   : electret mic -> MAX9814 preamp/AGC -> GP40 (ADC0) -> DSP on
+            core1 -> I2S (GP16/17/18) -> TLV320DAC3100 -> speaker
+   Control: TLV320 registers over I2C0 (GP20/21) @ 0x18; reset on GP22
+   Rate   : 16 kHz (voice band, low latency)
+   Clock  : the I2S output clock paces the loop, so ADC in and DAC out stay
+            sample-locked with no drift. Runs on core1 only, so core0
+            button debounce is never disturbed.
+   Note   : kVoiceEnabled is FALSE, so the changer is compiled in but starts
+            INACTIVE and is switched on at runtime. The pins are still
+            claimed by the build either way.
+
+ MAX7219 SPI BRIDGE                                  [env: coproc_voice]
+   GP10 SCK / GP11 TX / GP13 CS0, hardware SPI1, 8 MHz (chip max ~10 MHz).
+   Lets the CM5 drive MAX7219 panels THROUGH this coprocessor: the Pi ships
+   pre-formatted bytes as "SPI <cs> <hex>". Costs the CM5 zero GPIO, which
+   matters because piomatter's HUB75 output ties up the 40-pin header.
+   One chain is defined today (kMaxCsPins = { 13 }); add CS pins to extend.
+
+ PERIPHERAL HUB                                      [env: coproc_voice]
+   GP19      : 1-Wire DS18B20 probes, up to 8, 4.7k pull-up to 3V3.
+               Convert+read every 2000 ms -> "TEMP <rom> <milli-degC>"
+   GP14/GP15 : fan PWM zones at 25 kHz, driven by "FAN <zone> <duty%>"
+   MPR121    : boop pads on I2C0 @ 0x5A, polled ~30 Hz -> "BOOP <e> <0|1>"
+
+==============================================================================
+ I2C0 BUS (GP20 SDA / GP21 SCL) - SHARED, 100 kHz
+==============================================================================
+   0x40  PCA9685        16-channel servo/PWM driver  (primary servo backend)
+   0x5A  MPR121         capacitive boop electrodes   [PERIPHERAL_HUB]
+   0x18  TLV320DAC3100  voice codec                  [VOICE_CHANGER]
+
+   No address conflicts. PCA9685 A0-A5 solder jumpers shift its address if a
+   second board is ever added.
+   Diagnostics: "I2CSCAN [sda] [scl]" scans any legal pair. SDA must be even,
+   SCL odd, and both on the same controller (GP bit 1 selects I2C1).
+
+==============================================================================
+ CONSTRAINTS AND GOTCHAS
+==============================================================================
+ * ADC pins are package-specific and the mistake is SILENT: analogRead() on
+   a non-ADC pin returns garbage rather than failing. config.h carries
+   static_asserts that fail the BUILD instead. Do not hand-edit kMicAdcPin
+   or kAdcPins onto a non-ADC GP.
+ * GP26 / GP27 / GP28 are A0 / A1 / A2 through 1k links to GP40 / 41 / 42.
+   Driving any of them corrupts that ADC channel (GP40 is also the voice mic),
+   which is why no servo or touch pad was placed there.
+ * GP23/24/25/29 go to the RM2 wireless module, GP43 is VBAT sense, GP47 is
+   PSRAM, GP30 is the BOOT button. None reach a usable header on the
+   Pico LiPo 2 XL W.
+ * Servo pins moved to GP34-36/38 specifically so they no longer overlap
+   the buttons. In the old layout servos shared GP6-9, so commanding a servo
+   silently converted a button slot until the next reboot / PINCFG APPLY.
+ * The three feature blocks (voice, MAX bridge, peripheral hub) are compiled
+   OUT of the plain "coproc" env, so those pins are genuinely free in that
+   build. Flash coproc_voice to claim them.
+ * "PINS" over USB dumps every GP with its live level and current role, and
+   is the authoritative runtime answer if this file and the hardware
+   disagree. Menu: GPIO > RP2350 GPIO Expander > Peripheral Test.
+
+==============================================================================
+ RP2350A DIFFERENCES (Pico 2 / Pico 2 W - QFN-60, GP0-GP29)
+==============================================================================
+ Only these groups move; everything else is identical.
+
+   FUNCTION           RP2350B (default)    RP2350A
+   -----------------  -------------------  --------------------------
+   Mic / ADC0         GP40                 GP26
+   ADC ch0 / 1 / 2    GP40 / GP41 / GP42   GP26 / GP27 / GP28
+   Touch pads 0/1     GP39 / GP44          GP0 / GP1
+   Touch pads 3/4/5   GP31 / GP32 / GP33   GP16 / GP17 / GP18
+   LED zone data      GP37                 GP22
+
+ Consequences on RP2350A:
+   * Touch pads 3-5 land on GP16-18, which are the voice changer's I2S
+     pins. With the voice build enabled, wire AT MOST pads 0-2.
+   * The LED zone falls back to GP22, the TLV320 reset line. That is free
+     whenever the voice changer is off; with VOICE_CHANGER on, move the
+     zone or set kLedZonePin = -1 to disable it.
+   * GP26-28 are ADC here, not plain digital as on the RP2350B.
+   * GP0/GP1 are NOT free on the RP2350A - they are still touch pads 0-1,
+     because nothing else on the QFN60 package is spare.
+
+==============================================================================
+ QUICK WIRING CHECKLIST
+==============================================================================
+ [ ] 8x momentary switches, each GP2..GP9 -> GND
+ [ ] up to 6x TTP223 pads: OUT -> GP39/44/12/31/32/33, VCC 3V3, GND
+ [ ] PCA9685: SDA GP20, SCL GP21, VCC 3V3, V+ external 5-6 V, GND common
+ [ ] WS2812 zone: data GP37, series resistor, bulk cap on the 5 V rail
+ [ ] analog sources -> GP40 / GP41 / GP42 (0-3.3 V only)
+ [ ] voice: MAX9814 OUT -> GP40; TLV320 BCLK GP16, WS GP17, DIN GP18,
+     SDA GP20, SCL GP21, RST GP22
+ [ ] MAX7219 chain: CLK GP10, DIN GP11, CS GP13, buffered to a 5 V rail
+ [ ] DS18B20 bus: data GP19 + 4.7k to 3V3
+ [ ] fans: gate/PWM GP14 and GP15 via MOSFETs, flyback diode per fan
+ [ ] USB-C to a CM5 host port
+==============================================================================

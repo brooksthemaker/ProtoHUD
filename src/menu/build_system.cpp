@@ -209,7 +209,8 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
     }
 
     // Peripheral Test — exercise the pre-assigned test pins (servos GP6-9,
-    // WS2812 zone GP22, ADC GP26-28, TTP223 touch GP0/1/12/16/17/18; see
+    // WS2812 zone GP22, ADC GP26-28, TTP223 touch GP39/44/12/31/32/33 on
+    // RP2350B or GP0/1/12/16/17/18 on RP2350A; see
     // firmware/button_coproc/pico/include/config.h).
     if (ctx.coproc_servo) {
         std::vector<MenuItem> pt;
@@ -310,7 +311,8 @@ static std::vector<MenuItem> build_coproc_expander_menu(MenuBuildContext& ctx)
             "Exercise the pre-assigned test pins for the planned peripherals: "
             "4 servo channels (GP6-9), a WS2812 LED zone (GP22) and 3 ADC "
             "inputs (GP26-28 on RP2350A, GP40-42 on RP2350B). TTP223 touch "
-            "pads (GP0/1/12/16/17/18) test themselves \xe2\x80\x94 touching "
+            "pads (GP39/44/12/31/32/33 on RP2350B, GP0/1/12/16/17/18 on "
+            "RP2350A) test themselves \xe2\x80\x94 touching "
             "one fires its boop zone / mapped function. See "
             "docs/wiring-guide.md."));
     }
