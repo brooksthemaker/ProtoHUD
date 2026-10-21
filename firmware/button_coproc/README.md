@@ -81,3 +81,44 @@ ls -l /dev/serial/by-id/
 - If you'd rather not add a board, the same `BTN`/`PING` CDC interface can be a
   **second USB interface** on the RP2350 helmet-audio processor (composite
   UAC2 + CDC).
+
+## Board compatibility — Pimoroni Pico LiPo 2 XL W (verified)
+
+Cross-checked against Pimoroni's official board definition
+(`pico-lipo` repo, `boards/pimoroni_pico_lipo2xl_w.h`) — the RP2350B pin map
+in `include/config.h` has **no collisions** with the board's internal wiring:
+
+| Board reservation (XL W) | Pins | Firmware use of those pins |
+|---|---|---|
+| RM2 radio (REG_ON / DATA / CS / CLK) | GP23, GP24, GP25, GP29 | none ✓ |
+| BOOT button (active low) | GP30 | avoided by design ✓ |
+| VBAT sense (cuttable "BtS Cut") | GP43 | avoided (`kAdcPins` stop at GP42) ✓ |
+| PSRAM chip select (cuttable "PSRAM Cut") | GP47 | none ✓ |
+| User LED / VBUS sense | RM2 WL_GPIO0 / WL_GPIO2 | not bank-0, n/a ✓ |
+
+So the full RP2350B map carries over as-is: **buttons GP2–9**, **all six
+TTP223 touch pads (GP0/1/12 + GP31/32/33)**, MPR121 + DAC on I2C0 GP20/21,
+MAX bridge GP10/11/13, fans GP14/15, voice I2S GP16–18, 1-Wire GP19,
+LED zone GP22(/28), mic + ADC GP40–42.
+
+Two shared-connector nuances (shared, not reserved — fine unless you plug
+something into that connector):
+
+- **Qw/ST connector = GP4/GP5**, which the default map uses as buttons 3–4.
+  To hang the MPR121 off the handy Qw/ST socket instead of wiring GP20/21,
+  move I2C0 to GP4/5 in `config.h` (both pairs are valid I2C0) and remap
+  those two buttons to spare pins via `PINCFG` — no firmware logic changes.
+- **SP/CE connector = GP32–36**; touch pads 4–5 sit on GP32/33. That collides
+  only if SP/CE is in use — and conveniently, the SP/CE socket can serve as
+  the physical connector *for* those two pads.
+
+On a **regular RP2350A** (Pico 2 / Pico 2 W): buttons GP2–9 and MPR121 carry
+over unchanged; touch pads 0–2 (GP0/1/12) always work; pads 3–5 fall back to
+GP16/17/18, which the optional voice changer's I2S also wants — with voice
+enabled wire pads 0–2 only (already enforced in `config.h`). The Pico 2 W's
+radio also lives on GP23/24/25/29, so no conflict there either.
+
+PlatformIO note: `board = pimoroni_pico_plus_2w` (the closest def) is
+functionally correct for the XL W — same radio pins, PSRAM CS (GP47) and
+16 MB flash; only its USER_SW define differs (GP45 vs the XL W's GP30
+BOOT), and this firmware uses neither.
