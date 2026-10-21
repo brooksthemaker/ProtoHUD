@@ -27,6 +27,8 @@ public:
     void set_detents(int count, const std::vector<int16_t>& positions = {});
     void wake();
     void set_sleep_timeout(uint16_t seconds);
+    // frequency scales the knob's velocity damping (anti-ring/buzz term);
+    // it was a no-op on older firmware, kept as the same wire byte.
     void set_haptic(uint8_t amplitude, uint8_t frequency, uint8_t detent_strength);
 
     // Configure detent-index endstops (Scott-style bounded rotation). The knob

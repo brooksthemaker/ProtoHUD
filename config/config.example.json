@@ -125,6 +125,7 @@
     "smartknob": {
       "port": "/dev/ttyACM1",
       "baud": 115200,
+      "_note": "Auto-discovery when this port is absent: a Pico 2 (RP2350) knob is found via its stable /dev/serial/by-id/usb-ProtoHUD_SmartKnob*-if00 path; an ESP32-S3 knob via Espressif VID:PID 303a:1001. Set the by-id path here explicitly if either lookup is ambiguous.",
       "sleep_timeout_s": 30,
       "wake_degrees": 5.0
     },
