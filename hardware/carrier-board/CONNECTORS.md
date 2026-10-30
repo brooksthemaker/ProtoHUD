@@ -171,6 +171,10 @@ wrong). Functional groups carried:
 
 > Use a flip-lock 0.5 mm connector; keep the differential pairs length-matched
 > and short. Confirm exact pin numbers against the CM5 datasheet during layout.
+>
+> **4-lane sensors** (e.g. the IMX563 OIS module, see
+> `docs/imx563-ois-bringup.md`) need D2± and D3± routed as well. The 22-pin
+> FFC already carries them, so routing all four lanes keeps both options open.
 
 ---
 

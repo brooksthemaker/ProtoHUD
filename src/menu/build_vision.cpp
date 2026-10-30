@@ -513,20 +513,22 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
 
         // Sensor Model picker — Auto-detect, or force a specific model so the
         // resolution list carries that manufacturer's mode table (vendor
-        // submenus: Raspberry Pi / Arducam). Forcing rebuilds the camera.
+        // submenus: Raspberry Pi / Arducam / Waveshare). Forcing rebuilds the camera.
         MenuItem model_sub;
         {
             auto cur_model = [cam_ptr]() -> std::string {
                 auto* c = cam_ptr();
                 return c ? c->sensor_model() : std::string("auto");
             };
-            std::vector<MenuItem> rp_items, ard_items;
+            std::vector<MenuItem> rp_items, ard_items, ws_items;
             for (const auto& si : DmaCamera::sensor_catalog()) {
                 const std::string key = si.key;
                 MenuItem it = leaf_sel(si.label,
                     [set_model, key]{ if (set_model) set_model(key); },
                     [cur_model, key]{ return cur_model() == key; });
-                (std::string(si.vendor) == "Raspberry Pi" ? rp_items : ard_items)
+                const std::string vendor = si.vendor;
+                (vendor == "Raspberry Pi" ? rp_items
+                 : vendor == "Waveshare"  ? ws_items : ard_items)
                     .push_back(std::move(it));
             }
             std::vector<MenuItem> model_items;
@@ -537,6 +539,7 @@ std::vector<MenuItem> build_vision_menu(MenuBuildContext& ctx)
                 "dtoverlay (the startup log shows what was matched)."));
             model_items.push_back(submenu("Raspberry Pi", std::move(rp_items)));
             model_items.push_back(submenu("Arducam",      std::move(ard_items)));
+            model_items.push_back(submenu("Waveshare",    std::move(ws_items)));
             model_sub = with_desc(submenu("Sensor Model", std::move(model_items)),
                 "Which manufacturer mode table fills the resolution list. "
                 "Auto-detect matches the driver; force a model if the "

@@ -70,7 +70,7 @@ public:
     // Config::sensor_model takes, vendor groups the picker's submenus).
     struct SensorInfo {
         const char* key;
-        const char* vendor;   // "Raspberry Pi" | "Arducam"
+        const char* vendor;   // "Raspberry Pi" | "Arducam" | "Waveshare"
         const char* label;
     };
     static const std::vector<SensorInfo>& sensor_catalog();
