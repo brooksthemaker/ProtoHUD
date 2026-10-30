@@ -36,7 +36,7 @@ namespace {
 struct SpecMode { int w, h, fps; };
 struct SensorSpec {
     const char* key;
-    const char* vendor;   // menu grouping: "Raspberry Pi" | "Arducam"
+    const char* vendor;   // menu grouping: "Raspberry Pi" | "Arducam" | "Waveshare"
     const char* label;    // menu display name
     std::vector<SpecMode> modes;
 };
@@ -85,6 +85,10 @@ const std::vector<SensorSpec>& sensor_specs() {
         // OV9281 global-shutter (fps depends on vendor board/link)
         {"ov9281",  "Arducam", "Global Shutter (OV9281)",
                     {{640,400,0},{1280,720,0},{1280,800,0}}},
+        // Waveshare IMX563 12MP OIS (out-of-tree driver, drivers/imx563/ —
+        // mode tables are placeholders until the init sequence is captured)
+        {"imx563",  "Waveshare", "12MP OIS (IMX563)",
+                    {{2016,1512,0},{4032,3024,0}}},
     };
     return specs;
 }

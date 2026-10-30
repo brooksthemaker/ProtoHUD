@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: GPL-2.0
+// Device Tree overlay — Waveshare IMX563 12MP OIS module on a Pi 5 / CM5
+// CSI port (4 lanes), through the ProtoHUD 24-pin B2B -> 22-pin FFC adapter.
+//
+// Nodes created on the camera's I2C bus:
+//   imx563@1a   sensor          (drivers/imx563/imx563.c)
+//   dw9800v@c   focus VCM       (drivers/imx563/dw9800v.c)
+//   ak7323@1c   OIS controller  (drivers/imx563/ak7323_ois.c)
+//
+// TODO(verify) all three I2C addresses with tools/imx563_probe.py before
+// trusting this file — the OIS address in particular is a guess. They are
+// overridable: dtoverlay=imx563-ois,ois-addr=0x0d
+//
+// Power: the adapter's LDO enables are driven by the port's CAM_GPIO, which
+// the base DT exposes as camN_reg (a GPIO-switched fixed regulator). All
+// sensor/VCM/OIS supplies hang off it; the driver's power sequencing sees one
+// rail, and the adapter's LDO soft-start ordering does the rest.
+//
+// Build:
+//   dtc -@ -I dts -O dtb -o imx563-ois.dtbo imx563-ois.dts
+// Install:
+//   sudo cp imx563-ois.dtbo /boot/firmware/overlays/
+//   # /boot/firmware/config.txt:
+//   camera_auto_detect=0
+//   dtoverlay=imx563-ois            # CAM1 / CSI1
+//   dtoverlay=imx563-ois,cam0       # CAM0 / CSI0 (second eye)
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	fragment@0 {
+		target = <&i2c0if>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	clk_frag: fragment@1 {
+		target = <&cam1_clk>;
+		__overlay__ {
+			clock-frequency = <24000000>;
+			status = "okay";
+		};
+	};
+
+	fragment@2 {
+		target = <&i2c0mux>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	reg_frag: fragment@3 {
+		target = <&cam1_reg>;
+		__overlay__ {
+			startup-delay-us = <70000>;
+			off-on-delay-us = <30000>;
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+		};
+	};
+
+	i2c_frag: fragment@100 {
+		target = <&i2c_csi_dsi>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			cam_node: imx563@1a {
+				compatible = "sony,imx563";
+				reg = <0x1a>;
+				status = "okay";
+
+				clocks = <&cam1_clk>;
+				clock-names = "xclk";
+
+				vana-supply = <&cam1_reg>;
+				vdig-supply = <&cam_dummy_reg>;
+				vddl-supply = <&cam_dummy_reg>;
+
+				rotation = <180>;
+				orientation = <2>;
+				lens-focus = <&vcm_node>;
+
+				port {
+					cam_endpoint: endpoint {
+						clock-lanes = <0>;
+						data-lanes = <1 2 3 4>;
+						clock-noncontinuous;
+						link-frequencies =
+							/bits/ 64 <600000000>;
+						remote-endpoint = <&csi_ep>;
+					};
+				};
+			};
+
+			vcm_node: dw9800v@c {
+				compatible = "dongwoon,dw9800v";
+				reg = <0x0c>;
+				status = "okay";
+				VDD-supply = <&cam1_reg>;
+			};
+
+			ois_node: ak7323@1c {
+				compatible = "asahi-kasei,ak7323";
+				reg = <0x1c>;
+				status = "okay";
+				VDD-supply = <&cam1_reg>;
+			};
+		};
+	};
+
+	csi_frag: fragment@101 {
+		target = <&csi1>;
+		csi: __overlay__ {
+			status = "okay";
+			brcm,media-controller;
+
+			port {
+				csi_ep: endpoint {
+					remote-endpoint = <&cam_endpoint>;
+					clock-lanes = <0>;
+					data-lanes = <1 2 3 4>;
+					clock-noncontinuous;
+				};
+			};
+		};
+	};
+
+	__overrides__ {
+		rotation = <&cam_node>, "rotation:0";
+		orientation = <&cam_node>, "orientation:0";
+		media-controller = <&csi>, "brcm,media-controller?";
+		link-frequency = <&cam_endpoint>, "link-frequencies#0";
+		sensor-addr = <&cam_node>, "reg:0";
+		vcm-addr = <&vcm_node>, "reg:0";
+		ois-addr = <&ois_node>, "reg:0";
+		ois = <&ois_node>, "status";	/* ois=off skips the OIS node */
+		cam0 = <&i2c_frag>, "target:0=", <&i2c_csi_dsi0>,
+		       <&csi_frag>, "target:0=", <&csi0>,
+		       <&clk_frag>, "target:0=", <&cam0_clk>,
+		       <&reg_frag>, "target:0=", <&cam0_reg>,
+		       <&cam_node>, "clocks:0=", <&cam0_clk>,
+		       <&cam_node>, "vana-supply:0=", <&cam0_reg>,
+		       <&vcm_node>, "VDD-supply:0=", <&cam0_reg>,
+		       <&ois_node>, "VDD-supply:0=", <&cam0_reg>;
+	};
+};

@@ -1,0 +1,23 @@
+Add to the sensor table in libcamera
+src/libcamera/sensor/camera_sensor_properties.cpp (keep alphabetical order,
+between "imx519" and "imx708"). Field names track libcamera ~v0.5; if your
+tree differs, copy the shape of the neighbouring imx477/imx708 entries.
+
+		{ "imx563", {
+			.unitCellSize = { 1400, 1400 },
+			.testPatternModes = {
+				{ controls::draft::TestPatternModeOff, 0 },
+				{ controls::draft::TestPatternModeSolidColor, 1 },
+				{ controls::draft::TestPatternModeColorBars, 2 },
+				{ controls::draft::TestPatternModeColorBarsFadeToGray, 3 },
+				{ controls::draft::TestPatternModePn9, 4 },
+			},
+			.sensorDelays = {
+				.exposureDelay = 2,
+				.gainDelay = 2,
+				.vblankDelay = 3,
+				.hblankDelay = 3,
+			},
+		} },
+
+The indices must match imx563_test_pattern_menu[] in the kernel driver.

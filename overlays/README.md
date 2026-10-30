@@ -100,3 +100,17 @@ ICS-43434 mics  →  Teensy I2S  →  USB  →  CM5 ALSA
 
 Change `capture_device` to `"hw:CARD=TeensyAudio,DEV=0"` and flash the sketch
 from `firmware/teensy_audio/teensy_audio.ino`.
+
+## imx563-ois — Waveshare IMX563 12MP OIS camera (4-lane CSI)
+
+Sensor + DW9800V focus VCM + AK7323 OIS on CAM1 (default) or CAM0
+(`dtoverlay=imx563-ois,cam0`). Needs the out-of-tree drivers in
+`drivers/imx563/`. Parameters: `rotation`, `orientation`, `link-frequency`,
+`sensor-addr`, `vcm-addr`, `ois-addr`, `ois=off`. Full bring-up guide:
+[`docs/imx563-ois-bringup.md`](../docs/imx563-ois-bringup.md).
+
+```bash
+dtc -@ -I dts -O dtb -o imx563-ois.dtbo imx563-ois.dts
+sudo cp imx563-ois.dtbo /boot/firmware/overlays/
+# config.txt:  camera_auto_detect=0  +  dtoverlay=imx563-ois
+```
